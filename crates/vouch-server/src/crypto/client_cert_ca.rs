@@ -92,20 +92,15 @@ impl ClientCertCa {
     ///
     /// - If both key and cert PEM are provided: load them
     /// - If neither: generate ephemeral P-256 key + self-signed CA cert
-    pub fn load_or_generate(
-        key_pem: Option<&str>,
-        ca_cert_pem: Option<&str>,
-    ) -> Result<Self> {
+    pub fn load_or_generate(key_pem: Option<&str>, ca_cert_pem: Option<&str>) -> Result<Self> {
         match (key_pem, ca_cert_pem) {
             (Some(key), Some(cert)) if !key.trim().is_empty() => {
-                let pkcs8_der = decode_pem_key(key)
-                    .context("Failed to decode client cert CA key PEM")?;
+                let pkcs8_der =
+                    decode_pem_key(key).context("Failed to decode client cert CA key PEM")?;
                 let signing_key = SigningKey::from_pkcs8_der(&pkcs8_der)
-                    .map_err(|e| {
-                        anyhow::anyhow!("Failed to parse client cert CA key: {e}")
-                    })?;
-                let ca_cert_der = decode_pem_cert(cert)
-                    .context("Failed to decode client cert CA certificate")?;
+                    .map_err(|e| anyhow::anyhow!("Failed to parse client cert CA key: {e}"))?;
+                let ca_cert_der =
+                    decode_pem_cert(cert).context("Failed to decode client cert CA certificate")?;
                 Ok(Self::Local {
                     signing_key,
                     pkcs8_der,
@@ -142,8 +137,7 @@ impl ClientCertCa {
     #[must_use]
     pub fn ca_cert_der(&self) -> &[u8] {
         match self {
-            Self::Local { ca_cert_der, .. }
-            | Self::Kms { ca_cert_der, .. } => ca_cert_der,
+            Self::Local { ca_cert_der, .. } | Self::Kms { ca_cert_der, .. } => ca_cert_der,
         }
     }
 
@@ -151,11 +145,7 @@ impl ClientCertCa {
     ///
     /// Creates an X.509 certificate for the given subject, signed by
     /// this CA.
-    pub fn sign_client_cert(
-        &self,
-        subject_cn: &str,
-        validity_days: u32,
-    ) -> Result<Vec<u8>> {
+    pub fn sign_client_cert(&self, subject_cn: &str, validity_days: u32) -> Result<Vec<u8>> {
         let subject = build_dn(subject_cn)?;
         let validity = build_validity(validity_days)?;
         let serial = generate_serial()?;
@@ -168,13 +158,7 @@ impl ClientCertCa {
             } => {
                 let issuer_cert = x509_cert::Certificate::from_der(ca_cert_der)
                     .context("Failed to parse CA certificate")?;
-                sign_client_cert_local(
-                    signing_key,
-                    &issuer_cert,
-                    subject,
-                    validity,
-                    serial,
-                )
+                sign_client_cert_local(signing_key, &issuer_cert, subject, validity, serial)
             }
             Self::Kms {
                 signer,
@@ -349,8 +333,8 @@ fn verifying_key_to_spki(
 /// Build a Distinguished Name with a Common Name.
 fn build_dn(cn: &str) -> Result<RdnSequence> {
     let cn_oid = ObjectIdentifier::new_unwrap("2.5.4.3");
-    let cn_value = der::asn1::Utf8StringRef::new(cn)
-        .map_err(|e| anyhow::anyhow!("Invalid CN value: {e}"))?;
+    let cn_value =
+        der::asn1::Utf8StringRef::new(cn).map_err(|e| anyhow::anyhow!("Invalid CN value: {e}"))?;
     let atv = x509_cert::attr::AttributeTypeAndValue {
         oid: cn_oid,
         value: der::asn1::Any::from(cn_value),
@@ -386,8 +370,7 @@ fn generate_serial() -> Result<SerialNumber> {
     {
         *last = 1;
     }
-    SerialNumber::new(&bytes)
-        .map_err(|e| anyhow::anyhow!("Failed to create serial number: {e}"))
+    SerialNumber::new(&bytes).map_err(|e| anyhow::anyhow!("Failed to create serial number: {e}"))
 }
 
 /// Build and sign a certificate manually using KMS.
@@ -461,9 +444,7 @@ fn build_and_sign_cert_kms(
 /// Build an EC SPKI (SubjectPublicKeyInfo) for P-256 from raw bytes.
 ///
 /// Used for KMS path where we only have the raw uncompressed point.
-fn build_ec_spki(
-    uncompressed_point: &[u8],
-) -> Result<spki::SubjectPublicKeyInfoOwned> {
+fn build_ec_spki(uncompressed_point: &[u8]) -> Result<spki::SubjectPublicKeyInfoOwned> {
     let ec_public_key_oid = ObjectIdentifier::new_unwrap("1.2.840.10045.2.1");
     let p256_oid = ObjectIdentifier::new_unwrap("1.2.840.10045.3.1.7");
 
@@ -485,12 +466,11 @@ fn decode_pem_cert(pem_content: &str) -> Result<Vec<u8>> {
     let pem = if pem_content.trim().starts_with("-----BEGIN") {
         pem_content.trim().to_string()
     } else {
-        super::pem::decode_base64_pem(pem_content)
-            .context("Failed to decode base64 PEM")?
+        super::pem::decode_base64_pem(pem_content).context("Failed to decode base64 PEM")?
     };
-    let cert = x509_cert::Certificate::from_pem(&pem)
-        .context("Failed to parse PEM certificate")?;
-    cert.to_der().context("Failed to re-encode certificate to DER")
+    let cert = x509_cert::Certificate::from_pem(&pem).context("Failed to parse PEM certificate")?;
+    cert.to_der()
+        .context("Failed to re-encode certificate to DER")
 }
 
 /// Decode PEM private key (supports base64-encoded PEM).
@@ -498,8 +478,7 @@ fn decode_pem_key(pem_content: &str) -> Result<Vec<u8>> {
     let pem = if pem_content.trim().starts_with("-----BEGIN") {
         pem_content.trim().to_string()
     } else {
-        super::pem::decode_base64_pem(pem_content)
-            .context("Failed to decode base64 PEM key")?
+        super::pem::decode_base64_pem(pem_content).context("Failed to decode base64 PEM key")?
     };
     let mut reader = std::io::Cursor::new(pem.as_bytes());
     let key = rustls_pemfile::private_key(&mut reader)
@@ -519,8 +498,7 @@ mod tests {
         let cert_der = ca.ca_cert_der();
         assert!(!cert_der.is_empty(), "CA cert should not be empty");
 
-        let cert = x509_cert::Certificate::from_der(cert_der)
-            .expect("Failed to parse CA cert");
+        let cert = x509_cert::Certificate::from_der(cert_der).expect("Failed to parse CA cert");
         let subject = cert.tbs_certificate.subject.to_string();
         assert!(
             subject.contains("Vouch Client CA"),
@@ -540,8 +518,8 @@ mod tests {
 
     #[test]
     fn test_load_or_generate_ephemeral() {
-        let ca = ClientCertCa::load_or_generate(None, None)
-            .expect("Ephemeral CA generation failed");
+        let ca =
+            ClientCertCa::load_or_generate(None, None).expect("Ephemeral CA generation failed");
         assert!(!ca.ca_cert_der().is_empty(), "CA cert should not be empty");
     }
 
@@ -552,8 +530,8 @@ mod tests {
             .sign_client_cert("test-client", 365)
             .expect("Client cert signing failed");
 
-        let cert = x509_cert::Certificate::from_der(&cert_der)
-            .expect("Failed to parse client cert");
+        let cert =
+            x509_cert::Certificate::from_der(&cert_der).expect("Failed to parse client cert");
         let subject = cert.tbs_certificate.subject.to_string();
         assert!(
             subject.contains("test-client"),
@@ -565,8 +543,8 @@ mod tests {
             let bc_oid = ObjectIdentifier::new_unwrap("2.5.29.19");
             for ext in extensions {
                 if ext.extn_id == bc_oid {
-                    let bc = BasicConstraints::from_der(ext.extn_value.as_bytes())
-                        .expect("parse BC");
+                    let bc =
+                        BasicConstraints::from_der(ext.extn_value.as_bytes()).expect("parse BC");
                     assert!(!bc.ca, "Client cert should not be CA");
                 }
             }

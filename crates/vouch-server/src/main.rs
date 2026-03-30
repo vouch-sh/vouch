@@ -19,10 +19,7 @@ compile_error!("test-utils feature must not be enabled in release builds");
 
 use vouch_server::{
     config,
-    infra::{
-        generate_client_cert_ca, generate_document_key, router, serve, startup,
-        telemetry,
-    },
+    infra::{generate_client_cert_ca, generate_document_key, router, serve, startup, telemetry},
 };
 
 // ============================================================================
@@ -65,7 +62,11 @@ async fn main() -> Result<()> {
     // (legacy: `vouch-server --listen-addr ...`).
     let first_arg = std::env::args().nth(1).unwrap_or_default();
     match first_arg.as_str() {
-        "serve" | "generate-document-key" | "generate-client-cert-ca" | "help" | "--help"
+        "serve"
+        | "generate-document-key"
+        | "generate-client-cert-ca"
+        | "help"
+        | "--help"
         | "-h" => {
             let cli = Cli::parse();
             match cli.command {

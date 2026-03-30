@@ -16,13 +16,13 @@ pub mod ber;
 #[cfg(not(any(test, feature = "test-utils")))]
 #[allow(unreachable_pub)]
 pub(crate) mod ber;
+pub(crate) mod client_cert_ca;
 pub mod cose;
 pub(crate) mod document_crypto;
 pub mod hash;
 pub(crate) mod jwt;
 pub(crate) mod kms_signer;
 pub(crate) mod pem;
-pub(crate) mod client_cert_ca;
 pub mod ssh_ca;
 pub mod tpm_decrypt;
 pub mod webauthn_verify;

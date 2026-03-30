@@ -150,11 +150,7 @@ pub struct CnfClaim {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub jkt: Option<String>,
     /// Certificate thumbprint (mTLS).
-    #[serde(
-        default,
-        rename = "x5t#S256",
-        skip_serializing_if = "Option::is_none"
-    )]
+    #[serde(default, rename = "x5t#S256", skip_serializing_if = "Option::is_none")]
     pub x5t_s256: Option<String>,
 }
 

@@ -364,10 +364,7 @@ impl std::fmt::Debug for S3Config {
                 &self.oidc_rsa_signing_kms_key_id,
             )
             .field("jwt_hmac_kms_key_id", &self.jwt_hmac_kms_key_id)
-            .field(
-                "client_cert_ca_kms_key_id",
-                &self.client_cert_ca_kms_key_id,
-            )
+            .field("client_cert_ca_kms_key_id", &self.client_cert_ca_kms_key_id)
             .field(
                 "client_cert_ca_key",
                 &self.client_cert_ca_key.as_ref().map(|_| "[REDACTED]"),

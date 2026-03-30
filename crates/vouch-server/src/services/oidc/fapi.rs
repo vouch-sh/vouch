@@ -64,16 +64,26 @@ pub fn validate_fapi_client_registration(client: &OAuthClient) -> ServiceResult<
         ));
     }
 
-    // FAPI 2.0 Section 5.2.2: Must use private_key_jwt
-    if client.token_endpoint_auth_method != TokenEndpointAuthMethod::PrivateKeyJwt {
+    // FAPI 2.0 Section 5.2.2: Must use private_key_jwt or mTLS auth
+    let is_valid_fapi_auth = matches!(
+        client.token_endpoint_auth_method,
+        TokenEndpointAuthMethod::PrivateKeyJwt
+            | TokenEndpointAuthMethod::TlsClientAuth
+            | TokenEndpointAuthMethod::SelfSignedTlsClientAuth
+    );
+    if !is_valid_fapi_auth {
         return Err(ServiceError::oauth(
             OAuthErrorCode::InvalidClient,
-            "FAPI 2.0 requires private_key_jwt authentication",
+            "FAPI 2.0 requires private_key_jwt or mTLS authentication",
         ));
     }
 
     // FAPI 2.0: Must have JWKS configured for private_key_jwt
-    if client.jwks.is_none() && client.jwks_uri.is_none() {
+    // (not required for tls_client_auth which uses certificate identity)
+    if client.token_endpoint_auth_method == TokenEndpointAuthMethod::PrivateKeyJwt
+        && client.jwks.is_none()
+        && client.jwks_uri.is_none()
+    {
         return Err(ServiceError::oauth(
             OAuthErrorCode::InvalidClient,
             "FAPI 2.0 requires JWKS or JWKS URI for private_key_jwt",
@@ -132,16 +142,20 @@ pub fn validate_fapi_authorization_request(
 /// # Errors
 ///
 /// Returns `ServiceError::OAuth` with `invalid_request` if constraints are violated.
-pub fn validate_fapi_token_request(client: &OAuthClient, has_dpop: bool) -> ServiceResult<()> {
+pub fn validate_fapi_token_request(
+    client: &OAuthClient,
+    has_dpop: bool,
+    has_mtls_cert: bool,
+) -> ServiceResult<()> {
     if !client.is_fapi() {
         return Ok(());
     }
 
     // FAPI 2.0 Section 5.2.2: Sender-constrained tokens required (DPoP or mTLS)
-    if !has_dpop {
+    if !has_dpop && !has_mtls_cert {
         return Err(ServiceError::oauth(
             OAuthErrorCode::InvalidRequest,
-            "FAPI 2.0 requires sender-constrained access tokens (DPoP proof required)",
+            "FAPI 2.0 requires sender-constrained access tokens (DPoP or mTLS required)",
         ));
     }
 
@@ -206,11 +220,13 @@ pub fn validate_fapi_client_auth_method(
     }
 
     match auth_method {
-        TokenEndpointAuthMethod::PrivateKeyJwt => Ok(()),
+        TokenEndpointAuthMethod::PrivateKeyJwt
+        | TokenEndpointAuthMethod::TlsClientAuth
+        | TokenEndpointAuthMethod::SelfSignedTlsClientAuth => Ok(()),
         _ => Err(ServiceError::oauth(
             OAuthErrorCode::InvalidClient,
             format!(
-                "FAPI 2.0 requires private_key_jwt authentication, got '{}'",
+                "FAPI 2.0 requires private_key_jwt or mTLS authentication, got '{}'",
                 auth_method.as_str()
             ),
         )),
@@ -419,22 +435,22 @@ mod tests {
     // =========================================================================
 
     #[test]
-    fn test_validate_fapi_token_request_requires_dpop() {
+    fn test_validate_fapi_token_request_requires_sender_constraint() {
         let client = fapi_client();
-        assert!(validate_fapi_token_request(&client, false).is_err());
+        assert!(validate_fapi_token_request(&client, false, false).is_err());
     }
 
     #[test]
     fn test_validate_fapi_token_request_accepts_dpop() {
         let client = fapi_client();
-        assert!(validate_fapi_token_request(&client, true).is_ok());
+        assert!(validate_fapi_token_request(&client, true, false).is_ok());
     }
 
     #[test]
     fn test_validate_fapi_token_request_skips_non_fapi() {
         let client = standard_client();
-        assert!(validate_fapi_token_request(&client, false).is_ok());
-        assert!(validate_fapi_token_request(&client, true).is_ok());
+        assert!(validate_fapi_token_request(&client, false, false).is_ok());
+        assert!(validate_fapi_token_request(&client, true, false).is_ok());
     }
 
     // =========================================================================

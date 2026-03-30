@@ -74,12 +74,9 @@ pub(crate) fn compute_cert_thumbprint(der: &[u8]) -> String {
 }
 
 /// Parse a DER-encoded X.509 certificate into a [`ClientCertificate`].
-pub(crate) fn parse_client_certificate(
-    der: &[u8],
-) -> Result<ClientCertificate, MtlsError> {
-    let cert = x509_cert::Certificate::from_der(der).map_err(|e| {
-        MtlsError::InvalidCertificateFormat(format!("DER parse error: {e}"))
-    })?;
+pub(crate) fn parse_client_certificate(der: &[u8]) -> Result<ClientCertificate, MtlsError> {
+    let cert = x509_cert::Certificate::from_der(der)
+        .map_err(|e| MtlsError::InvalidCertificateFormat(format!("DER parse error: {e}")))?;
 
     let thumbprint = compute_cert_thumbprint(der);
     let subject_dn = {
@@ -97,8 +94,7 @@ pub(crate) fn parse_client_certificate(
     if let Some(extensions) = &cert.tbs_certificate.extensions {
         for ext in extensions {
             if ext.extn_id == san_oid
-                && let Ok(san) =
-                    SubjectAltName::from_der(ext.extn_value.as_bytes())
+                && let Ok(san) = SubjectAltName::from_der(ext.extn_value.as_bytes())
             {
                 for name in &san.0 {
                     match name {
@@ -222,10 +218,8 @@ mod tests {
 
     /// Generate a test certificate with CN.
     fn make_test_cert(cn: &str) -> Vec<u8> {
-        let ca = crate::crypto::client_cert_ca::ClientCertCa::load_or_generate(
-            None, None,
-        )
-        .expect("CA generation");
+        let ca = crate::crypto::client_cert_ca::ClientCertCa::load_or_generate(None, None)
+            .expect("CA generation");
         ca.sign_client_cert(cn, 1).expect("sign cert")
     }
 
@@ -243,7 +237,10 @@ mod tests {
         let cert_der = make_test_cert("test-parse");
         let cert = parse_client_certificate(&cert_der).expect("parse");
         assert!(
-            cert.subject_dn.as_deref().unwrap_or("").contains("test-parse"),
+            cert.subject_dn
+                .as_deref()
+                .unwrap_or("")
+                .contains("test-parse"),
             "subject_dn should contain CN, got: {:?}",
             cert.subject_dn
         );
@@ -258,14 +255,10 @@ mod tests {
         let subject_dn = cert.subject_dn.as_deref().unwrap();
 
         // Matching subject DN should succeed
-        assert!(
-            verify_tls_client_auth(&cert, Some(subject_dn), None, None, None, None).is_ok()
-        );
+        assert!(verify_tls_client_auth(&cert, Some(subject_dn), None, None, None, None).is_ok());
 
         // Non-matching should fail
-        assert!(
-            verify_tls_client_auth(&cert, Some("CN=wrong"), None, None, None, None).is_err()
-        );
+        assert!(verify_tls_client_auth(&cert, Some("CN=wrong"), None, None, None, None).is_err());
     }
 
     #[test]

@@ -78,17 +78,11 @@ impl AsyncWrite for MtlsStream {
         Pin::new(&mut self.get_mut().inner).poll_write(cx, buf)
     }
 
-    fn poll_flush(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<io::Result<()>> {
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         Pin::new(&mut self.get_mut().inner).poll_flush(cx)
     }
 
-    fn poll_shutdown(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<io::Result<()>> {
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         Pin::new(&mut self.get_mut().inner).poll_shutdown(cx)
     }
 }
@@ -110,10 +104,7 @@ impl MtlsListener {
     /// * `tcp` - Bound TCP listener
     /// * `tls_config` - Rustls config with client cert verifier (wrapped
     ///   in `ArcSwap` for hot reload)
-    pub(crate) fn new(
-        tcp: TcpListener,
-        tls_config: Arc<ArcSwap<rustls::ServerConfig>>,
-    ) -> Self {
+    pub(crate) fn new(tcp: TcpListener, tls_config: Arc<ArcSwap<rustls::ServerConfig>>) -> Self {
         Self { tcp, tls_config }
     }
 }
@@ -136,9 +127,7 @@ impl Listener for MtlsListener {
 
             // Set TCP_NODELAY
             if let Err(e) = tcp_stream.set_nodelay(true) {
-                tracing::trace!(
-                    "Failed to set TCP_NODELAY on mTLS connection: {e:#}"
-                );
+                tracing::trace!("Failed to set TCP_NODELAY on mTLS connection: {e:#}");
             }
 
             // Perform TLS handshake
@@ -204,16 +193,12 @@ pub(crate) fn build_mtls_server_config(
     let client_verifier = WebPkiClientVerifier::builder(Arc::new(root_store))
         .allow_unauthenticated()
         .build()
-        .map_err(|e| {
-            anyhow::anyhow!("Failed to build mTLS client verifier: {e}")
-        })?;
+        .map_err(|e| anyhow::anyhow!("Failed to build mTLS client verifier: {e}"))?;
 
     let mut config = rustls::ServerConfig::builder()
         .with_client_cert_verifier(client_verifier)
         .with_single_cert(server_cert_der, server_key_der)
-        .map_err(|e| {
-            anyhow::anyhow!("Failed to build mTLS server config: {e}")
-        })?;
+        .map_err(|e| anyhow::anyhow!("Failed to build mTLS server config: {e}"))?;
 
     // TLS 1.3 only, ALPN h2/http1.1
     config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
@@ -251,10 +236,7 @@ where
     type Error = S::Error;
     type Future = S::Future;
 
-    fn poll_ready(
-        &mut self,
-        cx: &mut Context<'_>,
-    ) -> Poll<Result<(), Self::Error>> {
+    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         self.inner.poll_ready(cx)
     }
 

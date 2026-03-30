@@ -238,9 +238,7 @@ fn extract_validated_header(headers: &HeaderMap, name: &str, max_len: usize) -> 
 /// On the main (non-mTLS) port, this always yields `None`.
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
-pub(crate) struct OptionalClientCert(
-    pub Option<crate::services::oidc::mtls::ClientCertificate>,
-);
+pub(crate) struct OptionalClientCert(pub Option<crate::services::oidc::mtls::ClientCertificate>);
 
 impl FromRequestParts<Arc<AppState>> for OptionalClientCert {
     type Rejection = std::convert::Infallible;
@@ -253,9 +251,7 @@ impl FromRequestParts<Arc<AppState>> for OptionalClientCert {
             .extensions
             .get::<crate::infra::mtls_listener::PeerClientCert>()
             .and_then(|ext| ext.0.as_ref())
-            .and_then(|der| {
-                crate::services::oidc::mtls::parse_client_certificate(der).ok()
-            });
+            .and_then(|der| crate::services::oidc::mtls::parse_client_certificate(der).ok());
 
         Ok(Self(cert))
     }

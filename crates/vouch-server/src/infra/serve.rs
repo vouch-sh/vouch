@@ -121,38 +121,31 @@ pub async fn serve(components: ServerComponents, app: Router) -> Result<()> {
         });
 
         // Start mTLS listener if Client Certificate CA is configured
-        let mtls_handle: Option<tokio::task::JoinHandle<()>> =
-            if state.client_cert_ca.is_some() {
-                let mtls_port = state.config().mtls_port;
-                let mtls_addr: std::net::SocketAddr =
-                    format!("[::]:{mtls_port}")
-                        .parse()
-                        .context("Invalid mTLS listen address")?;
+        let mtls_handle: Option<tokio::task::JoinHandle<()>> = if state.client_cert_ca.is_some() {
+            let mtls_port = state.config().mtls_port;
+            let mtls_addr: std::net::SocketAddr = format!("[::]:{mtls_port}")
+                .parse()
+                .context("Invalid mTLS listen address")?;
 
-                match start_mtls_listener(
-                    &state,
-                    &config,
-                    mtls_addr,
-                    app.clone(),
-                    shutdown_token.clone(),
-                ) {
-                    Ok(handle) => {
-                        tracing::info!(
-                            "mTLS listener started on port {}",
-                            mtls_port
-                        );
-                        Some(handle)
-                    }
-                    Err(e) => {
-                        tracing::error!(
-                            "Failed to start mTLS listener: {e:#}"
-                        );
-                        None
-                    }
+            match start_mtls_listener(
+                &state,
+                &config,
+                mtls_addr,
+                app.clone(),
+                shutdown_token.clone(),
+            ) {
+                Ok(handle) => {
+                    tracing::info!("mTLS listener started on port {}", mtls_port);
+                    Some(handle)
                 }
-            } else {
-                None
-            };
+                Err(e) => {
+                    tracing::error!("Failed to start mTLS listener: {e:#}");
+                    None
+                }
+            }
+        } else {
+            None
+        };
 
         // Create handle for graceful shutdown of HTTPS server
         let handle = axum_server::Handle::new();
@@ -303,9 +296,7 @@ fn start_mtls_listener(
     app: Router,
     shutdown_token: CancellationToken,
 ) -> anyhow::Result<tokio::task::JoinHandle<()>> {
-    use super::mtls_listener::{
-        MtlsListener, PeerCertLayer, build_mtls_server_config,
-    };
+    use super::mtls_listener::{MtlsListener, PeerCertLayer, build_mtls_server_config};
 
     // Parse server cert/key for the mTLS listener (same identity)
     let (certs, key) = super::tls::parse_server_cert_and_key(config)?;
@@ -315,14 +306,10 @@ fn start_mtls_listener(
         .client_cert_ca
         .as_ref()
         .map(|ca| ca.ca_cert_der())
-        .ok_or_else(|| {
-            anyhow::anyhow!("Client Certificate CA not configured")
-        })?;
+        .ok_or_else(|| anyhow::anyhow!("Client Certificate CA not configured"))?;
 
-    let mtls_config =
-        build_mtls_server_config(certs, key, ca_cert_der)?;
-    let mtls_config_swap =
-        std::sync::Arc::new(arc_swap::ArcSwap::from(mtls_config));
+    let mtls_config = build_mtls_server_config(certs, key, ca_cert_der)?;
+    let mtls_config_swap = std::sync::Arc::new(arc_swap::ArcSwap::from(mtls_config));
 
     // Apply peer cert middleware to the router
     let mtls_app = app.layer(PeerCertLayer);
@@ -331,9 +318,7 @@ fn start_mtls_listener(
         let tcp = match tokio::net::TcpListener::bind(addr).await {
             Ok(listener) => listener,
             Err(e) => {
-                tracing::error!(
-                    "Failed to bind mTLS listener on {addr}: {e}"
-                );
+                tracing::error!("Failed to bind mTLS listener on {addr}: {e}");
                 return;
             }
         };

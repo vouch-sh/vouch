@@ -94,11 +94,40 @@ pub struct OidcDiscoveryDocument {
     /// RFC 9396 §11.3: Supported authorization detail types.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub authorization_details_types_supported: Option<Vec<String>>,
-    /// OAuth 2.0 Mutual TLS Client Authentication — not supported.
+    /// OAuth 2.0 Mutual TLS Client Authentication (RFC 8705 Section 3).
     ///
-    /// Explicitly advertised as `false` so FAPI 2.0 conformance tools know we do
-    /// not support mTLS certificate-bound access tokens (we use DPoP instead).
+    /// `true` when Client Certificate CA is configured, `false` otherwise.
     pub tls_client_certificate_bound_access_tokens: bool,
+    /// RFC 8705 Section 5: mTLS endpoint aliases.
+    ///
+    /// Present when mTLS is configured, pointing to the mTLS port.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mtls_endpoint_aliases: Option<MtlsEndpointAliases>,
+}
+
+/// RFC 8705 Section 5: mTLS endpoint aliases.
+///
+/// Clients that use mTLS for client authentication or certificate-bound
+/// tokens should use these endpoint URLs instead of the standard ones.
+#[derive(Debug, Serialize)]
+pub struct MtlsEndpointAliases {
+    /// Token endpoint on the mTLS port.
+    pub token_endpoint: String,
+    /// Revocation endpoint on the mTLS port.
+    pub revocation_endpoint: String,
+    /// Introspection endpoint on the mTLS port.
+    pub introspection_endpoint: String,
+    /// Device authorization endpoint on the mTLS port.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub device_authorization_endpoint: Option<String>,
+    /// Registration endpoint on the mTLS port.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub registration_endpoint: Option<String>,
+    /// Pushed Authorization Request endpoint on the mTLS port.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pushed_authorization_request_endpoint: Option<String>,
+    /// UserInfo endpoint on the mTLS port.
+    pub userinfo_endpoint: String,
 }
 
 /// JSON Web Key Set response (RFC 7517 Section 5).
@@ -149,12 +178,19 @@ pub fn build_discovery_document(state: &Arc<AppState>) -> OidcDiscoveryDocument 
         } else {
             vec!["ES256".to_string()]
         },
-        token_endpoint_auth_methods_supported: vec![
-            "none".to_string(),
-            "client_secret_basic".to_string(),
-            "client_secret_post".to_string(),
-            "private_key_jwt".to_string(),
-        ],
+        token_endpoint_auth_methods_supported: {
+            let mut methods = vec![
+                "none".to_string(),
+                "client_secret_basic".to_string(),
+                "client_secret_post".to_string(),
+                "private_key_jwt".to_string(),
+            ];
+            if state.client_cert_ca.is_some() {
+                methods.push("tls_client_auth".to_string());
+                methods.push("self_signed_tls_client_auth".to_string());
+            }
+            methods
+        },
         claims_supported: vec![
             "sub".to_string(),
             "iss".to_string(),
@@ -205,9 +241,36 @@ pub fn build_discovery_document(state: &Arc<AppState>) -> OidcDiscoveryDocument 
         require_signed_request_object: false,
         // RFC 9396 §11.3: Server accepts any authorization detail type (opaque)
         authorization_details_types_supported: None,
-        // We use DPoP (not mTLS) for sender-constrained tokens.
-        tls_client_certificate_bound_access_tokens: false,
+        // RFC 8705: advertise mTLS support when CA is configured
+        tls_client_certificate_bound_access_tokens: state.client_cert_ca.is_some(),
+        mtls_endpoint_aliases: build_mtls_aliases(state, base_url),
     }
+}
+
+/// Build mTLS endpoint aliases if Client Certificate CA is configured.
+fn build_mtls_aliases(state: &Arc<AppState>, base_url: &str) -> Option<MtlsEndpointAliases> {
+    state.client_cert_ca.as_ref()?;
+
+    let config = state.config();
+    let mtls_base = config.mtls_base_url.clone().unwrap_or_else(|| {
+        // Derive from base_url by replacing the port with mtls_port
+        if let Ok(mut url) = url::Url::parse(base_url) {
+            let _ = url.set_port(Some(config.mtls_port));
+            url.to_string().trim_end_matches('/').to_string()
+        } else {
+            format!("{base_url}:{}", config.mtls_port)
+        }
+    });
+
+    Some(MtlsEndpointAliases {
+        token_endpoint: format!("{mtls_base}/oauth/token"),
+        revocation_endpoint: format!("{mtls_base}/oauth/revoke"),
+        introspection_endpoint: format!("{mtls_base}/oauth/introspect"),
+        device_authorization_endpoint: Some(format!("{mtls_base}/oauth/device")),
+        registration_endpoint: Some(format!("{mtls_base}/oauth/register")),
+        pushed_authorization_request_endpoint: Some(format!("{mtls_base}/oauth/par")),
+        userinfo_endpoint: format!("{mtls_base}/oauth/userinfo"),
+    })
 }
 
 /// Build the JSON Web Key Set for token verification.

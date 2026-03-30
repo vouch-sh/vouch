@@ -445,13 +445,10 @@ async fn build_app_state(
             .as_ref()
             .context("KMS client required for Client Cert CA KMS signing")?
             .clone();
-        let ca_cert_pem = config
-            .client_cert_ca_cert
-            .as_deref()
-            .context(
-                "VOUCH_CLIENT_CERT_CA_CERT required when using \
+        let ca_cert_pem = config.client_cert_ca_cert.as_deref().context(
+            "VOUCH_CLIENT_CERT_CA_CERT required when using \
                  VOUCH_CLIENT_CERT_CA_KMS_KEY_ID",
-            )?;
+        )?;
         let ca = crate::crypto::client_cert_ca::ClientCertCa::from_kms(
             client,
             key_id.clone(),
@@ -461,9 +458,7 @@ async fn build_app_state(
         .context("Failed to initialize KMS Client Certificate CA")?;
         tracing::info!("Client Certificate CA initialized (KMS)");
         Some(ca)
-    } else if config.client_cert_ca_key.is_some()
-        || config.client_cert_ca_cert.is_some()
-    {
+    } else if config.client_cert_ca_key.is_some() || config.client_cert_ca_cert.is_some() {
         let ca = crate::crypto::client_cert_ca::ClientCertCa::load_or_generate(
             config
                 .client_cert_ca_key

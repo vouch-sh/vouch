@@ -135,10 +135,9 @@ pub(crate) fn parse_server_cert_and_key(
     let cert_bytes = crate::crypto::pem::decode_base64_pem(cert_pem)
         .context("Failed to decode TLS certificate")?
         .into_bytes();
-    let key_bytes =
-        crate::crypto::pem::decode_base64_pem(key_secret.expose_secret())
-            .context("Failed to decode TLS private key")?
-            .into_bytes();
+    let key_bytes = crate::crypto::pem::decode_base64_pem(key_secret.expose_secret())
+        .context("Failed to decode TLS private key")?
+        .into_bytes();
 
     let certs: Vec<rustls::pki_types::CertificateDer<'static>> =
         rustls_pemfile::certs(&mut &*cert_bytes)
