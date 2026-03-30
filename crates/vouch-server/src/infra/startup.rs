@@ -381,7 +381,8 @@ async fn build_app_state(
     let kms_needs = config.ssh_ca_kms_key_id.is_some()
         || config.oidc_signing_kms_key_id.is_some()
         || config.oidc_rsa_signing_kms_key_id.is_some()
-        || config.jwt_hmac_kms_key_id.is_some();
+        || config.jwt_hmac_kms_key_id.is_some()
+        || config.client_cert_ca_kms_key_id.is_some();
     let kms_client = if kms_needs && kms_client.is_none() {
         tracing::info!("Creating KMS client for signing key access");
         let mut builder = aws_config::defaults(aws_config::BehaviorVersion::latest());
@@ -435,6 +436,47 @@ async fn build_app_state(
                 None
             }
         }
+    };
+
+    // Initialize Client Certificate CA for mTLS (RFC 8705)
+    // Priority: KMS key ID > PEM content (key + cert) > auto-generate ephemeral
+    let client_cert_ca = if let Some(key_id) = &config.client_cert_ca_kms_key_id {
+        let client = kms_client
+            .as_ref()
+            .context("KMS client required for Client Cert CA KMS signing")?
+            .clone();
+        let ca_cert_pem = config
+            .client_cert_ca_cert
+            .as_deref()
+            .context(
+                "VOUCH_CLIENT_CERT_CA_CERT required when using \
+                 VOUCH_CLIENT_CERT_CA_KMS_KEY_ID",
+            )?;
+        let ca = crate::crypto::client_cert_ca::ClientCertCa::from_kms(
+            client,
+            key_id.clone(),
+            ca_cert_pem,
+        )
+        .await
+        .context("Failed to initialize KMS Client Certificate CA")?;
+        tracing::info!("Client Certificate CA initialized (KMS)");
+        Some(ca)
+    } else if config.client_cert_ca_key.is_some()
+        || config.client_cert_ca_cert.is_some()
+    {
+        let ca = crate::crypto::client_cert_ca::ClientCertCa::load_or_generate(
+            config
+                .client_cert_ca_key
+                .as_ref()
+                .map(|s| s.expose_secret()),
+            config.client_cert_ca_cert.as_deref(),
+        )
+        .context("Failed to initialize local Client Certificate CA")?;
+        tracing::info!("Client Certificate CA initialized (local)");
+        Some(ca)
+    } else {
+        tracing::info!("Client Certificate CA not configured, mTLS disabled");
+        None
     };
 
     // Initialize OIDC signing key (ES256 for AWS and OIDC ID tokens)
@@ -648,6 +690,7 @@ async fn build_app_state(
         config: config_swap,
         webauthn,
         ssh_ca,
+        client_cert_ca,
         oidc_key,
         oidc_rsa_key,
         state_signer,

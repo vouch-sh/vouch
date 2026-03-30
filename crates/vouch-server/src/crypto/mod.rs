@@ -22,6 +22,7 @@ pub mod hash;
 pub(crate) mod jwt;
 pub(crate) mod kms_signer;
 pub(crate) mod pem;
+pub(crate) mod client_cert_ca;
 pub mod ssh_ca;
 pub mod tpm_decrypt;
 pub mod webauthn_verify;

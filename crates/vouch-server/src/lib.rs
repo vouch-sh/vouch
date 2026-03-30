@@ -76,6 +76,8 @@ pub struct AppState {
     pub webauthn: webauthn_rs::Webauthn,
     /// SSH Certificate Authority (optional, None if disabled).
     pub ssh_ca: Option<crypto::ssh_ca::SshCa>,
+    /// Client Certificate CA for mTLS (RFC 8705). None if mTLS disabled.
+    pub client_cert_ca: Option<crypto::client_cert_ca::ClientCertCa>,
     /// ES256 OIDC signing key (always present, used for access tokens).
     pub oidc_key: services::oidc::OidcSigningKey,
     /// OIDC RSA signing key for RS256 ID token signing (optional).
@@ -208,6 +210,11 @@ mod redirect_tests {
             oidc_rsa_signing_key: None,
             oidc_rsa_signing_kms_key_id: None,
             jwt_hmac_kms_key_id: None,
+            client_cert_ca_kms_key_id: None,
+            client_cert_ca_key: None,
+            client_cert_ca_cert: None,
+            mtls_port: 8443,
+            mtls_base_url: None,
             dpop_max_age_seconds: 300,
             cleanup_interval_minutes: 0,
             auth_events_retention_days: 90,
@@ -257,6 +264,7 @@ mod redirect_tests {
             config: Arc::new(ArcSwap::from_pointee(config)),
             webauthn,
             ssh_ca: None,
+            client_cert_ca: None,
             oidc_key: OidcSigningKey::generate().unwrap(),
             oidc_rsa_key: None,
             state_signer: crypto::jwt::StateTokenSigner::local(

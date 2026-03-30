@@ -19,7 +19,10 @@ compile_error!("test-utils feature must not be enabled in release builds");
 
 use vouch_server::{
     config,
-    infra::{generate_document_key, router, serve, startup, telemetry},
+    infra::{
+        generate_client_cert_ca, generate_document_key, router, serve, startup,
+        telemetry,
+    },
 };
 
 // ============================================================================
@@ -41,6 +44,8 @@ enum Commands {
     Serve(config::Args),
     /// Generate a P-384 document encryption key pair via KMS.
     GenerateDocumentKey(generate_document_key::GenerateDocumentKeyArgs),
+    /// Generate a Client Certificate CA for mTLS (RFC 8705).
+    GenerateClientCertCa(generate_client_cert_ca::GenerateClientCertCaArgs),
 }
 
 #[tokio::main]
@@ -60,13 +65,18 @@ async fn main() -> Result<()> {
     // (legacy: `vouch-server --listen-addr ...`).
     let first_arg = std::env::args().nth(1).unwrap_or_default();
     match first_arg.as_str() {
-        "serve" | "generate-document-key" | "help" | "--help" | "-h" => {
+        "serve" | "generate-document-key" | "generate-client-cert-ca" | "help" | "--help"
+        | "-h" => {
             let cli = Cli::parse();
             match cli.command {
                 Commands::Serve(args) => run_server(args).await,
                 Commands::GenerateDocumentKey(args) => {
                     init_stderr_logging();
                     generate_document_key::run(args).await
+                }
+                Commands::GenerateClientCertCa(args) => {
+                    init_stderr_logging();
+                    generate_client_cert_ca::run(args).await
                 }
             }
         }
