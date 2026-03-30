@@ -273,6 +273,7 @@ fn test_mock_device_fixture_compatibility() {
             &user_id,
             "test@example.com",
             "123456",
+            &[],
         )
         .unwrap();
     let auth = device

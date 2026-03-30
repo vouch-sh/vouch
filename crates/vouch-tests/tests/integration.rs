@@ -2397,6 +2397,7 @@ mod encoding_verification {
                 &user_id,
                 "user@test.com",
                 "",
+                &[],
             )
             .unwrap();
 
@@ -2437,6 +2438,7 @@ mod encoding_verification {
                 &user_id,
                 "user@test.com",
                 "",
+                &[],
             )
             .unwrap();
 

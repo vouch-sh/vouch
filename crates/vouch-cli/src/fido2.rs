@@ -398,6 +398,10 @@ impl YubiKey {
     /// Perform FIDO2 registration (`make_credential`).
     ///
     /// This creates a new credential on the `YubiKey`.
+    ///
+    /// `exclude_credentials` is a list of credential IDs already registered
+    /// for this user. If the `YubiKey` holds any of them, it returns
+    /// `CTAP2_ERR_CREDENTIAL_EXCLUDED` (0x19) instead of creating a duplicate.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn register(
         &self,
@@ -407,6 +411,7 @@ impl YubiKey {
         user_id: &[u8],
         user_name: &str,
         pin: &str,
+        exclude_credentials: &[CredentialId<Raw>],
     ) -> Result<RegistrationResult> {
         // Build client data JSON (WebAuthn spec)
         let client_data = ClientData::new_create(challenge, rp_id);
@@ -421,11 +426,16 @@ impl YubiKey {
         // IMPORTANT: ctap-hid-fido2 expects raw bytes and hashes them internally.
         // We pass the full client_data_json so the library computes:
         // clientDataHash = SHA256(client_data_json)
-        let args = MakeCredentialArgsBuilder::new(rp_id, &client_data_json)
+        let mut builder = MakeCredentialArgsBuilder::new(rp_id, &client_data_json)
             .user_entity(&user)
             .pin(pin)
-            .resident_key()
-            .build();
+            .resident_key();
+
+        for cred_id in exclude_credentials {
+            builder = builder.exclude_authenticator(cred_id.as_bytes());
+        }
+
+        let args = builder.build();
 
         // Execute make_credential
         let attestation = with_suppressed_stdout(|| self.device.make_credential_with_args(&args))
@@ -523,6 +533,12 @@ fn prompt_pin() -> Result<SecretString> {
 /// This function provides more helpful guidance for common PIN-related errors.
 fn translate_fido2_error(err: anyhow::Error, operation: &str) -> anyhow::Error {
     let err_str = err.to_string();
+
+    // CTAP2_ERR_CREDENTIAL_EXCLUDED: authenticator already holds a
+    // credential from the exclude list for this RP.
+    if err_str.contains("0x19") || err_str.contains("CREDENTIAL_EXCLUDED") {
+        return anyhow::anyhow!("This YubiKey is already registered for this service.");
+    }
 
     // Check for specific CTAP2 PIN errors in the error string
     if err_str.contains("0x31") || err_str.contains("PIN_INVALID") {
@@ -699,6 +715,9 @@ pub trait FidoDevice: Send {
     /// Perform FIDO2 registration (makeCredential).
     ///
     /// Creates a new credential on the device.
+    /// `exclude_credentials` prevents duplicate registration when the device
+    /// already holds one of the listed credentials.
+    #[allow(clippy::too_many_arguments)]
     fn register(
         &self,
         rp_id: &str,
@@ -707,6 +726,7 @@ pub trait FidoDevice: Send {
         user_id: &[u8],
         user_name: &str,
         pin: &str,
+        exclude_credentials: &[CredentialId<Raw>],
     ) -> Result<RegistrationResult>;
 
     /// Perform FIDO2 authentication (getAssertion) using discoverable credentials.
@@ -729,8 +749,18 @@ impl FidoDevice for YubiKey {
         user_id: &[u8],
         user_name: &str,
         pin: &str,
+        exclude_credentials: &[CredentialId<Raw>],
     ) -> Result<RegistrationResult> {
-        YubiKey::register(self, rp_id, rp_name, challenge, user_id, user_name, pin)
+        YubiKey::register(
+            self,
+            rp_id,
+            rp_name,
+            challenge,
+            user_id,
+            user_name,
+            pin,
+            exclude_credentials,
+        )
     }
 
     fn authenticate(
@@ -881,6 +911,7 @@ impl FidoDevice for MockFidoDevice {
         _user_id: &[u8],
         _user_name: &str,
         _pin: &str,
+        _exclude_credentials: &[CredentialId<Raw>],
     ) -> Result<RegistrationResult> {
         // Build client data JSON
         let client_data = ClientData::new_create(challenge, rp_id);
@@ -1043,6 +1074,7 @@ mod tests {
             b"user123",
             "test@example.com",
             "1234",
+            &[],
         );
 
         assert!(result.is_ok());

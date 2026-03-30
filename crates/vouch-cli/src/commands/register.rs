@@ -66,6 +66,7 @@ pub(crate) async fn run(server: &str, name: Option<&str>, timeout_secs: u64) -> 
     let challenge = start_resp.challenge.clone();
     let user_id = start_resp.user_id;
     let user_name = start_resp.user_name.clone();
+    let exclude_credentials = start_resp.exclude_credential_ids.clone();
     let result = fido2::spawn_fido2(move || {
         let key = YubiKey::wait_for_device(timeout_secs)?;
         let pin = fido2::ensure_pin_configured(&key)?;
@@ -77,6 +78,7 @@ pub(crate) async fn run(server: &str, name: Option<&str>, timeout_secs: u64) -> 
             user_id.as_bytes(),
             &user_name,
             pin.expose_secret(),
+            &exclude_credentials,
         )
     })
     .await?;
