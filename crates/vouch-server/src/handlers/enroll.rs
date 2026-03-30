@@ -861,6 +861,25 @@ pub async fn browser_register_start(
     // root CAs and AAGUID extraction from the leaf certificate.
     ccr.public_key.attestation = Some(webauthn_rs_proto::AttestationConveyancePreference::Direct);
 
+    // Signal that only cross-platform security keys (USB/NFC) are accepted.
+    // This suppresses the macOS "Scan QR Code" (hybrid/caBLE) option and
+    // platform authenticator prompts (Touch ID, Windows Hello).
+    if let Some(ref mut sel) = ccr.public_key.authenticator_selection {
+        sel.authenticator_attachment =
+            Some(webauthn_rs_proto::AuthenticatorAttachment::CrossPlatform);
+    } else {
+        ccr.public_key.authenticator_selection =
+            Some(webauthn_rs_proto::AuthenticatorSelectionCriteria {
+                authenticator_attachment: Some(
+                    webauthn_rs_proto::AuthenticatorAttachment::CrossPlatform,
+                ),
+                ..Default::default()
+            });
+    }
+    ccr.public_key.hints = Some(vec![
+        webauthn_rs_proto::PublicKeyCredentialHints::SecurityKey,
+    ]);
+
     // Create registration state with webauthn verification state
     let now = jiff::Timestamp::now();
     let reg_exp = now

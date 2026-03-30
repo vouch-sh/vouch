@@ -61,10 +61,38 @@ pub(crate) async fn run(server: &str) -> Result<()> {
         scope: None,
     };
 
-    let device_response: DeviceCodeResponse = client
-        .post_form("/oauth/device", &device_request)
-        .await
-        .context("Failed to start enrollment")?;
+    let device_response: DeviceCodeResponse =
+        match client.post_form("/oauth/device", &device_request).await {
+            Ok(resp) => resp,
+            Err(e) if pre_registered_client_id.is_some() => {
+                // The cached client_id may be stale (e.g. server DB was reset). Clear FAPI state, re-register, and retry once.
+                tracing::info!(
+                    "Device code request failed with cached client_id, re-registering: {e:#}"
+                );
+                if let Err(clear_err) = Config::modify(|c| {
+                    c.set_server_url(server);
+                    c.clear_fapi();
+                }) {
+                    tracing::warn!("Failed to clear stale FAPI config: {clear_err}");
+                }
+
+                let new_client_id = if let Some(ref key) = fapi_key {
+                    register_fapi_client_open(client.raw_client(), server, key).await
+                } else {
+                    None
+                };
+
+                let retry_request = DeviceCodeRequest {
+                    client_id: new_client_id,
+                    scope: None,
+                };
+                client
+                    .post_form("/oauth/device", &retry_request)
+                    .await
+                    .context("Failed to start enrollment")?
+            }
+            Err(e) => return Err(e.context("Failed to start enrollment")),
+        };
 
     // Step 4: Open browser and display instructions.
     let verification_url = &device_response.verification_uri;
@@ -423,6 +451,18 @@ async fn register_current_key(server: &str, token: SecretString) -> Result<()> {
         .await
         .context("failed to start key registration")?;
 
+    // If the server already has credentials for this user (browser just
+    // registered one), skip CLI registration — the browser-created
+    // discoverable credential works for CLI login via getAssertion too.
+    if !start_resp.exclude_credential_ids.is_empty() {
+        tracing::debug!(
+            "Skipping CLI auto-registration: {} credential(s) already \
+             registered during browser enrollment",
+            start_resp.exclude_credential_ids.len()
+        );
+        return Ok(());
+    }
+
     println!("\nRegistering your YubiKey with the server...");
 
     let rp_id = start_resp.rp_id.clone();
@@ -433,6 +473,8 @@ async fn register_current_key(server: &str, token: SecretString) -> Result<()> {
 
     // Short timeout — the key should already be inserted from
     // the enrollment flow. Don't block the user for long.
+    // Note: exclude list is always empty here (non-empty returns
+    // early above), but we pass &[] explicitly for clarity.
     let result = fido2::spawn_fido2(move || {
         let key = YubiKey::wait_for_device(10)?;
         let pin = fido2::ensure_pin_configured(&key)?;
@@ -444,6 +486,7 @@ async fn register_current_key(server: &str, token: SecretString) -> Result<()> {
             user_id.as_bytes(),
             &user_name,
             pin.expose_secret(),
+            &[],
         )
     })
     .await?;
