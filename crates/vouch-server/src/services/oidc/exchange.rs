@@ -345,6 +345,7 @@ pub async fn exchange_token(
             client_id: params.client_id,
             scope: granted_scope.clone(),
             dpop_jkt: params.dpop_jkt,
+            mtls_cert_thumbprint: None,
             act: actor_claim,
             audience,
             // Token exchange does not carry auth_time from the subject token

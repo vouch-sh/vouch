@@ -259,6 +259,8 @@ pub(crate) struct CreateOAuthTokenParams<'a> {
     pub scope: Option<ScopeSet>,
     /// DPoP JWK thumbprint for sender-constrained binding.
     pub dpop_jkt: Option<&'a str>,
+    /// mTLS certificate thumbprint for sender-constrained binding (RFC 8705).
+    pub mtls_cert_thumbprint: Option<&'a str>,
     /// Actor claim for delegation chains (token exchange).
     pub act: Option<ActorClaim>,
     /// Optional audience override (for token exchange with explicit audience).
@@ -322,10 +324,19 @@ pub(crate) async fn create_oauth_access_token(
         .as_ref()
         .is_some_and(|s| s.contains(crate::services::oidc::scope::OAuthScope::Email));
 
-    // RFC 9449 Section 6: Include cnf claim if DPoP was used
-    let cnf = params.dpop_jkt.map(|jkt| CnfClaim {
-        jkt: jkt.to_string(),
-    });
+    // RFC 9449 / RFC 8705: Include cnf claim for sender-constrained tokens.
+    // DPoP (jkt) takes priority over mTLS (x5t#S256).
+    let cnf = match (params.dpop_jkt, params.mtls_cert_thumbprint) {
+        (Some(jkt), _) => Some(CnfClaim {
+            jkt: Some(jkt.to_string()),
+            x5t_s256: None,
+        }),
+        (None, Some(x5t)) => Some(CnfClaim {
+            jkt: None,
+            x5t_s256: Some(x5t.to_string()),
+        }),
+        (None, None) => None,
+    };
 
     let claims = AccessTokenClaims {
         iss: state.config().base_url.clone(),

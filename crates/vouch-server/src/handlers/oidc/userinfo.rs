@@ -164,8 +164,9 @@ pub async fn userinfo(
                     }
                 };
                 match decoded.cnf() {
-                    Some(cnf) => {
-                        let is_valid: bool = proof.jkt.as_bytes().ct_eq(cnf.jkt.as_bytes()).into();
+                    Some(cnf) if cnf.jkt.is_some() => {
+                        let jkt = cnf.jkt.as_deref().unwrap_or("");
+                        let is_valid: bool = proof.jkt.as_bytes().ct_eq(jkt.as_bytes()).into();
                         if !is_valid {
                             return oauth_error(
                                 StatusCode::UNAUTHORIZED,
@@ -174,8 +175,9 @@ pub async fn userinfo(
                             );
                         }
                     }
-                    None => {
-                        // Token is not DPoP-bound but DPoP scheme was used
+                    Some(_) | None => {
+                        // Token is not DPoP-bound (mTLS-only or no cnf)
+                        // but DPoP scheme was used
                         return oauth_error(
                             StatusCode::UNAUTHORIZED,
                             OAuthErrorCode::InvalidDpopProof.as_str(),

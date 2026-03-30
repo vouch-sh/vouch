@@ -140,11 +140,22 @@ impl DpopJwk {
     }
 }
 
-/// Confirmation claim for token binding (RFC 9449 Section 6).
+/// Confirmation claim for token binding.
+///
+/// - `jkt`: JWK thumbprint for DPoP (RFC 9449 Section 6)
+/// - `x5t#S256`: Certificate thumbprint for mTLS (RFC 8705 Section 3.1)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CnfClaim {
-    /// JWK thumbprint of the sender's key.
-    pub jkt: String,
+    /// JWK thumbprint of the sender's key (DPoP).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jkt: Option<String>,
+    /// Certificate thumbprint (mTLS).
+    #[serde(
+        default,
+        rename = "x5t#S256",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub x5t_s256: Option<String>,
 }
 
 /// DPoP validation error.

@@ -74,6 +74,7 @@ pub async fn exchange_client_credentials(
             client_id: &client.client_id,
             scope: scope.clone(),
             dpop_jkt: None,
+            mtls_cert_thumbprint: None,
             act: None,
             audience: None,
             auth_time: None,

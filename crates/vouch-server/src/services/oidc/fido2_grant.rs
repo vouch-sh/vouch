@@ -307,6 +307,7 @@ pub async fn exchange_fido2_assertion(
             client_id: &params.client.client.client_id,
             scope: Some(scope.clone()),
             dpop_jkt,
+            mtls_cert_thumbprint: None,
             act: None,
             audience: None,
             auth_time: Some(now),

@@ -120,8 +120,10 @@ pub async fn extract_resource_token(
         })?;
 
     // 4. DPoP validation for sender-constrained tokens
-    if let Some(ref cnf) = access_claims.cnf {
-        // Token has cnf.jkt → it's sender-constrained
+    if let Some(ref cnf) = access_claims.cnf
+        && cnf.jkt.is_some()
+    {
+        // Token has cnf.jkt → it's DPoP sender-constrained
         match auth_scheme {
             AuthScheme::DPoP => {
                 // Validate DPoP proof header against cnf.jkt
@@ -140,8 +142,9 @@ pub async fn extract_resource_token(
                     {
                         Ok(validated) => {
                             // Verify jkt matches
+                            let jkt = cnf.jkt.as_deref().unwrap_or("");
                             let is_match: bool =
-                                validated.jkt.as_bytes().ct_eq(cnf.jkt.as_bytes()).into();
+                                validated.jkt.as_bytes().ct_eq(jkt.as_bytes()).into();
                             if !is_match {
                                 return Err(ServiceError::api(
                                     StatusCode::UNAUTHORIZED,

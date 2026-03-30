@@ -236,6 +236,7 @@ pub async fn exchange_authorization_code(
             client_id: &auth_code.client_id,
             scope: Some(auth_code.scope.clone()),
             dpop_jkt,
+            mtls_cert_thumbprint: None,
             act: None,
             audience: grants.audience.as_deref(),
             auth_time: Some(auth_code.auth_time.unwrap_or(auth_code.iat)),
@@ -722,9 +723,10 @@ async fn generate_id_token(
         .checked_add(expires_seconds)
         .ok_or_else(|| ServiceError::Internal("Expiration time overflow".to_string()))?;
 
-    // RFC 9449: Include cnf claim if DPoP was used
+    // RFC 9449 / RFC 8705: Include cnf claim for sender-constrained tokens.
     let cnf = params.dpop_jkt.map(|jkt| CnfClaim {
-        jkt: jkt.to_string(),
+        jkt: Some(jkt.to_string()),
+        x5t_s256: None,
     });
 
     let has_email = params.scope.contains(OAuthScope::Email);

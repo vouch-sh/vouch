@@ -277,6 +277,7 @@ pub async fn device_token(
                     client_id: &client_id,
                     scope: Some(ScopeSet::all()),
                     dpop_jkt: None,
+                    mtls_cert_thumbprint: None,
                     act: None,
                     audience: None,
                     auth_time: Some(now_secs),

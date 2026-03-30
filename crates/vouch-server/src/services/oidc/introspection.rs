@@ -141,8 +141,9 @@ pub async fn introspect_token(
     // RFC 9396: authorization_details from session (already a Value).
     let authorization_details = session.authorization_details;
 
-    // RFC 9449 §7: DPoP-bound tokens report token_type "DPoP" and include cnf
-    let is_dpop = claims.cnf.is_some();
+    // RFC 9449 §7: DPoP-bound tokens report token_type "DPoP".
+    // mTLS-bound tokens (x5t#S256 only, no jkt) report "Bearer".
+    let is_dpop = claims.cnf.as_ref().is_some_and(|c| c.jkt.is_some());
     let token_type = if is_dpop { "DPoP" } else { "Bearer" };
 
     // RFC 9068 access token — populate client_id from the JWT
