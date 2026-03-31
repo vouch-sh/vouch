@@ -53,6 +53,7 @@ pub async fn register(
             &jar,
             method.as_str(),
             uri.path(),
+            None,
         )
         .await
         {

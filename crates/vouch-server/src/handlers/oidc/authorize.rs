@@ -6,8 +6,12 @@
 //! - RFC 9207 (Authorization Server Issuer Identification)
 //! - RFC 9700 (OAuth 2.0 Security Best Current Practice)
 
-use super::{build_authorization_success_redirect_url, build_redirect_url_with_params};
+use super::{
+    build_authorization_success_redirect_url, build_jarm_redirect_url,
+    build_redirect_url_with_params,
+};
 use crate::AppState;
+use crate::db::documents::oauth::ResponseMode;
 use crate::db::{self, Authenticator, CreatePendingOAuthParams, OAuthClient, Session, User};
 use crate::handlers::HasVersion;
 use crate::impl_template_response;
@@ -84,6 +88,9 @@ pub struct AuthorizeQuery {
     /// RFC 9396: Rich authorization details (JSON string).
     #[serde(default)]
     authorization_details: Option<String>,
+    /// JARM (oauth-v2-jarm): Requested authorization response mode.
+    #[serde(default)]
+    response_mode: Option<String>,
 }
 
 /// GET /oauth/authorize
@@ -229,6 +236,7 @@ async fn authorize_inner(state: Arc<AppState>, params: AuthorizeQuery, jar: Cook
         prompt: parsed_prompt,
         dpop_jkt: params.dpop_jkt.clone(),
         authorization_details: params.authorization_details.clone(),
+        response_mode: None,
     };
 
     let validated = match validate_authorize_request(request_params) {
@@ -285,12 +293,32 @@ async fn authorize_inner(state: Arc<AppState>, params: AuthorizeQuery, jar: Cook
             }
         };
 
+    // Determine the response mode for error redirects in this direct authorize flow.
+    // When the client requests response_mode=jwt, errors must also be JARM-encoded
+    // so the conformance suite can detect the error via the `response` JWT parameter.
+    let direct_response_mode = params
+        .response_mode
+        .as_deref()
+        .and_then(ResponseMode::parse)
+        .unwrap_or(ResponseMode::Query);
+
     // RFC 9700: PKCE required for public clients and Native/SPA types.
     if let Err(e) = require_pkce_for_client(&validated, &oauth_client) {
         let description = match &e {
             crate::services::ServiceError::OAuth { description, .. } => description.clone(),
             _ => e.to_string(),
         };
+        if direct_response_mode == ResponseMode::Jwt {
+            return oauth_error_redirect_jarm(
+                &state,
+                &oauth_client,
+                validated.redirect_uri(),
+                "invalid_request",
+                &description,
+                validated.state(),
+            )
+            .await;
+        }
         return oauth_error_redirect(
             validated.redirect_uri(),
             "invalid_request",
@@ -312,6 +340,17 @@ async fn authorize_inner(state: Arc<AppState>, params: AuthorizeQuery, jar: Cook
             crate::services::ServiceError::OAuth { description, .. } => description.clone(),
             _ => e.to_string(),
         };
+        if direct_response_mode == ResponseMode::Jwt {
+            return oauth_error_redirect_jarm(
+                &state,
+                &oauth_client,
+                validated.redirect_uri(),
+                "invalid_request",
+                &description,
+                validated.state(),
+            )
+            .await;
+        }
         return oauth_error_redirect(
             validated.redirect_uri(),
             "invalid_request",
@@ -323,8 +362,21 @@ async fn authorize_inner(state: Arc<AppState>, params: AuthorizeQuery, jar: Cook
 
     // RFC 9101: Enforce require_signed_request_object for this client.
     // If the client requires JAR but the request came through the normal flow
-    // (no `request` JWT, no PAR `request_uri`), reject it.
+    // (no `request` JWT, no PAR `request_uri`), reject it. The error response
+    // uses JARM encoding when response_mode=jwt was requested so the conformance
+    // suite can observe the error via the `response` JWT parameter.
     if oauth_client.require_signed_request_object == Some(true) {
+        if direct_response_mode == ResponseMode::Jwt {
+            return oauth_error_redirect_jarm(
+                &state,
+                &oauth_client,
+                validated.redirect_uri(),
+                "invalid_request",
+                "This client requires a signed Request Object (RFC 9101)",
+                validated.state(),
+            )
+            .await;
+        }
         return oauth_error_redirect(
             validated.redirect_uri(),
             "invalid_request",
@@ -372,6 +424,7 @@ async fn authorize_inner(state: Arc<AppState>, params: AuthorizeQuery, jar: Cook
                 &authenticator,
                 ReauthPolicy::OnDemand,
                 None,
+                direct_response_mode,
             )
             .await
         }
@@ -387,7 +440,7 @@ async fn authorize_inner(state: Arc<AppState>, params: AuthorizeQuery, jar: Cook
                     &state.config().base_url,
                 );
             }
-            store_pending_and_redirect(&state, validated).await
+            store_pending_and_redirect(&state, validated, direct_response_mode).await
         }
     }
 }
@@ -418,6 +471,7 @@ pub async fn authorize_post(
 async fn store_pending_and_redirect(
     state: &Arc<AppState>,
     validated: crate::services::oidc::authorization::ValidatedAuthRequest,
+    response_mode: ResponseMode,
 ) -> Response {
     let scope_str = validated.scope().to_space_separated();
     let max_age_i64 = validated.max_age().and_then(|v| i64::try_from(v).ok());
@@ -437,6 +491,7 @@ async fn store_pending_and_redirect(
         prompt: validated.prompt().map(|p| p.as_str()),
         dpop_jkt: validated.dpop_jkt(),
         authorization_details: ad_value.as_ref(),
+        response_mode,
     };
 
     match db::create_pending_oauth_authorization(&state.store, pending_params).await {
@@ -568,6 +623,8 @@ async fn handle_pending_auth(state: &Arc<AppState>, pending_id: &str, jar: &Cook
                 code_params,
                 &pending.redirect_uri,
                 pending.state.as_deref(),
+                &oauth_client,
+                pending.response_mode,
             )
             .await
         }
@@ -730,6 +787,7 @@ async fn handle_jar_request(
                 &authenticator,
                 ReauthPolicy::OnDemand,
                 None,
+                ResponseMode::Query,
             )
             .await
         }
@@ -743,7 +801,7 @@ async fn handle_jar_request(
                     &state.config().base_url,
                 );
             }
-            store_pending_and_redirect(state, validated).await
+            store_pending_and_redirect(state, validated, ResponseMode::Query).await
         }
     }
 }
@@ -829,6 +887,7 @@ async fn handle_par_request(
             .authorization_details
             .as_ref()
             .and_then(|v| serde_json::to_string(v).ok()),
+        response_mode: None,
     };
 
     let validated = match validate_authorize_request(request_params) {
@@ -921,6 +980,7 @@ async fn handle_par_request(
                 &authenticator,
                 ReauthPolicy::Always,
                 Some((request_uri, client_id)),
+                par.response_mode,
             )
             .await
         }
@@ -935,7 +995,7 @@ async fn handle_par_request(
                 );
             }
             // DPoP key binding is already in validated.dpop_jkt() from par.dpop_jkt.
-            store_pending_and_redirect(state, validated).await
+            store_pending_and_redirect(state, validated, par.response_mode).await
         }
     }
 }
@@ -973,6 +1033,7 @@ async fn authorize_authenticated_user(
     authenticator: &Authenticator,
     reauth_policy: ReauthPolicy,
     par_to_consume: Option<(&str, &str)>,
+    response_mode: ResponseMode,
 ) -> Response {
     // Step 1: Check client access.
     if let Err(e) = check_client_access(oauth_client, user) {
@@ -1023,7 +1084,7 @@ async fn authorize_authenticated_user(
 
     // Step 4: Re-auth needed — store pending request and redirect to login.
     if needs_reauth {
-        return store_pending_and_redirect(state, validated).await;
+        return store_pending_and_redirect(state, validated, response_mode).await;
     }
 
     // Step 5: Validate requested ACR (RFC 9470).
@@ -1094,11 +1155,16 @@ async fn authorize_authenticated_user(
         code_params,
         validated.redirect_uri(),
         validated.state(),
+        oauth_client,
+        response_mode,
     )
     .await
 }
 
 /// Issue an authorization code and build the success redirect response.
+///
+/// When `response_mode` is `ResponseMode::Jwt`, wraps the response in a JARM
+/// signed JWT delivered as a single `response` query parameter.
 ///
 /// Shared helper used by both direct authorization and pending-auth flows.
 async fn issue_code_and_redirect(
@@ -1106,20 +1172,48 @@ async fn issue_code_and_redirect(
     code_params: AuthorizationCodeParams<'_>,
     redirect_uri: &str,
     oauth_state: Option<&str>,
+    oauth_client: &OAuthClient,
+    response_mode: ResponseMode,
 ) -> Response {
     match issue_authorization_code(state, code_params).await {
         Ok(code) => {
-            let base_url = state.config().base_url.clone();
-            match build_authorization_success_redirect_url(
-                redirect_uri,
-                code.as_str(),
-                oauth_state,
-                &base_url,
-            ) {
-                Ok(url) => Redirect::to(&url).into_response(),
-                Err(_) => {
-                    // Fallback: should not happen since redirect_uri was already validated
-                    Redirect::to(redirect_uri).into_response()
+            if response_mode == ResponseMode::Jwt {
+                match crate::services::oidc::jarm::build_jarm_success_jwt(
+                    state,
+                    oauth_client,
+                    code.as_str(),
+                    oauth_state,
+                )
+                .await
+                {
+                    Ok(jwt) => {
+                        let url = build_jarm_redirect_url(redirect_uri, &jwt);
+                        Redirect::to(&url).into_response()
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to build JARM success JWT: {e}");
+                        oauth_error_redirect(
+                            redirect_uri,
+                            "server_error",
+                            "Failed to generate authorization response",
+                            oauth_state,
+                            &state.config().base_url,
+                        )
+                    }
+                }
+            } else {
+                let base_url = state.config().base_url.clone();
+                match build_authorization_success_redirect_url(
+                    redirect_uri,
+                    code.as_str(),
+                    oauth_state,
+                    &base_url,
+                ) {
+                    Ok(url) => Redirect::to(&url).into_response(),
+                    Err(_) => {
+                        // Fallback: should not happen since redirect_uri was already validated
+                        Redirect::to(redirect_uri).into_response()
+                    }
                 }
             }
         }
@@ -1165,6 +1259,45 @@ fn oauth_error_redirect(
     // RFC 9207: Include iss parameter even in error responses
     params.push(("iss", issuer));
     build_authorization_redirect(redirect_uri, &params)
+}
+
+/// Create an OAuth error redirect response, using JARM encoding when the client
+/// has requested `response_mode=jwt`.
+///
+/// Falls back to plain query parameters if JARM JWT signing fails.
+async fn oauth_error_redirect_jarm(
+    state: &Arc<AppState>,
+    client: &OAuthClient,
+    redirect_uri: &str,
+    error: &str,
+    description: &str,
+    oauth_state: Option<&str>,
+) -> Response {
+    match crate::services::oidc::jarm::build_jarm_error_jwt(
+        state,
+        client,
+        error,
+        Some(description),
+        oauth_state,
+    )
+    .await
+    {
+        Ok(jwt) => {
+            let url = build_jarm_redirect_url(redirect_uri, &jwt);
+            axum::response::Redirect::to(&url).into_response()
+        }
+        Err(e) => {
+            tracing::error!("Failed to build JARM error JWT: {e}");
+            // Fall back to plain query params so the user-agent is not left stranded.
+            oauth_error_redirect(
+                redirect_uri,
+                error,
+                description,
+                oauth_state,
+                &state.config().base_url,
+            )
+        }
+    }
 }
 
 #[cfg(test)]

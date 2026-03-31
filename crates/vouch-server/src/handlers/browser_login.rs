@@ -622,6 +622,7 @@ pub async fn browser_login_complete(
             client_id: &client_id,
             scope: Some(ScopeSet::all()),
             dpop_jkt: None,
+            mtls_cert_thumbprint: None,
             act: None,
             audience: None,
             auth_time: Some(auth_now.as_second()),
@@ -838,6 +839,7 @@ mod tests {
                 prompt: Some("login"),
                 dpop_jkt: None,
                 authorization_details: None,
+                response_mode: Default::default(),
             },
         )
         .await
@@ -889,6 +891,7 @@ mod tests {
                 prompt: None,
                 dpop_jkt: None,
                 authorization_details: None,
+                response_mode: Default::default(),
             },
         )
         .await

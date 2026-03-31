@@ -9,8 +9,10 @@ use crate::AppState;
 use crate::crypto::hash_token;
 use crate::db;
 use crate::redact_email;
+use crate::services::ServiceError;
 use crate::services::ServiceResult;
 use crate::services::auth::{DecodedToken, decode_token};
+use crate::services::oidc::keys::OidcSigningKey;
 use crate::services::oidc::scope::ScopeSet;
 use serde::Serialize;
 use std::sync::Arc;
@@ -79,6 +81,53 @@ impl IntrospectionResult {
     }
 }
 
+/// JWT claims for an RFC 9701 introspection response.
+///
+/// RFC 9701 Section 5.4: The JWT MUST include `iss`, `aud`, `iat`, and
+/// a `token_introspection` claim. It MUST NOT include a top-level `sub` or `exp`.
+#[derive(Serialize)]
+struct IntrospectionJwtClaims {
+    iss: String,
+    aud: String,
+    iat: i64,
+    token_introspection: serde_json::Value,
+}
+
+/// Wrap an introspection result in a signed JWT per RFC 9701.
+///
+/// The JWT structure:
+/// - Header: `typ: "token-introspection+jwt"`, `alg: "ES256"`
+/// - Claims: `iss`, `aud`, `iat` at top level
+/// - Token data inside `token_introspection` claim
+/// - For inactive tokens: `{"token_introspection": {"active": false}}`
+/// - No top-level `sub` or `exp` (RFC 9701 Section 5.4)
+pub(crate) async fn wrap_introspection_jwt(
+    result: &IntrospectionResult,
+    issuer: &str,
+    audience: &str,
+    oidc_key: &OidcSigningKey,
+) -> Result<String, ServiceError> {
+    let token_introspection = if result.active {
+        serde_json::to_value(result).map_err(|e| {
+            ServiceError::Internal(format!("Failed to serialize introspection result: {e}"))
+        })?
+    } else {
+        serde_json::json!({"active": false})
+    };
+
+    let claims = IntrospectionJwtClaims {
+        iss: issuer.to_string(),
+        aud: audience.to_string(),
+        iat: jiff::Timestamp::now().as_second(),
+        token_introspection,
+    };
+
+    oidc_key
+        .sign_jwt_with_typ(&claims, Some("token-introspection+jwt"))
+        .await
+        .map_err(|e| ServiceError::Internal(format!("Failed to sign introspection JWT: {e}")))
+}
+
 /// Result of token revocation.
 #[derive(Debug)]
 pub struct RevocationResult {
@@ -141,8 +190,9 @@ pub async fn introspect_token(
     // RFC 9396: authorization_details from session (already a Value).
     let authorization_details = session.authorization_details;
 
-    // RFC 9449 §7: DPoP-bound tokens report token_type "DPoP" and include cnf
-    let is_dpop = claims.cnf.is_some();
+    // RFC 9449 §7: DPoP-bound tokens report token_type "DPoP".
+    // mTLS-bound tokens (x5t#S256 only, no jkt) report "Bearer".
+    let is_dpop = claims.cnf.as_ref().is_some_and(|c| c.jkt.is_some());
     let token_type = if is_dpop { "DPoP" } else { "Bearer" };
 
     // RFC 9068 access token — populate client_id from the JWT

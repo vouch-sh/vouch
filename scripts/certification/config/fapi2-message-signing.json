@@ -1,12 +1,15 @@
 {
-  "description": "Vouch {VERSION} FAPI 2.0 Security Profile",
+  "description": "Vouch {VERSION} FAPI 2.0 Message Signing",
   "variant": {
     "openid": "openid_connect",
     "client_auth_type": "private_key_jwt",
     "sender_constrain": "dpop",
-    "fapi_profile": "plain_fapi"
+    "fapi_profile": "plain_fapi",
+    "fapi_request_method": "signed_non_repudiation",
+    "fapi_response_mode": "plain_response",
+    "authorization_request_type": "simple"
   },
-  "client_alias": "vouch-fapi2",
+  "client_alias": "vouch-fapi2-ms",
   "server": {
     "discoveryUrl": "{BASEURL}/.well-known/openid-configuration"
   },

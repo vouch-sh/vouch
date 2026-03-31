@@ -56,7 +56,7 @@ mimalloc = { workspace = true, features = ["secure"] }
 opentelemetry = { workspace = true, features = ["trace"] }
 opentelemetry-otlp = { workspace = true, features = ["trace", "grpc-tonic", "tls-aws-lc"] }
 opentelemetry_sdk = { workspace = true, features = ["rt-tokio", "trace"] }
-p256 = { workspace = true, features = ["ecdsa"] }
+p256 = { workspace = true, features = ["alloc", "ecdsa", "pkcs8", "pem"] }
 reqwest = { workspace = true, features = ["json", "rustls", "form"] }
 roxmltree = { workspace = true }
 rust-embed = { workspace = true, features = ["axum-ex", "deterministic-timestamps", "mime-guess"] }
@@ -68,6 +68,7 @@ secrecy = { workspace = true, features = ["serde"] }
 serde = { workspace = true, features = ["std", "derive"] }
 serde_json = { workspace = true, features = ["std"] }
 serde_urlencoded = { workspace = true }
+sha2 = { workspace = true, features = ["oid"] }
 signature = { workspace = true }
 spki = { workspace = true, features = ["std"] }
 sqlx = { workspace = true, features = ["runtime-tokio", "migrate", "derive", "macros", "sqlite", "postgres", "tls-rustls-aws-lc-rs"] }
@@ -77,6 +78,7 @@ tempfile = { workspace = true }
 thiserror = { workspace = true }
 time = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "signal", "time"] }
+tokio-rustls = { workspace = true, features = ["aws-lc-rs"] }
 tokio-util = { workspace = true }
 tower = { workspace = true, features = ["util"] }
 tower-http = { workspace = true, features = ["cors", "request-id", "set-header", "timeout"] }
@@ -91,7 +93,7 @@ vouch-common = { workspace = true }
 vouch-httpsig = { workspace = true, features = ["axum"] }
 webauthn-rs = { workspace = true, features = ["danger-allow-state-serialisation"] }
 webauthn-rs-proto = { workspace = true }
-x509-cert = { workspace = true, features = ["std", "pem"] }
+x509-cert = { workspace = true, features = ["std", "pem", "builder"] }
 zeroize = { workspace = true }
 
 [dev-dependencies]

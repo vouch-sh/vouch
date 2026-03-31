@@ -187,21 +187,39 @@ pub async fn complete_login(
     };
 
     // ── 8. Build redirect URL ─────────────────────────────────────────────
-    // RFC 6749 Section 4.1.2: code + state (if present) + iss (RFC 9207).
-    let redirect_url = match build_authorization_success_redirect_url(
-        &pending.redirect_uri,
-        &code,
-        pending.state.as_deref(),
-        &state.config().base_url,
-    ) {
-        Ok(url) => url,
-        Err(e) => {
-            tracing::error!(
-                redirect_uri = %pending.redirect_uri,
-                error = %e,
-                "Certification login: invalid redirect URI"
-            );
-            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    // When response_mode is JARM, wrap the response in a signed JWT.
+    use crate::db::documents::oauth::ResponseMode;
+    let redirect_url = if pending.response_mode == ResponseMode::Jwt {
+        match crate::services::oidc::jarm::build_jarm_success_jwt(
+            &state,
+            &client,
+            &code,
+            pending.state.as_deref(),
+        )
+        .await
+        {
+            Ok(jwt) => crate::handlers::oidc::build_jarm_redirect_url(&pending.redirect_uri, &jwt),
+            Err(e) => {
+                tracing::error!(error = %e, "Certification login: JARM JWT signing failed");
+                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+            }
+        }
+    } else {
+        match build_authorization_success_redirect_url(
+            &pending.redirect_uri,
+            &code,
+            pending.state.as_deref(),
+            &state.config().base_url,
+        ) {
+            Ok(url) => url,
+            Err(e) => {
+                tracing::error!(
+                    redirect_uri = %pending.redirect_uri,
+                    error = %e,
+                    "Certification login: invalid redirect URI"
+                );
+                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+            }
         }
     };
 
@@ -226,6 +244,7 @@ pub async fn complete_login(
             client_id: &client_id,
             scope: Some(ScopeSet::all()),
             dpop_jkt: None,
+            mtls_cert_thumbprint: None,
             act: None,
             audience: None,
             auth_time: Some(Timestamp::now().as_second()),
@@ -290,26 +309,53 @@ pub async fn deny_login(
         };
 
     // Redirect to callback with access_denied error (RFC 6749 Section 4.1.2.1).
-    let mut redirect = match url::Url::parse(&pending.redirect_uri) {
-        Ok(u) => u,
-        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
-    };
-    {
-        let mut q = redirect.query_pairs_mut();
-        q.append_pair("error", "access_denied");
-        q.append_pair("error_description", "User rejected authentication");
-        if let Some(ref s) = pending.state {
-            q.append_pair("state", s);
+    // When response_mode is JARM, wrap the error in a signed JWT.
+    use crate::db::documents::oauth::ResponseMode;
+    let redirect_url = if pending.response_mode == ResponseMode::Jwt {
+        let client = match db::get_oauth_client_by_client_id(&state.store, &pending.client_id).await
+        {
+            Ok(Some(c)) => c,
+            _ => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        };
+        match crate::services::oidc::jarm::build_jarm_error_jwt(
+            &state,
+            &client,
+            "access_denied",
+            Some("User rejected authentication"),
+            pending.state.as_deref(),
+        )
+        .await
+        {
+            Ok(jwt) => crate::handlers::oidc::build_jarm_redirect_url(&pending.redirect_uri, &jwt),
+            Err(e) => {
+                tracing::error!(error = %e, "Certification deny-login: JARM JWT signing failed");
+                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+            }
         }
-        q.append_pair("iss", &state.config().base_url);
-    }
+    } else {
+        let mut redirect = match url::Url::parse(&pending.redirect_uri) {
+            Ok(u) => u,
+            Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        };
+        {
+            let mut q = redirect.query_pairs_mut();
+            q.append_pair("error", "access_denied");
+            q.append_pair("error_description", "User rejected authentication");
+            if let Some(ref s) = pending.state {
+                q.append_pair("state", s);
+            }
+            // RFC 9207: Authorization Response Issuer Identification.
+            q.append_pair("iss", &state.config().base_url);
+        }
+        redirect.to_string()
+    };
 
     tracing::info!(
         pending_auth = %query.pending_auth,
         "Certification deny-login: redirecting with access_denied"
     );
 
-    Redirect::to(redirect.as_str()).into_response()
+    Redirect::to(&redirect_url).into_response()
 }
 
 /// Get the certification test user, creating it if it doesn't exist.
@@ -487,6 +533,7 @@ mod tests {
                 prompt: None,
                 dpop_jkt: None,
                 authorization_details: None,
+                response_mode: Default::default(),
             },
         )
         .await
@@ -527,6 +574,7 @@ mod tests {
                 prompt: None,
                 dpop_jkt: None,
                 authorization_details: None,
+                response_mode: Default::default(),
             },
         )
         .await

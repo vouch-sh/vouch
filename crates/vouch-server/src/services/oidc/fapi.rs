@@ -64,16 +64,26 @@ pub fn validate_fapi_client_registration(client: &OAuthClient) -> ServiceResult<
         ));
     }
 
-    // FAPI 2.0 Section 5.2.2: Must use private_key_jwt
-    if client.token_endpoint_auth_method != TokenEndpointAuthMethod::PrivateKeyJwt {
+    // FAPI 2.0 Section 5.2.2: Must use private_key_jwt or mTLS auth
+    let is_valid_fapi_auth = matches!(
+        client.token_endpoint_auth_method,
+        TokenEndpointAuthMethod::PrivateKeyJwt
+            | TokenEndpointAuthMethod::TlsClientAuth
+            | TokenEndpointAuthMethod::SelfSignedTlsClientAuth
+    );
+    if !is_valid_fapi_auth {
         return Err(ServiceError::oauth(
             OAuthErrorCode::InvalidClient,
-            "FAPI 2.0 requires private_key_jwt authentication",
+            "FAPI 2.0 requires private_key_jwt or mTLS authentication",
         ));
     }
 
     // FAPI 2.0: Must have JWKS configured for private_key_jwt
-    if client.jwks.is_none() && client.jwks_uri.is_none() {
+    // (not required for tls_client_auth which uses certificate identity)
+    if client.token_endpoint_auth_method == TokenEndpointAuthMethod::PrivateKeyJwt
+        && client.jwks.is_none()
+        && client.jwks_uri.is_none()
+    {
         return Err(ServiceError::oauth(
             OAuthErrorCode::InvalidClient,
             "FAPI 2.0 requires JWKS or JWKS URI for private_key_jwt",
@@ -132,16 +142,20 @@ pub fn validate_fapi_authorization_request(
 /// # Errors
 ///
 /// Returns `ServiceError::OAuth` with `invalid_request` if constraints are violated.
-pub fn validate_fapi_token_request(client: &OAuthClient, has_dpop: bool) -> ServiceResult<()> {
+pub fn validate_fapi_token_request(
+    client: &OAuthClient,
+    has_dpop: bool,
+    has_mtls_cert: bool,
+) -> ServiceResult<()> {
     if !client.is_fapi() {
         return Ok(());
     }
 
     // FAPI 2.0 Section 5.2.2: Sender-constrained tokens required (DPoP or mTLS)
-    if !has_dpop {
+    if !has_dpop && !has_mtls_cert {
         return Err(ServiceError::oauth(
             OAuthErrorCode::InvalidRequest,
-            "FAPI 2.0 requires sender-constrained access tokens (DPoP proof required)",
+            "FAPI 2.0 requires sender-constrained access tokens (DPoP or mTLS required)",
         ));
     }
 
@@ -206,11 +220,13 @@ pub fn validate_fapi_client_auth_method(
     }
 
     match auth_method {
-        TokenEndpointAuthMethod::PrivateKeyJwt => Ok(()),
+        TokenEndpointAuthMethod::PrivateKeyJwt
+        | TokenEndpointAuthMethod::TlsClientAuth
+        | TokenEndpointAuthMethod::SelfSignedTlsClientAuth => Ok(()),
         _ => Err(ServiceError::oauth(
             OAuthErrorCode::InvalidClient,
             format!(
-                "FAPI 2.0 requires private_key_jwt authentication, got '{}'",
+                "FAPI 2.0 requires private_key_jwt or mTLS authentication, got '{}'",
                 auth_method.as_str()
             ),
         )),
@@ -247,7 +263,7 @@ pub fn auth_code_lifetime_seconds(client: &OAuthClient) -> i64 {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use crate::db::{AccessScope, FapiProfile, OAuthClientType};
+    use crate::db::{AccessScope, FapiProfile, JwsAlgorithm, OAuthClientType};
 
     /// Create a minimal FAPI 2.0 confidential client for testing.
     fn fapi_client() -> OAuthClient {
@@ -283,7 +299,15 @@ mod tests {
             registration_source: None,
             registration_access_token_hash: None,
             registration_metadata: None,
-            id_token_signed_response_alg: "RS256".to_string(),
+            id_token_signed_response_alg: JwsAlgorithm::Rs256,
+            tls_client_auth_subject_dn: None,
+            tls_client_auth_san_dns: None,
+            tls_client_auth_san_uri: None,
+            tls_client_auth_san_ip: None,
+            tls_client_auth_san_email: None,
+            tls_client_certificate_bound_access_tokens: false,
+            authorization_signed_response_alg: None,
+            introspection_signed_response_alg: None,
         }
     }
 
@@ -321,7 +345,15 @@ mod tests {
             registration_source: None,
             registration_access_token_hash: None,
             registration_metadata: None,
-            id_token_signed_response_alg: "RS256".to_string(),
+            id_token_signed_response_alg: JwsAlgorithm::Rs256,
+            tls_client_auth_subject_dn: None,
+            tls_client_auth_san_dns: None,
+            tls_client_auth_san_uri: None,
+            tls_client_auth_san_ip: None,
+            tls_client_auth_san_email: None,
+            tls_client_certificate_bound_access_tokens: false,
+            authorization_signed_response_alg: None,
+            introspection_signed_response_alg: None,
         }
     }
 
@@ -407,22 +439,32 @@ mod tests {
     // =========================================================================
 
     #[test]
-    fn test_validate_fapi_token_request_requires_dpop() {
+    fn test_validate_fapi_token_request_requires_sender_constraint() {
         let client = fapi_client();
-        assert!(validate_fapi_token_request(&client, false).is_err());
+        assert!(validate_fapi_token_request(&client, false, false).is_err());
     }
 
     #[test]
     fn test_validate_fapi_token_request_accepts_dpop() {
         let client = fapi_client();
-        assert!(validate_fapi_token_request(&client, true).is_ok());
+        assert!(validate_fapi_token_request(&client, true, false).is_ok());
+    }
+
+    #[test]
+    fn test_validate_fapi_token_request_accepts_mtls() {
+        // mTLS certificate is a valid sender-constraint mechanism for FAPI 2.0.
+        let client = fapi_client();
+        assert!(
+            validate_fapi_token_request(&client, false, true).is_ok(),
+            "mTLS cert must be accepted as sender-constraint for FAPI token request"
+        );
     }
 
     #[test]
     fn test_validate_fapi_token_request_skips_non_fapi() {
         let client = standard_client();
-        assert!(validate_fapi_token_request(&client, false).is_ok());
-        assert!(validate_fapi_token_request(&client, true).is_ok());
+        assert!(validate_fapi_token_request(&client, false, false).is_ok());
+        assert!(validate_fapi_token_request(&client, true, false).is_ok());
     }
 
     // =========================================================================
@@ -477,6 +519,42 @@ mod tests {
         assert!(
             validate_fapi_client_auth_method(&client, TokenEndpointAuthMethod::PrivateKeyJwt)
                 .is_ok()
+        );
+    }
+
+    #[test]
+    fn test_validate_fapi_client_auth_method_accepts_tls_client_auth() {
+        let client = fapi_client();
+        assert!(
+            validate_fapi_client_auth_method(&client, TokenEndpointAuthMethod::TlsClientAuth)
+                .is_ok(),
+            "TlsClientAuth must be accepted for FAPI clients"
+        );
+    }
+
+    #[test]
+    fn test_validate_fapi_client_auth_method_accepts_self_signed_tls() {
+        let client = fapi_client();
+        assert!(
+            validate_fapi_client_auth_method(
+                &client,
+                TokenEndpointAuthMethod::SelfSignedTlsClientAuth
+            )
+            .is_ok(),
+            "SelfSignedTlsClientAuth must be accepted for FAPI clients"
+        );
+    }
+
+    #[test]
+    fn test_validate_fapi_client_registration_accepts_tls_client_auth() {
+        // A FAPI client registered with TlsClientAuth (no JWKS required) must pass.
+        let mut client = fapi_client();
+        client.token_endpoint_auth_method = TokenEndpointAuthMethod::TlsClientAuth;
+        client.jwks = None;
+        client.jwks_uri = None;
+        assert!(
+            validate_fapi_client_registration(&client).is_ok(),
+            "TlsClientAuth FAPI client without JWKS must be valid (cert identity used instead)"
         );
     }
 

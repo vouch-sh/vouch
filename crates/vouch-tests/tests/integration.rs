@@ -929,6 +929,10 @@ mod oidc {
     }
 
     /// Test that userinfo requires bearer token.
+    ///
+    /// RFC 6750 Section 3.1: When the request lacks any authentication
+    /// information, the WWW-Authenticate challenge SHOULD NOT include an
+    /// error code.
     #[tokio::test]
     async fn test_userinfo_requires_bearer_token() {
         let harness = TestHarness::new().await;
@@ -939,8 +943,14 @@ mod oidc {
             .expect("Failed to get userinfo");
 
         assert_eq!(response.status, 401);
-        let error: serde_json::Value = response.json().expect("Failed to parse error");
-        assert_eq!(error["error"], "invalid_token");
+        let www_auth = response
+            .www_authenticate
+            .as_deref()
+            .expect("Should have WWW-Authenticate header");
+        assert_eq!(
+            www_auth, "Bearer",
+            "No-auth response must use bare Bearer challenge per RFC 6750 Section 3.1"
+        );
     }
 
     /// Test that userinfo returns claims with valid token.
@@ -2521,7 +2531,15 @@ mod httpsig {
                 registration_source: vouch_server::db::RegistrationSource::Dynamic,
                 registration_access_token_hash: None,
                 registration_metadata: None,
-                id_token_signed_response_alg: "ES256",
+                id_token_signed_response_alg: vouch_server::db::JwsAlgorithm::Es256,
+                tls_client_auth_subject_dn: None,
+                tls_client_auth_san_dns: None,
+                tls_client_auth_san_uri: None,
+                tls_client_auth_san_ip: None,
+                tls_client_auth_san_email: None,
+                tls_client_certificate_bound_access_tokens: None,
+                authorization_signed_response_alg: None,
+                introspection_signed_response_alg: None,
             },
         )
         .await

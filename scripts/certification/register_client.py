@@ -1,22 +1,68 @@
 #!/usr/bin/env python3
 """Register an OAuth client with the Vouch server via Dynamic Client Registration.
 
-Reads client_alias and auth method from the plan config JSON, then:
-  - client_secret_basic  (OIDC Basic plans)
-  - private_key_jwt      (FAPI 2.0 plans — generates an ES256 key pair)
+Reads client_alias and variant from the plan config JSON, then:
+  - client_secret_basic       (OIDC Basic plans)
+  - private_key_jwt           (FAPI 2.0 plans — generates an ES256 key pair)
+  - tls_client_auth           (FAPI 2.0 MTLS plans — generates self-signed cert)
 
-Writes CLIENT_ID, CLIENT_SECRET, and CLIENT_JWKS to GITHUB_ENV so that
-subsequent workflow steps can reference them as environment variables.
+Writes CLIENT_ID, CLIENT_SECRET, CLIENT_JWKS, and optionally MTLS_CERT,
+MTLS_KEY, TLS_CLIENT_AUTH_SUBJECT_DN to GITHUB_ENV.
 """
 
 import argparse
 import base64
+import datetime
 import json
 import os
 import re
 import sys
 import urllib.request
 from pathlib import Path
+
+
+def parse_variant(raw: str) -> dict[str, str]:
+    """Extract the variant object from raw config JSON."""
+    match = re.search(r'"variant"\s*:\s*(\{[^}]+\})', raw, re.DOTALL)
+    if not match:
+        return {}
+    try:
+        return json.loads(match.group(1))
+    except json.JSONDecodeError:
+        return {}
+
+
+def generate_self_signed_cert(cn: str) -> tuple[str, str, str]:
+    """Generate a self-signed X.509 cert. Returns (cert_pem, key_pem, subject_dn)."""
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.x509.oid import NameOID
+
+    key = ec.generate_private_key(ec.SECP256R1())
+    subject = issuer = x509.Name([
+        x509.NameAttribute(NameOID.COMMON_NAME, cn),
+    ])
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(subject)
+        .issuer_name(issuer)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(datetime.datetime.now(datetime.UTC))
+        .not_valid_after(
+            datetime.datetime.now(datetime.UTC)
+            + datetime.timedelta(days=365)
+        )
+        .sign(key, hashes.SHA256())
+    )
+    cert_pem = cert.public_bytes(serialization.Encoding.PEM).decode()
+    key_pem = key.private_bytes(
+        serialization.Encoding.PEM,
+        serialization.PrivateFormat.PKCS8,
+        serialization.NoEncryption(),
+    ).decode()
+    return cert_pem, key_pem, f"CN={cn}"
 
 
 def b64url(n: int, length: int = 32) -> str:
@@ -61,34 +107,52 @@ def build_payload(
     client_alias: str,
     public_jwks: dict | None,
     is_second_client: bool = False,
+    client_auth_type: str = "private_key_jwt",
+    sender_constrain: str = "dpop",
+    subject_dn: str = "",
 ) -> dict:
     conformance_redirect = (
         f"https://www.certification.openid.net/test/a/{client_alias}/callback"
     )
-    if public_jwks is not None:
-        # The conformance suite's happy-flow adds dummy query params
-        # to the second client's redirect_uri. Both must be registered.
-        redirect_uris = [conformance_redirect]
-        if is_second_client:
-            redirect_uris.append(
-                f"{conformance_redirect}?dummy1=lorem&dummy2=ipsum"
-            )
+    if public_jwks is None:
         return {
-            "redirect_uris": redirect_uris,
-            "token_endpoint_auth_method": "private_key_jwt",
+            "redirect_uris": [conformance_redirect],
+            "token_endpoint_auth_method": "client_secret_basic",
             "grant_types": ["authorization_code"],
             "response_types": ["code"],
             "scope": "openid email",
-            "jwks": public_jwks,
-            "dpop_bound_access_tokens": True,
         }
-    return {
-        "redirect_uris": [conformance_redirect],
-        "token_endpoint_auth_method": "client_secret_basic",
+
+    redirect_uris = [conformance_redirect]
+    if is_second_client:
+        redirect_uris.append(
+            f"{conformance_redirect}?dummy1=lorem&dummy2=ipsum"
+        )
+
+    auth_method = (
+        "tls_client_auth"
+        if client_auth_type == "mtls"
+        else "private_key_jwt"
+    )
+
+    payload: dict = {
+        "redirect_uris": redirect_uris,
+        "token_endpoint_auth_method": auth_method,
         "grant_types": ["authorization_code"],
         "response_types": ["code"],
         "scope": "openid email",
+        "jwks": public_jwks,
     }
+
+    if client_auth_type == "mtls" and subject_dn:
+        payload["tls_client_auth_subject_dn"] = subject_dn
+
+    if sender_constrain == "dpop":
+        payload["dpop_bound_access_tokens"] = True
+    elif sender_constrain == "mtls":
+        payload["tls_client_certificate_bound_access_tokens"] = True
+
+    return payload
 
 
 def post_dcr(vouch_url: str, payload: dict) -> dict:
@@ -148,6 +212,10 @@ def main() -> None:
         sys.exit(1)
 
     is_fapi2 = "fapi2" in args.plan
+    variant = parse_variant(raw)
+    client_auth_type = variant.get("client_auth_type", "private_key_jwt")
+    sender_constrain = variant.get("sender_constrain", "dpop")
+    needs_mtls = client_auth_type == "mtls" or sender_constrain == "mtls"
 
     public_jwks = None
     private_jwks = None
@@ -155,7 +223,23 @@ def main() -> None:
         public_jwks, private_jwks = generate_ec_jwk(Path(args.key_dir))
         print("ES256 key pair generated")
 
-    payload = build_payload(args.plan, client_alias, public_jwks)
+    cert_pem = ""
+    key_pem = ""
+    subject_dn = ""
+    if is_fapi2 and needs_mtls:
+        cert_pem, key_pem, subject_dn = generate_self_signed_cert(
+            f"{client_alias}-client1"
+        )
+        print("mTLS client cert generated")
+
+    payload = build_payload(
+        args.plan,
+        client_alias,
+        public_jwks,
+        client_auth_type=client_auth_type,
+        sender_constrain=sender_constrain,
+        subject_dn=subject_dn,
+    )
     response = post_dcr(args.vouch_url, payload)
     print(f"DCR response: {json.dumps(response)}")
 
@@ -163,12 +247,17 @@ def main() -> None:
         json.dumps(private_jwks, separators=(",", ":")) if private_jwks else ""
     )
 
-    env = {
+    env: dict[str, str] = {
         "CLIENT_ID": response["client_id"],
         "CLIENT_SECRET": response.get("client_secret", ""),
         "CLIENT_JWKS": client_jwks,
         "CLIENT_REG_TOKEN": response.get("registration_access_token", ""),
     }
+
+    if is_fapi2 and needs_mtls:
+        env["MTLS_CERT"] = cert_pem
+        env["MTLS_KEY"] = key_pem
+        env["TLS_CLIENT_AUTH_SUBJECT_DN"] = subject_dn
 
     # FAPI 2.0 tests require a second client for certain modules.
     if is_fapi2:
@@ -176,8 +265,24 @@ def main() -> None:
             Path(args.key_dir) / "client2"
         )
         print("ES256 key pair generated for client2")
+
+        cert_pem2 = ""
+        key_pem2 = ""
+        subject_dn2 = ""
+        if needs_mtls:
+            cert_pem2, key_pem2, subject_dn2 = generate_self_signed_cert(
+                f"{client_alias}-client2"
+            )
+            print("mTLS client cert generated for client2")
+
         payload2 = build_payload(
-            args.plan, client_alias, public_jwks2, is_second_client=True
+            args.plan,
+            client_alias,
+            public_jwks2,
+            is_second_client=True,
+            client_auth_type=client_auth_type,
+            sender_constrain=sender_constrain,
+            subject_dn=subject_dn2,
         )
         response2 = post_dcr(args.vouch_url, payload2)
         print(f"DCR response (client2): {json.dumps(response2)}")
@@ -187,6 +292,11 @@ def main() -> None:
             private_jwks2, separators=(",", ":")
         )
         env["CLIENT2_REG_TOKEN"] = response2.get("registration_access_token", "")
+
+        if needs_mtls:
+            env["MTLS2_CERT"] = cert_pem2
+            env["MTLS2_KEY"] = key_pem2
+            env["TLS_CLIENT_AUTH_SUBJECT_DN2"] = subject_dn2
 
     write_github_env(env)
 

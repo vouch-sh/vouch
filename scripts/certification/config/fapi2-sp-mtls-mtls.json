@@ -1,12 +1,12 @@
 {
-  "description": "Vouch {VERSION} FAPI 2.0 Security Profile",
+  "description": "Vouch {VERSION} FAPI2SP MTLS+MTLS",
   "variant": {
     "openid": "openid_connect",
-    "client_auth_type": "private_key_jwt",
-    "sender_constrain": "dpop",
+    "client_auth_type": "mtls",
+    "sender_constrain": "mtls",
     "fapi_profile": "plain_fapi"
   },
-  "client_alias": "vouch-fapi2",
+  "client_alias": "vouch-fapi2-sp-mtls-mtls",
   "server": {
     "discoveryUrl": "{BASEURL}/.well-known/openid-configuration"
   },
@@ -14,7 +14,12 @@
     "client_id": "{CLIENT_ID}",
     "jwks": {CLIENT_JWKS},
     "scope": "openid email",
-    "registration_access_token": "{CLIENT_REG_TOKEN}"
+    "registration_access_token": "{CLIENT_REG_TOKEN}",
+    "tls_client_auth_subject_dn": "{TLS_CLIENT_AUTH_SUBJECT_DN}"
+  },
+  "mtls": {
+    "cert": "{MTLS_CERT}",
+    "key": "{MTLS_KEY}"
   },
   "resource": {
     "resourceUrl": "{BASEURL}/oauth/userinfo"
@@ -23,7 +28,12 @@
     "client_id": "{CLIENT2_ID}",
     "jwks": {CLIENT2_JWKS},
     "scope": "openid email",
-    "registration_access_token": "{CLIENT2_REG_TOKEN}"
+    "registration_access_token": "{CLIENT2_REG_TOKEN}",
+    "tls_client_auth_subject_dn": "{TLS_CLIENT_AUTH_SUBJECT_DN2}"
+  },
+  "mtls2": {
+    "cert": "{MTLS2_CERT}",
+    "key": "{MTLS2_KEY}"
   },
   "browser": [
     {

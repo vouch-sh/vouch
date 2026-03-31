@@ -299,6 +299,7 @@ const MAX_ASSERTION_LEN: usize = 8192;
 pub async fn token(
     State(state): State<Arc<AppState>>,
     client_info: crate::handlers::extractors::ClientInfo,
+    client_cert: crate::handlers::extractors::OptionalClientCert,
     headers: HeaderMap,
     axum::Form(params): axum::Form<TokenRequest>,
 ) -> Response {
@@ -391,18 +392,20 @@ pub async fn token(
 
     match grant_type {
         OAuthGrantType::AuthorizationCode => {
-            handle_authorization_code_grant(State(state), headers, params).await
+            handle_authorization_code_grant(State(state), client_cert, headers, params).await
         }
         OAuthGrantType::ClientCredentials => {
-            handle_client_credentials_grant(State(state), client_info, headers, params).await
+            handle_client_credentials_grant(State(state), client_info, client_cert, headers, params)
+                .await
         }
         OAuthGrantType::DeviceCode => handle_device_code_grant(State(state), params).await,
         OAuthGrantType::TokenExchange => {
-            handle_token_exchange_grant(State(state), headers, params).await
+            handle_token_exchange_grant(State(state), client_cert, headers, params).await
         }
         OAuthGrantType::JwtBearer => handle_jwt_bearer_grant(State(state), params).await,
         OAuthGrantType::Fido2Assertion => {
-            handle_fido2_assertion_grant(State(state), client_info, headers, params).await
+            handle_fido2_assertion_grant(State(state), client_info, client_cert, headers, params)
+                .await
         }
     }
 }
@@ -410,6 +413,7 @@ pub async fn token(
 /// Handle authorization code grant.
 async fn handle_authorization_code_grant(
     State(state): State<Arc<AppState>>,
+    client_cert: crate::handlers::extractors::OptionalClientCert,
     headers: HeaderMap,
     params: TokenRequest,
 ) -> Response {
@@ -454,12 +458,52 @@ async fn handle_authorization_code_grant(
         (None, None)
     };
 
-    // For non-JWT auth, extract traditional credentials
-    let credentials = if !has_jwt_assertion {
-        extract_client_credentials(&headers, params.client_id.as_deref(), params.client_secret)
+    // For non-JWT auth, extract traditional credentials or mTLS auth.
+    let (credentials, mtls_authenticated) = if !has_jwt_assertion {
+        let creds =
+            extract_client_credentials(&headers, params.client_id.as_deref(), params.client_secret);
+
+        // RFC 8705: If only client_id (no secret) and a cert is present,
+        // try mTLS authentication. authenticate_client() will skip secret
+        // validation for mTLS-registered clients.
+        let mtls_auth = if let Some(ref c) = creds
+            && c.client_secret.is_none()
+            && client_cert.0.is_some()
+        {
+            match crate::services::oidc::token::authenticate_client(&state, c).await {
+                Ok(client)
+                    if matches!(
+                        client.client.token_endpoint_auth_method,
+                        crate::db::TokenEndpointAuthMethod::TlsClientAuth
+                            | crate::db::TokenEndpointAuthMethod::SelfSignedTlsClientAuth
+                    ) =>
+                {
+                    // Validate the certificate against registered identity
+                    if let Some(ref cert) = client_cert.0
+                        && let Err(e) = crate::services::oidc::token::authenticate_client_mtls(
+                            &client.client,
+                            cert,
+                        )
+                    {
+                        return e.into_service_error().into_oauth_response().into_response();
+                    }
+                    Some(client)
+                }
+                Ok(_) => None, // Not an mTLS client, fall through
+                Err(_) => None,
+            }
+        } else {
+            None
+        };
+
+        (creds, mtls_auth)
     } else {
-        None
+        (None, None)
     };
+
+    // Resolve the authenticated client from either path
+    let authenticated_client: Option<&crate::services::oidc::token::AuthenticatedClient> =
+        jwt_authenticated.as_ref().or(mtls_authenticated.as_ref());
 
     // RFC 9449 Section 5: Validate DPoP proof if present at the token endpoint
     let dpop_header = headers.get("DPoP").and_then(|v| v.to_str().ok());
@@ -476,21 +520,33 @@ async fn handle_authorization_code_grant(
             }
         };
 
-    // FAPI 2.0: Require DPoP for FAPI clients (sender-constrained tokens).
-    // FAPI 2.0 Section 5.2.2 mandates sender-constrained access tokens.
-    // Since we use DPoP (not mTLS), a DPoP proof is required for FAPI clients.
+    // RFC 8705 Section 2: Validate mTLS client auth for JWT-authenticated clients
+    // that are also registered for mTLS (e.g., FAPI clients using both).
+    let has_mtls_cert = client_cert.0.is_some();
     if let Some(ref auth) = jwt_authenticated
+        && mtls_authenticated.is_none()
+        && let Err(resp) = validate_mtls_client_auth(auth, &client_cert)
+    {
+        return *resp;
+    }
+
+    // FAPI 2.0: Require DPoP for FAPI clients (sender-constrained tokens).
+    if let Some(auth) = authenticated_client
         && let Err(e) = crate::services::oidc::fapi::validate_fapi_token_request(
             &auth.client,
             dpop_proof.is_some(),
+            has_mtls_cert,
         )
     {
         return e.into_oauth_response().into_response();
     }
 
+    // RFC 8705 Section 3: Bind access token to cert thumbprint only when opted in.
+    let mtls_thumbprint =
+        authenticated_client.and_then(|auth| extract_mtls_thumbprint(auth, &client_cert));
+
     // Extract client_id for audience validation (RFC 8725 §3.9)
-    let exchange_client_id = jwt_authenticated
-        .as_ref()
+    let exchange_client_id = authenticated_client
         .map(|c| c.client.client_id.as_str())
         .or_else(|| credentials.as_ref().map(|c| c.client_id.as_str()))
         .or(params.client_id.as_deref())
@@ -501,12 +557,13 @@ async fn handle_authorization_code_grant(
         code,
         redirect_uri: params.redirect_uri.as_deref(),
         credentials: credentials.as_ref(),
-        jwt_authenticated_client: jwt_authenticated.as_ref(),
+        jwt_authenticated_client: jwt_authenticated.as_ref().or(mtls_authenticated.as_ref()),
         code_verifier: params.code_verifier.as_deref(),
         dpop_proof,
         client_id: exchange_client_id,
         resource: params.resource.as_deref(),
         authorization_details: params.authorization_details.as_deref(),
+        mtls_cert_thumbprint: mtls_thumbprint.as_deref(),
     };
 
     match exchange_authorization_code(&state, exchange_params).await {
@@ -547,6 +604,7 @@ async fn handle_authorization_code_grant(
 async fn handle_client_credentials_grant(
     State(state): State<Arc<AppState>>,
     client_info: crate::handlers::extractors::ClientInfo,
+    client_cert: crate::handlers::extractors::OptionalClientCert,
     headers: HeaderMap,
     params: TokenRequest,
 ) -> Response {
@@ -580,10 +638,19 @@ async fn handle_client_credentials_grant(
         .into_response();
     }
 
+    // RFC 8705 Section 2: Validate mTLS client auth if the client uses it.
+    if let Err(resp) = validate_mtls_client_auth(&authenticated_client, &client_cert) {
+        return *resp;
+    }
+
+    // RFC 8705 Section 3: Bind access token to cert thumbprint only when opted in.
+    let mtls_thumbprint = extract_mtls_thumbprint(&authenticated_client, &client_cert);
+
     match exchange_client_credentials(
         &state,
         &authenticated_client.client,
         params.scope.as_deref(),
+        mtls_thumbprint.as_deref(),
     )
     .await
     {
@@ -652,6 +719,7 @@ async fn handle_device_code_grant(
 /// match any client_id provided in the request body.
 async fn handle_token_exchange_grant(
     State(state): State<Arc<AppState>>,
+    client_cert: crate::handlers::extractors::OptionalClientCert,
     headers: HeaderMap,
     params: TokenRequest,
 ) -> Response {
@@ -693,6 +761,14 @@ async fn handle_token_exchange_grant(
 
     let dpop_jkt = dpop_proof.as_ref().map(|p| p.jkt.clone());
 
+    // RFC 8705 Section 2: Validate mTLS client auth if the client uses it.
+    if let Err(resp) = validate_mtls_client_auth(&authenticated_client, &client_cert) {
+        return *resp;
+    }
+
+    // RFC 8705 Section 3: Bind access token to cert thumbprint only when opted in.
+    let mtls_thumbprint = extract_mtls_thumbprint(&authenticated_client, &client_cert);
+
     // RFC 8707: If resource is present, use it as audience (unless audience is explicitly set).
     // If both are present, they must match.
     let effective_audience = match (params.audience.as_deref(), params.resource.as_deref()) {
@@ -720,6 +796,7 @@ async fn handle_token_exchange_grant(
         client_id: &authenticated_client.client.client_id,
         dpop_jkt: dpop_jkt.as_deref(),
         authorization_details: params.authorization_details.as_deref(),
+        mtls_cert_thumbprint: mtls_thumbprint.as_deref(),
     };
 
     match exchange_token(&state, exchange_params).await {
@@ -779,6 +856,7 @@ impl ClientAuthFields for TokenRequest {
 async fn handle_fido2_assertion_grant(
     State(state): State<Arc<AppState>>,
     client_info: crate::handlers::extractors::ClientInfo,
+    client_cert: crate::handlers::extractors::OptionalClientCert,
     headers: HeaderMap,
     params: TokenRequest,
 ) -> Response {
@@ -830,13 +908,19 @@ async fn handle_fido2_assertion_grant(
             }
         };
 
-    // FAPI 2.0: Require DPoP for FAPI clients
+    let has_mtls_cert = client_cert.0.is_some();
+
+    // FAPI 2.0: Require sender-constrained tokens (DPoP or mTLS)
     if let Err(e) = crate::services::oidc::fapi::validate_fapi_token_request(
         &jwt_authenticated.client,
         dpop_proof.is_some(),
+        has_mtls_cert,
     ) {
         return e.into_oauth_response().into_response();
     }
+
+    // RFC 8705 Section 3: Bind access token to cert thumbprint only when opted in.
+    let mtls_thumbprint = extract_mtls_thumbprint(&jwt_authenticated, &client_cert);
 
     // Exchange the FIDO2 assertion for an access token
     let exchange_params = crate::services::oidc::fido2_grant::Fido2AssertionParams {
@@ -849,6 +933,7 @@ async fn handle_fido2_assertion_grant(
         scope: params.scope.as_deref(),
         authorization_details: params.authorization_details.as_deref(),
         client_info,
+        mtls_cert_thumbprint: mtls_thumbprint.as_deref(),
     };
 
     match crate::services::oidc::fido2_grant::exchange_fido2_assertion(&state, exchange_params)
@@ -909,6 +994,52 @@ async fn handle_jwt_bearer_grant(
             authorization_details: None,
         }),
         Err(e) => e.into_oauth_response().into_response(),
+    }
+}
+
+/// Validate mTLS client authentication when the client uses `tls_client_auth`
+/// or `self_signed_tls_client_auth` (RFC 8705 Section 2).
+///
+/// Returns `Ok(())` if the auth method is not mTLS-based, or if the cert
+/// is present and validates successfully. Returns `Err(Box<Response>)` with a
+/// 401-equivalent OAuth error response if the cert is absent or invalid.
+fn validate_mtls_client_auth(
+    client: &crate::services::oidc::token::AuthenticatedClient,
+    client_cert: &crate::handlers::extractors::OptionalClientCert,
+) -> Result<(), Box<Response>> {
+    if client.client.token_endpoint_auth_method != crate::db::TokenEndpointAuthMethod::TlsClientAuth
+        && client.client.token_endpoint_auth_method
+            != crate::db::TokenEndpointAuthMethod::SelfSignedTlsClientAuth
+    {
+        return Ok(());
+    }
+    let Some(ref cert) = client_cert.0 else {
+        return Err(Box::new(
+            ServiceError::oauth(
+                OAuthErrorCode::InvalidClient,
+                "mTLS client certificate required",
+            )
+            .into_oauth_response()
+            .into_response(),
+        ));
+    };
+    crate::services::oidc::token::authenticate_client_mtls(&client.client, cert)
+        .map_err(|e| Box::new(e.into_service_error().into_oauth_response().into_response()))
+}
+
+/// Extract mTLS certificate thumbprint for certificate-bound access tokens
+/// (RFC 8705 Section 3).
+///
+/// Returns `Some(thumbprint)` only when the client has opted in via
+/// `tls_client_certificate_bound_access_tokens` **and** a cert is present.
+fn extract_mtls_thumbprint(
+    client: &crate::services::oidc::token::AuthenticatedClient,
+    client_cert: &crate::handlers::extractors::OptionalClientCert,
+) -> Option<String> {
+    if client.client.tls_client_certificate_bound_access_tokens {
+        client_cert.0.as_ref().map(|c| c.thumbprint.clone())
+    } else {
+        None
     }
 }
 

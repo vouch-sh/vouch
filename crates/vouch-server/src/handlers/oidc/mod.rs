@@ -46,6 +46,25 @@ pub(crate) fn build_authorization_success_redirect_url(
     build_redirect_url_with_params(redirect_uri, &params)
 }
 
+/// Build a JARM redirect URL with the signed JWT as the `response` parameter.
+///
+/// Per the JARM specification, all authorization response parameters are wrapped
+/// in a single signed JWT delivered via the `response` query parameter.
+pub(crate) fn build_jarm_redirect_url(redirect_uri: &str, jwt: &str) -> String {
+    // redirect_uri has already been validated at this point, so parse errors
+    // fall back to a best-effort string append rather than panicking.
+    match url::Url::parse(redirect_uri) {
+        Ok(mut url) => {
+            url.query_pairs_mut().append_pair("response", jwt);
+            url.to_string()
+        }
+        Err(_) => {
+            // Fallback: should not happen since redirect_uri was already validated
+            format!("{redirect_uri}?response={}", urlencoding::encode(jwt))
+        }
+    }
+}
+
 /// Build a redirect URL by appending query parameters to a validated redirect URI.
 pub(crate) fn build_redirect_url_with_params(
     redirect_uri: &str,

@@ -294,6 +294,9 @@ pub struct S3Config {
     /// AWS KMS key ID for HMAC state token signing.
     pub jwt_hmac_kms_key_id: Option<String>,
 
+    /// mTLS listener port.
+    pub mtls_port: Option<u16>,
+
     // Cleanup settings
     /// Cleanup interval in minutes.
     pub cleanup_interval_minutes: Option<u64>,
@@ -353,6 +356,7 @@ impl std::fmt::Debug for S3Config {
                 &self.oidc_rsa_signing_kms_key_id,
             )
             .field("jwt_hmac_kms_key_id", &self.jwt_hmac_kms_key_id)
+            .field("mtls_port", &self.mtls_port)
             .field("cleanup_interval_minutes", &self.cleanup_interval_minutes)
             .field(
                 "auth_events_retention_days",
@@ -809,6 +813,11 @@ impl ServerConfig {
         // JWT HMAC KMS key ID
         if let Some(v) = &s3.jwt_hmac_kms_key_id {
             self.jwt_hmac_kms_key_id = Some(v.clone());
+        }
+
+        // mTLS port
+        if let Some(v) = s3.mtls_port {
+            self.mtls_port = v;
         }
 
         // Cleanup settings

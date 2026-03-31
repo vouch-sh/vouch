@@ -99,7 +99,7 @@ pub(crate) async fn extract_admin_and_target(
     uri: &str,
     target_user_id: &str,
 ) -> Result<(db::User, db::User, String), ServiceError> {
-    let (admin, org_id) = extract_org_admin(state, headers, jar, method, uri).await?;
+    let (admin, org_id) = extract_org_admin(state, headers, jar, method, uri, None).await?;
 
     let target = db::get_user_by_id(&state.store, target_user_id)
         .await?

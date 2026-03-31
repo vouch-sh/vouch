@@ -25,6 +25,7 @@ use vouch_common::{
     fido2_types::Challenge,
 };
 
+use super::extractors::OptionalClientCert;
 use super::session::extract_resource_token;
 use super::{generate_challenge, validate_registration_attestation};
 use crate::crypto::webauthn_verify;
@@ -83,9 +84,18 @@ pub async fn register_start(
     headers: HeaderMap,
     jar: CookieJar,
     State(state): State<Arc<AppState>>,
+    client_cert: OptionalClientCert,
     Json(req): Json<RegisterStartRequest>,
 ) -> Result<Json<RegisterStartResponse>, ServiceError> {
-    let token = extract_resource_token(&state, &headers, &jar, method.as_str(), uri.path()).await?;
+    let token = extract_resource_token(
+        &state,
+        &headers,
+        &jar,
+        method.as_str(),
+        uri.path(),
+        client_cert.0.as_ref(),
+    )
+    .await?;
     let user_id = Uuid::parse_str(&token.sub).map_err(|e| {
         ServiceError::api(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -275,8 +285,17 @@ pub async fn list_keys(
     headers: HeaderMap,
     jar: CookieJar,
     State(state): State<Arc<AppState>>,
+    client_cert: OptionalClientCert,
 ) -> Result<Json<ListKeysResponse>, ServiceError> {
-    let token = extract_resource_token(&state, &headers, &jar, method.as_str(), uri.path()).await?;
+    let token = extract_resource_token(
+        &state,
+        &headers,
+        &jar,
+        method.as_str(),
+        uri.path(),
+        client_cert.0.as_ref(),
+    )
+    .await?;
 
     let keys =
         key_svc::list_keys_for_user(&state.store, &token.sub, token.authenticator_id.as_deref())
@@ -286,12 +305,15 @@ pub async fn list_keys(
 }
 
 /// Rename a registered key.
+// Axum handlers require all extractors as parameters; argument count is inherent to the framework.
+#[allow(clippy::too_many_arguments)]
 pub async fn rename_key(
     method: Method,
     uri: OriginalUri,
     headers: HeaderMap,
     jar: CookieJar,
     State(state): State<Arc<AppState>>,
+    client_cert: OptionalClientCert,
     Path(key_id): Path<String>,
     Json(req): Json<RenameKeyRequest>,
 ) -> Result<Json<RenameKeyResponse>, ServiceError> {
@@ -312,7 +334,15 @@ pub async fn rename_key(
         ));
     }
 
-    let token = extract_resource_token(&state, &headers, &jar, method.as_str(), uri.path()).await?;
+    let token = extract_resource_token(
+        &state,
+        &headers,
+        &jar,
+        method.as_str(),
+        uri.path(),
+        client_cert.0.as_ref(),
+    )
+    .await?;
 
     let message = key_svc::rename_key(&state.store, &token.sub, &key_id, name).await?;
 
@@ -326,6 +356,7 @@ pub async fn delete_key(
     headers: HeaderMap,
     jar: CookieJar,
     State(state): State<Arc<AppState>>,
+    client_cert: OptionalClientCert,
     Path(key_id): Path<String>,
 ) -> Result<Json<DeleteKeyResponse>, ServiceError> {
     // Pure validation first — reject malformed key IDs before DB access
@@ -337,7 +368,15 @@ pub async fn delete_key(
         ));
     }
 
-    let token = extract_resource_token(&state, &headers, &jar, method.as_str(), uri.path()).await?;
+    let token = extract_resource_token(
+        &state,
+        &headers,
+        &jar,
+        method.as_str(),
+        uri.path(),
+        client_cert.0.as_ref(),
+    )
+    .await?;
     // Use auth_time as the freshness anchor; default to epoch (always stale) if absent
     key_svc::require_fresh_timestamp(
         token.auth_time.unwrap_or(0),

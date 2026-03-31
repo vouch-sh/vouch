@@ -190,6 +190,10 @@ pub struct Args {
     #[arg(long, env = "VOUCH_JWT_HMAC_KMS_KEY_ID")]
     pub jwt_hmac_kms_key_id: Option<String>,
 
+    /// mTLS listener port (default: 8443).
+    #[arg(long, env = "VOUCH_MTLS_PORT", default_value = "8443")]
+    pub mtls_port: u16,
+
     /// Maximum age of DPoP proofs in seconds.
     #[arg(long, env = "VOUCH_DPOP_MAX_AGE", default_value = "300")]
     pub dpop_max_age: i64,
@@ -410,6 +414,8 @@ pub struct ServerConfig {
     /// AWS KMS key ID for HMAC state token signing.
     /// When set, KMS HMAC-SHA256 is used instead of local `jwt_secret`.
     pub jwt_hmac_kms_key_id: Option<String>,
+    /// mTLS listener port (default: 8443).
+    pub mtls_port: u16,
     /// Maximum age of DPoP proofs in seconds (default: 300).
     pub dpop_max_age_seconds: i64,
     /// Cleanup task interval in minutes (default: 15).
@@ -562,6 +568,7 @@ impl ServerConfig {
             oidc_rsa_signing_key: args.oidc_rsa_signing_key.map(SecretString::from),
             oidc_rsa_signing_kms_key_id: args.oidc_rsa_signing_kms_key_id,
             jwt_hmac_kms_key_id: args.jwt_hmac_kms_key_id,
+            mtls_port: args.mtls_port,
             dpop_max_age_seconds: args.dpop_max_age,
             cleanup_interval_minutes: args.cleanup_interval,
             auth_events_retention_days: args.auth_events_retention_days,

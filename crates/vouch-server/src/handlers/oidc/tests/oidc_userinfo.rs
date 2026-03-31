@@ -12,11 +12,18 @@ async fn test_userinfo_requires_bearer_token() {
     // OIDC Core 1.0 Section 5.3.1: UserInfo requires bearer token
     let (app, _state) = test_app().await;
 
-    // No token
-    let (status, body) = http_get(&app, "/oauth/userinfo", &[]).await;
-    assert_eq!(status, StatusCode::UNAUTHORIZED);
-    let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
-    assert_eq!(error["error"], "invalid_token");
+    // No token — RFC 6750 Section 3.1: bare Bearer challenge, no body
+    let response = http_get_full(&app, "/oauth/userinfo", &[]).await;
+    assert_eq!(response.status, StatusCode::UNAUTHORIZED);
+    let www_auth = response
+        .headers
+        .get("WWW-Authenticate")
+        .expect("401 must include WWW-Authenticate header");
+    assert_eq!(
+        www_auth.to_str().expect("valid header value"),
+        "Bearer",
+        "No-auth case must return bare Bearer challenge with no error attributes"
+    );
 
     // Invalid token format
     let (status, _body) = http_get(
@@ -82,10 +89,12 @@ async fn test_userinfo_invalid_token() {
 
 #[tokio::test]
 async fn test_userinfo_401_includes_www_authenticate() {
-    // RFC 6750 Section 3: 401 responses MUST include WWW-Authenticate header
+    // RFC 6750 Section 3: 401 responses MUST include WWW-Authenticate header.
+    // RFC 6750 Section 3.1: When no auth info is present, the challenge MUST NOT
+    // include an error code — return a bare "Bearer" challenge.
     let (app, _state) = test_app().await;
 
-    // No token — should get 401 with WWW-Authenticate
+    // No token — should get 401 with bare WWW-Authenticate: Bearer
     let response = http_get_full(&app, "/oauth/userinfo", &[]).await;
     assert_eq!(response.status, StatusCode::UNAUTHORIZED);
 
@@ -96,14 +105,9 @@ async fn test_userinfo_401_includes_www_authenticate() {
     let www_auth_str = www_auth
         .to_str()
         .expect("WWW-Authenticate should be a string");
-    assert!(
-        www_auth_str.starts_with("Bearer"),
-        "WWW-Authenticate should use Bearer scheme, got: {}",
-        www_auth_str
-    );
-    assert!(
-        www_auth_str.contains("error="),
-        "WWW-Authenticate should include error parameter, got: {}",
+    assert_eq!(
+        www_auth_str, "Bearer",
+        "No-auth case must return bare Bearer challenge without error attributes, got: {}",
         www_auth_str
     );
 }
@@ -190,27 +194,44 @@ async fn test_userinfo_post_body_access_token() {
 
 #[tokio::test]
 async fn test_userinfo_post_body_without_token() {
-    // RFC 6750 Section 2.2: POST with empty body and no Authorization header → 401
+    // RFC 6750 Section 2.2: POST with empty body and no Authorization header → 401.
+    // RFC 6750 Section 3.1: No auth info present → bare Bearer challenge, no body.
     let (app, _state) = test_app().await;
 
-    let (status, body) = http_post_form(&app, "/oauth/userinfo", "", &[]).await;
+    let response = http_post_form_full(&app, "/oauth/userinfo", "", &[]).await;
 
-    assert_eq!(status, StatusCode::UNAUTHORIZED);
-    let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
-    assert_eq!(error["error"], "invalid_token");
+    assert_eq!(response.status, StatusCode::UNAUTHORIZED);
+    let www_auth = response
+        .headers
+        .get("WWW-Authenticate")
+        .expect("401 must include WWW-Authenticate header");
+    assert_eq!(
+        www_auth.to_str().expect("valid header value"),
+        "Bearer",
+        "No-auth POST must return bare Bearer challenge"
+    );
 }
 
 #[tokio::test]
 async fn test_userinfo_get_body_ignored() {
-    // RFC 6750 Section 2.2: Only POST body is accepted, not GET
+    // RFC 6750 Section 2.2: Only POST body is accepted, not GET.
+    // RFC 6750 Section 3.1: No auth info in headers → bare Bearer challenge, no body.
     let (app, _state) = test_app().await;
 
-    // GET with no Authorization header should fail even if query has access_token
-    let (status, body) = http_get(&app, "/oauth/userinfo?access_token=sometoken", &[]).await;
+    // GET with no Authorization header returns bare Bearer challenge even if
+    // query string carries an access_token (query params are not a valid method)
+    let response = http_get_full(&app, "/oauth/userinfo?access_token=sometoken", &[]).await;
 
-    assert_eq!(status, StatusCode::UNAUTHORIZED);
-    let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
-    assert_eq!(error["error"], "invalid_token");
+    assert_eq!(response.status, StatusCode::UNAUTHORIZED);
+    let www_auth = response
+        .headers
+        .get("WWW-Authenticate")
+        .expect("401 must include WWW-Authenticate header");
+    assert_eq!(
+        www_auth.to_str().expect("valid header value"),
+        "Bearer",
+        "No-auth GET must return bare Bearer challenge"
+    );
 }
 
 #[tokio::test]

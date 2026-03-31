@@ -9,6 +9,7 @@ use crate::AppState;
 use crate::handlers::extractors::ClientInfo;
 use crate::services::oidc::introspection::{
     IntrospectionResult, introspect_token as svc_introspect, revoke_token as svc_revoke,
+    wrap_introspection_jwt,
 };
 use crate::services::oidc::token::authenticate_client;
 use axum::{
@@ -142,9 +143,9 @@ pub async fn introspect(
     // Supports both client_secret_basic (header) and client_secret_post (body).
     let credentials =
         extract_client_credentials(&headers, params.client_id.as_deref(), params.client_secret);
-    let authenticated_client_id = match credentials {
+    let authenticated_client = match credentials {
         Some(creds) => match authenticate_client(&state, &creds).await {
-            Ok(client) => Some(client.client.client_id),
+            Ok(c) => c.client,
             Err(_) => {
                 // RFC 7662 §2.1: Invalid client credentials → 401
                 return (StatusCode::UNAUTHORIZED, [("www-authenticate", "Basic")]).into_response();
@@ -156,15 +157,40 @@ pub async fn introspect(
         }
     };
 
-    match svc_introspect(
+    let wants_jwt = authenticated_client
+        .introspection_signed_response_alg
+        .is_some();
+    let client_id = authenticated_client.client_id.clone();
+    let config = state.config();
+    let issuer = config.base_url.clone();
+
+    let result = match svc_introspect(
         &state,
         &params.token,
         params.token_type_hint.as_deref(),
-        authenticated_client_id.as_deref(),
+        Some(client_id.as_str()),
     )
     .await
     {
-        Ok(result) => Json(result).into_response(),
-        Err(_) => Json(IntrospectionResult::inactive()).into_response(),
+        Ok(r) => r,
+        Err(_) => IntrospectionResult::inactive(),
+    };
+
+    if wants_jwt {
+        // RFC 9701: Return a signed JWT with Content-Type: application/token-introspection+jwt
+        match wrap_introspection_jwt(&result, &issuer, &client_id, &state.oidc_key).await {
+            Ok(jwt) => (
+                StatusCode::OK,
+                [(
+                    axum::http::header::CONTENT_TYPE,
+                    "application/token-introspection+jwt",
+                )],
+                jwt,
+            )
+                .into_response(),
+            Err(_) => Json(IntrospectionResult::inactive()).into_response(),
+        }
+    } else {
+        Json(result).into_response()
     }
 }

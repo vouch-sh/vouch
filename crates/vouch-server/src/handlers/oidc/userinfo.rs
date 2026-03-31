@@ -4,13 +4,16 @@
 //! Implements:
 //! - OIDC Core Section 5.3 - UserInfo Endpoint
 //! - RFC 9449 Section 7.1 - DPoP-bound access tokens at resource endpoints
+//! - RFC 8705 Section 3 - mTLS certificate-bound access tokens at resource endpoints
 
 use crate::AppState;
 use crate::db::SessionPurpose;
+use crate::handlers::extractors::OptionalClientCert;
 use crate::services::OAuthErrorCode;
 use crate::services::auth::decode_token;
 use crate::services::error::OAuthErrorResponse;
 use crate::services::oidc::dpop::{self, DpopError};
+use crate::services::oidc::keys::OidcSigningKey;
 use crate::services::oidc::scope::OAuthScope;
 use crate::services::oidc::token::validate_session_token;
 use axum::{
@@ -56,10 +59,12 @@ struct UserInfoForm {
 /// Returns information about the authenticated user.
 /// Supports `Bearer` and `DPoP` authorization schemes (RFC 9449 Section 7.1),
 /// and access token in POST body (RFC 6750 Section 2.2, Bearer only).
+/// Enforces mTLS certificate binding per RFC 8705 Section 3.
 pub async fn userinfo(
     State(state): State<Arc<AppState>>,
     method: Method,
     headers: HeaderMap,
+    client_cert: OptionalClientCert,
     body: Bytes,
 ) -> Response {
     // Extract token and scheme from Authorization header or POST body
@@ -99,11 +104,14 @@ pub async fn userinfo(
         // RFC 6750 Section 2.2: POST body access_token (Bearer only, no DPoP)
         (ft.clone(), false)
     } else {
-        return oauth_error(
+        // RFC 6750 Section 3.1: When the request lacks any authentication
+        // information, the WWW-Authenticate challenge SHOULD NOT include
+        // an error code or other error information.
+        return (
             StatusCode::UNAUTHORIZED,
-            "invalid_token",
-            "Missing authorization header",
-        );
+            [(header::WWW_AUTHENTICATE, "Bearer")],
+        )
+            .into_response();
     };
 
     // RFC 9449 Section 7.1: If DPoP scheme is used, validate the DPoP proof at resource endpoint
@@ -164,8 +172,9 @@ pub async fn userinfo(
                     }
                 };
                 match decoded.cnf() {
-                    Some(cnf) => {
-                        let is_valid: bool = proof.jkt.as_bytes().ct_eq(cnf.jkt.as_bytes()).into();
+                    Some(cnf) if cnf.jkt.is_some() => {
+                        let jkt = cnf.jkt.as_deref().unwrap_or("");
+                        let is_valid: bool = proof.jkt.as_bytes().ct_eq(jkt.as_bytes()).into();
                         if !is_valid {
                             return oauth_error(
                                 StatusCode::UNAUTHORIZED,
@@ -174,8 +183,9 @@ pub async fn userinfo(
                             );
                         }
                     }
-                    None => {
-                        // Token is not DPoP-bound but DPoP scheme was used
+                    Some(_) | None => {
+                        // Token is not DPoP-bound (mTLS-only or no cnf)
+                        // but DPoP scheme was used
                         return oauth_error(
                             StatusCode::UNAUTHORIZED,
                             OAuthErrorCode::InvalidDpopProof.as_str(),
@@ -213,7 +223,7 @@ pub async fn userinfo(
     if !is_dpop_scheme {
         let config = state.config();
         if let Some(decoded) = decode_token(&token, &state.oidc_key, &config.base_url)
-            && decoded.cnf().is_some()
+            && decoded.cnf().is_some_and(|cnf| cnf.jkt.is_some())
         {
             return oauth_error(
                 StatusCode::UNAUTHORIZED,
@@ -221,6 +231,16 @@ pub async fn userinfo(
                 "Token is DPoP-bound but was presented with Bearer scheme. Use DPoP scheme instead",
             );
         }
+    }
+
+    // RFC 8705 Section 3: Verify mTLS certificate binding.
+    if let Err(resp) = verify_mtls_binding(
+        &token,
+        &state.oidc_key,
+        &state.config().base_url,
+        &client_cert,
+    ) {
+        return *resp;
     }
 
     // Validate the session token
@@ -262,6 +282,60 @@ pub async fn userinfo(
         hardware_aaguid: result.authenticator.and_then(|a| a.aaguid),
     })
     .into_response()
+}
+
+/// Verify mTLS certificate binding per RFC 8705 Section 3.
+///
+/// If the access token contains a `cnf.x5t#S256` claim, the client MUST
+/// present a certificate whose thumbprint matches. Returns `Err(Box<Response>)` on
+/// mismatch so the caller can short-circuit with the error response.
+///
+/// The `Response` is boxed to satisfy `clippy::result_large_err`.
+fn verify_mtls_binding(
+    token: &str,
+    oidc_key: &OidcSigningKey,
+    issuer: &str,
+    client_cert: &OptionalClientCert,
+) -> Result<(), Box<Response>> {
+    // Decode the token to check for a cnf claim. If decoding fails here,
+    // the token is invalid — validate_session_token will reject it shortly.
+    let decoded = match decode_token(token, oidc_key, issuer) {
+        Some(d) => d,
+        None => return Ok(()),
+    };
+
+    // Check if the token carries an x5t#S256 certificate binding.
+    let expected = match decoded.cnf() {
+        Some(cnf) => match cnf.x5t_s256.as_deref() {
+            Some(thumbprint) => thumbprint,
+            None => return Ok(()), // No mTLS binding — nothing to verify.
+        },
+        None => return Ok(()), // No cnf claim at all — nothing to verify.
+    };
+
+    // Token is certificate-bound: client MUST present a matching certificate.
+    let cert = match &client_cert.0 {
+        Some(c) => c,
+        None => {
+            return Err(Box::new(oauth_error(
+                StatusCode::UNAUTHORIZED,
+                "invalid_token",
+                "Token is certificate-bound but no client certificate was presented",
+            )));
+        }
+    };
+
+    // Constant-time comparison prevents timing-based thumbprint enumeration.
+    let is_valid: bool = cert.thumbprint.as_bytes().ct_eq(expected.as_bytes()).into();
+    if !is_valid {
+        return Err(Box::new(oauth_error(
+            StatusCode::UNAUTHORIZED,
+            "invalid_token",
+            "Client certificate does not match token certificate binding",
+        )));
+    }
+
+    Ok(())
 }
 
 /// Build an OAuth error response for the userinfo endpoint.

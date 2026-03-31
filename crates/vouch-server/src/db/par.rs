@@ -46,6 +46,8 @@ pub struct PushedAuthorizationRequest {
     pub created_at: Timestamp,
     pub expires_at: Timestamp,
     pub consumed_at: Option<Timestamp>,
+    /// JARM: response mode requested by the client.
+    pub response_mode: super::documents::oauth::ResponseMode,
 }
 
 impl From<Document<PushedAuthorizationRequestDoc>> for PushedAuthorizationRequest {
@@ -70,6 +72,7 @@ impl From<Document<PushedAuthorizationRequestDoc>> for PushedAuthorizationReques
             created_at: doc.created_at,
             expires_at: doc.data.expires_at,
             consumed_at: doc.data.consumed_at,
+            response_mode: doc.data.response_mode,
         }
     }
 }
@@ -97,6 +100,8 @@ pub struct CreateParParams<'a> {
     pub dpop_jkt: Option<&'a str>,
     /// RFC 9396: Rich authorization details (JSON array).
     pub authorization_details: Option<&'a serde_json::Value>,
+    /// JARM: response mode requested by the client.
+    pub response_mode: super::documents::oauth::ResponseMode,
 }
 
 /// Generate a cryptographically random `request_uri` per RFC 9126 Section 2.2.
@@ -149,6 +154,7 @@ pub async fn create_pushed_authorization_request(
         expires_at,
         consumed_at: None,
         authorization_details: params.authorization_details.cloned(),
+        response_mode: params.response_mode,
     };
 
     let result = store.insert(&doc).await?;

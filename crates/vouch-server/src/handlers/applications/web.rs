@@ -6,8 +6,8 @@
 
 use crate::AppState;
 use crate::db::{
-    self, AccessScope, CreateOAuthClientParams, FapiProfile, OAuthClientType, RegistrationSource,
-    TokenEndpointAuthMethod, UpdateOAuthClientParams,
+    self, AccessScope, CreateOAuthClientParams, FapiProfile, JwsAlgorithm, OAuthClientType,
+    RegistrationSource, TokenEndpointAuthMethod, UpdateOAuthClientParams,
 };
 use axum::{
     Form,
@@ -294,7 +294,15 @@ pub async fn create_application_form(
             registration_source: RegistrationSource::Manual,
             registration_access_token_hash: None,
             registration_metadata: None,
-            id_token_signed_response_alg: "RS256",
+            id_token_signed_response_alg: JwsAlgorithm::Rs256,
+            tls_client_auth_subject_dn: None,
+            tls_client_auth_san_dns: None,
+            tls_client_auth_san_uri: None,
+            tls_client_auth_san_ip: None,
+            tls_client_auth_san_email: None,
+            tls_client_certificate_bound_access_tokens: None,
+            authorization_signed_response_alg: None,
+            introspection_signed_response_alg: None,
         },
     )
     .await

@@ -22,7 +22,7 @@ use vouch_common::{
     K8sTokenResponse, SshCaPublicKeyResponse, SshCertificateRequest, SshCertificateResponse,
 };
 
-use super::extractors::ClientInfo;
+use super::extractors::{ClientInfo, OptionalClientCert};
 use super::session::{extract_resource_token, extract_resource_token_with_email};
 use crate::redact_email;
 
@@ -38,6 +38,7 @@ pub async fn issue_ssh_certificate(
     headers: HeaderMap,
     jar: CookieJar,
     State(state): State<Arc<AppState>>,
+    client_cert: OptionalClientCert,
     Json(request): Json<SshCertificateRequest>,
 ) -> Result<Json<SshCertificateResponse>, ServiceError> {
     // Check config before auth — zero-cost in-memory check avoids DB queries
@@ -50,9 +51,15 @@ pub async fn issue_ssh_certificate(
     }
 
     // Validate token and get user email
-    let (_token, user_email) =
-        extract_resource_token_with_email(&state, &headers, &jar, method.as_str(), uri.path())
-            .await?;
+    let (_token, user_email) = extract_resource_token_with_email(
+        &state,
+        &headers,
+        &jar,
+        method.as_str(),
+        uri.path(),
+        client_cert.0.as_ref(),
+    )
+    .await?;
 
     // Certificate validity matches session duration
     let valid_seconds = state.config().session_hours * 3600;
@@ -256,9 +263,18 @@ pub async fn get_aws_token(
     headers: HeaderMap,
     jar: CookieJar,
     State(state): State<Arc<AppState>>,
+    client_cert: OptionalClientCert,
 ) -> Result<Json<AwsTokenResponse>, ServiceError> {
     // Single auth + user lookup (avoids duplicate get_user_by_id)
-    let token = extract_resource_token(&state, &headers, &jar, method.as_str(), uri.path()).await?;
+    let token = extract_resource_token(
+        &state,
+        &headers,
+        &jar,
+        method.as_str(),
+        uri.path(),
+        client_cert.0.as_ref(),
+    )
+    .await?;
 
     // Get user record once — extract both email and org_id
     let user = db::get_user_by_id(&state.store, &token.sub)
@@ -368,9 +384,18 @@ pub async fn get_kubernetes_token(
     headers: HeaderMap,
     jar: CookieJar,
     State(state): State<Arc<AppState>>,
+    client_cert: OptionalClientCert,
     Query(query): Query<K8sTokenQuery>,
 ) -> Result<Json<K8sTokenResponse>, ServiceError> {
-    let token = extract_resource_token(&state, &headers, &jar, method.as_str(), uri.path()).await?;
+    let token = extract_resource_token(
+        &state,
+        &headers,
+        &jar,
+        method.as_str(),
+        uri.path(),
+        client_cert.0.as_ref(),
+    )
+    .await?;
 
     let user = db::get_user_by_id(&state.store, &token.sub)
         .await
@@ -480,9 +505,18 @@ pub async fn get_github_status(
     headers: HeaderMap,
     jar: CookieJar,
     State(state): State<Arc<AppState>>,
+    client_cert: OptionalClientCert,
 ) -> Result<Json<GitHubStatusResponse>, ServiceError> {
     // Validate token
-    let token = extract_resource_token(&state, &headers, &jar, method.as_str(), uri.path()).await?;
+    let token = extract_resource_token(
+        &state,
+        &headers,
+        &jar,
+        method.as_str(),
+        uri.path(),
+        client_cert.0.as_ref(),
+    )
+    .await?;
 
     // Get user
     let user = db::get_user_by_id(&state.store, &token.sub)
@@ -539,6 +573,8 @@ pub async fn get_github_status(
 /// Returns a short-lived GitHub installation access token that can be used
 /// with Git operations. The token is scoped to the user's organization's
 /// GitHub installation with minimal permissions (contents:write, metadata:read).
+// Axum handlers require all extractors as parameters; argument count is inherent to the framework.
+#[allow(clippy::too_many_arguments)]
 pub async fn get_github_token(
     method: Method,
     uri: OriginalUri,
@@ -546,6 +582,7 @@ pub async fn get_github_token(
     headers: HeaderMap,
     jar: CookieJar,
     State(state): State<Arc<AppState>>,
+    client_cert: OptionalClientCert,
     Json(request): Json<GitHubTokenRequest>,
 ) -> Result<Json<GitHubTokenResponse>, ServiceError> {
     // Check config before auth — zero-cost in-memory check avoids DB queries
@@ -558,7 +595,15 @@ pub async fn get_github_token(
     })?;
 
     // Validate token
-    let token = extract_resource_token(&state, &headers, &jar, method.as_str(), uri.path()).await?;
+    let token = extract_resource_token(
+        &state,
+        &headers,
+        &jar,
+        method.as_str(),
+        uri.path(),
+        client_cert.0.as_ref(),
+    )
+    .await?;
 
     // Get user
     let user = db::get_user_by_id(&state.store, &token.sub)

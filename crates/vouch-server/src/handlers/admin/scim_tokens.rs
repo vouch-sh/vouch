@@ -89,7 +89,7 @@ pub async fn create_scim_token(
     }
 
     let (user, org_id) =
-        extract_org_admin(&state, &headers, &jar, method.as_str(), uri.path()).await?;
+        extract_org_admin(&state, &headers, &jar, method.as_str(), uri.path(), None).await?;
 
     // Enforce 2-token limit
     let existing = db::list_scim_tokens(&state.store, Some(&org_id)).await?;
@@ -151,7 +151,7 @@ pub async fn list_scim_tokens(
     jar: CookieJar,
 ) -> Result<Json<ListScimTokensResponse>, ServiceError> {
     let (_user, org_id) =
-        extract_org_admin(&state, &headers, &jar, method.as_str(), uri.path()).await?;
+        extract_org_admin(&state, &headers, &jar, method.as_str(), uri.path(), None).await?;
 
     let tokens = db::list_scim_tokens(&state.store, Some(&org_id)).await?;
 
@@ -180,7 +180,7 @@ pub async fn delete_scim_token(
     ValidPath(token_id): ValidPath<ValidUuid>,
 ) -> Result<StatusCode, ServiceError> {
     let (user, org_id) =
-        extract_org_admin(&state, &headers, &jar, method.as_str(), uri.path()).await?;
+        extract_org_admin(&state, &headers, &jar, method.as_str(), uri.path(), None).await?;
 
     let deleted = db::delete_scim_token(&state.store, &token_id, &org_id).await?;
 
@@ -335,7 +335,7 @@ pub async fn admin_create_scim_token(
     }
 
     let (admin, org_id) =
-        extract_org_admin(&state, &headers, &jar, method.as_str(), uri.path()).await?;
+        extract_org_admin(&state, &headers, &jar, method.as_str(), uri.path(), None).await?;
 
     // Enforce 2-token limit
     let existing = db::list_scim_tokens(&state.store, Some(&org_id)).await?;
@@ -427,7 +427,7 @@ pub async fn admin_revoke_scim_token(
     validate_origin(&headers, &state.config().base_url)?;
 
     let (admin, org_id) =
-        extract_org_admin(&state, &headers, &jar, method.as_str(), uri.path()).await?;
+        extract_org_admin(&state, &headers, &jar, method.as_str(), uri.path(), None).await?;
 
     let deleted = db::delete_scim_token(&state.store, &token_id, &org_id).await?;
 

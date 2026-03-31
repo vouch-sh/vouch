@@ -78,6 +78,9 @@ pub struct Fido2AssertionParams<'a> {
     pub authorization_details: Option<&'a str>,
     /// Client metadata extracted from HTTP headers.
     pub client_info: crate::handlers::extractors::ClientInfo,
+    /// RFC 8705 Section 3: mTLS certificate thumbprint for token binding.
+    /// Only set when the client has `tls_client_certificate_bound_access_tokens = true`.
+    pub mtls_cert_thumbprint: Option<&'a str>,
 }
 
 /// Result of a successful FIDO2 assertion grant exchange.
@@ -307,6 +310,7 @@ pub async fn exchange_fido2_assertion(
             client_id: &params.client.client.client_id,
             scope: Some(scope.clone()),
             dpop_jkt,
+            mtls_cert_thumbprint: params.mtls_cert_thumbprint,
             act: None,
             audience: None,
             auth_time: Some(now),
@@ -333,4 +337,17 @@ pub async fn exchange_fido2_assertion(
         email: user.email,
         authorization_details: validated_ad.as_ref().map(serde_json::Value::from),
     })
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    // NOTE(mtls-threading): `Fido2AssertionParams::mtls_cert_thumbprint` is a
+    // plain `Option<&str>` threaded from the handler through to
+    // `create_oauth_access_token` as `CreateOAuthTokenParams::mtls_cert_thumbprint`.
+    // Unit-testing the threading in isolation would require a fully mocked AppState
+    // (database, signing key, WebAuthn instance, etc.). End-to-end coverage for
+    // RFC 8705 token binding through the FIDO2 grant should be added as an
+    // integration test in `crates/vouch-tests/` once the mTLS test infrastructure
+    // (client cert generation + mTLS test server) is available.
 }

@@ -52,6 +52,9 @@ pub struct TokenExchangeParams<'a> {
     pub dpop_jkt: Option<&'a str>,
     /// RFC 9396 Section 6: Authorization details for narrowing.
     pub authorization_details: Option<&'a str>,
+    /// RFC 8705 Section 3: mTLS certificate thumbprint for token binding.
+    /// Only set when the client has `tls_client_certificate_bound_access_tokens = true`.
+    pub mtls_cert_thumbprint: Option<&'a str>,
 }
 
 /// Result of a token exchange (RFC 8693 Section 2.2).
@@ -345,6 +348,7 @@ pub async fn exchange_token(
             client_id: params.client_id,
             scope: granted_scope.clone(),
             dpop_jkt: params.dpop_jkt,
+            mtls_cert_thumbprint: params.mtls_cert_thumbprint,
             act: actor_claim,
             audience,
             // Token exchange does not carry auth_time from the subject token

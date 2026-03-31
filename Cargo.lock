@@ -1777,6 +1777,7 @@ dependencies = [
  "ff",
  "generic-array",
  "group",
+ "pem-rfc7468",
  "pkcs8",
  "rand_core 0.6.4",
  "sec1",
@@ -5484,7 +5485,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "vouch-agent"
-version = "2026.3.20"
+version = "2026.3.21"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -5510,7 +5511,7 @@ dependencies = [
 
 [[package]]
 name = "vouch-cli"
-version = "2026.3.20"
+version = "2026.3.21"
 dependencies = [
  "anyhow",
  "aws-lc-rs",
@@ -5561,7 +5562,7 @@ dependencies = [
 
 [[package]]
 name = "vouch-common"
-version = "2026.3.20"
+version = "2026.3.21"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -5581,7 +5582,7 @@ dependencies = [
 
 [[package]]
 name = "vouch-httpsig"
-version = "2026.3.20"
+version = "2026.3.21"
 dependencies = [
  "aws-lc-rs",
  "axum",
@@ -5597,7 +5598,7 @@ dependencies = [
 
 [[package]]
 name = "vouch-server"
-version = "2026.3.20"
+version = "2026.3.21"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -5647,6 +5648,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_urlencoded",
+ "sha2",
  "signature",
  "spki",
  "sqlx",
@@ -5656,6 +5658,7 @@ dependencies = [
  "thiserror 2.0.18",
  "time",
  "tokio",
+ "tokio-rustls",
  "tokio-util",
  "tower",
  "tower-http",
@@ -5677,7 +5680,7 @@ dependencies = [
 
 [[package]]
 name = "vouch-tests"
-version = "2026.3.20"
+version = "2026.3.21"
 dependencies = [
  "anyhow",
  "aws-lc-rs",
@@ -6306,9 +6309,9 @@ checksum = "d6bbff5f0aada427a1e5a6da5f1f98158182f26556f345ac9e04d36d0ebed650"
 
 [[package]]
 name = "winnow"
-version = "1.0.0"
+version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a90e88e4667264a994d34e6d1ab2d26d398dcdca8b7f52bec8668957517fc7d8"
+checksum = "09dac053f1cd375980747450bfc7250c264eaae0583872e845c0c7cd578872b5"
 dependencies = [
  "memchr",
 ]
@@ -6438,6 +6441,8 @@ checksum = "1301e935010a701ae5f8655edc0ad17c44bad3ac5ce8c39185f75453b720ae94"
 dependencies = [
  "const-oid",
  "der",
+ "sha1",
+ "signature",
  "spki",
  "tls_codec",
 ]

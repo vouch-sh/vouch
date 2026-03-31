@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 //! RFC 8414 — Authorization Server Metadata tests.
+//!
+//! Covers discovery fields required by RFC 8414 Section 2, including
+//! the revocation and introspection endpoint authentication method arrays.
 
 use super::helpers::*;
 
@@ -202,6 +205,81 @@ async fn test_rfc8414_oauth_authorization_server_alias_returns_200() {
     assert!(
         metadata.get("token_endpoint").is_some(),
         "RFC 8414 metadata must include token_endpoint"
+    );
+}
+
+#[tokio::test]
+async fn test_discovery_includes_revocation_auth_methods() {
+    // RFC 8414 Section 2: revocation_endpoint_auth_methods_supported must be present
+    // and be a non-empty array when the revocation endpoint is advertised.
+    let (app, _state) = test_app().await;
+
+    let (status, body) = http_get(&app, "/.well-known/openid-configuration", &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    let metadata: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+
+    let methods = metadata
+        .get("revocation_endpoint_auth_methods_supported")
+        .expect("revocation_endpoint_auth_methods_supported must be present")
+        .as_array()
+        .expect("revocation_endpoint_auth_methods_supported must be an array");
+
+    assert!(
+        !methods.is_empty(),
+        "revocation_endpoint_auth_methods_supported must contain at least one method"
+    );
+}
+
+#[tokio::test]
+async fn test_discovery_includes_introspection_auth_methods() {
+    // RFC 8414 Section 2: introspection_endpoint_auth_methods_supported must be present
+    // and be a non-empty array when the introspection endpoint is advertised.
+    let (app, _state) = test_app().await;
+
+    let (status, body) = http_get(&app, "/.well-known/openid-configuration", &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    let metadata: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+
+    let methods = metadata
+        .get("introspection_endpoint_auth_methods_supported")
+        .expect("introspection_endpoint_auth_methods_supported must be present")
+        .as_array()
+        .expect("introspection_endpoint_auth_methods_supported must be an array");
+
+    assert!(
+        !methods.is_empty(),
+        "introspection_endpoint_auth_methods_supported must contain at least one method"
+    );
+}
+
+#[tokio::test]
+async fn test_discovery_auth_methods_match_token_endpoint() {
+    // RFC 8414 Section 2: All three *_auth_methods_supported arrays should expose
+    // the same set of authentication methods since the server applies uniform auth
+    // policy across the token, revocation, and introspection endpoints.
+    let (app, _state) = test_app().await;
+
+    let (status, body) = http_get(&app, "/.well-known/openid-configuration", &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    let metadata: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+
+    let token_methods = metadata["token_endpoint_auth_methods_supported"]
+        .as_array()
+        .expect("token_endpoint_auth_methods_supported must be an array");
+    let revocation_methods = metadata["revocation_endpoint_auth_methods_supported"]
+        .as_array()
+        .expect("revocation_endpoint_auth_methods_supported must be an array");
+    let introspection_methods = metadata["introspection_endpoint_auth_methods_supported"]
+        .as_array()
+        .expect("introspection_endpoint_auth_methods_supported must be an array");
+
+    assert_eq!(
+        token_methods, revocation_methods,
+        "revocation_endpoint_auth_methods_supported must match token_endpoint_auth_methods_supported"
+    );
+    assert_eq!(
+        token_methods, introspection_methods,
+        "introspection_endpoint_auth_methods_supported must match token_endpoint_auth_methods_supported"
     );
 }
 

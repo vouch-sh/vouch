@@ -21,8 +21,8 @@
 use crate::AppState;
 use crate::crypto::{generate_random_bytes, hash_token};
 use crate::db::{
-    self, CreateOAuthClientParams, FapiProfile, OAuthClient, OAuthClientType, OAuthEventType,
-    RegistrationSource, TokenEndpointAuthMethod, UpdateClientRegistrationParams,
+    self, CreateOAuthClientParams, FapiProfile, JwsAlgorithm, OAuthClient, OAuthClientType,
+    OAuthEventType, RegistrationSource, TokenEndpointAuthMethod, UpdateClientRegistrationParams,
 };
 use crate::services::error::{OAuthErrorCode, ServiceError};
 use base64::Engine;
@@ -72,7 +72,7 @@ const REGISTRATION_TOKEN_LENGTH: usize = 32;
 ///
 /// Per RFC 7591 Section 2: "The authorization server MUST ignore any
 /// metadata it does not understand", so we do NOT use `deny_unknown_fields`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 pub struct RegistrationRequest {
     /// RFC 7591 Section 2: Array of redirection URI strings.
     pub redirect_uris: Option<Vec<String>>,
@@ -110,6 +110,22 @@ pub struct RegistrationRequest {
     pub dpop_bound_access_tokens: Option<bool>,
     /// OIDC Core Section 3.1.3.7: ID token signing algorithm.
     pub id_token_signed_response_alg: Option<String>,
+    /// RFC 8705 Section 2.1.1: subject DN for tls_client_auth.
+    pub tls_client_auth_subject_dn: Option<String>,
+    /// RFC 8705 Section 2.1.1: SAN DNS name for tls_client_auth.
+    pub tls_client_auth_san_dns: Option<String>,
+    /// RFC 8705 Section 2.1.1: SAN URI for tls_client_auth.
+    pub tls_client_auth_san_uri: Option<String>,
+    /// RFC 8705 Section 2.1.1: SAN IP for tls_client_auth.
+    pub tls_client_auth_san_ip: Option<String>,
+    /// RFC 8705 Section 2.1.1: SAN email for tls_client_auth.
+    pub tls_client_auth_san_email: Option<String>,
+    /// RFC 8705 Section 3: certificate-bound access tokens.
+    pub tls_client_certificate_bound_access_tokens: Option<bool>,
+    /// JARM: signing algorithm for authorization responses.
+    pub authorization_signed_response_alg: Option<String>,
+    /// RFC 9701 Section 6.1: Introspection response signing algorithm.
+    pub introspection_signed_response_alg: Option<String>,
 }
 
 /// RFC 7591 Section 3.2.1: Client Information Response.
@@ -165,6 +181,12 @@ pub struct RegistrationResponse {
     pub dpop_bound_access_tokens: Option<bool>,
     /// OIDC: Algorithm used for signing ID tokens.
     pub id_token_signed_response_alg: String,
+    /// JARM: signing algorithm for authorization responses.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub authorization_signed_response_alg: Option<String>,
+    /// RFC 9701 Section 6.1: Introspection response signing algorithm.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub introspection_signed_response_alg: Option<String>,
 }
 
 // ============================================================================
@@ -204,12 +226,24 @@ pub async fn register_client(
 
     // 12. FAPI 2.0 enforcement
     let dpop_bound = request.dpop_bound_access_tokens.unwrap_or(false);
-    let fapi_profile = if dpop_bound {
-        // Require FAPI constraints
-        if jwks_auth.auth_method != TokenEndpointAuthMethod::PrivateKeyJwt {
+    let cert_bound = request
+        .tls_client_certificate_bound_access_tokens
+        .unwrap_or(false);
+    let is_fapi2 = dpop_bound || cert_bound;
+    let fapi_profile = if is_fapi2 {
+        // Require FAPI-compliant auth method
+        let is_fapi_auth = matches!(
+            jwks_auth.auth_method,
+            TokenEndpointAuthMethod::PrivateKeyJwt
+                | TokenEndpointAuthMethod::TlsClientAuth
+                | TokenEndpointAuthMethod::SelfSignedTlsClientAuth
+        );
+        if !is_fapi_auth {
             return Err(ServiceError::oauth(
                 OAuthErrorCode::InvalidClientMetadata,
-                "FAPI 2.0 requires token_endpoint_auth_method 'private_key_jwt'",
+                "FAPI 2.0 requires token_endpoint_auth_method \
+                 'private_key_jwt', 'tls_client_auth', or \
+                 'self_signed_tls_client_auth'",
             ));
         }
         if jwks_auth.jwks_value.is_none() && jwks_auth.jwks_uri.is_none() {
@@ -224,51 +258,126 @@ pub async fn register_client(
     };
 
     // OIDC Core Section 3.1.3.7: Default is RS256, but fall back to ES256 if no RSA key.
-    let explicit_alg = request.id_token_signed_response_alg.as_deref();
-
-    // Validate against supported algorithms (only when client makes an explicit choice)
-    if let Some(alg) = explicit_alg {
-        if alg != "RS256" && alg != "ES256" {
-            return Err(ServiceError::oauth(
-                OAuthErrorCode::InvalidClientMetadata,
-                format!(
-                    "Unsupported id_token_signed_response_alg: '{alg}'. \
+    let explicit_alg: Option<JwsAlgorithm> =
+        if let Some(ref s) = request.id_token_signed_response_alg {
+            let parsed = s.parse::<JwsAlgorithm>().map_err(|_| {
+                ServiceError::oauth(
+                    OAuthErrorCode::InvalidClientMetadata,
+                    format!(
+                        "Unsupported id_token_signed_response_alg: '{s}'. \
                      Supported: RS256, ES256"
-                ),
-            ));
-        }
+                    ),
+                )
+            })?;
+            // Only RS256 and ES256 are accepted for ID tokens.
+            if !matches!(parsed, JwsAlgorithm::Rs256 | JwsAlgorithm::Es256) {
+                return Err(ServiceError::oauth(
+                    OAuthErrorCode::InvalidClientMetadata,
+                    format!(
+                        "Unsupported id_token_signed_response_alg: '{s}'. \
+                     Supported: RS256, ES256"
+                    ),
+                ));
+            }
 
-        // FAPI 2.0 Section 5.4: RS256 is not permitted for FAPI clients.
-        if alg == "RS256" && fapi_profile != FapiProfile::None {
-            return Err(ServiceError::oauth(
-                OAuthErrorCode::InvalidClientMetadata,
-                "RS256 is not permitted for FAPI 2.0 clients. Use ES256",
-            ));
-        }
+            // FAPI 2.0 Section 5.4: RS256 is not permitted for FAPI clients.
+            if parsed == JwsAlgorithm::Rs256 && fapi_profile != FapiProfile::None {
+                return Err(ServiceError::oauth(
+                    OAuthErrorCode::InvalidClientMetadata,
+                    "RS256 is not permitted for FAPI 2.0 clients. Use ES256",
+                ));
+            }
 
-        // If RS256 is explicitly requested but no RSA key is configured, reject.
-        // An unspecified algorithm falls back to ES256 automatically (see below).
-        if alg == "RS256" && state.oidc_rsa_key.is_none() {
-            return Err(ServiceError::oauth(
-                OAuthErrorCode::InvalidClientMetadata,
-                "RS256 is not available (no RSA signing key configured)",
-            ));
-        }
-    }
+            // If RS256 is explicitly requested but no RSA key is configured, reject.
+            // An unspecified algorithm falls back to ES256 automatically (see below).
+            if parsed == JwsAlgorithm::Rs256 && state.oidc_rsa_key.is_none() {
+                return Err(ServiceError::oauth(
+                    OAuthErrorCode::InvalidClientMetadata,
+                    "RS256 is not available (no RSA signing key configured)",
+                ));
+            }
+
+            Some(parsed)
+        } else {
+            None
+        };
 
     // When the client didn't specify, use RS256 if available, otherwise ES256.
     // FAPI 2.0 Section 5.4: FAPI clients always use ES256.
     let id_token_alg = if fapi_profile != FapiProfile::None {
-        "ES256"
+        JwsAlgorithm::Es256
     } else {
         explicit_alg.unwrap_or_else(|| {
             if state.oidc_rsa_key.is_some() {
-                "RS256"
+                JwsAlgorithm::Rs256
             } else {
-                "ES256"
+                JwsAlgorithm::Es256
             }
         })
     };
+
+    // 12b. Validate authorization_signed_response_alg (JARM).
+    // Serde rejects "none" and symmetric (HS*) algorithms since they are not
+    // valid JwsAlgorithm variants. Only RS256 and ES256 are accepted for JARM.
+    let jarm_alg: Option<JwsAlgorithm> =
+        if let Some(ref s) = request.authorization_signed_response_alg {
+            let parsed = s.parse::<JwsAlgorithm>().map_err(|_| {
+                ServiceError::oauth(
+                    OAuthErrorCode::InvalidClientMetadata,
+                    format!(
+                        "Unsupported authorization_signed_response_alg: '{s}'. \
+                     Must be an asymmetric algorithm such as RS256 or ES256"
+                    ),
+                )
+            })?;
+            // Only RS256 and ES256 are accepted for JARM responses.
+            if !matches!(parsed, JwsAlgorithm::Rs256 | JwsAlgorithm::Es256) {
+                return Err(ServiceError::oauth(
+                    OAuthErrorCode::InvalidClientMetadata,
+                    format!(
+                        "Unsupported authorization_signed_response_alg: '{s}'. \
+                     Supported: RS256, ES256"
+                    ),
+                ));
+            }
+            if parsed == JwsAlgorithm::Rs256 && state.oidc_rsa_key.is_none() {
+                return Err(ServiceError::oauth(
+                    OAuthErrorCode::InvalidClientMetadata,
+                    "RS256 is not available for authorization_signed_response_alg \
+                 (no RSA signing key configured)",
+                ));
+            }
+            Some(parsed)
+        } else {
+            None
+        };
+
+    // 12c. Validate introspection_signed_response_alg (RFC 9701).
+    // Only ES256 is supported — the server's primary P-256 ECDSA key.
+    let introspection_alg: Option<JwsAlgorithm> =
+        if let Some(ref s) = request.introspection_signed_response_alg {
+            let parsed = s.parse::<JwsAlgorithm>().map_err(|_| {
+                ServiceError::oauth(
+                    OAuthErrorCode::InvalidClientMetadata,
+                    format!(
+                        "Unsupported introspection_signed_response_alg: '{s}'. \
+                     Supported: ES256"
+                    ),
+                )
+            })?;
+            if parsed != JwsAlgorithm::Es256 {
+                return Err(ServiceError::oauth(
+                    OAuthErrorCode::InvalidClientMetadata,
+                    format!(
+                        "Unsupported introspection_signed_response_alg: '{s}'. \
+                     Supported: ES256"
+                    ),
+                ));
+            }
+            Some(parsed)
+        } else {
+            None
+        };
 
     // 13. Infer application type
     let app_type = determine_client_type(
@@ -316,6 +425,15 @@ pub async fn register_client(
             registration_access_token_hash: Some(&reg_token_hash),
             registration_metadata: Some(&registration_metadata),
             id_token_signed_response_alg: id_token_alg,
+            tls_client_auth_subject_dn: request.tls_client_auth_subject_dn.as_deref(),
+            tls_client_auth_san_dns: request.tls_client_auth_san_dns.as_deref(),
+            tls_client_auth_san_uri: request.tls_client_auth_san_uri.as_deref(),
+            tls_client_auth_san_ip: request.tls_client_auth_san_ip.as_deref(),
+            tls_client_auth_san_email: request.tls_client_auth_san_email.as_deref(),
+            tls_client_certificate_bound_access_tokens: request
+                .tls_client_certificate_bound_access_tokens,
+            authorization_signed_response_alg: jarm_alg,
+            introspection_signed_response_alg: introspection_alg,
         },
     )
     .await
@@ -411,6 +529,8 @@ pub async fn register_client(
         software_version: request.software_version,
         dpop_bound_access_tokens: if dpop_bound { Some(true) } else { None },
         id_token_signed_response_alg: id_token_alg.to_string(),
+        authorization_signed_response_alg: jarm_alg.map(|a| a.to_string()),
+        introspection_signed_response_alg: introspection_alg.map(|a| a.to_string()),
     })
 }
 
@@ -600,6 +720,24 @@ fn validate_jwks_and_auth_method(
             OAuthErrorCode::InvalidClientMetadata,
             "private_key_jwt requires jwks or jwks_uri",
         ));
+    }
+
+    // RFC 8705 Section 2.1.1: tls_client_auth requires at least one identity field
+    if auth_method == TokenEndpointAuthMethod::TlsClientAuth {
+        let has_identity = request.tls_client_auth_subject_dn.is_some()
+            || request.tls_client_auth_san_dns.is_some()
+            || request.tls_client_auth_san_email.is_some()
+            || request.tls_client_auth_san_uri.is_some()
+            || request.tls_client_auth_san_ip.is_some();
+        if !has_identity {
+            return Err(ServiceError::oauth(
+                OAuthErrorCode::InvalidClientMetadata,
+                "tls_client_auth requires at least one identity field \
+                 (tls_client_auth_subject_dn, tls_client_auth_san_dns, \
+                 tls_client_auth_san_email, tls_client_auth_san_uri, \
+                 or tls_client_auth_san_ip)",
+            ));
+        }
     }
 
     Ok(ValidatedJwksAuth {
@@ -911,7 +1049,13 @@ fn build_client_response(client: &OAuthClient, base_url: &str) -> RegistrationRe
         } else {
             None
         },
-        id_token_signed_response_alg: client.id_token_signed_response_alg.clone(),
+        id_token_signed_response_alg: client.id_token_signed_response_alg.to_string(),
+        authorization_signed_response_alg: client
+            .authorization_signed_response_alg
+            .map(|a| a.to_string()),
+        introspection_signed_response_alg: client
+            .introspection_signed_response_alg
+            .map(|a| a.to_string()),
     }
 }
 
@@ -1448,6 +1592,7 @@ mod tests {
             software_statement: None,
             dpop_bound_access_tokens: None,
             id_token_signed_response_alg: None,
+            ..Default::default()
         };
 
         let metadata = build_registration_metadata(&request);
@@ -1488,6 +1633,7 @@ mod tests {
             software_statement: None,
             dpop_bound_access_tokens: None,
             id_token_signed_response_alg: None,
+            ..Default::default()
         };
 
         let metadata = build_registration_metadata(&request);
@@ -1526,6 +1672,7 @@ mod tests {
             software_statement: None,
             dpop_bound_access_tokens: None,
             id_token_signed_response_alg: None,
+            ..Default::default()
         };
 
         let metadata = build_registration_metadata(&request);
@@ -1562,6 +1709,7 @@ mod tests {
             software_statement: None,
             dpop_bound_access_tokens: None,
             id_token_signed_response_alg: None,
+            ..Default::default()
         };
 
         let metadata = build_registration_metadata(&request);
@@ -1595,6 +1743,7 @@ mod tests {
             software_statement: None,
             dpop_bound_access_tokens: None,
             id_token_signed_response_alg: None,
+            ..Default::default()
         };
 
         let metadata = build_registration_metadata(&request);
@@ -1808,6 +1957,8 @@ mod tests {
             software_version: None,
             dpop_bound_access_tokens: None,
             id_token_signed_response_alg: "ES256".to_string(),
+            authorization_signed_response_alg: None,
+            introspection_signed_response_alg: None,
         };
 
         let json = serde_json::to_string(&response).unwrap();
@@ -1868,6 +2019,8 @@ mod tests {
             software_version: None,
             dpop_bound_access_tokens: None,
             id_token_signed_response_alg: "ES256".to_string(),
+            authorization_signed_response_alg: None,
+            introspection_signed_response_alg: None,
         };
 
         let json = serde_json::to_string(&response).unwrap();
@@ -2053,6 +2206,7 @@ mod tests {
             software_statement: None,
             dpop_bound_access_tokens: None,
             id_token_signed_response_alg: None,
+            ..Default::default()
         }
     }
 
@@ -2146,6 +2300,7 @@ mod tests {
             software_statement: None,
             dpop_bound_access_tokens: None,
             id_token_signed_response_alg: None,
+            ..Default::default()
         };
         let result = validate_grant_and_response_types(&mut req2);
         assert_oauth_error(result, OAuthErrorCode::InvalidClientMetadata);
@@ -2197,6 +2352,7 @@ mod tests {
             software_statement: None,
             dpop_bound_access_tokens: None,
             id_token_signed_response_alg: None,
+            ..Default::default()
         }
     }
 
@@ -2270,6 +2426,7 @@ mod tests {
             software_statement: None,
             dpop_bound_access_tokens: None,
             id_token_signed_response_alg: None,
+            ..Default::default()
         }
     }
 
@@ -2352,8 +2509,109 @@ mod tests {
     #[test]
     fn test_validate_jwks_and_auth_method_unknown_auth_method_rejected() {
         let mut req = make_request_with_jwks(None, None);
+        let result = validate_jwks_and_auth_method(&mut req, "unknown_method");
+        assert_oauth_error(result, OAuthErrorCode::InvalidClientMetadata);
+    }
+
+    // =========================================================================
+    // validate_jwks_and_auth_method — tls_client_auth (RFC 8705 Section 2.1.1)
+    // =========================================================================
+
+    /// tls_client_auth with a subject_dn identity field is accepted.
+    #[test]
+    fn test_validate_tls_client_auth_accepted() {
+        let mut req = RegistrationRequest {
+            tls_client_auth_subject_dn: Some("CN=test-client".to_string()),
+            ..Default::default()
+        };
+        let result = validate_jwks_and_auth_method(&mut req, "tls_client_auth");
+        let validated = result.expect("tls_client_auth + subject_dn must succeed");
+        assert_eq!(
+            validated.auth_method,
+            TokenEndpointAuthMethod::TlsClientAuth
+        );
+    }
+
+    /// tls_client_auth without any identity field must be rejected with invalid_client_metadata.
+    #[test]
+    fn test_validate_tls_client_auth_requires_identity_field() {
+        let mut req = RegistrationRequest {
+            // No tls_client_auth_* identity fields set
+            ..Default::default()
+        };
         let result = validate_jwks_and_auth_method(&mut req, "tls_client_auth");
         assert_oauth_error(result, OAuthErrorCode::InvalidClientMetadata);
+    }
+
+    /// tls_client_auth with san_dns identity field is accepted.
+    #[test]
+    fn test_validate_tls_client_auth_with_san_dns_accepted() {
+        let mut req = RegistrationRequest {
+            tls_client_auth_san_dns: Some("client.example.com".to_string()),
+            ..Default::default()
+        };
+        let result = validate_jwks_and_auth_method(&mut req, "tls_client_auth");
+        assert!(
+            result.is_ok(),
+            "tls_client_auth + san_dns must succeed, got: {result:?}"
+        );
+    }
+
+    /// tls_client_auth with san_email identity field is accepted (RFC 8705 Section 2.1.1).
+    #[test]
+    fn test_validate_tls_client_auth_with_san_email() {
+        let mut req = RegistrationRequest {
+            tls_client_auth_san_email: Some("client@example.com".to_string()),
+            ..Default::default()
+        };
+        let result = validate_jwks_and_auth_method(&mut req, "tls_client_auth");
+        let validated = result.expect("tls_client_auth + san_email must succeed");
+        assert_eq!(
+            validated.auth_method,
+            TokenEndpointAuthMethod::TlsClientAuth
+        );
+    }
+
+    /// tls_client_auth with san_uri identity field is accepted (RFC 8705 Section 2.1.1).
+    #[test]
+    fn test_validate_tls_client_auth_with_san_uri() {
+        let mut req = RegistrationRequest {
+            tls_client_auth_san_uri: Some("https://client.example.com/".to_string()),
+            ..Default::default()
+        };
+        let result = validate_jwks_and_auth_method(&mut req, "tls_client_auth");
+        let validated = result.expect("tls_client_auth + san_uri must succeed");
+        assert_eq!(
+            validated.auth_method,
+            TokenEndpointAuthMethod::TlsClientAuth
+        );
+    }
+
+    /// tls_client_auth with san_ip identity field is accepted (RFC 8705 Section 2.1.1).
+    #[test]
+    fn test_validate_tls_client_auth_with_san_ip() {
+        let mut req = RegistrationRequest {
+            tls_client_auth_san_ip: Some("192.0.2.1".to_string()),
+            ..Default::default()
+        };
+        let result = validate_jwks_and_auth_method(&mut req, "tls_client_auth");
+        let validated = result.expect("tls_client_auth + san_ip must succeed");
+        assert_eq!(
+            validated.auth_method,
+            TokenEndpointAuthMethod::TlsClientAuth
+        );
+    }
+
+    /// self_signed_tls_client_auth does not require identity fields — accepted without them.
+    #[test]
+    fn test_validate_self_signed_tls_client_auth_accepted_without_identity() {
+        let mut req = make_request_with_jwks(None, None);
+        let result = validate_jwks_and_auth_method(&mut req, "self_signed_tls_client_auth");
+        let validated = result.expect("self_signed_tls_client_auth must succeed without identity");
+        assert_eq!(
+            validated.auth_method,
+            TokenEndpointAuthMethod::SelfSignedTlsClientAuth
+        );
     }
 
     // =========================================================================
@@ -2386,6 +2644,7 @@ mod tests {
             software_statement: None,
             dpop_bound_access_tokens: None,
             id_token_signed_response_alg: None,
+            ..Default::default()
         }
     }
 

@@ -34,6 +34,8 @@ pub enum OAuthDocumentParseError {
     ClientType(String),
     #[error("Unknown token endpoint auth method: {0}")]
     TokenEndpointAuthMethod(String),
+    #[error("Unknown JWS algorithm: {0}")]
+    JwsAlgorithm(String),
 }
 
 impl AccessScope {
@@ -164,6 +166,12 @@ pub enum TokenEndpointAuthMethod {
     PrivateKeyJwt,
     #[serde(rename = "none")]
     None,
+    /// RFC 8705 Section 2.1.1: mTLS with PKI certificate.
+    #[serde(rename = "tls_client_auth")]
+    TlsClientAuth,
+    /// RFC 8705 Section 2.2.2: mTLS with self-signed certificate.
+    #[serde(rename = "self_signed_tls_client_auth")]
+    SelfSignedTlsClientAuth,
 }
 
 impl TokenEndpointAuthMethod {
@@ -175,6 +183,8 @@ impl TokenEndpointAuthMethod {
             Self::ClientSecretPost => "client_secret_post",
             Self::PrivateKeyJwt => "private_key_jwt",
             Self::None => "none",
+            Self::TlsClientAuth => "tls_client_auth",
+            Self::SelfSignedTlsClientAuth => "self_signed_tls_client_auth",
         }
     }
 }
@@ -191,6 +201,10 @@ impl std::str::FromStr for TokenEndpointAuthMethod {
             Ok(Self::PrivateKeyJwt)
         } else if s.eq_ignore_ascii_case("none") {
             Ok(Self::None)
+        } else if s.eq_ignore_ascii_case("tls_client_auth") {
+            Ok(Self::TlsClientAuth)
+        } else if s.eq_ignore_ascii_case("self_signed_tls_client_auth") {
+            Ok(Self::SelfSignedTlsClientAuth)
         } else {
             Err(OAuthDocumentParseError::TokenEndpointAuthMethod(
                 s.to_string(),
@@ -202,6 +216,89 @@ impl std::str::FromStr for TokenEndpointAuthMethod {
 impl std::fmt::Display for TokenEndpointAuthMethod {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
+    }
+}
+
+/// JWS signing algorithm for OAuth 2.0 / OIDC.
+///
+/// Only asymmetric algorithms are supported. Symmetric (HS*)
+/// and `none` are rejected at registration time via serde deserialization.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum JwsAlgorithm {
+    /// ECDSA using P-256 and SHA-256.
+    #[default]
+    #[serde(rename = "ES256")]
+    Es256,
+    /// RSASSA-PKCS1-v1_5 using SHA-256.
+    #[serde(rename = "RS256")]
+    Rs256,
+    /// RSASSA-PSS using SHA-256.
+    #[serde(rename = "PS256")]
+    Ps256,
+    /// Edwards-curve Digital Signature Algorithm.
+    #[serde(rename = "EdDSA")]
+    EdDsa,
+}
+
+impl JwsAlgorithm {
+    /// Returns the canonical string representation used in the wire format.
+    #[must_use]
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Es256 => "ES256",
+            Self::Rs256 => "RS256",
+            Self::Ps256 => "PS256",
+            Self::EdDsa => "EdDSA",
+        }
+    }
+}
+
+impl std::str::FromStr for JwsAlgorithm {
+    type Err = OAuthDocumentParseError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "ES256" => Ok(Self::Es256),
+            "RS256" => Ok(Self::Rs256),
+            "PS256" => Ok(Self::Ps256),
+            "EdDSA" => Ok(Self::EdDsa),
+            _ => Err(OAuthDocumentParseError::JwsAlgorithm(s.to_string())),
+        }
+    }
+}
+
+impl std::fmt::Display for JwsAlgorithm {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// OAuth 2.0 authorization response mode.
+///
+/// Default is `Query` (plain query parameters). JARM modes wrap the
+/// response in a signed JWT delivered as a single `response` parameter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum ResponseMode {
+    /// Standard query-string response (RFC 6749 Section 4.1.2).
+    #[default]
+    #[serde(rename = "query")]
+    Query,
+    /// JARM: response parameters in a signed JWT via query string.
+    /// Accepts both `"jwt"` and `"query.jwt"` on the wire.
+    #[serde(rename = "jwt", alias = "query.jwt")]
+    Jwt,
+}
+
+impl ResponseMode {
+    /// Parse a raw `response_mode` string, returning `None` for
+    /// unrecognized values so the caller can produce an error.
+    #[must_use]
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "query" => Some(Self::Query),
+            "jwt" | "query.jwt" => Some(Self::Jwt),
+            _ => Option::None,
+        }
     }
 }
 
@@ -271,7 +368,7 @@ pub struct OAuthClientDoc {
     pub jwks_uri_cache: Option<serde_json::Value>,
     pub token_endpoint_auth_method: TokenEndpointAuthMethod,
     /// RFC 9101 request object signing algorithm.
-    pub request_object_signing_alg: Option<String>,
+    pub request_object_signing_alg: Option<JwsAlgorithm>,
     /// RFC 9101 require signed request objects.
     pub require_signed_request_object: Option<bool>,
     pub fapi_profile: FapiProfile,
@@ -291,12 +388,36 @@ pub struct OAuthClientDoc {
     /// New registrations default to "RS256" per OIDC Core spec, but the serde
     /// default is "ES256" for backward compatibility with existing client records
     /// that were created before RS256 support was added.
-    #[serde(default = "default_id_token_alg")]
-    pub id_token_signed_response_alg: String,
-}
-
-fn default_id_token_alg() -> String {
-    "ES256".to_string()
+    #[serde(default)]
+    pub id_token_signed_response_alg: JwsAlgorithm,
+    /// RFC 8705 Section 2.1.1: subject DN for tls_client_auth.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tls_client_auth_subject_dn: Option<String>,
+    /// RFC 8705 Section 2.1.1: SAN DNS name for tls_client_auth.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tls_client_auth_san_dns: Option<String>,
+    /// RFC 8705 Section 2.1.1: SAN URI for tls_client_auth.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tls_client_auth_san_uri: Option<String>,
+    /// RFC 8705 Section 2.1.1: SAN IP for tls_client_auth.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tls_client_auth_san_ip: Option<String>,
+    /// RFC 8705 Section 2.1.1: SAN email for tls_client_auth.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tls_client_auth_san_email: Option<String>,
+    /// RFC 8705 Section 3: certificate-bound access tokens.
+    #[serde(default)]
+    pub tls_client_certificate_bound_access_tokens: bool,
+    /// JARM (oauth-v2-jarm) Section 2.3.2: signing algorithm for
+    /// authorization responses. `None` = server default (RS256 or ES256).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authorization_signed_response_alg: Option<JwsAlgorithm>,
+    /// RFC 9701 Section 6.1: Introspection response signing algorithm.
+    ///
+    /// When set, introspection returns a signed JWT instead of plain JSON.
+    /// Only `Es256` is supported (the server's primary signing key).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub introspection_signed_response_alg: Option<JwsAlgorithm>,
 }
 
 impl DocumentType for OAuthClientDoc {
@@ -425,7 +546,10 @@ impl DocumentType for DelegationPolicyDoc {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
-    use super::{AccessScope, OAuthClientType, OAuthDocumentParseError, TokenEndpointAuthMethod};
+    use super::{
+        AccessScope, JwsAlgorithm, OAuthClientType, OAuthDocumentParseError,
+        TokenEndpointAuthMethod,
+    };
     use std::str::FromStr;
 
     #[test]
@@ -465,6 +589,39 @@ mod tests {
     }
 
     #[test]
+    fn test_jws_algorithm_round_trip() {
+        for (s, variant) in &[
+            ("ES256", JwsAlgorithm::Es256),
+            ("RS256", JwsAlgorithm::Rs256),
+            ("PS256", JwsAlgorithm::Ps256),
+            ("EdDSA", JwsAlgorithm::EdDsa),
+        ] {
+            assert_eq!(
+                JwsAlgorithm::from_str(s).unwrap(),
+                *variant,
+                "from_str({s})"
+            );
+            assert_eq!(variant.as_str(), *s, "as_str({s})");
+            assert_eq!(variant.to_string(), *s, "Display({s})");
+        }
+    }
+
+    #[test]
+    fn test_jws_algorithm_default_is_es256() {
+        assert_eq!(JwsAlgorithm::default(), JwsAlgorithm::Es256);
+    }
+
+    #[test]
+    fn test_jws_algorithm_from_str_unknown() {
+        let result = JwsAlgorithm::from_str("HS256");
+        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err(),
+            OAuthDocumentParseError::JwsAlgorithm("HS256".to_string())
+        );
+    }
+
+    #[test]
     fn test_id_token_signed_response_alg_serde_default() {
         // Existing client records without id_token_signed_response_alg should
         // default to "ES256" for backward compatibility (not "RS256").
@@ -500,7 +657,8 @@ mod tests {
         let doc: super::OAuthClientDoc = serde_json::from_str(json)
             .expect("Should deserialize OAuthClientDoc without id_token_signed_response_alg");
         assert_eq!(
-            doc.id_token_signed_response_alg, "ES256",
+            doc.id_token_signed_response_alg,
+            JwsAlgorithm::Es256,
             "Missing field should default to ES256 for backward compatibility"
         );
     }

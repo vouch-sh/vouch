@@ -182,6 +182,7 @@ pub async fn exchange_jwt_bearer_grant(
             client_id: &issuer.issuer,
             scope: scope.clone(),
             dpop_jkt: None,
+            mtls_cert_thumbprint: None,
             act: None,
             audience: None,
             auth_time: None,

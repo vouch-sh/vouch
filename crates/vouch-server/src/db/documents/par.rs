@@ -34,6 +34,9 @@ pub struct PushedAuthorizationRequestDoc {
     /// RFC 9396: Rich authorization details (JSON array).
     #[serde(default)]
     pub authorization_details: Option<Value>,
+    /// JARM: response_mode from the PAR request.
+    #[serde(default)]
+    pub response_mode: super::oauth::ResponseMode,
 }
 
 impl DocumentType for PushedAuthorizationRequestDoc {

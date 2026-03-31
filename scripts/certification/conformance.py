@@ -172,9 +172,90 @@ class ConformanceClient:
 
             time.sleep(min(POLL_INTERVAL, remaining))
 
+    # ── Module logs ─────────────────────────────────────────────────────────
+
+    def get_module_log(self, module_id: str) -> list[dict[str, Any]]:
+        """Fetch the full structured log for a test module."""
+        return self._get(f"/api/log/{module_id}")
+
     # ── Certification ────────────────────────────────────────────────────────
 
     def create_certification_package(self, plan_id: str) -> dict[str, Any]:
         """Generate an official certification package for a passing plan."""
         log.info("Creating certification package for plan %s", plan_id)
         return self._post(f"/api/plan/{plan_id}/certificationpackage")
+
+
+def format_log_entry(entry: dict) -> str | None:
+    """Format a single log entry for debugging output.
+
+    Returns None for entries that aren't useful for debugging
+    (e.g. INFO-level successes).
+    """
+    result = entry.get("result", "")
+    src = entry.get("src", "")
+    msg = entry.get("msg", "")
+
+    # Skip noise: only show failures, warnings, and HTTP exchanges.
+    if result in ("SUCCESS", "INFO", "") and "http" not in entry:
+        return None
+
+    lines = []
+
+    # Header line with result and source condition.
+    if result and result not in ("SUCCESS", "INFO"):
+        lines.append(f"[{result}] {src}: {msg}")
+    elif "http" in entry:
+        lines.append(f"[HTTP] {src}: {msg}")
+    else:
+        return None
+
+    # RFC requirements.
+    reqs = entry.get("requirements", [])
+    if reqs:
+        lines.append(f"  requirements: {', '.join(reqs)}")
+
+    # HTTP request/response details.
+    http = entry.get("http", "")
+    if isinstance(http, str) and http:
+        lines.append(f"  http: {http}")
+    elif isinstance(http, dict):
+        req = http.get("request", {})
+        resp = http.get("response", {})
+        if req:
+            method = req.get("method", "?")
+            url = req.get("url", "?")
+            lines.append(f"  request: {method} {url}")
+            body = req.get("body", "")
+            if body:
+                lines.append(f"    body: {body}")
+        if resp:
+            status = resp.get("status", "?")
+            lines.append(f"  response: HTTP {status}")
+            body = resp.get("body", "")
+            if body:
+                lines.append(f"    body: {body}")
+
+    # Upload/endpoint data that might be useful.
+    for key in ("upload", "endpoint", "actual", "expected"):
+        val = entry.get(key)
+        if val is not None:
+            if isinstance(val, (dict, list)):
+                lines.append(f"  {key}: {json.dumps(val, indent=2)}")
+            else:
+                lines.append(f"  {key}: {val}")
+
+    return "\n".join(lines)
+
+
+def format_module_log(entries: list[dict]) -> str:
+    """Format a module's log entries for debugging.
+
+    Shows only failures, warnings, and HTTP exchanges.
+    """
+    lines = []
+    for entry in entries:
+        formatted = format_log_entry(entry)
+        if formatted:
+            lines.append(formatted)
+    return "\n".join(lines)

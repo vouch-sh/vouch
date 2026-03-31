@@ -106,7 +106,8 @@ pub use scim::{
 
 // Re-export OAuth enum types from the document layer (single source of truth)
 pub use documents::oauth::{
-    AccessScope, FapiProfile, OAuthClientType, RegistrationSource, TokenEndpointAuthMethod,
+    AccessScope, FapiProfile, JwsAlgorithm, OAuthClientType, RegistrationSource,
+    TokenEndpointAuthMethod,
 };
 
 // Re-export OAuth domain types and functions
