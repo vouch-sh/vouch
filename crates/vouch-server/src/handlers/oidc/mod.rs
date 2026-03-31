@@ -60,7 +60,7 @@ pub(crate) fn build_jarm_redirect_url(redirect_uri: &str, jwt: &str) -> String {
         }
         Err(_) => {
             // Fallback: should not happen since redirect_uri was already validated
-            format!("{redirect_uri}?response={jwt}")
+            format!("{redirect_uri}?response={}", urlencoding::encode(jwt))
         }
     }
 }

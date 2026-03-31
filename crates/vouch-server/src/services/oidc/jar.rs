@@ -195,8 +195,8 @@ pub async fn validate_request_object(
     let (_full_header, assertion_header) = parse_request_object_header(request_jwt)?;
 
     // 2. Enforce client's preferred signing algorithm if configured
-    if let Some(ref required_alg) = client.request_object_signing_alg
-        && assertion_header.alg != *required_alg
+    if let Some(required_alg) = client.request_object_signing_alg
+        && assertion_header.alg != required_alg.as_str()
     {
         return Err(ServiceError::oauth(
             OAuthErrorCode::InvalidRequestObject,

@@ -21,8 +21,8 @@
 use crate::AppState;
 use crate::crypto::{generate_random_bytes, hash_token};
 use crate::db::{
-    self, CreateOAuthClientParams, FapiProfile, OAuthClient, OAuthClientType, OAuthEventType,
-    RegistrationSource, TokenEndpointAuthMethod, UpdateClientRegistrationParams,
+    self, CreateOAuthClientParams, FapiProfile, JwsAlgorithm, OAuthClient, OAuthClientType,
+    OAuthEventType, RegistrationSource, TokenEndpointAuthMethod, UpdateClientRegistrationParams,
 };
 use crate::services::error::{OAuthErrorCode, ServiceError};
 use base64::Engine;
@@ -124,6 +124,8 @@ pub struct RegistrationRequest {
     pub tls_client_certificate_bound_access_tokens: Option<bool>,
     /// JARM: signing algorithm for authorization responses.
     pub authorization_signed_response_alg: Option<String>,
+    /// RFC 9701 Section 6.1: Introspection response signing algorithm.
+    pub introspection_signed_response_alg: Option<String>,
 }
 
 /// RFC 7591 Section 3.2.1: Client Information Response.
@@ -182,6 +184,9 @@ pub struct RegistrationResponse {
     /// JARM: signing algorithm for authorization responses.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub authorization_signed_response_alg: Option<String>,
+    /// RFC 9701 Section 6.1: Introspection response signing algorithm.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub introspection_signed_response_alg: Option<String>,
 }
 
 // ============================================================================
@@ -253,85 +258,126 @@ pub async fn register_client(
     };
 
     // OIDC Core Section 3.1.3.7: Default is RS256, but fall back to ES256 if no RSA key.
-    let explicit_alg = request.id_token_signed_response_alg.as_deref();
-
-    // Validate against supported algorithms (only when client makes an explicit choice)
-    if let Some(alg) = explicit_alg {
-        if alg != "RS256" && alg != "ES256" {
-            return Err(ServiceError::oauth(
-                OAuthErrorCode::InvalidClientMetadata,
-                format!(
-                    "Unsupported id_token_signed_response_alg: '{alg}'. \
+    let explicit_alg: Option<JwsAlgorithm> =
+        if let Some(ref s) = request.id_token_signed_response_alg {
+            let parsed = s.parse::<JwsAlgorithm>().map_err(|_| {
+                ServiceError::oauth(
+                    OAuthErrorCode::InvalidClientMetadata,
+                    format!(
+                        "Unsupported id_token_signed_response_alg: '{s}'. \
                      Supported: RS256, ES256"
-                ),
-            ));
-        }
+                    ),
+                )
+            })?;
+            // Only RS256 and ES256 are accepted for ID tokens.
+            if !matches!(parsed, JwsAlgorithm::Rs256 | JwsAlgorithm::Es256) {
+                return Err(ServiceError::oauth(
+                    OAuthErrorCode::InvalidClientMetadata,
+                    format!(
+                        "Unsupported id_token_signed_response_alg: '{s}'. \
+                     Supported: RS256, ES256"
+                    ),
+                ));
+            }
 
-        // FAPI 2.0 Section 5.4: RS256 is not permitted for FAPI clients.
-        if alg == "RS256" && fapi_profile != FapiProfile::None {
-            return Err(ServiceError::oauth(
-                OAuthErrorCode::InvalidClientMetadata,
-                "RS256 is not permitted for FAPI 2.0 clients. Use ES256",
-            ));
-        }
+            // FAPI 2.0 Section 5.4: RS256 is not permitted for FAPI clients.
+            if parsed == JwsAlgorithm::Rs256 && fapi_profile != FapiProfile::None {
+                return Err(ServiceError::oauth(
+                    OAuthErrorCode::InvalidClientMetadata,
+                    "RS256 is not permitted for FAPI 2.0 clients. Use ES256",
+                ));
+            }
 
-        // If RS256 is explicitly requested but no RSA key is configured, reject.
-        // An unspecified algorithm falls back to ES256 automatically (see below).
-        if alg == "RS256" && state.oidc_rsa_key.is_none() {
-            return Err(ServiceError::oauth(
-                OAuthErrorCode::InvalidClientMetadata,
-                "RS256 is not available (no RSA signing key configured)",
-            ));
-        }
-    }
+            // If RS256 is explicitly requested but no RSA key is configured, reject.
+            // An unspecified algorithm falls back to ES256 automatically (see below).
+            if parsed == JwsAlgorithm::Rs256 && state.oidc_rsa_key.is_none() {
+                return Err(ServiceError::oauth(
+                    OAuthErrorCode::InvalidClientMetadata,
+                    "RS256 is not available (no RSA signing key configured)",
+                ));
+            }
+
+            Some(parsed)
+        } else {
+            None
+        };
 
     // When the client didn't specify, use RS256 if available, otherwise ES256.
     // FAPI 2.0 Section 5.4: FAPI clients always use ES256.
     let id_token_alg = if fapi_profile != FapiProfile::None {
-        "ES256"
+        JwsAlgorithm::Es256
     } else {
         explicit_alg.unwrap_or_else(|| {
             if state.oidc_rsa_key.is_some() {
-                "RS256"
+                JwsAlgorithm::Rs256
             } else {
-                "ES256"
+                JwsAlgorithm::Es256
             }
         })
     };
 
     // 12b. Validate authorization_signed_response_alg (JARM).
-    // Reject "none" and symmetric algorithms — signing key must be asymmetric.
-    let jarm_alg = if let Some(ref alg) = request.authorization_signed_response_alg {
-        let alg = alg.as_str();
-        if alg == "none" || alg.starts_with("HS") {
-            return Err(ServiceError::oauth(
-                OAuthErrorCode::InvalidClientMetadata,
-                format!(
-                    "Unsupported authorization_signed_response_alg: '{alg}'. \
+    // Serde rejects "none" and symmetric (HS*) algorithms since they are not
+    // valid JwsAlgorithm variants. Only RS256 and ES256 are accepted for JARM.
+    let jarm_alg: Option<JwsAlgorithm> =
+        if let Some(ref s) = request.authorization_signed_response_alg {
+            let parsed = s.parse::<JwsAlgorithm>().map_err(|_| {
+                ServiceError::oauth(
+                    OAuthErrorCode::InvalidClientMetadata,
+                    format!(
+                        "Unsupported authorization_signed_response_alg: '{s}'. \
                      Must be an asymmetric algorithm such as RS256 or ES256"
-                ),
-            ));
-        }
-        if alg != "RS256" && alg != "ES256" {
-            return Err(ServiceError::oauth(
-                OAuthErrorCode::InvalidClientMetadata,
-                format!(
-                    "Unsupported authorization_signed_response_alg: '{alg}'. \
+                    ),
+                )
+            })?;
+            // Only RS256 and ES256 are accepted for JARM responses.
+            if !matches!(parsed, JwsAlgorithm::Rs256 | JwsAlgorithm::Es256) {
+                return Err(ServiceError::oauth(
+                    OAuthErrorCode::InvalidClientMetadata,
+                    format!(
+                        "Unsupported authorization_signed_response_alg: '{s}'. \
                      Supported: RS256, ES256"
-                ),
-            ));
-        }
-        if alg == "RS256" && state.oidc_rsa_key.is_none() {
-            return Err(ServiceError::oauth(
-                OAuthErrorCode::InvalidClientMetadata,
-                "RS256 is not available for authorization_signed_response_alg \
+                    ),
+                ));
+            }
+            if parsed == JwsAlgorithm::Rs256 && state.oidc_rsa_key.is_none() {
+                return Err(ServiceError::oauth(
+                    OAuthErrorCode::InvalidClientMetadata,
+                    "RS256 is not available for authorization_signed_response_alg \
                  (no RSA signing key configured)",
-            ));
-        }
-        Some(alg.to_string())
-    } else {
-        None
-    };
+                ));
+            }
+            Some(parsed)
+        } else {
+            None
+        };
+
+    // 12c. Validate introspection_signed_response_alg (RFC 9701).
+    // Only ES256 is supported — the server's primary P-256 ECDSA key.
+    let introspection_alg: Option<JwsAlgorithm> =
+        if let Some(ref s) = request.introspection_signed_response_alg {
+            let parsed = s.parse::<JwsAlgorithm>().map_err(|_| {
+                ServiceError::oauth(
+                    OAuthErrorCode::InvalidClientMetadata,
+                    format!(
+                        "Unsupported introspection_signed_response_alg: '{s}'. \
+                     Supported: ES256"
+                    ),
+                )
+            })?;
+            if parsed != JwsAlgorithm::Es256 {
+                return Err(ServiceError::oauth(
+                    OAuthErrorCode::InvalidClientMetadata,
+                    format!(
+                        "Unsupported introspection_signed_response_alg: '{s}'. \
+                     Supported: ES256"
+                    ),
+                ));
+            }
+            Some(parsed)
+        } else {
+            None
+        };
 
     // 13. Infer application type
     let app_type = determine_client_type(
@@ -386,7 +432,8 @@ pub async fn register_client(
             tls_client_auth_san_email: request.tls_client_auth_san_email.as_deref(),
             tls_client_certificate_bound_access_tokens: request
                 .tls_client_certificate_bound_access_tokens,
-            authorization_signed_response_alg: jarm_alg.as_deref(),
+            authorization_signed_response_alg: jarm_alg,
+            introspection_signed_response_alg: introspection_alg,
         },
     )
     .await
@@ -482,7 +529,8 @@ pub async fn register_client(
         software_version: request.software_version,
         dpop_bound_access_tokens: if dpop_bound { Some(true) } else { None },
         id_token_signed_response_alg: id_token_alg.to_string(),
-        authorization_signed_response_alg: jarm_alg,
+        authorization_signed_response_alg: jarm_alg.map(|a| a.to_string()),
+        introspection_signed_response_alg: introspection_alg.map(|a| a.to_string()),
     })
 }
 
@@ -1001,8 +1049,13 @@ fn build_client_response(client: &OAuthClient, base_url: &str) -> RegistrationRe
         } else {
             None
         },
-        id_token_signed_response_alg: client.id_token_signed_response_alg.clone(),
-        authorization_signed_response_alg: client.authorization_signed_response_alg.clone(),
+        id_token_signed_response_alg: client.id_token_signed_response_alg.to_string(),
+        authorization_signed_response_alg: client
+            .authorization_signed_response_alg
+            .map(|a| a.to_string()),
+        introspection_signed_response_alg: client
+            .introspection_signed_response_alg
+            .map(|a| a.to_string()),
     }
 }
 
@@ -1905,6 +1958,7 @@ mod tests {
             dpop_bound_access_tokens: None,
             id_token_signed_response_alg: "ES256".to_string(),
             authorization_signed_response_alg: None,
+            introspection_signed_response_alg: None,
         };
 
         let json = serde_json::to_string(&response).unwrap();
@@ -1966,6 +2020,7 @@ mod tests {
             dpop_bound_access_tokens: None,
             id_token_signed_response_alg: "ES256".to_string(),
             authorization_signed_response_alg: None,
+            introspection_signed_response_alg: None,
         };
 
         let json = serde_json::to_string(&response).unwrap();

@@ -246,7 +246,8 @@ impl OidcSigningKey {
     ///
     /// When `typ` is `None`, the default `"JWT"` type is used (for ID tokens).
     /// When `typ` is `Some("at+jwt")`, produces an RFC 9068 access token.
-    async fn sign_jwt_with_typ<T: Serialize>(
+    /// When `typ` is `Some("token-introspection+jwt")`, produces an RFC 9701 response.
+    pub(crate) async fn sign_jwt_with_typ<T: Serialize>(
         &self,
         claims: &T,
         typ: Option<&str>,

@@ -6,8 +6,8 @@
 
 use crate::AppState;
 use crate::db::{
-    self, AccessScope, CreateOAuthClientParams, FapiProfile, OAuthClientType, OAuthEventType,
-    RegistrationSource, TokenEndpointAuthMethod, UpdateOAuthClientParams,
+    self, AccessScope, CreateOAuthClientParams, FapiProfile, JwsAlgorithm, OAuthClientType,
+    OAuthEventType, RegistrationSource, TokenEndpointAuthMethod, UpdateOAuthClientParams,
 };
 use axum::extract::OriginalUri;
 use axum::http::Method;
@@ -25,6 +25,7 @@ use super::types::{
     UpdateApplicationRequest,
 };
 use super::{MAX_ACTIVE_SECRETS, generate_client_secret, validate_redirect_uris};
+use crate::handlers::extractors::OptionalClientCert;
 use crate::handlers::hash_token;
 use crate::handlers::session::extract_resource_token;
 use crate::handlers::{ValidPath, ValidUuid};
@@ -39,9 +40,17 @@ pub async fn list_applications_api(
     headers: HeaderMap,
     jar: CookieJar,
     State(state): State<Arc<AppState>>,
+    client_cert: OptionalClientCert,
 ) -> Result<Json<ListApplicationsResponse>, ServiceError> {
-    let token =
-        extract_resource_token(&state, &headers, &jar, method.as_str(), uri.path(), None).await?;
+    let token = extract_resource_token(
+        &state,
+        &headers,
+        &jar,
+        method.as_str(),
+        uri.path(),
+        client_cert.0.as_ref(),
+    )
+    .await?;
 
     let applications = db::get_oauth_clients_for_user(&state.store, &token.sub)
         .await
@@ -68,6 +77,7 @@ pub async fn create_application_api(
     headers: HeaderMap,
     jar: CookieJar,
     State(state): State<Arc<AppState>>,
+    client_cert: OptionalClientCert,
     Json(req): Json<CreateApplicationRequest>,
 ) -> Result<Json<CreateApplicationResponse>, ServiceError> {
     // ── Pure format validation first — no DB cost for malformed requests ──
@@ -200,8 +210,15 @@ pub async fn create_application_api(
     }
 
     // ── Authentication — validated input is good, now check credentials ──
-    let token =
-        extract_resource_token(&state, &headers, &jar, method.as_str(), uri.path(), None).await?;
+    let token = extract_resource_token(
+        &state,
+        &headers,
+        &jar,
+        method.as_str(),
+        uri.path(),
+        client_cert.0.as_ref(),
+    )
+    .await?;
 
     // Parse access scope (default to personal if not provided)
     let access_scope = req
@@ -271,7 +288,7 @@ pub async fn create_application_api(
             registration_source: RegistrationSource::Manual,
             registration_access_token_hash: None,
             registration_metadata: None,
-            id_token_signed_response_alg: "RS256",
+            id_token_signed_response_alg: JwsAlgorithm::Rs256,
             tls_client_auth_subject_dn: None,
             tls_client_auth_san_dns: None,
             tls_client_auth_san_uri: None,
@@ -279,6 +296,7 @@ pub async fn create_application_api(
             tls_client_auth_san_email: None,
             tls_client_certificate_bound_access_tokens: None,
             authorization_signed_response_alg: None,
+            introspection_signed_response_alg: None,
         },
     )
     .await
@@ -346,10 +364,18 @@ pub async fn get_application_api(
     headers: HeaderMap,
     jar: CookieJar,
     State(state): State<Arc<AppState>>,
+    client_cert: OptionalClientCert,
     ValidPath(app_id): ValidPath<ValidUuid>,
 ) -> Result<Json<ApplicationResponse>, ServiceError> {
-    let token =
-        extract_resource_token(&state, &headers, &jar, method.as_str(), uri.path(), None).await?;
+    let token = extract_resource_token(
+        &state,
+        &headers,
+        &jar,
+        method.as_str(),
+        uri.path(),
+        client_cert.0.as_ref(),
+    )
+    .await?;
 
     let client = db::get_oauth_client_by_id(&state.store, &app_id)
         .await
@@ -379,12 +405,15 @@ pub async fn get_application_api(
 
 /// Update an application (API).
 /// PATCH /api/v1/applications/:id
+// Axum handlers require all extractors as parameters; argument count is inherent to the framework.
+#[allow(clippy::too_many_arguments)]
 pub async fn update_application_api(
     method: Method,
     uri: OriginalUri,
     headers: HeaderMap,
     jar: CookieJar,
     State(state): State<Arc<AppState>>,
+    client_cert: OptionalClientCert,
     ValidPath(app_id): ValidPath<ValidUuid>,
     Json(req): Json<UpdateApplicationRequest>,
 ) -> Result<Json<ApplicationResponse>, ServiceError> {
@@ -466,8 +495,15 @@ pub async fn update_application_api(
     }
 
     // ── Authentication — validated input is good, now check credentials ──
-    let token =
-        extract_resource_token(&state, &headers, &jar, method.as_str(), uri.path(), None).await?;
+    let token = extract_resource_token(
+        &state,
+        &headers,
+        &jar,
+        method.as_str(),
+        uri.path(),
+        client_cert.0.as_ref(),
+    )
+    .await?;
 
     // Get existing application
     let client = db::get_oauth_client_by_id(&state.store, &app_id)
@@ -685,10 +721,18 @@ pub async fn delete_application_api(
     headers: HeaderMap,
     jar: CookieJar,
     State(state): State<Arc<AppState>>,
+    client_cert: OptionalClientCert,
     ValidPath(app_id): ValidPath<ValidUuid>,
 ) -> Result<StatusCode, ServiceError> {
-    let token =
-        extract_resource_token(&state, &headers, &jar, method.as_str(), uri.path(), None).await?;
+    let token = extract_resource_token(
+        &state,
+        &headers,
+        &jar,
+        method.as_str(),
+        uri.path(),
+        client_cert.0.as_ref(),
+    )
+    .await?;
 
     // Verify ownership
     let client = db::get_oauth_client_by_id(&state.store, &app_id)
@@ -731,17 +775,27 @@ pub async fn delete_application_api(
 
 /// Add a new client secret (API).
 /// POST /api/v1/applications/:id/secrets
+// Axum handlers require all extractors as parameters; argument count is inherent to the framework.
+#[allow(clippy::too_many_arguments)]
 pub async fn add_secret_api(
     method: Method,
     uri: OriginalUri,
     headers: HeaderMap,
     jar: CookieJar,
     State(state): State<Arc<AppState>>,
+    client_cert: OptionalClientCert,
     ValidPath(app_id): ValidPath<ValidUuid>,
     Json(req): Json<AddSecretRequest>,
 ) -> Result<(StatusCode, Json<AddSecretResponse>), ServiceError> {
-    let token =
-        extract_resource_token(&state, &headers, &jar, method.as_str(), uri.path(), None).await?;
+    let token = extract_resource_token(
+        &state,
+        &headers,
+        &jar,
+        method.as_str(),
+        uri.path(),
+        client_cert.0.as_ref(),
+    )
+    .await?;
 
     let client = db::get_oauth_client_by_id(&state.store, &app_id)
         .await
@@ -859,10 +913,18 @@ pub async fn list_secrets_api(
     headers: HeaderMap,
     jar: CookieJar,
     State(state): State<Arc<AppState>>,
+    client_cert: OptionalClientCert,
     ValidPath(app_id): ValidPath<ValidUuid>,
 ) -> Result<Json<ListSecretsResponse>, ServiceError> {
-    let token =
-        extract_resource_token(&state, &headers, &jar, method.as_str(), uri.path(), None).await?;
+    let token = extract_resource_token(
+        &state,
+        &headers,
+        &jar,
+        method.as_str(),
+        uri.path(),
+        client_cert.0.as_ref(),
+    )
+    .await?;
 
     let client = db::get_oauth_client_by_id(&state.store, &app_id)
         .await
@@ -922,10 +984,18 @@ pub async fn delete_secret_api(
     headers: HeaderMap,
     jar: CookieJar,
     State(state): State<Arc<AppState>>,
+    client_cert: OptionalClientCert,
     ValidPath((app_id, secret_id)): ValidPath<(ValidUuid, ValidUuid)>,
 ) -> Result<StatusCode, ServiceError> {
-    let token =
-        extract_resource_token(&state, &headers, &jar, method.as_str(), uri.path(), None).await?;
+    let token = extract_resource_token(
+        &state,
+        &headers,
+        &jar,
+        method.as_str(),
+        uri.path(),
+        client_cert.0.as_ref(),
+    )
+    .await?;
 
     let client = db::get_oauth_client_by_id(&state.store, &app_id)
         .await
@@ -1044,10 +1114,18 @@ pub async fn revoke_tokens_api(
     headers: HeaderMap,
     jar: CookieJar,
     State(state): State<Arc<AppState>>,
+    client_cert: OptionalClientCert,
     ValidPath(app_id): ValidPath<ValidUuid>,
 ) -> Result<StatusCode, ServiceError> {
-    let token =
-        extract_resource_token(&state, &headers, &jar, method.as_str(), uri.path(), None).await?;
+    let token = extract_resource_token(
+        &state,
+        &headers,
+        &jar,
+        method.as_str(),
+        uri.path(),
+        client_cert.0.as_ref(),
+    )
+    .await?;
 
     // Verify ownership
     let client = db::get_oauth_client_by_id(&state.store, &app_id)

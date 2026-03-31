@@ -419,7 +419,7 @@ async fn test_oauth_client_crud() {
             registration_source: RegistrationSource::Manual,
             registration_access_token_hash: None,
             registration_metadata: None,
-            id_token_signed_response_alg: "RS256",
+            id_token_signed_response_alg: JwsAlgorithm::Rs256,
             tls_client_auth_subject_dn: None,
             tls_client_auth_san_dns: None,
             tls_client_auth_san_uri: None,
@@ -427,6 +427,7 @@ async fn test_oauth_client_crud() {
             tls_client_auth_san_email: None,
             tls_client_certificate_bound_access_tokens: None,
             authorization_signed_response_alg: None,
+            introspection_signed_response_alg: None,
         },
     )
     .await
@@ -534,7 +535,7 @@ async fn test_oauth_client_types() {
                 registration_source: RegistrationSource::Manual,
                 registration_access_token_hash: None,
                 registration_metadata: None,
-                id_token_signed_response_alg: "RS256",
+                id_token_signed_response_alg: JwsAlgorithm::Rs256,
                 tls_client_auth_subject_dn: None,
                 tls_client_auth_san_dns: None,
                 tls_client_auth_san_uri: None,
@@ -542,6 +543,7 @@ async fn test_oauth_client_types() {
                 tls_client_auth_san_email: None,
                 tls_client_certificate_bound_access_tokens: None,
                 authorization_signed_response_alg: None,
+                introspection_signed_response_alg: None,
             },
         )
         .await
@@ -594,7 +596,7 @@ async fn test_oauth_client_list_for_user() {
                 registration_source: RegistrationSource::Manual,
                 registration_access_token_hash: None,
                 registration_metadata: None,
-                id_token_signed_response_alg: "RS256",
+                id_token_signed_response_alg: JwsAlgorithm::Rs256,
                 tls_client_auth_subject_dn: None,
                 tls_client_auth_san_dns: None,
                 tls_client_auth_san_uri: None,
@@ -602,6 +604,7 @@ async fn test_oauth_client_list_for_user() {
                 tls_client_auth_san_email: None,
                 tls_client_certificate_bound_access_tokens: None,
                 authorization_signed_response_alg: None,
+                introspection_signed_response_alg: None,
             },
         )
         .await
@@ -632,7 +635,7 @@ async fn test_oauth_client_list_for_user() {
             registration_source: RegistrationSource::Manual,
             registration_access_token_hash: None,
             registration_metadata: None,
-            id_token_signed_response_alg: "RS256",
+            id_token_signed_response_alg: JwsAlgorithm::Rs256,
             tls_client_auth_subject_dn: None,
             tls_client_auth_san_dns: None,
             tls_client_auth_san_uri: None,
@@ -640,6 +643,7 @@ async fn test_oauth_client_list_for_user() {
             tls_client_auth_san_email: None,
             tls_client_certificate_bound_access_tokens: None,
             authorization_signed_response_alg: None,
+            introspection_signed_response_alg: None,
         },
     )
     .await
@@ -689,7 +693,7 @@ async fn test_oauth_client_secret_management() {
             registration_source: RegistrationSource::Manual,
             registration_access_token_hash: None,
             registration_metadata: None,
-            id_token_signed_response_alg: "RS256",
+            id_token_signed_response_alg: JwsAlgorithm::Rs256,
             tls_client_auth_subject_dn: None,
             tls_client_auth_san_dns: None,
             tls_client_auth_san_uri: None,
@@ -697,6 +701,7 @@ async fn test_oauth_client_secret_management() {
             tls_client_auth_san_email: None,
             tls_client_certificate_bound_access_tokens: None,
             authorization_signed_response_alg: None,
+            introspection_signed_response_alg: None,
         },
     )
     .await
@@ -768,7 +773,7 @@ async fn test_oauth_usage_recording() {
             registration_source: RegistrationSource::Manual,
             registration_access_token_hash: None,
             registration_metadata: None,
-            id_token_signed_response_alg: "RS256",
+            id_token_signed_response_alg: JwsAlgorithm::Rs256,
             tls_client_auth_subject_dn: None,
             tls_client_auth_san_dns: None,
             tls_client_auth_san_uri: None,
@@ -776,6 +781,7 @@ async fn test_oauth_usage_recording() {
             tls_client_auth_san_email: None,
             tls_client_certificate_bound_access_tokens: None,
             authorization_signed_response_alg: None,
+            introspection_signed_response_alg: None,
         },
     )
     .await
@@ -1372,7 +1378,7 @@ async fn test_oauth_client_cascade_delete() {
             registration_source: RegistrationSource::Manual,
             registration_access_token_hash: None,
             registration_metadata: None,
-            id_token_signed_response_alg: "RS256",
+            id_token_signed_response_alg: JwsAlgorithm::Rs256,
             tls_client_auth_subject_dn: None,
             tls_client_auth_san_dns: None,
             tls_client_auth_san_uri: None,
@@ -1380,6 +1386,7 @@ async fn test_oauth_client_cascade_delete() {
             tls_client_auth_san_email: None,
             tls_client_certificate_bound_access_tokens: None,
             authorization_signed_response_alg: None,
+            introspection_signed_response_alg: None,
         },
     )
     .await

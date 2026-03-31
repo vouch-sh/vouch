@@ -128,7 +128,7 @@ mod tests {
     /// `mtls_cert_thumbprint` is supplied to `exchange_client_credentials`.
     #[tokio::test]
     async fn test_client_credentials_with_mtls_thumbprint() {
-        use crate::db::{CreateOAuthClientParams, RegistrationSource};
+        use crate::db::{CreateOAuthClientParams, JwsAlgorithm, RegistrationSource};
         use crate::test_utils::test_app_state;
 
         let state = test_app_state().await;
@@ -157,7 +157,7 @@ mod tests {
                 registration_source: RegistrationSource::Manual,
                 registration_access_token_hash: None,
                 registration_metadata: None,
-                id_token_signed_response_alg: "ES256",
+                id_token_signed_response_alg: JwsAlgorithm::Es256,
                 tls_client_auth_subject_dn: None,
                 tls_client_auth_san_dns: None,
                 tls_client_auth_san_uri: None,
@@ -165,6 +165,7 @@ mod tests {
                 tls_client_auth_san_email: None,
                 tls_client_certificate_bound_access_tokens: Some(true),
                 authorization_signed_response_alg: None,
+                introspection_signed_response_alg: None,
             },
         )
         .await

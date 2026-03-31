@@ -49,10 +49,11 @@ struct JarmErrorClaims {
 /// per FAPI 2.0 Section 5.2.2.1). RS256 is only used when a client
 /// explicitly registers with `authorization_signed_response_alg=RS256`.
 fn select_alg(_state: &AppState, client: &OAuthClient) -> &'static str {
-    match client.authorization_signed_response_alg.as_deref() {
-        Some("RS256") => "RS256",
-        Some("ES256") | None => "ES256",
-        Some(_) => "ES256", // Validated at registration; shouldn't reach here.
+    match client.authorization_signed_response_alg {
+        Some(crate::db::JwsAlgorithm::Rs256) => "RS256",
+        Some(crate::db::JwsAlgorithm::Es256) | None => "ES256",
+        // Validated at registration; only RS256 and ES256 are accepted for JARM.
+        Some(_) => "ES256",
     }
 }
 

@@ -175,10 +175,11 @@ pub(crate) fn build_mtls_server_config(
 ) -> anyhow::Result<Arc<rustls::ServerConfig>> {
     let client_verifier = Arc::new(AcceptAnyClientCert);
 
-    let mut config = rustls::ServerConfig::builder()
-        .with_client_cert_verifier(client_verifier)
-        .with_single_cert(server_cert_der, server_key_der)
-        .map_err(|e| anyhow::anyhow!("Failed to build mTLS server config: {e}"))?;
+    let mut config =
+        rustls::ServerConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
+            .with_client_cert_verifier(client_verifier)
+            .with_single_cert(server_cert_der, server_key_der)
+            .map_err(|e| anyhow::anyhow!("Failed to build mTLS server config: {e}"))?;
 
     // TLS 1.3 only, ALPN h2/http1.1
     config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];

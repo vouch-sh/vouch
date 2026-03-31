@@ -126,16 +126,22 @@ pub async fn serve(components: ServerComponents, app: Router) -> Result<()> {
             .parse()
             .context("Invalid mTLS listen address")?;
 
-        let mtls_handle: Option<tokio::task::JoinHandle<()>> =
-            match start_mtls_listener(&config, mtls_addr, app.clone(), shutdown_token.clone()) {
-                Ok(handle) => {
-                    tracing::info!("mTLS listener started on port {}", mtls_port);
-                    Some(handle)
-                }
-                Err(e) => {
-                    return Err(e.context("Failed to start mTLS listener"));
-                }
-            };
+        let mtls_handle: Option<tokio::task::JoinHandle<()>> = match start_mtls_listener(
+            &config,
+            mtls_addr,
+            app.clone(),
+            shutdown_token.clone(),
+        )
+        .await
+        {
+            Ok(handle) => {
+                tracing::info!("mTLS listener started on port {}", mtls_port);
+                Some(handle)
+            }
+            Err(e) => {
+                return Err(e.context("Failed to start mTLS listener"));
+            }
+        };
 
         // Create handle for graceful shutdown of HTTPS server
         let handle = axum_server::Handle::new();
@@ -280,7 +286,7 @@ async fn shutdown_signal() {
 /// Uses the same server TLS certificate as the main HTTPS listener,
 /// with a custom client cert verifier that accepts any certificate
 /// (including self-signed) and delegates validation to the application layer.
-fn start_mtls_listener(
+async fn start_mtls_listener(
     config: &crate::config::ServerConfig,
     addr: std::net::SocketAddr,
     app: Router,
@@ -294,15 +300,12 @@ fn start_mtls_listener(
     let mtls_config = build_mtls_server_config(certs, key)?;
     let mtls_config_swap = std::sync::Arc::new(arc_swap::ArcSwap::from(mtls_config));
 
-    let handle = tokio::spawn(async move {
-        let tcp = match tokio::net::TcpListener::bind(addr).await {
-            Ok(listener) => listener,
-            Err(e) => {
-                tracing::error!("Failed to bind mTLS listener on {addr}: {e}");
-                return;
-            }
-        };
+    // Bind before spawning so the caller learns of port conflicts immediately.
+    let tcp = tokio::net::TcpListener::bind(addr)
+        .await
+        .with_context(|| format!("Failed to bind mTLS listener on {addr}"))?;
 
+    let handle = tokio::spawn(async move {
         let listener = MtlsListener::new(tcp, mtls_config_swap);
         if let Err(e) = axum::serve(
             listener,

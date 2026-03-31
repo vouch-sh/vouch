@@ -6,7 +6,7 @@ use super::document_type::{Document, DocumentType};
 use super::documents::audit::OAuthUsageData;
 use super::documents::jwt_assertion_jti::JwtAssertionJtiDoc;
 use super::documents::oauth::{
-    AccessScope, FapiProfile, OAuthClientDoc, OAuthClientSecretDoc, OAuthClientType,
+    AccessScope, FapiProfile, JwsAlgorithm, OAuthClientDoc, OAuthClientSecretDoc, OAuthClientType,
     RegistrationSource, TokenEndpointAuthMethod,
 };
 use super::store::DocumentStore;
@@ -39,7 +39,7 @@ pub struct OAuthClient {
     pub jwks_uri_cached_at: Option<Timestamp>,
     pub jwks_uri_cache: Option<serde_json::Value>,
     pub token_endpoint_auth_method: TokenEndpointAuthMethod,
-    pub request_object_signing_alg: Option<String>,
+    pub request_object_signing_alg: Option<JwsAlgorithm>,
     pub require_signed_request_object: Option<bool>,
     pub fapi_profile: FapiProfile,
     pub dpop_bound_access_tokens: bool,
@@ -50,7 +50,7 @@ pub struct OAuthClient {
     pub registration_source: Option<RegistrationSource>,
     pub registration_access_token_hash: Option<String>,
     pub registration_metadata: Option<serde_json::Value>,
-    pub id_token_signed_response_alg: String,
+    pub id_token_signed_response_alg: JwsAlgorithm,
     /// RFC 8705: mTLS subject DN for tls_client_auth.
     pub tls_client_auth_subject_dn: Option<String>,
     /// RFC 8705: mTLS SAN DNS name.
@@ -64,7 +64,11 @@ pub struct OAuthClient {
     /// RFC 8705: certificate-bound access tokens.
     pub tls_client_certificate_bound_access_tokens: bool,
     /// JARM: signing algorithm for authorization responses.
-    pub authorization_signed_response_alg: Option<String>,
+    pub authorization_signed_response_alg: Option<JwsAlgorithm>,
+    /// RFC 9701: Introspection response signing algorithm.
+    ///
+    /// When `Some`, the introspection endpoint returns a signed JWT instead of plain JSON.
+    pub introspection_signed_response_alg: Option<JwsAlgorithm>,
 }
 
 impl From<Document<OAuthClientDoc>> for OAuthClient {
@@ -110,6 +114,7 @@ impl From<Document<OAuthClientDoc>> for OAuthClient {
                 .data
                 .tls_client_certificate_bound_access_tokens,
             authorization_signed_response_alg: doc.data.authorization_signed_response_alg,
+            introspection_signed_response_alg: doc.data.introspection_signed_response_alg,
         }
     }
 }
@@ -156,7 +161,7 @@ pub struct CreateOAuthClientParams<'a> {
     pub registration_source: RegistrationSource,
     pub registration_access_token_hash: Option<&'a str>,
     pub registration_metadata: Option<&'a serde_json::Value>,
-    pub id_token_signed_response_alg: &'a str,
+    pub id_token_signed_response_alg: JwsAlgorithm,
     /// RFC 8705 mTLS fields.
     pub tls_client_auth_subject_dn: Option<&'a str>,
     pub tls_client_auth_san_dns: Option<&'a str>,
@@ -165,7 +170,9 @@ pub struct CreateOAuthClientParams<'a> {
     pub tls_client_auth_san_email: Option<&'a str>,
     pub tls_client_certificate_bound_access_tokens: Option<bool>,
     /// JARM: signing algorithm for authorization responses.
-    pub authorization_signed_response_alg: Option<&'a str>,
+    pub authorization_signed_response_alg: Option<JwsAlgorithm>,
+    /// RFC 9701: Introspection response signing algorithm.
+    pub introspection_signed_response_alg: Option<JwsAlgorithm>,
 }
 
 /// Create a new OAuth client application.
@@ -202,7 +209,7 @@ pub async fn create_oauth_client(
         registration_source: Some(params.registration_source),
         registration_access_token_hash: params.registration_access_token_hash.map(String::from),
         registration_metadata: params.registration_metadata.cloned(),
-        id_token_signed_response_alg: params.id_token_signed_response_alg.to_string(),
+        id_token_signed_response_alg: params.id_token_signed_response_alg,
         tls_client_auth_subject_dn: params.tls_client_auth_subject_dn.map(String::from),
         tls_client_auth_san_dns: params.tls_client_auth_san_dns.map(String::from),
         tls_client_auth_san_uri: params.tls_client_auth_san_uri.map(String::from),
@@ -211,9 +218,8 @@ pub async fn create_oauth_client(
         tls_client_certificate_bound_access_tokens: params
             .tls_client_certificate_bound_access_tokens
             .unwrap_or(false),
-        authorization_signed_response_alg: params
-            .authorization_signed_response_alg
-            .map(String::from),
+        authorization_signed_response_alg: params.authorization_signed_response_alg,
+        introspection_signed_response_alg: params.introspection_signed_response_alg,
     };
 
     let result = store.insert(&doc).await?;
@@ -659,12 +665,12 @@ pub(super) mod test_helpers {
     pub async fn update_oauth_client_jar_settings(
         store: &DocumentStore,
         id: &str,
-        request_object_signing_alg: Option<&str>,
+        request_object_signing_alg: Option<JwsAlgorithm>,
         require_signed_request_object: bool,
     ) -> Result<()> {
         if let Some(doc) = store.get::<OAuthClientDoc>(id).await? {
             let mut data = doc.data;
-            data.request_object_signing_alg = request_object_signing_alg.map(String::from);
+            data.request_object_signing_alg = request_object_signing_alg;
             data.require_signed_request_object = Some(require_signed_request_object);
             store.update(id, &data).await?;
         }
@@ -1041,7 +1047,7 @@ mod tests {
                 registration_source: RegistrationSource::Manual,
                 registration_access_token_hash: None,
                 registration_metadata: None,
-                id_token_signed_response_alg: "RS256",
+                id_token_signed_response_alg: JwsAlgorithm::Rs256,
                 tls_client_auth_subject_dn: None,
                 tls_client_auth_san_dns: None,
                 tls_client_auth_san_uri: None,
@@ -1049,6 +1055,7 @@ mod tests {
                 tls_client_auth_san_email: None,
                 tls_client_certificate_bound_access_tokens: None,
                 authorization_signed_response_alg: None,
+                introspection_signed_response_alg: None,
             },
         )
         .await

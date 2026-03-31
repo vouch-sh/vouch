@@ -263,7 +263,7 @@ pub fn auth_code_lifetime_seconds(client: &OAuthClient) -> i64 {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use crate::db::{AccessScope, FapiProfile, OAuthClientType};
+    use crate::db::{AccessScope, FapiProfile, JwsAlgorithm, OAuthClientType};
 
     /// Create a minimal FAPI 2.0 confidential client for testing.
     fn fapi_client() -> OAuthClient {
@@ -299,7 +299,7 @@ mod tests {
             registration_source: None,
             registration_access_token_hash: None,
             registration_metadata: None,
-            id_token_signed_response_alg: "RS256".to_string(),
+            id_token_signed_response_alg: JwsAlgorithm::Rs256,
             tls_client_auth_subject_dn: None,
             tls_client_auth_san_dns: None,
             tls_client_auth_san_uri: None,
@@ -307,6 +307,7 @@ mod tests {
             tls_client_auth_san_email: None,
             tls_client_certificate_bound_access_tokens: false,
             authorization_signed_response_alg: None,
+            introspection_signed_response_alg: None,
         }
     }
 
@@ -344,7 +345,7 @@ mod tests {
             registration_source: None,
             registration_access_token_hash: None,
             registration_metadata: None,
-            id_token_signed_response_alg: "RS256".to_string(),
+            id_token_signed_response_alg: JwsAlgorithm::Rs256,
             tls_client_auth_subject_dn: None,
             tls_client_auth_san_dns: None,
             tls_client_auth_san_uri: None,
@@ -352,6 +353,7 @@ mod tests {
             tls_client_auth_san_email: None,
             tls_client_certificate_bound_access_tokens: false,
             authorization_signed_response_alg: None,
+            introspection_signed_response_alg: None,
         }
     }
 

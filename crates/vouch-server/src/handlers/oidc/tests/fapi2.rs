@@ -12,6 +12,7 @@
 //! Reference: <https://openid.net/specs/fapi-security-profile-2_0-final.html>
 
 use super::helpers::*;
+use crate::db::TokenEndpointAuthMethod;
 use aws_lc_rs::signature::{ECDSA_P256_SHA256_FIXED_SIGNING, EcdsaKeyPair};
 
 // ========================================================================
@@ -1045,14 +1046,12 @@ async fn test_discovery_tls_client_auth_in_auth_methods_with_tls() {
     );
     assert!(
         doc.token_endpoint_auth_methods_supported
-            .iter()
-            .any(|m| m == "tls_client_auth"),
+            .contains(&TokenEndpointAuthMethod::TlsClientAuth),
         "tls_client_auth must appear in token_endpoint_auth_methods_supported"
     );
     assert!(
         doc.token_endpoint_auth_methods_supported
-            .iter()
-            .any(|m| m == "self_signed_tls_client_auth"),
+            .contains(&TokenEndpointAuthMethod::SelfSignedTlsClientAuth),
         "self_signed_tls_client_auth must appear in token_endpoint_auth_methods_supported"
     );
     assert!(

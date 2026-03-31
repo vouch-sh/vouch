@@ -7,6 +7,7 @@
 //! - RFC 9396 OAuth 2.0 Rich Authorization Requests (authorization_details supported)
 
 use crate::AppState;
+use crate::db::{JwsAlgorithm, TokenEndpointAuthMethod};
 use crate::services::ServiceError;
 use crate::services::oidc::amr::ACR_AAL3;
 use crate::services::oidc::scope::OAuthScope;
@@ -49,9 +50,13 @@ pub struct OidcDiscoveryDocument {
     /// OIDC Discovery 1.0 Section 3: REQUIRED. Supported Subject Identifier types.
     pub subject_types_supported: Vec<String>,
     /// OIDC Discovery 1.0 Section 3: REQUIRED. Supported JWS alg values for ID Tokens.
-    pub id_token_signing_alg_values_supported: Vec<String>,
+    pub id_token_signing_alg_values_supported: Vec<JwsAlgorithm>,
     /// OIDC Discovery 1.0 Section 3: OPTIONAL. Supported token endpoint auth methods.
-    pub token_endpoint_auth_methods_supported: Vec<String>,
+    pub token_endpoint_auth_methods_supported: Vec<TokenEndpointAuthMethod>,
+    /// RFC 8414 Section 2: Supported revocation endpoint auth methods.
+    pub revocation_endpoint_auth_methods_supported: Vec<TokenEndpointAuthMethod>,
+    /// RFC 8414 Section 2: Supported introspection endpoint auth methods.
+    pub introspection_endpoint_auth_methods_supported: Vec<TokenEndpointAuthMethod>,
     /// OIDC Discovery 1.0 Section 3: RECOMMENDED. Supported Claim Names.
     pub claims_supported: Vec<String>,
     /// RFC 7636 Section 6.2: Supported PKCE code challenge methods.
@@ -60,7 +65,7 @@ pub struct OidcDiscoveryDocument {
     ///
     /// RS256 is excluded per FAPI 2.0 Section 5.2.2.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub dpop_signing_alg_values_supported: Option<Vec<String>>,
+    pub dpop_signing_alg_values_supported: Option<Vec<JwsAlgorithm>>,
     /// OIDC Discovery 1.0 Section 3: OPTIONAL. Supported ACR values.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub acr_values_supported: Option<Vec<String>>,
@@ -76,7 +81,7 @@ pub struct OidcDiscoveryDocument {
     /// Includes PS256 and EdDSA per FAPI 2.0 requirements; RS256 is excluded
     /// per FAPI 2.0 Section 5.2.2.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub token_endpoint_auth_signing_alg_values_supported: Option<Vec<String>>,
+    pub token_endpoint_auth_signing_alg_values_supported: Option<Vec<JwsAlgorithm>>,
     /// RFC 9126: URL of the Pushed Authorization Request endpoint.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pushed_authorization_request_endpoint: Option<String>,
@@ -88,10 +93,10 @@ pub struct OidcDiscoveryDocument {
     ///
     /// Includes EdDSA and PS256 per FAPI 2.0; RS256 is excluded per FAPI 2.0 Section 5.2.2.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub request_object_signing_alg_values_supported: Option<Vec<String>>,
+    pub request_object_signing_alg_values_supported: Option<Vec<JwsAlgorithm>>,
     /// JARM: Supported JWS algorithms for authorization response signing.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub authorization_signing_alg_values_supported: Option<Vec<String>>,
+    pub authorization_signing_alg_values_supported: Option<Vec<JwsAlgorithm>>,
     /// RFC 9101: Whether all authorization requests must use signed Request Objects.
     pub require_signed_request_object: bool,
     /// RFC 9396 §11.3: Supported authorization detail types.
@@ -106,6 +111,9 @@ pub struct OidcDiscoveryDocument {
     /// Present when mTLS is configured, pointing to the mTLS port.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mtls_endpoint_aliases: Option<MtlsEndpointAliases>,
+    /// RFC 9701 Section 7.1: Supported introspection response signing algorithms.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub introspection_signing_alg_values_supported: Option<Vec<JwsAlgorithm>>,
 }
 
 /// RFC 8705 Section 5: mTLS endpoint aliases.
@@ -151,6 +159,21 @@ pub struct JwksResponse {
 pub fn build_discovery_document(state: &Arc<AppState>) -> OidcDiscoveryDocument {
     let base_url = &state.config().base_url;
 
+    let auth_methods = {
+        let mut methods = vec![
+            TokenEndpointAuthMethod::None,
+            TokenEndpointAuthMethod::ClientSecretBasic,
+            TokenEndpointAuthMethod::ClientSecretPost,
+            TokenEndpointAuthMethod::PrivateKeyJwt,
+        ];
+        // mTLS client auth methods are available whenever TLS is configured.
+        if state.config().tls_cert.is_some() {
+            methods.push(TokenEndpointAuthMethod::TlsClientAuth);
+            methods.push(TokenEndpointAuthMethod::SelfSignedTlsClientAuth);
+        }
+        methods
+    };
+
     OidcDiscoveryDocument {
         issuer: base_url.clone(),
         authorization_endpoint: format!("{base_url}/oauth/authorize"),
@@ -181,24 +204,13 @@ pub fn build_discovery_document(state: &Arc<AppState>) -> OidcDiscoveryDocument 
         ],
         subject_types_supported: vec!["public".to_string()],
         id_token_signing_alg_values_supported: if state.oidc_rsa_key.is_some() {
-            vec!["RS256".to_string(), "ES256".to_string()]
+            vec![JwsAlgorithm::Rs256, JwsAlgorithm::Es256]
         } else {
-            vec!["ES256".to_string()]
+            vec![JwsAlgorithm::Es256]
         },
-        token_endpoint_auth_methods_supported: {
-            let mut methods = vec![
-                "none".to_string(),
-                "client_secret_basic".to_string(),
-                "client_secret_post".to_string(),
-                "private_key_jwt".to_string(),
-            ];
-            // mTLS client auth methods are available whenever TLS is configured.
-            if state.config().tls_cert.is_some() {
-                methods.push("tls_client_auth".to_string());
-                methods.push("self_signed_tls_client_auth".to_string());
-            }
-            methods
-        },
+        token_endpoint_auth_methods_supported: auth_methods.clone(),
+        revocation_endpoint_auth_methods_supported: auth_methods.clone(),
+        introspection_endpoint_auth_methods_supported: auth_methods,
         claims_supported: vec![
             "sub".to_string(),
             "iss".to_string(),
@@ -218,9 +230,9 @@ pub fn build_discovery_document(state: &Arc<AppState>) -> OidcDiscoveryDocument 
         code_challenge_methods_supported: vec!["S256".to_string()],
         // RS256 excluded per FAPI 2.0 Section 5.2.2.
         dpop_signing_alg_values_supported: Some(vec![
-            "ES256".to_string(),
-            "PS256".to_string(),
-            "EdDSA".to_string(),
+            JwsAlgorithm::Es256,
+            JwsAlgorithm::Ps256,
+            JwsAlgorithm::EdDsa,
         ]),
         acr_values_supported: Some(vec![ACR_AAL3.to_string()]),
         // RFC 9207: Advertise that we include `iss` in authorization responses
@@ -230,9 +242,9 @@ pub fn build_discovery_document(state: &Arc<AppState>) -> OidcDiscoveryDocument 
         // RFC 7523: JWT client auth signing algorithms.
         // PS256 and EdDSA added per FAPI 2.0; RS256 excluded per FAPI 2.0 Section 5.2.2.
         token_endpoint_auth_signing_alg_values_supported: Some(vec![
-            "ES256".to_string(),
-            "PS256".to_string(),
-            "EdDSA".to_string(),
+            JwsAlgorithm::Es256,
+            JwsAlgorithm::Ps256,
+            JwsAlgorithm::EdDsa,
         ]),
         // RFC 9126: Pushed Authorization Request endpoint
         pushed_authorization_request_endpoint: Some(format!("{base_url}/oauth/par")),
@@ -242,22 +254,24 @@ pub fn build_discovery_document(state: &Arc<AppState>) -> OidcDiscoveryDocument 
         // Request Object signing algorithms: EdDSA added per FAPI 2.0; RS256 excluded
         // per FAPI 2.0 Section 5.2.2.
         request_object_signing_alg_values_supported: Some(vec![
-            "ES256".to_string(),
-            "PS256".to_string(),
-            "EdDSA".to_string(),
+            JwsAlgorithm::Es256,
+            JwsAlgorithm::Ps256,
+            JwsAlgorithm::EdDsa,
         ]),
         require_signed_request_object: false,
         // JARM: supported signing algorithms for authorization responses.
         authorization_signing_alg_values_supported: Some(if state.oidc_rsa_key.is_some() {
-            vec!["RS256".to_string(), "ES256".to_string()]
+            vec![JwsAlgorithm::Rs256, JwsAlgorithm::Es256]
         } else {
-            vec!["ES256".to_string()]
+            vec![JwsAlgorithm::Es256]
         }),
         // RFC 9396 §11.3: Server accepts any authorization detail type (opaque)
         authorization_details_types_supported: None,
         // RFC 8705: advertise mTLS support when TLS is configured.
         tls_client_certificate_bound_access_tokens: state.config().tls_cert.is_some(),
         mtls_endpoint_aliases: build_mtls_aliases(state, base_url),
+        // RFC 9701: ES256 is the only supported introspection signing algorithm.
+        introspection_signing_alg_values_supported: Some(vec![JwsAlgorithm::Es256]),
     }
 }
 

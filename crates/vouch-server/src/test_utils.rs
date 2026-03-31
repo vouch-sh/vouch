@@ -21,7 +21,7 @@ use tower::ServiceExt;
 use crate::crypto::document_crypto::PlaintextDocumentCrypto;
 use crate::db::audit::AuditStore;
 use crate::db::store::DocumentStore;
-use crate::db::{CreateOAuthClientParams, Pool, RegistrationSource};
+use crate::db::{CreateOAuthClientParams, JwsAlgorithm, Pool, RegistrationSource};
 use crate::infra::router::build_app;
 
 use crate::AppState;
@@ -173,6 +173,60 @@ pub async fn test_app_with_certification() -> (Router, Arc<AppState>) {
     (router, state)
 }
 
+/// Build a request with standard test extensions (no mTLS cert).
+fn build_test_request(
+    method: &str,
+    uri: &str,
+    body: Option<String>,
+    headers: &[(&str, &str)],
+) -> Request<Body> {
+    let mut req_builder = Request::builder().method(method).uri(uri);
+    for (name, value) in headers {
+        req_builder = req_builder.header(*name, *value);
+    }
+    let body = match body {
+        Some(b) => Body::from(b),
+        None => Body::empty(),
+    };
+    let request = req_builder.body(body).expect("Failed to build request");
+    let (mut parts, body) = request.into_parts();
+    parts
+        .extensions
+        .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 0))));
+    Request::from_parts(parts, body)
+}
+
+/// Build a request with an injected mTLS client certificate DER.
+///
+/// Injects `ConnectInfo<PeerClientCert>` so `OptionalClientCert` extracts it.
+fn build_test_request_with_cert(
+    method: &str,
+    uri: &str,
+    body: Option<String>,
+    headers: &[(&str, &str)],
+    cert_der: Option<Vec<u8>>,
+) -> Request<Body> {
+    use crate::infra::mtls_listener::PeerClientCert;
+
+    let mut req_builder = Request::builder().method(method).uri(uri);
+    for (name, value) in headers {
+        req_builder = req_builder.header(*name, *value);
+    }
+    let body = match body {
+        Some(b) => Body::from(b),
+        None => Body::empty(),
+    };
+    let request = req_builder.body(body).expect("Failed to build request");
+    let (mut parts, body) = request.into_parts();
+    parts
+        .extensions
+        .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 0))));
+    parts
+        .extensions
+        .insert(ConnectInfo(PeerClientCert(cert_der)));
+    Request::from_parts(parts, body)
+}
+
 /// Helper for making test HTTP requests.
 pub async fn http_request(
     app: &Router,
@@ -181,23 +235,7 @@ pub async fn http_request(
     body: Option<String>,
     headers: &[(&str, &str)],
 ) -> (StatusCode, String) {
-    let mut req_builder = Request::builder().method(method).uri(uri);
-
-    for (name, value) in headers {
-        req_builder = req_builder.header(*name, *value);
-    }
-
-    let body = match body {
-        Some(b) => Body::from(b),
-        None => Body::empty(),
-    };
-
-    let request = req_builder.body(body).expect("Failed to build request");
-    let (mut parts, body) = request.into_parts();
-    parts
-        .extensions
-        .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 0))));
-    let request = Request::from_parts(parts, body);
+    let request = build_test_request(method, uri, body, headers);
 
     let response: axum::response::Response = app
         .clone()
@@ -340,6 +378,30 @@ pub async fn http_delete(
 /// Helper for making DELETE requests that returns full response including headers.
 pub async fn http_delete_full(app: &Router, uri: &str, headers: &[(&str, &str)]) -> HttpResponse {
     http_request_full(app, "DELETE", uri, None, headers).await
+}
+
+/// Helper for making GET requests with an injected mTLS client certificate.
+///
+/// The `cert_der` is injected via `ConnectInfo<PeerClientCert>` so that
+/// `OptionalClientCert` extracts it in the handler. Pass `None` to simulate
+/// a connection where no client certificate was presented.
+pub async fn http_get_with_cert(
+    app: &Router,
+    uri: &str,
+    headers: &[(&str, &str)],
+    cert_der: Option<Vec<u8>>,
+) -> (StatusCode, String) {
+    let request = build_test_request_with_cert("GET", uri, None, headers, cert_der);
+    let response: axum::response::Response = app
+        .clone()
+        .oneshot(request)
+        .await
+        .expect("Failed to execute request");
+    let status = response.status();
+    let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("Failed to read response body");
+    (status, String::from_utf8_lossy(&body_bytes).to_string())
 }
 
 /// Create a test user in the database.
@@ -671,7 +733,7 @@ pub async fn create_test_oauth_client(store: &DocumentStore, user_id: &str) -> T
             registration_source: RegistrationSource::Manual,
             registration_access_token_hash: None,
             registration_metadata: None,
-            id_token_signed_response_alg: "RS256",
+            id_token_signed_response_alg: JwsAlgorithm::Rs256,
             tls_client_auth_subject_dn: None,
             tls_client_auth_san_dns: None,
             tls_client_auth_san_uri: None,
@@ -679,6 +741,7 @@ pub async fn create_test_oauth_client(store: &DocumentStore, user_id: &str) -> T
             tls_client_auth_san_email: None,
             tls_client_certificate_bound_access_tokens: None,
             authorization_signed_response_alg: None,
+            introspection_signed_response_alg: None,
         },
     )
     .await
@@ -736,7 +799,7 @@ pub async fn create_test_oauth_client_with_options(
             registration_source: RegistrationSource::Manual,
             registration_access_token_hash: None,
             registration_metadata: None,
-            id_token_signed_response_alg: "RS256",
+            id_token_signed_response_alg: JwsAlgorithm::Rs256,
             tls_client_auth_subject_dn: None,
             tls_client_auth_san_dns: None,
             tls_client_auth_san_uri: None,
@@ -744,6 +807,7 @@ pub async fn create_test_oauth_client_with_options(
             tls_client_auth_san_email: None,
             tls_client_certificate_bound_access_tokens: None,
             authorization_signed_response_alg: None,
+            introspection_signed_response_alg: None,
         },
     )
     .await
@@ -794,7 +858,7 @@ pub async fn create_test_public_oauth_client(
             registration_source: RegistrationSource::Manual,
             registration_access_token_hash: None,
             registration_metadata: None,
-            id_token_signed_response_alg: "RS256",
+            id_token_signed_response_alg: JwsAlgorithm::Rs256,
             tls_client_auth_subject_dn: None,
             tls_client_auth_san_dns: None,
             tls_client_auth_san_uri: None,
@@ -802,6 +866,7 @@ pub async fn create_test_public_oauth_client(
             tls_client_auth_san_email: None,
             tls_client_certificate_bound_access_tokens: None,
             authorization_signed_response_alg: None,
+            introspection_signed_response_alg: None,
         },
     )
     .await

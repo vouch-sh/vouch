@@ -831,7 +831,7 @@ pub fn check_client_access(client: &OAuthClient, user: &User) -> ServiceResult<(
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use crate::db::{FapiProfile, OAuthClientType, TokenEndpointAuthMethod};
+    use crate::db::{FapiProfile, JwsAlgorithm, OAuthClientType, TokenEndpointAuthMethod};
 
     fn assert_oauth_error<T: std::fmt::Debug>(
         result: Result<T, ServiceError>,
@@ -878,7 +878,7 @@ mod tests {
             registration_source: None,
             registration_access_token_hash: None,
             registration_metadata: None,
-            id_token_signed_response_alg: "RS256".to_string(),
+            id_token_signed_response_alg: JwsAlgorithm::Rs256,
             tls_client_auth_subject_dn: None,
             tls_client_auth_san_dns: None,
             tls_client_auth_san_uri: None,
@@ -886,6 +886,7 @@ mod tests {
             tls_client_auth_san_email: None,
             tls_client_certificate_bound_access_tokens: false,
             authorization_signed_response_alg: None,
+            introspection_signed_response_alg: None,
         }
     }
 
@@ -946,7 +947,7 @@ mod tests {
             registration_source: None,
             registration_access_token_hash: None,
             registration_metadata: None,
-            id_token_signed_response_alg: "RS256".to_string(),
+            id_token_signed_response_alg: JwsAlgorithm::Rs256,
             tls_client_auth_subject_dn: None,
             tls_client_auth_san_dns: None,
             tls_client_auth_san_uri: None,
@@ -954,6 +955,7 @@ mod tests {
             tls_client_auth_san_email: None,
             tls_client_certificate_bound_access_tokens: false,
             authorization_signed_response_alg: None,
+            introspection_signed_response_alg: None,
         }
     }
 

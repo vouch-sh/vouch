@@ -1454,7 +1454,7 @@ mod tests {
             registration_source: None,
             registration_access_token_hash: None,
             registration_metadata: None,
-            id_token_signed_response_alg: "RS256".to_string(),
+            id_token_signed_response_alg: crate::db::JwsAlgorithm::Rs256,
             tls_client_auth_subject_dn: subject_dn.map(String::from),
             tls_client_auth_san_dns: None,
             tls_client_auth_san_uri: None,
@@ -1462,6 +1462,7 @@ mod tests {
             tls_client_auth_san_email: None,
             tls_client_certificate_bound_access_tokens: false,
             authorization_signed_response_alg: None,
+            introspection_signed_response_alg: None,
         }
     }
 

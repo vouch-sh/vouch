@@ -901,9 +901,14 @@ async fn test_rfc9101_client_signing_alg_es256_rejects_rs256_jwt() {
         .await
         .expect("DB error")
         .expect("Client not found");
-    db::update_oauth_client_jar_settings(&state.store, &oauth_client.id, Some("ES256"), false)
-        .await
-        .expect("Failed to set request_object_signing_alg");
+    db::update_oauth_client_jar_settings(
+        &state.store,
+        &oauth_client.id,
+        Some(db::JwsAlgorithm::Es256),
+        false,
+    )
+    .await
+    .expect("Failed to set request_object_signing_alg");
 
     // Build a JWT that claims to be RS256 in the header (but is signed with ES256 key)
     // The server should reject it because the header alg (RS256) != required alg (ES256)
@@ -969,9 +974,14 @@ async fn test_rfc9101_client_signing_alg_es256_accepts_es256_jwt() {
         .await
         .expect("DB error")
         .expect("Client not found");
-    db::update_oauth_client_jar_settings(&state.store, &oauth_client.id, Some("ES256"), false)
-        .await
-        .expect("Failed to set request_object_signing_alg");
+    db::update_oauth_client_jar_settings(
+        &state.store,
+        &oauth_client.id,
+        Some(db::JwsAlgorithm::Es256),
+        false,
+    )
+    .await
+    .expect("Failed to set request_object_signing_alg");
 
     let issuer = &state.config().base_url;
     let request_jwt = build_request_object(&client.client_id, issuer, &pkcs8_bytes);
