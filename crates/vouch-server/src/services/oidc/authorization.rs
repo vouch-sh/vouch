@@ -187,6 +187,8 @@ pub struct AuthorizeRequestParams {
     pub dpop_jkt: Option<String>,
     /// RFC 9396: Rich authorization details (raw JSON string from request).
     pub authorization_details: Option<String>,
+    /// JARM (oauth-v2-jarm): Requested authorization response mode.
+    pub response_mode: Option<String>,
 }
 
 /// Validated authorization request ready for code issuance.
@@ -883,6 +885,7 @@ mod tests {
             tls_client_auth_san_ip: None,
             tls_client_auth_san_email: None,
             tls_client_certificate_bound_access_tokens: false,
+            authorization_signed_response_alg: None,
         }
     }
 
@@ -950,6 +953,7 @@ mod tests {
             tls_client_auth_san_ip: None,
             tls_client_auth_san_email: None,
             tls_client_certificate_bound_access_tokens: false,
+            authorization_signed_response_alg: None,
         }
     }
 
@@ -1104,6 +1108,7 @@ mod tests {
             prompt: None,
             dpop_jkt: None,
             authorization_details: None,
+            response_mode: None,
         };
 
         let result = validate_authorize_request(params);
@@ -1130,6 +1135,7 @@ mod tests {
             prompt: None,
             dpop_jkt: None,
             authorization_details: None,
+            response_mode: None,
         };
 
         let result = validate_authorize_request(params);
@@ -1154,6 +1160,7 @@ mod tests {
             prompt: None,
             dpop_jkt: None,
             authorization_details: None,
+            response_mode: None,
         };
 
         let result = validate_authorize_request(params);
@@ -1177,6 +1184,7 @@ mod tests {
             prompt: None,
             dpop_jkt: None,
             authorization_details: None,
+            response_mode: None,
         };
 
         let result = validate_authorize_request(params);
@@ -1204,6 +1212,7 @@ mod tests {
             prompt: None,
             dpop_jkt: None,
             authorization_details: None,
+            response_mode: None,
         };
 
         let result = validate_authorize_request(params);
@@ -1285,6 +1294,7 @@ mod tests {
             prompt: None,
             dpop_jkt: None,
             authorization_details: None,
+            response_mode: None,
         };
 
         let result = validate_authorize_request(params);
@@ -1384,6 +1394,7 @@ mod tests {
             prompt: None,
             dpop_jkt: None,
             authorization_details: None,
+            response_mode: None,
         };
 
         let result = validate_authorize_request(params);
@@ -1412,6 +1423,7 @@ mod tests {
             prompt: None,
             dpop_jkt: None,
             authorization_details: None,
+            response_mode: None,
         };
 
         let result = validate_authorize_request(params);
@@ -1437,6 +1449,7 @@ mod tests {
             prompt: Some(Prompt::Login),
             dpop_jkt: None,
             authorization_details: None,
+            response_mode: None,
         };
 
         let result = validate_authorize_request(params);
@@ -1462,6 +1475,7 @@ mod tests {
             prompt: Some(Prompt::Silent),
             dpop_jkt: None,
             authorization_details: None,
+            response_mode: None,
         };
 
         let result = validate_authorize_request(params);
@@ -1487,6 +1501,7 @@ mod tests {
             prompt: None,
             dpop_jkt: None,
             authorization_details: None,
+            response_mode: None,
         };
 
         let result = validate_authorize_request(params);
@@ -1541,6 +1556,7 @@ mod tests {
             prompt: None,
             dpop_jkt: None,
             authorization_details: None,
+            response_mode: None,
         };
 
         let result = validate_authorize_request(params);
@@ -1570,6 +1586,7 @@ mod tests {
             prompt: None,
             dpop_jkt: None,
             authorization_details: None,
+            response_mode: None,
         };
 
         let result = validate_authorize_request(params);
@@ -1593,6 +1610,7 @@ mod tests {
             prompt: None,
             dpop_jkt: None,
             authorization_details: None,
+            response_mode: None,
         };
 
         let result = validate_authorize_request(params);
@@ -1618,6 +1636,7 @@ mod tests {
             prompt: None,
             dpop_jkt: None,
             authorization_details: None,
+            response_mode: None,
         };
 
         let result = validate_authorize_request(params);

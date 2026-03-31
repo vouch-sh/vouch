@@ -89,6 +89,9 @@ pub struct OidcDiscoveryDocument {
     /// Includes EdDSA and PS256 per FAPI 2.0; RS256 is excluded per FAPI 2.0 Section 5.2.2.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub request_object_signing_alg_values_supported: Option<Vec<String>>,
+    /// JARM: Supported JWS algorithms for authorization response signing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub authorization_signing_alg_values_supported: Option<Vec<String>>,
     /// RFC 9101: Whether all authorization requests must use signed Request Objects.
     pub require_signed_request_object: bool,
     /// RFC 9396 §11.3: Supported authorization detail types.
@@ -163,7 +166,11 @@ pub fn build_discovery_document(state: &Arc<AppState>) -> OidcDiscoveryDocument 
             .map(|s| s.as_str().to_string())
             .collect(),
         response_types_supported: vec!["code".to_string()],
-        response_modes_supported: vec!["query".to_string()],
+        response_modes_supported: vec![
+            "query".to_string(),
+            "jwt".to_string(),
+            "query.jwt".to_string(),
+        ],
         grant_types_supported: vec![
             "authorization_code".to_string(),
             "client_credentials".to_string(),
@@ -240,6 +247,12 @@ pub fn build_discovery_document(state: &Arc<AppState>) -> OidcDiscoveryDocument 
             "EdDSA".to_string(),
         ]),
         require_signed_request_object: false,
+        // JARM: supported signing algorithms for authorization responses.
+        authorization_signing_alg_values_supported: Some(if state.oidc_rsa_key.is_some() {
+            vec!["RS256".to_string(), "ES256".to_string()]
+        } else {
+            vec!["ES256".to_string()]
+        }),
         // RFC 9396 §11.3: Server accepts any authorization detail type (opaque)
         authorization_details_types_supported: None,
         // RFC 8705: advertise mTLS support when TLS is configured.

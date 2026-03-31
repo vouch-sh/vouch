@@ -217,6 +217,35 @@ impl std::fmt::Display for TokenEndpointAuthMethod {
     }
 }
 
+/// OAuth 2.0 authorization response mode.
+///
+/// Default is `Query` (plain query parameters). JARM modes wrap the
+/// response in a signed JWT delivered as a single `response` parameter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum ResponseMode {
+    /// Standard query-string response (RFC 6749 Section 4.1.2).
+    #[default]
+    #[serde(rename = "query")]
+    Query,
+    /// JARM: response parameters in a signed JWT via query string.
+    /// Accepts both `"jwt"` and `"query.jwt"` on the wire.
+    #[serde(rename = "jwt", alias = "query.jwt")]
+    Jwt,
+}
+
+impl ResponseMode {
+    /// Parse a raw `response_mode` string, returning `None` for
+    /// unrecognized values so the caller can produce an error.
+    #[must_use]
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "query" => Some(Self::Query),
+            "jwt" | "query.jwt" => Some(Self::Jwt),
+            _ => Option::None,
+        }
+    }
+}
+
 /// FAPI 2.0 compliance profile.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum FapiProfile {
@@ -323,6 +352,10 @@ pub struct OAuthClientDoc {
     /// RFC 8705 Section 3: certificate-bound access tokens.
     #[serde(default)]
     pub tls_client_certificate_bound_access_tokens: bool,
+    /// JARM (oauth-v2-jarm) Section 2.3.2: signing algorithm for
+    /// authorization responses. `None` = server default (RS256 or ES256).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authorization_signed_response_alg: Option<String>,
 }
 
 fn default_id_token_alg() -> String {

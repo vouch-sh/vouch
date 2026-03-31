@@ -426,6 +426,7 @@ async fn test_oauth_client_crud() {
             tls_client_auth_san_ip: None,
             tls_client_auth_san_email: None,
             tls_client_certificate_bound_access_tokens: None,
+            authorization_signed_response_alg: None,
         },
     )
     .await
@@ -540,6 +541,7 @@ async fn test_oauth_client_types() {
                 tls_client_auth_san_ip: None,
                 tls_client_auth_san_email: None,
                 tls_client_certificate_bound_access_tokens: None,
+                authorization_signed_response_alg: None,
             },
         )
         .await
@@ -599,6 +601,7 @@ async fn test_oauth_client_list_for_user() {
                 tls_client_auth_san_ip: None,
                 tls_client_auth_san_email: None,
                 tls_client_certificate_bound_access_tokens: None,
+                authorization_signed_response_alg: None,
             },
         )
         .await
@@ -636,6 +639,7 @@ async fn test_oauth_client_list_for_user() {
             tls_client_auth_san_ip: None,
             tls_client_auth_san_email: None,
             tls_client_certificate_bound_access_tokens: None,
+            authorization_signed_response_alg: None,
         },
     )
     .await
@@ -692,6 +696,7 @@ async fn test_oauth_client_secret_management() {
             tls_client_auth_san_ip: None,
             tls_client_auth_san_email: None,
             tls_client_certificate_bound_access_tokens: None,
+            authorization_signed_response_alg: None,
         },
     )
     .await
@@ -770,6 +775,7 @@ async fn test_oauth_usage_recording() {
             tls_client_auth_san_ip: None,
             tls_client_auth_san_email: None,
             tls_client_certificate_bound_access_tokens: None,
+            authorization_signed_response_alg: None,
         },
     )
     .await
@@ -1373,6 +1379,7 @@ async fn test_oauth_client_cascade_delete() {
             tls_client_auth_san_ip: None,
             tls_client_auth_san_email: None,
             tls_client_certificate_bound_access_tokens: None,
+            authorization_signed_response_alg: None,
         },
     )
     .await

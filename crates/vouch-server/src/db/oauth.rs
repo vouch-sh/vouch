@@ -63,6 +63,8 @@ pub struct OAuthClient {
     pub tls_client_auth_san_email: Option<String>,
     /// RFC 8705: certificate-bound access tokens.
     pub tls_client_certificate_bound_access_tokens: bool,
+    /// JARM: signing algorithm for authorization responses.
+    pub authorization_signed_response_alg: Option<String>,
 }
 
 impl From<Document<OAuthClientDoc>> for OAuthClient {
@@ -107,6 +109,7 @@ impl From<Document<OAuthClientDoc>> for OAuthClient {
             tls_client_certificate_bound_access_tokens: doc
                 .data
                 .tls_client_certificate_bound_access_tokens,
+            authorization_signed_response_alg: doc.data.authorization_signed_response_alg,
         }
     }
 }
@@ -161,6 +164,8 @@ pub struct CreateOAuthClientParams<'a> {
     pub tls_client_auth_san_ip: Option<&'a str>,
     pub tls_client_auth_san_email: Option<&'a str>,
     pub tls_client_certificate_bound_access_tokens: Option<bool>,
+    /// JARM: signing algorithm for authorization responses.
+    pub authorization_signed_response_alg: Option<&'a str>,
 }
 
 /// Create a new OAuth client application.
@@ -206,6 +211,9 @@ pub async fn create_oauth_client(
         tls_client_certificate_bound_access_tokens: params
             .tls_client_certificate_bound_access_tokens
             .unwrap_or(false),
+        authorization_signed_response_alg: params
+            .authorization_signed_response_alg
+            .map(String::from),
     };
 
     let result = store.insert(&doc).await?;
@@ -1040,6 +1048,7 @@ mod tests {
                 tls_client_auth_san_ip: None,
                 tls_client_auth_san_email: None,
                 tls_client_certificate_bound_access_tokens: None,
+                authorization_signed_response_alg: None,
             },
         )
         .await

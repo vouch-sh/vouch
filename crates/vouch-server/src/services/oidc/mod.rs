@@ -60,6 +60,7 @@ pub mod fapi;
 pub mod fido2_grant;
 pub mod introspection;
 pub mod jar;
+pub mod jarm;
 pub mod jwt_bearer;
 pub mod keys;
 pub(crate) mod mtls;

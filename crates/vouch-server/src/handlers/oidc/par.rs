@@ -11,7 +11,7 @@ use crate::services::oidc::authorization::{
     AuthorizeRequestParams, Prompt, require_pkce_for_client, validate_authorize_request,
 };
 use crate::services::oidc::dpop::DpopError;
-use crate::services::oidc::jar::validate_request_object;
+use crate::services::oidc::jar::{validate_request_object, validate_request_object_header};
 use crate::services::oidc::jwt_bearer::client_auth::commit_jti;
 use crate::services::oidc::token::validate_dpop_if_present;
 use axum::{
@@ -97,6 +97,9 @@ pub struct ParRequest {
     /// RFC 9396: Rich authorization details (JSON array).
     #[serde(default)]
     authorization_details: Option<String>,
+    /// JARM: Requested authorization response mode.
+    #[serde(default)]
+    response_mode: Option<String>,
 }
 
 /// Implement `ClientAuthFields` for `ParRequest` to enable shared client
@@ -148,6 +151,24 @@ pub async fn par(
             StatusCode::BAD_REQUEST,
             "invalid_request",
             "request_uri must not be provided in a pushed authorization request",
+        );
+    }
+
+    // RFC 9101: If a Request Object is present, validate its header algorithm BEFORE
+    // client authentication. When alg=none is used, the unsigned JWT would otherwise
+    // be mistaken for a client_assertion and produce `invalid_client` instead of the
+    // correct `invalid_request_object`.
+    if let Some(ref request_jwt) = params.request
+        && let Err(e) = validate_request_object_header(request_jwt)
+    {
+        let description = match &e {
+            crate::services::ServiceError::OAuth { description, .. } => description.clone(),
+            _ => e.to_string(),
+        };
+        return par_error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_request_object",
+            &description,
         );
     }
 
@@ -243,7 +264,7 @@ pub async fn par(
 
     // RFC 9101: If request parameter is present, validate the Request Object JWT
     // and extract parameters from it instead of using the form fields.
-    let validated = if let Some(ref request_jwt) = params.request {
+    let (validated, jar_response_mode) = if let Some(ref request_jwt) = params.request {
         let request_params =
             match validate_request_object(&state, request_jwt, &authenticated_client.client, None)
                 .await
@@ -264,13 +285,17 @@ pub async fn par(
             );
         }
 
-        match validate_authorize_request(request_params) {
+        // Capture response_mode from the JAR claims before consuming request_params.
+        // JAR claims take precedence over the plain form body.
+        let jar_rm = request_params.response_mode.clone();
+        let v = match validate_authorize_request(request_params) {
             Ok(v) => v,
             Err(e) => {
                 let (error_code, description) = service_error_codes(&e);
                 return par_error_response(StatusCode::BAD_REQUEST, error_code, &description);
             }
-        }
+        };
+        (v, jar_rm)
     } else {
         // Validate prompt before constructing params
         let parsed_prompt = match params.prompt.as_deref() {
@@ -302,15 +327,17 @@ pub async fn par(
             prompt: parsed_prompt,
             dpop_jkt: params.dpop_jkt.clone(),
             authorization_details: params.authorization_details.clone(),
+            response_mode: params.response_mode.clone(),
         };
 
-        match validate_authorize_request(request_params) {
+        let v = match validate_authorize_request(request_params) {
             Ok(v) => v,
             Err(e) => {
                 let (error_code, description) = service_error_codes(&e);
                 return par_error_response(StatusCode::BAD_REQUEST, error_code, &description);
             }
-        }
+        };
+        (v, None)
     };
 
     // RFC 9700: PKCE required for public clients and Native/SPA types.
@@ -351,9 +378,42 @@ pub async fn par(
     // The request parameter takes precedence since it's the explicit binding.
     let effective_dpop_jkt = validated.dpop_jkt().or(dpop_jkt);
 
+    // RFC 9449 Section 10: When a dpop_jkt value is present (either from the
+    // JAR claims or the plain form body) AND a DPoP proof header was provided,
+    // the two JWK thumbprints MUST match. The earlier check (above) only covers
+    // params.dpop_jkt; this covers the JAR-sourced dpop_jkt value.
+    if let (Some(requested_jkt), Some(proof)) = (effective_dpop_jkt, &dpop_proof) {
+        let is_match: bool = requested_jkt.as_bytes().ct_eq(proof.jkt.as_bytes()).into();
+        if !is_match {
+            return par_error_response(
+                StatusCode::BAD_REQUEST,
+                "invalid_dpop_proof",
+                "dpop_jkt does not match DPoP proof JWK thumbprint",
+            );
+        }
+    }
+
     let scope_str = validated.scope().to_space_separated();
     let max_age_i64 = validated.max_age().and_then(|v| i64::try_from(v).ok());
     let ad_value = validated.authorization_details_value();
+    // JAR claims take precedence over the plain form body for response_mode.
+    let response_mode_str = jar_response_mode
+        .as_deref()
+        .or(params.response_mode.as_deref());
+    let response_mode = match response_mode_str {
+        None | Some("query") => crate::db::documents::oauth::ResponseMode::Query,
+        Some(mode) => match crate::db::documents::oauth::ResponseMode::parse(mode) {
+            Some(m) => m,
+            None => {
+                return par_error_response(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_request",
+                    "Unsupported response_mode. Supported values: query, jwt, query.jwt",
+                );
+            }
+        },
+    };
+
     let create_params = CreateParParams {
         client_id: validated.client_id(),
         response_type: "code",
@@ -369,6 +429,7 @@ pub async fn par(
         prompt: validated.prompt().map(|p| p.as_str()),
         dpop_jkt: effective_dpop_jkt,
         authorization_details: ad_value.as_ref(),
+        response_mode,
     };
 
     // RFC 9126 Section 2.2: Return 201 Created

@@ -678,6 +678,7 @@ pub async fn create_test_oauth_client(store: &DocumentStore, user_id: &str) -> T
             tls_client_auth_san_ip: None,
             tls_client_auth_san_email: None,
             tls_client_certificate_bound_access_tokens: None,
+            authorization_signed_response_alg: None,
         },
     )
     .await
@@ -742,6 +743,7 @@ pub async fn create_test_oauth_client_with_options(
             tls_client_auth_san_ip: None,
             tls_client_auth_san_email: None,
             tls_client_certificate_bound_access_tokens: None,
+            authorization_signed_response_alg: None,
         },
     )
     .await
@@ -799,6 +801,7 @@ pub async fn create_test_public_oauth_client(
             tls_client_auth_san_ip: None,
             tls_client_auth_san_email: None,
             tls_client_certificate_bound_access_tokens: None,
+            authorization_signed_response_alg: None,
         },
     )
     .await

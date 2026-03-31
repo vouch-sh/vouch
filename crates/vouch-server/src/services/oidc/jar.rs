@@ -83,6 +83,9 @@ struct RequestObjectClaims {
     /// RFC 9396: Rich authorization details.
     #[serde(default)]
     authorization_details: Option<serde_json::Value>,
+    /// JARM (oauth-v2-jarm): Requested authorization response mode.
+    #[serde(default)]
+    response_mode: Option<String>,
 
     // Nesting prevention — must NOT be present
     #[serde(default)]
@@ -114,6 +117,15 @@ struct RequestObjectHeader {
     /// Type header — must be "oauth-authz-req+jwt" for Request Objects.
     #[serde(default)]
     pub typ: Option<String>,
+}
+
+/// Validate a Request Object JWT header algorithm and `typ` only.
+///
+/// Used by the PAR handler to perform an early header check before client
+/// authentication. This ensures that an unsigned request object (`alg=none`)
+/// returns `invalid_request_object` rather than `invalid_client`.
+pub(crate) fn validate_request_object_header(jwt: &str) -> ServiceResult<()> {
+    parse_request_object_header(jwt).map(|_| ())
 }
 
 /// Parse a Request Object JWT header, validating algorithm and `typ`.
@@ -466,6 +478,7 @@ pub async fn validate_request_object(
         prompt: parsed_prompt,
         dpop_jkt: claims.dpop_jkt,
         authorization_details: authorization_details_str,
+        response_mode: claims.response_mode,
     })
 }
 

@@ -164,6 +164,7 @@ mod tests {
                 tls_client_auth_san_ip: None,
                 tls_client_auth_san_email: None,
                 tls_client_certificate_bound_access_tokens: Some(true),
+                authorization_signed_response_alg: None,
             },
         )
         .await

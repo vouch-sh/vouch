@@ -122,6 +122,8 @@ pub struct RegistrationRequest {
     pub tls_client_auth_san_email: Option<String>,
     /// RFC 8705 Section 3: certificate-bound access tokens.
     pub tls_client_certificate_bound_access_tokens: Option<bool>,
+    /// JARM: signing algorithm for authorization responses.
+    pub authorization_signed_response_alg: Option<String>,
 }
 
 /// RFC 7591 Section 3.2.1: Client Information Response.
@@ -177,6 +179,9 @@ pub struct RegistrationResponse {
     pub dpop_bound_access_tokens: Option<bool>,
     /// OIDC: Algorithm used for signing ID tokens.
     pub id_token_signed_response_alg: String,
+    /// JARM: signing algorithm for authorization responses.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub authorization_signed_response_alg: Option<String>,
 }
 
 // ============================================================================
@@ -294,6 +299,40 @@ pub async fn register_client(
         })
     };
 
+    // 12b. Validate authorization_signed_response_alg (JARM).
+    // Reject "none" and symmetric algorithms — signing key must be asymmetric.
+    let jarm_alg = if let Some(ref alg) = request.authorization_signed_response_alg {
+        let alg = alg.as_str();
+        if alg == "none" || alg.starts_with("HS") {
+            return Err(ServiceError::oauth(
+                OAuthErrorCode::InvalidClientMetadata,
+                format!(
+                    "Unsupported authorization_signed_response_alg: '{alg}'. \
+                     Must be an asymmetric algorithm such as RS256 or ES256"
+                ),
+            ));
+        }
+        if alg != "RS256" && alg != "ES256" {
+            return Err(ServiceError::oauth(
+                OAuthErrorCode::InvalidClientMetadata,
+                format!(
+                    "Unsupported authorization_signed_response_alg: '{alg}'. \
+                     Supported: RS256, ES256"
+                ),
+            ));
+        }
+        if alg == "RS256" && state.oidc_rsa_key.is_none() {
+            return Err(ServiceError::oauth(
+                OAuthErrorCode::InvalidClientMetadata,
+                "RS256 is not available for authorization_signed_response_alg \
+                 (no RSA signing key configured)",
+            ));
+        }
+        Some(alg.to_string())
+    } else {
+        None
+    };
+
     // 13. Infer application type
     let app_type = determine_client_type(
         &validated.grant_types,
@@ -347,6 +386,7 @@ pub async fn register_client(
             tls_client_auth_san_email: request.tls_client_auth_san_email.as_deref(),
             tls_client_certificate_bound_access_tokens: request
                 .tls_client_certificate_bound_access_tokens,
+            authorization_signed_response_alg: jarm_alg.as_deref(),
         },
     )
     .await
@@ -442,6 +482,7 @@ pub async fn register_client(
         software_version: request.software_version,
         dpop_bound_access_tokens: if dpop_bound { Some(true) } else { None },
         id_token_signed_response_alg: id_token_alg.to_string(),
+        authorization_signed_response_alg: jarm_alg,
     })
 }
 
@@ -961,6 +1002,7 @@ fn build_client_response(client: &OAuthClient, base_url: &str) -> RegistrationRe
             None
         },
         id_token_signed_response_alg: client.id_token_signed_response_alg.clone(),
+        authorization_signed_response_alg: client.authorization_signed_response_alg.clone(),
     }
 }
 
@@ -1862,6 +1904,7 @@ mod tests {
             software_version: None,
             dpop_bound_access_tokens: None,
             id_token_signed_response_alg: "ES256".to_string(),
+            authorization_signed_response_alg: None,
         };
 
         let json = serde_json::to_string(&response).unwrap();
@@ -1922,6 +1965,7 @@ mod tests {
             software_version: None,
             dpop_bound_access_tokens: None,
             id_token_signed_response_alg: "ES256".to_string(),
+            authorization_signed_response_alg: None,
         };
 
         let json = serde_json::to_string(&response).unwrap();

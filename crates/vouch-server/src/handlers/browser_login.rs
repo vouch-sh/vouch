@@ -839,6 +839,7 @@ mod tests {
                 prompt: Some("login"),
                 dpop_jkt: None,
                 authorization_details: None,
+                response_mode: Default::default(),
             },
         )
         .await
@@ -890,6 +891,7 @@ mod tests {
                 prompt: None,
                 dpop_jkt: None,
                 authorization_details: None,
+                response_mode: Default::default(),
             },
         )
         .await
