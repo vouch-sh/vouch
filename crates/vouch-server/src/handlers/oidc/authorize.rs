@@ -424,7 +424,7 @@ async fn authorize_inner(state: Arc<AppState>, params: AuthorizeQuery, jar: Cook
                 &authenticator,
                 ReauthPolicy::OnDemand,
                 None,
-                ResponseMode::Query,
+                direct_response_mode,
             )
             .await
         }
@@ -440,7 +440,7 @@ async fn authorize_inner(state: Arc<AppState>, params: AuthorizeQuery, jar: Cook
                     &state.config().base_url,
                 );
             }
-            store_pending_and_redirect(&state, validated, ResponseMode::Query).await
+            store_pending_and_redirect(&state, validated, direct_response_mode).await
         }
     }
 }
