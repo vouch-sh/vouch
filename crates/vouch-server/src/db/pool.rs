@@ -707,42 +707,52 @@ fn spawn_token_refresh(pool: sqlx::PgPool, dsql: DsqlEndpoint, user: String, is_
             region,
         );
 
+        let mut interval = tokio::time::interval(refresh_interval);
+        interval.tick().await; // skip the immediate first tick
+
         loop {
-            tokio::time::sleep(refresh_interval).await;
-
-            // Check if pool has been closed (graceful shutdown)
-            if pool.is_closed() {
-                tracing::debug!("DSQL pool closed, stopping token refresh task");
-                break;
-            }
-
-            // Reload AWS credentials (in case they've been rotated)
-            let sdk_config = load_sdk_config(Some(&region)).await;
-
-            match generate_dsql_token(&sdk_config, dsql.token_hostname(), &region, is_admin).await {
-                Ok(new_token) => {
-                    // Update the pool's connect options with the new token
-                    let mut new_options = PgConnectOptions::new()
-                        .host(dsql.connect_hostname())
-                        .port(5432)
-                        .database("postgres")
-                        .username(&user)
-                        .password(&new_token)
-                        .ssl_mode(dsql.ssl_mode());
-
-                    if let Some(opt) = dsql.pg_options() {
-                        new_options = new_options.options([opt]);
-                    }
-
-                    pool.set_connect_options(new_options);
-                    tracing::debug!("DSQL authentication token refreshed successfully");
+            tokio::select! {
+                _ = pool.close_event() => {
+                    tracing::debug!("DSQL pool closed, stopping token refresh task");
+                    break;
                 }
-                Err(e) => {
-                    // Log warning but continue - existing connections still work
-                    tracing::warn!(
-                        error = %e,
-                        "failed to refresh DSQL authentication token"
-                    );
+                _ = interval.tick() => {
+                    // Reload AWS credentials (in case they've been rotated)
+                    let sdk_config = load_sdk_config(Some(&region)).await;
+
+                    match generate_dsql_token(
+                        &sdk_config,
+                        dsql.token_hostname(),
+                        &region,
+                        is_admin,
+                    )
+                    .await
+                    {
+                        Ok(new_token) => {
+                            // Update the pool's connect options with the new token
+                            let mut new_options = PgConnectOptions::new()
+                                .host(dsql.connect_hostname())
+                                .port(5432)
+                                .database("postgres")
+                                .username(&user)
+                                .password(&new_token)
+                                .ssl_mode(dsql.ssl_mode());
+
+                            if let Some(opt) = dsql.pg_options() {
+                                new_options = new_options.options([opt]);
+                            }
+
+                            pool.set_connect_options(new_options);
+                            tracing::debug!("DSQL authentication token refreshed successfully");
+                        }
+                        Err(e) => {
+                            // Log warning but continue - existing connections still work
+                            tracing::warn!(
+                                error = %e,
+                                "failed to refresh DSQL authentication token"
+                            );
+                        }
+                    }
                 }
             }
         }
@@ -760,7 +770,8 @@ pub(crate) const MAX_DSQL_RETRIES: u32 = 3;
 ///
 /// - `40001`: Serialization failure (standard SQL)
 /// - `OC000`: Aurora DSQL optimistic concurrency conflict
-const RETRYABLE_SQL_STATES: &[&str] = &["40001", "OC000"];
+/// - `OC001`: Aurora DSQL transaction conflict
+const RETRYABLE_SQL_STATES: &[&str] = &["40001", "OC000", "OC001"];
 
 /// Check whether an error is a transient database error worth retrying.
 ///
@@ -778,9 +789,9 @@ pub(crate) fn is_retryable_db_error(err: &anyhow::Error) -> bool {
 
 /// Compute a jittered exponential backoff duration for the given attempt.
 ///
-/// Base delay doubles each attempt (~10ms, ~20ms, ~40ms) with ±25% jitter.
+/// Base delay doubles each attempt (~100ms, ~200ms, ~400ms) with ±25% jitter.
 pub(crate) fn retry_backoff(attempt: u32) -> Duration {
-    let base_ms = 10u64.saturating_mul(1u64 << attempt);
+    let base_ms = 100u64.saturating_mul(1u64 << attempt);
     // ±25% jitter using simple xorshift on timestamp
     let jitter_range = base_ms / 4;
     let nanos = std::time::SystemTime::now()
@@ -881,8 +892,8 @@ mod tests {
         let d1 = retry_backoff(1);
         let d2 = retry_backoff(2);
         // Base roughly doubles; allow wide range due to jitter
-        assert!(d0.as_millis() <= 20);
-        assert!(d1.as_millis() <= 40);
-        assert!(d2.as_millis() <= 80);
+        assert!(d0.as_millis() <= 200);
+        assert!(d1.as_millis() <= 400);
+        assert!(d2.as_millis() <= 800);
     }
 }
