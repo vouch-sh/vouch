@@ -61,7 +61,7 @@ pub struct ValidatedResourceToken {
     /// OAuth client_id from the access token.
     pub client_id: String,
     /// Granted OAuth scope.
-    pub scope: Option<crate::services::oidc::scope::ScopeSet>,
+    pub scope: Option<crate::services::oidc::ScopeSet>,
     /// Authenticator ID from the server-side session record (not in JWT).
     pub authenticator_id: Option<String>,
     /// Authentication time (`auth_time` claim).

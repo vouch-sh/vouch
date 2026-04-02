@@ -28,7 +28,7 @@ pub(crate) fn require_fresh_timestamp(
     let session_age = now.saturating_sub(issued_at);
     if session_age > max_age_secs {
         return Err(ServiceError::StepUpRequired {
-            acr_values: Some(crate::services::oidc::amr::ACR_AAL3.to_string()),
+            acr_values: Some(crate::services::auth::ACR_AAL3.to_string()),
             max_age: Some(u64::try_from(max_age_secs).unwrap_or(60)),
         });
     }

@@ -3,9 +3,12 @@
 //!
 //! Implements:
 //! - WebAuthn Level 2 Section 7.2 — Verifying an Authentication Assertion
+//! - RFC 8176 — Authentication Method Reference Values
+//! - RFC 9068 Section 2.2 — JWT Access Token claims (`amr`, `acr`)
 //!
 //! This module provides business logic for authenticating users via WebAuthn
 //! discoverable credentials. It handles:
+//! - Authentication method references (AMR) and assurance levels (ACR)
 //! - Authenticator lookup and ownership verification
 //! - WebAuthn assertion verification
 //! - OAuth access token creation and storage
@@ -16,18 +19,88 @@ use crate::AppState;
 use crate::crypto::hash_token;
 use crate::crypto::webauthn_verify;
 use crate::db::{self, Authenticator, SessionPurpose, User};
-use crate::services::oidc::amr::AuthMethod;
-use crate::services::oidc::dpop::CnfClaim;
-use crate::services::oidc::keys::OidcSigningKey;
-use crate::services::oidc::scope::ScopeSet;
+use crate::services::oidc::{CnfClaim, OidcSigningKey, ScopeSet};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use jiff::{Span, Timestamp};
 use secrecy::SecretString;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use std::fmt;
 use uuid::Uuid;
 
 use super::{OAuthErrorCode, ServiceError, ServiceResult};
+
+// ============================================================================
+// Authentication Method References (RFC 8176)
+// ============================================================================
+
+/// Authentication method reference value (RFC 8176).
+///
+/// Represents a single authentication method used during user authentication.
+/// Vouch always uses FIDO2 hardware keys with PIN and user presence, so all
+/// three methods are present in every authentication event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthMethod {
+    /// RFC 8176: Proof-of-possession of a hardware-secured key.
+    HardwareKey,
+    /// RFC 8176: Personal Identification Number or pattern verified on device.
+    Pin,
+    /// RFC 8176: User presence test (physical interaction with authenticator).
+    UserPresence,
+}
+
+impl AuthMethod {
+    /// Return the wire-format string per RFC 8176.
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::HardwareKey => "hwk",
+            Self::Pin => "pin",
+            Self::UserPresence => "user",
+        }
+    }
+
+    /// All authentication methods used in a FIDO2 hardware key flow.
+    ///
+    /// Vouch always requires hardware key + PIN + user presence, so this
+    /// returns all three methods.
+    #[must_use]
+    pub const fn all_fido2() -> &'static [Self] {
+        &[Self::HardwareKey, Self::Pin, Self::UserPresence]
+    }
+}
+
+impl fmt::Display for AuthMethod {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl Serialize for AuthMethod {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for AuthMethod {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        match s.as_str() {
+            "hwk" => Ok(Self::HardwareKey),
+            "pin" => Ok(Self::Pin),
+            "user" => Ok(Self::UserPresence),
+            other => Err(serde::de::Error::unknown_variant(
+                other,
+                &["hwk", "pin", "user"],
+            )),
+        }
+    }
+}
+
+/// NIST SP 800-63B AAL3: Hardware-based multi-factor authentication.
+///
+/// FIDO2 hardware key + PIN + user presence meets AAL3 per NIST SP 800-63B.
+pub(crate) const ACR_AAL3: &str = "urn:nist:authentication:assurance-level:aal3";
 
 /// Parameters for verifying authenticator ownership.
 pub(crate) struct AuthenticatorLookupParams<'a> {
@@ -322,7 +395,7 @@ pub(crate) async fn create_oauth_access_token(
     let has_email_scope = params
         .scope
         .as_ref()
-        .is_some_and(|s| s.contains(crate::services::oidc::scope::OAuthScope::Email));
+        .is_some_and(|s| s.contains(crate::services::oidc::OAuthScope::Email));
 
     // RFC 9449 / RFC 8705: Include cnf claim for sender-constrained tokens.
     // DPoP (jkt) takes priority over mTLS (x5t#S256).
@@ -616,6 +689,53 @@ mod tests {
             };
         }
         assert!(actor.depth() > MAX_DELEGATION_DEPTH);
+    }
+
+    // AMR tests (RFC 8176)
+
+    #[test]
+    fn test_auth_method_wire_format() {
+        assert_eq!(AuthMethod::HardwareKey.as_str(), "hwk");
+        assert_eq!(AuthMethod::Pin.as_str(), "pin");
+        assert_eq!(AuthMethod::UserPresence.as_str(), "user");
+    }
+
+    #[test]
+    fn test_all_fido2() {
+        let methods = AuthMethod::all_fido2();
+        assert_eq!(methods.len(), 3);
+        assert_eq!(methods[0], AuthMethod::HardwareKey);
+        assert_eq!(methods[1], AuthMethod::Pin);
+        assert_eq!(methods[2], AuthMethod::UserPresence);
+    }
+
+    #[test]
+    fn test_auth_method_serde_roundtrip() {
+        let methods: Vec<AuthMethod> = AuthMethod::all_fido2().to_vec();
+        let json = serde_json::to_string(&methods).unwrap();
+        assert_eq!(json, r#"["hwk","pin","user"]"#);
+
+        let deserialized: Vec<AuthMethod> = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized, methods);
+    }
+
+    #[test]
+    fn test_auth_method_deserialize_rejects_unknown() {
+        let result: Result<AuthMethod, _> = serde_json::from_str(r#""mfa""#);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_auth_method_display() {
+        assert_eq!(format!("{}", AuthMethod::HardwareKey), "hwk");
+        assert_eq!(format!("{}", AuthMethod::Pin), "pin");
+        assert_eq!(format!("{}", AuthMethod::UserPresence), "user");
+    }
+
+    #[test]
+    fn test_acr_aal3_constant() {
+        assert!(ACR_AAL3.starts_with("urn:nist:"));
+        assert!(ACR_AAL3.contains("aal3"));
     }
 
     #[test]

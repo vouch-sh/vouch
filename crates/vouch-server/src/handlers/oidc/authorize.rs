@@ -11,7 +11,7 @@ use super::{
     build_redirect_url_with_params,
 };
 use crate::AppState;
-use crate::db::documents::oauth::ResponseMode;
+use crate::db::ResponseMode;
 use crate::db::{self, Authenticator, CreatePendingOAuthParams, OAuthClient, Session, User};
 use crate::handlers::HasVersion;
 use crate::impl_template_response;
@@ -1092,7 +1092,7 @@ async fn authorize_authenticated_user(
     if let Some(acr) = validated.acr_values() {
         let acr_ok = acr
             .split_whitespace()
-            .any(|v| v == crate::services::oidc::amr::ACR_AAL3);
+            .any(|v| v == crate::services::auth::ACR_AAL3);
         if !acr_ok {
             return oauth_error_redirect(
                 validated.redirect_uri(),

@@ -12,8 +12,7 @@ use crate::redact_email;
 use crate::services::ServiceError;
 use crate::services::ServiceResult;
 use crate::services::auth::{DecodedToken, decode_token};
-use crate::services::oidc::keys::OidcSigningKey;
-use crate::services::oidc::scope::ScopeSet;
+use crate::services::oidc::{OidcSigningKey, ScopeSet};
 use serde::Serialize;
 use std::sync::Arc;
 

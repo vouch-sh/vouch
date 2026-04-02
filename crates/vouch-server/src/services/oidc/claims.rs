@@ -1,7 +1,22 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 //! OIDC token claims for cloud provider identity federation.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+
+/// Confirmation claim for sender-constrained token binding.
+///
+/// Used in access tokens to bind them to a client's cryptographic key:
+/// - `jkt`: JWK thumbprint for DPoP (RFC 9449 Section 6)
+/// - `x5t#S256`: Certificate thumbprint for mTLS (RFC 8705 Section 3.1)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CnfClaim {
+    /// JWK thumbprint of the sender's key (DPoP).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jkt: Option<String>,
+    /// Certificate thumbprint (mTLS).
+    #[serde(default, rename = "x5t#S256", skip_serializing_if = "Option::is_none")]
+    pub x5t_s256: Option<String>,
+}
 
 /// Standard OIDC ID token claims with Vouch extensions.
 /// Used by credential endpoints (AWS, Kubernetes).

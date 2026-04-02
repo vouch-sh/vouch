@@ -31,11 +31,12 @@ use super::{
     validate_registration_attestation,
 };
 use crate::redact_email;
-use crate::services::auth::{CreateOAuthTokenParams, create_oauth_access_token};
+use crate::services::auth::{
+    ACR_AAL3, AuthMethod, CreateOAuthTokenParams, create_oauth_access_token,
+};
 use crate::services::error::ServiceError;
 use crate::services::idp::IdentityResult;
-use crate::services::oidc::amr::{ACR_AAL3, AuthMethod};
-use crate::services::oidc::scope::ScopeSet;
+use crate::services::oidc::ScopeSet;
 
 // ============================================================================
 // Templates

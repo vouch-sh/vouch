@@ -7,12 +7,12 @@ use crate::db::par::PAR_EXPIRES_IN;
 use crate::db::{self, CreateParParams};
 use crate::services::ServiceError;
 use crate::services::error::OAuthErrorResponse;
+use crate::services::oidc::DpopError;
 use crate::services::oidc::authorization::{
     AuthorizeRequestParams, Prompt, require_pkce_for_client, validate_authorize_request,
 };
-use crate::services::oidc::dpop::DpopError;
 use crate::services::oidc::jar::{validate_request_object, validate_request_object_header};
-use crate::services::oidc::jwt_bearer::client_auth::commit_jti;
+use crate::services::oidc::jwt_bearer::commit_jti;
 use crate::services::oidc::token::validate_dpop_if_present;
 use axum::{
     Json,

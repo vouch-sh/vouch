@@ -12,7 +12,7 @@
 //! substitution attacks.
 
 use crate::services::auth::{AccessTokenClaims, DecodedToken};
-use crate::services::oidc::keys::OidcSigningKey;
+use crate::services::oidc::OidcSigningKey;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, Validation};
@@ -458,7 +458,7 @@ pub(crate) fn decode_state_token<T: DeserializeOwned>(
 mod tests {
     use super::*;
     use crate::services::auth::AccessTokenClaims;
-    use crate::services::oidc::keys::OidcSigningKey;
+    use crate::services::oidc::OidcSigningKey;
     use crate::test_utils::{
         TEST_ISSUER, TEST_JWT_SECRET, make_test_access_token, make_test_oidc_key,
     };

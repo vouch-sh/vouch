@@ -8,7 +8,7 @@
 use crate::AppState;
 use crate::crypto::jwt::JwtType;
 use crate::db::{AccessScope, Authenticator, OAuthClient, Session, TokenEndpointAuthMethod, User};
-use crate::services::oidc::scope::ScopeSet;
+use crate::services::oidc::ScopeSet;
 use crate::services::{OAuthErrorCode, ServiceError, ServiceResult};
 use jiff::{Span, Timestamp};
 use serde::{Deserialize, Serialize};

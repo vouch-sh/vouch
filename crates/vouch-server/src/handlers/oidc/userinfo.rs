@@ -12,10 +12,9 @@ use crate::handlers::extractors::OptionalClientCert;
 use crate::services::OAuthErrorCode;
 use crate::services::auth::decode_token;
 use crate::services::error::OAuthErrorResponse;
-use crate::services::oidc::dpop::{self, DpopError};
-use crate::services::oidc::keys::OidcSigningKey;
-use crate::services::oidc::scope::OAuthScope;
+use crate::services::oidc::dpop;
 use crate::services::oidc::token::validate_session_token;
+use crate::services::oidc::{DpopError, OAuthScope, OidcSigningKey};
 use axum::{
     Json,
     body::Bytes,

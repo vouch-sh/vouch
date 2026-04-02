@@ -48,7 +48,6 @@
 //! - [`resource`] - Resource indicators (RFC 8707)
 //! - [`scope`] - OAuth 2.0 scope types (RFC 6749 Section 3.3)
 
-pub mod amr;
 pub mod authorization;
 pub mod authorization_details;
 pub mod claims;
@@ -72,8 +71,9 @@ pub mod token;
 // Re-export commonly used types
 pub use authorization::{AuthorizationCodeParams, ValidatedAuthRequest, check_client_access};
 pub use authorization_details::AuthorizationDetails;
-pub use claims::{ClaimsBuildError, OidcIdTokenClaims, OidcIdTokenClaimsBuilder};
+pub use claims::{ClaimsBuildError, CnfClaim, OidcIdTokenClaims, OidcIdTokenClaimsBuilder};
 pub use discovery::{OidcDiscoveryDocument, build_discovery_document, build_jwks};
+pub use dpop::{DpopError, ValidatedDpopProof};
 pub use exchange::{TokenExchangeParams, TokenExchangeResult};
 pub use introspection::{IntrospectionResult, RevocationResult};
 pub use keys::{EcJwk, Jwk, OidcRsaSigningKey, OidcSigningKey, RsaJwk};

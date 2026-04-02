@@ -15,10 +15,10 @@
 use crate::AppState;
 use crate::db::OAuthClient;
 use crate::services::oidc::authorization::{AuthorizeRequestParams, Prompt};
-use crate::services::oidc::jwt_bearer::jwks::{find_matching_key, resolve_client_jwks};
 use crate::services::oidc::jwt_bearer::validate::{
     JwtAssertionHeader, JwtAudience, map_algorithm, parse_assertion_header,
 };
+use crate::services::oidc::jwt_bearer::{find_matching_key, resolve_client_jwks};
 use crate::services::{OAuthErrorCode, ServiceError, ServiceResult};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -486,7 +486,7 @@ pub async fn validate_request_object(
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 mod tests {
     use super::*;
-    use crate::services::oidc::jwt_bearer::validate::SUPPORTED_ALGORITHMS;
+    use crate::services::oidc::jwt_bearer::SUPPORTED_ALGORITHMS;
 
     // ========================================================================
     // Helper: Build a minimal JWT string from a raw header JSON object.

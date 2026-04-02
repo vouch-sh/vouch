@@ -27,10 +27,11 @@ use crate::handlers::HasVersion;
 use crate::handlers::session::{create_session_cookie, get_auth_context};
 use crate::impl_template_response;
 use crate::redact_email;
-use crate::services::auth::{CreateOAuthTokenParams, create_oauth_access_token};
+use crate::services::auth::{
+    ACR_AAL3, AuthMethod, CreateOAuthTokenParams, create_oauth_access_token,
+};
 use crate::services::error::ServiceError;
-use crate::services::oidc::amr::{ACR_AAL3, AuthMethod};
-use crate::services::oidc::scope::ScopeSet;
+use crate::services::oidc::ScopeSet;
 use askama::Template;
 use axum::{
     Json,

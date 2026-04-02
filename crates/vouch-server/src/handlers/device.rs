@@ -3,9 +3,10 @@
 
 use crate::AppState;
 use crate::db::{self, DeviceAuthStatus};
-use crate::services::auth::{CreateOAuthTokenParams, create_oauth_access_token};
-use crate::services::oidc::amr::{ACR_AAL3, AuthMethod};
-use crate::services::oidc::scope::ScopeSet;
+use crate::services::auth::{
+    ACR_AAL3, AuthMethod, CreateOAuthTokenParams, create_oauth_access_token,
+};
+use crate::services::oidc::ScopeSet;
 use aws_lc_rs::digest::{self, SHA256};
 use axum::{Json, extract::State, http::StatusCode};
 use base64::Engine;

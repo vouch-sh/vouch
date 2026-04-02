@@ -14,8 +14,9 @@ use crate::AppState;
 use crate::crypto::hash_token;
 use crate::db::{self, Authenticator, OAuthClient, Session, User};
 use crate::redact_email;
-use crate::services::auth::{CreateOAuthTokenParams, create_oauth_access_token, decode_token};
-use crate::services::oidc::amr::AuthMethod;
+use crate::services::auth::{
+    AuthMethod, CreateOAuthTokenParams, create_oauth_access_token, decode_token,
+};
 use crate::services::{OAuthErrorCode, ServiceError, ServiceResult};
 use aws_lc_rs::digest::{self, SHA256};
 use base64::Engine;
@@ -247,7 +248,7 @@ pub async fn exchange_authorization_code(
             audience: grants.audience.as_deref(),
             auth_time: Some(auth_code.auth_time.unwrap_or(auth_code.iat)),
             amr: Some(AuthMethod::all_fido2().to_vec()),
-            acr: Some(crate::services::oidc::amr::ACR_AAL3.to_string()),
+            acr: Some(crate::services::auth::ACR_AAL3.to_string()),
             hardware_verified: true,
             session_purpose: db::SessionPurpose::OAuthAccessToken,
             authorization_details: grants.authorization_details_value.as_ref(),
@@ -283,7 +284,7 @@ pub async fn exchange_authorization_code(
             scope: &auth_code.scope,
             auth_time: Some(auth_code.auth_time.unwrap_or(auth_code.iat)),
             amr: Some(AuthMethod::all_fido2().to_vec()),
-            acr: Some(crate::services::oidc::amr::ACR_AAL3.to_string()),
+            acr: Some(crate::services::auth::ACR_AAL3.to_string()),
             access_token: Some(access_token.expose_secret()),
             id_token_alg,
         },
@@ -494,7 +495,7 @@ fn validate_code_bindings(
     if let Some(ref acr_values) = auth_code.acr_values {
         let acr_ok = acr_values
             .split_whitespace()
-            .any(|v| v == crate::services::oidc::amr::ACR_AAL3);
+            .any(|v| v == crate::services::auth::ACR_AAL3);
         if !acr_ok {
             return Err(ServiceError::oauth(
                 OAuthErrorCode::UnmetAuthenticationRequirements,
