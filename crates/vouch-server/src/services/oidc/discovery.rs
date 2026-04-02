@@ -9,8 +9,8 @@
 use crate::AppState;
 use crate::db::{JwsAlgorithm, TokenEndpointAuthMethod};
 use crate::services::ServiceError;
-use crate::services::oidc::amr::ACR_AAL3;
-use crate::services::oidc::scope::OAuthScope;
+use crate::services::auth::ACR_AAL3;
+use crate::services::oidc::OAuthScope;
 use serde::Serialize;
 use std::sync::Arc;
 

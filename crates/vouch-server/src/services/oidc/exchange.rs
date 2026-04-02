@@ -12,8 +12,8 @@ use crate::services::auth::{
     ActorClaim, CreateOAuthTokenParams, MAX_DELEGATION_DEPTH, create_oauth_access_token,
     decode_token,
 };
+use crate::services::oidc::ScopeSet;
 use crate::services::oidc::authorization_details::AuthorizationDetails;
-use crate::services::oidc::scope::ScopeSet;
 use crate::services::{OAuthErrorCode, ServiceError, ServiceResult};
 use jiff::Timestamp;
 use secrecy::ExposeSecret;
@@ -355,8 +355,8 @@ pub async fn exchange_token(
             auth_time: None,
             // Hardcoded to FIDO2 values because all Vouch authentication flows
             // require hardware keys. Revisit if non-FIDO2 flows are added.
-            amr: Some(crate::services::oidc::amr::AuthMethod::all_fido2().to_vec()),
-            acr: Some(crate::services::oidc::amr::ACR_AAL3.to_string()),
+            amr: Some(crate::services::auth::AuthMethod::all_fido2().to_vec()),
+            acr: Some(crate::services::auth::ACR_AAL3.to_string()),
             hardware_verified: true,
             session_purpose: crate::db::SessionPurpose::OAuthAccessToken,
             authorization_details: effective_ad_value.as_ref(),

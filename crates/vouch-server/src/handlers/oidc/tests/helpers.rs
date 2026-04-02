@@ -2,10 +2,10 @@
 //! Shared test helpers and re-exported imports for OIDC test modules.
 
 pub(super) use crate::db;
+pub(super) use crate::services::oidc::ScopeSet;
 pub(super) use crate::services::oidc::authorization::{
     AuthorizationCodeParams, CodeChallengeMethod, issue_authorization_code,
 };
-pub(super) use crate::services::oidc::scope::ScopeSet;
 pub(super) use crate::test_utils::*;
 pub(super) use aws_lc_rs::digest::SHA256;
 pub(super) use axum::http::StatusCode;

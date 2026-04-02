@@ -105,8 +105,9 @@ pub use scim::{
 };
 
 // Re-export OAuth enum types from the document layer (single source of truth)
+pub use documents::audit::GitHubCredentialAuditData;
 pub use documents::oauth::{
-    AccessScope, FapiProfile, JwsAlgorithm, OAuthClientType, RegistrationSource,
+    AccessScope, FapiProfile, JwsAlgorithm, OAuthClientType, RegistrationSource, ResponseMode,
     TokenEndpointAuthMethod,
 };
 

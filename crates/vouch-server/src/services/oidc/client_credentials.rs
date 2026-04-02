@@ -11,7 +11,7 @@
 use crate::AppState;
 use crate::db::{OAuthClient, SessionPurpose};
 use crate::services::auth::{CreateOAuthTokenParams, create_oauth_access_token};
-use crate::services::oidc::scope::ScopeSet;
+use crate::services::oidc::ScopeSet;
 use crate::services::{OAuthErrorCode, ServiceError, ServiceResult};
 use secrecy::ExposeSecret;
 use std::sync::Arc;
@@ -106,7 +106,7 @@ pub async fn exchange_client_credentials(
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use crate::services::oidc::scope::OAuthScope;
+    use crate::services::oidc::OAuthScope;
 
     #[test]
     fn test_scope_filters_openid_and_email() {

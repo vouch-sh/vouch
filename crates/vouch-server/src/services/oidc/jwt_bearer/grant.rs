@@ -12,7 +12,7 @@ use super::validate::{
 use crate::AppState;
 use crate::db;
 use crate::services::auth::{CreateOAuthTokenParams, create_oauth_access_token};
-use crate::services::oidc::scope::ScopeSet;
+use crate::services::oidc::ScopeSet;
 use crate::services::{OAuthErrorCode, ServiceError, ServiceResult};
 use jiff::{Timestamp, ToSpan};
 use secrecy::ExposeSecret;
@@ -232,7 +232,7 @@ fn compute_granted_scope(requested: Option<&str>, allowed: Option<&str>) -> Opti
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::compute_granted_scope;
-    use crate::services::oidc::scope::OAuthScope;
+    use crate::services::oidc::OAuthScope;
 
     #[test]
     fn test_compute_granted_scope_intersection() {

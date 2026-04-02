@@ -468,7 +468,7 @@ pub async fn create_test_session(
     auth_id: &str,
 ) -> String {
     use crate::services::auth::{CreateOAuthTokenParams, create_oauth_access_token};
-    use crate::services::oidc::scope::ScopeSet;
+    use crate::services::oidc::ScopeSet;
     use secrecy::ExposeSecret;
 
     let result = create_oauth_access_token(
@@ -509,7 +509,7 @@ pub async fn create_test_session_with_iat(
     iat: i64,
 ) -> String {
     use crate::services::auth::{CreateOAuthTokenParams, create_oauth_access_token};
-    use crate::services::oidc::scope::ScopeSet;
+    use crate::services::oidc::ScopeSet;
     use secrecy::ExposeSecret;
 
     let result = create_oauth_access_token(
@@ -550,7 +550,7 @@ pub async fn create_test_session_for_client(
     client_id: &str,
 ) -> String {
     use crate::services::auth::{CreateOAuthTokenParams, create_oauth_access_token};
-    use crate::services::oidc::scope::ScopeSet;
+    use crate::services::oidc::ScopeSet;
     use secrecy::ExposeSecret;
 
     let result = create_oauth_access_token(
@@ -591,7 +591,7 @@ pub async fn create_test_session_with_dpop(
     dpop_jkt: &str,
 ) -> String {
     use crate::services::auth::{CreateOAuthTokenParams, create_oauth_access_token};
-    use crate::services::oidc::scope::ScopeSet;
+    use crate::services::oidc::ScopeSet;
     use secrecy::ExposeSecret;
 
     let result = create_oauth_access_token(
@@ -632,7 +632,7 @@ pub async fn create_test_session_with_mtls(
     mtls_cert_thumbprint: &str,
 ) -> String {
     use crate::services::auth::{CreateOAuthTokenParams, create_oauth_access_token};
-    use crate::services::oidc::scope::ScopeSet;
+    use crate::services::oidc::ScopeSet;
     use secrecy::ExposeSecret;
 
     let result = create_oauth_access_token(
@@ -897,7 +897,7 @@ pub fn make_test_oidc_key() -> OidcSigningKey {
 /// Create a test ES256 access token signed by the given OIDC key.
 pub async fn make_test_access_token(key: &OidcSigningKey) -> String {
     use crate::services::auth::AccessTokenClaims;
-    use crate::services::oidc::scope::ScopeSet;
+    use crate::services::oidc::ScopeSet;
 
     let claims = AccessTokenClaims {
         iss: TEST_ISSUER.to_string(),

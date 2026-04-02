@@ -13,8 +13,7 @@ use super::{
     GitHubError, GitHubInstallationId, GitHubResult, GitHubService,
     list_user_accessible_installations,
 };
-use crate::db::documents::audit::GitHubCredentialAuditData;
-use crate::db::{self, User};
+use crate::db::{self, GitHubCredentialAuditData, User};
 
 // ============================================================================
 // Installation Connection Types

@@ -25,12 +25,11 @@ use crate::{
     handlers::browser_login::hmac_sha256_base64url,
     handlers::oidc::build_authorization_success_redirect_url,
     handlers::session::create_session_cookie,
-    services::auth::{CreateOAuthTokenParams, create_oauth_access_token},
+    services::auth::{ACR_AAL3, AuthMethod, CreateOAuthTokenParams, create_oauth_access_token},
     services::oidc::{
-        amr::{ACR_AAL3, AuthMethod},
+        ScopeSet,
         authorization::{AuthorizationCodeParams, CodeChallengeMethod, issue_authorization_code},
         fapi::auth_code_lifetime_seconds,
-        scope::ScopeSet,
     },
 };
 
@@ -188,7 +187,7 @@ pub async fn complete_login(
 
     // ── 8. Build redirect URL ─────────────────────────────────────────────
     // When response_mode is JARM, wrap the response in a signed JWT.
-    use crate::db::documents::oauth::ResponseMode;
+    use crate::db::ResponseMode;
     let redirect_url = if pending.response_mode == ResponseMode::Jwt {
         match crate::services::oidc::jarm::build_jarm_success_jwt(
             &state,
@@ -310,7 +309,7 @@ pub async fn deny_login(
 
     // Redirect to callback with access_denied error (RFC 6749 Section 4.1.2.1).
     // When response_mode is JARM, wrap the error in a signed JWT.
-    use crate::db::documents::oauth::ResponseMode;
+    use crate::db::ResponseMode;
     let redirect_url = if pending.response_mode == ResponseMode::Jwt {
         let client = match db::get_oauth_client_by_client_id(&state.store, &pending.client_id).await
         {

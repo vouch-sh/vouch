@@ -17,14 +17,12 @@ use crate::AppState;
 use crate::crypto::jwt::JwtType;
 use crate::db::{self, AuthEventParams, AuthEventType};
 use crate::services::auth::{
-    AuthenticatorLookupParams, CreateOAuthTokenParams, LoginAssertionParams,
+    ACR_AAL3, AuthMethod, AuthenticatorLookupParams, CreateOAuthTokenParams, LoginAssertionParams,
     create_oauth_access_token, lookup_and_verify_authenticator, verify_login_assertion,
 };
-use crate::services::oidc::amr::{ACR_AAL3, AuthMethod};
 use crate::services::oidc::authorization_details::AuthorizationDetails;
-use crate::services::oidc::dpop::ValidatedDpopProof;
-use crate::services::oidc::scope::ScopeSet;
 use crate::services::oidc::token::AuthenticatedClient;
+use crate::services::oidc::{ScopeSet, ValidatedDpopProof};
 use crate::services::{OAuthErrorCode, ServiceError, ServiceResult};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
