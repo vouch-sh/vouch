@@ -162,9 +162,13 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # OIDC Certification
           - plan: oidcc-basic-certification-test-plan
             plan-label: OIDC Basic OP
             config: scripts/certification/config/oidcc-basic.json
+          - plan: oidcc-config-certification-test-plan
+            plan-label: OIDC Config OP
+            config: scripts/certification/config/oidcc-config.json
           # FAPI 2.0 Security Profile — columns 1-5
           - plan: fapi2-security-profile-final-test-plan
             plan-label: FAPI2SP PK+DPoP
@@ -178,13 +182,19 @@ jobs:
           - plan: fapi2-security-profile-final-test-plan
             plan-label: FAPI2SP PK+MTLS
             config: scripts/certification/config/fapi2-sp-pk-mtls.json
-          # FAPI 2.0 Message Signing — columns 6-7
+          # FAPI 2.0 Message Signing — columns 6-9
           - plan: fapi2-message-signing-final-test-plan
             plan-label: FAPI2MS JAR
             config: scripts/certification/config/fapi2-message-signing.json
           - plan: fapi2-message-signing-final-test-plan
             plan-label: FAPI2MS JARM
             config: scripts/certification/config/fapi2-ms-jarm.json
+          - plan: fapi2-message-signing-final-test-plan
+            plan-label: FAPI2MS MTLS
+            config: scripts/certification/config/fapi2-ms-mtls.json
+          - plan: fapi2-message-signing-final-test-plan
+            plan-label: FAPI2MS MTLS+JARM
+            config: scripts/certification/config/fapi2-ms-mtls-jarm.json
 
     steps:
       # GHAS "checkout of untrusted code in privileged workflow_run" is a

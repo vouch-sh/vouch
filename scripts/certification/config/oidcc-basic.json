@@ -1,5 +1,5 @@
 {
-  "description": "Vouch {VERSION} OIDC Basic OP",
+  "description": "vouch-server/{VERSION} (https://github.com/vouch-sh/vouch)",
   "variant": {
     "server_metadata": "discovery",
     "client_registration": "dynamic_client"

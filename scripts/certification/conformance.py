@@ -3,6 +3,10 @@
 """
 API client for the OpenID Foundation conformance suite.
 
+Works with both the public certification server (certification.openid.net,
+requires a bearer token) and a local devmode instance (self-signed TLS,
+no token required).
+
 Usage:
     from conformance import ConformanceClient
     client = ConformanceClient()
@@ -14,11 +18,11 @@ Usage:
 import json
 import logging
 import os
+import ssl
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from pathlib import Path
 from typing import Any
 
 log = logging.getLogger(__name__)
@@ -28,7 +32,7 @@ CONFORMANCE_SERVER = os.environ.get(
     "CONFORMANCE_SERVER", "https://www.certification.openid.net/"
 ).rstrip("/")
 
-# Bearer token for the conformance API (required)
+# Bearer token for the conformance API (empty = no auth header)
 CONFORMANCE_TOKEN = os.environ.get("CONFORMANCE_TOKEN", "")
 
 # How often to poll for test module state changes (seconds)
@@ -43,51 +47,78 @@ class ConformanceError(Exception):
 
 
 class ConformanceClient:
-    """HTTP client for certification.openid.net."""
+    """HTTP client for certification.openid.net or a local instance."""
 
     def __init__(
         self,
         server: str = CONFORMANCE_SERVER,
         token: str = CONFORMANCE_TOKEN,
+        verify_ssl: bool = True,
     ) -> None:
         self.server = server.rstrip("/")
         self.token = token
+        self._ssl_ctx: ssl.SSLContext | None = None
+        if not verify_ssl:
+            ctx = ssl.create_default_context()
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+            self._ssl_ctx = ctx
+
+    def _headers(self) -> dict[str, str]:
+        if self.token:
+            return {"Authorization": f"Bearer {self.token}"}
+        return {}
 
     def _get(self, path: str, params: dict | None = None) -> Any:
         return json.loads(self._get_bytes(path, params=params))
 
-    def _get_bytes(self, path: str, params: dict | None = None) -> bytes:
+    def _get_bytes(
+        self, path: str, params: dict | None = None
+    ) -> bytes:
         url = f"{self.server}{path}"
         if params:
             url = f"{url}?{urllib.parse.urlencode(params)}"
-        req = urllib.request.Request(url, headers={"Authorization": f"Bearer {self.token}"})
+        req = urllib.request.Request(url, headers=self._headers())
         try:
-            with urllib.request.urlopen(req) as resp:
+            with urllib.request.urlopen(
+                req, context=self._ssl_ctx
+            ) as resp:
                 return resp.read()
         except urllib.error.HTTPError as e:
             raise ConformanceError(
-                f"GET {path} failed: HTTP {e.code}: {e.read().decode()}"
+                f"GET {path} failed: HTTP {e.code}: "
+                f"{e.read().decode()}"
             ) from e
 
-    def _post(self, path: str, params: dict | None = None, body: Any = None) -> Any:
+    def _post(
+        self,
+        path: str,
+        params: dict | None = None,
+        body: Any = None,
+    ) -> Any:
         url = f"{self.server}{path}"
         if params:
             url = f"{url}?{urllib.parse.urlencode(params)}"
-        headers: dict[str, str] = {"Authorization": f"Bearer {self.token}"}
+        headers = self._headers()
         data: bytes | None = None
         if body is not None:
             data = json.dumps(body).encode()
             headers["Content-Type"] = "application/json"
-        req = urllib.request.Request(url, data=data, method="POST", headers=headers)
+        req = urllib.request.Request(
+            url, data=data, method="POST", headers=headers
+        )
         try:
-            with urllib.request.urlopen(req) as resp:
+            with urllib.request.urlopen(
+                req, context=self._ssl_ctx
+            ) as resp:
                 return json.loads(resp.read())
         except urllib.error.HTTPError as e:
             raise ConformanceError(
-                f"POST {path} failed: HTTP {e.code}: {e.read().decode()}"
+                f"POST {path} failed: HTTP {e.code}: "
+                f"{e.read().decode()}"
             ) from e
 
-    # ── Plan management ──────────────────────────────────────────────────────
+    # ── Plan management ──────────────────────────────────────────────────
 
     def create_test_plan(
         self,
@@ -101,9 +132,13 @@ class ConformanceClient:
             params["variant"] = json.dumps(variant)
         log.info("Creating test plan %s", plan_name)
         data = self._post("/api/plan", params=params, body=config)
-        plan_id = data.get("id") or data.get("plan", {}).get("id")
+        plan_id = (
+            data.get("id") or data.get("plan", {}).get("id")
+        )
         if not plan_id:
-            raise ConformanceError(f"No plan ID in create response: {data}")
+            raise ConformanceError(
+                f"No plan ID in create response: {data}"
+            )
         log.info("Created plan %s with ID %s", plan_name, plan_id)
         return plan_id
 
@@ -111,27 +146,48 @@ class ConformanceClient:
         """Fetch plan details including the list of test modules."""
         return self._get(f"/api/plan/{plan_id}")
 
-    def get_plan_modules(self, plan_id: str) -> list[dict[str, Any]]:
+    def get_plan_modules(
+        self, plan_id: str
+    ) -> list[dict[str, Any]]:
         """Return the list of test module descriptors for a plan."""
         plan = self.get_test_plan(plan_id)
         modules = plan.get("modules", [])
         if not modules:
-            raise ConformanceError(f"Plan {plan_id} has no modules")
+            raise ConformanceError(
+                f"Plan {plan_id} has no modules"
+            )
         return modules
 
-    # ── Module execution ─────────────────────────────────────────────────────
+    # ── Module execution ─────────────────────────────────────────────────
 
-    def start_test_module(self, plan_id: str, module_name: str) -> str:
+    def start_test_module(
+        self, plan_id: str, module_name: str
+    ) -> str:
         """Start a test module and return the module instance ID."""
-        log.info("Starting module %s in plan %s", module_name, plan_id)
-        data = self._post("/api/runner", params={"plan": plan_id, "test": module_name})
+        log.info(
+            "Starting module %s in plan %s",
+            module_name,
+            plan_id,
+        )
+        data = self._post(
+            "/api/runner",
+            params={"plan": plan_id, "test": module_name},
+        )
         module_id = data.get("id")
         if not module_id:
-            raise ConformanceError(f"No module ID in start response: {data}")
-        log.info("Started module %s with ID %s", module_name, module_id)
+            raise ConformanceError(
+                f"No module ID in start response: {data}"
+            )
+        log.info(
+            "Started module %s with ID %s",
+            module_name,
+            module_id,
+        )
         return module_id
 
-    def get_module_info(self, module_id: str) -> dict[str, Any]:
+    def get_module_info(
+        self, module_id: str
+    ) -> dict[str, Any]:
         """Fetch module instance status and results."""
         return self._get(f"/api/info/{module_id}")
 
@@ -149,16 +205,21 @@ class ConformanceClient:
         if terminal_states is None:
             # FINISHED = test completed normally
             # INTERRUPTED = test was interrupted (counts as done)
-            # FAILED = test framework error (distinct from FAILED test result)
-            # Note: WAITING means the suite is waiting for browser interaction;
-            # we do NOT treat it as terminal since our browser task handles it.
-            terminal_states = {"FINISHED", "INTERRUPTED", "FAILED"}
+            # FAILED = test framework error
+            # WAITING is NOT terminal — browser tasks handle it.
+            terminal_states = {
+                "FINISHED",
+                "INTERRUPTED",
+                "FAILED",
+            }
 
         deadline = time.monotonic() + timeout
         while True:
             info = self.get_module_info(module_id)
             status = info.get("status", "")
-            log.debug("Module %s status: %s", module_id, status)
+            log.debug(
+                "Module %s status: %s", module_id, status
+            )
 
             if status in terminal_states:
                 return info
@@ -166,24 +227,34 @@ class ConformanceClient:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise ConformanceError(
-                    f"Module {module_id} did not complete within {timeout}s "
+                    f"Module {module_id} did not complete "
+                    f"within {timeout}s "
                     f"(last status: {status})"
                 )
 
             time.sleep(min(POLL_INTERVAL, remaining))
 
-    # ── Module logs ─────────────────────────────────────────────────────────
+    # ── Module logs ──────────────────────────────────────────────────────
 
-    def get_module_log(self, module_id: str) -> list[dict[str, Any]]:
+    def get_module_log(
+        self, module_id: str
+    ) -> list[dict[str, Any]]:
         """Fetch the full structured log for a test module."""
         return self._get(f"/api/log/{module_id}")
 
-    # ── Certification ────────────────────────────────────────────────────────
+    # ── Certification ────────────────────────────────────────────────────
 
-    def create_certification_package(self, plan_id: str) -> dict[str, Any]:
-        """Generate an official certification package for a passing plan."""
-        log.info("Creating certification package for plan %s", plan_id)
-        return self._post(f"/api/plan/{plan_id}/certificationpackage")
+    def create_certification_package(
+        self, plan_id: str
+    ) -> dict[str, Any]:
+        """Generate an official certification package."""
+        log.info(
+            "Creating certification package for plan %s",
+            plan_id,
+        )
+        return self._post(
+            f"/api/plan/{plan_id}/certificationpackage"
+        )
 
 
 def format_log_entry(entry: dict) -> str | None:
@@ -197,7 +268,10 @@ def format_log_entry(entry: dict) -> str | None:
     msg = entry.get("msg", "")
 
     # Skip noise: only show failures, warnings, and HTTP exchanges.
-    if result in ("SUCCESS", "INFO", "") and "http" not in entry:
+    if (
+        result in ("SUCCESS", "INFO", "")
+        and "http" not in entry
+    ):
         return None
 
     lines = []
@@ -226,12 +300,20 @@ def format_log_entry(entry: dict) -> str | None:
             method = req.get("method", "?")
             url = req.get("url", "?")
             lines.append(f"  request: {method} {url}")
+            headers = req.get("headers", {})
+            if headers:
+                for k, v in headers.items():
+                    lines.append(f"    {k}: {v}")
             body = req.get("body", "")
             if body:
                 lines.append(f"    body: {body}")
         if resp:
             status = resp.get("status", "?")
             lines.append(f"  response: HTTP {status}")
+            headers = resp.get("headers", {})
+            if headers:
+                for k, v in headers.items():
+                    lines.append(f"    {k}: {v}")
             body = resp.get("body", "")
             if body:
                 lines.append(f"    body: {body}")
@@ -241,21 +323,34 @@ def format_log_entry(entry: dict) -> str | None:
         val = entry.get(key)
         if val is not None:
             if isinstance(val, (dict, list)):
-                lines.append(f"  {key}: {json.dumps(val, indent=2)}")
+                lines.append(
+                    f"  {key}: {json.dumps(val, indent=2)}"
+                )
             else:
                 lines.append(f"  {key}: {val}")
 
     return "\n".join(lines)
 
 
-def format_module_log(entries: list[dict]) -> str:
+def format_module_log(
+    entries: list[dict], verbose: bool = False
+) -> str:
     """Format a module's log entries for debugging.
 
-    Shows only failures, warnings, and HTTP exchanges.
+    By default only shows failures, warnings, and HTTP
+    exchanges. With verbose=True, shows everything.
     """
     lines = []
     for entry in entries:
-        formatted = format_log_entry(entry)
-        if formatted:
-            lines.append(formatted)
+        if verbose:
+            result = entry.get("result", "")
+            src = entry.get("src", "")
+            msg = entry.get("msg", "")
+            if msg or src:
+                prefix = f"[{result}] " if result else ""
+                lines.append(f"{prefix}{src}: {msg}")
+        else:
+            formatted = format_log_entry(entry)
+            if formatted:
+                lines.append(formatted)
     return "\n".join(lines)

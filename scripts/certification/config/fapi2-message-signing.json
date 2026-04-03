@@ -1,5 +1,5 @@
 {
-  "description": "Vouch {VERSION} FAPI 2.0 Message Signing",
+  "description": "vouch-server/{VERSION} (https://github.com/vouch-sh/vouch)",
   "variant": {
     "openid": "openid_connect",
     "client_auth_type": "private_key_jwt",

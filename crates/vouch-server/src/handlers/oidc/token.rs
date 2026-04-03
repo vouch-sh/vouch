@@ -541,6 +541,25 @@ async fn handle_authorization_code_grant(
         return e.into_oauth_response().into_response();
     }
 
+    // RFC 8705 Section 3: When the client requires certificate-bound access
+    // tokens, a client certificate MUST be present. Without a cert the token
+    // would be issued without a cnf.x5t#S256 binding, violating the client's
+    // registered constraint. DPoP is accepted as an alternative sender
+    // constraint mechanism.
+    if let Some(auth) = authenticated_client
+        && auth.client.tls_client_certificate_bound_access_tokens
+        && !has_mtls_cert
+        && dpop_proof.is_none()
+    {
+        return ServiceError::oauth(
+            OAuthErrorCode::InvalidRequest,
+            "Client requires certificate-bound access tokens \
+             but no client certificate was presented",
+        )
+        .into_oauth_response()
+        .into_response();
+    }
+
     // RFC 8705 Section 3: Bind access token to cert thumbprint only when opted in.
     let mtls_thumbprint =
         authenticated_client.and_then(|auth| extract_mtls_thumbprint(auth, &client_cert));
