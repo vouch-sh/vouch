@@ -169,19 +169,52 @@ impl Listener for MtlsListener {
 ///
 /// Clients may also connect without a certificate — the application
 /// layer handles unauthenticated connections.
+///
+/// Supports TLS 1.3 and TLS 1.2 with BCP 195 (RFC 9325) cipher suites.
+/// TLS 1.2 is needed for FAPI2 conformance suite `RequireOnlyBCP195
+/// RecommendedCiphersForTLS12` checks. Only ECDHE+AEAD suites are
+/// permitted for TLS 1.2.
 pub(crate) fn build_mtls_server_config(
     server_cert_der: Vec<rustls::pki_types::CertificateDer<'static>>,
     server_key_der: rustls::pki_types::PrivateKeyDer<'static>,
 ) -> anyhow::Result<Arc<rustls::ServerConfig>> {
     let client_verifier = Arc::new(AcceptAnyClientCert);
 
-    let mut config =
-        rustls::ServerConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
-            .with_client_cert_verifier(client_verifier)
-            .with_single_cert(server_cert_der, server_key_der)
-            .map_err(|e| anyhow::anyhow!("Failed to build mTLS server config: {e}"))?;
+    // BCP 195 (RFC 9325): Only ECDHE+AEAD cipher suites for TLS 1.2.
+    // All TLS 1.3 suites are BCP 195 compliant by design.
+    let provider = rustls::crypto::aws_lc_rs::default_provider();
+    let bcp195_suites: Vec<rustls::SupportedCipherSuite> = provider
+        .cipher_suites
+        .iter()
+        .filter(|cs| {
+            matches!(
+                cs.suite(),
+                // TLS 1.3 suites (all BCP 195 compliant)
+                rustls::CipherSuite::TLS13_AES_128_GCM_SHA256
+                    | rustls::CipherSuite::TLS13_AES_256_GCM_SHA384
+                    | rustls::CipherSuite::TLS13_CHACHA20_POLY1305_SHA256
+                    // TLS 1.2 ECDHE+AEAD suites (BCP 195 recommended)
+                    | rustls::CipherSuite::TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256
+                    | rustls::CipherSuite::TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384
+                    | rustls::CipherSuite::TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256
+                    | rustls::CipherSuite::TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384
+            )
+        })
+        .copied()
+        .collect();
 
-    // TLS 1.3 only, ALPN h2/http1.1
+    let filtered_provider = rustls::crypto::CryptoProvider {
+        cipher_suites: bcp195_suites,
+        ..provider
+    };
+
+    let mut config = rustls::ServerConfig::builder_with_provider(Arc::new(filtered_provider))
+        .with_protocol_versions(&[&rustls::version::TLS13, &rustls::version::TLS12])
+        .map_err(|e| anyhow::anyhow!("Failed to configure TLS versions: {e}"))?
+        .with_client_cert_verifier(client_verifier)
+        .with_single_cert(server_cert_der, server_key_der)
+        .map_err(|e| anyhow::anyhow!("Failed to build mTLS server config: {e}"))?;
+
     config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
 
     Ok(Arc::new(config))

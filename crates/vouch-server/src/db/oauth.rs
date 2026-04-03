@@ -173,6 +173,10 @@ pub struct CreateOAuthClientParams<'a> {
     pub authorization_signed_response_alg: Option<JwsAlgorithm>,
     /// RFC 9701: Introspection response signing algorithm.
     pub introspection_signed_response_alg: Option<JwsAlgorithm>,
+    /// RFC 9101: Request object signing algorithm.
+    pub request_object_signing_alg: Option<JwsAlgorithm>,
+    /// RFC 9101: Whether signed request objects are required.
+    pub require_signed_request_object: Option<bool>,
 }
 
 /// Create a new OAuth client application.
@@ -198,8 +202,8 @@ pub async fn create_oauth_client(
         jwks_uri_cached_at: None,
         jwks_uri_cache: None,
         token_endpoint_auth_method: params.token_endpoint_auth_method.unwrap_or_default(),
-        request_object_signing_alg: None,
-        require_signed_request_object: None,
+        request_object_signing_alg: params.request_object_signing_alg,
+        require_signed_request_object: params.require_signed_request_object,
         fapi_profile: params.fapi_profile.unwrap_or_default(),
         dpop_bound_access_tokens: params.dpop_bound_access_tokens.unwrap_or(false),
         grant_types: params.grant_types.map(<[String]>::to_vec),
@@ -1056,6 +1060,8 @@ mod tests {
                 tls_client_certificate_bound_access_tokens: None,
                 authorization_signed_response_alg: None,
                 introspection_signed_response_alg: None,
+                request_object_signing_alg: None,
+                require_signed_request_object: None,
             },
         )
         .await

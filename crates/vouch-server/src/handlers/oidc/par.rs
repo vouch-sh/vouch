@@ -207,6 +207,19 @@ pub async fn par(
         return par_error_response(StatusCode::UNAUTHORIZED, "invalid_client", &desc);
     }
 
+    // RFC 9101: Enforce require_signed_request_object for this client.
+    // If the client requires signed request objects and no `request` JWT was
+    // provided, reject the PAR request.
+    if authenticated_client.client.require_signed_request_object == Some(true)
+        && params.request.is_none()
+    {
+        return par_error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_request_object",
+            "This client requires a signed Request Object (RFC 9101)",
+        );
+    }
+
     // RFC 9449 Section 10: Capture DPoP proof at PAR for authorization code binding.
     // If a DPoP proof is provided, bind the JWK thumbprint to the PAR record so
     // that the same key must be used at the token endpoint.

@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 //! TLS configuration for optional HTTPS support with hot reloading.
 //!
-//! Enforces TLS 1.3 only — TLS 1.2 is compiled out via rustls feature flags
-//! and explicitly excluded via `builder_with_protocol_versions`. This eliminates
-//! CBC mode attacks, RSA key exchange, and protocol downgrade vectors.
+//! The main HTTPS listener enforces TLS 1.3 only via
+//! `builder_with_protocol_versions`. The mTLS listener (see
+//! `mtls_listener.rs`) additionally supports TLS 1.2 with BCP 195
+//! cipher suites for FAPI2 conformance suite compatibility.
 
 use std::sync::Arc;
 

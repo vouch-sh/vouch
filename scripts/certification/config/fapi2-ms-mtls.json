@@ -3,10 +3,13 @@
   "variant": {
     "openid": "openid_connect",
     "client_auth_type": "mtls",
-    "sender_constrain": "dpop",
-    "fapi_profile": "plain_fapi"
+    "sender_constrain": "mtls",
+    "fapi_profile": "plain_fapi",
+    "fapi_request_method": "signed_non_repudiation",
+    "fapi_response_mode": "plain_response",
+    "authorization_request_type": "simple"
   },
-  "client_alias": "vouch-fapi2-sp-mtls-dpop",
+  "client_alias": "vouch-fapi2-ms-mtls",
   "server": {
     "discoveryUrl": "{BASEURL}/.well-known/openid-configuration"
   },

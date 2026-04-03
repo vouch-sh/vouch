@@ -60,7 +60,7 @@ p256 = { workspace = true, features = ["alloc", "ecdsa", "pkcs8", "pem"] }
 reqwest = { workspace = true, features = ["json", "rustls", "form"] }
 roxmltree = { workspace = true }
 rust-embed = { workspace = true, features = ["axum-ex", "deterministic-timestamps", "mime-guess"] }
-rustls = { workspace = true, features = ["aws-lc-rs", "std", "prefer-post-quantum"] }
+rustls = { workspace = true, features = ["aws-lc-rs", "std", "prefer-post-quantum", "tls12"] }
 rustls-pemfile = { workspace = true, features = ["std"] }
 sea-query = { workspace = true, features = ["backend-sqlite", "backend-postgres", "derive"] }
 sea-query-binder = { workspace = true, features = ["sqlx-sqlite", "sqlx-postgres", "runtime-tokio"] }

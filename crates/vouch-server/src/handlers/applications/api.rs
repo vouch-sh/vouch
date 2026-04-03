@@ -297,6 +297,8 @@ pub async fn create_application_api(
             tls_client_certificate_bound_access_tokens: None,
             authorization_signed_response_alg: None,
             introspection_signed_response_alg: None,
+            request_object_signing_alg: None,
+            require_signed_request_object: None,
         },
     )
     .await

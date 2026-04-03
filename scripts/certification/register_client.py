@@ -7,7 +7,21 @@ Reads client_alias and variant from the plan config JSON, then:
   - tls_client_auth           (FAPI 2.0 MTLS plans — generates self-signed cert)
 
 Writes CLIENT_ID, CLIENT_SECRET, CLIENT_JWKS, and optionally MTLS_CERT,
-MTLS_KEY, TLS_CLIENT_AUTH_SUBJECT_DN to GITHUB_ENV.
+MTLS_KEY, TLS_CLIENT_AUTH_SUBJECT_DN to GITHUB_ENV (CI) or shell exports (local).
+
+Usage:
+    # CI (writes to GITHUB_ENV):
+    python3 register_client.py \\
+        --plan fapi2-security-profile-final-test-plan \\
+        --config config/fapi2-security-profile.json \\
+        --vouch-url http://localhost:3000
+
+    # Local dev with shell eval:
+    eval $(python3 register_client.py \\
+        --plan fapi2-security-profile-final-test-plan \\
+        --config config/fapi2-security-profile.json \\
+        --vouch-url https://localhost:9443 \\
+        --conformance-url https://localhost.emobix.co.uk:8443)
 """
 
 import argparse
@@ -16,9 +30,13 @@ import datetime
 import json
 import os
 import re
+import ssl
 import sys
 import urllib.request
 from pathlib import Path
+
+
+CONFORMANCE_BASE_URL = "https://www.certification.openid.net"
 
 
 def parse_variant(raw: str) -> dict[str, str]:
@@ -103,16 +121,16 @@ def generate_ec_jwk(key_dir: Path) -> tuple[dict, dict]:
 
 
 def build_payload(
-    plan: str,
     client_alias: str,
     public_jwks: dict | None,
+    conformance_base_url: str = CONFORMANCE_BASE_URL,
     is_second_client: bool = False,
     client_auth_type: str = "private_key_jwt",
     sender_constrain: str = "dpop",
     subject_dn: str = "",
 ) -> dict:
     conformance_redirect = (
-        f"https://www.certification.openid.net/test/a/{client_alias}/callback"
+        f"{conformance_base_url.rstrip('/')}/test/a/{client_alias}/callback"
     )
     if public_jwks is None:
         return {
@@ -155,16 +173,21 @@ def build_payload(
     return payload
 
 
-def post_dcr(vouch_url: str, payload: dict) -> dict:
+def post_dcr(vouch_url: str, payload: dict, verify_ssl: bool = True) -> dict:
     url = vouch_url.rstrip("/") + "/oauth/register"
     data = json.dumps(payload).encode()
+    ctx: ssl.SSLContext | None = None
+    if not verify_ssl:
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
     req = urllib.request.Request(
         url,
         data=data,
         headers={"Content-Type": "application/json"},
         method="POST",
     )
-    with urllib.request.urlopen(req) as resp:  # noqa: S310
+    with urllib.request.urlopen(req, context=ctx) as resp:  # noqa: S310
         return json.loads(resp.read())
 
 
@@ -175,9 +198,10 @@ def write_github_env(env: dict[str, str]) -> None:
             for k, v in env.items():
                 f.write(f"{k}={v}\n")
     else:
-        # Local dev: just print
+        # Local dev: shell-evaluable export statements (use with eval $(...))
         for k, v in env.items():
-            print(f"{k}={v}")
+            safe = v.replace("'", "'\\''")
+            print(f"export {k}='{safe}'")
 
 
 def main() -> None:
@@ -195,9 +219,20 @@ def main() -> None:
         help="Base URL of the Vouch server",
     )
     parser.add_argument(
+        "--conformance-url",
+        default=CONFORMANCE_BASE_URL,
+        help="Conformance suite base URL for redirect URIs "
+        f"(default: {CONFORMANCE_BASE_URL})",
+    )
+    parser.add_argument(
         "--key-dir",
         default="/tmp/vouch-cert-keys",
         help="Directory for generated key files",
+    )
+    parser.add_argument(
+        "--no-verify-ssl",
+        action="store_true",
+        help="Disable SSL certificate verification (for local self-signed certs)",
     )
     args = parser.parse_args()
 
@@ -232,15 +267,16 @@ def main() -> None:
         )
         print("mTLS client cert generated")
 
+    verify_ssl = not args.no_verify_ssl
     payload = build_payload(
-        args.plan,
         client_alias,
         public_jwks,
+        conformance_base_url=args.conformance_url,
         client_auth_type=client_auth_type,
         sender_constrain=sender_constrain,
         subject_dn=subject_dn,
     )
-    response = post_dcr(args.vouch_url, payload)
+    response = post_dcr(args.vouch_url, payload, verify_ssl=verify_ssl)
     print(f"DCR response: {json.dumps(response)}")
 
     client_jwks = (
@@ -276,15 +312,15 @@ def main() -> None:
             print("mTLS client cert generated for client2")
 
         payload2 = build_payload(
-            args.plan,
             client_alias,
             public_jwks2,
+            conformance_base_url=args.conformance_url,
             is_second_client=True,
             client_auth_type=client_auth_type,
             sender_constrain=sender_constrain,
             subject_dn=subject_dn2,
         )
-        response2 = post_dcr(args.vouch_url, payload2)
+        response2 = post_dcr(args.vouch_url, payload2, verify_ssl=verify_ssl)
         print(f"DCR response (client2): {json.dumps(response2)}")
         env["CLIENT2_ID"] = response2["client_id"]
         env["CLIENT2_SECRET"] = response2.get("client_secret", "")

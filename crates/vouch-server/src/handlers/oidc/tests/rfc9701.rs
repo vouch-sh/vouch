@@ -47,6 +47,8 @@ async fn create_test_client_with_introspection_jwt(
             tls_client_certificate_bound_access_tokens: None,
             authorization_signed_response_alg: None,
             introspection_signed_response_alg: Some(JwsAlgorithm::Es256),
+            request_object_signing_alg: None,
+            require_signed_request_object: None,
         },
     )
     .await

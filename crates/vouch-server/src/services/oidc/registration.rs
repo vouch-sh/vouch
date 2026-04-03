@@ -126,6 +126,10 @@ pub struct RegistrationRequest {
     pub authorization_signed_response_alg: Option<String>,
     /// RFC 9701 Section 6.1: Introspection response signing algorithm.
     pub introspection_signed_response_alg: Option<String>,
+    /// RFC 9101: Algorithm for Request Object signing.
+    pub request_object_signing_alg: Option<String>,
+    /// RFC 9101: Whether this client requires signed request objects.
+    pub require_signed_request_object: Option<bool>,
 }
 
 /// RFC 7591 Section 3.2.1: Client Information Response.
@@ -187,6 +191,12 @@ pub struct RegistrationResponse {
     /// RFC 9701 Section 6.1: Introspection response signing algorithm.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub introspection_signed_response_alg: Option<String>,
+    /// RFC 9101: Algorithm for Request Object signing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_object_signing_alg: Option<String>,
+    /// RFC 9101: Whether signed request objects are required.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub require_signed_request_object: Option<bool>,
 }
 
 // ============================================================================
@@ -379,6 +389,34 @@ pub async fn register_client(
             None
         };
 
+    // 12d. Validate request_object_signing_alg (RFC 9101).
+    let req_obj_alg: Option<JwsAlgorithm> = if let Some(ref s) = request.request_object_signing_alg
+    {
+        let parsed = s.parse::<JwsAlgorithm>().map_err(|_| {
+            ServiceError::oauth(
+                OAuthErrorCode::InvalidClientMetadata,
+                format!("Unsupported request_object_signing_alg: '{s}'"),
+            )
+        })?;
+        // FAPI 2.0 Section 5.4: RS256 is not permitted for FAPI clients.
+        if parsed == JwsAlgorithm::Rs256 && fapi_profile != FapiProfile::None {
+            return Err(ServiceError::oauth(
+                OAuthErrorCode::InvalidClientMetadata,
+                "RS256 is not permitted for FAPI 2.0 request objects. Use ES256",
+            ));
+        }
+        Some(parsed)
+    } else {
+        None
+    };
+
+    // Determine require_signed_request_object:
+    // - Explicit request value takes precedence
+    // - FAPI 2.0 clients with request_object_signing_alg always require it
+    let require_signed = request
+        .require_signed_request_object
+        .unwrap_or(fapi_profile != FapiProfile::None && req_obj_alg.is_some());
+
     // 13. Infer application type
     let app_type = determine_client_type(
         &validated.grant_types,
@@ -434,6 +472,8 @@ pub async fn register_client(
                 .tls_client_certificate_bound_access_tokens,
             authorization_signed_response_alg: jarm_alg,
             introspection_signed_response_alg: introspection_alg,
+            request_object_signing_alg: req_obj_alg,
+            require_signed_request_object: if require_signed { Some(true) } else { None },
         },
     )
     .await
@@ -531,6 +571,8 @@ pub async fn register_client(
         id_token_signed_response_alg: id_token_alg.to_string(),
         authorization_signed_response_alg: jarm_alg.map(|a| a.to_string()),
         introspection_signed_response_alg: introspection_alg.map(|a| a.to_string()),
+        request_object_signing_alg: req_obj_alg.map(|a| a.to_string()),
+        require_signed_request_object: if require_signed { Some(true) } else { None },
     })
 }
 
@@ -1056,6 +1098,8 @@ fn build_client_response(client: &OAuthClient, base_url: &str) -> RegistrationRe
         introspection_signed_response_alg: client
             .introspection_signed_response_alg
             .map(|a| a.to_string()),
+        request_object_signing_alg: client.request_object_signing_alg.map(|a| a.to_string()),
+        require_signed_request_object: client.require_signed_request_object,
     }
 }
 
@@ -1959,6 +2003,8 @@ mod tests {
             id_token_signed_response_alg: "ES256".to_string(),
             authorization_signed_response_alg: None,
             introspection_signed_response_alg: None,
+            request_object_signing_alg: None,
+            require_signed_request_object: None,
         };
 
         let json = serde_json::to_string(&response).unwrap();
@@ -2021,6 +2067,8 @@ mod tests {
             id_token_signed_response_alg: "ES256".to_string(),
             authorization_signed_response_alg: None,
             introspection_signed_response_alg: None,
+            request_object_signing_alg: None,
+            require_signed_request_object: None,
         };
 
         let json = serde_json::to_string(&response).unwrap();
