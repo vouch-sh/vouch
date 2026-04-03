@@ -310,9 +310,9 @@ def cmd_rerun_failures(
 
     print(f"Rerunning {len(failed)} failed module(s): {', '.join(failed)}")
 
-    if not args.config or not args.plan:
+    if not args.config or not args.plan or not args.base_url:
         print(
-            "ERROR: --config and --plan are required for --rerun-failures\n"
+            "ERROR: --config, --plan, and --base-url are required for --rerun-failures\n"
             f"  Last plan was: {state['plan_name']}",
             file=sys.stderr,
         )
