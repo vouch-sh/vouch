@@ -461,7 +461,7 @@ pub async fn admin_revoke_scim_token(
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used, clippy::unwrap_used)]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::indexing_slicing)]
 mod tests {
     use axum::http::StatusCode;
     use secrecy::ExposeSecret;
@@ -647,6 +647,346 @@ mod tests {
         assert!(
             diff_secs >= expected_secs - 5 && diff_secs <= expected_secs + 5,
             "365 days should be ~{expected_secs}s, got {diff_secs}s"
+        );
+    }
+
+    // ================================================================
+    // Authenticated CRUD — Create (positive)
+    // ================================================================
+
+    #[tokio::test]
+    async fn test_create_scim_token_succeeds() {
+        let (app, state) = test_app().await;
+        let org = create_test_org(&state.store, "example.com").await;
+        let admin = create_test_user_in_org(&state.store, "admin@example.com", &org.id, true).await;
+        let auth_id = create_test_authenticator(&state.store, &admin.id).await;
+        let token = create_test_session(&state, &admin.id, &admin.email, &auth_id).await;
+        let auth_header = format!("Bearer {token}");
+
+        let (status, body) = http_post_json(
+            &app,
+            "/api/v1/org/scim-tokens",
+            r#"{"description": "CI provisioning", "expires_in_days": 30}"#,
+            &[("Authorization", &auth_header)],
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK, "body: {body}");
+        let resp: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
+        assert!(resp["id"].as_str().is_some(), "response must contain id");
+        let scim_token = resp["token"].as_str().expect("response must contain token");
+        assert!(
+            scim_token.starts_with("vouch_scim_"),
+            "token must start with vouch_scim_, got: {scim_token}"
+        );
+        assert_eq!(
+            resp["description"].as_str(),
+            Some("CI provisioning"),
+            "description must match"
+        );
+        assert!(
+            resp["expires_at"].as_str().is_some(),
+            "expires_at must be present"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_create_scim_token_custom_expiry() {
+        let (app, state) = test_app().await;
+        let org = create_test_org(&state.store, "example.com").await;
+        let admin = create_test_user_in_org(&state.store, "admin@example.com", &org.id, true).await;
+        let auth_id = create_test_authenticator(&state.store, &admin.id).await;
+        let token = create_test_session(&state, &admin.id, &admin.email, &auth_id).await;
+        let auth_header = format!("Bearer {token}");
+
+        let (status, body) = http_post_json(
+            &app,
+            "/api/v1/org/scim-tokens",
+            r#"{"description": "long-lived", "expires_in_days": 365}"#,
+            &[("Authorization", &auth_header)],
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK, "body: {body}");
+        let resp: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
+        let expires_at_str = resp["expires_at"]
+            .as_str()
+            .expect("expires_at must be present");
+        let expires_at: jiff::Timestamp = expires_at_str
+            .parse()
+            .expect("expires_at must be valid timestamp");
+        let now = jiff::Timestamp::now();
+        let diff_secs = expires_at.duration_since(now).as_secs();
+        let expected_secs: i64 = 365 * 24 * 3600;
+        assert!(
+            diff_secs >= expected_secs - 60 && diff_secs <= expected_secs + 60,
+            "expires_at should be ~365 days from now, diff was {diff_secs}s"
+        );
+    }
+
+    // ================================================================
+    // Authenticated CRUD — Create (negative)
+    // ================================================================
+
+    #[tokio::test]
+    async fn test_create_scim_token_requires_auth() {
+        let (app, _state) = test_app().await;
+
+        let (status, _body) = http_post_json(
+            &app,
+            "/api/v1/org/scim-tokens",
+            r#"{"description": "test", "expires_in_days": 30}"#,
+            &[],
+        )
+        .await;
+
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "missing auth must return 401"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_create_scim_token_requires_admin() {
+        let (app, state) = test_app().await;
+        let org = create_test_org(&state.store, "example.com").await;
+        let member =
+            create_test_user_in_org(&state.store, "member@example.com", &org.id, false).await;
+        let auth_id = create_test_authenticator(&state.store, &member.id).await;
+        let token = create_test_session(&state, &member.id, &member.email, &auth_id).await;
+        let auth_header = format!("Bearer {token}");
+
+        let (status, _body) = http_post_json(
+            &app,
+            "/api/v1/org/scim-tokens",
+            r#"{"description": "test", "expires_in_days": 30}"#,
+            &[("Authorization", &auth_header)],
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::FORBIDDEN, "non-admin must receive 403");
+    }
+
+    #[tokio::test]
+    async fn test_create_scim_token_max_limit() {
+        let (app, state) = test_app().await;
+        let org = create_test_org(&state.store, "example.com").await;
+        let admin = create_test_user_in_org(&state.store, "admin@example.com", &org.id, true).await;
+        let auth_id = create_test_authenticator(&state.store, &admin.id).await;
+        let token = create_test_session(&state, &admin.id, &admin.email, &auth_id).await;
+        let auth_header = format!("Bearer {token}");
+
+        // Create first token
+        let (status, _) = http_post_json(
+            &app,
+            "/api/v1/org/scim-tokens",
+            r#"{"description": "first", "expires_in_days": 30}"#,
+            &[("Authorization", &auth_header)],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "first token must succeed");
+
+        // Create second token
+        let (status, _) = http_post_json(
+            &app,
+            "/api/v1/org/scim-tokens",
+            r#"{"description": "second", "expires_in_days": 30}"#,
+            &[("Authorization", &auth_header)],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "second token must succeed");
+
+        // Third token must be rejected with 409
+        let (status, body) = http_post_json(
+            &app,
+            "/api/v1/org/scim-tokens",
+            r#"{"description": "third", "expires_in_days": 30}"#,
+            &[("Authorization", &auth_header)],
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::CONFLICT,
+            "third token must return 409; body: {body}"
+        );
+    }
+
+    // ================================================================
+    // Authenticated CRUD — List (positive)
+    // ================================================================
+
+    #[tokio::test]
+    async fn test_list_scim_tokens_empty() {
+        let (app, state) = test_app().await;
+        let org = create_test_org(&state.store, "example.com").await;
+        let admin = create_test_user_in_org(&state.store, "admin@example.com", &org.id, true).await;
+        let auth_id = create_test_authenticator(&state.store, &admin.id).await;
+        let token = create_test_session(&state, &admin.id, &admin.email, &auth_id).await;
+        let auth_header = format!("Bearer {token}");
+
+        let (status, body) = http_get(
+            &app,
+            "/api/v1/org/scim-tokens",
+            &[("Authorization", &auth_header)],
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK, "body: {body}");
+        let resp: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
+        let tokens = resp["tokens"].as_array().expect("tokens must be an array");
+        assert!(tokens.is_empty(), "no tokens created, list must be empty");
+    }
+
+    #[tokio::test]
+    async fn test_list_scim_tokens_returns_created() {
+        let (app, state) = test_app().await;
+        let org = create_test_org(&state.store, "example.com").await;
+        let admin = create_test_user_in_org(&state.store, "admin@example.com", &org.id, true).await;
+        let auth_id = create_test_authenticator(&state.store, &admin.id).await;
+        let token = create_test_session(&state, &admin.id, &admin.email, &auth_id).await;
+        let auth_header = format!("Bearer {token}");
+
+        // Create a token
+        let (status, create_body) = http_post_json(
+            &app,
+            "/api/v1/org/scim-tokens",
+            r#"{"description": "listed token", "expires_in_days": 30}"#,
+            &[("Authorization", &auth_header)],
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "create must succeed; body: {create_body}"
+        );
+        let created: serde_json::Value = serde_json::from_str(&create_body).expect("valid JSON");
+        let created_id = created["id"].as_str().expect("id present");
+
+        // List tokens — should contain the created one
+        let (status, list_body) = http_get(
+            &app,
+            "/api/v1/org/scim-tokens",
+            &[("Authorization", &auth_header)],
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "list must succeed; body: {list_body}"
+        );
+        let resp: serde_json::Value = serde_json::from_str(&list_body).expect("valid JSON");
+        let tokens = resp["tokens"].as_array().expect("tokens must be an array");
+        assert_eq!(tokens.len(), 1, "list must contain exactly one token");
+        assert_eq!(
+            tokens[0]["id"].as_str(),
+            Some(created_id),
+            "listed token id must match created id"
+        );
+        assert_eq!(
+            tokens[0]["description"].as_str(),
+            Some("listed token"),
+            "listed token description must match"
+        );
+    }
+
+    // ================================================================
+    // Authenticated CRUD — List (negative)
+    // ================================================================
+
+    #[tokio::test]
+    async fn test_list_scim_tokens_requires_auth() {
+        let (app, _state) = test_app().await;
+
+        let (status, _body) = http_get(&app, "/api/v1/org/scim-tokens", &[]).await;
+
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "missing auth must return 401"
+        );
+    }
+
+    // ================================================================
+    // Authenticated CRUD — Delete (positive)
+    // ================================================================
+
+    #[tokio::test]
+    async fn test_delete_scim_token_succeeds() {
+        let (app, state) = test_app().await;
+        let org = create_test_org(&state.store, "example.com").await;
+        let admin = create_test_user_in_org(&state.store, "admin@example.com", &org.id, true).await;
+        let auth_id = create_test_authenticator(&state.store, &admin.id).await;
+        let token = create_test_session(&state, &admin.id, &admin.email, &auth_id).await;
+        let auth_header = format!("Bearer {token}");
+
+        // Create a token to delete
+        let (status, create_body) = http_post_json(
+            &app,
+            "/api/v1/org/scim-tokens",
+            r#"{"description": "to delete", "expires_in_days": 30}"#,
+            &[("Authorization", &auth_header)],
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "create must succeed; body: {create_body}"
+        );
+        let resp: serde_json::Value = serde_json::from_str(&create_body).expect("valid JSON");
+        let token_id = resp["id"].as_str().expect("id present");
+
+        // Delete the token
+        let (status, _body) = http_delete(
+            &app,
+            &format!("/api/v1/org/scim-tokens/{token_id}"),
+            &[("Authorization", &auth_header)],
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::NO_CONTENT, "delete must return 204");
+    }
+
+    // ================================================================
+    // Authenticated CRUD — Delete (negative)
+    // ================================================================
+
+    #[tokio::test]
+    async fn test_delete_scim_token_not_found() {
+        let (app, state) = test_app().await;
+        let org = create_test_org(&state.store, "example.com").await;
+        let admin = create_test_user_in_org(&state.store, "admin@example.com", &org.id, true).await;
+        let auth_id = create_test_authenticator(&state.store, &admin.id).await;
+        let token = create_test_session(&state, &admin.id, &admin.email, &auth_id).await;
+        let auth_header = format!("Bearer {token}");
+
+        let nonexistent_id = uuid::Uuid::now_v7();
+        let (status, _body) = http_delete(
+            &app,
+            &format!("/api/v1/org/scim-tokens/{nonexistent_id}"),
+            &[("Authorization", &auth_header)],
+        )
+        .await;
+
+        assert_eq!(
+            status,
+            StatusCode::NOT_FOUND,
+            "unknown token id must return 404"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_delete_scim_token_requires_auth() {
+        let (app, _state) = test_app().await;
+        let token_id = uuid::Uuid::now_v7();
+
+        let (status, _body) =
+            http_delete(&app, &format!("/api/v1/org/scim-tokens/{token_id}"), &[]).await;
+
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "missing auth must return 401"
         );
     }
 }

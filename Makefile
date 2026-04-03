@@ -13,7 +13,7 @@ KAMAL ?= kamal
 IMAGE_NAME ?= vouch-sh/vouch
 IMAGE_TAG ?= latest
 
-.PHONY: all build test test-integration test-fuzz run run-agent clean help docker-build docker-run deploy deploy-logs css-dev css-build docs-build docs-serve bake-cli bake-server bake-all
+.PHONY: all build test test-integration test-fuzz test-coverage test-mutants run run-agent clean help docker-build docker-run deploy deploy-logs css-dev css-build docs-build docs-serve bake-cli bake-server bake-all
 
 all: build
 
@@ -60,6 +60,13 @@ test-fuzz: ## Run fuzz targets (60s each, requires nightly)
 	cargo +nightly fuzz run fuzz_ber_parse -- -max_total_time=60
 	cargo +nightly fuzz run fuzz_attestation_object -- -max_total_time=60
 	cargo +nightly fuzz run fuzz_cose_key -- -max_total_time=60
+
+test-coverage: ## Generate test coverage report (requires cargo-llvm-cov)
+	$(CARGO) llvm-cov --workspace --html
+	@echo "Coverage report: target/llvm-cov/html/index.html"
+
+test-mutants: ## Run mutation testing (requires cargo-mutants)
+	$(CARGO) mutants --workspace --timeout 60 --output mutants.out
 
 ##@ Docker
 

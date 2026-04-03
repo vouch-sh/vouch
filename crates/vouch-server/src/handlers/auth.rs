@@ -176,3 +176,90 @@ pub async fn logout(
         .body(Body::empty())
         .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
 }
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::indexing_slicing)]
+mod tests {
+    use crate::test_utils::*;
+    use axum::http::StatusCode;
+
+    #[tokio::test]
+    async fn test_auth_status_valid_session() {
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "valid@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+
+        let auth_header = format!("Bearer {token}");
+        let (status, body) =
+            http_get(&app, "/v1/auth/status", &[("Authorization", &auth_header)]).await;
+
+        assert_eq!(status, StatusCode::OK);
+        let json: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
+        assert_eq!(json["authenticated"], true);
+        assert!(
+            json["expires_in_seconds"].as_u64().unwrap_or(0) > 0,
+            "expires_in_seconds should be positive"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_auth_status_includes_email() {
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "email-check@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+
+        let auth_header = format!("Bearer {token}");
+        let (status, body) =
+            http_get(&app, "/v1/auth/status", &[("Authorization", &auth_header)]).await;
+
+        assert_eq!(status, StatusCode::OK);
+        let json: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
+        assert_eq!(json["email"], "email-check@example.com");
+    }
+
+    #[tokio::test]
+    async fn test_auth_status_no_auth_header() {
+        let (app, _state) = test_app().await;
+
+        let (status, body) = http_get(&app, "/v1/auth/status", &[]).await;
+
+        assert_eq!(status, StatusCode::OK);
+        let json: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
+        assert_eq!(json["authenticated"], false);
+        assert!(json["email"].is_null());
+        assert!(json["expires_in_seconds"].is_null());
+        assert!(json["device_name"].is_null());
+    }
+
+    #[tokio::test]
+    async fn test_auth_status_invalid_token() {
+        let (app, _state) = test_app().await;
+
+        let (status, body) = http_get(
+            &app,
+            "/v1/auth/status",
+            &[("Authorization", "Bearer not.a.valid.jwt.token")],
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        let json: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
+        assert_eq!(json["authenticated"], false);
+        assert!(json["email"].is_null());
+    }
+
+    #[tokio::test]
+    async fn test_auth_status_empty_bearer() {
+        let (app, _state) = test_app().await;
+
+        let (status, body) =
+            http_get(&app, "/v1/auth/status", &[("Authorization", "Bearer ")]).await;
+
+        assert_eq!(status, StatusCode::OK);
+        let json: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
+        assert_eq!(json["authenticated"], false);
+        assert!(json["email"].is_null());
+    }
+}

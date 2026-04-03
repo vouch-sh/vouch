@@ -1945,4 +1945,365 @@ mod tests {
             "Invalid JWKS must return 400 (not 401) even without auth: {body}"
         );
     }
+
+    // ========================================================================
+    // GET /api/v1/applications — List Applications
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_list_applications_empty() {
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "list-empty@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let auth = bearer(&token);
+
+        let (status, body) =
+            http_get(&app, "/api/v1/applications", &[("Authorization", &auth)]).await;
+
+        assert_eq!(status, StatusCode::OK, "body: {body}");
+        let json: serde_json::Value = serde_json::from_str(&body).expect("valid json");
+        assert_eq!(json["applications"], serde_json::json!([]));
+    }
+
+    #[tokio::test]
+    async fn test_list_applications_returns_created() {
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "list-created@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let auth = bearer(&token);
+
+        let client = create_test_oauth_client(&state.store, &user.id).await;
+
+        let (status, body) =
+            http_get(&app, "/api/v1/applications", &[("Authorization", &auth)]).await;
+
+        assert_eq!(status, StatusCode::OK, "body: {body}");
+        let json: serde_json::Value = serde_json::from_str(&body).expect("valid json");
+        let apps = json["applications"].as_array().unwrap();
+        assert_eq!(apps.len(), 1);
+        assert_eq!(apps[0]["id"].as_str().unwrap(), client.app_id);
+    }
+
+    #[tokio::test]
+    async fn test_list_applications_requires_auth() {
+        let (app, _state) = test_app().await;
+
+        let (status, _body) = http_get(&app, "/api/v1/applications", &[]).await;
+
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    // ========================================================================
+    // POST /api/v1/applications — Create Application
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_create_application_succeeds() {
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "create-ok@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let auth = bearer(&token);
+
+        let (status, body) = http_post_json(
+            &app,
+            "/api/v1/applications",
+            r#"{"name": "My App", "application_type": "web", "redirect_uris": ["https://example.com/callback"]}"#,
+            &[("Authorization", &auth)],
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK, "body: {body}");
+        let json: serde_json::Value = serde_json::from_str(&body).expect("valid json");
+        assert!(json.get("id").is_some());
+        assert_eq!(json["name"].as_str().unwrap(), "My App");
+        assert_eq!(json["application_type"].as_str().unwrap(), "web");
+    }
+
+    #[tokio::test]
+    async fn test_create_application_returns_client_credentials() {
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "create-creds@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let auth = bearer(&token);
+
+        let (status, body) = http_post_json(
+            &app,
+            "/api/v1/applications",
+            r#"{"name": "Creds App", "application_type": "web", "redirect_uris": ["https://example.com/callback"]}"#,
+            &[("Authorization", &auth)],
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK, "body: {body}");
+        let json: serde_json::Value = serde_json::from_str(&body).expect("valid json");
+
+        let client_id = json["client_id"].as_str().unwrap();
+        let client_secret = json["client_secret"].as_str().unwrap();
+        assert!(!client_id.is_empty(), "client_id must not be empty");
+        assert!(!client_secret.is_empty(), "client_secret must not be empty");
+        assert!(
+            client_secret.starts_with("vouch_"),
+            "client_secret must have expected prefix"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_create_application_requires_auth() {
+        let (app, _state) = test_app().await;
+
+        let (status, _body) = http_post_json(
+            &app,
+            "/api/v1/applications",
+            r#"{"name": "App", "application_type": "web", "redirect_uris": ["https://example.com/cb"]}"#,
+            &[],
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn test_create_application_rejects_empty_name() {
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "create-emptyname@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let auth = bearer(&token);
+
+        let (status, body) = http_post_json(
+            &app,
+            "/api/v1/applications",
+            r#"{"name": "", "application_type": "web", "redirect_uris": ["https://example.com/cb"]}"#,
+            &[("Authorization", &auth)],
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+        let json: serde_json::Value = serde_json::from_str(&body).expect("valid json");
+        assert_eq!(json["code"].as_str().unwrap(), "invalid_name");
+    }
+
+    #[tokio::test]
+    async fn test_create_application_rejects_http_redirect_uri() {
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "create-http-uri@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let auth = bearer(&token);
+
+        // http:// redirect URIs are not valid for web apps — only https:// or custom schemes
+        let (status, body) = http_post_json(
+            &app,
+            "/api/v1/applications",
+            r#"{"name": "App", "application_type": "web", "redirect_uris": ["not-a-url"]}"#,
+            &[("Authorization", &auth)],
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+        let json: serde_json::Value = serde_json::from_str(&body).expect("valid json");
+        assert_eq!(json["code"].as_str().unwrap(), "invalid_redirect_uris");
+    }
+
+    // ========================================================================
+    // GET /api/v1/applications/:id — Get Application
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_get_application_by_id() {
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "get-app@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let auth = bearer(&token);
+        let client = create_test_oauth_client(&state.store, &user.id).await;
+
+        let (status, body) = http_get(
+            &app,
+            &format!("/api/v1/applications/{}", client.app_id),
+            &[("Authorization", &auth)],
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK, "body: {body}");
+        let json: serde_json::Value = serde_json::from_str(&body).expect("valid json");
+        assert_eq!(json["id"].as_str().unwrap(), client.app_id);
+    }
+
+    #[tokio::test]
+    async fn test_get_application_not_found() {
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "get-notfound@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let auth = bearer(&token);
+        let bogus_id = uuid::Uuid::now_v7();
+
+        let (status, _body) = http_get(
+            &app,
+            &format!("/api/v1/applications/{bogus_id}"),
+            &[("Authorization", &auth)],
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_get_application_requires_auth() {
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "get-noauth@example.com").await;
+        let client = create_test_oauth_client(&state.store, &user.id).await;
+
+        let (status, _body) = http_get(
+            &app,
+            &format!("/api/v1/applications/{}", client.app_id),
+            &[],
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    // ========================================================================
+    // PATCH /api/v1/applications/:id — Update Application
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_update_application_name() {
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "update-name@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let auth = bearer(&token);
+        let client = create_test_oauth_client(&state.store, &user.id).await;
+
+        let body = r#"{"name": "Renamed App"}"#.to_string();
+        let (status, resp_body) = http_request(
+            &app,
+            "PATCH",
+            &format!("/api/v1/applications/{}", client.app_id),
+            Some(body),
+            &[
+                ("Content-Type", "application/json"),
+                ("Authorization", &auth),
+            ],
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK, "body: {resp_body}");
+        let json: serde_json::Value = serde_json::from_str(&resp_body).expect("valid json");
+        assert_eq!(json["name"].as_str().unwrap(), "Renamed App");
+    }
+
+    // ========================================================================
+    // DELETE /api/v1/applications/:id — Delete Application
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_delete_application_succeeds() {
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "delete-ok@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let auth = bearer(&token);
+        let client = create_test_oauth_client(&state.store, &user.id).await;
+
+        let (status, _body) = http_delete(
+            &app,
+            &format!("/api/v1/applications/{}", client.app_id),
+            &[("Authorization", &auth)],
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        // Subsequent GET returns 404
+        let (status, _body) = http_get(
+            &app,
+            &format!("/api/v1/applications/{}", client.app_id),
+            &[("Authorization", &auth)],
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_delete_application_not_found() {
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "delete-notfound@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let auth = bearer(&token);
+        let bogus_id = uuid::Uuid::now_v7();
+
+        let (status, _body) = http_delete(
+            &app,
+            &format!("/api/v1/applications/{bogus_id}"),
+            &[("Authorization", &auth)],
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_delete_application_requires_auth() {
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "delete-noauth@example.com").await;
+        let client = create_test_oauth_client(&state.store, &user.id).await;
+
+        let (status, _body) = http_delete(
+            &app,
+            &format!("/api/v1/applications/{}", client.app_id),
+            &[],
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    // ========================================================================
+    // POST /api/v1/applications/:id/revoke — Revoke Tokens
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_revoke_tokens_requires_auth() {
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "revoke-noauth@example.com").await;
+        let client = create_test_oauth_client(&state.store, &user.id).await;
+
+        let (status, _body) = http_post_json(
+            &app,
+            &format!("/api/v1/applications/{}/revoke", client.app_id),
+            "{}",
+            &[],
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn test_revoke_tokens_not_found() {
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "revoke-notfound@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let auth = bearer(&token);
+        let bogus_id = uuid::Uuid::now_v7();
+
+        let (status, _body) = http_post_json(
+            &app,
+            &format!("/api/v1/applications/{bogus_id}/revoke"),
+            "{}",
+            &[("Authorization", &auth)],
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
 }

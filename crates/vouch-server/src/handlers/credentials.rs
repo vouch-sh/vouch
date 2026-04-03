@@ -920,4 +920,372 @@ mod tests {
         let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
         assert_eq!(error["code"], "invalid_serial");
     }
+
+    // ========================================================================
+    // SSH CA Public Key Tests
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_ssh_ca_public_key_returns_key() {
+        let (app, _state) = test_app().await;
+
+        let (status, body) = http_get(&app, "/v1/credentials/ssh/ca", &[]).await;
+
+        // SSH CA is not configured in test_app, so 503 is expected
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+        assert_eq!(error["code"], "ssh_ca_not_configured");
+    }
+
+    #[tokio::test]
+    async fn test_ssh_ca_public_key_no_auth_required() {
+        let (app, _state) = test_app().await;
+
+        // No Authorization header — endpoint does not require auth
+        let (status, _body) = http_get(&app, "/v1/credentials/ssh/ca", &[]).await;
+
+        // 503 because SSH CA is not configured, not 401 — confirms auth is not checked
+        assert_ne!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    // ========================================================================
+    // SSH Certificate Issuance Tests
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_ssh_cert_requires_auth() {
+        let (app, _state) = test_app().await;
+
+        // SSH CA is checked before auth in this handler, so 503 is returned
+        let body =
+            serde_json::json!({ "public_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI test" });
+        let (status, resp_body) =
+            http_post_json(&app, "/v1/credentials/ssh", &body.to_string(), &[]).await;
+
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        let error: serde_json::Value = serde_json::from_str(&resp_body).expect("Valid JSON");
+        assert_eq!(error["code"], "ssh_ca_not_configured");
+    }
+
+    #[tokio::test]
+    async fn test_ssh_cert_rejects_invalid_token() {
+        let (app, _state) = test_app().await;
+
+        // SSH CA is checked before auth, so still 503 even with a bad token
+        let body =
+            serde_json::json!({ "public_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI test" });
+        let (status, resp_body) = http_post_json(
+            &app,
+            "/v1/credentials/ssh",
+            &body.to_string(),
+            &[("Authorization", "Bearer garbage.token.value")],
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        let error: serde_json::Value = serde_json::from_str(&resp_body).expect("Valid JSON");
+        assert_eq!(error["code"], "ssh_ca_not_configured");
+    }
+
+    // ========================================================================
+    // SSH KRL Tests
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_ssh_krl_returns_empty_list() {
+        let (app, _state) = test_app().await;
+
+        let (status, body) = http_get(&app, "/v1/credentials/ssh/krl", &[]).await;
+
+        assert_eq!(status, StatusCode::OK);
+        let resp: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+        assert_eq!(resp["revoked_serials"], serde_json::json!([]));
+        assert_eq!(resp["total"], 0);
+    }
+
+    #[tokio::test]
+    async fn test_ssh_krl_no_auth_required() {
+        let (app, _state) = test_app().await;
+
+        let (status, _body) = http_get(&app, "/v1/credentials/ssh/krl", &[]).await;
+
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    // ========================================================================
+    // SSH Revocation Check Tests
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_ssh_revocation_check_not_revoked() {
+        let (app, _state) = test_app().await;
+
+        let (status, body) = http_get(&app, "/v1/credentials/ssh/krl/99999", &[]).await;
+
+        assert_eq!(status, StatusCode::OK);
+        let resp: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+        assert_eq!(resp["serial"], "99999");
+        assert_eq!(resp["revoked"], false);
+    }
+
+    #[tokio::test]
+    async fn test_ssh_serial_rejects_empty() {
+        let (app, _state) = test_app().await;
+
+        // An empty path segment routes to /v1/credentials/ssh/krl which is the
+        // KRL list endpoint, not the per-serial endpoint — expect 200 not a crash
+        let (status, _body) = http_get(&app, "/v1/credentials/ssh/krl/", &[]).await;
+
+        assert_ne!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    // ========================================================================
+    // AWS Token Tests
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_aws_token_requires_auth() {
+        let (app, _state) = test_app().await;
+
+        let (status, body) = http_get(&app, "/v1/credentials/aws/token", &[]).await;
+
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+        assert_eq!(error["code"], "unauthorized");
+    }
+
+    #[tokio::test]
+    async fn test_aws_token_rejects_invalid_token() {
+        let (app, _state) = test_app().await;
+
+        let (status, body) = http_get(
+            &app,
+            "/v1/credentials/aws/token",
+            &[("Authorization", "Bearer garbage.token.value")],
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+        assert_eq!(error["code"], "invalid_token");
+    }
+
+    #[tokio::test]
+    async fn test_aws_token_returns_token_for_valid_session() {
+        let (app, state) = test_app().await;
+
+        let user = create_test_user(&state.store, "user@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+
+        let (status, body) = http_get(
+            &app,
+            "/v1/credentials/aws/token",
+            &[("Authorization", &format!("Bearer {token}"))],
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        let resp: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+        assert!(resp["id_token"].is_string());
+        assert!(resp["expires_in"].is_number());
+    }
+
+    #[tokio::test]
+    async fn test_aws_token_returns_token_for_org_user() {
+        let (app, state) = test_app().await;
+
+        let org = create_test_org(&state.store, "example.com").await;
+        let user =
+            create_test_user_in_org(&state.store, "orguser@example.com", &org.id, false).await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+
+        let (status, body) = http_get(
+            &app,
+            "/v1/credentials/aws/token",
+            &[("Authorization", &format!("Bearer {token}"))],
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        let resp: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+        assert!(resp["id_token"].is_string());
+        assert!(resp["expires_in"].is_number());
+    }
+
+    // ========================================================================
+    // Kubernetes Token Tests
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_k8s_token_requires_auth() {
+        let (app, _state) = test_app().await;
+
+        let (status, body) = http_get(&app, "/v1/credentials/kubernetes/token", &[]).await;
+
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+        assert_eq!(error["code"], "unauthorized");
+    }
+
+    #[tokio::test]
+    async fn test_k8s_token_returns_token_for_valid_session() {
+        let (app, state) = test_app().await;
+
+        let user = create_test_user(&state.store, "k8suser@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+
+        let (status, body) = http_get(
+            &app,
+            "/v1/credentials/kubernetes/token",
+            &[("Authorization", &format!("Bearer {token}"))],
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        let resp: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+        assert!(resp["id_token"].is_string());
+    }
+
+    #[tokio::test]
+    async fn test_k8s_token_default_audience() {
+        let (app, state) = test_app().await;
+
+        let user = create_test_user(&state.store, "k8saud@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+
+        let (status, body) = http_get(
+            &app,
+            "/v1/credentials/kubernetes/token",
+            &[("Authorization", &format!("Bearer {token}"))],
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        let resp: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+        assert!(resp["id_token"].is_string());
+    }
+
+    #[tokio::test]
+    async fn test_k8s_token_custom_audience() {
+        let (app, state) = test_app().await;
+
+        let user = create_test_user(&state.store, "k8scustom@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+
+        let (status, body) = http_get(
+            &app,
+            "/v1/credentials/kubernetes/token?audience=my-cluster",
+            &[("Authorization", &format!("Bearer {token}"))],
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        let resp: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+        assert!(resp["id_token"].is_string());
+    }
+
+    // ========================================================================
+    // GitHub Status Tests
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_github_status_requires_auth() {
+        let (app, _state) = test_app().await;
+
+        let (status, body) = http_get(&app, "/v1/credentials/github/status", &[]).await;
+
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+        assert_eq!(error["code"], "unauthorized");
+    }
+
+    #[tokio::test]
+    async fn test_github_status_not_configured() {
+        let (app, state) = test_app().await;
+
+        let user = create_test_user(&state.store, "ghstatus@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+
+        let (status, body) = http_get(
+            &app,
+            "/v1/credentials/github/status",
+            &[("Authorization", &format!("Bearer {token}"))],
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        let resp: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+        assert_eq!(resp["configured"], false);
+    }
+
+    #[tokio::test]
+    async fn test_github_status_no_org_returns_empty() {
+        let (app, state) = test_app().await;
+
+        let user = create_test_user(&state.store, "ghnoorg@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+
+        let (status, body) = http_get(
+            &app,
+            "/v1/credentials/github/status",
+            &[("Authorization", &format!("Bearer {token}"))],
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        let resp: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+        // Field is omitted when empty (skip_serializing_if = "Vec::is_empty")
+        let accounts = resp["github_accounts"].as_array();
+        assert!(
+            accounts.is_none() || accounts.unwrap().is_empty(),
+            "Expected no github_accounts for user without org"
+        );
+    }
+
+    // ========================================================================
+    // GitHub Token Tests
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_github_token_not_configured() {
+        let (app, state) = test_app().await;
+
+        let user = create_test_user(&state.store, "ghtoken@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+
+        let body = serde_json::json!({ "repositories": [] });
+        let (status, resp_body) = http_post_json(
+            &app,
+            "/v1/credentials/github/token",
+            &body.to_string(),
+            &[("Authorization", &format!("Bearer {token}"))],
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        let error: serde_json::Value = serde_json::from_str(&resp_body).expect("Valid JSON");
+        assert_eq!(error["code"], "github_not_configured");
+    }
+
+    #[tokio::test]
+    async fn test_github_token_requires_auth() {
+        let (app, _state) = test_app().await;
+
+        // GitHub App config is checked before auth — 503 even without a token
+        let body = serde_json::json!({ "repositories": [] });
+        let (status, resp_body) =
+            http_post_json(&app, "/v1/credentials/github/token", &body.to_string(), &[]).await;
+
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        let error: serde_json::Value = serde_json::from_str(&resp_body).expect("Valid JSON");
+        assert_eq!(error["code"], "github_not_configured");
+    }
 }

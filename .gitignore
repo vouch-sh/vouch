@@ -85,3 +85,4 @@ scripts/certification/__pycache__/
 .local/
 fuzz/corpus/
 fuzz/artifacts/
+/mutants.out
