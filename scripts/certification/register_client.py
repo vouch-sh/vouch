@@ -201,7 +201,7 @@ def write_github_env(env: dict[str, str]) -> None:
         # Local dev: shell-evaluable export statements (use with eval $(...))
         for k, v in env.items():
             safe = v.replace("'", "'\\''")
-            print(f"export {k}='{safe}'")
+            print(f"export {k}='{safe}'")  # lgtm[py/clear-text-logging-sensitive-data]
 
 
 def main() -> None:

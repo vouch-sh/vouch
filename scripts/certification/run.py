@@ -43,6 +43,7 @@ import logging
 import os
 import sys
 from pathlib import Path
+from urllib.parse import urlparse
 
 from conformance import ConformanceClient, ConformanceError, format_module_log
 
@@ -459,7 +460,12 @@ def main() -> None:
     if not args.base_url:
         parser.error("--base-url is required")
 
-    if not conformance_token and "certification.openid.net" in conformance_server:
+    parsed_server = urlparse(conformance_server)
+    is_production = parsed_server.hostname is not None and (
+        parsed_server.hostname == "certification.openid.net"
+        or parsed_server.hostname.endswith(".certification.openid.net")
+    )
+    if not conformance_token and is_production:
         print("ERROR: CONFORMANCE_TOKEN environment variable is required", file=sys.stderr)
         sys.exit(1)
 
