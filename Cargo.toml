@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/*"]
 
 [workspace.package]
-version = "2026.4.1"
+version = "2026.4.2"
 edition = "2024"
 license = "Apache-2.0 OR MIT"
 rust-version = "1.94.1"
@@ -55,7 +55,7 @@ similar_names = "allow"
 
 [workspace.dependencies]
 anyhow = { version = "=1.0.102", default-features = false }
-arc-swap = { version = "=1.9.0", default-features = false }
+arc-swap = { version = "=1.9.1", default-features = false }
 askama = { version = "=0.15.6", default-features = false }
 aws-config = { version = "=1.8.15", default-features = false }
 aws-lc-rs = { version = "=1.16.2", default-features = false }
