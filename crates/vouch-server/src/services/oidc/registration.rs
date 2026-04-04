@@ -412,10 +412,10 @@ pub async fn register_client(
 
     // Determine require_signed_request_object:
     // - Explicit request value takes precedence
-    // - FAPI 2.0 clients with request_object_signing_alg always require it
+    // - FAPI 2.0 Section 5.3.2: all FAPI2 clients require signed request objects
     let require_signed = request
         .require_signed_request_object
-        .unwrap_or(fapi_profile != FapiProfile::None && req_obj_alg.is_some());
+        .unwrap_or(fapi_profile != FapiProfile::None);
 
     // 13. Infer application type
     let app_type = determine_client_type(

@@ -440,7 +440,7 @@ async fn authorize_inner(state: Arc<AppState>, params: AuthorizeQuery, jar: Cook
                     &state.config().base_url,
                 );
             }
-            store_pending_and_redirect(&state, validated, direct_response_mode).await
+            store_pending_and_redirect(&state, validated, direct_response_mode, None).await
         }
     }
 }
@@ -472,10 +472,14 @@ async fn store_pending_and_redirect(
     state: &Arc<AppState>,
     validated: crate::services::oidc::authorization::ValidatedAuthRequest,
     response_mode: ResponseMode,
+    prompt_override: Option<Prompt>,
 ) -> Response {
     let scope_str = validated.scope().to_space_separated();
     let max_age_i64 = validated.max_age().and_then(|v| i64::try_from(v).ok());
     let ad_value = validated.authorization_details_value();
+    let prompt_str = prompt_override
+        .map(|p| p.as_str())
+        .or_else(|| validated.prompt().map(|p| p.as_str()));
     let pending_params = CreatePendingOAuthParams {
         client_id: validated.client_id(),
         redirect_uri: validated.redirect_uri(),
@@ -488,7 +492,7 @@ async fn store_pending_and_redirect(
         resource: validated.resource(),
         acr_values: validated.acr_values(),
         max_age: max_age_i64,
-        prompt: validated.prompt().map(|p| p.as_str()),
+        prompt: prompt_str,
         dpop_jkt: validated.dpop_jkt(),
         authorization_details: ad_value.as_ref(),
         response_mode,
@@ -801,7 +805,7 @@ async fn handle_jar_request(
                     &state.config().base_url,
                 );
             }
-            store_pending_and_redirect(state, validated, ResponseMode::Query).await
+            store_pending_and_redirect(state, validated, ResponseMode::Query, None).await
         }
     }
 }
@@ -995,7 +999,7 @@ async fn handle_par_request(
                 );
             }
             // DPoP key binding is already in validated.dpop_jkt() from par.dpop_jkt.
-            store_pending_and_redirect(state, validated, par.response_mode).await
+            store_pending_and_redirect(state, validated, par.response_mode, None).await
         }
     }
 }
@@ -1083,8 +1087,11 @@ async fn authorize_authenticated_user(
     }
 
     // Step 4: Re-auth needed — store pending request and redirect to login.
+    // Override prompt to Prompt::Login so the login page shows the form instead
+    // of auto-redirecting when an old session cookie exists from a previous flow.
     if needs_reauth {
-        return store_pending_and_redirect(state, validated, response_mode).await;
+        return store_pending_and_redirect(state, validated, response_mode, Some(Prompt::Login))
+            .await;
     }
 
     // Step 5: Validate requested ACR (RFC 9470).

@@ -23,14 +23,9 @@ use jiff::Timestamp;
 use crate::{
     AppState, db,
     handlers::browser_login::hmac_sha256_base64url,
-    handlers::oidc::build_authorization_success_redirect_url,
     handlers::session::create_session_cookie,
     services::auth::{ACR_AAL3, AuthMethod, CreateOAuthTokenParams, create_oauth_access_token},
-    services::oidc::{
-        ScopeSet,
-        authorization::{AuthorizationCodeParams, CodeChallengeMethod, issue_authorization_code},
-        fapi::auth_code_lifetime_seconds,
-    },
+    services::oidc::ScopeSet,
 };
 
 /// Test user email used by the certification endpoint (never a real user).
@@ -47,11 +42,13 @@ pub struct CompleteLoginQuery {
 
 /// GET /certification/complete-login?pending_auth=<UUID>&token=<HMAC>
 ///
-/// Validates the HMAC, looks up the pending authorization, creates an
-/// authorization code, and redirects to the client's callback URI.
+/// Validates the HMAC, creates a browser session for the test user, and
+/// redirects back to the authorize endpoint with the pending auth ID.
+/// The authorize endpoint then issues the authorization code via its
+/// normal flow (matching the production browser login pattern).
 ///
 /// Responses:
-/// - `302` — authorization code issued, redirect to `redirect_uri`
+/// - `303` — session created, redirect to `/oauth/authorize?pending_auth=…`
 /// - `403` — HMAC validation failed
 /// - `404` — no pending authorization found for the given ID
 /// - `500` — internal error
@@ -63,7 +60,6 @@ pub async fn complete_login(
     let secret = match state.config().certification_test_token.as_ref() {
         Some(s) => s.expose_secret().to_string(),
         None => {
-            // Should never happen — route is only registered when token is set.
             tracing::error!("Certification endpoint called but token not configured");
             return StatusCode::NOT_FOUND.into_response();
         }
@@ -71,7 +67,6 @@ pub async fn complete_login(
 
     let expected = hmac_sha256_base64url(&secret, &query.pending_auth);
 
-    // Constant-time comparison to prevent timing attacks.
     let token_valid: bool = expected.as_bytes().ct_eq(query.token.as_bytes()).into();
     if !token_valid {
         tracing::warn!(
@@ -81,26 +76,17 @@ pub async fn complete_login(
         return StatusCode::FORBIDDEN.into_response();
     }
 
-    // ── 2. Consume pending authorization ─────────────────────────────────
-    let pending =
-        match db::consume_pending_oauth_authorization(&state.store, &query.pending_auth).await {
-            Ok(Some(p)) => p,
-            Ok(None) => {
-                tracing::warn!(
-                    pending_auth = %query.pending_auth,
-                    "Certification login: pending authorization not found or already consumed"
-                );
-                return StatusCode::NOT_FOUND.into_response();
-            }
-            Err(e) => {
-                tracing::error!(
-                    pending_auth = %query.pending_auth,
-                    error = %e,
-                    "Certification login: DB error consuming pending authorization"
-                );
-                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-            }
-        };
+    // ── 2. Validate pending authorization exists (read, don't consume) ────
+    // The pending auth will be consumed by the authorize endpoint when
+    // it issues the authorization code via handle_pending_auth.
+    if let Err(e) = db::get_pending_oauth_authorization(&state.store, &query.pending_auth).await {
+        tracing::error!(
+            pending_auth = %query.pending_auth,
+            error = %e,
+            "Certification login: DB error reading pending authorization"
+        );
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    }
 
     // ── 3. Get or create the certification test user ──────────────────────
     let user = match get_or_create_cert_user(&state).await {
@@ -124,108 +110,7 @@ pub async fn complete_login(
             }
         };
 
-    // ── 5. Look up the OAuth client for lifetime calculation ──────────────
-    let client = match db::get_oauth_client_by_client_id(&state.store, &pending.client_id).await {
-        Ok(Some(c)) => c,
-        Ok(None) => {
-            tracing::error!(
-                client_id = %pending.client_id,
-                "Certification login: OAuth client not found"
-            );
-            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-        }
-        Err(e) => {
-            tracing::error!(error = %e, "Certification login: DB error fetching OAuth client");
-            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-        }
-    };
-
-    let lifetime = auth_code_lifetime_seconds(&client);
-
-    // ── 6. Parse scope and code challenge method ──────────────────────────
-    let scope = pending
-        .scope
-        .as_deref()
-        .map(ScopeSet::parse)
-        .unwrap_or_default();
-
-    let code_challenge_method = pending
-        .code_challenge_method
-        .as_deref()
-        .and_then(CodeChallengeMethod::parse);
-
-    // ── 7. Issue authorization code ───────────────────────────────────────
-    let code = match issue_authorization_code(
-        &state,
-        AuthorizationCodeParams {
-            client_id: &pending.client_id,
-            redirect_uri: &pending.redirect_uri,
-            user_id: &user.id,
-            email: &user.email,
-            authenticator_id: &authenticator_id,
-            aaguid: None,
-            scope: &scope,
-            nonce: pending.nonce.as_deref(),
-            code_challenge: pending.code_challenge.as_deref(),
-            code_challenge_method,
-            resource: pending.resource.as_deref(),
-            acr_values: pending.acr_values.as_deref(),
-            dpop_jkt: pending.dpop_jkt.as_deref(),
-            auth_code_lifetime_seconds: lifetime,
-            authorization_details: pending.authorization_details.as_ref(),
-            auth_time: None,
-        },
-    )
-    .await
-    {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::error!(error = %e, "Certification login: failed to issue authorization code");
-            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-        }
-    };
-
-    // ── 8. Build redirect URL ─────────────────────────────────────────────
-    // When response_mode is JARM, wrap the response in a signed JWT.
-    use crate::db::ResponseMode;
-    let redirect_url = if pending.response_mode == ResponseMode::Jwt {
-        match crate::services::oidc::jarm::build_jarm_success_jwt(
-            &state,
-            &client,
-            &code,
-            pending.state.as_deref(),
-        )
-        .await
-        {
-            Ok(jwt) => crate::handlers::oidc::build_jarm_redirect_url(&pending.redirect_uri, &jwt),
-            Err(e) => {
-                tracing::error!(error = %e, "Certification login: JARM JWT signing failed");
-                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-            }
-        }
-    } else {
-        match build_authorization_success_redirect_url(
-            &pending.redirect_uri,
-            &code,
-            pending.state.as_deref(),
-            &state.config().base_url,
-        ) {
-            Ok(url) => url,
-            Err(e) => {
-                tracing::error!(
-                    redirect_uri = %pending.redirect_uri,
-                    error = %e,
-                    "Certification login: invalid redirect URI"
-                );
-                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-            }
-        }
-    };
-
-    // ── 9. Create a browser session ──────────────────────────────────────
-    // Set a session cookie so that subsequent authorization requests from
-    // the same browser (e.g. prompt=none, max_age) recognize the user.
-    //
+    // ── 5. Create a browser session ──────────────────────────────────────
     // Delete any previous sessions for the cert user first to prevent
     // session leakage between conformance test modules (which share a
     // browser context). Each module should start with a clean session.
@@ -233,14 +118,14 @@ pub async fn complete_login(
         tracing::warn!("Failed to delete previous cert sessions: {e}");
     }
 
-    let client_id = state.config().base_url.clone();
+    let session_client_id = state.config().base_url.clone();
     let session_result = match create_oauth_access_token(
         &state,
         CreateOAuthTokenParams {
             user_id: &user.id,
             email: &user.email,
             authenticator_id: Some(&authenticator_id),
-            client_id: &client_id,
+            client_id: &session_client_id,
             scope: Some(ScopeSet::all()),
             dpop_jkt: None,
             mtls_cert_thumbprint: None,
@@ -266,10 +151,19 @@ pub async fn complete_login(
     let session_hours = i64::try_from(state.config().session_hours).unwrap_or(8);
     let cookie = create_session_cookie(session_result.token.expose_secret(), session_hours * 3600);
 
+    // ── 6. Redirect to authorize endpoint with pending_auth ──────────────
+    // This mirrors the production browser login flow: after authentication,
+    // redirect to /oauth/authorize?pending_auth={id} where handle_pending_auth
+    // consumes the pending auth, checks the session, and issues the code.
+    let redirect_url = format!(
+        "/oauth/authorize?pending_auth={}",
+        urlencoding::encode(&query.pending_auth)
+    );
+
     tracing::info!(
         pending_auth = %query.pending_auth,
         user_id = %user.id,
-        "Certification login: authorization code issued, redirecting to callback"
+        "Certification login: session created, redirecting to authorize endpoint"
     );
 
     (
@@ -442,6 +336,7 @@ mod tests {
     #![allow(clippy::expect_used, clippy::unwrap_used)]
     use super::*;
     use crate::handlers::browser_login::hmac_sha256_base64url;
+    use crate::handlers::oidc::build_authorization_success_redirect_url;
 
     #[test]
     fn test_hmac_valid_token_accepted() {
@@ -549,7 +444,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_complete_login_issues_code_with_valid_token() {
+    async fn test_complete_login_redirects_to_authorize_with_valid_token() {
         let (app, state) = crate::test_utils::test_app_with_certification().await;
 
         let user =
@@ -595,7 +490,7 @@ mod tests {
         )
         .await;
 
-        // Should redirect to callback with authorization code
+        // Should redirect to authorize endpoint with pending_auth
         assert!(
             resp.status == axum::http::StatusCode::FOUND
                 || resp.status == axum::http::StatusCode::SEE_OTHER,
@@ -611,12 +506,18 @@ mod tests {
             .expect("location must be valid string");
 
         assert!(
-            location.contains("code="),
-            "Location must contain authorization code: {location}"
+            location.contains("pending_auth="),
+            "Location must redirect to authorize with pending_auth: {location}"
         );
         assert!(
-            location.contains("state=mystate"),
-            "Location must contain state: {location}"
+            location.starts_with("/oauth/authorize"),
+            "Location must redirect to authorize endpoint: {location}"
+        );
+
+        // Should set a session cookie
+        assert!(
+            resp.headers.get("set-cookie").is_some(),
+            "Response must set a session cookie"
         );
     }
 }

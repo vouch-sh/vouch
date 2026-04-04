@@ -128,6 +128,7 @@ def build_payload(
     client_auth_type: str = "private_key_jwt",
     sender_constrain: str = "dpop",
     subject_dn: str = "",
+    fapi_request_method: str = "",
 ) -> dict:
     conformance_redirect = (
         f"{conformance_base_url.rstrip('/')}/test/a/{client_alias}/callback"
@@ -170,6 +171,9 @@ def build_payload(
     elif sender_constrain == "mtls":
         payload["tls_client_certificate_bound_access_tokens"] = True
 
+    if fapi_request_method == "signed_non_repudiation":
+        payload["request_object_signing_alg"] = "ES256"
+
     return payload
 
 
@@ -196,7 +200,10 @@ def write_github_env(env: dict[str, str]) -> None:
     if github_env:
         with open(github_env, "a") as f:
             for k, v in env.items():
-                f.write(f"{k}={v}\n")
+                if "\n" in v:
+                    f.write(f"{k}<<EOF\n{v}\nEOF\n")
+                else:
+                    f.write(f"{k}={v}\n")
     else:
         # Local dev: shell-evaluable export statements (use with eval $(...))
         for k, v in env.items():
@@ -250,6 +257,7 @@ def main() -> None:
     variant = parse_variant(raw)
     client_auth_type = variant.get("client_auth_type", "private_key_jwt")
     sender_constrain = variant.get("sender_constrain", "dpop")
+    fapi_request_method = variant.get("fapi_request_method", "")
     needs_mtls = client_auth_type == "mtls" or sender_constrain == "mtls"
 
     public_jwks = None
@@ -275,6 +283,7 @@ def main() -> None:
         client_auth_type=client_auth_type,
         sender_constrain=sender_constrain,
         subject_dn=subject_dn,
+        fapi_request_method=fapi_request_method,
     )
     response = post_dcr(args.vouch_url, payload, verify_ssl=verify_ssl)
     print(f"DCR response: {json.dumps(response)}")
@@ -319,6 +328,7 @@ def main() -> None:
             client_auth_type=client_auth_type,
             sender_constrain=sender_constrain,
             subject_dn=subject_dn2,
+            fapi_request_method=fapi_request_method,
         )
         response2 = post_dcr(args.vouch_url, payload2, verify_ssl=verify_ssl)
         print(f"DCR response (client2): {json.dumps(response2)}")
