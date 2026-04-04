@@ -79,13 +79,23 @@ pub async fn complete_login(
     // ── 2. Validate pending authorization exists (read, don't consume) ────
     // The pending auth will be consumed by the authorize endpoint when
     // it issues the authorization code via handle_pending_auth.
-    if let Err(e) = db::get_pending_oauth_authorization(&state.store, &query.pending_auth).await {
-        tracing::error!(
-            pending_auth = %query.pending_auth,
-            error = %e,
-            "Certification login: DB error reading pending authorization"
-        );
-        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    match db::get_pending_oauth_authorization(&state.store, &query.pending_auth).await {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            tracing::warn!(
+                pending_auth = %query.pending_auth,
+                "Certification login: pending authorization not found or already consumed"
+            );
+            return StatusCode::NOT_FOUND.into_response();
+        }
+        Err(e) => {
+            tracing::error!(
+                pending_auth = %query.pending_auth,
+                error = %e,
+                "Certification login: DB error reading pending authorization"
+            );
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
     }
 
     // ── 3. Get or create the certification test user ──────────────────────
