@@ -605,7 +605,7 @@ async fn handle_pending_auth(state: &Arc<AppState>, pending_id: &str, jar: &Cook
                     .max(0);
                 let max_age_u64 = u64::try_from(max_age).unwrap_or(0);
                 let age_u64 = u64::try_from(age_secs).unwrap_or(u64::MAX);
-                if age_u64 >= max_age_u64 {
+                if age_u64 > max_age_u64 {
                     return oauth_error_redirect(
                         &pending.redirect_uri,
                         "login_required",
