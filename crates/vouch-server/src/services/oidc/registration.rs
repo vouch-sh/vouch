@@ -412,10 +412,12 @@ pub async fn register_client(
 
     // Determine require_signed_request_object:
     // - Explicit request value takes precedence
-    // - FAPI 2.0 Section 5.3.2: all FAPI2 clients require signed request objects
+    // - FAPI 2.0 Message Signing requires signed request objects (JAR/RFC 9101)
+    //   only when the client registers a request_object_signing_alg
+    // - FAPI 2.0 Security Profile uses unsigned PAR (RFC 9126) without JAR
     let require_signed = request
         .require_signed_request_object
-        .unwrap_or(fapi_profile != FapiProfile::None);
+        .unwrap_or(fapi_profile != FapiProfile::None && req_obj_alg.is_some());
 
     // 13. Infer application type
     let app_type = determine_client_type(
