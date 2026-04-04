@@ -1100,3 +1100,664 @@ async fn test_validation_before_auth_create_group_empty_name_no_token() {
         "Empty displayName must return 400 (not 401) even without auth: {body}"
     );
 }
+
+// ========================================================================
+// RFC 7643 Section 4.2 — Group CRUD Positive Tests
+// ========================================================================
+
+#[tokio::test]
+async fn test_scim_create_group() {
+    // POST /scim/v2/Groups returns 201 with id, displayName, schemas, meta
+    let (app, state) = test_app().await;
+    let token = create_test_scim_token(&state.store, "test-create-group").await;
+    let auth_header = format!("Bearer {}", token);
+
+    let (status, body) = http_post_json(
+        &app,
+        "/scim/v2/Groups",
+        r#"{"schemas": ["urn:ietf:params:scim:schemas:core:2.0:Group"], "displayName": "Engineering"}"#,
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::CREATED);
+    let group: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert!(group.get("id").is_some(), "Created group must have id");
+    assert_eq!(group["displayName"], "Engineering");
+    assert!(group.get("schemas").is_some(), "Group must have schemas");
+    assert!(group.get("meta").is_some(), "Group must have meta");
+}
+
+#[tokio::test]
+async fn test_scim_create_group_with_external_id() {
+    // POST with externalId should return it in the response
+    let (app, state) = test_app().await;
+    let token = create_test_scim_token(&state.store, "test-create-group-extid").await;
+    let auth_header = format!("Bearer {}", token);
+
+    let (status, body) = http_post_json(
+        &app,
+        "/scim/v2/Groups",
+        r#"{"schemas": ["urn:ietf:params:scim:schemas:core:2.0:Group"], "displayName": "Sales", "externalId": "ext-sales-42"}"#,
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::CREATED);
+    let group: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(group["externalId"], "ext-sales-42");
+    assert_eq!(group["displayName"], "Sales");
+}
+
+#[tokio::test]
+async fn test_scim_get_group_by_id() {
+    // GET /scim/v2/Groups/{id} returns the group
+    let (app, state) = test_app().await;
+    let token = create_test_scim_token(&state.store, "test-get-group").await;
+    let auth_header = format!("Bearer {}", token);
+
+    // Create a group first
+    let (status, body) = http_post_json(
+        &app,
+        "/scim/v2/Groups",
+        r#"{"schemas": ["urn:ietf:params:scim:schemas:core:2.0:Group"], "displayName": "Platform"}"#,
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let created: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let group_id = created["id"].as_str().expect("group id");
+
+    // Fetch the group by ID
+    let (status, body) = http_get(
+        &app,
+        &format!("/scim/v2/Groups/{}", group_id),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    let group: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(group["id"], group_id);
+    assert_eq!(group["displayName"], "Platform");
+}
+
+#[tokio::test]
+async fn test_scim_list_groups_empty() {
+    // GET /scim/v2/Groups on fresh DB returns empty Resources and totalResults: 0
+    let (app, state) = test_app().await;
+    let token = create_test_scim_token(&state.store, "test-list-groups-empty").await;
+    let auth_header = format!("Bearer {}", token);
+
+    let (status, body) =
+        http_get(&app, "/scim/v2/Groups", &[("Authorization", &auth_header)]).await;
+
+    assert_eq!(status, StatusCode::OK);
+    let response: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(response["totalResults"], 0);
+    let resources = response["Resources"].as_array().expect("Resources array");
+    assert!(resources.is_empty(), "Empty DB must return empty Resources");
+}
+
+#[tokio::test]
+async fn test_scim_list_groups_returns_created() {
+    // Create a group then list — it should appear in the results
+    let (app, state) = test_app().await;
+    let token = create_test_scim_token(&state.store, "test-list-groups-created").await;
+    let auth_header = format!("Bearer {}", token);
+
+    let (status, _) = http_post_json(
+        &app,
+        "/scim/v2/Groups",
+        r#"{"schemas": ["urn:ietf:params:scim:schemas:core:2.0:Group"], "displayName": "Infra"}"#,
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    let (status, body) =
+        http_get(&app, "/scim/v2/Groups", &[("Authorization", &auth_header)]).await;
+
+    assert_eq!(status, StatusCode::OK);
+    let response: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert!(
+        response["totalResults"].as_u64().unwrap_or(0) >= 1,
+        "totalResults must be at least 1 after creating a group"
+    );
+    let resources = response["Resources"].as_array().expect("Resources array");
+    assert!(
+        resources.iter().any(|r| r["displayName"] == "Infra"),
+        "Created group must appear in list response"
+    );
+}
+
+#[tokio::test]
+async fn test_scim_delete_group() {
+    // DELETE returns 204; subsequent GET returns 404
+    let (app, state) = test_app().await;
+    let token = create_test_scim_token(&state.store, "test-delete-group").await;
+    let auth_header = format!("Bearer {}", token);
+
+    // Create group to delete
+    let (status, body) = http_post_json(
+        &app,
+        "/scim/v2/Groups",
+        r#"{"schemas": ["urn:ietf:params:scim:schemas:core:2.0:Group"], "displayName": "ToDelete"}"#,
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let created: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let group_id = created["id"].as_str().expect("group id");
+
+    // Delete it
+    let (status, _) = http_delete(
+        &app,
+        &format!("/scim/v2/Groups/{}", group_id),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    // Verify the group is gone
+    let (status, _) = http_get(
+        &app,
+        &format!("/scim/v2/Groups/{}", group_id),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_scim_patch_group_replace_display_name() {
+    // PATCH replace displayName, verify the change is persisted
+    let (app, state) = test_app().await;
+    let token = create_test_scim_token(&state.store, "test-patch-group-name").await;
+    let auth_header = format!("Bearer {}", token);
+
+    // Create group
+    let (status, body) = http_post_json(
+        &app,
+        "/scim/v2/Groups",
+        r#"{"schemas": ["urn:ietf:params:scim:schemas:core:2.0:Group"], "displayName": "OldName"}"#,
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let created: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let group_id = created["id"].as_str().expect("group id");
+
+    // PATCH to replace displayName
+    let (status, body) = http_request(
+        &app,
+        "PATCH",
+        &format!("/scim/v2/Groups/{}", group_id),
+        Some(r#"{"schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"], "Operations": [{"op": "replace", "path": "displayName", "value": "NewName"}]}"#.to_string()),
+        &[
+            ("Content-Type", "application/json"),
+            ("Authorization", &auth_header),
+        ],
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "PATCH must return 200: {body}");
+    let updated: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(updated["displayName"], "NewName");
+}
+
+#[tokio::test]
+async fn test_scim_patch_group_replace_external_id() {
+    // PATCH replace externalId, verify the change is persisted
+    let (app, state) = test_app().await;
+    let token = create_test_scim_token(&state.store, "test-patch-group-extid").await;
+    let auth_header = format!("Bearer {}", token);
+
+    // Create group without externalId
+    let (status, body) = http_post_json(
+        &app,
+        "/scim/v2/Groups",
+        r#"{"schemas": ["urn:ietf:params:scim:schemas:core:2.0:Group"], "displayName": "DevOps"}"#,
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let created: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let group_id = created["id"].as_str().expect("group id");
+
+    // PATCH to set externalId
+    let (status, body) = http_request(
+        &app,
+        "PATCH",
+        &format!("/scim/v2/Groups/{}", group_id),
+        Some(r#"{"schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"], "Operations": [{"op": "replace", "path": "externalId", "value": "ext-devops-99"}]}"#.to_string()),
+        &[
+            ("Content-Type", "application/json"),
+            ("Authorization", &auth_header),
+        ],
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "PATCH must return 200: {body}");
+    let updated: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(updated["externalId"], "ext-devops-99");
+}
+
+// ========================================================================
+// RFC 7643 Section 4.2 — Group Members Positive Tests
+// ========================================================================
+
+#[tokio::test]
+async fn test_scim_create_group_with_members() {
+    // Create group with members array; verify members appear in GET response
+    let (app, state) = test_app().await;
+    let token = create_test_scim_token(&state.store, "test-create-group-members").await;
+    let auth_header = format!("Bearer {}", token);
+
+    // Create a user first
+    let (_, user_body) = http_post_json(
+        &app,
+        "/scim/v2/Users",
+        r#"{"schemas":["urn:ietf:params:scim:schemas:core:2.0:User"],"userName":"member-create@example.com"}"#,
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    let user: serde_json::Value = serde_json::from_str(&user_body).expect("Valid JSON");
+    let user_id = user["id"].as_str().expect("user id");
+
+    // Create group with that user as a member
+    let create_body = format!(
+        r#"{{"schemas":["urn:ietf:params:scim:schemas:core:2.0:Group"],"displayName":"TeamA","members":[{{"value":"{}"}}]}}"#,
+        user_id
+    );
+    let (status, body) = http_post_json(
+        &app,
+        "/scim/v2/Groups",
+        &create_body,
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let created: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let group_id = created["id"].as_str().expect("group id");
+
+    // GET the group and verify members
+    let (status, body) = http_get(
+        &app,
+        &format!("/scim/v2/Groups/{}", group_id),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let group: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let members = group["members"].as_array().expect("members array");
+    assert!(
+        members.iter().any(|m| m["value"] == user_id),
+        "Group must contain the created member"
+    );
+}
+
+#[tokio::test]
+async fn test_scim_patch_group_add_members() {
+    // PATCH add members operation adds the user to the group
+    let (app, state) = test_app().await;
+    let token = create_test_scim_token(&state.store, "test-patch-add-members").await;
+    let auth_header = format!("Bearer {}", token);
+
+    // Create a user
+    let (_, user_body) = http_post_json(
+        &app,
+        "/scim/v2/Users",
+        r#"{"schemas":["urn:ietf:params:scim:schemas:core:2.0:User"],"userName":"member-add@example.com"}"#,
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    let user: serde_json::Value = serde_json::from_str(&user_body).expect("Valid JSON");
+    let user_id = user["id"].as_str().expect("user id");
+
+    // Create group without members
+    let (status, body) = http_post_json(
+        &app,
+        "/scim/v2/Groups",
+        r#"{"schemas":["urn:ietf:params:scim:schemas:core:2.0:Group"],"displayName":"TeamB"}"#,
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let created: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let group_id = created["id"].as_str().expect("group id");
+
+    // PATCH add the user as a member
+    let patch_body = format!(
+        r#"{{"schemas":["urn:ietf:params:scim:api:messages:2.0:PatchOp"],"Operations":[{{"op":"add","path":"members","value":[{{"value":"{}"}}]}}]}}"#,
+        user_id
+    );
+    let (status, body) = http_request(
+        &app,
+        "PATCH",
+        &format!("/scim/v2/Groups/{}", group_id),
+        Some(patch_body),
+        &[
+            ("Content-Type", "application/json"),
+            ("Authorization", &auth_header),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "PATCH add must return 200: {body}");
+
+    // Verify the member appears in the group
+    let (status, body) = http_get(
+        &app,
+        &format!("/scim/v2/Groups/{}", group_id),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let group: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let members = group["members"].as_array().expect("members array");
+    assert!(
+        members.iter().any(|m| m["value"] == user_id),
+        "Added member must appear in GET response"
+    );
+}
+
+#[tokio::test]
+async fn test_scim_patch_group_remove_member() {
+    // PATCH remove with path `members[value eq "user-id"]` removes the member
+    let (app, state) = test_app().await;
+    let token = create_test_scim_token(&state.store, "test-patch-remove-member").await;
+    let auth_header = format!("Bearer {}", token);
+
+    // Create a user
+    let (_, user_body) = http_post_json(
+        &app,
+        "/scim/v2/Users",
+        r#"{"schemas":["urn:ietf:params:scim:schemas:core:2.0:User"],"userName":"member-remove@example.com"}"#,
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    let user: serde_json::Value = serde_json::from_str(&user_body).expect("Valid JSON");
+    let user_id = user["id"].as_str().expect("user id");
+
+    // Create group with that user as a member
+    let create_body = format!(
+        r#"{{"schemas":["urn:ietf:params:scim:schemas:core:2.0:Group"],"displayName":"TeamC","members":[{{"value":"{}"}}]}}"#,
+        user_id
+    );
+    let (status, body) = http_post_json(
+        &app,
+        "/scim/v2/Groups",
+        &create_body,
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let created: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let group_id = created["id"].as_str().expect("group id");
+
+    // PATCH remove the member using filter path — value eq requires escaped quotes in JSON
+    let patch_body = format!(
+        r#"{{"schemas":["urn:ietf:params:scim:api:messages:2.0:PatchOp"],"Operations":[{{"op":"remove","path":"members[value eq \"{}\"]"}}]}}"#,
+        user_id
+    );
+    let (status, body) = http_request(
+        &app,
+        "PATCH",
+        &format!("/scim/v2/Groups/{}", group_id),
+        Some(patch_body),
+        &[
+            ("Content-Type", "application/json"),
+            ("Authorization", &auth_header),
+        ],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "PATCH remove must return 200: {body}"
+    );
+
+    // Verify the member is gone
+    let (status, body) = http_get(
+        &app,
+        &format!("/scim/v2/Groups/{}", group_id),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let group: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    // members should be absent or empty after removal
+    let has_member = group
+        .get("members")
+        .and_then(|m| m.as_array())
+        .map(|arr| arr.iter().any(|m| m["value"] == user_id))
+        .unwrap_or(false);
+    assert!(
+        !has_member,
+        "Removed member must not appear in GET response"
+    );
+}
+
+// ========================================================================
+// RFC 7644 — Group CRUD Negative Tests
+// ========================================================================
+
+#[tokio::test]
+async fn test_scim_create_group_empty_display_name() {
+    // Empty displayName should return 400
+    let (app, state) = test_app().await;
+    let token = create_test_scim_token(&state.store, "test-create-group-empty-name").await;
+    let auth_header = format!("Bearer {}", token);
+
+    let (status, body) = http_post_json(
+        &app,
+        "/scim/v2/Groups",
+        r#"{"schemas": ["urn:ietf:params:scim:schemas:core:2.0:Group"], "displayName": ""}"#,
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+    let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(error["status"], "400");
+}
+
+#[tokio::test]
+async fn test_scim_create_group_requires_auth() {
+    // No token should return 401
+    let (app, _state) = test_app().await;
+
+    let (status, body) = http_post_json(
+        &app,
+        "/scim/v2/Groups",
+        r#"{"schemas": ["urn:ietf:params:scim:schemas:core:2.0:Group"], "displayName": "Unauthorized"}"#,
+        &[],
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "body: {body}");
+    let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert!(
+        error.get("schemas").is_some(),
+        "SCIM error must have schemas"
+    );
+}
+
+#[tokio::test]
+async fn test_scim_get_group_not_found() {
+    // Valid UUID that doesn't exist returns 404
+    let (app, state) = test_app().await;
+    let token = create_test_scim_token(&state.store, "test-group-not-found").await;
+    let auth_header = format!("Bearer {}", token);
+
+    let (status, body) = http_get(
+        &app,
+        "/scim/v2/Groups/00000000-0000-7000-0000-000000000000",
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(error["status"], "404");
+}
+
+#[tokio::test]
+async fn test_scim_get_group_invalid_id() {
+    // Non-UUID id should return 400
+    let (app, state) = test_app().await;
+    let token = create_test_scim_token(&state.store, "test-group-invalid-id").await;
+    let auth_header = format!("Bearer {}", token);
+
+    let (status, body) = http_get(
+        &app,
+        "/scim/v2/Groups/not-a-uuid",
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(error["status"], "400");
+}
+
+#[tokio::test]
+async fn test_scim_delete_group_not_found() {
+    // DELETE on a valid UUID that doesn't exist returns 404
+    let (app, state) = test_app().await;
+    let token = create_test_scim_token(&state.store, "test-delete-group-not-found").await;
+    let auth_header = format!("Bearer {}", token);
+
+    let (status, body) = http_delete(
+        &app,
+        "/scim/v2/Groups/00000000-0000-7000-0000-000000000099",
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(error["status"], "404");
+}
+
+#[tokio::test]
+async fn test_scim_delete_group_invalid_id() {
+    // DELETE with non-UUID id returns 400
+    let (app, state) = test_app().await;
+    let token = create_test_scim_token(&state.store, "test-delete-group-invalid-id").await;
+    let auth_header = format!("Bearer {}", token);
+
+    let (status, body) = http_delete(
+        &app,
+        "/scim/v2/Groups/not-a-uuid",
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(error["status"], "400");
+}
+
+#[tokio::test]
+async fn test_scim_patch_group_not_found() {
+    // PATCH on a non-existent group returns 404
+    let (app, state) = test_app().await;
+    let token = create_test_scim_token(&state.store, "test-patch-group-not-found").await;
+    let auth_header = format!("Bearer {}", token);
+
+    let (status, body) = http_request(
+        &app,
+        "PATCH",
+        "/scim/v2/Groups/00000000-0000-7000-0000-000000000088",
+        Some(r#"{"schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"], "Operations": [{"op": "replace", "path": "displayName", "value": "Ghost"}]}"#.to_string()),
+        &[
+            ("Content-Type", "application/json"),
+            ("Authorization", &auth_header),
+        ],
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::NOT_FOUND, "body: {body}");
+    let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(error["status"], "404");
+}
+
+#[tokio::test]
+async fn test_scim_list_groups_requires_auth() {
+    // No token returns 401
+    let (app, _state) = test_app().await;
+
+    let (status, body) = http_get(&app, "/scim/v2/Groups", &[]).await;
+
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "body: {body}");
+    let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert!(
+        error.get("schemas").is_some(),
+        "SCIM error must have schemas"
+    );
+}
+
+// ========================================================================
+// RFC 7643 Section 4.2 — Group Schema Validation Tests
+// ========================================================================
+
+#[tokio::test]
+async fn test_scim_group_response_has_correct_schema() {
+    // Schemas array must contain the Group schema URN
+    let (app, state) = test_app().await;
+    let token = create_test_scim_token(&state.store, "test-group-schema-urn").await;
+    let auth_header = format!("Bearer {}", token);
+
+    let (status, body) = http_post_json(
+        &app,
+        "/scim/v2/Groups",
+        r#"{"schemas": ["urn:ietf:params:scim:schemas:core:2.0:Group"], "displayName": "SchemaCheck"}"#,
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let group: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+
+    let schemas = group["schemas"].as_array().expect("schemas array");
+    assert!(
+        schemas
+            .iter()
+            .any(|s| s == "urn:ietf:params:scim:schemas:core:2.0:Group"),
+        "Group schemas must contain the Group URN, got: {:?}",
+        schemas
+    );
+}
+
+#[tokio::test]
+async fn test_scim_group_response_has_meta() {
+    // meta must include resourceType, location, and created
+    let (app, state) = test_app().await;
+    let token = create_test_scim_token(&state.store, "test-group-meta").await;
+    let auth_header = format!("Bearer {}", token);
+
+    let (status, body) = http_post_json(
+        &app,
+        "/scim/v2/Groups",
+        r#"{"schemas": ["urn:ietf:params:scim:schemas:core:2.0:Group"], "displayName": "MetaCheck"}"#,
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let group: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+
+    let meta = group.get("meta").expect("Group must have meta");
+    assert_eq!(
+        meta["resourceType"], "Group",
+        "meta.resourceType must be 'Group'"
+    );
+    assert!(meta.get("location").is_some(), "meta must include location");
+    assert!(
+        meta["location"]
+            .as_str()
+            .unwrap_or("")
+            .contains("/scim/v2/Groups/"),
+        "meta.location must point to the Groups endpoint"
+    );
+    assert!(meta.get("created").is_some(), "meta must include created");
+}

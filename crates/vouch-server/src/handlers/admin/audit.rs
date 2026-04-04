@@ -216,9 +216,11 @@ impl GeoFields {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use crate::test_utils::*;
+    use axum::http::StatusCode;
 
     #[test]
     fn test_geo_fields_from_json_full_record() {
@@ -343,5 +345,146 @@ mod tests {
     fn test_ip_title_all_none() {
         let geo = GeoFields::default();
         assert_eq!(geo.ip_title(), "");
+    }
+
+    // ---- Handler tests ----
+
+    #[tokio::test]
+    async fn test_audit_page_redirects_unauthenticated() {
+        let (app, _state) = test_app().await;
+        let (status, _body) = http_get(&app, "/admin/audit", &[]).await;
+        assert!(
+            status == StatusCode::SEE_OTHER || status == StatusCode::TEMPORARY_REDIRECT,
+            "expected redirect, got {status}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_audit_page_redirects_non_admin() {
+        let (app, state) = test_app().await;
+        let org = create_test_org(&state.store, "example.com").await;
+        let user =
+            create_test_user_in_org(&state.store, "regular@example.com", &org.id, false).await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let cookie = format!("{}={token}", vouch_common::SESSION_COOKIE_NAME);
+
+        let (status, _body) = http_get(&app, "/admin/audit", &[("Cookie", &cookie)]).await;
+        assert!(
+            status == StatusCode::SEE_OTHER || status == StatusCode::TEMPORARY_REDIRECT,
+            "expected redirect for non-admin, got {status}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_audit_page_redirects_user_without_org() {
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "noorg@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let cookie = format!("{}={token}", vouch_common::SESSION_COOKIE_NAME);
+
+        let (status, _body) = http_get(&app, "/admin/audit", &[("Cookie", &cookie)]).await;
+        assert!(
+            status == StatusCode::SEE_OTHER || status == StatusCode::TEMPORARY_REDIRECT,
+            "expected redirect for user without org, got {status}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_audit_page_returns_html_for_admin() {
+        let (app, state) = test_app().await;
+        let org = create_test_org(&state.store, "example.com").await;
+        let admin = create_test_user_in_org(&state.store, "admin@example.com", &org.id, true).await;
+        let auth_id = create_test_authenticator(&state.store, &admin.id).await;
+        let token = create_test_session(&state, &admin.id, &admin.email, &auth_id).await;
+        let cookie = format!("{}={token}", vouch_common::SESSION_COOKIE_NAME);
+
+        let (status, body) = http_get(&app, "/admin/audit", &[("Cookie", &cookie)]).await;
+        assert_eq!(status, StatusCode::OK, "admin should get 200");
+        assert!(
+            body.contains("<!DOCTYPE html") || body.contains("<html"),
+            "should return HTML"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_audit_page_with_filter_param() {
+        let (app, state) = test_app().await;
+        let org = create_test_org(&state.store, "example.com").await;
+        let admin = create_test_user_in_org(&state.store, "admin@example.com", &org.id, true).await;
+        let auth_id = create_test_authenticator(&state.store, &admin.id).await;
+        let token = create_test_session(&state, &admin.id, &admin.email, &auth_id).await;
+        let cookie = format!("{}={token}", vouch_common::SESSION_COOKIE_NAME);
+
+        let (status, _body) =
+            http_get(&app, "/admin/audit?filter=logins", &[("Cookie", &cookie)]).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "admin with filter=logins should get 200"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_audit_page_with_invalid_filter() {
+        let (app, state) = test_app().await;
+        let org = create_test_org(&state.store, "example.com").await;
+        let admin = create_test_user_in_org(&state.store, "admin@example.com", &org.id, true).await;
+        let auth_id = create_test_authenticator(&state.store, &admin.id).await;
+        let token = create_test_session(&state, &admin.id, &admin.email, &auth_id).await;
+        let cookie = format!("{}={token}", vouch_common::SESSION_COOKIE_NAME);
+
+        // Unknown filters are treated as no filter — page still loads
+        let (status, _body) = http_get(
+            &app,
+            "/admin/audit?filter=nonexistent",
+            &[("Cookie", &cookie)],
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "unknown filter should be ignored, still 200"
+        );
+    }
+
+    // ---- audit_filter_event_types helper tests ----
+
+    #[test]
+    fn test_audit_filter_event_types_logins() {
+        let types = audit_filter_event_types("logins").unwrap();
+        assert!(types.contains(&"login_success".to_string()));
+        assert!(types.contains(&"login_failed".to_string()));
+    }
+
+    #[test]
+    fn test_audit_filter_event_types_promotions() {
+        let types = audit_filter_event_types("promotions").unwrap();
+        assert!(types.contains(&"admin_promote".to_string()));
+    }
+
+    #[test]
+    fn test_audit_filter_event_types_unknown() {
+        let result = audit_filter_event_types("nonexistent");
+        assert!(result.is_none(), "unknown filter name should return None");
+    }
+
+    #[test]
+    fn test_audit_filter_event_types_all_known_filters() {
+        let known = [
+            "logins",
+            "promotions",
+            "demotions",
+            "deactivations",
+            "removals",
+            "revocations",
+        ];
+        for filter in &known {
+            assert!(
+                audit_filter_event_types(filter).is_some(),
+                "filter '{filter}' should return Some"
+            );
+        }
     }
 }

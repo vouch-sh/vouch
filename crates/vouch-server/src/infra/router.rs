@@ -163,6 +163,9 @@ pub fn build_app(state: Arc<AppState>, config: &config::ServerConfig) -> anyhow:
     ))
     .layer(DefaultBodyLimit::max(GLOBAL_BODY_LIMIT))
     .layer(request_id::propagate_request_id_layer())
+    .layer(axum::middleware::from_fn(
+        request_id::request_span_middleware,
+    ))
     .layer(request_id::set_request_id_layer())
     .with_state(state))
 }

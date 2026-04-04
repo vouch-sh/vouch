@@ -396,11 +396,13 @@ pub async fn delete_key(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 mod tests {
     use super::*;
     use crate::crypto::jwt::{JwtType, StateTokenSigner};
     use crate::test_utils::TEST_JWT_SECRET;
+    use crate::test_utils::*;
+    use axum::http::StatusCode;
     use vouch_common::fido2_types::Challenge;
 
     #[tokio::test]
@@ -468,5 +470,302 @@ mod tests {
             .decode_state_token(&token, JwtType::BrowserRegistrationState)
             .await;
         assert!(result.is_err(), "Wrong JWT type should be rejected");
+    }
+
+    // ========================================================================
+    // List Keys — Positive
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_list_keys_returns_ok() {
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "list@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+
+        let (status, body) = http_get(
+            &app,
+            "/v1/keys",
+            &[("Authorization", &format!("Bearer {token}"))],
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        let json: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
+        assert!(json["keys"].is_array(), "response must have a keys array");
+    }
+
+    #[tokio::test]
+    async fn test_list_keys_includes_registered_key() {
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "listkey@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+
+        let (status, body) = http_get(
+            &app,
+            "/v1/keys",
+            &[("Authorization", &format!("Bearer {token}"))],
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        let json: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
+        let keys = json["keys"].as_array().expect("keys must be array");
+        assert!(
+            !keys.is_empty(),
+            "authenticated user with a key must see it in the list"
+        );
+    }
+
+    // ========================================================================
+    // List Keys — Negative
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_list_keys_requires_auth() {
+        let (app, _state) = test_app().await;
+
+        let (status, _body) = http_get(&app, "/v1/keys", &[]).await;
+
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn test_list_keys_rejects_invalid_token() {
+        let (app, _state) = test_app().await;
+
+        let (status, _body) = http_get(
+            &app,
+            "/v1/keys",
+            &[("Authorization", "Bearer garbage.token.value")],
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    // ========================================================================
+    // Register Start — Positive
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_register_start_returns_challenge() {
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "start@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+
+        let (status, body) = http_post_json(
+            &app,
+            "/v1/keys/register/start",
+            r#"{"name":"My Key"}"#,
+            &[("Authorization", &format!("Bearer {token}"))],
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        let json: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
+        // Challenge<Raw> serializes as a byte array
+        assert!(
+            json["challenge"].is_array(),
+            "response must have a challenge array"
+        );
+        assert!(json["rp_id"].is_string(), "response must have rp_id");
+        assert!(json["state"].is_string(), "response must have state");
+        assert!(!json["user_id"].is_null(), "response must have user_id");
+    }
+
+    // ========================================================================
+    // Register Start — Negative
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_register_start_requires_auth() {
+        let (app, _state) = test_app().await;
+
+        let (status, _body) =
+            http_post_json(&app, "/v1/keys/register/start", r#"{"name":"My Key"}"#, &[]).await;
+
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    // ========================================================================
+    // Register Complete — Negative
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_register_complete_invalid_state() {
+        let (app, _state) = test_app().await;
+
+        // All Raw fields deserialize as Vec<u8> (JSON arrays); provide empty arrays
+        // so the JSON extractor succeeds, but the state JWT decode fails with 400.
+        let body = r#"{
+            "state": "garbage.state.jwt",
+            "credential_id": [],
+            "public_key": [],
+            "attestation_object": [],
+            "client_data_json": []
+        }"#;
+        let (status, resp_body) =
+            http_post_json(&app, "/v1/keys/register/complete", body, &[]).await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let json: serde_json::Value = serde_json::from_str(&resp_body).expect("valid JSON");
+        assert_eq!(json["code"], "invalid_state");
+    }
+
+    // ========================================================================
+    // Rename Key — Positive
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_rename_key_succeeds() {
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "rename@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+
+        let (status, _body) = http_request(
+            &app,
+            "PATCH",
+            &format!("/v1/keys/{auth_id}"),
+            Some(r#"{"name":"New Name"}"#.to_string()),
+            &[
+                ("Content-Type", "application/json"),
+                ("Authorization", &format!("Bearer {token}")),
+            ],
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    // ========================================================================
+    // Rename Key — Negative
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_rename_key_requires_auth() {
+        let (app, _state) = test_app().await;
+        let key_id = Uuid::new_v4();
+
+        let (status, _body) = http_request(
+            &app,
+            "PATCH",
+            &format!("/v1/keys/{key_id}"),
+            Some(r#"{"name":"New Name"}"#.to_string()),
+            &[("Content-Type", "application/json")],
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn test_rename_key_invalid_uuid() {
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "renamebaduuid@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+
+        let (status, body) = http_request(
+            &app,
+            "PATCH",
+            "/v1/keys/not-a-valid-uuid",
+            Some(r#"{"name":"New Name"}"#.to_string()),
+            &[
+                ("Content-Type", "application/json"),
+                ("Authorization", &format!("Bearer {token}")),
+            ],
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let json: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
+        assert_eq!(json["code"], "invalid_key_id");
+    }
+
+    #[tokio::test]
+    async fn test_rename_key_empty_name() {
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "renameempty@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+
+        let (status, body) = http_request(
+            &app,
+            "PATCH",
+            &format!("/v1/keys/{auth_id}"),
+            Some(r#"{"name":""}"#.to_string()),
+            &[
+                ("Content-Type", "application/json"),
+                ("Authorization", &format!("Bearer {token}")),
+            ],
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let json: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
+        assert_eq!(json["code"], "invalid_name");
+    }
+
+    #[tokio::test]
+    async fn test_rename_key_name_too_long() {
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "renametoolong@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+
+        let long_name = "a".repeat(257);
+        let body_str = format!(r#"{{"name":"{long_name}"}}"#);
+        let (status, body) = http_request(
+            &app,
+            "PATCH",
+            &format!("/v1/keys/{auth_id}"),
+            Some(body_str),
+            &[
+                ("Content-Type", "application/json"),
+                ("Authorization", &format!("Bearer {token}")),
+            ],
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let json: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
+        assert_eq!(json["code"], "invalid_name");
+    }
+
+    // ========================================================================
+    // Delete Key — Negative
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_delete_key_requires_auth() {
+        let (app, _state) = test_app().await;
+        let key_id = Uuid::new_v4();
+
+        let (status, _body) = http_delete(&app, &format!("/v1/keys/{key_id}"), &[]).await;
+
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn test_delete_key_invalid_uuid() {
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "deletebaduuid@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+
+        let (status, body) = http_delete(
+            &app,
+            "/v1/keys/not-a-valid-uuid",
+            &[("Authorization", &format!("Bearer {token}"))],
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let json: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
+        assert_eq!(json["code"], "invalid_key_id");
     }
 }

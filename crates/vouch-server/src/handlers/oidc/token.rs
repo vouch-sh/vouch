@@ -492,6 +492,28 @@ async fn handle_authorization_code_grant(
                 Ok(_) => None, // Not an mTLS client, fall through
                 Err(_) => None,
             }
+        } else if let Some(ref c) = creds
+            && c.client_secret.is_none()
+        {
+            // No secret and no certificate — check if this client requires mTLS.
+            // If so, reject immediately per RFC 8705 Section 2.
+            match crate::services::oidc::token::authenticate_client(&state, c).await {
+                Ok(client)
+                    if matches!(
+                        client.client.token_endpoint_auth_method,
+                        crate::db::TokenEndpointAuthMethod::TlsClientAuth
+                            | crate::db::TokenEndpointAuthMethod::SelfSignedTlsClientAuth
+                    ) =>
+                {
+                    return ServiceError::oauth(
+                        OAuthErrorCode::InvalidClient,
+                        "mTLS client certificate required",
+                    )
+                    .into_oauth_response()
+                    .into_response();
+                }
+                _ => None,
+            }
         } else {
             None
         };

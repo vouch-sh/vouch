@@ -640,3 +640,417 @@ pub async fn validate_cel_api(
         test_result,
     }))
 }
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::indexing_slicing)]
+mod tests {
+    use crate::test_utils::*;
+    use axum::http::StatusCode;
+
+    fn admin_cookie(token: &str) -> String {
+        format!("{}={token}", vouch_common::SESSION_COOKIE_NAME)
+    }
+
+    /// Helper: create an org with an admin user and return the session token.
+    async fn setup_admin(state: &crate::AppState) -> (crate::db::User, String) {
+        let org = create_test_org(&state.store, "example.com").await;
+        let admin = create_test_user_in_org(&state.store, "admin@example.com", &org.id, true).await;
+        let auth_id = create_test_authenticator(&state.store, &admin.id).await;
+        let token = create_test_session(state, &admin.id, &admin.email, &auth_id).await;
+        (admin, token)
+    }
+
+    // ── CEL Validation API — Positive ────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_cel_validate_valid_expression() {
+        let (app, state) = test_app().await;
+        let (_admin, token) = setup_admin(&state).await;
+        let auth = format!("Bearer {token}");
+
+        let body = serde_json::json!({
+            "cel_expression": "posture.os == \"macos\""
+        });
+        let (status, resp) = http_post_json(
+            &app,
+            "/api/v1/org/policies/validate",
+            &body.to_string(),
+            &[("Authorization", &auth)],
+        )
+        .await;
+
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "Valid CEL should return 200: {resp}"
+        );
+        let json: serde_json::Value = serde_json::from_str(&resp).unwrap();
+        assert_eq!(json["valid"], true, "valid field must be true");
+        assert!(
+            json.get("error").is_none() || json["error"].is_null(),
+            "no error for valid CEL"
+        );
+        assert!(
+            json.get("test_result").is_none() || json["test_result"].is_null(),
+            "no test_result without test_posture"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_cel_validate_with_test_posture() {
+        let (app, state) = test_app().await;
+        let (_admin, token) = setup_admin(&state).await;
+        let auth = format!("Bearer {token}");
+
+        let body = serde_json::json!({
+            "cel_expression": "posture.os == \"macos\"",
+            "test_posture": {
+                "type": "device_posture",
+                "posture_version": 1,
+                "os": "macos"
+            }
+        });
+        let (status, resp) = http_post_json(
+            &app,
+            "/api/v1/org/policies/validate",
+            &body.to_string(),
+            &[("Authorization", &auth)],
+        )
+        .await;
+
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "Valid CEL with matching posture should return 200: {resp}"
+        );
+        let json: serde_json::Value = serde_json::from_str(&resp).unwrap();
+        assert_eq!(json["valid"], true, "valid must be true");
+        assert_eq!(
+            json["test_result"]["pass"], true,
+            "test_result.pass must be true when posture matches"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_cel_validate_with_failing_test_posture() {
+        let (app, state) = test_app().await;
+        let (_admin, token) = setup_admin(&state).await;
+        let auth = format!("Bearer {token}");
+
+        // Expression checks for macos but posture reports linux
+        let body = serde_json::json!({
+            "cel_expression": "posture.os == \"macos\"",
+            "test_posture": {
+                "type": "device_posture",
+                "posture_version": 1,
+                "os": "linux"
+            }
+        });
+        let (status, resp) = http_post_json(
+            &app,
+            "/api/v1/org/policies/validate",
+            &body.to_string(),
+            &[("Authorization", &auth)],
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK, "Response should be 200: {resp}");
+        let json: serde_json::Value = serde_json::from_str(&resp).unwrap();
+        assert_eq!(json["valid"], true, "CEL itself is valid");
+        assert_eq!(
+            json["test_result"]["pass"], false,
+            "test_result.pass must be false when posture does not match"
+        );
+    }
+
+    // ── CEL Validation API — Negative ────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_cel_validate_requires_auth() {
+        let (app, _state) = test_app().await;
+
+        let body = serde_json::json!({"cel_expression": "posture.os == \"macos\""});
+        let (status, _resp) = http_post_json(
+            &app,
+            "/api/v1/org/policies/validate",
+            &body.to_string(),
+            &[],
+        )
+        .await;
+
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "Unauthenticated request must return 401"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_cel_validate_requires_org_admin() {
+        let (app, state) = test_app().await;
+        let org = create_test_org(&state.store, "example.com").await;
+        let member =
+            create_test_user_in_org(&state.store, "member@example.com", &org.id, false).await;
+        let auth_id = create_test_authenticator(&state.store, &member.id).await;
+        let token = create_test_session(&state, &member.id, &member.email, &auth_id).await;
+        let auth = format!("Bearer {token}");
+
+        let body = serde_json::json!({"cel_expression": "posture.os == \"macos\""});
+        let (status, _resp) = http_post_json(
+            &app,
+            "/api/v1/org/policies/validate",
+            &body.to_string(),
+            &[("Authorization", &auth)],
+        )
+        .await;
+
+        assert_eq!(
+            status,
+            StatusCode::FORBIDDEN,
+            "Non-admin user must receive 403"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_cel_validate_empty_expression() {
+        let (app, state) = test_app().await;
+        let (_admin, token) = setup_admin(&state).await;
+        let auth = format!("Bearer {token}");
+
+        let body = serde_json::json!({"cel_expression": ""});
+        let (status, resp) = http_post_json(
+            &app,
+            "/api/v1/org/policies/validate",
+            &body.to_string(),
+            &[("Authorization", &auth)],
+        )
+        .await;
+
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "Empty expression returns 200: {resp}"
+        );
+        let json: serde_json::Value = serde_json::from_str(&resp).unwrap();
+        assert_eq!(
+            json["valid"], false,
+            "valid must be false for empty expression"
+        );
+        assert!(
+            json["error"].as_str().is_some(),
+            "error message must be present"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_cel_validate_too_long_expression() {
+        let (app, state) = test_app().await;
+        let (_admin, token) = setup_admin(&state).await;
+        let auth = format!("Bearer {token}");
+
+        let long_expr = "a".repeat(1025);
+        let body = serde_json::json!({"cel_expression": long_expr});
+        let (status, resp) = http_post_json(
+            &app,
+            "/api/v1/org/policies/validate",
+            &body.to_string(),
+            &[("Authorization", &auth)],
+        )
+        .await;
+
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "Over-length expression returns 200: {resp}"
+        );
+        let json: serde_json::Value = serde_json::from_str(&resp).unwrap();
+        assert_eq!(
+            json["valid"], false,
+            "valid must be false for >1024 char expression"
+        );
+        assert!(
+            json["error"].as_str().is_some(),
+            "error message must be present"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_cel_validate_invalid_syntax() {
+        let (app, state) = test_app().await;
+        let (_admin, token) = setup_admin(&state).await;
+        let auth = format!("Bearer {token}");
+
+        // Unterminated string literal is genuinely invalid CEL syntax
+        let body = serde_json::json!({"cel_expression": "posture.os == \"unterminated"});
+        let (status, resp) = http_post_json(
+            &app,
+            "/api/v1/org/policies/validate",
+            &body.to_string(),
+            &[("Authorization", &auth)],
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK, "Invalid CEL returns 200: {resp}");
+        let json: serde_json::Value = serde_json::from_str(&resp).unwrap();
+        assert_eq!(
+            json["valid"], false,
+            "valid must be false for invalid syntax"
+        );
+        assert!(
+            json["error"].as_str().is_some(),
+            "error message must be present for invalid CEL"
+        );
+    }
+
+    // ── Admin UI Endpoints — Auth checks ─────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_admin_policies_page_redirects_unauthenticated() {
+        let (app, _state) = test_app().await;
+
+        let (status, _body) = http_get(&app, "/admin/policies", &[]).await;
+
+        assert_eq!(
+            status,
+            StatusCode::SEE_OTHER,
+            "Unauthenticated GET /admin/policies must redirect"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_admin_policies_page_redirects_non_admin() {
+        let (app, state) = test_app().await;
+        let org = create_test_org(&state.store, "example.com").await;
+        let member =
+            create_test_user_in_org(&state.store, "member@example.com", &org.id, false).await;
+        let auth_id = create_test_authenticator(&state.store, &member.id).await;
+        let token = create_test_session(&state, &member.id, &member.email, &auth_id).await;
+        let cookie = admin_cookie(&token);
+
+        let (status, _body) = http_get(&app, "/admin/policies", &[("Cookie", &cookie)]).await;
+
+        assert_eq!(
+            status,
+            StatusCode::SEE_OTHER,
+            "Non-admin GET /admin/policies must redirect"
+        );
+    }
+
+    // ── Admin UI Endpoints — CSRF checks ─────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_create_custom_policy_requires_origin() {
+        let (app, state) = test_app().await;
+        let (_admin, token) = setup_admin(&state).await;
+        let cookie = admin_cookie(&token);
+
+        let (status, _body) = http_post_form(
+            &app,
+            "/admin/policies/custom",
+            "policy_name=Test&cel_expression=posture.os+%3D%3D+%22macos%22",
+            &[("Cookie", &cookie)],
+        )
+        .await;
+
+        assert_eq!(
+            status,
+            StatusCode::FORBIDDEN,
+            "POST without Origin header must be rejected with 403"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_toggle_preconfigured_requires_origin() {
+        let (app, state) = test_app().await;
+        let (_admin, token) = setup_admin(&state).await;
+        let cookie = admin_cookie(&token);
+
+        let (status, _body) = http_post_form(
+            &app,
+            "/admin/policies/preconfigured/disk_encryption/toggle",
+            "",
+            &[("Cookie", &cookie)],
+        )
+        .await;
+
+        assert_eq!(
+            status,
+            StatusCode::FORBIDDEN,
+            "POST without Origin header must be rejected with 403"
+        );
+    }
+
+    // ── Input Validation ─────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_create_custom_policy_rejects_empty_name() {
+        let (app, state) = test_app().await;
+        let (_admin, token) = setup_admin(&state).await;
+        let cookie = admin_cookie(&token);
+        let origin = "https://test.example.com";
+
+        let (status, _body) = http_post_form(
+            &app,
+            "/admin/policies/custom",
+            "policy_name=&cel_expression=posture.os+%3D%3D+%22macos%22",
+            &[("Cookie", &cookie), ("Origin", origin)],
+        )
+        .await;
+
+        // Empty name triggers redirect with error query param
+        assert_eq!(
+            status,
+            StatusCode::SEE_OTHER,
+            "Empty name must result in redirect"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_create_custom_policy_rejects_long_cel() {
+        let (app, state) = test_app().await;
+        let (_admin, token) = setup_admin(&state).await;
+        let cookie = admin_cookie(&token);
+        let origin = "https://test.example.com";
+
+        let long_cel = "a".repeat(1025);
+        let body = format!(
+            "policy_name=Test&cel_expression={}",
+            urlencoding::encode(&long_cel)
+        );
+        let (status, _body) = http_post_form(
+            &app,
+            "/admin/policies/custom",
+            &body,
+            &[("Cookie", &cookie), ("Origin", origin)],
+        )
+        .await;
+
+        assert_eq!(
+            status,
+            StatusCode::SEE_OTHER,
+            "Over-length CEL must result in redirect"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_toggle_preconfigured_invalid_slug() {
+        let (app, state) = test_app().await;
+        let (_admin, token) = setup_admin(&state).await;
+        let cookie = admin_cookie(&token);
+        let origin = "https://test.example.com";
+
+        let (status, _body) = http_post_form(
+            &app,
+            "/admin/policies/preconfigured/nonexistent_slug_xyz/toggle",
+            "",
+            &[("Cookie", &cookie), ("Origin", origin)],
+        )
+        .await;
+
+        assert_eq!(
+            status,
+            StatusCode::NOT_FOUND,
+            "Unknown preconfigured slug must return 404"
+        );
+    }
+}

@@ -123,7 +123,7 @@ subtle = { version = "=2.6.1", default-features = false }
 tempfile = { version = "=3.27.0", default-features = false }
 thiserror = { version = "=2.0.18", default-features = false }
 time = { version = "=0.3.47", default-features = false }
-tokio = { version = "=1.50.0", default-features = false }
+tokio = { version = "=1.51.0", default-features = false }
 tokio-rustls = { version = "=0.26.4", default-features = false }
 tokio-util = { version = "=0.7.18", default-features = false }
 toml_edit = { version = "=0.25.10", default-features = false }
