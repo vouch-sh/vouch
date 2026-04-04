@@ -45,17 +45,23 @@ pub fn propagate_request_id_layer() -> PropagateRequestIdLayer {
 /// Middleware that creates a tracing span with the FAPI interaction ID.
 ///
 /// Must be placed after [`set_request_id_layer`] in the middleware stack so
-/// that the [`RequestId`] extension is available. All downstream middleware
-/// and handlers inherit this span, making `interaction_id` appear in every
-/// log line and OpenTelemetry span.
+/// that the request always carries `x-fapi-interaction-id` (either
+/// client-provided or server-generated). All downstream middleware and
+/// handlers inherit this span, making `interaction_id` appear in every log
+/// line and OpenTelemetry span.
 pub async fn request_span_middleware(
     req: Request<axum::body::Body>,
     next: Next,
 ) -> impl IntoResponse {
     let interaction_id = req
-        .extensions()
-        .get::<RequestId>()
-        .and_then(|id| id.header_value().to_str().ok())
+        .headers()
+        .get(&X_FAPI_INTERACTION_ID)
+        .and_then(|id| id.to_str().ok())
+        .or_else(|| {
+            req.extensions()
+                .get::<RequestId>()
+                .and_then(|id| id.header_value().to_str().ok())
+        })
         .unwrap_or("unknown");
 
     let method = req.method().clone();
