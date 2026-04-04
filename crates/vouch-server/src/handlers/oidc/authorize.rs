@@ -212,7 +212,7 @@ async fn authorize_inner(state: Arc<AppState>, params: AuthorizeQuery, jar: Cook
                 return oauth_error_redirect(
                     &redirect_uri,
                     "invalid_request",
-                    "Unsupported prompt value. Only 'login' and 'none' are supported",
+                    "Unsupported prompt value. Supported values: login, none, consent",
                     params.state.as_deref(),
                     &state.config().base_url,
                 );
@@ -594,6 +594,26 @@ async fn handle_pending_auth(state: &Arc<AppState>, pending_id: &str, jar: &Cook
                     error_message,
                 }
                 .into_response();
+            }
+
+            // Validate max_age: if the pending request specified max_age,
+            // verify the session is not older than that threshold (RFC 9470).
+            if let Some(max_age) = pending.max_age {
+                let age_secs = jiff::Timestamp::now()
+                    .duration_since(auth_session.created_at)
+                    .as_secs()
+                    .max(0);
+                let max_age_u64 = u64::try_from(max_age).unwrap_or(0);
+                let age_u64 = u64::try_from(age_secs).unwrap_or(u64::MAX);
+                if age_u64 >= max_age_u64 {
+                    return oauth_error_redirect(
+                        &pending.redirect_uri,
+                        "login_required",
+                        "Session exceeds requested max_age",
+                        pending.state.as_deref(),
+                        &state.config().base_url,
+                    );
+                }
             }
 
             // Issue authorization code using stored parameters.
