@@ -144,10 +144,6 @@ pub fn build_app(state: Arc<AppState>, config: &config::ServerConfig) -> anyhow:
                 "/certification/deny-login",
                 get(handlers::certification::deny_login),
             )
-            .route(
-                "/certification/clear-sessions",
-                post(handlers::certification::clear_sessions),
-            )
     } else {
         Router::new()
     };

@@ -261,42 +261,6 @@ pub async fn deny_login(
     Redirect::to(&redirect_url).into_response()
 }
 
-/// POST /certification/clear-sessions
-///
-/// Deletes all sessions for the certification test user. Called by the
-/// test runner between conformance test modules to prevent session cookies
-/// from leaking across modules (which share a browser context).
-///
-/// Responses:
-/// - `204` — sessions cleared
-/// - `404` — certification mode not enabled or test user not found
-/// - `500` — internal error
-pub async fn clear_sessions(State(state): State<Arc<AppState>>) -> Response {
-    if state.config().certification_test_token.is_none() {
-        return StatusCode::NOT_FOUND.into_response();
-    }
-
-    let user = match db::get_user_by_email(&state.store, CERT_USER_EMAIL).await {
-        Ok(Some(u)) => u,
-        Ok(None) => return StatusCode::NO_CONTENT.into_response(),
-        Err(e) => {
-            tracing::error!(error = %e, "clear-sessions: DB error");
-            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-        }
-    };
-
-    match db::delete_sessions_for_user(&state.store, &user.id).await {
-        Ok(count) => {
-            tracing::info!(count, "Certification clear-sessions: deleted sessions");
-            StatusCode::NO_CONTENT.into_response()
-        }
-        Err(e) => {
-            tracing::error!(error = %e, "clear-sessions: failed to delete sessions");
-            StatusCode::INTERNAL_SERVER_ERROR.into_response()
-        }
-    }
-}
-
 /// Get the certification test user, creating it if it doesn't exist.
 async fn get_or_create_cert_user(state: &Arc<AppState>) -> anyhow::Result<db::User> {
     // Try to find existing user first.
