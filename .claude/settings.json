@@ -16,7 +16,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "which apt-get > /dev/null 2>&1 && (dpkg -s libudev-dev > /dev/null 2>&1 || sudo apt-get update && sudo apt-get install -y libudev-dev cmake golang-go clang)"
+            "command": "which apt-get > /dev/null 2>&1 && (dpkg -s libudev-dev > /dev/null 2>&1 || (sudo apt-get update && sudo apt-get install -y libudev-dev cmake golang-go clang))"
           },
           {
             "type": "command",
