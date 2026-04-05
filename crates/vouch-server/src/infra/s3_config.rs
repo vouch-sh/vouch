@@ -694,7 +694,19 @@ impl ServerConfig {
             self.rp_name = v.clone();
         }
         if let Some(v) = &s3.base_url {
-            self.base_url = v.clone();
+            match vouch_common::ensure_url_has_scheme(v) {
+                Ok(normalized) => {
+                    if normalized != *v {
+                        tracing::warn!(
+                            "S3 config base_url missing scheme, normalized to: {normalized}"
+                        );
+                    }
+                    self.base_url = normalized;
+                }
+                Err(e) => {
+                    tracing::error!("S3 config base_url has invalid scheme: {e}; keeping current value");
+                }
+            }
         }
         if let Some(v) = &s3.jwt_secret {
             self.jwt_secret = SecretString::from(v.clone());
