@@ -98,6 +98,75 @@ pub fn is_loopback_host(host: &str) -> bool {
     false
 }
 
+/// Ensure a URL string has an `https://` or `http://` scheme.
+///
+/// - If the URL already starts with `https://` or `http://`, it is returned unchanged.
+/// - If the URL has no scheme, `https://` is prepended (or `http://` for loopback hosts).
+/// - Returns an error if the URL has a non-HTTP scheme (e.g., `ftp://`, `javascript:`).
+///
+/// # Examples
+///
+/// ```
+/// use vouch_common::ensure_url_has_scheme;
+///
+/// assert_eq!(ensure_url_has_scheme("https://vouch.sh").unwrap(), "https://vouch.sh");
+/// assert_eq!(ensure_url_has_scheme("vouch.sh").unwrap(), "https://vouch.sh");
+/// assert_eq!(ensure_url_has_scheme("localhost:3000").unwrap(), "http://localhost:3000");
+/// assert!(ensure_url_has_scheme("ftp://vouch.sh").is_err());
+/// ```
+///
+/// # Errors
+///
+/// Returns an error string if the URL has a disallowed scheme.
+pub fn ensure_url_has_scheme(url: &str) -> Result<String, String> {
+    if url.starts_with("https://") || url.starts_with("http://") {
+        return Ok(url.to_string());
+    }
+
+    // Check for other schemes (ftp://, javascript:, data:, etc.).
+    // A URI scheme is followed by ":" (RFC 3986 §3.1). We look for "://" to
+    // distinguish schemes from host:port patterns like "vouch.sh:8443" or
+    // "localhost:3000".  For schemeless URIs like "javascript:..." (no "//"),
+    // we also check for the pattern "<alpha-only>:" which cannot be a valid
+    // host:port (hostnames contain dots or digits).
+    if let Some(colon_pos) = url.find(':') {
+        let before_colon = url.get(..colon_pos).unwrap_or_default();
+        let after_colon = url.get(colon_pos + 1..).unwrap_or_default();
+
+        if !before_colon.is_empty()
+            && before_colon.chars().all(|c| c.is_ascii_alphabetic())
+            && after_colon.starts_with("//")
+        {
+            // Looks like "scheme://..." — reject non-HTTP schemes.
+            return Err(format!(
+                "URL has disallowed scheme '{before_colon}': {url}"
+            ));
+        }
+
+        // Also catch scheme-like prefixes without "//" (e.g., "javascript:alert(1)",
+        // "data:text/html,..."). These have no dots/digits before the colon and no
+        // "//" after it, so they can't be host:port.
+        if !before_colon.is_empty()
+            && before_colon.chars().all(|c| c.is_ascii_alphabetic())
+            && !after_colon.starts_with("//")
+            && !after_colon.chars().next().is_some_and(|c| c.is_ascii_digit())
+        {
+            return Err(format!(
+                "URL has disallowed scheme '{before_colon}': {url}"
+            ));
+        }
+    }
+
+    // No scheme — prepend based on whether the host is loopback.
+    let host = url.split('/').next().unwrap_or(url);
+    let host_no_port = host.split(':').next().unwrap_or(host);
+    if is_loopback_host(host_no_port) {
+        Ok(format!("http://{url}"))
+    } else {
+        Ok(format!("https://{url}"))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -256,5 +325,88 @@ mod tests {
     #[test]
     fn not_loopback_localhost_subdomain() {
         assert!(!is_loopback_host("localhost.evil.com"));
+    }
+
+    // =========================================================================
+    // ensure_url_has_scheme() tests
+    // =========================================================================
+
+    #[test]
+    fn scheme_passthrough_https() {
+        assert_eq!(
+            ensure_url_has_scheme("https://vouch.sh").unwrap(),
+            "https://vouch.sh"
+        );
+    }
+
+    #[test]
+    fn scheme_passthrough_http() {
+        assert_eq!(
+            ensure_url_has_scheme("http://localhost:3000").unwrap(),
+            "http://localhost:3000"
+        );
+    }
+
+    #[test]
+    fn scheme_prepend_https_for_remote() {
+        assert_eq!(
+            ensure_url_has_scheme("vouch.example.com").unwrap(),
+            "https://vouch.example.com"
+        );
+    }
+
+    #[test]
+    fn scheme_prepend_https_for_remote_with_port() {
+        assert_eq!(
+            ensure_url_has_scheme("vouch.example.com:8443").unwrap(),
+            "https://vouch.example.com:8443"
+        );
+    }
+
+    #[test]
+    fn scheme_prepend_http_for_localhost() {
+        assert_eq!(
+            ensure_url_has_scheme("localhost:3000").unwrap(),
+            "http://localhost:3000"
+        );
+    }
+
+    #[test]
+    fn scheme_prepend_http_for_loopback_ip() {
+        assert_eq!(
+            ensure_url_has_scheme("127.0.0.1:3000").unwrap(),
+            "http://127.0.0.1:3000"
+        );
+    }
+
+    #[test]
+    fn scheme_rejects_ftp() {
+        assert!(ensure_url_has_scheme("ftp://vouch.sh").is_err());
+    }
+
+    #[test]
+    fn scheme_rejects_javascript() {
+        assert!(ensure_url_has_scheme("javascript:alert(1)").is_err());
+    }
+
+    #[test]
+    fn scheme_rejects_data() {
+        assert!(ensure_url_has_scheme("data:text/html,<h1>hi</h1>").is_err());
+    }
+
+    #[test]
+    fn scheme_preserves_path() {
+        assert_eq!(
+            ensure_url_has_scheme("https://vouch.sh/path").unwrap(),
+            "https://vouch.sh/path"
+        );
+    }
+
+    #[test]
+    fn scheme_prepend_preserves_path() {
+        assert_eq!(
+            ensure_url_has_scheme("vouch.sh/path").unwrap(),
+            "https://vouch.sh/path"
+        );
     }
 }

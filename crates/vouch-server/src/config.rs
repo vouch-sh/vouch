@@ -496,7 +496,12 @@ impl ServerConfig {
 
         // Compute base URL (handles both production https and local http)
         let base_url = if let Some(url) = args.base_url {
-            url
+            let normalized = vouch_common::ensure_url_has_scheme(&url)
+                .map_err(|e| anyhow::anyhow!("Invalid VOUCH_BASE_URL: {e}"))?;
+            if normalized != url {
+                tracing::warn!("VOUCH_BASE_URL missing scheme, normalized to: {normalized}");
+            }
+            normalized
         } else {
             let derived = if vouch_common::is_loopback_host(&args.rp_id) {
                 // For local development (localhost/127.0.0.1), use http with port
@@ -680,6 +685,14 @@ impl ServerConfig {
     /// Validate that all required configuration is present.
     /// Call this after all config sources (env, S3) have been merged.
     pub fn validate(&self) -> Result<()> {
+        // Ensure base_url has a valid HTTP(S) scheme.
+        if !self.base_url.starts_with("https://") && !self.base_url.starts_with("http://") {
+            anyhow::bail!(
+                "base_url must include a scheme (https:// or http://), got: {}",
+                self.base_url
+            );
+        }
+
         // OIDC and SAML are mutually exclusive.
         if self.oidc_configured() && self.saml_configured() {
             anyhow::bail!(
