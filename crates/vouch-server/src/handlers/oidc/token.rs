@@ -564,13 +564,12 @@ async fn handle_authorization_code_grant(
     }
 
     // RFC 9449 Section 5: When the client requires DPoP-bound access tokens,
-    // a valid DPoP proof MUST be present. Without it the token would be
-    // issued without a jkt binding, violating the client's registered
-    // constraint. mTLS is accepted as an alternative sender constraint.
+    // a valid DPoP proof MUST be present. The client explicitly opted into
+    // DPoP binding via dpop_bound_access_tokens=true, so mTLS alone does
+    // not satisfy this — the access token must carry a jkt confirmation.
     if let Some(auth) = authenticated_client
         && auth.client.dpop_bound_access_tokens
         && dpop_proof.is_none()
-        && !has_mtls_cert
     {
         return ServiceError::oauth(
             OAuthErrorCode::InvalidRequest,
