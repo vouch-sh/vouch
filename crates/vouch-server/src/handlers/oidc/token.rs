@@ -563,6 +563,23 @@ async fn handle_authorization_code_grant(
         return e.into_oauth_response().into_response();
     }
 
+    // RFC 9449 Section 5: When the client requires DPoP-bound access tokens,
+    // a valid DPoP proof MUST be present. The client explicitly opted into
+    // DPoP binding via dpop_bound_access_tokens=true, so mTLS alone does
+    // not satisfy this — the access token must carry a jkt confirmation.
+    if let Some(auth) = authenticated_client
+        && auth.client.dpop_bound_access_tokens
+        && dpop_proof.is_none()
+    {
+        return ServiceError::oauth(
+            OAuthErrorCode::InvalidRequest,
+            "Client requires DPoP-bound access tokens \
+             but no DPoP proof was provided",
+        )
+        .into_oauth_response()
+        .into_response();
+    }
+
     // RFC 8705 Section 3: When the client requires certificate-bound access
     // tokens, a client certificate MUST be present. Without a cert the token
     // would be issued without a cnf.x5t#S256 binding, violating the client's

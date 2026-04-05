@@ -1,0 +1,29 @@
+{
+  "enabledPlugins": {
+    "rust-agents@claude-rust-agents": true
+  },
+  "extraKnownMarketplaces": {
+    "claude-rust-agents": {
+      "source": {
+        "source": "github",
+        "repo": "bug-ops/claude-plugins"
+      }
+    }
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "which apt-get > /dev/null 2>&1 && (dpkg -s libudev-dev > /dev/null 2>&1 || (sudo apt-get update && sudo apt-get install -y libudev-dev cmake golang-go clang))"
+          },
+          {
+            "type": "command",
+            "command": "which rustup > /dev/null 2>&1 || curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain none && . \"$HOME/.cargo/env\" && rustup show"
+          }
+        ]
+      }
+    ]
+  }
+}

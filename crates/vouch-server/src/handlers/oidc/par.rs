@@ -209,13 +209,15 @@ pub async fn par(
 
     // RFC 9101: Enforce require_signed_request_object for this client.
     // If the client requires signed request objects and no `request` JWT was
-    // provided, reject the PAR request.
+    // provided, reject the PAR request.  Use `invalid_request` per PAR-2.3:
+    // the request itself is invalid (missing required parameter), not a
+    // malformed request object.
     if authenticated_client.client.require_signed_request_object == Some(true)
         && params.request.is_none()
     {
         return par_error_response(
             StatusCode::BAD_REQUEST,
-            "invalid_request_object",
+            "invalid_request",
             "This client requires a signed Request Object (RFC 9101)",
         );
     }

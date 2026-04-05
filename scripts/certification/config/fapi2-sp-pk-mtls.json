@@ -81,6 +81,36 @@
           ]
         }
       ]
+    },
+    "fapi2-security-profile-final-par-ensure-reused-request-uri-prior-to-auth-completion-succeeds": {
+      "browser": [
+        {
+          "match": "{BASEURL}/oauth/authorize*",
+          "match-limit": 1,
+          "tasks": []
+        },
+        {
+          "match": "{BASEURL}/oauth/authorize*",
+          "tasks": [
+            {
+              "task": "Login",
+              "optional": true,
+              "match": "{BASEURL}/login*",
+              "commands": [
+                ["click", "id", "cert-login"]
+              ]
+            },
+            {
+              "task": "Verify Complete",
+              "optional": true,
+              "match": "*/test/*/callback*",
+              "commands": [
+                ["wait", "id", "submission_complete", 10]
+              ]
+            }
+          ]
+        }
+      ]
     }
   }
 }
