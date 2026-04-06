@@ -6,7 +6,7 @@
 
 **Prove you're here.**
 
-[![OpenID Certified](https://openid.net/wordpress-content/uploads/2016/04/oid-l-certification-mark-l-rgb-150dpi-90mm-300x157.png)](https://openid.net/certification/)
+[![OpenID Certified](https://vouch.sh/img/openid-certified.png)](https://openid.net/certification/)
 
 Hardware-backed authentication that issues short-lived credentials only after a human touches a YubiKey. One touch, one PIN, one 8-hour session — then SSH, AWS, Kubernetes, and more just work.
 
