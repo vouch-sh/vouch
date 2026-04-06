@@ -108,6 +108,9 @@ sudo dnf install vouch
 cargo install --git https://github.com/vouch-sh/vouch vouch-cli
 ```
 
+> [!NOTE]
+> Vouch is not published to crates.io. Install from the Git repository or use a package manager.
+
 ### Setup
 ```bash
 # Enroll with your YubiKey (one-time, opens browser)
@@ -120,8 +123,18 @@ vouch setup eks --cluster my-cluster               # kubectl for EKS via IAM
 vouch setup k8s --cluster my-cluster --server URL  # kubectl via OIDC
 vouch setup github --configure                     # Git credential helper for GitHub
 vouch setup docker --configure ghcr.io             # Docker registry auth
+vouch setup cargo --configure                      # Cargo registry auth
+vouch setup codecommit --configure                 # AWS CodeCommit Git credentials
+vouch setup ssm                                    # SSH via AWS Systems Manager
+vouch setup codeartifact --tool pip --repository R # Private package registry
 # See all integrations: https://vouch.sh/docs/
 ```
+
+> [!TIP]
+> Run `vouch doctor` at any time to check your YubiKey, agent, and configuration status.
+
+> [!IMPORTANT]
+> The `vouch-agent` daemon must be running for credential operations. It starts automatically on `vouch login` and manages your session.
 
 ### Daily Use
 ```bash
@@ -139,6 +152,20 @@ git clone https://github.com/your-org/private-repo.git
 vouch status
 ```
 
+### Credential Injection
+
+For scripts and CI/CD pipelines, inject credentials into subprocesses:
+
+```bash
+# Run a command with AWS credentials in the environment
+vouch exec --type aws --role arn:aws:iam::ID:role/name -- terraform plan
+
+# Export credentials for the current shell
+eval "$(vouch env --type aws --role arn:aws:iam::ID:role/name)"
+
+# Available types: aws, github, codeartifact, rds, redshift
+```
+
 ### Shell Completions
 ```bash
 # Bash
@@ -151,6 +178,35 @@ vouch completions zsh > "${fpath[1]}/_vouch"
 vouch completions fish > ~/.config/fish/completions/vouch.fish
 ```
 
+### Shell Integration
+
+Add session status to your shell prompt (sets `VOUCH_AUTHENTICATED` and `VOUCH_EXPIRES_IN`):
+
+```bash
+# Bash (add to ~/.bashrc)
+eval "$(vouch init bash)"
+
+# Zsh (add to ~/.zshrc)
+eval "$(vouch init zsh)"
+
+# Fish (add to ~/.config/fish/config.fish)
+vouch init fish | source
+```
+
+### Exit Codes
+
+| Code | Meaning |
+|------|---------|
+| 0 | Success |
+| 1 | General error |
+| 2 | Not authenticated (session expired or missing) |
+| 3 | Hardware key not detected |
+| 4 | Network or server unreachable |
+| 5 | Permission denied |
+| 6 | Configuration error |
+| 7 | Step-up authentication required |
+| 8 | Rate limited |
+
 ## Requirements
 
 - **YubiKey 5 series** (firmware 5.2+) with FIDO2/WebAuthn support
@@ -160,6 +216,8 @@ vouch completions fish > ~/.config/fish/completions/vouch.fish
 - For EKS: Cluster with Access Entries configured for IAM role
 - For Kubernetes: API server with OIDC configured — see [Operator Guide](https://docs.vouch.sh)
 - For GitHub: Organization admin connects the Vouch GitHub App
+
+**Server deployment:** Docker (distroless), systemd, or Kubernetes (Helm). See [Operator Guide](https://docs.vouch.sh).
 
 ## Architecture
 
@@ -171,7 +229,7 @@ Vouch consists of:
 | `vouch-agent` | Background daemon, session management |
 | `vouch-common` | Shared types, FIDO2 helpers, API client |
 | `vouch-server` | OIDC provider, certificate authority |
-| `vouch-httpsig` | HTTP Message Signatures (RFC 9421) |
+| `vouch-httpsig` | HTTP Message Signatures ([RFC 9421](https://www.rfc-editor.org/rfc/rfc9421)) |
 | `vouch-tests` | Integration and property-based tests |
 
 All components are [Apache-2.0 OR MIT](LICENSE-APACHE) licensed.
@@ -187,6 +245,8 @@ Vouch is designed for high-security environments:
 - **Audit trail** — Every credential issuance logged with attestation
 
 See the [Security Model](https://vouch.sh/docs/security/) for our security philosophy and the [Threat Model](https://vouch.sh/docs/threat-model/) for STRIDE analysis.
+
+To report a security vulnerability, email **security@vouch.sh**. Do not open public issues for security concerns.
 
 ## Documentation
 
