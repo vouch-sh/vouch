@@ -6,7 +6,9 @@
 
 **Prove you're here.**
 
-Hardware-backed authentication that issues short-lived credentials only after a human touches a YubiKey. One touch, one PIN, one 8-hour session — then SSH and AWS just work.
+[![OpenID Certified](https://openid.net/wordpress-content/uploads/2016/04/oid-l-certification-mark-l-rgb-150dpi-90mm-300x157.png)](https://openid.net/certification/)
+
+Hardware-backed authentication that issues short-lived credentials only after a human touches a YubiKey. One touch, one PIN, one 8-hour session — then SSH, AWS, Kubernetes, and more just work.
 
 ```bash
 $ vouch login
@@ -17,6 +19,7 @@ Enter PIN: ****
 
 $ ssh prod.example.com                        # Just works
 $ aws s3 ls                                   # Just works
+$ kubectl get pods                            # Just works
 $ git push origin main                        # Just works
 ```
 
@@ -56,14 +59,14 @@ Vouch requires **physical presence** for every credential issuance:
 │                         ▼                      ▼                   │
 │                   ┌──────────┐          ┌──────────────┐           │
 │                   │  vouch   │          │ Native tools │           │
-│                   │  server  │          │ (ssh, aws)   │           │
+│                   │  server  │          │ (ssh, aws, …)│           │
 │                   │  (OIDC)  │          │              │           │
 │                   └──────────┘          └──────────────┘           │
 └────────────────────────────────────────────────────────────────────┘
 ```
 
 1. **`vouch login`** — Touch YubiKey, enter PIN, get 8-hour session
-2. **Vouch issues credentials** — SSH certificates, AWS STS tokens
+2. **Vouch issues credentials** — SSH certificates, AWS STS tokens, Kubernetes tokens, and more
 3. **Tools just work** — Standard credential helpers, no wrappers needed
 
 ## Key Features
@@ -74,6 +77,7 @@ Unlike optional MFA that can be bypassed, Vouch only issues credentials after FI
 ### Short-Lived Everything
 - SSH certificates: 8 hours
 - AWS credentials: 1 hour (auto-refresh within session)
+- Kubernetes, Docker, RDS, Redshift, CodeArtifact, and more — see [Integrations](https://vouch.sh/docs/)
 
 No more rotating keys. No more revoking access. Credentials simply expire.
 
@@ -81,6 +85,7 @@ No more rotating keys. No more revoking access. Credentials simply expire.
 Vouch configures standard credential providers:
 - SSH: `IdentityAgent` pointing to vouch's signing agent
 - AWS: `credential_process` in `~/.aws/config`
+- Plus: Kubernetes, Docker, Git, Cargo, and more — see [Integrations](https://vouch.sh/docs/)
 
 After `vouch login`, existing workflows are unchanged.
 
@@ -109,10 +114,13 @@ cargo install --git https://github.com/vouch-sh/vouch vouch-cli
 vouch enroll
 
 # Configure integrations
-vouch setup ssh                                    # Configures SSH to use vouch certificates
-vouch setup aws --role arn:aws:iam::ID:role/name   # Configures AWS credential_process
-vouch setup eks --cluster my-cluster                # Configures kubectl for EKS via IAM
-vouch setup github --configure                     # Configures git credential helper for GitHub
+vouch setup ssh                                    # SSH certificates
+vouch setup aws --role arn:aws:iam::ID:role/name   # AWS credential_process
+vouch setup eks --cluster my-cluster               # kubectl for EKS via IAM
+vouch setup k8s --cluster my-cluster --server URL  # kubectl via OIDC
+vouch setup github --configure                     # Git credential helper for GitHub
+vouch setup docker --configure ghcr.io             # Docker registry auth
+# See all integrations: https://vouch.sh/docs/
 ```
 
 ### Daily Use
@@ -123,6 +131,8 @@ vouch login
 # Everything just works for 8 hours
 ssh prod-server
 aws s3 ls
+kubectl get pods
+docker pull ghcr.io/your-org/image
 git clone https://github.com/your-org/private-repo.git
 
 # Check session status
@@ -145,9 +155,10 @@ vouch completions fish > ~/.config/fish/completions/vouch.fish
 
 - **YubiKey 5 series** (firmware 5.2+) with FIDO2/WebAuthn support
 - **macOS** 12+ or **Linux** (glibc 2.31+) — Windows support is planned
+- For SSH: CA public key distributed to target hosts
 - For AWS: IAM role with OIDC federation configured
 - For EKS: Cluster with Access Entries configured for IAM role
-- For SSH: CA public key distributed to target hosts
+- For Kubernetes: API server with OIDC configured — see [Operator Guide](http://docs.vouch.sh)
 - For GitHub: Organization admin connects the Vouch GitHub App
 
 ## Architecture
@@ -160,6 +171,8 @@ Vouch consists of:
 | `vouch-agent` | Background daemon, session management |
 | `vouch-common` | Shared types, FIDO2 helpers, API client |
 | `vouch-server` | OIDC provider, certificate authority |
+| `vouch-httpsig` | HTTP Message Signatures (RFC 9421) |
+| `vouch-tests` | Integration and property-based tests |
 
 All components are [Apache-2.0 OR MIT](LICENSE-APACHE) licensed.
 
@@ -177,22 +190,22 @@ See the [Security Model](https://vouch.sh/docs/security/) for our security philo
 
 ## Documentation
 
-Full documentation is available as an [mdBook](https://rust-lang.github.io/mdBook/):
-
-```bash
-# Build and serve locally
-make docs-serve
-```
+- **User Guide:** [vouch.sh](https://vouch.sh) — Getting started, integrations, daily use
+- **Operator Guide:** [docs.vouch.sh](http://docs.vouch.sh) — Server deployment, configuration, administration
 
 Key sections:
 
 - [Getting Started](https://vouch.sh/docs/getting-started/) — Installation and first enrollment
-- [Server Deployment](docs/src/deployment/overview.md) — Deploy and configure the Vouch server
-- [Integrations](https://vouch.sh/docs/ssh/) — SSH, AWS, EKS, GitHub, Docker, and more
+- [Integrations](https://vouch.sh/docs/ssh/) — SSH, AWS, EKS, Kubernetes, GitHub, Docker, and more
+- [Server Deployment](http://docs.vouch.sh/deployment/overview/) — Deploy and configure the Vouch server
 - [Architecture](https://vouch.sh/docs/architecture/) — System design and data flows
 - [Security Model](https://vouch.sh/docs/security/) — Security controls and incident response
 - [Threat Model](https://vouch.sh/docs/threat-model/) — STRIDE analysis and mitigations
-- [Air-Gapped Deployment](docs/src/advanced/airgap.md) — On-premises installation guide
+
+```bash
+# Build and serve docs locally
+make docs-serve
+```
 
 ## Contributing
 
