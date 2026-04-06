@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 //! TLS configuration for optional HTTPS support with hot reloading.
 //!
-//! The main HTTPS listener enforces TLS 1.3 only via
-//! `builder_with_protocol_versions`. The mTLS listener (see
-//! `mtls_listener.rs`) additionally supports TLS 1.2 with BCP 195
-//! cipher suites for FAPI2 conformance suite compatibility.
+//! Both the main HTTPS listener and the mTLS listener (see
+//! `mtls_listener.rs`) support TLS 1.3 and TLS 1.2 with BCP 195
+//! (RFC 9325) cipher suites only. TLS 1.2 uses only ECDHE+AEAD suites
+//! per FAPI2-SP-FINAL-5.2.2.
 
 use std::sync::Arc;
 
@@ -83,10 +83,44 @@ pub fn reload_tls_from_config(
     Ok(())
 }
 
+/// BCP 195 (RFC 9325) crypto provider with only ECDHE+AEAD cipher suites.
+///
+/// Shared by both the main TLS listener and the mTLS listener to satisfy
+/// FAPI2-SP-FINAL-5.2.2 (`RequireOnlyBCP195RecommendedCiphersForTLS12`).
+/// All TLS 1.3 suites are BCP 195 compliant by design; TLS 1.2 is restricted
+/// to ECDHE+AEAD suites only.
+pub(crate) fn bcp195_crypto_provider() -> rustls::crypto::CryptoProvider {
+    let provider = rustls::crypto::aws_lc_rs::default_provider();
+    let bcp195_suites: Vec<rustls::SupportedCipherSuite> = provider
+        .cipher_suites
+        .iter()
+        .filter(|cs| {
+            matches!(
+                cs.suite(),
+                // TLS 1.3 suites (all BCP 195 compliant)
+                rustls::CipherSuite::TLS13_AES_128_GCM_SHA256
+                    | rustls::CipherSuite::TLS13_AES_256_GCM_SHA384
+                    | rustls::CipherSuite::TLS13_CHACHA20_POLY1305_SHA256
+                    // TLS 1.2 ECDHE+AEAD suites (BCP 195 recommended)
+                    | rustls::CipherSuite::TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256
+                    | rustls::CipherSuite::TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384
+                    | rustls::CipherSuite::TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256
+                    | rustls::CipherSuite::TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384
+            )
+        })
+        .copied()
+        .collect();
+
+    rustls::crypto::CryptoProvider {
+        cipher_suites: bcp195_suites,
+        ..provider
+    }
+}
+
 /// Build a hardened `rustls::ServerConfig` from PEM-encoded certificate and key.
 ///
 /// Enforces:
-/// - TLS 1.3 only (no TLS 1.2 or earlier)
+/// - TLS 1.3 + TLS 1.2 with BCP 195 (RFC 9325) cipher suites only
 /// - ALPN: h2, http/1.1
 /// - No client authentication (public-facing server)
 fn build_server_config(cert_pem: &[u8], key_pem: &[u8]) -> Result<Arc<rustls::ServerConfig>> {
@@ -102,14 +136,18 @@ fn build_server_config(cert_pem: &[u8], key_pem: &[u8]) -> Result<Arc<rustls::Se
         .ok_or_else(|| anyhow::anyhow!("No private key found in PEM data"))?;
 
     let mut config =
-        rustls::ServerConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
+        rustls::ServerConfig::builder_with_provider(Arc::new(bcp195_crypto_provider()))
+            .with_protocol_versions(&[&rustls::version::TLS13, &rustls::version::TLS12])
+            .map_err(|e| anyhow::anyhow!("Failed to configure TLS versions: {e}"))?
             .with_no_client_auth()
             .with_single_cert(certs, key)
             .context("Failed to build rustls ServerConfig")?;
 
     config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
 
-    tracing::info!("TLS configuration: TLS 1.3 only, ALPN=[h2, http/1.1]");
+    tracing::info!(
+        "TLS configuration: TLS 1.3 + TLS 1.2 (BCP 195 ciphers only), ALPN=[h2, http/1.1]"
+    );
 
     Ok(Arc::new(config))
 }
