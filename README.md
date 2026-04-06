@@ -158,7 +158,7 @@ vouch completions fish > ~/.config/fish/completions/vouch.fish
 - For SSH: CA public key distributed to target hosts
 - For AWS: IAM role with OIDC federation configured
 - For EKS: Cluster with Access Entries configured for IAM role
-- For Kubernetes: API server with OIDC configured — see [Operator Guide](http://docs.vouch.sh)
+- For Kubernetes: API server with OIDC configured — see [Operator Guide](https://docs.vouch.sh)
 - For GitHub: Organization admin connects the Vouch GitHub App
 
 ## Architecture
@@ -191,13 +191,13 @@ See the [Security Model](https://vouch.sh/docs/security/) for our security philo
 ## Documentation
 
 - **User Guide:** [vouch.sh](https://vouch.sh) — Getting started, integrations, daily use
-- **Operator Guide:** [docs.vouch.sh](http://docs.vouch.sh) — Server deployment, configuration, administration
+- **Operator Guide:** [docs.vouch.sh](https://docs.vouch.sh) — Server deployment, configuration, administration
 
 Key sections:
 
 - [Getting Started](https://vouch.sh/docs/getting-started/) — Installation and first enrollment
 - [Integrations](https://vouch.sh/docs/ssh/) — SSH, AWS, EKS, Kubernetes, GitHub, Docker, and more
-- [Server Deployment](http://docs.vouch.sh/deployment/overview/) — Deploy and configure the Vouch server
+- [Server Deployment](https://docs.vouch.sh/deployment/overview/) — Deploy and configure the Vouch server
 - [Architecture](https://vouch.sh/docs/architecture/) — System design and data flows
 - [Security Model](https://vouch.sh/docs/security/) — Security controls and incident response
 - [Threat Model](https://vouch.sh/docs/threat-model/) — STRIDE analysis and mitigations
