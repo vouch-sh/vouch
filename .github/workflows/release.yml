@@ -909,6 +909,32 @@ jobs:
             echo "| vouch-agent | ⚠️ Differs |" >> $GITHUB_STEP_SUMMARY
           fi
 
+  conformance:
+    name: Trigger Conformance Tests
+    runs-on: ubuntu-latest
+    needs: merge
+    permissions:
+      contents: read
+    steps:
+      - name: Get version
+        id: version
+        env:
+          REF_TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          VERSION="${REF_TAG#v}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Trigger conformance tests
+        env:
+          GH_TOKEN: ${{ secrets.CONFORMANCE_DISPATCH_TOKEN }}
+          VERSION: ${{ steps.version.outputs.version }}
+          IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}
+        run: |
+          gh api repos/vouch-sh/conformance/dispatches \
+            -f event_type=release \
+            -f "client_payload[version]=${VERSION}" \
+            -f "client_payload[image]=${IMAGE}"
+
   helm:
     name: Package Helm Chart
     runs-on: ubuntu-latest
