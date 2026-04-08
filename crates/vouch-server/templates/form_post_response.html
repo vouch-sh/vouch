@@ -1,0 +1,16 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Redirecting...</title>
+</head>
+<body onload="document.forms[0].submit()">
+  <noscript><p>Submitting authorization response. If you are not redirected, click the button below.</p></noscript>
+  <form method="post" action="{{ redirect_uri|e }}">
+    {% for (name, value) in params %}
+    <input type="hidden" name="{{ name|e }}" value="{{ value|e }}">
+    {% endfor %}
+    <noscript><button type="submit">Continue</button></noscript>
+  </form>
+</body>
+</html>

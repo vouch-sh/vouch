@@ -192,13 +192,15 @@ async fn test_rfc6749_authorize_missing_response_type_redirects_with_error() {
 // ========================================================================
 
 #[tokio::test]
-async fn test_rfc6749_authorize_empty_redirect_uri_shows_error_page() {
-    // RFC 6749 Section 4.1.2.1: If the redirect_uri is missing or invalid,
-    // the server MUST NOT redirect and MUST display an error to the user.
+async fn test_rfc6749_authorize_missing_redirect_uri_single_uri_auto_selects() {
+    // OIDC Core 3.1.2.1: When redirect_uri is absent and the client has exactly
+    // one registered URI, the server MUST use that URI (auto-select).
+    // The request proceeds normally — user gets redirected to login.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.store, "authorize-noredir@example.com").await;
+    let user = create_test_user(&state.store, "authorize-noredir-single@example.com").await;
     let client = create_test_oauth_client(&state.store, &user.id).await;
+    // create_test_oauth_client registers exactly one redirect URI
 
     let response = http_get_full(
         &app,
@@ -211,14 +213,84 @@ async fn test_rfc6749_authorize_empty_redirect_uri_shows_error_page() {
     )
     .await;
 
+    // Auto-select proceeds — server redirects to login
+    assert!(
+        response.status == StatusCode::SEE_OTHER || response.status == StatusCode::FOUND,
+        "Single-URI client missing redirect_uri should auto-select and redirect to login, got: {}",
+        response.status
+    );
+}
+
+#[tokio::test]
+async fn test_rfc6749_authorize_missing_redirect_uri_multi_uri_shows_error_page() {
+    // OIDC Core 3.1.2.1: When redirect_uri is absent and the client has multiple
+    // registered URIs, the server MUST show an error page (cannot determine which URI).
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "authorize-noredir-multi@example.com").await;
+    // Create a client with two redirect URIs
+    let (client_record, _) = crate::db::create_oauth_client(
+        &state.store,
+        &crate::db::CreateOAuthClientParams {
+            user_id: Some(&user.id),
+            name: "Multi-URI App",
+            description: None,
+            application_type: crate::db::OAuthClientType::Web,
+            redirect_uris: &[
+                "https://example.com/callback".to_string(),
+                "https://example.com/callback2".to_string(),
+            ],
+            access_scope: crate::db::AccessScope::Public,
+            org_id: None,
+            resource_uris: &[],
+            token_endpoint_auth_method: None,
+            jwks: None,
+            jwks_uri: None,
+            fapi_profile: None,
+            dpop_bound_access_tokens: None,
+            grant_types: None,
+            response_types: None,
+            software_id: None,
+            software_version: None,
+            registration_source: crate::db::documents::oauth::RegistrationSource::Manual,
+            registration_access_token_hash: None,
+            registration_metadata: None,
+            id_token_signed_response_alg: crate::db::documents::oauth::JwsAlgorithm::Rs256,
+            tls_client_auth_subject_dn: None,
+            tls_client_auth_san_dns: None,
+            tls_client_auth_san_uri: None,
+            tls_client_auth_san_ip: None,
+            tls_client_auth_san_email: None,
+            tls_client_certificate_bound_access_tokens: None,
+            authorization_signed_response_alg: None,
+            introspection_signed_response_alg: None,
+            request_object_signing_alg: None,
+            require_signed_request_object: None,
+            userinfo_signed_response_alg: None,
+            request_uris: None,
+        },
+    )
+    .await
+    .expect("create client");
+
+    let response = http_get_full(
+        &app,
+        &format!(
+            "/oauth/authorize?response_type=code&client_id={}&scope=openid\
+             &code_challenge=dummychallenge&code_challenge_method=S256",
+            client_record.client_id,
+        ),
+        &[],
+    )
+    .await;
+
     // Must show an error page, not redirect
     assert!(
         response.status == StatusCode::OK || response.status.is_client_error(),
-        "Missing redirect_uri must produce error page, not redirect, got: {}",
+        "Multi-URI client missing redirect_uri must produce error page, got: {}",
         response.status
     );
 
-    // Body must indicate redirect_uri is required
     assert!(
         response.body.contains("redirect_uri"),
         "Error page should mention redirect_uri: {}",
@@ -814,4 +886,243 @@ async fn test_rfc6749_state_parameter_passthrough() {
             "State parameter must be preserved unchanged in redirect"
         );
     }
+}
+
+#[tokio::test]
+async fn test_response_mode_form_post_returns_html_form() {
+    // OAuth 2.0 Form Post Response Mode: response_mode=form_post must return HTTP 200
+    // with an HTML form auto-submit body instead of a 302 redirect.
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "form-post-test@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+    let session_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+
+    let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+    let challenge = sha256_base64url(verifier);
+
+    let response = http_get_full(
+        &app,
+        &format!(
+            "/oauth/authorize?response_type=code&client_id={}&redirect_uri={}&scope=openid\
+             &code_challenge={}&code_challenge_method=S256&state=form-post-state\
+             &response_mode=form_post",
+            client.client_id,
+            urlencoding::encode("https://example.com/callback"),
+            challenge,
+        ),
+        &[("Cookie", &format!("__Host-vouch_session={session_token}"))],
+    )
+    .await;
+
+    // form_post delivers via HTTP 200 with an HTML body, not a redirect
+    assert_eq!(
+        response.status,
+        StatusCode::OK,
+        "form_post response must be 200 OK, not a redirect: {}",
+        response.body
+    );
+
+    // Must contain a form with method="post" targeting the redirect_uri
+    assert!(
+        response.body.contains(r#"method="post""#),
+        "form_post body must contain a POST form"
+    );
+    assert!(
+        response.body.contains("https://example.com/callback"),
+        "form_post form must target the redirect_uri"
+    );
+
+    // Authorization code must be in a hidden input
+    assert!(
+        response.body.contains(r#"name="code""#),
+        "form_post body must contain a hidden 'code' input"
+    );
+
+    // iss parameter (RFC 9207) must be present
+    assert!(
+        response.body.contains(r#"name="iss""#),
+        "form_post body must contain a hidden 'iss' input (RFC 9207)"
+    );
+
+    // State must be echoed
+    assert!(
+        response.body.contains("form-post-state"),
+        "form_post body must echo the state parameter"
+    );
+}
+
+#[tokio::test]
+async fn test_rfc6749_deactivated_client_shows_error_page() {
+    // RFC 6749 Section 4.1.2.1: A deactivated client must not receive an
+    // authorization code. The server shows an error page — it must NOT redirect
+    // to the redirect_uri with an error code because that would still pass client
+    // identity to the redirect target.
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "deactivated-client@example.com").await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+
+    // Deactivate the client
+    let oauth_client = db::get_oauth_client_by_client_id(&state.store, &client.client_id)
+        .await
+        .expect("DB error")
+        .expect("Client not found");
+    db::set_oauth_client_active(&state.store, &oauth_client.id, false)
+        .await
+        .expect("Failed to deactivate client");
+
+    let response = http_get_full(
+        &app,
+        &format!(
+            "/oauth/authorize?response_type=code&client_id={}&redirect_uri={}&scope=openid\
+             &code_challenge=dummychallenge&code_challenge_method=S256",
+            client.client_id,
+            urlencoding::encode("https://example.com/callback"),
+        ),
+        &[],
+    )
+    .await;
+
+    // Must show an error page (not redirect)
+    assert!(
+        response.status == StatusCode::OK || response.status.is_client_error(),
+        "Deactivated client must produce error page, not redirect, got: {}",
+        response.status
+    );
+
+    // Must not redirect to the callback
+    if let Some(location) = response.headers.get("Location") {
+        let loc = location.to_str().unwrap_or("");
+        assert!(
+            !loc.contains("example.com/callback"),
+            "Must not redirect to callback for deactivated client: {loc}"
+        );
+    }
+
+    // Error page must mention deactivation
+    assert!(
+        response.body.contains("deactivated") || response.body.contains("This application"),
+        "Error page should describe deactivation: {}",
+        response.body
+    );
+}
+
+#[tokio::test]
+async fn test_request_uri_non_https_non_urn_shows_error_page() {
+    // OIDC Core Section 6.2 / RFC 9126: request_uri must be either a PAR URN
+    // (urn:ietf:params:oauth:request_uri:*) or an HTTPS URL.
+    // An HTTP URL, javascript: URI, or other scheme must be rejected with an error page.
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "bad-request-uri@example.com").await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+
+    let response = http_get_full(
+        &app,
+        &format!(
+            "/oauth/authorize?client_id={}&request_uri={}",
+            client.client_id,
+            urlencoding::encode("http://evil.example.com/request-object"),
+        ),
+        &[],
+    )
+    .await;
+
+    // Must show error page — no redirect
+    assert!(
+        response.status == StatusCode::OK || response.status.is_client_error(),
+        "Non-HTTPS/non-URN request_uri must produce error page, got: {}",
+        response.status
+    );
+
+    // Error message should indicate invalid format
+    assert!(
+        response.body.contains("request_uri")
+            || response.body.contains("Invalid")
+            || response.body.contains("invalid"),
+        "Error page should describe the invalid request_uri"
+    );
+}
+
+#[tokio::test]
+async fn test_request_uri_missing_client_id_shows_error_page() {
+    // request_uri without client_id is always an error — cannot look up client.
+    let (app, _state) = test_app().await;
+
+    let response = http_get_full(
+        &app,
+        &format!(
+            "/oauth/authorize?request_uri={}",
+            urlencoding::encode("https://example.com/request-object.jwt"),
+        ),
+        &[],
+    )
+    .await;
+
+    assert!(
+        response.status == StatusCode::OK || response.status.is_client_error(),
+        "request_uri without client_id must produce error page, got: {}",
+        response.status
+    );
+}
+
+#[tokio::test]
+async fn test_form_post_error_delivers_html_form() {
+    // OAuth 2.0 Form Post Response Mode: When response_mode=form_post and an
+    // error occurs (e.g. unsupported response_type), the error MUST be delivered
+    // via an HTTP 200 HTML form targeting the redirect_uri — not a redirect.
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "form-post-error@example.com").await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+
+    let response = http_get_full(
+        &app,
+        &format!(
+            "/oauth/authorize?response_type=token&client_id={}&redirect_uri={}&scope=openid\
+             &state=error-state&response_mode=form_post",
+            client.client_id,
+            urlencoding::encode("https://example.com/callback"),
+        ),
+        &[],
+    )
+    .await;
+
+    // Must return 200 with HTML form — not a redirect
+    assert_eq!(
+        response.status,
+        StatusCode::OK,
+        "form_post error must be HTTP 200, not redirect: {}",
+        response.body
+    );
+
+    // Must contain an HTML form targeting the redirect_uri
+    assert!(
+        response.body.contains(r#"method="post""#),
+        "form_post error must contain a POST form"
+    );
+    assert!(
+        response.body.contains("https://example.com/callback"),
+        "form_post error form must target the redirect_uri"
+    );
+
+    // Must carry an error parameter
+    assert!(
+        response.body.contains(r#"name="error""#),
+        "form_post error form must contain a hidden 'error' input"
+    );
+
+    // Must include iss (RFC 9207)
+    assert!(
+        response.body.contains(r#"name="iss""#),
+        "form_post error must contain a hidden 'iss' input (RFC 9207)"
+    );
+
+    // State must be echoed
+    assert!(
+        response.body.contains("error-state"),
+        "form_post error must echo the state parameter"
+    );
 }

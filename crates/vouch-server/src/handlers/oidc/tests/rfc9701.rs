@@ -49,6 +49,8 @@ async fn create_test_client_with_introspection_jwt(
             introspection_signed_response_alg: Some(JwsAlgorithm::Es256),
             request_object_signing_alg: None,
             require_signed_request_object: None,
+            userinfo_signed_response_alg: None,
+            request_uris: None,
         },
     )
     .await

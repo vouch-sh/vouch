@@ -314,3 +314,244 @@ async fn test_rfc7592_delete_client_already_deleted() {
         "Second delete should return 404"
     );
 }
+
+// =========================================================================
+// PUT /oauth/register/:client_id — userinfo_signed_response_alg + request_uris
+// =========================================================================
+
+#[tokio::test]
+async fn test_rfc7592_put_sets_userinfo_signed_response_alg() {
+    // RFC 7592 Section 2.2: PUT must allow setting userinfo_signed_response_alg.
+    // The field must be stored and returned in the response.
+    let (app, _state) = test_app().await;
+    let (client_id, token) = register_dynamic_client(&app).await;
+
+    let update_body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "userinfo_signed_response_alg": "ES256"
+    });
+
+    let (status, body) = http_request(
+        &app,
+        "PUT",
+        &format!("/oauth/register/{client_id}"),
+        Some(update_body.to_string()),
+        &[
+            ("Authorization", &format!("Bearer {token}")),
+            ("Content-Type", "application/json"),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "PUT failed: {body}");
+
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(
+        json["userinfo_signed_response_alg"].as_str(),
+        Some("ES256"),
+        "PUT response must echo userinfo_signed_response_alg: {json}"
+    );
+}
+
+#[tokio::test]
+async fn test_rfc7592_put_clears_userinfo_signed_response_alg() {
+    // RFC 7592 Section 2.2: PUT is a full replacement. Omitting
+    // userinfo_signed_response_alg must clear any previously set value.
+    let (app, _state) = test_app().await;
+
+    // Register with ES256 userinfo signing
+    let body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "client_name": "Userinfo Alg Clear Test",
+        "userinfo_signed_response_alg": "ES256"
+    });
+    let (status, body_str) = http_post_json(&app, "/oauth/register", &body.to_string(), &[]).await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "Registration failed: {body_str}"
+    );
+    let reg_json: serde_json::Value = serde_json::from_str(&body_str).expect("Valid JSON");
+    let client_id = reg_json["client_id"]
+        .as_str()
+        .expect("client_id")
+        .to_string();
+    let token = reg_json["registration_access_token"]
+        .as_str()
+        .expect("registration_access_token")
+        .to_string();
+
+    // PUT without userinfo_signed_response_alg — must clear the field
+    let update_body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"]
+    });
+    let (status, body) = http_request(
+        &app,
+        "PUT",
+        &format!("/oauth/register/{client_id}"),
+        Some(update_body.to_string()),
+        &[
+            ("Authorization", &format!("Bearer {token}")),
+            ("Content-Type", "application/json"),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "PUT failed: {body}");
+
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    // Field must be absent or null — plain JSON response means unsigned userinfo
+    assert!(
+        json.get("userinfo_signed_response_alg").is_none()
+            || json["userinfo_signed_response_alg"].is_null(),
+        "PUT without userinfo_signed_response_alg must clear the field, got: {json}"
+    );
+}
+
+#[tokio::test]
+async fn test_rfc7592_put_sets_request_uris() {
+    // RFC 7592 Section 2.2: PUT must store request_uris (OIDC Core Section 6.2 allowlist).
+    // The field must be present in the response when set.
+    let (app, _state) = test_app().await;
+    let (client_id, token) = register_dynamic_client(&app).await;
+
+    let update_body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "request_uris": ["https://example.com/requests/req1.jwt"]
+    });
+
+    let (status, body) = http_request(
+        &app,
+        "PUT",
+        &format!("/oauth/register/{client_id}"),
+        Some(update_body.to_string()),
+        &[
+            ("Authorization", &format!("Bearer {token}")),
+            ("Content-Type", "application/json"),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "PUT failed: {body}");
+
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let uris = json["request_uris"]
+        .as_array()
+        .expect("request_uris must be a JSON array in PUT response");
+    assert_eq!(uris.len(), 1, "Must store exactly one request_uri");
+    assert_eq!(
+        uris[0].as_str(),
+        Some("https://example.com/requests/req1.jwt"),
+        "Stored request_uri must match the PUT value"
+    );
+}
+
+#[tokio::test]
+async fn test_rfc7592_put_clears_request_uris() {
+    // RFC 7592 Section 2.2: PUT is a full replacement. Omitting request_uris
+    // in a subsequent PUT must clear the allowlist (revert to "accept any").
+    let (app, _state) = test_app().await;
+
+    // Register with a request_uri allowlist
+    let body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "client_name": "Request URIs Clear Test",
+        "request_uris": ["https://example.com/requests/req1.jwt"]
+    });
+    let (status, body_str) = http_post_json(&app, "/oauth/register", &body.to_string(), &[]).await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "Registration failed: {body_str}"
+    );
+    let reg_json: serde_json::Value = serde_json::from_str(&body_str).expect("Valid JSON");
+    let client_id = reg_json["client_id"]
+        .as_str()
+        .expect("client_id")
+        .to_string();
+    let token = reg_json["registration_access_token"]
+        .as_str()
+        .expect("registration_access_token")
+        .to_string();
+
+    // PUT without request_uris — must clear the allowlist
+    let update_body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"]
+    });
+    let (status, body) = http_request(
+        &app,
+        "PUT",
+        &format!("/oauth/register/{client_id}"),
+        Some(update_body.to_string()),
+        &[
+            ("Authorization", &format!("Bearer {token}")),
+            ("Content-Type", "application/json"),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "PUT failed: {body}");
+
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    // Field must be absent or null — no allowlist means any HTTPS request_uri accepted
+    assert!(
+        json.get("request_uris").is_none() || json["request_uris"].is_null(),
+        "PUT without request_uris must clear the allowlist, got: {json}"
+    );
+}
+
+#[tokio::test]
+async fn test_rfc7592_put_rejects_non_https_request_uri() {
+    // RFC 7592 Section 2.2 + OIDC Core Section 6.2: request_uris must be HTTPS.
+    // An HTTP URI in request_uris must be rejected with 400.
+    let (app, _state) = test_app().await;
+    let (client_id, token) = register_dynamic_client(&app).await;
+
+    let update_body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "request_uris": ["http://evil.example.com/request.jwt"]
+    });
+
+    let (status, _body) = http_request(
+        &app,
+        "PUT",
+        &format!("/oauth/register/{client_id}"),
+        Some(update_body.to_string()),
+        &[
+            ("Authorization", &format!("Bearer {token}")),
+            ("Content-Type", "application/json"),
+        ],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "Non-HTTPS request_uri in PUT must be rejected with 400"
+    );
+}
+
+#[tokio::test]
+async fn test_rfc7592_put_rejects_invalid_userinfo_signing_alg() {
+    // RFC 7592 Section 2.2: Invalid userinfo_signed_response_alg must return 400.
+    // Only RS256 and ES256 are accepted.
+    let (app, _state) = test_app().await;
+    let (client_id, token) = register_dynamic_client(&app).await;
+
+    let update_body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "userinfo_signed_response_alg": "HS256"
+    });
+
+    let (status, _body) = http_request(
+        &app,
+        "PUT",
+        &format!("/oauth/register/{client_id}"),
+        Some(update_body.to_string()),
+        &[
+            ("Authorization", &format!("Bearer {token}")),
+            ("Content-Type", "application/json"),
+        ],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "Invalid userinfo_signed_response_alg (HS256) in PUT must return 400"
+    );
+}

@@ -308,6 +308,8 @@ mod tests {
             tls_client_certificate_bound_access_tokens: false,
             authorization_signed_response_alg: None,
             introspection_signed_response_alg: None,
+            userinfo_signed_response_alg: None,
+            request_uris: None,
         }
     }
 
@@ -354,6 +356,8 @@ mod tests {
             tls_client_certificate_bound_access_tokens: false,
             authorization_signed_response_alg: None,
             introspection_signed_response_alg: None,
+            userinfo_signed_response_alg: None,
+            request_uris: None,
         }
     }
 

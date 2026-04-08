@@ -430,6 +430,8 @@ async fn test_oauth_client_crud() {
             introspection_signed_response_alg: None,
             request_object_signing_alg: None,
             require_signed_request_object: None,
+            userinfo_signed_response_alg: None,
+            request_uris: None,
         },
     )
     .await
@@ -548,6 +550,8 @@ async fn test_oauth_client_types() {
                 introspection_signed_response_alg: None,
                 request_object_signing_alg: None,
                 require_signed_request_object: None,
+                userinfo_signed_response_alg: None,
+                request_uris: None,
             },
         )
         .await
@@ -611,6 +615,8 @@ async fn test_oauth_client_list_for_user() {
                 introspection_signed_response_alg: None,
                 request_object_signing_alg: None,
                 require_signed_request_object: None,
+                userinfo_signed_response_alg: None,
+                request_uris: None,
             },
         )
         .await
@@ -652,6 +658,8 @@ async fn test_oauth_client_list_for_user() {
             introspection_signed_response_alg: None,
             request_object_signing_alg: None,
             require_signed_request_object: None,
+            userinfo_signed_response_alg: None,
+            request_uris: None,
         },
     )
     .await
@@ -712,6 +720,8 @@ async fn test_oauth_client_secret_management() {
             introspection_signed_response_alg: None,
             request_object_signing_alg: None,
             require_signed_request_object: None,
+            userinfo_signed_response_alg: None,
+            request_uris: None,
         },
     )
     .await
@@ -794,6 +804,8 @@ async fn test_oauth_usage_recording() {
             introspection_signed_response_alg: None,
             request_object_signing_alg: None,
             require_signed_request_object: None,
+            userinfo_signed_response_alg: None,
+            request_uris: None,
         },
     )
     .await
@@ -1401,6 +1413,8 @@ async fn test_oauth_client_cascade_delete() {
             introspection_signed_response_alg: None,
             request_object_signing_alg: None,
             require_signed_request_object: None,
+            userinfo_signed_response_alg: None,
+            request_uris: None,
         },
     )
     .await

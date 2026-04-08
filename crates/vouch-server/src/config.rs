@@ -312,6 +312,12 @@ pub struct Args {
     #[arg(long, env = "VOUCH_CERTIFICATION_TEST_TOKEN")]
     pub certification_test_token: Option<String>,
 
+    /// Path to a PEM file containing extra CA certificates to trust for
+    /// outbound HTTPS requests (e.g., to conformance suite endpoints with
+    /// self-signed certs). Multiple certs can be concatenated in one file.
+    #[arg(long, env = "VOUCH_EXTRA_CA_CERTS")]
+    pub extra_ca_certs: Option<String>,
+
     /// Maximum number of database connections in the pool.
     #[arg(long, env = "VOUCH_DB_MAX_CONNECTIONS", default_value = "25")]
     pub db_max_connections: u32,
@@ -470,6 +476,9 @@ pub struct ServerConfig {
     /// When `Some`, `GET /certification/complete-login` is registered.
     /// MUST NOT be set in production deployments.
     pub certification_test_token: Option<SecretString>,
+    /// Path to a PEM file containing extra CA certificates to trust for
+    /// outbound HTTPS requests (e.g., peers with self-signed certs).
+    pub extra_ca_certs: Option<String>,
     /// Database pool configuration.
     pub pool_config: crate::db::pool::PoolConfig,
     /// Maximum entries in the session lookup cache.
@@ -593,6 +602,7 @@ impl ServerConfig {
             trusted_proxies,
             metrics_bearer_token: args.metrics_bearer_token.map(SecretString::from),
             certification_test_token: args.certification_test_token.map(SecretString::from),
+            extra_ca_certs: args.extra_ca_certs,
             pool_config: crate::db::pool::PoolConfig {
                 max_connections: args.db_max_connections,
                 min_connections: args.db_min_connections,

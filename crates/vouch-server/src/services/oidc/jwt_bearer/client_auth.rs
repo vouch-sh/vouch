@@ -4,7 +4,7 @@
 //! Clients authenticate at the token endpoint using a signed JWT assertion
 //! instead of a shared client secret (`private_key_jwt` method).
 
-use super::jwks::{find_matching_key, resolve_client_jwks};
+use super::jwks::{find_matching_key_with_refresh_client, resolve_client_jwks};
 use super::validate::{
     decode_claims_unverified, map_algorithm, parse_assertion_header, validate_jwt_assertion,
 };
@@ -129,16 +129,18 @@ pub async fn authenticate_client_jwt(
     }
 
     // 5. Resolve client's JWKS (inline or from URI)
+    // Note: `jwks_uri_cached_at` is captured before `resolve_client_jwks` runs. If
+    // `resolve_client_jwks` performs a TTL-based refresh, the timestamp passed to
+    // `find_matching_key_with_refresh_client` below will be stale. Worst case: one
+    // extra JWKS fetch when a TTL-refresh and kid-miss coincide. Acceptable trade-off.
+    let jwks_uri_cached_at = client.jwks_uri_cached_at.map(|ts| ts.to_string());
     let jwks = resolve_client_jwks(
         &state.store,
         &client.id,
         client.jwks.as_ref(),
         client.jwks_uri.as_deref(),
         client.jwks_uri_cache.as_ref(),
-        client
-            .jwks_uri_cached_at
-            .map(|ts| ts.to_string())
-            .as_deref(),
+        jwks_uri_cached_at.as_deref(),
         &state.http_client,
     )
     .await
@@ -150,8 +152,18 @@ pub async fn authenticate_client_jwt(
         ClientAuthError::InvalidCredentials
     })?;
 
-    // 6. Find matching key
-    let decoding_key = find_matching_key(&jwks, &header).map_err(|e| {
+    // 6. Find matching key, with force-refresh on kid-miss for jwks_uri clients
+    let decoding_key = find_matching_key_with_refresh_client(
+        &state.store,
+        &client.id,
+        client.jwks_uri.as_deref(),
+        jwks_uri_cached_at.as_deref(),
+        &state.http_client,
+        &jwks,
+        &header,
+    )
+    .await
+    .map_err(|e| {
         tracing::debug!("No matching key found for client {}: {e}", client.client_id);
         ClientAuthError::InvalidCredentials
     })?;
@@ -333,6 +345,7 @@ mod tests {
             trusted_proxies: Vec::new(),
             metrics_bearer_token: None,
             certification_test_token: None,
+            extra_ca_certs: None,
             pool_config: db::pool::PoolConfig::default(),
             session_cache_max_capacity: 10_000,
             session_cache_ttl_secs: 30,

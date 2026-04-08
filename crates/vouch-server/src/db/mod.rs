@@ -128,8 +128,8 @@ pub use oauth::{
 // Re-export test-only OAuth client helpers
 #[cfg(test)]
 pub use oauth::test_helpers::{
-    update_oauth_client_auth_method, update_oauth_client_fapi_settings,
-    update_oauth_client_jar_settings, update_oauth_client_jwks,
+    set_oauth_client_active, set_oauth_client_userinfo_alg, update_oauth_client_auth_method,
+    update_oauth_client_fapi_settings, update_oauth_client_jar_settings, update_oauth_client_jwks,
 };
 
 // Re-export JWT issuer types and functions (RFC 7523)

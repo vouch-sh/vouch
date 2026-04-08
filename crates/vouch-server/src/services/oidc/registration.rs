@@ -130,6 +130,12 @@ pub struct RegistrationRequest {
     pub request_object_signing_alg: Option<String>,
     /// RFC 9101: Whether this client requires signed request objects.
     pub require_signed_request_object: Option<bool>,
+    /// OIDC Core Section 5.3.4: UserInfo response signing algorithm.
+    pub userinfo_signed_response_alg: Option<String>,
+    /// OIDC Core Section 6.2: Pre-registered request_uri values (optional allowlist).
+    ///
+    /// Each URI must be HTTPS. When present, only these URLs are accepted as `request_uri`.
+    pub request_uris: Option<Vec<String>>,
 }
 
 /// RFC 7591 Section 3.2.1: Client Information Response.
@@ -197,6 +203,12 @@ pub struct RegistrationResponse {
     /// RFC 9101: Whether signed request objects are required.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub require_signed_request_object: Option<bool>,
+    /// OIDC Core Section 5.3.4: UserInfo response signing algorithm.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub userinfo_signed_response_alg: Option<String>,
+    /// OIDC Core Section 6.2: Pre-registered request_uri values (echoed).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_uris: Option<Vec<String>>,
 }
 
 // ============================================================================
@@ -389,6 +401,15 @@ pub async fn register_client(
             None
         };
 
+    // 12c-2. Validate userinfo_signed_response_alg (OIDC Core Section 5.3.4).
+    let userinfo_alg = validate_userinfo_signed_response_alg(
+        request.userinfo_signed_response_alg.as_deref(),
+        state.oidc_rsa_key.is_some(),
+    )?;
+
+    // 12b-2. Validate request_uris (OIDC Core Section 6.2).
+    let validated_request_uris = validate_request_uris(request.request_uris.as_deref())?;
+
     // 12d. Validate request_object_signing_alg (RFC 9101).
     let req_obj_alg: Option<JwsAlgorithm> = if let Some(ref s) = request.request_object_signing_alg
     {
@@ -476,6 +497,8 @@ pub async fn register_client(
             introspection_signed_response_alg: introspection_alg,
             request_object_signing_alg: req_obj_alg,
             require_signed_request_object: if require_signed { Some(true) } else { None },
+            userinfo_signed_response_alg: userinfo_alg,
+            request_uris: validated_request_uris.clone(),
         },
     )
     .await
@@ -575,6 +598,8 @@ pub async fn register_client(
         introspection_signed_response_alg: introspection_alg.map(|a| a.to_string()),
         request_object_signing_alg: req_obj_alg.map(|a| a.to_string()),
         require_signed_request_object: if require_signed { Some(true) } else { None },
+        userinfo_signed_response_alg: userinfo_alg.map(|a| a.to_string()),
+        request_uris: validated_request_uris,
     })
 }
 
@@ -589,6 +614,57 @@ struct ValidatedGrantTypes {
     response_types: Vec<String>,
     auth_method_str: String,
     has_auth_code: bool,
+}
+
+/// Validate `userinfo_signed_response_alg` — only RS256 and ES256 are accepted.
+///
+/// Returns the parsed algorithm, or `None` if the field is absent.
+fn validate_userinfo_signed_response_alg(
+    raw: Option<&str>,
+    has_rsa_key: bool,
+) -> Result<Option<JwsAlgorithm>, ServiceError> {
+    let Some(s) = raw else { return Ok(None) };
+    let parsed = s.parse::<JwsAlgorithm>().map_err(|_| {
+        ServiceError::oauth(
+            OAuthErrorCode::InvalidClientMetadata,
+            format!("Unsupported userinfo_signed_response_alg: '{s}'. Supported: RS256, ES256"),
+        )
+    })?;
+    match parsed {
+        JwsAlgorithm::Rs256 if !has_rsa_key => Err(ServiceError::oauth(
+            OAuthErrorCode::InvalidClientMetadata,
+            "RS256 is not available for userinfo_signed_response_alg \
+             (no RSA signing key configured)",
+        )),
+        JwsAlgorithm::Rs256 | JwsAlgorithm::Es256 => Ok(Some(parsed)),
+        _ => Err(ServiceError::oauth(
+            OAuthErrorCode::InvalidClientMetadata,
+            format!("Unsupported userinfo_signed_response_alg: '{s}'. Supported: RS256, ES256"),
+        )),
+    }
+}
+
+/// Validate `request_uris` — each must be HTTPS, max 10 entries.
+///
+/// Returns the validated list, or `None` if the field is absent.
+fn validate_request_uris(uris: Option<&[String]>) -> Result<Option<Vec<String>>, ServiceError> {
+    let Some(uris) = uris else { return Ok(None) };
+    const MAX_REQUEST_URIS: usize = 10;
+    if uris.len() > MAX_REQUEST_URIS {
+        return Err(ServiceError::oauth(
+            OAuthErrorCode::InvalidClientMetadata,
+            format!("Too many request_uris: maximum is {MAX_REQUEST_URIS}"),
+        ));
+    }
+    for uri in uris {
+        if !uri.starts_with("https://") {
+            return Err(ServiceError::oauth(
+                OAuthErrorCode::InvalidClientMetadata,
+                format!("request_uri '{uri}' must use HTTPS"),
+            ));
+        }
+    }
+    Ok(Some(uris.to_vec()))
 }
 
 /// Reject implicit grant, apply defaults, validate allowed types, check consistency.
@@ -955,6 +1031,15 @@ pub async fn update_client_configuration(
         mutable_request.jwks_uri.as_deref(),
     )?;
 
+    // Validate userinfo_signed_response_alg (same rules as initial registration).
+    let userinfo_alg = validate_userinfo_signed_response_alg(
+        mutable_request.userinfo_signed_response_alg.as_deref(),
+        state.oidc_rsa_key.is_some(),
+    )?;
+
+    // Validate request_uris (same rules as initial registration).
+    let validated_request_uris = validate_request_uris(mutable_request.request_uris.as_deref())?;
+
     // Rotate the registration access token per RFC 7592 Section 2.2
     let new_reg_token = generate_registration_token()?;
     let new_reg_token_hash = hash_token(&new_reg_token);
@@ -972,6 +1057,8 @@ pub async fn update_client_configuration(
             jwks_uri: mutable_request.jwks_uri.as_deref(),
             registration_access_token_hash: &new_reg_token_hash,
             registration_metadata: Some(&registration_metadata),
+            userinfo_signed_response_alg: userinfo_alg,
+            request_uris: validated_request_uris.as_deref(),
         },
     )
     .await
@@ -1102,6 +1189,8 @@ fn build_client_response(client: &OAuthClient, base_url: &str) -> RegistrationRe
             .map(|a| a.to_string()),
         request_object_signing_alg: client.request_object_signing_alg.map(|a| a.to_string()),
         require_signed_request_object: client.require_signed_request_object,
+        userinfo_signed_response_alg: client.userinfo_signed_response_alg.map(|a| a.to_string()),
+        request_uris: client.request_uris.clone(),
     }
 }
 
@@ -2007,6 +2096,8 @@ mod tests {
             introspection_signed_response_alg: None,
             request_object_signing_alg: None,
             require_signed_request_object: None,
+            userinfo_signed_response_alg: None,
+            request_uris: None,
         };
 
         let json = serde_json::to_string(&response).unwrap();
@@ -2071,6 +2162,8 @@ mod tests {
             introspection_signed_response_alg: None,
             request_object_signing_alg: None,
             require_signed_request_object: None,
+            userinfo_signed_response_alg: None,
+            request_uris: None,
         };
 
         let json = serde_json::to_string(&response).unwrap();

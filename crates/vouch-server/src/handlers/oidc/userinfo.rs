@@ -7,7 +7,7 @@
 //! - RFC 8705 Section 3 - mTLS certificate-bound access tokens at resource endpoints
 
 use crate::AppState;
-use crate::db::SessionPurpose;
+use crate::db::{self, JwsAlgorithm, SessionPurpose};
 use crate::handlers::extractors::OptionalClientCert;
 use crate::services::OAuthErrorCode;
 use crate::services::auth::decode_token;
@@ -22,6 +22,7 @@ use axum::{
     http::{HeaderMap, Method, StatusCode, header},
     response::{IntoResponse, Response},
 };
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use subtle::ConstantTimeEq;
@@ -40,11 +41,20 @@ pub(super) struct UserInfoResponse {
     /// OIDC Core Section 5.1: Whether the email has been verified.
     #[serde(skip_serializing_if = "Option::is_none")]
     email_verified: Option<bool>,
-    /// Custom claim: Hardware verification flag (FIDO2 presence proof).
-    hardware_verified: bool,
-    /// Custom claim: Hardware authenticator AAGUID.
+}
+
+/// Claims for a signed UserInfo JWT response (OIDC Core Section 5.3.4).
+#[derive(Debug, Serialize)]
+struct SignedUserInfoClaims {
+    iss: String,
+    sub: String,
+    aud: String,
+    iat: i64,
+    exp: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
-    hardware_aaguid: Option<String>,
+    email: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    email_verified: Option<bool>,
 }
 
 /// Form body for POST access token delivery (RFC 6750 Section 2.2).
@@ -269,7 +279,7 @@ pub async fn userinfo(
         None => result.session.session_type == SessionPurpose::OAuthAccessToken,
     };
 
-    Json(UserInfoResponse {
+    let response_body = UserInfoResponse {
         sub: result.user.id.clone(),
         email: if has_email_scope {
             Some(result.user.email)
@@ -277,10 +287,100 @@ pub async fn userinfo(
             None
         },
         email_verified: if has_email_scope { Some(true) } else { None },
-        hardware_verified: result.authenticator.is_some(),
-        hardware_aaguid: result.authenticator.and_then(|a| a.aaguid),
-    })
-    .into_response()
+    };
+
+    // OIDC Core Section 5.3.4: Return signed JWT if client registered userinfo_signed_response_alg.
+    let signed_alg = if let Some(ref client_id) = result.client_id {
+        match db::get_oauth_client_by_client_id(&state.store, client_id).await {
+            Ok(Some(client)) => client.userinfo_signed_response_alg,
+            _ => None,
+        }
+    } else {
+        None
+    };
+
+    if let Some(alg) = signed_alg {
+        build_signed_userinfo_response(&state, &result.client_id, &response_body, alg).await
+    } else {
+        Json(response_body).into_response()
+    }
+}
+
+/// Build a signed JWT userinfo response (OIDC Core Section 5.3.4).
+///
+/// Signs the userinfo claims with the algorithm registered by the client.
+/// Returns `application/jwt` with the signed JWT, or a 500 error on signing failure.
+async fn build_signed_userinfo_response(
+    state: &AppState,
+    client_id: &Option<String>,
+    response_body: &UserInfoResponse,
+    alg: JwsAlgorithm,
+) -> Response {
+    // OIDC Core Section 5.3.4: aud MUST identify the requesting client.
+    // client_id is always present in RFC 9068 access tokens, but guard defensively.
+    let aud = match client_id.as_deref().filter(|s| !s.is_empty()) {
+        Some(id) => id.to_string(),
+        None => {
+            tracing::error!("Cannot determine client_id for signed userinfo response");
+            return oauth_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "server_error",
+                "Cannot determine client identity for signed userinfo",
+            );
+        }
+    };
+    let now = Timestamp::now().as_second();
+    let signed_claims = SignedUserInfoClaims {
+        iss: state.config().base_url.clone(),
+        sub: response_body.sub.clone(),
+        aud,
+        iat: now,
+        exp: now + 300,
+        email: response_body.email.clone(),
+        email_verified: response_body.email_verified,
+    };
+    let jwt_result = match alg {
+        JwsAlgorithm::Rs256 => match state.oidc_rsa_key.as_ref() {
+            Some(rsa_key) => rsa_key.sign_jwt(&signed_claims).await,
+            None => {
+                tracing::error!(
+                    "Client requested RS256 userinfo signing but RSA key is unavailable"
+                );
+                return oauth_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "server_error",
+                    "RS256 signing key unavailable",
+                );
+            }
+        },
+        JwsAlgorithm::Es256 => state.oidc_key.sign_jwt(&signed_claims).await,
+        // Registration rejects non-RS256/ES256 values, but guard against
+        // manual client creation or future changes.
+        other => {
+            tracing::error!("Unsupported userinfo signing algorithm: {other}");
+            return oauth_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "server_error",
+                "Unsupported userinfo signing algorithm",
+            );
+        }
+    };
+    match jwt_result {
+        Ok(token) => (
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, "application/jwt")],
+            token,
+        )
+            .into_response(),
+        Err(e) => {
+            tracing::error!("Failed to sign userinfo response: {e}");
+            oauth_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "server_error",
+                "Failed to generate signed userinfo response",
+            )
+        }
+    }
 }
 
 /// Verify mTLS certificate binding per RFC 8705 Section 3.

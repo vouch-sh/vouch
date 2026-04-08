@@ -161,17 +161,12 @@ pub struct IdTokenClaims {
     pub email_verified: Option<bool>,
     /// Custom claim: Hardware verification flag (FIDO2 presence proof).
     ///
-    /// This is the **cryptographic** proof of user presence. It is only set to
-    /// `true` after the server verifies a FIDO2 assertion where both the User
-    /// Presence (UP) and User Verified (UV) flags are set in the authenticator
-    /// data. This is enforced by passing `require_user_verification: true` to
-    /// the WebAuthn verification step.
-    ///
-    /// Unlike the client-side `x-fapi-end-user-present` header (which is a
-    /// non-verifiable hint per FAPI 2.0 Implementation Advice), this claim
-    /// is backed by the authenticator's cryptographic attestation.
-    pub hardware_verified: bool,
+    /// Excluded from standard OIDC id_tokens for conformance. Set to `None`
+    /// here. `OidcIdTokenClaims` (cloud federation) retains this claim.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hardware_verified: Option<bool>,
     /// Custom claim: Hardware authenticator AAGUID.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub hardware_aaguid: Option<String>,
     /// RFC 9449 Section 6: DPoP token binding confirmation.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -277,7 +272,6 @@ pub async fn exchange_authorization_code(
             client_id: &auth_code.client_id,
             user_id: &auth_code.user_id,
             email: &auth_code.email,
-            aaguid: auth_code.aaguid.as_deref(),
             nonce: auth_code.nonce.as_deref(),
             expires_in,
             dpop_jkt,
@@ -721,7 +715,6 @@ struct IdTokenParams<'a> {
     client_id: &'a str,
     user_id: &'a str,
     email: &'a str,
-    aaguid: Option<&'a str>,
     nonce: Option<&'a str>,
     expires_in: u64,
     dpop_jkt: Option<&'a str>,
@@ -773,8 +766,8 @@ async fn generate_id_token(
             None
         },
         email_verified: if has_email { Some(true) } else { None },
-        hardware_verified: true,
-        hardware_aaguid: params.aaguid.map(String::from),
+        hardware_verified: None,
+        hardware_aaguid: None,
         cnf,
         amr: params.amr,
         acr: params.acr,
@@ -920,6 +913,8 @@ pub struct OidcValidatedSession {
     pub authenticator: Option<Authenticator>,
     /// Granted OAuth scope from the access token JWT.
     pub scope: Option<ScopeSet>,
+    /// The OAuth client_id from the access token (used for signed userinfo lookup).
+    pub client_id: Option<String>,
 }
 
 /// Validate a session token and return the user, session, and authenticator.
@@ -984,11 +979,16 @@ pub async fn validate_session_token(
         None => None,
     };
 
+    let client_id = match &decoded {
+        crate::services::auth::DecodedToken::AccessToken(c) => Some(c.client_id.clone()),
+    };
+
     Ok(Some(OidcValidatedSession {
         user,
         session,
         authenticator,
         scope: decoded.scope().cloned(),
+        client_id,
     }))
 }
 
@@ -1378,7 +1378,7 @@ mod tests {
             nonce,
             email: None,
             email_verified: None,
-            hardware_verified: false,
+            hardware_verified: None,
             hardware_aaguid: None,
             cnf: None,
             amr: None,
@@ -1464,6 +1464,8 @@ mod tests {
             tls_client_certificate_bound_access_tokens: false,
             authorization_signed_response_alg: None,
             introspection_signed_response_alg: None,
+            userinfo_signed_response_alg: None,
+            request_uris: None,
         }
     }
 

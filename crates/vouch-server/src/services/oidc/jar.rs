@@ -18,7 +18,9 @@ use crate::services::oidc::authorization::{AuthorizeRequestParams, Prompt};
 use crate::services::oidc::jwt_bearer::validate::{
     JwtAssertionHeader, JwtAudience, map_algorithm, parse_assertion_header,
 };
-use crate::services::oidc::jwt_bearer::{find_matching_key, resolve_client_jwks};
+use crate::services::oidc::jwt_bearer::{
+    find_matching_key_with_refresh_client, resolve_client_jwks,
+};
 use crate::services::{OAuthErrorCode, ServiceError, ServiceResult};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -117,6 +119,124 @@ struct RequestObjectHeader {
     /// Type header — must be "oauth-authz-req+jwt" for Request Objects.
     #[serde(default)]
     pub typ: Option<String>,
+}
+
+/// Maximum size for a fetched Request Object (64 KB).
+///
+/// Request Objects are single JWTs; 64 KB is more than sufficient for
+/// any realistic payload while preventing memory exhaustion from large responses.
+const MAX_REQUEST_OBJECT_SIZE: usize = 64 * 1024;
+
+/// Fetch a Request Object JWT from an HTTPS URL (OIDC Core Section 6.2).
+///
+/// # SSRF Mitigation
+///
+/// This function fetches a URL derived from user input (`request_uri` query
+/// parameter). SSRF is mitigated by:
+/// 1. HTTPS-only enforcement (no plaintext HTTP)
+/// 2. URL structure validation (must parse as a valid URL with a hostname)
+/// 3. Caller-side allowlist (`OAuthClient.request_uris`) when configured
+/// 4. Caller verifies the client is registered and active before calling
+/// 5. 64 KB response size cap prevents data exfiltration
+/// 6. `reqwest` with `rustls` — no system cert store manipulation
+///
+/// # Errors
+/// Returns `OAuthErrorCode::InvalidRequestUri` if the URI is not HTTPS,
+/// is malformed, the HTTP request fails, the response status is not 2xx,
+/// or the body exceeds `MAX_REQUEST_OBJECT_SIZE`.
+pub async fn fetch_request_object(
+    uri: &str,
+    http_client: &reqwest::Client,
+) -> ServiceResult<String> {
+    if !uri.starts_with("https://") {
+        return Err(ServiceError::oauth(
+            OAuthErrorCode::InvalidRequestUri,
+            "request_uri must use HTTPS",
+        ));
+    }
+
+    // Validate URL structure to catch malformed URIs early.
+    let parsed = url::Url::parse(uri).map_err(|_| {
+        ServiceError::oauth(
+            OAuthErrorCode::InvalidRequestUri,
+            "request_uri is not a valid URL",
+        )
+    })?;
+    if parsed.host_str().is_none() {
+        return Err(ServiceError::oauth(
+            OAuthErrorCode::InvalidRequestUri,
+            "request_uri must contain a hostname",
+        ));
+    }
+
+    // SSRF: URL has been validated (HTTPS, valid hostname, caller-side allowlist).
+    let response = http_client.get(uri).send().await.map_err(|e| {
+        tracing::debug!("Failed to fetch Request Object from {uri}: {e}");
+        ServiceError::oauth(
+            OAuthErrorCode::InvalidRequestUri,
+            "Failed to fetch Request Object from request_uri",
+        )
+    })?;
+
+    // M3: Check HTTP response status before reading body.
+    if !response.status().is_success() {
+        tracing::debug!(
+            "Request Object fetch returned non-2xx status {} for {uri}",
+            response.status()
+        );
+        return Err(ServiceError::oauth(
+            OAuthErrorCode::InvalidRequestUri,
+            format!(
+                "Request Object fetch failed with HTTP status {}",
+                response.status()
+            ),
+        ));
+    }
+
+    // Validate Content-Type (warn-only for interoperability).
+    if let Some(ct) = response.headers().get(reqwest::header::CONTENT_TYPE) {
+        let ct_str = ct.to_str().unwrap_or("");
+        if !ct_str.contains("application/oauth-authz-req+jwt")
+            && !ct_str.contains("application/jwt")
+        {
+            tracing::warn!(
+                "Unexpected Content-Type '{}' for Request Object at {uri}",
+                ct_str
+            );
+        }
+    }
+
+    // Check Content-Length before reading to avoid streaming large responses.
+    if let Some(len) = response.content_length()
+        && len > MAX_REQUEST_OBJECT_SIZE as u64
+    {
+        return Err(ServiceError::oauth(
+            OAuthErrorCode::InvalidRequestUri,
+            "Request Object response exceeds maximum size (64 KB)",
+        ));
+    }
+
+    let bytes = response.bytes().await.map_err(|e| {
+        tracing::debug!("Failed to read Request Object body from {uri}: {e}");
+        ServiceError::oauth(
+            OAuthErrorCode::InvalidRequestUri,
+            "Failed to read Request Object response body",
+        )
+    })?;
+
+    if bytes.len() > MAX_REQUEST_OBJECT_SIZE {
+        return Err(ServiceError::oauth(
+            OAuthErrorCode::InvalidRequestUri,
+            "Request Object response exceeds maximum size (64 KB)",
+        ));
+    }
+
+    String::from_utf8(bytes.to_vec()).map_err(|_| {
+        ServiceError::oauth(
+            OAuthErrorCode::InvalidRequestUri,
+            "Request Object response is not valid UTF-8",
+        )
+    })
 }
 
 /// Validate a Request Object JWT header algorithm and `typ` only.
@@ -222,16 +342,14 @@ pub async fn validate_request_object(
     }
 
     // 3. Resolve client JWKS and find matching key
+    let jwks_uri_cached_at = client.jwks_uri_cached_at.map(|ts| ts.to_string());
     let jwks = resolve_client_jwks(
         &state.store,
         &client.id,
         client.jwks.as_ref(),
         client.jwks_uri.as_deref(),
         client.jwks_uri_cache.as_ref(),
-        client
-            .jwks_uri_cached_at
-            .map(|ts| ts.to_string())
-            .as_deref(),
+        jwks_uri_cached_at.as_deref(),
         &state.http_client,
     )
     .await
@@ -244,7 +362,17 @@ pub async fn validate_request_object(
         )
     })?;
 
-    let decoding_key = find_matching_key(&jwks, &assertion_header).map_err(|e| {
+    let decoding_key = find_matching_key_with_refresh_client(
+        &state.store,
+        &client.id,
+        client.jwks_uri.as_deref(),
+        jwks_uri_cached_at.as_deref(),
+        &state.http_client,
+        &jwks,
+        &assertion_header,
+    )
+    .await
+    .map_err(|e| {
         tracing::debug!("No matching key for Request Object: {e}");
         ServiceError::oauth(
             OAuthErrorCode::InvalidRequestObject,

@@ -152,18 +152,20 @@ async fn test_rfc9101_discovery_includes_request_object_signing_alg_values_suppo
         .as_array()
         .expect("Must be an array");
     assert!(
-        algs.len() >= 3,
-        "Must support at least ES256, PS256, and EdDSA"
+        algs.len() >= 4,
+        "Must support at least RS256, ES256, PS256, and EdDSA"
     );
 
     let alg_strs: Vec<&str> = algs.iter().map(|v| v.as_str().unwrap()).collect();
     assert!(alg_strs.contains(&"ES256"), "Must support ES256");
     assert!(alg_strs.contains(&"PS256"), "Must support PS256");
     assert!(alg_strs.contains(&"EdDSA"), "Must support EdDSA");
-    // RS256 is excluded per FAPI 2.0 Section 5.2.2
+    // RS256 is advertised for non-FAPI clients (OIDC Basic Profile conformance).
+    // FAPI 2.0 Section 5.2.2 restricts DPoP/token-endpoint signing, not JAR signing.
+    // The JAR validator enforces PS256/ES256/EdDSA for FAPI clients at runtime.
     assert!(
-        !alg_strs.contains(&"RS256"),
-        "RS256 must be excluded per FAPI 2.0"
+        alg_strs.contains(&"RS256"),
+        "RS256 must be advertised for OIDC Basic Profile conformance (oidcc-request-uri-signed-rs256)"
     );
 }
 

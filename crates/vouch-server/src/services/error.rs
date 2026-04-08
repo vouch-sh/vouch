@@ -152,6 +152,8 @@ pub enum OAuthErrorCode {
     UnapprovedSoftwareStatement,
     /// RFC 9396 Section 7: The authorization_details parameter is invalid.
     InvalidAuthorizationDetails,
+    /// OIDC Core Section 6.2: The request_uri parameter value is invalid.
+    InvalidRequestUri,
 }
 
 impl std::fmt::Display for OAuthErrorCode {
@@ -175,7 +177,8 @@ impl OAuthErrorCode {
             | Self::InvalidClientMetadata
             | Self::InvalidSoftwareStatement
             | Self::UnapprovedSoftwareStatement
-            | Self::InvalidAuthorizationDetails => StatusCode::BAD_REQUEST,
+            | Self::InvalidAuthorizationDetails
+            | Self::InvalidRequestUri => StatusCode::BAD_REQUEST,
             Self::InvalidClient | Self::UnauthorizedClient => StatusCode::UNAUTHORIZED,
             Self::InsufficientUserAuthentication => StatusCode::UNAUTHORIZED,
             Self::InvalidGrant
@@ -218,6 +221,7 @@ impl OAuthErrorCode {
             Self::InvalidSoftwareStatement => "invalid_software_statement",
             Self::UnapprovedSoftwareStatement => "unapproved_software_statement",
             Self::InvalidAuthorizationDetails => "invalid_authorization_details",
+            Self::InvalidRequestUri => "invalid_request_uri",
         }
     }
 }

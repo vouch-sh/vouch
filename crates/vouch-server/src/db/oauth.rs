@@ -69,6 +69,13 @@ pub struct OAuthClient {
     ///
     /// When `Some`, the introspection endpoint returns a signed JWT instead of plain JSON.
     pub introspection_signed_response_alg: Option<JwsAlgorithm>,
+    /// OIDC Core Section 5.3.4: UserInfo response signing algorithm.
+    pub userinfo_signed_response_alg: Option<JwsAlgorithm>,
+    /// OIDC Core Section 6.2: Pre-registered request_uri allowlist.
+    ///
+    /// When `Some`, only the listed HTTPS URLs are accepted as `request_uri` values.
+    /// When `None`, any HTTPS `request_uri` is accepted.
+    pub request_uris: Option<Vec<String>>,
 }
 
 impl From<Document<OAuthClientDoc>> for OAuthClient {
@@ -115,6 +122,8 @@ impl From<Document<OAuthClientDoc>> for OAuthClient {
                 .tls_client_certificate_bound_access_tokens,
             authorization_signed_response_alg: doc.data.authorization_signed_response_alg,
             introspection_signed_response_alg: doc.data.introspection_signed_response_alg,
+            userinfo_signed_response_alg: doc.data.userinfo_signed_response_alg,
+            request_uris: doc.data.request_uris,
         }
     }
 }
@@ -177,6 +186,10 @@ pub struct CreateOAuthClientParams<'a> {
     pub request_object_signing_alg: Option<JwsAlgorithm>,
     /// RFC 9101: Whether signed request objects are required.
     pub require_signed_request_object: Option<bool>,
+    /// OIDC Core Section 5.3.4: UserInfo response signing algorithm.
+    pub userinfo_signed_response_alg: Option<JwsAlgorithm>,
+    /// OIDC Core Section 6.2: Pre-registered request_uri allowlist.
+    pub request_uris: Option<Vec<String>>,
 }
 
 /// Create a new OAuth client application.
@@ -224,6 +237,8 @@ pub async fn create_oauth_client(
             .unwrap_or(false),
         authorization_signed_response_alg: params.authorization_signed_response_alg,
         introspection_signed_response_alg: params.introspection_signed_response_alg,
+        userinfo_signed_response_alg: params.userinfo_signed_response_alg,
+        request_uris: params.request_uris.clone(),
     };
 
     let result = store.insert(&doc).await?;
@@ -695,6 +710,36 @@ pub(super) mod test_helpers {
         }
         Ok(())
     }
+
+    /// Set an OAuth client's `active` flag. Used to simulate deactivated clients.
+    pub async fn set_oauth_client_active(
+        store: &DocumentStore,
+        id: &str,
+        active: bool,
+    ) -> Result<()> {
+        if let Some(doc) = store.get::<OAuthClientDoc>(id).await? {
+            let mut data = doc.data;
+            data.active = active;
+            store.update(id, &data).await?;
+        }
+        Ok(())
+    }
+
+    /// Set the `userinfo_signed_response_alg` directly on an OAuth client.
+    ///
+    /// Bypasses registration validation to allow injection of normally-rejected values.
+    pub async fn set_oauth_client_userinfo_alg(
+        store: &DocumentStore,
+        id: &str,
+        alg: Option<JwsAlgorithm>,
+    ) -> Result<()> {
+        if let Some(doc) = store.get::<OAuthClientDoc>(id).await? {
+            let mut data = doc.data;
+            data.userinfo_signed_response_alg = alg;
+            store.update(id, &data).await?;
+        }
+        Ok(())
+    }
 }
 
 /// Parameters for updating a client via RFC 7592 PUT.
@@ -706,6 +751,8 @@ pub struct UpdateClientRegistrationParams<'a> {
     pub jwks_uri: Option<&'a str>,
     pub registration_access_token_hash: &'a str,
     pub registration_metadata: Option<&'a serde_json::Value>,
+    pub userinfo_signed_response_alg: Option<JwsAlgorithm>,
+    pub request_uris: Option<&'a [String]>,
 }
 
 /// Update a dynamically registered OAuth client (RFC 7592 Section 2.2).
@@ -728,15 +775,19 @@ pub async fn update_oauth_client_registration(
             }
             // RFC 7592: PUT is a full replacement — clear fields not present.
             data.jwks = params.jwks.cloned();
-            data.jwks_uri = params.jwks_uri.map(String::from);
             // Clear JWKS URI cache when the URI changes or is removed.
+            // Compare before overwriting so the check sees the old value.
             if data.jwks_uri.as_deref() != params.jwks_uri {
                 data.jwks_uri_cache = None;
                 data.jwks_uri_cached_at = None;
             }
+            data.jwks_uri = params.jwks_uri.map(String::from);
             data.registration_access_token_hash =
                 Some(params.registration_access_token_hash.to_string());
             data.registration_metadata = params.registration_metadata.cloned();
+            // RFC 7592: PUT is a full replacement — clear fields not present.
+            data.userinfo_signed_response_alg = params.userinfo_signed_response_alg;
+            data.request_uris = params.request_uris.map(|u| u.to_vec());
         })
         .await?;
 
@@ -1062,6 +1113,8 @@ mod tests {
                 introspection_signed_response_alg: None,
                 request_object_signing_alg: None,
                 require_signed_request_object: None,
+                userinfo_signed_response_alg: None,
+                request_uris: None,
             },
         )
         .await

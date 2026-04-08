@@ -5,7 +5,7 @@
 //! access token, enabling federated service-to-service auth without
 //! browser-based flows.
 
-use super::jwks::{find_matching_key, resolve_issuer_jwks};
+use super::jwks::{find_matching_key_with_refresh_issuer, resolve_issuer_jwks};
 use super::validate::{
     decode_claims_unverified, map_algorithm, parse_assertion_header, validate_jwt_assertion,
 };
@@ -84,8 +84,17 @@ pub async fn exchange_jwt_bearer_grant(
     )
     .await?;
 
-    // 5. Find matching key
-    let decoding_key = find_matching_key(&jwks, &header)?;
+    // 5. Find matching key, with force-refresh on kid-miss
+    let decoding_key = find_matching_key_with_refresh_issuer(
+        &state.store,
+        &issuer.id,
+        &issuer.jwks_uri,
+        issuer.jwks_cached_at.as_deref(),
+        &state.http_client,
+        &jwks,
+        &header,
+    )
+    .await?;
 
     // 6. Validate JWT assertion (single verification, multiple acceptable audiences)
     let algorithm = map_algorithm(&header.alg)?;

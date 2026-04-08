@@ -74,20 +74,36 @@ pub fn agent_client(user_agent: &str) -> Result<reqwest::Client, reqwest::Error>
 /// Redirects are disabled to prevent SSRF attacks where an HTTPS
 /// URL redirects to an internal HTTP endpoint.
 ///
+/// Extra CA certificates can be provided to trust peers with
+/// self-signed or private CA certs (e.g., conformance suite endpoints).
+///
 /// # Arguments
 ///
 /// * `user_agent` - The User-Agent header value for outgoing requests.
+/// * `extra_ca_certs` - Optional PEM-encoded CA certificates to trust.
 ///
 /// # Errors
 ///
-/// Returns an error if the client cannot be built.
-pub fn server_client(user_agent: &str) -> Result<reqwest::Client, reqwest::Error> {
-    reqwest::Client::builder()
+/// Returns an error if the client cannot be built or certs are invalid.
+pub fn server_client(
+    user_agent: &str,
+    extra_ca_certs: Option<&[u8]>,
+) -> anyhow::Result<reqwest::Client> {
+    let mut builder = reqwest::Client::builder()
         .user_agent(user_agent)
         .redirect(reqwest::redirect::Policy::none())
         .timeout(timeouts::SERVER_TOTAL)
-        .connect_timeout(timeouts::SERVER_CONNECT)
-        .build()
+        .connect_timeout(timeouts::SERVER_CONNECT);
+
+    if let Some(pem_data) = extra_ca_certs {
+        let certs = reqwest::Certificate::from_pem_bundle(pem_data)
+            .map_err(|e| anyhow::anyhow!("Invalid PEM in extra CA certs: {e}"))?;
+        for cert in certs {
+            builder = builder.add_root_certificate(cert);
+        }
+    }
+
+    Ok(builder.build()?)
 }
 
 #[cfg(test)]
@@ -108,7 +124,7 @@ mod tests {
 
     #[test]
     fn test_server_client_builds() {
-        let client = server_client("test-agent");
+        let client = server_client("test-agent", None);
         assert!(client.is_ok());
     }
 
