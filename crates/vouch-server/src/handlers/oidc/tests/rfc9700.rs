@@ -3,6 +3,10 @@
 
 use super::helpers::*;
 
+// ============================================================================
+// RFC 9700 — PKCE Enforcement
+// ============================================================================
+
 #[tokio::test]
 async fn test_rfc9700_pkce_required_for_public_clients() {
     // RFC 9700: Public clients (token_endpoint_auth_method=none) MUST provide PKCE.
@@ -84,6 +88,10 @@ async fn test_rfc9700_pkce_optional_for_confidential_clients() {
         );
     }
 }
+
+// ============================================================================
+// RFC 9700 — Token Endpoint Security
+// ============================================================================
 
 #[tokio::test]
 async fn test_rfc9700_client_id_matching_at_token_endpoint() {
@@ -259,6 +267,10 @@ async fn test_rfc9700_redirect_uri_required_when_present_in_auth() {
     );
 }
 
+// ============================================================================
+// RFC 9700 — Authorization Code Security
+// ============================================================================
+
 #[tokio::test]
 async fn test_rfc9700_authorization_code_single_use() {
     // RFC 9700 Section 2.1 / RFC 6749 Section 10.5:
@@ -379,5 +391,51 @@ async fn test_rfc9700_authorize_pkce_required_for_public_client_without_challeng
     assert!(
         location.contains(&format!("state={state_param}")),
         "Error redirect must echo state parameter: {location}"
+    );
+}
+
+// ============================================================================
+// RFC 9700 — Code Challenge Method Validation
+// ============================================================================
+
+#[tokio::test]
+async fn test_rfc9700_pkce_plain_method_rejected() {
+    // RFC 9700 Section 2.1.1: Only S256 code_challenge_method is acceptable.
+    // The "plain" method MUST be rejected as it provides no security benefit.
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "pkce-plain@example.com").await;
+    let client = create_test_public_oauth_client(&state.store, &user.id).await;
+
+    let response = http_get_full(
+        &app,
+        &format!(
+            "/oauth/authorize?response_type=code&client_id={}&redirect_uri={}&scope=openid\
+             &code_challenge=dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk\
+             &code_challenge_method=plain&state=plain-test",
+            client.client_id,
+            urlencoding::encode("https://example.com/callback"),
+        ),
+        &[],
+    )
+    .await;
+
+    // Should redirect with error (not succeed)
+    assert!(
+        response.status == StatusCode::FOUND || response.status == StatusCode::SEE_OTHER,
+        "plain code_challenge_method must produce an error redirect, got: {}",
+        response.status
+    );
+
+    let location = response
+        .headers
+        .get("Location")
+        .expect("Must have Location header")
+        .to_str()
+        .expect("Valid UTF-8");
+
+    assert!(
+        location.contains("error="),
+        "Redirect must contain error parameter for plain PKCE method: {location}"
     );
 }

@@ -6,6 +6,10 @@
 
 use super::helpers::*;
 
+// ============================================================================
+// RFC 8414 Section 2 — Required Metadata Fields
+// ============================================================================
+
 #[tokio::test]
 async fn test_rfc8414_metadata_content_type() {
     // RFC 8414 Section 3: Response must be application/json.
@@ -170,6 +174,10 @@ async fn test_rfc8414_grant_types_supported() {
     );
 }
 
+// ============================================================================
+// RFC 8414 Section 3 — Discovery Endpoints
+// ============================================================================
+
 #[tokio::test]
 async fn test_rfc8414_oauth_authorization_server_alias_returns_200() {
     // RFC 8414 Section 3: The authorization server MUST publish its metadata at
@@ -207,6 +215,10 @@ async fn test_rfc8414_oauth_authorization_server_alias_returns_200() {
         "RFC 8414 metadata must include token_endpoint"
     );
 }
+
+// ============================================================================
+// RFC 8414 — Endpoint Authentication Methods
+// ============================================================================
 
 #[tokio::test]
 async fn test_discovery_includes_revocation_auth_methods() {
@@ -379,5 +391,81 @@ async fn test_discovery_request_object_signing_alg_values_supported() {
     assert!(
         alg_strs.contains(&"RS256") || alg_strs.contains(&"ES256"),
         "request_object_signing_alg_values_supported must include at least RS256 or ES256"
+    );
+}
+
+// ============================================================================
+// RFC 8414 — Metadata Validation
+// ============================================================================
+
+#[tokio::test]
+async fn test_rfc8414_no_none_alg_in_signing_algorithms() {
+    // Security: The "none" algorithm must never be advertised in any
+    // signing algorithm list. RFC 8725 Section 3.2 prohibits "none".
+    let (app, _state) = test_app().await;
+
+    let (status, body) = http_get(&app, "/.well-known/openid-configuration", &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    let m: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+
+    let alg_fields = [
+        "id_token_signing_alg_values_supported",
+        "token_endpoint_auth_signing_alg_values_supported",
+        "request_object_signing_alg_values_supported",
+    ];
+
+    for field in &alg_fields {
+        if let Some(algs) = m.get(*field) {
+            let alg_array = algs.as_array().expect("algorithm field must be an array");
+            assert!(
+                !alg_array.iter().any(|v| v == "none"),
+                "RFC 8725: '{field}' must NOT contain 'none' algorithm"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_rfc8414_issuer_no_trailing_slash() {
+    // RFC 8414 Section 2: The issuer identifier MUST be byte-for-byte
+    // identical everywhere it appears. No trailing slash normalization.
+    let (app, state) = test_app().await;
+
+    let (status, body) = http_get(&app, "/.well-known/openid-configuration", &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    let m: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+
+    let issuer = m["issuer"].as_str().expect("issuer must be a string");
+
+    assert!(
+        !issuer.ends_with('/'),
+        "RFC 8414: issuer must NOT have trailing slash, got: {issuer}"
+    );
+
+    // Must match the configured base_url exactly
+    let expected = &state.config().base_url;
+    assert_eq!(
+        issuer,
+        expected.as_str(),
+        "issuer must be byte-for-byte identical to configured base_url"
+    );
+}
+
+#[tokio::test]
+async fn test_rfc8414_scopes_supported_includes_openid() {
+    // OIDC Discovery Section 3: scopes_supported MUST include "openid".
+    let (app, _state) = test_app().await;
+
+    let (status, body) = http_get(&app, "/.well-known/openid-configuration", &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    let m: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+
+    let scopes = m["scopes_supported"]
+        .as_array()
+        .expect("scopes_supported must be a JSON array");
+
+    assert!(
+        scopes.iter().any(|s| s == "openid"),
+        "scopes_supported must include 'openid', got: {scopes:?}"
     );
 }

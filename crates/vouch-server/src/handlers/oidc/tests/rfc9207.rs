@@ -3,6 +3,10 @@
 
 use super::helpers::*;
 
+// ============================================================================
+// RFC 9207 Section 2 — Issuer in Error Responses
+// ============================================================================
+
 #[tokio::test]
 async fn test_rfc9207_iss_in_error_redirect() {
     // RFC 9207 Section 2: Error redirects must include `iss` parameter.
@@ -75,6 +79,10 @@ async fn test_rfc9207_iss_matches_discovery_issuer() {
         "Issuer must be an HTTPS URL"
     );
 }
+
+// ============================================================================
+// RFC 9207 Section 2 — Issuer in Success Responses
+// ============================================================================
 
 #[tokio::test]
 async fn test_rfc9207_authorize_response_includes_iss_parameter() {
@@ -191,5 +199,33 @@ async fn test_rfc9207_authorize_error_redirect_includes_iss() {
     assert!(
         location.contains(&format!("iss={encoded_issuer}")),
         "iss must match server issuer '{expected_issuer}': {location}"
+    );
+}
+
+// ============================================================================
+// RFC 9207 — Validation
+// ============================================================================
+
+#[tokio::test]
+async fn test_rfc9207_unknown_client_does_not_redirect() {
+    // RFC 9207 / RFC 6749 Section 4.1.2.1: If the client_id is unknown,
+    // the server MUST NOT redirect — it cannot determine a safe redirect_uri.
+    // This prevents iss parameter leakage to attacker-controlled endpoints.
+    let (app, _state) = test_app().await;
+
+    let response = http_get_full(
+        &app,
+        "/oauth/authorize?response_type=code&client_id=nonexistent_client_id_12345&redirect_uri=https://evil.com/callback&scope=openid&state=test",
+        &[],
+    )
+    .await;
+
+    // Must NOT be a redirect (302/303)
+    assert!(
+        response.status != StatusCode::FOUND
+            && response.status != StatusCode::SEE_OTHER
+            && response.status != StatusCode::TEMPORARY_REDIRECT,
+        "Unknown client_id must NOT produce a redirect, got: {}",
+        response.status
     );
 }

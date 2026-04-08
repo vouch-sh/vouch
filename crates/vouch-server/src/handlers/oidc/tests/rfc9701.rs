@@ -392,3 +392,119 @@ async fn test_discovery_includes_introspection_signing_alg() {
         "RFC 9701 §7.1: ES256 must be in introspection_signing_alg_values_supported, got: {algs}"
     );
 }
+
+// ============================================================================
+// RFC 9701 — Error/Edge-Case Tests
+// ============================================================================
+
+#[tokio::test]
+async fn test_rfc9701_introspect_jwt_revoked_token_returns_inactive() {
+    // RFC 9701 Section 4: After revocation, introspection must still return
+    // a JWT response (not plain JSON) with token_introspection.active=false.
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "rfc9701-revoked@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_client_with_introspection_jwt(&state, &user.id).await;
+
+    let (token, _) = issue_oauth_access_token(&app, &state, &user, &auth_id, &client).await;
+    let auth_header = client.basic_auth_header();
+
+    // Revoke the token
+    let (revoke_status, _) = http_post_form(
+        &app,
+        "/oauth/revoke",
+        &format!("token={token}"),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    assert_eq!(
+        revoke_status,
+        StatusCode::OK,
+        "Token revocation must succeed"
+    );
+
+    // Introspect the revoked token — must still be JWT format
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/introspect",
+        &format!("token={token}"),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // Must be a JWT (three parts)
+    let parts: Vec<&str> = body.split('.').collect();
+    assert_eq!(
+        parts.len(),
+        3,
+        "Revoked token introspection must still be a JWT, got: {body}"
+    );
+
+    let payload_json = URL_SAFE_NO_PAD
+        .decode(parts[1])
+        .expect("Payload must be valid base64url");
+    let payload: serde_json::Value = serde_json::from_slice(&payload_json).expect("Valid JSON");
+
+    let ti = &payload["token_introspection"];
+    assert_eq!(
+        ti["active"], false,
+        "RFC 9701: Revoked token must have token_introspection.active=false"
+    );
+}
+
+#[tokio::test]
+async fn test_rfc9701_introspect_jwt_cross_client_returns_inactive() {
+    // RFC 7662 Section 4 + RFC 9701: When client B introspects a token
+    // issued to client A, the response must be active=false (wrapped in JWT).
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "rfc9701-cross@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client_a = create_test_client_with_introspection_jwt(&state, &user.id).await;
+    let client_b = create_test_client_with_introspection_jwt(&state, &user.id).await;
+
+    // Issue token to client A
+    let (token_a, _) = issue_oauth_access_token(&app, &state, &user, &auth_id, &client_a).await;
+
+    // Client B introspects client A's token
+    let auth_header_b = client_b.basic_auth_header();
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/introspect",
+        &format!("token={token_a}"),
+        &[("Authorization", &auth_header_b)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // Must be a JWT response (client B has introspection_signed_response_alg)
+    let parts: Vec<&str> = body.split('.').collect();
+    assert_eq!(
+        parts.len(),
+        3,
+        "Cross-client introspection must still be JWT format"
+    );
+
+    let payload_json = URL_SAFE_NO_PAD
+        .decode(parts[1])
+        .expect("Payload must be valid base64url");
+    let payload: serde_json::Value = serde_json::from_slice(&payload_json).expect("Valid JSON");
+
+    let ti = &payload["token_introspection"];
+    assert_eq!(
+        ti["active"], false,
+        "RFC 7662 §4: Cross-client introspection must return active=false"
+    );
+
+    // Must not leak any token data
+    assert!(
+        ti.get("sub").is_none(),
+        "Cross-client introspection must not leak sub"
+    );
+    assert!(
+        ti.get("scope").is_none(),
+        "Cross-client introspection must not leak scope"
+    );
+}
