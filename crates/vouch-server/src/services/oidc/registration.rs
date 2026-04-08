@@ -1032,6 +1032,57 @@ pub async fn update_client_configuration(
         mutable_request.jwks_uri.as_deref(),
     )?;
 
+    // Validate userinfo_signed_response_alg (same rules as initial registration).
+    let userinfo_alg: Option<JwsAlgorithm> =
+        if let Some(ref s) = mutable_request.userinfo_signed_response_alg {
+            let parsed = s.parse::<JwsAlgorithm>().map_err(|_| {
+                ServiceError::oauth(
+                    OAuthErrorCode::InvalidClientMetadata,
+                    format!("Unsupported userinfo_signed_response_alg: '{s}'"),
+                )
+            })?;
+            match parsed {
+                JwsAlgorithm::Rs256 if state.oidc_rsa_key.is_none() => {
+                    return Err(ServiceError::oauth(
+                        OAuthErrorCode::InvalidClientMetadata,
+                        "RS256 is not available for userinfo_signed_response_alg",
+                    ));
+                }
+                JwsAlgorithm::Rs256 | JwsAlgorithm::Es256 => Some(parsed),
+                _ => {
+                    return Err(ServiceError::oauth(
+                        OAuthErrorCode::InvalidClientMetadata,
+                        format!("Unsupported userinfo_signed_response_alg: '{s}'"),
+                    ));
+                }
+            }
+        } else {
+            None
+        };
+
+    // Validate request_uris (same rules as initial registration).
+    let validated_request_uris: Option<Vec<String>> =
+        if let Some(ref uris) = mutable_request.request_uris {
+            const MAX_REQUEST_URIS: usize = 10;
+            if uris.len() > MAX_REQUEST_URIS {
+                return Err(ServiceError::oauth(
+                    OAuthErrorCode::InvalidClientMetadata,
+                    format!("Too many request_uris: maximum is {MAX_REQUEST_URIS}"),
+                ));
+            }
+            for uri in uris {
+                if !uri.starts_with("https://") {
+                    return Err(ServiceError::oauth(
+                        OAuthErrorCode::InvalidClientMetadata,
+                        format!("request_uris must use HTTPS: '{uri}'"),
+                    ));
+                }
+            }
+            Some(uris.clone())
+        } else {
+            None
+        };
+
     // Rotate the registration access token per RFC 7592 Section 2.2
     let new_reg_token = generate_registration_token()?;
     let new_reg_token_hash = hash_token(&new_reg_token);
@@ -1049,6 +1100,8 @@ pub async fn update_client_configuration(
             jwks_uri: mutable_request.jwks_uri.as_deref(),
             registration_access_token_hash: &new_reg_token_hash,
             registration_metadata: Some(&registration_metadata),
+            userinfo_signed_response_alg: userinfo_alg,
+            request_uris: validated_request_uris.as_deref(),
         },
     )
     .await

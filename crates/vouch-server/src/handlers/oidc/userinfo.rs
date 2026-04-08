@@ -353,10 +353,18 @@ async fn build_signed_userinfo_response(
                 );
             }
         },
-        // ES256 and unsupported algorithms fall back to the ECDSA key.
-        // Registration validation already rejects non-RS256/ES256 values.
-        JwsAlgorithm::Es256 | JwsAlgorithm::Ps256 | JwsAlgorithm::EdDsa => {
-            state.oidc_key.sign_jwt(&signed_claims).await
+        JwsAlgorithm::Es256 => state.oidc_key.sign_jwt(&signed_claims).await,
+        // Registration rejects non-RS256/ES256 values, but guard against
+        // manual client creation or future changes.
+        other => {
+            tracing::error!(
+                "Unsupported userinfo signing algorithm: {other}"
+            );
+            return oauth_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "server_error",
+                "Unsupported userinfo signing algorithm",
+            );
         }
     };
     match jwt_result {

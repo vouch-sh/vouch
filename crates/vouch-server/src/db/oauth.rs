@@ -721,6 +721,8 @@ pub struct UpdateClientRegistrationParams<'a> {
     pub jwks_uri: Option<&'a str>,
     pub registration_access_token_hash: &'a str,
     pub registration_metadata: Option<&'a serde_json::Value>,
+    pub userinfo_signed_response_alg: Option<JwsAlgorithm>,
+    pub request_uris: Option<&'a [String]>,
 }
 
 /// Update a dynamically registered OAuth client (RFC 7592 Section 2.2).
@@ -753,6 +755,9 @@ pub async fn update_oauth_client_registration(
             data.registration_access_token_hash =
                 Some(params.registration_access_token_hash.to_string());
             data.registration_metadata = params.registration_metadata.cloned();
+            // RFC 7592: PUT is a full replacement — clear fields not present.
+            data.userinfo_signed_response_alg = params.userinfo_signed_response_alg;
+            data.request_uris = params.request_uris.map(|u| u.to_vec());
         })
         .await?;
 

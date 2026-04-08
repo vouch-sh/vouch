@@ -106,6 +106,7 @@ pub fn test_config() -> ServerConfig {
         trusted_proxies: Vec::new(),
         metrics_bearer_token: None,
         certification_test_token: None,
+        extra_ca_certs: None,
         pool_config: crate::db::pool::PoolConfig::default(),
         session_cache_max_capacity: 10_000,
         session_cache_ttl_secs: 30,
