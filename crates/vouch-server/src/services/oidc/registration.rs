@@ -437,8 +437,7 @@ pub async fn register_client(
 
     // 12b-2. Validate request_uris (OIDC Core Section 6.2).
     // Each URI must be HTTPS. Maximum 10 entries.
-    let validated_request_uris: Option<Vec<String>> = if let Some(ref uris) = request.request_uris
-    {
+    let validated_request_uris: Option<Vec<String>> = if let Some(ref uris) = request.request_uris {
         const MAX_REQUEST_URIS: usize = 10;
         if uris.len() > MAX_REQUEST_URIS {
             return Err(ServiceError::oauth(

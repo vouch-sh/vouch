@@ -203,14 +203,7 @@ async fn authorize_inner(state: Arc<AppState>, params: AuthorizeQuery, jar: Cook
 
         if request_uri.starts_with("https://") {
             // OIDC Core Section 6.2: HTTPS URL — fetch the Request Object JWT.
-            return handle_request_uri_fetch(
-                &state,
-                request_uri,
-                &client_id,
-                &params,
-                jar,
-            )
-            .await;
+            return handle_request_uri_fetch(&state, request_uri, &client_id, &params, jar).await;
         }
 
         // Neither a PAR URN nor an HTTPS URL.
@@ -978,38 +971,33 @@ async fn handle_request_uri_fetch(
         scope: query.scope.as_deref(),
     };
 
-    let request_params = match validate_request_object(
-        state,
-        &fetched_jwt,
-        &oauth_client,
-        Some(&query_hints),
-    )
-    .await
-    {
-        Ok(params) => params,
-        Err(e) => {
-            let (error_code, description) = match &e {
-                crate::services::ServiceError::OAuth { code, description } => {
-                    (code.as_str(), description.clone())
+    let request_params =
+        match validate_request_object(state, &fetched_jwt, &oauth_client, Some(&query_hints)).await
+        {
+            Ok(params) => params,
+            Err(e) => {
+                let (error_code, description) = match &e {
+                    crate::services::ServiceError::OAuth { code, description } => {
+                        (code.as_str(), description.clone())
+                    }
+                    _ => ("invalid_request_object", e.to_string()),
+                };
+                if let Some(ref redirect_uri) = query.redirect_uri {
+                    return oauth_error_redirect(
+                        redirect_uri,
+                        error_code,
+                        &description,
+                        query.state.as_deref(),
+                        &state.config().base_url,
+                    );
                 }
-                _ => ("invalid_request_object", e.to_string()),
-            };
-            if let Some(ref redirect_uri) = query.redirect_uri {
-                return oauth_error_redirect(
-                    redirect_uri,
-                    error_code,
-                    &description,
-                    query.state.as_deref(),
-                    &state.config().base_url,
-                );
+                return AuthorizeDeniedTemplate {
+                    client_name: oauth_client.name,
+                    error_message: format!("Invalid Request Object: {description}"),
+                }
+                .into_response();
             }
-            return AuthorizeDeniedTemplate {
-                client_name: oauth_client.name,
-                error_message: format!("Invalid Request Object: {description}"),
-            }
-            .into_response();
-        }
-    };
+        };
 
     // Extract redirect_uri and response_mode from the validated params.
     let redirect_uri = request_params.redirect_uri.clone();
