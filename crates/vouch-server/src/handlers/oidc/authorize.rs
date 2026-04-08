@@ -222,48 +222,64 @@ async fn authorize_inner(state: Arc<AppState>, params: AuthorizeQuery, jar: Cook
     // one registered URI, that URI is used. If the client has zero or multiple
     // registered URIs, the server cannot determine which to use — show an error
     // page without redirecting (RFC 6749 Section 4.1.2.1).
-    let redirect_uri = match params.redirect_uri.as_deref() {
-        Some(uri) if !uri.is_empty() => uri.to_string(),
-        _ => {
-            // redirect_uri missing — consult the client record
-            if client_id.is_empty() {
-                return AuthorizeDeniedTemplate {
-                    client_name: "Unknown Application".to_string(),
-                    error_message: "Invalid request: redirect_uri is required".to_string(),
-                }
-                .into_response();
-            }
-            match db::get_oauth_client_by_client_id(&state.store, &client_id).await {
-                Ok(Some(ref client)) if client.redirect_uris.len() == 1 => {
-                    client.redirect_uris.first().cloned().unwrap_or_default()
-                }
-                Ok(Some(client)) => {
-                    return AuthorizeDeniedTemplate {
-                        client_name: client.name,
-                        error_message: "Invalid request: redirect_uri is required when multiple \
-                                        redirect URIs are registered"
-                            .to_string(),
-                    }
-                    .into_response();
-                }
-                _ => {
-                    return AuthorizeDeniedTemplate {
-                        client_name: "Unknown Application".to_string(),
-                        error_message: "Invalid request: redirect_uri is required".to_string(),
-                    }
-                    .into_response();
-                }
-            }
-        }
-    };
-
-    // Parse response_mode early so error responses use the correct delivery
-    // mechanism (form_post, JARM, or query-string redirect).
-    let early_response_mode = params
+    // Parse response_mode once, used for both early error responses and the
+    // full authorization flow (form_post, JARM, or query-string redirect).
+    let direct_response_mode = params
         .response_mode
         .as_deref()
         .and_then(ResponseMode::parse)
         .unwrap_or(ResponseMode::Query);
+
+    // Look up the OAuth client early so we can:
+    // 1. Auto-select redirect_uri when client has exactly one registered URI
+    // 2. Avoid a redundant DB lookup after validation
+    // RFC 6749 Section 4.1.2.1: If client_id is invalid, show error page.
+    if client_id.is_empty() {
+        return AuthorizeDeniedTemplate {
+            client_name: "Unknown Application".to_string(),
+            error_message: "Invalid request: client_id is required".to_string(),
+        }
+        .into_response();
+    }
+    let oauth_client = match db::get_oauth_client_by_client_id(&state.store, &client_id).await {
+        Ok(Some(client)) => client,
+        Ok(None) => {
+            return AuthorizeDeniedTemplate {
+                client_name: "Unknown Application".to_string(),
+                error_message:
+                    "Unknown client application. Please contact the application administrator."
+                        .to_string(),
+            }
+            .into_response();
+        }
+        Err(_) => {
+            return AuthorizeDeniedTemplate {
+                client_name: "Unknown Application".to_string(),
+                error_message: "An error occurred. Please try again.".to_string(),
+            }
+            .into_response();
+        }
+    };
+
+    // Resolve redirect_uri: use the provided value, or auto-select when the
+    // client has exactly one registered URI (OIDC Core 3.1.2.1).
+    let redirect_uri = match params.redirect_uri.as_deref() {
+        Some(uri) if !uri.is_empty() => uri.to_string(),
+        _ if oauth_client.redirect_uris.len() == 1 => oauth_client
+            .redirect_uris
+            .first()
+            .cloned()
+            .unwrap_or_default(),
+        _ => {
+            return AuthorizeDeniedTemplate {
+                client_name: oauth_client.name.clone(),
+                error_message: "Invalid request: redirect_uri is required when multiple \
+                                redirect URIs are registered"
+                    .to_string(),
+            }
+            .into_response();
+        }
+    };
 
     // Validate prompt before constructing params — reject unsupported values.
     let parsed_prompt = match params.prompt.as_deref() {
@@ -276,7 +292,7 @@ async fn authorize_inner(state: Arc<AppState>, params: AuthorizeQuery, jar: Cook
                     "Unsupported prompt value. Supported values: login, none, consent",
                     params.state.as_deref(),
                     &state.config().base_url,
-                    early_response_mode,
+                    direct_response_mode,
                 );
             }
         },
@@ -312,58 +328,20 @@ async fn authorize_inner(state: Arc<AppState>, params: AuthorizeQuery, jar: Cook
                 _ => ("server_error", e.to_string()),
             };
 
-            // RFC 6749 Section 4.1.2.1: If client_id is unknown, show error page
-            if client_id.is_empty() {
-                return AuthorizeDeniedTemplate {
-                    client_name: "Unknown Application".to_string(),
-                    error_message: format!("Invalid request: {description}"),
-                }
-                .into_response();
-            }
-
+            // client_id was already validated and the client looked up above,
+            // so this error is from parameter validation (response_type, etc.).
             return oauth_error_redirect(
                 &redirect_uri,
                 error_code,
                 &description,
                 params.state.as_deref(),
                 &state.config().base_url,
-                early_response_mode,
+                direct_response_mode,
             );
         }
     };
 
-    // Look up the OAuth client to get app details
-    // RFC 6749 Section 4.1.2.1: If the client identifier is invalid, the authorization
-    // server MUST NOT automatically redirect the user-agent to the invalid redirection URI.
-    let oauth_client =
-        match db::get_oauth_client_by_client_id(&state.store, validated.client_id()).await {
-            Ok(Some(client)) => client,
-            Ok(None) => {
-                return AuthorizeDeniedTemplate {
-                    client_name: "Unknown Application".to_string(),
-                    error_message:
-                        "Unknown client application. Please contact the application administrator."
-                            .to_string(),
-                }
-                .into_response();
-            }
-            Err(_) => {
-                return AuthorizeDeniedTemplate {
-                    client_name: "Unknown Application".to_string(),
-                    error_message: "An error occurred. Please try again.".to_string(),
-                }
-                .into_response();
-            }
-        };
-
-    // Determine the response mode for error redirects in this direct authorize flow.
-    // When the client requests response_mode=jwt, errors must also be JARM-encoded
-    // so the conformance suite can detect the error via the `response` JWT parameter.
-    let direct_response_mode = params
-        .response_mode
-        .as_deref()
-        .and_then(ResponseMode::parse)
-        .unwrap_or(ResponseMode::Query);
+    // oauth_client was looked up before validation — reuse it directly.
 
     // RFC 9700: PKCE required for public clients and Native/SPA types.
     if let Err(e) = require_pkce_for_client(&validated, &oauth_client) {

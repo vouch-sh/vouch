@@ -8,7 +8,7 @@
   <noscript><p>Submitting authorization response. If you are not redirected, click the button below.</p></noscript>
   <form method="post" action="{{ redirect_uri|e }}">
     {% for (name, value) in params %}
-    <input type="hidden" name="{{ name }}" value="{{ value }}">
+    <input type="hidden" name="{{ name|e }}" value="{{ value|e }}">
     {% endfor %}
     <noscript><button type="submit">Continue</button></noscript>
   </form>
