@@ -952,3 +952,177 @@ async fn test_response_mode_form_post_returns_html_form() {
         "form_post body must echo the state parameter"
     );
 }
+
+#[tokio::test]
+async fn test_rfc6749_deactivated_client_shows_error_page() {
+    // RFC 6749 Section 4.1.2.1: A deactivated client must not receive an
+    // authorization code. The server shows an error page — it must NOT redirect
+    // to the redirect_uri with an error code because that would still pass client
+    // identity to the redirect target.
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "deactivated-client@example.com").await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+
+    // Deactivate the client
+    let oauth_client = db::get_oauth_client_by_client_id(&state.store, &client.client_id)
+        .await
+        .expect("DB error")
+        .expect("Client not found");
+    db::set_oauth_client_active(&state.store, &oauth_client.id, false)
+        .await
+        .expect("Failed to deactivate client");
+
+    let response = http_get_full(
+        &app,
+        &format!(
+            "/oauth/authorize?response_type=code&client_id={}&redirect_uri={}&scope=openid\
+             &code_challenge=dummychallenge&code_challenge_method=S256",
+            client.client_id,
+            urlencoding::encode("https://example.com/callback"),
+        ),
+        &[],
+    )
+    .await;
+
+    // Must show an error page (not redirect)
+    assert!(
+        response.status == StatusCode::OK || response.status.is_client_error(),
+        "Deactivated client must produce error page, not redirect, got: {}",
+        response.status
+    );
+
+    // Must not redirect to the callback
+    if let Some(location) = response.headers.get("Location") {
+        let loc = location.to_str().unwrap_or("");
+        assert!(
+            !loc.contains("example.com/callback"),
+            "Must not redirect to callback for deactivated client: {loc}"
+        );
+    }
+
+    // Error page must mention deactivation
+    assert!(
+        response.body.contains("deactivated") || response.body.contains("This application"),
+        "Error page should describe deactivation: {}",
+        response.body
+    );
+}
+
+#[tokio::test]
+async fn test_request_uri_non_https_non_urn_shows_error_page() {
+    // OIDC Core Section 6.2 / RFC 9126: request_uri must be either a PAR URN
+    // (urn:ietf:params:oauth:request_uri:*) or an HTTPS URL.
+    // An HTTP URL, javascript: URI, or other scheme must be rejected with an error page.
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "bad-request-uri@example.com").await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+
+    let response = http_get_full(
+        &app,
+        &format!(
+            "/oauth/authorize?client_id={}&request_uri={}",
+            client.client_id,
+            urlencoding::encode("http://evil.example.com/request-object"),
+        ),
+        &[],
+    )
+    .await;
+
+    // Must show error page — no redirect
+    assert!(
+        response.status == StatusCode::OK || response.status.is_client_error(),
+        "Non-HTTPS/non-URN request_uri must produce error page, got: {}",
+        response.status
+    );
+
+    // Error message should indicate invalid format
+    assert!(
+        response.body.contains("request_uri")
+            || response.body.contains("Invalid")
+            || response.body.contains("invalid"),
+        "Error page should describe the invalid request_uri"
+    );
+}
+
+#[tokio::test]
+async fn test_request_uri_missing_client_id_shows_error_page() {
+    // request_uri without client_id is always an error — cannot look up client.
+    let (app, _state) = test_app().await;
+
+    let response = http_get_full(
+        &app,
+        &format!(
+            "/oauth/authorize?request_uri={}",
+            urlencoding::encode("https://example.com/request-object.jwt"),
+        ),
+        &[],
+    )
+    .await;
+
+    assert!(
+        response.status == StatusCode::OK || response.status.is_client_error(),
+        "request_uri without client_id must produce error page, got: {}",
+        response.status
+    );
+}
+
+#[tokio::test]
+async fn test_form_post_error_delivers_html_form() {
+    // OAuth 2.0 Form Post Response Mode: When response_mode=form_post and an
+    // error occurs (e.g. unsupported response_type), the error MUST be delivered
+    // via an HTTP 200 HTML form targeting the redirect_uri — not a redirect.
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "form-post-error@example.com").await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+
+    let response = http_get_full(
+        &app,
+        &format!(
+            "/oauth/authorize?response_type=token&client_id={}&redirect_uri={}&scope=openid\
+             &state=error-state&response_mode=form_post",
+            client.client_id,
+            urlencoding::encode("https://example.com/callback"),
+        ),
+        &[],
+    )
+    .await;
+
+    // Must return 200 with HTML form — not a redirect
+    assert_eq!(
+        response.status,
+        StatusCode::OK,
+        "form_post error must be HTTP 200, not redirect: {}",
+        response.body
+    );
+
+    // Must contain an HTML form targeting the redirect_uri
+    assert!(
+        response.body.contains(r#"method="post""#),
+        "form_post error must contain a POST form"
+    );
+    assert!(
+        response.body.contains("https://example.com/callback"),
+        "form_post error form must target the redirect_uri"
+    );
+
+    // Must carry an error parameter
+    assert!(
+        response.body.contains(r#"name="error""#),
+        "form_post error form must contain a hidden 'error' input"
+    );
+
+    // Must include iss (RFC 9207)
+    assert!(
+        response.body.contains(r#"name="iss""#),
+        "form_post error must contain a hidden 'iss' input (RFC 9207)"
+    );
+
+    // State must be echoed
+    assert!(
+        response.body.contains("error-state"),
+        "form_post error must echo the state parameter"
+    );
+}

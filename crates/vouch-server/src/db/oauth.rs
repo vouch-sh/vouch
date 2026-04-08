@@ -710,6 +710,36 @@ pub(super) mod test_helpers {
         }
         Ok(())
     }
+
+    /// Set an OAuth client's `active` flag. Used to simulate deactivated clients.
+    pub async fn set_oauth_client_active(
+        store: &DocumentStore,
+        id: &str,
+        active: bool,
+    ) -> Result<()> {
+        if let Some(doc) = store.get::<OAuthClientDoc>(id).await? {
+            let mut data = doc.data;
+            data.active = active;
+            store.update(id, &data).await?;
+        }
+        Ok(())
+    }
+
+    /// Set the `userinfo_signed_response_alg` directly on an OAuth client.
+    ///
+    /// Bypasses registration validation to allow injection of normally-rejected values.
+    pub async fn set_oauth_client_userinfo_alg(
+        store: &DocumentStore,
+        id: &str,
+        alg: Option<JwsAlgorithm>,
+    ) -> Result<()> {
+        if let Some(doc) = store.get::<OAuthClientDoc>(id).await? {
+            let mut data = doc.data;
+            data.userinfo_signed_response_alg = alg;
+            store.update(id, &data).await?;
+        }
+        Ok(())
+    }
 }
 
 /// Parameters for updating a client via RFC 7592 PUT.

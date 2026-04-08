@@ -322,3 +322,62 @@ async fn test_rfc8414_oauth_authorization_server_alias_matches_openid_configurat
         "RFC 8414 issuer must equal base_url"
     );
 }
+
+#[tokio::test]
+async fn test_discovery_request_uri_parameter_supported() {
+    // OIDC Core Section 6.2: When request_uri is supported, the server MUST
+    // advertise request_uri_parameter_supported: true in discovery metadata.
+    let (app, _state) = test_app().await;
+
+    let (status, body) = http_get(&app, "/.well-known/openid-configuration", &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    let meta: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+
+    assert_eq!(
+        meta["request_uri_parameter_supported"], true,
+        "Discovery must advertise request_uri_parameter_supported: true"
+    );
+}
+
+#[tokio::test]
+async fn test_discovery_require_request_uri_registration_is_false() {
+    // OIDC Core Section 6.2: require_request_uri_registration: false means the
+    // server accepts HTTPS request_uri values without prior registration.
+    let (app, _state) = test_app().await;
+
+    let (status, body) = http_get(&app, "/.well-known/openid-configuration", &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    let meta: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+
+    // Field must be present and false — registration is optional (allowlist opt-in).
+    assert_eq!(
+        meta["require_request_uri_registration"], false,
+        "Discovery must advertise require_request_uri_registration: false"
+    );
+}
+
+#[tokio::test]
+async fn test_discovery_request_object_signing_alg_values_supported() {
+    // RFC 9101: The server must advertise which algorithms it accepts for
+    // signed Request Objects in request_object_signing_alg_values_supported.
+    let (app, _state) = test_app().await;
+
+    let (status, body) = http_get(&app, "/.well-known/openid-configuration", &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    let meta: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+
+    let algs = meta["request_object_signing_alg_values_supported"]
+        .as_array()
+        .expect("request_object_signing_alg_values_supported must be a JSON array");
+
+    let alg_strs: Vec<&str> = algs.iter().filter_map(|v| v.as_str()).collect();
+    assert!(
+        alg_strs.contains(&"ES256"),
+        "request_object_signing_alg_values_supported must include ES256, got: {alg_strs:?}"
+    );
+    // At minimum RS256 or ES256 must be listed — both are widely supported.
+    assert!(
+        alg_strs.contains(&"RS256") || alg_strs.contains(&"ES256"),
+        "request_object_signing_alg_values_supported must include at least RS256 or ES256"
+    );
+}

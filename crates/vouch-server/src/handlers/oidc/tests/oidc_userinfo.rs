@@ -408,6 +408,181 @@ async fn test_userinfo_signed_jwt_when_es256_configured() {
 }
 
 #[tokio::test]
+async fn test_userinfo_rs256_without_rsa_key_returns_500() {
+    // OIDC Core Section 5.3.4: When a client requests RS256 signed userinfo but
+    // the server has no RSA key configured, it must return 500 (not silently fall
+    // back to ES256 or omit the signature). test_app() uses test_app_state() which
+    // has oidc_rsa_key: None.
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "rs256-no-key@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+
+    // Create a client with userinfo_signed_response_alg=ES256 first (valid),
+    // then override it to RS256 directly via the DB to bypass registration checks.
+    let (client_doc, client_id_str) = db::create_oauth_client(
+        &state.store,
+        &db::CreateOAuthClientParams {
+            user_id: Some(&user.id),
+            name: "RS256 No Key Test Client",
+            description: None,
+            application_type: db::OAuthClientType::Web,
+            redirect_uris: &["https://example.com/callback".to_string()],
+            access_scope: db::AccessScope::Public,
+            org_id: None,
+            resource_uris: &[],
+            token_endpoint_auth_method: None,
+            jwks: None,
+            jwks_uri: None,
+            fapi_profile: None,
+            dpop_bound_access_tokens: None,
+            grant_types: None,
+            response_types: None,
+            software_id: None,
+            software_version: None,
+            registration_source: db::RegistrationSource::Manual,
+            registration_access_token_hash: None,
+            registration_metadata: None,
+            id_token_signed_response_alg: db::JwsAlgorithm::Es256,
+            tls_client_auth_subject_dn: None,
+            tls_client_auth_san_dns: None,
+            tls_client_auth_san_uri: None,
+            tls_client_auth_san_ip: None,
+            tls_client_auth_san_email: None,
+            tls_client_certificate_bound_access_tokens: None,
+            authorization_signed_response_alg: None,
+            introspection_signed_response_alg: None,
+            request_object_signing_alg: None,
+            require_signed_request_object: None,
+            userinfo_signed_response_alg: None,
+            request_uris: None,
+        },
+    )
+    .await
+    .expect("Failed to create RS256-no-key test client");
+
+    // Override userinfo_signed_response_alg to RS256 directly — registration would
+    // reject RS256 when no RSA key is available, but direct DB write is needed here.
+    db::set_oauth_client_userinfo_alg(&state.store, &client_doc.id, Some(db::JwsAlgorithm::Rs256))
+        .await
+        .expect("Failed to set RS256 alg");
+
+    let token =
+        create_test_session_for_client(&state, &user.id, &user.email, &auth_id, &client_id_str)
+            .await;
+
+    let response = http_request_full(
+        &app,
+        "GET",
+        "/oauth/userinfo",
+        None,
+        &[("Authorization", &format!("Bearer {token}"))],
+    )
+    .await;
+
+    // Must return 500 — RS256 key is unavailable. Must NOT fall back to ES256.
+    assert_eq!(
+        response.status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "RS256 userinfo without RSA key must return 500, got: {} — {}",
+        response.status,
+        response.body
+    );
+
+    let error: serde_json::Value = serde_json::from_str(&response.body).expect("Valid JSON");
+    assert_eq!(
+        error["error"], "server_error",
+        "Error code must be server_error"
+    );
+}
+
+#[tokio::test]
+async fn test_userinfo_unsupported_signing_algorithm_returns_500() {
+    // OIDC Core Section 5.3.4 / build_signed_userinfo_response: When a client's
+    // userinfo_signed_response_alg is set to an algorithm not supported by the
+    // server (e.g. PS256, EdDSA), the endpoint must return 500 server_error.
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "unsupported-alg@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+
+    let (client_doc, client_id_str) = db::create_oauth_client(
+        &state.store,
+        &db::CreateOAuthClientParams {
+            user_id: Some(&user.id),
+            name: "Unsupported Alg Test Client",
+            description: None,
+            application_type: db::OAuthClientType::Web,
+            redirect_uris: &["https://example.com/callback".to_string()],
+            access_scope: db::AccessScope::Public,
+            org_id: None,
+            resource_uris: &[],
+            token_endpoint_auth_method: None,
+            jwks: None,
+            jwks_uri: None,
+            fapi_profile: None,
+            dpop_bound_access_tokens: None,
+            grant_types: None,
+            response_types: None,
+            software_id: None,
+            software_version: None,
+            registration_source: db::RegistrationSource::Manual,
+            registration_access_token_hash: None,
+            registration_metadata: None,
+            id_token_signed_response_alg: db::JwsAlgorithm::Es256,
+            tls_client_auth_subject_dn: None,
+            tls_client_auth_san_dns: None,
+            tls_client_auth_san_uri: None,
+            tls_client_auth_san_ip: None,
+            tls_client_auth_san_email: None,
+            tls_client_certificate_bound_access_tokens: None,
+            authorization_signed_response_alg: None,
+            introspection_signed_response_alg: None,
+            request_object_signing_alg: None,
+            require_signed_request_object: None,
+            userinfo_signed_response_alg: None,
+            request_uris: None,
+        },
+    )
+    .await
+    .expect("Failed to create unsupported-alg test client");
+
+    // Inject PS256 directly — registration correctly rejects it, but a client
+    // record could have it from a future schema change or manual edit.
+    db::set_oauth_client_userinfo_alg(&state.store, &client_doc.id, Some(db::JwsAlgorithm::Ps256))
+        .await
+        .expect("Failed to set PS256 alg");
+
+    let token =
+        create_test_session_for_client(&state, &user.id, &user.email, &auth_id, &client_id_str)
+            .await;
+
+    let response = http_request_full(
+        &app,
+        "GET",
+        "/oauth/userinfo",
+        None,
+        &[("Authorization", &format!("Bearer {token}"))],
+    )
+    .await;
+
+    // Must return 500 — PS256 is not a supported userinfo signing algorithm.
+    assert_eq!(
+        response.status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "Unsupported userinfo signing alg must return 500, got: {} — {}",
+        response.status,
+        response.body
+    );
+
+    let error: serde_json::Value = serde_json::from_str(&response.body).expect("Valid JSON");
+    assert_eq!(
+        error["error"], "server_error",
+        "Error code must be server_error"
+    );
+}
+
+#[tokio::test]
 async fn test_id_token_does_not_contain_hardware_claims() {
     // OIDC compliance: standard OIDC id_tokens must not contain hardware_verified
     // or hardware_aaguid after the compliance update.
