@@ -139,8 +139,8 @@ async fn test_rfc8176_amr_values_are_rfc8176_registered() {
     let amr = claims["amr"].as_array().expect("amr must be a JSON array");
 
     let registered_values = [
-        "hwk", "pin", "user", "swk", "sms", "mfa", "otp", "mca", "pwd", "kba", "sc", "tel", "geo",
-        "fpt", "eye", "vbm", "wia", "pop",
+        "face", "fpt", "geo", "hwk", "iris", "kba", "mca", "mfa", "otp", "pin", "pop", "pwd",
+        "rba", "retina", "sc", "sms", "swk", "tel", "user", "vbm", "wia",
     ];
 
     for value in amr {
