@@ -1396,15 +1396,13 @@ async fn oauth_error_response(
             )
             .await
         }
-        ResponseMode::Query => {
-            oauth_error_redirect(
-                redirect_uri,
-                error,
-                description,
-                oauth_state,
-                &app_state.config().base_url,
-            )
-        }
+        ResponseMode::Query => oauth_error_redirect(
+            redirect_uri,
+            error,
+            description,
+            oauth_state,
+            &app_state.config().base_url,
+        ),
     }
 }
 
