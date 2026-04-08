@@ -322,24 +322,16 @@ async fn authorize_inner(state: Arc<AppState>, params: AuthorizeQuery, jar: Cook
             crate::services::ServiceError::OAuth { description, .. } => description.clone(),
             _ => e.to_string(),
         };
-        if direct_response_mode == ResponseMode::Jwt {
-            return oauth_error_redirect_jarm(
-                &state,
-                &oauth_client,
-                validated.redirect_uri(),
-                "invalid_request",
-                &description,
-                validated.state(),
-            )
-            .await;
-        }
-        return oauth_error_redirect(
+        return oauth_error_response(
+            &state,
+            &oauth_client,
             validated.redirect_uri(),
             "invalid_request",
             &description,
             validated.state(),
-            &state.config().base_url,
-        );
+            direct_response_mode,
+        )
+        .await;
     }
 
     // FAPI 2.0: Require PAR for FAPI clients.
@@ -354,50 +346,33 @@ async fn authorize_inner(state: Arc<AppState>, params: AuthorizeQuery, jar: Cook
             crate::services::ServiceError::OAuth { description, .. } => description.clone(),
             _ => e.to_string(),
         };
-        if direct_response_mode == ResponseMode::Jwt {
-            return oauth_error_redirect_jarm(
-                &state,
-                &oauth_client,
-                validated.redirect_uri(),
-                "invalid_request",
-                &description,
-                validated.state(),
-            )
-            .await;
-        }
-        return oauth_error_redirect(
+        return oauth_error_response(
+            &state,
+            &oauth_client,
             validated.redirect_uri(),
             "invalid_request",
             &description,
             validated.state(),
-            &state.config().base_url,
-        );
+            direct_response_mode,
+        )
+        .await;
     }
 
     // RFC 9101: Enforce require_signed_request_object for this client.
     // If the client requires JAR but the request came through the normal flow
     // (no `request` JWT, no PAR `request_uri`), reject it. The error response
-    // uses JARM encoding when response_mode=jwt was requested so the conformance
-    // suite can observe the error via the `response` JWT parameter.
+    // respects the requested response_mode (query, form_post, or JARM jwt).
     if oauth_client.require_signed_request_object == Some(true) {
-        if direct_response_mode == ResponseMode::Jwt {
-            return oauth_error_redirect_jarm(
-                &state,
-                &oauth_client,
-                validated.redirect_uri(),
-                "invalid_request",
-                "This client requires a signed Request Object (RFC 9101)",
-                validated.state(),
-            )
-            .await;
-        }
-        return oauth_error_redirect(
+        return oauth_error_response(
+            &state,
+            &oauth_client,
             validated.redirect_uri(),
             "invalid_request",
             "This client requires a signed Request Object (RFC 9101)",
             validated.state(),
-            &state.config().base_url,
-        );
+            direct_response_mode,
+        )
+        .await;
     }
 
     // RFC 6749 Section 10.6: Validate redirect_uri against registered URIs
@@ -623,13 +598,16 @@ async fn handle_pending_auth(state: &Arc<AppState>, pending_id: &str, jar: &Cook
                 let max_age_u64 = u64::try_from(max_age).unwrap_or(0);
                 let age_u64 = u64::try_from(age_secs).unwrap_or(u64::MAX);
                 if age_u64 >= max_age_u64 {
-                    return oauth_error_redirect(
+                    return oauth_error_response(
+                        state,
+                        &oauth_client,
                         &pending.redirect_uri,
                         "login_required",
                         "Session exceeds requested max_age",
                         pending.state.as_deref(),
-                        &state.config().base_url,
-                    );
+                        pending.response_mode,
+                    )
+                    .await;
                 }
             }
 

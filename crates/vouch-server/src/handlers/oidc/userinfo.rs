@@ -342,7 +342,16 @@ async fn build_signed_userinfo_response(
     let jwt_result = match alg {
         JwsAlgorithm::Rs256 => match state.oidc_rsa_key.as_ref() {
             Some(rsa_key) => rsa_key.sign_jwt(&signed_claims).await,
-            None => state.oidc_key.sign_jwt(&signed_claims).await,
+            None => {
+                tracing::error!(
+                    "Client requested RS256 userinfo signing but RSA key is unavailable"
+                );
+                return oauth_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "server_error",
+                    "RS256 signing key unavailable",
+                );
+            }
         },
         // ES256 and unsupported algorithms fall back to the ECDSA key.
         // Registration validation already rejects non-RS256/ES256 values.
