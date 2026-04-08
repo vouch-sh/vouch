@@ -261,6 +261,14 @@ async fn authorize_inner(state: Arc<AppState>, params: AuthorizeQuery, jar: Cook
         }
     };
 
+    if !oauth_client.active {
+        return AuthorizeDeniedTemplate {
+            client_name: oauth_client.name,
+            error_message: "This application has been deactivated.".to_string(),
+        }
+        .into_response();
+    }
+
     // Resolve redirect_uri: use the provided value, or auto-select when the
     // client has exactly one registered URI (OIDC Core 3.1.2.1).
     let redirect_uri = match params.redirect_uri.as_deref() {

@@ -402,65 +402,13 @@ pub async fn register_client(
         };
 
     // 12c-2. Validate userinfo_signed_response_alg (OIDC Core Section 5.3.4).
-    // Only RS256 and ES256 are accepted.
-    let userinfo_alg: Option<JwsAlgorithm> =
-        if let Some(ref s) = request.userinfo_signed_response_alg {
-            let parsed = s.parse::<JwsAlgorithm>().map_err(|_| {
-                ServiceError::oauth(
-                    OAuthErrorCode::InvalidClientMetadata,
-                    format!(
-                        "Unsupported userinfo_signed_response_alg: '{s}'. \
-                     Supported: RS256, ES256"
-                    ),
-                )
-            })?;
-            if !matches!(parsed, JwsAlgorithm::Rs256 | JwsAlgorithm::Es256) {
-                return Err(ServiceError::oauth(
-                    OAuthErrorCode::InvalidClientMetadata,
-                    format!(
-                        "Unsupported userinfo_signed_response_alg: '{s}'. \
-                     Supported: RS256, ES256"
-                    ),
-                ));
-            }
-            if parsed == JwsAlgorithm::Rs256 && state.oidc_rsa_key.is_none() {
-                return Err(ServiceError::oauth(
-                    OAuthErrorCode::InvalidClientMetadata,
-                    "RS256 is not available for userinfo_signed_response_alg \
-                 (no RSA signing key configured)",
-                ));
-            }
-            Some(parsed)
-        } else {
-            None
-        };
+    let userinfo_alg = validate_userinfo_signed_response_alg(
+        request.userinfo_signed_response_alg.as_deref(),
+        state.oidc_rsa_key.is_some(),
+    )?;
 
     // 12b-2. Validate request_uris (OIDC Core Section 6.2).
-    // Each URI must be HTTPS. Maximum 10 entries.
-    let validated_request_uris: Option<Vec<String>> = if let Some(ref uris) = request.request_uris {
-        const MAX_REQUEST_URIS: usize = 10;
-        if uris.len() > MAX_REQUEST_URIS {
-            return Err(ServiceError::oauth(
-                OAuthErrorCode::InvalidClientMetadata,
-                format!("Too many request_uris: maximum is {MAX_REQUEST_URIS}"),
-            ));
-        }
-        for uri in uris {
-            if !uri.starts_with("https://") {
-                return Err(ServiceError::oauth(
-                    OAuthErrorCode::InvalidClientMetadata,
-                    format!("request_uri '{uri}' must use HTTPS"),
-                ));
-            }
-            // Note: fragments in request_uris are allowed during registration.
-            // The no-fragment rule (RFC 9101) applies only when request_uri is
-            // used in an authorization request, not at registration time.
-            // The conformance suite uses fragments for integrity checking.
-        }
-        Some(uris.clone())
-    } else {
-        None
-    };
+    let validated_request_uris = validate_request_uris(request.request_uris.as_deref())?;
 
     // 12d. Validate request_object_signing_alg (RFC 9101).
     let req_obj_alg: Option<JwsAlgorithm> = if let Some(ref s) = request.request_object_signing_alg
@@ -666,6 +614,57 @@ struct ValidatedGrantTypes {
     response_types: Vec<String>,
     auth_method_str: String,
     has_auth_code: bool,
+}
+
+/// Validate `userinfo_signed_response_alg` — only RS256 and ES256 are accepted.
+///
+/// Returns the parsed algorithm, or `None` if the field is absent.
+fn validate_userinfo_signed_response_alg(
+    raw: Option<&str>,
+    has_rsa_key: bool,
+) -> Result<Option<JwsAlgorithm>, ServiceError> {
+    let Some(s) = raw else { return Ok(None) };
+    let parsed = s.parse::<JwsAlgorithm>().map_err(|_| {
+        ServiceError::oauth(
+            OAuthErrorCode::InvalidClientMetadata,
+            format!("Unsupported userinfo_signed_response_alg: '{s}'. Supported: RS256, ES256"),
+        )
+    })?;
+    match parsed {
+        JwsAlgorithm::Rs256 if !has_rsa_key => Err(ServiceError::oauth(
+            OAuthErrorCode::InvalidClientMetadata,
+            "RS256 is not available for userinfo_signed_response_alg \
+             (no RSA signing key configured)",
+        )),
+        JwsAlgorithm::Rs256 | JwsAlgorithm::Es256 => Ok(Some(parsed)),
+        _ => Err(ServiceError::oauth(
+            OAuthErrorCode::InvalidClientMetadata,
+            format!("Unsupported userinfo_signed_response_alg: '{s}'. Supported: RS256, ES256"),
+        )),
+    }
+}
+
+/// Validate `request_uris` — each must be HTTPS, max 10 entries.
+///
+/// Returns the validated list, or `None` if the field is absent.
+fn validate_request_uris(uris: Option<&[String]>) -> Result<Option<Vec<String>>, ServiceError> {
+    let Some(uris) = uris else { return Ok(None) };
+    const MAX_REQUEST_URIS: usize = 10;
+    if uris.len() > MAX_REQUEST_URIS {
+        return Err(ServiceError::oauth(
+            OAuthErrorCode::InvalidClientMetadata,
+            format!("Too many request_uris: maximum is {MAX_REQUEST_URIS}"),
+        ));
+    }
+    for uri in uris {
+        if !uri.starts_with("https://") {
+            return Err(ServiceError::oauth(
+                OAuthErrorCode::InvalidClientMetadata,
+                format!("request_uri '{uri}' must use HTTPS"),
+            ));
+        }
+    }
+    Ok(Some(uris.to_vec()))
 }
 
 /// Reject implicit grant, apply defaults, validate allowed types, check consistency.
@@ -1033,55 +1032,13 @@ pub async fn update_client_configuration(
     )?;
 
     // Validate userinfo_signed_response_alg (same rules as initial registration).
-    let userinfo_alg: Option<JwsAlgorithm> =
-        if let Some(ref s) = mutable_request.userinfo_signed_response_alg {
-            let parsed = s.parse::<JwsAlgorithm>().map_err(|_| {
-                ServiceError::oauth(
-                    OAuthErrorCode::InvalidClientMetadata,
-                    format!("Unsupported userinfo_signed_response_alg: '{s}'"),
-                )
-            })?;
-            match parsed {
-                JwsAlgorithm::Rs256 if state.oidc_rsa_key.is_none() => {
-                    return Err(ServiceError::oauth(
-                        OAuthErrorCode::InvalidClientMetadata,
-                        "RS256 is not available for userinfo_signed_response_alg",
-                    ));
-                }
-                JwsAlgorithm::Rs256 | JwsAlgorithm::Es256 => Some(parsed),
-                _ => {
-                    return Err(ServiceError::oauth(
-                        OAuthErrorCode::InvalidClientMetadata,
-                        format!("Unsupported userinfo_signed_response_alg: '{s}'"),
-                    ));
-                }
-            }
-        } else {
-            None
-        };
+    let userinfo_alg = validate_userinfo_signed_response_alg(
+        mutable_request.userinfo_signed_response_alg.as_deref(),
+        state.oidc_rsa_key.is_some(),
+    )?;
 
     // Validate request_uris (same rules as initial registration).
-    let validated_request_uris: Option<Vec<String>> =
-        if let Some(ref uris) = mutable_request.request_uris {
-            const MAX_REQUEST_URIS: usize = 10;
-            if uris.len() > MAX_REQUEST_URIS {
-                return Err(ServiceError::oauth(
-                    OAuthErrorCode::InvalidClientMetadata,
-                    format!("Too many request_uris: maximum is {MAX_REQUEST_URIS}"),
-                ));
-            }
-            for uri in uris {
-                if !uri.starts_with("https://") {
-                    return Err(ServiceError::oauth(
-                        OAuthErrorCode::InvalidClientMetadata,
-                        format!("request_uris must use HTTPS: '{uri}'"),
-                    ));
-                }
-            }
-            Some(uris.clone())
-        } else {
-            None
-        };
+    let validated_request_uris = validate_request_uris(mutable_request.request_uris.as_deref())?;
 
     // Rotate the registration access token per RFC 7592 Section 2.2
     let new_reg_token = generate_registration_token()?;
