@@ -107,6 +107,239 @@ pub struct AuthorizeQuery {
     response_mode: Option<String>,
 }
 
+// ---------------------------------------------------------------------------
+// Security gate types
+// ---------------------------------------------------------------------------
+
+/// Security gate: client lookup + active check + redirect_uri validation have
+/// all passed. No redirect-based error may be produced before this exists.
+///
+/// **Phase A (errors → error page, never redirect):**
+/// 1. Client lookup
+/// 2. Active check
+/// 3. redirect_uri validation against registered URIs
+///
+/// Both constructors return `Result<Self, Response>` where `Err` is always an
+/// error *page* response (never a redirect to an unvalidated URI).
+struct ResolvedClient {
+    client: OAuthClient,
+    redirect_uri: String,
+    response_mode: ResponseMode,
+}
+
+impl ResolvedClient {
+    /// Full Phase A pipeline: DB lookup + active check + redirect_uri validation.
+    ///
+    /// Used for Direct, PAR, and pending_auth flows.
+    async fn resolve(
+        state: &Arc<AppState>,
+        client_id: &str,
+        redirect_uri_param: Option<&str>,
+        response_mode_param: Option<&str>,
+    ) -> Result<Self, Response> {
+        let client = lookup_and_check_active(state, client_id).await?;
+
+        let redirect_uri = resolve_redirect_uri(redirect_uri_param, &client)?;
+
+        let response_mode = response_mode_param
+            .and_then(ResponseMode::parse)
+            .unwrap_or(ResponseMode::Query);
+
+        Ok(Self {
+            client,
+            redirect_uri,
+            response_mode,
+        })
+    }
+
+    /// Phase A using a pre-loaded client: validates redirect_uri only.
+    ///
+    /// Used for JAR and request_uri_fetch flows, where the client must be
+    /// loaded before JWT verification. The client has already been through
+    /// `lookup_and_check_active`.
+    // Response is 128 bytes but this is intentional — we return HTTP responses.
+    #[allow(clippy::result_large_err)]
+    fn from_validated_client(
+        client: OAuthClient,
+        redirect_uri: String,
+        response_mode: ResponseMode,
+    ) -> Result<Self, Response> {
+        if !client.is_valid_redirect_uri(&redirect_uri) {
+            tracing::warn!(
+                client_id = %client.client_id,
+                %redirect_uri,
+                registered = ?client.redirect_uris,
+                "redirect_uri not registered for client"
+            );
+            let resp = AuthorizeDeniedTemplate {
+                client_name: client.name,
+                error_message: "Invalid redirect_uri: not registered for this application"
+                    .to_string(),
+            }
+            .into_response();
+            return Err(resp);
+        }
+        Ok(Self {
+            client,
+            redirect_uri,
+            response_mode,
+        })
+    }
+
+    /// Produce a redirect-based OAuth error using the validated redirect_uri.
+    ///
+    /// This is the only path to produce a redirect error — the `ResolvedClient`
+    /// guarantees the URI is safe to redirect to.
+    async fn error_redirect(
+        &self,
+        state: &Arc<AppState>,
+        error: &str,
+        description: &str,
+        oauth_state: Option<&str>,
+    ) -> Response {
+        oauth_error_response(
+            state,
+            &self.client,
+            &self.redirect_uri,
+            error,
+            description,
+            oauth_state,
+            self.response_mode,
+        )
+        .await
+    }
+}
+
+/// Which authorization flow is in use, for `run_security_pipeline()` parameterization.
+enum AuthFlowKind {
+    /// Normal query-parameter flow: all checks apply.
+    Direct,
+    /// JWT-Secured Authorization Request (RFC 9101): signed_request_object inherently satisfied.
+    Jar,
+    /// Pushed Authorization Request (RFC 9126): PAR requirement and signed_request_object
+    /// inherently satisfied.
+    Par,
+    /// Fetched HTTPS request_uri: signed_request_object inherently satisfied.
+    RequestUriFetch,
+}
+
+// ---------------------------------------------------------------------------
+// Shared security pipeline (Phase B)
+// ---------------------------------------------------------------------------
+
+/// Run Phase B security checks: PKCE + FAPI + signed-request-object.
+///
+/// All errors redirect to the validated `resolved.redirect_uri`. Returns `Ok(())`
+/// if all checks pass, or `Err(Response)` on the first failure.
+async fn run_security_pipeline(
+    state: &Arc<AppState>,
+    validated: &ValidatedAuthRequest,
+    resolved: &ResolvedClient,
+    flow: &AuthFlowKind,
+) -> Result<(), Response> {
+    // PKCE: required for public clients and Native/SPA types (RFC 9700).
+    if let Err(e) = require_pkce_for_client(validated, &resolved.client) {
+        let description = match &e {
+            crate::services::ServiceError::OAuth { description, .. } => description.clone(),
+            _ => e.to_string(),
+        };
+        return Err(resolved
+            .error_redirect(state, "invalid_request", &description, validated.state())
+            .await);
+    }
+
+    // FAPI PAR requirement: skip only for PAR flows (already satisfied).
+    if !matches!(flow, AuthFlowKind::Par)
+        && let Err(e) = crate::services::oidc::fapi::validate_fapi_authorization_request(
+            &resolved.client,
+            false,
+        )
+    {
+        let description = match &e {
+            crate::services::ServiceError::OAuth { description, .. } => description.clone(),
+            _ => e.to_string(),
+        };
+        return Err(resolved
+            .error_redirect(state, "invalid_request", &description, validated.state())
+            .await);
+    }
+
+    // require_signed_request_object: skip for JAR, PAR, and request_uri_fetch
+    // (all three inherently provide a signed request object or satisfy PAR).
+    if matches!(flow, AuthFlowKind::Direct)
+        && resolved.client.require_signed_request_object == Some(true)
+    {
+        return Err(resolved
+            .error_redirect(
+                state,
+                "invalid_request",
+                "This client requires a signed Request Object (RFC 9101)",
+                validated.state(),
+            )
+            .await);
+    }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Shared session check + dispatch (Phase C)
+// ---------------------------------------------------------------------------
+
+/// Check session and dispatch to authorization or pending-login.
+///
+/// Called after Phase A + Phase B have both succeeded.
+async fn check_session_and_authorize(
+    state: &Arc<AppState>,
+    resolved: &ResolvedClient,
+    validated: ValidatedAuthRequest,
+    jar: &CookieJar,
+    reauth_policy: ReauthPolicy,
+    par_to_consume: Option<(&str, &str)>,
+) -> Response {
+    let session_token = jar
+        .get(vouch_common::SESSION_COOKIE_NAME)
+        .map(|c| c.value());
+
+    match check_session_for_authorization(state, session_token).await {
+        Ok(AuthorizationSessionState::Authenticated {
+            user,
+            session: ref auth_session,
+            authenticator,
+        }) => {
+            authorize_authenticated_user(
+                state,
+                validated,
+                &resolved.client,
+                &user,
+                auth_session,
+                &authenticator,
+                reauth_policy,
+                par_to_consume,
+                resolved.response_mode,
+            )
+            .await
+        }
+        Ok(AuthorizationSessionState::NeedsAuth) | Err(_) => {
+            if validated.prompt() == Some(Prompt::Silent) {
+                return resolved
+                    .error_redirect(
+                        state,
+                        "login_required",
+                        "User is not authenticated and prompt=none was requested",
+                        validated.state(),
+                    )
+                    .await;
+            }
+            store_pending_and_redirect(state, validated, resolved.response_mode, None).await
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Handler entry points
+// ---------------------------------------------------------------------------
+
 /// GET /oauth/authorize
 ///
 /// Authorization endpoint - redirects user to login if not authenticated,
@@ -214,26 +447,38 @@ async fn authorize_inner(state: Arc<AppState>, params: AuthorizeQuery, jar: Cook
         .into_response();
     }
 
-    // Normal authorization request - validate parameters
-    let response_type = params.response_type.unwrap_or_default();
+    // Normal direct authorization request.
+    handle_direct_request(&state, params, jar).await
+}
+
+/// POST /oauth/authorize
+///
+/// RFC 6749 Section 3.1: The authorization endpoint MAY support POST.
+/// Accepts `application/x-www-form-urlencoded` parameters and delegates
+/// to the same logic as the GET handler.
+pub async fn authorize_post(
+    State(state): State<Arc<AppState>>,
+    jar: CookieJar,
+    Form(params): Form<AuthorizeQuery>,
+) -> Response {
+    authorize_inner(state, params, jar).await
+}
+
+// ---------------------------------------------------------------------------
+// Flow handlers
+// ---------------------------------------------------------------------------
+
+/// Handle a direct (query-parameter only) authorization request.
+///
+/// Phase A: resolve client + validate redirect_uri (errors → error page).
+/// Phase B: PKCE + FAPI + signed-request-object (errors → redirect).
+/// Phase C: session check + code issuance.
+async fn handle_direct_request(
+    state: &Arc<AppState>,
+    params: AuthorizeQuery,
+    jar: CookieJar,
+) -> Response {
     let client_id = params.client_id.clone().unwrap_or_default();
-
-    // OIDC Core 3.1.2.1: If redirect_uri is absent and the client has exactly
-    // one registered URI, that URI is used. If the client has zero or multiple
-    // registered URIs, the server cannot determine which to use — show an error
-    // page without redirecting (RFC 6749 Section 4.1.2.1).
-    // Parse response_mode once, used for both early error responses and the
-    // full authorization flow (form_post, JARM, or query-string redirect).
-    let direct_response_mode = params
-        .response_mode
-        .as_deref()
-        .and_then(ResponseMode::parse)
-        .unwrap_or(ResponseMode::Query);
-
-    // Look up the OAuth client early so we can:
-    // 1. Auto-select redirect_uri when client has exactly one registered URI
-    // 2. Avoid a redundant DB lookup after validation
-    // RFC 6749 Section 4.1.2.1: If client_id is invalid, show error page.
     if client_id.is_empty() {
         return AuthorizeDeniedTemplate {
             client_name: "Unknown Application".to_string(),
@@ -241,52 +486,18 @@ async fn authorize_inner(state: Arc<AppState>, params: AuthorizeQuery, jar: Cook
         }
         .into_response();
     }
-    let oauth_client = match db::get_oauth_client_by_client_id(&state.store, &client_id).await {
-        Ok(Some(client)) => client,
-        Ok(None) => {
-            return AuthorizeDeniedTemplate {
-                client_name: "Unknown Application".to_string(),
-                error_message:
-                    "Unknown client application. Please contact the application administrator."
-                        .to_string(),
-            }
-            .into_response();
-        }
-        Err(_) => {
-            return AuthorizeDeniedTemplate {
-                client_name: "Unknown Application".to_string(),
-                error_message: "An error occurred. Please try again.".to_string(),
-            }
-            .into_response();
-        }
-    };
 
-    if !oauth_client.active {
-        return AuthorizeDeniedTemplate {
-            client_name: oauth_client.name,
-            error_message: "This application has been deactivated.".to_string(),
-        }
-        .into_response();
-    }
-
-    // Resolve redirect_uri: use the provided value, or auto-select when the
-    // client has exactly one registered URI (OIDC Core 3.1.2.1).
-    let redirect_uri = match params.redirect_uri.as_deref() {
-        Some(uri) if !uri.is_empty() => uri.to_string(),
-        _ if oauth_client.redirect_uris.len() == 1 => oauth_client
-            .redirect_uris
-            .first()
-            .cloned()
-            .unwrap_or_default(),
-        _ => {
-            return AuthorizeDeniedTemplate {
-                client_name: oauth_client.name.clone(),
-                error_message: "Invalid request: redirect_uri is required when multiple \
-                                redirect URIs are registered"
-                    .to_string(),
-            }
-            .into_response();
-        }
+    // Phase A: client lookup + active + redirect_uri validation (errors → page).
+    let resolved = match ResolvedClient::resolve(
+        state,
+        &client_id,
+        params.redirect_uri.as_deref(),
+        params.response_mode.as_deref(),
+    )
+    .await
+    {
+        Ok(r) => r,
+        Err(resp) => return resp,
     };
 
     // Validate prompt before constructing params — reject unsupported values.
@@ -294,23 +505,23 @@ async fn authorize_inner(state: Arc<AppState>, params: AuthorizeQuery, jar: Cook
         Some(p) => match Prompt::parse(p) {
             Some(prompt) => Some(prompt),
             None => {
-                return oauth_error_redirect(
-                    &redirect_uri,
-                    "invalid_request",
-                    "Unsupported prompt value. Supported values: login, none, consent",
-                    params.state.as_deref(),
-                    &state.config().base_url,
-                    direct_response_mode,
-                );
+                return resolved
+                    .error_redirect(
+                        state,
+                        "invalid_request",
+                        "Unsupported prompt value. Supported values: login, none, consent",
+                        params.state.as_deref(),
+                    )
+                    .await;
             }
         },
         None => None,
     };
 
     let request_params = AuthorizeRequestParams {
-        response_type,
+        response_type: params.response_type.unwrap_or_default(),
         client_id: client_id.clone(),
-        redirect_uri: redirect_uri.clone(),
+        redirect_uri: resolved.redirect_uri.clone(),
         scope: params.scope.clone(),
         state: params.state.clone(),
         nonce: params.nonce.clone(),
@@ -328,52 +539,350 @@ async fn authorize_inner(state: Arc<AppState>, params: AuthorizeQuery, jar: Cook
     let validated = match validate_authorize_request(request_params) {
         Ok(v) => v,
         Err(e) => {
-            // Map the specific error type to the correct OAuth error code
             let (error_code, description) = match &e {
                 crate::services::ServiceError::OAuth { code, description } => {
                     (code.as_str(), description.clone())
                 }
                 _ => ("server_error", e.to_string()),
             };
-
-            // client_id was already validated and the client looked up above,
-            // so this error is from parameter validation (response_type, etc.).
-            return oauth_error_redirect(
-                &redirect_uri,
-                error_code,
-                &description,
-                params.state.as_deref(),
-                &state.config().base_url,
-                direct_response_mode,
-            );
+            return resolved
+                .error_redirect(state, error_code, &description, params.state.as_deref())
+                .await;
         }
     };
 
-    // oauth_client was looked up before validation — reuse it directly.
-
-    // RFC 9700: PKCE required for public clients and Native/SPA types.
-    if let Err(e) = require_pkce_for_client(&validated, &oauth_client) {
-        let description = match &e {
-            crate::services::ServiceError::OAuth { description, .. } => description.clone(),
-            _ => e.to_string(),
-        };
-        return oauth_error_response(
-            &state,
-            &oauth_client,
-            validated.redirect_uri(),
-            "invalid_request",
-            &description,
-            validated.state(),
-            direct_response_mode,
-        )
-        .await;
+    // Phase B: PKCE + FAPI + signed-request-object (errors → redirect).
+    if let Err(resp) =
+        run_security_pipeline(state, &validated, &resolved, &AuthFlowKind::Direct).await
+    {
+        return resp;
     }
 
-    // FAPI 2.0: Require PAR for FAPI clients.
-    //
-    // This catches the case where a FAPI client tries to use the normal
-    // authorization flow (no PAR `request_uri`). FAPI 2.0 Section 5.2.2 mandates
-    // that all authorization requests use PAR.
+    // Phase C: session check + dispatch.
+    check_session_and_authorize(
+        state,
+        &resolved,
+        validated,
+        &jar,
+        ReauthPolicy::OnDemand,
+        None,
+    )
+    .await
+}
+
+/// Handle an authorization request using a JWT-Secured Authorization Request (RFC 9101).
+///
+/// Phase A: lookup_and_check_active → validate_request_object → from_validated_client.
+/// Phase B: run_security_pipeline (Jar kind — skips signed_request_object check).
+/// Phase C: session check + code issuance.
+async fn handle_jar_request(
+    state: &Arc<AppState>,
+    request_jwt: &str,
+    client_id: &str,
+    query: &AuthorizeQuery,
+    jar: CookieJar,
+) -> Response {
+    // Phase A step 1: client lookup + active check (errors → page).
+    let oauth_client = match lookup_and_check_active(state, client_id).await {
+        Ok(c) => c,
+        Err(resp) => return resp,
+    };
+
+    // Phase A step 2: validate the Request Object JWT (client already loaded).
+    let query_hints = QueryParamHints {
+        client_id: Some(client_id),
+        response_type: query.response_type.as_deref(),
+        scope: query.scope.as_deref(),
+    };
+
+    let request_params = match validate_request_object(
+        state,
+        request_jwt,
+        &oauth_client,
+        Some(&query_hints),
+    )
+    .await
+    {
+        Ok(params) => params,
+        Err(e) => {
+            let description = match &e {
+                crate::services::ServiceError::OAuth { description, .. } => description.clone(),
+                _ => e.to_string(),
+            };
+            return AuthorizeDeniedTemplate {
+                client_name: oauth_client.name,
+                error_message: format!("Invalid Request Object: {description}"),
+            }
+            .into_response();
+        }
+    };
+
+    // Extract redirect_uri and response_mode from the Request Object.
+    let redirect_uri = request_params.redirect_uri.clone();
+    let jar_response_mode = request_params
+        .response_mode
+        .as_deref()
+        .and_then(ResponseMode::parse)
+        .unwrap_or(ResponseMode::Query);
+
+    // Phase A step 3: validate redirect_uri against registered URIs (errors → page).
+    let resolved = match ResolvedClient::from_validated_client(
+        oauth_client,
+        redirect_uri,
+        jar_response_mode,
+    ) {
+        Ok(r) => r,
+        Err(resp) => return resp,
+    };
+
+    let validated = match validate_authorize_request(request_params) {
+        Ok(v) => v,
+        Err(e) => {
+            let (error_code, description) = match &e {
+                crate::services::ServiceError::OAuth { code, description } => {
+                    (code.as_str(), description.clone())
+                }
+                _ => ("server_error", e.to_string()),
+            };
+            return resolved
+                .error_redirect(state, error_code, &description, query.state.as_deref())
+                .await;
+        }
+    };
+
+    // Phase B: PKCE + FAPI PAR requirement (Jar kind — skips signed_request_object).
+    if let Err(resp) = run_security_pipeline(state, &validated, &resolved, &AuthFlowKind::Jar).await
+    {
+        return resp;
+    }
+
+    // Phase C: session check + dispatch.
+    check_session_and_authorize(
+        state,
+        &resolved,
+        validated,
+        &jar,
+        ReauthPolicy::OnDemand,
+        None,
+    )
+    .await
+}
+
+/// Look up a PAR record by request_uri and client_id.
+///
+/// Returns `Err(Response)` on failure:
+/// - Not found / expired: error page (or redirect if fallback_redirect_uri provided).
+/// - DB error: error page.
+async fn lookup_par(
+    state: &Arc<AppState>,
+    request_uri: &str,
+    client_id: &str,
+    fallback_redirect_uri: Option<&str>,
+) -> Result<db::PushedAuthorizationRequest, Response> {
+    match db::get_pushed_authorization_request(&state.store, request_uri, client_id).await {
+        Ok(Some(p)) => Ok(p),
+        Ok(None) => {
+            tracing::warn!(
+                request_uri,
+                client_id,
+                "PAR not found, expired, or wrong client"
+            );
+            if let Some(uri) = fallback_redirect_uri
+                && let Ok(mut redirect) = url::Url::parse(uri)
+            {
+                {
+                    let mut q = redirect.query_pairs_mut();
+                    q.append_pair("error", "invalid_request_uri");
+                    q.append_pair("error_description", "Invalid or expired request_uri");
+                    q.append_pair("iss", &state.config().base_url);
+                }
+                return Err(axum::response::Redirect::to(redirect.as_str()).into_response());
+            }
+            Err(AuthorizeDeniedTemplate {
+                client_name: "Unknown Application".to_string(),
+                error_message:
+                    "Invalid or expired request_uri. Please restart the authorization flow."
+                        .to_string(),
+            }
+            .into_response())
+        }
+        Err(e) => {
+            tracing::error!("Failed to look up PAR: {}", e);
+            Err(AuthorizeDeniedTemplate {
+                client_name: "Unknown Application".to_string(),
+                error_message: "An error occurred. Please try again.".to_string(),
+            }
+            .into_response())
+        }
+    }
+}
+
+/// Handle an authorization request using a pushed authorization request URI (RFC 9126).
+///
+/// Phase A: consume PAR → resolve client (lookup + active + redirect_uri).
+/// Phase B: run_security_pipeline (Par kind — skips FAPI PAR requirement + signed_request_object).
+/// Phase C: session check + code issuance.
+async fn handle_par_request(
+    state: &Arc<AppState>,
+    request_uri: &str,
+    client_id: &str,
+    fallback_redirect_uri: Option<&str>,
+    jar: CookieJar,
+) -> Response {
+    // FAPI 2.0 Section 5.3.2.2 Note 3: Look up the PAR without consuming it.
+    let par = match lookup_par(state, request_uri, client_id, fallback_redirect_uri).await {
+        Ok(p) => p,
+        Err(resp) => return resp,
+    };
+
+    // Phase A: client lookup + active check + redirect_uri validation (errors → page).
+    // Client lookup happens here (after PAR lookup) to catch deactivated clients.
+    let resolved = match ResolvedClient::resolve(
+        state,
+        &par.client_id,
+        Some(&par.redirect_uri),
+        None, // PAR response_mode handled below
+    )
+    .await
+    {
+        Ok(r) => r,
+        Err(resp) => return resp,
+    };
+
+    // Build the ValidatedAuthRequest from PAR fields.
+    let parsed_prompt = par.prompt.as_deref().and_then(Prompt::parse);
+    let request_params = AuthorizeRequestParams {
+        response_type: par.response_type.clone(),
+        client_id: par.client_id.clone(),
+        redirect_uri: par.redirect_uri.clone(),
+        scope: par.scope.clone(),
+        state: par.state.clone(),
+        nonce: par.nonce.clone(),
+        code_challenge: par.code_challenge.clone(),
+        code_challenge_method: par.code_challenge_method.clone(),
+        resource: par.resource.clone(),
+        acr_values: par.acr_values.clone(),
+        max_age: par.max_age.and_then(|v| u64::try_from(v).ok()),
+        prompt: parsed_prompt,
+        dpop_jkt: par.dpop_jkt.clone(),
+        authorization_details: par
+            .authorization_details
+            .as_ref()
+            .and_then(|v| serde_json::to_string(v).ok()),
+        response_mode: None,
+    };
+
+    let validated = match validate_authorize_request(request_params) {
+        Ok(v) => v,
+        Err(e) => {
+            let (error_code, description) = match &e {
+                crate::services::ServiceError::OAuth { code, description } => {
+                    (code.as_str(), description.clone())
+                }
+                _ => ("server_error", e.to_string()),
+            };
+            return resolved
+                .error_redirect(state, error_code, &description, par.state.as_deref())
+                .await;
+        }
+    };
+
+    // Overlay the PAR response_mode (resolve() used None above).
+    let resolved = ResolvedClient {
+        client: resolved.client,
+        redirect_uri: resolved.redirect_uri,
+        response_mode: par.response_mode,
+    };
+
+    // Phase B: PKCE only (PAR kind skips FAPI PAR requirement + signed_request_object).
+    if let Err(resp) = run_security_pipeline(state, &validated, &resolved, &AuthFlowKind::Par).await
+    {
+        return resp;
+    }
+
+    // Phase C: PAR always requires a fresh FIDO2 assertion (FAPI 2.0 Section 5.3.2.2 Note 3).
+    check_session_and_authorize(
+        state,
+        &resolved,
+        validated,
+        &jar,
+        ReauthPolicy::Always,
+        Some((request_uri, client_id)),
+    )
+    .await
+}
+
+/// Handle an authorization request using an OIDC Core Section 6.2 `request_uri` URL.
+///
+/// Phase A: lookup_and_check_active → FAPI check → allowlist → fetch+validate JWT
+///          → from_validated_client.
+/// Phase B: run_security_pipeline (RequestUriFetch kind).
+/// Phase C: session check + code issuance.
+async fn handle_request_uri_fetch(
+    state: &Arc<AppState>,
+    request_uri: &str,
+    client_id: &str,
+    query: &AuthorizeQuery,
+    jar: CookieJar,
+) -> Response {
+    // Phase A steps 1-6: lookup + FAPI + allowlist + fetch + validate + redirect_uri.
+    let (resolved, request_params) =
+        match fetch_and_resolve_request_uri(state, request_uri, client_id, query).await {
+            Ok(pair) => pair,
+            Err(resp) => return resp,
+        };
+
+    let validated = match validate_authorize_request(request_params) {
+        Ok(v) => v,
+        Err(e) => {
+            let (error_code, description) = match &e {
+                crate::services::ServiceError::OAuth { code, description } => {
+                    (code.as_str(), description.clone())
+                }
+                _ => ("server_error", e.to_string()),
+            };
+            return resolved
+                .error_redirect(state, error_code, &description, query.state.as_deref())
+                .await;
+        }
+    };
+
+    // Phase B: PKCE + FAPI PAR requirement (RequestUriFetch skips signed_request_object).
+    if let Err(resp) =
+        run_security_pipeline(state, &validated, &resolved, &AuthFlowKind::RequestUriFetch).await
+    {
+        return resp;
+    }
+
+    // Phase C: session check + dispatch.
+    check_session_and_authorize(
+        state,
+        &resolved,
+        validated,
+        &jar,
+        ReauthPolicy::OnDemand,
+        None,
+    )
+    .await
+}
+
+/// Phase A steps 1-6 for the request_uri_fetch flow.
+///
+/// Performs: client lookup + active check, FAPI check, allowlist check,
+/// fetch JWT, validate JWT, redirect_uri validation.
+///
+/// Returns `Ok((ResolvedClient, AuthorizeRequestParams))` on success,
+/// or `Err(Response)` (always an error page) on failure.
+async fn fetch_and_resolve_request_uri(
+    state: &Arc<AppState>,
+    request_uri: &str,
+    client_id: &str,
+    query: &AuthorizeQuery,
+) -> Result<(ResolvedClient, AuthorizeRequestParams), Response> {
+    // Step 1: client lookup + active check (errors → page).
+    let oauth_client = lookup_and_check_active(state, client_id).await?;
+
+    // Step 2: FAPI 2.0 clients must use PAR; URL request_uri is not permitted.
     if let Err(e) =
         crate::services::oidc::fapi::validate_fapi_authorization_request(&oauth_client, false)
     {
@@ -381,109 +890,335 @@ async fn authorize_inner(state: Arc<AppState>, params: AuthorizeQuery, jar: Cook
             crate::services::ServiceError::OAuth { description, .. } => description.clone(),
             _ => e.to_string(),
         };
-        return oauth_error_response(
-            &state,
-            &oauth_client,
-            validated.redirect_uri(),
-            "invalid_request",
-            &description,
-            validated.state(),
-            direct_response_mode,
-        )
-        .await;
-    }
-
-    // RFC 9101: Enforce require_signed_request_object for this client.
-    // If the client requires JAR but the request came through the normal flow
-    // (no `request` JWT, no PAR `request_uri`), reject it. The error response
-    // respects the requested response_mode (query, form_post, or JARM jwt).
-    if oauth_client.require_signed_request_object == Some(true) {
-        return oauth_error_response(
-            &state,
-            &oauth_client,
-            validated.redirect_uri(),
-            "invalid_request",
-            "This client requires a signed Request Object (RFC 9101)",
-            validated.state(),
-            direct_response_mode,
-        )
-        .await;
-    }
-
-    // RFC 6749 Section 10.6: Validate redirect_uri against registered URIs
-    // This prevents attackers from redirecting authorization codes to malicious endpoints
-    if !oauth_client.is_valid_redirect_uri(validated.redirect_uri()) {
-        tracing::warn!(
-            "Invalid redirect_uri '{}' for client '{}'. Registered URIs: {:?}",
-            validated.redirect_uri(),
-            validated.client_id(),
-            oauth_client.redirect_uris
-        );
-        // Show error page instead of redirecting to unregistered URI
-        return AuthorizeDeniedTemplate {
+        return Err(AuthorizeDeniedTemplate {
             client_name: oauth_client.name,
-            error_message: "Invalid redirect_uri: not registered for this application".to_string(),
+            error_message: format!("Invalid request: {description}"),
         }
-        .into_response();
+        .into_response());
     }
 
-    // Try to get existing session from cookie
+    // Step 3: allowlist check.
+    if let Some(ref allowed) = oauth_client.request_uris
+        && !allowed.iter().any(|u| u == request_uri)
+    {
+        return Err(AuthorizeDeniedTemplate {
+            client_name: oauth_client.name,
+            error_message: "Invalid request: request_uri is not registered for this client"
+                .to_string(),
+        }
+        .into_response());
+    }
+
+    // Step 4: fetch the Request Object JWT from the URL.
+    let fetched_jwt = match fetch_request_object(request_uri, &state.http_client).await {
+        Ok(jwt) => jwt,
+        Err(e) => {
+            let description = match &e {
+                crate::services::ServiceError::OAuth { description, .. } => description.clone(),
+                _ => e.to_string(),
+            };
+            return Err(AuthorizeDeniedTemplate {
+                client_name: oauth_client.name,
+                error_message: format!("Failed to fetch Request Object: {description}"),
+            }
+            .into_response());
+        }
+    };
+
+    // Step 5: validate the JWT.
+    let query_hints = QueryParamHints {
+        client_id: Some(client_id),
+        response_type: query.response_type.as_deref(),
+        scope: query.scope.as_deref(),
+    };
+    let request_params =
+        match validate_request_object(state, &fetched_jwt, &oauth_client, Some(&query_hints)).await
+        {
+            Ok(params) => params,
+            Err(e) => {
+                let (error_code, description) = match &e {
+                    crate::services::ServiceError::OAuth { code, description } => {
+                        (code.as_str(), description.clone())
+                    }
+                    _ => ("invalid_request_object", e.to_string()),
+                };
+                return Err(AuthorizeDeniedTemplate {
+                    client_name: oauth_client.name,
+                    error_message: format!("Invalid Request Object ({error_code}): {description}"),
+                }
+                .into_response());
+            }
+        };
+
+    // Step 6: extract redirect_uri and validate against registered URIs.
+    let redirect_uri = request_params.redirect_uri.clone();
+    let jar_response_mode = request_params
+        .response_mode
+        .as_deref()
+        .and_then(ResponseMode::parse)
+        .unwrap_or(ResponseMode::Query);
+    let resolved =
+        ResolvedClient::from_validated_client(oauth_client, redirect_uri, jar_response_mode)?;
+
+    Ok((resolved, request_params))
+}
+
+/// Handle returning from login with a pending auth ID.
+///
+/// Phase A: consume pending → resolve client (lookup + active + redirect_uri re-validation).
+/// Phase C: session check + max_age check + code issuance.
+async fn handle_pending_auth(state: &Arc<AppState>, pending_id: &str, jar: &CookieJar) -> Response {
+    // Consume the pending auth (single-use).
+    let pending = match db::consume_pending_oauth_authorization(&state.store, pending_id).await {
+        Ok(Some(p)) => p,
+        Ok(None) => {
+            tracing::warn!(
+                pending_id,
+                "Pending OAuth authorization not found or expired"
+            );
+            return AuthorizeDeniedTemplate {
+                client_name: "Unknown Application".to_string(),
+                error_message: "Authorization session expired. Please try again.".to_string(),
+            }
+            .into_response();
+        }
+        Err(e) => {
+            tracing::error!("Failed to retrieve pending OAuth authorization: {}", e);
+            return AuthorizeDeniedTemplate {
+                client_name: "Unknown Application".to_string(),
+                error_message: "An error occurred. Please try again.".to_string(),
+            }
+            .into_response();
+        }
+    };
+
+    // Phase A: re-validate client active + redirect_uri (errors → page).
+    // This guards against the client being deactivated or redirect_uri removed
+    // between when the pending auth was stored and when the user completed login.
+    let resolved = match ResolvedClient::resolve(
+        state,
+        &pending.client_id,
+        Some(&pending.redirect_uri),
+        None, // response_mode set from pending record below
+    )
+    .await
+    {
+        Ok(r) => r,
+        Err(resp) => return resp,
+    };
+
+    // Overlay the pending record's response_mode.
+    let resolved = ResolvedClient {
+        client: resolved.client,
+        redirect_uri: resolved.redirect_uri,
+        response_mode: pending.response_mode,
+    };
+
+    // Get session from cookie (should exist after login).
     let session_token = jar
         .get(vouch_common::SESSION_COOKIE_NAME)
         .map(|c| c.value());
 
-    // Check if we have a valid session
-    match check_session_for_authorization(&state, session_token).await {
+    let auth_code_lifetime: i64 =
+        crate::services::oidc::fapi::auth_code_lifetime_seconds(&resolved.client);
+
+    match check_session_for_authorization(state, session_token).await {
         Ok(AuthorizationSessionState::Authenticated {
             user,
             session: ref auth_session,
             authenticator,
         }) => {
-            authorize_authenticated_user(
-                &state,
-                validated,
-                &oauth_client,
+            complete_pending_auth(
+                state,
+                &resolved,
+                &pending,
                 &user,
                 auth_session,
                 &authenticator,
-                ReauthPolicy::OnDemand,
-                None,
-                direct_response_mode,
+                auth_code_lifetime,
             )
             .await
         }
         Ok(AuthorizationSessionState::NeedsAuth) | Err(_) => {
-            // No valid session - store OAuth params and redirect to login.
-            // prompt=none means "don't show UI" — return error immediately.
-            if validated.prompt() == Some(Prompt::Silent) {
-                return oauth_error_response(
-                    &state,
-                    &oauth_client,
-                    validated.redirect_uri(),
-                    "login_required",
-                    "User is not authenticated and prompt=none was requested",
-                    validated.state(),
-                    direct_response_mode,
-                )
-                .await;
+            tracing::warn!("User not authenticated after returning from login");
+            AuthorizeDeniedTemplate {
+                client_name: resolved.client.name.clone(),
+                error_message: "Authentication failed. Please try again.".to_string(),
             }
-            store_pending_and_redirect(&state, validated, direct_response_mode, None).await
+            .into_response()
         }
     }
 }
 
-/// POST /oauth/authorize
-///
-/// RFC 6749 Section 3.1: The authorization endpoint MAY support POST.
-/// Accepts `application/x-www-form-urlencoded` parameters and delegates
-/// to the same logic as the GET handler.
-pub async fn authorize_post(
-    State(state): State<Arc<AppState>>,
-    jar: CookieJar,
-    Form(params): Form<AuthorizeQuery>,
+// ---------------------------------------------------------------------------
+// Pending auth completion (extracted to keep handle_pending_auth under 100 lines)
+// ---------------------------------------------------------------------------
+
+/// Complete the pending auth flow: check access, check max_age, issue code.
+#[allow(clippy::too_many_arguments)]
+async fn complete_pending_auth(
+    state: &Arc<AppState>,
+    resolved: &ResolvedClient,
+    pending: &db::PendingOAuthAuthorization,
+    user: &User,
+    auth_session: &Session,
+    authenticator: &Authenticator,
+    auth_code_lifetime: i64,
 ) -> Response {
-    authorize_inner(state, params, jar).await
+    // Check client access for the authenticated user.
+    if let Err(e) = check_client_access(&resolved.client, user) {
+        let error_message = match e {
+            crate::services::ServiceError::OAuth { description, .. } => description,
+            _ => "You don't have access to this application".to_string(),
+        };
+        return AuthorizeDeniedTemplate {
+            client_name: resolved.client.name.clone(),
+            error_message,
+        }
+        .into_response();
+    }
+
+    // Validate max_age: if the pending request specified max_age,
+    // verify the session is not older than that threshold (RFC 9470).
+    if let Some(max_age) = pending.max_age {
+        let age_secs = jiff::Timestamp::now()
+            .duration_since(auth_session.created_at)
+            .as_secs()
+            .max(0);
+        let max_age_u64 = u64::try_from(max_age).unwrap_or(0);
+        let age_u64 = u64::try_from(age_secs).unwrap_or(u64::MAX);
+        if age_u64 >= max_age_u64 {
+            return resolved
+                .error_redirect(
+                    state,
+                    "login_required",
+                    "Session exceeds requested max_age",
+                    pending.state.as_deref(),
+                )
+                .await;
+        }
+    }
+
+    let scope_set = ScopeSet::parse(pending.scope.as_deref().unwrap_or("openid"));
+    let code_params = AuthorizationCodeParams {
+        client_id: &pending.client_id,
+        redirect_uri: &resolved.redirect_uri,
+        user_id: &user.id,
+        email: &user.email,
+        authenticator_id: &authenticator.id,
+        aaguid: authenticator.aaguid.as_deref(),
+        scope: &scope_set,
+        nonce: pending.nonce.as_deref(),
+        code_challenge: pending.code_challenge.as_deref(),
+        code_challenge_method: pending
+            .code_challenge_method
+            .as_deref()
+            .and_then(CodeChallengeMethod::parse),
+        resource: pending.resource.as_deref(),
+        acr_values: pending.acr_values.as_deref(),
+        dpop_jkt: pending.dpop_jkt.as_deref(),
+        auth_code_lifetime_seconds: auth_code_lifetime,
+        authorization_details: pending.authorization_details.as_ref(),
+        auth_time: Some(auth_session.created_at.as_second()),
+    };
+
+    issue_code_and_redirect(
+        state,
+        code_params,
+        &resolved.redirect_uri,
+        pending.state.as_deref(),
+        &resolved.client,
+        resolved.response_mode,
+    )
+    .await
 }
+
+// ---------------------------------------------------------------------------
+// Phase A helpers
+// ---------------------------------------------------------------------------
+
+/// Look up a client by client_id and verify it is active.
+///
+/// Returns `Err(Response)` with an error page on any failure.
+async fn lookup_and_check_active(
+    state: &Arc<AppState>,
+    client_id: &str,
+) -> Result<OAuthClient, Response> {
+    let client = match db::get_oauth_client_by_client_id(&state.store, client_id).await {
+        Ok(Some(c)) => c,
+        Ok(None) => {
+            return Err(AuthorizeDeniedTemplate {
+                client_name: "Unknown Application".to_string(),
+                error_message:
+                    "Unknown client application. Please contact the application administrator."
+                        .to_string(),
+            }
+            .into_response());
+        }
+        Err(_) => {
+            return Err(AuthorizeDeniedTemplate {
+                client_name: "Unknown Application".to_string(),
+                error_message: "An error occurred. Please try again.".to_string(),
+            }
+            .into_response());
+        }
+    };
+
+    if !client.active {
+        return Err(AuthorizeDeniedTemplate {
+            client_name: client.name,
+            error_message: "This application has been deactivated.".to_string(),
+        }
+        .into_response());
+    }
+
+    Ok(client)
+}
+
+/// Resolve the redirect_uri from the request parameter or the client's single registered URI.
+///
+/// Returns `Err(Response)` with an error page when the URI cannot be determined.
+// Response is 128 bytes but this is intentional — we return HTTP responses.
+#[allow(clippy::result_large_err)]
+fn resolve_redirect_uri(
+    redirect_uri_param: Option<&str>,
+    client: &OAuthClient,
+) -> Result<String, Response> {
+    match redirect_uri_param {
+        Some(uri) if !uri.is_empty() => {
+            if !client.is_valid_redirect_uri(uri) {
+                tracing::warn!(
+                    client_id = %client.client_id,
+                    redirect_uri = %uri,
+                    registered = ?client.redirect_uris,
+                    "redirect_uri not registered for client"
+                );
+                return Err(AuthorizeDeniedTemplate {
+                    client_name: client.name.clone(),
+                    error_message: "Invalid redirect_uri: not registered for this application"
+                        .to_string(),
+                }
+                .into_response());
+            }
+            Ok(uri.to_string())
+        }
+        _ if client.redirect_uris.len() == 1 => {
+            // OIDC Core 3.1.2.1: auto-select when exactly one URI is registered.
+            Ok(client.redirect_uris.first().cloned().unwrap_or_default())
+        }
+        _ => Err(AuthorizeDeniedTemplate {
+            client_name: client.name.clone(),
+            error_message: "Invalid request: redirect_uri is required when multiple \
+                            redirect URIs are registered"
+                .to_string(),
+        }
+        .into_response()),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Store pending and redirect to login
+// ---------------------------------------------------------------------------
 
 /// Store OAuth params in the database and redirect to login.
 ///
@@ -526,8 +1261,6 @@ async fn store_pending_and_redirect(
     };
 
     match db::create_pending_oauth_authorization(&state.store, pending_params).await {
-        // axum's Redirect::to() produces a 303 See Other, which is correct for
-        // FAPI 2.0 and best-practice for POST-redirect-GET patterns (RFC 9700).
         Ok(pending_id) => Redirect::to(&format!(
             "/login?pending_auth={}",
             urlencoding::encode(&pending_id)
@@ -535,797 +1268,24 @@ async fn store_pending_and_redirect(
         .into_response(),
         Err(e) => {
             tracing::error!("Failed to create pending OAuth authorization: {}", e);
-            oauth_error_redirect(
+            // At this point the redirect_uri has been validated (ResolvedClient constructed),
+            // so it is safe to redirect with the error. However we don't have the
+            // ResolvedClient here — use a bare redirect as a best-effort fallback.
+            build_authorization_redirect(
                 validated.redirect_uri(),
-                "server_error",
-                "Failed to initiate login",
-                validated.state(),
-                &state.config().base_url,
-                response_mode,
+                &[
+                    ("error", "server_error"),
+                    ("error_description", "Failed to initiate login"),
+                    ("iss", &state.config().base_url),
+                ],
             )
         }
     }
 }
 
-/// Handle returning from login with a pending auth ID.
-async fn handle_pending_auth(state: &Arc<AppState>, pending_id: &str, jar: &CookieJar) -> Response {
-    // Consume the pending auth (single-use)
-    let pending = match db::consume_pending_oauth_authorization(&state.store, pending_id).await {
-        Ok(Some(p)) => p,
-        Ok(None) => {
-            tracing::warn!(
-                "Pending OAuth authorization not found or expired: {}",
-                pending_id
-            );
-            return AuthorizeDeniedTemplate {
-                client_name: "Unknown Application".to_string(),
-                error_message: "Authorization session expired. Please try again.".to_string(),
-            }
-            .into_response();
-        }
-        Err(e) => {
-            tracing::error!("Failed to retrieve pending OAuth authorization: {}", e);
-            return AuthorizeDeniedTemplate {
-                client_name: "Unknown Application".to_string(),
-                error_message: "An error occurred. Please try again.".to_string(),
-            }
-            .into_response();
-        }
-    };
-
-    // Look up the OAuth client
-    let oauth_client =
-        match db::get_oauth_client_by_client_id(&state.store, &pending.client_id).await {
-            Ok(Some(client)) => client,
-            Ok(None) => {
-                return oauth_error_redirect(
-                    &pending.redirect_uri,
-                    "invalid_client",
-                    "Unknown client_id",
-                    pending.state.as_deref(),
-                    &state.config().base_url,
-                    pending.response_mode,
-                );
-            }
-            Err(_) => {
-                return oauth_error_redirect(
-                    &pending.redirect_uri,
-                    "server_error",
-                    "Database error",
-                    pending.state.as_deref(),
-                    &state.config().base_url,
-                    pending.response_mode,
-                );
-            }
-        };
-
-    // Get session from cookie (should exist after login)
-    let session_token = jar
-        .get(vouch_common::SESSION_COOKIE_NAME)
-        .map(|c| c.value());
-
-    // Compute auth code lifetime for this client (FAPI 2.0: 60s, standard: 300s).
-    let auth_code_lifetime = crate::services::oidc::fapi::auth_code_lifetime_seconds(&oauth_client);
-
-    match check_session_for_authorization(state, session_token).await {
-        Ok(AuthorizationSessionState::Authenticated {
-            user,
-            session: ref auth_session,
-            authenticator,
-        }) => {
-            // Check access
-            if let Err(e) = check_client_access(&oauth_client, &user) {
-                let error_message = match e {
-                    crate::services::ServiceError::OAuth { description, .. } => description,
-                    _ => "You don't have access to this application".to_string(),
-                };
-                return AuthorizeDeniedTemplate {
-                    client_name: oauth_client.name,
-                    error_message,
-                }
-                .into_response();
-            }
-
-            // Validate max_age: if the pending request specified max_age,
-            // verify the session is not older than that threshold (RFC 9470).
-            if let Some(max_age) = pending.max_age {
-                let age_secs = jiff::Timestamp::now()
-                    .duration_since(auth_session.created_at)
-                    .as_secs()
-                    .max(0);
-                let max_age_u64 = u64::try_from(max_age).unwrap_or(0);
-                let age_u64 = u64::try_from(age_secs).unwrap_or(u64::MAX);
-                if age_u64 >= max_age_u64 {
-                    return oauth_error_response(
-                        state,
-                        &oauth_client,
-                        &pending.redirect_uri,
-                        "login_required",
-                        "Session exceeds requested max_age",
-                        pending.state.as_deref(),
-                        pending.response_mode,
-                    )
-                    .await;
-                }
-            }
-
-            // Issue authorization code using stored parameters.
-            // Thread dpop_jkt from the pending record through to the auth code so
-            // the token endpoint can enforce DPoP key binding (RFC 9449 Section 10).
-            let scope_set = ScopeSet::parse(pending.scope.as_deref().unwrap_or("openid"));
-            let code_params = AuthorizationCodeParams {
-                client_id: &pending.client_id,
-                redirect_uri: &pending.redirect_uri,
-                user_id: &user.id,
-                email: &user.email,
-                authenticator_id: &authenticator.id,
-                aaguid: authenticator.aaguid.as_deref(),
-                scope: &scope_set,
-                nonce: pending.nonce.as_deref(),
-                code_challenge: pending.code_challenge.as_deref(),
-                code_challenge_method: pending
-                    .code_challenge_method
-                    .as_deref()
-                    .and_then(CodeChallengeMethod::parse),
-                resource: pending.resource.as_deref(),
-                acr_values: pending.acr_values.as_deref(),
-                dpop_jkt: pending.dpop_jkt.as_deref(),
-                auth_code_lifetime_seconds: auth_code_lifetime,
-                authorization_details: pending.authorization_details.as_ref(),
-                auth_time: Some(auth_session.created_at.as_second()),
-            };
-
-            issue_code_and_redirect(
-                state,
-                code_params,
-                &pending.redirect_uri,
-                pending.state.as_deref(),
-                &oauth_client,
-                pending.response_mode,
-            )
-            .await
-        }
-        Ok(AuthorizationSessionState::NeedsAuth) | Err(_) => {
-            // Still not authenticated - something went wrong
-            // Redirect back to login (shouldn't happen normally)
-            tracing::warn!("User not authenticated after returning from login");
-            AuthorizeDeniedTemplate {
-                client_name: oauth_client.name,
-                error_message: "Authentication failed. Please try again.".to_string(),
-            }
-            .into_response()
-        }
-    }
-}
-
-/// Handle an authorization request using a JWT-Secured Authorization Request (RFC 9101).
-///
-/// Validates the Request Object JWT, extracts parameters, and proceeds with the
-/// normal authorization flow using the extracted parameters.
-async fn handle_jar_request(
-    state: &Arc<AppState>,
-    request_jwt: &str,
-    client_id: &str,
-    query: &AuthorizeQuery,
-    jar: CookieJar,
-) -> Response {
-    // Look up the OAuth client
-    let oauth_client = match db::get_oauth_client_by_client_id(&state.store, client_id).await {
-        Ok(Some(client)) => client,
-        Ok(None) => {
-            return AuthorizeDeniedTemplate {
-                client_name: "Unknown Application".to_string(),
-                error_message:
-                    "Unknown client application. Please contact the application administrator."
-                        .to_string(),
-            }
-            .into_response();
-        }
-        Err(_) => {
-            return AuthorizeDeniedTemplate {
-                client_name: "Unknown Application".to_string(),
-                error_message: "An error occurred. Please try again.".to_string(),
-            }
-            .into_response();
-        }
-    };
-
-    if !oauth_client.active {
-        return AuthorizeDeniedTemplate {
-            client_name: oauth_client.name,
-            error_message: "This application has been deactivated.".to_string(),
-        }
-        .into_response();
-    }
-
-    // Validate the Request Object JWT with FAPI 2.0 parameter consistency check
-    let query_hints = QueryParamHints {
-        client_id: Some(client_id),
-        response_type: query.response_type.as_deref(),
-        scope: query.scope.as_deref(),
-    };
-
-    let request_params = match validate_request_object(
-        state,
-        request_jwt,
-        &oauth_client,
-        Some(&query_hints),
-    )
-    .await
-    {
-        Ok(params) => params,
-        Err(e) => {
-            let description = match &e {
-                crate::services::ServiceError::OAuth { description, .. } => description.clone(),
-                _ => e.to_string(),
-            };
-            // If we have a redirect_uri from query, redirect; otherwise show error page
-            if let Some(ref redirect_uri) = query.redirect_uri {
-                return oauth_error_redirect(
-                    redirect_uri,
-                    "invalid_request_object",
-                    &description,
-                    query.state.as_deref(),
-                    &state.config().base_url,
-                    ResponseMode::Query,
-                );
-            }
-            return AuthorizeDeniedTemplate {
-                client_name: oauth_client.name,
-                error_message: format!("Invalid Request Object: {description}"),
-            }
-            .into_response();
-        }
-    };
-
-    // Continue with the validated parameters from the Request Object
-    let redirect_uri = request_params.redirect_uri.clone();
-
-    // Extract response_mode from the Request Object before validate_authorize_request
-    // discards it (ValidatedAuthRequest does not carry response_mode).
-    let jar_response_mode = request_params
-        .response_mode
-        .as_deref()
-        .and_then(ResponseMode::parse)
-        .unwrap_or(ResponseMode::Query);
-
-    let validated = match validate_authorize_request(request_params) {
-        Ok(v) => v,
-        Err(e) => {
-            let (error_code, description) = match &e {
-                crate::services::ServiceError::OAuth { code, description } => {
-                    (code.as_str(), description.clone())
-                }
-                _ => ("server_error", e.to_string()),
-            };
-            return oauth_error_redirect(
-                &redirect_uri,
-                error_code,
-                &description,
-                query.state.as_deref(),
-                &state.config().base_url,
-                jar_response_mode,
-            );
-        }
-    };
-
-    // RFC 9700: PKCE required for public clients and Native/SPA types.
-    if let Err(e) = require_pkce_for_client(&validated, &oauth_client) {
-        let description = match &e {
-            crate::services::ServiceError::OAuth { description, .. } => description.clone(),
-            _ => e.to_string(),
-        };
-        return oauth_error_redirect(
-            &redirect_uri,
-            "invalid_request",
-            &description,
-            query.state.as_deref(),
-            &state.config().base_url,
-            jar_response_mode,
-        );
-    }
-
-    // Validate redirect_uri against registered URIs
-    if !oauth_client.is_valid_redirect_uri(validated.redirect_uri()) {
-        return AuthorizeDeniedTemplate {
-            client_name: oauth_client.name,
-            error_message: "Invalid redirect_uri: not registered for this application".to_string(),
-        }
-        .into_response();
-    }
-
-    // Try to get existing session from cookie
-    let session_token = jar
-        .get(vouch_common::SESSION_COOKIE_NAME)
-        .map(|c| c.value());
-
-    // Check if we have a valid session
-    match check_session_for_authorization(state, session_token).await {
-        Ok(AuthorizationSessionState::Authenticated {
-            user,
-            session: ref auth_session,
-            authenticator,
-        }) => {
-            authorize_authenticated_user(
-                state,
-                validated,
-                &oauth_client,
-                &user,
-                auth_session,
-                &authenticator,
-                ReauthPolicy::OnDemand,
-                None,
-                jar_response_mode,
-            )
-            .await
-        }
-        Ok(AuthorizationSessionState::NeedsAuth) | Err(_) => {
-            if validated.prompt() == Some(Prompt::Silent) {
-                return oauth_error_response(
-                    state,
-                    &oauth_client,
-                    validated.redirect_uri(),
-                    "login_required",
-                    "User is not authenticated and prompt=none was requested",
-                    validated.state(),
-                    jar_response_mode,
-                )
-                .await;
-            }
-            store_pending_and_redirect(state, validated, jar_response_mode, None).await
-        }
-    }
-}
-
-/// Handle an authorization request using an OIDC Core Section 6.2 `request_uri` URL.
-///
-/// Fetches the Request Object JWT from the HTTPS URL, validates it through the
-/// existing JAR validation pipeline, and proceeds with the normal authorization flow.
-///
-/// Security checks (in order):
-/// 1. Client lookup and active check
-/// 2. FAPI clients are rejected (they must use PAR)
-/// 3. Allowlist check: if `request_uris` is `Some`, the URI must be in the list
-/// 4. Fetch and validate the JWT
-async fn handle_request_uri_fetch(
-    state: &Arc<AppState>,
-    request_uri: &str,
-    client_id: &str,
-    query: &AuthorizeQuery,
-    jar: CookieJar,
-) -> Response {
-    // Look up the OAuth client.
-    let oauth_client = match db::get_oauth_client_by_client_id(&state.store, client_id).await {
-        Ok(Some(client)) => client,
-        Ok(None) => {
-            return AuthorizeDeniedTemplate {
-                client_name: "Unknown Application".to_string(),
-                error_message:
-                    "Unknown client application. Please contact the application administrator."
-                        .to_string(),
-            }
-            .into_response();
-        }
-        Err(_) => {
-            return AuthorizeDeniedTemplate {
-                client_name: "Unknown Application".to_string(),
-                error_message: "An error occurred. Please try again.".to_string(),
-            }
-            .into_response();
-        }
-    };
-
-    if !oauth_client.active {
-        return AuthorizeDeniedTemplate {
-            client_name: oauth_client.name,
-            error_message: "This application has been deactivated.".to_string(),
-        }
-        .into_response();
-    }
-
-    // S2: FAPI 2.0 clients must use PAR; URL request_uri is not permitted.
-    if let Err(e) =
-        crate::services::oidc::fapi::validate_fapi_authorization_request(&oauth_client, false)
-    {
-        let description = match &e {
-            crate::services::ServiceError::OAuth { description, .. } => description.clone(),
-            _ => e.to_string(),
-        };
-        if let Some(ref redirect_uri) = query.redirect_uri {
-            return oauth_error_redirect(
-                redirect_uri,
-                "invalid_request",
-                &description,
-                query.state.as_deref(),
-                &state.config().base_url,
-                ResponseMode::Query,
-            );
-        }
-        return AuthorizeDeniedTemplate {
-            client_name: oauth_client.name,
-            error_message: format!("Invalid request: {description}"),
-        }
-        .into_response();
-    }
-
-    // S1: Allowlist check — if request_uris is Some, only listed URIs are accepted.
-    // If None, accept any HTTPS URI (no allowlist enforced).
-    if let Some(ref allowed) = oauth_client.request_uris
-        && !allowed.iter().any(|u| u == request_uri)
-    {
-        let msg = "request_uri is not registered for this client";
-        if let Some(ref redirect_uri) = query.redirect_uri {
-            return oauth_error_redirect(
-                redirect_uri,
-                "invalid_request_uri",
-                msg,
-                query.state.as_deref(),
-                &state.config().base_url,
-                ResponseMode::Query,
-            );
-        }
-        return AuthorizeDeniedTemplate {
-            client_name: oauth_client.name,
-            error_message: format!("Invalid request: {msg}"),
-        }
-        .into_response();
-    }
-
-    // Fetch the Request Object JWT from the URL.
-    let fetched_jwt = match fetch_request_object(request_uri, &state.http_client).await {
-        Ok(jwt) => jwt,
-        Err(e) => {
-            let description = match &e {
-                crate::services::ServiceError::OAuth { description, .. } => description.clone(),
-                _ => e.to_string(),
-            };
-            if let Some(ref redirect_uri) = query.redirect_uri {
-                return oauth_error_redirect(
-                    redirect_uri,
-                    "invalid_request_uri",
-                    &description,
-                    query.state.as_deref(),
-                    &state.config().base_url,
-                    ResponseMode::Query,
-                );
-            }
-            return AuthorizeDeniedTemplate {
-                client_name: oauth_client.name,
-                error_message: format!("Failed to fetch Request Object: {description}"),
-            }
-            .into_response();
-        }
-    };
-
-    // Validate the fetched JWT through the existing JAR pipeline.
-    let query_hints = QueryParamHints {
-        client_id: Some(client_id),
-        response_type: query.response_type.as_deref(),
-        scope: query.scope.as_deref(),
-    };
-
-    let request_params =
-        match validate_request_object(state, &fetched_jwt, &oauth_client, Some(&query_hints)).await
-        {
-            Ok(params) => params,
-            Err(e) => {
-                let (error_code, description) = match &e {
-                    crate::services::ServiceError::OAuth { code, description } => {
-                        (code.as_str(), description.clone())
-                    }
-                    _ => ("invalid_request_object", e.to_string()),
-                };
-                if let Some(ref redirect_uri) = query.redirect_uri {
-                    return oauth_error_redirect(
-                        redirect_uri,
-                        error_code,
-                        &description,
-                        query.state.as_deref(),
-                        &state.config().base_url,
-                        ResponseMode::Query,
-                    );
-                }
-                return AuthorizeDeniedTemplate {
-                    client_name: oauth_client.name,
-                    error_message: format!("Invalid Request Object: {description}"),
-                }
-                .into_response();
-            }
-        };
-
-    // Extract redirect_uri and response_mode from the validated params.
-    let redirect_uri = request_params.redirect_uri.clone();
-    let jar_response_mode = request_params
-        .response_mode
-        .as_deref()
-        .and_then(ResponseMode::parse)
-        .unwrap_or(ResponseMode::Query);
-
-    let validated = match validate_authorize_request(request_params) {
-        Ok(v) => v,
-        Err(e) => {
-            let (error_code, description) = match &e {
-                crate::services::ServiceError::OAuth { code, description } => {
-                    (code.as_str(), description.clone())
-                }
-                _ => ("server_error", e.to_string()),
-            };
-            return oauth_error_redirect(
-                &redirect_uri,
-                error_code,
-                &description,
-                query.state.as_deref(),
-                &state.config().base_url,
-                jar_response_mode,
-            );
-        }
-    };
-
-    // RFC 9700: PKCE required for public clients and Native/SPA types.
-    if let Err(e) = require_pkce_for_client(&validated, &oauth_client) {
-        let description = match &e {
-            crate::services::ServiceError::OAuth { description, .. } => description.clone(),
-            _ => e.to_string(),
-        };
-        return oauth_error_redirect(
-            &redirect_uri,
-            "invalid_request",
-            &description,
-            query.state.as_deref(),
-            &state.config().base_url,
-            jar_response_mode,
-        );
-    }
-
-    // Validate redirect_uri against registered URIs.
-    if !oauth_client.is_valid_redirect_uri(validated.redirect_uri()) {
-        return AuthorizeDeniedTemplate {
-            client_name: oauth_client.name,
-            error_message: "Invalid redirect_uri: not registered for this application".to_string(),
-        }
-        .into_response();
-    }
-
-    // Check session and proceed.
-    let session_token = jar
-        .get(vouch_common::SESSION_COOKIE_NAME)
-        .map(|c| c.value());
-
-    match check_session_for_authorization(state, session_token).await {
-        Ok(AuthorizationSessionState::Authenticated {
-            user,
-            session: ref auth_session,
-            authenticator,
-        }) => {
-            authorize_authenticated_user(
-                state,
-                validated,
-                &oauth_client,
-                &user,
-                auth_session,
-                &authenticator,
-                ReauthPolicy::OnDemand,
-                None,
-                jar_response_mode,
-            )
-            .await
-        }
-        Ok(AuthorizationSessionState::NeedsAuth) | Err(_) => {
-            if validated.prompt() == Some(Prompt::Silent) {
-                return oauth_error_response(
-                    state,
-                    &oauth_client,
-                    validated.redirect_uri(),
-                    "login_required",
-                    "User is not authenticated and prompt=none was requested",
-                    validated.state(),
-                    jar_response_mode,
-                )
-                .await;
-            }
-            store_pending_and_redirect(state, validated, jar_response_mode, None).await
-        }
-    }
-}
-
-/// Handle an authorization request using a pushed authorization request URI (RFC 9126).
-///
-/// Consumes the PAR (single-use) and proceeds with the normal authorization flow
-/// using the stored parameters, including any DPoP key binding from the PAR record.
-async fn handle_par_request(
-    state: &Arc<AppState>,
-    request_uri: &str,
-    client_id: &str,
-    fallback_redirect_uri: Option<&str>,
-    jar: CookieJar,
-) -> Response {
-    // FAPI 2.0 Section 5.3.2.2 Note 3: Look up the PAR without consuming it.
-    // The request_uri should be reusable until the authorization is completed
-    // (code issued). Consumption happens when the auth code is issued.
-    let par = match db::get_pushed_authorization_request(&state.store, request_uri, client_id).await
-    {
-        Ok(Some(p)) => p,
-        Ok(None) => {
-            tracing::warn!(
-                "PAR not found, expired, consumed, or wrong client: request_uri={}, client_id={}",
-                request_uri,
-                client_id,
-            );
-            // If a redirect_uri was provided in the query, redirect with error
-            // so the conformance suite's browser can detect the outcome.
-            if let Some(uri) = fallback_redirect_uri
-                && let Ok(mut redirect) = url::Url::parse(uri)
-            {
-                {
-                    let mut q = redirect.query_pairs_mut();
-                    q.append_pair("error", "invalid_request_uri");
-                    q.append_pair("error_description", "Invalid or expired request_uri");
-                    q.append_pair("iss", &state.config().base_url);
-                }
-                return axum::response::Redirect::to(redirect.as_str()).into_response();
-            }
-            return AuthorizeDeniedTemplate {
-                client_name: "Unknown Application".to_string(),
-                error_message:
-                    "Invalid or expired request_uri. Please restart the authorization flow."
-                        .to_string(),
-            }
-            .into_response();
-        }
-        Err(e) => {
-            tracing::error!("Failed to consume PAR: {}", e);
-            return AuthorizeDeniedTemplate {
-                client_name: "Unknown Application".to_string(),
-                error_message: "An error occurred. Please try again.".to_string(),
-            }
-            .into_response();
-        }
-    };
-
-    // Reconstruct the authorization parameters from the stored PAR
-    let redirect_uri = par.redirect_uri.clone();
-
-    // Validate prompt
-    let parsed_prompt = match par.prompt.as_deref() {
-        Some(p) => Prompt::parse(p),
-        None => None,
-    };
-
-    let request_params = AuthorizeRequestParams {
-        response_type: par.response_type.clone(),
-        client_id: par.client_id.clone(),
-        redirect_uri: par.redirect_uri.clone(),
-        scope: par.scope.clone(),
-        state: par.state.clone(),
-        nonce: par.nonce.clone(),
-        code_challenge: par.code_challenge.clone(),
-        code_challenge_method: par.code_challenge_method.clone(),
-        resource: par.resource.clone(),
-        acr_values: par.acr_values.clone(),
-        max_age: par.max_age.and_then(|v| u64::try_from(v).ok()),
-        prompt: parsed_prompt,
-        dpop_jkt: par.dpop_jkt.clone(),
-        authorization_details: par
-            .authorization_details
-            .as_ref()
-            .and_then(|v| serde_json::to_string(v).ok()),
-        response_mode: None,
-    };
-
-    let validated = match validate_authorize_request(request_params) {
-        Ok(v) => v,
-        Err(e) => {
-            let (error_code, description) = match &e {
-                crate::services::ServiceError::OAuth { code, description } => {
-                    (code.as_str(), description.clone())
-                }
-                _ => ("server_error", e.to_string()),
-            };
-            return oauth_error_redirect(
-                &redirect_uri,
-                error_code,
-                &description,
-                par.state.as_deref(),
-                &state.config().base_url,
-                par.response_mode,
-            );
-        }
-    };
-
-    // Look up the OAuth client
-    let oauth_client =
-        match db::get_oauth_client_by_client_id(&state.store, validated.client_id()).await {
-            Ok(Some(client)) => client,
-            Ok(None) => {
-                return AuthorizeDeniedTemplate {
-                    client_name: "Unknown Application".to_string(),
-                    error_message:
-                        "Unknown client application. Please contact the application administrator."
-                            .to_string(),
-                }
-                .into_response();
-            }
-            Err(_) => {
-                return AuthorizeDeniedTemplate {
-                    client_name: "Unknown Application".to_string(),
-                    error_message: "An error occurred. Please try again.".to_string(),
-                }
-                .into_response();
-            }
-        };
-
-    // RFC 9700: PKCE required for public clients and Native/SPA types.
-    if let Err(e) = require_pkce_for_client(&validated, &oauth_client) {
-        let description = match &e {
-            crate::services::ServiceError::OAuth { description, .. } => description.clone(),
-            _ => e.to_string(),
-        };
-        return oauth_error_redirect(
-            validated.redirect_uri(),
-            "invalid_request",
-            &description,
-            par.state.as_deref(),
-            &state.config().base_url,
-            par.response_mode,
-        );
-    }
-
-    // Validate redirect_uri against registered URIs
-    if !oauth_client.is_valid_redirect_uri(validated.redirect_uri()) {
-        return AuthorizeDeniedTemplate {
-            client_name: oauth_client.name,
-            error_message: "Invalid redirect_uri: not registered for this application".to_string(),
-        }
-        .into_response();
-    }
-
-    // Try to get existing session from cookie
-    let session_token = jar
-        .get(vouch_common::SESSION_COOKIE_NAME)
-        .map(|c| c.value());
-
-    // Check if we have a valid session
-    match check_session_for_authorization(state, session_token).await {
-        Ok(AuthorizationSessionState::Authenticated {
-            user,
-            session: ref auth_session,
-            authenticator,
-        }) => {
-            // PAR flows always require a fresh FIDO2 assertion (FAPI 2.0 Section 5.3.2.2 Note 3).
-            // ReauthPolicy::Always encodes this: redirect to login unless prompt=none.
-            // dpop_jkt flows through ValidatedAuthRequest (set from par.dpop_jkt above)
-            // so the token endpoint can enforce DPoP key binding (RFC 9449 Section 10).
-            authorize_authenticated_user(
-                state,
-                validated,
-                &oauth_client,
-                &user,
-                auth_session,
-                &authenticator,
-                ReauthPolicy::Always,
-                Some((request_uri, client_id)),
-                par.response_mode,
-            )
-            .await
-        }
-        Ok(AuthorizationSessionState::NeedsAuth) | Err(_) => {
-            if validated.prompt() == Some(Prompt::Silent) {
-                return oauth_error_response(
-                    state,
-                    &oauth_client,
-                    validated.redirect_uri(),
-                    "login_required",
-                    "User is not authenticated and prompt=none was requested",
-                    validated.state(),
-                    par.response_mode,
-                )
-                .await;
-            }
-            // DPoP key binding is already in validated.dpop_jkt() from par.dpop_jkt.
-            store_pending_and_redirect(state, validated, par.response_mode, None).await
-        }
-    }
-}
+// ---------------------------------------------------------------------------
+// Re-authentication policy
+// ---------------------------------------------------------------------------
 
 /// Re-authentication policy for the authorization flow.
 ///
@@ -1339,17 +1299,15 @@ enum ReauthPolicy {
     Always,
 }
 
-/// Handle the authenticated-user path common to all three authorization flows.
+// ---------------------------------------------------------------------------
+// Authenticated user handler
+// ---------------------------------------------------------------------------
+
+/// Handle the authenticated-user path common to all authorization flows.
 ///
-/// Called after session validation confirms the user is authenticated.  Checks
+/// Called after session validation confirms the user is authenticated. Checks
 /// client access, applies the re-auth policy, validates ACR and resource, optionally
 /// consumes a PAR record, and issues the authorization code.
-///
-/// `reauth_policy` distinguishes PAR flows (always require fresh auth) from
-/// standard/JAR flows (only re-auth on prompt=login or max_age exceeded).
-///
-/// `par_to_consume` is `Some((request_uri, client_id))` only for PAR flows that
-/// reached code issuance without re-auth (i.e., prompt=none path).
 #[allow(clippy::too_many_arguments)]
 async fn authorize_authenticated_user(
     state: &Arc<AppState>,
@@ -1376,11 +1334,6 @@ async fn authorize_authenticated_user(
     }
 
     // Step 2: Determine whether re-authentication is required.
-    //
-    // PAR flows always require a fresh FIDO2 assertion per authorization
-    // (FAPI 2.0 Section 5.3.2.2 Note 3) unless prompt=none is explicitly
-    // requested.  Standard/JAR flows only re-auth on prompt=login or when
-    // the session age exceeds max_age (RFC 9470).
     let needs_reauth = match reauth_policy {
         ReauthPolicy::Always => validated.prompt() != Some(Prompt::Silent),
         ReauthPolicy::OnDemand => {
@@ -1413,15 +1366,40 @@ async fn authorize_authenticated_user(
     }
 
     // Step 4: Re-auth needed — store pending request and redirect to login.
-    // Override prompt to Prompt::Login so the login page shows the form instead
-    // of auto-redirecting when an old session cookie exists from a previous flow.
     if needs_reauth {
         return store_pending_and_redirect(state, validated, response_mode, Some(Prompt::Login))
             .await;
     }
 
+    // Steps 5-8: ACR + resource + PAR consumption + code issuance.
+    issue_code_after_reauth_check(
+        state,
+        validated,
+        oauth_client,
+        user,
+        auth_session,
+        authenticator,
+        par_to_consume,
+        response_mode,
+    )
+    .await
+}
+
+/// Validate ACR, resource, consume PAR if needed, and issue the authorization code.
+///
+/// Called after access and re-auth checks have passed in `authorize_authenticated_user`.
+#[allow(clippy::too_many_arguments)]
+async fn issue_code_after_reauth_check(
+    state: &Arc<AppState>,
+    validated: ValidatedAuthRequest,
+    oauth_client: &OAuthClient,
+    user: &User,
+    auth_session: &Session,
+    authenticator: &Authenticator,
+    par_to_consume: Option<(&str, &str)>,
+    response_mode: ResponseMode,
+) -> Response {
     // Step 5: Validate requested ACR (RFC 9470).
-    // Vouch only provides AAL3 — reject requests for other ACR levels.
     if let Some(acr) = validated.acr_values() {
         let acr_ok = acr
             .split_whitespace()
@@ -1456,10 +1434,7 @@ async fn authorize_authenticated_user(
         .await;
     }
 
-    // Step 7: Consume PAR if applicable.
-    //
-    // FAPI 2.0 Section 5.3.2.2 Note 3: consumption happens at code issuance
-    // (here), not at the initial authorize endpoint visit.
+    // Step 7: Consume PAR if applicable (code issuance, not initial authorize visit).
     if let Some((request_uri, client_id)) = par_to_consume
         && let Err(e) =
             db::consume_pushed_authorization_request(&state.store, request_uri, client_id).await
@@ -1500,14 +1475,11 @@ async fn authorize_authenticated_user(
     .await
 }
 
+// ---------------------------------------------------------------------------
+// Response helpers
+// ---------------------------------------------------------------------------
+
 /// Issue an authorization code and build the success redirect response.
-///
-/// When `response_mode` is `ResponseMode::Jwt`, wraps the response in a JARM
-/// signed JWT delivered as a single `response` query parameter. When
-/// `response_mode` is `ResponseMode::FormPost`, delivers parameters via an
-/// HTML form auto-submit (POST to redirect_uri).
-///
-/// Shared helper used by both direct authorization and pending-auth flows.
 async fn issue_code_and_redirect(
     state: &Arc<AppState>,
     code_params: AuthorizationCodeParams<'_>,
@@ -1570,10 +1542,7 @@ async fn issue_code_and_redirect(
                     &base_url,
                 ) {
                     Ok(url) => Redirect::to(&url).into_response(),
-                    Err(_) => {
-                        // Fallback: should not happen since redirect_uri was already validated
-                        Redirect::to(redirect_uri).into_response()
-                    }
+                    Err(_) => Redirect::to(redirect_uri).into_response(),
                 }
             }
         },
@@ -1593,69 +1562,20 @@ async fn issue_code_and_redirect(
 }
 
 /// Build an authorization redirect URL with the given query parameters.
-///
-/// Uses `url::Url` for proper encoding instead of manual string concatenation.
-/// axum's `Redirect::to()` produces a 303 See Other, which is correct for
-/// FAPI 2.0 and the OAuth best-practice POST-redirect-GET pattern (RFC 9700).
 fn build_authorization_redirect(redirect_uri: &str, params: &[(&str, &str)]) -> Response {
     match build_redirect_url_with_params(redirect_uri, params) {
         Ok(url) => Redirect::to(&url).into_response(),
-        Err(_) => {
-            // Fallback: should not happen since redirect_uri was already validated
-            Redirect::to(redirect_uri).into_response()
-        }
-    }
-}
-
-/// Create an OAuth error response, respecting the requested `response_mode`.
-///
-/// - `FormPost`: delivers error parameters via an HTML auto-submitting form
-///   (OAuth 2.0 Form Post Response Mode).
-/// - `Query` (and fallback): delivers via query-string redirect (RFC 6749).
-///
-/// Includes the `iss` parameter per RFC 9207 in all modes.
-fn oauth_error_redirect(
-    redirect_uri: &str,
-    error: &str,
-    description: &str,
-    state: Option<&str>,
-    issuer: &str,
-    response_mode: ResponseMode,
-) -> Response {
-    match response_mode {
-        ResponseMode::FormPost => {
-            let mut params = vec![
-                ("error".to_string(), error.to_string()),
-                ("error_description".to_string(), description.to_string()),
-                ("iss".to_string(), issuer.to_string()),
-            ];
-            if let Some(s) = state {
-                params.push(("state".to_string(), s.to_string()));
-            }
-            FormPostResponseTemplate {
-                redirect_uri: redirect_uri.to_string(),
-                params,
-            }
-            .into_response()
-        }
-        ResponseMode::Query | ResponseMode::Jwt => {
-            // Jwt without a client falls back to query (JARM needs client keys).
-            let mut params = vec![("error", error), ("error_description", description)];
-            if let Some(state_param) = state {
-                params.push(("state", state_param));
-            }
-            params.push(("iss", issuer));
-            build_authorization_redirect(redirect_uri, &params)
-        }
+        Err(_) => Redirect::to(redirect_uri).into_response(),
     }
 }
 
 /// Create an OAuth error response, dispatching on `response_mode`.
 ///
-/// OIDC Core Section 3.1.2.6: when `response_mode=form_post`, the error MUST
-/// also be delivered via HTTP POST. When `response_mode=jwt` (JARM), the error
-/// MUST be wrapped in a signed JWT. Falls back to `oauth_error_redirect` for
-/// query and form_post modes.
+/// - `Jwt`: wraps error in a JARM signed JWT.
+/// - `FormPost`: delivers error via HTML auto-submitting form.
+/// - `Query`: delivers via query-string redirect (RFC 6749).
+///
+/// Includes the `iss` parameter per RFC 9207 in all modes.
 async fn oauth_error_response(
     app_state: &Arc<AppState>,
     client: &OAuthClient,
@@ -1677,19 +1597,34 @@ async fn oauth_error_response(
             )
             .await
         }
-        mode => oauth_error_redirect(
-            redirect_uri,
-            error,
-            description,
-            oauth_state,
-            &app_state.config().base_url,
-            mode,
-        ),
+        ResponseMode::FormPost => {
+            let mut params = vec![
+                ("error".to_string(), error.to_string()),
+                ("error_description".to_string(), description.to_string()),
+                ("iss".to_string(), app_state.config().base_url.clone()),
+            ];
+            if let Some(s) = oauth_state {
+                params.push(("state".to_string(), s.to_string()));
+            }
+            FormPostResponseTemplate {
+                redirect_uri: redirect_uri.to_string(),
+                params,
+            }
+            .into_response()
+        }
+        ResponseMode::Query => {
+            let issuer = &app_state.config().base_url;
+            let mut params = vec![("error", error), ("error_description", description)];
+            if let Some(state_param) = oauth_state {
+                params.push(("state", state_param));
+            }
+            params.push(("iss", issuer));
+            build_authorization_redirect(redirect_uri, &params)
+        }
     }
 }
 
-/// Create an OAuth error redirect response, using JARM encoding when the client
-/// has requested `response_mode=jwt`.
+/// Create an OAuth error redirect response using JARM encoding.
 ///
 /// Falls back to plain query parameters if JARM JWT signing fails.
 async fn oauth_error_redirect_jarm(
@@ -1715,15 +1650,13 @@ async fn oauth_error_redirect_jarm(
         }
         Err(e) => {
             tracing::error!("Failed to build JARM error JWT: {e}");
-            // Fall back to plain query params so the user-agent is not left stranded.
-            oauth_error_redirect(
-                redirect_uri,
-                error,
-                description,
-                oauth_state,
-                &state.config().base_url,
-                ResponseMode::Query,
-            )
+            let issuer = &state.config().base_url;
+            let mut params = vec![("error", error), ("error_description", description)];
+            if let Some(state_param) = oauth_state {
+                params.push(("state", state_param));
+            }
+            params.push(("iss", issuer));
+            build_authorization_redirect(redirect_uri, &params)
         }
     }
 }
@@ -1731,18 +1664,84 @@ async fn oauth_error_redirect_jarm(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::{
+        AccessScope, FapiProfile, JwsAlgorithm, OAuthClientType, TokenEndpointAuthMethod,
+    };
+
+    fn make_client(redirect_uris: Vec<String>) -> OAuthClient {
+        OAuthClient {
+            id: "id".to_string(),
+            user_id: None,
+            client_id: "client_id".to_string(),
+            name: "Test App".to_string(),
+            description: None,
+            application_type: OAuthClientType::Web,
+            redirect_uris,
+            active: true,
+            created_at: jiff::Timestamp::UNIX_EPOCH,
+            updated_at: jiff::Timestamp::UNIX_EPOCH,
+            last_used_at: None,
+            access_scope: AccessScope::Personal,
+            org_id: None,
+            resource_uris: vec![],
+            jwks: None,
+            jwks_uri: None,
+            jwks_uri_cached_at: None,
+            jwks_uri_cache: None,
+            token_endpoint_auth_method: TokenEndpointAuthMethod::None,
+            request_object_signing_alg: None,
+            require_signed_request_object: None,
+            fapi_profile: FapiProfile::None,
+            dpop_bound_access_tokens: false,
+            grant_types: None,
+            response_types: None,
+            software_id: None,
+            software_version: None,
+            registration_source: None,
+            registration_access_token_hash: None,
+            registration_metadata: None,
+            id_token_signed_response_alg: JwsAlgorithm::Es256,
+            tls_client_auth_subject_dn: None,
+            tls_client_auth_san_dns: None,
+            tls_client_auth_san_uri: None,
+            tls_client_auth_san_ip: None,
+            tls_client_auth_san_email: None,
+            tls_client_certificate_bound_access_tokens: false,
+            authorization_signed_response_alg: None,
+            introspection_signed_response_alg: None,
+            userinfo_signed_response_alg: None,
+            request_uris: None,
+        }
+    }
 
     #[test]
-    fn test_oauth_error_redirect_includes_iss() {
-        // This is a compile-time check that the function signature is correct.
-        // Integration tests will verify actual behavior.
-        let _response = oauth_error_redirect(
-            "https://example.com/callback",
-            "invalid_request",
-            "Something went wrong",
-            Some("state123"),
-            "https://vouch.example.com",
-            ResponseMode::Query,
-        );
+    fn test_resolve_redirect_uri_prefers_param() {
+        let client = make_client(vec!["https://example.com/callback".to_string()]);
+        let result = resolve_redirect_uri(Some("https://example.com/callback"), &client);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_resolve_redirect_uri_auto_selects_single() {
+        let client = make_client(vec!["https://example.com/callback".to_string()]);
+        let result = resolve_redirect_uri(None, &client);
+        assert!(matches!(result, Ok(ref s) if s == "https://example.com/callback"));
+    }
+
+    #[test]
+    fn test_resolve_redirect_uri_rejects_unregistered() {
+        let client = make_client(vec!["https://example.com/callback".to_string()]);
+        let result = resolve_redirect_uri(Some("https://evil.com/steal"), &client);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_resolve_redirect_uri_requires_explicit_when_multiple() {
+        let client = make_client(vec![
+            "https://example.com/callback1".to_string(),
+            "https://example.com/callback2".to_string(),
+        ]);
+        let result = resolve_redirect_uri(None, &client);
+        assert!(result.is_err());
     }
 }
