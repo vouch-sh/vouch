@@ -69,6 +69,8 @@ pub struct OAuthClient {
     ///
     /// When `Some`, the introspection endpoint returns a signed JWT instead of plain JSON.
     pub introspection_signed_response_alg: Option<JwsAlgorithm>,
+    /// OIDC Core Section 5.3.4: UserInfo response signing algorithm.
+    pub userinfo_signed_response_alg: Option<JwsAlgorithm>,
 }
 
 impl From<Document<OAuthClientDoc>> for OAuthClient {
@@ -115,6 +117,7 @@ impl From<Document<OAuthClientDoc>> for OAuthClient {
                 .tls_client_certificate_bound_access_tokens,
             authorization_signed_response_alg: doc.data.authorization_signed_response_alg,
             introspection_signed_response_alg: doc.data.introspection_signed_response_alg,
+            userinfo_signed_response_alg: doc.data.userinfo_signed_response_alg,
         }
     }
 }
@@ -177,6 +180,8 @@ pub struct CreateOAuthClientParams<'a> {
     pub request_object_signing_alg: Option<JwsAlgorithm>,
     /// RFC 9101: Whether signed request objects are required.
     pub require_signed_request_object: Option<bool>,
+    /// OIDC Core Section 5.3.4: UserInfo response signing algorithm.
+    pub userinfo_signed_response_alg: Option<JwsAlgorithm>,
 }
 
 /// Create a new OAuth client application.
@@ -224,6 +229,7 @@ pub async fn create_oauth_client(
             .unwrap_or(false),
         authorization_signed_response_alg: params.authorization_signed_response_alg,
         introspection_signed_response_alg: params.introspection_signed_response_alg,
+        userinfo_signed_response_alg: params.userinfo_signed_response_alg,
     };
 
     let result = store.insert(&doc).await?;
@@ -1062,6 +1068,7 @@ mod tests {
                 introspection_signed_response_alg: None,
                 request_object_signing_alg: None,
                 require_signed_request_object: None,
+                userinfo_signed_response_alg: None,
             },
         )
         .await

@@ -815,3 +815,68 @@ async fn test_rfc6749_state_parameter_passthrough() {
         );
     }
 }
+
+#[tokio::test]
+async fn test_response_mode_form_post_returns_html_form() {
+    // OAuth 2.0 Form Post Response Mode: response_mode=form_post must return HTTP 200
+    // with an HTML form auto-submit body instead of a 302 redirect.
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "form-post-test@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+    let session_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+
+    let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+    let challenge = sha256_base64url(verifier);
+
+    let response = http_get_full(
+        &app,
+        &format!(
+            "/oauth/authorize?response_type=code&client_id={}&redirect_uri={}&scope=openid\
+             &code_challenge={}&code_challenge_method=S256&state=form-post-state\
+             &response_mode=form_post",
+            client.client_id,
+            urlencoding::encode("https://example.com/callback"),
+            challenge,
+        ),
+        &[("Cookie", &format!("__Host-vouch_session={session_token}"))],
+    )
+    .await;
+
+    // form_post delivers via HTTP 200 with an HTML body, not a redirect
+    assert_eq!(
+        response.status,
+        StatusCode::OK,
+        "form_post response must be 200 OK, not a redirect: {}",
+        response.body
+    );
+
+    // Must contain a form with method="post" targeting the redirect_uri
+    assert!(
+        response.body.contains(r#"method="post""#),
+        "form_post body must contain a POST form"
+    );
+    assert!(
+        response.body.contains("https://example.com/callback"),
+        "form_post form must target the redirect_uri"
+    );
+
+    // Authorization code must be in a hidden input
+    assert!(
+        response.body.contains(r#"name="code""#),
+        "form_post body must contain a hidden 'code' input"
+    );
+
+    // iss parameter (RFC 9207) must be present
+    assert!(
+        response.body.contains(r#"name="iss""#),
+        "form_post body must contain a hidden 'iss' input (RFC 9207)"
+    );
+
+    // State must be echoed
+    assert!(
+        response.body.contains("form-post-state"),
+        "form_post body must echo the state parameter"
+    );
+}

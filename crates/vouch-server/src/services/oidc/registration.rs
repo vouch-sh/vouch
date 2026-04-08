@@ -130,6 +130,8 @@ pub struct RegistrationRequest {
     pub request_object_signing_alg: Option<String>,
     /// RFC 9101: Whether this client requires signed request objects.
     pub require_signed_request_object: Option<bool>,
+    /// OIDC Core Section 5.3.4: UserInfo response signing algorithm.
+    pub userinfo_signed_response_alg: Option<String>,
 }
 
 /// RFC 7591 Section 3.2.1: Client Information Response.
@@ -197,6 +199,9 @@ pub struct RegistrationResponse {
     /// RFC 9101: Whether signed request objects are required.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub require_signed_request_object: Option<bool>,
+    /// OIDC Core Section 5.3.4: UserInfo response signing algorithm.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub userinfo_signed_response_alg: Option<String>,
 }
 
 // ============================================================================
@@ -389,6 +394,40 @@ pub async fn register_client(
             None
         };
 
+    // 12c-2. Validate userinfo_signed_response_alg (OIDC Core Section 5.3.4).
+    // Only RS256 and ES256 are accepted.
+    let userinfo_alg: Option<JwsAlgorithm> =
+        if let Some(ref s) = request.userinfo_signed_response_alg {
+            let parsed = s.parse::<JwsAlgorithm>().map_err(|_| {
+                ServiceError::oauth(
+                    OAuthErrorCode::InvalidClientMetadata,
+                    format!(
+                        "Unsupported userinfo_signed_response_alg: '{s}'. \
+                     Supported: RS256, ES256"
+                    ),
+                )
+            })?;
+            if !matches!(parsed, JwsAlgorithm::Rs256 | JwsAlgorithm::Es256) {
+                return Err(ServiceError::oauth(
+                    OAuthErrorCode::InvalidClientMetadata,
+                    format!(
+                        "Unsupported userinfo_signed_response_alg: '{s}'. \
+                     Supported: RS256, ES256"
+                    ),
+                ));
+            }
+            if parsed == JwsAlgorithm::Rs256 && state.oidc_rsa_key.is_none() {
+                return Err(ServiceError::oauth(
+                    OAuthErrorCode::InvalidClientMetadata,
+                    "RS256 is not available for userinfo_signed_response_alg \
+                 (no RSA signing key configured)",
+                ));
+            }
+            Some(parsed)
+        } else {
+            None
+        };
+
     // 12d. Validate request_object_signing_alg (RFC 9101).
     let req_obj_alg: Option<JwsAlgorithm> = if let Some(ref s) = request.request_object_signing_alg
     {
@@ -476,6 +515,7 @@ pub async fn register_client(
             introspection_signed_response_alg: introspection_alg,
             request_object_signing_alg: req_obj_alg,
             require_signed_request_object: if require_signed { Some(true) } else { None },
+            userinfo_signed_response_alg: userinfo_alg,
         },
     )
     .await
@@ -575,6 +615,7 @@ pub async fn register_client(
         introspection_signed_response_alg: introspection_alg.map(|a| a.to_string()),
         request_object_signing_alg: req_obj_alg.map(|a| a.to_string()),
         require_signed_request_object: if require_signed { Some(true) } else { None },
+        userinfo_signed_response_alg: userinfo_alg.map(|a| a.to_string()),
     })
 }
 
@@ -1102,6 +1143,7 @@ fn build_client_response(client: &OAuthClient, base_url: &str) -> RegistrationRe
             .map(|a| a.to_string()),
         request_object_signing_alg: client.request_object_signing_alg.map(|a| a.to_string()),
         require_signed_request_object: client.require_signed_request_object,
+        userinfo_signed_response_alg: client.userinfo_signed_response_alg.map(|a| a.to_string()),
     }
 }
 
@@ -2007,6 +2049,7 @@ mod tests {
             introspection_signed_response_alg: None,
             request_object_signing_alg: None,
             require_signed_request_object: None,
+            userinfo_signed_response_alg: None,
         };
 
         let json = serde_json::to_string(&response).unwrap();
@@ -2071,6 +2114,7 @@ mod tests {
             introspection_signed_response_alg: None,
             request_object_signing_alg: None,
             require_signed_request_object: None,
+            userinfo_signed_response_alg: None,
         };
 
         let json = serde_json::to_string(&response).unwrap();

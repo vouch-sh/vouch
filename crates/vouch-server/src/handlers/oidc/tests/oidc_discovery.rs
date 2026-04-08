@@ -264,3 +264,77 @@ async fn test_discovery_advertises_es256() {
         "Discovery should not advertise HS256 for AWS compatibility"
     );
 }
+
+#[tokio::test]
+async fn test_oidc_discovery_form_post_in_response_modes() {
+    // OIDC Core 1.0 + OAuth 2.0 Form Post Response Mode: response_modes_supported
+    // must include "form_post" after the OIDC compliance update.
+    let (app, _state) = test_app().await;
+
+    let (status, body) = http_get(&app, "/.well-known/openid-configuration", &[]).await;
+
+    assert_eq!(status, StatusCode::OK);
+    let discovery: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+
+    let modes = discovery["response_modes_supported"]
+        .as_array()
+        .expect("response_modes_supported is an array");
+    let mode_strs: Vec<&str> = modes.iter().filter_map(|v| v.as_str()).collect();
+
+    assert!(
+        mode_strs.contains(&"form_post"),
+        "response_modes_supported must include form_post, got: {mode_strs:?}"
+    );
+    assert!(
+        mode_strs.contains(&"query"),
+        "response_modes_supported must include query"
+    );
+}
+
+#[tokio::test]
+async fn test_oidc_discovery_userinfo_signing_alg_values_supported() {
+    // OIDC Core Section 5.3.4: userinfo_signing_alg_values_supported must be present
+    // and include ES256.
+    let (app, _state) = test_app().await;
+
+    let (status, body) = http_get(&app, "/.well-known/openid-configuration", &[]).await;
+
+    assert_eq!(status, StatusCode::OK);
+    let discovery: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+
+    let algs = discovery["userinfo_signing_alg_values_supported"]
+        .as_array()
+        .expect("userinfo_signing_alg_values_supported must be present and an array");
+    let alg_strs: Vec<&str> = algs.iter().filter_map(|v| v.as_str()).collect();
+
+    assert!(
+        alg_strs.contains(&"ES256"),
+        "userinfo_signing_alg_values_supported must include ES256, got: {alg_strs:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_oidc_discovery_hardware_claims_not_in_claims_supported() {
+    // OIDC compliance: hardware_verified and hardware_aaguid must not appear in
+    // claims_supported after removal from standard OIDC id_tokens.
+    let (app, _state) = test_app().await;
+
+    let (status, body) = http_get(&app, "/.well-known/openid-configuration", &[]).await;
+
+    assert_eq!(status, StatusCode::OK);
+    let discovery: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+
+    let claims = discovery["claims_supported"]
+        .as_array()
+        .expect("claims_supported is an array");
+    let claim_strs: Vec<&str> = claims.iter().filter_map(|v| v.as_str()).collect();
+
+    assert!(
+        !claim_strs.contains(&"hardware_verified"),
+        "claims_supported must not include hardware_verified (removed for OIDC conformance)"
+    );
+    assert!(
+        !claim_strs.contains(&"hardware_aaguid"),
+        "claims_supported must not include hardware_aaguid (removed for OIDC conformance)"
+    );
+}

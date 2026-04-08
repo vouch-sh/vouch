@@ -841,11 +841,13 @@ async fn test_fapi2_discovery_excludes_rs256() {
 
     let doc: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
 
-    // Check all relevant algorithm arrays
+    // FAPI 2.0 Section 5.2.2 restricts RS256 from DPoP and token endpoint auth signing.
+    // request_object_signing_alg_values_supported intentionally includes RS256 to support
+    // OIDC Basic Profile conformance (oidcc-request-uri-signed-rs256). The JAR validator
+    // enforces PS256/ES256/EdDSA for FAPI clients at runtime via validate_fapi_algorithm().
     let alg_fields = [
         "token_endpoint_auth_signing_alg_values_supported",
         "dpop_signing_alg_values_supported",
-        "request_object_signing_alg_values_supported",
     ];
 
     for field in &alg_fields {

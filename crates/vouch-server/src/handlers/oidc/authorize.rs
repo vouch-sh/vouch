@@ -43,6 +43,20 @@ pub(super) struct AuthorizeDeniedTemplate {
 
 impl_template_response!(AuthorizeDeniedTemplate);
 
+/// OAuth 2.0 Form Post Response Mode template.
+///
+/// Delivers authorization response parameters via an HTML form that auto-submits
+/// to the redirect_uri using POST. JavaScript is required; a fallback button is
+/// shown when JS is disabled.
+#[derive(Template)]
+#[template(path = "form_post_response.html")]
+struct FormPostResponseTemplate {
+    redirect_uri: String,
+    params: Vec<(String, String)>,
+}
+
+impl_template_response!(FormPostResponseTemplate);
+
 /// Authorization request query parameters (RFC 6749 Section 4.1.1).
 #[derive(Debug, Deserialize)]
 pub struct AuthorizeQuery {
@@ -432,12 +446,13 @@ async fn authorize_inner(state: Arc<AppState>, params: AuthorizeQuery, jar: Cook
             // No valid session - store OAuth params and redirect to login.
             // prompt=none means "don't show UI" — return error immediately.
             if validated.prompt() == Some(Prompt::Silent) {
-                return oauth_error_redirect(
+                return oauth_error_response(
                     validated.redirect_uri(),
                     "login_required",
                     "User is not authenticated and prompt=none was requested",
                     validated.state(),
                     &state.config().base_url,
+                    direct_response_mode,
                 );
             }
             store_pending_and_redirect(&state, validated, direct_response_mode, None).await
@@ -747,6 +762,14 @@ async fn handle_jar_request(
     // Continue with the validated parameters from the Request Object
     let redirect_uri = request_params.redirect_uri.clone();
 
+    // Extract response_mode from the Request Object before validate_authorize_request
+    // discards it (ValidatedAuthRequest does not carry response_mode).
+    let jar_response_mode = request_params
+        .response_mode
+        .as_deref()
+        .and_then(ResponseMode::parse)
+        .unwrap_or(ResponseMode::Query);
+
     let validated = match validate_authorize_request(request_params) {
         Ok(v) => v,
         Err(e) => {
@@ -811,21 +834,22 @@ async fn handle_jar_request(
                 &authenticator,
                 ReauthPolicy::OnDemand,
                 None,
-                ResponseMode::Query,
+                jar_response_mode,
             )
             .await
         }
         Ok(AuthorizationSessionState::NeedsAuth) | Err(_) => {
             if validated.prompt() == Some(Prompt::Silent) {
-                return oauth_error_redirect(
+                return oauth_error_response(
                     validated.redirect_uri(),
                     "login_required",
                     "User is not authenticated and prompt=none was requested",
                     validated.state(),
                     &state.config().base_url,
+                    jar_response_mode,
                 );
             }
-            store_pending_and_redirect(state, validated, ResponseMode::Query, None).await
+            store_pending_and_redirect(state, validated, jar_response_mode, None).await
         }
     }
 }
@@ -1010,12 +1034,13 @@ async fn handle_par_request(
         }
         Ok(AuthorizationSessionState::NeedsAuth) | Err(_) => {
             if validated.prompt() == Some(Prompt::Silent) {
-                return oauth_error_redirect(
+                return oauth_error_response(
                     validated.redirect_uri(),
                     "login_required",
                     "User is not authenticated and prompt=none was requested",
                     validated.state(),
                     &state.config().base_url,
+                    par.response_mode,
                 );
             }
             // DPoP key binding is already in validated.dpop_jkt() from par.dpop_jkt.
@@ -1097,12 +1122,13 @@ async fn authorize_authenticated_user(
 
     // Step 3: prompt=none + re-auth needed → error (cannot show UI).
     if needs_reauth && validated.prompt() == Some(Prompt::Silent) {
-        return oauth_error_redirect(
+        return oauth_error_response(
             validated.redirect_uri(),
             "login_required",
             "Re-authentication required but prompt=none was requested",
             validated.state(),
             &state.config().base_url,
+            response_mode,
         );
     }
 
@@ -1121,12 +1147,13 @@ async fn authorize_authenticated_user(
             .split_whitespace()
             .any(|v| v == crate::services::auth::ACR_AAL3);
         if !acr_ok {
-            return oauth_error_redirect(
+            return oauth_error_response(
                 validated.redirect_uri(),
                 "unmet_authentication_requirements",
                 "The requested authentication context class is not supported",
                 validated.state(),
                 &state.config().base_url,
+                response_mode,
             );
         }
     }
@@ -1135,12 +1162,13 @@ async fn authorize_authenticated_user(
     if let Some(resource) = validated.resource()
         && !oauth_client.is_valid_resource_uri(resource)
     {
-        return oauth_error_redirect(
+        return oauth_error_response(
             validated.redirect_uri(),
             "invalid_target",
             "The requested resource is not registered for this client",
             validated.state(),
             &state.config().base_url,
+            response_mode,
         );
     }
 
@@ -1191,7 +1219,9 @@ async fn authorize_authenticated_user(
 /// Issue an authorization code and build the success redirect response.
 ///
 /// When `response_mode` is `ResponseMode::Jwt`, wraps the response in a JARM
-/// signed JWT delivered as a single `response` query parameter.
+/// signed JWT delivered as a single `response` query parameter. When
+/// `response_mode` is `ResponseMode::FormPost`, delivers parameters via an
+/// HTML form auto-submit (POST to redirect_uri).
 ///
 /// Shared helper used by both direct authorization and pending-auth flows.
 async fn issue_code_and_redirect(
@@ -1203,8 +1233,8 @@ async fn issue_code_and_redirect(
     response_mode: ResponseMode,
 ) -> Response {
     match issue_authorization_code(state, code_params).await {
-        Ok(code) => {
-            if response_mode == ResponseMode::Jwt {
+        Ok(code) => match response_mode {
+            ResponseMode::Jwt => {
                 match crate::services::oidc::jarm::build_jarm_success_jwt(
                     state,
                     oauth_client,
@@ -1219,16 +1249,33 @@ async fn issue_code_and_redirect(
                     }
                     Err(e) => {
                         tracing::error!("Failed to build JARM success JWT: {e}");
-                        oauth_error_redirect(
+                        oauth_error_response(
                             redirect_uri,
                             "server_error",
                             "Failed to generate authorization response",
                             oauth_state,
                             &state.config().base_url,
+                            response_mode,
                         )
                     }
                 }
-            } else {
+            }
+            ResponseMode::FormPost => {
+                let base_url = state.config().base_url.clone();
+                let mut params = vec![
+                    ("code".to_string(), code.to_string()),
+                    ("iss".to_string(), base_url),
+                ];
+                if let Some(s) = oauth_state {
+                    params.push(("state".to_string(), s.to_string()));
+                }
+                FormPostResponseTemplate {
+                    redirect_uri: redirect_uri.to_string(),
+                    params,
+                }
+                .into_response()
+            }
+            ResponseMode::Query => {
                 let base_url = state.config().base_url.clone();
                 match build_authorization_success_redirect_url(
                     redirect_uri,
@@ -1243,13 +1290,14 @@ async fn issue_code_and_redirect(
                     }
                 }
             }
-        }
-        Err(_) => oauth_error_redirect(
+        },
+        Err(_) => oauth_error_response(
             redirect_uri,
             "server_error",
             "Failed to generate authorization code",
             oauth_state,
             &state.config().base_url,
+            response_mode,
         ),
     }
 }
@@ -1286,6 +1334,40 @@ fn oauth_error_redirect(
     // RFC 9207: Include iss parameter even in error responses
     params.push(("iss", issuer));
     build_authorization_redirect(redirect_uri, &params)
+}
+
+/// Create an OAuth error response, dispatching on `response_mode`.
+///
+/// OIDC Core Section 3.1.2.6: when `response_mode=form_post`, the error MUST
+/// also be delivered via HTTP POST. Falls back to query-string for other modes.
+fn oauth_error_response(
+    redirect_uri: &str,
+    error: &str,
+    description: &str,
+    state: Option<&str>,
+    issuer: &str,
+    response_mode: ResponseMode,
+) -> Response {
+    match response_mode {
+        ResponseMode::FormPost => {
+            let mut params = vec![
+                ("error".to_string(), error.to_string()),
+                ("error_description".to_string(), description.to_string()),
+                ("iss".to_string(), issuer.to_string()),
+            ];
+            if let Some(s) = state {
+                params.push(("state".to_string(), s.to_string()));
+            }
+            FormPostResponseTemplate {
+                redirect_uri: redirect_uri.to_string(),
+                params,
+            }
+            .into_response()
+        }
+        ResponseMode::Query | ResponseMode::Jwt => {
+            oauth_error_redirect(redirect_uri, error, description, state, issuer)
+        }
+    }
 }
 
 /// Create an OAuth error redirect response, using JARM encoding when the client

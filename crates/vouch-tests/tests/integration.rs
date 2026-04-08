@@ -2542,6 +2542,7 @@ mod httpsig {
                 introspection_signed_response_alg: None,
                 request_object_signing_alg: None,
                 require_signed_request_object: None,
+                userinfo_signed_response_alg: None,
             },
         )
         .await

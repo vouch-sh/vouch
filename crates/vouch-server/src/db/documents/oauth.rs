@@ -277,6 +277,7 @@ impl std::fmt::Display for JwsAlgorithm {
 ///
 /// Default is `Query` (plain query parameters). JARM modes wrap the
 /// response in a signed JWT delivered as a single `response` parameter.
+/// `FormPost` delivers parameters via an HTML form auto-submit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum ResponseMode {
     /// Standard query-string response (RFC 6749 Section 4.1.2).
@@ -287,6 +288,10 @@ pub enum ResponseMode {
     /// Accepts both `"jwt"` and `"query.jwt"` on the wire.
     #[serde(rename = "jwt", alias = "query.jwt")]
     Jwt,
+    /// OAuth 2.0 Form Post Response Mode.
+    /// Delivers response parameters via an HTML form auto-submit.
+    #[serde(rename = "form_post")]
+    FormPost,
 }
 
 impl ResponseMode {
@@ -297,6 +302,7 @@ impl ResponseMode {
         match s {
             "query" => Some(Self::Query),
             "jwt" | "query.jwt" => Some(Self::Jwt),
+            "form_post" => Some(Self::FormPost),
             _ => Option::None,
         }
     }
@@ -418,6 +424,12 @@ pub struct OAuthClientDoc {
     /// Only `Es256` is supported (the server's primary signing key).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub introspection_signed_response_alg: Option<JwsAlgorithm>,
+    /// OIDC Core Section 5.3.4: UserInfo response signing algorithm.
+    ///
+    /// When set, the userinfo endpoint returns a signed JWT (content-type: application/jwt)
+    /// instead of plain JSON (content-type: application/json).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub userinfo_signed_response_alg: Option<JwsAlgorithm>,
 }
 
 impl DocumentType for OAuthClientDoc {

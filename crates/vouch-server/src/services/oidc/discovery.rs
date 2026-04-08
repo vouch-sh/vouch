@@ -91,7 +91,9 @@ pub struct OidcDiscoveryDocument {
     pub request_parameter_supported: bool,
     /// RFC 9101: Supported JWS algorithms for Request Object signing.
     ///
-    /// Includes EdDSA and PS256 per FAPI 2.0; RS256 is excluded per FAPI 2.0 Section 5.2.2.
+    /// RS256 is included because FAPI 2.0 Section 5.2.2 restricts DPoP and token endpoint
+    /// auth signing, not JAR signing. The validation layer enforces PS256/ES256/EdDSA for
+    /// FAPI-profile clients; RS256 JARs from non-FAPI clients are accepted and advertised.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub request_object_signing_alg_values_supported: Option<Vec<JwsAlgorithm>>,
     /// JARM: Supported JWS algorithms for authorization response signing.
@@ -114,6 +116,9 @@ pub struct OidcDiscoveryDocument {
     /// RFC 9701 Section 7.1: Supported introspection response signing algorithms.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub introspection_signing_alg_values_supported: Option<Vec<JwsAlgorithm>>,
+    /// OIDC Discovery 1.0 Section 3: OPTIONAL. Supported JWS alg values for UserInfo signing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub userinfo_signing_alg_values_supported: Option<Vec<JwsAlgorithm>>,
 }
 
 /// RFC 8705 Section 5: mTLS endpoint aliases.
@@ -191,6 +196,7 @@ pub fn build_discovery_document(state: &Arc<AppState>) -> OidcDiscoveryDocument 
         response_types_supported: vec!["code".to_string()],
         response_modes_supported: vec![
             "query".to_string(),
+            "form_post".to_string(),
             "jwt".to_string(),
             "query.jwt".to_string(),
         ],
@@ -222,8 +228,6 @@ pub fn build_discovery_document(state: &Arc<AppState>) -> OidcDiscoveryDocument 
             "at_hash".to_string(),
             "email".to_string(),
             "email_verified".to_string(),
-            "hardware_verified".to_string(),
-            "hardware_aaguid".to_string(),
             "amr".to_string(),
             "acr".to_string(),
         ],
@@ -251,9 +255,11 @@ pub fn build_discovery_document(state: &Arc<AppState>) -> OidcDiscoveryDocument 
         require_pushed_authorization_requests: false,
         // RFC 9101: JWT-Secured Authorization Request support
         request_parameter_supported: true,
-        // Request Object signing algorithms: EdDSA added per FAPI 2.0; RS256 excluded
-        // per FAPI 2.0 Section 5.2.2.
+        // RS256 is advertised for non-FAPI clients (OIDC Basic Profile conformance requires it).
+        // The JAR validator enforces PS256/ES256/EdDSA for FAPI-profile clients via
+        // validate_fapi_algorithm(); non-FAPI clients may use RS256 and it validates correctly.
         request_object_signing_alg_values_supported: Some(vec![
+            JwsAlgorithm::Rs256,
             JwsAlgorithm::Es256,
             JwsAlgorithm::Ps256,
             JwsAlgorithm::EdDsa,
@@ -272,6 +278,12 @@ pub fn build_discovery_document(state: &Arc<AppState>) -> OidcDiscoveryDocument 
         mtls_endpoint_aliases: build_mtls_aliases(state, base_url),
         // RFC 9701: ES256 is the only supported introspection signing algorithm.
         introspection_signing_alg_values_supported: Some(vec![JwsAlgorithm::Es256]),
+        // OIDC Core Section 5.3.4: Supported UserInfo signing algorithms.
+        userinfo_signing_alg_values_supported: Some(if state.oidc_rsa_key.is_some() {
+            vec![JwsAlgorithm::Rs256, JwsAlgorithm::Es256]
+        } else {
+            vec![JwsAlgorithm::Es256]
+        }),
     }
 }
 

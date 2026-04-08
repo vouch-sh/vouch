@@ -83,6 +83,12 @@ pub struct LoginTemplate {
     pub cert_login_url: Option<String>,
     /// URL for the certification test-mode deny link (returns access_denied).
     pub cert_deny_url: Option<String>,
+    /// RFC 7591 client logo_uri (HTTPS only). Shown when coming from an OAuth flow.
+    pub logo_uri: Option<String>,
+    /// RFC 7591 client policy_uri (HTTPS only). Shown when coming from an OAuth flow.
+    pub policy_uri: Option<String>,
+    /// RFC 7591 client tos_uri (HTTPS only). Shown when coming from an OAuth flow.
+    pub tos_uri: Option<String>,
 }
 
 impl_template_response!(LoginTemplate);
@@ -223,12 +229,26 @@ pub async fn login_page(
         return axum::response::Redirect::to("/").into_response();
     }
 
-    let client_name = match &pending {
+    let (client_name, logo_uri, policy_uri, tos_uri) = match &pending {
         Some(p) => match db::get_oauth_client_by_client_id(&state.store, &p.client_id).await {
-            Ok(Some(client)) => Some(client.name),
-            _ => None,
+            Ok(Some(client)) => {
+                let meta = client.registration_metadata.as_ref();
+                let extract = |key: &str| -> Option<String> {
+                    meta.and_then(|m| m.get(key))
+                        .and_then(|v| v.as_str())
+                        .filter(|s| s.starts_with("https://"))
+                        .map(String::from)
+                };
+                (
+                    Some(client.name),
+                    extract("logo_uri"),
+                    extract("policy_uri"),
+                    extract("tos_uri"),
+                )
+            }
+            _ => (None, None, None, None),
         },
-        None => None,
+        None => (None, None, None, None),
     };
 
     // Build the certification test-mode login link when the feature is enabled.
@@ -272,6 +292,9 @@ pub async fn login_page(
         auth,
         cert_login_url,
         cert_deny_url,
+        logo_uri,
+        policy_uri,
+        tos_uri,
     }
     .into_response()
 }

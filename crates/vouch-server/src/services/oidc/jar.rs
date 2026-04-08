@@ -18,7 +18,9 @@ use crate::services::oidc::authorization::{AuthorizeRequestParams, Prompt};
 use crate::services::oidc::jwt_bearer::validate::{
     JwtAssertionHeader, JwtAudience, map_algorithm, parse_assertion_header,
 };
-use crate::services::oidc::jwt_bearer::{find_matching_key, resolve_client_jwks};
+use crate::services::oidc::jwt_bearer::{
+    find_matching_key_with_refresh_client, resolve_client_jwks,
+};
 use crate::services::{OAuthErrorCode, ServiceError, ServiceResult};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -222,16 +224,14 @@ pub async fn validate_request_object(
     }
 
     // 3. Resolve client JWKS and find matching key
+    let jwks_uri_cached_at = client.jwks_uri_cached_at.map(|ts| ts.to_string());
     let jwks = resolve_client_jwks(
         &state.store,
         &client.id,
         client.jwks.as_ref(),
         client.jwks_uri.as_deref(),
         client.jwks_uri_cache.as_ref(),
-        client
-            .jwks_uri_cached_at
-            .map(|ts| ts.to_string())
-            .as_deref(),
+        jwks_uri_cached_at.as_deref(),
         &state.http_client,
     )
     .await
@@ -244,7 +244,17 @@ pub async fn validate_request_object(
         )
     })?;
 
-    let decoding_key = find_matching_key(&jwks, &assertion_header).map_err(|e| {
+    let decoding_key = find_matching_key_with_refresh_client(
+        &state.store,
+        &client.id,
+        client.jwks_uri.as_deref(),
+        jwks_uri_cached_at.as_deref(),
+        &state.http_client,
+        &jwks,
+        &assertion_header,
+    )
+    .await
+    .map_err(|e| {
         tracing::debug!("No matching key for Request Object: {e}");
         ServiceError::oauth(
             OAuthErrorCode::InvalidRequestObject,
