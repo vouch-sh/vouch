@@ -506,7 +506,16 @@ async fn build_app_state(
 
     // Build shared HTTP client for outbound API calls (GitHub, OIDC, etc.)
     let user_agent = format!("vouch-server/{}", env!("CARGO_PKG_VERSION"));
-    let http_client = vouch_common::http::server_client(&user_agent)
+    let extra_ca_pem = config
+        .extra_ca_certs
+        .as_deref()
+        .map(|path| {
+            tracing::info!("Loading extra CA certificates from {path}");
+            std::fs::read(path)
+        })
+        .transpose()
+        .context("Failed to read VOUCH_EXTRA_CA_CERTS file")?;
+    let http_client = vouch_common::http::server_client(&user_agent, extra_ca_pem.as_deref())
         .context("Failed to create shared HTTP client")?;
 
     // Fetch upstream IdP configuration if configured (OIDC or SAML, mutually exclusive).

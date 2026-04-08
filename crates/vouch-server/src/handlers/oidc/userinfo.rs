@@ -357,9 +357,7 @@ async fn build_signed_userinfo_response(
         // Registration rejects non-RS256/ES256 values, but guard against
         // manual client creation or future changes.
         other => {
-            tracing::error!(
-                "Unsupported userinfo signing algorithm: {other}"
-            );
+            tracing::error!("Unsupported userinfo signing algorithm: {other}");
             return oauth_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "server_error",
