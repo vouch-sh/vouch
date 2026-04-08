@@ -90,6 +90,29 @@ pub fn server_client(user_agent: &str) -> Result<reqwest::Client, reqwest::Error
         .build()
 }
 
+/// Create an HTTP client for server-side API calls in conformance testing mode.
+///
+/// Identical to [`server_client`] except TLS certificate verification is disabled.
+/// This is required for OpenID conformance testing where the test suite presents
+/// a self-signed certificate. MUST NOT be used in production deployments.
+///
+/// # Arguments
+///
+/// * `user_agent` - The User-Agent header value for outgoing requests.
+///
+/// # Errors
+///
+/// Returns an error if the client cannot be built.
+pub fn server_client_conformance_test(user_agent: &str) -> Result<reqwest::Client, reqwest::Error> {
+    reqwest::Client::builder()
+        .user_agent(user_agent)
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(timeouts::SERVER_TOTAL)
+        .connect_timeout(timeouts::SERVER_CONNECT)
+        .danger_accept_invalid_certs(true)
+        .build()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

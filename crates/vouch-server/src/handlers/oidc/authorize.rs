@@ -217,17 +217,45 @@ async fn authorize_inner(state: Arc<AppState>, params: AuthorizeQuery, jar: Cook
     // Normal authorization request - validate parameters
     let response_type = params.response_type.unwrap_or_default();
     let client_id = params.client_id.clone().unwrap_or_default();
-    let redirect_uri = params.redirect_uri.clone().unwrap_or_default();
 
-    // Validate redirect_uri is present before any errors that would redirect
-    if redirect_uri.is_empty() {
-        // Cannot redirect to empty URI - show error page
-        return AuthorizeDeniedTemplate {
-            client_name: "Unknown Application".to_string(),
-            error_message: "Invalid request: redirect_uri is required".to_string(),
+    // OIDC Core 3.1.2.1: If redirect_uri is absent and the client has exactly
+    // one registered URI, that URI is used. If the client has zero or multiple
+    // registered URIs, the server cannot determine which to use — show an error
+    // page without redirecting (RFC 6749 Section 4.1.2.1).
+    let redirect_uri = match params.redirect_uri.as_deref() {
+        Some(uri) if !uri.is_empty() => uri.to_string(),
+        _ => {
+            // redirect_uri missing — consult the client record
+            if client_id.is_empty() {
+                return AuthorizeDeniedTemplate {
+                    client_name: "Unknown Application".to_string(),
+                    error_message: "Invalid request: redirect_uri is required".to_string(),
+                }
+                .into_response();
+            }
+            match db::get_oauth_client_by_client_id(&state.store, &client_id).await {
+                Ok(Some(ref client)) if client.redirect_uris.len() == 1 => {
+                    client.redirect_uris.first().cloned().unwrap_or_default()
+                }
+                Ok(Some(client)) => {
+                    return AuthorizeDeniedTemplate {
+                        client_name: client.name,
+                        error_message: "Invalid request: redirect_uri is required when multiple \
+                                        redirect URIs are registered"
+                            .to_string(),
+                    }
+                    .into_response();
+                }
+                _ => {
+                    return AuthorizeDeniedTemplate {
+                        client_name: "Unknown Application".to_string(),
+                        error_message: "Invalid request: redirect_uri is required".to_string(),
+                    }
+                    .into_response();
+                }
+            }
         }
-        .into_response();
-    }
+    };
 
     // Parse response_mode early so error responses use the correct delivery
     // mechanism (form_post, JARM, or query-string redirect).

@@ -505,9 +505,15 @@ async fn build_app_state(
     };
 
     // Build shared HTTP client for outbound API calls (GitHub, OIDC, etc.)
-    let http_client =
-        vouch_common::http::server_client(&format!("vouch-server/{}", env!("CARGO_PKG_VERSION")))
-            .context("Failed to create shared HTTP client")?;
+    // In conformance-test mode the test suite presents a self-signed cert, so
+    // certificate verification must be disabled for JWKS URI fetches.
+    let user_agent = format!("vouch-server/{}", env!("CARGO_PKG_VERSION"));
+    let http_client = if config.certification_test_token.is_some() {
+        vouch_common::http::server_client_conformance_test(&user_agent)
+    } else {
+        vouch_common::http::server_client(&user_agent)
+    }
+    .context("Failed to create shared HTTP client")?;
 
     // Fetch upstream IdP configuration if configured (OIDC or SAML, mutually exclusive).
     let upstream_idp = if config.oidc_configured() {

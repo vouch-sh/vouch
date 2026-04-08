@@ -192,13 +192,15 @@ async fn test_rfc6749_authorize_missing_response_type_redirects_with_error() {
 // ========================================================================
 
 #[tokio::test]
-async fn test_rfc6749_authorize_empty_redirect_uri_shows_error_page() {
-    // RFC 6749 Section 4.1.2.1: If the redirect_uri is missing or invalid,
-    // the server MUST NOT redirect and MUST display an error to the user.
+async fn test_rfc6749_authorize_missing_redirect_uri_single_uri_auto_selects() {
+    // OIDC Core 3.1.2.1: When redirect_uri is absent and the client has exactly
+    // one registered URI, the server MUST use that URI (auto-select).
+    // The request proceeds normally — user gets redirected to login.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.store, "authorize-noredir@example.com").await;
+    let user = create_test_user(&state.store, "authorize-noredir-single@example.com").await;
     let client = create_test_oauth_client(&state.store, &user.id).await;
+    // create_test_oauth_client registers exactly one redirect URI
 
     let response = http_get_full(
         &app,
@@ -211,14 +213,84 @@ async fn test_rfc6749_authorize_empty_redirect_uri_shows_error_page() {
     )
     .await;
 
+    // Auto-select proceeds — server redirects to login
+    assert!(
+        response.status == StatusCode::SEE_OTHER || response.status == StatusCode::FOUND,
+        "Single-URI client missing redirect_uri should auto-select and redirect to login, got: {}",
+        response.status
+    );
+}
+
+#[tokio::test]
+async fn test_rfc6749_authorize_missing_redirect_uri_multi_uri_shows_error_page() {
+    // OIDC Core 3.1.2.1: When redirect_uri is absent and the client has multiple
+    // registered URIs, the server MUST show an error page (cannot determine which URI).
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "authorize-noredir-multi@example.com").await;
+    // Create a client with two redirect URIs
+    let (client_record, _) = crate::db::create_oauth_client(
+        &state.store,
+        &crate::db::CreateOAuthClientParams {
+            user_id: Some(&user.id),
+            name: "Multi-URI App",
+            description: None,
+            application_type: crate::db::OAuthClientType::Web,
+            redirect_uris: &[
+                "https://example.com/callback".to_string(),
+                "https://example.com/callback2".to_string(),
+            ],
+            access_scope: crate::db::AccessScope::Public,
+            org_id: None,
+            resource_uris: &[],
+            token_endpoint_auth_method: None,
+            jwks: None,
+            jwks_uri: None,
+            fapi_profile: None,
+            dpop_bound_access_tokens: None,
+            grant_types: None,
+            response_types: None,
+            software_id: None,
+            software_version: None,
+            registration_source: crate::db::documents::oauth::RegistrationSource::Manual,
+            registration_access_token_hash: None,
+            registration_metadata: None,
+            id_token_signed_response_alg: crate::db::documents::oauth::JwsAlgorithm::Rs256,
+            tls_client_auth_subject_dn: None,
+            tls_client_auth_san_dns: None,
+            tls_client_auth_san_uri: None,
+            tls_client_auth_san_ip: None,
+            tls_client_auth_san_email: None,
+            tls_client_certificate_bound_access_tokens: None,
+            authorization_signed_response_alg: None,
+            introspection_signed_response_alg: None,
+            request_object_signing_alg: None,
+            require_signed_request_object: None,
+            userinfo_signed_response_alg: None,
+            request_uris: None,
+        },
+    )
+    .await
+    .expect("create client");
+
+    let response = http_get_full(
+        &app,
+        &format!(
+            "/oauth/authorize?response_type=code&client_id={}&scope=openid\
+             &code_challenge=dummychallenge&code_challenge_method=S256",
+            client_record.client_id,
+        ),
+        &[],
+    )
+    .await;
+
     // Must show an error page, not redirect
     assert!(
         response.status == StatusCode::OK || response.status.is_client_error(),
-        "Missing redirect_uri must produce error page, not redirect, got: {}",
+        "Multi-URI client missing redirect_uri must produce error page, got: {}",
         response.status
     );
 
-    // Body must indicate redirect_uri is required
     assert!(
         response.body.contains("redirect_uri"),
         "Error page should mention redirect_uri: {}",

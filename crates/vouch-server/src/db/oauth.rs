@@ -743,12 +743,13 @@ pub async fn update_oauth_client_registration(
             }
             // RFC 7592: PUT is a full replacement — clear fields not present.
             data.jwks = params.jwks.cloned();
-            data.jwks_uri = params.jwks_uri.map(String::from);
             // Clear JWKS URI cache when the URI changes or is removed.
+            // Compare before overwriting so the check sees the old value.
             if data.jwks_uri.as_deref() != params.jwks_uri {
                 data.jwks_uri_cache = None;
                 data.jwks_uri_cached_at = None;
             }
+            data.jwks_uri = params.jwks_uri.map(String::from);
             data.registration_access_token_hash =
                 Some(params.registration_access_token_hash.to_string());
             data.registration_metadata = params.registration_metadata.cloned();
