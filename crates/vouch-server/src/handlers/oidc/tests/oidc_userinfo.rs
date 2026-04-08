@@ -344,6 +344,7 @@ async fn test_userinfo_signed_jwt_when_es256_configured() {
             request_object_signing_alg: None,
             require_signed_request_object: None,
             userinfo_signed_response_alg: Some(db::JwsAlgorithm::Es256),
+            request_uris: None,
         },
     )
     .await

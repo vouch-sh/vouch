@@ -309,6 +309,7 @@ mod tests {
             authorization_signed_response_alg: None,
             introspection_signed_response_alg: None,
             userinfo_signed_response_alg: None,
+            request_uris: None,
         }
     }
 
@@ -356,6 +357,7 @@ mod tests {
             authorization_signed_response_alg: None,
             introspection_signed_response_alg: None,
             userinfo_signed_response_alg: None,
+            request_uris: None,
         }
     }
 

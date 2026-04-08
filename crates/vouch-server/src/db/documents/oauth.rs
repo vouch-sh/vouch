@@ -430,6 +430,12 @@ pub struct OAuthClientDoc {
     /// instead of plain JSON (content-type: application/json).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub userinfo_signed_response_alg: Option<JwsAlgorithm>,
+    /// OIDC Core Section 6.2: Pre-registered request_uri allowlist.
+    ///
+    /// When `Some`, only the listed HTTPS URLs are accepted as `request_uri` values.
+    /// When `None`, any HTTPS `request_uri` is accepted (no allowlist enforced).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_uris: Option<Vec<String>>,
 }
 
 impl DocumentType for OAuthClientDoc {

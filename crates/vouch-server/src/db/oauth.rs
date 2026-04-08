@@ -71,6 +71,11 @@ pub struct OAuthClient {
     pub introspection_signed_response_alg: Option<JwsAlgorithm>,
     /// OIDC Core Section 5.3.4: UserInfo response signing algorithm.
     pub userinfo_signed_response_alg: Option<JwsAlgorithm>,
+    /// OIDC Core Section 6.2: Pre-registered request_uri allowlist.
+    ///
+    /// When `Some`, only the listed HTTPS URLs are accepted as `request_uri` values.
+    /// When `None`, any HTTPS `request_uri` is accepted.
+    pub request_uris: Option<Vec<String>>,
 }
 
 impl From<Document<OAuthClientDoc>> for OAuthClient {
@@ -118,6 +123,7 @@ impl From<Document<OAuthClientDoc>> for OAuthClient {
             authorization_signed_response_alg: doc.data.authorization_signed_response_alg,
             introspection_signed_response_alg: doc.data.introspection_signed_response_alg,
             userinfo_signed_response_alg: doc.data.userinfo_signed_response_alg,
+            request_uris: doc.data.request_uris,
         }
     }
 }
@@ -182,6 +188,8 @@ pub struct CreateOAuthClientParams<'a> {
     pub require_signed_request_object: Option<bool>,
     /// OIDC Core Section 5.3.4: UserInfo response signing algorithm.
     pub userinfo_signed_response_alg: Option<JwsAlgorithm>,
+    /// OIDC Core Section 6.2: Pre-registered request_uri allowlist.
+    pub request_uris: Option<Vec<String>>,
 }
 
 /// Create a new OAuth client application.
@@ -230,6 +238,7 @@ pub async fn create_oauth_client(
         authorization_signed_response_alg: params.authorization_signed_response_alg,
         introspection_signed_response_alg: params.introspection_signed_response_alg,
         userinfo_signed_response_alg: params.userinfo_signed_response_alg,
+        request_uris: params.request_uris.clone(),
     };
 
     let result = store.insert(&doc).await?;
@@ -1069,6 +1078,7 @@ mod tests {
                 request_object_signing_alg: None,
                 require_signed_request_object: None,
                 userinfo_signed_response_alg: None,
+                request_uris: None,
             },
         )
         .await

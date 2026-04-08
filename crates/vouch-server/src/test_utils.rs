@@ -745,6 +745,7 @@ pub async fn create_test_oauth_client(store: &DocumentStore, user_id: &str) -> T
             request_object_signing_alg: None,
             require_signed_request_object: None,
             userinfo_signed_response_alg: None,
+            request_uris: None,
         },
     )
     .await
@@ -814,6 +815,7 @@ pub async fn create_test_oauth_client_with_options(
             request_object_signing_alg: None,
             require_signed_request_object: None,
             userinfo_signed_response_alg: None,
+            request_uris: None,
         },
     )
     .await
@@ -876,6 +878,7 @@ pub async fn create_test_public_oauth_client(
             request_object_signing_alg: None,
             require_signed_request_object: None,
             userinfo_signed_response_alg: None,
+            request_uris: None,
         },
     )
     .await

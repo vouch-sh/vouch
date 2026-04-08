@@ -132,6 +132,10 @@ pub struct RegistrationRequest {
     pub require_signed_request_object: Option<bool>,
     /// OIDC Core Section 5.3.4: UserInfo response signing algorithm.
     pub userinfo_signed_response_alg: Option<String>,
+    /// OIDC Core Section 6.2: Pre-registered request_uri values (optional allowlist).
+    ///
+    /// Each URI must be HTTPS. When present, only these URLs are accepted as `request_uri`.
+    pub request_uris: Option<Vec<String>>,
 }
 
 /// RFC 7591 Section 3.2.1: Client Information Response.
@@ -202,6 +206,9 @@ pub struct RegistrationResponse {
     /// OIDC Core Section 5.3.4: UserInfo response signing algorithm.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub userinfo_signed_response_alg: Option<String>,
+    /// OIDC Core Section 6.2: Pre-registered request_uri values (echoed).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_uris: Option<Vec<String>>,
 }
 
 // ============================================================================
@@ -428,6 +435,36 @@ pub async fn register_client(
             None
         };
 
+    // 12b-2. Validate request_uris (OIDC Core Section 6.2).
+    // Each URI must be HTTPS. Maximum 10 entries.
+    let validated_request_uris: Option<Vec<String>> = if let Some(ref uris) = request.request_uris
+    {
+        const MAX_REQUEST_URIS: usize = 10;
+        if uris.len() > MAX_REQUEST_URIS {
+            return Err(ServiceError::oauth(
+                OAuthErrorCode::InvalidClientMetadata,
+                format!("Too many request_uris: maximum is {MAX_REQUEST_URIS}"),
+            ));
+        }
+        for uri in uris {
+            if !uri.starts_with("https://") {
+                return Err(ServiceError::oauth(
+                    OAuthErrorCode::InvalidClientMetadata,
+                    format!("request_uri '{uri}' must use HTTPS"),
+                ));
+            }
+            if uri.contains('#') {
+                return Err(ServiceError::oauth(
+                    OAuthErrorCode::InvalidClientMetadata,
+                    format!("request_uri '{uri}' must not contain a fragment component"),
+                ));
+            }
+        }
+        Some(uris.clone())
+    } else {
+        None
+    };
+
     // 12d. Validate request_object_signing_alg (RFC 9101).
     let req_obj_alg: Option<JwsAlgorithm> = if let Some(ref s) = request.request_object_signing_alg
     {
@@ -516,6 +553,7 @@ pub async fn register_client(
             request_object_signing_alg: req_obj_alg,
             require_signed_request_object: if require_signed { Some(true) } else { None },
             userinfo_signed_response_alg: userinfo_alg,
+            request_uris: validated_request_uris.clone(),
         },
     )
     .await
@@ -616,6 +654,7 @@ pub async fn register_client(
         request_object_signing_alg: req_obj_alg.map(|a| a.to_string()),
         require_signed_request_object: if require_signed { Some(true) } else { None },
         userinfo_signed_response_alg: userinfo_alg.map(|a| a.to_string()),
+        request_uris: validated_request_uris,
     })
 }
 
@@ -1144,6 +1183,7 @@ fn build_client_response(client: &OAuthClient, base_url: &str) -> RegistrationRe
         request_object_signing_alg: client.request_object_signing_alg.map(|a| a.to_string()),
         require_signed_request_object: client.require_signed_request_object,
         userinfo_signed_response_alg: client.userinfo_signed_response_alg.map(|a| a.to_string()),
+        request_uris: client.request_uris.clone(),
     }
 }
 
@@ -2050,6 +2090,7 @@ mod tests {
             request_object_signing_alg: None,
             require_signed_request_object: None,
             userinfo_signed_response_alg: None,
+            request_uris: None,
         };
 
         let json = serde_json::to_string(&response).unwrap();
@@ -2115,6 +2156,7 @@ mod tests {
             request_object_signing_alg: None,
             require_signed_request_object: None,
             userinfo_signed_response_alg: None,
+            request_uris: None,
         };
 
         let json = serde_json::to_string(&response).unwrap();

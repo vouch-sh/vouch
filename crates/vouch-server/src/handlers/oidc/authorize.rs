@@ -22,7 +22,7 @@ use crate::services::oidc::authorization::{
     check_session_for_authorization, issue_authorization_code, require_pkce_for_client,
     validate_authorize_request,
 };
-use crate::services::oidc::jar::{QueryParamHints, validate_request_object};
+use crate::services::oidc::jar::{QueryParamHints, fetch_request_object, validate_request_object};
 use askama::Template;
 use axum::{
     Form,
@@ -170,19 +170,8 @@ async fn authorize_inner(state: Arc<AppState>, params: AuthorizeQuery, jar: Cook
         return handle_jar_request(&state, request_jwt, &client_id, &params, jar).await;
     }
 
-    // RFC 9126: If request_uri is present, resolve the PAR and replace parameters.
+    // RFC 9126 / OIDC Core Section 6.2: If request_uri is present, dispatch by scheme.
     if let Some(ref request_uri) = params.request_uri {
-        // Validate request_uri format before DB lookup (RFC 9126 Section 2.2).
-        // Must start with the standard URN prefix and be reasonably sized.
-        if !request_uri.starts_with("urn:ietf:params:oauth:request_uri:") || request_uri.len() > 256
-        {
-            return AuthorizeDeniedTemplate {
-                client_name: "Unknown Application".to_string(),
-                error_message: "Invalid request_uri format".to_string(),
-            }
-            .into_response();
-        }
-
         let client_id = params.client_id.clone().unwrap_or_default();
         if client_id.is_empty() {
             return AuthorizeDeniedTemplate {
@@ -193,14 +182,43 @@ async fn authorize_inner(state: Arc<AppState>, params: AuthorizeQuery, jar: Cook
             .into_response();
         }
 
-        return handle_par_request(
-            &state,
-            request_uri,
-            &client_id,
-            params.redirect_uri.as_deref(),
-            jar,
-        )
-        .await;
+        if request_uri.starts_with("urn:ietf:params:oauth:request_uri:") {
+            // RFC 9126: PAR URN — must be reasonably sized.
+            if request_uri.len() > 256 {
+                return AuthorizeDeniedTemplate {
+                    client_name: "Unknown Application".to_string(),
+                    error_message: "Invalid request_uri format".to_string(),
+                }
+                .into_response();
+            }
+            return handle_par_request(
+                &state,
+                request_uri,
+                &client_id,
+                params.redirect_uri.as_deref(),
+                jar,
+            )
+            .await;
+        }
+
+        if request_uri.starts_with("https://") {
+            // OIDC Core Section 6.2: HTTPS URL — fetch the Request Object JWT.
+            return handle_request_uri_fetch(
+                &state,
+                request_uri,
+                &client_id,
+                &params,
+                jar,
+            )
+            .await;
+        }
+
+        // Neither a PAR URN nor an HTTPS URL.
+        return AuthorizeDeniedTemplate {
+            client_name: "Unknown Application".to_string(),
+            error_message: "Invalid request_uri: must be a PAR URN or an HTTPS URL".to_string(),
+        }
+        .into_response();
     }
 
     // Normal authorization request - validate parameters
@@ -799,6 +817,256 @@ async fn handle_jar_request(
         .map(|c| c.value());
 
     // Check if we have a valid session
+    match check_session_for_authorization(state, session_token).await {
+        Ok(AuthorizationSessionState::Authenticated {
+            user,
+            session: ref auth_session,
+            authenticator,
+        }) => {
+            authorize_authenticated_user(
+                state,
+                validated,
+                &oauth_client,
+                &user,
+                auth_session,
+                &authenticator,
+                ReauthPolicy::OnDemand,
+                None,
+                jar_response_mode,
+            )
+            .await
+        }
+        Ok(AuthorizationSessionState::NeedsAuth) | Err(_) => {
+            if validated.prompt() == Some(Prompt::Silent) {
+                return oauth_error_response(
+                    state,
+                    &oauth_client,
+                    validated.redirect_uri(),
+                    "login_required",
+                    "User is not authenticated and prompt=none was requested",
+                    validated.state(),
+                    jar_response_mode,
+                )
+                .await;
+            }
+            store_pending_and_redirect(state, validated, jar_response_mode, None).await
+        }
+    }
+}
+
+/// Handle an authorization request using an OIDC Core Section 6.2 `request_uri` URL.
+///
+/// Fetches the Request Object JWT from the HTTPS URL, validates it through the
+/// existing JAR validation pipeline, and proceeds with the normal authorization flow.
+///
+/// Security checks (in order):
+/// 1. Client lookup and active check
+/// 2. FAPI clients are rejected (they must use PAR)
+/// 3. Allowlist check: if `request_uris` is `Some`, the URI must be in the list
+/// 4. Fetch and validate the JWT
+async fn handle_request_uri_fetch(
+    state: &Arc<AppState>,
+    request_uri: &str,
+    client_id: &str,
+    query: &AuthorizeQuery,
+    jar: CookieJar,
+) -> Response {
+    // Look up the OAuth client.
+    let oauth_client = match db::get_oauth_client_by_client_id(&state.store, client_id).await {
+        Ok(Some(client)) => client,
+        Ok(None) => {
+            return AuthorizeDeniedTemplate {
+                client_name: "Unknown Application".to_string(),
+                error_message:
+                    "Unknown client application. Please contact the application administrator."
+                        .to_string(),
+            }
+            .into_response();
+        }
+        Err(_) => {
+            return AuthorizeDeniedTemplate {
+                client_name: "Unknown Application".to_string(),
+                error_message: "An error occurred. Please try again.".to_string(),
+            }
+            .into_response();
+        }
+    };
+
+    if !oauth_client.active {
+        return AuthorizeDeniedTemplate {
+            client_name: oauth_client.name,
+            error_message: "This application has been deactivated.".to_string(),
+        }
+        .into_response();
+    }
+
+    // S2: FAPI 2.0 clients must use PAR; URL request_uri is not permitted.
+    if let Err(e) =
+        crate::services::oidc::fapi::validate_fapi_authorization_request(&oauth_client, false)
+    {
+        let description = match &e {
+            crate::services::ServiceError::OAuth { description, .. } => description.clone(),
+            _ => e.to_string(),
+        };
+        if let Some(ref redirect_uri) = query.redirect_uri {
+            return oauth_error_redirect(
+                redirect_uri,
+                "invalid_request",
+                &description,
+                query.state.as_deref(),
+                &state.config().base_url,
+            );
+        }
+        return AuthorizeDeniedTemplate {
+            client_name: oauth_client.name,
+            error_message: format!("Invalid request: {description}"),
+        }
+        .into_response();
+    }
+
+    // S1: Allowlist check — if request_uris is Some, only listed URIs are accepted.
+    // If None, accept any HTTPS URI (no allowlist enforced).
+    if let Some(ref allowed) = oauth_client.request_uris
+        && !allowed.iter().any(|u| u == request_uri)
+    {
+        let msg = "request_uri is not registered for this client";
+        if let Some(ref redirect_uri) = query.redirect_uri {
+            return oauth_error_redirect(
+                redirect_uri,
+                "invalid_request_uri",
+                msg,
+                query.state.as_deref(),
+                &state.config().base_url,
+            );
+        }
+        return AuthorizeDeniedTemplate {
+            client_name: oauth_client.name,
+            error_message: format!("Invalid request: {msg}"),
+        }
+        .into_response();
+    }
+
+    // Fetch the Request Object JWT from the URL.
+    let fetched_jwt = match fetch_request_object(request_uri, &state.http_client).await {
+        Ok(jwt) => jwt,
+        Err(e) => {
+            let description = match &e {
+                crate::services::ServiceError::OAuth { description, .. } => description.clone(),
+                _ => e.to_string(),
+            };
+            if let Some(ref redirect_uri) = query.redirect_uri {
+                return oauth_error_redirect(
+                    redirect_uri,
+                    "invalid_request_uri",
+                    &description,
+                    query.state.as_deref(),
+                    &state.config().base_url,
+                );
+            }
+            return AuthorizeDeniedTemplate {
+                client_name: oauth_client.name,
+                error_message: format!("Failed to fetch Request Object: {description}"),
+            }
+            .into_response();
+        }
+    };
+
+    // Validate the fetched JWT through the existing JAR pipeline.
+    let query_hints = QueryParamHints {
+        client_id: Some(client_id),
+        response_type: query.response_type.as_deref(),
+        scope: query.scope.as_deref(),
+    };
+
+    let request_params = match validate_request_object(
+        state,
+        &fetched_jwt,
+        &oauth_client,
+        Some(&query_hints),
+    )
+    .await
+    {
+        Ok(params) => params,
+        Err(e) => {
+            let (error_code, description) = match &e {
+                crate::services::ServiceError::OAuth { code, description } => {
+                    (code.as_str(), description.clone())
+                }
+                _ => ("invalid_request_object", e.to_string()),
+            };
+            if let Some(ref redirect_uri) = query.redirect_uri {
+                return oauth_error_redirect(
+                    redirect_uri,
+                    error_code,
+                    &description,
+                    query.state.as_deref(),
+                    &state.config().base_url,
+                );
+            }
+            return AuthorizeDeniedTemplate {
+                client_name: oauth_client.name,
+                error_message: format!("Invalid Request Object: {description}"),
+            }
+            .into_response();
+        }
+    };
+
+    // Extract redirect_uri and response_mode from the validated params.
+    let redirect_uri = request_params.redirect_uri.clone();
+    let jar_response_mode = request_params
+        .response_mode
+        .as_deref()
+        .and_then(ResponseMode::parse)
+        .unwrap_or(ResponseMode::Query);
+
+    let validated = match validate_authorize_request(request_params) {
+        Ok(v) => v,
+        Err(e) => {
+            let (error_code, description) = match &e {
+                crate::services::ServiceError::OAuth { code, description } => {
+                    (code.as_str(), description.clone())
+                }
+                _ => ("server_error", e.to_string()),
+            };
+            return oauth_error_redirect(
+                &redirect_uri,
+                error_code,
+                &description,
+                query.state.as_deref(),
+                &state.config().base_url,
+            );
+        }
+    };
+
+    // RFC 9700: PKCE required for public clients and Native/SPA types.
+    if let Err(e) = require_pkce_for_client(&validated, &oauth_client) {
+        let description = match &e {
+            crate::services::ServiceError::OAuth { description, .. } => description.clone(),
+            _ => e.to_string(),
+        };
+        return oauth_error_redirect(
+            &redirect_uri,
+            "invalid_request",
+            &description,
+            query.state.as_deref(),
+            &state.config().base_url,
+        );
+    }
+
+    // Validate redirect_uri against registered URIs.
+    if !oauth_client.is_valid_redirect_uri(validated.redirect_uri()) {
+        return AuthorizeDeniedTemplate {
+            client_name: oauth_client.name,
+            error_message: "Invalid redirect_uri: not registered for this application".to_string(),
+        }
+        .into_response();
+    }
+
+    // Check session and proceed.
+    let session_token = jar
+        .get(vouch_common::SESSION_COOKIE_NAME)
+        .map(|c| c.value());
+
     match check_session_for_authorization(state, session_token).await {
         Ok(AuthorizationSessionState::Authenticated {
             user,

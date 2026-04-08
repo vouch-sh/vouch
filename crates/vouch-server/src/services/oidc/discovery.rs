@@ -101,6 +101,14 @@ pub struct OidcDiscoveryDocument {
     pub authorization_signing_alg_values_supported: Option<Vec<JwsAlgorithm>>,
     /// RFC 9101: Whether all authorization requests must use signed Request Objects.
     pub require_signed_request_object: bool,
+    /// OIDC Core Section 6.2 / OIDC Discovery Section 3: Whether the server supports
+    /// the `request_uri` parameter for fetching Request Object JWTs from URLs.
+    pub request_uri_parameter_supported: bool,
+    /// OIDC Discovery Section 3: Whether clients must pre-register `request_uris`.
+    ///
+    /// Set to `false` so the OIDC conformance suite (which does not pre-register
+    /// `request_uris`) can use URL-based request_uri without registration.
+    pub require_request_uri_registration: bool,
     /// RFC 9396 §11.3: Supported authorization detail types.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub authorization_details_types_supported: Option<Vec<String>>,
@@ -265,6 +273,11 @@ pub fn build_discovery_document(state: &Arc<AppState>) -> OidcDiscoveryDocument 
             JwsAlgorithm::EdDsa,
         ]),
         require_signed_request_object: false,
+        // OIDC Core Section 6.2: Advertise URL-based request_uri support.
+        request_uri_parameter_supported: true,
+        // OIDC Discovery Section 3: pre-registration not required (conformance suite
+        // does not register request_uris during dynamic registration).
+        require_request_uri_registration: false,
         // JARM: supported signing algorithms for authorization responses.
         authorization_signing_alg_values_supported: Some(if state.oidc_rsa_key.is_some() {
             vec![JwsAlgorithm::Rs256, JwsAlgorithm::Es256]
