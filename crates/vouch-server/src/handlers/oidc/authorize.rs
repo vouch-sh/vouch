@@ -229,6 +229,14 @@ async fn authorize_inner(state: Arc<AppState>, params: AuthorizeQuery, jar: Cook
         .into_response();
     }
 
+    // Parse response_mode early so error responses use the correct delivery
+    // mechanism (form_post, JARM, or query-string redirect).
+    let early_response_mode = params
+        .response_mode
+        .as_deref()
+        .and_then(ResponseMode::parse)
+        .unwrap_or(ResponseMode::Query);
+
     // Validate prompt before constructing params — reject unsupported values.
     let parsed_prompt = match params.prompt.as_deref() {
         Some(p) => match Prompt::parse(p) {
@@ -240,6 +248,7 @@ async fn authorize_inner(state: Arc<AppState>, params: AuthorizeQuery, jar: Cook
                     "Unsupported prompt value. Supported values: login, none, consent",
                     params.state.as_deref(),
                     &state.config().base_url,
+                    early_response_mode,
                 );
             }
         },
@@ -290,6 +299,7 @@ async fn authorize_inner(state: Arc<AppState>, params: AuthorizeQuery, jar: Cook
                 &description,
                 params.state.as_deref(),
                 &state.config().base_url,
+                early_response_mode,
             );
         }
     };
@@ -517,6 +527,7 @@ async fn store_pending_and_redirect(
                 "Failed to initiate login",
                 validated.state(),
                 &state.config().base_url,
+                response_mode,
             )
         }
     }
@@ -559,6 +570,7 @@ async fn handle_pending_auth(state: &Arc<AppState>, pending_id: &str, jar: &Cook
                     "Unknown client_id",
                     pending.state.as_deref(),
                     &state.config().base_url,
+                    pending.response_mode,
                 );
             }
             Err(_) => {
@@ -568,6 +580,7 @@ async fn handle_pending_auth(state: &Arc<AppState>, pending_id: &str, jar: &Cook
                     "Database error",
                     pending.state.as_deref(),
                     &state.config().base_url,
+                    pending.response_mode,
                 );
             }
         };
@@ -740,6 +753,7 @@ async fn handle_jar_request(
                     &description,
                     query.state.as_deref(),
                     &state.config().base_url,
+                    ResponseMode::Query,
                 );
             }
             return AuthorizeDeniedTemplate {
@@ -776,6 +790,7 @@ async fn handle_jar_request(
                 &description,
                 query.state.as_deref(),
                 &state.config().base_url,
+                jar_response_mode,
             );
         }
     };
@@ -792,6 +807,7 @@ async fn handle_jar_request(
             &description,
             query.state.as_deref(),
             &state.config().base_url,
+            jar_response_mode,
         );
     }
 
@@ -908,6 +924,7 @@ async fn handle_request_uri_fetch(
                 &description,
                 query.state.as_deref(),
                 &state.config().base_url,
+                ResponseMode::Query,
             );
         }
         return AuthorizeDeniedTemplate {
@@ -930,6 +947,7 @@ async fn handle_request_uri_fetch(
                 msg,
                 query.state.as_deref(),
                 &state.config().base_url,
+                ResponseMode::Query,
             );
         }
         return AuthorizeDeniedTemplate {
@@ -954,6 +972,7 @@ async fn handle_request_uri_fetch(
                     &description,
                     query.state.as_deref(),
                     &state.config().base_url,
+                    ResponseMode::Query,
                 );
             }
             return AuthorizeDeniedTemplate {
@@ -989,6 +1008,7 @@ async fn handle_request_uri_fetch(
                         &description,
                         query.state.as_deref(),
                         &state.config().base_url,
+                        ResponseMode::Query,
                     );
                 }
                 return AuthorizeDeniedTemplate {
@@ -1022,6 +1042,7 @@ async fn handle_request_uri_fetch(
                 &description,
                 query.state.as_deref(),
                 &state.config().base_url,
+                jar_response_mode,
             );
         }
     };
@@ -1038,6 +1059,7 @@ async fn handle_request_uri_fetch(
             &description,
             query.state.as_deref(),
             &state.config().base_url,
+            jar_response_mode,
         );
     }
 
@@ -1191,6 +1213,7 @@ async fn handle_par_request(
                 &description,
                 par.state.as_deref(),
                 &state.config().base_url,
+                par.response_mode,
             );
         }
     };
@@ -1229,6 +1252,7 @@ async fn handle_par_request(
             &description,
             par.state.as_deref(),
             &state.config().base_url,
+            par.response_mode,
         );
     }
 
@@ -1569,30 +1593,55 @@ fn build_authorization_redirect(redirect_uri: &str, params: &[(&str, &str)]) -> 
     }
 }
 
-/// Create an OAuth error redirect response.
+/// Create an OAuth error response, respecting the requested `response_mode`.
 ///
-/// Includes the `iss` parameter per RFC 9207.
+/// - `FormPost`: delivers error parameters via an HTML auto-submitting form
+///   (OAuth 2.0 Form Post Response Mode).
+/// - `Query` (and fallback): delivers via query-string redirect (RFC 6749).
+///
+/// Includes the `iss` parameter per RFC 9207 in all modes.
 fn oauth_error_redirect(
     redirect_uri: &str,
     error: &str,
     description: &str,
     state: Option<&str>,
     issuer: &str,
+    response_mode: ResponseMode,
 ) -> Response {
-    let mut params = vec![("error", error), ("error_description", description)];
-    if let Some(state_param) = state {
-        params.push(("state", state_param));
+    match response_mode {
+        ResponseMode::FormPost => {
+            let mut params = vec![
+                ("error".to_string(), error.to_string()),
+                ("error_description".to_string(), description.to_string()),
+                ("iss".to_string(), issuer.to_string()),
+            ];
+            if let Some(s) = state {
+                params.push(("state".to_string(), s.to_string()));
+            }
+            FormPostResponseTemplate {
+                redirect_uri: redirect_uri.to_string(),
+                params,
+            }
+            .into_response()
+        }
+        ResponseMode::Query | ResponseMode::Jwt => {
+            // Jwt without a client falls back to query (JARM needs client keys).
+            let mut params = vec![("error", error), ("error_description", description)];
+            if let Some(state_param) = state {
+                params.push(("state", state_param));
+            }
+            params.push(("iss", issuer));
+            build_authorization_redirect(redirect_uri, &params)
+        }
     }
-    // RFC 9207: Include iss parameter even in error responses
-    params.push(("iss", issuer));
-    build_authorization_redirect(redirect_uri, &params)
 }
 
 /// Create an OAuth error response, dispatching on `response_mode`.
 ///
 /// OIDC Core Section 3.1.2.6: when `response_mode=form_post`, the error MUST
 /// also be delivered via HTTP POST. When `response_mode=jwt` (JARM), the error
-/// MUST be wrapped in a signed JWT. Falls back to query-string for query mode.
+/// MUST be wrapped in a signed JWT. Falls back to `oauth_error_redirect` for
+/// query and form_post modes.
 async fn oauth_error_response(
     app_state: &Arc<AppState>,
     client: &OAuthClient,
@@ -1603,22 +1652,6 @@ async fn oauth_error_response(
     response_mode: ResponseMode,
 ) -> Response {
     match response_mode {
-        ResponseMode::FormPost => {
-            let issuer = &app_state.config().base_url;
-            let mut params = vec![
-                ("error".to_string(), error.to_string()),
-                ("error_description".to_string(), description.to_string()),
-                ("iss".to_string(), issuer.clone()),
-            ];
-            if let Some(s) = oauth_state {
-                params.push(("state".to_string(), s.to_string()));
-            }
-            FormPostResponseTemplate {
-                redirect_uri: redirect_uri.to_string(),
-                params,
-            }
-            .into_response()
-        }
         ResponseMode::Jwt => {
             oauth_error_redirect_jarm(
                 app_state,
@@ -1630,12 +1663,13 @@ async fn oauth_error_response(
             )
             .await
         }
-        ResponseMode::Query => oauth_error_redirect(
+        mode => oauth_error_redirect(
             redirect_uri,
             error,
             description,
             oauth_state,
             &app_state.config().base_url,
+            mode,
         ),
     }
 }
@@ -1674,6 +1708,7 @@ async fn oauth_error_redirect_jarm(
                 description,
                 oauth_state,
                 &state.config().base_url,
+                ResponseMode::Query,
             )
         }
     }
@@ -1693,6 +1728,7 @@ mod tests {
             "Something went wrong",
             Some("state123"),
             "https://vouch.example.com",
+            ResponseMode::Query,
         );
     }
 }

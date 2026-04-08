@@ -452,12 +452,10 @@ pub async fn register_client(
                     format!("request_uri '{uri}' must use HTTPS"),
                 ));
             }
-            if uri.contains('#') {
-                return Err(ServiceError::oauth(
-                    OAuthErrorCode::InvalidClientMetadata,
-                    format!("request_uri '{uri}' must not contain a fragment component"),
-                ));
-            }
+            // Note: fragments in request_uris are allowed during registration.
+            // The no-fragment rule (RFC 9101) applies only when request_uri is
+            // used in an authorization request, not at registration time.
+            // The conformance suite uses fragments for integrity checking.
         }
         Some(uris.clone())
     } else {
