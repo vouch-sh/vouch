@@ -19,7 +19,7 @@ pub mod validate;
 
 pub use client_auth::commit_jti;
 pub use jwks::{
-    find_matching_key, find_matching_key_with_refresh_client,
-    find_matching_key_with_refresh_issuer, resolve_client_jwks,
+    find_matching_key_with_refresh_client, find_matching_key_with_refresh_issuer,
+    resolve_client_jwks,
 };
 pub use validate::SUPPORTED_ALGORITHMS;

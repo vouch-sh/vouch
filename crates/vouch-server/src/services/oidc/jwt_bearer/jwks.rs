@@ -1249,7 +1249,7 @@ mod tests {
         let hdr = header("ES256", Some("fresh-kid"));
 
         // cached_at 60 seconds ago — well outside the 10-second rate-limit window
-        let old_ts = (jiff::Timestamp::now().as_second() - 60).to_string();
+        let old_ts = (jiff::Timestamp::now() - jiff::SignedDuration::from_secs(60)).to_string();
 
         // Use an http URI (wiremock) so fetch_and_parse_jwks rejects it with an HTTPS error.
         // The wrapper logs a warning and falls back to the stale JWKS → kid not found → error.
