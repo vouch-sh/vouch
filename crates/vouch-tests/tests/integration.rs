@@ -977,9 +977,11 @@ mod oidc {
             Some("userinfo@example.com"),
             "Email should be present when email scope is granted"
         );
+        // hardware_verified is no longer included in standard OIDC userinfo
+        // responses (Task 9: only non-requested custom claims are excluded)
         assert!(
-            userinfo["hardware_verified"].as_bool().unwrap_or(false),
-            "Should be hardware verified"
+            userinfo.get("hardware_verified").is_none(),
+            "hardware_verified should not be in standard userinfo response"
         );
     }
 
