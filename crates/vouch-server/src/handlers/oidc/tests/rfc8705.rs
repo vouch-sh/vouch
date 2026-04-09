@@ -195,3 +195,41 @@ async fn test_userinfo_non_mtls_token_works_without_cert() {
     let userinfo: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
     assert_eq!(userinfo["email"].as_str(), Some("mtls-none@example.com"));
 }
+
+// ========================================================================
+// RFC 8705 Section 3 — Token Structure Validation
+// ========================================================================
+
+/// RFC 8705 Section 3: The cnf claim in an mTLS-bound token must contain
+/// x5t#S256 matching the bound certificate's SHA-256 thumbprint.
+#[tokio::test]
+async fn test_rfc8705_cnf_claim_present_in_mtls_bound_token() {
+    let (_app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "mtls-cnf@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+
+    let cert_der = make_test_cert_der("client-cnf");
+    let thumbprint = cert_thumbprint(&cert_der);
+
+    let token =
+        create_test_session_with_mtls(&state, &user.id, &user.email, &auth_id, &thumbprint).await;
+
+    // Decode the JWT and inspect the cnf claim
+    let claims = decode_jwt_payload(&token);
+
+    let cnf = claims
+        .get("cnf")
+        .expect("RFC 8705: mTLS-bound token must contain cnf claim");
+
+    let x5t = cnf
+        .get("x5t#S256")
+        .expect("RFC 8705: cnf must contain x5t#S256")
+        .as_str()
+        .expect("x5t#S256 must be a string");
+
+    assert_eq!(
+        x5t, thumbprint,
+        "RFC 8705: x5t#S256 in cnf must match the certificate thumbprint"
+    );
+}

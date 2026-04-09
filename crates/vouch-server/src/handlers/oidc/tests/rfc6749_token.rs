@@ -117,3 +117,172 @@ async fn test_rfc6749_client_credentials_requires_auth() {
         "Unauthenticated client_credentials must return invalid_client"
     );
 }
+
+// ========================================================================
+// RFC 6749 Section 5.1 — Successful Token Response
+// ========================================================================
+
+#[tokio::test]
+async fn test_rfc6749_successful_authorization_code_exchange() {
+    // RFC 6749 Section 5.1: Successful token response must contain
+    // access_token, token_type, and expires_in.
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "success-exchange@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+
+    let scope_set = ScopeSet::parse("openid email");
+    let code = issue_authorization_code(
+        &state,
+        AuthorizationCodeParams {
+            client_id: &client.client_id,
+            redirect_uri: "https://example.com/callback",
+            user_id: &user.id,
+            email: &user.email,
+            authenticator_id: &auth_id,
+            aaguid: None,
+            scope: &scope_set,
+            nonce: None,
+            code_challenge: None,
+            code_challenge_method: None,
+            resource: None,
+            acr_values: None,
+            dpop_jkt: None,
+            auth_code_lifetime_seconds:
+                crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
+            authorization_details: None,
+            auth_time: None,
+        },
+    )
+    .await
+    .expect("Failed to issue authorization code");
+
+    let auth_header = client.basic_auth_header();
+
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        &format!(
+            "grant_type=authorization_code&code={}&redirect_uri=https://example.com/callback",
+            code
+        ),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "Successful token exchange must return 200: {body}"
+    );
+
+    let response: serde_json::Value =
+        serde_json::from_str(&body).expect("Response must be valid JSON");
+
+    // RFC 6749 Section 5.1: REQUIRED fields
+    assert!(
+        response.get("access_token").is_some(),
+        "Response must contain access_token"
+    );
+    assert!(
+        response.get("token_type").is_some(),
+        "Response must contain token_type"
+    );
+    assert!(
+        response.get("expires_in").is_some(),
+        "Response must contain expires_in"
+    );
+
+    let token_type = response["token_type"]
+        .as_str()
+        .expect("token_type must be a string");
+    assert!(
+        token_type == "Bearer" || token_type == "DPoP",
+        "token_type must be Bearer or DPoP, got: {token_type}"
+    );
+
+    assert!(
+        response["expires_in"].is_number(),
+        "expires_in must be a number"
+    );
+
+    // OIDC: id_token must be present when scope includes "openid"
+    assert!(
+        response.get("id_token").is_some(),
+        "id_token must be present when scope includes openid"
+    );
+}
+
+#[tokio::test]
+async fn test_rfc6749_token_response_no_error_field_on_success() {
+    // RFC 6749 Section 5.1 vs 5.2: Success responses must NOT contain
+    // the error field — success and error formats are mutually exclusive.
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "no-error-field@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+
+    let (access_token, _) = issue_oauth_access_token(&app, &state, &user, &auth_id, &client).await;
+
+    // If we got here, the exchange was successful.
+    // Verify the token works (proving the exchange was genuine).
+    let claims = decode_jwt_payload(&access_token);
+    assert!(
+        claims.get("sub").is_some(),
+        "Access token must contain sub claim"
+    );
+
+    // The issue_oauth_access_token helper already validates success,
+    // but let's explicitly verify via a fresh exchange.
+    let scope_set = ScopeSet::parse("openid");
+    let code = issue_authorization_code(
+        &state,
+        AuthorizationCodeParams {
+            client_id: &client.client_id,
+            redirect_uri: "https://example.com/callback",
+            user_id: &user.id,
+            email: &user.email,
+            authenticator_id: &auth_id,
+            aaguid: None,
+            scope: &scope_set,
+            nonce: None,
+            code_challenge: None,
+            code_challenge_method: None,
+            resource: None,
+            acr_values: None,
+            dpop_jkt: None,
+            auth_code_lifetime_seconds:
+                crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
+            authorization_details: None,
+            auth_time: None,
+        },
+    )
+    .await
+    .expect("Failed to issue code");
+
+    let auth_header = client.basic_auth_header();
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        &format!(
+            "grant_type=authorization_code&code={}&redirect_uri=https://example.com/callback",
+            code
+        ),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    let response: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+
+    assert!(
+        response.get("error").is_none(),
+        "RFC 6749 §5.1: Successful response must NOT contain 'error' field"
+    );
+    assert!(
+        response.get("error_description").is_none(),
+        "RFC 6749 §5.1: Successful response must NOT contain 'error_description'"
+    );
+}
