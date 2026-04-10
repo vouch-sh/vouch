@@ -271,7 +271,7 @@ pub(crate) fn resolve_management_role(
 /// and uses it for both the cache key and credential exchange.
 pub(crate) async fn get_aws_credentials(server: &str, role_arn: &str) -> Result<serde_json::Value> {
     let vouch_config = crate::config::Config::load()?;
-    let management_role = resolve_management_role(&vouch_config)?;
+    let management_role = resolve_management_role(&vouch_config)?.filter(|m| m != role_arn);
     let cache_key = if let Some(ref mgmt_role) = management_role {
         format!("aws:chain:{mgmt_role}:{role_arn}")
     } else {

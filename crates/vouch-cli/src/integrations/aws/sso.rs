@@ -253,7 +253,11 @@ fn python_json_value(v: &serde_json::Value) -> String {
             // Sort keys to match Python's sort_keys=True.
             let mut pairs: Vec<String> = obj
                 .iter()
-                .map(|(k, val)| format!("\"{k}\": {}", python_json_value(val)))
+                .map(|(k, val)| {
+                    let escaped_key =
+                        serde_json::to_string(k).unwrap_or_else(|_| format!("\"{k}\""));
+                    format!("{escaped_key}: {}", python_json_value(val))
+                })
                 .collect();
             pairs.sort();
             format!("{{{}}}", pairs.join(", "))
