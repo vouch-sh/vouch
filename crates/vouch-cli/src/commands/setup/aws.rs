@@ -282,4 +282,14 @@ mod tests {
     fn test_sanitize_profile_name_leading_trailing_hyphen() {
         assert_eq!(sanitize_profile_name("-my-account-"), "my-account");
     }
+
+    #[test]
+    fn test_sanitize_profile_name_empty() {
+        assert_eq!(sanitize_profile_name(""), "");
+    }
+
+    #[test]
+    fn test_sanitize_profile_name_all_special_chars() {
+        assert_eq!(sanitize_profile_name("!!!@@@###"), "");
+    }
 }

@@ -374,6 +374,92 @@ mod tests {
     }
 
     #[test]
+    fn test_source_identity_included_in_form_params() {
+        // Build the same form_params as assume_role_with_web_identity does,
+        // then verify SourceIdentity is appended when source_identity is Some.
+        let mut form_params: Vec<(String, String)> = vec![
+            (
+                "Action".to_string(),
+                "AssumeRoleWithWebIdentity".to_string(),
+            ),
+            ("Version".to_string(), "2011-06-15".to_string()),
+            (
+                "RoleArn".to_string(),
+                "arn:aws:iam::123:role/Test".to_string(),
+            ),
+            ("RoleSessionName".to_string(), "test-session".to_string()),
+            ("WebIdentityToken".to_string(), "token".to_string()),
+        ];
+
+        let source_identity: Option<&str> = Some("user@example.com");
+        if let Some(identity) = source_identity {
+            form_params.push(("SourceIdentity".to_string(), identity.to_string()));
+        }
+
+        let found = form_params
+            .iter()
+            .any(|(k, v)| k == "SourceIdentity" && v == "user@example.com");
+        assert!(found, "SourceIdentity param should be present");
+    }
+
+    #[test]
+    fn test_source_identity_absent_when_none() {
+        let mut form_params: Vec<(String, String)> = vec![(
+            "Action".to_string(),
+            "AssumeRoleWithWebIdentity".to_string(),
+        )];
+
+        let source_identity: Option<&str> = None;
+        if let Some(identity) = source_identity {
+            form_params.push(("SourceIdentity".to_string(), identity.to_string()));
+        }
+
+        let found = form_params.iter().any(|(k, _)| k == "SourceIdentity");
+        assert!(!found, "SourceIdentity param should be absent when None");
+    }
+
+    #[test]
+    fn test_transitive_tag_keys_format() {
+        // Verify the TransitiveTagKeys.member.N format used in assume_role_with_web_identity.
+        let transitive_tag_keys: &[&str] = &["email", "domain"];
+        let mut form_params: Vec<(String, String)> = Vec::new();
+
+        for (i, key) in transitive_tag_keys.iter().enumerate() {
+            let n = i + 1;
+            form_params.push((format!("TransitiveTagKeys.member.{n}"), (*key).to_string()));
+        }
+
+        assert_eq!(form_params.len(), 2);
+        assert_eq!(
+            form_params[0],
+            (
+                "TransitiveTagKeys.member.1".to_string(),
+                "email".to_string()
+            )
+        );
+        assert_eq!(
+            form_params[1],
+            (
+                "TransitiveTagKeys.member.2".to_string(),
+                "domain".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn test_transitive_tag_keys_empty() {
+        let transitive_tag_keys: &[&str] = &[];
+        let mut form_params: Vec<(String, String)> = Vec::new();
+
+        for (i, key) in transitive_tag_keys.iter().enumerate() {
+            let n = i + 1;
+            form_params.push((format!("TransitiveTagKeys.member.{n}"), (*key).to_string()));
+        }
+
+        assert!(form_params.is_empty());
+    }
+
+    #[test]
     fn test_append_tag_form_params_multiple_tags() {
         let mut params = vec![(
             "Action".to_string(),

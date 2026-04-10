@@ -486,6 +486,38 @@ mod tests {
     // =========================================================================
 
     #[test]
+    fn test_sso_oidc_endpoint_commercial() {
+        assert_eq!(
+            Partition::Aws.sso_oidc_endpoint("us-east-1"),
+            "https://oidc.us-east-1.amazonaws.com"
+        );
+    }
+
+    #[test]
+    fn test_sso_oidc_endpoint_china() {
+        assert_eq!(
+            Partition::AwsCn.sso_oidc_endpoint("cn-north-1"),
+            "https://oidc.cn-north-1.amazonaws.com.cn"
+        );
+    }
+
+    #[test]
+    fn test_sso_portal_endpoint_commercial() {
+        assert_eq!(
+            Partition::Aws.sso_portal_endpoint("us-east-1"),
+            "https://portal.sso.us-east-1.amazonaws.com"
+        );
+    }
+
+    #[test]
+    fn test_sso_portal_endpoint_govcloud() {
+        assert_eq!(
+            Partition::AwsUsGov.sso_portal_endpoint("us-gov-west-1"),
+            "https://portal.sso.us-gov-west-1.amazonaws.com"
+        );
+    }
+
+    #[test]
     fn test_dns_suffix() {
         assert_eq!(Partition::Aws.dns_suffix(), "amazonaws.com");
         assert_eq!(Partition::AwsCn.dns_suffix(), "amazonaws.com.cn");

@@ -1056,6 +1056,27 @@ mod tests {
     }
 
     #[test]
+    fn test_add_python_json_spacing_with_colons_in_strings() {
+        let input = r#"{"url":"https://a.com/b","note":"a,b:c"}"#;
+        let expected = r#"{"url": "https://a.com/b", "note": "a,b:c"}"#;
+        assert_eq!(add_python_json_spacing(input), expected);
+    }
+
+    #[test]
+    fn test_add_python_json_spacing_nested_array() {
+        let input = r#"{"scopes":["sso:account:access"]}"#;
+        let expected = r#"{"scopes": ["sso:account:access"]}"#;
+        assert_eq!(add_python_json_spacing(input), expected);
+    }
+
+    #[test]
+    fn test_add_python_json_spacing_escaped_quotes() {
+        let input = r#"{"key":"value with \"quotes\""}"#;
+        let expected = r#"{"key": "value with \"quotes\""}"#;
+        assert_eq!(add_python_json_spacing(input), expected);
+    }
+
+    #[test]
     fn test_access_token_deserialization_without_refresh_token() {
         // Older botocore versions may omit refreshToken
         let json = r#"{
