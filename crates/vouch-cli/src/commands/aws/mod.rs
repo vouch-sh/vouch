@@ -46,25 +46,21 @@ pub(crate) fn resolve_sso_session(
     }
 
     // No explicit selection — use first found, with a hint if multiple exist
-    let all = aws_config.find_all_sso_sessions();
-    match all.len() {
-        0 => Err(crate::exit_code::CliError::ConfigError(
-            "No SSO session found in ~/.aws/config. Run 'aws configure sso' first.".to_string(),
+    let mut all = aws_config.find_all_sso_sessions();
+    if all.is_empty() {
+        return Err(crate::exit_code::CliError::ConfigError(
+            "No SSO session found in ~/.aws/config. \
+             Run 'aws configure sso' first."
+                .to_string(),
         )
-        .into()),
-        1 => all
-            .into_iter()
-            .next()
-            .ok_or_else(|| anyhow::anyhow!("internal: list was empty after length check")),
-        _ => {
-            let Some(first) = all.into_iter().next() else {
-                anyhow::bail!("internal: list was empty after length check");
-            };
-            eprintln!(
-                "Using SSO session '{}'. Specify --sso-session to use a different one.",
-                first.name
-            );
-            Ok(first)
-        }
+        .into());
     }
+    if all.len() > 1 {
+        eprintln!(
+            "Using SSO session '{}'. \
+             Specify --sso-session to use a different one.",
+            all.first().map_or("", |s| &s.name)
+        );
+    }
+    Ok(all.swap_remove(0))
 }
