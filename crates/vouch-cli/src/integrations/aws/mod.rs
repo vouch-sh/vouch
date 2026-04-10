@@ -9,6 +9,8 @@ pub(crate) mod codecommit;
 pub(crate) mod config;
 pub(crate) mod redshift;
 pub(crate) mod sigv4;
+pub(crate) mod sso;
+pub(crate) mod sso_portal;
 pub(crate) mod sts;
 
 // Re-export commonly used types

@@ -12,6 +12,32 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
 
+/// AWS multi-account configuration in ~/.vouch/config.json.
+///
+/// Keyed by SSO session name (matching `[sso-session <name>]` in `~/.aws/config`).
+/// SSO connection details (start URL, region, scopes) are read from `~/.aws/config`
+/// — only role chaining config lives here.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub(crate) struct AwsMultiAccountConfig {
+    /// Per-SSO-session role chaining configuration, keyed by session name.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub sso_sessions: BTreeMap<String, SsoSessionConfig>,
+}
+
+/// Per-SSO-session configuration for role chaining.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct SsoSessionConfig {
+    /// Management account role ARN (Vouch OIDC trust deployed here).
+    pub management_role: String,
+    /// Role name to assume in member accounts.
+    #[serde(default = "default_member_role_name")]
+    pub member_role_name: String,
+}
+
+fn default_member_role_name() -> String {
+    "VouchAccess".to_string()
+}
+
 /// CLI configuration stored in ~/.vouch/config.json
 ///
 /// Per-server state (token, client_id, registration, DPoP key) is
@@ -27,6 +53,8 @@ pub(crate) struct Config {
     servers: BTreeMap<String, ServerConfig>,
     /// Global CodeArtifact profile configuration.
     codeartifact: Option<CodeArtifactConfig>,
+    /// AWS multi-account configuration (role chaining + SSO discovery).
+    aws: Option<AwsMultiAccountConfig>,
 }
 
 /// Per-server configuration state.
@@ -90,6 +118,9 @@ struct ConfigFile {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     codeartifact: Option<CodeArtifactConfig>,
 
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    aws: Option<AwsMultiAccountConfig>,
+
     // Legacy flat fields — read for migration, never written back.
     #[serde(default, skip_serializing)]
     server_url: Option<String>,
@@ -134,6 +165,7 @@ impl std::fmt::Debug for ConfigFile {
             .field("current_server", &self.current_server)
             .field("servers", &"[...]")
             .field("codeartifact", &self.codeartifact)
+            .field("aws", &self.aws)
             .finish()
     }
 }
@@ -144,6 +176,7 @@ impl std::fmt::Debug for Config {
             .field("current_server", &self.current_server)
             .field("servers", &self.servers.keys().collect::<Vec<_>>())
             .field("codeartifact", &self.codeartifact)
+            .field("aws", &self.aws)
             .finish()
     }
 }
@@ -363,6 +396,22 @@ impl Config {
         ca.profiles.insert(name.to_string(), profile);
     }
 
+    // =====================================================================
+    // AWS multi-account (global, not per-server)
+    // =====================================================================
+
+    /// Get the AWS multi-account configuration.
+    #[must_use]
+    pub(crate) fn aws(&self) -> Option<&AwsMultiAccountConfig> {
+        self.aws.as_ref()
+    }
+
+    /// Set the AWS multi-account configuration (in memory only, call `save()` to persist).
+    #[allow(dead_code)]
+    pub(crate) fn set_aws(&mut self, config: AwsMultiAccountConfig) {
+        self.aws = Some(config);
+    }
+
     /// Get the path to the config file.
     fn config_path() -> Result<PathBuf> {
         let home = dirs::home_dir().context("could not determine home directory")?;
@@ -492,6 +541,7 @@ impl From<ConfigFile> for Config {
             current_server,
             servers,
             codeartifact: file.codeartifact.take(),
+            aws: file.aws.take(),
         }
     }
 }
@@ -525,6 +575,7 @@ impl From<&Config> for ConfigFile {
             current_server: config.current_server.clone(),
             servers,
             codeartifact: config.codeartifact.clone(),
+            aws: config.aws.clone(),
             // Legacy fields are never written.
             server_url: None,
             token: None,
@@ -1028,6 +1079,117 @@ mod tests {
         config.set_token("tok");
         assert_eq!(config.server_url(), Some("https://us.vouch.sh"));
         assert!(config.token().is_some());
+    }
+
+    // -----------------------------------------------------------------
+    // AwsMultiAccountConfig round-trip serialization
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn test_aws_multi_account_config_round_trip() {
+        let json = r#"{
+            "current_server": "us.vouch.sh",
+            "servers": {
+                "us.vouch.sh": {
+                    "server_url": "https://us.vouch.sh",
+                    "token": "test-token"
+                }
+            },
+            "aws": {
+                "sso_sessions": {
+                    "smoketurner": {
+                        "management_role": "arn:aws:iam::111:role/VouchManagement",
+                        "member_role_name": "VouchAccess"
+                    }
+                }
+            }
+        }"#;
+
+        let file: ConfigFile = serde_json::from_str(json).unwrap();
+        let config = Config::from(file);
+
+        let aws = config.aws().expect("aws config should exist");
+        assert_eq!(aws.sso_sessions.len(), 1);
+
+        let session = aws
+            .sso_sessions
+            .get("smoketurner")
+            .expect("smoketurner session");
+        assert_eq!(
+            session.management_role,
+            "arn:aws:iam::111:role/VouchManagement"
+        );
+        assert_eq!(session.member_role_name, "VouchAccess");
+
+        // Round-trip through JSON
+        let file2 = ConfigFile::from(&config);
+        let json2 = serde_json::to_string_pretty(&file2).unwrap();
+        let file3: ConfigFile = serde_json::from_str(&json2).unwrap();
+        let config2 = Config::from(file3);
+
+        let aws2 = config2.aws().expect("aws config should survive round-trip");
+        let session2 = aws2
+            .sso_sessions
+            .get("smoketurner")
+            .expect("smoketurner session");
+        assert_eq!(
+            session2.management_role,
+            "arn:aws:iam::111:role/VouchManagement"
+        );
+        assert_eq!(session2.member_role_name, "VouchAccess");
+    }
+
+    #[test]
+    fn test_aws_member_role_name_default_when_omitted() {
+        let json = r#"{
+            "aws": {
+                "sso_sessions": {
+                    "my-session": {
+                        "management_role": "arn:aws:iam::123456789012:role/Mgmt"
+                    }
+                }
+            }
+        }"#;
+
+        let file: ConfigFile = serde_json::from_str(json).unwrap();
+        let config = Config::from(file);
+
+        let aws = config.aws().expect("aws config should exist");
+        let session = aws.sso_sessions.get("my-session").expect("session");
+        assert_eq!(session.member_role_name, "VouchAccess");
+    }
+
+    #[test]
+    fn test_aws_empty_sso_sessions_serializes_correctly() {
+        let mut config = Config::default();
+        config.set_aws(AwsMultiAccountConfig {
+            sso_sessions: BTreeMap::new(),
+        });
+
+        let file = ConfigFile::from(&config);
+        let json = serde_json::to_string(&file).unwrap();
+
+        // Empty sso_sessions map is skipped due to skip_serializing_if
+        assert!(!json.contains("sso_sessions"));
+    }
+
+    #[test]
+    fn test_config_without_aws_section_loads_fine() {
+        let json = r#"{
+            "current_server": "us.vouch.sh",
+            "servers": {
+                "us.vouch.sh": {
+                    "server_url": "https://us.vouch.sh",
+                    "token": "test-token"
+                }
+            }
+        }"#;
+
+        let file: ConfigFile = serde_json::from_str(json).unwrap();
+        let config = Config::from(file);
+
+        assert!(config.aws().is_none());
+        assert_eq!(config.server_url(), Some("https://us.vouch.sh"));
     }
 
     // -----------------------------------------------------------------

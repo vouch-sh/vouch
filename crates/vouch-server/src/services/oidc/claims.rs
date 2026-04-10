@@ -49,6 +49,26 @@ pub struct OidcIdTokenClaims {
     /// Can be used in AWS IAM trust policy conditions to restrict access by domain.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hd: Option<String>,
+    /// AWS STS source identity for role chaining audit trails.
+    ///
+    /// When present in the OIDC token, AWS STS extracts this as the
+    /// `SourceIdentity` during `AssumeRoleWithWebIdentity`. The value
+    /// persists immutably through role chains and appears in CloudTrail,
+    /// enabling end-to-end user attribution across chained role
+    /// assumptions.
+    ///
+    /// Uses the AWS-defined claim namespace per:
+    /// <https://docs.aws.amazon.com/IAM/latest/UserGuide/id_credentials_temp_control-access_monitor.html#id_credentials_temp_control-access_monitor-assume-role-web-id>
+    ///
+    /// Only set for AWS tokens (via `for_aws()`), not Kubernetes or
+    /// other providers. This is a provider-defined claim permitted by
+    /// OIDC Core Section 5.1.2 (additional claims using
+    /// collision-resistant names).
+    #[serde(
+        rename = "https://aws.amazon.com/source_identity",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub source_identity: Option<String>,
 }
 
 /// Errors from building OIDC ID token claims.
@@ -67,6 +87,7 @@ pub struct OidcIdTokenClaimsBuilder {
     email: Option<String>,
     hardware_aaguid: Option<String>,
     hd: Option<String>,
+    source_identity: Option<String>,
     valid_for_seconds: u64,
 }
 
@@ -81,6 +102,7 @@ impl OidcIdTokenClaimsBuilder {
             email: None,
             hardware_aaguid: None,
             hd: None,
+            source_identity: None,
             valid_for_seconds: 28800, // 8 hours default
         }
     }
@@ -89,6 +111,8 @@ impl OidcIdTokenClaimsBuilder {
     ///
     /// AWS uses the issuer URL as the audience (AWS matches against the OIDC provider).
     /// The subject and email are both set to the user's email.
+    /// Includes `https://aws.amazon.com/source_identity` claim set to the
+    /// user's email for role chaining audit trails.
     #[must_use]
     pub fn for_aws(issuer: &str, email: &str) -> Self {
         Self::new()
@@ -96,6 +120,7 @@ impl OidcIdTokenClaimsBuilder {
             .subject(email)
             .audience(issuer) // AWS uses issuer as audience
             .email(email)
+            .source_identity(email)
     }
 
     /// Create a builder pre-configured for Kubernetes.
@@ -157,6 +182,16 @@ impl OidcIdTokenClaimsBuilder {
         self
     }
 
+    /// Set the AWS STS source identity for role chaining.
+    ///
+    /// Only relevant for AWS tokens. The value appears in CloudTrail
+    /// and persists immutably through role chains.
+    #[must_use]
+    pub fn source_identity(mut self, identity: &str) -> Self {
+        self.source_identity = Some(identity.to_string());
+        self
+    }
+
     /// Set the token validity period in seconds.
     #[must_use]
     pub fn valid_for_seconds(mut self, seconds: u64) -> Self {
@@ -195,6 +230,7 @@ impl OidcIdTokenClaimsBuilder {
             hardware_verified: true,
             hardware_aaguid: self.hardware_aaguid,
             hd: self.hd,
+            source_identity: self.source_identity,
         })
     }
 }

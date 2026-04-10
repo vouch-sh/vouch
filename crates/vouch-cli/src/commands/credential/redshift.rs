@@ -98,7 +98,8 @@ pub(crate) async fn fetch_redshift_credentials(
     region: &str,
     role_arn: &str,
 ) -> Result<crate::integrations::aws::redshift::RedshiftCredentials> {
-    let result = exchange_for_sts_credentials(server, role_arn, region, "vouch-redshift").await?;
+    let result =
+        exchange_for_sts_credentials(server, role_arn, region, "vouch-redshift", None).await?;
 
     match target {
         RedshiftTarget::Cluster {

@@ -59,6 +59,9 @@ pub struct OidcDiscoveryDocument {
     pub introspection_endpoint_auth_methods_supported: Vec<TokenEndpointAuthMethod>,
     /// OIDC Discovery 1.0 Section 3: RECOMMENDED. Supported Claim Names.
     pub claims_supported: Vec<String>,
+    /// OIDC Discovery 1.0 Section 3: OPTIONAL. Whether the server supports
+    /// the `claims` request parameter (OIDC Core Section 5.5).
+    pub claims_parameter_supported: bool,
     /// RFC 7636 Section 6.2: Supported PKCE code challenge methods.
     pub code_challenge_methods_supported: Vec<String>,
     /// RFC 9449 Section 5.1: Supported DPoP JWS signing algorithms.
@@ -239,6 +242,7 @@ pub fn build_discovery_document(state: &Arc<AppState>) -> OidcDiscoveryDocument 
             "amr".to_string(),
             "acr".to_string(),
         ],
+        claims_parameter_supported: false,
         code_challenge_methods_supported: vec!["S256".to_string()],
         // RS256 excluded per FAPI 2.0 Section 5.2.2.
         dpop_signing_alg_values_supported: Some(vec![
