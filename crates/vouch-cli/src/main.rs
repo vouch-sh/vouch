@@ -406,15 +406,17 @@ enum Commands {
 impl Commands {
     /// Whether this command contacts the server (and thus needs URL security checks).
     fn uses_server(&self) -> bool {
-        !matches!(
-            self,
-            Commands::Aws { .. }
-                | Commands::Completions(_)
-                | Commands::Diag(_)
-                | Commands::Logout
-                | Commands::Init { .. }
-                | Commands::Posture { .. }
-        )
+        match self {
+            Commands::Aws { command } => {
+                matches!(command, AwsCommands::Console(_))
+            }
+            Commands::Completions(_)
+            | Commands::Diag(_)
+            | Commands::Logout
+            | Commands::Init { .. }
+            | Commands::Posture { .. } => false,
+            _ => true,
+        }
     }
 }
 
@@ -740,6 +742,7 @@ async fn run() -> Result<()> {
             AwsCommands::Login(args) => commands::aws::login::run(args).await,
             AwsCommands::Accounts(args) => commands::aws::accounts::run(args).await,
             AwsCommands::Roles(args) => commands::aws::roles::run(args).await,
+            AwsCommands::Console(args) => commands::aws::console::run(server, args).await,
         },
         Commands::Completions(args) => {
             let mut cmd = Cli::command();

@@ -130,6 +130,51 @@ impl Partition {
         format!("https://portal.sso.{}.{}", region, self.dns_suffix())
     }
 
+    /// AWS Console sign-in federation endpoint for this partition.
+    ///
+    /// Used to obtain a sign-in token and construct a console login URL.
+    /// See: <https://docs.aws.amazon.com/IAM/latest/UserGuide/id_roles_providers_enable-console-custom-url.html>
+    ///
+    /// Note: China uses `amazonaws.cn` for console/signin portals, NOT
+    /// `amazonaws.com.cn` (which is the API endpoint DNS suffix from
+    /// [`dns_suffix`](Self::dns_suffix)).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for ISO partitions which do not support console
+    /// federation.
+    pub fn federation_endpoint(self) -> Result<&'static str, FederationError> {
+        match self {
+            Self::Aws => Ok("https://signin.aws.amazon.com/federation"),
+            // amazonaws.cn, not amazonaws.com.cn — see doc comment
+            Self::AwsCn => Ok("https://signin.amazonaws.cn/federation"),
+            Self::AwsUsGov => Ok("https://signin.amazonaws-us-gov.com/federation"),
+            Self::AwsEusc => Ok("https://signin.amazonaws-eusc.eu/federation"),
+            Self::AwsIso | Self::AwsIsoB | Self::AwsIsoE | Self::AwsIsoF => {
+                Err(FederationError(self))
+            }
+        }
+    }
+
+    /// AWS Management Console URL for this partition.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for ISO partitions which do not have a public
+    /// console URL.
+    pub fn console_url(self) -> Result<&'static str, FederationError> {
+        match self {
+            Self::Aws => Ok("https://console.aws.amazon.com/"),
+            // amazonaws.cn, not amazonaws.com.cn — see federation_endpoint doc
+            Self::AwsCn => Ok("https://console.amazonaws.cn/"),
+            Self::AwsUsGov => Ok("https://console.amazonaws-us-gov.com/"),
+            Self::AwsEusc => Ok("https://console.amazonaws-eusc.eu/"),
+            Self::AwsIso | Self::AwsIsoB | Self::AwsIsoE | Self::AwsIsoF => {
+                Err(FederationError(self))
+            }
+        }
+    }
+
     /// DNS suffix for this partition's AWS endpoints.
     #[must_use]
     pub fn dns_suffix(self) -> &'static str {
@@ -145,6 +190,12 @@ impl Partition {
     }
 }
 
+impl std::fmt::Display for Partition {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// Error returned when a partition string is not recognized.
 #[derive(Debug, thiserror::Error)]
 #[error(
@@ -153,6 +204,12 @@ impl Partition {
      aws-iso, aws-iso-b, aws-iso-e, aws-iso-f"
 )]
 pub struct PartitionError(String);
+
+/// Error returned when console federation is not supported for a
+/// partition.
+#[derive(Debug, thiserror::Error)]
+#[error("AWS Console federation is not supported for the '{0}' partition")]
+pub struct FederationError(Partition);
 
 /// Parsed AWS ARN (Amazon Resource Name).
 ///
@@ -527,5 +584,100 @@ mod tests {
         assert_eq!(Partition::AwsIsoB.dns_suffix(), "sc2s.sgov.gov");
         assert_eq!(Partition::AwsIsoE.dns_suffix(), "cloud.adc-e.uk");
         assert_eq!(Partition::AwsIsoF.dns_suffix(), "csp.hci.ic.gov");
+    }
+
+    // =========================================================================
+    // Federation endpoint tests
+    // =========================================================================
+
+    #[test]
+    fn test_federation_endpoint_commercial() {
+        assert_eq!(
+            Partition::Aws.federation_endpoint().unwrap(),
+            "https://signin.aws.amazon.com/federation"
+        );
+    }
+
+    #[test]
+    fn test_federation_endpoint_china() {
+        assert_eq!(
+            Partition::AwsCn.federation_endpoint().unwrap(),
+            "https://signin.amazonaws.cn/federation"
+        );
+    }
+
+    #[test]
+    fn test_federation_endpoint_govcloud() {
+        assert_eq!(
+            Partition::AwsUsGov.federation_endpoint().unwrap(),
+            "https://signin.amazonaws-us-gov.com/federation"
+        );
+    }
+
+    #[test]
+    fn test_federation_endpoint_eusc() {
+        assert_eq!(
+            Partition::AwsEusc.federation_endpoint().unwrap(),
+            "https://signin.amazonaws-eusc.eu/federation"
+        );
+    }
+
+    #[test]
+    fn test_federation_endpoint_iso_unsupported() {
+        assert!(Partition::AwsIso.federation_endpoint().is_err());
+        assert!(Partition::AwsIsoB.federation_endpoint().is_err());
+        assert!(Partition::AwsIsoE.federation_endpoint().is_err());
+        assert!(Partition::AwsIsoF.federation_endpoint().is_err());
+    }
+
+    // =========================================================================
+    // Console URL tests
+    // =========================================================================
+
+    #[test]
+    fn test_console_url_commercial() {
+        assert_eq!(
+            Partition::Aws.console_url().unwrap(),
+            "https://console.aws.amazon.com/"
+        );
+    }
+
+    #[test]
+    fn test_console_url_china() {
+        assert_eq!(
+            Partition::AwsCn.console_url().unwrap(),
+            "https://console.amazonaws.cn/"
+        );
+    }
+
+    #[test]
+    fn test_console_url_govcloud() {
+        assert_eq!(
+            Partition::AwsUsGov.console_url().unwrap(),
+            "https://console.amazonaws-us-gov.com/"
+        );
+    }
+
+    #[test]
+    fn test_console_url_eusc() {
+        assert_eq!(
+            Partition::AwsEusc.console_url().unwrap(),
+            "https://console.amazonaws-eusc.eu/"
+        );
+    }
+
+    #[test]
+    fn test_console_url_iso_unsupported() {
+        assert!(Partition::AwsIso.console_url().is_err());
+        assert!(Partition::AwsIsoB.console_url().is_err());
+        assert!(Partition::AwsIsoE.console_url().is_err());
+        assert!(Partition::AwsIsoF.console_url().is_err());
+    }
+
+    #[test]
+    fn test_partition_display() {
+        assert_eq!(Partition::Aws.to_string(), "aws");
+        assert_eq!(Partition::AwsCn.to_string(), "aws-cn");
+        assert_eq!(Partition::AwsUsGov.to_string(), "aws-us-gov");
     }
 }

@@ -7,6 +7,7 @@ use clap::Subcommand;
 use crate::integrations::aws::config::{AwsConfig, SsoSession};
 
 pub(crate) mod accounts;
+pub(crate) mod console;
 pub(crate) mod login;
 pub(crate) mod roles;
 
@@ -19,6 +20,8 @@ pub(crate) enum AwsCommands {
     Accounts(accounts::AccountsArgs),
     /// List available roles across your AWS accounts.
     Roles(roles::RolesArgs),
+    /// Open the AWS Management Console in your browser.
+    Console(console::ConsoleArgs),
 }
 
 /// Resolve which SSO session to use.
