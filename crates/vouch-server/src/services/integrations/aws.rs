@@ -32,8 +32,7 @@
 
 use crate::db::{self, Authenticator, store::DocumentStore};
 use crate::redact_email;
-use crate::services::oidc::OidcIdTokenClaimsBuilder;
-use crate::services::oidc::OidcSigningKey;
+use crate::services::oidc::{AwsSessionTags, OidcIdTokenClaimsBuilder, OidcSigningKey};
 
 /// Error types for AWS integration operations.
 #[derive(Debug, thiserror::Error)]
@@ -100,11 +99,31 @@ pub async fn issue_aws_token(
     // Token validity matches session duration
     let expires_in = session_hours * 3600;
 
+    // Build AWS session tags for ABAC and CloudTrail attribution.
+    // Tags are embedded in the JWT so AWS extracts them during
+    // AssumeRoleWithWebIdentity and logs them as principalTags in CloudTrail.
+    let mut principal_tags = std::collections::HashMap::new();
+    let mut transitive_tag_keys = Vec::new();
+
+    principal_tags.insert("email".to_string(), vec![user_email.to_string()]);
+    transitive_tag_keys.push("email".to_string());
+
+    if let Some(ref domain) = hd {
+        principal_tags.insert("domain".to_string(), vec![domain.clone()]);
+        transitive_tag_keys.push("domain".to_string());
+    }
+
+    let aws_tags = AwsSessionTags {
+        principal_tags,
+        transitive_tag_keys,
+    };
+
     // Build OIDC claims
     // For AWS, the audience is the issuer URL (AWS matches against the OIDC provider)
     let id_claims = OidcIdTokenClaimsBuilder::for_aws(base_url, user_email)
         .hardware_aaguid(authenticator.and_then(|a| a.aaguid))
         .hd(hd)
+        .aws_tags(aws_tags)
         .valid_for_seconds(expires_in)
         .build()
         .map_err(|e| AwsError::ClaimsBuild(e.to_string()))?;

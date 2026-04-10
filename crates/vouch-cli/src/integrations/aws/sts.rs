@@ -57,8 +57,14 @@ impl std::fmt::Debug for StsCredentials {
 
 /// Parameters for `AssumeRoleWithWebIdentity`.
 ///
-/// Bundles the required and optional parameters to stay within the
-/// project's 5-positional-parameter limit.
+/// Session tags and transitive tag keys are embedded in the JWT via the
+/// `https://aws.amazon.com/tags` claim (set server-side). AWS extracts
+/// them during the call and logs them as `principalTags` in CloudTrail.
+/// Tags must NOT also be passed as STS API parameters — AWS rejects
+/// requests that include both.
+///
+/// Similarly, `SourceIdentity` is extracted by AWS from the JWT's
+/// `https://aws.amazon.com/source_identity` claim.
 pub(crate) struct WebIdentityRequest<'a> {
     pub http_client: &'a reqwest::Client,
     pub role_arn: &'a str,
@@ -66,11 +72,6 @@ pub(crate) struct WebIdentityRequest<'a> {
     pub web_identity_token: &'a str,
     pub region: &'a str,
     pub domain_suffix: &'a str,
-    pub tags: &'a [(String, String)],
-    /// Optional `SourceIdentity` for CloudTrail audit trails (propagates through role chains).
-    pub source_identity: Option<&'a str>,
-    /// Tags to propagate through role chains via `TransitiveTagKeys`.
-    pub transitive_tag_keys: &'a [&'a str],
 }
 
 /// Call AWS STS `AssumeRoleWithWebIdentity`.
@@ -83,7 +84,7 @@ pub(crate) async fn assume_role_with_web_identity(
     // Use regional STS endpoint for the appropriate partition
     let sts_url = format!("https://sts.{}.{}/", req.region, req.domain_suffix);
 
-    let mut form_params: Vec<(String, String)> = vec![
+    let form_params: Vec<(String, String)> = vec![
         (
             "Action".to_string(),
             "AssumeRoleWithWebIdentity".to_string(),
@@ -99,20 +100,6 @@ pub(crate) async fn assume_role_with_web_identity(
             req.web_identity_token.to_string(),
         ),
     ];
-
-    // Add session tags using AWS Tags.member.N format (1-based indexing)
-    append_tag_form_params(&mut form_params, req.tags);
-
-    // Set SourceIdentity for audit trails (propagates immutably through role chains)
-    if let Some(identity) = req.source_identity {
-        form_params.push(("SourceIdentity".to_string(), identity.to_string()));
-    }
-
-    // Mark tags as transitive so they propagate through AssumeRole chains
-    for (i, key) in req.transitive_tag_keys.iter().enumerate() {
-        let n = i + 1;
-        form_params.push((format!("TransitiveTagKeys.member.{n}"), (*key).to_string()));
-    }
 
     let response = req
         .http_client
@@ -174,18 +161,6 @@ pub(crate) async fn assume_role(
         .context("failed to call AWS STS AssumeRole")?;
 
     parse_sts_xml_response(&body)
-}
-
-/// Append session tag parameters to the form body.
-///
-/// Uses the AWS `Tags.member.N.Key` / `Tags.member.N.Value` format
-/// with 1-based indexing.
-fn append_tag_form_params(params: &mut Vec<(String, String)>, tags: &[(String, String)]) {
-    for (i, (key, value)) in tags.iter().enumerate() {
-        let n = i + 1;
-        params.push((format!("Tags.member.{n}.Key"), key.clone()));
-        params.push((format!("Tags.member.{n}.Value"), value.clone()));
-    }
 }
 
 /// Parse AWS STS XML response using `roxmltree`.
@@ -341,154 +316,5 @@ mod tests {
         assert!(debug.contains("[REDACTED]"));
         assert!(debug.contains("AKIAIOSFODNN7EXAMPLE"));
         assert!(debug.contains("2024-01-15T18:30:45"));
-    }
-
-    // =========================================================================
-    // Tag tests
-    // =========================================================================
-
-    #[test]
-    fn test_append_tag_form_params_empty() {
-        let mut params = Vec::new();
-        append_tag_form_params(&mut params, &[]);
-        assert!(params.is_empty());
-    }
-
-    #[test]
-    fn test_append_tag_form_params_single_tag() {
-        let mut params = Vec::new();
-        let tags = vec![("email".to_string(), "alice@example.com".to_string())];
-        append_tag_form_params(&mut params, &tags);
-        assert_eq!(params.len(), 2);
-        assert_eq!(
-            params[0],
-            ("Tags.member.1.Key".to_string(), "email".to_string())
-        );
-        assert_eq!(
-            params[1],
-            (
-                "Tags.member.1.Value".to_string(),
-                "alice@example.com".to_string()
-            )
-        );
-    }
-
-    #[test]
-    fn test_source_identity_included_in_form_params() {
-        // Build the same form_params as assume_role_with_web_identity does,
-        // then verify SourceIdentity is appended when source_identity is Some.
-        let mut form_params: Vec<(String, String)> = vec![
-            (
-                "Action".to_string(),
-                "AssumeRoleWithWebIdentity".to_string(),
-            ),
-            ("Version".to_string(), "2011-06-15".to_string()),
-            (
-                "RoleArn".to_string(),
-                "arn:aws:iam::123:role/Test".to_string(),
-            ),
-            ("RoleSessionName".to_string(), "test-session".to_string()),
-            ("WebIdentityToken".to_string(), "token".to_string()),
-        ];
-
-        let source_identity: Option<&str> = Some("user@example.com");
-        if let Some(identity) = source_identity {
-            form_params.push(("SourceIdentity".to_string(), identity.to_string()));
-        }
-
-        let found = form_params
-            .iter()
-            .any(|(k, v)| k == "SourceIdentity" && v == "user@example.com");
-        assert!(found, "SourceIdentity param should be present");
-    }
-
-    #[test]
-    fn test_source_identity_absent_when_none() {
-        let mut form_params: Vec<(String, String)> = vec![(
-            "Action".to_string(),
-            "AssumeRoleWithWebIdentity".to_string(),
-        )];
-
-        let source_identity: Option<&str> = None;
-        if let Some(identity) = source_identity {
-            form_params.push(("SourceIdentity".to_string(), identity.to_string()));
-        }
-
-        let found = form_params.iter().any(|(k, _)| k == "SourceIdentity");
-        assert!(!found, "SourceIdentity param should be absent when None");
-    }
-
-    #[test]
-    fn test_transitive_tag_keys_format() {
-        // Verify the TransitiveTagKeys.member.N format used in assume_role_with_web_identity.
-        let transitive_tag_keys: &[&str] = &["email", "domain"];
-        let mut form_params: Vec<(String, String)> = Vec::new();
-
-        for (i, key) in transitive_tag_keys.iter().enumerate() {
-            let n = i + 1;
-            form_params.push((format!("TransitiveTagKeys.member.{n}"), (*key).to_string()));
-        }
-
-        assert_eq!(form_params.len(), 2);
-        assert_eq!(
-            form_params[0],
-            (
-                "TransitiveTagKeys.member.1".to_string(),
-                "email".to_string()
-            )
-        );
-        assert_eq!(
-            form_params[1],
-            (
-                "TransitiveTagKeys.member.2".to_string(),
-                "domain".to_string()
-            )
-        );
-    }
-
-    #[test]
-    fn test_transitive_tag_keys_empty() {
-        let transitive_tag_keys: &[&str] = &[];
-        let mut form_params: Vec<(String, String)> = Vec::new();
-
-        for (i, key) in transitive_tag_keys.iter().enumerate() {
-            let n = i + 1;
-            form_params.push((format!("TransitiveTagKeys.member.{n}"), (*key).to_string()));
-        }
-
-        assert!(form_params.is_empty());
-    }
-
-    #[test]
-    fn test_append_tag_form_params_multiple_tags() {
-        let mut params = vec![(
-            "Action".to_string(),
-            "AssumeRoleWithWebIdentity".to_string(),
-        )];
-        let tags = vec![
-            ("email".to_string(), "alice@example.com".to_string()),
-            ("domain".to_string(), "example.com".to_string()),
-        ];
-        append_tag_form_params(&mut params, &tags);
-        assert_eq!(params.len(), 5);
-        assert_eq!(
-            params[1],
-            ("Tags.member.1.Key".to_string(), "email".to_string())
-        );
-        assert_eq!(
-            params[2],
-            (
-                "Tags.member.1.Value".to_string(),
-                "alice@example.com".to_string()
-            )
-        );
-        assert_eq!(
-            params[3],
-            ("Tags.member.2.Key".to_string(), "domain".to_string())
-        );
-        assert_eq!(
-            params[4],
-            ("Tags.member.2.Value".to_string(), "example.com".to_string())
-        );
     }
 }
