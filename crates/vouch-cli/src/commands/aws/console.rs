@@ -27,7 +27,7 @@ struct SigninTokenResponse {
 }
 
 /// Run `vouch aws console`.
-pub(crate) async fn run(args: ConsoleArgs) -> Result<()> {
+pub(crate) async fn run(server: &str, args: ConsoleArgs) -> Result<()> {
     // 1. Resolve role ARN
     let role_arn = match args.role {
         Some(r) => r,
@@ -56,13 +56,10 @@ pub(crate) async fn run(args: ConsoleArgs) -> Result<()> {
         }
     };
 
-    // 4. Resolve Vouch session and exchange for STS credentials.
+    // 4. Exchange Vouch session for STS credentials.
     //    Uses exchange_for_sts_credentials directly to keep
     //    SecretAccessKey/SessionToken as SecretString until
     //    serialization.
-    let session = crate::session::resolve_session().await?;
-    let server = &session.server_url;
-
     let result = crate::commands::credential::aws::exchange_for_sts_credentials(
         server,
         &role_arn,
