@@ -84,11 +84,7 @@ pub(crate) async fn run(server: &str, args: ConsoleArgs) -> Result<()> {
     let resp = result
         .http_client
         .post(federation_url)
-        .form(&[
-            ("Action", "getSigninToken"),
-            ("SessionDuration", "3600"),
-            ("Session", &session_encoded),
-        ])
+        .form(&[("Action", "getSigninToken"), ("Session", &session_encoded)])
         .send()
         .await
         .context("failed to request signin token")?;
