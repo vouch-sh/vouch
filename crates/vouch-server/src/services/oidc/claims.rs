@@ -69,6 +69,34 @@ pub struct OidcIdTokenClaims {
         skip_serializing_if = "Option::is_none"
     )]
     pub source_identity: Option<String>,
+    /// AWS session tags for ABAC and CloudTrail attribution.
+    ///
+    /// Uses the nested claim format per:
+    /// <https://docs.aws.amazon.com/IAM/latest/UserGuide/id_session-tags.html>
+    ///
+    /// Tags passed via JWT claims appear as `principalTags` in CloudTrail
+    /// `requestParameters`. Tags passed via STS API parameters do NOT
+    /// appear in CloudTrail for `AssumeRoleWithWebIdentity`.
+    ///
+    /// **Important:** Tags must be in either the JWT OR the STS API call,
+    /// never both — AWS rejects requests that include both.
+    #[serde(
+        rename = "https://aws.amazon.com/tags",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub aws_tags: Option<AwsSessionTags>,
+}
+
+/// AWS session tags claim structure (nested format).
+///
+/// Per the AWS docs, tag values are arrays of strings and transitive
+/// tag keys is an array of key names.
+#[derive(Debug, Clone, Serialize)]
+pub struct AwsSessionTags {
+    /// Tag key-value pairs. Values are single-element arrays per AWS spec.
+    pub principal_tags: std::collections::HashMap<String, Vec<String>>,
+    /// Tag keys that propagate through role chains.
+    pub transitive_tag_keys: Vec<String>,
 }
 
 /// Errors from building OIDC ID token claims.
@@ -88,6 +116,7 @@ pub struct OidcIdTokenClaimsBuilder {
     hardware_aaguid: Option<String>,
     hd: Option<String>,
     source_identity: Option<String>,
+    aws_tags: Option<AwsSessionTags>,
     valid_for_seconds: u64,
 }
 
@@ -103,6 +132,7 @@ impl OidcIdTokenClaimsBuilder {
             hardware_aaguid: None,
             hd: None,
             source_identity: None,
+            aws_tags: None,
             valid_for_seconds: 28800, // 8 hours default
         }
     }
@@ -192,6 +222,17 @@ impl OidcIdTokenClaimsBuilder {
         self
     }
 
+    /// Set AWS session tags for ABAC and CloudTrail attribution.
+    ///
+    /// Tags are embedded in the JWT using the nested `https://aws.amazon.com/tags`
+    /// claim format. AWS extracts them during `AssumeRoleWithWebIdentity` and
+    /// logs them as `principalTags` in CloudTrail.
+    #[must_use]
+    pub fn aws_tags(mut self, tags: AwsSessionTags) -> Self {
+        self.aws_tags = Some(tags);
+        self
+    }
+
     /// Set the token validity period in seconds.
     #[must_use]
     pub fn valid_for_seconds(mut self, seconds: u64) -> Self {
@@ -231,6 +272,7 @@ impl OidcIdTokenClaimsBuilder {
             hardware_aaguid: self.hardware_aaguid,
             hd: self.hd,
             source_identity: self.source_identity,
+            aws_tags: self.aws_tags,
         })
     }
 }
@@ -242,7 +284,7 @@ impl Default for OidcIdTokenClaimsBuilder {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 mod tests {
     use super::*;
 
@@ -391,5 +433,62 @@ mod tests {
         if let Ok(claims) = result {
             assert_eq!(claims.aud, "my-cluster");
         }
+    }
+
+    #[test]
+    fn test_aws_tags_serialized_in_jwt() {
+        let mut principal_tags = std::collections::HashMap::new();
+        principal_tags.insert("email".to_string(), vec!["user@example.com".to_string()]);
+        principal_tags.insert("domain".to_string(), vec!["example.com".to_string()]);
+
+        let aws_tags = AwsSessionTags {
+            principal_tags,
+            transitive_tag_keys: vec!["email".to_string(), "domain".to_string()],
+        };
+
+        let claims =
+            OidcIdTokenClaimsBuilder::for_aws("https://vouch.example.com", "user@example.com")
+                .hd(Some("example.com".to_string()))
+                .aws_tags(aws_tags)
+                .build()
+                .unwrap();
+
+        let json = serde_json::to_value(&claims).unwrap();
+
+        // Verify the nested claim structure
+        let tags = &json["https://aws.amazon.com/tags"];
+        assert!(tags.is_object(), "aws tags claim should be present");
+
+        let ptags = &tags["principal_tags"];
+        assert_eq!(ptags["email"], serde_json::json!(["user@example.com"]));
+        assert_eq!(ptags["domain"], serde_json::json!(["example.com"]));
+
+        let transitive = &tags["transitive_tag_keys"];
+        assert!(
+            transitive
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!("email"))
+        );
+        assert!(
+            transitive
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!("domain"))
+        );
+    }
+
+    #[test]
+    fn test_aws_tags_omitted_when_none() {
+        let claims =
+            OidcIdTokenClaimsBuilder::for_aws("https://vouch.example.com", "user@example.com")
+                .build()
+                .unwrap();
+
+        let json = serde_json::to_value(&claims).unwrap();
+        assert!(
+            json.get("https://aws.amazon.com/tags").is_none(),
+            "aws tags claim should be absent when not set"
+        );
     }
 }

@@ -71,7 +71,9 @@ pub mod token;
 // Re-export commonly used types
 pub use authorization::{AuthorizationCodeParams, ValidatedAuthRequest, check_client_access};
 pub use authorization_details::AuthorizationDetails;
-pub use claims::{ClaimsBuildError, CnfClaim, OidcIdTokenClaims, OidcIdTokenClaimsBuilder};
+pub use claims::{
+    AwsSessionTags, ClaimsBuildError, CnfClaim, OidcIdTokenClaims, OidcIdTokenClaimsBuilder,
+};
 pub use discovery::{OidcDiscoveryDocument, build_discovery_document, build_jwks};
 pub use dpop::{DpopError, ValidatedDpopProof};
 pub use exchange::{TokenExchangeParams, TokenExchangeResult};
