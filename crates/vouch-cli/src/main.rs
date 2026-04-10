@@ -376,6 +376,11 @@ enum Commands {
         #[command(subcommand)]
         command: SetupCommands,
     },
+    /// AWS Identity Center commands for multi-account management.
+    Aws {
+        #[command(subcommand)]
+        command: AwsCommands,
+    },
     /// Generate shell completions.
     Completions(commands::completions::CompletionsArgs),
     /// Check your Vouch environment for common issues.
@@ -403,7 +408,8 @@ impl Commands {
     fn uses_server(&self) -> bool {
         !matches!(
             self,
-            Commands::Completions(_)
+            Commands::Aws { .. }
+                | Commands::Completions(_)
                 | Commands::Diag(_)
                 | Commands::Logout
                 | Commands::Init { .. }
@@ -412,6 +418,7 @@ impl Commands {
     }
 }
 
+use commands::aws::AwsCommands;
 use commands::credential::CredentialCommands;
 use commands::keys::KeysCommands;
 use commands::setup::SetupCommands;
@@ -636,7 +643,16 @@ async fn run() -> Result<()> {
                 profile,
                 role,
                 region,
-            } => commands::setup::aws::run(profile.as_deref(), &role, region.as_deref()).await,
+                discover,
+            } => {
+                commands::setup::aws::run(
+                    profile.as_deref(),
+                    role.as_deref(),
+                    region.as_deref(),
+                    discover,
+                )
+                .await
+            }
             SetupCommands::Ssh { hosts } => {
                 commands::setup::ssh::run(server, hosts.as_deref()).await
             }
@@ -719,6 +735,11 @@ async fn run() -> Result<()> {
                 )
                 .await
             }
+        },
+        Commands::Aws { command } => match command {
+            AwsCommands::Login(args) => commands::aws::login::run(args).await,
+            AwsCommands::Accounts(args) => commands::aws::accounts::run(args).await,
+            AwsCommands::Roles(args) => commands::aws::roles::run(args).await,
         },
         Commands::Completions(args) => {
             let mut cmd = Cli::command();

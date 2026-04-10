@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 //! CLI command implementations.
 
+pub(crate) mod aws;
 pub(crate) mod completions;
 pub(crate) mod credential;
 pub(crate) mod diag;

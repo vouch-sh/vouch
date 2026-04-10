@@ -55,28 +55,33 @@ impl std::fmt::Debug for StsCredentials {
     }
 }
 
+/// Parameters for `AssumeRoleWithWebIdentity`.
+///
+/// Bundles the required and optional parameters to stay within the
+/// project's 5-positional-parameter limit.
+pub(crate) struct WebIdentityRequest<'a> {
+    pub http_client: &'a reqwest::Client,
+    pub role_arn: &'a str,
+    pub role_session_name: &'a str,
+    pub web_identity_token: &'a str,
+    pub region: &'a str,
+    pub domain_suffix: &'a str,
+    pub tags: &'a [(String, String)],
+    /// Optional `SourceIdentity` for CloudTrail audit trails (propagates through role chains).
+    pub source_identity: Option<&'a str>,
+    /// Tags to propagate through role chains via `TransitiveTagKeys`.
+    pub transitive_tag_keys: &'a [&'a str],
+}
+
 /// Call AWS STS `AssumeRoleWithWebIdentity`.
 ///
 /// Uses regional STS endpoints to support all AWS partitions
 /// (commercial, China, GovCloud, EU Sovereign Cloud).
-///
-/// # Arguments
-/// * `role_arn` - The ARN of the role to assume
-/// * `role_session_name` - An identifier for the assumed role session
-/// * `web_identity_token` - The OIDC ID token from Vouch
-/// * `region` - AWS region (e.g., "us-east-1", "cn-north-1")
-/// * `domain_suffix` - AWS domain suffix (e.g., "amazonaws.com")
 pub(crate) async fn assume_role_with_web_identity(
-    http_client: &reqwest::Client,
-    role_arn: &str,
-    role_session_name: &str,
-    web_identity_token: &str,
-    region: &str,
-    domain_suffix: &str,
-    tags: &[(String, String)],
+    req: WebIdentityRequest<'_>,
 ) -> Result<StsCredentials> {
     // Use regional STS endpoint for the appropriate partition
-    let sts_url = format!("https://sts.{region}.{domain_suffix}/");
+    let sts_url = format!("https://sts.{}.{}/", req.region, req.domain_suffix);
 
     let mut form_params: Vec<(String, String)> = vec![
         (
@@ -84,18 +89,33 @@ pub(crate) async fn assume_role_with_web_identity(
             "AssumeRoleWithWebIdentity".to_string(),
         ),
         ("Version".to_string(), "2011-06-15".to_string()),
-        ("RoleArn".to_string(), role_arn.to_string()),
-        ("RoleSessionName".to_string(), role_session_name.to_string()),
+        ("RoleArn".to_string(), req.role_arn.to_string()),
+        (
+            "RoleSessionName".to_string(),
+            req.role_session_name.to_string(),
+        ),
         (
             "WebIdentityToken".to_string(),
-            web_identity_token.to_string(),
+            req.web_identity_token.to_string(),
         ),
     ];
 
     // Add session tags using AWS Tags.member.N format (1-based indexing)
-    append_tag_form_params(&mut form_params, tags);
+    append_tag_form_params(&mut form_params, req.tags);
 
-    let response = http_client
+    // Set SourceIdentity for audit trails (propagates immutably through role chains)
+    if let Some(identity) = req.source_identity {
+        form_params.push(("SourceIdentity".to_string(), identity.to_string()));
+    }
+
+    // Mark tags as transitive so they propagate through AssumeRole chains
+    for (i, key) in req.transitive_tag_keys.iter().enumerate() {
+        let n = i + 1;
+        form_params.push((format!("TransitiveTagKeys.member.{n}"), (*key).to_string()));
+    }
+
+    let response = req
+        .http_client
         .post(&sts_url)
         .form(&form_params)
         .send()
@@ -115,6 +135,43 @@ pub(crate) async fn assume_role_with_web_identity(
         .text()
         .await
         .context("failed to read STS response")?;
+
+    parse_sts_xml_response(&body)
+}
+
+/// Call AWS STS `AssumeRole` using SigV4-signed form POST.
+///
+/// Used for role chaining: assumes a target role using credentials
+/// from a prior `AssumeRoleWithWebIdentity` call.
+pub(crate) async fn assume_role(
+    http_client: &reqwest::Client,
+    role_arn: &str,
+    role_session_name: &str,
+    region: &str,
+    source_creds: &StsCredentials,
+) -> Result<StsCredentials> {
+    use crate::integrations::aws::sigv4::sign_and_send_form_post;
+    use vouch_common::aws::Partition;
+
+    let partition = Partition::from_region(region);
+    let domain_suffix = partition.dns_suffix();
+    let endpoint = format!("https://sts.{region}.{domain_suffix}/");
+
+    // Bind owned values to variables first — sign_and_send_form_post takes &[(&str, &str)]
+    // so all values must outlive the params slice. This pattern mirrors redshift.rs.
+    let duration_str = "3600".to_string();
+
+    let params: &[(&str, &str)] = &[
+        ("Action", "AssumeRole"),
+        ("Version", "2011-06-15"),
+        ("RoleArn", role_arn),
+        ("RoleSessionName", role_session_name),
+        ("DurationSeconds", &duration_str),
+    ];
+
+    let body = sign_and_send_form_post(http_client, &endpoint, "sts", region, source_creds, params)
+        .await
+        .context("failed to call AWS STS AssumeRole")?;
 
     parse_sts_xml_response(&body)
 }

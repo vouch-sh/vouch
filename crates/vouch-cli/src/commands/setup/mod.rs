@@ -23,12 +23,15 @@ pub(crate) enum SetupCommands {
         /// AWS profile name to configure. Defaults to "vouch" if not specified.
         #[arg(long)]
         profile: Option<String>,
-        /// AWS IAM role ARN to assume.
-        #[arg(long)]
-        role: String,
+        /// AWS IAM role ARN to assume. Required unless --discover is set.
+        #[arg(long, required_unless_present = "discover")]
+        role: Option<String>,
         /// AWS region to set in the profile.
         #[arg(long)]
         region: Option<String>,
+        /// Discover accounts and roles via SSO and generate profiles automatically.
+        #[arg(long, conflicts_with = "role")]
+        discover: bool,
     },
     /// Configure SSH to use Vouch certificates.
     Ssh {

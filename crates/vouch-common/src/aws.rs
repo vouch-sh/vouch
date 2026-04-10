@@ -93,6 +93,43 @@ impl Partition {
         }
     }
 
+    /// Infer the AWS partition from a region string.
+    ///
+    /// Checks longer prefixes before shorter ones to avoid false matches
+    /// (e.g., `us-isob-` before `us-iso-`).
+    #[must_use]
+    pub fn from_region(region: &str) -> Self {
+        if region.starts_with("cn-") {
+            Self::AwsCn
+        } else if region.starts_with("us-gov-") {
+            Self::AwsUsGov
+        } else if region.starts_with("us-isob-") {
+            Self::AwsIsoB
+        } else if region.starts_with("us-isof-") {
+            Self::AwsIsoF
+        } else if region.starts_with("us-iso-") {
+            Self::AwsIso
+        } else if region.starts_with("eu-isoe-") {
+            Self::AwsIsoE
+        } else if region.starts_with("eusc-") {
+            Self::AwsEusc
+        } else {
+            Self::Aws
+        }
+    }
+
+    /// SSO OIDC endpoint for this partition.
+    #[must_use]
+    pub fn sso_oidc_endpoint(self, region: &str) -> String {
+        format!("https://oidc.{}.{}", region, self.dns_suffix())
+    }
+
+    /// SSO Portal endpoint for this partition.
+    #[must_use]
+    pub fn sso_portal_endpoint(self, region: &str) -> String {
+        format!("https://portal.sso.{}.{}", region, self.dns_suffix())
+    }
+
     /// DNS suffix for this partition's AWS endpoints.
     #[must_use]
     pub fn dns_suffix(self) -> &'static str {
@@ -397,6 +434,53 @@ mod tests {
         for p in &partitions {
             assert_eq!(Partition::parse(p.as_str()).unwrap(), *p);
         }
+    }
+
+    // =========================================================================
+    // from_region tests
+    // =========================================================================
+
+    #[test]
+    fn test_from_region_commercial() {
+        assert_eq!(Partition::from_region("us-east-1"), Partition::Aws);
+        assert_eq!(Partition::from_region("eu-west-1"), Partition::Aws);
+        assert_eq!(Partition::from_region("ap-southeast-2"), Partition::Aws);
+    }
+
+    #[test]
+    fn test_from_region_china() {
+        assert_eq!(Partition::from_region("cn-north-1"), Partition::AwsCn);
+        assert_eq!(Partition::from_region("cn-northwest-1"), Partition::AwsCn);
+    }
+
+    #[test]
+    fn test_from_region_govcloud() {
+        assert_eq!(Partition::from_region("us-gov-west-1"), Partition::AwsUsGov);
+        assert_eq!(Partition::from_region("us-gov-east-1"), Partition::AwsUsGov);
+    }
+
+    #[test]
+    fn test_from_region_iso_prefix_ordering() {
+        // us-isob- must be checked before us-iso- to avoid false match
+        assert_eq!(Partition::from_region("us-isob-east-1"), Partition::AwsIsoB);
+        assert_eq!(
+            Partition::from_region("us-isof-south-1"),
+            Partition::AwsIsoF
+        );
+        assert_eq!(Partition::from_region("us-iso-east-1"), Partition::AwsIso);
+        assert_eq!(Partition::from_region("us-iso-west-1"), Partition::AwsIso);
+        assert_eq!(Partition::from_region("eu-isoe-west-1"), Partition::AwsIsoE);
+    }
+
+    #[test]
+    fn test_from_region_eusc() {
+        assert_eq!(Partition::from_region("eusc-de-east-1"), Partition::AwsEusc);
+    }
+
+    #[test]
+    fn test_from_region_unknown_defaults_commercial() {
+        assert_eq!(Partition::from_region("unknown-region-1"), Partition::Aws);
+        assert_eq!(Partition::from_region(""), Partition::Aws);
     }
 
     // =========================================================================
