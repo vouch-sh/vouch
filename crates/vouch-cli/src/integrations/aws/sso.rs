@@ -53,9 +53,9 @@ pub(crate) struct SsoClientRegistration {
     pub client_secret: String,
     /// ISO 8601 expiry timestamp (e.g. `"2026-07-09T01:54:45Z"`).
     pub expires_at: String,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
     pub scopes: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
     pub grant_types: Vec<String>,
 }
 
@@ -360,8 +360,8 @@ fn save_registration(
 ) -> Result<()> {
     crate::utils::ensure_secure_dir(cache_dir)?;
     let path = cache_dir.join(format!("{key}.json"));
-    let content = serde_json::to_vec_pretty(reg).context("failed to serialize registration")?;
-    crate::utils::atomic_write_secure(&path, &content)
+    let content = serialize_python_compat(reg).context("failed to serialize registration")?;
+    crate::utils::atomic_write_secure(&path, content.as_bytes())
         .context("failed to write SSO client registration cache")
 }
 
@@ -371,9 +371,56 @@ pub(crate) fn save_access_token(config: &SsoConfig, token: &SsoAccessToken) -> R
     crate::utils::ensure_secure_dir(&cache_dir)?;
     let key = token_cache_key(config);
     let path = cache_dir.join(format!("{key}.json"));
-    let content = serde_json::to_vec_pretty(token).context("failed to serialize access token")?;
-    crate::utils::atomic_write_secure(&path, &content)
+    let content = serialize_python_compat(token).context("failed to serialize access token")?;
+    crate::utils::atomic_write_secure(&path, content.as_bytes())
         .context("failed to write SSO access token cache")
+}
+
+/// Serialize a value to JSON with Python-compatible separators.
+///
+/// Python's `json.dumps()` uses `(', ', ': ')` as default separators,
+/// producing `{"key": "value", ...}`. Rust's `serde_json::to_string()`
+/// uses compact `{"key":"value",...}`. This function matches Python's
+/// format while preserving struct field order (serde serializes fields
+/// in declaration order).
+fn serialize_python_compat<T: Serialize>(value: &T) -> Result<String> {
+    // Serialize to compact JSON first (preserves struct field order),
+    // then add spaces to match Python's default separators.
+    let compact = serde_json::to_string(value).context("failed to serialize to JSON")?;
+    // Post-process: add space after every `:` and `,` that's part of
+    // JSON structure (not inside string values).
+    Ok(add_python_json_spacing(&compact))
+}
+
+/// Add Python-compatible spacing to compact JSON.
+///
+/// Inserts a space after `:` and `,` that appear at the JSON structure
+/// level (not inside quoted strings).
+fn add_python_json_spacing(compact: &str) -> String {
+    let mut result = String::with_capacity(compact.len() * 2);
+    let mut in_string = false;
+    let mut escape_next = false;
+
+    for ch in compact.chars() {
+        if escape_next {
+            result.push(ch);
+            escape_next = false;
+            continue;
+        }
+        if ch == '\\' && in_string {
+            result.push(ch);
+            escape_next = true;
+            continue;
+        }
+        if ch == '"' {
+            in_string = !in_string;
+        }
+        result.push(ch);
+        if !in_string && (ch == ':' || ch == ',') {
+            result.push(' ');
+        }
+    }
+    result
 }
 
 /// Register a new SSO OIDC client (or return cached registration).
@@ -425,10 +472,6 @@ pub(crate) async fn register_client(
         client_secret: String,
         /// Epoch seconds from the API; converted to ISO 8601 for the cache file.
         client_secret_expires_at: i64,
-        #[serde(default)]
-        scopes: Vec<String>,
-        #[serde(default)]
-        grant_types: Vec<String>,
     }
 
     let resp: RegisterResponse = response
@@ -439,12 +482,17 @@ pub(crate) async fn register_client(
     let expires_at = jiff::Timestamp::from_second(resp.client_secret_expires_at)
         .context("invalid clientSecretExpiresAt from SSO OIDC RegisterClient")?;
 
+    // scopes and grantTypes are not returned by the API — botocore
+    // populates them from the request parameters before caching.
     let reg = SsoClientRegistration {
         client_id: resp.client_id,
         client_secret: resp.client_secret,
         expires_at: format_sso_timestamp(expires_at),
-        scopes: resp.scopes,
-        grant_types: resp.grant_types,
+        scopes: config.scopes.clone(),
+        grant_types: vec![
+            "authorization_code".to_string(),
+            "refresh_token".to_string(),
+        ],
     };
 
     save_registration(&cache_dir, &cache_key, &reg)?;

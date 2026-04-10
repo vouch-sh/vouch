@@ -212,9 +212,14 @@ async fn run_discover(profile_prefix: Option<&str>, region: Option<&str>) -> Res
         );
 
         let safe_name = sanitize_profile_name(&account.account_name);
+        let name_part = if safe_name.is_empty() {
+            account.account_id.clone()
+        } else {
+            safe_name
+        };
         let profile_name = match profile_prefix {
-            Some(prefix) => format!("{prefix}-{safe_name}"),
-            None => format!("vouch-{safe_name}"),
+            Some(prefix) => format!("{prefix}-{name_part}"),
+            None => format!("vouch-{name_part}"),
         };
 
         if config.profile_exists(&profile_name) {

@@ -65,14 +65,7 @@ pub(crate) async fn fetch_aws_credentials(
     server: &str,
     role_arn: &str,
 ) -> Result<AwsEnvCredentials> {
-    let cache_key = format!("aws:{role_arn}");
-
-    let data = cache::get_or_fetch(&cache_key, "AWS credentials", || async {
-        let output = super::credential::aws::fetch_and_assume(server, role_arn).await?;
-        let expires_at = output.expiration.clone();
-        Ok((output.to_json(), expires_at))
-    })
-    .await?;
+    let data = super::credential::aws::get_aws_credentials(server, role_arn).await?;
 
     let access_key_id = data
         .get("AccessKeyId")

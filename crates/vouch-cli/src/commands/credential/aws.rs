@@ -124,6 +124,11 @@ pub(crate) struct StsExchangeResult {
 /// Handles the full flow: OIDC token fetch → JWT decode for session tags →
 /// role ARN validation → `AssumeRoleWithWebIdentity`.
 ///
+/// If a management role is configured (via vouch config) and differs from
+/// `role_arn`, automatically chains: AssumeRoleWithWebIdentity into the
+/// management role, then AssumeRole into the target role. All callers get
+/// chaining transparently with no code changes.
+///
 /// The STS session name is always the user's email address (for CloudTrail
 /// visibility). Falls back to `fallback_label` if email is unavailable.
 /// Sets `SourceIdentity` and `TransitiveTagKeys` for audit trails through chains.
@@ -134,7 +139,7 @@ pub(crate) async fn exchange_for_sts_credentials(
     fallback_label: &str,
 ) -> Result<StsExchangeResult> {
     use crate::integrations::aws::sts::{
-        WebIdentityRequest, assume_role_with_web_identity, parse_role_arn,
+        WebIdentityRequest, assume_role, assume_role_with_web_identity, parse_role_arn,
     };
 
     let arn = parse_role_arn(role_arn)?;
@@ -158,6 +163,43 @@ pub(crate) async fn exchange_for_sts_credentials(
 
     let email = get_user_email(server).await;
     let session = email.as_deref().unwrap_or(fallback_label);
+
+    // Check if management role chaining is configured
+    let vouch_config = crate::config::Config::load()?;
+    let management_role = resolve_management_role(&vouch_config)?;
+
+    if let Some(mgmt_role_arn) = management_role.filter(|m| m != role_arn) {
+        // Chain: AssumeRoleWithWebIdentity into management role, then AssumeRole into target
+        let mgmt_arn = parse_role_arn(&mgmt_role_arn)?;
+        let mgmt_domain_suffix = mgmt_arn.partition.dns_suffix();
+        let transitive_keys: Vec<&str> = tags.iter().map(|(k, _)| k.as_str()).collect();
+
+        let mgmt_credentials = assume_role_with_web_identity(WebIdentityRequest {
+            http_client: &http_client,
+            role_arn: &mgmt_role_arn,
+            role_session_name: session,
+            web_identity_token: id_token,
+            region,
+            domain_suffix: mgmt_domain_suffix,
+            tags: &tags,
+            source_identity: None,
+            transitive_tag_keys: &transitive_keys,
+        })
+        .await
+        .context("failed to assume management role")?;
+
+        let credentials = assume_role(&http_client, role_arn, session, region, &mgmt_credentials)
+            .await
+            .context("failed to assume target role via chaining")?;
+
+        return Ok(StsExchangeResult {
+            http_client,
+            credentials,
+            domain_suffix,
+        });
+    }
+
+    // Direct AssumeRoleWithWebIdentity (no chaining needed)
     let transitive_keys: Vec<&str> = tags.iter().map(|(k, _)| k.as_str()).collect();
     let credentials = assume_role_with_web_identity(WebIdentityRequest {
         http_client: &http_client,
@@ -167,7 +209,7 @@ pub(crate) async fn exchange_for_sts_credentials(
         region,
         domain_suffix,
         tags: &tags,
-        source_identity: Some(session),
+        source_identity: None, // extracted from JWT claim by AWS
         transitive_tag_keys: &transitive_keys,
     })
     .await
@@ -180,45 +222,67 @@ pub(crate) async fn exchange_for_sts_credentials(
     })
 }
 
-/// Resolve the management role ARN for the active SSO session.
+/// Resolve the management role ARN from vouch config.
 ///
-/// Looks up the first SSO session from `~/.aws/config`, then checks
-/// `~/.vouch/config.json` for a matching entry in `aws.sso_sessions`.
+/// Tries to match an SSO session from `~/.aws/config` to a key in
+/// `aws.sso_sessions`. If no SSO session is found but there's exactly
+/// one entry in `sso_sessions`, uses that directly (chaining doesn't
+/// require SSO discovery).
 /// Returns `None` if no chaining config is found (direct auth is used).
-fn resolve_management_role(vouch_config: &crate::config::Config) -> Result<Option<String>> {
+pub(crate) fn resolve_management_role(
+    vouch_config: &crate::config::Config,
+) -> Result<Option<String>> {
+    let aws_cfg = match vouch_config.aws() {
+        Some(cfg) if !cfg.sso_sessions.is_empty() => cfg,
+        _ => return Ok(None),
+    };
+
+    // Try to match via SSO session name from ~/.aws/config
     let aws_config = crate::integrations::aws::config::AwsConfig::load()?;
-    let sso_session = aws_config.find_sso_session(None);
-    let session_name = sso_session.as_ref().map(|s| s.name.as_str());
+    if let Some(session_cfg) = aws_config
+        .find_sso_session(None)
+        .and_then(|s| aws_cfg.sso_sessions.get(&s.name))
+    {
+        return Ok(Some(session_cfg.management_role.clone()));
+    }
 
-    let mgmt_role = vouch_config
-        .aws()
-        .and_then(|a| session_name.and_then(|name| a.sso_sessions.get(name)))
-        .map(|s| s.management_role.clone());
+    // Fallback: if there's exactly one sso_sessions entry, use it
+    if let [only] = aws_cfg.sso_sessions.values().collect::<Vec<_>>().as_slice() {
+        return Ok(Some(only.management_role.clone()));
+    }
 
-    Ok(mgmt_role)
+    Ok(None)
 }
 
-/// Run the AWS credential command.
+/// Get cached AWS credentials, fetching fresh ones if needed.
 ///
-/// Uses a cache-first strategy via [`super::cache::get_or_fetch`]:
-/// 1. Check agent cache — return immediately if valid cached credentials exist
-/// 2. Fetch fresh OIDC token from Vouch server, call STS, cache the result
-/// 3. On network error, fall back to cached credentials (if any)
-pub(crate) async fn run(server: &str, role_arn: &str) -> Result<()> {
+/// This is the shared entry point for all code paths that need AWS
+/// STS credentials: `vouch credential aws`, `vouch credential codecommit`,
+/// and `vouch exec`. It handles:
+/// 1. Cache key generation (includes chain path when chaining is configured)
+/// 2. Cache-first fetch via the vouch agent
+pub(crate) async fn get_aws_credentials(server: &str, role_arn: &str) -> Result<serde_json::Value> {
     let vouch_config = crate::config::Config::load()?;
-    let cache_key = if let Some(mgmt_role) = resolve_management_role(&vouch_config)? {
+    let management_role = resolve_management_role(&vouch_config)?;
+    let cache_key = if let Some(ref mgmt_role) = management_role {
         format!("aws:chain:{mgmt_role}:{role_arn}")
     } else {
         format!("aws:{role_arn}")
     };
 
-    let data = super::cache::get_or_fetch(&cache_key, "AWS credentials", || async {
+    super::cache::get_or_fetch(&cache_key, "AWS credentials", || async move {
         let output = fetch_and_assume(server, role_arn).await?;
         let expires_at = output.expiration.clone();
         Ok((output.to_json(), expires_at))
     })
-    .await?;
+    .await
+}
 
+/// Run the AWS credential command.
+///
+/// Outputs AWS credential_process JSON to stdout.
+pub(crate) async fn run(server: &str, role_arn: &str) -> Result<()> {
+    let data = get_aws_credentials(server, role_arn).await?;
     let json = serde_json::to_string(&data).context("failed to serialize credentials")?;
     println!("{json}");
     Ok(())
@@ -226,15 +290,15 @@ pub(crate) async fn run(server: &str, role_arn: &str) -> Result<()> {
 
 /// Fetch an OIDC token from the Vouch server and exchange it for STS credentials.
 ///
-/// If `aws.management_role` is configured and the target role differs from the
-/// management role, chains through the management role (AssumeRoleWithWebIdentity →
-/// AssumeRole). Otherwise uses direct AssumeRoleWithWebIdentity.
+/// Resolves the AWS region, calls `exchange_for_sts_credentials` (which
+/// handles management role chaining internally), and wraps the result in
+/// `CredentialProcessOutput`.
 pub(crate) async fn fetch_and_assume(
     server: &str,
     role_arn: &str,
 ) -> Result<CredentialProcessOutput> {
     use crate::integrations::aws;
-    use crate::integrations::aws::sts::{assume_role, parse_role_arn};
+    use crate::integrations::aws::sts::parse_role_arn;
 
     let profile_name = aws::resolve_profile(None).unwrap_or_default();
     let region = match aws::resolve_region(None, &profile_name) {
@@ -247,40 +311,6 @@ pub(crate) async fn fetch_and_assume(
         }
     };
 
-    let vouch_config = crate::config::Config::load()?;
-    let management_role = resolve_management_role(&vouch_config)?;
-
-    if let Some(mgmt_role_arn) = management_role.filter(|m| m != role_arn) {
-        // Target differs from management role: chain management → target
-        let mgmt_result =
-            exchange_for_sts_credentials(server, &mgmt_role_arn, &region, "vouch-session")
-                .await
-                .context("failed to assume management role")?;
-
-        // Derive a session name from the email for CloudTrail visibility
-        let email = crate::session::get_user_email(server).await;
-        let session_name = email.as_deref().unwrap_or("vouch-session");
-
-        let chained_creds = assume_role(
-            &mgmt_result.http_client,
-            role_arn,
-            session_name,
-            &region,
-            &mgmt_result.credentials,
-        )
-        .await
-        .context("failed to assume target role via chaining")?;
-
-        return Ok(CredentialProcessOutput {
-            version: 1,
-            access_key_id: chained_creds.access_key_id.clone(),
-            secret_access_key: chained_creds.secret_access_key.clone(),
-            session_token: chained_creds.session_token.clone(),
-            expiration: chained_creds.expiration.to_string(),
-        });
-    }
-
-    // Direct AssumeRoleWithWebIdentity (no chaining needed)
     let result = exchange_for_sts_credentials(server, role_arn, &region, "vouch-session").await?;
     let creds = &result.credentials;
     Ok(CredentialProcessOutput {
