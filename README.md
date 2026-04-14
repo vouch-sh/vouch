@@ -6,7 +6,7 @@
 
 **Prove you're here.**
 
-<a href="https://openid.net/certification/"><img src="https://vouch.sh/img/openid-certified.png" alt="OpenID Certified" width="200"></a>
+<a href="https://openid.net/certification/certified-fapi-2-0-op-security-profile-final-message-signing-final/"><img src="https://vouch.sh/img/openid-certified.png" alt="OpenID Certified" width="200"></a>
 
 Hardware-backed authentication that issues short-lived credentials only after a human touches a YubiKey. One touch, one PIN, one 8-hour session — then SSH, AWS, Kubernetes, and more just work.
 
