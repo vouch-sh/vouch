@@ -96,7 +96,7 @@ pub fn print_startup_banner() {
 /// Returns an error if rate limiter configuration fails.
 pub fn build_app(state: Arc<AppState>, config: &config::ServerConfig) -> anyhow::Result<Router> {
     let httpsig_resolver = Arc::new(httpsig::OAuthClientKeyResolver::new(Arc::clone(&state)));
-    let api_routes = build_api_routes(Arc::clone(&state), config, Arc::clone(&httpsig_resolver))?;
+    let api_routes = build_api_routes(&state, config, Arc::clone(&httpsig_resolver))?;
     let ui_routes = build_ui_routes(config)?;
 
     // Install Prometheus metrics recorder and optionally expose /metrics endpoint.
@@ -177,7 +177,7 @@ pub fn build_app(state: Arc<AppState>, config: &config::ServerConfig) -> anyhow:
 ///
 /// These endpoints are brute-force targets so rate limiting is critical.
 fn build_rate_limited_routes(
-    state: Arc<AppState>,
+    state: &Arc<AppState>,
     config: &config::ServerConfig,
     httpsig_resolver: Arc<httpsig::OAuthClientKeyResolver>,
 ) -> anyhow::Result<Router<Arc<AppState>>> {
@@ -196,16 +196,17 @@ fn build_rate_limited_routes(
             vouch_httpsig::middleware::verify_signature::<httpsig::OAuthClientKeyResolver>,
         ));
 
-    // OAuth 2.0 protected resource routes within the rate-limited
-    // group: dynamic client registration management (RFC 7591/7592)
-    // uses bearer tokens and is therefore an OAuth protected resource.
-    // `/oauth/register` POST is technically unauthenticated dynamic
-    // registration but its sibling `{client_id}` endpoints accept the
-    // registration access token. Applying the RFC 9728 middleware
-    // here is safe because the middleware is a no-op for non-401
-    // responses.
-    let registration_routes = Router::new()
-        .route("/oauth/register", post(handlers::oidc::register))
+    // RFC 7592 dynamic client registration MANAGEMENT endpoints
+    // (`GET/PUT/DELETE /oauth/register/{client_id}`) accept a
+    // registration access token and are therefore OAuth 2.0 protected
+    // resources. They get the RFC 9728 `resource_metadata` middleware.
+    //
+    // The sibling `POST /oauth/register` is an UNAUTHENTICATED RFC 7591
+    // endpoint — a 401 there would be a parameter-validation error,
+    // not a missing-credential error, and adding `resource_metadata`
+    // would mislead clients. We register it outside the wrapped
+    // sub-router below.
+    let registration_management_routes = Router::new()
         .route(
             "/oauth/register/{client_id}",
             get(handlers::oidc::read_client)
@@ -213,13 +214,15 @@ fn build_rate_limited_routes(
                 .delete(handlers::oidc::delete_client),
         )
         .layer(axum::middleware::from_fn_with_state(
-            Arc::clone(&state),
+            Arc::clone(state),
             resource_metadata::layer,
         ));
 
     Ok(Router::new()
         .merge(key_routes)
-        .merge(registration_routes)
+        .merge(registration_management_routes)
+        // Unauthenticated dynamic client registration (RFC 7591).
+        .route("/oauth/register", post(handlers::oidc::register))
         .route("/oauth/token", post(handlers::oidc::token))
         .route("/oauth/par", post(handlers::oidc::par))
         .route(
@@ -240,7 +243,7 @@ fn build_rate_limited_routes(
 /// any 401 `WWW-Authenticate` header so unauthenticated callers
 /// discover the metadata document.
 fn build_credential_routes(
-    state: Arc<AppState>,
+    state: &Arc<AppState>,
     config: &config::ServerConfig,
     httpsig_resolver: Arc<httpsig::OAuthClientKeyResolver>,
 ) -> anyhow::Result<Router<Arc<AppState>>> {
@@ -273,7 +276,7 @@ fn build_credential_routes(
             vouch_httpsig::middleware::verify_signature::<httpsig::OAuthClientKeyResolver>,
         ))
         .layer(axum::middleware::from_fn_with_state(
-            state,
+            Arc::clone(state),
             resource_metadata::layer,
         ));
 
@@ -292,7 +295,7 @@ fn build_credential_routes(
 /// is the AS authorization endpoint (not a resource) and therefore
 /// stays outside the wrapped group.
 fn build_general_limited_routes(
-    state: Arc<AppState>,
+    state: &Arc<AppState>,
     config: &config::ServerConfig,
 ) -> anyhow::Result<Router<Arc<AppState>>> {
     let protected_api_routes = Router::new()
@@ -341,7 +344,7 @@ fn build_general_limited_routes(
                 .delete(handlers::scim::delete_group),
         )
         .layer(axum::middleware::from_fn_with_state(
-            state,
+            Arc::clone(state),
             resource_metadata::layer,
         ));
 
@@ -359,8 +362,12 @@ fn build_general_limited_routes(
 }
 
 /// Build all API routes with CORS and cache headers.
+///
+/// `state` is borrowed; the sub-router builders that need to layer
+/// `resource_metadata::layer` clone the `Arc` once internally rather
+/// than at every call site here.
 fn build_api_routes(
-    state: Arc<AppState>,
+    state: &Arc<AppState>,
     config: &config::ServerConfig,
     httpsig_resolver: Arc<httpsig::OAuthClientKeyResolver>,
 ) -> anyhow::Result<Router<Arc<AppState>>> {
@@ -375,7 +382,7 @@ fn build_api_routes(
             get(handlers::oidc::userinfo).post(handlers::oidc::userinfo),
         )
         .layer(axum::middleware::from_fn_with_state(
-            Arc::clone(&state),
+            Arc::clone(state),
             resource_metadata::layer,
         ));
 
@@ -410,18 +417,18 @@ fn build_api_routes(
         .route("/v1/auth/status", get(handlers::auth::status))
         // Merge rate-limited route groups
         .merge(build_rate_limited_routes(
-            Arc::clone(&state),
+            state,
             config,
             Arc::clone(&httpsig_resolver),
         )?)
         .merge(build_credential_routes(
-            Arc::clone(&state),
+            state,
             config,
             Arc::clone(&httpsig_resolver),
         )?)
-        .merge(build_general_limited_routes(Arc::clone(&state), config)?)
+        .merge(build_general_limited_routes(state, config)?)
         .merge(build_api_management_routes(
-            Arc::clone(&state),
+            state,
             config,
             httpsig_resolver,
         )?)
@@ -482,7 +489,7 @@ fn build_public_read_routes(
 /// (not a resource server endpoint per RFC 7009) and is excluded.
 /// The GitHub webhook is not an OAuth resource and is excluded.
 fn build_api_management_routes(
-    state: Arc<AppState>,
+    state: &Arc<AppState>,
     config: &config::ServerConfig,
     httpsig_resolver: Arc<httpsig::OAuthClientKeyResolver>,
 ) -> anyhow::Result<Router<Arc<AppState>>> {
@@ -532,7 +539,7 @@ fn build_api_management_routes(
             post(handlers::applications::revoke_tokens_api),
         )
         .layer(axum::middleware::from_fn_with_state(
-            state,
+            Arc::clone(state),
             resource_metadata::layer,
         ));
 

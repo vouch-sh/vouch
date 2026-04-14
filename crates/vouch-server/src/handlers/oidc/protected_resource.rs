@@ -63,13 +63,7 @@ pub async fn protected_resource_metadata_subpath(
 async fn build_response(
     state: &Arc<AppState>,
     sub_path: Option<String>,
-) -> Result<
-    (
-        [(axum::http::header::HeaderName, &'static str); 1],
-        Json<svc::ProtectedResourceMetadata>,
-    ),
-    StatusCode,
-> {
+) -> Result<impl IntoResponse + use<>, StatusCode> {
     let metadata = svc::build_protected_resource_metadata(state, sub_path.as_deref())
         .await
         .map_err(|e| match e {

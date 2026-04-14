@@ -150,15 +150,27 @@ async fn test_rfc9728_required_fields_present() {
         "scopes_supported must include openid"
     );
 
-    // bearer_methods_supported is fixed to the header location.
+    // bearer_methods_supported lists the token *locations* Vouch
+    // accepts: `header` for every resource endpoint, `body` for the
+    // RFC 6750 §2.2 POST form variant on `/oauth/userinfo`. `query`
+    // is excluded (forbidden by FAPI 2.0).
     let methods = m["bearer_methods_supported"]
         .as_array()
         .expect("bearer_methods_supported must be array");
-    let method_strs: Vec<&str> = methods.iter().filter_map(|v| v.as_str()).collect();
+    let method_strs: std::collections::HashSet<&str> =
+        methods.iter().filter_map(|v| v.as_str()).collect();
+    // RFC 6750 §2.1 (Authorization header) is used by every resource
+    // endpoint; RFC 6750 §2.2 (POST body access_token) is accepted by
+    // the userinfo endpoint. RFC 6750 §2.3 (URI query) is forbidden
+    // by FAPI 2.0 §5.3.2.1 and not supported.
     assert_eq!(
         method_strs,
-        vec!["header"],
-        "Vouch accepts tokens only via Authorization header"
+        std::collections::HashSet::from(["header", "body"]),
+        "Vouch accepts header and body tokens, not query, got: {method_strs:?}"
+    );
+    assert!(
+        !method_strs.contains("query"),
+        "FAPI 2.0 forbids query-string tokens"
     );
 
     // DPoP posture.
@@ -300,6 +312,52 @@ async fn test_rfc9728_optional_config_fields_omitted_when_unset() {
 }
 
 #[tokio::test]
+async fn test_rfc9728_tls_binding_mirrors_discovery_when_mtls_configured() {
+    // RFC 8705 §3 + RFC 9728 §2: when the server is configured with
+    // a TLS certificate (which enables mTLS client auth), the
+    // `tls_client_certificate_bound_access_tokens` field flips to
+    // `true` and matches the AS discovery document. The default test
+    // harness has no TLS, so this test mutates the live ArcSwap
+    // config (the builder re-snapshots per request).
+    use std::sync::Arc;
+
+    let (app, state) = test_app().await;
+
+    // Default: no TLS → false in both documents.
+    let (status, rs_body) = http_get(&app, WELL_KNOWN_SUFFIX, &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    let rs: serde_json::Value = serde_json::from_str(&rs_body).expect("valid JSON");
+    assert_eq!(
+        rs["tls_client_certificate_bound_access_tokens"], false,
+        "default test harness has no TLS"
+    );
+
+    // Flip TLS on by injecting a placeholder cert path. Vouch only
+    // checks `tls_cert.is_some()` for advertising mTLS support
+    // (services/oidc/discovery.rs:294 + protected_resource.rs).
+    let mut new_config = (**state.config()).clone();
+    new_config.tls_cert = Some("/tmp/fake-cert.pem".to_string());
+    state.config.store(Arc::new(new_config));
+
+    let (status, rs_body) = http_get(&app, WELL_KNOWN_SUFFIX, &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    let rs: serde_json::Value = serde_json::from_str(&rs_body).expect("valid JSON");
+    assert_eq!(
+        rs["tls_client_certificate_bound_access_tokens"], true,
+        "with TLS configured, mTLS binding must be advertised"
+    );
+
+    let (status, as_body) = http_get(&app, "/.well-known/openid-configuration", &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    let as_meta: serde_json::Value = serde_json::from_str(&as_body).expect("valid JSON");
+    assert_eq!(
+        rs["tls_client_certificate_bound_access_tokens"],
+        as_meta["tls_client_certificate_bound_access_tokens"],
+        "AS and RS must agree on mTLS binding"
+    );
+}
+
+#[tokio::test]
 async fn test_rfc9728_optional_config_fields_serialized_when_set() {
     // When the operator configures descriptive URLs, the metadata
     // document echoes them verbatim. Mutates the live `ArcSwap`
@@ -392,6 +450,91 @@ async fn test_rfc9728_unknown_subpath_returns_404() {
     let url = format!("{WELL_KNOWN_SUFFIX}/does/not/exist");
     let response = http_get_full(&app, &url, &[]).await;
     assert_eq!(response.status, StatusCode::NOT_FOUND);
+}
+
+/// Canonical, hand-maintained list of every URL prefix Vouch serves
+/// as an OAuth 2.0 protected resource (i.e. requires a bearer/DPoP
+/// access token). Mirrors the routes layered with
+/// [`crate::infra::resource_metadata::layer`] in
+/// [`crate::infra::router`]. The drift-detection test below cross-
+/// checks this against [`PROTECTED_RESOURCE_PREFIXES`] in the service
+/// layer; updates to either side must keep them in sync.
+const KNOWN_PROTECTED_ENDPOINTS: &[&str] = &[
+    "oauth/userinfo",
+    "oauth/introspect",
+    // RFC 7592 management endpoints — `/oauth/register/{client_id}`.
+    // The bare `/oauth/register` POST is RFC 7591 dynamic registration
+    // (unauthenticated) and is intentionally NOT a protected resource.
+    "oauth/register",
+    "v1/credentials/ssh",
+    "v1/credentials/aws/token",
+    "v1/credentials/kubernetes/token",
+    "v1/credentials/github/token",
+    "v1/keys",
+    "api/v1/org",
+    "scim/v2",
+];
+
+#[tokio::test]
+async fn test_rfc9728_allowlist_matches_protected_endpoints() {
+    // Drift guard: any change to PROTECTED_RESOURCE_PREFIXES must be
+    // mirrored in KNOWN_PROTECTED_ENDPOINTS, and vice versa. New
+    // protected resource endpoints must be added to both lists. This
+    // test catches the silent failure mode where a new resource
+    // endpoint is added to the router without being advertised at
+    // `/.well-known/oauth-protected-resource/{path}`.
+    let allowlist: std::collections::HashSet<&str> =
+        PROTECTED_RESOURCE_PREFIXES.iter().copied().collect();
+    let known: std::collections::HashSet<&str> =
+        KNOWN_PROTECTED_ENDPOINTS.iter().copied().collect();
+
+    let missing_from_allowlist: Vec<&&str> = known.difference(&allowlist).collect();
+    assert!(
+        missing_from_allowlist.is_empty(),
+        "Endpoints listed as protected but missing from PROTECTED_RESOURCE_PREFIXES: \
+         {missing_from_allowlist:?}. Add them to the allowlist in \
+         services/oidc/protected_resource.rs."
+    );
+    let extra_in_allowlist: Vec<&&str> = allowlist.difference(&known).collect();
+    assert!(
+        extra_in_allowlist.is_empty(),
+        "Allowlist entries with no matching protected endpoint in this test: \
+         {extra_in_allowlist:?}. Either remove the entry from \
+         PROTECTED_RESOURCE_PREFIXES or add the route to \
+         KNOWN_PROTECTED_ENDPOINTS in tests/rfc9728.rs."
+    );
+}
+
+#[tokio::test]
+async fn test_rfc9728_metadata_serves_every_known_prefix() {
+    // For every known protected-endpoint prefix, the path-insertion
+    // metadata variant must respond 200 and echo the requested
+    // resource URL byte-identically. This is the contract clients
+    // actually depend on — they fetch the metadata, not the resource
+    // itself — and serves as a complementary drift guard: a change
+    // to `PROTECTED_RESOURCE_PREFIXES` that breaks the §4 identity
+    // rule for any known endpoint surfaces here.
+    //
+    // Note: we deliberately do *not* probe the resource endpoints
+    // themselves, because some allowlist entries (e.g. `api/v1/org`)
+    // are namespaces that have no GET handler at the bare prefix.
+    let (app, state) = test_app().await;
+    for prefix in KNOWN_PROTECTED_ENDPOINTS {
+        let url = format!("{WELL_KNOWN_SUFFIX}/{prefix}");
+        let (status, body) = http_get(&app, &url, &[]).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "metadata for {prefix} must be served"
+        );
+        let m: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
+        let expected = format!("{}/{prefix}", state.config().base_url);
+        assert_eq!(
+            m["resource"].as_str(),
+            Some(expected.as_str()),
+            "resource must echo the caller URL byte-identically"
+        );
+    }
 }
 
 // ============================================================================
@@ -690,6 +833,49 @@ async fn test_rfc9728_www_authenticate_not_applied_to_as_metadata() {
     assert!(
         resp.headers.get("www-authenticate").is_none(),
         "AS discovery response must not include WWW-Authenticate"
+    );
+}
+
+#[tokio::test]
+async fn test_rfc9728_root_document_field_set_snapshot() {
+    // Snapshot the *set of fields* present in the root document
+    // (excluding values that vary per-test like `signed_metadata`,
+    // descriptive URLs, the EC public key embedded in the signature,
+    // and `iat`). Catches accidental field additions/removals from
+    // `ProtectedResourceMetadata` in code review.
+    let (app, _state) = test_app().await;
+    let (status, body) = http_get(&app, WELL_KNOWN_SUFFIX, &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    let m: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
+
+    let mut keys: Vec<&str> = m
+        .as_object()
+        .expect("metadata must be a JSON object")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    keys.sort_unstable();
+
+    // Optional config fields are absent in the default test harness.
+    // Adding a new RFC 9728 field requires updating this list — that
+    // is intentional, the snapshot is the change-detection contract.
+    let expected: Vec<&str> = vec![
+        "authorization_servers",
+        "bearer_methods_supported",
+        "dpop_bound_access_tokens_required",
+        "dpop_signing_alg_values_supported",
+        "jwks_uri",
+        "resource",
+        "resource_signing_alg_values_supported",
+        "scopes_supported",
+        "signed_metadata",
+        "tls_client_certificate_bound_access_tokens",
+    ];
+
+    assert_eq!(
+        keys, expected,
+        "Protected Resource Metadata field set drifted. \
+         Update the snapshot or revisit field selection."
     );
 }
 

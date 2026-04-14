@@ -31,6 +31,28 @@
 //! signed claims as authoritative when they differ from the
 //! surrounding JSON; Vouch guarantees they do not differ.
 //!
+//! Including `signed_metadata` even though Vouch is AS == RS behind
+//! mandatory TLS is a defense-in-depth choice rather than a
+//! cryptographic necessity:
+//!
+//! 1. **TLS terminator drift**: the metadata document may be served
+//!    through a CDN, reverse proxy, or service mesh that terminates
+//!    TLS upstream of the Vouch process. A signed copy lets a client
+//!    detect tampering even when it cannot itself validate the
+//!    upstream chain.
+//! 2. **Cache poisoning**: `Cache-Control: public, max-age=3600`
+//!    invites intermediary caches; signed claims survive a
+//!    compromised cache.
+//! 3. **MCP-style clients**: the Model Context Protocol bootstraps
+//!    via RFC 9728 and treats `signed_metadata` as the canonical
+//!    description, falling back to the unsigned JSON only when
+//!    absent. Emitting both ensures both classes of consumer behave
+//!    identically.
+//! 4. **Future-proofing**: when Vouch eventually splits the AS and
+//!    RS deployments (e.g. moves credential issuance behind a
+//!    separate service), `signed_metadata` already establishes the
+//!    issuer-of-record convention without a wire-format change.
+//!
 //! ## Allowlist of sub-paths
 //!
 //! RFC 9728 §4 mandates that the `resource` value returned in the
@@ -121,9 +143,15 @@ pub struct ProtectedResourceMetadata {
 
     /// RFC 9728 §2: OPTIONAL. Supported methods for sending bearer
     /// tokens. Enum values are `"header"`, `"body"`, `"query"`
-    /// (location, not scheme). Vouch only accepts `Authorization:`
-    /// header tokens — both the `Bearer` and `DPoP` auth schemes live
-    /// there — so this is `["header"]`.
+    /// (location, not scheme).
+    ///
+    /// Vouch advertises both `"header"` (the `Authorization:` header,
+    /// covering both `Bearer` and `DPoP` schemes — used by every
+    /// resource endpoint) and `"body"` (POST `application/x-www-form-
+    /// urlencoded` `access_token=…` accepted at `/oauth/userinfo`
+    /// per RFC 6750 §2.2). `"query"` is intentionally excluded:
+    /// query-string tokens are forbidden by FAPI 2.0 §5.3.2.1 and
+    /// none of Vouch's resource endpoints accept them.
     pub bearer_methods_supported: Vec<String>,
 
     /// RFC 9728 §2: OPTIONAL. JWS algorithms Vouch can use to sign
@@ -301,7 +329,7 @@ pub async fn build_protected_resource_metadata(
         authorization_servers: vec![config.base_url.clone()],
         jwks_uri: format!("{}/oauth/jwks", config.base_url.trim_end_matches('/')),
         scopes_supported,
-        bearer_methods_supported: vec!["header".to_string()],
+        bearer_methods_supported: vec!["header".to_string(), "body".to_string()],
         resource_signing_alg_values_supported,
         resource_name: config.resource_name.clone(),
         resource_documentation: config.resource_documentation.clone(),
