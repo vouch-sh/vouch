@@ -7,6 +7,7 @@
 //! ## Endpoints
 //!
 //! - `GET /.well-known/openid-configuration` — OIDC Discovery 1.0 Section 4
+//! - `GET /.well-known/oauth-protected-resource` — RFC 9728 Protected Resource Metadata
 //! - `GET /oauth/jwks` — RFC 7517 Section 5 (JWK Set)
 //! - `GET|POST /oauth/authorize` — RFC 6749 Section 3.1 (Authorization Endpoint)
 //! - `POST /oauth/token` — RFC 6749 Section 3.2 (Token Endpoint)
@@ -27,6 +28,7 @@ mod discovery;
 mod fido2_challenge;
 mod introspect;
 mod par;
+mod protected_resource;
 mod register;
 mod token;
 mod userinfo;
@@ -86,6 +88,9 @@ pub use discovery::{discovery, jwks};
 pub use fido2_challenge::fido2_challenge;
 pub use introspect::{introspect, revoke};
 pub use par::par;
+pub use protected_resource::{
+    protected_resource_metadata_root, protected_resource_metadata_subpath,
+};
 pub use register::{delete_client, read_client, register, update_client};
 pub use token::token;
 pub use userinfo::userinfo;

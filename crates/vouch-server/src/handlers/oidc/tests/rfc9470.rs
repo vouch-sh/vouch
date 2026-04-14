@@ -791,6 +791,14 @@ async fn test_rfc9470_key_delete_requires_step_up() {
         www_auth.contains("max_age="),
         "WWW-Authenticate must contain max_age: {www_auth}"
     );
+    // RFC 9728 §5.2: step-up challenges from protected resources
+    // additionally point at the Protected Resource Metadata
+    // document. Injection is performed by
+    // `infra::resource_metadata::layer`.
+    assert!(
+        www_auth.contains("resource_metadata="),
+        "WWW-Authenticate must include resource_metadata (RFC 9728 §5.2): {www_auth}"
+    );
 
     // Verify body
     let body: serde_json::Value = serde_json::from_str(&response.body).expect("Valid JSON");
