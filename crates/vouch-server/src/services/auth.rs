@@ -144,6 +144,10 @@ pub(crate) async fn lookup_and_verify_authenticator(
         return Err(ServiceError::Forbidden("user_mismatch"));
     }
 
+    if !user.active {
+        return Err(ServiceError::Forbidden("user_deactivated"));
+    }
+
     Ok(AuthenticatorLookupResult {
         authenticator,
         user,

@@ -201,6 +201,21 @@ pub async fn exchange_authorization_code(
     // Decode and validate the authorization code
     let auth_code = decode_authorization_code(state, params.code, params.client_id).await?;
 
+    // Reject deactivated users before issuing tokens
+    let user = db::get_user_by_id(&state.store, &auth_code.user_id)
+        .await
+        .map_err(|e| ServiceError::Internal(e.to_string()))?
+        .ok_or(ServiceError::oauth(
+            OAuthErrorCode::InvalidGrant,
+            "User not found",
+        ))?;
+    if !user.active {
+        return Err(ServiceError::oauth(
+            OAuthErrorCode::InvalidGrant,
+            "User account is deactivated",
+        ));
+    }
+
     // RFC 6749 Section 10.5: Enforce single-use authorization codes.
     let code_hash = hash_token(params.code);
     enforce_single_use_code(state, &code_hash, &auth_code).await?;
