@@ -513,7 +513,9 @@ pub async fn delete_user(
         state.session_cache.invalidate_for_user(&id);
     }
 
-    // Revoke all SSH certificates for this user
+    // Revoke SSH certificates before deleting. If revocation fails,
+    // abort — delete_user would destroy the issued cert records,
+    // making the certs permanently unrevocable.
     if let Err(e) = db::revoke_all_ssh_certificates_for_user(
         &state.store,
         &id,
@@ -523,6 +525,11 @@ pub async fn delete_user(
     .await
     {
         tracing::error!("Failed to revoke SSH certificates for deleted user: {e}");
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ScimError::new(500, "Failed to revoke SSH certificates")),
+        )
+            .into_response();
     }
 
     // Delete user (cascades to authenticators)

@@ -1371,6 +1371,58 @@ async fn test_user_cascade_delete() {
     assert!(get_user_by_id(&store, &user_id).await.unwrap().is_none());
 }
 
+/// Regression test for GH#249 / PR#262: SSH revocation records must
+/// survive user deletion so they remain visible in the KRL.
+#[tokio::test]
+async fn test_user_delete_preserves_ssh_revocations() {
+    let (store, _audit) = test_db().await;
+
+    let (user_id, _) = upsert_user(&store, "revoke-preserve@example.com", None)
+        .await
+        .expect("Failed to create user");
+
+    let serial: u64 = 4_242_424;
+    let expires_at: jiff::Timestamp = "2099-12-31T23:59:59Z".parse().unwrap();
+
+    record_ssh_certificate_issuance(
+        &store,
+        serial,
+        &user_id,
+        "revoke-preserve@example.com",
+        &["revoke-preserve@example.com".to_string()],
+        expires_at,
+    )
+    .await
+    .expect("Failed to record issued SSH certificate");
+
+    revoke_all_ssh_certificates_for_user(
+        &store,
+        &user_id,
+        Some("User deleted by admin"),
+        Some("admin-user-id"),
+    )
+    .await
+    .expect("Failed to revoke SSH certificates");
+
+    delete_user(&store, &user_id).await.expect("delete failed");
+
+    // User should be gone
+    assert!(
+        get_user_by_id(&store, &user_id)
+            .await
+            .expect("query failed")
+            .is_none()
+    );
+
+    // Revocation record must persist after user deletion
+    assert!(
+        is_ssh_certificate_revoked(&store, &serial.to_string())
+            .await
+            .expect("revocation check failed"),
+        "revoked serial must remain after deleting the user"
+    );
+}
+
 #[tokio::test]
 async fn test_oauth_client_cascade_delete() {
     let (store, audit) = test_db().await;

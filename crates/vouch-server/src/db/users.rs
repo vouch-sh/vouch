@@ -116,13 +116,17 @@ pub async fn get_user_by_id(store: &DocumentStore, user_id: &str) -> Result<Opti
 /// 1. Delete sessions
 /// 2. Delete enrollment sessions
 /// 3. Delete authenticators (and their related device_auth refs)
-/// 4. Delete SSH revoked certificates
+/// 4. Delete SSH issued certificate records
 /// 5. Delete token exchanges
 /// 6. Unlink OAuth clients (set user_id to None)
 /// 7. Delete the user
+///
+/// Note: SSH revocation records (`SshRevokedCertDoc`) are intentionally
+/// NOT deleted — they must outlive the user so SSH servers can still
+/// check the KRL. They expire naturally via `expires_at`.
 pub async fn delete_user(store: &DocumentStore, user_id: &str) -> Result<bool> {
     use super::documents::authenticator::AuthenticatorDoc;
-    use super::documents::credential::{EnrollmentSessionDoc, SshRevokedCertDoc};
+    use super::documents::credential::{EnrollmentSessionDoc, SshIssuedCertDoc};
     use super::documents::device_auth::DeviceAuthRequestDoc;
     use super::documents::oauth::OAuthClientDoc;
     use super::documents::oauth::TokenExchangeDoc;
@@ -149,8 +153,8 @@ pub async fn delete_user(store: &DocumentStore, user_id: &str) -> Result<bool> {
     tx.delete_by_index::<AuthenticatorDoc>("user_id", user_id)
         .await?;
 
-    // 4. Delete SSH revoked certificates
-    tx.delete_by_index::<SshRevokedCertDoc>("user_id", user_id)
+    // 4. Delete SSH issued certificate records
+    tx.delete_by_index::<SshIssuedCertDoc>("user_id", user_id)
         .await?;
 
     // 5. Delete token exchanges

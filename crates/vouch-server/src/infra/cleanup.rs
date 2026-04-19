@@ -213,6 +213,12 @@ pub async fn run_cleanup(
         "expired SSH certificate revocations"
     );
 
+    // Clean up expired SSH issued certificate records
+    cleanup_and_log!(
+        db::delete_expired_ssh_issued_certs(store),
+        "expired SSH issued certificate records"
+    );
+
     tracing::debug!("Background cleanup tasks complete");
 }
 

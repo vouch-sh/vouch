@@ -49,8 +49,8 @@ pub async fn issue_ssh_certificate(
         ));
     }
 
-    // Validate token and get user email
-    let (_token, user_email) = extract_resource_token_with_email(
+    // Validate token and get user email + user_id
+    let (token, user_email) = extract_resource_token_with_email(
         &state,
         &headers,
         &jar,
@@ -97,6 +97,46 @@ pub async fn issue_ssh_certificate(
             StatusCode::BAD_REQUEST,
             "signing_failed",
             "Failed to sign certificate",
+        )
+    })?;
+
+    // Record issuance for revocation tracking. If this fails, do NOT
+    // return the certificate — an untracked cert cannot be revoked.
+    let valid_secs_i64 = i64::try_from(valid_seconds).map_err(|_| {
+        ServiceError::api(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "time_error",
+            "Session duration overflow",
+        )
+    })?;
+    let cert_expires_at = Timestamp::now()
+        .checked_add(jiff::Span::new().seconds(valid_secs_i64))
+        .map_err(|_| {
+            ServiceError::api(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "time_error",
+                "Failed to compute certificate expiry",
+            )
+        })?;
+
+    db::record_ssh_certificate_issuance(
+        &state.store,
+        signed.serial,
+        &token.sub,
+        &user_email,
+        &signed.principals,
+        cert_expires_at,
+    )
+    .await
+    .map_err(|e| {
+        tracing::error!(
+            "Failed to record SSH certificate issuance for {}: {e}",
+            redact_email(&user_email),
+        );
+        ServiceError::api(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "recording_failed",
+            "Failed to record certificate issuance",
         )
     })?;
 
