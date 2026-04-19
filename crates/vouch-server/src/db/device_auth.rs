@@ -25,6 +25,7 @@ pub struct DeviceAuthRequest {
     pub expires_at: Timestamp,
     pub interval_seconds: i32,
     pub last_poll_at: Option<Timestamp>,
+    pub consumed_at: Option<Timestamp>,
 }
 
 impl From<Document<DeviceAuthRequestDoc>> for DeviceAuthRequest {
@@ -41,6 +42,7 @@ impl From<Document<DeviceAuthRequestDoc>> for DeviceAuthRequest {
             expires_at: doc.data.expires_at,
             interval_seconds: doc.data.interval_seconds,
             last_poll_at: doc.data.last_poll_at,
+            consumed_at: doc.data.consumed_at,
         }
     }
 }
@@ -90,6 +92,7 @@ pub async fn create_device_auth_request(
         expires_at,
         interval_seconds,
         last_poll_at: None,
+        consumed_at: None,
     };
     let result = store.insert(&doc).await?;
     Ok(result.id)
@@ -173,6 +176,55 @@ pub async fn deny_device_auth(store: &DocumentStore, id: &str) -> Result<()> {
         store.update(id, &data).await?;
     }
     Ok(())
+}
+
+/// Try to consume an authorized device code (RFC 8628 Section 3.5).
+///
+/// Returns `true` if the code was successfully consumed (first use).
+/// Returns `false` if already consumed, not authorized, expired,
+/// or was concurrently consumed by another request (optimistic lock).
+pub async fn try_consume_device_auth(
+    store: &DocumentStore,
+    device_code_hash: &str,
+) -> Result<bool> {
+    let now = Timestamp::now();
+
+    let doc = store
+        .find_one::<DeviceAuthRequestDoc>("device_code_hash", device_code_hash)
+        .await?;
+    let Some(doc) = doc else {
+        return Ok(false);
+    };
+
+    // Only consume if currently Authorized and not expired
+    if doc.data.status != DeviceAuthStatus::Authorized || doc.data.expires_at <= now {
+        return Ok(false);
+    }
+
+    // Atomically transition to Consumed with optimistic concurrency.
+    // If another request consumed between our read and write,
+    // compare_and_update returns false (version mismatch).
+    let mut data = doc.data;
+    data.status = DeviceAuthStatus::Consumed;
+    data.consumed_at = Some(now);
+    store.compare_and_update(&doc.id, doc.version, &data).await
+}
+
+/// Check if a device code was already consumed and return the user_id.
+///
+/// Used during replay detection to identify the victim user
+/// whose tokens should be revoked.
+pub async fn get_consumed_device_auth_user(
+    store: &DocumentStore,
+    device_code_hash: &str,
+) -> Result<Option<String>> {
+    let doc = store
+        .find_one::<DeviceAuthRequestDoc>("device_code_hash", device_code_hash)
+        .await?;
+    match doc {
+        Some(d) if d.data.status == DeviceAuthStatus::Consumed => Ok(d.data.user_id),
+        _ => Ok(None),
+    }
 }
 
 /// Update the last poll time for a device auth request.

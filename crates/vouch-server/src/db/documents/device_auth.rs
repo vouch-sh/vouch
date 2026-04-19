@@ -15,6 +15,8 @@ pub enum DeviceAuthStatus {
     Authorized,
     #[serde(rename = "denied")]
     Denied,
+    #[serde(rename = "consumed")]
+    Consumed,
 }
 
 /// A device authorization request (RFC 8628).
@@ -32,6 +34,9 @@ pub struct DeviceAuthRequestDoc {
     pub expires_at: Timestamp,
     pub interval_seconds: i32,
     pub last_poll_at: Option<Timestamp>,
+    /// Timestamp when the device code was consumed (token issued).
+    #[serde(default)]
+    pub consumed_at: Option<Timestamp>,
 }
 
 impl DocumentType for DeviceAuthRequestDoc {
