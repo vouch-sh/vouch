@@ -154,7 +154,8 @@ pub async fn exchange_jwt_bearer_grant(
     })?;
 
     // 9. Check JTI for replay (RFC 7523 Section 3)
-    //    Atomic insert with UNIQUE(jti, client_id) prevents TOCTOU races.
+    //    Deterministic document ID derived from (jti, issuer) ensures the
+    //    PRIMARY KEY constraint prevents concurrent duplicate inserts.
     if let Some(ref jti) = validated.claims.jti {
         let max_lifetime = i64::from(issuer.max_token_lifetime_seconds);
         let expires_at = Timestamp::now()

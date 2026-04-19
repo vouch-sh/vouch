@@ -2039,6 +2039,69 @@ async fn test_store_jwt_assertion_jti_too_long() {
 }
 
 #[tokio::test]
+async fn test_store_jwt_assertion_jti_at_max_length() {
+    let (store, _audit) = test_db().await;
+
+    // Exactly MAX_JTI_LENGTH (256) must be accepted
+    let max_jti = "j".repeat(256);
+    let stored = store_jwt_assertion_jti(
+        &store,
+        &max_jti,
+        "client-1",
+        "2099-01-01T00:00:00Z".parse().unwrap(),
+    )
+    .await
+    .expect("256-char JTI should not error");
+    assert!(stored, "JTI at max length should be accepted");
+
+    // Replay still detected
+    let replayed = store_jwt_assertion_jti(
+        &store,
+        &max_jti,
+        "client-1",
+        "2099-01-01T00:00:00Z".parse().unwrap(),
+    )
+    .await
+    .expect("replay check should not error");
+    assert!(!replayed, "Replay of max-length JTI should be rejected");
+}
+
+#[tokio::test]
+async fn test_store_jwt_assertion_jti_client_isolation() {
+    let (store, _audit) = test_db().await;
+
+    let expires: jiff::Timestamp = "2099-01-01T00:00:00Z".parse().unwrap();
+
+    // Three independent (jti, client_id) pairs must all succeed
+    let a = store_jwt_assertion_jti(&store, "jti-xyz", "client-A", expires)
+        .await
+        .expect("pair A should not error");
+    let b = store_jwt_assertion_jti(&store, "jti-xyz", "client-B", expires)
+        .await
+        .expect("pair B should not error");
+    let c = store_jwt_assertion_jti(&store, "jti-pqr", "client-A", expires)
+        .await
+        .expect("pair C should not error");
+    assert!(a, "First pair should be accepted");
+    assert!(b, "Same JTI, different client should be accepted");
+    assert!(c, "Different JTI, same client should be accepted");
+
+    // Each pair replays to false independently
+    let a2 = store_jwt_assertion_jti(&store, "jti-xyz", "client-A", expires)
+        .await
+        .expect("replay A");
+    let b2 = store_jwt_assertion_jti(&store, "jti-xyz", "client-B", expires)
+        .await
+        .expect("replay B");
+    let c2 = store_jwt_assertion_jti(&store, "jti-pqr", "client-A", expires)
+        .await
+        .expect("replay C");
+    assert!(!a2, "Replay of pair A should be rejected");
+    assert!(!b2, "Replay of pair B should be rejected");
+    assert!(!c2, "Replay of pair C should be rejected");
+}
+
+#[tokio::test]
 async fn test_delete_expired_jwt_assertion_jtis() {
     let (store, _audit) = test_db().await;
 
