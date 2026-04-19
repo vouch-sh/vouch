@@ -206,6 +206,16 @@ pub(crate) fn validate_saml_response(
             "signed Response element does not match document root Response (XSW)".to_string(),
         ));
     }
+    if signed_element.has_tag_name((NS_SAML, "Assertion")) {
+        let is_direct_child = response_root
+            .children()
+            .any(|child| child.id() == signed_element.id());
+        if !is_direct_child {
+            return Err(ResponseError::Other(
+                "signed Assertion is not a direct child of Response (XSW)".to_string(),
+            ));
+        }
+    }
 
     let destination = response_root
         .attribute("Destination")
@@ -653,7 +663,12 @@ fn parse_saml_timestamp(s: &str) -> Result<Timestamp, ResponseError> {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::too_many_lines)]
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::too_many_lines,
+        clippy::string_slice
+    )]
     use super::*;
 
     // =========================================================================
@@ -1636,6 +1651,82 @@ mod tests {
         assert!(
             matches!(err, ResponseError::Other(ref msg) if msg.contains("SubjectConfirmation")),
             "Expected error for zero SubjectConfirmation children, got: {err}"
+        );
+    }
+
+    /// XSW mitigation: a signed Assertion that is NOT a direct child of the
+    /// Response must be rejected, even if the signature itself is valid.
+    ///
+    /// Attack: the Signature is placed inside a wrapper Assertion (direct
+    /// child of Response — an allowed position for `find_saml_signature`),
+    /// but its Reference URI points to the real Assertion nested inside a
+    /// Container element. Without the direct-child check the victim's
+    /// identity would be accepted.
+    #[test]
+    fn xsw_nested_assertion_rejected() {
+        use base64::Engine as _;
+        use base64::engine::general_purpose::STANDARD as B64;
+
+        let (key_pair, cert_der) = generate_test_key_and_cert();
+        let provider = test_provider(cert_der);
+        let (not_before, not_on_or_after) = valid_time_window();
+
+        // Build a legitimately signed response first.
+        let xml = build_signed_saml_response(
+            &key_pair,
+            "victim@example.com",
+            "_response_xsw",
+            "_assertion_xsw",
+            "_request_xsw",
+            "https://vouch.example.com/saml/acs",
+            "https://idp.example.com",
+            "https://vouch.example.com",
+            &not_before,
+            &not_on_or_after,
+        );
+
+        // Extract the Assertion (which contains an enveloped Signature
+        // whose Reference URI is "#_assertion_xsw").
+        let assertion_start = xml.find("<saml:Assertion").unwrap();
+        let assertion_end = xml.find("</saml:Assertion>").unwrap() + "</saml:Assertion>".len();
+        let assertion_xml = &xml[assertion_start..assertion_end];
+
+        // Extract just the Signature from the assertion.
+        let sig_start = assertion_xml.find("<ds:Signature").unwrap();
+        let sig_end = assertion_xml.find("</ds:Signature>").unwrap() + "</ds:Signature>".len();
+        let signature_xml = &assertion_xml[sig_start..sig_end];
+
+        // Build the victim's assertion WITHOUT its Signature.
+        let assertion_no_sig = format!(
+            "{}{}",
+            &assertion_xml[..sig_start],
+            &assertion_xml[sig_end..],
+        );
+
+        // Construct the XSW attack payload:
+        // - A wrapper Assertion (direct child of Response) holds the
+        //   Signature in an allowed position.
+        // - The real victim Assertion (with matching ID) is nested inside
+        //   a <Container> — NOT a direct child of Response.
+        let response_close_idx = xml.find("</samlp:Response>").unwrap();
+        let xsw_xml = format!(
+            "{}<saml:Assertion xmlns:saml=\"urn:oasis:names:tc:SAML:2.0:assertion\" \
+             ID=\"_wrapper\" Version=\"2.0\" IssueInstant=\"{not_before}\">\
+             {signature_xml}</saml:Assertion>\
+             <Container>{assertion_no_sig}</Container>\
+             {}",
+            &xml[..assertion_start],
+            &xml[response_close_idx..],
+        );
+
+        let base64_response = B64.encode(xsw_xml.as_bytes());
+        let result = validate_saml_response(&base64_response, "_request_xsw", &provider);
+
+        assert!(result.is_err(), "Expected Err for nested Assertion XSW");
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("XSW") || err_msg.contains("direct child"),
+            "Expected XSW-related error, got: {err_msg}"
         );
     }
 
