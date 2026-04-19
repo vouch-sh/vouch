@@ -1435,11 +1435,35 @@ async fn issue_code_after_reauth_check(
     }
 
     // Step 7: Consume PAR if applicable (code issuance, not initial authorize visit).
-    if let Some((request_uri, client_id)) = par_to_consume
-        && let Err(e) =
-            db::consume_pushed_authorization_request(&state.store, request_uri, client_id).await
-    {
-        tracing::error!("Failed to consume PAR: {e}");
+    if let Some((request_uri, client_id)) = par_to_consume {
+        match db::consume_pushed_authorization_request(&state.store, request_uri, client_id).await {
+            Ok(true) => {} // Successfully consumed
+            Ok(false) => {
+                return oauth_error_response(
+                    state,
+                    oauth_client,
+                    validated.redirect_uri(),
+                    "invalid_request",
+                    "The request_uri has already been used or is invalid",
+                    validated.state(),
+                    response_mode,
+                )
+                .await;
+            }
+            Err(e) => {
+                tracing::error!("Failed to consume PAR: {e}");
+                return oauth_error_response(
+                    state,
+                    oauth_client,
+                    validated.redirect_uri(),
+                    "server_error",
+                    "Failed to process pushed authorization request",
+                    validated.state(),
+                    response_mode,
+                )
+                .await;
+            }
+        }
     }
 
     // Step 8: Issue authorization code.

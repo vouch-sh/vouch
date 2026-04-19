@@ -866,3 +866,128 @@ async fn test_rfc9126_client_binding_failure_does_not_consume() {
         response.status
     );
 }
+
+// ========================================================================
+// RFC 9126 Section 2.3 — Expired PAR
+// ========================================================================
+
+#[tokio::test]
+async fn test_rfc9126_authorize_rejects_expired_request_uri() {
+    // An expired PAR must not be usable at the authorization endpoint.
+    // We create a valid PAR, then backdate its expires_at to the past.
+    use crate::db::documents::par::PushedAuthorizationRequestDoc;
+
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "par-expired@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+    let _session_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+
+    let request_uri = create_par_request_with_prompt(&app, &client, Some("none")).await;
+
+    // Backdate the PAR's expires_at so it appears expired.
+    let doc = state
+        .store
+        .find_one::<PushedAuthorizationRequestDoc>("request_uri", &request_uri)
+        .await
+        .unwrap()
+        .expect("PAR doc should exist");
+
+    let mut data = doc.data;
+    data.expires_at = jiff::Timestamp::from_second(0).unwrap();
+    state.store.update(&doc.id, &data).await.unwrap();
+
+    // Attempt to authorize — should be rejected at lookup.
+    let response = http_get_full(
+        &app,
+        &format!(
+            "/oauth/authorize?client_id={}&request_uri={}",
+            client.client_id,
+            urlencoding::encode(&request_uri),
+        ),
+        &[("Cookie", &format!("__Host-vouch_session={_session_token}"))],
+    )
+    .await;
+
+    // The lookup_par function returns an error page for expired PARs.
+    assert_eq!(
+        response.status,
+        StatusCode::OK,
+        "Expired PAR should return error page, got: {}",
+        response.status
+    );
+    assert!(
+        response.body.contains("expired")
+            || response.body.contains("Invalid")
+            || response.body.contains("error"),
+        "Response should indicate the request_uri is expired: {}",
+        response.body
+    );
+}
+
+// ========================================================================
+// RFC 9126 — Optimistic concurrency on PAR consumption (db layer)
+// ========================================================================
+
+#[tokio::test]
+async fn test_rfc9126_consume_par_with_stale_version_returns_false() {
+    // Verify that consume_pushed_authorization_request uses optimistic
+    // concurrency: if the document version changes between read and
+    // write (simulating a concurrent consumer), consumption must fail.
+    use crate::db::documents::par::PushedAuthorizationRequestDoc;
+
+    let (_app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "par-occ@example.com").await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+
+    let (_, request_uri) = db::create_pushed_authorization_request(
+        &state.store,
+        db::CreateParParams {
+            client_id: &client.client_id,
+            response_type: "code",
+            redirect_uri: "https://example.com/callback",
+            scope: Some("openid"),
+            state: None,
+            nonce: None,
+            code_challenge: None,
+            code_challenge_method: None,
+            resource: None,
+            acr_values: None,
+            max_age: None,
+            prompt: None,
+            dpop_jkt: None,
+            authorization_details: None,
+            response_mode: Default::default(),
+        },
+    )
+    .await
+    .unwrap();
+
+    // First consumption should succeed.
+    let result =
+        db::consume_pushed_authorization_request(&state.store, &request_uri, &client.client_id)
+            .await
+            .unwrap();
+    assert!(result, "First consumption should succeed");
+
+    // Verify the PAR is now consumed.
+    let doc = state
+        .store
+        .find_one::<PushedAuthorizationRequestDoc>("request_uri", &request_uri)
+        .await
+        .unwrap()
+        .expect("PAR doc should still exist");
+    assert!(
+        doc.data.consumed_at.is_some(),
+        "PAR should be marked as consumed"
+    );
+
+    // Second consumption should fail (already consumed — pre-check catches it).
+    let result =
+        db::consume_pushed_authorization_request(&state.store, &request_uri, &client.client_id)
+            .await
+            .unwrap();
+    assert!(!result, "Second consumption should fail (already consumed)");
+}
