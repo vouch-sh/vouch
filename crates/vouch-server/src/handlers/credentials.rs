@@ -102,7 +102,13 @@ pub async fn issue_ssh_certificate(
 
     // Record issuance for revocation tracking. If this fails, do NOT
     // return the certificate — an untracked cert cannot be revoked.
-    let valid_secs_i64 = i64::try_from(valid_seconds).unwrap_or(i64::MAX);
+    let valid_secs_i64 = i64::try_from(valid_seconds).map_err(|_| {
+        ServiceError::api(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "time_error",
+            "Session duration overflow",
+        )
+    })?;
     let cert_expires_at = Timestamp::now()
         .checked_add(jiff::Span::new().seconds(valid_secs_i64))
         .map_err(|_| {
