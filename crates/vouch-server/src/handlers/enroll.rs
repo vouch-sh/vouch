@@ -1162,6 +1162,20 @@ pub async fn browser_register_complete(
                 );
             }
             Err(e) => {
+                if state.config().require_attestation_cert {
+                    tracing::warn!(
+                        "Browser enrollment: x5c chain validation \
+                         failed (fatal, require_attestation_cert=true): {e}"
+                    );
+                    return Err(ServiceError::api(
+                        StatusCode::BAD_REQUEST,
+                        "attestation_chain_invalid",
+                        "Attestation certificate chain could not be \
+                         verified against trusted roots. Only genuine \
+                         hardware authenticators with valid attestation \
+                         chains are accepted.",
+                    ));
+                }
                 tracing::warn!(
                     "Browser enrollment: x5c chain validation \
                      failed (non-fatal): {e}"
