@@ -122,7 +122,7 @@ pub async fn get_user_by_id(store: &DocumentStore, user_id: &str) -> Result<Opti
 /// 7. Delete the user
 pub async fn delete_user(store: &DocumentStore, user_id: &str) -> Result<bool> {
     use super::documents::authenticator::AuthenticatorDoc;
-    use super::documents::credential::{EnrollmentSessionDoc, SshRevokedCertDoc};
+    use super::documents::credential::{EnrollmentSessionDoc, SshIssuedCertDoc, SshRevokedCertDoc};
     use super::documents::device_auth::DeviceAuthRequestDoc;
     use super::documents::oauth::OAuthClientDoc;
     use super::documents::oauth::TokenExchangeDoc;
@@ -151,6 +151,10 @@ pub async fn delete_user(store: &DocumentStore, user_id: &str) -> Result<bool> {
 
     // 4. Delete SSH revoked certificates
     tx.delete_by_index::<SshRevokedCertDoc>("user_id", user_id)
+        .await?;
+
+    // 4b. Delete SSH issued certificate records
+    tx.delete_by_index::<SshIssuedCertDoc>("user_id", user_id)
         .await?;
 
     // 5. Delete token exchanges

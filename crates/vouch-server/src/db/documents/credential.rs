@@ -37,6 +37,37 @@ impl DocumentType for EnrollmentSessionDoc {
     }
 }
 
+/// A record of an issued SSH certificate (for revocation tracking).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SshIssuedCertDoc {
+    pub serial: String,
+    pub user_id: String,
+    pub user_email: String,
+    pub principals: Vec<String>,
+    pub expires_at: Timestamp,
+}
+
+impl DocumentType for SshIssuedCertDoc {
+    const DOC_TYPE: &'static str = "ssh_issued_cert";
+
+    fn index_entries(&self) -> Vec<IndexEntry> {
+        vec![
+            IndexEntry {
+                field: "serial",
+                value: self.serial.clone(),
+            },
+            IndexEntry {
+                field: "user_id",
+                value: self.user_id.clone(),
+            },
+        ]
+    }
+
+    fn expires_at(&self) -> Option<Timestamp> {
+        Some(self.expires_at)
+    }
+}
+
 /// A revoked SSH certificate.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SshRevokedCertDoc {

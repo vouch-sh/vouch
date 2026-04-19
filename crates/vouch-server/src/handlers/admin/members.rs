@@ -434,6 +434,19 @@ pub async fn remove_member(
 
     let target_email = target.email.clone();
 
+    // Revoke SSH certificates before deleting (delete_user cascades
+    // and removes the issued cert records, so revoke first).
+    if let Err(e) = db::revoke_all_ssh_certificates_for_user(
+        &state.store,
+        &target_id,
+        Some("User removed by admin"),
+        Some(&admin.id),
+    )
+    .await
+    {
+        tracing::error!("Failed to revoke SSH certificates for removed user: {e}");
+    }
+
     db::delete_user(&state.store, &target_id).await?;
 
     let data = serde_json::json!({
