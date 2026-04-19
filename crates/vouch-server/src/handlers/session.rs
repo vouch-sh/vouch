@@ -359,6 +359,14 @@ pub async fn extract_user_with_org(
             ServiceError::api(StatusCode::UNAUTHORIZED, "unauthorized", "User not found")
         })?;
 
+    if !user.active {
+        return Err(ServiceError::api(
+            StatusCode::UNAUTHORIZED,
+            "unauthorized",
+            "User account is deactivated",
+        ));
+    }
+
     let org_id = user.org_id.clone().ok_or_else(|| {
         ServiceError::api(
             StatusCode::FORBIDDEN,
