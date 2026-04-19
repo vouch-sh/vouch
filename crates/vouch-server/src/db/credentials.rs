@@ -432,6 +432,7 @@ pub async fn revoke_all_ssh_certificates_for_user(
     }
 
     let now = Timestamp::now();
+    let mut tx = store.begin().await?;
     let mut count: u64 = 0;
     for cert in &issued {
         let doc = SshRevokedCertDoc {
@@ -442,9 +443,10 @@ pub async fn revoke_all_ssh_certificates_for_user(
             expires_at: cert.expires_at,
             revoked_by: revoked_by.map(String::from),
         };
-        store.insert(&doc).await?;
+        tx.insert(&doc).await?;
         count += 1;
     }
+    tx.commit().await?;
     Ok(count)
 }
 
