@@ -810,7 +810,7 @@ async fn test_token_revocation_vs_key_deletion() {
     let auth_b = create_test_authenticator(&state.store, &user.id).await;
     let client = create_test_oauth_client(&state.store, &user.id).await;
 
-    let token_a1 = create_test_session(&state, &user.id, &user.email, &auth_a).await;
+    let (token_a1, _) = issue_oauth_access_token(&app, &state, &user, &auth_a, &client).await;
     let token_a2 = create_test_session(&state, &user.id, &user.email, &auth_a).await;
 
     // Revoke token_a1 — kills ALL sessions for the user

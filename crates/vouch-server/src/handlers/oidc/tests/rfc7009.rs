@@ -12,11 +12,11 @@ async fn test_revoke_valid_token() {
     // RFC 7009 Section 2.1: Successful revocation returns 200 and invalidates the token
     let (app, state) = test_app().await;
 
-    // Create a test session and OAuth client for authentication
     let user = create_test_user(&state.store, "revoke@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
     let client = create_test_oauth_client(&state.store, &user.id).await;
+
+    let (token, _) = issue_oauth_access_token(&app, &state, &user, &auth_id, &client).await;
     let auth_header = client.basic_auth_header();
 
     // Verify token works before revocation
@@ -72,11 +72,11 @@ async fn test_revoke_token_invalidates_session() {
     // After revocation, the token should not work
     let (app, state) = test_app().await;
 
-    // Create a test session and OAuth client for authentication
     let user = create_test_user(&state.store, "revoke-check@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
     let client = create_test_oauth_client(&state.store, &user.id).await;
+
+    let (token, _) = issue_oauth_access_token(&app, &state, &user, &auth_id, &client).await;
     let auth_header = client.basic_auth_header();
 
     // Verify token works before revocation
@@ -393,5 +393,51 @@ async fn test_revoke_already_revoked_token_returns_200() {
         status,
         StatusCode::OK,
         "RFC 7009 §2.2: revoking an already-revoked token must still return 200"
+    );
+}
+
+#[tokio::test]
+async fn test_rfc7009_cross_client_revocation_blocked() {
+    // RFC 7009 Section 2.1: Client B must NOT be able to revoke Client A's token.
+    // The server must verify the token was issued to the requesting client.
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "revoke-cross@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client_a = create_test_oauth_client(&state.store, &user.id).await;
+    let client_b = create_test_oauth_client(&state.store, &user.id).await;
+
+    // Issue token for client A
+    let (token_a, _) = issue_oauth_access_token(&app, &state, &user, &auth_id, &client_a).await;
+
+    // Client B tries to revoke Client A's token — returns 200 but must NOT revoke
+    let auth_b = client_b.basic_auth_header();
+    let (status, _) = http_post_form(
+        &app,
+        "/oauth/revoke",
+        &format!("token={}", token_a),
+        &[("Authorization", &auth_b)],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "RFC 7009: revocation always returns 200"
+    );
+
+    // Verify token is still active — cross-client revocation must be a no-op
+    let auth_a = client_a.basic_auth_header();
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/introspect",
+        &format!("token={}", token_a),
+        &[("Authorization", &auth_a)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let result: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(
+        result["active"], true,
+        "Cross-client revocation must not revoke the token"
     );
 }

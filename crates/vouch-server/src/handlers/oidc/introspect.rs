@@ -109,20 +109,21 @@ pub async fn revoke(
         Err(response) => return response,
     };
 
-    match authenticate_client_any(&state, auth).await {
-        Ok(Some(_)) => {}
+    let caller_client_id = match authenticate_client_any(&state, auth).await {
+        Ok(Some((_client, client_id, _jti))) => client_id,
         Ok(None) => {
             // No credentials provided → 401
             return (StatusCode::UNAUTHORIZED, [("www-authenticate", "Basic")]).into_response();
         }
         Err(response) => return response,
-    }
+    };
 
     let _result = svc_revoke(
         &state,
         &params.token,
         params.token_type_hint.as_deref(),
         client_info,
+        &caller_client_id,
     )
     .await;
     // Always return 200 per RFC 7009 Section 2 (for valid clients)
