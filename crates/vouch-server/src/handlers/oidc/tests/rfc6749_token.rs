@@ -1,5 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 //! RFC 6749 — Token endpoint basics and error format tests.
+//!
+//! GH#272 regression tests are also housed here: an authorization code whose
+//! authenticator has been deleted must return `invalid_grant` at the token
+//! endpoint instead of issuing a token.
 
 use super::helpers::*;
 
@@ -284,5 +288,80 @@ async fn test_rfc6749_token_response_no_error_field_on_success() {
     assert!(
         response.get("error_description").is_none(),
         "RFC 6749 §5.1: Successful response must NOT contain 'error_description'"
+    );
+}
+
+// ========================================================================
+// GH#272 — Revoked authenticator blocks code exchange
+// ========================================================================
+
+/// Regression test for GH#272: an authorization code that embeds an
+/// `authenticator_id` for an authenticator that has since been
+/// deleted/revoked must return `invalid_grant` at the token endpoint.
+///
+/// Before the fix, `exchange_authorization_code` looked up the user and
+/// enforced single-use but never verified that the authenticator still
+/// existed.  An attacker (or a stale code in flight) could therefore redeem
+/// a code issued for a revoked key and receive a live access token.
+#[tokio::test]
+async fn test_token_exchange_rejects_revoked_authenticator() {
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "revoked-auth@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+
+    let scope_set = ScopeSet::parse("openid email");
+    let code = issue_authorization_code(
+        &state,
+        AuthorizationCodeParams {
+            client_id: &client.client_id,
+            redirect_uri: "https://example.com/callback",
+            user_id: &user.id,
+            email: &user.email,
+            authenticator_id: &auth_id,
+            aaguid: None,
+            scope: &scope_set,
+            nonce: None,
+            code_challenge: None,
+            code_challenge_method: None,
+            resource: None,
+            acr_values: None,
+            dpop_jkt: None,
+            auth_code_lifetime_seconds:
+                crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
+            authorization_details: None,
+            auth_time: None,
+        },
+    )
+    .await
+    .expect("Failed to issue authorization code");
+
+    // Revoke the authenticator between code issuance and code exchange.
+    db::delete_authenticator(&state.store, &auth_id)
+        .await
+        .expect("Failed to delete authenticator");
+
+    let auth_header = client.basic_auth_header();
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        &format!(
+            "grant_type=authorization_code&code={}&redirect_uri=https://example.com/callback",
+            code
+        ),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "Revoked authenticator must return 400, got: {body}"
+    );
+    let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(
+        error["error"], "invalid_grant",
+        "Revoked authenticator must return invalid_grant, got: {body}"
     );
 }

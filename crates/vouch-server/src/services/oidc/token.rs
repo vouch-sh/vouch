@@ -201,6 +201,12 @@ pub async fn exchange_authorization_code(
     // Decode and validate the authorization code
     let auth_code = decode_authorization_code(state, params.code, params.client_id).await?;
 
+    // RFC 6749 Section 10.5: Enforce single-use authorization codes.
+    // This MUST happen before any other validation to ensure codes are always
+    // consumed, enabling replay detection regardless of subsequent check outcomes.
+    let code_hash = hash_token(params.code);
+    enforce_single_use_code(state, &code_hash, &auth_code).await?;
+
     // Reject deactivated users before issuing tokens
     let user = db::get_user_by_id(&state.store, &auth_code.user_id)
         .await
@@ -216,9 +222,14 @@ pub async fn exchange_authorization_code(
         ));
     }
 
-    // RFC 6749 Section 10.5: Enforce single-use authorization codes.
-    let code_hash = hash_token(params.code);
-    enforce_single_use_code(state, &code_hash, &auth_code).await?;
+    // Reject tokens for revoked/deleted authenticators (GH#272)
+    let _authenticator = db::get_authenticator_by_id(&state.store, &auth_code.authenticator_id)
+        .await
+        .map_err(|e| ServiceError::Internal(e.to_string()))?
+        .ok_or(ServiceError::oauth(
+            OAuthErrorCode::InvalidGrant,
+            "Authenticator not found",
+        ))?;
 
     // RFC 6749 Section 4.1.3: Authenticate the client (if credentials provided)
     let authenticated_client =
