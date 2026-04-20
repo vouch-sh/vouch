@@ -125,7 +125,7 @@ All SCIM operations are logged for compliance and security monitoring:
 |--------|-------------------|-------------------|
 | User record creation | IdP pushes user info | User initiates enrollment |
 | Hardware enrollment | Still requires physical hardware key | Requires physical hardware key |
-| De-provisioning | Immediate via IdP (user deleted, sessions invalidated, certs revoked) | Manual admin action |
+| De-provisioning | Immediate via IdP (user deleted, sessions invalidated, certs revoked) | Manual admin action (sessions invalidated, certs revoked) |
 | Group membership | Synced from IdP | Not available outside SCIM |
 
 **Note**: SCIM pre-provisioning creates a user record, but they still cannot authenticate until they physically enroll a hardware FIDO2 authenticator. The security model remains: no credential without hardware.
