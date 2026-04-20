@@ -161,10 +161,22 @@ pub async fn create_pushed_authorization_request(
     Ok((result.id, request_uri))
 }
 
+/// Controls expiry enforcement when consuming a PAR (RFC 9126).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParConsumptionMode {
+    /// Direct authorization: the user already has a session and the
+    /// PAR is within its 60-second TTL. Enforce the expiry check.
+    EnforceExpiry,
+    /// Deferred authorization: the user completed login after the PAR
+    /// TTL elapsed. Expiry was already validated at `/oauth/authorize`
+    /// (FAPI 2.0 §5.3.2.2 Note 3). Skip the check.
+    SkipExpiry,
+}
+
 /// Consume a pushed authorization request (single-use).
 ///
-/// Returns `None` if not found, expired, already consumed, or bound to a
-/// different client.
+/// Returns `Ok(true)` if successfully consumed, `Ok(false)` if not
+/// found, already consumed, or bound to a different client.
 ///
 /// # Client Binding
 ///
@@ -175,6 +187,7 @@ pub async fn consume_pushed_authorization_request(
     store: &DocumentStore,
     request_uri: &str,
     client_id: &str,
+    mode: ParConsumptionMode,
 ) -> Result<bool> {
     let now = Timestamp::now();
 
@@ -186,11 +199,11 @@ pub async fn consume_pushed_authorization_request(
         return Ok(false);
     };
 
-    // Validate client binding, single-use, and expiry
-    if doc.data.client_id != client_id
-        || doc.data.consumed_at.is_some()
-        || doc.data.expires_at <= now
-    {
+    if doc.data.client_id != client_id || doc.data.consumed_at.is_some() {
+        return Ok(false);
+    }
+
+    if mode == ParConsumptionMode::EnforceExpiry && doc.data.expires_at <= now {
         return Ok(false);
     }
 

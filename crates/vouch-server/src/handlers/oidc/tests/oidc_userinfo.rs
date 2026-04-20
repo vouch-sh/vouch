@@ -12,17 +12,25 @@ async fn test_userinfo_requires_bearer_token() {
     // OIDC Core 1.0 Section 5.3.1: UserInfo requires bearer token
     let (app, _state) = test_app().await;
 
-    // No token — RFC 6750 Section 3.1: bare Bearer challenge, no body
+    // No token — RFC 6750 Section 3.1: Bearer challenge, no error
+    // attributes. RFC 9728 §5.2 additionally appends
+    // `resource_metadata="…"` via the middleware.
     let response = http_get_full(&app, "/oauth/userinfo", &[]).await;
     assert_eq!(response.status, StatusCode::UNAUTHORIZED);
     let www_auth = response
         .headers
         .get("WWW-Authenticate")
-        .expect("401 must include WWW-Authenticate header");
-    assert_eq!(
-        www_auth.to_str().expect("valid header value"),
-        "Bearer",
-        "No-auth case must return bare Bearer challenge with no error attributes"
+        .expect("401 must include WWW-Authenticate header")
+        .to_str()
+        .expect("valid header value");
+    assert!(www_auth.starts_with("Bearer"), "got: {www_auth}");
+    assert!(
+        !www_auth.contains("error="),
+        "No-auth case must not include an error parameter, got: {www_auth}"
+    );
+    assert!(
+        www_auth.contains("resource_metadata="),
+        "RFC 9728 §5.2: resource_metadata must be present, got: {www_auth}"
     );
 
     // Invalid token format
@@ -94,7 +102,10 @@ async fn test_userinfo_401_includes_www_authenticate() {
     // include an error code — return a bare "Bearer" challenge.
     let (app, _state) = test_app().await;
 
-    // No token — should get 401 with bare WWW-Authenticate: Bearer
+    // No token — should get 401 with a Bearer challenge. RFC 9728
+    // §5.2 additionally adds a `resource_metadata` parameter, so the
+    // header is `Bearer resource_metadata="…"` (no `error=…` because
+    // RFC 6750 §3.1 forbids an error when no auth info was sent).
     let response = http_get_full(&app, "/oauth/userinfo", &[]).await;
     assert_eq!(response.status, StatusCode::UNAUTHORIZED);
 
@@ -105,10 +116,17 @@ async fn test_userinfo_401_includes_www_authenticate() {
     let www_auth_str = www_auth
         .to_str()
         .expect("WWW-Authenticate should be a string");
-    assert_eq!(
-        www_auth_str, "Bearer",
-        "No-auth case must return bare Bearer challenge without error attributes, got: {}",
-        www_auth_str
+    assert!(
+        www_auth_str.starts_with("Bearer"),
+        "No-auth case must use Bearer scheme, got: {www_auth_str}"
+    );
+    assert!(
+        !www_auth_str.contains("error="),
+        "No-auth case MUST NOT include an error parameter (RFC 6750 §3.1), got: {www_auth_str}"
+    );
+    assert!(
+        www_auth_str.contains("resource_metadata="),
+        "RFC 9728 §5.2: resource_metadata must be present, got: {www_auth_str}"
     );
 }
 
@@ -205,11 +223,12 @@ async fn test_userinfo_post_body_without_token() {
         .headers
         .get("WWW-Authenticate")
         .expect("401 must include WWW-Authenticate header");
-    assert_eq!(
-        www_auth.to_str().expect("valid header value"),
-        "Bearer",
-        "No-auth POST must return bare Bearer challenge"
-    );
+    let v = www_auth.to_str().expect("valid header value");
+    // RFC 6750 §3.1 + RFC 9728 §5.2: Bearer, no `error=…`, with
+    // `resource_metadata=` attached by the middleware.
+    assert!(v.starts_with("Bearer"), "got: {v}");
+    assert!(!v.contains("error="), "got: {v}");
+    assert!(v.contains("resource_metadata="), "got: {v}");
 }
 
 #[tokio::test]
@@ -218,8 +237,9 @@ async fn test_userinfo_get_body_ignored() {
     // RFC 6750 Section 3.1: No auth info in headers → bare Bearer challenge, no body.
     let (app, _state) = test_app().await;
 
-    // GET with no Authorization header returns bare Bearer challenge even if
-    // query string carries an access_token (query params are not a valid method)
+    // GET with no Authorization header returns a Bearer challenge
+    // even if the query string carries an access_token (query params
+    // are not a valid method). RFC 9728 §5.2 adds `resource_metadata`.
     let response = http_get_full(&app, "/oauth/userinfo?access_token=sometoken", &[]).await;
 
     assert_eq!(response.status, StatusCode::UNAUTHORIZED);
@@ -227,11 +247,10 @@ async fn test_userinfo_get_body_ignored() {
         .headers
         .get("WWW-Authenticate")
         .expect("401 must include WWW-Authenticate header");
-    assert_eq!(
-        www_auth.to_str().expect("valid header value"),
-        "Bearer",
-        "No-auth GET must return bare Bearer challenge"
-    );
+    let v = www_auth.to_str().expect("valid header value");
+    assert!(v.starts_with("Bearer"), "got: {v}");
+    assert!(!v.contains("error="), "got: {v}");
+    assert!(v.contains("resource_metadata="), "got: {v}");
 }
 
 #[tokio::test]

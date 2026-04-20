@@ -36,6 +36,8 @@ pub struct PendingOAuthAuthorization {
     pub authorization_details: Option<serde_json::Value>,
     /// JARM: response_mode from the authorization request.
     pub response_mode: super::documents::oauth::ResponseMode,
+    /// RFC 9126: PAR request_uri to consume when authorization completes.
+    pub par_request_uri: Option<String>,
 }
 
 impl From<Document<PendingOAuthAuthDoc>> for PendingOAuthAuthorization {
@@ -60,6 +62,7 @@ impl From<Document<PendingOAuthAuthDoc>> for PendingOAuthAuthorization {
             dpop_jkt: doc.data.dpop_jkt,
             authorization_details: doc.data.authorization_details,
             response_mode: doc.data.response_mode,
+            par_request_uri: doc.data.par_request_uri,
         }
     }
 }
@@ -84,6 +87,8 @@ pub struct CreatePendingOAuthParams<'a> {
     pub authorization_details: Option<&'a serde_json::Value>,
     /// JARM: response_mode from the authorization request.
     pub response_mode: super::documents::oauth::ResponseMode,
+    /// RFC 9126: PAR request_uri to consume when authorization completes.
+    pub par_request_uri: Option<&'a str>,
 }
 
 /// Create a pending OAuth authorization.
@@ -114,6 +119,7 @@ pub async fn create_pending_oauth_authorization(
         dpop_jkt: params.dpop_jkt.map(String::from),
         authorization_details: params.authorization_details.cloned(),
         response_mode: params.response_mode,
+        par_request_uri: params.par_request_uri.map(String::from),
     };
     let result = store.insert(&doc).await?;
     Ok(result.id)

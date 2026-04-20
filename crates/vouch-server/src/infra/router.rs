@@ -19,7 +19,10 @@ use tower_http::timeout::TimeoutLayer;
 
 use crate::{
     AppState, config, handlers,
-    infra::{httpsig, metrics, rate_limit, request_id, security_headers, static_assets},
+    infra::{
+        httpsig, metrics, rate_limit, request_id, resource_metadata, security_headers,
+        static_assets,
+    },
 };
 
 /// Body limit for credential endpoints (SSH public key is ~500 bytes).
@@ -93,7 +96,7 @@ pub fn print_startup_banner() {
 /// Returns an error if rate limiter configuration fails.
 pub fn build_app(state: Arc<AppState>, config: &config::ServerConfig) -> anyhow::Result<Router> {
     let httpsig_resolver = Arc::new(httpsig::OAuthClientKeyResolver::new(Arc::clone(&state)));
-    let api_routes = build_api_routes(config, Arc::clone(&httpsig_resolver))?;
+    let api_routes = build_api_routes(&state, config, Arc::clone(&httpsig_resolver))?;
     let ui_routes = build_ui_routes(config)?;
 
     // Install Prometheus metrics recorder and optionally expose /metrics endpoint.
@@ -174,6 +177,7 @@ pub fn build_app(state: Arc<AppState>, config: &config::ServerConfig) -> anyhow:
 ///
 /// These endpoints are brute-force targets so rate limiting is critical.
 fn build_rate_limited_routes(
+    state: &Arc<AppState>,
     config: &config::ServerConfig,
     httpsig_resolver: Arc<httpsig::OAuthClientKeyResolver>,
 ) -> anyhow::Result<Router<Arc<AppState>>> {
@@ -192,17 +196,35 @@ fn build_rate_limited_routes(
             vouch_httpsig::middleware::verify_signature::<httpsig::OAuthClientKeyResolver>,
         ));
 
-    Ok(Router::new()
-        .merge(key_routes)
-        .route("/oauth/token", post(handlers::oidc::token))
-        .route("/oauth/par", post(handlers::oidc::par))
-        .route("/oauth/register", post(handlers::oidc::register))
+    // RFC 7592 dynamic client registration MANAGEMENT endpoints
+    // (`GET/PUT/DELETE /oauth/register/{client_id}`) accept a
+    // registration access token and are therefore OAuth 2.0 protected
+    // resources. They get the RFC 9728 `resource_metadata` middleware.
+    //
+    // The sibling `POST /oauth/register` is an UNAUTHENTICATED RFC 7591
+    // endpoint — a 401 there would be a parameter-validation error,
+    // not a missing-credential error, and adding `resource_metadata`
+    // would mislead clients. We register it outside the wrapped
+    // sub-router below.
+    let registration_management_routes = Router::new()
         .route(
             "/oauth/register/{client_id}",
             get(handlers::oidc::read_client)
                 .put(handlers::oidc::update_client)
                 .delete(handlers::oidc::delete_client),
         )
+        .layer(axum::middleware::from_fn_with_state(
+            Arc::clone(state),
+            resource_metadata::layer,
+        ));
+
+    Ok(Router::new()
+        .merge(key_routes)
+        .merge(registration_management_routes)
+        // Unauthenticated dynamic client registration (RFC 7591).
+        .route("/oauth/register", post(handlers::oidc::register))
+        .route("/oauth/token", post(handlers::oidc::token))
+        .route("/oauth/par", post(handlers::oidc::par))
         .route(
             "/oauth/fido2/challenge",
             post(handlers::oidc::fido2_challenge),
@@ -215,13 +237,23 @@ fn build_rate_limited_routes(
 }
 
 /// Rate-limited credential issuance routes.
+///
+/// These are all OAuth 2.0 protected resources (RFC 9728). The
+/// `resource_metadata` middleware attaches the RFC 9728 pointer to
+/// any 401 `WWW-Authenticate` header so unauthenticated callers
+/// discover the metadata document.
 fn build_credential_routes(
+    state: &Arc<AppState>,
     config: &config::ServerConfig,
     httpsig_resolver: Arc<httpsig::OAuthClientKeyResolver>,
 ) -> anyhow::Result<Router<Arc<AppState>>> {
     // Credential routes with HTTP signature verification.
-    // Layer order (outside→inside): rate_limit → body_limit → httpsig → handler
+    // Layer order (outside→inside): rate_limit → body_limit →
+    //     resource_metadata → httpsig → handler
     // Rate limiting runs first to reject DoS before signature verification.
+    // The RFC 9728 middleware wraps the signature middleware so that
+    // when either the signature check or the handler returns 401, the
+    // response gets a `resource_metadata` parameter.
     let credential_routes = Router::new()
         .route(
             "/v1/credentials/ssh",
@@ -242,6 +274,10 @@ fn build_credential_routes(
         .layer(axum::middleware::from_fn_with_state(
             httpsig_resolver,
             vouch_httpsig::middleware::verify_signature::<httpsig::OAuthClientKeyResolver>,
+        ))
+        .layer(axum::middleware::from_fn_with_state(
+            Arc::clone(state),
+            resource_metadata::layer,
         ));
 
     Ok(credential_routes
@@ -252,15 +288,17 @@ fn build_credential_routes(
         .layer(DefaultBodyLimit::max(CREDENTIAL_BODY_LIMIT)))
 }
 
-/// Rate-limited general routes (SCIM, admin, authorize).
+/// Rate-limited general routes (SCIM, admin API, authorize).
+///
+/// `/api/v1/org/*` and `/scim/v2/*` are OAuth 2.0 protected resources
+/// and get the RFC 9728 `resource_metadata` middleware. `/oauth/authorize`
+/// is the AS authorization endpoint (not a resource) and therefore
+/// stays outside the wrapped group.
 fn build_general_limited_routes(
+    state: &Arc<AppState>,
     config: &config::ServerConfig,
 ) -> anyhow::Result<Router<Arc<AppState>>> {
-    Ok(Router::new()
-        .route(
-            "/oauth/authorize",
-            get(handlers::oidc::authorize).post(handlers::oidc::authorize_post),
-        )
+    let protected_api_routes = Router::new()
         // Org admin API (JSON, JWT Bearer auth)
         .route(
             "/api/v1/org/scim-tokens",
@@ -305,6 +343,17 @@ fn build_general_limited_routes(
                 .patch(handlers::scim::patch_group)
                 .delete(handlers::scim::delete_group),
         )
+        .layer(axum::middleware::from_fn_with_state(
+            Arc::clone(state),
+            resource_metadata::layer,
+        ));
+
+    Ok(Router::new()
+        .route(
+            "/oauth/authorize",
+            get(handlers::oidc::authorize).post(handlers::oidc::authorize_post),
+        )
+        .merge(protected_api_routes)
         .layer(maybe_rate_limit!(
             rate_limit::build_general_rate_limiter,
             config
@@ -313,10 +362,30 @@ fn build_general_limited_routes(
 }
 
 /// Build all API routes with CORS and cache headers.
+///
+/// `state` is borrowed; the sub-router builders that need to layer
+/// `resource_metadata::layer` clone the `Arc` once internally rather
+/// than at every call site here.
 fn build_api_routes(
+    state: &Arc<AppState>,
     config: &config::ServerConfig,
     httpsig_resolver: Arc<httpsig::OAuthClientKeyResolver>,
 ) -> anyhow::Result<Router<Arc<AppState>>> {
+    // OAuth 2.0 protected resource: UserInfo endpoint (RFC 9728 §5.2 +
+    // RFC 6750 §3). The `resource_metadata` middleware appends the
+    // RFC 9728 pointer to any 401 `WWW-Authenticate` header produced
+    // by the handler.
+    let userinfo_routes = Router::new()
+        // OIDC Core Section 5.3.1: UserInfo MUST support GET and POST.
+        .route(
+            "/oauth/userinfo",
+            get(handlers::oidc::userinfo).post(handlers::oidc::userinfo),
+        )
+        .layer(axum::middleware::from_fn_with_state(
+            Arc::clone(state),
+            resource_metadata::layer,
+        ));
+
     Ok(Router::new()
         // OIDC Provider endpoints
         .route(
@@ -328,26 +397,41 @@ fn build_api_routes(
             "/.well-known/oauth-authorization-server",
             get(handlers::oidc::discovery),
         )
-        .route("/oauth/jwks", get(handlers::oidc::jwks))
-        // OIDC Core Section 5.3.1: UserInfo MUST support GET and POST
+        // RFC 9728 §3.1: OAuth 2.0 Protected Resource Metadata.
+        // Root document plus the path-insertion form for per-resource
+        // metadata. The wildcard variant is a separate route and does
+        // NOT shadow the sibling well-known URLs above (axum 0.8 route
+        // matcher prefers literal routes over wildcards).
         .route(
-            "/oauth/userinfo",
-            get(handlers::oidc::userinfo).post(handlers::oidc::userinfo),
+            "/.well-known/oauth-protected-resource",
+            get(handlers::oidc::protected_resource_metadata_root),
         )
+        .route(
+            "/.well-known/oauth-protected-resource/{*path}",
+            get(handlers::oidc::protected_resource_metadata_subpath),
+        )
+        .route("/oauth/jwks", get(handlers::oidc::jwks))
+        .merge(userinfo_routes)
         .route("/oauth/callback", get(handlers::enroll::oidc_callback))
         // Auth endpoints
         .route("/v1/auth/status", get(handlers::auth::status))
         // Merge rate-limited route groups
         .merge(build_rate_limited_routes(
+            state,
             config,
             Arc::clone(&httpsig_resolver),
         )?)
         .merge(build_credential_routes(
+            state,
             config,
             Arc::clone(&httpsig_resolver),
         )?)
-        .merge(build_general_limited_routes(config)?)
-        .merge(build_api_management_routes(config, httpsig_resolver)?)
+        .merge(build_general_limited_routes(state, config)?)
+        .merge(build_api_management_routes(
+            state,
+            config,
+            httpsig_resolver,
+        )?)
         .merge(build_public_read_routes(config)?)
         .layer(security_headers::build_api_cors_layer())
         .layer(SetResponseHeaderLayer::if_not_present(
@@ -398,11 +482,18 @@ fn build_public_read_routes(
 ///
 /// Token operations, key management, integration config, webhook, and
 /// application CRUD endpoints that need protection from abuse.
+///
+/// `/oauth/introspect` and the key/application CRUD endpoints are
+/// OAuth 2.0 protected resources and get the RFC 9728
+/// `resource_metadata` middleware. `/oauth/revoke` is an AS endpoint
+/// (not a resource server endpoint per RFC 7009) and is excluded.
+/// The GitHub webhook is not an OAuth resource and is excluded.
 fn build_api_management_routes(
+    state: &Arc<AppState>,
     config: &config::ServerConfig,
     httpsig_resolver: Arc<httpsig::OAuthClientKeyResolver>,
 ) -> anyhow::Result<Router<Arc<AppState>>> {
-    // Key management routes use HTTP signature verification
+    // Key management routes use HTTP signature verification.
     let key_mgmt_routes = Router::new()
         .route("/v1/keys", get(handlers::keys::list_keys))
         .route(
@@ -414,17 +505,14 @@ fn build_api_management_routes(
             vouch_httpsig::middleware::verify_signature::<httpsig::OAuthClientKeyResolver>,
         ));
 
-    Ok(Router::new()
-        // Token operations
-        .route("/oauth/revoke", post(handlers::oidc::revoke))
+    // RFC 9728 protected-resource endpoints in this group. Layered with
+    // the `resource_metadata` middleware at the inner-most level so
+    // the 401 `WWW-Authenticate` injection runs before the outer rate
+    // limiter.
+    let protected_routes = Router::new()
         .route("/oauth/introspect", post(handlers::oidc::introspect))
         // Key management (authenticated API, with HTTP signature verification)
         .merge(key_mgmt_routes)
-        // GitHub webhook API
-        .route(
-            "/api/webhooks/github",
-            post(handlers::github::github_webhook).layer(DefaultBodyLimit::max(WEBHOOK_BODY_LIMIT)),
-        )
         // Applications API (JSON)
         .route(
             "/api/v1/applications",
@@ -450,6 +538,20 @@ fn build_api_management_routes(
             "/api/v1/applications/{id}/revoke",
             post(handlers::applications::revoke_tokens_api),
         )
+        .layer(axum::middleware::from_fn_with_state(
+            Arc::clone(state),
+            resource_metadata::layer,
+        ));
+
+    Ok(Router::new()
+        // Token revocation (AS endpoint per RFC 7009 — not a resource)
+        .route("/oauth/revoke", post(handlers::oidc::revoke))
+        // GitHub webhook (HMAC-authenticated, not OAuth)
+        .route(
+            "/api/webhooks/github",
+            post(handlers::github::github_webhook).layer(DefaultBodyLimit::max(WEBHOOK_BODY_LIMIT)),
+        )
+        .merge(protected_routes)
         .layer(maybe_rate_limit!(
             rate_limit::build_general_rate_limiter,
             config

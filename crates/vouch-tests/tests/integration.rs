@@ -947,9 +947,16 @@ mod oidc {
             .www_authenticate
             .as_deref()
             .expect("Should have WWW-Authenticate header");
-        assert_eq!(
-            www_auth, "Bearer",
-            "No-auth response must use bare Bearer challenge per RFC 6750 Section 3.1"
+        assert!(
+            www_auth.starts_with("Bearer"),
+            "No-auth response must use Bearer challenge per RFC 6750 Section 3.1, got: {www_auth}"
+        );
+        // RFC 9728 §5.2: the middleware appends resource_metadata to 401s
+        // from protected resources. This is compatible with RFC 6750 §3.1
+        // (no error code when authentication info is absent).
+        assert!(
+            www_auth.contains("resource_metadata="),
+            "401 from a protected resource should include resource_metadata (RFC 9728 §5.2)"
         );
     }
 

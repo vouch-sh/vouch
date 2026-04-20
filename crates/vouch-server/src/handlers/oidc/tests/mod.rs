@@ -1,7 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Tests for OIDC handlers — organized by RFC/specification.
 
-#![allow(clippy::expect_used, clippy::unwrap_used, clippy::indexing_slicing)]
+#![allow(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::indexing_slicing,
+    clippy::string_slice
+)]
 
 mod helpers;
 
@@ -36,3 +41,4 @@ mod rfc9449;
 mod rfc9470;
 mod rfc9700;
 mod rfc9701;
+mod rfc9728;

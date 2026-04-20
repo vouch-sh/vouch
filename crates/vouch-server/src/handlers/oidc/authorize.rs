@@ -334,10 +334,9 @@ async fn check_session_and_authorize(
             store_pending_and_redirect(
                 state,
                 validated,
-                &resolved.client,
                 resolved.response_mode,
                 None,
-                par_to_consume,
+                par_to_consume.map(|(uri, _)| uri),
             )
             .await
         }
@@ -1107,6 +1106,40 @@ async fn complete_pending_auth(
         }
     }
 
+    if let Some(ref request_uri) = pending.par_request_uri {
+        match db::consume_pushed_authorization_request(
+            &state.store,
+            request_uri,
+            &pending.client_id,
+            db::ParConsumptionMode::SkipExpiry,
+        )
+        .await
+        {
+            Ok(true) => {} // successfully consumed
+            Ok(false) => {
+                return resolved
+                    .error_redirect(
+                        state,
+                        "invalid_request",
+                        "The request_uri has already been used",
+                        pending.state.as_deref(),
+                    )
+                    .await;
+            }
+            Err(e) => {
+                tracing::error!("Failed to consume PAR at code issuance: {e}");
+                return resolved
+                    .error_redirect(
+                        state,
+                        "server_error",
+                        "Failed to process pushed authorization request",
+                        pending.state.as_deref(),
+                    )
+                    .await;
+            }
+        }
+    }
+
     let scope_set = ScopeSet::parse(pending.scope.as_deref().unwrap_or("openid"));
     let code_params = AuthorizationCodeParams {
         client_id: &pending.client_id,
@@ -1241,50 +1274,14 @@ fn resolve_redirect_uri(
 async fn store_pending_and_redirect(
     state: &Arc<AppState>,
     validated: crate::services::oidc::authorization::ValidatedAuthRequest,
-    oauth_client: &OAuthClient,
     response_mode: ResponseMode,
     prompt_override: Option<Prompt>,
-    par_to_consume: Option<(&str, &str)>,
+    par_request_uri: Option<&str>,
 ) -> Response {
-    // RFC 9126: Consume PAR immediately to enforce single-use semantics.
-    // The pending auth record takes over as the single-use artifact for the
-    // remainder of the flow. Consuming now avoids PAR TTL expiry issues
-    // (PAR lives 60s but user auth takes minutes).
-    if let Some((request_uri, client_id)) = par_to_consume {
-        match db::consume_pushed_authorization_request(&state.store, request_uri, client_id).await {
-            Ok(true) => {} // successfully consumed
-            Ok(false) => {
-                tracing::warn!(
-                    request_uri,
-                    client_id,
-                    "PAR replay detected during pending auth creation"
-                );
-                return oauth_error_response(
-                    state,
-                    oauth_client,
-                    validated.redirect_uri(),
-                    "invalid_request_uri",
-                    "The request_uri has already been used or is invalid",
-                    validated.state(),
-                    response_mode,
-                )
-                .await;
-            }
-            Err(e) => {
-                tracing::error!("Failed to consume PAR: {e}");
-                return oauth_error_response(
-                    state,
-                    oauth_client,
-                    validated.redirect_uri(),
-                    "server_error",
-                    "Failed to process pushed authorization request",
-                    validated.state(),
-                    response_mode,
-                )
-                .await;
-            }
-        }
-    }
+    // FAPI 2.0 Section 5.3.2.2 Note 3: Do NOT consume the PAR here.
+    // The request_uri must remain valid until authorization completes (code issued).
+    // Instead, store the PAR request_uri in the pending auth record so it can be
+    // consumed when the authorization code is issued in complete_pending_auth.
 
     let scope_str = validated.scope().to_space_separated();
     let max_age_i64 = validated.max_age().and_then(|v| i64::try_from(v).ok());
@@ -1308,6 +1305,7 @@ async fn store_pending_and_redirect(
         dpop_jkt: validated.dpop_jkt(),
         authorization_details: ad_value.as_ref(),
         response_mode,
+        par_request_uri,
     };
 
     match db::create_pending_oauth_authorization(&state.store, pending_params).await {
@@ -1420,10 +1418,9 @@ async fn authorize_authenticated_user(
         return store_pending_and_redirect(
             state,
             validated,
-            oauth_client,
             response_mode,
             Some(Prompt::Login),
-            par_to_consume,
+            par_to_consume.map(|(uri, _)| uri),
         )
         .await;
     }
@@ -1493,7 +1490,14 @@ async fn issue_code_after_reauth_check(
 
     // Step 7: Consume PAR if applicable (code issuance, not initial authorize visit).
     if let Some((request_uri, client_id)) = par_to_consume {
-        match db::consume_pushed_authorization_request(&state.store, request_uri, client_id).await {
+        match db::consume_pushed_authorization_request(
+            &state.store,
+            request_uri,
+            client_id,
+            db::ParConsumptionMode::EnforceExpiry,
+        )
+        .await
+        {
             Ok(true) => {} // Successfully consumed
             Ok(false) => {
                 return oauth_error_response(

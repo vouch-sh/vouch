@@ -12,6 +12,7 @@ pub mod metrics;
 pub(crate) mod mtls_listener;
 pub mod rate_limit;
 pub mod request_id;
+pub mod resource_metadata;
 pub mod router;
 pub mod s3_config;
 pub mod security_headers;
