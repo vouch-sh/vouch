@@ -268,6 +268,22 @@ pub async fn deactivate_member(
     db::delete_sessions_for_user(&state.store, &target_id).await?;
     state.session_cache.invalidate_for_user(&target_id);
 
+    // Revoke all SSH certificates for this user
+    if let Err(e) = db::revoke_all_ssh_certificates_for_user(
+        &state.store,
+        &target_id,
+        Some("User deactivated by admin"),
+        Some(&admin.id),
+    )
+    .await
+    {
+        tracing::error!("Failed to revoke SSH certificates for deactivated user: {e}");
+    }
+    // Clear GitHub refresh token to prevent further API access
+    if let Err(e) = db::clear_user_github_refresh_token(&state.store, &target_id).await {
+        tracing::error!("Failed to clear GitHub refresh token for deactivated user: {e}");
+    }
+
     let data = serde_json::json!({
         "action": "deactivate",
         "target_email": target.email,
@@ -375,6 +391,22 @@ pub async fn revoke_member_credentials(
     db::delete_sessions_for_user(&state.store, &target_id).await?;
     state.session_cache.invalidate_for_user(&target_id);
 
+    // Revoke all SSH certificates for this user
+    if let Err(e) = db::revoke_all_ssh_certificates_for_user(
+        &state.store,
+        &target_id,
+        Some("Credentials revoked by admin"),
+        Some(&admin.id),
+    )
+    .await
+    {
+        tracing::error!("Failed to revoke SSH certificates for user: {e}");
+    }
+    // Clear GitHub refresh token to prevent further API access
+    if let Err(e) = db::clear_user_github_refresh_token(&state.store, &target_id).await {
+        tracing::error!("Failed to clear GitHub refresh token for user: {e}");
+    }
+
     let data = serde_json::json!({
         "action": "revoke_credentials",
         "target_email": target.email,
@@ -481,7 +513,7 @@ pub async fn remove_member(
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used, clippy::unwrap_used)]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::indexing_slicing)]
 mod tests {
     use axum::http::StatusCode;
 
@@ -885,6 +917,111 @@ mod tests {
             .await
             .unwrap();
         assert!(deleted.is_none(), "User should be deleted");
+    }
+
+    // ---- Security: SSH certificate revocation on admin actions ----
+
+    /// Record an issued SSH cert for `user_id` so revocation has something to act on.
+    async fn record_test_ssh_cert(state: &crate::AppState, user_id: &str) {
+        let expires_at = jiff::Timestamp::now()
+            .checked_add(jiff::Span::new().hours(8))
+            .expect("future timestamp");
+        crate::db::record_ssh_certificate_issuance(
+            &state.store,
+            42_000_001,
+            user_id,
+            "member@example.com",
+            &["member".to_string()],
+            expires_at,
+        )
+        .await
+        .expect("record issuance");
+    }
+
+    #[tokio::test]
+    async fn test_deactivate_member_revokes_ssh_certificates() {
+        let (app, state) = test_app().await;
+        let (_admin, token, member) = setup_admin_and_member(&state).await;
+        let cookie = admin_cookie(&token);
+
+        record_test_ssh_cert(&state, &member.id).await;
+
+        // Pre-condition: one issued cert, zero revoked.
+        let issued_before =
+            crate::db::get_issued_ssh_certificates_for_user(&state.store, &member.id)
+                .await
+                .unwrap();
+        assert_eq!(issued_before.len(), 1, "setup: one cert should be issued");
+        let revoked_before = crate::db::get_revoked_ssh_certificates(&state.store)
+            .await
+            .unwrap();
+        assert!(revoked_before.is_empty(), "setup: no revocations yet");
+
+        let (status, _body) = http_post_form(
+            &app,
+            &format!("/admin/members/{}/deactivate", member.id),
+            "",
+            &[("Cookie", &cookie), ("Origin", "https://test.example.com")],
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::SEE_OTHER, "deactivate should succeed");
+
+        // The cert should now appear in the revocation list.
+        let revoked = crate::db::get_revoked_ssh_certificates(&state.store)
+            .await
+            .unwrap();
+        assert_eq!(
+            revoked.len(),
+            1,
+            "deactivate_member must revoke all SSH certificates"
+        );
+        assert_eq!(
+            revoked[0].serial, issued_before[0].serial,
+            "revoked serial must match the issued cert"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_revoke_member_credentials_revokes_ssh_certificates() {
+        let (app, state) = test_app().await;
+        let (_admin, token, member) = setup_admin_and_member(&state).await;
+        let cookie = admin_cookie(&token);
+
+        record_test_ssh_cert(&state, &member.id).await;
+
+        let issued_before =
+            crate::db::get_issued_ssh_certificates_for_user(&state.store, &member.id)
+                .await
+                .unwrap();
+        assert_eq!(issued_before.len(), 1, "setup: one cert should be issued");
+
+        let (status, _body) = http_post_form(
+            &app,
+            &format!("/admin/members/{}/revoke-credentials", member.id),
+            "",
+            &[("Cookie", &cookie), ("Origin", "https://test.example.com")],
+        )
+        .await;
+
+        assert_eq!(
+            status,
+            StatusCode::SEE_OTHER,
+            "revoke-credentials should succeed"
+        );
+
+        let revoked = crate::db::get_revoked_ssh_certificates(&state.store)
+            .await
+            .unwrap();
+        assert_eq!(
+            revoked.len(),
+            1,
+            "revoke_member_credentials must revoke all SSH certificates"
+        );
+        assert_eq!(
+            revoked[0].serial, issued_before[0].serial,
+            "revoked serial must match the issued cert"
+        );
     }
 
     // ---- Invalid UUID on admin routes ----
