@@ -2456,6 +2456,122 @@ async fn test_delete_expired_jwt_assertion_jtis() {
 }
 
 // ========================================================================
+// DPoP JTI replay prevention
+// ========================================================================
+
+#[tokio::test]
+async fn test_dpop_jti_replay_prevention() {
+    let (store, _audit) = test_db().await;
+
+    // First use returns true
+    let stored = check_and_store_dpop_jti(&store, "dpop-jti-1", 600)
+        .await
+        .expect("first store should not error");
+    assert!(stored, "First use of a JTI should be accepted");
+
+    // Replay returns false
+    let replayed = check_and_store_dpop_jti(&store, "dpop-jti-1", 600)
+        .await
+        .expect("replay check should not error");
+    assert!(!replayed, "Replay of same JTI should be rejected");
+
+    // Different JTI succeeds
+    let different = check_and_store_dpop_jti(&store, "dpop-jti-2", 600)
+        .await
+        .expect("different JTI should not error");
+    assert!(different, "Different JTI should be accepted");
+}
+
+#[tokio::test]
+async fn test_dpop_jti_empty() {
+    let (store, _audit) = test_db().await;
+
+    let result = check_and_store_dpop_jti(&store, "", 600).await;
+    assert!(result.is_err(), "Empty JTI must return an error");
+}
+
+#[tokio::test]
+async fn test_dpop_jti_too_long() {
+    let (store, _audit) = test_db().await;
+
+    let long_jti = "x".repeat(257);
+    let result = check_and_store_dpop_jti(&store, &long_jti, 600).await;
+    assert!(
+        result.is_err(),
+        "JTI exceeding max length must return an error"
+    );
+}
+
+#[tokio::test]
+async fn test_dpop_jti_at_max_length() {
+    let (store, _audit) = test_db().await;
+
+    let max_jti = "d".repeat(256);
+    let stored = check_and_store_dpop_jti(&store, &max_jti, 600)
+        .await
+        .expect("256-char JTI should not error");
+    assert!(stored, "JTI at max length should be accepted");
+
+    let replayed = check_and_store_dpop_jti(&store, &max_jti, 600)
+        .await
+        .expect("replay check should not error");
+    assert!(!replayed, "Replay of max-length JTI should be rejected");
+}
+
+#[tokio::test]
+async fn test_dpop_jti_concurrent_insert_rejects_duplicates() {
+    let (store, _audit) = test_db().await;
+    let store = Arc::new(store);
+
+    let num_tasks = 20;
+    let mut handles = Vec::with_capacity(num_tasks);
+
+    for _ in 0..num_tasks {
+        let s = Arc::clone(&store);
+        handles.push(tokio::spawn(async move {
+            check_and_store_dpop_jti(&s, "same-jti", 600).await
+        }));
+    }
+
+    let mut successes = 0u32;
+    for handle in handles {
+        let result = handle.await.expect("task should not panic");
+        if let Ok(true) = result {
+            successes += 1;
+        }
+    }
+
+    assert_eq!(
+        successes, 1,
+        "Exactly one concurrent insert should succeed, got {successes}"
+    );
+}
+
+#[tokio::test]
+async fn test_delete_expired_dpop_jtis() {
+    let (store, _audit) = test_db().await;
+
+    // Insert one with past expiry (validity_seconds=0 won't work since
+    // it computes from now; instead insert directly with short validity
+    // and rely on the fact that we can test cleanup.)
+    check_and_store_dpop_jti(&store, "valid-dpop-jti", 3600)
+        .await
+        .expect("insert valid");
+
+    // Cleanup should not delete the valid one
+    let deleted = delete_expired_dpop_jtis(&store, "")
+        .await
+        .expect("delete_expired should not error");
+    assert_eq!(deleted, 0, "No expired JTIs to delete");
+
+    // The valid one should still block replay
+    let still_blocked = check_and_store_dpop_jti(&store, "valid-dpop-jti", 3600)
+        .await
+        .expect("check");
+    assert!(!still_blocked, "Valid JTI should still block replay");
+}
+
+// ========================================================================
 // SCIM filter parsing — co / sw operators and error path
 // ========================================================================
 
