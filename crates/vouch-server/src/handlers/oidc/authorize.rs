@@ -331,7 +331,14 @@ async fn check_session_and_authorize(
                     )
                     .await;
             }
-            store_pending_and_redirect(state, validated, resolved.response_mode, None).await
+            store_pending_and_redirect(
+                state,
+                validated,
+                resolved.response_mode,
+                None,
+                par_to_consume,
+            )
+            .await
         }
     }
 }
@@ -1235,7 +1242,50 @@ async fn store_pending_and_redirect(
     validated: crate::services::oidc::authorization::ValidatedAuthRequest,
     response_mode: ResponseMode,
     prompt_override: Option<Prompt>,
+    par_to_consume: Option<(&str, &str)>,
 ) -> Response {
+    // RFC 9126: Consume PAR immediately to enforce single-use semantics.
+    // The pending auth record takes over as the single-use artifact for the
+    // remainder of the flow. Consuming now avoids PAR TTL expiry issues
+    // (PAR lives 60s but user auth takes minutes).
+    if let Some((request_uri, client_id)) = par_to_consume {
+        match db::consume_pushed_authorization_request(&state.store, request_uri, client_id).await {
+            Ok(true) => {} // successfully consumed
+            Ok(false) => {
+                tracing::warn!(
+                    request_uri,
+                    client_id,
+                    "PAR replay detected during pending auth creation"
+                );
+                return build_authorization_redirect(
+                    validated.redirect_uri(),
+                    &[
+                        ("error", "invalid_request_uri"),
+                        (
+                            "error_description",
+                            "The request_uri has already been used or is invalid",
+                        ),
+                        ("iss", &state.config().base_url),
+                    ],
+                );
+            }
+            Err(e) => {
+                tracing::error!("Failed to consume PAR: {e}");
+                return build_authorization_redirect(
+                    validated.redirect_uri(),
+                    &[
+                        ("error", "server_error"),
+                        (
+                            "error_description",
+                            "Failed to process pushed authorization request",
+                        ),
+                        ("iss", &state.config().base_url),
+                    ],
+                );
+            }
+        }
+    }
+
     let scope_str = validated.scope().to_space_separated();
     let max_age_i64 = validated.max_age().and_then(|v| i64::try_from(v).ok());
     let ad_value = validated.authorization_details_value();
@@ -1367,8 +1417,14 @@ async fn authorize_authenticated_user(
 
     // Step 4: Re-auth needed — store pending request and redirect to login.
     if needs_reauth {
-        return store_pending_and_redirect(state, validated, response_mode, Some(Prompt::Login))
-            .await;
+        return store_pending_and_redirect(
+            state,
+            validated,
+            response_mode,
+            Some(Prompt::Login),
+            par_to_consume,
+        )
+        .await;
     }
 
     // Steps 5-8: ACR + resource + PAR consumption + code issuance.
