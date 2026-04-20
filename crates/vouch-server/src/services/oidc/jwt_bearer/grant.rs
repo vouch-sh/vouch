@@ -153,6 +153,20 @@ pub async fn exchange_jwt_bearer_grant(
         ServiceError::oauth(OAuthErrorCode::InvalidGrant, "User not found")
     })?;
 
+    // 8b. Reject deactivated users
+    if !user.active {
+        tracing::warn!(
+            target: "security",
+            user_id = %user.id,
+            issuer = %issuer.issuer,
+            "JWT bearer grant rejected: user account is deactivated"
+        );
+        return Err(ServiceError::oauth(
+            OAuthErrorCode::InvalidGrant,
+            "User account is deactivated",
+        ));
+    }
+
     // 9. Check JTI for replay (RFC 7523 Section 3)
     //    Deterministic document ID derived from (jti, issuer) ensures the
     //    PRIMARY KEY constraint prevents concurrent duplicate inserts.

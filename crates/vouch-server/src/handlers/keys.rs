@@ -111,6 +111,14 @@ pub async fn register_start(
             ServiceError::api(StatusCode::NOT_FOUND, "user_not_found", "User not found")
         })?;
 
+    if !user.active {
+        return Err(ServiceError::api(
+            StatusCode::UNAUTHORIZED,
+            "unauthorized",
+            "User account is deactivated",
+        ));
+    }
+
     tracing::info!(
         "Registration start for authenticated user: {} (adding key: {})",
         redact_email(&user.email),
@@ -588,6 +596,31 @@ mod tests {
             http_post_json(&app, "/v1/keys/register/start", r#"{"name":"My Key"}"#, &[]).await;
 
         assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn test_register_start_rejects_deactivated_user() {
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "deactivated-register@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+
+        crate::db::update_user_active_status(&state.store, &user.id, false)
+            .await
+            .expect("deactivate user");
+
+        let (status, body) = http_post_json(
+            &app,
+            "/v1/keys/register/start",
+            r#"{"name":"My Key"}"#,
+            &[("Authorization", &format!("Bearer {token}"))],
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+        assert_eq!(error["code"], "unauthorized");
+        assert_eq!(error["message"], "User account is deactivated");
     }
 
     // ========================================================================
