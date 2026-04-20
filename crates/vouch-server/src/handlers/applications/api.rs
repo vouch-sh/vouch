@@ -548,38 +548,28 @@ pub async fn update_application_api(
         .and_then(|s| s.parse::<AccessScope>().ok());
 
     // Get user to check active status and org membership
-    let user = if access_scope == Some(AccessScope::Organization) {
-        let u = db::get_user_by_id(&state.store, &token.sub)
-            .await
-            .map_err(|e| {
-                tracing::error!("Failed to get user for scope validation: {e}");
-                ServiceError::api(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "db_error",
-                    "Internal database error",
-                )
-            })?
-            .ok_or_else(|| {
-                ServiceError::api(StatusCode::NOT_FOUND, "not_found", "User not found")
-            })?;
+    let user = db::get_user_by_id(&state.store, &token.sub)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to get user: {e}");
+            ServiceError::api(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "db_error",
+                "Internal database error",
+            )
+        })?
+        .ok_or_else(|| ServiceError::api(StatusCode::NOT_FOUND, "not_found", "User not found"))?;
 
-        if !u.active {
-            return Err(ServiceError::api(
-                StatusCode::UNAUTHORIZED,
-                "unauthorized",
-                "User account is deactivated",
-            ));
-        }
-
-        Some(u)
-    } else {
-        None
-    };
+    if !user.active {
+        return Err(ServiceError::api(
+            StatusCode::UNAUTHORIZED,
+            "unauthorized",
+            "User account is deactivated",
+        ));
+    }
 
     // Validate: Organization scope requires user to have an org
-    if access_scope == Some(AccessScope::Organization)
-        && user.as_ref().is_some_and(|u| u.org_id.is_none())
-    {
+    if access_scope == Some(AccessScope::Organization) && user.org_id.is_none() {
         return Err(ServiceError::api(
             StatusCode::BAD_REQUEST,
             "invalid_access_scope",
@@ -589,7 +579,7 @@ pub async fn update_application_api(
 
     // Set org_id only for organization-scoped apps
     let org_id = if access_scope == Some(AccessScope::Organization) {
-        user.as_ref().and_then(|u| u.org_id.as_deref())
+        user.org_id.as_deref()
     } else {
         None
     };
@@ -2245,7 +2235,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_update_application_rejects_deactivated_user_on_org_scope() {
+    async fn test_update_application_rejects_deactivated_user() {
         let (app, state) = test_app().await;
         let user = create_test_user(&state.store, "deactivated-update@example.com").await;
         let auth_id = create_test_authenticator(&state.store, &user.id).await;
@@ -2261,7 +2251,7 @@ mod tests {
             &app,
             "PATCH",
             &format!("/api/v1/applications/{}", client.app_id),
-            Some(r#"{"access_scope": "organization"}"#.to_string()),
+            Some(r#"{"name": "Renamed App"}"#.to_string()),
             &[
                 ("Content-Type", "application/json"),
                 ("Authorization", &auth),
