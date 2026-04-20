@@ -104,6 +104,7 @@ pub const PROTECTED_RESOURCE_PREFIXES: &[&str] = &[
     "v1/credentials/github/token",
     "v1/keys",
     "api/v1/org",
+    "api/v1/applications",
     "scim/v2",
 ];
 
@@ -335,6 +336,7 @@ pub async fn build_protected_resource_metadata(
         resource_documentation: config.resource_documentation.clone(),
         resource_policy_uri: config.resource_policy_uri.clone(),
         resource_tos_uri: config.resource_tos_uri.clone(),
+
         tls_client_certificate_bound_access_tokens: config.tls_cert.is_some(),
         authorization_details_types_supported: None,
         dpop_signing_alg_values_supported,

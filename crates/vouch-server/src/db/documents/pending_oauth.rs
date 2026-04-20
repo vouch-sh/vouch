@@ -36,6 +36,9 @@ pub struct PendingOAuthAuthDoc {
     /// JARM: response_mode from the authorization request.
     #[serde(default)]
     pub response_mode: super::oauth::ResponseMode,
+    /// RFC 9126: PAR request_uri to consume when authorization completes.
+    #[serde(default)]
+    pub par_request_uri: Option<String>,
 }
 
 impl DocumentType for PendingOAuthAuthDoc {

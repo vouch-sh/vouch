@@ -280,35 +280,41 @@ async fn test_rfc9728_resource_signing_algs_match_available_keys() {
 }
 
 #[tokio::test]
-async fn test_rfc9728_optional_config_fields_omitted_when_unset() {
-    // When `ServerConfig.resource_name` / `resource_documentation`
-    // / `resource_policy_uri` / `resource_tos_uri` are None, the
-    // JSON response omits them entirely (no explicit `null`).
+async fn test_rfc9728_descriptive_fields_have_defaults() {
+    // The descriptive metadata fields have defaults and are present
+    // in the metadata document without explicit configuration.
     let (app, state) = test_app().await;
-    // Test harness default leaves these fields as None.
-    assert!(state.config().resource_name.is_none());
-    assert!(state.config().resource_documentation.is_none());
-    assert!(state.config().resource_policy_uri.is_none());
-    assert!(state.config().resource_tos_uri.is_none());
+    assert_eq!(state.config().resource_name.as_deref(), Some("Vouch"));
+    assert_eq!(
+        state.config().resource_documentation.as_deref(),
+        Some("https://vouch.sh/docs/")
+    );
+    assert_eq!(
+        state.config().resource_policy_uri.as_deref(),
+        Some("https://vouch.sh/privacy/")
+    );
+    assert_eq!(
+        state.config().resource_tos_uri.as_deref(),
+        Some("https://vouch.sh/terms/")
+    );
 
     let (status, body) = http_get(&app, WELL_KNOWN_SUFFIX, &[]).await;
     assert_eq!(status, StatusCode::OK);
     let m: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
-    let obj = m.as_object().expect("top-level must be a JSON object");
 
-    for key in [
-        "resource_name",
-        "resource_documentation",
-        "resource_policy_uri",
-        "resource_tos_uri",
-    ] {
-        assert!(
-            !obj.contains_key(key),
-            "field `{key}` must be omitted when unset (no null), got: {}",
-            obj.get(key)
-                .map_or("<absent>".to_string(), |v| v.to_string())
-        );
-    }
+    assert_eq!(m["resource_name"].as_str(), Some("Vouch"));
+    assert_eq!(
+        m["resource_documentation"].as_str(),
+        Some("https://vouch.sh/docs/")
+    );
+    assert_eq!(
+        m["resource_policy_uri"].as_str(),
+        Some("https://vouch.sh/privacy/")
+    );
+    assert_eq!(
+        m["resource_tos_uri"].as_str(),
+        Some("https://vouch.sh/terms/")
+    );
 }
 
 #[tokio::test]
@@ -358,8 +364,8 @@ async fn test_rfc9728_tls_binding_mirrors_discovery_when_mtls_configured() {
 }
 
 #[tokio::test]
-async fn test_rfc9728_optional_config_fields_serialized_when_set() {
-    // When the operator configures descriptive URLs, the metadata
+async fn test_rfc9728_descriptive_fields_overridden_via_config() {
+    // When the operator overrides descriptive URLs, the metadata
     // document echoes them verbatim. Mutates the live `ArcSwap`
     // config on an already-built router — exercises the hot-reload
     // path that the builder uses (it re-snapshots on every request).
@@ -472,6 +478,7 @@ const KNOWN_PROTECTED_ENDPOINTS: &[&str] = &[
     "v1/credentials/github/token",
     "v1/keys",
     "api/v1/org",
+    "api/v1/applications",
     "scim/v2",
 ];
 
@@ -856,7 +863,6 @@ async fn test_rfc9728_root_document_field_set_snapshot() {
         .collect();
     keys.sort_unstable();
 
-    // Optional config fields are absent in the default test harness.
     // Adding a new RFC 9728 field requires updating this list — that
     // is intentional, the snapshot is the change-detection contract.
     let expected: Vec<&str> = vec![
@@ -866,7 +872,11 @@ async fn test_rfc9728_root_document_field_set_snapshot() {
         "dpop_signing_alg_values_supported",
         "jwks_uri",
         "resource",
+        "resource_documentation",
+        "resource_name",
+        "resource_policy_uri",
         "resource_signing_alg_values_supported",
+        "resource_tos_uri",
         "scopes_supported",
         "signed_metadata",
         "tls_client_certificate_bound_access_tokens",

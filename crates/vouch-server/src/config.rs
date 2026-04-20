@@ -140,22 +140,25 @@ pub struct Args {
 
     /// Human-readable name of this protected resource (RFC 9728 §2).
     /// Appears in the `resource_name` field of the Protected Resource
-    /// Metadata document.
+    /// Metadata document. Defaults to "Vouch" when unset.
     #[arg(long, env = "VOUCH_RESOURCE_NAME")]
     pub resource_name: Option<String>,
 
     /// URL of developer documentation for this protected resource
     /// (RFC 9728 §2 `resource_documentation`).
+    /// Defaults to "https://vouch.sh/docs/" when unset.
     #[arg(long, env = "VOUCH_RESOURCE_DOCUMENTATION")]
     pub resource_documentation: Option<String>,
 
     /// URL of the resource's data-use policy
     /// (RFC 9728 §2 `resource_policy_uri`).
+    /// Defaults to "https://vouch.sh/privacy/" when unset.
     #[arg(long, env = "VOUCH_RESOURCE_POLICY_URI")]
     pub resource_policy_uri: Option<String>,
 
     /// URL of the resource's terms of service
     /// (RFC 9728 §2 `resource_tos_uri`).
+    /// Defaults to "https://vouch.sh/terms/" when unset.
     #[arg(long, env = "VOUCH_RESOURCE_TOS_URI")]
     pub resource_tos_uri: Option<String>,
 
@@ -412,20 +415,19 @@ pub struct ServerConfig {
     /// Organization name for branding.
     pub org_name: Option<String>,
     /// Human-readable name of this protected resource
-    /// (RFC 9728 §2 `resource_name`). Optional — omitted from metadata
-    /// when `None`.
+    /// (RFC 9728 §2 `resource_name`). Defaults to `"Vouch"`.
     pub resource_name: Option<String>,
     /// URL of developer documentation for this protected resource
-    /// (RFC 9728 §2 `resource_documentation`). Optional — omitted from
-    /// metadata when `None`.
+    /// (RFC 9728 §2 `resource_documentation`).
+    /// Defaults to `"https://vouch.sh/docs/"`.
     pub resource_documentation: Option<String>,
     /// URL of the resource's data-use policy
-    /// (RFC 9728 §2 `resource_policy_uri`). Optional — omitted from
-    /// metadata when `None`.
+    /// (RFC 9728 §2 `resource_policy_uri`).
+    /// Defaults to `"https://vouch.sh/privacy/"`.
     pub resource_policy_uri: Option<String>,
     /// URL of the resource's terms of service
-    /// (RFC 9728 §2 `resource_tos_uri`). Optional — omitted from
-    /// metadata when `None`.
+    /// (RFC 9728 §2 `resource_tos_uri`).
+    /// Defaults to `"https://vouch.sh/terms/"`.
     pub resource_tos_uri: Option<String>,
     /// CLI download URL for macOS.
     pub cli_download_macos: Option<String>,
@@ -603,10 +605,16 @@ impl ServerConfig {
             device_poll_interval_seconds: args.device_poll_interval,
             allowed_domains,
             org_name: args.org_name,
-            resource_name: args.resource_name,
-            resource_documentation: args.resource_documentation,
-            resource_policy_uri: args.resource_policy_uri,
-            resource_tos_uri: args.resource_tos_uri,
+            resource_name: args.resource_name.or_else(|| Some("Vouch".to_string())),
+            resource_documentation: args
+                .resource_documentation
+                .or_else(|| Some("https://vouch.sh/docs/".to_string())),
+            resource_policy_uri: args
+                .resource_policy_uri
+                .or_else(|| Some("https://vouch.sh/privacy/".to_string())),
+            resource_tos_uri: args
+                .resource_tos_uri
+                .or_else(|| Some("https://vouch.sh/terms/".to_string())),
             cli_download_macos: args.cli_download_macos,
             cli_download_linux: args.cli_download_linux,
             cli_download_windows: args.cli_download_windows,

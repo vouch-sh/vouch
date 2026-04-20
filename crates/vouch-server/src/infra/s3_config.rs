@@ -259,6 +259,16 @@ pub struct S3Config {
     /// Organization name.
     pub org_name: Option<String>,
 
+    // Protected Resource Metadata (RFC 9728)
+    /// Human-readable name of this protected resource.
+    pub resource_name: Option<String>,
+    /// URL of developer documentation for this protected resource.
+    pub resource_documentation: Option<String>,
+    /// URL of the resource's data-use policy.
+    pub resource_policy_uri: Option<String>,
+    /// URL of the resource's terms of service.
+    pub resource_tos_uri: Option<String>,
+
     // DPoP configuration
     /// Nested DPoP config.
     pub dpop: Option<S3DpopConfig>,
@@ -343,6 +353,10 @@ impl std::fmt::Debug for S3Config {
             .field("acme", &self.acme)
             .field("allowed_domains", &self.allowed_domains)
             .field("org_name", &self.org_name)
+            .field("resource_name", &self.resource_name)
+            .field("resource_documentation", &self.resource_documentation)
+            .field("resource_policy_uri", &self.resource_policy_uri)
+            .field("resource_tos_uri", &self.resource_tos_uri)
             .field("dpop", &self.dpop)
             .field("cors_origins", &self.cors_origins)
             .field("github", &self.github)
@@ -750,6 +764,20 @@ impl ServerConfig {
         // Branding
         if let Some(v) = &s3.org_name {
             self.org_name = Some(v.clone());
+        }
+
+        // Protected Resource Metadata (RFC 9728)
+        if let Some(v) = &s3.resource_name {
+            self.resource_name = Some(v.clone());
+        }
+        if let Some(v) = &s3.resource_documentation {
+            self.resource_documentation = Some(v.clone());
+        }
+        if let Some(v) = &s3.resource_policy_uri {
+            self.resource_policy_uri = Some(v.clone());
+        }
+        if let Some(v) = &s3.resource_tos_uri {
+            self.resource_tos_uri = Some(v.clone());
         }
 
         // DPoP configuration

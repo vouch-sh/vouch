@@ -993,14 +993,15 @@ async fn test_rfc9126_consume_par_with_stale_version_returns_false() {
 }
 
 // ========================================================================
-// RFC 9126 Section 2.3 — PAR Single-Use When Login Required (Issue #270)
+// FAPI 2.0 Section 5.3.2.2 — PAR Reuse Before Auth Completion
 // ========================================================================
 
 #[tokio::test]
-async fn test_rfc9126_par_consumed_when_no_session() {
-    // RFC 9126 Section 2.3: request_uri MUST be consumed on first use even
-    // when the user has no existing session and must authenticate first.
-    // The PAR should be consumed immediately when creating the pending auth.
+async fn test_rfc9126_par_not_consumed_when_no_session() {
+    // FAPI 2.0 Section 5.3.2.2 Note 3: request_uri must remain valid until
+    // authorization completes (code issued). When the user has no session,
+    // the PAR should NOT be consumed — it is stored in the pending auth record
+    // and consumed when the code is issued.
     use crate::db::documents::par::PushedAuthorizationRequestDoc;
 
     let (app, state) = test_app().await;
@@ -1036,7 +1037,7 @@ async fn test_rfc9126_par_consumed_when_no_session() {
         "Should redirect to /login?pending_auth=..., got: {location_str}"
     );
 
-    // Verify PAR is consumed in DB
+    // Verify PAR is NOT consumed — it remains valid for reuse until code issuance.
     let doc = state
         .store
         .find_one::<PushedAuthorizationRequestDoc>("request_uri", &request_uri)
@@ -1044,15 +1045,15 @@ async fn test_rfc9126_par_consumed_when_no_session() {
         .unwrap()
         .expect("PAR doc should still exist");
     assert!(
-        doc.data.consumed_at.is_some(),
-        "PAR should be marked as consumed after pending auth creation"
+        doc.data.consumed_at.is_none(),
+        "PAR should NOT be consumed when redirecting to login (FAPI 2.0 reuse allowed)"
     );
 }
 
 #[tokio::test]
-async fn test_rfc9126_par_replay_rejected_after_login_redirect() {
-    // RFC 9126 Section 2.3: After a PAR is consumed during the login-required
-    // path, replaying the same request_uri must fail.
+async fn test_rfc9126_par_reuse_succeeds_before_auth_completion() {
+    // FAPI 2.0 Section 5.3.2.2 Note 3: request_uri can be reused before
+    // authorization completes. Both uses should succeed (redirect to login).
     let (app, state) = test_app().await;
 
     let user = create_test_user(&state.store, "par-replay-login@example.com").await;
@@ -1060,7 +1061,7 @@ async fn test_rfc9126_par_replay_rejected_after_login_redirect() {
 
     let request_uri = create_par_request(&app, &client).await;
 
-    // First use without session — triggers login redirect + PAR consumption
+    // First use without session — triggers login redirect
     let response1 = http_get_full(
         &app,
         &format!(
@@ -1076,7 +1077,7 @@ async fn test_rfc9126_par_replay_rejected_after_login_redirect() {
         "First use should redirect to login"
     );
 
-    // Second use of same request_uri — should fail (PAR already consumed)
+    // Second use of same request_uri — should also succeed (PAR not consumed yet)
     let response2 = http_get_full(
         &app,
         &format!(
@@ -1088,34 +1089,31 @@ async fn test_rfc9126_par_replay_rejected_after_login_redirect() {
     )
     .await;
 
-    // The PAR lookup should fail because it's consumed — error page shown
-    assert_eq!(
-        response2.status,
-        StatusCode::OK,
-        "Second use should return error page, got: {}",
+    assert!(
+        response2.status == StatusCode::FOUND || response2.status == StatusCode::SEE_OTHER,
+        "Second use should also redirect to login (reuse allowed before auth completes), got: {}",
         response2.status
     );
+    let location = response2
+        .headers
+        .get("location")
+        .expect("redirect location");
+    let location_str = location.to_str().unwrap();
     assert!(
-        response2.body.contains("expired")
-            || response2.body.contains("Invalid")
-            || response2.body.contains("error"),
-        "Response should indicate the request_uri was already consumed"
+        location_str.starts_with("/login?pending_auth="),
+        "Second use should redirect to /login?pending_auth=..., got: {location_str}"
     );
 }
 
 // ========================================================================
-// RFC 9126 Section 2.3 — PAR Consumed on Re-auth Path (Issue #270)
+// FAPI 2.0 Section 5.3.2.2 — PAR Reuse on Re-auth Path
 // ========================================================================
 
 #[tokio::test]
-async fn test_rfc9126_par_consumed_when_reauth_required() {
-    // RFC 9126 Section 2.3: request_uri MUST be consumed even when the user
-    // has an existing session but re-authentication is required.
-    //
-    // The PAR flow uses ReauthPolicy::Always, so any authenticated user
-    // without prompt=none triggers the re-auth path (call site 2 of the fix).
-    // This exercises authorize_authenticated_user → needs_reauth=true →
-    // store_pending_and_redirect(par_to_consume=Some(...)).
+async fn test_rfc9126_par_not_consumed_when_reauth_required() {
+    // FAPI 2.0 Section 5.3.2.2 Note 3: request_uri must remain valid until
+    // authorization completes. When re-auth is required, the PAR should NOT
+    // be consumed — it is stored in the pending auth record for later consumption.
     use crate::db::documents::par::PushedAuthorizationRequestDoc;
 
     let (app, state) = test_app().await;
@@ -1154,7 +1152,7 @@ async fn test_rfc9126_par_consumed_when_reauth_required() {
         "Should redirect to /login?pending_auth=..., got: {location_str}"
     );
 
-    // Verify PAR is consumed in DB — the fix ensures consumption at re-auth path too.
+    // Verify PAR is NOT consumed — it remains valid for reuse until code issuance.
     let doc = state
         .store
         .find_one::<PushedAuthorizationRequestDoc>("request_uri", &request_uri)
@@ -1162,15 +1160,15 @@ async fn test_rfc9126_par_consumed_when_reauth_required() {
         .unwrap()
         .expect("PAR doc should still exist");
     assert!(
-        doc.data.consumed_at.is_some(),
-        "PAR should be marked as consumed after re-auth redirect (call site 2 of fix)"
+        doc.data.consumed_at.is_none(),
+        "PAR should NOT be consumed when redirecting to re-auth (FAPI 2.0 reuse allowed)"
     );
 }
 
 #[tokio::test]
-async fn test_rfc9126_par_replay_rejected_after_reauth_redirect() {
-    // RFC 9126 Section 2.3: After a PAR is consumed during the re-auth path,
-    // replaying the same request_uri must fail — even though the user has a session.
+async fn test_rfc9126_par_reuse_succeeds_after_reauth_redirect() {
+    // FAPI 2.0 Section 5.3.2.2 Note 3: request_uri can be reused before
+    // authorization completes, even on the re-auth path.
     let (app, state) = test_app().await;
 
     let user = create_test_user(&state.store, "par-reauth-replay@example.com").await;
@@ -1180,7 +1178,7 @@ async fn test_rfc9126_par_replay_rejected_after_reauth_redirect() {
 
     let request_uri = create_par_request(&app, &client).await;
 
-    // First use with session — triggers re-auth redirect + PAR consumption.
+    // First use with session — triggers re-auth redirect.
     let response1 = http_get_full(
         &app,
         &format!(
@@ -1197,7 +1195,7 @@ async fn test_rfc9126_par_replay_rejected_after_reauth_redirect() {
         response1.status
     );
 
-    // Second use of same request_uri — PAR is already consumed, must fail.
+    // Second use of same request_uri — should also succeed (PAR not consumed).
     let response2 = http_get_full(
         &app,
         &format!(
@@ -1209,28 +1207,27 @@ async fn test_rfc9126_par_replay_rejected_after_reauth_redirect() {
     )
     .await;
 
-    // The PAR lookup returns consumed/expired — error page shown.
-    assert_eq!(
-        response2.status,
-        StatusCode::OK,
-        "Second use of request_uri after re-auth redirect should return error page, got: {}",
+    assert!(
+        response2.status == StatusCode::FOUND || response2.status == StatusCode::SEE_OTHER,
+        "Second use should also redirect to login (reuse allowed), got: {}",
         response2.status
     );
+    let location = response2
+        .headers
+        .get("location")
+        .expect("redirect location");
+    let location_str = location.to_str().unwrap();
     assert!(
-        response2.body.contains("expired")
-            || response2.body.contains("Invalid")
-            || response2.body.contains("error"),
-        "Response should indicate the request_uri was already consumed: {}",
-        response2.body
+        location_str.starts_with("/login?pending_auth="),
+        "Second use should redirect to /login?pending_auth=..., got: {location_str}"
     );
 }
 
 #[tokio::test]
-async fn test_rfc9126_par_already_consumed_returns_error_redirect_not_login() {
-    // When store_pending_and_redirect is called with par_to_consume but the PAR
-    // is already consumed (Ok(false)), the response must be an OAuth error redirect
-    // (invalid_request_uri) — NOT a login redirect. This verifies the Ok(false) branch
-    // in store_pending_and_redirect.
+async fn test_rfc9126_par_already_consumed_returns_error_not_login() {
+    // When the PAR has already been consumed (e.g., code was issued in a prior
+    // flow), lookup_par detects consumed_at and returns an error page instead
+    // of proceeding with authorization.
     use crate::db::documents::par::PushedAuthorizationRequestDoc;
 
     let (app, state) = test_app().await;

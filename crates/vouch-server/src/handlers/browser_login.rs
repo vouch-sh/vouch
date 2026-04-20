@@ -860,6 +860,7 @@ mod tests {
                 dpop_jkt: None,
                 authorization_details: None,
                 response_mode: Default::default(),
+                par_request_uri: None,
             },
         )
         .await
@@ -912,6 +913,7 @@ mod tests {
                 dpop_jkt: None,
                 authorization_details: None,
                 response_mode: Default::default(),
+                par_request_uri: None,
             },
         )
         .await
