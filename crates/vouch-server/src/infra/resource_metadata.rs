@@ -65,8 +65,12 @@ pub async fn layer(State(state): State<Arc<AppState>>, req: Request, next: Next)
 /// * No existing header → insert `Bearer resource_metadata="<url>"`.
 /// * Existing header that already contains a `resource_metadata`
 ///   parameter → leave unchanged.
-/// * Existing header without the parameter → append
-///   `, resource_metadata="<url>"`.
+/// * Existing header that is a bare scheme (e.g. `Bearer`) with no
+///   parameters → append ` resource_metadata="<url>"` (space, not
+///   comma — per RFC 7235 §4.1 a comma would start a new challenge).
+/// * Existing header with parameters → append
+///   `, resource_metadata="<url>"` (comma separates auth-params
+///   within a single challenge).
 ///
 /// The `<url>` value is emitted inside an RFC 7235 `quoted-string`.
 /// Base URLs contain no characters that require escaping (URL-safe
@@ -90,7 +94,16 @@ fn append_resource_metadata(headers: &mut axum::http::HeaderMap, url: &str) {
             if has_resource_metadata_parameter(existing_str) {
                 return;
             }
-            let new_value = format!("{existing_str}, {parameter}");
+            // RFC 7235 §4.1: a comma between challenges starts a new
+            // challenge. When the existing header is a bare scheme
+            // (e.g. "Bearer" with no params), we must use a space to
+            // add the first auth-param, not a comma.
+            let separator = if has_auth_params(existing_str) {
+                ", "
+            } else {
+                " "
+            };
+            let new_value = format!("{existing_str}{separator}{parameter}");
             if let Ok(value) = HeaderValue::from_str(&new_value) {
                 headers.insert(WWW_AUTHENTICATE, value);
             }
@@ -101,6 +114,20 @@ fn append_resource_metadata(headers: &mut axum::http::HeaderMap, url: &str) {
     // module is compiled without any WWW_AUTHENTICATE usage (it is
     // always used above, but clippy sometimes grumbles).
     let _ = HeaderName::from_static("www-authenticate");
+}
+
+/// Check whether a `WWW-Authenticate` header contains auth-params
+/// (i.e. is more than a bare scheme like `"Bearer"`).
+///
+/// A bare scheme has no `=` sign; any `key=value` pair means params
+/// are present and a comma separator is safe for appending.
+fn has_auth_params(header: &str) -> bool {
+    // Skip the scheme token, then check if there's a `=` in the rest.
+    // Auth-params always contain `key=value`, so the presence of `=`
+    // after the scheme reliably indicates parameters.
+    header
+        .split_once(char::is_whitespace)
+        .is_some_and(|(_, rest)| rest.contains('='))
 }
 
 /// Check whether the given `WWW-Authenticate` header already carries a
@@ -220,6 +247,42 @@ mod tests {
         // to be `resource_metadata` (defensive).
         assert!(!has_resource_metadata_parameter(
             "Bearer resource_metadata_extra=\"x\""
+        ));
+    }
+
+    #[test]
+    fn appends_with_space_to_bare_bearer() {
+        // RFC 7235 §4.1: a comma after a bare scheme starts a new
+        // challenge. The parameter must be space-separated so it
+        // stays part of the Bearer challenge.
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(WWW_AUTHENTICATE, HeaderValue::from_static("Bearer"));
+        append_resource_metadata(
+            &mut headers,
+            "https://example.test/.well-known/oauth-protected-resource",
+        );
+        let v = headers.get(WWW_AUTHENTICATE).unwrap().to_str().unwrap();
+        assert_eq!(
+            v,
+            "Bearer resource_metadata=\"https://example.test/.well-known/oauth-protected-resource\""
+        );
+        // Must NOT contain a comma (which would split into two challenges).
+        assert!(
+            !v.contains(','),
+            "bare Bearer + param must use space, not comma: {v}"
+        );
+    }
+
+    #[test]
+    fn has_auth_params_detects_bare_vs_parameterized() {
+        assert!(!has_auth_params("Bearer"));
+        assert!(!has_auth_params("DPoP"));
+        assert!(has_auth_params("Bearer error=\"invalid_token\""));
+        assert!(has_auth_params(
+            "Bearer error=\"invalid_token\", error_description=\"bad\""
+        ));
+        assert!(has_auth_params(
+            "Bearer resource_metadata=\"https://example.test\""
         ));
     }
 
