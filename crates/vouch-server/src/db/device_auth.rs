@@ -156,6 +156,15 @@ pub async fn authorize_device_auth(
         );
     };
 
+    if doc.data.status != DeviceAuthStatus::Pending {
+        bail!(
+            "authorize_device_auth: device auth request '{}' \
+             already has status '{:?}'",
+            id,
+            doc.data.status
+        );
+    }
+
     let mut data = doc.data;
     data.status = DeviceAuthStatus::Authorized;
     data.user_id = Some(user_id.to_string());
@@ -168,13 +177,40 @@ pub async fn authorize_device_auth(
 }
 
 /// Deny a device auth request.
+///
+/// The read and status update execute within a single transaction so
+/// concurrent denial attempts are serialized correctly.
 #[allow(dead_code)]
 pub async fn deny_device_auth(store: &DocumentStore, id: &str) -> Result<()> {
-    if let Some(doc) = store.get::<DeviceAuthRequestDoc>(id).await? {
-        let mut data = doc.data;
-        data.status = DeviceAuthStatus::Denied;
-        store.update(id, &data).await?;
+    if id.is_empty() {
+        bail!("deny_device_auth called with empty id");
     }
+
+    let mut tx = store.begin().await?;
+
+    let doc = tx.get::<DeviceAuthRequestDoc>(id).await?;
+    let Some(doc) = doc else {
+        bail!(
+            "deny_device_auth: no device auth request \
+             found with id '{}'",
+            id
+        );
+    };
+
+    if doc.data.status != DeviceAuthStatus::Pending {
+        bail!(
+            "deny_device_auth: device auth request '{}' \
+             already has status '{:?}'",
+            id,
+            doc.data.status
+        );
+    }
+
+    let mut data = doc.data;
+    data.status = DeviceAuthStatus::Denied;
+    tx.update(id, &data).await?;
+
+    tx.commit().await?;
     Ok(())
 }
 

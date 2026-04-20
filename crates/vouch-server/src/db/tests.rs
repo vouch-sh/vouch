@@ -526,6 +526,128 @@ async fn test_device_auth_request_doc_consumed_at_defaults_to_none() {
 }
 
 // ========================================================================
+// Device Auth Single-Use Semantics (GH#254)
+// ========================================================================
+
+#[tokio::test]
+async fn test_double_authorization_should_fail() {
+    let (store, _audit) = test_db().await;
+
+    let id = create_device_auth_request(
+        &store,
+        "dbl_auth_hash",
+        "DBLA-0001",
+        None,
+        "2099-12-31T23:59:59Z".parse().unwrap(),
+        5,
+    )
+    .await
+    .expect("create");
+
+    authorize_device_auth(&store, &id, "user_a", "a@example.com", "auth_a")
+        .await
+        .expect("first authorization should succeed");
+
+    let result = authorize_device_auth(&store, &id, "user_b", "b@example.com", "auth_b").await;
+    assert!(result.is_err(), "second authorization should fail");
+
+    // Original user must be preserved
+    let req = get_device_auth_by_id(&store, &id)
+        .await
+        .expect("get")
+        .expect("exists");
+    assert_eq!(req.status, DeviceAuthStatus::Authorized);
+    assert_eq!(req.user_id.as_deref(), Some("user_a"));
+}
+
+#[tokio::test]
+async fn test_authorize_after_deny_should_fail() {
+    let (store, _audit) = test_db().await;
+
+    let id = create_device_auth_request(
+        &store,
+        "deny_then_auth",
+        "DNYA-0001",
+        None,
+        "2099-12-31T23:59:59Z".parse().unwrap(),
+        5,
+    )
+    .await
+    .expect("create");
+
+    deny_device_auth(&store, &id).await.expect("deny succeeds");
+
+    let result = authorize_device_auth(&store, &id, "user_a", "a@example.com", "auth_a").await;
+    assert!(result.is_err(), "authorize after deny should fail");
+
+    let req = get_device_auth_by_id(&store, &id)
+        .await
+        .expect("get")
+        .expect("exists");
+    assert_eq!(req.status, DeviceAuthStatus::Denied);
+    assert!(req.user_id.is_none());
+}
+
+#[tokio::test]
+async fn test_deny_after_authorize_should_fail() {
+    let (store, _audit) = test_db().await;
+
+    let id = create_device_auth_request(
+        &store,
+        "auth_then_deny",
+        "ATDN-0001",
+        None,
+        "2099-12-31T23:59:59Z".parse().unwrap(),
+        5,
+    )
+    .await
+    .expect("create");
+
+    authorize_device_auth(&store, &id, "user_a", "a@example.com", "auth_a")
+        .await
+        .expect("authorize succeeds");
+
+    let result = deny_device_auth(&store, &id).await;
+    assert!(result.is_err(), "deny after authorize should fail");
+
+    let req = get_device_auth_by_id(&store, &id)
+        .await
+        .expect("get")
+        .expect("exists");
+    assert_eq!(req.status, DeviceAuthStatus::Authorized);
+    assert_eq!(req.user_id.as_deref(), Some("user_a"));
+}
+
+#[tokio::test]
+async fn test_double_deny_should_fail() {
+    let (store, _audit) = test_db().await;
+
+    let id = create_device_auth_request(
+        &store,
+        "dbl_deny_hash",
+        "DBLD-0001",
+        None,
+        "2099-12-31T23:59:59Z".parse().unwrap(),
+        5,
+    )
+    .await
+    .expect("create");
+
+    deny_device_auth(&store, &id)
+        .await
+        .expect("first deny should succeed");
+
+    let result = deny_device_auth(&store, &id).await;
+    assert!(result.is_err(), "second deny should fail");
+
+    let req = get_device_auth_by_id(&store, &id)
+        .await
+        .expect("get")
+        .expect("exists");
+    assert_eq!(req.status, DeviceAuthStatus::Denied);
+}
+
+// ========================================================================
 // OIDC State Tests
 // ========================================================================
 
