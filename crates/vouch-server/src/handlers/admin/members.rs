@@ -402,6 +402,10 @@ pub async fn revoke_member_credentials(
     {
         tracing::error!("Failed to revoke SSH certificates for user: {e}");
     }
+    // Clear GitHub refresh token to prevent further API access
+    if let Err(e) = db::clear_user_github_refresh_token(&state.store, &target_id).await {
+        tracing::error!("Failed to clear GitHub refresh token for user: {e}");
+    }
 
     let data = serde_json::json!({
         "action": "revoke_credentials",
