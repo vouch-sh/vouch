@@ -216,6 +216,15 @@ pub async fn exchange_authorization_code(
         ));
     }
 
+    // Reject tokens for revoked/deleted authenticators (GH#272)
+    let _authenticator = db::get_authenticator_by_id(&state.store, &auth_code.authenticator_id)
+        .await
+        .map_err(|e| ServiceError::Internal(e.to_string()))?
+        .ok_or(ServiceError::oauth(
+            OAuthErrorCode::InvalidGrant,
+            "Authenticator not found",
+        ))?;
+
     // RFC 6749 Section 10.5: Enforce single-use authorization codes.
     let code_hash = hash_token(params.code);
     enforce_single_use_code(state, &code_hash, &auth_code).await?;
