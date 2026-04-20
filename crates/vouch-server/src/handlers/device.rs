@@ -242,7 +242,52 @@ pub async fn device_token(
             StatusCode::BAD_REQUEST,
             OAuthError::access_denied(),
         )),
+        DeviceAuthStatus::Consumed => {
+            // RFC 8628 Section 3.5: Device code already used.
+            // Replay detected — revoke all tokens for the affected user.
+            if let Some(ref user_id) = request.user_id {
+                tracing::warn!(
+                    target: "security",
+                    "Device code replay detected \
+                     — revoking tokens for user"
+                );
+                if let Ok(count) = db::delete_oauth_sessions_for_user(&state.store, user_id).await
+                    && count > 0
+                {
+                    state.session_cache.invalidate_for_user(user_id);
+                    tracing::warn!(
+                        target: "security",
+                        user_id = %user_id,
+                        revoked_count = count,
+                        "Revoked tokens due to device code replay"
+                    );
+                }
+            }
+            Err(oauth_error(
+                StatusCode::BAD_REQUEST,
+                OAuthError::invalid_grant(),
+            ))
+        }
         DeviceAuthStatus::Authorized => {
+            // RFC 8628 Section 3.5: Atomically consume the device
+            // code before issuing a token.
+            let consumed = db::try_consume_device_auth(&state.store, &device_code_hash)
+                .await
+                .map_err(|_| {
+                    oauth_error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        OAuthError::invalid_grant(),
+                    )
+                })?;
+
+            if !consumed {
+                // Lost the race — another request consumed first.
+                return Err(oauth_error(
+                    StatusCode::BAD_REQUEST,
+                    OAuthError::invalid_grant(),
+                ));
+            }
+
             // Get user info and create OAuth access token
             let user_id = request.user_id.ok_or_else(|| {
                 oauth_error(
@@ -816,6 +861,234 @@ mod tests {
             status,
             StatusCode::UNSUPPORTED_MEDIA_TYPE,
             "Token endpoint should reject JSON content-type per RFC 8628/6749"
+        );
+    }
+
+    // ========================================================================
+    // RFC 8628 Section 3.5 - Device Code Single-Use Tests
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_rfc8628_device_code_single_use() {
+        // RFC 8628 Section 3.5: Device code is single-use.
+        // After a successful token issuance, a second poll must
+        // return invalid_grant.
+        let (app, state) = test_app().await;
+
+        let device_code = "test_single_use_device_code";
+        let device_code_hash = hash_device_code(device_code);
+        let user_code = "SNGL-CODE";
+
+        let now = Timestamp::now();
+        let expires_at = now.checked_add(Span::new().hours(1)).unwrap();
+
+        let id = crate::db::create_device_auth_request(
+            &state.store,
+            &device_code_hash,
+            user_code,
+            None,
+            expires_at,
+            0, // no rate limit for test
+        )
+        .await
+        .expect("create device auth");
+
+        let user = create_test_user(&state.store, "single-use@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+
+        crate::db::authorize_device_auth(&state.store, &id, &user.id, &user.email, &auth_id)
+            .await
+            .expect("authorize device");
+
+        // First poll — should succeed
+        let body = format!(
+            "grant_type=urn:ietf:params:oauth:grant-type:\
+             device_code&device_code={}",
+            device_code
+        );
+        let (status, _) = http_post_form(&app, "/oauth/token", &body, &[]).await;
+        assert_eq!(status, StatusCode::OK, "First poll should succeed");
+
+        // Second poll — must return invalid_grant
+        let (status, resp_body) = http_post_form(&app, "/oauth/token", &body, &[]).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "Second poll should fail");
+        let error: serde_json::Value = serde_json::from_str(&resp_body).expect("Valid JSON");
+        assert_eq!(
+            error["error"], "invalid_grant",
+            "Replayed device code must return invalid_grant"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_rfc8628_consumed_code_returns_invalid_grant() {
+        // Directly set a device code to Consumed, verify polling
+        // returns invalid_grant.
+        let (app, state) = test_app().await;
+
+        let device_code = "test_consumed_device_code";
+        let device_code_hash = hash_device_code(device_code);
+        let user_code = "CNSD-CODE";
+
+        let now = Timestamp::now();
+        let expires_at = now.checked_add(Span::new().hours(1)).unwrap();
+
+        let id = crate::db::create_device_auth_request(
+            &state.store,
+            &device_code_hash,
+            user_code,
+            None,
+            expires_at,
+            0,
+        )
+        .await
+        .expect("create device auth");
+
+        let user = create_test_user(&state.store, "consumed-test@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+
+        // Authorize then consume
+        crate::db::authorize_device_auth(&state.store, &id, &user.id, &user.email, &auth_id)
+            .await
+            .expect("authorize");
+
+        let consumed = crate::db::try_consume_device_auth(&state.store, &device_code_hash)
+            .await
+            .expect("consume");
+        assert!(consumed, "Consumption should succeed");
+
+        // Poll — must return invalid_grant
+        let body = format!(
+            "grant_type=urn:ietf:params:oauth:grant-type:\
+             device_code&device_code={}",
+            device_code
+        );
+        let (status, resp_body) = http_post_form(&app, "/oauth/token", &body, &[]).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let error: serde_json::Value = serde_json::from_str(&resp_body).expect("Valid JSON");
+        assert_eq!(
+            error["error"], "invalid_grant",
+            "Consumed device code must return invalid_grant"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_rfc8628_consumed_code_with_session_revokes_tokens() {
+        // Verify that replay detection actually revokes the user's
+        // OAuth sessions, not just returns invalid_grant.
+        let (app, state) = test_app().await;
+
+        let device_code = "test_revoke_device_code";
+        let device_code_hash = hash_device_code(device_code);
+        let user_code = "RVOK-CODE";
+
+        let now = Timestamp::now();
+        let expires_at = now.checked_add(Span::new().hours(1)).unwrap();
+
+        let id = crate::db::create_device_auth_request(
+            &state.store,
+            &device_code_hash,
+            user_code,
+            None,
+            expires_at,
+            0,
+        )
+        .await
+        .expect("create device auth");
+
+        let user = create_test_user(&state.store, "revoke@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+
+        crate::db::authorize_device_auth(&state.store, &id, &user.id, &user.email, &auth_id)
+            .await
+            .expect("authorize");
+
+        // First poll — get a real token
+        let body = format!(
+            "grant_type=urn:ietf:params:oauth:grant-type:\
+             device_code&device_code={}",
+            device_code
+        );
+        let (status, resp_body) = http_post_form(&app, "/oauth/token", &body, &[]).await;
+        assert_eq!(status, StatusCode::OK, "First poll should succeed");
+
+        // Extract the token and verify the session exists
+        let resp: serde_json::Value = serde_json::from_str(&resp_body).expect("Valid JSON");
+        let token = resp["access_token"].as_str().expect("token");
+        let token_hash = {
+            use aws_lc_rs::digest::{self, SHA256};
+            URL_SAFE_NO_PAD.encode(digest::digest(&SHA256, token.as_bytes()).as_ref())
+        };
+        let session = crate::db::get_session_by_token_hash(&state.store, &token_hash)
+            .await
+            .expect("session lookup");
+        assert!(session.is_some(), "Session should exist before replay");
+
+        // Replay — triggers revocation
+        let (status, _) = http_post_form(&app, "/oauth/token", &body, &[]).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        // Session should now be revoked
+        let session = crate::db::get_session_by_token_hash(&state.store, &token_hash)
+            .await
+            .expect("session lookup");
+        assert!(session.is_none(), "Session should be revoked after replay");
+    }
+
+    #[tokio::test]
+    async fn test_rfc8628_consumed_code_without_user_id() {
+        // A consumed device code with no user_id should still return
+        // invalid_grant without a 500.
+        let (app, state) = test_app().await;
+
+        let device_code = "test_no_user_device_code";
+        let device_code_hash = hash_device_code(device_code);
+        let user_code = "NUID-CODE";
+
+        let now = Timestamp::now();
+        let expires_at = now.checked_add(Span::new().hours(1)).unwrap();
+
+        let id = crate::db::create_device_auth_request(
+            &state.store,
+            &device_code_hash,
+            user_code,
+            None,
+            expires_at,
+            0,
+        )
+        .await
+        .expect("create device auth");
+
+        // Directly set status to Consumed without user_id by
+        // manipulating the document store.
+        use crate::db::documents::device_auth::DeviceAuthRequestDoc;
+        let doc = state
+            .store
+            .get::<DeviceAuthRequestDoc>(&id)
+            .await
+            .expect("get")
+            .expect("doc exists");
+        let mut data = doc.data;
+        data.status = crate::db::DeviceAuthStatus::Consumed;
+        data.consumed_at = Some(now);
+        // user_id remains None
+        state.store.update(&id, &data).await.expect("update");
+
+        // Poll — should return invalid_grant, not 500
+        let body = format!(
+            "grant_type=urn:ietf:params:oauth:grant-type:\
+             device_code&device_code={}",
+            device_code
+        );
+        let (status, resp_body) = http_post_form(&app, "/oauth/token", &body, &[]).await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "Should return 400, not 500"
+        );
+        let error: serde_json::Value = serde_json::from_str(&resp_body).expect("Valid JSON");
+        assert_eq!(
+            error["error"], "invalid_grant",
+            "Consumed code without user_id should return invalid_grant"
         );
     }
 }
