@@ -441,3 +441,90 @@ async fn test_rfc7009_cross_client_revocation_blocked() {
         "Cross-client revocation must not revoke the token"
     );
 }
+
+// ========================================================================
+// RFC 7009 — Token Revocation with private_key_jwt (GH#274)
+// ========================================================================
+
+#[tokio::test]
+async fn test_rfc7009_revoke_with_private_key_jwt_succeeds() {
+    // RFC 7009 + RFC 7523: Revocation with private_key_jwt authentication.
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "revoke-jwt@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let (jwt_client, pkcs8_bytes) = create_test_jwt_client(&state.store, &user.id).await;
+
+    // Issue a token via a separate client_secret client (to have a token to revoke)
+    let secret_client = create_test_oauth_client(&state.store, &user.id).await;
+    let (token, _) = issue_oauth_access_token(&app, &state, &user, &auth_id, &secret_client).await;
+
+    // Revoke using private_key_jwt with aud=/oauth/revoke
+    let revoke_url = format!("{}/oauth/revoke", state.config().base_url);
+    let assertion = build_client_assertion(&jwt_client.client_id, &revoke_url, &pkcs8_bytes, None);
+
+    let body = format!(
+        "token={}&client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer\
+         &client_assertion={}",
+        token, assertion
+    );
+
+    let (status, _) = http_post_form(&app, "/oauth/revoke", &body, &[]).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "Revocation with private_key_jwt must return 200"
+    );
+}
+
+#[tokio::test]
+async fn test_rfc7009_revoke_private_key_jwt_jti_replay_rejected() {
+    // GH#274: Replayed JWT assertion at /oauth/revoke must be rejected.
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "revoke-replay@example.com").await;
+    let (jwt_client, pkcs8_bytes) = create_test_jwt_client(&state.store, &user.id).await;
+
+    let revoke_url = format!("{}/oauth/revoke", state.config().base_url);
+    let fixed_jti = "revoke-replay-jti-001";
+
+    // First revocation with a fixed JTI — should return 200
+    let assertion1 = build_client_assertion(
+        &jwt_client.client_id,
+        &revoke_url,
+        &pkcs8_bytes,
+        Some(fixed_jti),
+    );
+    let body1 = format!(
+        "token=some_token\
+         &client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer\
+         &client_assertion={}",
+        assertion1
+    );
+    let (status1, _) = http_post_form(&app, "/oauth/revoke", &body1, &[]).await;
+    assert_eq!(
+        status1,
+        StatusCode::OK,
+        "First use of JTI at revoke must return 200"
+    );
+
+    // Second revocation with the SAME JTI — must be rejected (replay)
+    let assertion2 = build_client_assertion(
+        &jwt_client.client_id,
+        &revoke_url,
+        &pkcs8_bytes,
+        Some(fixed_jti),
+    );
+    let body2 = format!(
+        "token=some_other_token\
+         &client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer\
+         &client_assertion={}",
+        assertion2
+    );
+    let (status2, _) = http_post_form(&app, "/oauth/revoke", &body2, &[]).await;
+    assert_eq!(
+        status2,
+        StatusCode::UNAUTHORIZED,
+        "Replayed JTI at revoke must be rejected with 401"
+    );
+}
