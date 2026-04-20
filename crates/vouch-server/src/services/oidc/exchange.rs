@@ -353,11 +353,10 @@ pub async fn exchange_token(
             audience,
             // Token exchange does not carry auth_time from the subject token
             auth_time: None,
-            // Hardcoded to FIDO2 values because all Vouch authentication flows
-            // require hardware keys. Revisit if non-FIDO2 flows are added.
-            amr: Some(crate::services::auth::AuthMethod::all_fido2().to_vec()),
-            acr: Some(crate::services::auth::ACR_AAL3.to_string()),
-            hardware_verified: true,
+            // Propagate hardware verification from the subject token so
+            // non-FIDO2 tokens (e.g., JWT bearer) cannot be laundered into
+            // hardware-verified tokens via exchange.
+            hardware_verification: subject_decoded.hardware_verification(),
             session_purpose: crate::db::SessionPurpose::OAuthAccessToken,
             authorization_details: effective_ad_value.as_ref(),
         },

@@ -257,9 +257,7 @@ pub async fn exchange_authorization_code(
             act: None,
             audience: grants.audience.as_deref(),
             auth_time: Some(auth_code.auth_time.unwrap_or(auth_code.iat)),
-            amr: Some(AuthMethod::all_fido2().to_vec()),
-            acr: Some(crate::services::auth::ACR_AAL3.to_string()),
-            hardware_verified: true,
+            hardware_verification: crate::services::auth::HardwareVerification::Verified,
             session_purpose: db::SessionPurpose::OAuthAccessToken,
             authorization_details: grants.authorization_details_value.as_ref(),
         },
@@ -292,8 +290,7 @@ pub async fn exchange_authorization_code(
             dpop_jkt,
             scope: &auth_code.scope,
             auth_time: Some(auth_code.auth_time.unwrap_or(auth_code.iat)),
-            amr: Some(AuthMethod::all_fido2().to_vec()),
-            acr: Some(crate::services::auth::ACR_AAL3.to_string()),
+            hardware_verification: crate::services::auth::HardwareVerification::Verified,
             access_token: Some(access_token.expose_secret()),
             id_token_alg,
         },
@@ -736,10 +733,8 @@ struct IdTokenParams<'a> {
     scope: &'a ScopeSet,
     /// Time when the user authenticated (FIDO2 session creation time).
     auth_time: Option<i64>,
-    /// RFC 8176: Authentication methods reference.
-    amr: Option<Vec<AuthMethod>>,
-    /// RFC 9068 Section 2.2: Authentication context class reference.
-    acr: Option<String>,
+    /// Authentication assurance level — bundles `amr` and `acr`.
+    hardware_verification: crate::services::auth::HardwareVerification,
     /// Access token string, used to compute `at_hash` (OIDC Core Section 3.1.3.6).
     access_token: Option<&'a str>,
     /// OIDC Core: Algorithm for signing this ID token.
@@ -784,8 +779,8 @@ async fn generate_id_token(
         hardware_verified: None,
         hardware_aaguid: None,
         cnf,
-        amr: params.amr,
-        acr: params.acr,
+        amr: params.hardware_verification.amr(),
+        acr: params.hardware_verification.acr(),
         at_hash: params.access_token.and_then(compute_at_hash),
     };
 
