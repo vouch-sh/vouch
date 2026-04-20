@@ -1106,9 +1106,11 @@ async fn complete_pending_auth(
         }
     }
 
-    // RFC 9126: Consume PAR at code issuance time (best-effort).
+    // RFC 9126: Consume PAR at code issuance time.
     // The PAR may have expired (60s TTL) by the time the user completes login,
-    // which is fine — the TTL itself prevents reuse after expiry.
+    // which is fine — the TTL itself prevents reuse after expiry. However,
+    // Ok(false) means another pending auth already consumed this PAR
+    // (e.g. browser tab duplication), so reject to enforce single-use.
     if let Some(ref request_uri) = pending.par_request_uri {
         match db::consume_pushed_authorization_request(
             &state.store,
@@ -1117,9 +1119,27 @@ async fn complete_pending_auth(
         )
         .await
         {
-            Ok(_) => {} // consumed or already expired — either is fine
+            Ok(true) => {} // successfully consumed
+            Ok(false) => {
+                return resolved
+                    .error_redirect(
+                        state,
+                        "invalid_request",
+                        "The request_uri has already been used",
+                        pending.state.as_deref(),
+                    )
+                    .await;
+            }
             Err(e) => {
-                tracing::warn!("Failed to consume PAR during pending auth completion: {e}");
+                tracing::error!("Failed to consume PAR during pending auth completion: {e}");
+                return resolved
+                    .error_redirect(
+                        state,
+                        "server_error",
+                        "Failed to process pushed authorization request",
+                        pending.state.as_deref(),
+                    )
+                    .await;
             }
         }
     }
