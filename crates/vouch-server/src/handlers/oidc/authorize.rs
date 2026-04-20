@@ -334,6 +334,7 @@ async fn check_session_and_authorize(
             store_pending_and_redirect(
                 state,
                 validated,
+                &resolved.client,
                 resolved.response_mode,
                 None,
                 par_to_consume,
@@ -1240,6 +1241,7 @@ fn resolve_redirect_uri(
 async fn store_pending_and_redirect(
     state: &Arc<AppState>,
     validated: crate::services::oidc::authorization::ValidatedAuthRequest,
+    oauth_client: &OAuthClient,
     response_mode: ResponseMode,
     prompt_override: Option<Prompt>,
     par_to_consume: Option<(&str, &str)>,
@@ -1257,31 +1259,29 @@ async fn store_pending_and_redirect(
                     client_id,
                     "PAR replay detected during pending auth creation"
                 );
-                return build_authorization_redirect(
+                return oauth_error_response(
+                    state,
+                    oauth_client,
                     validated.redirect_uri(),
-                    &[
-                        ("error", "invalid_request_uri"),
-                        (
-                            "error_description",
-                            "The request_uri has already been used or is invalid",
-                        ),
-                        ("iss", &state.config().base_url),
-                    ],
-                );
+                    "invalid_request_uri",
+                    "The request_uri has already been used or is invalid",
+                    validated.state(),
+                    response_mode,
+                )
+                .await;
             }
             Err(e) => {
                 tracing::error!("Failed to consume PAR: {e}");
-                return build_authorization_redirect(
+                return oauth_error_response(
+                    state,
+                    oauth_client,
                     validated.redirect_uri(),
-                    &[
-                        ("error", "server_error"),
-                        (
-                            "error_description",
-                            "Failed to process pushed authorization request",
-                        ),
-                        ("iss", &state.config().base_url),
-                    ],
-                );
+                    "server_error",
+                    "Failed to process pushed authorization request",
+                    validated.state(),
+                    response_mode,
+                )
+                .await;
             }
         }
     }
@@ -1420,6 +1420,7 @@ async fn authorize_authenticated_user(
         return store_pending_and_redirect(
             state,
             validated,
+            oauth_client,
             response_mode,
             Some(Prompt::Login),
             par_to_consume,
