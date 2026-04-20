@@ -210,23 +210,6 @@ pub async fn try_consume_device_auth(
     store.compare_and_update(&doc.id, doc.version, &data).await
 }
 
-/// Check if a device code was already consumed and return the user_id.
-///
-/// Used during replay detection to identify the victim user
-/// whose tokens should be revoked.
-pub async fn get_consumed_device_auth_user(
-    store: &DocumentStore,
-    device_code_hash: &str,
-) -> Result<Option<String>> {
-    let doc = store
-        .find_one::<DeviceAuthRequestDoc>("device_code_hash", device_code_hash)
-        .await?;
-    match doc {
-        Some(d) if d.data.status == DeviceAuthStatus::Consumed => Ok(d.data.user_id),
-        _ => Ok(None),
-    }
-}
-
 /// Update the last poll time for a device auth request.
 /// Returns true if poll was allowed, false if polling too fast.
 pub async fn update_device_auth_poll_time(
@@ -251,7 +234,12 @@ pub async fn update_device_auth_poll_time(
 
     let mut data = doc.data;
     data.last_poll_at = Some(now);
-    store.update(id, &data).await?;
+    // Use compare_and_update to avoid blind overwrites that could
+    // revert a concurrent status change (e.g. Consumed → Authorized).
+    // A version conflict is harmless here — proceed as if poll was
+    // allowed since the rate limit is a courtesy, not a security
+    // control.
+    let _updated = store.compare_and_update(id, doc.version, &data).await?;
     Ok(true)
 }
 

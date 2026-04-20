@@ -330,6 +330,202 @@ async fn test_device_auth_not_found() {
 }
 
 // ========================================================================
+// Device Auth Consumption Tests (RFC 8628 Section 3.5)
+// ========================================================================
+
+#[tokio::test]
+async fn test_try_consume_device_auth_authorized_succeeds() {
+    let (store, _audit) = test_db().await;
+
+    let device_code_hash = "consume_success_hash";
+    let user_code = "CNSM-SUCC";
+    let expires_at: jiff::Timestamp = "2099-12-31T23:59:59Z".parse().unwrap();
+
+    let id = create_device_auth_request(&store, device_code_hash, user_code, None, expires_at, 5)
+        .await
+        .expect("create");
+
+    // Authorize it first
+    let (user_id, _) = upsert_user(&store, "consume@example.com", Some("Test"))
+        .await
+        .expect("user");
+    let auth_id = create_authenticator(
+        &store,
+        &user_id,
+        "consume@example.com",
+        "Key",
+        b"cred-consume",
+        &[0u8; 32],
+        None,
+        None,
+        false,
+    )
+    .await
+    .expect("auth");
+
+    authorize_device_auth(&store, &id, &user_id, "consume@example.com", &auth_id)
+        .await
+        .expect("authorize");
+
+    // Consume
+    let consumed = try_consume_device_auth(&store, device_code_hash)
+        .await
+        .expect("consume");
+    assert!(consumed, "First consumption should succeed");
+
+    // Verify status and consumed_at
+    let request = get_device_auth_by_code_hash(&store, device_code_hash)
+        .await
+        .expect("get")
+        .expect("should exist");
+    assert_eq!(request.status, DeviceAuthStatus::Consumed);
+    assert!(request.consumed_at.is_some(), "consumed_at should be set");
+}
+
+#[tokio::test]
+async fn test_try_consume_device_auth_already_consumed_returns_false() {
+    let (store, _audit) = test_db().await;
+
+    let device_code_hash = "double_consume_hash";
+    let id = create_device_auth_request(
+        &store,
+        device_code_hash,
+        "DBLC-CODE",
+        None,
+        "2099-12-31T23:59:59Z".parse().unwrap(),
+        5,
+    )
+    .await
+    .expect("create");
+
+    let (user_id, _) = upsert_user(&store, "double@example.com", Some("Test"))
+        .await
+        .expect("user");
+    let auth_id = create_authenticator(
+        &store,
+        &user_id,
+        "double@example.com",
+        "Key",
+        b"cred-double",
+        &[0u8; 32],
+        None,
+        None,
+        false,
+    )
+    .await
+    .expect("auth");
+
+    authorize_device_auth(&store, &id, &user_id, "double@example.com", &auth_id)
+        .await
+        .expect("authorize");
+
+    let first = try_consume_device_auth(&store, device_code_hash)
+        .await
+        .expect("first consume");
+    assert!(first, "First consumption should succeed");
+
+    let second = try_consume_device_auth(&store, device_code_hash)
+        .await
+        .expect("second consume");
+    assert!(!second, "Second consumption must return false");
+}
+
+#[tokio::test]
+async fn test_try_consume_device_auth_pending_returns_false() {
+    let (store, _audit) = test_db().await;
+
+    let device_code_hash = "pending_consume_hash";
+    create_device_auth_request(
+        &store,
+        device_code_hash,
+        "PEND-CODE",
+        None,
+        "2099-12-31T23:59:59Z".parse().unwrap(),
+        5,
+    )
+    .await
+    .expect("create");
+
+    // Attempt to consume a Pending request (never authorized)
+    let consumed = try_consume_device_auth(&store, device_code_hash)
+        .await
+        .expect("consume");
+    assert!(!consumed, "Pending device code must not be consumable");
+}
+
+#[tokio::test]
+async fn test_try_consume_device_auth_expired_returns_false() {
+    let (store, _audit) = test_db().await;
+
+    let device_code_hash = "expired_consume_hash";
+    // Already expired
+    let expired_at: jiff::Timestamp = "2020-01-01T00:00:00Z".parse().unwrap();
+    let id = create_device_auth_request(&store, device_code_hash, "EXPD-CNSM", None, expired_at, 5)
+        .await
+        .expect("create");
+
+    let (user_id, _) = upsert_user(&store, "expired@example.com", Some("Test"))
+        .await
+        .expect("user");
+    let auth_id = create_authenticator(
+        &store,
+        &user_id,
+        "expired@example.com",
+        "Key",
+        b"cred-expired",
+        &[0u8; 32],
+        None,
+        None,
+        false,
+    )
+    .await
+    .expect("auth");
+
+    authorize_device_auth(&store, &id, &user_id, "expired@example.com", &auth_id)
+        .await
+        .expect("authorize");
+
+    let consumed = try_consume_device_auth(&store, device_code_hash)
+        .await
+        .expect("consume");
+    assert!(!consumed, "Expired device code must not be consumable");
+}
+
+#[tokio::test]
+async fn test_try_consume_device_auth_not_found_returns_false() {
+    let (store, _audit) = test_db().await;
+
+    let consumed = try_consume_device_auth(&store, "nonexistent_hash")
+        .await
+        .expect("consume");
+    assert!(!consumed, "Nonexistent hash must return false");
+}
+
+#[tokio::test]
+async fn test_device_auth_request_doc_consumed_at_defaults_to_none() {
+    // Pre-fix documents without consumed_at should deserialize cleanly
+    let json = r#"{
+        "device_code_hash": "test",
+        "user_code": "TEST-CODE",
+        "status": "pending",
+        "user_id": null,
+        "user_email": null,
+        "authenticator_id": null,
+        "expires_at": "2099-12-31T23:59:59Z",
+        "interval_seconds": 5,
+        "last_poll_at": null
+    }"#;
+
+    let doc: super::documents::device_auth::DeviceAuthRequestDoc =
+        serde_json::from_str(json).expect("should deserialize without consumed_at");
+    assert!(
+        doc.consumed_at.is_none(),
+        "consumed_at should default to None"
+    );
+    assert_eq!(doc.status, DeviceAuthStatus::Pending);
+}
+
+// ========================================================================
 // OIDC State Tests
 // ========================================================================
 

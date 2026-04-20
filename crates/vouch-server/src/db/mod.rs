@@ -82,9 +82,9 @@ pub use organizations::create_organization;
 pub use device_auth::{
     DeviceAuthRequest, DeviceAuthStatus, OidcState, authorize_device_auth,
     create_device_auth_request, create_oidc_state, delete_expired_device_auth_requests,
-    delete_expired_oidc_states, delete_oidc_state, deny_device_auth, get_consumed_device_auth_user,
-    get_device_auth_by_code_hash, get_device_auth_by_user_code, get_oidc_state,
-    try_consume_device_auth, update_device_auth_poll_time,
+    delete_expired_oidc_states, delete_oidc_state, deny_device_auth, get_device_auth_by_code_hash,
+    get_device_auth_by_user_code, get_oidc_state, try_consume_device_auth,
+    update_device_auth_poll_time,
 };
 
 // Re-export device auth test helpers (only available in tests)
