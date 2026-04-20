@@ -19,6 +19,7 @@ use std::sync::Arc;
 /// Call [`commit_jti`] after the full request succeeds to prevent replay.
 /// If the request fails with a retryable error (e.g., `use_dpop_nonce`),
 /// drop this without committing so the client can retry.
+#[must_use = "JTI must be committed via commit_jti() after the request succeeds"]
 pub struct PendingJti {
     jti: Option<String>,
     client_id: String,
@@ -37,7 +38,7 @@ pub async fn commit_jti(
     };
     let expires_at = Timestamp::now()
         .checked_add(pending.max_lifetime.seconds())
-        .unwrap_or_else(|_| Timestamp::now());
+        .map_err(|e| ClientAuthError::DatabaseError(e.to_string()))?;
 
     let is_new = db::store_jwt_assertion_jti(&state.store, jti, &pending.client_id, expires_at)
         .await
@@ -180,6 +181,7 @@ pub async fn authenticate_client_jwt(
     let token_endpoint_url = format!("{base_url}/oauth/token");
     let revoke_endpoint_url = format!("{base_url}/oauth/revoke");
     let par_endpoint_url = format!("{base_url}/oauth/par");
+    let introspect_endpoint_url = format!("{base_url}/oauth/introspect");
 
     let allowed_audiences: Vec<&str> = if client.is_fapi() {
         vec![base_url]
@@ -188,6 +190,7 @@ pub async fn authenticate_client_jwt(
             &token_endpoint_url,
             &revoke_endpoint_url,
             &par_endpoint_url,
+            &introspect_endpoint_url,
             base_url,
         ]
     };

@@ -3,7 +3,7 @@
 //! token exchange, cloud integrations).
 
 use super::document_type::{Document, DocumentType};
-use super::documents::credential::{EnrollmentSessionDoc, SshRevokedCertDoc};
+use super::documents::credential::{EnrollmentSessionDoc, SshIssuedCertDoc, SshRevokedCertDoc};
 use super::documents::oauth::{DelegationPolicyDoc, TokenExchangeDoc};
 use super::store::DocumentStore;
 use anyhow::Result;
@@ -268,6 +268,79 @@ pub async fn delete_expired_enrollment_sessions(store: &DocumentStore) -> Result
 }
 
 // ============================================================
+// SSH Issued Certificate Tracking
+// ============================================================
+
+/// Record of an issued SSH certificate.
+#[derive(Debug)]
+pub struct IssuedSshCertificate {
+    #[allow(dead_code)]
+    pub id: String,
+    pub serial: String,
+    #[allow(dead_code)]
+    pub user_id: String,
+    #[allow(dead_code)]
+    pub user_email: String,
+    #[allow(dead_code)]
+    pub principals: Vec<String>,
+    pub expires_at: Timestamp,
+}
+
+impl From<Document<SshIssuedCertDoc>> for IssuedSshCertificate {
+    fn from(doc: Document<SshIssuedCertDoc>) -> Self {
+        Self {
+            id: doc.id,
+            serial: doc.data.serial,
+            user_id: doc.data.user_id,
+            user_email: doc.data.user_email,
+            principals: doc.data.principals,
+            expires_at: doc.data.expires_at,
+        }
+    }
+}
+
+/// Record an SSH certificate issuance for revocation tracking.
+pub async fn record_ssh_certificate_issuance(
+    store: &DocumentStore,
+    serial: u64,
+    user_id: &str,
+    user_email: &str,
+    principals: &[String],
+    expires_at: Timestamp,
+) -> Result<String> {
+    let doc = SshIssuedCertDoc {
+        serial: serial.to_string(),
+        user_id: user_id.to_string(),
+        user_email: user_email.to_string(),
+        principals: principals.to_vec(),
+        expires_at,
+    };
+    let result = store.insert(&doc).await?;
+    Ok(result.id)
+}
+
+/// Get all non-expired issued SSH certificates for a user.
+pub async fn get_issued_ssh_certificates_for_user(
+    store: &DocumentStore,
+    user_id: &str,
+) -> Result<Vec<IssuedSshCertificate>> {
+    let docs = store
+        .find_all::<SshIssuedCertDoc>("user_id", user_id)
+        .await?;
+    let now = Timestamp::now();
+    Ok(docs
+        .into_iter()
+        .filter(|d| d.data.expires_at > now)
+        .map(IssuedSshCertificate::from)
+        .collect())
+}
+
+/// Delete expired SSH issued certificate records.
+pub async fn delete_expired_ssh_issued_certs(store: &DocumentStore) -> Result<u64> {
+    store.delete_expired(SshIssuedCertDoc::DOC_TYPE).await
+}
+
+// ============================================================
 // SSH Certificate Revocation
 // ============================================================
 
@@ -304,7 +377,6 @@ impl From<Document<SshRevokedCertDoc>> for RevokedSshCertificate {
 }
 
 /// Revoke an SSH certificate.
-#[allow(dead_code)]
 pub async fn revoke_ssh_certificate(
     store: &DocumentStore,
     serial: &str,
@@ -346,31 +418,398 @@ pub async fn get_revoked_ssh_certificates(
         .collect())
 }
 
-/// Revoke all SSH certificates for a user.
+/// Revoke all SSH certificates for a user by looking up issued certs
+/// and inserting a revocation record for each real serial.
 pub async fn revoke_all_ssh_certificates_for_user(
     store: &DocumentStore,
     user_id: &str,
     reason: Option<&str>,
     revoked_by: Option<&str>,
 ) -> Result<u64> {
-    let now = Timestamp::now();
-    let expires_at = jiff::Timestamp::now()
-        .checked_add(jiff::Span::new().years(1))
-        .map_err(|_| anyhow::anyhow!("Time calculation overflow"))?;
+    let issued = get_issued_ssh_certificates_for_user(store, user_id).await?;
+    if issued.is_empty() {
+        return Ok(0);
+    }
 
-    let doc = SshRevokedCertDoc {
-        serial: format!("user:{user_id}"),
-        user_id: user_id.to_string(),
-        reason: reason.map(String::from),
-        revoked_at: now,
-        expires_at,
-        revoked_by: revoked_by.map(String::from),
-    };
-    store.insert(&doc).await?;
-    Ok(1)
+    let now = Timestamp::now();
+    let mut tx = store.begin().await?;
+    let mut count: u64 = 0;
+    for cert in &issued {
+        let doc = SshRevokedCertDoc {
+            serial: cert.serial.clone(),
+            user_id: user_id.to_string(),
+            reason: reason.map(String::from),
+            revoked_at: now,
+            expires_at: cert.expires_at,
+            revoked_by: revoked_by.map(String::from),
+        };
+        tx.insert(&doc).await?;
+        count += 1;
+    }
+    tx.commit().await?;
+    Ok(count)
 }
 
 /// Delete expired SSH certificate revocations.
 pub async fn delete_expired_ssh_revocations(store: &DocumentStore) -> Result<u64> {
     store.delete_expired(SshRevokedCertDoc::DOC_TYPE).await
+}
+
+// ============================================================
+// Tests
+// ============================================================
+
+#[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::indexing_slicing,
+    clippy::panic
+)]
+mod tests {
+    use super::*;
+    use crate::crypto::document_crypto::PlaintextDocumentCrypto;
+    use crate::db::pool::Pool;
+    use crate::db::store::DocumentStore;
+    use std::sync::Arc;
+
+    /// Create an in-memory test store with SQLite migrations applied.
+    async fn test_store() -> DocumentStore {
+        let pool = Pool::connect("sqlite::memory:", &crate::db::pool::PoolConfig::default())
+            .await
+            .expect("connect");
+        match &pool {
+            Pool::Sqlite(p) => sqlx::migrate!("./migrations/sqlite")
+                .run(p)
+                .await
+                .expect("migrate"),
+            Pool::Postgres(_) => panic!("unexpected pool type in unit tests"),
+        }
+        let crypto: Arc<dyn crate::crypto::document_crypto::DocumentCrypto> =
+            Arc::new(PlaintextDocumentCrypto);
+        DocumentStore::new(pool, crypto)
+    }
+
+    /// Helper: insert an issued SSH certificate and return its serial as a string.
+    async fn insert_issued(store: &DocumentStore, user_id: &str, serial: u64) -> String {
+        let expires_at = Timestamp::now()
+            .checked_add(jiff::Span::new().hours(8))
+            .expect("future timestamp");
+        record_ssh_certificate_issuance(
+            store,
+            serial,
+            user_id,
+            "user@example.com",
+            &["user".to_string()],
+            expires_at,
+        )
+        .await
+        .expect("record issuance");
+        serial.to_string()
+    }
+
+    // ────────────────────────────────────────────────────────────
+    // record_ssh_certificate_issuance
+    // ────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_record_ssh_certificate_issuance_stores_correct_serial() {
+        let store = test_store().await;
+        let serial: u64 = 9_876_543_210;
+        let stored_serial = insert_issued(&store, "user-1", serial).await;
+
+        assert_eq!(stored_serial, serial.to_string());
+
+        // Verify the record is retrievable.
+        let certs = get_issued_ssh_certificates_for_user(&store, "user-1")
+            .await
+            .expect("get issued");
+        assert_eq!(certs.len(), 1);
+        assert_eq!(certs[0].serial, serial.to_string());
+    }
+
+    #[tokio::test]
+    async fn test_record_ssh_certificate_issuance_serial_is_numeric_string() {
+        // The core invariant: serials must be stored as decimal u64 strings,
+        // never as synthetic "user:{id}" values or any non-numeric form.
+        let store = test_store().await;
+        let serial: u64 = 12_345;
+        insert_issued(&store, "user-numeric", serial).await;
+
+        let certs = get_issued_ssh_certificates_for_user(&store, "user-numeric")
+            .await
+            .expect("get issued");
+
+        let stored = &certs[0].serial;
+        assert!(
+            stored.parse::<u64>().is_ok(),
+            "stored serial '{stored}' must parse as u64"
+        );
+        assert_eq!(stored, "12345");
+    }
+
+    #[tokio::test]
+    async fn test_record_ssh_certificate_issuance_max_u64() {
+        let store = test_store().await;
+        let serial = u64::MAX;
+        insert_issued(&store, "user-max", serial).await;
+
+        let certs = get_issued_ssh_certificates_for_user(&store, "user-max")
+            .await
+            .expect("get issued");
+        assert_eq!(certs[0].serial, u64::MAX.to_string());
+    }
+
+    // ────────────────────────────────────────────────────────────
+    // get_issued_ssh_certificates_for_user
+    // ────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_get_issued_ssh_certificates_filters_expired() {
+        let store = test_store().await;
+
+        // Insert one expired cert (in the past)
+        let expired_at = Timestamp::now()
+            .checked_sub(jiff::Span::new().hours(1))
+            .expect("past timestamp");
+        record_ssh_certificate_issuance(
+            &store,
+            1001,
+            "user-exp",
+            "user@example.com",
+            &["user".to_string()],
+            expired_at,
+        )
+        .await
+        .expect("record expired");
+
+        // Insert one valid cert (in the future)
+        insert_issued(&store, "user-exp", 1002).await;
+
+        let certs = get_issued_ssh_certificates_for_user(&store, "user-exp")
+            .await
+            .expect("get issued");
+
+        // Only the valid cert should be returned.
+        assert_eq!(certs.len(), 1, "only non-expired cert should be returned");
+        assert_eq!(certs[0].serial, "1002");
+    }
+
+    #[tokio::test]
+    async fn test_get_issued_ssh_certificates_returns_empty_for_unknown_user() {
+        let store = test_store().await;
+
+        let certs = get_issued_ssh_certificates_for_user(&store, "nonexistent-user")
+            .await
+            .expect("get issued");
+
+        assert!(certs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_get_issued_ssh_certificates_multiple_certs() {
+        let store = test_store().await;
+
+        let serials = [111_u64, 222, 333];
+        for &s in &serials {
+            insert_issued(&store, "user-multi", s).await;
+        }
+
+        let certs = get_issued_ssh_certificates_for_user(&store, "user-multi")
+            .await
+            .expect("get issued");
+
+        assert_eq!(certs.len(), 3);
+        let mut returned: Vec<u64> = certs
+            .iter()
+            .map(|c| c.serial.parse::<u64>().expect("numeric serial"))
+            .collect();
+        returned.sort_unstable();
+        assert_eq!(returned, vec![111, 222, 333]);
+    }
+
+    // ────────────────────────────────────────────────────────────
+    // revoke_all_ssh_certificates_for_user — core security property
+    // ────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_revoke_all_creates_revocations_with_real_numeric_serials() {
+        // SECURITY: This test verifies the fix for GH#249.
+        // Prior to the fix, revoke_all_ssh_certificates_for_user inserted a
+        // synthetic "user:{user_id}" serial that could never match the real u64
+        // serial stored in the SSH certificate.  The fix must look up issued
+        // certificate records and revoke each real serial.
+        let store = test_store().await;
+
+        let serial_a: u64 = 5_000_000;
+        let serial_b: u64 = 9_999_999;
+        insert_issued(&store, "user-revoke", serial_a).await;
+        insert_issued(&store, "user-revoke", serial_b).await;
+
+        let count = revoke_all_ssh_certificates_for_user(&store, "user-revoke", None, None)
+            .await
+            .expect("revoke all");
+
+        assert_eq!(count, 2, "should have revoked exactly 2 certs");
+
+        // Each revocation record must carry a real numeric serial.
+        let revoked = get_revoked_ssh_certificates(&store)
+            .await
+            .expect("get revoked");
+
+        let mut revoked_serials: Vec<u64> = revoked
+            .iter()
+            .filter(|r| r.user_id == "user-revoke")
+            .map(|r| r.serial.parse::<u64>().expect("serial must be numeric u64"))
+            .collect();
+        revoked_serials.sort_unstable();
+
+        assert_eq!(
+            revoked_serials,
+            vec![serial_a, serial_b],
+            "revoked serials must exactly match the issued serials"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_revoke_all_returns_zero_when_no_issued_certs() {
+        let store = test_store().await;
+
+        let count = revoke_all_ssh_certificates_for_user(&store, "user-none", None, None)
+            .await
+            .expect("revoke all");
+
+        assert_eq!(count, 0);
+    }
+
+    #[tokio::test]
+    async fn test_revoke_all_does_not_revoke_expired_certs() {
+        // Expired certs are filtered by get_issued_ssh_certificates_for_user
+        // and must not generate revocation records (they have already expired).
+        let store = test_store().await;
+
+        let expired_at = Timestamp::now()
+            .checked_sub(jiff::Span::new().hours(1))
+            .expect("past");
+        record_ssh_certificate_issuance(
+            &store,
+            7001,
+            "user-exp-revoke",
+            "user@example.com",
+            &["user".to_string()],
+            expired_at,
+        )
+        .await
+        .expect("record expired");
+
+        let count = revoke_all_ssh_certificates_for_user(&store, "user-exp-revoke", None, None)
+            .await
+            .expect("revoke all");
+
+        assert_eq!(count, 0, "expired certs should not generate revocations");
+    }
+
+    #[tokio::test]
+    async fn test_revoke_all_propagates_reason_and_revoked_by() {
+        let store = test_store().await;
+        insert_issued(&store, "user-meta", 42).await;
+
+        revoke_all_ssh_certificates_for_user(
+            &store,
+            "user-meta",
+            Some("scim_deprovisioning"),
+            Some("admin@example.com"),
+        )
+        .await
+        .expect("revoke all");
+
+        let revoked = get_revoked_ssh_certificates(&store)
+            .await
+            .expect("get revoked");
+
+        let record = revoked
+            .iter()
+            .find(|r| r.user_id == "user-meta")
+            .expect("revocation record must exist");
+
+        assert_eq!(record.reason.as_deref(), Some("scim_deprovisioning"));
+        assert_eq!(record.revoked_by.as_deref(), Some("admin@example.com"));
+    }
+
+    // ────────────────────────────────────────────────────────────
+    // Revoked serial appears in KRL (is_ssh_certificate_revoked)
+    // ────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_revoked_serial_is_detected_by_krl_check() {
+        // After revoke_all, each real serial must be visible through
+        // is_ssh_certificate_revoked (the check used by SSH servers).
+        let store = test_store().await;
+        let serial: u64 = 1_234_567_890;
+        insert_issued(&store, "user-krl", serial).await;
+
+        revoke_all_ssh_certificates_for_user(&store, "user-krl", None, None)
+            .await
+            .expect("revoke all");
+
+        let is_revoked = is_ssh_certificate_revoked(&store, &serial.to_string())
+            .await
+            .expect("check revocation");
+
+        assert!(
+            is_revoked,
+            "serial {serial} must be reported as revoked after revoke_all"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_non_revoked_serial_is_not_in_krl() {
+        let store = test_store().await;
+
+        let is_revoked = is_ssh_certificate_revoked(&store, "99999999")
+            .await
+            .expect("check revocation");
+
+        assert!(!is_revoked);
+    }
+
+    // ────────────────────────────────────────────────────────────
+    // delete_expired_ssh_issued_certs
+    // ────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_delete_expired_ssh_issued_certs_removes_expired() {
+        let store = test_store().await;
+
+        // Insert expired cert
+        let expired_at = Timestamp::now()
+            .checked_sub(jiff::Span::new().hours(1))
+            .expect("past");
+        record_ssh_certificate_issuance(
+            &store,
+            8001,
+            "user-cleanup",
+            "user@example.com",
+            &["user".to_string()],
+            expired_at,
+        )
+        .await
+        .expect("record expired");
+
+        // Insert valid cert
+        insert_issued(&store, "user-cleanup", 8002).await;
+
+        let deleted = delete_expired_ssh_issued_certs(&store)
+            .await
+            .expect("delete expired");
+
+        assert_eq!(deleted, 1, "only the expired cert record should be removed");
+
+        // Valid cert is still there
+        let remaining = get_issued_ssh_certificates_for_user(&store, "user-cleanup")
+            .await
+            .expect("get issued");
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].serial, "8002");
+    }
 }

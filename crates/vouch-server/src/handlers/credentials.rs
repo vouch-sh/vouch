@@ -49,8 +49,8 @@ pub async fn issue_ssh_certificate(
         ));
     }
 
-    // Validate token and get user email
-    let (_token, user_email) = extract_resource_token_with_email(
+    // Validate token and get user email + user_id
+    let (token, user_email) = extract_resource_token_with_email(
         &state,
         &headers,
         &jar,
@@ -59,6 +59,29 @@ pub async fn issue_ssh_certificate(
         client_cert.0.as_ref(),
     )
     .await?;
+
+    // Reject deactivated users (defense-in-depth for SCIM deactivation)
+    let user = db::get_user_by_id(&state.store, &token.sub)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to get user by ID: {e}");
+            ServiceError::api(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "db_error",
+                "Internal database error",
+            )
+        })?
+        .ok_or_else(|| {
+            ServiceError::api(StatusCode::NOT_FOUND, "user_not_found", "User not found")
+        })?;
+
+    if !user.active {
+        return Err(ServiceError::api(
+            StatusCode::UNAUTHORIZED,
+            "unauthorized",
+            "User account is deactivated",
+        ));
+    }
 
     // Certificate validity matches session duration
     let valid_seconds = state.config().session_hours * 3600;
@@ -97,6 +120,46 @@ pub async fn issue_ssh_certificate(
             StatusCode::BAD_REQUEST,
             "signing_failed",
             "Failed to sign certificate",
+        )
+    })?;
+
+    // Record issuance for revocation tracking. If this fails, do NOT
+    // return the certificate — an untracked cert cannot be revoked.
+    let valid_secs_i64 = i64::try_from(valid_seconds).map_err(|_| {
+        ServiceError::api(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "time_error",
+            "Session duration overflow",
+        )
+    })?;
+    let cert_expires_at = Timestamp::now()
+        .checked_add(jiff::Span::new().seconds(valid_secs_i64))
+        .map_err(|_| {
+            ServiceError::api(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "time_error",
+                "Failed to compute certificate expiry",
+            )
+        })?;
+
+    db::record_ssh_certificate_issuance(
+        &state.store,
+        signed.serial,
+        &token.sub,
+        &user_email,
+        &signed.principals,
+        cert_expires_at,
+    )
+    .await
+    .map_err(|e| {
+        tracing::error!(
+            "Failed to record SSH certificate issuance for {}: {e}",
+            redact_email(&user_email),
+        );
+        ServiceError::api(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "recording_failed",
+            "Failed to record certificate issuance",
         )
     })?;
 
@@ -290,6 +353,14 @@ pub async fn get_aws_token(
             ServiceError::api(StatusCode::NOT_FOUND, "user_not_found", "User not found")
         })?;
 
+    if !user.active {
+        return Err(ServiceError::api(
+            StatusCode::UNAUTHORIZED,
+            "unauthorized",
+            "User account is deactivated",
+        ));
+    }
+
     let user_email = token.email.clone().unwrap_or_else(|| user.email.clone());
 
     // Get user's organization domain (hd claim) if they belong to an org
@@ -409,6 +480,14 @@ pub async fn get_kubernetes_token(
         .ok_or_else(|| {
             ServiceError::api(StatusCode::NOT_FOUND, "user_not_found", "User not found")
         })?;
+
+    if !user.active {
+        return Err(ServiceError::api(
+            StatusCode::UNAUTHORIZED,
+            "unauthorized",
+            "User account is deactivated",
+        ));
+    }
 
     let user_email = token.email.clone().unwrap_or_else(|| user.email.clone());
     let audience = query
@@ -532,6 +611,14 @@ pub async fn get_github_status(
             ServiceError::api(StatusCode::NOT_FOUND, "user_not_found", "User not found")
         })?;
 
+    if !user.active {
+        return Err(ServiceError::api(
+            StatusCode::UNAUTHORIZED,
+            "unauthorized",
+            "User account is deactivated",
+        ));
+    }
+
     // Check if GitHub App is configured
     let configured = state.github_app.is_some();
 
@@ -618,6 +705,14 @@ pub async fn get_github_token(
         .ok_or_else(|| {
             ServiceError::api(StatusCode::NOT_FOUND, "user_not_found", "User not found")
         })?;
+
+    if !user.active {
+        return Err(ServiceError::api(
+            StatusCode::UNAUTHORIZED,
+            "unauthorized",
+            "User account is deactivated",
+        ));
+    }
 
     // Verify user has an organization
     let org_id = user.org_id.as_ref().ok_or_else(|| {
@@ -1287,5 +1382,85 @@ mod tests {
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
         let error: serde_json::Value = serde_json::from_str(&resp_body).expect("Valid JSON");
         assert_eq!(error["code"], "github_not_configured");
+    }
+
+    // ========================================================================
+    // Deactivated User Credential Denial Tests (Issue #252)
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_deactivated_user_cannot_get_aws_token() {
+        let (app, state) = test_app().await;
+
+        let user = create_test_user(&state.store, "deactivated-aws@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+
+        // Deactivate the user
+        crate::db::update_user_active_status(&state.store, &user.id, false)
+            .await
+            .expect("deactivate user");
+
+        let (status, body) = http_get(
+            &app,
+            "/v1/credentials/aws/token",
+            &[("Authorization", &format!("Bearer {token}"))],
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+        assert_eq!(error["code"], "unauthorized");
+        assert_eq!(error["message"], "User account is deactivated");
+    }
+
+    #[tokio::test]
+    async fn test_deactivated_user_cannot_get_k8s_token() {
+        let (app, state) = test_app().await;
+
+        let user = create_test_user(&state.store, "deactivated-k8s@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+
+        crate::db::update_user_active_status(&state.store, &user.id, false)
+            .await
+            .expect("deactivate user");
+
+        let (status, body) = http_get(
+            &app,
+            "/v1/credentials/kubernetes/token",
+            &[("Authorization", &format!("Bearer {token}"))],
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+        assert_eq!(error["code"], "unauthorized");
+        assert_eq!(error["message"], "User account is deactivated");
+    }
+
+    #[tokio::test]
+    async fn test_deactivated_user_cannot_get_github_status() {
+        let (app, state) = test_app().await;
+
+        let user = create_test_user(&state.store, "deactivated-gh@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+
+        crate::db::update_user_active_status(&state.store, &user.id, false)
+            .await
+            .expect("deactivate user");
+
+        let (status, body) = http_get(
+            &app,
+            "/v1/credentials/github/status",
+            &[("Authorization", &format!("Bearer {token}"))],
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+        assert_eq!(error["code"], "unauthorized");
+        assert_eq!(error["message"], "User account is deactivated");
     }
 }

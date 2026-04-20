@@ -175,7 +175,7 @@ pub async fn consume_pushed_authorization_request(
     store: &DocumentStore,
     request_uri: &str,
     client_id: &str,
-) -> Result<Option<PushedAuthorizationRequest>> {
+) -> Result<bool> {
     let now = Timestamp::now();
 
     let doc = store
@@ -183,7 +183,7 @@ pub async fn consume_pushed_authorization_request(
         .await?;
 
     let Some(doc) = doc else {
-        return Ok(None);
+        return Ok(false);
     };
 
     // Validate client binding, single-use, and expiry
@@ -191,17 +191,15 @@ pub async fn consume_pushed_authorization_request(
         || doc.data.consumed_at.is_some()
         || doc.data.expires_at <= now
     {
-        return Ok(None);
+        return Ok(false);
     }
 
-    // Mark as consumed
+    // Consume with optimistic concurrency — if another request already
+    // consumed this PAR between our read and write, compare_and_update
+    // returns false (version mismatch).
     let mut data = doc.data;
     data.consumed_at = Some(now);
-    store.update(&doc.id, &data).await?;
-
-    // Return the consumed record
-    let updated = store.get::<PushedAuthorizationRequestDoc>(&doc.id).await?;
-    Ok(updated.map(PushedAuthorizationRequest::from))
+    store.compare_and_update(&doc.id, doc.version, &data).await
 }
 
 /// Look up a pushed authorization request without consuming it.

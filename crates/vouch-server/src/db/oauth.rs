@@ -806,7 +806,30 @@ pub async fn update_oauth_client_registration(
 /// Maximum JTI length.
 const MAX_JTI_LENGTH: usize = 256;
 
+/// Derive a deterministic document ID from (jti, client_id).
+///
+/// Two concurrent inserts for the same JTI+client_id produce the same
+/// document ID, so the second INSERT fails on the `documents` PRIMARY KEY
+/// constraint. This eliminates the TOCTOU race without requiring elevated
+/// transaction isolation or advisory locks.
+fn deterministic_jti_id(jti: &str, client_id: &str) -> String {
+    use aws_lc_rs::digest::{self, SHA256};
+
+    let mut ctx = digest::Context::new(&SHA256);
+    ctx.update(b"jwt_assertion_jti\0");
+    ctx.update(client_id.as_bytes());
+    ctx.update(b"\0");
+    ctx.update(jti.as_bytes());
+    hex::encode(ctx.finish().as_ref())
+}
+
 /// Store a JWT assertion JTI for replay prevention.
+///
+/// Returns `true` if the JTI was stored (first use), `false` if it
+/// already exists (replay). Uses a deterministic document ID derived
+/// from (jti, client_id) so that concurrent inserts collide on the
+/// PRIMARY KEY constraint, preventing TOCTOU races regardless of
+/// transaction isolation level or database backend.
 pub async fn store_jwt_assertion_jti(
     store: &DocumentStore,
     jti: &str,
@@ -819,25 +842,17 @@ pub async fn store_jwt_assertion_jti(
         ));
     }
 
-    // Check for existing JTI+client_id combination
-    let existing = store
-        .find_by_indexes::<JwtAssertionJtiDoc>(&[("jti", jti), ("client_id", client_id)])
-        .await?;
-    if !existing.is_empty() {
-        return Ok(false);
-    }
-
+    let id = deterministic_jti_id(jti, client_id);
     let doc = JwtAssertionJtiDoc {
         jti: jti.to_string(),
         client_id: client_id.to_string(),
         expires_at,
     };
 
-    match store.insert(&doc).await {
+    match store.insert_with_id(&id, &doc).await {
         Ok(_) => Ok(true),
         Err(e) => {
-            let err_str = e.to_string();
-            if err_str.contains("UNIQUE") || err_str.contains("duplicate key") {
+            if super::pool::is_unique_violation(&e) {
                 Ok(false)
             } else {
                 Err(e)

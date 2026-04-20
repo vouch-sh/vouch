@@ -31,9 +31,7 @@ use super::{
     validate_registration_attestation,
 };
 use crate::redact_email;
-use crate::services::auth::{
-    ACR_AAL3, AuthMethod, CreateOAuthTokenParams, create_oauth_access_token,
-};
+use crate::services::auth::{CreateOAuthTokenParams, create_oauth_access_token};
 use crate::services::error::ServiceError;
 use crate::services::idp::IdentityResult;
 use crate::services::oidc::ScopeSet;
@@ -628,9 +626,7 @@ pub(crate) async fn complete_enrollment_after_identity(
             act: None,
             audience: None,
             auth_time: Some(now.as_second()),
-            amr: None,
-            acr: None,
-            hardware_verified: false,
+            hardware_verification: crate::services::auth::HardwareVerification::NotVerified,
             session_purpose: db::SessionPurpose::OAuthAccessToken,
             authorization_details: None,
         },
@@ -1162,6 +1158,20 @@ pub async fn browser_register_complete(
                 );
             }
             Err(e) => {
+                if state.config().require_attestation_cert {
+                    tracing::warn!(
+                        "Browser enrollment: x5c chain validation \
+                         failed (fatal, require_attestation_cert=true): {e}"
+                    );
+                    return Err(ServiceError::api(
+                        StatusCode::BAD_REQUEST,
+                        "attestation_chain_invalid",
+                        "Attestation certificate chain could not be \
+                         verified against trusted roots. Only genuine \
+                         hardware authenticators with valid attestation \
+                         chains are accepted.",
+                    ));
+                }
                 tracing::warn!(
                     "Browser enrollment: x5c chain validation \
                      failed (non-fatal): {e}"
@@ -1263,9 +1273,7 @@ pub async fn browser_register_complete(
             act: None,
             audience: None,
             auth_time: None,
-            amr: Some(AuthMethod::all_fido2().to_vec()),
-            acr: Some(ACR_AAL3.to_string()),
-            hardware_verified: true,
+            hardware_verification: crate::services::auth::HardwareVerification::Verified,
             session_purpose: db::SessionPurpose::OAuthAccessToken,
             authorization_details: None,
         },

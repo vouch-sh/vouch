@@ -11,7 +11,8 @@ use crate::services::oidc::introspection::{
     IntrospectionResult, introspect_token as svc_introspect, revoke_token as svc_revoke,
     wrap_introspection_jwt,
 };
-use crate::services::oidc::token::authenticate_client;
+use crate::services::oidc::jwt_bearer::commit_jti;
+use crate::services::oidc::token::ClientAuthError;
 use axum::{
     Json,
     extract::State,
@@ -22,9 +23,7 @@ use secrecy::SecretString;
 use serde::Deserialize;
 use std::sync::Arc;
 
-use super::client_auth::{
-    ClientAuthFields, authenticate_client_any, extract_client_auth, extract_client_credentials,
-};
+use super::client_auth::{ClientAuthFields, authenticate_client_any, extract_client_auth};
 
 /// Token revocation request (RFC 7009 Section 2.1).
 ///
@@ -73,8 +72,8 @@ impl ClientAuthFields for RevokeRequest {
 
 /// Token introspection request (RFC 7662 Section 2.1).
 ///
-/// Also accepts `client_id`/`client_secret` for `client_secret_post` authentication
-/// (RFC 6749 Section 2.3.1).
+/// Supports `client_secret_basic`, `client_secret_post`, and `private_key_jwt`
+/// (RFC 7523) client authentication methods.
 #[derive(Debug, Deserialize)]
 pub struct IntrospectRequest {
     /// RFC 7662 Section 2.1: The string value of the token.
@@ -89,6 +88,31 @@ pub struct IntrospectRequest {
     /// Wrapped in `SecretString` to prevent accidental logging and ensure zeroization on drop.
     #[serde(default)]
     client_secret: Option<SecretString>,
+    /// RFC 7521 Section 4.2: JWT assertion for `private_key_jwt` authentication.
+    #[serde(default)]
+    client_assertion: Option<String>,
+    /// RFC 7521 Section 4.2: Assertion type (must be
+    /// `urn:ietf:params:oauth:client-assertion-type:jwt-bearer`).
+    #[serde(default)]
+    client_assertion_type: Option<String>,
+}
+
+impl ClientAuthFields for IntrospectRequest {
+    fn client_id(&self) -> Option<&str> {
+        self.client_id.as_deref()
+    }
+
+    fn client_secret(&self) -> Option<SecretString> {
+        self.client_secret.clone()
+    }
+
+    fn client_assertion(&self) -> Option<&str> {
+        self.client_assertion.as_deref()
+    }
+
+    fn client_assertion_type(&self) -> Option<&str> {
+        self.client_assertion_type.as_deref()
+    }
 }
 
 /// POST /oauth/revoke
@@ -109,22 +133,40 @@ pub async fn revoke(
         Err(response) => return response,
     };
 
-    match authenticate_client_any(&state, auth).await {
-        Ok(Some(_)) => {}
+    let (caller_client_id, pending_jti) = match authenticate_client_any(&state, auth).await {
+        Ok(Some((_client, client_id, jti))) => (client_id, jti),
         Ok(None) => {
             // No credentials provided → 401
             return (StatusCode::UNAUTHORIZED, [("www-authenticate", "Basic")]).into_response();
         }
         Err(response) => return response,
-    }
+    };
 
     let _result = svc_revoke(
         &state,
         &params.token,
         params.token_type_hint.as_deref(),
         client_info,
+        &caller_client_id,
     )
     .await;
+
+    // Commit JTI after revocation so clients can retry on failure.
+    if let Some(ref jti) = pending_jti {
+        match commit_jti(&state, jti).await {
+            Ok(()) => {}
+            Err(ClientAuthError::InvalidCredentials) => {
+                // JTI was already used — reject so the client generates a new assertion.
+                return StatusCode::UNAUTHORIZED.into_response();
+            }
+            Err(e) => {
+                // Transient DB error. Revocation already succeeded — return 200
+                // per RFC 7009 §2 and log for ops visibility.
+                tracing::warn!("JTI commit failed for revoke (revocation succeeded): {e:?}");
+            }
+        }
+    }
+
     // Always return 200 per RFC 7009 Section 2 (for valid clients)
     StatusCode::OK.into_response()
 }
@@ -132,7 +174,8 @@ pub async fn revoke(
 /// POST /oauth/introspect
 ///
 /// Introspect a token (RFC 7662).
-/// Requires client authentication via `Authorization: Basic` header or body credentials.
+/// Requires client authentication via `Authorization: Basic` header, body
+/// credentials, or `private_key_jwt` (RFC 7523).
 /// Returns token metadata if valid, or `{"active": false}` if invalid or auth fails.
 pub async fn introspect(
     State(state): State<Arc<AppState>>,
@@ -140,21 +183,19 @@ pub async fn introspect(
     axum::Form(params): axum::Form<IntrospectRequest>,
 ) -> Response {
     // RFC 7662 Section 2.1: The introspection endpoint MUST authenticate the caller.
-    // Supports both client_secret_basic (header) and client_secret_post (body).
-    let credentials =
-        extract_client_credentials(&headers, params.client_id.as_deref(), params.client_secret);
-    let authenticated_client = match credentials {
-        Some(creds) => match authenticate_client(&state, &creds).await {
-            Ok(c) => c.client,
-            Err(_) => {
-                // RFC 7662 §2.1: Invalid client credentials → 401
-                return (StatusCode::UNAUTHORIZED, [("www-authenticate", "Basic")]).into_response();
-            }
-        },
-        None => {
+    // Supports client_secret_basic, client_secret_post, and private_key_jwt.
+    let auth = match extract_client_auth(&headers, &params) {
+        Ok(auth) => auth,
+        Err(response) => return response,
+    };
+
+    let (authenticated_client, pending_jti) = match authenticate_client_any(&state, auth).await {
+        Ok(Some((client, _client_id, jti))) => (client.client, jti),
+        Ok(None) => {
             // No credentials provided → 401
             return (StatusCode::UNAUTHORIZED, [("www-authenticate", "Basic")]).into_response();
         }
+        Err(response) => return response,
     };
 
     let wants_jwt = authenticated_client
@@ -175,6 +216,23 @@ pub async fn introspect(
         Ok(r) => r,
         Err(_) => IntrospectionResult::inactive(),
     };
+
+    // Commit JTI after introspection so clients can retry on failure.
+    if let Some(ref jti) = pending_jti {
+        match commit_jti(&state, jti).await {
+            Ok(()) => {}
+            Err(ClientAuthError::InvalidCredentials) => {
+                // JTI was already used — reject so the client generates a new assertion.
+                return StatusCode::UNAUTHORIZED.into_response();
+            }
+            Err(e) => {
+                // Transient DB error. Introspection already succeeded — return the
+                // result per defense-in-depth: prefer denying replay over dropping
+                // a valid response. Log for ops visibility.
+                tracing::warn!("JTI commit failed for introspect (returning result anyway): {e:?}");
+            }
+        }
+    }
 
     if wants_jwt {
         // RFC 9701: Return a signed JWT with Content-Type: application/token-introspection+jwt

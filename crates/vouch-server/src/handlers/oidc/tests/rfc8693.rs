@@ -673,3 +673,36 @@ async fn test_rfc8693_invalid_actor_token_type() {
         "Invalid actor_token_type should be rejected, got {status}: {body}"
     );
 }
+
+#[tokio::test]
+async fn test_rfc8693_deactivated_subject_user_rejected() {
+    // GH#275: Deactivated user cannot exchange tokens.
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "deactivated-exchange@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+    let auth_header = client.basic_auth_header();
+
+    // Deactivate the user after creating the session
+    crate::db::update_user_active_status(&state.store, &user.id, false)
+        .await
+        .expect("deactivate user");
+
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        &format!(
+            "grant_type=urn:ietf:params:oauth:grant-type:token-exchange\
+             &subject_token={token}\
+             &subject_token_type=urn:ietf:params:oauth:token-type:access_token"
+        ),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(error["error"], "invalid_grant");
+}

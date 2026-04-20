@@ -330,6 +330,324 @@ async fn test_device_auth_not_found() {
 }
 
 // ========================================================================
+// Device Auth Consumption Tests (RFC 8628 Section 3.5)
+// ========================================================================
+
+#[tokio::test]
+async fn test_try_consume_device_auth_authorized_succeeds() {
+    let (store, _audit) = test_db().await;
+
+    let device_code_hash = "consume_success_hash";
+    let user_code = "CNSM-SUCC";
+    let expires_at: jiff::Timestamp = "2099-12-31T23:59:59Z".parse().unwrap();
+
+    let id = create_device_auth_request(&store, device_code_hash, user_code, None, expires_at, 5)
+        .await
+        .expect("create");
+
+    // Authorize it first
+    let (user_id, _) = upsert_user(&store, "consume@example.com", Some("Test"))
+        .await
+        .expect("user");
+    let auth_id = create_authenticator(
+        &store,
+        &user_id,
+        "consume@example.com",
+        "Key",
+        b"cred-consume",
+        &[0u8; 32],
+        None,
+        None,
+        false,
+    )
+    .await
+    .expect("auth");
+
+    authorize_device_auth(&store, &id, &user_id, "consume@example.com", &auth_id)
+        .await
+        .expect("authorize");
+
+    // Consume
+    let consumed = try_consume_device_auth(&store, device_code_hash)
+        .await
+        .expect("consume");
+    assert!(consumed, "First consumption should succeed");
+
+    // Verify status and consumed_at
+    let request = get_device_auth_by_code_hash(&store, device_code_hash)
+        .await
+        .expect("get")
+        .expect("should exist");
+    assert_eq!(request.status, DeviceAuthStatus::Consumed);
+    assert!(request.consumed_at.is_some(), "consumed_at should be set");
+}
+
+#[tokio::test]
+async fn test_try_consume_device_auth_already_consumed_returns_false() {
+    let (store, _audit) = test_db().await;
+
+    let device_code_hash = "double_consume_hash";
+    let id = create_device_auth_request(
+        &store,
+        device_code_hash,
+        "DBLC-CODE",
+        None,
+        "2099-12-31T23:59:59Z".parse().unwrap(),
+        5,
+    )
+    .await
+    .expect("create");
+
+    let (user_id, _) = upsert_user(&store, "double@example.com", Some("Test"))
+        .await
+        .expect("user");
+    let auth_id = create_authenticator(
+        &store,
+        &user_id,
+        "double@example.com",
+        "Key",
+        b"cred-double",
+        &[0u8; 32],
+        None,
+        None,
+        false,
+    )
+    .await
+    .expect("auth");
+
+    authorize_device_auth(&store, &id, &user_id, "double@example.com", &auth_id)
+        .await
+        .expect("authorize");
+
+    let first = try_consume_device_auth(&store, device_code_hash)
+        .await
+        .expect("first consume");
+    assert!(first, "First consumption should succeed");
+
+    let second = try_consume_device_auth(&store, device_code_hash)
+        .await
+        .expect("second consume");
+    assert!(!second, "Second consumption must return false");
+}
+
+#[tokio::test]
+async fn test_try_consume_device_auth_pending_returns_false() {
+    let (store, _audit) = test_db().await;
+
+    let device_code_hash = "pending_consume_hash";
+    create_device_auth_request(
+        &store,
+        device_code_hash,
+        "PEND-CODE",
+        None,
+        "2099-12-31T23:59:59Z".parse().unwrap(),
+        5,
+    )
+    .await
+    .expect("create");
+
+    // Attempt to consume a Pending request (never authorized)
+    let consumed = try_consume_device_auth(&store, device_code_hash)
+        .await
+        .expect("consume");
+    assert!(!consumed, "Pending device code must not be consumable");
+}
+
+#[tokio::test]
+async fn test_try_consume_device_auth_expired_returns_false() {
+    let (store, _audit) = test_db().await;
+
+    let device_code_hash = "expired_consume_hash";
+    // Already expired
+    let expired_at: jiff::Timestamp = "2020-01-01T00:00:00Z".parse().unwrap();
+    let id = create_device_auth_request(&store, device_code_hash, "EXPD-CNSM", None, expired_at, 5)
+        .await
+        .expect("create");
+
+    let (user_id, _) = upsert_user(&store, "expired@example.com", Some("Test"))
+        .await
+        .expect("user");
+    let auth_id = create_authenticator(
+        &store,
+        &user_id,
+        "expired@example.com",
+        "Key",
+        b"cred-expired",
+        &[0u8; 32],
+        None,
+        None,
+        false,
+    )
+    .await
+    .expect("auth");
+
+    authorize_device_auth(&store, &id, &user_id, "expired@example.com", &auth_id)
+        .await
+        .expect("authorize");
+
+    let consumed = try_consume_device_auth(&store, device_code_hash)
+        .await
+        .expect("consume");
+    assert!(!consumed, "Expired device code must not be consumable");
+}
+
+#[tokio::test]
+async fn test_try_consume_device_auth_not_found_returns_false() {
+    let (store, _audit) = test_db().await;
+
+    let consumed = try_consume_device_auth(&store, "nonexistent_hash")
+        .await
+        .expect("consume");
+    assert!(!consumed, "Nonexistent hash must return false");
+}
+
+#[tokio::test]
+async fn test_device_auth_request_doc_consumed_at_defaults_to_none() {
+    // Pre-fix documents without consumed_at should deserialize cleanly
+    let json = r#"{
+        "device_code_hash": "test",
+        "user_code": "TEST-CODE",
+        "status": "pending",
+        "user_id": null,
+        "user_email": null,
+        "authenticator_id": null,
+        "expires_at": "2099-12-31T23:59:59Z",
+        "interval_seconds": 5,
+        "last_poll_at": null
+    }"#;
+
+    let doc: super::documents::device_auth::DeviceAuthRequestDoc =
+        serde_json::from_str(json).expect("should deserialize without consumed_at");
+    assert!(
+        doc.consumed_at.is_none(),
+        "consumed_at should default to None"
+    );
+    assert_eq!(doc.status, DeviceAuthStatus::Pending);
+}
+
+// ========================================================================
+// Device Auth Single-Use Semantics (GH#254)
+// ========================================================================
+
+#[tokio::test]
+async fn test_double_authorization_should_fail() {
+    let (store, _audit) = test_db().await;
+
+    let id = create_device_auth_request(
+        &store,
+        "dbl_auth_hash",
+        "DBLA-0001",
+        None,
+        "2099-12-31T23:59:59Z".parse().unwrap(),
+        5,
+    )
+    .await
+    .expect("create");
+
+    authorize_device_auth(&store, &id, "user_a", "a@example.com", "auth_a")
+        .await
+        .expect("first authorization should succeed");
+
+    let result = authorize_device_auth(&store, &id, "user_b", "b@example.com", "auth_b").await;
+    assert!(result.is_err(), "second authorization should fail");
+
+    // Original user must be preserved
+    let req = get_device_auth_by_id(&store, &id)
+        .await
+        .expect("get")
+        .expect("exists");
+    assert_eq!(req.status, DeviceAuthStatus::Authorized);
+    assert_eq!(req.user_id.as_deref(), Some("user_a"));
+}
+
+#[tokio::test]
+async fn test_authorize_after_deny_should_fail() {
+    let (store, _audit) = test_db().await;
+
+    let id = create_device_auth_request(
+        &store,
+        "deny_then_auth",
+        "DNYA-0001",
+        None,
+        "2099-12-31T23:59:59Z".parse().unwrap(),
+        5,
+    )
+    .await
+    .expect("create");
+
+    deny_device_auth(&store, &id).await.expect("deny succeeds");
+
+    let result = authorize_device_auth(&store, &id, "user_a", "a@example.com", "auth_a").await;
+    assert!(result.is_err(), "authorize after deny should fail");
+
+    let req = get_device_auth_by_id(&store, &id)
+        .await
+        .expect("get")
+        .expect("exists");
+    assert_eq!(req.status, DeviceAuthStatus::Denied);
+    assert!(req.user_id.is_none());
+}
+
+#[tokio::test]
+async fn test_deny_after_authorize_should_fail() {
+    let (store, _audit) = test_db().await;
+
+    let id = create_device_auth_request(
+        &store,
+        "auth_then_deny",
+        "ATDN-0001",
+        None,
+        "2099-12-31T23:59:59Z".parse().unwrap(),
+        5,
+    )
+    .await
+    .expect("create");
+
+    authorize_device_auth(&store, &id, "user_a", "a@example.com", "auth_a")
+        .await
+        .expect("authorize succeeds");
+
+    let result = deny_device_auth(&store, &id).await;
+    assert!(result.is_err(), "deny after authorize should fail");
+
+    let req = get_device_auth_by_id(&store, &id)
+        .await
+        .expect("get")
+        .expect("exists");
+    assert_eq!(req.status, DeviceAuthStatus::Authorized);
+    assert_eq!(req.user_id.as_deref(), Some("user_a"));
+}
+
+#[tokio::test]
+async fn test_double_deny_should_fail() {
+    let (store, _audit) = test_db().await;
+
+    let id = create_device_auth_request(
+        &store,
+        "dbl_deny_hash",
+        "DBLD-0001",
+        None,
+        "2099-12-31T23:59:59Z".parse().unwrap(),
+        5,
+    )
+    .await
+    .expect("create");
+
+    deny_device_auth(&store, &id)
+        .await
+        .expect("first deny should succeed");
+
+    let result = deny_device_auth(&store, &id).await;
+    assert!(result.is_err(), "second deny should fail");
+
+    let req = get_device_auth_by_id(&store, &id)
+        .await
+        .expect("get")
+        .expect("exists");
+    assert_eq!(req.status, DeviceAuthStatus::Denied);
+}
+
+// ========================================================================
 // OIDC State Tests
 // ========================================================================
 
@@ -1371,6 +1689,58 @@ async fn test_user_cascade_delete() {
     assert!(get_user_by_id(&store, &user_id).await.unwrap().is_none());
 }
 
+/// Regression test for GH#249 / PR#262: SSH revocation records must
+/// survive user deletion so they remain visible in the KRL.
+#[tokio::test]
+async fn test_user_delete_preserves_ssh_revocations() {
+    let (store, _audit) = test_db().await;
+
+    let (user_id, _) = upsert_user(&store, "revoke-preserve@example.com", None)
+        .await
+        .expect("Failed to create user");
+
+    let serial: u64 = 4_242_424;
+    let expires_at: jiff::Timestamp = "2099-12-31T23:59:59Z".parse().unwrap();
+
+    record_ssh_certificate_issuance(
+        &store,
+        serial,
+        &user_id,
+        "revoke-preserve@example.com",
+        &["revoke-preserve@example.com".to_string()],
+        expires_at,
+    )
+    .await
+    .expect("Failed to record issued SSH certificate");
+
+    revoke_all_ssh_certificates_for_user(
+        &store,
+        &user_id,
+        Some("User deleted by admin"),
+        Some("admin-user-id"),
+    )
+    .await
+    .expect("Failed to revoke SSH certificates");
+
+    delete_user(&store, &user_id).await.expect("delete failed");
+
+    // User should be gone
+    assert!(
+        get_user_by_id(&store, &user_id)
+            .await
+            .expect("query failed")
+            .is_none()
+    );
+
+    // Revocation record must persist after user deletion
+    assert!(
+        is_ssh_certificate_revoked(&store, &serial.to_string())
+            .await
+            .expect("revocation check failed"),
+        "revoked serial must remain after deleting the user"
+    );
+}
+
 #[tokio::test]
 async fn test_oauth_client_cascade_delete() {
     let (store, audit) = test_db().await;
@@ -1987,6 +2357,69 @@ async fn test_store_jwt_assertion_jti_too_long() {
 }
 
 #[tokio::test]
+async fn test_store_jwt_assertion_jti_at_max_length() {
+    let (store, _audit) = test_db().await;
+
+    // Exactly MAX_JTI_LENGTH (256) must be accepted
+    let max_jti = "j".repeat(256);
+    let stored = store_jwt_assertion_jti(
+        &store,
+        &max_jti,
+        "client-1",
+        "2099-01-01T00:00:00Z".parse().unwrap(),
+    )
+    .await
+    .expect("256-char JTI should not error");
+    assert!(stored, "JTI at max length should be accepted");
+
+    // Replay still detected
+    let replayed = store_jwt_assertion_jti(
+        &store,
+        &max_jti,
+        "client-1",
+        "2099-01-01T00:00:00Z".parse().unwrap(),
+    )
+    .await
+    .expect("replay check should not error");
+    assert!(!replayed, "Replay of max-length JTI should be rejected");
+}
+
+#[tokio::test]
+async fn test_store_jwt_assertion_jti_client_isolation() {
+    let (store, _audit) = test_db().await;
+
+    let expires: jiff::Timestamp = "2099-01-01T00:00:00Z".parse().unwrap();
+
+    // Three independent (jti, client_id) pairs must all succeed
+    let a = store_jwt_assertion_jti(&store, "jti-xyz", "client-A", expires)
+        .await
+        .expect("pair A should not error");
+    let b = store_jwt_assertion_jti(&store, "jti-xyz", "client-B", expires)
+        .await
+        .expect("pair B should not error");
+    let c = store_jwt_assertion_jti(&store, "jti-pqr", "client-A", expires)
+        .await
+        .expect("pair C should not error");
+    assert!(a, "First pair should be accepted");
+    assert!(b, "Same JTI, different client should be accepted");
+    assert!(c, "Different JTI, same client should be accepted");
+
+    // Each pair replays to false independently
+    let a2 = store_jwt_assertion_jti(&store, "jti-xyz", "client-A", expires)
+        .await
+        .expect("replay A");
+    let b2 = store_jwt_assertion_jti(&store, "jti-xyz", "client-B", expires)
+        .await
+        .expect("replay B");
+    let c2 = store_jwt_assertion_jti(&store, "jti-pqr", "client-A", expires)
+        .await
+        .expect("replay C");
+    assert!(!a2, "Replay of pair A should be rejected");
+    assert!(!b2, "Replay of pair B should be rejected");
+    assert!(!c2, "Replay of pair C should be rejected");
+}
+
+#[tokio::test]
 async fn test_delete_expired_jwt_assertion_jtis() {
     let (store, _audit) = test_db().await;
 
@@ -2020,6 +2453,122 @@ async fn test_delete_expired_jwt_assertion_jtis() {
         reused,
         "Expired+deleted JTI should be accepted again after cleanup"
     );
+}
+
+// ========================================================================
+// DPoP JTI replay prevention
+// ========================================================================
+
+#[tokio::test]
+async fn test_dpop_jti_replay_prevention() {
+    let (store, _audit) = test_db().await;
+
+    // First use returns true
+    let stored = check_and_store_dpop_jti(&store, "dpop-jti-1", 600)
+        .await
+        .expect("first store should not error");
+    assert!(stored, "First use of a JTI should be accepted");
+
+    // Replay returns false
+    let replayed = check_and_store_dpop_jti(&store, "dpop-jti-1", 600)
+        .await
+        .expect("replay check should not error");
+    assert!(!replayed, "Replay of same JTI should be rejected");
+
+    // Different JTI succeeds
+    let different = check_and_store_dpop_jti(&store, "dpop-jti-2", 600)
+        .await
+        .expect("different JTI should not error");
+    assert!(different, "Different JTI should be accepted");
+}
+
+#[tokio::test]
+async fn test_dpop_jti_empty() {
+    let (store, _audit) = test_db().await;
+
+    let result = check_and_store_dpop_jti(&store, "", 600).await;
+    assert!(result.is_err(), "Empty JTI must return an error");
+}
+
+#[tokio::test]
+async fn test_dpop_jti_too_long() {
+    let (store, _audit) = test_db().await;
+
+    let long_jti = "x".repeat(257);
+    let result = check_and_store_dpop_jti(&store, &long_jti, 600).await;
+    assert!(
+        result.is_err(),
+        "JTI exceeding max length must return an error"
+    );
+}
+
+#[tokio::test]
+async fn test_dpop_jti_at_max_length() {
+    let (store, _audit) = test_db().await;
+
+    let max_jti = "d".repeat(256);
+    let stored = check_and_store_dpop_jti(&store, &max_jti, 600)
+        .await
+        .expect("256-char JTI should not error");
+    assert!(stored, "JTI at max length should be accepted");
+
+    let replayed = check_and_store_dpop_jti(&store, &max_jti, 600)
+        .await
+        .expect("replay check should not error");
+    assert!(!replayed, "Replay of max-length JTI should be rejected");
+}
+
+#[tokio::test]
+async fn test_dpop_jti_concurrent_insert_rejects_duplicates() {
+    let (store, _audit) = test_db().await;
+    let store = Arc::new(store);
+
+    let num_tasks = 20;
+    let mut handles = Vec::with_capacity(num_tasks);
+
+    for _ in 0..num_tasks {
+        let s = Arc::clone(&store);
+        handles.push(tokio::spawn(async move {
+            check_and_store_dpop_jti(&s, "same-jti", 600).await
+        }));
+    }
+
+    let mut successes = 0u32;
+    for handle in handles {
+        let result = handle.await.expect("task should not panic");
+        if let Ok(true) = result {
+            successes += 1;
+        }
+    }
+
+    assert_eq!(
+        successes, 1,
+        "Exactly one concurrent insert should succeed, got {successes}"
+    );
+}
+
+#[tokio::test]
+async fn test_delete_expired_dpop_jtis() {
+    let (store, _audit) = test_db().await;
+
+    // Insert one with past expiry (validity_seconds=0 won't work since
+    // it computes from now; instead insert directly with short validity
+    // and rely on the fact that we can test cleanup.)
+    check_and_store_dpop_jti(&store, "valid-dpop-jti", 3600)
+        .await
+        .expect("insert valid");
+
+    // Cleanup should not delete the valid one
+    let deleted = delete_expired_dpop_jtis(&store, "")
+        .await
+        .expect("delete_expired should not error");
+    assert_eq!(deleted, 0, "No expired JTIs to delete");
+
+    // The valid one should still block replay
+    let still_blocked = check_and_store_dpop_jti(&store, "valid-dpop-jti", 3600)
+        .await
+        .expect("check");
+    assert!(!still_blocked, "Valid JTI should still block replay");
 }
 
 // ========================================================================

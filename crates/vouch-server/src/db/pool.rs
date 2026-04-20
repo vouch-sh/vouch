@@ -787,6 +787,20 @@ pub(crate) fn is_retryable_db_error(err: &anyhow::Error) -> bool {
     false
 }
 
+/// Check whether an error is a unique/primary-key constraint violation.
+///
+/// Downcasts through `anyhow::Error` → `sqlx::Error::Database` and
+/// inspects the structured error kind. Covers both UNIQUE and PRIMARY KEY
+/// constraints across SQLite, PostgreSQL, and Aurora DSQL.
+pub(crate) fn is_unique_violation(err: &anyhow::Error) -> bool {
+    if let Some(sqlx_err) = err.downcast_ref::<sqlx::Error>()
+        && let sqlx::Error::Database(db_err) = sqlx_err
+    {
+        return db_err.is_unique_violation();
+    }
+    false
+}
+
 /// Compute a jittered exponential backoff duration for the given attempt.
 ///
 /// Base delay doubles each attempt (~100ms, ~200ms, ~400ms) with ±25% jitter.
@@ -884,6 +898,12 @@ mod tests {
     fn test_is_retryable_db_error_non_db() {
         let err = anyhow::anyhow!("some random error");
         assert!(!is_retryable_db_error(&err));
+    }
+
+    #[test]
+    fn test_is_unique_violation_non_db() {
+        let err = anyhow::anyhow!("some random error");
+        assert!(!is_unique_violation(&err));
     }
 
     #[test]

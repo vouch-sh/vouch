@@ -720,7 +720,7 @@ pub async fn list_scim_groups(
         if let Some(f) = filter {
             records = apply_scim_group_filter(records, f)?;
         }
-        records.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        records.sort_by_key(|b| std::cmp::Reverse(b.created_at));
         let total = records.len();
         let page = records.into_iter().skip(offset).take(count).collect();
         return Ok((page, total));

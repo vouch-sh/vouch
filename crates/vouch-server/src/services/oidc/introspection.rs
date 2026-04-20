@@ -230,10 +230,22 @@ pub async fn revoke_token(
     token: &str,
     _token_type_hint: Option<&str>,
     client_info: crate::handlers::extractors::ClientInfo,
+    caller_client_id: &str,
 ) -> RevocationResult {
     // Try to decode to get email for audit logging
     let config = state.config();
     let decoded = decode_token(token, &state.oidc_key, &config.base_url);
+
+    // RFC 7009 Section 2.1: Verify the token was issued to the calling client.
+    // If not, return success but perform no revocation.
+    if let Some(DecodedToken::AccessToken(ref claims)) = decoded
+        && caller_client_id != claims.client_id
+    {
+        return RevocationResult {
+            revoked: false,
+            user_email: None,
+        };
+    }
 
     let sub = decoded.as_ref().map(|d| d.sub().to_string());
     let email = decoded.as_ref().and_then(|d| d.email().map(String::from));

@@ -83,7 +83,8 @@ pub use device_auth::{
     DeviceAuthRequest, DeviceAuthStatus, OidcState, authorize_device_auth,
     create_device_auth_request, create_oidc_state, delete_expired_device_auth_requests,
     delete_expired_oidc_states, delete_oidc_state, deny_device_auth, get_device_auth_by_code_hash,
-    get_device_auth_by_user_code, get_oidc_state, update_device_auth_poll_time,
+    get_device_auth_by_user_code, get_oidc_state, try_consume_device_auth,
+    update_device_auth_poll_time,
 };
 
 // Re-export device auth test helpers (only available in tests)
@@ -147,11 +148,13 @@ pub use dpop::{
 
 // Re-export credentials types and functions
 pub use credentials::{
-    DelegationPolicy, EnrollmentSession, RevokedSshCertificate, TokenExchangeRecord,
-    check_delegation_policy, create_enrollment_session, delete_delegation_policy,
-    delete_expired_enrollment_sessions, delete_expired_ssh_revocations, delete_old_token_exchanges,
-    get_delegation_policies, get_enrollment_session_by_token_hash, get_revoked_ssh_certificates,
-    get_token_exchanges_for_user, insert_token_exchange, is_ssh_certificate_revoked,
+    DelegationPolicy, EnrollmentSession, IssuedSshCertificate, RevokedSshCertificate,
+    TokenExchangeRecord, check_delegation_policy, create_enrollment_session,
+    delete_delegation_policy, delete_expired_enrollment_sessions, delete_expired_ssh_issued_certs,
+    delete_expired_ssh_revocations, delete_old_token_exchanges, get_delegation_policies,
+    get_enrollment_session_by_token_hash, get_issued_ssh_certificates_for_user,
+    get_revoked_ssh_certificates, get_token_exchanges_for_user, insert_token_exchange,
+    is_ssh_certificate_revoked, record_ssh_certificate_issuance,
     revoke_all_ssh_certificates_for_user, revoke_ssh_certificate, set_delegation_policy_enabled,
 };
 

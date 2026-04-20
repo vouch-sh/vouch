@@ -12,11 +12,11 @@ async fn test_revoke_valid_token() {
     // RFC 7009 Section 2.1: Successful revocation returns 200 and invalidates the token
     let (app, state) = test_app().await;
 
-    // Create a test session and OAuth client for authentication
     let user = create_test_user(&state.store, "revoke@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
     let client = create_test_oauth_client(&state.store, &user.id).await;
+
+    let (token, _) = issue_oauth_access_token(&app, &state, &user, &auth_id, &client).await;
     let auth_header = client.basic_auth_header();
 
     // Verify token works before revocation
@@ -72,11 +72,11 @@ async fn test_revoke_token_invalidates_session() {
     // After revocation, the token should not work
     let (app, state) = test_app().await;
 
-    // Create a test session and OAuth client for authentication
     let user = create_test_user(&state.store, "revoke-check@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
     let client = create_test_oauth_client(&state.store, &user.id).await;
+
+    let (token, _) = issue_oauth_access_token(&app, &state, &user, &auth_id, &client).await;
     let auth_header = client.basic_auth_header();
 
     // Verify token works before revocation
@@ -393,5 +393,138 @@ async fn test_revoke_already_revoked_token_returns_200() {
         status,
         StatusCode::OK,
         "RFC 7009 §2.2: revoking an already-revoked token must still return 200"
+    );
+}
+
+#[tokio::test]
+async fn test_rfc7009_cross_client_revocation_blocked() {
+    // RFC 7009 Section 2.1: Client B must NOT be able to revoke Client A's token.
+    // The server must verify the token was issued to the requesting client.
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "revoke-cross@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client_a = create_test_oauth_client(&state.store, &user.id).await;
+    let client_b = create_test_oauth_client(&state.store, &user.id).await;
+
+    // Issue token for client A
+    let (token_a, _) = issue_oauth_access_token(&app, &state, &user, &auth_id, &client_a).await;
+
+    // Client B tries to revoke Client A's token — returns 200 but must NOT revoke
+    let auth_b = client_b.basic_auth_header();
+    let (status, _) = http_post_form(
+        &app,
+        "/oauth/revoke",
+        &format!("token={}", token_a),
+        &[("Authorization", &auth_b)],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "RFC 7009: revocation always returns 200"
+    );
+
+    // Verify token is still active — cross-client revocation must be a no-op
+    let auth_a = client_a.basic_auth_header();
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/introspect",
+        &format!("token={}", token_a),
+        &[("Authorization", &auth_a)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let result: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(
+        result["active"], true,
+        "Cross-client revocation must not revoke the token"
+    );
+}
+
+// ========================================================================
+// RFC 7009 — Token Revocation with private_key_jwt (GH#274)
+// ========================================================================
+
+#[tokio::test]
+async fn test_rfc7009_revoke_with_private_key_jwt_succeeds() {
+    // RFC 7009 + RFC 7523: Revocation with private_key_jwt authentication.
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "revoke-jwt@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let (jwt_client, pkcs8_bytes) = create_test_jwt_client(&state.store, &user.id).await;
+
+    // Issue a token via a separate client_secret client (to have a token to revoke)
+    let secret_client = create_test_oauth_client(&state.store, &user.id).await;
+    let (token, _) = issue_oauth_access_token(&app, &state, &user, &auth_id, &secret_client).await;
+
+    // Revoke using private_key_jwt with aud=/oauth/revoke
+    let revoke_url = format!("{}/oauth/revoke", state.config().base_url);
+    let assertion = build_client_assertion(&jwt_client.client_id, &revoke_url, &pkcs8_bytes, None);
+
+    let body = format!(
+        "token={}&client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer\
+         &client_assertion={}",
+        token, assertion
+    );
+
+    let (status, _) = http_post_form(&app, "/oauth/revoke", &body, &[]).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "Revocation with private_key_jwt must return 200"
+    );
+}
+
+#[tokio::test]
+async fn test_rfc7009_revoke_private_key_jwt_jti_replay_rejected() {
+    // GH#274: Replayed JWT assertion at /oauth/revoke must be rejected.
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "revoke-replay@example.com").await;
+    let (jwt_client, pkcs8_bytes) = create_test_jwt_client(&state.store, &user.id).await;
+
+    let revoke_url = format!("{}/oauth/revoke", state.config().base_url);
+    let fixed_jti = "revoke-replay-jti-001";
+
+    // First revocation with a fixed JTI — should return 200
+    let assertion1 = build_client_assertion(
+        &jwt_client.client_id,
+        &revoke_url,
+        &pkcs8_bytes,
+        Some(fixed_jti),
+    );
+    let body1 = format!(
+        "token=some_token\
+         &client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer\
+         &client_assertion={}",
+        assertion1
+    );
+    let (status1, _) = http_post_form(&app, "/oauth/revoke", &body1, &[]).await;
+    assert_eq!(
+        status1,
+        StatusCode::OK,
+        "First use of JTI at revoke must return 200"
+    );
+
+    // Second revocation with the SAME JTI — must be rejected (replay)
+    let assertion2 = build_client_assertion(
+        &jwt_client.client_id,
+        &revoke_url,
+        &pkcs8_bytes,
+        Some(fixed_jti),
+    );
+    let body2 = format!(
+        "token=some_other_token\
+         &client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer\
+         &client_assertion={}",
+        assertion2
+    );
+    let (status2, _) = http_post_form(&app, "/oauth/revoke", &body2, &[]).await;
+    assert_eq!(
+        status2,
+        StatusCode::UNAUTHORIZED,
+        "Replayed JTI at revoke must be rejected with 401"
     );
 }

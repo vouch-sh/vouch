@@ -10,6 +10,23 @@ use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use jiff::{Timestamp, ToSpan};
 
+/// Maximum JTI length.
+const MAX_JTI_LENGTH: usize = 256;
+
+/// Derive a deterministic document ID from a DPoP JTI.
+///
+/// DPoP JTIs are globally unique (RFC 9449 Section 11.1), unlike JWT
+/// assertion JTIs which are scoped per-client. The domain separator
+/// `"dpop_jti\0"` prevents cross-type ID collisions.
+fn deterministic_dpop_jti_id(jti: &str) -> String {
+    use aws_lc_rs::digest::{self, SHA256};
+
+    let mut ctx = digest::Context::new(&SHA256);
+    ctx.update(b"dpop_jti\0");
+    ctx.update(jti.as_bytes());
+    hex::encode(ctx.finish().as_ref())
+}
+
 /// Generate a random URL-safe string.
 fn generate_random_string(len: usize) -> Result<String> {
     let mut bytes = vec![0u8; len];
@@ -57,40 +74,41 @@ pub async fn validate_and_consume_dpop_nonce(store: &DocumentStore, nonce: &str)
     Ok(true)
 }
 
-/// Check if JTI exists (replay) and store it.
+/// Check if JTI exists (replay) and store it atomically.
 /// Returns `true` if new, `false` if replay.
 ///
-/// Uses the JTI as the document ID for uniqueness.
+/// Uses a deterministic document ID derived from the JTI so that
+/// concurrent inserts collide on the PRIMARY KEY constraint,
+/// preventing TOCTOU races.
 pub async fn check_and_store_dpop_jti(
     store: &DocumentStore,
     jti: &str,
     validity_seconds: i64,
 ) -> Result<bool> {
+    if jti.is_empty() {
+        return Err(anyhow::anyhow!("DPoP JTI must not be empty"));
+    }
+    if jti.len() > MAX_JTI_LENGTH {
+        return Err(anyhow::anyhow!(
+            "DPoP JTI exceeds maximum length ({MAX_JTI_LENGTH})"
+        ));
+    }
+
     let now = Timestamp::now();
     let expires_at = now
         .checked_add(validity_seconds.seconds())
         .context("DPoP JTI expiry timestamp overflow")?;
 
-    // Check if JTI already exists by looking up the index
-    let existing = store.find_one::<DpopJtiDoc>("jti", jti).await?;
-    if existing.is_some() {
-        return Ok(false);
-    }
-
+    let id = deterministic_dpop_jti_id(jti);
     let doc = DpopJtiDoc {
         jti: jti.to_string(),
         expires_at,
     };
 
-    // Insert — if a race causes a duplicate, treat as replay
-    match store.insert(&doc).await {
+    match store.insert_with_id(&id, &doc).await {
         Ok(_) => Ok(true),
         Err(e) => {
-            let err_str = e.to_string();
-            if err_str.contains("UNIQUE")
-                || err_str.contains("duplicate key")
-                || err_str.contains("PRIMARY KEY")
-            {
+            if super::pool::is_unique_violation(&e) {
                 Ok(false)
             } else {
                 Err(e)

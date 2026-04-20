@@ -153,8 +153,23 @@ pub async fn exchange_jwt_bearer_grant(
         ServiceError::oauth(OAuthErrorCode::InvalidGrant, "User not found")
     })?;
 
+    // 8b. Reject deactivated users
+    if !user.active {
+        tracing::warn!(
+            target: "security",
+            user_id = %user.id,
+            issuer = %issuer.issuer,
+            "JWT bearer grant rejected: user account is deactivated"
+        );
+        return Err(ServiceError::oauth(
+            OAuthErrorCode::InvalidGrant,
+            "User account is deactivated",
+        ));
+    }
+
     // 9. Check JTI for replay (RFC 7523 Section 3)
-    //    Atomic insert with UNIQUE(jti, client_id) prevents TOCTOU races.
+    //    Deterministic document ID derived from (jti, issuer) ensures the
+    //    PRIMARY KEY constraint prevents concurrent duplicate inserts.
     if let Some(ref jti) = validated.claims.jti {
         let max_lifetime = i64::from(issuer.max_token_lifetime_seconds);
         let expires_at = Timestamp::now()
@@ -195,9 +210,7 @@ pub async fn exchange_jwt_bearer_grant(
             act: None,
             audience: None,
             auth_time: None,
-            amr: None,
-            acr: None,
-            hardware_verified: true,
+            hardware_verification: crate::services::auth::HardwareVerification::NotVerified,
             session_purpose: crate::db::SessionPurpose::OAuthAccessToken,
             authorization_details: None,
         },

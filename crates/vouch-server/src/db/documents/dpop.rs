@@ -39,10 +39,9 @@ impl DocumentType for DpopJtiDoc {
     const DOC_TYPE: &'static str = "dpop_jti";
 
     fn index_entries(&self) -> Vec<IndexEntry> {
-        vec![IndexEntry {
-            field: "jti",
-            value: self.jti.clone(),
-        }]
+        // No index needed — replay detection uses deterministic document IDs
+        // (PRIMARY KEY collision), not index lookups.
+        Vec::new()
     }
 
     fn expires_at(&self) -> Option<Timestamp> {

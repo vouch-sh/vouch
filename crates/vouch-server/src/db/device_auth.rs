@@ -25,6 +25,7 @@ pub struct DeviceAuthRequest {
     pub expires_at: Timestamp,
     pub interval_seconds: i32,
     pub last_poll_at: Option<Timestamp>,
+    pub consumed_at: Option<Timestamp>,
 }
 
 impl From<Document<DeviceAuthRequestDoc>> for DeviceAuthRequest {
@@ -41,6 +42,7 @@ impl From<Document<DeviceAuthRequestDoc>> for DeviceAuthRequest {
             expires_at: doc.data.expires_at,
             interval_seconds: doc.data.interval_seconds,
             last_poll_at: doc.data.last_poll_at,
+            consumed_at: doc.data.consumed_at,
         }
     }
 }
@@ -90,6 +92,7 @@ pub async fn create_device_auth_request(
         expires_at,
         interval_seconds,
         last_poll_at: None,
+        consumed_at: None,
     };
     let result = store.insert(&doc).await?;
     Ok(result.id)
@@ -153,6 +156,15 @@ pub async fn authorize_device_auth(
         );
     };
 
+    if doc.data.status != DeviceAuthStatus::Pending {
+        bail!(
+            "authorize_device_auth: device auth request '{}' \
+             already has status '{:?}'",
+            id,
+            doc.data.status
+        );
+    }
+
     let mut data = doc.data;
     data.status = DeviceAuthStatus::Authorized;
     data.user_id = Some(user_id.to_string());
@@ -165,14 +177,73 @@ pub async fn authorize_device_auth(
 }
 
 /// Deny a device auth request.
+///
+/// The read and status update execute within a single transaction so
+/// concurrent denial attempts are serialized correctly.
 #[allow(dead_code)]
 pub async fn deny_device_auth(store: &DocumentStore, id: &str) -> Result<()> {
-    if let Some(doc) = store.get::<DeviceAuthRequestDoc>(id).await? {
-        let mut data = doc.data;
-        data.status = DeviceAuthStatus::Denied;
-        store.update(id, &data).await?;
+    if id.is_empty() {
+        bail!("deny_device_auth called with empty id");
     }
+
+    let mut tx = store.begin().await?;
+
+    let doc = tx.get::<DeviceAuthRequestDoc>(id).await?;
+    let Some(doc) = doc else {
+        bail!(
+            "deny_device_auth: no device auth request \
+             found with id '{}'",
+            id
+        );
+    };
+
+    if doc.data.status != DeviceAuthStatus::Pending {
+        bail!(
+            "deny_device_auth: device auth request '{}' \
+             already has status '{:?}'",
+            id,
+            doc.data.status
+        );
+    }
+
+    let mut data = doc.data;
+    data.status = DeviceAuthStatus::Denied;
+    tx.update(id, &data).await?;
+
+    tx.commit().await?;
     Ok(())
+}
+
+/// Try to consume an authorized device code (RFC 8628 Section 3.5).
+///
+/// Returns `true` if the code was successfully consumed (first use).
+/// Returns `false` if already consumed, not authorized, expired,
+/// or was concurrently consumed by another request (optimistic lock).
+pub async fn try_consume_device_auth(
+    store: &DocumentStore,
+    device_code_hash: &str,
+) -> Result<bool> {
+    let now = Timestamp::now();
+
+    let doc = store
+        .find_one::<DeviceAuthRequestDoc>("device_code_hash", device_code_hash)
+        .await?;
+    let Some(doc) = doc else {
+        return Ok(false);
+    };
+
+    // Only consume if currently Authorized and not expired
+    if doc.data.status != DeviceAuthStatus::Authorized || doc.data.expires_at <= now {
+        return Ok(false);
+    }
+
+    // Atomically transition to Consumed with optimistic concurrency.
+    // If another request consumed between our read and write,
+    // compare_and_update returns false (version mismatch).
+    let mut data = doc.data;
+    data.status = DeviceAuthStatus::Consumed;
+    data.consumed_at = Some(now);
+    store.compare_and_update(&doc.id, doc.version, &data).await
 }
 
 /// Update the last poll time for a device auth request.
@@ -199,7 +270,12 @@ pub async fn update_device_auth_poll_time(
 
     let mut data = doc.data;
     data.last_poll_at = Some(now);
-    store.update(id, &data).await?;
+    // Use compare_and_update to avoid blind overwrites that could
+    // revert a concurrent status change (e.g. Consumed → Authorized).
+    // A version conflict is harmless here — proceed as if poll was
+    // allowed since the rate limit is a courtesy, not a security
+    // control.
+    let _updated = store.compare_and_update(id, doc.version, &data).await?;
     Ok(true)
 }
 

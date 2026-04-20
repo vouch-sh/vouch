@@ -1440,16 +1440,21 @@ mod session {
     async fn test_logout_via_revoke_clears_session() {
         let harness = TestHarness::new().await;
 
-        let (user, _auth_id, token) = harness
+        let (user, auth_id, _raw_token) = harness
             .create_authenticated_user("logout@example.com")
             .await
             .expect("Failed to create authenticated user");
 
-        // RFC 7009 Section 2.1: Revocation requires client authentication
+        // RFC 7009 Section 2.1: Revocation requires client authentication.
+        // Token must be bound to the client for ownership check.
         let client = harness
             .create_oauth_client(&user.id)
             .await
             .expect("Failed to create OAuth client");
+        let token = harness
+            .create_session_for_client(&user.id, &user.email, &auth_id, &client.client_id)
+            .await
+            .expect("Failed to create client-bound session");
         let auth_header = client.basic_auth_header();
 
         // Verify token works

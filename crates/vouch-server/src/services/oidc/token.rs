@@ -202,8 +202,34 @@ pub async fn exchange_authorization_code(
     let auth_code = decode_authorization_code(state, params.code, params.client_id).await?;
 
     // RFC 6749 Section 10.5: Enforce single-use authorization codes.
+    // This MUST happen before any other validation to ensure codes are always
+    // consumed, enabling replay detection regardless of subsequent check outcomes.
     let code_hash = hash_token(params.code);
     enforce_single_use_code(state, &code_hash, &auth_code).await?;
+
+    // Reject deactivated users before issuing tokens
+    let user = db::get_user_by_id(&state.store, &auth_code.user_id)
+        .await
+        .map_err(|e| ServiceError::Internal(e.to_string()))?
+        .ok_or(ServiceError::oauth(
+            OAuthErrorCode::InvalidGrant,
+            "User not found",
+        ))?;
+    if !user.active {
+        return Err(ServiceError::oauth(
+            OAuthErrorCode::InvalidGrant,
+            "User account is deactivated",
+        ));
+    }
+
+    // Reject tokens for revoked/deleted authenticators (GH#272)
+    let _authenticator = db::get_authenticator_by_id(&state.store, &auth_code.authenticator_id)
+        .await
+        .map_err(|e| ServiceError::Internal(e.to_string()))?
+        .ok_or(ServiceError::oauth(
+            OAuthErrorCode::InvalidGrant,
+            "Authenticator not found",
+        ))?;
 
     // RFC 6749 Section 4.1.3: Authenticate the client (if credentials provided)
     let authenticated_client =
@@ -242,9 +268,7 @@ pub async fn exchange_authorization_code(
             act: None,
             audience: grants.audience.as_deref(),
             auth_time: Some(auth_code.auth_time.unwrap_or(auth_code.iat)),
-            amr: Some(AuthMethod::all_fido2().to_vec()),
-            acr: Some(crate::services::auth::ACR_AAL3.to_string()),
-            hardware_verified: true,
+            hardware_verification: crate::services::auth::HardwareVerification::Verified,
             session_purpose: db::SessionPurpose::OAuthAccessToken,
             authorization_details: grants.authorization_details_value.as_ref(),
         },
@@ -277,8 +301,7 @@ pub async fn exchange_authorization_code(
             dpop_jkt,
             scope: &auth_code.scope,
             auth_time: Some(auth_code.auth_time.unwrap_or(auth_code.iat)),
-            amr: Some(AuthMethod::all_fido2().to_vec()),
-            acr: Some(crate::services::auth::ACR_AAL3.to_string()),
+            hardware_verification: crate::services::auth::HardwareVerification::Verified,
             access_token: Some(access_token.expose_secret()),
             id_token_alg,
         },
@@ -721,10 +744,8 @@ struct IdTokenParams<'a> {
     scope: &'a ScopeSet,
     /// Time when the user authenticated (FIDO2 session creation time).
     auth_time: Option<i64>,
-    /// RFC 8176: Authentication methods reference.
-    amr: Option<Vec<AuthMethod>>,
-    /// RFC 9068 Section 2.2: Authentication context class reference.
-    acr: Option<String>,
+    /// Authentication assurance level — bundles `amr` and `acr`.
+    hardware_verification: crate::services::auth::HardwareVerification,
     /// Access token string, used to compute `at_hash` (OIDC Core Section 3.1.3.6).
     access_token: Option<&'a str>,
     /// OIDC Core: Algorithm for signing this ID token.
@@ -769,8 +790,8 @@ async fn generate_id_token(
         hardware_verified: None,
         hardware_aaguid: None,
         cnf,
-        amr: params.amr,
-        acr: params.acr,
+        amr: params.hardware_verification.amr(),
+        acr: params.hardware_verification.acr(),
         at_hash: params.access_token.and_then(compute_at_hash),
     };
 
