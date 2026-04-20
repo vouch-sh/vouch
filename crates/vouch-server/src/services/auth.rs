@@ -102,6 +102,48 @@ impl<'de> Deserialize<'de> for AuthMethod {
 /// FIDO2 hardware key + PIN + user presence meets AAL3 per NIST SP 800-63B.
 pub(crate) const ACR_AAL3: &str = "urn:nist:authentication:assurance-level:aal3";
 
+/// Authentication assurance level for an issued token.
+///
+/// Bundles `hardware_verified`, `amr`, and `acr` into a single type
+/// to prevent inconsistent combinations (e.g., `hardware_verified: true`
+/// with `amr: None`).
+#[derive(Debug, Clone)]
+pub(crate) enum HardwareVerification {
+    /// FIDO2 hardware key verified by Vouch (UP + UV).
+    /// Sets `hardware_verified: true`, `amr: [hwk, pin, user]`,
+    /// `acr: urn:nist:...:aal3`.
+    Verified,
+    /// No hardware verification performed (M2M, JWT bearer, etc.).
+    /// Sets `hardware_verified: false`, `amr: None`, `acr: None`.
+    NotVerified,
+}
+
+impl HardwareVerification {
+    /// Whether FIDO2 hardware verification was performed.
+    #[must_use]
+    pub(crate) fn hardware_verified(&self) -> bool {
+        matches!(self, Self::Verified)
+    }
+
+    /// RFC 8176 authentication methods reference.
+    #[must_use]
+    pub(crate) fn amr(&self) -> Option<Vec<AuthMethod>> {
+        match self {
+            Self::Verified => Some(AuthMethod::all_fido2().to_vec()),
+            Self::NotVerified => None,
+        }
+    }
+
+    /// RFC 9068 authentication context class reference.
+    #[must_use]
+    pub(crate) fn acr(&self) -> Option<String> {
+        match self {
+            Self::Verified => Some(ACR_AAL3.to_string()),
+            Self::NotVerified => None,
+        }
+    }
+}
+
 /// Parameters for verifying authenticator ownership.
 pub(crate) struct AuthenticatorLookupParams<'a> {
     /// The credential ID from the WebAuthn assertion.
@@ -346,13 +388,9 @@ pub(crate) struct CreateOAuthTokenParams<'a> {
     /// Time when the End-User authentication occurred (Unix timestamp).
     /// Populated from FIDO2 session creation time for authorization code grants.
     pub auth_time: Option<i64>,
-    /// RFC 9068 Section 2.2 / RFC 8176: Authentication methods reference.
-    pub amr: Option<Vec<AuthMethod>>,
-    /// RFC 9068 Section 2.2: Authentication context class reference.
-    pub acr: Option<String>,
-    /// Whether FIDO2 hardware verification was performed.
-    /// `false` for M2M tokens issued via `client_credentials` grant.
-    pub hardware_verified: bool,
+    /// Authentication assurance level — bundles `hardware_verified`, `amr`,
+    /// and `acr` to prevent inconsistent combinations.
+    pub hardware_verification: HardwareVerification,
     /// Session purpose for the database record.
     pub session_purpose: SessionPurpose,
     /// RFC 9396: Rich authorization details (JSON array, stored in session).
@@ -431,12 +469,12 @@ pub(crate) async fn create_oauth_access_token(
             None
         },
         email_verified: if has_email_scope { Some(true) } else { None },
-        hardware_verified: params.hardware_verified,
+        hardware_verified: params.hardware_verification.hardware_verified(),
         cnf,
         auth_time: params.auth_time,
         act: params.act,
-        amr: params.amr,
-        acr: params.acr,
+        amr: params.hardware_verification.amr(),
+        acr: params.hardware_verification.acr(),
     };
 
     let token = state
@@ -521,6 +559,15 @@ impl DecodedToken {
     pub(crate) fn act(&self) -> Option<&ActorClaim> {
         match self {
             Self::AccessToken(c) => c.act.as_ref(),
+        }
+    }
+
+    /// Reconstruct the hardware verification level from token claims.
+    #[must_use]
+    pub(crate) fn hardware_verification(&self) -> HardwareVerification {
+        match self {
+            Self::AccessToken(c) if c.hardware_verified => HardwareVerification::Verified,
+            Self::AccessToken(_) => HardwareVerification::NotVerified,
         }
     }
 }

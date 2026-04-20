@@ -3,9 +3,7 @@
 
 use crate::AppState;
 use crate::db::{self, DeviceAuthStatus};
-use crate::services::auth::{
-    ACR_AAL3, AuthMethod, CreateOAuthTokenParams, create_oauth_access_token,
-};
+use crate::services::auth::{CreateOAuthTokenParams, create_oauth_access_token};
 use crate::services::oidc::ScopeSet;
 use aws_lc_rs::digest::{self, SHA256};
 use axum::{Json, extract::State, http::StatusCode};
@@ -327,9 +325,7 @@ pub async fn device_token(
                     act: None,
                     audience: None,
                     auth_time: Some(now_secs),
-                    amr: Some(AuthMethod::all_fido2().to_vec()),
-                    acr: Some(ACR_AAL3.to_string()),
-                    hardware_verified: true,
+                    hardware_verification: crate::services::auth::HardwareVerification::Verified,
                     session_purpose: crate::db::SessionPurpose::OAuthAccessToken,
                     authorization_details: None,
                 },

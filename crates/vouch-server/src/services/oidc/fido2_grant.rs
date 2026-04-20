@@ -17,7 +17,7 @@ use crate::AppState;
 use crate::crypto::jwt::JwtType;
 use crate::db::{self, AuthEventParams, AuthEventType};
 use crate::services::auth::{
-    ACR_AAL3, AuthMethod, AuthenticatorLookupParams, CreateOAuthTokenParams, LoginAssertionParams,
+    AuthenticatorLookupParams, CreateOAuthTokenParams, LoginAssertionParams,
     create_oauth_access_token, lookup_and_verify_authenticator, verify_login_assertion,
 };
 use crate::services::oidc::authorization_details::AuthorizationDetails;
@@ -312,9 +312,7 @@ pub async fn exchange_fido2_assertion(
             act: None,
             audience: None,
             auth_time: Some(now),
-            amr: Some(AuthMethod::all_fido2().to_vec()),
-            acr: Some(ACR_AAL3.to_string()),
-            hardware_verified: true,
+            hardware_verification: crate::services::auth::HardwareVerification::Verified,
             session_purpose: db::SessionPurpose::OAuthAccessToken,
             authorization_details: ad_value.as_ref(),
         },

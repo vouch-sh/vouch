@@ -27,9 +27,7 @@ use crate::handlers::HasVersion;
 use crate::handlers::session::{create_session_cookie, get_auth_context};
 use crate::impl_template_response;
 use crate::redact_email;
-use crate::services::auth::{
-    ACR_AAL3, AuthMethod, CreateOAuthTokenParams, create_oauth_access_token,
-};
+use crate::services::auth::{CreateOAuthTokenParams, create_oauth_access_token};
 use crate::services::error::ServiceError;
 use crate::services::oidc::ScopeSet;
 use askama::Template;
@@ -650,9 +648,7 @@ pub async fn browser_login_complete(
             act: None,
             audience: None,
             auth_time: Some(auth_now.as_second()),
-            amr: Some(AuthMethod::all_fido2().to_vec()),
-            acr: Some(ACR_AAL3.to_string()),
-            hardware_verified: true,
+            hardware_verification: crate::services::auth::HardwareVerification::Verified,
             session_purpose: db::SessionPurpose::OAuthAccessToken,
             authorization_details: None,
         },
