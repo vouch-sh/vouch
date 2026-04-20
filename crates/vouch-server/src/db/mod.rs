@@ -170,7 +170,7 @@ pub use github::{
 
 // Re-export PAR types and functions (RFC 9126)
 pub use par::{
-    CreateParParams, PAR_EXPIRES_IN, PushedAuthorizationRequest,
+    CreateParParams, PAR_EXPIRES_IN, ParConsumptionMode, PushedAuthorizationRequest,
     consume_pushed_authorization_request, create_pushed_authorization_request,
     delete_expired_pushed_authorization_requests, get_pushed_authorization_request,
 };

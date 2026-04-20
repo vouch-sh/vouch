@@ -1106,16 +1106,12 @@ async fn complete_pending_auth(
         }
     }
 
-    // RFC 9126: Consume PAR at code issuance time.
-    // The PAR may have expired (60s TTL) by the time the user completes login,
-    // which is fine — the TTL itself prevents reuse after expiry. However,
-    // Ok(false) means another pending auth already consumed this PAR
-    // (e.g. browser tab duplication), so reject to enforce single-use.
     if let Some(ref request_uri) = pending.par_request_uri {
         match db::consume_pushed_authorization_request(
             &state.store,
             request_uri,
             &pending.client_id,
+            db::ParConsumptionMode::SkipExpiry,
         )
         .await
         {
@@ -1131,7 +1127,7 @@ async fn complete_pending_auth(
                     .await;
             }
             Err(e) => {
-                tracing::error!("Failed to consume PAR during pending auth completion: {e}");
+                tracing::error!("Failed to consume PAR at code issuance: {e}");
                 return resolved
                     .error_redirect(
                         state,
@@ -1494,7 +1490,14 @@ async fn issue_code_after_reauth_check(
 
     // Step 7: Consume PAR if applicable (code issuance, not initial authorize visit).
     if let Some((request_uri, client_id)) = par_to_consume {
-        match db::consume_pushed_authorization_request(&state.store, request_uri, client_id).await {
+        match db::consume_pushed_authorization_request(
+            &state.store,
+            request_uri,
+            client_id,
+            db::ParConsumptionMode::EnforceExpiry,
+        )
+        .await
+        {
             Ok(true) => {} // Successfully consumed
             Ok(false) => {
                 return oauth_error_response(
