@@ -108,11 +108,7 @@ pub async fn check_and_store_dpop_jti(
     match store.insert_with_id(&id, &doc).await {
         Ok(_) => Ok(true),
         Err(e) => {
-            let err_str = e.to_string();
-            if err_str.contains("UNIQUE")
-                || err_str.contains("duplicate key")
-                || err_str.contains("PRIMARY KEY")
-            {
+            if super::pool::is_unique_violation(&e) {
                 Ok(false)
             } else {
                 Err(e)
