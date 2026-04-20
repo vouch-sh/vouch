@@ -150,6 +150,14 @@ pub async fn exchange_token(
         .ok_or_else(|| {
             ServiceError::oauth(OAuthErrorCode::InvalidGrant, "Subject token user not found")
         })?;
+
+    if !subject_user.active {
+        return Err(ServiceError::oauth(
+            OAuthErrorCode::InvalidGrant,
+            "User account is deactivated",
+        ));
+    }
+
     let subject_email = &subject_user.email;
 
     // Handle actor token if present (for delegation chains)

@@ -1135,3 +1135,67 @@ async fn test_non_fapi_client_accepts_token_endpoint_audience() {
         "Non-FAPI client with aud=token_endpoint_url must pass client auth (status={status}): {resp_body}"
     );
 }
+
+#[tokio::test]
+async fn test_rfc7523_jwt_bearer_grant_deactivated_user_rejected() {
+    // GH#275: Deactivated user cannot obtain tokens via JWT bearer grant.
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "deactivated-bearer@example.com").await;
+
+    let (pkcs8_bytes, jwk) = generate_es256_signing_key();
+
+    let issuer_url = "https://deactivated-issuer.example.com";
+    let issuer = db::create_trusted_jwt_issuer(
+        &state.store,
+        issuer_url,
+        "Deactivated Test Issuer",
+        None,
+        "https://deactivated-issuer.example.com/.well-known/jwks.json",
+        Some("email"),
+        Some("openid email"),
+        Some(3600),
+    )
+    .await
+    .expect("Failed to create trusted issuer");
+
+    let jwks_value = serde_json::json!({
+        "keys": [jwk]
+    });
+    db::update_issuer_jwks_cache(&state.store, &issuer.id, &jwks_value)
+        .await
+        .expect("Failed to update JWKS cache");
+
+    // Build JWT assertion
+    let now = jiff::Timestamp::now().as_second();
+    let header = serde_json::json!({
+        "alg": "ES256",
+        "typ": "JWT",
+        "kid": "test-key-1"
+    });
+    let claims = serde_json::json!({
+        "iss": issuer_url,
+        "sub": user.email,
+        "aud": state.config().base_url,
+        "iat": now,
+        "exp": now + 60,
+        "jti": uuid::Uuid::now_v7().to_string()
+    });
+    let assertion = sign_jwt_assertion(&pkcs8_bytes, &header, &claims);
+
+    // Deactivate the user after building the assertion
+    crate::db::update_user_active_status(&state.store, &user.id, false)
+        .await
+        .expect("deactivate user");
+
+    let body = format!(
+        "grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer\
+         &assertion={assertion}&scope=openid email"
+    );
+
+    let (status, resp_body) = http_post_form(&app, "/oauth/token", &body, &[]).await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let error: serde_json::Value = serde_json::from_str(&resp_body).expect("Valid JSON");
+    assert_eq!(error["error"], "invalid_grant");
+}

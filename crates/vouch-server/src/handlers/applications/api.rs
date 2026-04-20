@@ -240,6 +240,14 @@ pub async fn create_application_api(
         })?
         .ok_or_else(|| ServiceError::api(StatusCode::NOT_FOUND, "not_found", "User not found"))?;
 
+    if !user.active {
+        return Err(ServiceError::api(
+            StatusCode::UNAUTHORIZED,
+            "unauthorized",
+            "User account is deactivated",
+        ));
+    }
+
     // Validate: Organization scope requires user to have an org
     if access_scope == AccessScope::Organization && user.org_id.is_none() {
         return Err(ServiceError::api(
@@ -539,31 +547,29 @@ pub async fn update_application_api(
         .as_ref()
         .and_then(|s| s.parse::<AccessScope>().ok());
 
-    // Get user to check org membership if changing to organization scope
-    let user = if access_scope == Some(AccessScope::Organization) {
-        Some(
-            db::get_user_by_id(&state.store, &token.sub)
-                .await
-                .map_err(|e| {
-                    tracing::error!("Failed to get user for scope validation: {e}");
-                    ServiceError::api(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        "db_error",
-                        "Internal database error",
-                    )
-                })?
-                .ok_or_else(|| {
-                    ServiceError::api(StatusCode::NOT_FOUND, "not_found", "User not found")
-                })?,
-        )
-    } else {
-        None
-    };
+    // Get user to check active status and org membership
+    let user = db::get_user_by_id(&state.store, &token.sub)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to get user: {e}");
+            ServiceError::api(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "db_error",
+                "Internal database error",
+            )
+        })?
+        .ok_or_else(|| ServiceError::api(StatusCode::NOT_FOUND, "not_found", "User not found"))?;
+
+    if !user.active {
+        return Err(ServiceError::api(
+            StatusCode::UNAUTHORIZED,
+            "unauthorized",
+            "User account is deactivated",
+        ));
+    }
 
     // Validate: Organization scope requires user to have an org
-    if access_scope == Some(AccessScope::Organization)
-        && user.as_ref().is_some_and(|u| u.org_id.is_none())
-    {
+    if access_scope == Some(AccessScope::Organization) && user.org_id.is_none() {
         return Err(ServiceError::api(
             StatusCode::BAD_REQUEST,
             "invalid_access_scope",
@@ -573,7 +579,7 @@ pub async fn update_application_api(
 
     // Set org_id only for organization-scoped apps
     let org_id = if access_scope == Some(AccessScope::Organization) {
-        user.as_ref().and_then(|u| u.org_id.as_deref())
+        user.org_id.as_deref()
     } else {
         None
     };
@@ -2069,6 +2075,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_create_application_rejects_deactivated_user() {
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "deactivated-create@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let auth = bearer(&token);
+
+        crate::db::update_user_active_status(&state.store, &user.id, false)
+            .await
+            .expect("deactivate user");
+
+        let (status, body) = http_post_json(
+            &app,
+            "/api/v1/applications",
+            r#"{"name":"Test App","application_type":"web","redirect_uris":["https://example.com/cb"]}"#,
+            &[("Authorization", &auth)],
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+        assert_eq!(error["code"], "unauthorized");
+        assert_eq!(error["message"], "User account is deactivated");
+    }
+
+    #[tokio::test]
     async fn test_create_application_rejects_empty_name() {
         let (app, state) = test_app().await;
         let user = create_test_user(&state.store, "create-emptyname@example.com").await;
@@ -2200,6 +2232,37 @@ mod tests {
         assert_eq!(status, StatusCode::OK, "body: {resp_body}");
         let json: serde_json::Value = serde_json::from_str(&resp_body).expect("valid json");
         assert_eq!(json["name"].as_str().unwrap(), "Renamed App");
+    }
+
+    #[tokio::test]
+    async fn test_update_application_rejects_deactivated_user() {
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "deactivated-update@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let auth = bearer(&token);
+        let client = create_test_oauth_client(&state.store, &user.id).await;
+
+        crate::db::update_user_active_status(&state.store, &user.id, false)
+            .await
+            .expect("deactivate user");
+
+        let (status, body) = http_request(
+            &app,
+            "PATCH",
+            &format!("/api/v1/applications/{}", client.app_id),
+            Some(r#"{"name": "Renamed App"}"#.to_string()),
+            &[
+                ("Content-Type", "application/json"),
+                ("Authorization", &auth),
+            ],
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+        assert_eq!(error["code"], "unauthorized");
+        assert_eq!(error["message"], "User account is deactivated");
     }
 
     // ========================================================================
