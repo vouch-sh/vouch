@@ -60,7 +60,7 @@ askama = { version = "=0.15.6", default-features = false }
 aws-config = { version = "=1.8.16", default-features = false }
 aws-lc-rs = { version = "=1.16.3", default-features = false }
 aws-sdk-dsql = { version = "=1.55.0", default-features = false }
-aws-sdk-kms = { version = "=1.104.0", default-features = false }
+aws-sdk-kms = { version = "=1.105.0", default-features = false }
 aws-sdk-s3 = { version = "=1.129.0", default-features = false }
 aws-smithy-types = { version = "=1.4.7", default-features = false }
 axum = { version = "=0.8.9", default-features = false }
