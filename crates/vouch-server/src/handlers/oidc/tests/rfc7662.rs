@@ -481,3 +481,152 @@ async fn test_rfc7662_same_client_introspection_returns_active() {
         "Active introspection must include iat"
     );
 }
+
+// ========================================================================
+// RFC 7662 — Token Introspection with private_key_jwt (GH#274)
+// ========================================================================
+
+#[tokio::test]
+async fn test_rfc7662_introspect_with_private_key_jwt_succeeds() {
+    // RFC 7662 + RFC 7523: Introspection with private_key_jwt authentication.
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "introspect-jwt@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let (jwt_client, pkcs8_bytes) = create_test_jwt_client(&state.store, &user.id).await;
+
+    // Issue a token for the JWT client via auth code flow
+
+    let scope_set = ScopeSet::parse("openid email");
+    let code = issue_authorization_code(
+        &state,
+        AuthorizationCodeParams {
+            client_id: &jwt_client.client_id,
+            redirect_uri: "https://example.com/callback",
+            user_id: &user.id,
+            email: &user.email,
+            authenticator_id: &auth_id,
+            aaguid: None,
+            scope: &scope_set,
+            nonce: None,
+            code_challenge: None,
+            code_challenge_method: None,
+            resource: None,
+            acr_values: None,
+            dpop_jkt: None,
+            auth_code_lifetime_seconds:
+                crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
+            authorization_details: None,
+            auth_time: None,
+        },
+    )
+    .await
+    .expect("Failed to issue code");
+
+    // Exchange code using private_key_jwt
+    let token_url = format!("{}/oauth/token", state.config().base_url);
+    let assertion = build_client_assertion(&jwt_client.client_id, &token_url, &pkcs8_bytes, None);
+    let token_body = format!(
+        "grant_type=authorization_code&code={}&redirect_uri={}\
+         &client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer\
+         &client_assertion={}",
+        code,
+        urlencoding::encode("https://example.com/callback"),
+        assertion
+    );
+    let (status, resp_body) = http_post_form(&app, "/oauth/token", &token_body, &[]).await;
+    assert_eq!(status, StatusCode::OK, "Token exchange failed: {resp_body}");
+    let token_resp: serde_json::Value = serde_json::from_str(&resp_body).expect("Valid JSON");
+    let access_token = token_resp["access_token"].as_str().expect("access_token");
+
+    // Introspect using private_key_jwt with aud=/oauth/introspect
+    let introspect_url = format!("{}/oauth/introspect", state.config().base_url);
+    let intro_assertion =
+        build_client_assertion(&jwt_client.client_id, &introspect_url, &pkcs8_bytes, None);
+    let intro_body = format!(
+        "token={}&client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer\
+         &client_assertion={}",
+        access_token, intro_assertion
+    );
+    let (status, body) = http_post_form(&app, "/oauth/introspect", &intro_body, &[]).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "Introspection with private_key_jwt failed: {body}"
+    );
+    let result: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(
+        result["active"], true,
+        "Token should be active via private_key_jwt introspection"
+    );
+    assert!(result.get("sub").is_some(), "Active token must have sub");
+    assert!(result.get("exp").is_some(), "Active token must have exp");
+}
+
+#[tokio::test]
+async fn test_rfc7662_introspect_private_key_jwt_jti_replay_rejected() {
+    // GH#274: Replayed JWT assertion at /oauth/introspect must be rejected.
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "introspect-replay@example.com").await;
+    let (jwt_client, pkcs8_bytes) = create_test_jwt_client(&state.store, &user.id).await;
+
+    let introspect_url = format!("{}/oauth/introspect", state.config().base_url);
+    let fixed_jti = "introspect-replay-jti-001";
+
+    // First introspection with a fixed JTI — should return 200
+    let assertion1 = build_client_assertion(
+        &jwt_client.client_id,
+        &introspect_url,
+        &pkcs8_bytes,
+        Some(fixed_jti),
+    );
+    let body1 = format!(
+        "token=some_token\
+         &client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer\
+         &client_assertion={}",
+        assertion1
+    );
+    let (status1, _) = http_post_form(&app, "/oauth/introspect", &body1, &[]).await;
+    assert_eq!(
+        status1,
+        StatusCode::OK,
+        "First use of JTI at introspect must return 200"
+    );
+
+    // Second introspection with the SAME JTI — must be rejected (replay)
+    let assertion2 = build_client_assertion(
+        &jwt_client.client_id,
+        &introspect_url,
+        &pkcs8_bytes,
+        Some(fixed_jti),
+    );
+    let body2 = format!(
+        "token=another_token\
+         &client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer\
+         &client_assertion={}",
+        assertion2
+    );
+    let (status2, _) = http_post_form(&app, "/oauth/introspect", &body2, &[]).await;
+    assert_eq!(
+        status2,
+        StatusCode::UNAUTHORIZED,
+        "Replayed JTI at introspect must be rejected with 401"
+    );
+}
+
+#[tokio::test]
+async fn test_rfc7662_introspect_private_key_jwt_invalid_assertion_rejected() {
+    // Invalid client assertion at /oauth/introspect must be rejected.
+    let (app, _state) = test_app().await;
+
+    let body = "token=some_token\
+        &client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer\
+        &client_assertion=invalid.jwt.value";
+
+    let (status, _) = http_post_form(&app, "/oauth/introspect", body, &[]).await;
+    assert!(
+        status == StatusCode::UNAUTHORIZED || status == StatusCode::BAD_REQUEST,
+        "Invalid JWT assertion at introspect must be rejected, got: {status}"
+    );
+}

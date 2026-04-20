@@ -98,6 +98,118 @@ pub(super) async fn issue_oauth_access_token_with_scope(
     (access_token, id_token)
 }
 
+// ========================================================================
+// JWT Client Authentication Helpers (shared across rfc7009, rfc7523, rfc7662)
+// ========================================================================
+
+pub(super) use aws_lc_rs::signature::{ECDSA_P256_SHA256_FIXED_SIGNING, EcdsaKeyPair};
+
+/// Generate an ES256 signing key pair. Returns (pkcs8_bytes, JWK public key).
+pub(super) fn generate_es256_signing_key() -> (Vec<u8>, serde_json::Value) {
+    use aws_lc_rs::signature::KeyPair;
+
+    let rng = aws_lc_rs::rand::SystemRandom::new();
+    let pkcs8 = EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, &rng)
+        .expect("Failed to generate key");
+    let key_pair = EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, pkcs8.as_ref())
+        .expect("Failed to parse key");
+
+    let pub_bytes = key_pair.public_key().as_ref();
+    let x = URL_SAFE_NO_PAD.encode(&pub_bytes[1..33]);
+    let y = URL_SAFE_NO_PAD.encode(&pub_bytes[33..65]);
+
+    let jwk = serde_json::json!({
+        "kty": "EC",
+        "crv": "P-256",
+        "x": x,
+        "y": y,
+        "use": "sig",
+        "alg": "ES256",
+        "kid": "test-key-1"
+    });
+
+    (pkcs8.as_ref().to_vec(), jwk)
+}
+
+/// Sign a JWT assertion with an ES256 key (pkcs8 bytes).
+pub(super) fn sign_jwt_assertion(
+    pkcs8_bytes: &[u8],
+    header: &serde_json::Value,
+    claims: &serde_json::Value,
+) -> String {
+    let key_pair = EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, pkcs8_bytes)
+        .expect("Failed to parse key");
+
+    let header_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_vec(header).unwrap());
+    let claims_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_vec(claims).unwrap());
+    let signing_input = format!("{header_b64}.{claims_b64}");
+
+    let rng = aws_lc_rs::rand::SystemRandom::new();
+    let sig = key_pair
+        .sign(&rng, signing_input.as_bytes())
+        .expect("Failed to sign");
+    let sig_b64 = URL_SAFE_NO_PAD.encode(sig.as_ref());
+
+    format!("{header_b64}.{claims_b64}.{sig_b64}")
+}
+
+/// Create a test OAuth client configured for `private_key_jwt` auth with inline JWKS.
+/// Returns (TestOAuthClient, pkcs8_bytes) where pkcs8_bytes is the ES256 signing key.
+pub(super) async fn create_test_jwt_client(
+    store: &db::store::DocumentStore,
+    user_id: &str,
+) -> (TestOAuthClient, Vec<u8>) {
+    let (pkcs8_bytes, jwk) = generate_es256_signing_key();
+
+    let client = create_test_oauth_client(store, user_id).await;
+
+    let oauth_client = db::get_oauth_client_by_client_id(store, &client.client_id)
+        .await
+        .expect("DB error")
+        .expect("Client not found");
+
+    let jwks_value = serde_json::json!({
+        "keys": [jwk]
+    });
+    db::update_oauth_client_jwks(store, &oauth_client.id, &jwks_value)
+        .await
+        .expect("Failed to set JWKS");
+
+    db::update_oauth_client_auth_method(store, &oauth_client.id, "private_key_jwt")
+        .await
+        .expect("Failed to set auth method");
+
+    (client, pkcs8_bytes)
+}
+
+/// Build a JWT assertion for `private_key_jwt` client auth (RFC 7523 Section 2.2).
+pub(super) fn build_client_assertion(
+    client_id: &str,
+    audience: &str,
+    pkcs8_bytes: &[u8],
+    jti: Option<&str>,
+) -> String {
+    let now = jiff::Timestamp::now().as_second();
+    let header = serde_json::json!({
+        "alg": "ES256",
+        "typ": "JWT",
+        "kid": "test-key-1"
+    });
+    let mut claims = serde_json::json!({
+        "iss": client_id,
+        "sub": client_id,
+        "aud": audience,
+        "iat": now,
+        "exp": now + 60
+    });
+    if let Some(jti_val) = jti {
+        claims["jti"] = serde_json::json!(jti_val);
+    } else {
+        claims["jti"] = serde_json::json!(uuid::Uuid::now_v7().to_string());
+    }
+    sign_jwt_assertion(pkcs8_bytes, &header, &claims)
+}
+
 /// Decode a JWT payload (middle part) without signature verification.
 pub(super) fn decode_jwt_payload(token: &str) -> serde_json::Value {
     let parts: Vec<&str> = token.split('.').collect();
