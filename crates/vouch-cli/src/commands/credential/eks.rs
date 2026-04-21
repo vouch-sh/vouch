@@ -15,7 +15,7 @@ use anyhow::{Context, Result};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
-use crate::commands::credential::aws::exchange_for_sts_credentials;
+use crate::commands::credential::aws::{StsExchangeOptions, exchange_for_sts_credentials};
 use crate::commands::credential::cache;
 use crate::integrations::aws;
 use crate::integrations::aws::sigv4::{
@@ -68,9 +68,14 @@ async fn generate_eks_token(
     region: &str,
     role_arn: &str,
 ) -> Result<String> {
-    let result =
-        exchange_for_sts_credentials(server, role_arn, region, "vouch-eks", None, &[], None)
-            .await?;
+    let result = exchange_for_sts_credentials(
+        server,
+        role_arn,
+        region,
+        "vouch-eks",
+        &StsExchangeOptions::default(),
+    )
+    .await?;
 
     // Build presigned STS GetCallerIdentity URL with cluster ID
     let sts_endpoint = format!("https://sts.{region}.{}", result.domain_suffix);

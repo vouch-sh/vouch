@@ -13,7 +13,7 @@
 use anyhow::{Context, Result};
 use secrecy::{ExposeSecret, SecretString};
 
-use crate::commands::credential::aws::exchange_for_sts_credentials;
+use crate::commands::credential::aws::{StsExchangeOptions, exchange_for_sts_credentials};
 use crate::commands::credential::cache;
 use crate::config::Config;
 use crate::integrations::aws::codeartifact::{
@@ -184,9 +184,7 @@ async fn fetch_token(
         &role_arn,
         region,
         "vouch-codeartifact",
-        None,
-        &[],
-        None,
+        &StsExchangeOptions::default(),
     )
     .await?;
 

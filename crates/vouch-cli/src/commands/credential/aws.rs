@@ -81,24 +81,38 @@ pub(crate) struct StsExchangeResult {
 /// Exchange a Vouch session for AWS STS credentials.
 ///
 /// Handles the full flow: OIDC token fetch → JWT decode for session tags →
+/// Optional parameters for STS credential exchange.
+///
+/// Used to pass MCP-specific options (session policies, source attribution)
+/// or pre-resolved management roles without inflating the function signature.
+#[derive(Default)]
+pub(crate) struct StsExchangeOptions<'a> {
+    /// Pre-resolved management role ARN for role chaining.
+    /// When `None`, resolved from vouch config internally.
+    pub management_role: Option<&'a str>,
+    /// AWS managed policy names to attach as session policies.
+    /// Effective permissions = role policy ∩ session policy.
+    pub session_policy_names: &'a [&'a str],
+    /// Credential source for DPoP attribution (e.g., "mcp").
+    pub source: Option<&'a str>,
+}
+
 /// role ARN validation → `AssumeRoleWithWebIdentity`.
 ///
 /// When `management_role` is `Some` and differs from `role_arn`, chains
 /// through the management role: `AssumeRoleWithWebIdentity` into the
 /// management role, then `AssumeRole` into the target.
 ///
-/// External callers (EKS, RDS, etc.) pass `None` — the management role
-/// is resolved internally from vouch config so they get chaining for
-/// free. `get_aws_credentials` pre-resolves it to avoid a double config
-/// load.
+/// External callers (EKS, RDS, etc.) pass `Default::default()` — the
+/// management role is resolved internally from vouch config so they get
+/// chaining for free. `get_aws_credentials` pre-resolves it to avoid a
+/// double config load.
 pub(crate) async fn exchange_for_sts_credentials(
     server: &str,
     role_arn: &str,
     region: &str,
-    fallback_label: &str,
-    management_role: Option<&str>,
-    session_policy_names: &[&str],
-    source: Option<&str>,
+    session_name: &str,
+    opts: &StsExchangeOptions<'_>,
 ) -> Result<StsExchangeResult> {
     use crate::integrations::aws::sts::{
         WebIdentityRequest, assume_role, assume_role_with_web_identity, parse_role_arn,
@@ -106,7 +120,7 @@ pub(crate) async fn exchange_for_sts_credentials(
 
     // If caller didn't pre-resolve, resolve now from config
     let resolved;
-    let mgmt = match management_role {
+    let mgmt = match opts.management_role {
         Some(m) => Some(m),
         None => {
             resolved = crate::config::Config::load()
@@ -123,7 +137,7 @@ pub(crate) async fn exchange_for_sts_credentials(
     let mut client = VouchClient::new(server).await?;
 
     // Set DPoP source claim for MCP attribution (tamperproof via DPoP signature)
-    if let Some(s) = source {
+    if let Some(s) = opts.source {
         client.set_dpop_source(s);
     }
 
@@ -145,7 +159,7 @@ pub(crate) async fn exchange_for_sts_credentials(
             .context("failed to create HTTP client")?;
 
     let email = get_user_email(server).await;
-    let session = email.as_deref().unwrap_or(fallback_label);
+    let session = email.as_deref().unwrap_or(session_name);
 
     if let Some(mgmt_role_arn) = mgmt.filter(|m| *m != role_arn) {
         // Chain: AssumeRoleWithWebIdentity into management role, then AssumeRole into target
@@ -159,7 +173,7 @@ pub(crate) async fn exchange_for_sts_credentials(
             web_identity_token: id_token,
             region,
             domain_suffix: mgmt_domain_suffix,
-            session_policy_names,
+            session_policy_names: opts.session_policy_names,
         })
         .await
         .context("failed to assume management role")?;
@@ -170,7 +184,7 @@ pub(crate) async fn exchange_for_sts_credentials(
             session,
             region,
             &mgmt_credentials,
-            session_policy_names,
+            opts.session_policy_names,
         )
         .await
         .context("failed to assume target role via chaining")?;
@@ -190,7 +204,7 @@ pub(crate) async fn exchange_for_sts_credentials(
         web_identity_token: id_token,
         region,
         domain_suffix,
-        session_policy_names,
+        session_policy_names: opts.session_policy_names,
     })
     .await
     .context("failed to assume AWS role")?;
@@ -295,9 +309,10 @@ async fn fetch_and_assume(
         role_arn,
         &region,
         "vouch-session",
-        mgmt_role,
-        &[],
-        None,
+        &StsExchangeOptions {
+            management_role: mgmt_role,
+            ..StsExchangeOptions::default()
+        },
     )
     .await?;
     let creds = &result.credentials;
