@@ -41,9 +41,7 @@ keyring = { workspace = true, features = [
 mimalloc = { workspace = true, features = ["secure"] }
 open = { workspace = true }
 reqwest = { workspace = true, features = ["json", "rustls", "form", "query"] }
-rmcp = { workspace = true, features = ["server", "transport-io", "macros"] }
 roxmltree = { workspace = true, features = ["std"] }
-schemars = { workspace = true }
 rpassword = { workspace = true }
 rust-ini = { workspace = true }
 secrecy = { workspace = true, features = ["serde"] }

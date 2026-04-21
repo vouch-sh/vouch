@@ -13,7 +13,6 @@ pub(crate) mod init;
 pub(crate) mod keys;
 pub(crate) mod login;
 pub(crate) mod logout;
-pub(crate) mod mcp;
 pub(crate) mod posture;
 pub(crate) mod register;
 pub(crate) mod setup;
