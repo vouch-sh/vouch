@@ -68,6 +68,21 @@ pub(crate) fn resolve_region(region: Option<&str>, profile_name: &str) -> anyhow
     .into())
 }
 
+/// Resolve the AWS region, falling back to the partition's default STS region
+/// derived from the role ARN when no region is configured.
+pub(crate) fn resolve_region_with_fallback(role_arn: &str) -> anyhow::Result<String> {
+    let profile_name = resolve_profile(None).unwrap_or_default();
+    match resolve_region(None, &profile_name) {
+        Ok(r) => Ok(r),
+        Err(_) => {
+            let arn = sts::parse_role_arn(role_arn)?;
+            let default = arn.partition.default_sts_region();
+            tracing::debug!("no region configured, defaulting to {default} for STS");
+            Ok(default.to_string())
+        }
+    }
+}
+
 /// Try to read the AWS role ARN from the local `~/.aws/config` file.
 ///
 /// Finds the first vouch profile and extracts the role ARN from its `credential_process`.

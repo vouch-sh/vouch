@@ -47,39 +47,29 @@ pub struct StatusResult {
     pub guidance: Option<String>,
 }
 
-/// Parameters for `vouch_credential_aws`.
+/// Parameters for `vouch_aws_exec`.
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct AwsCredentialParams {
+pub struct AwsExecParams {
     /// AWS IAM role ARN to assume.
     pub role: String,
+    /// AWS CLI command to execute (without the leading "aws").
+    /// Example: "s3 ls" or "ec2 describe-instances --region us-west-2"
+    pub command: String,
 }
 
-/// Result of `vouch_credential_aws`.
+/// Result of `vouch_aws_exec`.
 #[derive(Debug, Serialize, schemars::JsonSchema)]
-pub struct AwsCredentialResult {
-    /// Whether credentials are ready for use.
+pub struct AwsExecResult {
+    /// Whether the command executed successfully.
     pub status: String,
-    /// AWS CLI profile name to use.
-    pub profile: String,
-    /// The role ARN that was assumed.
-    pub role_arn: String,
-    /// Cache TTL in seconds (credentials refreshed after this).
-    pub cache_ttl_seconds: u64,
-    /// Whether credentials are restricted to read-only access.
-    pub read_only: bool,
-    /// Session tags applied to the credentials.
-    pub session_tags: SessionTags,
-    /// How the agent should use these credentials.
-    pub usage: String,
-}
-
-/// AI session tags applied to MCP-sourced credentials.
-#[derive(Debug, Serialize, schemars::JsonSchema)]
-pub struct SessionTags {
-    #[serde(rename = "AccessType")]
-    pub access_type: String,
-    #[serde(rename = "Source")]
-    pub source: String,
+    /// Command stdout.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stdout: Option<String>,
+    /// Command stderr (if any).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stderr: Option<String>,
+    /// Process exit code.
+    pub exit_code: i32,
 }
 
 /// Parameters for `vouch_credential_ssh`.
@@ -123,21 +113,18 @@ impl VouchMcpServer {
         Json(self.handle_status().await)
     }
 
-    /// Get AWS credentials via credential_process.
+    /// Execute an AWS CLI command with scoped credentials.
     ///
-    /// Ensures the AWS CLI profile is configured with Vouch as the
-    /// credential_process. Returns the profile name and usage instructions.
-    /// Credentials are restricted to ReadOnlyAccess and tagged with
-    /// AccessType=AI for CloudTrail differentiation.
+    /// The MCP server is the trust boundary: it fetches ReadOnlyAccess-scoped
+    /// STS credentials with AI session tags, executes the AWS CLI command in a
+    /// subprocess with those credentials injected as env vars, and returns the
+    /// output. The agent never sees raw credentials.
     #[tool(
-        name = "vouch_credential_aws",
-        description = "Get read-only AWS credentials for a role. Returns an AWS CLI profile name — use `aws --profile vouch <command>`. Credentials are time-limited (15min cache), read-only (ReadOnlyAccess session policy), and tagged AccessType=AI in CloudTrail. Requires active FIDO2 session."
+        name = "vouch_aws_exec",
+        description = "Execute an AWS CLI command with read-only, FIDO2-backed credentials. The command runs server-side — credentials never enter the conversation. Scoped to ReadOnlyAccess and tagged AccessType=AI in CloudTrail. Requires active FIDO2 session. Example: { \"role\": \"arn:aws:iam::123:role/Dev\", \"command\": \"s3 ls\" }"
     )]
-    async fn credential_aws(
-        &self,
-        Parameters(params): Parameters<AwsCredentialParams>,
-    ) -> Json<AwsCredentialResult> {
-        Json(self.handle_aws_credential(&params.role).await)
+    async fn aws_exec(&self, Parameters(params): Parameters<AwsExecParams>) -> Json<AwsExecResult> {
+        Json(self.handle_aws_exec(&params.role, &params.command).await)
     }
 
     /// Get an SSH certificate.
@@ -191,72 +178,115 @@ impl VouchMcpServer {
         }
     }
 
-    async fn handle_aws_credential(&self, role_arn: &str) -> AwsCredentialResult {
-        use crate::integrations::aws::config::AwsConfig;
+    async fn handle_aws_exec(&self, role_arn: &str, command: &str) -> AwsExecResult {
+        use crate::commands::credential::aws::{StsExchangeOptions, exchange_for_sts_credentials};
+        use secrecy::ExposeSecret;
+        use std::process::Command;
 
-        // Verify that a vouch-configured AWS profile exists with credential_process.
-        // The user must have run `vouch setup aws --role <ARN>` beforehand.
-        let profile = match AwsConfig::load() {
-            Ok(config) => {
-                // Find a vouch profile matching this role ARN, or any vouch profile
-                let profiles = config.find_all_vouch_profiles();
-                let matching = profiles.iter().find(|p| {
-                    p.credential_process
-                        .as_ref()
-                        .is_some_and(|cp| cp.contains(role_arn))
-                });
-                match matching.or_else(|| profiles.first()) {
-                    Some(p) => p.name.clone(),
-                    None => {
-                        return AwsCredentialResult {
-                            status: "error: no vouch AWS profile configured".to_string(),
-                            profile: String::new(),
-                            role_arn: role_arn.to_string(),
-                            cache_ttl_seconds: 0,
-                            read_only: true,
-                            session_tags: SessionTags {
-                                access_type: "AI".to_string(),
-                                source: "VouchMCP".to_string(),
-                            },
-                            usage: format!(
-                                "Run `vouch setup aws --role {role_arn}` to configure the AWS profile, then retry."
-                            ),
-                        };
-                    }
-                }
-            }
+        // Resolve region from AWS config or partition default
+        let region = match crate::integrations::aws::resolve_region_with_fallback(role_arn) {
+            Ok(r) => r,
             Err(e) => {
-                tracing::warn!("Failed to load AWS config: {e:#}");
-                return AwsCredentialResult {
-                    status: "error: cannot read ~/.aws/config".to_string(),
-                    profile: String::new(),
-                    role_arn: role_arn.to_string(),
-                    cache_ttl_seconds: 0,
-                    read_only: true,
-                    session_tags: SessionTags {
-                        access_type: "AI".to_string(),
-                        source: "VouchMCP".to_string(),
-                    },
-                    usage: "Run `vouch setup aws --role <ARN>` to configure the AWS profile."
-                        .to_string(),
+                tracing::warn!("MCP AWS exec: failed to resolve region: {e:#}");
+                return AwsExecResult {
+                    status: "error".to_string(),
+                    stdout: None,
+                    stderr: Some(
+                        "Failed to resolve AWS region. Check your AWS config or role ARN."
+                            .to_string(),
+                    ),
+                    exit_code: -1,
                 };
             }
         };
 
-        // Profile exists with credential_process pointing to vouch.
-        // The actual STS call happens when the agent runs `aws --profile <name>` —
-        // credential_process invokes `vouch credential aws` at that point.
-        AwsCredentialResult {
-            status: "ready".to_string(),
-            profile: profile.clone(),
-            role_arn: role_arn.to_string(),
-            cache_ttl_seconds: 900,
-            read_only: true,
-            session_tags: SessionTags {
-                access_type: "AI".to_string(),
-                source: "VouchMCP".to_string(),
+        // Fetch scoped STS credentials with ReadOnlyAccess and MCP attribution
+        let sts_result = exchange_for_sts_credentials(
+            &self.server_url,
+            role_arn,
+            &region,
+            "vouch-mcp",
+            &StsExchangeOptions {
+                session_policy_names: &["ReadOnlyAccess"],
+                source: Some("mcp"),
+                ..StsExchangeOptions::default()
             },
-            usage: format!("aws --profile {profile} <command>"),
+        )
+        .await;
+
+        let creds = match sts_result {
+            Ok(result) => result.credentials,
+            Err(e) => {
+                tracing::warn!("MCP AWS exec: STS credential exchange failed: {e:#}");
+                return AwsExecResult {
+                    status: "error".to_string(),
+                    stdout: None,
+                    stderr: Some(
+                        "Credential exchange failed. Run `vouch login` and retry.".to_string(),
+                    ),
+                    exit_code: -1,
+                };
+            }
+        };
+
+        // Parse the command string into args
+        let args: Vec<&str> = command.split_whitespace().collect();
+        if args.is_empty() {
+            return AwsExecResult {
+                status: "error".to_string(),
+                stdout: None,
+                stderr: Some("No command specified.".to_string()),
+                exit_code: -1,
+            };
+        }
+
+        // Execute `aws <command>` with scoped credentials injected as env vars.
+        // Credentials never leave this process boundary.
+        let output = Command::new("aws")
+            .args(&args)
+            .env("AWS_ACCESS_KEY_ID", &creds.access_key_id)
+            .env(
+                "AWS_SECRET_ACCESS_KEY",
+                creds.secret_access_key.expose_secret(),
+            )
+            .env("AWS_SESSION_TOKEN", creds.session_token.expose_secret())
+            .env("AWS_DEFAULT_REGION", &region)
+            .env(
+                "AWS_EXECUTION_ENV",
+                format!("vouch-mcp/{}", env!("CARGO_PKG_VERSION")),
+            )
+            .output();
+
+        match output {
+            Ok(result) => {
+                let code = result.status.code().unwrap_or(-1);
+                AwsExecResult {
+                    status: if result.status.success() {
+                        "success".to_string()
+                    } else {
+                        "error".to_string()
+                    },
+                    stdout: Some(String::from_utf8_lossy(&result.stdout).to_string()),
+                    stderr: if result.stderr.is_empty() {
+                        None
+                    } else {
+                        Some(String::from_utf8_lossy(&result.stderr).to_string())
+                    },
+                    exit_code: code,
+                }
+            }
+            Err(e) => {
+                tracing::warn!("MCP AWS exec: failed to spawn aws CLI: {e:#}");
+                AwsExecResult {
+                    status: "error".to_string(),
+                    stdout: None,
+                    stderr: Some(
+                        "Failed to execute `aws` CLI. Ensure it is installed and in PATH."
+                            .to_string(),
+                    ),
+                    exit_code: -1,
+                }
+            }
         }
     }
 

@@ -290,19 +290,7 @@ async fn fetch_and_assume(
     role_arn: &str,
     mgmt_role: Option<&str>,
 ) -> Result<CredentialProcessOutput> {
-    use crate::integrations::aws;
-    use crate::integrations::aws::sts::parse_role_arn;
-
-    let profile_name = aws::resolve_profile(None).unwrap_or_default();
-    let region = match aws::resolve_region(None, &profile_name) {
-        Ok(r) => r,
-        Err(_) => {
-            let arn = parse_role_arn(role_arn)?;
-            let default = arn.partition.default_sts_region();
-            tracing::debug!("no region configured, defaulting to {default} for STS");
-            default.to_string()
-        }
-    };
+    let region = crate::integrations::aws::resolve_region_with_fallback(role_arn)?;
 
     let result = exchange_for_sts_credentials(
         server,
