@@ -239,8 +239,28 @@ pub(crate) async fn exchange_for_sts_credentials(
 
     let all_policies: &[&str] = agent_policies;
 
+    // Inline session policy for the management role hop when an agent is
+    // detected: restrict to only the STS actions needed for role chaining.
+    let mgmt_hop_policy = if agent_source.is_some() {
+        Some(serde_json::json!({
+            "Version": "2012-10-17",
+            "Statement": [{
+                "Effect": "Allow",
+                "Action": [
+                    "sts:AssumeRole",
+                    "sts:TagSession",
+                    "sts:SetSourceIdentity"
+                ],
+                "Resource": "*"
+            }]
+        }))
+    } else {
+        None
+    };
+
     if let Some(mgmt_role_arn) = mgmt.filter(|m| *m != role_arn) {
-        // Chain: AssumeRoleWithWebIdentity into management role, then AssumeRole into target
+        // Chain: AssumeRoleWithWebIdentity into management role, then AssumeRole into target.
+        // Management hop gets an inline STS-only policy; final hop gets ReadOnlyAccess.
         let mgmt_arn = parse_role_arn(mgmt_role_arn)?;
         let mgmt_domain_suffix = mgmt_arn.partition.dns_suffix();
 
@@ -251,7 +271,8 @@ pub(crate) async fn exchange_for_sts_credentials(
             web_identity_token: id_token,
             region,
             domain_suffix: mgmt_domain_suffix,
-            session_policy_names: all_policies,
+            session_policy_names: &[],
+            session_policy: mgmt_hop_policy.as_ref(),
         })
         .await
         .context("failed to assume management role")?;
@@ -263,6 +284,7 @@ pub(crate) async fn exchange_for_sts_credentials(
             region,
             &mgmt_credentials,
             all_policies,
+            None,
         )
         .await
         .context("failed to assume target role via chaining")?;
@@ -283,6 +305,7 @@ pub(crate) async fn exchange_for_sts_credentials(
         region,
         domain_suffix,
         session_policy_names: all_policies,
+        session_policy: None,
     })
     .await
     .context("failed to assume AWS role")?;
