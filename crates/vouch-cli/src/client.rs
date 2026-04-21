@@ -49,6 +49,9 @@ pub(crate) struct VouchClient<H: HttpClient = ReqwestClient> {
     /// Updated from the `Signature-Nonce` response header after each request.
     /// Uses `Mutex` for interior mutability (updated through `&self`).
     sig_nonce: std::sync::Mutex<Option<String>>,
+    /// Optional source identifier embedded in DPoP proofs (custom claim).
+    /// When set, the server uses this for credential attribution (e.g., AI tags).
+    dpop_source: Option<String>,
 }
 
 impl VouchClient<ReqwestClient> {
@@ -80,6 +83,7 @@ impl VouchClient<ReqwestClient> {
             token: Some(token),
             fapi_key: None,
             sig_nonce: std::sync::Mutex::new(None),
+            dpop_source: None,
         };
         client.fapi_key = vouch_cli::fapi::key_store::load_client_key();
         Ok(client)
@@ -97,6 +101,7 @@ impl VouchClient<ReqwestClient> {
             token: None,
             fapi_key: None,
             sig_nonce: std::sync::Mutex::new(None),
+            dpop_source: None,
         })
     }
 
@@ -130,6 +135,7 @@ impl<H: HttpClient> VouchClient<H> {
             token: None,
             fapi_key: None,
             sig_nonce: std::sync::Mutex::new(None),
+            dpop_source: None,
         }
     }
 
@@ -147,6 +153,16 @@ impl<H: HttpClient> VouchClient<H> {
     /// the login flow) and wants to avoid reloading from the keychain.
     pub(crate) fn set_fapi_key(&mut self, key: ClientKey) {
         self.fapi_key = Some(key);
+    }
+
+    /// Set the credential source identifier for DPoP proofs.
+    ///
+    /// When set, this value is included as a `source` custom claim in
+    /// DPoP proof JWTs (RFC 9449 §4.2 allows additional claims). The
+    /// server extracts this to determine credential attribution (e.g.,
+    /// adding AI session tags when source is "mcp").
+    pub(crate) fn set_dpop_source(&mut self, source: &str) {
+        self.dpop_source = Some(source.to_string());
     }
 
     /// Get the base URL.
@@ -173,10 +189,11 @@ impl<H: HttpClient> VouchClient<H> {
         let token_str = token.expose_secret();
 
         if let Some(ref key) = self.fapi_key {
-            match DpopProofBuilder::new(method, url)
-                .access_token(token_str)
-                .build(key)
-            {
+            let mut builder = DpopProofBuilder::new(method, url).access_token(token_str);
+            if let Some(ref source) = self.dpop_source {
+                builder = builder.source(source);
+            }
+            match builder.build(key) {
                 Ok(proof) => {
                     tracing::debug!("Using DPoP auth for {method} {url} (kid={})", key.kid());
                     return Ok((format!("DPoP {token_str}"), Some(proof)));

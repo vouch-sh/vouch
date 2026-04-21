@@ -398,6 +398,11 @@ enum Commands {
         #[arg(long, value_enum, default_value = "text")]
         format: commands::posture::OutputFormat,
     },
+    /// Run as an MCP (Model Context Protocol) server over stdio.
+    ///
+    /// Exposes Vouch credential commands as MCP tools for AI agents.
+    /// Register in Claude Code: `{ "mcpServers": { "vouch": { "command": "vouch", "args": ["mcp"] } } }`
+    Mcp,
     /// Run diagnostic test of YubiKey registration + authentication (bypasses server).
     #[command(hide = true)]
     Diag(commands::diag::DiagArgs),
@@ -749,6 +754,7 @@ async fn run() -> Result<()> {
             commands::completions::run(&args, &mut cmd);
             Ok(())
         }
+        Commands::Mcp => commands::mcp::run(server).await,
         Commands::Doctor { quiet, json } => commands::doctor::run(server, quiet, json).await,
         Commands::Posture { format } => commands::posture::run(format),
         Commands::Diag(args) => commands::diag::run(args),

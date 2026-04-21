@@ -97,6 +97,8 @@ pub(crate) async fn exchange_for_sts_credentials(
     region: &str,
     fallback_label: &str,
     management_role: Option<&str>,
+    session_policy_names: &[&str],
+    source: Option<&str>,
 ) -> Result<StsExchangeResult> {
     use crate::integrations::aws::sts::{
         WebIdentityRequest, assume_role, assume_role_with_web_identity, parse_role_arn,
@@ -118,7 +120,12 @@ pub(crate) async fn exchange_for_sts_credentials(
     let arn = parse_role_arn(role_arn)?;
     let domain_suffix = arn.partition.dns_suffix();
 
-    let client = VouchClient::new(server).await?;
+    let mut client = VouchClient::new(server).await?;
+
+    // Set DPoP source claim for MCP attribution (tamperproof via DPoP signature)
+    if let Some(s) = source {
+        client.set_dpop_source(s);
+    }
 
     let token_response: OidcTokenResponse = client
         .get_authenticated("/v1/credentials/aws/token")
@@ -152,13 +159,21 @@ pub(crate) async fn exchange_for_sts_credentials(
             web_identity_token: id_token,
             region,
             domain_suffix: mgmt_domain_suffix,
+            session_policy_names,
         })
         .await
         .context("failed to assume management role")?;
 
-        let credentials = assume_role(&http_client, role_arn, session, region, &mgmt_credentials)
-            .await
-            .context("failed to assume target role via chaining")?;
+        let credentials = assume_role(
+            &http_client,
+            role_arn,
+            session,
+            region,
+            &mgmt_credentials,
+            session_policy_names,
+        )
+        .await
+        .context("failed to assume target role via chaining")?;
 
         return Ok(StsExchangeResult {
             http_client,
@@ -175,6 +190,7 @@ pub(crate) async fn exchange_for_sts_credentials(
         web_identity_token: id_token,
         region,
         domain_suffix,
+        session_policy_names,
     })
     .await
     .context("failed to assume AWS role")?;
@@ -274,8 +290,16 @@ async fn fetch_and_assume(
         }
     };
 
-    let result =
-        exchange_for_sts_credentials(server, role_arn, &region, "vouch-session", mgmt_role).await?;
+    let result = exchange_for_sts_credentials(
+        server,
+        role_arn,
+        &region,
+        "vouch-session",
+        mgmt_role,
+        &[],
+        None,
+    )
+    .await?;
     let creds = &result.credentials;
     Ok(CredentialProcessOutput {
         version: 1,

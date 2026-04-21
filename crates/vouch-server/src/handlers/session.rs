@@ -68,6 +68,8 @@ pub struct ValidatedResourceToken {
     pub auth_time: Option<i64>,
     /// SHA-256 hash of the access token (for DB lookups/revocation).
     pub token_hash: String,
+    /// Credential source from DPoP proof custom claim (e.g., "mcp").
+    pub dpop_source: Option<String>,
 }
 
 /// Extract and validate an OAuth access token from the request.
@@ -91,6 +93,9 @@ pub async fn extract_resource_token(
     uri: &str,
     client_cert: Option<&crate::services::oidc::mtls::ClientCertificate>,
 ) -> Result<ValidatedResourceToken, ServiceError> {
+    // Track DPoP source claim (custom claim for MCP attribution)
+    let mut dpop_source: Option<String> = None;
+
     // 1. Extract token from Authorization header or cookie
     let (token, auth_scheme) = extract_token_from_request(headers, jar)?;
 
@@ -154,6 +159,7 @@ pub async fn extract_resource_token(
                                     "DPoP proof key does not match token binding",
                                 ));
                             }
+                            dpop_source = validated.source;
                         }
                         Err(e) => {
                             tracing::debug!("DPoP validation failed: {e}");
@@ -242,6 +248,7 @@ pub async fn extract_resource_token(
         authenticator_id,
         auth_time: access_claims.auth_time,
         token_hash,
+        dpop_source,
     })
 }
 

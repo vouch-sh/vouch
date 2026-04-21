@@ -1114,6 +1114,7 @@ mod tests {
                 y: "test-y".to_string(),
             }),
             jti: "jti-value".to_string(),
+            source: None,
         }
     }
 

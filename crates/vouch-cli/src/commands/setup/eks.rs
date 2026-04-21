@@ -50,7 +50,8 @@ async fn describe_cluster(
     role_arn: &str,
 ) -> Result<(String, String)> {
     let result =
-        exchange_for_sts_credentials(server, role_arn, region, "vouch-eks-setup", None).await?;
+        exchange_for_sts_credentials(server, role_arn, region, "vouch-eks-setup", None, &[], None)
+            .await?;
 
     // Call EKS DescribeCluster REST API
     let endpoint = format!("https://eks.{region}.{}", result.domain_suffix);

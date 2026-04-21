@@ -68,7 +68,9 @@ async fn generate_eks_token(
     region: &str,
     role_arn: &str,
 ) -> Result<String> {
-    let result = exchange_for_sts_credentials(server, role_arn, region, "vouch-eks", None).await?;
+    let result =
+        exchange_for_sts_credentials(server, role_arn, region, "vouch-eks", None, &[], None)
+            .await?;
 
     // Build presigned STS GetCallerIdentity URL with cluster ID
     let sts_endpoint = format!("https://sts.{region}.{}", result.domain_suffix);

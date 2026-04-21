@@ -84,6 +84,8 @@ pub struct AwsTokenResult {
 /// * `user_email` - The authenticated user's email
 /// * `authenticator_id` - The authenticator ID from the session (for AAGUID lookup)
 /// * `hd` - The user's organization domain (Google Workspace hosted domain)
+/// * `source` - Credential source identifier (e.g., "mcp" for AI agent requests)
+#[allow(clippy::too_many_arguments)]
 pub async fn issue_aws_token(
     store: &DocumentStore,
     base_url: &str,
@@ -92,6 +94,7 @@ pub async fn issue_aws_token(
     user_email: &str,
     authenticator_id: Option<&str>,
     hd: Option<String>,
+    source: Option<&str>,
 ) -> AwsResult<AwsTokenResult> {
     // Get authenticator info for AAGUID
     let authenticator = get_authenticator(store, authenticator_id).await?;
@@ -111,6 +114,16 @@ pub async fn issue_aws_token(
     if let Some(ref domain) = hd {
         principal_tags.insert("domain".to_string(), vec![domain.clone()]);
         transitive_tag_keys.push("domain".to_string());
+    }
+
+    // Add AI-specific tags for MCP-sourced requests.
+    // These enable IAM condition keys (aws:PrincipalTag/AccessType)
+    // and CloudTrail filtering for agent-initiated API calls.
+    if source == Some("mcp") {
+        principal_tags.insert("AccessType".to_string(), vec!["AI".to_string()]);
+        transitive_tag_keys.push("AccessType".to_string());
+        principal_tags.insert("Source".to_string(), vec!["VouchMCP".to_string()]);
+        transitive_tag_keys.push("Source".to_string());
     }
 
     let aws_tags = AwsSessionTags {
