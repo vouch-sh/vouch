@@ -87,6 +87,10 @@ The S3 configuration file is a JSON document with the following schema:
   "cleanup_interval_minutes": 15,
   "auth_events_retention_days": 90,
   "oauth_events_retention_days": 90,
+  "resource_name": "Vouch",
+  "resource_documentation": "https://vouch.sh/docs/",
+  "resource_policy_uri": "https://vouch.sh/privacy/",
+  "resource_tos_uri": "https://vouch.sh/terms/",
   "cli_download_macos": "https://example.com/vouch-macos",
   "cli_download_linux": "https://example.com/vouch-linux",
   "cli_download_windows": "https://example.com/vouch-windows",
@@ -138,6 +142,10 @@ The S3 configuration file is a JSON document with the following schema:
 | `cleanup_interval_minutes` | integer | Background cleanup task interval in minutes. |
 | `auth_events_retention_days` | integer | Retention period for authentication events in days. |
 | `oauth_events_retention_days` | integer | Retention period for OAuth usage events in days. |
+| `resource_name` | string | Human-readable name of this protected resource (RFC 9728). Defaults to `"Vouch"`. |
+| `resource_documentation` | string | URL of developer documentation for this protected resource (RFC 9728). Defaults to `"https://vouch.sh/docs/"`. |
+| `resource_policy_uri` | string | URL of the resource's data-use policy (RFC 9728). Defaults to `"https://vouch.sh/privacy/"`. |
+| `resource_tos_uri` | string | URL of the resource's terms of service (RFC 9728). Defaults to `"https://vouch.sh/terms/"`. |
 | `cli_download_macos` | string | CLI download URL for macOS, displayed in the server UI. |
 | `cli_download_linux` | string | CLI download URL for Linux, displayed in the server UI. |
 | `cli_download_windows` | string | CLI download URL for Windows, displayed in the server UI. |
