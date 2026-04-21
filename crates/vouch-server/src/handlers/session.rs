@@ -68,7 +68,7 @@ pub struct ValidatedResourceToken {
     pub auth_time: Option<i64>,
     /// SHA-256 hash of the access token (for DB lookups/revocation).
     pub token_hash: String,
-    /// Credential source from DPoP proof custom claim (e.g., "mcp").
+    /// AI coding agent identifier from DPoP proof custom claim (e.g., "claude-code").
     pub dpop_source: Option<String>,
 }
 

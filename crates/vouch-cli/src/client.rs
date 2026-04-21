@@ -160,7 +160,7 @@ impl<H: HttpClient> VouchClient<H> {
     /// When set, this value is included as a `source` custom claim in
     /// DPoP proof JWTs (RFC 9449 §4.2 allows additional claims). The
     /// server extracts this to determine credential attribution (e.g.,
-    /// adding AI session tags when source is "mcp").
+    /// adding AI session tags when an agent is detected).
     pub(crate) fn set_dpop_source(&mut self, source: &str) {
         self.dpop_source = Some(source.to_string());
     }

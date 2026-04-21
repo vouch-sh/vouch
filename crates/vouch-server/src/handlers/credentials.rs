@@ -320,9 +320,9 @@ pub struct SshRevocationCheckResponse {
 /// Returns an OIDC ID token that can be used with AWS STS to assume a role.
 /// The AWS IAM role must be configured to trust the Vouch OIDC provider.
 ///
-/// When the DPoP proof includes a `source` custom claim (e.g., "mcp"),
-/// the issued token includes AI-specific session tags (`AccessType=AI`,
-/// `Source=VouchMCP`) for CloudTrail differentiation and IAM condition keys.
+/// When the DPoP proof includes a `source` custom claim (e.g., "claude-code"),
+/// the issued token includes AI-specific session tags (`vouch:AccessType=AI`,
+/// `vouch:Agent=<agent>`) for CloudTrail differentiation and IAM condition keys.
 pub async fn get_aws_token(
     method: Method,
     uri: OriginalUri,

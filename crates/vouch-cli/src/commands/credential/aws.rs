@@ -86,8 +86,24 @@ pub(crate) struct StsExchangeResult {
 /// Returns the agent identifier (e.g., "claude-code", "cursor") if detected.
 /// These env vars are set by the agent's shell environment and inherited by
 /// child processes including `credential_process` invocations.
+///
+/// Reference implementation:
+/// <https://github.com/vercel/vercel/blob/main/packages/detect-agent/src/index.ts>
+///
+/// Sources:
+/// - `AGENT`: <https://github.com/agentsmd/agents.md/issues/136>
+/// - `AI_AGENT`: <https://github.com/vercel/vercel/blob/main/packages/detect-agent/src/index.ts>
+/// - `CLAUDECODE` / `CLAUDE_CODE`: <https://code.claude.com/docs/en/env-vars>
+/// - `CURSOR_TRACE_ID` / `CURSOR_AGENT`: <https://cursor.com/docs/agent/tools/terminal>
+/// - `GEMINI_CLI`: <https://github.com/google-gemini/gemini-cli/blob/main/packages/core/src/services/shellExecutionService.ts#L56>
+/// - `CODEX_SANDBOX` / `CODEX_THREAD_ID`: <https://github.com/openai/codex/blob/main/codex-rs/core/src/spawn.rs#L25>
+/// - `COPILOT_MODEL`: <https://github.com/microsoft/vscode/issues/265446>
+/// - `AUGMENT_AGENT`: <https://docs.augmentcode.com/cli/reference>
+/// - `ANTIGRAVITY_AGENT`: <https://github.com/vercel/vercel/blob/main/packages/detect-agent/src/index.ts>
+/// - `OPENCODE_CLIENT`: <https://github.com/vercel/vercel/blob/main/packages/detect-agent/src/index.ts>
+/// - `CLINE_ACTIVE`: <https://github.com/cline/cline/discussions/5366>
 fn detect_agent_source() -> Option<&'static str> {
-    // Emerging standard: https://github.com/agentsmd/agents.md
+    // Emerging standard: https://github.com/agentsmd/agents.md/issues/136
     if let Ok(val) = std::env::var("AGENT") {
         return match val.as_str() {
             "amp" => Some("amp"),
@@ -95,23 +111,49 @@ fn detect_agent_source() -> Option<&'static str> {
             _ => Some("agent"),
         };
     }
-    if std::env::var_os("CLAUDECODE").is_some() {
+    // Generic agent identifier (Vercel convention)
+    if let Ok(val) = std::env::var("AI_AGENT") {
+        return match val.as_str() {
+            "v0" => Some("v0"),
+            _ => Some("agent"),
+        };
+    }
+    // Claude Code: https://code.claude.com/docs/en/env-vars
+    if std::env::var_os("CLAUDECODE").is_some() || std::env::var_os("CLAUDE_CODE").is_some() {
         return Some("claude-code");
     }
-    if std::env::var_os("CURSOR_AGENT").is_some() {
+    // Cursor: https://cursor.com/docs/agent/tools/terminal
+    if std::env::var_os("CURSOR_TRACE_ID").is_some() || std::env::var_os("CURSOR_AGENT").is_some() {
         return Some("cursor");
     }
-    if std::env::var_os("CLINE_ACTIVE").is_some() {
-        return Some("cline");
-    }
+    // Gemini CLI: https://github.com/google-gemini/gemini-cli
     if std::env::var_os("GEMINI_CLI").is_some() {
         return Some("gemini");
     }
-    if std::env::var_os("CODEX_SANDBOX").is_some() {
+    // OpenAI Codex: https://github.com/openai/codex
+    if std::env::var_os("CODEX_SANDBOX").is_some() || std::env::var_os("CODEX_THREAD_ID").is_some()
+    {
         return Some("codex");
     }
+    // GitHub Copilot: https://github.com/microsoft/vscode/issues/265446
+    if std::env::var_os("COPILOT_MODEL").is_some() {
+        return Some("copilot");
+    }
+    // Augment: https://docs.augmentcode.com/cli/reference
     if std::env::var_os("AUGMENT_AGENT").is_some() {
         return Some("augment");
+    }
+    // Antigravity
+    if std::env::var_os("ANTIGRAVITY_AGENT").is_some() {
+        return Some("antigravity");
+    }
+    // OpenCode
+    if std::env::var_os("OPENCODE_CLIENT").is_some() {
+        return Some("opencode");
+    }
+    // Cline: https://github.com/cline/cline/discussions/5366
+    if std::env::var_os("CLINE_ACTIVE").is_some() {
+        return Some("cline");
     }
     None
 }

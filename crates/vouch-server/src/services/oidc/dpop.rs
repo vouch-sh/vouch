@@ -55,7 +55,7 @@ pub struct DpopClaims {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ath: Option<String>,
     /// Credential source identifier (custom claim, RFC 9449 §4.2 allows additional claims).
-    /// When "mcp", the server adds AI-specific session tags to issued tokens.
+    /// When present, the server adds AI-specific session tags to issued tokens.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
 }

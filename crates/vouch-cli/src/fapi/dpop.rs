@@ -45,7 +45,7 @@ struct DpopClaims {
     #[serde(skip_serializing_if = "Option::is_none")]
     ath: Option<String>,
     /// Credential source identifier (custom claim, RFC 9449 §4.2 allows additional claims).
-    /// When set to "mcp", the server adds AI-specific session tags to issued tokens.
+    /// When present, the server adds AI-specific session tags to issued tokens.
     #[serde(skip_serializing_if = "Option::is_none")]
     source: Option<String>,
 }
@@ -110,8 +110,9 @@ impl DpopProofBuilder {
 
     /// Set the credential source identifier (custom claim).
     ///
-    /// When set to "mcp", the server adds AI-specific session tags
-    /// (`AccessType=AI`, `Source=VouchMCP`) to issued tokens.
+    /// When present, the server adds AI-specific session tags
+    /// (`vouch:AccessType=AI`, `vouch:Agent=<value>`) to issued tokens.
+    /// The value is the detected agent name (e.g., "claude-code", "cursor").
     #[must_use]
     pub fn source(mut self, source: &str) -> Self {
         self.source = Some(source.to_string());
