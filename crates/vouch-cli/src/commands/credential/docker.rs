@@ -24,7 +24,7 @@ use std::io::{BufRead, Write};
 use vouch_common::{GitHubTokenRequest, GitHubTokenResponse};
 
 use crate::client::VouchClient;
-use crate::commands::credential::aws::{StsExchangeOptions, exchange_for_sts_credentials};
+use crate::commands::credential::aws::exchange_for_sts_credentials;
 use crate::integrations::aws::get_local_aws_role;
 use crate::integrations::aws::sigv4::sign_and_send_json_rpc;
 use crate::integrations::aws::sts::StsCredentials;
@@ -216,14 +216,8 @@ async fn get_ecr_credential(
         )
     })?;
 
-    let result = exchange_for_sts_credentials(
-        server,
-        &role_arn,
-        region,
-        "vouch-docker",
-        &StsExchangeOptions::default(),
-    )
-    .await?;
+    let result =
+        exchange_for_sts_credentials(server, &role_arn, region, "vouch-docker", None).await?;
 
     // Call ECR GetAuthorizationToken
     let ecr_token = get_ecr_authorization_token(

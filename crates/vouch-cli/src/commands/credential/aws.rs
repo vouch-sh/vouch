@@ -81,20 +81,39 @@ pub(crate) struct StsExchangeResult {
 /// Exchange a Vouch session for AWS STS credentials.
 ///
 /// Handles the full flow: OIDC token fetch → JWT decode for session tags →
-/// Optional parameters for STS credential exchange.
+/// Detect if running inside an AI coding agent by checking environment variables.
 ///
-/// Used to pass MCP-specific options (session policies, source attribution)
-/// or pre-resolved management roles without inflating the function signature.
-#[derive(Default)]
-pub(crate) struct StsExchangeOptions<'a> {
-    /// Pre-resolved management role ARN for role chaining.
-    /// When `None`, resolved from vouch config internally.
-    pub management_role: Option<&'a str>,
-    /// AWS managed policy names to attach as session policies.
-    /// Effective permissions = role policy ∩ session policy.
-    pub session_policy_names: &'a [&'a str],
-    /// Credential source for DPoP attribution (e.g., "mcp").
-    pub source: Option<&'a str>,
+/// Returns the agent identifier (e.g., "claude-code", "cursor") if detected.
+/// These env vars are set by the agent's shell environment and inherited by
+/// child processes including `credential_process` invocations.
+fn detect_agent_source() -> Option<&'static str> {
+    // Emerging standard: https://github.com/agentsmd/agents.md
+    if let Ok(val) = std::env::var("AGENT") {
+        return match val.as_str() {
+            "amp" => Some("amp"),
+            "goose" => Some("goose"),
+            _ => Some("agent"),
+        };
+    }
+    if std::env::var_os("CLAUDECODE").is_some() {
+        return Some("claude-code");
+    }
+    if std::env::var_os("CURSOR_AGENT").is_some() {
+        return Some("cursor");
+    }
+    if std::env::var_os("CLINE_ACTIVE").is_some() {
+        return Some("cline");
+    }
+    if std::env::var_os("GEMINI_CLI").is_some() {
+        return Some("gemini");
+    }
+    if std::env::var_os("CODEX_SANDBOX").is_some() {
+        return Some("codex");
+    }
+    if std::env::var_os("AUGMENT_AGENT").is_some() {
+        return Some("augment");
+    }
+    None
 }
 
 /// role ARN validation → `AssumeRoleWithWebIdentity`.
@@ -103,16 +122,21 @@ pub(crate) struct StsExchangeOptions<'a> {
 /// through the management role: `AssumeRoleWithWebIdentity` into the
 /// management role, then `AssumeRole` into the target.
 ///
-/// External callers (EKS, RDS, etc.) pass `Default::default()` — the
-/// management role is resolved internally from vouch config so they get
-/// chaining for free. `get_aws_credentials` pre-resolves it to avoid a
-/// double config load.
+/// External callers (EKS, RDS, etc.) pass `None` — the management role
+/// is resolved internally from vouch config so they get chaining for
+/// free. `get_aws_credentials` pre-resolves it to avoid a double config
+/// load.
+///
+/// When running inside an AI coding agent (detected via environment
+/// variables like `CLAUDECODE`, `CURSOR_AGENT`, etc.), automatically
+/// attaches `ReadOnlyAccess` session policy and sets a DPoP source
+/// claim for CloudTrail attribution.
 pub(crate) async fn exchange_for_sts_credentials(
     server: &str,
     role_arn: &str,
     region: &str,
     session_name: &str,
-    opts: &StsExchangeOptions<'_>,
+    management_role: Option<&str>,
 ) -> Result<StsExchangeResult> {
     use crate::integrations::aws::sts::{
         WebIdentityRequest, assume_role, assume_role_with_web_identity, parse_role_arn,
@@ -120,7 +144,7 @@ pub(crate) async fn exchange_for_sts_credentials(
 
     // If caller didn't pre-resolve, resolve now from config
     let resolved;
-    let mgmt = match opts.management_role {
+    let mgmt = match management_role {
         Some(m) => Some(m),
         None => {
             resolved = crate::config::Config::load()
@@ -134,11 +158,21 @@ pub(crate) async fn exchange_for_sts_credentials(
     let arn = parse_role_arn(role_arn)?;
     let domain_suffix = arn.partition.dns_suffix();
 
+    // Detect AI agent environment and apply restrictions automatically
+    let agent_source = detect_agent_source();
+    let agent_policies: &[&str] = if agent_source.is_some() {
+        &["ReadOnlyAccess"]
+    } else {
+        &[]
+    };
+
     let mut client = VouchClient::new(server).await?;
 
-    // Set DPoP source claim for MCP attribution (tamperproof via DPoP signature)
-    if let Some(s) = opts.source {
-        client.set_dpop_source(s);
+    // Set DPoP source claim for agent attribution (tamperproof via DPoP signature).
+    // Server extracts this to add AI-specific session tags to the JWT.
+    if let Some(source) = agent_source {
+        tracing::info!("AI agent detected ({source}), applying ReadOnlyAccess session policy");
+        client.set_dpop_source(source);
     }
 
     let token_response: OidcTokenResponse = client
@@ -161,6 +195,8 @@ pub(crate) async fn exchange_for_sts_credentials(
     let email = get_user_email(server).await;
     let session = email.as_deref().unwrap_or(session_name);
 
+    let all_policies: &[&str] = agent_policies;
+
     if let Some(mgmt_role_arn) = mgmt.filter(|m| *m != role_arn) {
         // Chain: AssumeRoleWithWebIdentity into management role, then AssumeRole into target
         let mgmt_arn = parse_role_arn(mgmt_role_arn)?;
@@ -173,7 +209,7 @@ pub(crate) async fn exchange_for_sts_credentials(
             web_identity_token: id_token,
             region,
             domain_suffix: mgmt_domain_suffix,
-            session_policy_names: opts.session_policy_names,
+            session_policy_names: all_policies,
         })
         .await
         .context("failed to assume management role")?;
@@ -184,7 +220,7 @@ pub(crate) async fn exchange_for_sts_credentials(
             session,
             region,
             &mgmt_credentials,
-            opts.session_policy_names,
+            all_policies,
         )
         .await
         .context("failed to assume target role via chaining")?;
@@ -204,7 +240,7 @@ pub(crate) async fn exchange_for_sts_credentials(
         web_identity_token: id_token,
         region,
         domain_suffix,
-        session_policy_names: opts.session_policy_names,
+        session_policy_names: all_policies,
     })
     .await
     .context("failed to assume AWS role")?;
@@ -292,17 +328,8 @@ async fn fetch_and_assume(
 ) -> Result<CredentialProcessOutput> {
     let region = crate::integrations::aws::resolve_region_with_fallback(role_arn)?;
 
-    let result = exchange_for_sts_credentials(
-        server,
-        role_arn,
-        &region,
-        "vouch-session",
-        &StsExchangeOptions {
-            management_role: mgmt_role,
-            ..StsExchangeOptions::default()
-        },
-    )
-    .await?;
+    let result =
+        exchange_for_sts_credentials(server, role_arn, &region, "vouch-session", mgmt_role).await?;
     let creds = &result.credentials;
     Ok(CredentialProcessOutput {
         version: 1,

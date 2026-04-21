@@ -147,39 +147,42 @@ impl VouchMcpServer {
 
 impl VouchMcpServer {
     async fn handle_status(&self) -> StatusResult {
-        // Try to get session from the agent daemon via IPC
-        let session = async {
-            let mut agent = vouch_agent::AgentClient::connect().await.ok()?;
-            agent.get_session().await.ok()
-        }
-        .await;
+        // Try to get session from the agent daemon via IPC.
+        // The agent uses Unix sockets and is only available on Unix.
+        #[cfg(unix)]
+        {
+            let session = async {
+                let mut agent = vouch_agent::AgentClient::connect().await.ok()?;
+                agent.get_session().await.ok()
+            }
+            .await;
 
-        match session {
-            Some(info) => {
+            if let Some(info) = session {
                 let hours_remaining = info.expires_in_seconds as f64 / 3600.0;
-                StatusResult {
+                return StatusResult {
                     authenticated: true,
                     email: Some(info.user_email),
                     expires_at: Some(info.expires_at),
                     hours_remaining: Some(hours_remaining),
                     guidance: None,
-                }
+                };
             }
-            None => StatusResult {
-                authenticated: false,
-                email: None,
-                expires_at: None,
-                hours_remaining: None,
-                guidance: Some(
-                    "Not authenticated. Run `vouch login` and touch your YubiKey to start a session."
-                        .to_string(),
-                ),
-            },
+        }
+
+        StatusResult {
+            authenticated: false,
+            email: None,
+            expires_at: None,
+            hours_remaining: None,
+            guidance: Some(
+                "Not authenticated. Run `vouch login` and touch your YubiKey to start a session."
+                    .to_string(),
+            ),
         }
     }
 
     async fn handle_aws_exec(&self, role_arn: &str, command: &str) -> AwsExecResult {
-        use crate::commands::credential::aws::{StsExchangeOptions, exchange_for_sts_credentials};
+        use crate::commands::credential::aws::exchange_for_sts_credentials;
         use secrecy::ExposeSecret;
         use std::process::Command;
 
@@ -201,18 +204,9 @@ impl VouchMcpServer {
         };
 
         // Fetch scoped STS credentials with ReadOnlyAccess and MCP attribution
-        let sts_result = exchange_for_sts_credentials(
-            &self.server_url,
-            role_arn,
-            &region,
-            "vouch-mcp",
-            &StsExchangeOptions {
-                session_policy_names: &["ReadOnlyAccess"],
-                source: Some("mcp"),
-                ..StsExchangeOptions::default()
-            },
-        )
-        .await;
+        let sts_result =
+            exchange_for_sts_credentials(&self.server_url, role_arn, &region, "vouch-mcp", None)
+                .await;
 
         let creds = match sts_result {
             Ok(result) => result.credentials,

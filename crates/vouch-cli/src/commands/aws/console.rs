@@ -65,7 +65,7 @@ pub(crate) async fn run(server: &str, args: ConsoleArgs) -> Result<()> {
         &role_arn,
         &region,
         "vouch-console",
-        &crate::commands::credential::aws::StsExchangeOptions::default(),
+        None,
     )
     .await
     .context("failed to get AWS credentials")?;

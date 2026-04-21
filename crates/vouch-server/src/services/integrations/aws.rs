@@ -116,13 +116,15 @@ pub async fn issue_aws_token(
         transitive_tag_keys.push("domain".to_string());
     }
 
-    // Add AI-specific tags for MCP-sourced requests.
-    // These enable IAM condition keys (aws:PrincipalTag/AccessType)
+    // Add AI-specific tags when a coding agent is detected.
+    // The `source` claim is set by the CLI via env-var sniffing (CLAUDECODE,
+    // CURSOR_AGENT, etc.) and carried tamperproof in the DPoP proof JWT.
+    // These tags enable IAM condition keys (aws:PrincipalTag/AccessType)
     // and CloudTrail filtering for agent-initiated API calls.
-    if source == Some("mcp") {
+    if let Some(agent) = source {
         principal_tags.insert("AccessType".to_string(), vec!["AI".to_string()]);
         transitive_tag_keys.push("AccessType".to_string());
-        principal_tags.insert("Source".to_string(), vec!["VouchMCP".to_string()]);
+        principal_tags.insert("Source".to_string(), vec![agent.to_string()]);
         transitive_tag_keys.push("Source".to_string());
     }
 
