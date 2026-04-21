@@ -81,6 +81,83 @@ pub(crate) struct StsExchangeResult {
 /// Exchange a Vouch session for AWS STS credentials.
 ///
 /// Handles the full flow: OIDC token fetch → JWT decode for session tags →
+/// Detect if running inside an AI coding agent by checking environment variables.
+///
+/// Returns the agent identifier (e.g., "claude-code", "cursor") if detected.
+/// These env vars are set by the agent's shell environment and inherited by
+/// child processes including `credential_process` invocations.
+///
+/// Reference implementation:
+/// <https://github.com/vercel/vercel/blob/main/packages/detect-agent/src/index.ts>
+///
+/// Sources:
+/// - `AGENT`: <https://github.com/agentsmd/agents.md/issues/136>
+/// - `AI_AGENT`: <https://github.com/vercel/vercel/blob/main/packages/detect-agent/src/index.ts>
+/// - `CLAUDECODE` / `CLAUDE_CODE`: <https://code.claude.com/docs/en/env-vars>
+/// - `CURSOR_TRACE_ID` / `CURSOR_AGENT`: <https://cursor.com/docs/agent/tools/terminal>
+/// - `GEMINI_CLI`: <https://github.com/google-gemini/gemini-cli/blob/main/packages/core/src/services/shellExecutionService.ts#L56>
+/// - `CODEX_SANDBOX` / `CODEX_THREAD_ID`: <https://github.com/openai/codex/blob/main/codex-rs/core/src/spawn.rs#L25>
+/// - `COPILOT_MODEL`: <https://github.com/microsoft/vscode/issues/265446>
+/// - `AUGMENT_AGENT`: <https://docs.augmentcode.com/cli/reference>
+/// - `ANTIGRAVITY_AGENT`: <https://github.com/vercel/vercel/blob/main/packages/detect-agent/src/index.ts>
+/// - `OPENCODE_CLIENT`: <https://github.com/vercel/vercel/blob/main/packages/detect-agent/src/index.ts>
+/// - `CLINE_ACTIVE`: <https://github.com/cline/cline/discussions/5366>
+fn detect_agent_source() -> Option<&'static str> {
+    // Emerging standard: https://github.com/agentsmd/agents.md/issues/136
+    if let Ok(val) = std::env::var("AGENT") {
+        return match val.as_str() {
+            "amp" => Some("amp"),
+            "goose" => Some("goose"),
+            _ => Some("agent"),
+        };
+    }
+    // Generic agent identifier (Vercel convention)
+    if let Ok(val) = std::env::var("AI_AGENT") {
+        return match val.as_str() {
+            "v0" => Some("v0"),
+            _ => Some("agent"),
+        };
+    }
+    // Claude Code: https://code.claude.com/docs/en/env-vars
+    if std::env::var_os("CLAUDECODE").is_some() || std::env::var_os("CLAUDE_CODE").is_some() {
+        return Some("claude-code");
+    }
+    // Cursor: https://cursor.com/docs/agent/tools/terminal
+    if std::env::var_os("CURSOR_TRACE_ID").is_some() || std::env::var_os("CURSOR_AGENT").is_some() {
+        return Some("cursor");
+    }
+    // Gemini CLI: https://github.com/google-gemini/gemini-cli
+    if std::env::var_os("GEMINI_CLI").is_some() {
+        return Some("gemini");
+    }
+    // OpenAI Codex: https://github.com/openai/codex
+    if std::env::var_os("CODEX_SANDBOX").is_some() || std::env::var_os("CODEX_THREAD_ID").is_some()
+    {
+        return Some("codex");
+    }
+    // GitHub Copilot: https://github.com/microsoft/vscode/issues/265446
+    if std::env::var_os("COPILOT_MODEL").is_some() {
+        return Some("copilot");
+    }
+    // Augment: https://docs.augmentcode.com/cli/reference
+    if std::env::var_os("AUGMENT_AGENT").is_some() {
+        return Some("augment");
+    }
+    // Antigravity
+    if std::env::var_os("ANTIGRAVITY_AGENT").is_some() {
+        return Some("antigravity");
+    }
+    // OpenCode
+    if std::env::var_os("OPENCODE_CLIENT").is_some() {
+        return Some("opencode");
+    }
+    // Cline: https://github.com/cline/cline/discussions/5366
+    if std::env::var_os("CLINE_ACTIVE").is_some() {
+        return Some("cline");
+    }
+    None
+}
+
 /// role ARN validation → `AssumeRoleWithWebIdentity`.
 ///
 /// When `management_role` is `Some` and differs from `role_arn`, chains
@@ -91,11 +168,16 @@ pub(crate) struct StsExchangeResult {
 /// is resolved internally from vouch config so they get chaining for
 /// free. `get_aws_credentials` pre-resolves it to avoid a double config
 /// load.
+///
+/// When running inside an AI coding agent (detected via environment
+/// variables like `CLAUDECODE`, `CURSOR_AGENT`, etc.), automatically
+/// attaches `ReadOnlyAccess` session policy and sets a DPoP source
+/// claim for CloudTrail attribution.
 pub(crate) async fn exchange_for_sts_credentials(
     server: &str,
     role_arn: &str,
     region: &str,
-    fallback_label: &str,
+    session_name: &str,
     management_role: Option<&str>,
 ) -> Result<StsExchangeResult> {
     use crate::integrations::aws::sts::{
@@ -118,7 +200,22 @@ pub(crate) async fn exchange_for_sts_credentials(
     let arn = parse_role_arn(role_arn)?;
     let domain_suffix = arn.partition.dns_suffix();
 
-    let client = VouchClient::new(server).await?;
+    // Detect AI agent environment and apply restrictions automatically
+    let agent_source = detect_agent_source();
+    let agent_policies: &[&str] = if agent_source.is_some() {
+        &["ReadOnlyAccess"]
+    } else {
+        &[]
+    };
+
+    let mut client = VouchClient::new(server).await?;
+
+    // Set DPoP source claim for agent attribution (tamperproof via DPoP signature).
+    // Server extracts this to add AI-specific session tags to the JWT.
+    if let Some(source) = agent_source {
+        tracing::info!("AI agent detected ({source}), applying ReadOnlyAccess session policy");
+        client.set_dpop_source(source);
+    }
 
     let token_response: OidcTokenResponse = client
         .get_authenticated("/v1/credentials/aws/token")
@@ -138,7 +235,9 @@ pub(crate) async fn exchange_for_sts_credentials(
             .context("failed to create HTTP client")?;
 
     let email = get_user_email(server).await;
-    let session = email.as_deref().unwrap_or(fallback_label);
+    let session = email.as_deref().unwrap_or(session_name);
+
+    let all_policies: &[&str] = agent_policies;
 
     if let Some(mgmt_role_arn) = mgmt.filter(|m| *m != role_arn) {
         // Chain: AssumeRoleWithWebIdentity into management role, then AssumeRole into target
@@ -152,13 +251,21 @@ pub(crate) async fn exchange_for_sts_credentials(
             web_identity_token: id_token,
             region,
             domain_suffix: mgmt_domain_suffix,
+            session_policy_names: all_policies,
         })
         .await
         .context("failed to assume management role")?;
 
-        let credentials = assume_role(&http_client, role_arn, session, region, &mgmt_credentials)
-            .await
-            .context("failed to assume target role via chaining")?;
+        let credentials = assume_role(
+            &http_client,
+            role_arn,
+            session,
+            region,
+            &mgmt_credentials,
+            all_policies,
+        )
+        .await
+        .context("failed to assume target role via chaining")?;
 
         return Ok(StsExchangeResult {
             http_client,
@@ -175,6 +282,7 @@ pub(crate) async fn exchange_for_sts_credentials(
         web_identity_token: id_token,
         region,
         domain_suffix,
+        session_policy_names: all_policies,
     })
     .await
     .context("failed to assume AWS role")?;
@@ -260,19 +368,7 @@ async fn fetch_and_assume(
     role_arn: &str,
     mgmt_role: Option<&str>,
 ) -> Result<CredentialProcessOutput> {
-    use crate::integrations::aws;
-    use crate::integrations::aws::sts::parse_role_arn;
-
-    let profile_name = aws::resolve_profile(None).unwrap_or_default();
-    let region = match aws::resolve_region(None, &profile_name) {
-        Ok(r) => r,
-        Err(_) => {
-            let arn = parse_role_arn(role_arn)?;
-            let default = arn.partition.default_sts_region();
-            tracing::debug!("no region configured, defaulting to {default} for STS");
-            default.to_string()
-        }
-    };
+    let region = crate::integrations::aws::resolve_region_with_fallback(role_arn)?;
 
     let result =
         exchange_for_sts_credentials(server, role_arn, &region, "vouch-session", mgmt_role).await?;

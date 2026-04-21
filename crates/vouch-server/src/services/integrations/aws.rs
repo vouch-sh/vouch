@@ -84,6 +84,8 @@ pub struct AwsTokenResult {
 /// * `user_email` - The authenticated user's email
 /// * `authenticator_id` - The authenticator ID from the session (for AAGUID lookup)
 /// * `hd` - The user's organization domain (Google Workspace hosted domain)
+/// * `source` - AI coding agent identifier (e.g., "claude-code", "cursor")
+#[allow(clippy::too_many_arguments)]
 pub async fn issue_aws_token(
     store: &DocumentStore,
     base_url: &str,
@@ -92,6 +94,7 @@ pub async fn issue_aws_token(
     user_email: &str,
     authenticator_id: Option<&str>,
     hd: Option<String>,
+    source: Option<&str>,
 ) -> AwsResult<AwsTokenResult> {
     // Get authenticator info for AAGUID
     let authenticator = get_authenticator(store, authenticator_id).await?;
@@ -105,12 +108,24 @@ pub async fn issue_aws_token(
     let mut principal_tags = std::collections::HashMap::new();
     let mut transitive_tag_keys = Vec::new();
 
-    principal_tags.insert("email".to_string(), vec![user_email.to_string()]);
-    transitive_tag_keys.push("email".to_string());
+    principal_tags.insert("vouch:Email".to_string(), vec![user_email.to_string()]);
+    transitive_tag_keys.push("vouch:Email".to_string());
 
     if let Some(ref domain) = hd {
-        principal_tags.insert("domain".to_string(), vec![domain.clone()]);
-        transitive_tag_keys.push("domain".to_string());
+        principal_tags.insert("vouch:Domain".to_string(), vec![domain.clone()]);
+        transitive_tag_keys.push("vouch:Domain".to_string());
+    }
+
+    // Add AI-specific tags when a coding agent is detected.
+    // The `source` claim is set by the CLI via env-var sniffing (CLAUDECODE,
+    // CURSOR_AGENT, etc.) and carried tamperproof in the DPoP proof JWT.
+    // These tags enable IAM condition keys (aws:PrincipalTag/vouch:access-type)
+    // and CloudTrail filtering for agent-initiated API calls.
+    if let Some(agent) = source {
+        principal_tags.insert("vouch:AccessType".to_string(), vec!["ai".to_string()]);
+        transitive_tag_keys.push("vouch:AccessType".to_string());
+        principal_tags.insert("vouch:Agent".to_string(), vec![agent.to_string()]);
+        transitive_tag_keys.push("vouch:Agent".to_string());
     }
 
     let aws_tags = AwsSessionTags {
@@ -154,4 +169,348 @@ async fn get_authenticator(
     db::get_authenticator_by_id(store, id)
         .await
         .map_err(AwsError::Database)
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::panic
+)]
+mod tests {
+    use super::*;
+    use crate::crypto::document_crypto::PlaintextDocumentCrypto;
+    use crate::db::{Pool, pool::PoolConfig, store::DocumentStore};
+    use crate::services::oidc::OidcSigningKey;
+    use base64::Engine;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use std::sync::Arc;
+
+    /// Create an in-memory SQLite store with migrations for testing.
+    async fn test_store() -> DocumentStore {
+        let pool = Pool::connect("sqlite::memory:", &PoolConfig::default())
+            .await
+            .expect("Failed to create test database");
+
+        match &pool {
+            Pool::Sqlite(p) => sqlx::migrate!("./migrations/sqlite")
+                .run(p)
+                .await
+                .expect("Failed to run migrations"),
+            Pool::Postgres(p) => sqlx::migrate!("./migrations/postgres")
+                .run(p)
+                .await
+                .expect("Failed to run migrations"),
+        }
+
+        let crypto: Arc<dyn crate::crypto::document_crypto::DocumentCrypto> =
+            Arc::new(PlaintextDocumentCrypto);
+        DocumentStore::new(pool, crypto)
+    }
+
+    /// Create a user and authenticator in the store, returning the authenticator ID.
+    async fn create_test_user_and_authenticator(store: &DocumentStore, email: &str) -> String {
+        let (user_id, _) = db::upsert_user(store, email, None)
+            .await
+            .expect("Failed to create test user");
+
+        db::create_authenticator(
+            store,
+            &user_id,
+            email,
+            "Test Key",
+            b"test-credential-id",
+            &[0u8; 32],
+            None,
+            Some(user_id.as_bytes()),
+            false,
+        )
+        .await
+        .expect("Failed to create test authenticator")
+    }
+
+    /// Decode a JWT payload (middle part) into a `serde_json::Value` without
+    /// signature verification. Used only in tests to inspect claims.
+    fn decode_jwt_payload(token: &str) -> serde_json::Value {
+        let parts: Vec<&str> = token.split('.').collect();
+        assert_eq!(parts.len(), 3, "JWT must have exactly 3 parts");
+        let payload_bytes = URL_SAFE_NO_PAD
+            .decode(parts[1])
+            .expect("Failed to base64url-decode JWT payload");
+        serde_json::from_slice(&payload_bytes).expect("Failed to parse JWT payload as JSON")
+    }
+
+    // ── test helpers ──────────────────────────────────────────────────────────
+
+    const BASE_URL: &str = "https://vouch.example.com";
+    const SESSION_HOURS: u64 = 8;
+    const USER_EMAIL: &str = "user@example.com";
+
+    // ── tests ─────────────────────────────────────────────────────────────────
+
+    /// Default tags present: `vouch:Email` is always included; `vouch:AccessType`
+    /// and `vouch:Agent` must NOT be present when `source` is `None`.
+    #[tokio::test]
+    async fn test_default_tags_present_without_source() {
+        let store = test_store().await;
+        let auth_id = create_test_user_and_authenticator(&store, USER_EMAIL).await;
+        let key = OidcSigningKey::generate().expect("Failed to generate OIDC key");
+
+        let result = issue_aws_token(
+            &store,
+            BASE_URL,
+            SESSION_HOURS,
+            &key,
+            USER_EMAIL,
+            Some(&auth_id),
+            None,
+            None, // no source
+        )
+        .await
+        .expect("issue_aws_token should succeed");
+
+        let claims = decode_jwt_payload(&result.id_token);
+        let tags = &claims["https://aws.amazon.com/tags"];
+        assert!(tags.is_object(), "aws tags claim must be present");
+
+        let principal_tags = &tags["principal_tags"];
+        assert_eq!(
+            principal_tags["vouch:Email"],
+            serde_json::json!([USER_EMAIL]),
+            "vouch:Email tag must contain the user email"
+        );
+        assert!(
+            principal_tags.get("vouch:AccessType").is_none(),
+            "vouch:AccessType must not be present when source is None"
+        );
+        assert!(
+            principal_tags.get("vouch:Agent").is_none(),
+            "vouch:Agent must not be present when source is None"
+        );
+    }
+
+    /// Domain tag: when `hd` is `Some`, `vouch:Domain` must be included.
+    #[tokio::test]
+    async fn test_domain_tag_included_when_hd_present() {
+        let store = test_store().await;
+        let auth_id = create_test_user_and_authenticator(&store, USER_EMAIL).await;
+        let key = OidcSigningKey::generate().expect("Failed to generate OIDC key");
+
+        let result = issue_aws_token(
+            &store,
+            BASE_URL,
+            SESSION_HOURS,
+            &key,
+            USER_EMAIL,
+            Some(&auth_id),
+            Some("example.com".to_string()),
+            None,
+        )
+        .await
+        .expect("issue_aws_token should succeed");
+
+        let claims = decode_jwt_payload(&result.id_token);
+        let tags = &claims["https://aws.amazon.com/tags"];
+        let principal_tags = &tags["principal_tags"];
+
+        assert_eq!(
+            principal_tags["vouch:Domain"],
+            serde_json::json!(["example.com"]),
+            "vouch:Domain tag must contain the hosted domain"
+        );
+        assert_eq!(
+            principal_tags["vouch:Email"],
+            serde_json::json!([USER_EMAIL]),
+            "vouch:Email must also be present alongside vouch:Domain"
+        );
+    }
+
+    /// Agent tags added: when `source` is `Some`, both `vouch:AccessType=ai`
+    /// and `vouch:Agent=<source>` must appear in `principal_tags`.
+    #[tokio::test]
+    async fn test_agent_tags_added_when_source_present() {
+        let store = test_store().await;
+        let auth_id = create_test_user_and_authenticator(&store, USER_EMAIL).await;
+        let key = OidcSigningKey::generate().expect("Failed to generate OIDC key");
+
+        let result = issue_aws_token(
+            &store,
+            BASE_URL,
+            SESSION_HOURS,
+            &key,
+            USER_EMAIL,
+            Some(&auth_id),
+            None,
+            Some("claude-code"),
+        )
+        .await
+        .expect("issue_aws_token should succeed");
+
+        let claims = decode_jwt_payload(&result.id_token);
+        let tags = &claims["https://aws.amazon.com/tags"];
+        let principal_tags = &tags["principal_tags"];
+
+        assert_eq!(
+            principal_tags["vouch:AccessType"],
+            serde_json::json!(["ai"]),
+            "vouch:AccessType must be 'ai' when source is present"
+        );
+        assert_eq!(
+            principal_tags["vouch:Agent"],
+            serde_json::json!(["claude-code"]),
+            "vouch:Agent must contain the source identifier"
+        );
+        assert_eq!(
+            principal_tags["vouch:Email"],
+            serde_json::json!([USER_EMAIL]),
+            "vouch:Email must still be present alongside agent tags"
+        );
+    }
+
+    /// Agent tags absent without source: when `source` is `None`, neither
+    /// `vouch:AccessType` nor `vouch:Agent` may appear.
+    #[tokio::test]
+    async fn test_agent_tags_absent_without_source() {
+        let store = test_store().await;
+        let auth_id = create_test_user_and_authenticator(&store, USER_EMAIL).await;
+        let key = OidcSigningKey::generate().expect("Failed to generate OIDC key");
+
+        let result = issue_aws_token(
+            &store,
+            BASE_URL,
+            SESSION_HOURS,
+            &key,
+            USER_EMAIL,
+            Some(&auth_id),
+            Some("example.com".to_string()), // hd present, but no source
+            None,
+        )
+        .await
+        .expect("issue_aws_token should succeed");
+
+        let claims = decode_jwt_payload(&result.id_token);
+        let tags = &claims["https://aws.amazon.com/tags"];
+        let principal_tags = &tags["principal_tags"];
+
+        assert!(
+            principal_tags.get("vouch:AccessType").is_none(),
+            "vouch:AccessType must be absent when source is None (even with hd present)"
+        );
+        assert!(
+            principal_tags.get("vouch:Agent").is_none(),
+            "vouch:Agent must be absent when source is None"
+        );
+    }
+
+    /// All tags are transitive: `transitive_tag_keys` must include every key
+    /// present in `principal_tags`.
+    #[tokio::test]
+    async fn test_all_tags_are_transitive() {
+        let store = test_store().await;
+        let auth_id = create_test_user_and_authenticator(&store, USER_EMAIL).await;
+        let key = OidcSigningKey::generate().expect("Failed to generate OIDC key");
+
+        let result = issue_aws_token(
+            &store,
+            BASE_URL,
+            SESSION_HOURS,
+            &key,
+            USER_EMAIL,
+            Some(&auth_id),
+            Some("example.com".to_string()),
+            Some("cursor"),
+        )
+        .await
+        .expect("issue_aws_token should succeed");
+
+        let claims = decode_jwt_payload(&result.id_token);
+        let tags = &claims["https://aws.amazon.com/tags"];
+        let principal_tags = &tags["principal_tags"];
+        let transitive_keys: Vec<&str> = tags["transitive_tag_keys"]
+            .as_array()
+            .expect("transitive_tag_keys must be an array")
+            .iter()
+            .map(|v| v.as_str().expect("key must be a string"))
+            .collect();
+
+        let tag_keys: Vec<&str> = principal_tags
+            .as_object()
+            .expect("principal_tags must be an object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+
+        for key_name in &tag_keys {
+            assert!(
+                transitive_keys.contains(key_name),
+                "tag key '{key_name}' must appear in transitive_tag_keys"
+            );
+        }
+
+        // Verify the specific expected keys are all transitive
+        for expected in &[
+            "vouch:Email",
+            "vouch:Domain",
+            "vouch:AccessType",
+            "vouch:Agent",
+        ] {
+            assert!(
+                transitive_keys.contains(expected),
+                "'{expected}' must be in transitive_tag_keys"
+            );
+        }
+    }
+
+    /// No-authenticator error: passing `authenticator_id = None` returns
+    /// `AwsError::NoAuthenticator` without touching the database.
+    #[tokio::test]
+    async fn test_no_authenticator_returns_error() {
+        let store = test_store().await;
+        let key = OidcSigningKey::generate().expect("Failed to generate OIDC key");
+
+        let result = issue_aws_token(
+            &store,
+            BASE_URL,
+            SESSION_HOURS,
+            &key,
+            USER_EMAIL,
+            None, // no authenticator
+            None,
+            None,
+        )
+        .await;
+
+        assert!(
+            matches!(result, Err(AwsError::NoAuthenticator)),
+            "expected NoAuthenticator error when authenticator_id is None, got: {result:?}"
+        );
+    }
+
+    /// `expires_in` matches `session_hours * 3600`.
+    #[tokio::test]
+    async fn test_expires_in_matches_session_hours() {
+        let store = test_store().await;
+        let auth_id = create_test_user_and_authenticator(&store, USER_EMAIL).await;
+        let key = OidcSigningKey::generate().expect("Failed to generate OIDC key");
+
+        let result = issue_aws_token(
+            &store,
+            BASE_URL,
+            4, // 4 hours
+            &key,
+            USER_EMAIL,
+            Some(&auth_id),
+            None,
+            None,
+        )
+        .await
+        .expect("issue_aws_token should succeed");
+
+        assert_eq!(
+            result.expires_in,
+            4 * 3600,
+            "expires_in must be session_hours * 3600"
+        );
+    }
 }

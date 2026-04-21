@@ -72,6 +72,11 @@ pub(crate) struct WebIdentityRequest<'a> {
     pub web_identity_token: &'a str,
     pub region: &'a str,
     pub domain_suffix: &'a str,
+    /// Optional AWS managed policy names to attach as session policies.
+    /// Names are resolved to partition-appropriate ARNs automatically
+    /// (e.g., "ReadOnlyAccess" → `arn:{partition}:iam::aws:policy/ReadOnlyAccess`).
+    /// Effective permissions = role policy ∩ session policy (intersection).
+    pub session_policy_names: &'a [&'a str],
 }
 
 /// Call AWS STS `AssumeRoleWithWebIdentity`.
@@ -84,7 +89,9 @@ pub(crate) async fn assume_role_with_web_identity(
     // Use regional STS endpoint for the appropriate partition
     let sts_url = format!("https://sts.{}.{}/", req.region, req.domain_suffix);
 
-    let form_params: Vec<(String, String)> = vec![
+    let partition = vouch_common::aws::Partition::from_region(req.region);
+
+    let mut form_params: Vec<(String, String)> = vec![
         (
             "Action".to_string(),
             "AssumeRoleWithWebIdentity".to_string(),
@@ -100,6 +107,12 @@ pub(crate) async fn assume_role_with_web_identity(
             req.web_identity_token.to_string(),
         ),
     ];
+
+    // Attach managed session policies (intersection model — only restricts).
+    for (i, policy_name) in req.session_policy_names.iter().enumerate() {
+        let arn = format!("arn:{}:iam::aws:policy/{}", partition.as_str(), policy_name);
+        form_params.push((format!("PolicyArns.member.{}.arn", i + 1), arn));
+    }
 
     let response = req
         .http_client
@@ -136,6 +149,7 @@ pub(crate) async fn assume_role(
     role_session_name: &str,
     region: &str,
     source_creds: &StsCredentials,
+    session_policy_names: &[&str],
 ) -> Result<StsCredentials> {
     use crate::integrations::aws::sigv4::sign_and_send_form_post;
     use vouch_common::aws::Partition;
@@ -148,7 +162,13 @@ pub(crate) async fn assume_role(
     // so all values must outlive the params slice. This pattern mirrors redshift.rs.
     let duration_str = "3600".to_string();
 
-    let params: &[(&str, &str)] = &[
+    // Build managed policy ARNs with partition-appropriate prefixes.
+    let policy_arns: Vec<String> = session_policy_names
+        .iter()
+        .map(|name| format!("arn:{}:iam::aws:policy/{}", partition.as_str(), name))
+        .collect();
+
+    let mut params: Vec<(&str, &str)> = vec![
         ("Action", "AssumeRole"),
         ("Version", "2011-06-15"),
         ("RoleArn", role_arn),
@@ -156,9 +176,18 @@ pub(crate) async fn assume_role(
         ("DurationSeconds", &duration_str),
     ];
 
-    let body = sign_and_send_form_post(http_client, &endpoint, "sts", region, source_creds, params)
-        .await
-        .context("failed to call AWS STS AssumeRole")?;
+    // Attach managed session policies (intersection model — only restricts).
+    let policy_keys: Vec<String> = (0..policy_arns.len())
+        .map(|i| format!("PolicyArns.member.{}.arn", i + 1))
+        .collect();
+    for (key, arn) in policy_keys.iter().zip(policy_arns.iter()) {
+        params.push((key.as_str(), arn.as_str()));
+    }
+
+    let body =
+        sign_and_send_form_post(http_client, &endpoint, "sts", region, source_creds, &params)
+            .await
+            .context("failed to call AWS STS AssumeRole")?;
 
     parse_sts_xml_response(&body)
 }

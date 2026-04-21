@@ -44,6 +44,10 @@ struct DpopClaims {
     /// Base64url-encoded SHA-256 hash of the access token (optional, RFC 9449 Section 4.2).
     #[serde(skip_serializing_if = "Option::is_none")]
     ath: Option<String>,
+    /// Credential source identifier (custom claim, RFC 9449 §4.2 allows additional claims).
+    /// When present, the server adds AI-specific session tags to issued tokens.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source: Option<String>,
 }
 
 /// Builder for DPoP proof JWTs per RFC 9449.
@@ -64,6 +68,8 @@ pub struct DpopProofBuilder {
     nonce: Option<String>,
     /// Optional access token hash (base64url SHA-256).
     ath: Option<String>,
+    /// Optional credential source identifier (custom claim).
+    source: Option<String>,
 }
 
 impl DpopProofBuilder {
@@ -81,6 +87,7 @@ impl DpopProofBuilder {
             htu,
             nonce: None,
             ath: None,
+            source: None,
         }
     }
 
@@ -98,6 +105,17 @@ impl DpopProofBuilder {
     pub fn access_token(mut self, token: &str) -> Self {
         let digest = aws_lc_rs::digest::digest(&aws_lc_rs::digest::SHA256, token.as_bytes());
         self.ath = Some(URL_SAFE_NO_PAD.encode(digest.as_ref()));
+        self
+    }
+
+    /// Set the credential source identifier (custom claim).
+    ///
+    /// When present, the server adds AI-specific session tags
+    /// (`vouch:AccessType=AI`, `vouch:Agent=<value>`) to issued tokens.
+    /// The value is the detected agent name (e.g., "claude-code", "cursor").
+    #[must_use]
+    pub fn source(mut self, source: &str) -> Self {
+        self.source = Some(source.to_string());
         self
     }
 
@@ -125,6 +143,7 @@ impl DpopProofBuilder {
             iat: jiff::Timestamp::now().as_second(),
             nonce: self.nonce,
             ath: self.ath,
+            source: self.source,
         };
 
         // Manually encode header and claims as base64url(JSON)
