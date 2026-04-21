@@ -24,6 +24,7 @@ This endpoint:
 |----------|--------|---------------|-------------|
 | `/health` | GET | No | Server health status |
 | `/.well-known/openid-configuration` | GET | No | OIDC discovery (verifies OIDC provider is functional) |
+| `/.well-known/oauth-protected-resource` | GET | No | OAuth 2.0 Protected Resource Metadata (RFC 9728) |
 | `/v1/credentials/ssh/ca` | GET | No | SSH CA public key (verifies SSH CA is loaded) |
 
 ## Log Format

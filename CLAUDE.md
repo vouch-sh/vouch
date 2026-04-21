@@ -299,6 +299,7 @@ Before implementing a feature:
 - [RFC 9449 - DPoP](https://www.rfc-editor.org/rfc/rfc9449)
 - [RFC 9470 - OAuth 2.0 Step Up Authentication Challenge Protocol](https://www.rfc-editor.org/rfc/rfc9470)
 - [RFC 9700 - OAuth 2.0 Security Best Current Practice](https://www.rfc-editor.org/rfc/rfc9700)
+- [RFC 9728 - OAuth 2.0 Protected Resource Metadata](https://www.rfc-editor.org/rfc/rfc9728)
 - [RFC 7591 - OAuth 2.0 Dynamic Client Registration](https://www.rfc-editor.org/rfc/rfc7591)
 - [RFC 7643/7644 - SCIM 2.0](https://www.rfc-editor.org/rfc/rfc7643)
 

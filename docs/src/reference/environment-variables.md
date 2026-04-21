@@ -135,6 +135,17 @@ Vouch supports loading configuration from an S3 object for centralized managemen
 |----------|----------|---------|-------------|
 | `VOUCH_JWT_ASSERTION_MAX_LIFETIME` | No | `300` | Maximum lifetime for JWT assertions in seconds (per RFC 7523). JWT bearer grant assertions older than this are rejected. |
 
+## Protected Resource Metadata (RFC 9728)
+
+These optional variables configure descriptive metadata published in the OAuth 2.0 Protected Resource Metadata document at `/.well-known/oauth-protected-resource`.
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `VOUCH_RESOURCE_NAME` | No | `Vouch` | Human-readable name of this protected resource. |
+| `VOUCH_RESOURCE_DOCUMENTATION` | No | `https://vouch.sh/docs/` | URL of developer documentation for this protected resource. |
+| `VOUCH_RESOURCE_POLICY_URI` | No | `https://vouch.sh/privacy/` | URL of the resource's data-use policy. |
+| `VOUCH_RESOURCE_TOS_URI` | No | `https://vouch.sh/terms/` | URL of the resource's terms of service. |
+
 ## CLI Download URLs
 
 These optional variables configure download links displayed in the server UI.
