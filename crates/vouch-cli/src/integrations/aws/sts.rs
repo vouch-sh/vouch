@@ -77,6 +77,10 @@ pub(crate) struct WebIdentityRequest<'a> {
     /// (e.g., "ReadOnlyAccess" → `arn:{partition}:iam::aws:policy/ReadOnlyAccess`).
     /// Effective permissions = role policy ∩ session policy (intersection).
     pub session_policy_names: &'a [&'a str],
+    /// Optional inline session policy (AWS IAM policy document).
+    /// Applied in addition to managed policies. Effective permissions =
+    /// role policy ∩ managed policies ∩ inline policy.
+    pub session_policy: Option<&'a serde_json::Value>,
 }
 
 /// Call AWS STS `AssumeRoleWithWebIdentity`.
@@ -112,6 +116,13 @@ pub(crate) async fn assume_role_with_web_identity(
     for (i, policy_name) in req.session_policy_names.iter().enumerate() {
         let arn = format!("arn:{}:iam::aws:policy/{}", partition.as_str(), policy_name);
         form_params.push((format!("PolicyArns.member.{}.arn", i + 1), arn));
+    }
+
+    // Attach inline session policy if provided.
+    if let Some(policy) = req.session_policy {
+        let policy_json = serde_json::to_string(policy)
+            .map_err(|e| anyhow::anyhow!("failed to serialize session policy: {e}"))?;
+        form_params.push(("Policy".to_string(), policy_json));
     }
 
     let response = req
@@ -150,6 +161,7 @@ pub(crate) async fn assume_role(
     region: &str,
     source_creds: &StsCredentials,
     session_policy_names: &[&str],
+    session_policy: Option<&serde_json::Value>,
 ) -> Result<StsCredentials> {
     use crate::integrations::aws::sigv4::sign_and_send_form_post;
     use vouch_common::aws::Partition;
@@ -182,6 +194,14 @@ pub(crate) async fn assume_role(
         .collect();
     for (key, arn) in policy_keys.iter().zip(policy_arns.iter()) {
         params.push((key.as_str(), arn.as_str()));
+    }
+
+    // Attach inline session policy if provided.
+    let policy_json;
+    if let Some(policy) = session_policy {
+        policy_json = serde_json::to_string(policy)
+            .map_err(|e| anyhow::anyhow!("failed to serialize session policy: {e}"))?;
+        params.push(("Policy", &policy_json));
     }
 
     let body =
