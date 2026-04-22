@@ -40,3 +40,9 @@ pub use url::{UrlSecurity, check_url_security, is_loopback_host};
 /// - Cookie must not include a `Domain` attribute
 /// - Cookie must have `Path=/`
 pub const SESSION_COOKIE_NAME: &str = "__Host-vouch_session";
+
+/// SSH certificate refresh/reissue threshold in seconds (1 hour).
+///
+/// Used by both the CLI (skip re-issuance if cert has more remaining)
+/// and the agent (trigger background refresh when cert has less remaining).
+pub const SSH_CERT_REFRESH_THRESHOLD_SECS: i64 = 60 * 60;

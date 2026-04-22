@@ -5,7 +5,9 @@
 //! from the Vouch server, and stores the certificate alongside the key.
 
 use anyhow::{Context, Result};
-use ssh_key::{Algorithm, LineEnding, PrivateKey, PublicKey, rand_core::OsRng};
+use ssh_key::{
+    Algorithm, LineEnding, PrivateKey, PublicKey, certificate::Certificate, rand_core::OsRng,
+};
 use std::path::{Path, PathBuf};
 use vouch_common::{SshCertificateRequest, SshCertificateResponse};
 
@@ -91,6 +93,60 @@ pub(crate) struct SshProvisionResult {
     pub response: SshCertificateResponse,
     /// Whether a new keypair was generated (vs loading existing).
     pub keypair_generated: bool,
+    /// Whether the result was returned from on-disk cache (no server call).
+    pub cached: bool,
+}
+
+/// Check if an existing certificate on disk is still valid with enough time remaining.
+///
+/// Returns `Some(SshProvisionResult)` if the certificate exists, is not expired,
+/// and has more than `SSH_CERT_REFRESH_THRESHOLD_SECS` remaining. Returns `None`
+/// otherwise so the caller falls through to server issuance.
+fn check_existing_certificate(key_path: &Path) -> Option<SshProvisionResult> {
+    let cert_path_str = format!("{}-cert.pub", key_path.display());
+    let cert_data = std::fs::read_to_string(&cert_path_str).ok()?;
+    let cert = Certificate::from_openssh(cert_data.trim()).ok()?;
+
+    let valid_before = cert.valid_before();
+    let valid_before_i64 = i64::try_from(valid_before).unwrap_or(i64::MAX);
+    let now_unix = jiff::Timestamp::now().as_second();
+
+    if valid_before_i64 <= now_unix {
+        tracing::debug!("Cached SSH certificate is expired");
+        return None;
+    }
+
+    let remaining_secs = valid_before_i64 - now_unix;
+    if remaining_secs <= vouch_common::SSH_CERT_REFRESH_THRESHOLD_SECS {
+        tracing::debug!(
+            remaining_secs,
+            threshold = vouch_common::SSH_CERT_REFRESH_THRESHOLD_SECS,
+            "Cached SSH certificate is below refresh threshold"
+        );
+        return None;
+    }
+
+    tracing::debug!(remaining_secs, "Using cached SSH certificate");
+
+    let principals: Vec<String> = cert
+        .valid_principals()
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    let response = SshCertificateResponse {
+        certificate: cert_data.trim().to_string(),
+        valid_for_seconds: u64::try_from(remaining_secs).unwrap_or(0),
+        principals,
+        serial: cert.serial(),
+    };
+
+    Some(SshProvisionResult {
+        key_path: key_path.to_path_buf(),
+        cert_path: PathBuf::from(cert_path_str),
+        response,
+        keypair_generated: false,
+        cached: true,
+    })
 }
 
 /// Core provisioning: ensure keypair, request cert from server, write cert to disk.
@@ -103,12 +159,18 @@ pub(crate) async fn provision_ssh_certificate(
     server: &str,
     key_path: Option<&str>,
     fapi_key: Option<vouch_cli::fapi::ClientKey>,
+    force: bool,
 ) -> Result<SshProvisionResult> {
     // Determine key path
     let key_path = match key_path {
         Some(p) => PathBuf::from(p),
         None => default_key_path()?,
     };
+
+    // Check if existing certificate is still valid (skip server call)
+    if !force && let Some(cached) = check_existing_certificate(&key_path) {
+        return Ok(cached);
+    }
 
     // Ensure keypair exists
     let action = ensure_keypair(&key_path)?;
@@ -142,6 +204,7 @@ pub(crate) async fn provision_ssh_certificate(
         cert_path,
         response,
         keypair_generated,
+        cached: false,
     })
 }
 
@@ -155,7 +218,7 @@ pub(crate) async fn auto_provision(
     expires_at: &str,
     fapi_key: Option<vouch_cli::fapi::ClientKey>,
 ) -> bool {
-    match provision_ssh_certificate(server, None, fapi_key).await {
+    match provision_ssh_certificate(server, None, fapi_key, false).await {
         Ok(result) => {
             // Store in agent with session linkage (Unix only)
             #[cfg(unix)]
@@ -170,16 +233,25 @@ pub(crate) async fn auto_provision(
                     .await;
             }
 
-            if result.keypair_generated {
-                println!("Generated SSH keypair: {}", result.key_path.display());
-            }
+            if result.cached {
+                let valid_hours = result.response.valid_for_seconds / 3600;
+                let valid_minutes = (result.response.valid_for_seconds % 3600) / 60;
+                println!(
+                    "SSH certificate still valid ({}h {}m remaining).",
+                    valid_hours, valid_minutes
+                );
+            } else {
+                if result.keypair_generated {
+                    println!("Generated SSH keypair: {}", result.key_path.display());
+                }
 
-            let valid_hours = result.response.valid_for_seconds / 3600;
-            let valid_minutes = (result.response.valid_for_seconds % 3600) / 60;
-            println!(
-                "SSH certificate provisioned (valid for {}h {}m).",
-                valid_hours, valid_minutes
-            );
+                let valid_hours = result.response.valid_for_seconds / 3600;
+                let valid_minutes = (result.response.valid_for_seconds % 3600) / 60;
+                println!(
+                    "SSH certificate provisioned (valid for {}h {}m).",
+                    valid_hours, valid_minutes
+                );
+            }
             true
         }
         Err(e) => {
@@ -202,8 +274,22 @@ pub(crate) async fn auto_provision(
 /// 1. Generates an SSH keypair if it doesn't exist
 /// 2. Requests a certificate from the Vouch server
 /// 3. Stores the certificate alongside the key
-pub(crate) async fn run(server: &str, key_path: Option<&str>) -> Result<()> {
-    let result = provision_ssh_certificate(server, key_path, None).await?;
+pub(crate) async fn run(server: &str, key_path: Option<&str>, force: bool) -> Result<()> {
+    let result = provision_ssh_certificate(server, key_path, None, force).await?;
+
+    if result.cached {
+        let valid_hours = result.response.valid_for_seconds / 3600;
+        let valid_minutes = (result.response.valid_for_seconds % 3600) / 60;
+
+        println!("SSH certificate still valid.");
+        println!("  Certificate: {}", result.cert_path.display());
+        println!("  Serial: {}", result.response.serial);
+        println!("  Principals: {}", result.response.principals.join(", "));
+        println!("  Remaining: {}h {}m", valid_hours, valid_minutes);
+        println!();
+        println!("Use --force to re-issue.");
+        return Ok(());
+    }
 
     if result.keypair_generated {
         println!("Generating new SSH keypair...");

@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/*"]
 
 [workspace.package]
-version = "2026.4.5"
+version = "2026.4.6"
 edition = "2024"
 license = "Apache-2.0 OR MIT"
 rust-version = "1.95.0"
@@ -61,7 +61,7 @@ aws-config = { version = "=1.8.16", default-features = false }
 aws-lc-rs = { version = "=1.16.3", default-features = false }
 aws-sdk-dsql = { version = "=1.55.0", default-features = false }
 aws-sdk-kms = { version = "=1.105.0", default-features = false }
-aws-sdk-s3 = { version = "=1.129.0", default-features = false }
+aws-sdk-s3 = { version = "=1.131.0", default-features = false }
 aws-smithy-types = { version = "=1.4.7", default-features = false }
 axum = { version = "=0.8.9", default-features = false }
 axum-extra = { version = "=0.12.6", default-features = false }
@@ -93,7 +93,7 @@ maxminddb = { version = "=0.27.3", default-features = false }
 metrics = { version = "=0.24.3", default-features = false }
 metrics-exporter-prometheus = { version = "=0.18.1", default-features = false }
 mime_guess = { version = "=2.0.5", default-features = false }
-mimalloc = { version = "=0.1.49", default-features = false }
+mimalloc = { version = "=0.1.50", default-features = false }
 open = { version = "=5.3.4", default-features = false }
 opentelemetry = { version = "=0.31.0", default-features = false }
 opentelemetry_sdk = { version = "=0.31.0", default-features = false }
@@ -105,7 +105,7 @@ roxmltree = { version = "=0.21.1", default-features = false }
 rpassword = { version = "=7.4.0", default-features = false }
 rust-embed = { version = "=8.11.0", default-features = false }
 rust-ini = { version = "=0.21.3", default-features = false }
-rustls = { version = "=0.23.38", default-features = false }
+rustls = { version = "=0.23.39", default-features = false }
 rustls-pemfile = { version = "=2.2.0", default-features = false }
 sea-query = { version = "=0.32.7", default-features = false }
 sea-query-binder = { version = "=0.7.0", default-features = false }
