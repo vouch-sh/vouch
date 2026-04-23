@@ -69,24 +69,33 @@ impl std::fmt::Debug for OidcTokenResponse {
     }
 }
 
-/// Minimal JWT claims for extracting the email field.
+/// Minimal OIDC ID token claims.
+///
+/// Only the fields needed by the credential flow are deserialized here.
 #[derive(Deserialize)]
-struct JwtEmailClaims {
-    email: Option<String>,
+struct JwtIdTokenClaims {
+    /// OIDC Core Section 2: Subject Identifier (required).
+    sub: String,
 }
 
-/// Extract the email from a JWT's payload without signature verification.
+/// Extract the `sub` claim from a JWT payload without signature verification.
 ///
 /// The token was just received over TLS from our server, so cryptographic
-/// verification is unnecessary. Returns `None` on any decode or parse failure.
-fn extract_email_from_jwt(token: &str) -> Option<String> {
-    let payload = token.split('.').nth(1)?;
-    let decoded = URL_SAFE_NO_PAD.decode(payload).ok()?;
-    let claims: JwtEmailClaims = serde_json::from_slice(&decoded).ok()?;
-    // AWS RoleSessionName max is 64 chars; filter empty strings so the
-    // fallback kicks in rather than sending an empty value to STS.
-    let email = claims.email.filter(|e| !e.is_empty())?;
-    Some(email.chars().take(64).collect())
+/// verification is unnecessary. Returns an error if the token is malformed
+/// or missing the required `sub` claim — this indicates a server bug.
+fn extract_sub_from_jwt(token: &str) -> Result<String> {
+    let payload = token
+        .split('.')
+        .nth(1)
+        .context("invalid JWT: expected 3 dot-separated parts")?;
+    let decoded = URL_SAFE_NO_PAD
+        .decode(payload)
+        .context("invalid JWT: payload is not valid base64url")?;
+    let claims: JwtIdTokenClaims = serde_json::from_slice(&decoded)
+        .context("invalid JWT: payload missing required 'sub' claim")?;
+    anyhow::ensure!(!claims.sub.is_empty(), "invalid JWT: 'sub' claim is empty");
+    // AWS RoleSessionName max is 64 chars.
+    Ok(claims.sub.chars().take(64).collect())
 }
 
 /// Result of the OIDC → STS credential exchange.
@@ -255,8 +264,7 @@ pub(crate) async fn exchange_for_sts_credentials(
         vouch_common::http::credential_client(&format!("vouch-cli/{}", env!("CARGO_PKG_VERSION")))
             .context("failed to create HTTP client")?;
 
-    let email = extract_email_from_jwt(id_token);
-    let session = email.as_deref().unwrap_or("vouch");
+    let session = extract_sub_from_jwt(id_token).context("server returned invalid OIDC token")?;
 
     let all_policies: &[&str] = agent_policies;
 
@@ -288,7 +296,7 @@ pub(crate) async fn exchange_for_sts_credentials(
         let mgmt_credentials = assume_role_with_web_identity(WebIdentityRequest {
             http_client: &http_client,
             role_arn: mgmt_role_arn,
-            role_session_name: session,
+            role_session_name: &session,
             web_identity_token: id_token,
             region,
             domain_suffix: mgmt_domain_suffix,
@@ -301,7 +309,7 @@ pub(crate) async fn exchange_for_sts_credentials(
         let credentials = assume_role(
             &http_client,
             role_arn,
-            session,
+            &session,
             region,
             &mgmt_credentials,
             all_policies,
@@ -321,7 +329,7 @@ pub(crate) async fn exchange_for_sts_credentials(
     let credentials = assume_role_with_web_identity(WebIdentityRequest {
         http_client: &http_client,
         role_arn,
-        role_session_name: session,
+        role_session_name: &session,
         web_identity_token: id_token,
         region,
         domain_suffix,
@@ -462,7 +470,7 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_email_from_jwt() {
+    fn test_extract_sub_from_jwt() {
         let payload = serde_json::json!({
             "sub": "user@example.com",
             "email": "user@example.com",
@@ -471,48 +479,63 @@ mod tests {
         let encoded = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&payload).unwrap());
         let token = format!("eyJhbGciOiJFUzI1NiJ9.{encoded}.fake-sig");
 
-        assert_eq!(
-            extract_email_from_jwt(&token),
-            Some("user@example.com".to_string())
+        assert_eq!(extract_sub_from_jwt(&token).unwrap(), "user@example.com");
+    }
+
+    #[test]
+    fn test_extract_sub_from_jwt_without_email() {
+        // sub is present but email is absent — should still succeed
+        let payload = serde_json::json!({"sub": "user@example.com"});
+        let encoded = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&payload).unwrap());
+        let token = format!("eyJhbGciOiJFUzI1NiJ9.{encoded}.fake");
+
+        assert_eq!(extract_sub_from_jwt(&token).unwrap(), "user@example.com");
+    }
+
+    #[test]
+    fn test_extract_sub_from_jwt_missing_sub() {
+        let payload = serde_json::json!({"email": "user@example.com"});
+        let encoded = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&payload).unwrap());
+        let token = format!("eyJhbGciOiJFUzI1NiJ9.{encoded}.fake");
+
+        let err = extract_sub_from_jwt(&token).unwrap_err();
+        assert!(
+            err.to_string().contains("sub"),
+            "error should mention 'sub': {err}"
         );
     }
 
     #[test]
-    fn test_extract_email_from_jwt_missing_email() {
-        let payload = serde_json::json!({"sub": "user"});
-        let encoded = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&payload).unwrap());
-        let token = format!("eyJhbGciOiJFUzI1NiJ9.{encoded}.fake");
-
-        assert_eq!(extract_email_from_jwt(&token), None);
+    fn test_extract_sub_from_jwt_invalid_token() {
+        assert!(extract_sub_from_jwt("not-a-jwt").is_err());
+        assert!(extract_sub_from_jwt("").is_err());
+        assert!(extract_sub_from_jwt("a.!!!.c").is_err());
     }
 
     #[test]
-    fn test_extract_email_from_jwt_invalid_token() {
-        assert_eq!(extract_email_from_jwt("not-a-jwt"), None);
-        assert_eq!(extract_email_from_jwt(""), None);
-        assert_eq!(extract_email_from_jwt("a.!!!.c"), None);
-    }
-
-    #[test]
-    fn test_extract_email_from_jwt_empty_email() {
-        let payload = serde_json::json!({"email": ""});
+    fn test_extract_sub_from_jwt_empty_sub() {
+        let payload = serde_json::json!({"sub": ""});
         let encoded = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&payload).unwrap());
         let token = format!("eyJhbGciOiJFUzI1NiJ9.{encoded}.fake");
 
-        assert_eq!(extract_email_from_jwt(&token), None);
+        let err = extract_sub_from_jwt(&token).unwrap_err();
+        assert!(
+            err.to_string().contains("empty"),
+            "error should mention 'empty': {err}"
+        );
     }
 
     #[test]
-    fn test_extract_email_from_jwt_truncates_to_64_chars() {
-        // 72-char email — must be truncated to 64 for AWS RoleSessionName limit
-        let long_email = "a".repeat(60) + "@example.com"; // 72 chars
-        let payload = serde_json::json!({"email": long_email});
+    fn test_extract_sub_from_jwt_truncates_to_64_chars() {
+        // 72-char sub — must be truncated to 64 for AWS RoleSessionName limit
+        let long_sub = "a".repeat(60) + "@example.com"; // 72 chars
+        let payload = serde_json::json!({"sub": long_sub});
         let encoded = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&payload).unwrap());
         let token = format!("eyJhbGciOiJFUzI1NiJ9.{encoded}.fake");
 
-        let result = extract_email_from_jwt(&token).unwrap();
+        let result = extract_sub_from_jwt(&token).unwrap();
         assert_eq!(result.len(), 64);
-        assert_eq!(result, long_email.chars().take(64).collect::<String>());
+        assert_eq!(result, long_sub.chars().take(64).collect::<String>());
     }
 
     /// Verify the cached credential JSON can be round-tripped through the
