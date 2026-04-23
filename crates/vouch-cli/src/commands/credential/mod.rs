@@ -34,6 +34,9 @@ pub(crate) enum CredentialCommands {
         /// Path to SSH private key (default: ~/.ssh/id_ed25519_vouch).
         #[arg(long)]
         key: Option<String>,
+        /// Force re-issuance even if existing certificate is still valid.
+        #[arg(long)]
+        force: bool,
     },
     /// Git credential helper for GitHub.
     ///

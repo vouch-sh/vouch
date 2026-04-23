@@ -32,8 +32,8 @@ pub(crate) const SSH_AGENT_IDENTITIES_ANSWER: u8 = 12;
 pub(crate) const SSH_AGENTC_SIGN_REQUEST: u8 = 13;
 pub(crate) const SSH_AGENT_SIGN_RESPONSE: u8 = 14;
 
-/// Refresh threshold in seconds (30 minutes before expiration).
-pub(crate) const REFRESH_THRESHOLD_SECONDS: i64 = 30 * 60;
+/// Refresh threshold in seconds (1 hour before expiration).
+pub(crate) use vouch_common::SSH_CERT_REFRESH_THRESHOLD_SECS as REFRESH_THRESHOLD_SECONDS;
 
 /// Minimum interval between refresh attempts (5 minutes).
 pub(crate) const MIN_REFRESH_INTERVAL_SECONDS: i64 = 5 * 60;

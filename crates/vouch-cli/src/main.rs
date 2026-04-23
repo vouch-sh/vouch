@@ -543,8 +543,8 @@ async fn run() -> Result<()> {
         }
         Commands::Credential { command } => match command {
             CredentialCommands::Aws { role } => commands::credential::aws::run(server, &role).await,
-            CredentialCommands::Ssh { key } => {
-                commands::credential::ssh::run(server, key.as_deref()).await
+            CredentialCommands::Ssh { key, force } => {
+                commands::credential::ssh::run(server, key.as_deref(), force).await
             }
             CredentialCommands::Github { operation } => {
                 commands::credential::github::run(&operation).await
