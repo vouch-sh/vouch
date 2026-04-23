@@ -103,6 +103,12 @@ pub(crate) struct SshProvisionResult {
 /// and has more than `SSH_CERT_REFRESH_THRESHOLD_SECS` remaining. Returns `None`
 /// otherwise so the caller falls through to server issuance.
 fn check_existing_certificate(key_path: &Path) -> Option<SshProvisionResult> {
+    // Verify the private key still exists — a cert without its key is useless
+    if !key_path.exists() {
+        tracing::debug!("Private key missing, skipping certificate cache");
+        return None;
+    }
+
     let cert_path_str = format!("{}-cert.pub", key_path.display());
     let cert_data = std::fs::read_to_string(&cert_path_str).ok()?;
     let cert = Certificate::from_openssh(cert_data.trim()).ok()?;
