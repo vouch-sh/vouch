@@ -7,8 +7,10 @@ use anyhow::{Context, Result};
 use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
 
+use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+
 use crate::client::VouchClient;
-use crate::session::get_user_email;
 
 /// AWS credential process output format.
 /// See: https://docs.aws.amazon.com/cli/latest/userguide/cli-configure-sourcing-external.html
@@ -65,6 +67,26 @@ impl std::fmt::Debug for OidcTokenResponse {
             .field("id_token", &"[REDACTED]")
             .finish()
     }
+}
+
+/// Minimal JWT claims for extracting the email field.
+#[derive(Deserialize)]
+struct JwtEmailClaims {
+    email: Option<String>,
+}
+
+/// Extract the email from a JWT's payload without signature verification.
+///
+/// The token was just received over TLS from our server, so cryptographic
+/// verification is unnecessary. Returns `None` on any decode or parse failure.
+fn extract_email_from_jwt(token: &str) -> Option<String> {
+    let payload = token.split('.').nth(1)?;
+    let decoded = URL_SAFE_NO_PAD.decode(payload).ok()?;
+    let claims: JwtEmailClaims = serde_json::from_slice(&decoded).ok()?;
+    // AWS RoleSessionName max is 64 chars; filter empty strings so the
+    // fallback kicks in rather than sending an empty value to STS.
+    let email = claims.email.filter(|e| !e.is_empty())?;
+    Some(email.chars().take(64).collect())
 }
 
 /// Result of the OIDC → STS credential exchange.
@@ -177,7 +199,6 @@ pub(crate) async fn exchange_for_sts_credentials(
     server: &str,
     role_arn: &str,
     region: &str,
-    session_name: &str,
     management_role: Option<&str>,
 ) -> Result<StsExchangeResult> {
     use crate::integrations::aws::sts::{
@@ -234,8 +255,8 @@ pub(crate) async fn exchange_for_sts_credentials(
         vouch_common::http::credential_client(&format!("vouch-cli/{}", env!("CARGO_PKG_VERSION")))
             .context("failed to create HTTP client")?;
 
-    let email = get_user_email(server).await;
-    let session = email.as_deref().unwrap_or(session_name);
+    let email = extract_email_from_jwt(id_token);
+    let session = email.as_deref().unwrap_or("vouch");
 
     let all_policies: &[&str] = agent_policies;
 
@@ -393,8 +414,7 @@ async fn fetch_and_assume(
 ) -> Result<CredentialProcessOutput> {
     let region = crate::integrations::aws::resolve_region_with_fallback(role_arn)?;
 
-    let result =
-        exchange_for_sts_credentials(server, role_arn, &region, "vouch-session", mgmt_role).await?;
+    let result = exchange_for_sts_credentials(server, role_arn, &region, mgmt_role).await?;
     let creds = &result.credentials;
     Ok(CredentialProcessOutput {
         version: 1,
@@ -439,6 +459,60 @@ mod tests {
 
         // Must have exactly 5 fields — no extra fields allowed
         assert_eq!(json.as_object().unwrap().len(), 5);
+    }
+
+    #[test]
+    fn test_extract_email_from_jwt() {
+        let payload = serde_json::json!({
+            "sub": "user@example.com",
+            "email": "user@example.com",
+            "iss": "https://vouch.example.com"
+        });
+        let encoded = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&payload).unwrap());
+        let token = format!("eyJhbGciOiJFUzI1NiJ9.{encoded}.fake-sig");
+
+        assert_eq!(
+            extract_email_from_jwt(&token),
+            Some("user@example.com".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_email_from_jwt_missing_email() {
+        let payload = serde_json::json!({"sub": "user"});
+        let encoded = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&payload).unwrap());
+        let token = format!("eyJhbGciOiJFUzI1NiJ9.{encoded}.fake");
+
+        assert_eq!(extract_email_from_jwt(&token), None);
+    }
+
+    #[test]
+    fn test_extract_email_from_jwt_invalid_token() {
+        assert_eq!(extract_email_from_jwt("not-a-jwt"), None);
+        assert_eq!(extract_email_from_jwt(""), None);
+        assert_eq!(extract_email_from_jwt("a.!!!.c"), None);
+    }
+
+    #[test]
+    fn test_extract_email_from_jwt_empty_email() {
+        let payload = serde_json::json!({"email": ""});
+        let encoded = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&payload).unwrap());
+        let token = format!("eyJhbGciOiJFUzI1NiJ9.{encoded}.fake");
+
+        assert_eq!(extract_email_from_jwt(&token), None);
+    }
+
+    #[test]
+    fn test_extract_email_from_jwt_truncates_to_64_chars() {
+        // 72-char email — must be truncated to 64 for AWS RoleSessionName limit
+        let long_email = "a".repeat(60) + "@example.com"; // 72 chars
+        let payload = serde_json::json!({"email": long_email});
+        let encoded = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&payload).unwrap());
+        let token = format!("eyJhbGciOiJFUzI1NiJ9.{encoded}.fake");
+
+        let result = extract_email_from_jwt(&token).unwrap();
+        assert_eq!(result.len(), 64);
+        assert_eq!(result, long_email.chars().take(64).collect::<String>());
     }
 
     /// Verify the cached credential JSON can be round-tripped through the

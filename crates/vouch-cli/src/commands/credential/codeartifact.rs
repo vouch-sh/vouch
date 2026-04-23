@@ -179,8 +179,7 @@ async fn fetch_token(
         )
     })?;
 
-    let result =
-        exchange_for_sts_credentials(server, &role_arn, region, "vouch-codeartifact", None).await?;
+    let result = exchange_for_sts_credentials(server, &role_arn, region, None).await?;
 
     let registry = CodeArtifactRegistry {
         domain: domain.to_string(),
