@@ -61,11 +61,7 @@ pub(crate) async fn run(server: &str, args: ConsoleArgs) -> Result<()> {
     //    SecretAccessKey/SessionToken as SecretString until
     //    serialization.
     let result = crate::commands::credential::aws::exchange_for_sts_credentials(
-        server,
-        &role_arn,
-        &region,
-        "vouch-console",
-        None,
+        server, &role_arn, &region, None,
     )
     .await
     .context("failed to get AWS credentials")?;

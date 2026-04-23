@@ -92,7 +92,7 @@ async fn generate_rds_token(
     region: &str,
     role_arn: &str,
 ) -> Result<String> {
-    let result = exchange_for_sts_credentials(server, role_arn, region, "vouch-rds", None).await?;
+    let result = exchange_for_sts_credentials(server, role_arn, region, None).await?;
 
     // Build presigned URL for RDS IAM auth
     let endpoint = format!("https://{hostname}:{port}");

@@ -216,8 +216,7 @@ async fn get_ecr_credential(
         )
     })?;
 
-    let result =
-        exchange_for_sts_credentials(server, &role_arn, region, "vouch-docker", None).await?;
+    let result = exchange_for_sts_credentials(server, &role_arn, region, None).await?;
 
     // Call ECR GetAuthorizationToken
     let ecr_token = get_ecr_authorization_token(

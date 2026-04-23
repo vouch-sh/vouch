@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Session utilities for credential commands.
 
-use crate::client::VouchClient;
 use crate::config::Config;
 use anyhow::{Context, Result};
 use secrecy::SecretString;
@@ -210,30 +209,4 @@ pub(crate) async fn store_and_finalize(
     );
 
     Ok(agent_stored)
-}
-
-/// Get user email for AWS session name default.
-///
-/// Tries multiple sources in order:
-/// 1. Agent (Unix only) - most reliable, always up-to-date
-/// 2. Server status endpoint - fallback for edge cases
-pub(crate) async fn get_user_email(server: &str) -> Option<String> {
-    // 1. Try agent first (Unix only)
-    #[cfg(unix)]
-    if let Ok(mut agent) = vouch_agent::AgentClient::connect().await
-        && let Ok(session) = agent.get_session().await
-    {
-        return Some(session.user_email);
-    }
-
-    // 2. Try server status endpoint (fallback)
-    if let Ok(client) = VouchClient::new(server).await
-        && let Ok(status) = client
-            .get_authenticated::<vouch_common::SessionStatus>("/v1/auth/status")
-            .await
-    {
-        return status.email;
-    }
-
-    None
 }
