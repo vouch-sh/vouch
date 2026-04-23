@@ -83,27 +83,45 @@ pub(crate) fn ensure_keypair(key_path: &Path) -> Result<KeypairAction> {
     Ok(KeypairAction::Generated(public_key.clone()))
 }
 
+/// How the SSH certificate was obtained.
+pub(crate) enum ProvisionOutcome {
+    /// Certificate served from on-disk cache; no server call.
+    Cached,
+    /// Certificate freshly issued from the server.
+    Issued,
+    /// Certificate freshly issued; a new keypair was also generated.
+    IssuedWithNewKeypair,
+}
+
 /// Result of SSH certificate provisioning.
 pub(crate) struct SshProvisionResult {
     /// Path to the private key.
     pub key_path: PathBuf,
     /// Path to the certificate file.
     pub cert_path: PathBuf,
-    /// Server response with certificate details.
+    /// Certificate details (from server or reconstructed from disk).
     pub response: SshCertificateResponse,
-    /// Whether a new keypair was generated (vs loading existing).
-    pub keypair_generated: bool,
-    /// Whether the result was returned from on-disk cache (no server call).
-    pub cached: bool,
+    /// How the certificate was obtained.
+    pub outcome: ProvisionOutcome,
 }
 
-/// Check if an existing certificate on disk is still valid with enough time remaining.
+/// Format seconds as a human-readable "Xh Ym" duration string.
+fn format_duration(secs: u64) -> String {
+    let hours = secs / 3600;
+    let minutes = (secs % 3600) / 60;
+    format!("{hours}h {minutes}m")
+}
+
+/// Check if an existing certificate on disk is still valid with
+/// enough time remaining.
 ///
-/// Returns `Some(SshProvisionResult)` if the certificate exists, is not expired,
-/// and has more than `SSH_CERT_REFRESH_THRESHOLD_SECS` remaining. Returns `None`
-/// otherwise so the caller falls through to server issuance.
+/// Returns `Some(SshProvisionResult)` if the certificate exists, is
+/// not expired, and has more than `SSH_CERT_REFRESH_THRESHOLD_SECS`
+/// remaining. Returns `None` otherwise so the caller falls through
+/// to server issuance.
 fn check_existing_certificate(key_path: &Path) -> Option<SshProvisionResult> {
-    // Verify the private key still exists — a cert without its key is useless
+    // Verify the private key still exists — a cert without its key
+    // is useless
     if !key_path.exists() {
         tracing::debug!("Private key missing, skipping certificate cache");
         return None;
@@ -150,17 +168,16 @@ fn check_existing_certificate(key_path: &Path) -> Option<SshProvisionResult> {
         key_path: key_path.to_path_buf(),
         cert_path: PathBuf::from(cert_path_str),
         response,
-        keypair_generated: false,
-        cached: true,
+        outcome: ProvisionOutcome::Cached,
     })
 }
 
-/// Core provisioning: ensure keypair, request cert from server, write cert to disk.
-/// No stdout output — callers decide what to print.
+/// Core provisioning: ensure keypair, request cert from server, write
+/// cert to disk. No stdout output — callers decide what to print.
 ///
-/// When `fapi_key` is provided, the client uses it directly for DPoP proof
-/// generation instead of reloading from the keychain. This avoids a storage
-/// round-trip that can fail on some platforms.
+/// When `fapi_key` is provided, the client uses it directly for DPoP
+/// proof generation instead of reloading from the keychain. This avoids
+/// a storage round-trip that can fail on some platforms.
 pub(crate) async fn provision_ssh_certificate(
     server: &str,
     key_path: Option<&str>,
@@ -180,7 +197,10 @@ pub(crate) async fn provision_ssh_certificate(
 
     // Ensure keypair exists
     let action = ensure_keypair(&key_path)?;
-    let keypair_generated = matches!(action, KeypairAction::Generated(_));
+    let outcome = match action {
+        KeypairAction::Generated(_) => ProvisionOutcome::IssuedWithNewKeypair,
+        KeypairAction::Loaded(_) => ProvisionOutcome::Issued,
+    };
     let public_key = action.public_key();
     let pub_key_str = public_key
         .to_openssh()
@@ -209,8 +229,7 @@ pub(crate) async fn provision_ssh_certificate(
         key_path,
         cert_path,
         response,
-        keypair_generated,
-        cached: false,
+        outcome,
     })
 }
 
@@ -239,35 +258,41 @@ pub(crate) async fn auto_provision(
                     .await;
             }
 
-            if result.cached {
-                let valid_hours = result.response.valid_for_seconds / 3600;
-                let valid_minutes = (result.response.valid_for_seconds % 3600) / 60;
-                println!(
-                    "SSH certificate still valid ({}h {}m remaining).",
-                    valid_hours, valid_minutes
-                );
-            } else {
-                if result.keypair_generated {
-                    println!("Generated SSH keypair: {}", result.key_path.display());
+            match result.outcome {
+                ProvisionOutcome::Cached => {
+                    println!(
+                        "SSH certificate still valid ({} remaining).",
+                        format_duration(result.response.valid_for_seconds)
+                    );
                 }
-
-                let valid_hours = result.response.valid_for_seconds / 3600;
-                let valid_minutes = (result.response.valid_for_seconds % 3600) / 60;
-                println!(
-                    "SSH certificate provisioned (valid for {}h {}m).",
-                    valid_hours, valid_minutes
-                );
+                ProvisionOutcome::IssuedWithNewKeypair => {
+                    println!("Generated SSH keypair: {}", result.key_path.display());
+                    println!(
+                        "SSH certificate provisioned (valid for {}).",
+                        format_duration(result.response.valid_for_seconds)
+                    );
+                }
+                ProvisionOutcome::Issued => {
+                    println!(
+                        "SSH certificate provisioned (valid for {}).",
+                        format_duration(result.response.valid_for_seconds)
+                    );
+                }
             }
             true
         }
         Err(e) => {
             let err_str = format!("{e}");
-            // Silence errors that indicate the server doesn't support SSH certs
+            // Silence errors that indicate the server doesn't
+            // support SSH certs
             if err_str.contains("404") || err_str.contains("501") {
                 tracing::debug!("Server does not support SSH certificates: {e}");
             } else {
                 tracing::warn!("Auto SSH provisioning failed: {e}");
-                println!("SSH certificate not provisioned ({e}). Run: vouch credential ssh");
+                println!(
+                    "SSH certificate not provisioned ({e}). \
+                     Run: vouch credential ssh"
+                );
             }
             false
         }
@@ -283,21 +308,35 @@ pub(crate) async fn auto_provision(
 pub(crate) async fn run(server: &str, key_path: Option<&str>, force: bool) -> Result<()> {
     let result = provision_ssh_certificate(server, key_path, None, force).await?;
 
-    if result.cached {
-        let valid_hours = result.response.valid_for_seconds / 3600;
-        let valid_minutes = (result.response.valid_for_seconds % 3600) / 60;
+    if matches!(result.outcome, ProvisionOutcome::Cached) {
+        // Ensure agent has credentials loaded even for a cached cert.
+        // Uses store_ssh_credentials (without session linkage) because
+        // `run()` is invoked standalone and has no session context.
+        // The agent's lazy-load and background refresh handle session
+        // association independently.
+        #[cfg(unix)]
+        if let Ok(mut agent_client) = vouch_agent::AgentClient::connect().await {
+            let key_str = result.key_path.to_string_lossy().to_string();
+            let cert_str = result.cert_path.to_string_lossy().to_string();
+            let _ = agent_client
+                .store_ssh_credentials(&key_str, &cert_str)
+                .await;
+        }
 
         println!("SSH certificate still valid.");
         println!("  Certificate: {}", result.cert_path.display());
         println!("  Serial: {}", result.response.serial);
         println!("  Principals: {}", result.response.principals.join(", "));
-        println!("  Remaining: {}h {}m", valid_hours, valid_minutes);
+        println!(
+            "  Remaining: {}",
+            format_duration(result.response.valid_for_seconds)
+        );
         println!();
         println!("Use --force to re-issue.");
         return Ok(());
     }
 
-    if result.keypair_generated {
+    if matches!(result.outcome, ProvisionOutcome::IssuedWithNewKeypair) {
         println!("Generating new SSH keypair...");
         println!("Created: {}", result.key_path.display());
         println!(
@@ -306,25 +345,24 @@ pub(crate) async fn run(server: &str, key_path: Option<&str>, force: bool) -> Re
         );
     }
 
-    // Calculate expiration time
-    let valid_hours = result.response.valid_for_seconds / 3600;
-    let valid_minutes = (result.response.valid_for_seconds % 3600) / 60;
-
     println!();
     println!("SSH certificate issued successfully!");
     println!("  Certificate: {}", result.cert_path.display());
     println!("  Serial: {}", result.response.serial);
     println!("  Principals: {}", result.response.principals.join(", "));
-    println!("  Valid for: {}h {}m", valid_hours, valid_minutes);
+    println!(
+        "  Valid for: {}",
+        format_duration(result.response.valid_for_seconds)
+    );
 
-    // Try to store credentials in the agent for SSH agent protocol (Unix only)
+    // Try to store credentials in the agent (Unix only)
     #[cfg(unix)]
     {
         if let Ok(mut agent_client) = vouch_agent::AgentClient::connect().await {
-            let key_path_str = result.key_path.to_string_lossy().to_string();
-            let cert_path_str = result.cert_path.to_string_lossy().to_string();
+            let key_str = result.key_path.to_string_lossy().to_string();
+            let cert_str = result.cert_path.to_string_lossy().to_string();
             if agent_client
-                .store_ssh_credentials(&key_path_str, &cert_path_str)
+                .store_ssh_credentials(&key_str, &cert_str)
                 .await
                 .is_ok()
             {
@@ -334,7 +372,7 @@ pub(crate) async fn run(server: &str, key_path: Option<&str>, force: bool) -> Re
                     "  SSH agent socket: {}",
                     vouch_agent::ssh_agent_socket_path()
                         .map(|p| p.display().to_string())
-                        .unwrap_or_else(|_| "~/.vouch/ssh-agent.sock".to_string())
+                        .unwrap_or_else(|_| { "~/.vouch/ssh-agent.sock".to_string() })
                 );
                 println!();
                 println!("To use the agent, set SSH_AUTH_SOCK:");
@@ -342,7 +380,7 @@ pub(crate) async fn run(server: &str, key_path: Option<&str>, force: bool) -> Re
                     "  export SSH_AUTH_SOCK={}",
                     vouch_agent::ssh_agent_socket_path()
                         .map(|p| p.display().to_string())
-                        .unwrap_or_else(|_| "~/.vouch/ssh-agent.sock".to_string())
+                        .unwrap_or_else(|_| { "~/.vouch/ssh-agent.sock".to_string() })
                 );
             }
         } else {
@@ -365,4 +403,174 @@ pub(crate) async fn run(server: &str, key_path: Option<&str>, force: bool) -> Re
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+    use ssh_key::certificate::Builder;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    /// Create a test certificate with the given validity window and
+    /// write it to `cert_path`. Also writes the private key to
+    /// `key_path`.
+    fn write_test_cert(key_path: &Path, cert_path: &Path, valid_after: u64, valid_before: u64) {
+        let ca_key = PrivateKey::random(&mut OsRng, Algorithm::Ed25519).unwrap();
+        let user_key = PrivateKey::random(&mut OsRng, Algorithm::Ed25519).unwrap();
+
+        // Write private key
+        let key_str = user_key.to_openssh(LineEnding::LF).unwrap();
+        std::fs::write(key_path, key_str.as_bytes()).unwrap();
+
+        // Build and sign certificate
+        let mut builder = Builder::new_with_random_nonce(
+            &mut OsRng,
+            user_key.public_key(),
+            valid_after,
+            valid_before,
+        )
+        .unwrap();
+        builder.serial(42).unwrap();
+        builder.key_id("test@example.com").unwrap();
+        builder.valid_principal("testuser").unwrap();
+
+        let cert = builder.sign(&ca_key).unwrap();
+        let cert_str = cert.to_openssh().unwrap();
+        std::fs::write(cert_path, format!("{cert_str}\n")).unwrap();
+    }
+
+    fn now_unix() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+    }
+
+    #[test]
+    fn test_check_existing_certificate_valid() {
+        let dir = tempfile::tempdir().unwrap();
+        let key_path = dir.path().join("id_ed25519_vouch");
+        let cert_path_str = format!("{}-cert.pub", key_path.display());
+        let cert_path = Path::new(&cert_path_str);
+
+        let now = now_unix();
+        // Certificate valid for 8 hours — well above the 1-hour
+        // threshold
+        write_test_cert(&key_path, cert_path, now - 60, now + 8 * 3600);
+
+        let result = check_existing_certificate(&key_path);
+        assert!(result.is_some(), "expected cache hit for valid cert");
+
+        let result = result.unwrap();
+        assert!(matches!(result.outcome, ProvisionOutcome::Cached));
+        assert_eq!(result.response.serial, 42);
+        assert_eq!(result.response.principals, vec!["testuser"]);
+        assert!(result.response.valid_for_seconds > 7 * 3600);
+    }
+
+    #[test]
+    fn test_check_existing_certificate_expired() {
+        let dir = tempfile::tempdir().unwrap();
+        let key_path = dir.path().join("id_ed25519_vouch");
+        let cert_path_str = format!("{}-cert.pub", key_path.display());
+        let cert_path = Path::new(&cert_path_str);
+
+        let now = now_unix();
+        // Certificate expired 10 minutes ago
+        write_test_cert(&key_path, cert_path, now - 3600, now - 600);
+
+        let result = check_existing_certificate(&key_path);
+        assert!(result.is_none(), "expected None for expired cert");
+    }
+
+    #[test]
+    fn test_check_existing_certificate_below_threshold() {
+        let dir = tempfile::tempdir().unwrap();
+        let key_path = dir.path().join("id_ed25519_vouch");
+        let cert_path_str = format!("{}-cert.pub", key_path.display());
+        let cert_path = Path::new(&cert_path_str);
+
+        let now = now_unix();
+        // Certificate has 30 minutes remaining — below the 1-hour
+        // threshold
+        write_test_cert(&key_path, cert_path, now - 3600, now + 30 * 60);
+
+        let result = check_existing_certificate(&key_path);
+        assert!(result.is_none(), "expected None when below threshold");
+    }
+
+    #[test]
+    fn test_check_existing_certificate_at_threshold_boundary() {
+        let dir = tempfile::tempdir().unwrap();
+        let key_path = dir.path().join("id_ed25519_vouch");
+        let cert_path_str = format!("{}-cert.pub", key_path.display());
+        let cert_path = Path::new(&cert_path_str);
+
+        let now = now_unix();
+        // Certificate has exactly 1 hour remaining — at the boundary
+        // (uses <=, so exactly-at-threshold should return None)
+        write_test_cert(&key_path, cert_path, now - 3600, now + 3600);
+
+        let result = check_existing_certificate(&key_path);
+        assert!(
+            result.is_none(),
+            "expected None at exact threshold boundary"
+        );
+    }
+
+    #[test]
+    fn test_check_existing_certificate_missing_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let key_path = dir.path().join("id_ed25519_vouch");
+        let cert_path_str = format!("{}-cert.pub", key_path.display());
+        let cert_path = Path::new(&cert_path_str);
+
+        let now = now_unix();
+        // Write cert but NOT the private key
+        let ca_key = PrivateKey::random(&mut OsRng, Algorithm::Ed25519).unwrap();
+        let user_key = PrivateKey::random(&mut OsRng, Algorithm::Ed25519).unwrap();
+        let mut builder = Builder::new_with_random_nonce(
+            &mut OsRng,
+            user_key.public_key(),
+            now - 60,
+            now + 8 * 3600,
+        )
+        .unwrap();
+        builder.serial(1).unwrap();
+        builder.key_id("test").unwrap();
+        builder.valid_principal("testuser").unwrap();
+        let cert = builder.sign(&ca_key).unwrap();
+        std::fs::write(cert_path, cert.to_openssh().unwrap()).unwrap();
+
+        let result = check_existing_certificate(&key_path);
+        assert!(
+            result.is_none(),
+            "expected None when private key is missing"
+        );
+    }
+
+    #[test]
+    fn test_check_existing_certificate_no_cert_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let key_path = dir.path().join("id_ed25519_vouch");
+
+        // Write private key but no cert file
+        let user_key = PrivateKey::random(&mut OsRng, Algorithm::Ed25519).unwrap();
+        let key_str = user_key.to_openssh(LineEnding::LF).unwrap();
+        std::fs::write(&key_path, key_str.as_bytes()).unwrap();
+
+        let result = check_existing_certificate(&key_path);
+        assert!(result.is_none(), "expected None when cert file is missing");
+    }
+
+    #[test]
+    fn test_format_duration() {
+        assert_eq!(format_duration(0), "0h 0m");
+        assert_eq!(format_duration(3600), "1h 0m");
+        assert_eq!(format_duration(5400), "1h 30m");
+        assert_eq!(format_duration(8 * 3600 + 15 * 60), "8h 15m");
+        assert_eq!(format_duration(59), "0h 0m");
+        assert_eq!(format_duration(60), "0h 1m");
+    }
 }
