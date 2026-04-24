@@ -168,8 +168,8 @@ eval "$(vouch env --type aws --role arn:aws:iam::ID:role/name)"
 
 ### Shell Completions
 ```bash
-# Bash
-vouch completions bash >> ~/.bashrc
+# Bash (requires the bash-completion package)
+vouch completions bash > ~/.local/share/bash-completion/completions/vouch
 
 # Zsh
 vouch completions zsh > "${fpath[1]}/_vouch"
@@ -180,7 +180,7 @@ vouch completions fish > ~/.config/fish/completions/vouch.fish
 
 ### Shell Integration
 
-Add session status to your shell prompt (sets `VOUCH_AUTHENTICATED` and `VOUCH_EXPIRES_IN`):
+Add session status to your shell prompt (sets `VOUCH_AUTHENTICATED`, `VOUCH_EMAIL`, and `VOUCH_EXPIRES_IN`):
 
 ```bash
 # Bash (add to ~/.bashrc)
