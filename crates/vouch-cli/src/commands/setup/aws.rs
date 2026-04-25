@@ -9,6 +9,19 @@ use std::path::PathBuf;
 use crate::integrations::aws::{AwsConfig, AwsProfile};
 use crate::utils::ensure_secure_dir;
 
+/// Build the assumable member-account role ARN.
+///
+/// `role_path` must already be in canonical form (starts and ends with `/`,
+/// or is just `/`); see [`crate::config::normalize_member_role_path`].
+fn build_member_role_arn(
+    partition: &str,
+    account_id: &str,
+    role_path: &str,
+    role_name: &str,
+) -> String {
+    format!("arn:{partition}:iam::{account_id}:role{role_path}{role_name}")
+}
+
 /// Sanitize an account name into a valid AWS CLI profile name segment.
 ///
 /// Converts to lowercase, replaces non-alphanumeric-non-hyphen chars with `-`,
@@ -155,10 +168,22 @@ async fn run_discover(profile_prefix: Option<&str>, region: Option<&str>) -> Res
             "No SSO session found in ~/.aws/config. Run 'aws configure sso' first.".to_string(),
         )
     })?;
-    let member_role_name = vouch_config
+    let session_cfg = vouch_config
         .aws()
-        .and_then(|a| a.sso_sessions.get(&session.name))
-        .map_or_else(|| "VouchAccess".to_string(), |s| s.member_role_name.clone());
+        .and_then(|a| a.sso_sessions.get(&session.name));
+    let member_role_name =
+        session_cfg.map_or_else(|| "VouchAccess".to_string(), |s| s.member_role_name.clone());
+    let member_role_path = match session_cfg {
+        Some(s) => {
+            crate::config::normalize_member_role_path(&s.member_role_path).with_context(|| {
+                format!(
+                    "invalid member_role_path for SSO session {:?}",
+                    session.name
+                )
+            })?
+        }
+        None => "/".to_string(),
+    };
 
     let sso_region = session.region.clone();
     let sso_config = SsoConfig::from_session(&session);
@@ -203,11 +228,11 @@ async fn run_discover(profile_prefix: Option<&str>, region: Option<&str>) -> Res
         }
 
         let partition = Partition::from_region(&sso_region);
-        let role_arn = format!(
-            "arn:{}:iam::{}:role/{}",
+        let role_arn = build_member_role_arn(
             partition.as_str(),
-            account.account_id,
-            member_role_name
+            &account.account_id,
+            &member_role_path,
+            &member_role_name,
         );
 
         let safe_name = sanitize_profile_name(&account.account_name);
@@ -289,5 +314,29 @@ mod tests {
     #[test]
     fn test_sanitize_profile_name_all_special_chars() {
         assert_eq!(sanitize_profile_name("!!!@@@###"), "");
+    }
+
+    #[test]
+    fn test_build_member_role_arn_no_path() {
+        assert_eq!(
+            build_member_role_arn("aws", "123456789012", "/", "VouchAccess"),
+            "arn:aws:iam::123456789012:role/VouchAccess",
+        );
+    }
+
+    #[test]
+    fn test_build_member_role_arn_with_path() {
+        assert_eq!(
+            build_member_role_arn("aws", "123456789012", "/teams/sec/", "VouchAccess"),
+            "arn:aws:iam::123456789012:role/teams/sec/VouchAccess",
+        );
+    }
+
+    #[test]
+    fn test_build_member_role_arn_partition_govcloud() {
+        assert_eq!(
+            build_member_role_arn("aws-us-gov", "123", "/teams/", "VouchAccess"),
+            "arn:aws-us-gov:iam::123:role/teams/VouchAccess",
+        );
     }
 }

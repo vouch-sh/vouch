@@ -32,10 +32,51 @@ pub(crate) struct SsoSessionConfig {
     /// Role name to assume in member accounts.
     #[serde(default = "default_member_role_name")]
     pub member_role_name: String,
+    /// IAM Path of the member-account role. Canonical form starts and ends
+    /// with `/` (e.g. `/teams/sec/`). `/` means no path. Use
+    /// [`normalize_member_role_path`] to coerce user input.
+    #[serde(default = "default_member_role_path")]
+    pub member_role_path: String,
 }
 
 fn default_member_role_name() -> String {
     "VouchAccess".to_string()
+}
+
+fn default_member_role_path() -> String {
+    "/".to_string()
+}
+
+/// Normalize an IAM Path string so it starts and ends with `/`.
+///
+/// Accepts forms like `""`, `"/"`, `"teams/sec"`, `"/teams/sec"`,
+/// `"teams/sec/"`, `"/teams/sec/"` and returns `/teams/sec/` (or `/` for
+/// the empty/root case). Rejects whitespace and embedded ARN fragments.
+pub(crate) fn normalize_member_role_path(raw: &str) -> Result<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() || trimmed == "/" {
+        return Ok("/".to_string());
+    }
+    if trimmed.chars().any(char::is_whitespace) {
+        anyhow::bail!("member_role_path must not contain whitespace: {raw:?}");
+    }
+    if trimmed.contains("//") {
+        anyhow::bail!("member_role_path must not contain empty segments: {raw:?}");
+    }
+    if trimmed.contains(':') || trimmed.contains("arn:") {
+        anyhow::bail!("member_role_path must be a path, not an ARN: {raw:?}");
+    }
+    let with_leading = if trimmed.starts_with('/') {
+        trimmed.to_string()
+    } else {
+        format!("/{trimmed}")
+    };
+    let canonical = if with_leading.ends_with('/') {
+        with_leading
+    } else {
+        format!("{with_leading}/")
+    };
+    Ok(canonical)
 }
 
 /// CLI configuration stored in ~/.vouch/config.json
@@ -1105,7 +1146,8 @@ mod tests {
                 "sso_sessions": {
                     "smoketurner": {
                         "management_role": "arn:aws:iam::111:role/VouchManagement",
-                        "member_role_name": "VouchAccess"
+                        "member_role_name": "VouchAccess",
+                        "member_role_path": "/teams/sec/"
                     }
                 }
             }
@@ -1126,6 +1168,7 @@ mod tests {
             "arn:aws:iam::111:role/VouchManagement"
         );
         assert_eq!(session.member_role_name, "VouchAccess");
+        assert_eq!(session.member_role_path, "/teams/sec/");
 
         // Round-trip through JSON
         let file2 = ConfigFile::from(&config);
@@ -1143,6 +1186,7 @@ mod tests {
             "arn:aws:iam::111:role/VouchManagement"
         );
         assert_eq!(session2.member_role_name, "VouchAccess");
+        assert_eq!(session2.member_role_path, "/teams/sec/");
     }
 
     #[test]
@@ -1163,6 +1207,36 @@ mod tests {
         let aws = config.aws().expect("aws config should exist");
         let session = aws.sso_sessions.get("my-session").expect("session");
         assert_eq!(session.member_role_name, "VouchAccess");
+        assert_eq!(session.member_role_path, "/");
+    }
+
+    #[test]
+    fn test_normalize_member_role_path_canonical_forms() {
+        assert_eq!(normalize_member_role_path("").unwrap(), "/");
+        assert_eq!(normalize_member_role_path("/").unwrap(), "/");
+        assert_eq!(
+            normalize_member_role_path("teams/sec").unwrap(),
+            "/teams/sec/"
+        );
+        assert_eq!(
+            normalize_member_role_path("/teams/sec").unwrap(),
+            "/teams/sec/"
+        );
+        assert_eq!(
+            normalize_member_role_path("teams/sec/").unwrap(),
+            "/teams/sec/"
+        );
+        assert_eq!(
+            normalize_member_role_path("/teams/sec/").unwrap(),
+            "/teams/sec/"
+        );
+    }
+
+    #[test]
+    fn test_normalize_member_role_path_rejects_invalid() {
+        assert!(normalize_member_role_path("teams sec").is_err());
+        assert!(normalize_member_role_path("//teams//sec").is_err());
+        assert!(normalize_member_role_path("arn:aws:iam::1:role/foo").is_err());
     }
 
     #[test]
