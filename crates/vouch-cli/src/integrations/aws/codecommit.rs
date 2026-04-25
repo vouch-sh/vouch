@@ -248,11 +248,11 @@ fn codecommit_domain_for_region(region: &str) -> &'static str {
 }
 
 #[cfg(test)]
-#[allow(
+#[expect(
     clippy::expect_used,
     clippy::unwrap_used,
-    clippy::indexing_slicing,
-    clippy::string_slice
+    clippy::string_slice,
+    reason = "test code: panic on assertion failure is acceptable"
 )]
 mod tests {
     use super::*;

@@ -73,7 +73,6 @@ impl RsaPrivateKeyDer {
     }
 
     /// Convert PEM to DER bytes.
-    #[cfg_attr(test, allow(dead_code))]
     pub(crate) fn pem_to_der(pem_content: &str) -> Result<Vec<u8>> {
         let lines: Vec<&str> = pem_content.lines().collect();
         let mut base64_content = String::new();
@@ -412,7 +411,6 @@ pub fn minimal_git_permissions() -> HashMap<String, String> {
 #[derive(Debug, Deserialize)]
 pub struct UserInstallationsResponse {
     /// Total count of installations the user has access to.
-    #[allow(dead_code)]
     pub total_count: u32,
     /// List of installations.
     pub installations: Vec<InstallationDetails>,
@@ -525,18 +523,14 @@ pub struct GitHubOAuthTokenResponse {
     /// Access token for API calls.
     pub access_token: String,
     /// Token type (usually "bearer").
-    #[allow(dead_code)]
     pub token_type: String,
     /// Granted scopes (space-separated).
-    #[allow(dead_code)]
     pub scope: Option<String>,
     /// Refresh token for getting new access tokens.
     pub refresh_token: Option<String>,
     /// Access token expiration in seconds (8 hours for GitHub Apps).
-    #[allow(dead_code)]
     pub expires_in: Option<u64>,
     /// Refresh token expiration in seconds (6 months for GitHub Apps).
-    #[allow(dead_code)]
     pub refresh_token_expires_in: Option<u64>,
 }
 
@@ -666,7 +660,10 @@ pub async fn refresh_oauth_token(
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used, clippy::unwrap_used, clippy::indexing_slicing)]
+#[expect(
+    clippy::expect_used,
+    reason = "test code: panic on assertion failure is acceptable"
+)]
 mod tests {
     use super::*;
 
@@ -752,7 +749,10 @@ eyYRskrWOAtu0DuWJARLn74r5B4ze8s4DvUdPe781neRB1hMbXte6g==
     }
 
     #[test]
-    #[allow(clippy::unreachable)]
+    #[expect(
+        clippy::unreachable,
+        reason = "test code: unreachable! after let-else-Err proof"
+    )]
     fn test_rsa_key_rejects_pkcs8_pem() {
         // Verify that PKCS#8 PEM format is rejected with a helpful error
         let pkcs8_pem = "-----BEGIN PRIVATE KEY-----\nMIIEvg...\n-----END PRIVATE KEY-----";

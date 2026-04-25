@@ -352,7 +352,6 @@ pub async fn update_oauth_client_last_used(store: &DocumentStore, id: &str) -> R
 
 /// OAuth client secret record.
 #[derive(Debug)]
-#[allow(dead_code)]
 pub struct OAuthClientSecret {
     pub id: String,
     pub oauth_client_id: String,
@@ -907,7 +906,11 @@ pub async fn validate_oauth_client_credentials(
 // ============================================================================
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "test code: panic on assertion failure is acceptable"
+)]
 mod tests {
     use super::*;
 

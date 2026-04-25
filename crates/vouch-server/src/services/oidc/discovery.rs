@@ -19,7 +19,10 @@ use std::sync::Arc;
 /// All fields defined in OpenID Provider Metadata:
 /// <https://openid.net/specs/openid-connect-discovery-1_0.html#ProviderMetadata>
 #[derive(Debug, Serialize)]
-#[allow(clippy::struct_excessive_bools)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "OIDC discovery document has many boolean capability flags by spec"
+)]
 pub struct OidcDiscoveryDocument {
     /// OIDC Discovery 1.0 Section 3: REQUIRED. Issuer Identifier (must match tokens).
     pub issuer: String,

@@ -49,7 +49,6 @@ mem_forget = "deny"
 module_name_repetitions = "allow"
 similar_names = "allow"
 
-allow_attributes = "deny"
 allow_attributes_without_reason = "deny"
 # pedantic = { level = "warn", priority = -1 }
 

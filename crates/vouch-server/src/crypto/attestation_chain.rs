@@ -173,7 +173,10 @@ pub fn validate_attestation_chain(
 // Pinned root CAs parsed once at first use. These are compile-time-embedded
 // PEM constants — a parse failure means the binary is broken, so expect is
 // the correct response (fail loudly on startup, not silently at runtime).
-#[allow(clippy::expect_used)]
+#[expect(
+    clippy::expect_used,
+    reason = "embedded PEM is a build-time constant; .expect surfaces invalid build"
+)]
 static PINNED_ROOTS: LazyLock<Vec<Certificate>> = LazyLock::new(|| {
     vec![
         Certificate::from_pem(YUBICO_FIDO_CA_1_PEM)
@@ -315,7 +318,10 @@ fn format_aaguid(bytes: &[u8]) -> String {
 // ============================================================================
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
+#[expect(
+    clippy::expect_used,
+    reason = "test code: panic on assertion failure is acceptable"
+)]
 mod tests {
     use super::*;
 

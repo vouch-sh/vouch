@@ -5,7 +5,10 @@
 //! and deserialize correctly with the typed encoding wrappers.
 
 #[cfg(test)]
-#[expect(clippy::unwrap_used, reason = "test code: panic on assertion failure is acceptable")]
+#[expect(
+    clippy::unwrap_used,
+    reason = "test code: panic on assertion failure is acceptable"
+)]
 mod tests {
     use crate::api::*;
     use uuid::Uuid;

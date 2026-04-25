@@ -369,7 +369,10 @@ pub async fn browser_login_start(
 /// 5. Credential ID byte length validation
 /// 6. Client data JSON structure validation (type, origin)
 /// 7. Database operations (authenticator lookup, signature verification)
-#[allow(clippy::too_many_lines)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "FAPI 2.0 browser login orchestrates assertion verification and session issuance"
+)]
 pub async fn browser_login_complete(
     State(state): State<Arc<AppState>>,
     client_info: ClientInfo,
@@ -752,7 +755,10 @@ pub(crate) fn validate_origin(
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::expect_used, clippy::unwrap_used)]
+    #![expect(
+        clippy::expect_used,
+        reason = "test code: panic on assertion failure is acceptable"
+    )]
     use super::*;
 
     #[tokio::test]

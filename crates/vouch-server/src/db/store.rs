@@ -118,7 +118,7 @@ fn build_index_insert(
 #[derive(sqlx::FromRow)]
 struct RawDocumentRow {
     id: String,
-    #[allow(dead_code)]
+    #[expect(dead_code, reason = "reserved for serde DTO conformance / future use")]
     doc_type: String,
     schema_version: i32,
     encapped_key: Option<String>,
@@ -193,7 +193,10 @@ fn raw_to_document<T: DocumentType>(
 
     let json_bytes = crypto.open(T::DOC_TYPE.as_bytes(), row.id.as_bytes(), &encrypted_doc)?;
 
-    #[allow(clippy::cast_sign_loss)]
+    #[expect(
+        clippy::cast_sign_loss,
+        reason = "schema_version stored as i64 but always non-negative by invariant"
+    )]
     let version = row.schema_version as u32;
     let typed_data = if version < T::CURRENT_VERSION {
         let value: serde_json::Value =
@@ -1571,11 +1574,11 @@ impl std::fmt::Debug for StoreTransaction<'_> {
 // ============================================================================
 
 #[cfg(test)]
-#[allow(
+#[expect(
     clippy::unwrap_used,
-    clippy::expect_used,
     clippy::unreachable,
-    clippy::indexing_slicing
+    clippy::indexing_slicing,
+    reason = "test code: panic on assertion failure is acceptable"
 )]
 mod tests {
     use super::*;

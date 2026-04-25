@@ -48,10 +48,10 @@ pub(crate) struct SamlAssertion {
     /// Domain extracted from email or configured domain attribute.
     pub domain: Option<String>,
     /// Display name extracted from configured name attribute, if available.
-    #[allow(dead_code)]
+    #[expect(dead_code, reason = "reserved for serde DTO conformance / future use")]
     pub name: Option<String>,
     /// Session expiry time from `<AuthnStatement SessionNotOnOrAfter>`.
-    #[allow(dead_code)]
+    #[expect(dead_code, reason = "reserved for serde DTO conformance / future use")]
     pub session_not_on_or_after: Option<Timestamp>,
 }
 
@@ -663,11 +663,11 @@ fn parse_saml_timestamp(s: &str) -> Result<Timestamp, ResponseError> {
 
 #[cfg(test)]
 mod tests {
-    #![allow(
+    #![expect(
         clippy::unwrap_used,
         clippy::expect_used,
-        clippy::too_many_lines,
-        clippy::string_slice
+        clippy::string_slice,
+        reason = "test code: panic on assertion failure is acceptable"
     )]
     use super::*;
 
@@ -1365,7 +1365,10 @@ mod tests {
     /// - After insertion: text(`\n  `) + Issuer + Signature(excluded) + text(`\n  `) + Subject
     ///
     /// Both produce the same canonical bytes.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "test helper builds SAML response with all signed-element parameters"
+    )]
     fn build_signed_saml_response(
         key_pair: &aws_lc_rs::rsa::KeyPair,
         email: &str,

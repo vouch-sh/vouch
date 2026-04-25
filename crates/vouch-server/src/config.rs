@@ -824,7 +824,10 @@ pub fn resolve_dsql_endpoints(endpoints: &HashMap<String, String>) -> Result<Str
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[expect(
+    clippy::unwrap_used,
+    reason = "test code: panic on assertion failure is acceptable"
+)]
 mod tests {
     use crate::test_utils::test_config;
     use secrecy::SecretString;

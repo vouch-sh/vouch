@@ -252,7 +252,6 @@ async fn run_discover(profile_prefix: Option<&str>, region: Option<&str>) -> Res
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
 

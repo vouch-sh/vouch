@@ -114,7 +114,6 @@ impl Default for ScimScopeSet {
 
 /// SCIM token record.
 #[derive(Debug)]
-#[allow(dead_code)]
 pub struct ScimToken {
     pub id: String,
     pub token_hash: String,
@@ -176,7 +175,6 @@ pub async fn update_scim_token_last_used(store: &DocumentStore, token_id: &str) 
 }
 
 /// Create a new SCIM token.
-#[allow(dead_code)]
 pub async fn create_scim_token(
     store: &DocumentStore,
     token_hash: &str,
@@ -204,7 +202,6 @@ pub async fn create_scim_token(
 /// Returns `Ok(true)` if a token was deleted, `Ok(false)` if no
 /// matching token was found for the given org (prevents cross-org
 /// deletion).
-#[allow(dead_code)]
 pub async fn delete_scim_token(
     store: &DocumentStore,
     token_id: &str,
@@ -224,7 +221,6 @@ pub async fn delete_scim_token(
 }
 
 /// List SCIM tokens, optionally filtered by organization.
-#[allow(dead_code)]
 pub async fn list_scim_tokens(
     store: &DocumentStore,
     org_id: Option<&str>,
@@ -632,7 +628,6 @@ impl From<Document<ScimGroupDoc>> for ScimGroupRecord {
 
 /// SCIM Group member record.
 #[derive(Debug)]
-#[allow(dead_code)]
 pub struct ScimGroupMemberRecord {
     pub group_id: String,
     pub user_id: String,
@@ -670,7 +665,6 @@ pub async fn get_scim_group(store: &DocumentStore, id: &str) -> Result<Option<Sc
 }
 
 /// Get a SCIM group by display name.
-#[allow(dead_code)]
 pub async fn get_scim_group_by_name(
     store: &DocumentStore,
     display_name: &str,
@@ -892,7 +886,6 @@ pub async fn get_scim_group_members(
 }
 
 /// Get all groups a user belongs to.
-#[allow(dead_code)]
 pub async fn get_user_scim_groups(
     store: &DocumentStore,
     user_id: &str,

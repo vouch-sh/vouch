@@ -50,7 +50,10 @@ impl From<Document<SessionDoc>> for Session {
 /// `authenticator_id` is optional for OIDC-authenticated users who haven't
 /// registered a security key yet.
 /// `user_email` is denormalized into the session document.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "session record requires all denormalized client/user fields"
+)]
 pub async fn create_session(
     store: &DocumentStore,
     user_id: &str,
@@ -155,7 +158,10 @@ impl SessionCache {
     /// * `ttl_secs` — time-to-live per entry in seconds (e.g. 30)
     #[must_use]
     pub fn new(max_capacity: u64, ttl_secs: u64) -> Self {
-        #[allow(clippy::cast_possible_truncation)]
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "min(u32::MAX) bounds the value to fit usize on 32-bit and larger targets"
+        )]
         let cap = max_capacity.min(u32::MAX as u64) as usize;
         Self {
             entries: Mutex::new(HashMap::with_capacity(cap)),

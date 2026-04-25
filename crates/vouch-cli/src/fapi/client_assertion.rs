@@ -105,11 +105,11 @@ impl ClientAssertionBuilder {
 }
 
 #[cfg(test)]
-#[allow(
+#[expect(
     clippy::unwrap_used,
     clippy::expect_used,
     clippy::indexing_slicing,
-    clippy::get_unwrap
+    reason = "test code: panic on assertion failure is acceptable"
 )]
 mod tests {
     use super::*;

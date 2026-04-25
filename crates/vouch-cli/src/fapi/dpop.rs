@@ -182,11 +182,11 @@ fn strip_query_and_fragment(raw_url: &str) -> String {
 }
 
 #[cfg(test)]
-#[allow(
+#[expect(
     clippy::unwrap_used,
     clippy::expect_used,
     clippy::indexing_slicing,
-    clippy::get_unwrap
+    reason = "test code: panic on assertion failure is acceptable"
 )]
 mod tests {
     use super::*;

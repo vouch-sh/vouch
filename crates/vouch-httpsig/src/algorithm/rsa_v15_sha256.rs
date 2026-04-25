@@ -117,7 +117,10 @@ impl VerifyingAlgorithm for RsaV15Sha256Verifier {
 }
 
 #[cfg(test)]
-#[expect(clippy::unwrap_used, reason = "test code: panic on assertion failure is acceptable")]
+#[expect(
+    clippy::unwrap_used,
+    reason = "test code: panic on assertion failure is acceptable"
+)]
 mod tests {
     use super::*;
 

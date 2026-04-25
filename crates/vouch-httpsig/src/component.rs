@@ -679,7 +679,10 @@ fn hex_val(c: u8) -> Option<u8> {
 }
 
 #[cfg(test)]
-#[expect(clippy::unwrap_used, reason = "test code: panic on assertion failure is acceptable")]
+#[expect(
+    clippy::unwrap_used,
+    reason = "test code: panic on assertion failure is acceptable"
+)]
 mod tests {
     use super::*;
 

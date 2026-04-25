@@ -271,7 +271,6 @@ fn exec_git_remote_http(remote_name: &str, signed_url: &str) -> Result<()> {
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
 

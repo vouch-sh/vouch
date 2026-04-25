@@ -184,7 +184,7 @@ pub struct GitHubCallbackParams {
     /// State token for CSRF protection.
     state: Option<String>,
     /// Setup action (only present during installation).
-    #[allow(dead_code)]
+    #[expect(dead_code, reason = "reserved for serde DTO conformance / future use")]
     setup_action: Option<String>,
     /// OAuth authorization code (present for OAuth callbacks).
     code: Option<String>,
@@ -198,7 +198,7 @@ pub struct GitHubConnectParams {
     /// State token for CSRF protection.
     state: Option<String>,
     /// Setup action (only present during installation).
-    #[allow(dead_code)]
+    #[expect(dead_code, reason = "reserved for serde DTO conformance / future use")]
     setup_action: Option<String>,
 }
 
@@ -665,7 +665,10 @@ pub async fn github_success_page(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[expect(
+    clippy::expect_used,
+    reason = "test code: panic on assertion failure is acceptable"
+)]
 mod tests {
     use super::*;
     use crate::crypto::jwt::{JwtType, StateTokenSigner};

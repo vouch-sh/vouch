@@ -14,7 +14,10 @@ use jiff::Timestamp;
 // ============================================================
 
 /// Insert a token exchange audit record.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "token-exchange audit row requires all RFC 8693 fields"
+)]
 pub async fn insert_token_exchange(
     store: &DocumentStore,
     subject_user_id: &str,
@@ -45,7 +48,6 @@ pub async fn delete_old_token_exchanges(store: &DocumentStore) -> Result<u64> {
 
 /// Token exchange audit record.
 #[derive(Debug)]
-#[allow(dead_code)]
 pub struct TokenExchangeRecord {
     pub id: String,
     pub subject_user_id: String,
@@ -75,7 +77,6 @@ impl From<Document<TokenExchangeDoc>> for TokenExchangeRecord {
 }
 
 /// Get token exchange records for a user.
-#[allow(dead_code)]
 pub async fn get_token_exchanges_for_user(
     store: &DocumentStore,
     user_id: &str,
@@ -93,7 +94,6 @@ pub async fn get_token_exchanges_for_user(
 
 /// Delegation policy record.
 #[derive(Debug)]
-#[allow(dead_code)]
 pub struct DelegationPolicy {
     pub id: String,
     pub name: String,
@@ -174,7 +174,6 @@ pub async fn get_delegation_policies(store: &DocumentStore) -> Result<Vec<Delega
 }
 
 /// Update a delegation policy's enabled status.
-#[allow(dead_code)]
 pub async fn set_delegation_policy_enabled(
     store: &DocumentStore,
     id: &str,
@@ -190,7 +189,6 @@ pub async fn set_delegation_policy_enabled(
 }
 
 /// Delete a delegation policy.
-#[allow(dead_code)]
 pub async fn delete_delegation_policy(store: &DocumentStore, id: &str) -> Result<bool> {
     store.delete(id).await?;
     Ok(true)
@@ -206,13 +204,10 @@ pub struct EnrollmentSession {
     pub id: String,
     pub user_id: String,
     pub user_email: String,
-    #[allow(dead_code)]
     pub session_token_hash: String,
     pub device_auth_id: Option<String>,
     pub expires_at: Timestamp,
-    #[allow(dead_code)]
     pub created_at: Timestamp,
-    #[allow(dead_code)]
     pub last_used_at: Option<Timestamp>,
 }
 
@@ -274,14 +269,10 @@ pub async fn delete_expired_enrollment_sessions(store: &DocumentStore) -> Result
 /// Record of an issued SSH certificate.
 #[derive(Debug)]
 pub struct IssuedSshCertificate {
-    #[allow(dead_code)]
     pub id: String,
     pub serial: String,
-    #[allow(dead_code)]
     pub user_id: String,
-    #[allow(dead_code)]
     pub user_email: String,
-    #[allow(dead_code)]
     pub principals: Vec<String>,
     pub expires_at: Timestamp,
 }
@@ -347,18 +338,12 @@ pub async fn delete_expired_ssh_issued_certs(store: &DocumentStore) -> Result<u6
 /// Revoked SSH certificate record.
 #[derive(Debug)]
 pub struct RevokedSshCertificate {
-    #[allow(dead_code)]
     pub id: String,
     pub serial: String,
-    #[allow(dead_code)]
     pub user_id: String,
-    #[allow(dead_code)]
     pub reason: Option<String>,
-    #[allow(dead_code)]
     pub revoked_at: Timestamp,
-    #[allow(dead_code)]
     pub expires_at: Timestamp,
-    #[allow(dead_code)]
     pub revoked_by: Option<String>,
 }
 
@@ -460,11 +445,11 @@ pub async fn delete_expired_ssh_revocations(store: &DocumentStore) -> Result<u64
 // ============================================================
 
 #[cfg(test)]
-#[allow(
+#[expect(
     clippy::expect_used,
-    clippy::unwrap_used,
     clippy::indexing_slicing,
-    clippy::panic
+    clippy::panic,
+    reason = "test code: panic on assertion failure is acceptable"
 )]
 mod tests {
     use super::*;

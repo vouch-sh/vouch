@@ -97,7 +97,11 @@ pub fn cose_key_to_cbor(key: &COSEKey) -> Result<Vec<u8>, CoseError> {
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used, clippy::unwrap_used)]
+#[expect(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    reason = "test code: panic on assertion failure is acceptable"
+)]
 mod tests {
     use super::*;
     use webauthn_rs::prelude::{COSEAlgorithm, COSEEC2Key, COSEKey, COSEKeyType, ECDSACurve};

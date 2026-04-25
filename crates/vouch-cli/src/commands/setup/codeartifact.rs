@@ -755,7 +755,10 @@ fn build_npmrc_pnpm_content(
 }
 
 #[cfg(test)]
-#[allow(clippy::indexing_slicing)]
+#[expect(
+    clippy::indexing_slicing,
+    reason = "test code: panic on assertion failure is acceptable"
+)]
 mod tests {
     use super::*;
     use clap::ValueEnum;

@@ -23,7 +23,10 @@ pub(crate) struct SsoAccount {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct SsoRole {
     pub role_name: String,
-    #[allow(dead_code)]
+    #[allow(
+        dead_code,
+        reason = "deserialized from AWS SSO portal listing; lint fires inconsistently across compilation targets"
+    )]
     pub account_id: String,
 }
 
@@ -185,7 +188,11 @@ pub(crate) async fn list_account_roles(
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used, clippy::unwrap_used, clippy::indexing_slicing)]
+#[expect(
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    reason = "test code: panic on assertion failure is acceptable"
+)]
 mod tests {
     use super::*;
 

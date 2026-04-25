@@ -164,7 +164,10 @@ pub(crate) async fn get_authorization_token(
     let ca_response: GetAuthorizationTokenResponse =
         serde_json::from_str(&response_body).context("failed to parse CodeArtifact response")?;
 
-    #[allow(clippy::cast_possible_truncation)]
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "CodeArtifact expiration is a Unix timestamp (seconds), well below i64::MAX"
+    )]
     let expiration = ca_response.expiration as i64;
 
     Ok(CodeArtifactToken {
@@ -174,7 +177,10 @@ pub(crate) async fn get_authorization_token(
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used, clippy::unwrap_used)]
+#[expect(
+    clippy::expect_used,
+    reason = "test code: panic on assertion failure is acceptable"
+)]
 mod tests {
     use super::*;
 

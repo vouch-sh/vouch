@@ -101,7 +101,6 @@ impl Default for FapiInteraction {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 

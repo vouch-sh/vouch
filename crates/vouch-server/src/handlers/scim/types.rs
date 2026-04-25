@@ -104,7 +104,6 @@ pub struct ScimMeta {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ScimPatchRequest {
-    #[allow(dead_code)]
     pub schemas: Vec<String>,
     #[serde(rename = "Operations")]
     pub operations: Vec<ScimPatchOp>,

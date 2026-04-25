@@ -43,7 +43,6 @@ pub struct SamlAcsForm {
 
 /// Return SP metadata XML.
 /// GET /saml/metadata
-#[allow(clippy::unused_async)]
 pub async fn metadata(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let config = state.config();
     let sp_entity_id = config
@@ -63,7 +62,6 @@ pub async fn metadata(State(state): State<Arc<AppState>>) -> impl IntoResponse {
 ///
 /// Receives the IdP's SAML Response, validates it, and completes the
 /// enrollment flow identically to `oidc_callback()`.
-#[allow(clippy::too_many_lines)]
 pub async fn acs(State(state): State<Arc<AppState>>, Form(form): Form<SamlAcsForm>) -> Response {
     // Step 1: RelayState is required — it's our CSRF/state token.
     let relay_state = match form.relay_state {
@@ -166,7 +164,6 @@ pub async fn acs(State(state): State<Arc<AppState>>, Form(form): Form<SamlAcsFor
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used)]
     use crate::test_utils::{http_get_full, http_post_form, test_app};
     use axum::http::StatusCode;
 

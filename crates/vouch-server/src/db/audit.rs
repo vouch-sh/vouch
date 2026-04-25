@@ -305,11 +305,11 @@ fn raw_to_audit_event(row: RawAuditRow) -> AuditEvent {
 // ============================================================================
 
 #[cfg(test)]
-#[allow(
+#[expect(
     clippy::unwrap_used,
-    clippy::expect_used,
     clippy::unreachable,
-    clippy::indexing_slicing
+    clippy::indexing_slicing,
+    reason = "test code: panic on assertion failure is acceptable"
 )]
 mod tests {
     use super::*;

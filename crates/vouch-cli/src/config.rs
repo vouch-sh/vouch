@@ -407,7 +407,10 @@ impl Config {
     }
 
     /// Set the AWS multi-account configuration (in memory only, call `save()` to persist).
-    #[allow(dead_code)]
+    #[allow(
+        dead_code,
+        reason = "API exposed for callers; lint fires inconsistently across compilation targets"
+    )]
     pub(crate) fn set_aws(&mut self, config: AwsMultiAccountConfig) {
         self.aws = Some(config);
     }
@@ -443,7 +446,6 @@ impl Config {
 
     /// Get the DPoP key ID for the stored client keypair.
     #[must_use]
-    #[allow(dead_code)]
     pub(crate) fn dpop_key_id(&self) -> Option<&str> {
         self.current().and_then(|s| s.dpop_key_id.as_deref())
     }
@@ -609,7 +611,11 @@ impl From<&ServerConfig> for ServerConfigFile {
 // =========================================================================
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "test code: panic on assertion failure is acceptable"
+)]
 mod tests {
     use super::*;
 

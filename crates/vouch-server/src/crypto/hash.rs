@@ -42,7 +42,10 @@ pub fn generate_challenge() -> Result<Vec<u8>, aws_lc_rs::error::Unspecified> {
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used, clippy::unwrap_used)]
+#[expect(
+    clippy::unwrap_used,
+    reason = "test code: panic on assertion failure is acceptable"
+)]
 mod tests {
     use super::*;
 

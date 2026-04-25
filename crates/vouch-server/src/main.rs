@@ -35,7 +35,10 @@ struct Cli {
 }
 
 #[derive(clap::Subcommand)]
-#[allow(clippy::large_enum_variant)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "clap::Subcommand variants vary in payload size by command"
+)]
 enum Commands {
     /// Start the identity server.
     Serve(config::Args),

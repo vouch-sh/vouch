@@ -104,7 +104,10 @@ pub(crate) fn set_socket_permissions(path: &Path) -> Result<()> {
 }
 
 /// Get the current process's real UID.
-#[expect(unsafe_code, reason = "libc::getuid is always safe with no side effects")]
+#[expect(
+    unsafe_code,
+    reason = "libc::getuid is always safe with no side effects"
+)]
 pub(crate) fn current_uid() -> u32 {
     // SAFETY: getuid() is always safe — it reads the process's real UID
     // with no side effects.

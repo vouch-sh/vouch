@@ -246,7 +246,10 @@ pub async fn get_group(
 ///
 /// Modifies a Group resource using SCIM PATCH operations (add, replace, remove).
 /// Supports member management via the `members` path.
-#[allow(clippy::too_many_lines)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "SCIM PATCH operation handles add/remove/replace across all group fields"
+)]
 pub async fn patch_group(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,

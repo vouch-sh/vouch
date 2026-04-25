@@ -55,7 +55,10 @@ const SECRET_LENGTH: usize = 32;
 ///
 /// # Panics
 /// Panics if the system RNG fails.
-#[allow(clippy::expect_used)]
+#[expect(
+    clippy::expect_used,
+    reason = ".expect on aws_rand::fill is acceptable: RNG failure is fatal at startup"
+)]
 pub(crate) fn generate_client_secret() -> String {
     let mut bytes = [0u8; SECRET_LENGTH];
     aws_rand::fill(&mut bytes).expect("RNG failure");

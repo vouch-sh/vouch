@@ -139,7 +139,11 @@ pub(crate) fn save_kubeconfig(path: &std::path::Path, config: &Kubeconfig) -> Re
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used, clippy::indexing_slicing, clippy::unwrap_used)]
+#[expect(
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    reason = "test code: panic on assertion failure is acceptable"
+)]
 mod tests {
     use super::*;
 

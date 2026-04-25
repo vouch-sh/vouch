@@ -685,7 +685,10 @@ fn extract_device_posture(ad_value: Option<&serde_json::Value>) -> ServiceResult
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
+#[expect(
+    clippy::unwrap_used,
+    reason = "test code: panic on assertion failure is acceptable"
+)]
 mod tests {
     use super::*;
     use vouch_common::posture::{EdrAgent, MdmAgent, OperatingSystem, PostureTypeTag};

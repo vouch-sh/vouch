@@ -406,7 +406,10 @@ pub(crate) async fn run(server: &str, key_path: Option<&str>, force: bool) -> Re
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[expect(
+    clippy::unwrap_used,
+    reason = "test code: panic on assertion failure is acceptable"
+)]
 mod tests {
     use super::*;
     use ssh_key::certificate::Builder;

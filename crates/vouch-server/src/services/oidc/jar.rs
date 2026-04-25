@@ -51,7 +51,7 @@ struct RequestObjectClaims {
     nbf: Option<i64>,
     /// JWT ID (optional).
     #[serde(default)]
-    #[allow(dead_code)]
+    #[expect(dead_code, reason = "reserved for serde DTO conformance / future use")]
     jti: Option<String>,
 
     // OAuth authorization request parameters
@@ -110,11 +110,11 @@ pub struct QueryParamHints<'a> {
 #[derive(Debug, Deserialize)]
 struct RequestObjectHeader {
     /// Algorithm used for signing.
-    #[allow(dead_code)]
+    #[expect(dead_code, reason = "reserved for serde DTO conformance / future use")]
     pub alg: String,
     /// Key ID (optional).
     #[serde(default)]
-    #[allow(dead_code)]
+    #[expect(dead_code, reason = "reserved for serde DTO conformance / future use")]
     pub kid: Option<String>,
     /// Type header — must be "oauth-authz-req+jwt" for Request Objects.
     #[serde(default)]
@@ -611,7 +611,12 @@ pub async fn validate_request_object(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
+#[expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    reason = "test code: panic on assertion failure is acceptable"
+)]
 mod tests {
     use super::*;
     use crate::services::oidc::jwt_bearer::SUPPORTED_ALGORITHMS;

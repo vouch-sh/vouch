@@ -7,12 +7,13 @@
 // This is a diagnostic/debug command that intentionally does low-level byte manipulation
 // and uses direct indexing for parsing binary data structures. The lints below are
 // suppressed because this is debugging code, not production code.
-#![allow(
+#![expect(
     clippy::indexing_slicing,
     clippy::unwrap_used,
     clippy::unwrap_in_result,
     clippy::expect_used,
-    clippy::needless_borrows_for_generic_args
+    clippy::needless_borrows_for_generic_args,
+    reason = "debugging command for diagnostics output, not production code paths"
 )]
 
 use anyhow::{Context, Result, bail};

@@ -235,7 +235,10 @@ fn extract_keyid_from_header(header_value: &str, label: &str) -> Option<String> 
 }
 
 #[cfg(test)]
-#[expect(clippy::unwrap_used, reason = "test code: panic on assertion failure is acceptable")]
+#[expect(
+    clippy::unwrap_used,
+    reason = "test code: panic on assertion failure is acceptable"
+)]
 mod tests {
     use super::*;
     use crate::algorithm::ecdsa_p256::EcdsaP256Signer;

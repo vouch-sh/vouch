@@ -417,8 +417,10 @@ pub async fn get_application_api(
 
 /// Update an application (API).
 /// PATCH /api/v1/applications/:id
-// Axum handlers require all extractors as parameters; argument count is inherent to the framework.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "axum handler signature: extractors are positional parameters"
+)]
 pub async fn update_application_api(
     method: Method,
     uri: OriginalUri,
@@ -785,8 +787,10 @@ pub async fn delete_application_api(
 
 /// Add a new client secret (API).
 /// POST /api/v1/applications/:id/secrets
-// Axum handlers require all extractors as parameters; argument count is inherent to the framework.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "axum handler signature: extractors are positional parameters"
+)]
 pub async fn add_secret_api(
     method: Method,
     uri: OriginalUri,
@@ -1196,7 +1200,12 @@ pub async fn revoke_tokens_api(
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used, clippy::unwrap_used, clippy::indexing_slicing)]
+#[expect(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::indexing_slicing,
+    reason = "test code: panic on assertion failure is acceptable"
+)]
 mod tests {
     use axum::http::StatusCode;
 

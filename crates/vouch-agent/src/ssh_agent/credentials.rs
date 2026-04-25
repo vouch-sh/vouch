@@ -193,7 +193,10 @@ pub(super) fn parse_openssh_public_key(openssh: &str) -> Result<Vec<u8>> {
 }
 
 #[cfg(test)]
-#[expect(clippy::unwrap_used, reason = "test code: panic on assertion failure is acceptable")]
+#[expect(
+    clippy::unwrap_used,
+    reason = "test code: panic on assertion failure is acceptable"
+)]
 mod tests {
     use super::*;
 

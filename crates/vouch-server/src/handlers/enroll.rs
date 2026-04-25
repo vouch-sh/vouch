@@ -125,13 +125,13 @@ pub struct OidcCallbackParams {
 #[derive(Debug, Deserialize)]
 struct OidcTokenResponse {
     id_token: String,
-    #[allow(dead_code)]
+    #[expect(dead_code, reason = "reserved for serde DTO conformance / future use")]
     access_token: String,
 }
 
 /// Client data JSON structure from `WebAuthn` response.
 #[derive(Deserialize)]
-#[allow(dead_code)]
+#[expect(dead_code, reason = "reserved for serde DTO conformance / future use")]
 struct ClientData {
     challenge: String,
     origin: String,
@@ -179,14 +179,12 @@ impl BrowserRegistrationState {
 
 /// Show device code entry page.
 /// GET /device
-#[allow(clippy::unused_async)]
 pub async fn device_verify_page() -> impl IntoResponse {
     DeviceVerifyTemplate { error: None }
 }
 
 /// Handle device code submission.
 /// POST /device
-#[allow(clippy::unused_async)]
 pub async fn device_verify_submit(
     State(state): State<Arc<AppState>>,
     Form(form): Form<UserCodeForm>,
@@ -345,7 +343,10 @@ pub async fn device_verify_submit(
 
 /// Handle OIDC callback.
 /// GET /oauth/callback
-#[allow(clippy::unused_async, clippy::too_many_lines)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "axum handler; OIDC callback orchestrates IdP exchange and enrollment"
+)]
 pub async fn oidc_callback(
     State(state): State<Arc<AppState>>,
     Query(params): Query<OidcCallbackParams>,
@@ -528,7 +529,6 @@ pub async fn oidc_callback(
     complete_enrollment_after_identity(&state, &stored_state, &oidc_state, identity).await
 }
 
-#[allow(clippy::too_many_lines)]
 pub(crate) async fn complete_enrollment_after_identity(
     state: &Arc<AppState>,
     stored_state: &db::OidcState,
@@ -752,7 +752,6 @@ pub async fn enroll_keys_page(State(state): State<Arc<AppState>>, jar: CookieJar
 /// Start browser-based `WebAuthn` registration.
 /// POST /enroll/webauthn/start
 /// Authentication is via session cookie (set by oidc_callback).
-#[allow(clippy::unused_async)]
 pub async fn browser_register_start(
     State(state): State<Arc<AppState>>,
     jar: CookieJar,
@@ -952,7 +951,10 @@ const MAX_CREDENTIAL_ID_BYTES: usize = 1023;
 /// 6. Hardware attestation validation (reject software passkeys)
 /// 7. WebAuthn cryptographic verification
 /// 8. Database operations (duplicate check, store, authorize)
-#[allow(clippy::unused_async, clippy::too_many_lines)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "axum handler; FIDO2 registration completion: attestation, db, session"
+)]
 pub async fn browser_register_complete(
     State(state): State<Arc<AppState>>,
     client_info: ClientInfo,
@@ -1432,7 +1434,6 @@ pub async fn direct_enroll_start(State(state): State<Arc<AppState>>) -> Response
 }
 
 /// Check if a device auth request is for direct enrollment.
-#[allow(dead_code)]
 pub fn is_direct_enrollment(device_auth: &db::DeviceAuthRequest) -> bool {
     device_auth.user_code.starts_with(DIRECT_ENROLL_PREFIX)
 }
@@ -1463,7 +1464,10 @@ fn is_valid_user_code_format(code: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
+    #![expect(
+        clippy::expect_used,
+        reason = "test code: panic on assertion failure is acceptable"
+    )]
 
     use super::*;
     use crate::test_utils::{http_post_json, test_app};

@@ -85,7 +85,10 @@ pub struct AwsTokenResult {
 /// * `authenticator_id` - The authenticator ID from the session (for AAGUID lookup)
 /// * `hd` - The user's organization domain (Google Workspace hosted domain)
 /// * `source` - AI coding agent identifier (e.g., "claude-code", "cursor")
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "AWS STS AssumeRoleWithWebIdentity issuance requires full session context"
+)]
 pub async fn issue_aws_token(
     store: &DocumentStore,
     base_url: &str,
@@ -172,11 +175,10 @@ async fn get_authenticator(
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
+#[expect(
     clippy::expect_used,
     clippy::indexing_slicing,
-    clippy::panic
+    reason = "test code: panic on assertion failure is acceptable"
 )]
 mod tests {
     use super::*;

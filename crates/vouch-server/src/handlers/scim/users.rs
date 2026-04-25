@@ -256,7 +256,10 @@ pub async fn get_user(
 ///
 /// Modifies a User resource using SCIM PATCH operations (add, replace, remove).
 /// Deactivating a user invalidates all sessions and revokes SSH certificates.
-#[allow(clippy::too_many_lines)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "SCIM PATCH operation handles add/remove/replace across all user fields"
+)]
 pub async fn patch_user(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,

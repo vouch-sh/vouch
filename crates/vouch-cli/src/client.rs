@@ -127,7 +127,10 @@ impl<H: HttpClient> VouchClient<H> {
     /// Create a client with a custom HTTP implementation.
     ///
     /// Used for testing with `TestHttpClient`.
-    #[allow(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "constructor used by TestHttpClient in test contexts"
+    )]
     pub(crate) fn with_http(http: H, base_url: &str) -> Self {
         Self {
             http,
@@ -705,12 +708,11 @@ impl ServerErrorKind {
 }
 
 #[cfg(test)]
-#[allow(
+#[expect(
     clippy::unwrap_used,
-    clippy::expect_used,
     clippy::indexing_slicing,
-    clippy::panic,
-    clippy::string_slice
+    clippy::string_slice,
+    reason = "test code: panic on assertion failure is acceptable"
 )]
 mod tests {
     use super::*;

@@ -106,7 +106,10 @@ pub struct Fido2AssertionResult {
 /// - Invalid FIDO2 assertion
 /// - Unknown authenticator
 /// - User mismatch
-#[allow(clippy::too_many_lines)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "FIDO2 grant: parse assertion, verify, bind tokens, audit"
+)]
 pub async fn exchange_fido2_assertion(
     state: &Arc<AppState>,
     params: Fido2AssertionParams<'_>,
@@ -336,7 +339,6 @@ pub async fn exchange_fido2_assertion(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     // NOTE(mtls-threading): `Fido2AssertionParams::mtls_cert_thumbprint` is a
     // plain `Option<&str>` threaded from the handler through to
