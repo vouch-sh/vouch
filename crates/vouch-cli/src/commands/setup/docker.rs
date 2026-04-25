@@ -161,8 +161,8 @@ fn print_example_config() {
 /// Check if Docker credential helper is configured.
 pub(crate) fn check_docker_config() -> DockerSetupStatus {
     // Check for symlink or batch file
-    let symlink_exists = crate::utils::vouch_helper_path("docker-credential-vouch")
-        .map(|p| {
+    let symlink_exists =
+        crate::utils::vouch_helper_path("docker-credential-vouch").is_ok_and(|p| {
             #[cfg(unix)]
             {
                 p.exists() || p.is_symlink()
@@ -172,8 +172,7 @@ pub(crate) fn check_docker_config() -> DockerSetupStatus {
                 // On Windows, check for the .bat file
                 p.with_extension("bat").exists()
             }
-        })
-        .unwrap_or(false);
+        });
 
     // Check Docker config
     let configured_registries = get_configured_registries().unwrap_or_default();

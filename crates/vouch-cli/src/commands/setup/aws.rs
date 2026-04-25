@@ -158,8 +158,7 @@ async fn run_discover(profile_prefix: Option<&str>, region: Option<&str>) -> Res
     let member_role_name = vouch_config
         .aws()
         .and_then(|a| a.sso_sessions.get(&session.name))
-        .map(|s| s.member_role_name.clone())
-        .unwrap_or_else(|| "VouchAccess".to_string());
+        .map_or_else(|| "VouchAccess".to_string(), |s| s.member_role_name.clone());
 
     let sso_region = session.region.clone();
     let sso_config = SsoConfig::from_session(&session);

@@ -370,17 +370,19 @@ pub(crate) async fn run(server: &str, key_path: Option<&str>, force: bool) -> Re
                 println!("SSH credentials loaded into agent.");
                 println!(
                     "  SSH agent socket: {}",
-                    vouch_agent::ssh_agent_socket_path()
-                        .map(|p| p.display().to_string())
-                        .unwrap_or_else(|_| { "~/.vouch/ssh-agent.sock".to_string() })
+                    vouch_agent::ssh_agent_socket_path().map_or_else(
+                        |_| "~/.vouch/ssh-agent.sock".to_string(),
+                        |p| p.display().to_string()
+                    )
                 );
                 println!();
                 println!("To use the agent, set SSH_AUTH_SOCK:");
                 println!(
                     "  export SSH_AUTH_SOCK={}",
-                    vouch_agent::ssh_agent_socket_path()
-                        .map(|p| p.display().to_string())
-                        .unwrap_or_else(|_| { "~/.vouch/ssh-agent.sock".to_string() })
+                    vouch_agent::ssh_agent_socket_path().map_or_else(
+                        |_| "~/.vouch/ssh-agent.sock".to_string(),
+                        |p| p.display().to_string()
+                    )
                 );
             }
         } else {

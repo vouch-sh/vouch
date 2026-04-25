@@ -123,8 +123,7 @@ pub(crate) async fn fetch_github_token_cached(server: &str) -> Result<GitHubEnvT
             .get("expires_at")
             .and_then(|v| v.as_str())
             .filter(|s| !s.is_empty())
-            .map(String::from)
-            .unwrap_or_else(cache::default_expiry);
+            .map_or_else(cache::default_expiry, String::from);
         Ok((response, expires_at))
     })
     .await?;

@@ -277,8 +277,7 @@ pub async fn github_webhook(
     let event_type = headers
         .get("x-github-event")
         .and_then(|h| h.to_str().ok())
-        .map(WebhookEvent::from)
-        .unwrap_or(WebhookEvent::Unknown);
+        .map_or(WebhookEvent::Unknown, WebhookEvent::from);
 
     service
         .handle_webhook_event(event_type, &body)

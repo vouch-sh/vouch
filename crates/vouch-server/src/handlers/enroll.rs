@@ -881,8 +881,7 @@ pub async fn browser_register_start(
     let now = jiff::Timestamp::now();
     let reg_exp = now
         .checked_add(jiff::Span::new().minutes(5))
-        .map(|t| t.as_second())
-        .unwrap_or(now.as_second() + 300);
+        .map_or(now.as_second() + 300, |t| t.as_second());
     let reg_state = BrowserRegistrationState {
         device_auth_id,
         user_id,

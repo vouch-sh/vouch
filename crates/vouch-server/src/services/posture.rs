@@ -222,6 +222,10 @@ pub(crate) fn validate_cel_expression(expression: &str) -> ServiceResult<()> {
 /// Supports 1-3 components: "15" → 15_000_000, "15.3" → 15_003_000,
 /// "15.3.1" → 15_003_001. Use for correct version comparisons:
 /// `semver(posture.os_version) >= semver("14.0.0")`
+#[expect(
+    clippy::rc_buffer,
+    reason = "cel::IntoFunction trait extractor only supports Arc<String>, not Arc<str>"
+)]
 fn cel_semver(ftx: &FunctionContext, value: Arc<String>) -> Result<Value, ExecutionError> {
     let mut parts = value.splitn(4, '.');
     let parse = |s: &str, ftx: &FunctionContext| -> Result<i64, ExecutionError> {

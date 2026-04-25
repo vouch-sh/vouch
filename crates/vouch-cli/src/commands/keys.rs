@@ -285,7 +285,7 @@ pub(crate) async fn remove(server: &str, key_id: &str, force: bool) -> Result<()
     // Prompt for confirmation unless --force is used
     if !force {
         println!("You are about to remove the key '{key_name}' (ID: {key_id}).");
-        if key.map(|k| k.is_current_session).unwrap_or(false) {
+        if key.is_some_and(|k| k.is_current_session) {
             println!("WARNING: This is the key used for your current session.");
             println!("         Your session will be invalidated.");
         }

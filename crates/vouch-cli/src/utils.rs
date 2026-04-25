@@ -133,12 +133,10 @@ pub(crate) fn vouch_helper_path(name: &str) -> Result<PathBuf> {
 ///
 /// Returns `true` if the path is a symlink whose target filename is `vouch`.
 pub(crate) fn is_vouch_symlink(path: &Path) -> bool {
-    std::fs::read_link(path)
-        .map(|target| {
-            let s = target.to_string_lossy();
-            s.ends_with("/vouch") || s.ends_with("\\vouch")
-        })
-        .unwrap_or(false)
+    std::fs::read_link(path).is_ok_and(|target| {
+        let s = target.to_string_lossy();
+        s.ends_with("/vouch") || s.ends_with("\\vouch")
+    })
 }
 
 /// Create a symlink (Unix) or batch file wrapper (Windows) pointing to the vouch binary.

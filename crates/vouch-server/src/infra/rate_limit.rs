@@ -41,7 +41,7 @@ use crate::handlers::extractors::resolve_client_ip;
 /// trusted proxies are configured or the peer is not trusted.
 #[derive(Debug, Clone)]
 pub struct TrustedProxyKeyExtractor {
-    trusted_cidrs: Arc<Vec<IpNet>>,
+    trusted_cidrs: Arc<[IpNet]>,
 }
 
 impl TrustedProxyKeyExtractor {
@@ -49,7 +49,7 @@ impl TrustedProxyKeyExtractor {
     #[must_use]
     pub fn new(trusted_cidrs: Vec<IpNet>) -> Self {
         Self {
-            trusted_cidrs: Arc::new(trusted_cidrs),
+            trusted_cidrs: Arc::from(trusted_cidrs),
         }
     }
 }

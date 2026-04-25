@@ -133,8 +133,7 @@ pub async fn admin_audit_page(
             let created_at = e
                 .created_at
                 .parse::<Timestamp>()
-                .map(|ts| format_timestamp(&ts))
-                .unwrap_or_else(|_| e.created_at.clone());
+                .map_or_else(|_| e.created_at.clone(), |ts| format_timestamp(&ts));
             AuditRow {
                 id: e.id.clone(),
                 event_type: e.event_type.clone(),

@@ -294,10 +294,7 @@ pub async fn exchange_fido2_assertion(
     }
 
     // 10. Create OAuth access token
-    let scope = params
-        .scope
-        .map(ScopeSet::parse)
-        .unwrap_or_else(ScopeSet::all);
+    let scope = params.scope.map_or_else(ScopeSet::all, ScopeSet::parse);
 
     let dpop_jkt = params.dpop_proof.as_ref().map(|p| p.jkt.as_str());
     let now = jiff::Timestamp::now().as_second();

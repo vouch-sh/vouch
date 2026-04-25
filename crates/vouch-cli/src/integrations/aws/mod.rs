@@ -158,17 +158,16 @@ impl IntegrationCheck for AwsIntegration {
             };
         }
 
-        let summary = status
-            .profile_name
-            .as_ref()
-            .map(|p| {
+        let summary = status.profile_name.as_ref().map_or_else(
+            || "configured".to_string(),
+            |p| {
                 if p == "default" {
                     "default profile".to_string()
                 } else {
                     format!("profile: {p}")
                 }
-            })
-            .unwrap_or_else(|| "configured".to_string());
+            },
+        );
 
         let mut details = Vec::new();
         if let Some(role) = &status.role_arn {

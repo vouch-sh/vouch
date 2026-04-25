@@ -136,8 +136,7 @@ async fn test_rfc9207_authorize_response_includes_iss_parameter() {
     let after_iss = location.get(iss_start..).expect("iss_start in bounds");
     let iss_end = after_iss
         .find('&')
-        .map(|i| iss_start + i)
-        .unwrap_or(location.len());
+        .map_or(location.len(), |i| iss_start + i);
     let iss_encoded = location
         .get(iss_start..iss_end)
         .expect("iss range in bounds");

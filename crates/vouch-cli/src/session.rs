@@ -149,9 +149,10 @@ fn write_session_cookie_file(server: &str, token: &str, expires_at_ts: Option<ji
         Err(_) => "localhost".to_string(),
     };
 
-    let expires = expires_at_ts
-        .map(|ts| ts.as_second())
-        .unwrap_or_else(|| jiff::Timestamp::now().as_second() + 28_800);
+    let expires = expires_at_ts.map_or_else(
+        || jiff::Timestamp::now().as_second() + 28_800,
+        |ts| ts.as_second(),
+    );
 
     let cookie = SessionCookie::new(&domain, token, expires);
     if let Err(e) = write_cookie(&cookie) {

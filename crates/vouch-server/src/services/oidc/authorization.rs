@@ -661,8 +661,7 @@ pub async fn issue_authorization_code(
     let lifetime_secs = params.auth_code_lifetime_seconds;
     let exp = now
         .checked_add(Span::new().seconds(lifetime_secs))
-        .map(|t| t.as_second())
-        .unwrap_or_else(|_| now.as_second() + lifetime_secs);
+        .map_or_else(|_| now.as_second() + lifetime_secs, |t| t.as_second());
 
     let auth_code = AuthorizationCode {
         iss: state.config().base_url.clone(),
