@@ -90,12 +90,7 @@ pub fn build_response_base_with_params_str<T, U>(
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::indexing_slicing,
-    clippy::panic
-)]
+#[expect(clippy::unwrap_used, reason = "test code: panic on assertion failure is acceptable")]
 mod tests {
     use super::*;
     use crate::component::ComponentIdentifier;

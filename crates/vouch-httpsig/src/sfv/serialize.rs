@@ -143,7 +143,7 @@ fn serialize_params(params: &SfvParams, out: &mut String) {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[expect(clippy::unwrap_used, reason = "test code: panic on assertion failure is acceptable")]
 mod tests {
     use super::*;
     use crate::sfv::parse;

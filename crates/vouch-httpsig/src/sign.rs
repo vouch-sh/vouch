@@ -241,12 +241,7 @@ fn build_signature_dict(label: &str, signature: &[u8]) -> String {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::indexing_slicing,
-    clippy::panic
-)]
+#[expect(clippy::unwrap_used, reason = "test code: panic on assertion failure is acceptable")]
 mod tests {
     use super::*;
     use crate::algorithm::hmac_sha256::HmacSha256Key;
