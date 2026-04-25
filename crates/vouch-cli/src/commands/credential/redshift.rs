@@ -155,7 +155,12 @@ pub(crate) fn resolve_target<'a>(
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+#[expect(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::panic,
+    reason = "test code: panic on assertion failure is acceptable"
+)]
 mod tests {
     use super::*;
 

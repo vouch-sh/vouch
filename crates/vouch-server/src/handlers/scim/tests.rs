@@ -1,5 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
-#![allow(clippy::expect_used, clippy::unwrap_used, clippy::indexing_slicing)]
+#![expect(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::indexing_slicing,
+    reason = "test code: panic on assertion failure is acceptable"
+)]
 
 use super::*;
 use crate::test_utils::*;

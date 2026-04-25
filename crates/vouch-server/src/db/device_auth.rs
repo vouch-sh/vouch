@@ -121,7 +121,10 @@ pub async fn get_device_auth_by_user_code(
 }
 
 /// Get a device auth request by ID.
-#[allow(dead_code)] // Used in db/tests.rs
+#[allow(
+    dead_code,
+    reason = "API exposed for callers; lint fires inconsistently across compilation targets"
+)]
 pub(crate) async fn get_device_auth_by_id(
     store: &DocumentStore,
     id: &str,
@@ -180,7 +183,6 @@ pub async fn authorize_device_auth(
 ///
 /// The read and status update execute within a single transaction so
 /// concurrent denial attempts are serialized correctly.
-#[allow(dead_code)]
 pub async fn deny_device_auth(store: &DocumentStore, id: &str) -> Result<()> {
     if id.is_empty() {
         bail!("deny_device_auth called with empty id");

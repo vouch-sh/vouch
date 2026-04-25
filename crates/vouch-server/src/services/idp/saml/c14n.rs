@@ -408,7 +408,11 @@ pub(crate) fn escape_attribute(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    #![expect(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        reason = "test code: panic on assertion failure is acceptable"
+    )]
     use super::*;
 
     fn c14n(xml: &str, xpath: &str, inclusive_prefixes: &[&str]) -> String {

@@ -151,7 +151,6 @@ pub use super::claims::CnfClaim;
 #[derive(Debug, Clone)]
 pub enum DpopError {
     /// Missing DPoP header.
-    #[allow(dead_code)]
     MissingProof,
     /// Invalid proof format.
     InvalidFormat(String),
@@ -201,7 +200,6 @@ pub struct ValidatedDpopProof {
     /// JWK thumbprint of the sender's key.
     pub jkt: String,
     /// The public key from the proof.
-    #[allow(dead_code)]
     pub jwk: DpopJwk,
     /// Unique identifier from the proof.
     pub jti: String,
@@ -382,8 +380,11 @@ pub fn validate_dpop_claims(
 ///
 /// RFC 9449 Section 4.2: The `htu` claim should contain the HTTP target URI
 /// without query and fragment components.
-#[allow(clippy::string_slice)]
 /// Normalize a URI by stripping query and fragment for comparison.
+#[expect(
+    clippy::string_slice,
+    reason = "byte offsets come from str::find on ASCII chars; always at valid char boundary"
+)]
 pub fn normalize_uri(uri: &str) -> String {
     // Find the first occurrence of either '?' or '#' to handle all orderings
     // Safety: both `find('?')` and `find('#')` return byte offsets of ASCII
@@ -566,7 +567,11 @@ pub async fn validate_dpop_at_resource(
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used, clippy::unwrap_used, clippy::indexing_slicing)]
+#[expect(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    reason = "test code: panic on assertion failure is acceptable"
+)]
 mod tests {
     use super::*;
 

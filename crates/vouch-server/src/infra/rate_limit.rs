@@ -61,7 +61,6 @@ impl KeyExtractor for TrustedProxyKeyExtractor {
         "TrustedProxyKeyExtractor"
     }
 
-    #[allow(clippy::indexing_slicing)]
     fn extract<T>(
         &self,
         req: &http::Request<T>,

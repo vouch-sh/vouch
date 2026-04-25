@@ -16,7 +16,10 @@ pub(super) fn detect(posture: &mut DevicePosture) {
 #[cfg(unix)]
 fn detect_elevated() -> bool {
     // SAFETY: geteuid() is always safe to call.
-    #[allow(unsafe_code)]
+    #[expect(
+        unsafe_code,
+        reason = "libc::geteuid is always safe with no side effects"
+    )]
     unsafe {
         libc::geteuid() == 0
     }
@@ -114,12 +117,6 @@ pub(super) fn run_command(program: &str, args: &[&str]) -> Option<String> {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::indexing_slicing,
-    clippy::panic
-)]
 mod tests {
     #[cfg(target_os = "linux")]
     use super::parse_ppid_from_proc_stat;

@@ -72,7 +72,10 @@ pub struct AuthenticatorWithUser {
 /// Create a new authenticator.
 ///
 /// `user_email` is denormalized into the document to eliminate JOINs.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "authenticator record requires all denormalized fields"
+)]
 pub async fn create_authenticator(
     store: &DocumentStore,
     user_id: &str,

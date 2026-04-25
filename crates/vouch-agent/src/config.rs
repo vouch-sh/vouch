@@ -114,7 +114,10 @@ pub(crate) fn read_config() -> Result<Option<VouchConfig>> {
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used)]
+#[expect(
+    clippy::expect_used,
+    reason = "test code: panic on assertion failure is acceptable"
+)]
 mod tests {
     use super::*;
 

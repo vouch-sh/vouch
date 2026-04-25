@@ -949,7 +949,6 @@ pub async fn delete_secret_form(
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use axum::http::StatusCode;
 

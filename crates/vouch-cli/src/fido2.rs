@@ -64,7 +64,10 @@ struct SuppressStdout {
 }
 
 #[cfg(unix)]
-#[allow(unsafe_code)]
+#[expect(
+    unsafe_code,
+    reason = "POSIX dup/dup2 for stdout suppression; safety documented inline"
+)]
 impl SuppressStdout {
     fn new() -> Option<Self> {
         use std::os::unix::io::AsRawFd;
@@ -94,7 +97,10 @@ impl SuppressStdout {
 }
 
 #[cfg(unix)]
-#[allow(unsafe_code)]
+#[expect(
+    unsafe_code,
+    reason = "POSIX dup2 to restore stdout on drop; safety documented inline"
+)]
 impl Drop for SuppressStdout {
     fn drop(&mut self) {
         use std::os::unix::io::AsRawFd;
@@ -264,7 +270,7 @@ impl YubiKey {
     /// Discover and connect to a `YubiKey`.
     ///
     /// Returns immediately if a device is found, or an error if not.
-    #[allow(dead_code)]
+    #[expect(dead_code, reason = "used by binary target, not the library")]
     pub(crate) fn discover() -> Result<Self> {
         let cfg = LibCfg::init();
         let device = FidoKeyHidFactory::create(&cfg)
@@ -360,7 +366,7 @@ impl YubiKey {
     /// Get the number of PIN retry attempts remaining.
     ///
     /// Returns the count of attempts before the PIN is blocked.
-    #[allow(dead_code)]
+    #[expect(dead_code, reason = "used by binary target, not the library")]
     pub(crate) fn pin_retries(&self) -> Result<i32> {
         self.device
             .get_pin_retries()
@@ -388,7 +394,7 @@ impl YubiKey {
     }
 
     /// Change the PIN on a `YubiKey`.
-    #[allow(dead_code)]
+    #[expect(dead_code, reason = "used by binary target, not the library")]
     pub(crate) fn change_pin(&self, current_pin: &str, new_pin: &str) -> Result<()> {
         self.device
             .change_pin(current_pin, new_pin)
@@ -402,7 +408,10 @@ impl YubiKey {
     /// `exclude_credentials` is a list of credential IDs already registered
     /// for this user. If the `YubiKey` holds any of them, it returns
     /// `CTAP2_ERR_CREDENTIAL_EXCLUDED` (0x19) instead of creating a duplicate.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "FIDO2 makeCredential parameters per CTAP2 spec"
+    )]
     pub(crate) fn register(
         &self,
         rp_id: &str,
@@ -520,7 +529,10 @@ impl YubiKey {
 /// Prompt for `YubiKey` PIN securely (no echo).
 ///
 /// Returns the PIN wrapped in `SecretString` for memory protection.
-#[allow(dead_code)] // Used by binary target, not the library
+#[allow(
+    dead_code,
+    reason = "used by binary target; lint fires inconsistently across compilation targets"
+)]
 fn prompt_pin() -> Result<SecretString> {
     eprint!("YubiKey PIN: ");
     let pin = rpassword::read_password().context("failed to read PIN")?;
@@ -611,7 +623,10 @@ fn translate_fido2_error(err: anyhow::Error, operation: &str) -> anyhow::Error {
 /// - Maximum 63 characters (FIDO2 limit)
 ///
 /// Returns the PIN wrapped in `SecretString` for memory protection.
-#[allow(dead_code)] // Used by binary target, not the library
+#[allow(
+    dead_code,
+    reason = "used by binary target; lint fires inconsistently across compilation targets"
+)]
 fn prompt_new_pin() -> Result<SecretString> {
     use std::io::{Write, stderr};
 
@@ -647,7 +662,10 @@ fn prompt_new_pin() -> Result<SecretString> {
 /// Check if a PIN is set on the YubiKey, and if not, guide the user through setup.
 ///
 /// Returns the PIN wrapped in `SecretString` (either existing or newly set).
-#[allow(dead_code)] // Used by binary target, not the library
+#[allow(
+    dead_code,
+    reason = "used by binary target; lint fires inconsistently across compilation targets"
+)]
 pub(crate) fn ensure_pin_configured(key: &YubiKey) -> Result<SecretString> {
     if key.is_pin_set()? {
         // PIN is already set, just prompt for it
@@ -710,14 +728,20 @@ impl ClientData {
 /// Trait for abstracting FIDO2 device operations.
 ///
 /// This trait enables testing FIDO2 flows without physical hardware.
-#[allow(dead_code)]
+#[allow(
+    dead_code,
+    reason = "trait used by tests and feature-gated test-utils consumers; lint fires inconsistently across compilation targets"
+)]
 pub trait FidoDevice: Send {
     /// Perform FIDO2 registration (makeCredential).
     ///
     /// Creates a new credential on the device.
     /// `exclude_credentials` prevents duplicate registration when the device
     /// already holds one of the listed credentials.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "FIDO2 makeCredential parameters per CTAP2 spec"
+    )]
     fn register(
         &self,
         rp_id: &str,
@@ -778,7 +802,10 @@ impl FidoDevice for YubiKey {
 /// This implementation uses Ed25519 keys to generate real cryptographic
 /// signatures that can be verified by the server's COSE verifier.
 #[cfg(any(test, feature = "test-utils"))]
-#[allow(dead_code)]
+#[allow(
+    dead_code,
+    reason = "test/test-utils helper; lint fires inconsistently across compilation targets"
+)]
 fn sha256(data: &[u8]) -> Vec<u8> {
     aws_lc_rs::digest::digest(&aws_lc_rs::digest::SHA256, data)
         .as_ref()
@@ -786,7 +813,10 @@ fn sha256(data: &[u8]) -> Vec<u8> {
 }
 
 #[cfg(feature = "test-utils")]
-#[allow(dead_code)]
+#[allow(
+    dead_code,
+    reason = "fields populated for feature-gated test-utils consumers; lint fires inconsistently"
+)]
 pub struct MockFidoDevice {
     /// The signing key (Ed25519 private key).
     signing_key: ed25519_dalek::SigningKey,
@@ -799,7 +829,10 @@ pub struct MockFidoDevice {
 }
 
 #[cfg(feature = "test-utils")]
-#[allow(dead_code)]
+#[allow(
+    dead_code,
+    reason = "constructors and helpers invoked by feature-gated test consumers; lint fires inconsistently"
+)]
 impl MockFidoDevice {
     /// Create a new mock FIDO2 device with random keys.
     #[must_use]
@@ -930,7 +963,10 @@ impl FidoDevice for MockFidoDevice {
         // Build attested credential data
         // AAGUID (16 bytes) + credential ID length (2 bytes) + credential ID + public key
         let aaguid = [0u8; 16]; // Zeros for mock device
-        #[allow(clippy::cast_possible_truncation)]
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "credential_id length is bounded to ≤u16::MAX by FIDO2 attestation format"
+        )]
         let cred_id_len = (self.credential_id.len() as u16).to_be_bytes();
 
         let mut auth_data = Vec::new();
@@ -991,7 +1027,11 @@ impl FidoDevice for MockFidoDevice {
 
 /// Build a COSE OKP (Octet Key Pair) key for Ed25519.
 #[cfg(any(test, feature = "test-utils"))]
-#[allow(dead_code, clippy::expect_used)]
+#[allow(
+    dead_code,
+    clippy::expect_used,
+    reason = "test/test-utils helper; .expect on infallible CBOR construction; lint fires inconsistently"
+)]
 fn build_cose_okp_key(public_key: &[u8; 32]) -> Vec<u8> {
     use ciborium::Value;
 
@@ -1016,7 +1056,10 @@ fn build_cose_okp_key(public_key: &[u8; 32]) -> Vec<u8> {
 
 /// Build a "none" attestation object for testing.
 #[cfg(any(test, feature = "test-utils"))]
-#[allow(dead_code)]
+#[allow(
+    dead_code,
+    reason = "test/test-utils helper; lint fires inconsistently across compilation targets"
+)]
 fn build_none_attestation_object(auth_data: &[u8]) -> Result<Vec<u8>> {
     use ciborium::Value;
 
@@ -1037,7 +1080,6 @@ fn build_none_attestation_object(auth_data: &[u8]) -> Result<Vec<u8>> {
 
 #[cfg(test)]
 mod tests {
-    #[allow(unused_imports)]
     use super::*;
 
     #[tokio::test]

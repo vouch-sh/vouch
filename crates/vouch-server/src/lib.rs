@@ -168,7 +168,10 @@ fn is_valid_host(hostname: &str, rp_id: &str) -> bool {
 #[cfg(test)]
 mod redirect_tests {
     // Tests are allowed to use unwrap/expect for convenience
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    #![expect(
+        clippy::unwrap_used,
+        reason = "test code: panic on assertion failure is acceptable"
+    )]
 
     use super::*;
     use crate::services::oidc::OidcSigningKey;

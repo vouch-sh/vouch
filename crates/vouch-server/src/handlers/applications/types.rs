@@ -86,7 +86,6 @@ impl From<OAuthClient> for ApplicationInfo {
 /// Application create page template.
 #[derive(Template)]
 #[template(path = "applications/create.html")]
-#[allow(dead_code)]
 pub struct ApplicationCreateTemplate {
     /// Authentication context for header display.
     pub auth: AuthContext,
@@ -97,7 +96,6 @@ pub struct ApplicationCreateTemplate {
 /// Application created success page (shows credentials once).
 #[derive(Template)]
 #[template(path = "applications/created.html")]
-#[allow(dead_code)]
 pub struct ApplicationCreatedTemplate {
     pub name: String,
     pub client_id: String,
@@ -111,7 +109,6 @@ pub struct ApplicationCreatedTemplate {
 /// Application detail page template.
 #[derive(Template)]
 #[template(path = "applications/detail.html")]
-#[allow(dead_code)]
 pub struct ApplicationDetailTemplate {
     pub app: ApplicationInfo,
     pub secrets_count: usize,
@@ -130,7 +127,6 @@ pub struct UsageStat {
 /// Secret added success page (shows new secret once).
 #[derive(Template)]
 #[template(path = "applications/secret_added.html")]
-#[allow(dead_code)]
 pub struct SecretAddedTemplate {
     pub app_id: String,
     pub name: String,

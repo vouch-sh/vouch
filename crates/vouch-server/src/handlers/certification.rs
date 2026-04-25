@@ -341,7 +341,10 @@ async fn get_or_create_cert_authenticator(
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::expect_used, clippy::unwrap_used)]
+    #![expect(
+        clippy::expect_used,
+        reason = "test code: panic on assertion failure is acceptable"
+    )]
     use super::*;
     use crate::handlers::browser_login::hmac_sha256_base64url;
     use crate::handlers::oidc::build_authorization_success_redirect_url;

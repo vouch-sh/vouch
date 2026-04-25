@@ -70,7 +70,10 @@ fn build_date() -> String {
 
 /// Print an ASCII banner at server startup.
 pub fn print_startup_banner() {
-    #[allow(clippy::print_stdout)]
+    #[expect(
+        clippy::print_stdout,
+        reason = "intentional banner output to stdout on server startup"
+    )]
     {
         println!(
             r"

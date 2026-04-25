@@ -5,7 +5,10 @@
 //! with serde_json before we introduce new encoding types.
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+#[expect(
+    clippy::unwrap_used,
+    reason = "test code: panic on assertion failure is acceptable"
+)]
 mod tests {
     use crate::encoding::{Base64Url, ConvertEncoding, Encoded, Raw};
     use serde::{Deserialize, Serialize};

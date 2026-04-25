@@ -80,7 +80,10 @@ pub fn is_running() -> Result<bool> {
 
 /// Check if a process with the given PID is running.
 #[cfg(unix)]
-#[allow(unsafe_code)]
+#[expect(
+    unsafe_code,
+    reason = "libc::kill(pid, 0) probe; safety documented inline"
+)]
 fn is_process_running(pid: i32) -> bool {
     // Send signal 0 to check if process exists
     // SAFETY: kill(pid, 0) is a standard Unix API to check if a process exists
@@ -144,7 +147,10 @@ pub fn remove_pid_file() -> Result<()> {
 /// Returns `Ok(DaemonizeResult::Child)` in the daemon process,
 /// `Ok(DaemonizeResult::Parent)` in parent processes (caller should exit with code 0).
 #[cfg(unix)]
-#[allow(unsafe_code)]
+#[expect(
+    unsafe_code,
+    reason = "POSIX double-fork daemonization; safety documented inline"
+)]
 pub fn daemonize() -> Result<DaemonizeResult> {
     use std::os::unix::io::AsRawFd;
 

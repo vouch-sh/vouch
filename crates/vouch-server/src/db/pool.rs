@@ -120,7 +120,10 @@ impl Pool {
     /// Panics if the in-memory pool creation fails (should never happen).
     #[cfg(any(test, feature = "test-utils"))]
     #[must_use]
-    #[allow(clippy::expect_used)]
+    #[expect(
+        clippy::expect_used,
+        reason = "test-only constructor; .expect surfaces broken in-memory sqlite setup"
+    )]
     pub fn new_test() -> Self {
         // Create a synchronous in-memory pool
         // Note: This is intentionally synchronous for test setup convenience
@@ -817,7 +820,10 @@ pub(crate) fn retry_backoff(attempt: u32) -> Duration {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[expect(
+    clippy::unwrap_used,
+    reason = "test code: panic on assertion failure is acceptable"
+)]
 mod tests {
     use super::*;
 

@@ -319,7 +319,10 @@ impl<'a> DerParser<'a> {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
+    #![expect(
+        clippy::unwrap_used,
+        reason = "test code: panic on assertion failure is acceptable"
+    )]
     use super::*;
 
     // ====================================================================

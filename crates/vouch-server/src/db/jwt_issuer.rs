@@ -52,7 +52,10 @@ impl From<Document<TrustedJwtIssuerDoc>> for TrustedJwtIssuer {
 }
 
 /// Create a new trusted JWT issuer.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "JWT issuer record requires all configuration fields"
+)]
 pub async fn create_trusted_jwt_issuer(
     store: &DocumentStore,
     issuer: &str,
@@ -100,7 +103,10 @@ pub async fn list_trusted_jwt_issuers(store: &DocumentStore) -> Result<Vec<Trust
 }
 
 /// Update a trusted JWT issuer.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "JWT issuer record requires all configuration fields"
+)]
 pub async fn update_trusted_jwt_issuer(
     store: &DocumentStore,
     id: &str,

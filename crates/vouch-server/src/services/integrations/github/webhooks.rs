@@ -25,13 +25,11 @@ pub enum InstallationEvent {
         installation: WebhookInstallation,
         #[serde(default)]
         repositories: Vec<WebhookRepository>,
-        #[allow(dead_code)]
         sender: Option<WebhookSender>,
     },
     Deleted {
         installation: WebhookInstallation,
         #[serde(default)]
-        #[allow(dead_code)]
         repositories: Vec<WebhookRepository>,
     },
     Suspend {
@@ -79,21 +77,17 @@ pub struct WebhookInstallation {
 pub struct WebhookAccount {
     pub login: String,
     #[serde(rename = "type")]
-    #[allow(dead_code)]
     pub account_type: String,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct WebhookRepository {
     pub name: String,
-    #[allow(dead_code)]
     pub full_name: String,
-    #[allow(dead_code)]
     pub private: bool,
 }
 
 #[derive(Debug, Deserialize)]
-#[allow(dead_code)]
 pub struct WebhookSender {
     pub login: String,
 }
@@ -342,7 +336,11 @@ impl GitHubService<'_> {
 // ============================================================================
 
 #[cfg(test)]
-#[allow(clippy::expect_used, clippy::unwrap_used, clippy::indexing_slicing)]
+#[expect(
+    clippy::unwrap_used,
+    clippy::indexing_slicing,
+    reason = "test code: panic on assertion failure is acceptable"
+)]
 mod tests {
     use super::*;
 

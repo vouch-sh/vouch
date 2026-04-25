@@ -517,7 +517,11 @@ pub fn extract_public_key_from_attestation(attestation: &[u8]) -> Option<Vec<u8>
 }
 
 #[cfg(test)]
-#[allow(clippy::indexing_slicing, clippy::unwrap_used)]
+#[expect(
+    clippy::indexing_slicing,
+    clippy::unwrap_used,
+    reason = "test code: panic on assertion failure is acceptable"
+)]
 mod tests {
     use super::*;
 

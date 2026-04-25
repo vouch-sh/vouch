@@ -157,8 +157,10 @@ impl ResolvedClient {
     /// Used for JAR and request_uri_fetch flows, where the client must be
     /// loaded before JWT verification. The client has already been through
     /// `lookup_and_check_active`.
-    // Response is 128 bytes but this is intentional — we return HTTP responses.
-    #[allow(clippy::result_large_err)]
+    #[expect(
+        clippy::result_large_err,
+        reason = "Err is an HTTP Response; size is acceptable in error path"
+    )]
     fn from_validated_client(
         client: OAuthClient,
         redirect_uri: String,
@@ -1062,7 +1064,6 @@ async fn handle_pending_auth(state: &Arc<AppState>, pending_id: &str, jar: &Cook
 // ---------------------------------------------------------------------------
 
 /// Complete the pending auth flow: check access, check max_age, issue code.
-#[allow(clippy::too_many_arguments)]
 async fn complete_pending_auth(
     state: &Arc<AppState>,
     resolved: &ResolvedClient,
@@ -1219,8 +1220,10 @@ async fn lookup_and_check_active(
 /// Resolve the redirect_uri from the request parameter or the client's single registered URI.
 ///
 /// Returns `Err(Response)` with an error page when the URI cannot be determined.
-// Response is 128 bytes but this is intentional — we return HTTP responses.
-#[allow(clippy::result_large_err)]
+#[expect(
+    clippy::result_large_err,
+    reason = "Err is an HTTP Response; size is acceptable in error path"
+)]
 fn resolve_redirect_uri(
     redirect_uri_param: Option<&str>,
     client: &OAuthClient,
@@ -1356,7 +1359,10 @@ enum ReauthPolicy {
 /// Called after session validation confirms the user is authenticated. Checks
 /// client access, applies the re-auth policy, validates ACR and resource, optionally
 /// consumes a PAR record, and issues the authorization code.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "OAuth authorization for authenticated user requires full validated request context"
+)]
 async fn authorize_authenticated_user(
     state: &Arc<AppState>,
     validated: ValidatedAuthRequest,
@@ -1442,7 +1448,10 @@ async fn authorize_authenticated_user(
 /// Validate ACR, resource, consume PAR if needed, and issue the authorization code.
 ///
 /// Called after access and re-auth checks have passed in `authorize_authenticated_user`.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "issuing authorization code requires full validated request context"
+)]
 async fn issue_code_after_reauth_check(
     state: &Arc<AppState>,
     validated: ValidatedAuthRequest,

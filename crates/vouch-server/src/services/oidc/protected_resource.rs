@@ -116,7 +116,6 @@ pub const PROTECTED_RESOURCE_PREFIXES: &[&str] = &[
 /// fields and `null` values as equivalent but discourages emitting
 /// explicit `null`s.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-#[allow(clippy::struct_excessive_bools)]
 pub struct ProtectedResourceMetadata {
     /// RFC 9728 §2: REQUIRED. Resource identifier URL. Per §4, the
     /// returned value MUST be byte-identical to the resource

@@ -183,7 +183,10 @@ fn parse_serverless_json_response(json: &str) -> Result<RedshiftCredentials> {
         .and_then(|v| v.as_f64())
         .context("missing expiration in Redshift Serverless response")?;
 
-    #[allow(clippy::cast_possible_truncation)]
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "Redshift expiration is a Unix timestamp (seconds), well below i64::MAX"
+    )]
     let expiration_secs = expiration_ts as i64;
     let expiration = jiff::Timestamp::from_second(expiration_secs)
         .context("invalid expiration timestamp in Redshift Serverless response")?
@@ -197,7 +200,10 @@ fn parse_serverless_json_response(json: &str) -> Result<RedshiftCredentials> {
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used, clippy::unwrap_used)]
+#[expect(
+    clippy::expect_used,
+    reason = "test code: panic on assertion failure is acceptable"
+)]
 mod tests {
     use super::*;
 

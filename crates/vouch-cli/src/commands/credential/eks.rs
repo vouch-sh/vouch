@@ -107,7 +107,10 @@ fn build_exec_credential(token: &str) -> Result<serde_json::Value> {
 /// The lifetime matches the presigned STS URL validity minus a safety
 /// margin, so cached tokens are never served after the URL expires.
 fn expiration_rfc3339() -> Result<String> {
-    #[allow(clippy::cast_possible_wrap)]
+    #[expect(
+        clippy::cast_possible_wrap,
+        reason = "EKS_TOKEN_EXPIRES_SECONDS is bounded to <2^63 by AWS EKS token TTL"
+    )]
     let ttl_seconds = EKS_TOKEN_EXPIRES_SECONDS as i64 - EKS_EXPIRY_MARGIN_SECONDS;
     let expires = jiff::Timestamp::now()
         .checked_add(jiff::SignedDuration::from_secs(ttl_seconds))
@@ -116,7 +119,12 @@ fn expiration_rfc3339() -> Result<String> {
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used, clippy::unwrap_used, clippy::indexing_slicing)]
+#[expect(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::indexing_slicing,
+    reason = "test code: panic on assertion failure is acceptable"
+)]
 mod tests {
     use super::*;
 

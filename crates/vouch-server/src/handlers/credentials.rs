@@ -664,8 +664,10 @@ pub async fn get_github_status(
 /// Returns a short-lived GitHub installation access token that can be used
 /// with Git operations. The token is scoped to the user's organization's
 /// GitHub installation with minimal permissions (contents:write, metadata:read).
-// Axum handlers require all extractors as parameters; argument count is inherent to the framework.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "axum handler signature: extractors are positional parameters"
+)]
 pub async fn get_github_token(
     method: Method,
     uri: OriginalUri,
@@ -908,7 +910,12 @@ pub async fn get_github_token(
 // ============================================================================
 
 #[cfg(test)]
-#[allow(clippy::expect_used, clippy::unwrap_used, clippy::indexing_slicing)]
+#[expect(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::indexing_slicing,
+    reason = "test code: panic on assertion failure is acceptable"
+)]
 mod tests {
     use crate::test_utils::*;
     use axum::http::StatusCode;

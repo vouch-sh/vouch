@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Shared utility functions for the CLI.
 
-#![allow(dead_code)]
+#![allow(
+    dead_code,
+    reason = "shared utilities used selectively across binary and test targets"
+)]
 
 use anyhow::{Context, Result};
 use std::fs;
@@ -149,7 +152,14 @@ pub(crate) fn is_vouch_symlink(path: &Path) -> bool {
 pub(crate) fn create_symlink_with_fallback(
     vouch_path: &Path,
     symlink_path: &Path,
-    #[allow(unused_variables)] windows_batch_content: &str,
+    #[cfg_attr(
+        not(target_os = "windows"),
+        expect(
+            unused_variables,
+            reason = "parameter consumed only under cfg(windows)"
+        )
+    )]
+    windows_batch_content: &str,
 ) -> Result<()> {
     // Ensure parent directory exists
     if let Some(parent) = symlink_path.parent()
@@ -222,7 +232,10 @@ pub(crate) fn create_symlink_with_fallback(
 /// This is the only `unsafe` call in the CLI crate. `flock` is a well-defined
 /// POSIX API and the file descriptor is guaranteed valid by the borrow of `File`.
 #[cfg(unix)]
-#[allow(unsafe_code)]
+#[expect(
+    unsafe_code,
+    reason = "POSIX flock; safety documented inline above call site"
+)]
 pub(crate) fn flock_exclusive(file: &fs::File) -> Result<(), std::io::Error> {
     use std::os::unix::io::{AsFd, AsRawFd};
     let ret = unsafe { libc::flock(file.as_fd().as_raw_fd(), libc::LOCK_EX) };
@@ -233,7 +246,10 @@ pub(crate) fn flock_exclusive(file: &fs::File) -> Result<(), std::io::Error> {
 }
 
 #[cfg(test)]
-#[allow(clippy::panic_in_result_fn)]
+#[expect(
+    clippy::panic_in_result_fn,
+    reason = "test code: panic on assertion failure is acceptable"
+)]
 mod tests {
     use super::*;
 

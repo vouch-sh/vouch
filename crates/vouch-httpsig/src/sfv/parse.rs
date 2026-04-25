@@ -554,11 +554,11 @@ pub fn parse_item(input: &str) -> Result<SfvItem, HttpSigError> {
 }
 
 #[cfg(test)]
-#[allow(
+#[expect(
     clippy::unwrap_used,
-    clippy::expect_used,
     clippy::indexing_slicing,
-    clippy::panic
+    clippy::panic,
+    reason = "test code: panic on assertion failure is acceptable"
 )]
 mod tests {
     use super::*;

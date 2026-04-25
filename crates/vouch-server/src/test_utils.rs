@@ -4,7 +4,10 @@
 //! This module provides shared test infrastructure for handler tests.
 
 // Tests are allowed to use expect/unwrap on failures
-#![allow(clippy::expect_used, clippy::unwrap_used, clippy::indexing_slicing)]
+#![expect(
+    clippy::expect_used,
+    reason = "test code: panic on assertion failure is acceptable"
+)]
 
 use arc_swap::ArcSwap;
 use axum::{

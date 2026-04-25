@@ -103,7 +103,11 @@ pub fn encode_bytes(data: &[u8]) -> Result<Vec<u8>> {
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used, clippy::unwrap_used, clippy::indexing_slicing)]
+#[expect(
+    clippy::unwrap_used,
+    clippy::indexing_slicing,
+    reason = "test code: panic on assertion failure is acceptable"
+)]
 mod tests {
     use super::*;
     use std::io::Cursor;

@@ -71,7 +71,6 @@ fn hash_device_code(code: &str) -> String {
 ///
 /// RFC 8628 Section 3.1: The client makes a request using
 /// "application/x-www-form-urlencoded" format.
-#[allow(clippy::unused_async)]
 pub async fn device_code(
     State(state): State<Arc<AppState>>,
     axum::Form(req): axum::Form<DeviceCodeRequest>,
@@ -165,7 +164,6 @@ pub async fn device_code(
 /// - `expired_token` — the device code has expired
 /// - `access_denied` — the user denied the authorization request
 /// - A successful token response when the user has authorized
-#[allow(clippy::unused_async)]
 pub async fn device_token(
     State(state): State<Arc<AppState>>,
     Json(req): Json<DeviceTokenRequest>,
@@ -361,7 +359,12 @@ pub async fn device_token(
 // ============================================================================
 
 #[cfg(test)]
-#[allow(clippy::expect_used, clippy::unwrap_used, clippy::indexing_slicing)]
+#[expect(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::indexing_slicing,
+    reason = "test code: panic on assertion failure is acceptable"
+)]
 mod tests {
     use super::*;
     use crate::test_utils::*;

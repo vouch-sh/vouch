@@ -50,7 +50,10 @@ impl From<Document<GitHubInstallationDoc>> for GitHubInstallation {
 }
 
 /// Create a new GitHub App installation for an organization.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "GitHub installation record requires all webhook fields"
+)]
 pub async fn create_github_installation(
     store: &DocumentStore,
     org_id: &str,

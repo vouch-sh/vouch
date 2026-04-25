@@ -828,7 +828,10 @@ pub fn check_client_access(client: &OAuthClient, user: &User) -> ServiceResult<(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[expect(
+    clippy::unwrap_used,
+    reason = "test code: panic on assertion failure is acceptable"
+)]
 mod tests {
     use super::*;
     use crate::db::{FapiProfile, JwsAlgorithm, OAuthClientType, TokenEndpointAuthMethod};

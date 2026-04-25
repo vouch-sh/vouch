@@ -65,7 +65,11 @@ impl Session {
     }
 
     /// Get seconds until expiration (0 if already expired).
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "duration since now is non-negative and bounded by session lifetime (< 24h, fits u64)"
+    )]
     pub fn expires_in_seconds(&self) -> u64 {
         let now = Timestamp::now();
         if now >= self.expires_at {
@@ -276,7 +280,6 @@ impl AgentState {
     ///
     /// Rejects keys longer than 256 bytes and caps the cache at 128 entries,
     /// evicting the oldest expired entry (or the oldest entry) when full.
-    #[allow(clippy::map_entry)] // Entry API not viable: eviction needs map access between check and insert
     pub async fn cache_credential(&self, credential_type: String, credential: CachedCredential) {
         if credential_type.len() > MAX_CREDENTIAL_TYPE_LEN {
             warn!(
@@ -345,7 +348,10 @@ impl AgentState {
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used, clippy::unwrap_used)]
+#[expect(
+    clippy::unwrap_used,
+    reason = "test code: panic on assertion failure is acceptable"
+)]
 mod tests {
     use super::*;
 

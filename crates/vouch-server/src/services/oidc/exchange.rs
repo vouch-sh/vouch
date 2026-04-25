@@ -88,7 +88,10 @@ pub struct TokenExchangeResult {
 ///
 /// # Errors
 /// Returns `ServiceError` for invalid requests.
-#[allow(clippy::too_many_lines)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "RFC 8693 token exchange: validate all params, resolve subject, issue tokens"
+)]
 pub async fn exchange_token(
     state: &Arc<AppState>,
     params: TokenExchangeParams<'_>,

@@ -196,7 +196,10 @@ async fn fetch_token(
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used, clippy::unwrap_used)]
+#[expect(
+    clippy::expect_used,
+    reason = "test code: panic on assertion failure is acceptable"
+)]
 mod tests {
     /// Verify the CodeArtifact cache JSON round-trips correctly.
     ///

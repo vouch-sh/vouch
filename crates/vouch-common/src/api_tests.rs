@@ -5,11 +5,9 @@
 //! and deserialize correctly with the typed encoding wrappers.
 
 #[cfg(test)]
-#[allow(
+#[expect(
     clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::panic,
-    clippy::indexing_slicing
+    reason = "test code: panic on assertion failure is acceptable"
 )]
 mod tests {
     use crate::api::*;

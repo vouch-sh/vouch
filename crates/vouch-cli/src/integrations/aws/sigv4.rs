@@ -178,7 +178,10 @@ pub(crate) async fn sign_and_send_json_rpc(
 /// * `service` - AWS service name for signing (e.g., `eks`, `codeartifact`)
 /// * `region` - AWS region
 /// * `creds` - Temporary AWS credentials from STS
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "AWS SigV4 REST request requires all listed parameters"
+)]
 pub(crate) async fn sign_and_send_rest(
     http_client: &reqwest::Client,
     method: reqwest::Method,
@@ -523,11 +526,11 @@ fn truncate_error_body(body: &str, max_len: usize) -> &str {
 }
 
 #[cfg(test)]
-#[allow(
+#[expect(
     clippy::expect_used,
     clippy::unwrap_used,
-    clippy::indexing_slicing,
-    clippy::string_slice
+    clippy::string_slice,
+    reason = "test code: panic on assertion failure is acceptable"
 )]
 mod tests {
     use super::*;

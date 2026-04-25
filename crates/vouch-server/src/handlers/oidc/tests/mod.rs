@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Tests for OIDC handlers — organized by RFC/specification.
 
-#![allow(
+#![expect(
     clippy::expect_used,
     clippy::unwrap_used,
     clippy::indexing_slicing,
-    clippy::string_slice
+    clippy::string_slice,
+    reason = "test code: panic on assertion failure is acceptable"
 )]
 
 mod helpers;

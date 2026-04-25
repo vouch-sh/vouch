@@ -49,7 +49,10 @@ struct CredentialRequest {
     action: Action,
     /// Additional command-line arguments (after `--`).
     #[serde(default)]
-    #[allow(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "deserialized from cargo credential protocol; not consumed"
+    )]
     args: Vec<String>,
 }
 
@@ -63,7 +66,10 @@ struct RegistryInfo {
     name: Option<String>,
     /// Headers from HTTP 401 response (if any).
     #[serde(default)]
-    #[allow(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "deserialized from cargo credential protocol; not consumed"
+    )]
     headers: Vec<String>,
 }
 
@@ -85,7 +91,10 @@ enum Action {
 /// Operation details for "get" action.
 #[derive(Debug, Deserialize)]
 #[serde(tag = "operation", rename_all = "kebab-case")]
-#[allow(dead_code)]
+#[expect(
+    dead_code,
+    reason = "enum variants deserialized from cargo credential protocol"
+)]
 enum Operation {
     /// Reading from registry (cargo fetch, build, etc).
     Read,
@@ -111,11 +120,9 @@ enum Operation {
 struct LoginOptions {
     /// Token provided by user (if any).
     /// We don't use this - vouch manages its own authentication.
-    #[allow(dead_code)]
     token: Option<SecretString>,
     /// URL for browser-based login (if any).
     #[serde(rename = "login-url")]
-    #[allow(dead_code)]
     login_url: Option<String>,
 }
 
@@ -145,7 +152,10 @@ enum CredentialResponse {
     },
     /// Successful login response.
     /// We don't use this - vouch doesn't support cargo login.
-    #[allow(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "variant declared for protocol completeness; vouch rejects cargo login"
+    )]
     Login,
     /// Successful logout response.
     Logout,
@@ -173,7 +183,10 @@ impl std::fmt::Debug for CredentialResponse {
 /// Cache control for tokens.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "kebab-case")]
-#[allow(dead_code)]
+#[expect(
+    dead_code,
+    reason = "variants serialized as part of cargo credential protocol"
+)]
 enum CacheControl {
     /// Never cache the token.
     Never,
@@ -406,7 +419,11 @@ fn parse_jwt_expiration(token: &str) -> Option<i64> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::panic)]
+#[expect(
+    clippy::unwrap_used,
+    clippy::panic,
+    reason = "test code: panic on assertion failure is acceptable"
+)]
 mod tests {
     use super::*;
 

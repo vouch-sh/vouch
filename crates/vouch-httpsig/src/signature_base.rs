@@ -90,11 +90,9 @@ pub fn build_response_base_with_params_str<T, U>(
 }
 
 #[cfg(test)]
-#[allow(
+#[expect(
     clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::indexing_slicing,
-    clippy::panic
+    reason = "test code: panic on assertion failure is acceptable"
 )]
 mod tests {
     use super::*;

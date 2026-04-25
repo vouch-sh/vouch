@@ -66,7 +66,6 @@ impl AwsConfig {
 
     /// Get a profile by name.
     #[must_use]
-    #[allow(dead_code)] // Used in tests and useful for future features
     pub(crate) fn get_profile(&self, name: &str) -> Option<AwsProfile> {
         let section_name = Self::profile_to_section(name);
         let section = self.ini.section(Some(section_name.as_str()))?;
@@ -284,7 +283,11 @@ pub(crate) fn extract_role_from_credential_process(credential_process: &str) -> 
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used, clippy::unwrap_used)]
+#[expect(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    reason = "test code: panic on assertion failure is acceptable"
+)]
 mod tests {
     use super::*;
 

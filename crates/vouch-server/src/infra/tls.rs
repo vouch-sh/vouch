@@ -207,7 +207,6 @@ fn validate_pem(pem_bytes: &[u8], expected_type: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used)]
     use super::*;
 
     #[test]

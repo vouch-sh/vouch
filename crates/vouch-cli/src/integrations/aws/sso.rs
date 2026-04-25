@@ -211,7 +211,10 @@ pub(crate) struct DeviceAuth {
     /// Code to display to the user.
     pub user_code: String,
     /// URL for the user to open (without code, for display or fallback).
-    #[allow(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "deserialized from AWS SSO OIDC response; UI uses verification_uri_complete"
+    )]
     pub verification_uri: String,
     /// URL with code pre-filled (for `open::that()`).
     pub verification_uri_complete: String,
@@ -651,7 +654,11 @@ pub(crate) async fn poll_for_token(
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used, clippy::unwrap_used)]
+#[expect(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    reason = "test code: panic on assertion failure is acceptable"
+)]
 mod tests {
     use super::*;
     use crate::integrations::aws::config::SsoSession;

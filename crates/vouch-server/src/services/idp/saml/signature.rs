@@ -162,8 +162,10 @@ pub(crate) fn verify_xml_signature(
         )));
     }
 
-    // Safety: we verified ref_uri starts with '#' (ASCII, single byte), so [1..] is safe
-    #[allow(clippy::string_slice)]
+    #[expect(
+        clippy::string_slice,
+        reason = "ref_uri is verified to start with '#' (ASCII, single byte); slice at [1..] is safe"
+    )]
     let element_id = &ref_uri[1..];
     if element_id.is_empty() {
         return Err(SignatureError::InvalidReference(
@@ -593,7 +595,10 @@ fn try_verify_with_cert(
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used)]
+    #![expect(
+        clippy::unwrap_used,
+        reason = "test code: panic on assertion failure is acceptable"
+    )]
     use super::*;
 
     // =========================================================================

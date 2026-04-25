@@ -313,8 +313,10 @@ pub async fn list_keys(
 }
 
 /// Rename a registered key.
-// Axum handlers require all extractors as parameters; argument count is inherent to the framework.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "axum handler signature: extractors are positional parameters"
+)]
 pub async fn rename_key(
     method: Method,
     uri: OriginalUri,
@@ -404,7 +406,11 @@ pub async fn delete_key(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
+#[expect(
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    reason = "test code: panic on assertion failure is acceptable"
+)]
 mod tests {
     use super::*;
     use crate::crypto::jwt::{JwtType, StateTokenSigner};

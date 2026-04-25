@@ -4,11 +4,10 @@
 //! These tests verify signature base construction and signature verification
 //! against the exact examples from RFC 9421 Appendix B.
 
-#![allow(
+#![expect(
     clippy::unwrap_used,
-    clippy::expect_used,
     clippy::indexing_slicing,
-    clippy::panic
+    reason = "test code: panic on assertion failure is acceptable"
 )]
 
 use base64::Engine;

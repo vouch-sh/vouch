@@ -50,7 +50,10 @@ pub(crate) enum CliError {
     },
 
     /// Hardware security key not found or timed out.
-    #[allow(dead_code)]
+    #[allow(
+        dead_code,
+        reason = "variant for future error categorisation; lint fires inconsistently across compilation targets"
+    )]
     #[error("{0}")]
     HardwareNotFound(String),
 
@@ -199,7 +202,6 @@ fn classify_message(msg: &str) -> ExitCode {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 

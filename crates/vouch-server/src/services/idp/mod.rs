@@ -266,7 +266,10 @@ impl UpstreamIdp {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used)]
+    #![expect(
+        clippy::unwrap_used,
+        reason = "test code: panic on assertion failure is acceptable"
+    )]
 
     use super::*;
     use crate::test_utils::test_config;

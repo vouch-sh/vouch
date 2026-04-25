@@ -95,7 +95,10 @@ pub(crate) fn extract_client_credentials(
 ///
 /// Handles mutual exclusion: a request MUST NOT use more than one client
 /// authentication method (e.g., Basic auth header + client_assertion = error).
-#[allow(clippy::result_large_err)]
+#[expect(
+    clippy::result_large_err,
+    reason = "Err is an HTTP Response; size is acceptable in error path"
+)]
 pub(crate) fn extract_client_auth<T: ClientAuthFields>(
     headers: &HeaderMap,
     params: &T,

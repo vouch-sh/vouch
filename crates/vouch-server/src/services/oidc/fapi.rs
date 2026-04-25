@@ -260,7 +260,6 @@ pub fn auth_code_lifetime_seconds(client: &OAuthClient) -> i64 {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use crate::db::{AccessScope, FapiProfile, JwsAlgorithm, OAuthClientType};

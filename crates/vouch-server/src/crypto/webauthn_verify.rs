@@ -176,7 +176,7 @@ struct ClientData {
     challenge: String,
     origin: String,
     #[serde(rename = "crossOrigin", default)]
-    #[allow(dead_code)]
+    #[expect(dead_code, reason = "reserved for serde DTO conformance / future use")]
     cross_origin: Option<bool>,
 }
 
@@ -195,7 +195,10 @@ struct ClientData {
 /// * `expected_origin` - The expected origin URL
 /// * `stored_counter` - The previously stored counter value
 /// * `require_user_verification` - Whether to require UV flag
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "WebAuthn assertion verification requires all per-RFC parameters"
+)]
 pub fn verify_assertion(
     authenticator_data: &[u8],
     client_data_json: &[u8],
@@ -237,7 +240,10 @@ pub fn verify_assertion(
 /// * `stored_counter` - The previously stored counter value
 /// * `require_user_verification` - Whether to require UV flag
 /// * `verifier` - The COSE verifier to use for signature verification
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "WebAuthn assertion verification requires all per-RFC parameters"
+)]
 pub fn verify_assertion_with_verifier<V: CoseVerifier>(
     authenticator_data: &[u8],
     client_data_json: &[u8],
@@ -367,7 +373,10 @@ pub fn verify_assertion_with_verifier<V: CoseVerifier>(
 /// - `ClientDataJson<Raw>` for client data JSON
 /// - `Signature<Raw>` for the signature
 /// - `CoseKey<Raw>` for the public key
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "WebAuthn assertion verification requires all per-RFC parameters"
+)]
 pub fn verify_assertion_typed(
     authenticator_data: &AuthData<Raw>,
     client_data_json: &ClientDataJson<Raw>,
@@ -395,7 +404,10 @@ pub fn verify_assertion_typed(
 /// Verify a WebAuthn assertion with a custom COSE verifier using typed parameters.
 ///
 /// This is a type-safe wrapper around [`verify_assertion_with_verifier`].
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "WebAuthn assertion verification requires all per-RFC parameters"
+)]
 pub fn verify_assertion_typed_with_verifier<V: CoseVerifier>(
     authenticator_data: &AuthData<Raw>,
     client_data_json: &ClientDataJson<Raw>,
@@ -451,7 +463,6 @@ pub struct RegistrationVerificationResult {
 /// 5. For `fmt="none"`: accept (no attestation statement)
 ///
 /// Returns the server-verified credential ID, public key, and AAGUID.
-#[allow(clippy::too_many_arguments)]
 pub fn verify_registration(
     attestation_object: &[u8],
     client_data_json: &[u8],
@@ -474,7 +485,6 @@ pub fn verify_registration(
 /// Verify a WebAuthn registration with a custom COSE verifier.
 ///
 /// This is the testable version of [`verify_registration`].
-#[allow(clippy::too_many_arguments)]
 pub fn verify_registration_with_verifier<V: CoseVerifier>(
     attestation_object: &[u8],
     client_data_json: &[u8],
@@ -1088,7 +1098,11 @@ fn verify_eddsa(
 }
 
 #[cfg(test)]
-#[allow(clippy::indexing_slicing, clippy::unwrap_used)]
+#[expect(
+    clippy::indexing_slicing,
+    clippy::unwrap_used,
+    reason = "test code: panic on assertion failure is acceptable"
+)]
 mod tests {
     use super::*;
     use aws_lc_rs::digest::{self, SHA256};
@@ -1118,7 +1132,7 @@ mod tests {
     }
 
     /// Create a minimal valid ES256 COSE key
-    #[allow(dead_code)]
+    #[expect(dead_code, reason = "reserved for serde DTO conformance / future use")]
     fn make_es256_cose_key(x: &[u8], y: &[u8]) -> Vec<u8> {
         let mut buf = Vec::new();
         let key = ciborium::Value::Map(vec![
@@ -1173,7 +1187,7 @@ mod tests {
     }
 
     /// Create a minimal valid RS256 COSE key
-    #[allow(dead_code)]
+    #[expect(dead_code, reason = "reserved for serde DTO conformance / future use")]
     fn make_rs256_cose_key(n: &[u8], e: &[u8]) -> Vec<u8> {
         let mut buf = Vec::new();
         let key = ciborium::Value::Map(vec![
