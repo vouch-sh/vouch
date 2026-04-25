@@ -142,8 +142,7 @@ pub async fn create_user(
             .iter()
             .find(|e| e.primary)
             .or_else(|| emails.first())
-            .map(|e| e.value.clone())
-            .unwrap_or_else(|| user.user_name.clone())
+            .map_or_else(|| user.user_name.clone(), |e| e.value.clone())
     } else {
         user.user_name.clone()
     };

@@ -104,9 +104,10 @@ pub(crate) async fn run(
     profile: Option<&str>,
     kubeconfig_path: Option<&str>,
 ) -> Result<()> {
-    let kubeconfig_path = kubeconfig_path.map(PathBuf::from).unwrap_or_else(|| {
-        default_kubeconfig_path().unwrap_or_else(|_| PathBuf::from("~/.kube/config"))
-    });
+    let kubeconfig_path = kubeconfig_path.map_or_else(
+        || default_kubeconfig_path().unwrap_or_else(|_| PathBuf::from("~/.kube/config")),
+        PathBuf::from,
+    );
 
     // Auto-discover profile, region, and role
     let profile_name = aws::resolve_profile(profile)?;

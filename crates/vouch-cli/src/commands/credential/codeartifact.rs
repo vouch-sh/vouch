@@ -140,8 +140,7 @@ pub(crate) async fn get_token(
     let data = cache::get_or_fetch(&cache_key, "CodeArtifact token", || async {
         let token = fetch_token(server, domain, domain_owner, region).await?;
         let expires_at = jiff::Timestamp::from_second(token.expiration)
-            .map(|ts| ts.to_string())
-            .unwrap_or_else(|_| cache::default_expiry());
+            .map_or_else(|_| cache::default_expiry(), |ts| ts.to_string());
         let data = serde_json::json!({
             "authorization_token": token.authorization_token.expose_secret(),
             "expiration": token.expiration,

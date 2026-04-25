@@ -115,8 +115,7 @@ fn strip_ssm_block(content: &str) -> String {
     let after_marker = from_marker.get(marker_offset..).unwrap_or("");
     let block_rest_len = after_marker
         .find("\n\n")
-        .map(|pos| marker_offset + pos + 1)
-        .unwrap_or(from_marker.len());
+        .map_or(from_marker.len(), |pos| marker_offset + pos + 1);
 
     let after = from_marker.get(block_rest_len..).unwrap_or("");
 

@@ -1535,8 +1535,7 @@ async fn test_scim_patch_group_remove_member() {
     let has_member = group
         .get("members")
         .and_then(|m| m.as_array())
-        .map(|arr| arr.iter().any(|m| m["value"] == user_id))
-        .unwrap_or(false);
+        .is_some_and(|arr| arr.iter().any(|m| m["value"] == user_id));
     assert!(
         !has_member,
         "Removed member must not appear in GET response"

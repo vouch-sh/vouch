@@ -598,8 +598,7 @@ pub async fn update_application_api(
     let resource_uris = req
         .resource_uris
         .as_deref()
-        .map(|u| u.to_vec())
-        .unwrap_or_else(|| client.resource_uris.clone());
+        .map_or_else(|| client.resource_uris.clone(), <[String]>::to_vec);
 
     // Determine FAPI profile
     let is_fapi = req

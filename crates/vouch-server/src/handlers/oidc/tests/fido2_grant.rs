@@ -855,7 +855,7 @@ fn build_client_assertion(
         "aud": audience,
         "iat": now,
         "exp": now + 60,
-        "jti": jti.map(str::to_string).unwrap_or_else(|| uuid::Uuid::now_v7().to_string())
+        "jti": jti.map_or_else(|| uuid::Uuid::now_v7().to_string(), str::to_string)
     });
 
     let header_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&header).unwrap());

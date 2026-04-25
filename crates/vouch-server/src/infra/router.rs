@@ -64,8 +64,10 @@ fn build_date() -> String {
         .and_then(|s| s.parse::<i64>().ok())
         .filter(|&ts| ts > 0)
         .and_then(|ts| jiff::Timestamp::from_second(ts).ok())
-        .map(|ts| ts.strftime("%Y-%m-%d").to_string())
-        .unwrap_or_else(|| "dev".to_string())
+        .map_or_else(
+            || "dev".to_string(),
+            |ts| ts.strftime("%Y-%m-%d").to_string(),
+        )
 }
 
 /// Print an ASCII banner at server startup.
@@ -776,8 +778,7 @@ async fn metrics_middleware(req: Request<axum::body::Body>, next: Next) -> impl 
     let path = req
         .extensions()
         .get::<MatchedPath>()
-        .map(|p| p.as_str().to_string())
-        .unwrap_or_else(|| req.uri().path().to_string());
+        .map_or_else(|| req.uri().path().to_string(), |p| p.as_str().to_string());
     let start = std::time::Instant::now();
 
     let response = next.run(req).await;

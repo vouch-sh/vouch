@@ -250,10 +250,10 @@ impl AwsConfig {
             let Some(region) = props.get("sso_region") else {
                 continue;
             };
-            let scopes = props
-                .get("sso_registration_scopes")
-                .map(|s| s.split(',').map(|s| s.trim().to_string()).collect())
-                .unwrap_or_else(|| vec!["sso:account:access".to_string()]);
+            let scopes = props.get("sso_registration_scopes").map_or_else(
+                || vec!["sso:account:access".to_string()],
+                |s| s.split(',').map(|s| s.trim().to_string()).collect(),
+            );
             sessions.push(SsoSession {
                 name: session_name.to_string(),
                 start_url: start_url.to_string(),

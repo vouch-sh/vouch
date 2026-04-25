@@ -143,12 +143,7 @@ fn detect_firewall(posture: &mut DevicePosture) {
 fn detect_secure_boot(posture: &mut DevicePosture) {
     // SIP — separate from Secure Boot
     let sip_output = run_command("csrutil", &["status"]);
-    posture.sip_enabled = Some(
-        sip_output
-            .as_deref()
-            .map(|s| s.contains("enabled"))
-            .unwrap_or(false),
-    );
+    posture.sip_enabled = Some(sip_output.as_deref().is_some_and(|s| s.contains("enabled")));
 
     let is_arm = std::env::consts::ARCH == "aarch64";
 

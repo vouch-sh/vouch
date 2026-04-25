@@ -123,8 +123,7 @@ fn canonicalize_node(
     let ancestor_default_ns = rendered_ns
         .iter()
         .find(|(p, _)| p.is_empty())
-        .map(|(_, u)| u.as_str())
-        .unwrap_or("");
+        .map_or("", |(_, u)| u.as_str());
 
     // Undeclare if: element has no default NS but ancestor rendered one,
     // AND we haven't already emitted xmlns="" (which would happen if this

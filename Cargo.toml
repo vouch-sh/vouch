@@ -36,7 +36,10 @@ get_unwrap = "deny"
 indexing_slicing = "deny"
 
 # String slicing can panic on non-UTF8 boundaries
-string_slice = "warn"
+string_slice = "deny"
+
+# Modulo by zero panics — use checked_rem or guard the divisor
+modulo_arithmetic = "deny"
 
 # Code hygiene
 dbg_macro = "deny"
@@ -45,6 +48,15 @@ dbg_macro = "deny"
 await_holding_lock = "deny"
 large_futures = "deny"
 mem_forget = "deny"
+
+# Use atomics (AtomicBool, AtomicU32, ...) instead of Mutex<bool/integer>
+mutex_atomic = "deny"
+
+# Rc<String>/Arc<Vec<T>> should be Rc<str>/Arc<[T]> (cheaper, sized)
+rc_buffer = "deny"
+
+# Style: prefer .map_or(default, f) over .map(f).unwrap_or(default)
+map_unwrap_or = "deny"
 
 module_name_repetitions = "allow"
 similar_names = "allow"

@@ -619,7 +619,7 @@ pub(crate) async fn poll_for_token(
 
         // Parse the error to decide whether to retry or fail
         let oidc_err: Option<SsoOidcError> = serde_json::from_str(&body_text).ok();
-        let error_code = oidc_err.as_ref().map(|e| e.error.as_str()).unwrap_or("");
+        let error_code = oidc_err.as_ref().map_or("", |e| e.error.as_str());
 
         match error_code {
             "authorization_pending" => {

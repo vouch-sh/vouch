@@ -243,8 +243,7 @@ impl SshCa {
         // random bits makes collision probability negligible (~2^-64).
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
+            .map_or(0, |d| d.as_secs());
         let mut rand_bytes = [0u8; 8];
         aws_lc_rs::rand::fill(&mut rand_bytes)
             .map_err(|_| anyhow::anyhow!("Failed to generate random serial bytes"))?;
