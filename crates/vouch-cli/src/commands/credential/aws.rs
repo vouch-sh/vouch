@@ -114,9 +114,14 @@ pub(crate) struct StsExchangeResult {
 /// Handles the full flow: OIDC token fetch → JWT decode for session tags →
 /// Detect if running inside an AI coding agent by checking environment variables.
 ///
-/// Returns the agent identifier (e.g., "claude-code", "cursor") if detected.
-/// These env vars are set by the agent's shell environment and inherited by
-/// child processes including `credential_process` invocations.
+/// Returns the agent identifier (e.g., "claude-code/2.1.120/agent", "cursor")
+/// if detected. These env vars are set by the agent's shell environment and
+/// inherited by child processes including `credential_process` invocations.
+///
+/// `AI_AGENT` (the emerging cross-vendor convention) is forwarded verbatim —
+/// agents like Claude Code v2.1.120+ self-identify with a slash-separated
+/// `<name>/<version>/<context>` value, which we surface unchanged so the full
+/// attribution reaches the AWS `vouch:Agent` session tag.
 ///
 /// Reference implementation:
 /// <https://github.com/vercel/vercel/blob/main/packages/detect-agent/src/index.ts>
@@ -133,58 +138,69 @@ pub(crate) struct StsExchangeResult {
 /// - `ANTIGRAVITY_AGENT`: <https://github.com/vercel/vercel/blob/main/packages/detect-agent/src/index.ts>
 /// - `OPENCODE_CLIENT`: <https://github.com/vercel/vercel/blob/main/packages/detect-agent/src/index.ts>
 /// - `CLINE_ACTIVE`: <https://github.com/cline/cline/discussions/5366>
-fn detect_agent_source() -> Option<&'static str> {
+fn detect_agent_source() -> Option<String> {
+    detect_agent_source_from(|k| std::env::var(k).ok())
+}
+
+/// Inner implementation of [`detect_agent_source`] parameterised over the env
+/// lookup, so unit tests can exercise the matrix without mutating the real
+/// process environment (which is `unsafe` under edition 2024).
+fn detect_agent_source_from<F>(get: F) -> Option<String>
+where
+    F: Fn(&str) -> Option<String>,
+{
     // Emerging standard: https://github.com/agentsmd/agents.md/issues/136
-    if let Ok(val) = std::env::var("AGENT") {
-        return match val.as_str() {
-            "amp" => Some("amp"),
-            "goose" => Some("goose"),
-            _ => Some("agent"),
-        };
+    if let Some(val) = get("AGENT") {
+        return Some(match val.as_str() {
+            "amp" => "amp".to_string(),
+            "goose" => "goose".to_string(),
+            _ => "agent".to_string(),
+        });
     }
-    // Generic agent identifier (Vercel convention)
-    if let Ok(val) = std::env::var("AI_AGENT") {
-        return match val.as_str() {
-            "v0" => Some("v0"),
-            _ => Some("agent"),
-        };
+    // Generic agent identifier (Vercel/Claude Code convention). Forwarded
+    // verbatim so callers see the agent's self-reported identity (e.g.
+    // "claude-code/2.1.120/agent"). An empty value falls through to the
+    // vendor-specific checks below.
+    if let Some(val) = get("AI_AGENT")
+        && !val.is_empty()
+    {
+        return Some(val);
     }
     // Claude Code: https://code.claude.com/docs/en/env-vars
-    if std::env::var_os("CLAUDECODE").is_some() || std::env::var_os("CLAUDE_CODE").is_some() {
-        return Some("claude-code");
+    if get("CLAUDECODE").is_some() || get("CLAUDE_CODE").is_some() {
+        return Some("claude-code".to_string());
     }
     // Cursor: https://cursor.com/docs/agent/tools/terminal
-    if std::env::var_os("CURSOR_TRACE_ID").is_some() || std::env::var_os("CURSOR_AGENT").is_some() {
-        return Some("cursor");
+    if get("CURSOR_TRACE_ID").is_some() || get("CURSOR_AGENT").is_some() {
+        return Some("cursor".to_string());
     }
     // Gemini CLI: https://github.com/google-gemini/gemini-cli
-    if std::env::var_os("GEMINI_CLI").is_some() {
-        return Some("gemini");
+    if get("GEMINI_CLI").is_some() {
+        return Some("gemini".to_string());
     }
     // OpenAI Codex: https://github.com/openai/codex
-    if std::env::var_os("CODEX_SANDBOX").is_some() || std::env::var_os("CODEX_THREAD_ID").is_some()
-    {
-        return Some("codex");
+    if get("CODEX_SANDBOX").is_some() || get("CODEX_THREAD_ID").is_some() {
+        return Some("codex".to_string());
     }
     // GitHub Copilot: https://github.com/microsoft/vscode/issues/265446
-    if std::env::var_os("COPILOT_MODEL").is_some() {
-        return Some("copilot");
+    if get("COPILOT_MODEL").is_some() {
+        return Some("copilot".to_string());
     }
     // Augment: https://docs.augmentcode.com/cli/reference
-    if std::env::var_os("AUGMENT_AGENT").is_some() {
-        return Some("augment");
+    if get("AUGMENT_AGENT").is_some() {
+        return Some("augment".to_string());
     }
     // Antigravity
-    if std::env::var_os("ANTIGRAVITY_AGENT").is_some() {
-        return Some("antigravity");
+    if get("ANTIGRAVITY_AGENT").is_some() {
+        return Some("antigravity".to_string());
     }
     // OpenCode
-    if std::env::var_os("OPENCODE_CLIENT").is_some() {
-        return Some("opencode");
+    if get("OPENCODE_CLIENT").is_some() {
+        return Some("opencode".to_string());
     }
     // Cline: https://github.com/cline/cline/discussions/5366
-    if std::env::var_os("CLINE_ACTIVE").is_some() {
-        return Some("cline");
+    if get("CLINE_ACTIVE").is_some() {
+        return Some("cline".to_string());
     }
     None
 }
@@ -242,7 +258,7 @@ pub(crate) async fn exchange_for_sts_credentials(
 
     // Set DPoP source claim for agent attribution (tamperproof via DPoP signature).
     // Server extracts this to add AI-specific session tags to the JWT.
-    if let Some(source) = agent_source {
+    if let Some(source) = agent_source.as_deref() {
         tracing::info!("AI agent detected ({source}), applying ReadOnlyAccess session policy");
         client.set_dpop_source(source);
     }
@@ -570,5 +586,62 @@ mod tests {
             data.get("Expiration").unwrap().as_str().unwrap(),
             "2024-01-14T18:00:00Z"
         );
+    }
+
+    /// Build an env-lookup closure backed by an in-memory map. Used to drive
+    /// `detect_agent_source_from` without mutating the real process env (which
+    /// is `unsafe` under edition 2024 and racy across parallel tests).
+    fn env(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
+        let map: std::collections::HashMap<String, String> = pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .collect();
+        move |k| map.get(k).cloned()
+    }
+
+    /// Claude Code v2.1.120+ sets `AI_AGENT=<name>/<version>/<context>`. The
+    /// full string flows verbatim into the AWS `vouch:Agent` session tag so
+    /// CloudTrail records the agent name, version, and invocation context.
+    #[test]
+    fn test_detect_agent_ai_agent_slash_format_verbatim() {
+        let got = detect_agent_source_from(env(&[("AI_AGENT", "claude-code/2.1.120/agent")]));
+        assert_eq!(got.as_deref(), Some("claude-code/2.1.120/agent"));
+    }
+
+    /// Bare `AI_AGENT` values (e.g. Vercel's `v0`) are also forwarded verbatim.
+    #[test]
+    fn test_detect_agent_ai_agent_bare_value_verbatim() {
+        let got = detect_agent_source_from(env(&[("AI_AGENT", "v0")]));
+        assert_eq!(got.as_deref(), Some("v0"));
+    }
+
+    /// Empty `AI_AGENT` must not suppress vendor-specific signals: it falls
+    /// through so a real `CLAUDECODE=1` is still detected.
+    #[test]
+    fn test_detect_agent_empty_ai_agent_falls_through_to_claudecode() {
+        let got = detect_agent_source_from(env(&[("AI_AGENT", ""), ("CLAUDECODE", "1")]));
+        assert_eq!(got.as_deref(), Some("claude-code"));
+    }
+
+    /// Empty `AI_AGENT` with no other agent vars returns `None`.
+    #[test]
+    fn test_detect_agent_empty_ai_agent_alone_returns_none() {
+        let got = detect_agent_source_from(env(&[("AI_AGENT", "")]));
+        assert_eq!(got, None);
+    }
+
+    /// No agent env vars set → `None`.
+    #[test]
+    fn test_detect_agent_no_env_returns_none() {
+        let got = detect_agent_source_from(env(&[]));
+        assert_eq!(got, None);
+    }
+
+    /// Existing vendor-specific detection still works for agents that don't
+    /// set `AI_AGENT` (older Claude Code, etc.).
+    #[test]
+    fn test_detect_agent_claudecode_only() {
+        let got = detect_agent_source_from(env(&[("CLAUDECODE", "1")]));
+        assert_eq!(got.as_deref(), Some("claude-code"));
     }
 }
