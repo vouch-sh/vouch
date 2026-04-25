@@ -136,7 +136,7 @@ impl AgentServer {
 /// method" (→ `method_not_found`) from "malformed JSON" (→ `parse_error`).
 #[derive(serde::Deserialize)]
 struct RawRequest {
-    #[allow(dead_code)]
+    #[expect(dead_code, reason = "deserialized for JSON-RPC 2.0 conformance, value not consumed")]
     jsonrpc: String,
     id: u64,
     method: String,

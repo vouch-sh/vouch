@@ -236,7 +236,7 @@ async fn run_agent_server(enable_ssh_agent: bool) -> ExitCode {
 }
 
 /// Stop a running agent.
-#[allow(unsafe_code)]
+#[expect(unsafe_code, reason = "libc::kill sends SIGTERM to a PID we own; safety documented inline")]
 fn stop_agent() -> ExitCode {
     // Read PID file
     let pid_path = match daemon::pid_file_path() {
