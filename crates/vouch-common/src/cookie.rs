@@ -199,7 +199,7 @@ pub fn is_cookie_expired(cookie: &SessionCookie) -> bool {
 }
 
 #[cfg(test)]
-#[expect(clippy::panic)]
+#[expect(clippy::panic, reason = "test code: panic on assertion failure is acceptable")]
 mod tests {
     use super::*;
 
