@@ -35,12 +35,25 @@ pub struct CreateScimTokenRequest {
 }
 
 /// Response for created SCIM token.
-#[derive(Debug, serde::Serialize)]
+///
+/// `Debug` is hand-implemented to redact the bearer token; do not derive.
+#[derive(serde::Serialize)]
 pub struct CreateScimTokenResponse {
     pub id: String,
     pub token: String,
     pub description: Option<String>,
     pub expires_at: Option<Timestamp>,
+}
+
+impl std::fmt::Debug for CreateScimTokenResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CreateScimTokenResponse")
+            .field("id", &self.id)
+            .field("token", &"[REDACTED]")
+            .field("description", &self.description)
+            .field("expires_at", &self.expires_at)
+            .finish()
+    }
 }
 
 /// SCIM token info for listing.

@@ -138,6 +138,49 @@ pub struct RegistrationRequest {
     pub request_uris: Option<Vec<String>>,
 }
 
+impl RegistrationRequest {
+    /// Build the JSON blob stored in `OAuthClient::registration_metadata`.
+    ///
+    /// Includes only fields that don't have their own database column:
+    /// `client_uri`, `logo_uri`, `tos_uri`, `policy_uri`, `contacts`, `scope`.
+    /// Fields with dedicated columns (e.g. `client_name`, `software_id`) are excluded.
+    fn registration_metadata(&self) -> serde_json::Value {
+        let mut metadata = serde_json::Map::new();
+        if let Some(ref v) = self.client_uri {
+            metadata.insert(
+                "client_uri".to_string(),
+                serde_json::Value::String(v.clone()),
+            );
+        }
+        if let Some(ref v) = self.logo_uri {
+            metadata.insert("logo_uri".to_string(), serde_json::Value::String(v.clone()));
+        }
+        if let Some(ref v) = self.tos_uri {
+            metadata.insert("tos_uri".to_string(), serde_json::Value::String(v.clone()));
+        }
+        if let Some(ref v) = self.policy_uri {
+            metadata.insert(
+                "policy_uri".to_string(),
+                serde_json::Value::String(v.clone()),
+            );
+        }
+        if let Some(ref v) = self.contacts {
+            metadata.insert(
+                "contacts".to_string(),
+                serde_json::Value::Array(
+                    v.iter()
+                        .map(|c| serde_json::Value::String(c.clone()))
+                        .collect(),
+                ),
+            );
+        }
+        if let Some(ref v) = self.scope {
+            metadata.insert("scope".to_string(), serde_json::Value::String(v.clone()));
+        }
+        serde_json::Value::Object(metadata)
+    }
+}
+
 /// RFC 7591 Section 3.2.1: Client Information Response.
 #[derive(Debug, Serialize)]
 pub struct RegistrationResponse {
@@ -451,7 +494,7 @@ pub async fn register_client(
     let client_name = request.client_name.as_deref().unwrap_or("Unnamed Client");
 
     // Build registration metadata JSON (cosmetic fields)
-    let registration_metadata = build_registration_metadata(&request);
+    let registration_metadata = request.registration_metadata();
 
     // 14. Generate registration access token
     let reg_token = generate_registration_token()?;
@@ -944,7 +987,7 @@ pub async fn read_client_configuration(
         lookup_and_verify_registration_token(state, client_id, registration_access_token).await?;
 
     let base_url = &state.config().base_url;
-    Ok(build_client_response(&client, base_url))
+    Ok(build_client_response(client, base_url))
 }
 
 /// Delete a dynamically registered client (RFC 7592 Section 2.3).
@@ -1022,7 +1065,7 @@ pub async fn update_client_configuration(
     let redirect_uris = validate_redirect_uris(&mut mutable_request, validated.has_auth_code)?;
 
     // Build updated registration metadata (cosmetic fields)
-    let registration_metadata = build_registration_metadata(&mutable_request);
+    let registration_metadata = mutable_request.registration_metadata();
 
     // Validate JWKS and jwks_uri (same rules as initial registration):
     // mutually exclusive, valid structure, HTTPS URI.
@@ -1088,7 +1131,7 @@ pub async fn update_client_configuration(
     );
 
     let base_url = &state.config().base_url;
-    let mut response = build_client_response(&updated, base_url);
+    let mut response = build_client_response(updated, base_url);
     response.registration_access_token = Some(new_reg_token);
 
     Ok(response)
@@ -1139,42 +1182,43 @@ async fn lookup_and_verify_registration_token(
 ///
 /// Per RFC 7592 Section 3, the response omits the `registration_access_token`
 /// but includes the `registration_client_uri`.
-fn build_client_response(client: &OAuthClient, base_url: &str) -> RegistrationResponse {
-    let grant_types = client.grant_types.clone().unwrap_or_default();
-    let response_types = client.response_types.clone().unwrap_or_default();
+fn build_client_response(client: OAuthClient, base_url: &str) -> RegistrationResponse {
+    let grant_types = client.grant_types.unwrap_or_default();
+    let response_types = client.response_types.unwrap_or_default();
     let metadata = client
         .registration_metadata
-        .clone()
         .unwrap_or(serde_json::Value::Null);
 
     let client_id_issued_at = client.created_at.as_second();
+    let registration_client_uri = format!("{base_url}/oauth/register/{}", client.client_id);
+    let redirect_uris = if client.redirect_uris.is_empty() {
+        None
+    } else {
+        Some(client.redirect_uris)
+    };
 
     RegistrationResponse {
-        client_id: client.client_id.clone(),
+        client_id: client.client_id,
         client_secret: None,
         client_secret_expires_at: None,
         client_id_issued_at: Some(client_id_issued_at),
         registration_access_token: None,
-        registration_client_uri: Some(format!("{base_url}/oauth/register/{}", client.client_id)),
-        redirect_uris: if client.redirect_uris.is_empty() {
-            None
-        } else {
-            Some(client.redirect_uris.clone())
-        },
+        registration_client_uri: Some(registration_client_uri),
+        redirect_uris,
         token_endpoint_auth_method: client.token_endpoint_auth_method.as_str().to_string(),
         grant_types,
         response_types,
-        client_name: Some(client.name.clone()),
+        client_name: Some(client.name),
         client_uri: metadata_string(&metadata, "client_uri"),
         logo_uri: metadata_string(&metadata, "logo_uri"),
         tos_uri: metadata_string(&metadata, "tos_uri"),
         policy_uri: metadata_string(&metadata, "policy_uri"),
         scope: metadata_string(&metadata, "scope"),
         contacts: metadata_string_array(&metadata, "contacts"),
-        jwks: client.jwks.clone(),
-        jwks_uri: client.jwks_uri.clone(),
-        software_id: client.software_id.clone(),
-        software_version: client.software_version.clone(),
+        jwks: client.jwks,
+        jwks_uri: client.jwks_uri,
+        software_id: client.software_id,
+        software_version: client.software_version,
         dpop_bound_access_tokens: if client.dpop_bound_access_tokens {
             Some(true)
         } else {
@@ -1190,7 +1234,7 @@ fn build_client_response(client: &OAuthClient, base_url: &str) -> RegistrationRe
         request_object_signing_alg: client.request_object_signing_alg.map(|a| a.to_string()),
         require_signed_request_object: client.require_signed_request_object,
         userinfo_signed_response_alg: client.userinfo_signed_response_alg.map(|a| a.to_string()),
-        request_uris: client.request_uris.clone(),
+        request_uris: client.request_uris,
     }
 }
 
@@ -1284,43 +1328,6 @@ fn validate_https_uri(field_name: &str, uri: Option<&str>) -> Result<(), Service
     } else {
         Ok(())
     }
-}
-
-/// Build the registration_metadata JSON blob from cosmetic request fields.
-fn build_registration_metadata(request: &RegistrationRequest) -> serde_json::Value {
-    let mut metadata = serde_json::Map::new();
-    if let Some(ref v) = request.client_uri {
-        metadata.insert(
-            "client_uri".to_string(),
-            serde_json::Value::String(v.clone()),
-        );
-    }
-    if let Some(ref v) = request.logo_uri {
-        metadata.insert("logo_uri".to_string(), serde_json::Value::String(v.clone()));
-    }
-    if let Some(ref v) = request.tos_uri {
-        metadata.insert("tos_uri".to_string(), serde_json::Value::String(v.clone()));
-    }
-    if let Some(ref v) = request.policy_uri {
-        metadata.insert(
-            "policy_uri".to_string(),
-            serde_json::Value::String(v.clone()),
-        );
-    }
-    if let Some(ref v) = request.contacts {
-        metadata.insert(
-            "contacts".to_string(),
-            serde_json::Value::Array(
-                v.iter()
-                    .map(|c| serde_json::Value::String(c.clone()))
-                    .collect(),
-            ),
-        );
-    }
-    if let Some(ref v) = request.scope {
-        metadata.insert("scope".to_string(), serde_json::Value::String(v.clone()));
-    }
-    serde_json::Value::Object(metadata)
 }
 
 /// Generate a secure random registration access token (RFC 7592 prep).
@@ -1735,7 +1742,7 @@ mod tests {
             ..Default::default()
         };
 
-        let metadata = build_registration_metadata(&request);
+        let metadata = request.registration_metadata();
 
         assert!(metadata.is_object());
         let obj = metadata.as_object().unwrap();
@@ -1776,7 +1783,7 @@ mod tests {
             ..Default::default()
         };
 
-        let metadata = build_registration_metadata(&request);
+        let metadata = request.registration_metadata();
 
         assert!(metadata.is_object());
         let obj = metadata.as_object().unwrap();
@@ -1815,7 +1822,7 @@ mod tests {
             ..Default::default()
         };
 
-        let metadata = build_registration_metadata(&request);
+        let metadata = request.registration_metadata();
         let obj = metadata.as_object().unwrap();
         assert!(
             !obj.contains_key("client_name"),
@@ -1852,7 +1859,7 @@ mod tests {
             ..Default::default()
         };
 
-        let metadata = build_registration_metadata(&request);
+        let metadata = request.registration_metadata();
         let obj = metadata.as_object().unwrap();
         let contacts = obj.get("contacts").unwrap().as_array().unwrap();
         assert_eq!(contacts.len(), 3);
@@ -1886,7 +1893,7 @@ mod tests {
             ..Default::default()
         };
 
-        let metadata = build_registration_metadata(&request);
+        let metadata = request.registration_metadata();
         let obj = metadata.as_object().unwrap();
         assert_eq!(obj.len(), 1);
         assert_eq!(obj.get("scope").unwrap(), "openid");
