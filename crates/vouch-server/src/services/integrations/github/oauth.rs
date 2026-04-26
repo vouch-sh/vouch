@@ -69,7 +69,7 @@ impl GitHubService<'_> {
         db::update_user_github_identity(
             self.store,
             params.user_id,
-            github_user.id as i64,
+            github_user.id.cast_signed(),
             &github_user.login,
             token_response.refresh_token.as_deref(),
         )

@@ -542,7 +542,11 @@ impl DocumentStore {
         let rows: Vec<RawDocumentRow> = crate::db_fetch_all!(&self.pool, stmt, RawDocumentRow)?;
 
         let has_more = rows.len() as u64 > limit;
-        let take = if has_more { limit as usize } else { rows.len() };
+        let take = if has_more {
+            usize::try_from(limit).context("pagination limit exceeds usize")?
+        } else {
+            rows.len()
+        };
 
         let mut results = Vec::with_capacity(take);
         for row in rows.into_iter().take(take) {
@@ -720,7 +724,7 @@ impl DocumentStore {
                     .value(Documents::ExpiresAt, Expr::val(expires_ref))
                     .value(
                         Documents::SchemaVersion,
-                        Expr::val(T::CURRENT_VERSION as i32),
+                        Expr::val(T::CURRENT_VERSION.cast_signed()),
                     )
                     .value(Documents::UpdatedAt, Expr::val(now_str.as_str()))
                     .value(
@@ -1002,7 +1006,11 @@ impl DocumentStore {
         let rows: Vec<RawDocumentRow> = crate::db_fetch_all!(&self.pool, stmt, RawDocumentRow)?;
 
         let has_more = rows.len() as u64 > limit;
-        let take = if has_more { limit as usize } else { rows.len() };
+        let take = if has_more {
+            usize::try_from(limit).context("pagination limit exceeds usize")?
+        } else {
+            rows.len()
+        };
 
         let mut results = Vec::with_capacity(take);
         for row in rows.into_iter().take(take) {
@@ -1142,7 +1150,7 @@ impl StoreTransaction<'_> {
             .values([
                 id.into(),
                 T::DOC_TYPE.into(),
-                (T::CURRENT_VERSION as i32).into(),
+                (T::CURRENT_VERSION.cast_signed()).into(),
                 encapped.into(),
                 encrypted.data.as_str().into(),
                 expires_ref.into(),
@@ -1312,7 +1320,7 @@ impl StoreTransaction<'_> {
                 .value(Documents::ExpiresAt, Expr::val(expires_ref))
                 .value(
                     Documents::SchemaVersion,
-                    Expr::val(T::CURRENT_VERSION as i32),
+                    Expr::val(T::CURRENT_VERSION.cast_signed()),
                 )
                 .value(Documents::UpdatedAt, Expr::val(now_str.as_str()))
                 .value(Documents::Version, Expr::col(Documents::Version).add(1))
@@ -1518,7 +1526,7 @@ impl StoreTransaction<'_> {
                 .value(Documents::ExpiresAt, Expr::val(expires_ref))
                 .value(
                     Documents::SchemaVersion,
-                    Expr::val(T::CURRENT_VERSION as i32),
+                    Expr::val(T::CURRENT_VERSION.cast_signed()),
                 )
                 .value(Documents::UpdatedAt, Expr::val(now_str.as_str()))
                 .value(

@@ -322,7 +322,11 @@ async fn connect_and_migrate(config: &config::ServerConfig) -> Result<Pool> {
             let after: i64 = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM _sqlx_migrations")
                 .fetch_one(pool)
                 .await?;
-            (after.saturating_sub(before) as usize, total)
+            (
+                usize::try_from(after.saturating_sub(before))
+                    .context("migration count delta exceeds usize")?,
+                total,
+            )
         }
         Pool::Postgres(pool) => {
             // Check if this is a DSQL endpoint
@@ -347,7 +351,11 @@ async fn connect_and_migrate(config: &config::ServerConfig) -> Result<Pool> {
                     sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM _sqlx_migrations")
                         .fetch_one(pool)
                         .await?;
-                (after.saturating_sub(before) as usize, total)
+                (
+                    usize::try_from(after.saturating_sub(before))
+                        .context("migration count delta exceeds usize")?,
+                    total,
+                )
             }
         }
     };

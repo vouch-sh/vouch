@@ -138,7 +138,7 @@ pub(crate) fn get_peer_credentials(stream: &UnixStream) -> Result<PeerCredential
 
     Ok(PeerCredentials {
         uid: cred.uid(),
-        pid: cred.pid().map_or(0, |p| p as u32),
+        pid: cred.pid().map_or(0, |p| p.cast_unsigned()),
     })
 }
 

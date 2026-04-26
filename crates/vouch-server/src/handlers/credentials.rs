@@ -856,7 +856,8 @@ pub async fn get_github_token(
     let expires_in = expires_at
         .as_second()
         .saturating_sub(now.as_second())
-        .max(0) as u64;
+        .max(0)
+        .unsigned_abs();
 
     // Log audit event
     if let Err(e) = db::log_github_credential_event(

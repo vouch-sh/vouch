@@ -222,11 +222,7 @@ fn read_boot_uptime() -> Option<u64> {
     let now_secs = jiff::Timestamp::now().as_second();
     let uptime = now_secs.saturating_sub(boot_secs);
 
-    if uptime >= 0 {
-        Some(uptime as u64)
-    } else {
-        None
-    }
+    u64::try_from(uptime).ok()
 }
 
 /// Detect Gatekeeper status via `spctl --status`.

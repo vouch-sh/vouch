@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Status command - show current session status.
 
-use anyhow::Result;
+use anyhow::{Context, Result, bail};
 use serde::Serialize;
 #[cfg(unix)]
 use vouch_agent::{AgentClient, AgentError, SessionInfo};
@@ -102,7 +102,7 @@ pub(crate) async fn run(server: &str, mode: OutputFormat) -> Result<()> {
                     );
                 }
                 OutputFormat::Human => {
-                    print_agent_session(effective_server, &session);
+                    print_agent_session(effective_server, &session)?;
                     println!();
                     print_all_integrations(effective_server).await;
                 }
@@ -214,7 +214,7 @@ pub(crate) async fn run(server: &str, mode: OutputFormat) -> Result<()> {
                         println!("  {:LABEL_WIDTH$} {device}", "Device:");
                     }
                     if let Some(expires_in) = status.expires_in_seconds {
-                        print_expiry(expires_in);
+                        print_expiry(expires_in)?;
                     }
                     println!(
                         "  {:LABEL_WIDTH$} {}",
@@ -266,11 +266,12 @@ async fn get_session_from_agent() -> vouch_agent::Result<SessionInfo> {
 
 /// Print session info from agent.
 #[cfg(unix)]
-fn print_agent_session(server: &str, session: &SessionInfo) {
+fn print_agent_session(server: &str, session: &SessionInfo) -> Result<()> {
     println!("{} ({server})", style::bold_green("Authenticated"));
     println!("  {:LABEL_WIDTH$} {}", "Email:", session.user_email);
-    print_expiry(session.expires_in_seconds);
+    print_expiry(session.expires_in_seconds)?;
     println!("  {:LABEL_WIDTH$} {}", "Agent:", style::green("running"));
+    Ok(())
 }
 
 /// Format the remaining time as a human-readable string.
@@ -292,10 +293,25 @@ pub(crate) fn format_remaining_time(expires_in: u64) -> String {
 /// Print expiry time with wall-clock time and remaining duration.
 ///
 /// Color: green (>1 h), yellow (<=1 h), red (<=15 min).
-fn print_expiry(expires_in: u64) {
+///
+/// # Errors
+///
+/// Returns an error if `expires_in` is outside the sane session lifetime
+/// (one year). Such values indicate a server bug, clock skew, or corrupt
+/// session state and should not be silently displayed.
+fn print_expiry(expires_in: u64) -> Result<()> {
+    // Real sessions are at most a few hours. Anything past one year means
+    // something is wrong upstream — fail loudly rather than render gibberish.
+    const MAX_SANE_SECS: u64 = 60 * 60 * 24 * 365;
+    if expires_in > MAX_SANE_SECS {
+        bail!(
+            "session expires_in_seconds={expires_in} exceeds sane upper bound \
+             ({MAX_SANE_SECS}s); refusing to render"
+        );
+    }
+
     let label = "Expires:";
 
-    // Color based on remaining time
     let color_fn: fn(&str) -> String = if expires_in > 3600 {
         style::green
     } else if expires_in > 900 {
@@ -306,7 +322,8 @@ fn print_expiry(expires_in: u64) {
 
     let remaining = format_remaining_time(expires_in);
 
-    let duration = jiff::SignedDuration::from_secs(expires_in as i64);
+    let secs = i64::try_from(expires_in).context("expires_in does not fit in i64")?;
+    let duration = jiff::SignedDuration::from_secs(secs);
     let now = jiff::Zoned::now();
     if let Ok(expiry_ts) = now.timestamp().checked_add(duration) {
         let expiry = expiry_ts.to_zoned(now.time_zone().clone());
@@ -315,6 +332,7 @@ fn print_expiry(expires_in: u64) {
     } else {
         println!("  {label:<LABEL_WIDTH$} {}", color_fn(&remaining));
     }
+    Ok(())
 }
 
 /// Print all integration statuses.

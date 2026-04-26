@@ -592,7 +592,7 @@ async fn test_rfc8693_token_lifetime_capped_by_subject() {
 
     // The exchanged token's lifetime should not exceed the subject token's remaining TTL
     assert!(
-        expires_in <= subject_remaining as u64 + 5, // +5s tolerance for test timing
+        expires_in <= u64::try_from(subject_remaining).unwrap_or(0) + 5, // +5s tolerance for test timing
         "Exchanged token lifetime ({expires_in}s) should not exceed subject remaining ({subject_remaining}s)"
     );
 }

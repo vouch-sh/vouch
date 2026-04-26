@@ -631,8 +631,9 @@ pub async fn browser_login_complete(
         verification_result.user_verified
     );
 
-    // Update counter in database (WebAuthn counter is u32, stored as i32)
-    let new_counter = verification_result.new_counter as i32;
+    // WebAuthn counter is u32; stored bit-identical as i32. Real authenticators never
+    // approach 2^31 uses, and bitwise reinterpret preserves DB monotonicity comparisons.
+    let new_counter = verification_result.new_counter.cast_signed();
     db::update_authenticator_counter(&state.store, &authenticator.id, new_counter).await?;
 
     // Issue an OAuth access token (RFC 9068) — the server acts as both issuer and audience

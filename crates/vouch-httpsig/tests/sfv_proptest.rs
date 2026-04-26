@@ -4,7 +4,8 @@
 #![expect(
     clippy::unwrap_used,
     clippy::let_underscore_must_use,
-    reason = "test code: panic on assertion failure is acceptable; proptest fuzz harness intentionally discards parse results"
+    clippy::cast_precision_loss,
+    reason = "test code: panic on assertion failure is acceptable; proptest fuzz harness intentionally discards parse results; proptest values are small ints that round-trip through f64"
 )]
 
 use proptest::prelude::*;

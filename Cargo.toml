@@ -53,6 +53,14 @@ integer_division = "deny"
 # Use checked_*/saturating_*/wrapping_* explicitly to declare intent.
 arithmetic_side_effects = "deny"
 
+# Numeric `as` casts silently truncate, lose sign, wrap, or lose precision.
+# Pair with arithmetic_side_effects to fully close the integer-bug surface.
+cast_possible_truncation = "deny"
+cast_sign_loss = "deny"
+cast_possible_wrap = "deny"
+cast_precision_loss = "deny"
+checked_conversions = "deny"
+
 # Time/Duration subtraction panics on negative result — use checked_sub or saturating_sub
 unchecked_time_subtraction = "deny"
 
