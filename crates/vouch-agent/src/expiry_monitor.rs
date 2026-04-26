@@ -60,7 +60,8 @@ pub async fn run(state: Arc<AgentState>) {
         for &threshold in WARN_THRESHOLDS_SECS {
             if remaining_secs <= threshold && !fired_thresholds.contains(&threshold) {
                 fired_thresholds.push(threshold);
-                let mins = threshold / 60;
+                // 60 is non-zero; unwrap_or arm is unreachable.
+                let mins = threshold.checked_div(60).unwrap_or(0);
                 let message = format!(
                     "Your Vouch session expires in {} minute{}.",
                     mins,

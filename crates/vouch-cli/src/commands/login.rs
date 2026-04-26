@@ -625,7 +625,8 @@ fn format_expiry(expires_at: &str) -> String {
     };
 
     let secs = ts.duration_since(jiff::Timestamp::now()).as_secs().max(0);
-    let remaining = jiff::SignedDuration::from_mins(secs / 60);
+    // 60 is non-zero; unwrap_or arm is unreachable.
+    let remaining = jiff::SignedDuration::from_mins(secs.checked_div(60).unwrap_or(0));
     let local = ts.to_zoned(jiff::tz::TimeZone::system());
     let datetime = local.strftime("%Y-%m-%d %H:%M %Z");
 

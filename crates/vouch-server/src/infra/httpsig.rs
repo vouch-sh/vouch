@@ -68,7 +68,8 @@ impl KeyResolver for OAuthClientKeyResolver {
                 if kid == keyid {
                     let public_key = jwk_to_p256_public_key(jwk)?;
                     let verifier = EcdsaP256Verifier::new(&public_key, &keyid);
-                    return Some(Arc::new(verifier) as Arc<dyn VerifyingAlgorithm>);
+                    let arc: Arc<dyn VerifyingAlgorithm> = Arc::new(verifier);
+                    return Some(arc);
                 }
             }
 

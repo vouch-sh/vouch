@@ -593,7 +593,8 @@ fn backoff_with_jitter(attempt: u32) -> std::time::Duration {
 
     let exp_ms = BASE_MS.saturating_mul(1_u64.checked_shl(attempt).unwrap_or(u64::MAX));
     let capped_ms = exp_ms.min(CAP_MS);
-    let half_ms = capped_ms / 2;
+    // 2 is non-zero; unwrap_or arm is unreachable.
+    let half_ms = capped_ms.checked_div(2).unwrap_or(0);
 
     let jitter_ms = random_u64_in_range(half_ms);
 
@@ -607,7 +608,8 @@ fn random_u64_in_range(max: u64) -> u64 {
     }
     let mut buf = [0u8; 8];
     if aws_lc_rs::rand::fill(&mut buf).is_err() {
-        return max / 2; // deterministic fallback
+        // 2 is non-zero; unwrap_or arm is unreachable.
+        return max.checked_div(2).unwrap_or(0); // deterministic fallback
     }
     u64::from_le_bytes(buf) % (max + 1)
 }

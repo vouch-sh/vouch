@@ -88,7 +88,9 @@ impl IntegrationCheck for SshIntegration {
         }
 
         let remaining_secs = valid_before_i64 - now_unix;
-        let remaining = jiff::SignedDuration::from_mins(remaining_secs / 60);
+        // 60 is non-zero; unwrap_or arm is unreachable.
+        let remaining =
+            jiff::SignedDuration::from_mins(remaining_secs.checked_div(60).unwrap_or(0));
 
         let principals: Vec<String> = cert
             .valid_principals()

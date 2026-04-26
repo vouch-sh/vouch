@@ -123,9 +123,10 @@ fn print_text(p: &vouch_common::posture::DevicePosture) {
 
     // System uptime
     if let Some(secs) = p.uptime_secs {
-        let days = secs / 86400;
-        let hours = (secs % 86400) / 3600;
-        let mins = (secs % 3600) / 60;
+        // 86400, 3600, 60 are non-zero; unwrap_or arms are unreachable.
+        let days = secs.checked_div(86400).unwrap_or(0);
+        let hours = (secs % 86400).checked_div(3600).unwrap_or(0);
+        let mins = (secs % 3600).checked_div(60).unwrap_or(0);
         println!("  Uptime:          {days}d {hours}h {mins}m");
     }
 
