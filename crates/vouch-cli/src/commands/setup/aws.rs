@@ -155,10 +155,11 @@ async fn run_discover(profile_prefix: Option<&str>, region: Option<&str>) -> Res
             "No SSO session found in ~/.aws/config. Run 'aws configure sso' first.".to_string(),
         )
     })?;
-    let member_role_name = vouch_config
+    let session_cfg = vouch_config
         .aws()
         .and_then(|a| a.sso_sessions.get(&session.name))
-        .map_or_else(|| "VouchAccess".to_string(), |s| s.member_role_name.clone());
+        .cloned()
+        .unwrap_or_default();
 
     let sso_region = session.region.clone();
     let sso_config = SsoConfig::from_session(&session);
@@ -197,18 +198,15 @@ async fn run_discover(profile_prefix: Option<&str>, region: Option<&str>) -> Res
             .await
             .with_context(|| format!("failed to list roles for account {}", account.account_id))?;
 
-        let has_vouch_role = roles.iter().any(|r| r.role_name == member_role_name);
+        let has_vouch_role = roles
+            .iter()
+            .any(|r| r.role_name == session_cfg.member_role_name);
         if !has_vouch_role {
             continue;
         }
 
         let partition = Partition::from_region(&sso_region);
-        let role_arn = format!(
-            "arn:{}:iam::{}:role/{}",
-            partition.as_str(),
-            account.account_id,
-            member_role_name
-        );
+        let role_arn = session_cfg.role_arn_in(partition.as_str(), &account.account_id);
 
         let safe_name = sanitize_profile_name(&account.account_name);
         let name_part = if safe_name.is_empty() {
