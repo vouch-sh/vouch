@@ -620,12 +620,6 @@ pub async fn delete_old_oauth_usage_events(audit: &AuditStore, before: Timestamp
 // JWKS Cache Operations (RFC 7523)
 // ============================================================================
 
-/// Get the effective JWKS for a client.
-#[must_use]
-pub fn get_client_jwks(client: &OAuthClient) -> Option<&serde_json::Value> {
-    client.jwks.as_ref().or(client.jwks_uri_cache.as_ref())
-}
-
 /// Update the cached JWKS fetched from a client's `jwks_uri`.
 ///
 /// Uses optimistic concurrency control. A version conflict on this

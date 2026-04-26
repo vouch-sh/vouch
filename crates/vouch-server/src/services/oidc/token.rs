@@ -485,7 +485,7 @@ fn validate_code_bindings(
         }
     }
 
-    validate_pkce(auth_code, code_verifier)?;
+    auth_code.validate_pkce(code_verifier)?;
 
     // FAPI 2.0 / RFC 9449 Section 10: Verify DPoP authorization code binding
     if let Some(ref bound_jkt) = auth_code.dpop_jkt {
@@ -597,44 +597,46 @@ async fn resolve_authorization_details(
     })
 }
 
-/// Validate PKCE code verifier against code challenge (RFC 7636 Section 4.6).
-///
-/// Uses constant-time comparison to prevent timing side-channel attacks.
-fn validate_pkce(auth_code: &AuthorizationCode, code_verifier: Option<&str>) -> ServiceResult<()> {
-    let Some(code_challenge) = &auth_code.code_challenge else {
-        // No PKCE challenge in authorization code
-        return Ok(());
-    };
+impl AuthorizationCode {
+    /// Validate PKCE code verifier against code challenge (RFC 7636 Section 4.6).
+    ///
+    /// Uses constant-time comparison to prevent timing side-channel attacks.
+    fn validate_pkce(&self, code_verifier: Option<&str>) -> ServiceResult<()> {
+        let Some(code_challenge) = &self.code_challenge else {
+            // No PKCE challenge in authorization code
+            return Ok(());
+        };
 
-    let code_verifier = code_verifier.ok_or_else(|| {
-        ServiceError::oauth(OAuthErrorCode::InvalidGrant, "Missing code_verifier")
-    })?;
+        let code_verifier = code_verifier.ok_or_else(|| {
+            ServiceError::oauth(OAuthErrorCode::InvalidGrant, "Missing code_verifier")
+        })?;
 
-    // RFC 9700 Section 2.1.1: Only S256 is supported.
-    // Default to S256 for backward compatibility with codes that don't store the method.
-    let _method = auth_code
-        .code_challenge_method
-        .unwrap_or(CodeChallengeMethod::S256);
+        // RFC 9700 Section 2.1.1: Only S256 is supported.
+        // Default to S256 for backward compatibility with codes that don't store the method.
+        let _method = self
+            .code_challenge_method
+            .unwrap_or(CodeChallengeMethod::S256);
 
-    let computed_challenge = {
-        let hash = digest::digest(&SHA256, code_verifier.as_bytes());
-        URL_SAFE_NO_PAD.encode(hash.as_ref())
-    };
+        let computed_challenge = {
+            let hash = digest::digest(&SHA256, code_verifier.as_bytes());
+            URL_SAFE_NO_PAD.encode(hash.as_ref())
+        };
 
-    // Use constant-time comparison to prevent timing side-channel attacks
-    let is_valid: bool = computed_challenge
-        .as_bytes()
-        .ct_eq(code_challenge.as_bytes())
-        .into();
+        // Use constant-time comparison to prevent timing side-channel attacks
+        let is_valid: bool = computed_challenge
+            .as_bytes()
+            .ct_eq(code_challenge.as_bytes())
+            .into();
 
-    if !is_valid {
-        return Err(ServiceError::oauth(
-            OAuthErrorCode::InvalidGrant,
-            "Invalid code_verifier",
-        ));
+        if !is_valid {
+            return Err(ServiceError::oauth(
+                OAuthErrorCode::InvalidGrant,
+                "Invalid code_verifier",
+            ));
+        }
+
+        Ok(())
     }
-
-    Ok(())
 }
 
 /// Authenticate an OAuth client using client credentials (RFC 6749 Section 2.3).
@@ -1234,7 +1236,7 @@ mod tests {
             auth_time: None,
         };
 
-        let result = validate_pkce(&auth_code, Some(code_verifier));
+        let result = auth_code.validate_pkce(Some(code_verifier));
         assert!(result.is_ok(), "RFC 7636 test vector should validate");
     }
 
@@ -1261,7 +1263,7 @@ mod tests {
             auth_time: None,
         };
 
-        let result = validate_pkce(&auth_code, Some("wrong_verifier"));
+        let result = auth_code.validate_pkce(Some("wrong_verifier"));
         assert!(result.is_err());
     }
 
@@ -1288,7 +1290,7 @@ mod tests {
             auth_time: None,
         };
 
-        let result = validate_pkce(&auth_code, None);
+        let result = auth_code.validate_pkce(None);
         // RFC 7636 Section 4.6: missing code_verifier when a challenge was registered
         // must return invalid_grant, not invalid_request or any other error code.
         assert_oauth_error(result, OAuthErrorCode::InvalidGrant);
@@ -1318,7 +1320,7 @@ mod tests {
             auth_time: None,
         };
 
-        let result = validate_pkce(&auth_code, None);
+        let result = auth_code.validate_pkce(None);
         assert!(result.is_ok());
     }
 

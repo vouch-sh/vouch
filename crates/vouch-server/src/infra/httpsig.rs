@@ -58,7 +58,7 @@ impl KeyResolver for OAuthClientKeyResolver {
                 .ok()
                 .flatten()?;
 
-            let jwks = crate::db::get_client_jwks(&client)?;
+            let jwks = client.jwks.as_ref().or(client.jwks_uri_cache.as_ref())?;
             let keys = jwks.get("keys")?.as_array()?;
 
             for jwk in keys {

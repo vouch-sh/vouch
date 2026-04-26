@@ -190,14 +190,6 @@ pub fn clear_cookie() -> Result<()> {
     Ok(())
 }
 
-/// Check if a cookie is expired.
-///
-/// Returns `true` if the cookie's expiration time has passed.
-pub fn is_cookie_expired(cookie: &SessionCookie) -> bool {
-    let now = jiff::Timestamp::now().as_second();
-    cookie.expires <= now
-}
-
 #[cfg(test)]
 #[expect(
     clippy::panic,
