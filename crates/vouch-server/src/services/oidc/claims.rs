@@ -247,7 +247,9 @@ impl OidcIdTokenClaimsBuilder {
     /// Returns an error if required fields (issuer, subject, audience) are missing.
     pub fn build(self) -> Result<OidcIdTokenClaims, ClaimsBuildError> {
         let now = jiff::Timestamp::now();
-        let exp = now.as_second() + i64::try_from(self.valid_for_seconds).unwrap_or(28800);
+        let exp = now
+            .as_second()
+            .saturating_add(i64::try_from(self.valid_for_seconds).unwrap_or(28800));
 
         Ok(OidcIdTokenClaims {
             iss: self

@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Vouch CLI - Hardware-backed identity for developers.
-#![deny(clippy::arithmetic_side_effects)]
 
 // Avoid musl's default allocator due to lackluster performance
 // https://nickb.dev/blog/default-musl-allocator-considered-harmful-to-performance

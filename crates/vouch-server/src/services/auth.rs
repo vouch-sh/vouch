@@ -292,10 +292,10 @@ impl ActorClaim {
     /// deeply nested (potentially malicious) actor chains.
     #[must_use]
     pub(crate) fn depth(&self) -> usize {
-        let mut depth = 1;
+        let mut depth: usize = 1;
         let mut current = &self.actor;
         while let Some(inner) = current {
-            depth += 1;
+            depth = depth.saturating_add(1);
             current = &inner.actor;
         }
         depth
@@ -498,7 +498,7 @@ pub(crate) async fn create_oauth_access_token(
     .await
     .map_err(|e| ServiceError::Internal(format!("Failed to store session: {e}")))?;
 
-    let expires_in = state.config().session_hours * 3600;
+    let expires_in = state.config().session_hours.saturating_mul(3600);
 
     Ok(CreateSessionResult {
         token: SecretString::from(token),

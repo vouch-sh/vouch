@@ -48,7 +48,10 @@ fn generate_user_code() -> Result<String, aws_lc_rs::error::Unspecified> {
     let chars: Vec<char> = bytes
         .iter()
         .map(|b| {
-            let idx = (*b as usize) % USER_CODE_ALPHABET.len();
+            // checked_rem returns None only if alphabet is empty; USER_CODE_ALPHABET is non-empty.
+            let idx = (*b as usize)
+                .checked_rem(USER_CODE_ALPHABET.len())
+                .unwrap_or(0);
             USER_CODE_ALPHABET.get(idx).copied().unwrap_or(b'X') as char
         })
         .collect();

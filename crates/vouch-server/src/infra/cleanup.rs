@@ -51,7 +51,10 @@ fn random_jitter(max_jitter_secs: u64) -> std::time::Duration {
     }
     let mut buf = [0u8; 8];
     if aws_rand::fill(&mut buf).is_ok() {
-        let value = u64::from_le_bytes(buf) % max_jitter_secs;
+        // checked_rem returns None only if max_jitter_secs is 0; guarded above.
+        let value = u64::from_le_bytes(buf)
+            .checked_rem(max_jitter_secs)
+            .unwrap_or(0);
         std::time::Duration::from_secs(value)
     } else {
         std::time::Duration::ZERO
@@ -73,7 +76,7 @@ pub fn start_cleanup_task(
     oauth_events_retention_days: i64,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
-        let base_secs = interval_minutes * 60;
+        let base_secs = interval_minutes.saturating_mul(60);
         // Jitter of up to 20% of the base interval
         // 5 is non-zero; unwrap_or arm is unreachable.
         let max_jitter_secs = base_secs.checked_div(5).unwrap_or(0);
@@ -81,7 +84,8 @@ pub fn start_cleanup_task(
         // Initial delay with jitter so instances started simultaneously don't
         // all fire their first cleanup at the same time.
         let initial_jitter = random_jitter(max_jitter_secs);
-        let initial_delay = std::time::Duration::from_secs(base_secs) + initial_jitter;
+        let initial_delay =
+            std::time::Duration::from_secs(base_secs).saturating_add(initial_jitter);
         tracing::debug!(
             "First cleanup in {}s (base {}s + jitter {}s)",
             initial_delay.as_secs(),
@@ -104,7 +108,7 @@ pub fn start_cleanup_task(
 
             // Sleep with jitter before the next run
             let jitter = random_jitter(max_jitter_secs);
-            let sleep_duration = std::time::Duration::from_secs(base_secs) + jitter;
+            let sleep_duration = std::time::Duration::from_secs(base_secs).saturating_add(jitter);
             tracing::debug!(
                 "Next cleanup in {}s (base {}s + jitter {}s)",
                 sleep_duration.as_secs(),

@@ -543,7 +543,7 @@ pub fn db_group_to_scim(
 fn parse_member_filter(path: &str) -> Option<String> {
     // Simple parser for members[value eq "user-id"]
     if let Some(start) = path.find("value eq \"") {
-        let start_idx = start + 10;
+        let start_idx = start.saturating_add(10);
         if let Some(rest) = path.get(start_idx..)
             && let Some(end) = rest.find('"')
         {

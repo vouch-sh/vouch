@@ -49,6 +49,10 @@ modulo_arithmetic = "deny"
 # Integer division panics on /0 — pair with modulo_arithmetic
 integer_division = "deny"
 
+# `+`, `-`, `*` panic in debug on overflow and wrap silently in release.
+# Use checked_*/saturating_*/wrapping_* explicitly to declare intent.
+arithmetic_side_effects = "deny"
+
 # Time/Duration subtraction panics on negative result — use checked_sub or saturating_sub
 unchecked_time_subtraction = "deny"
 

@@ -224,6 +224,7 @@ pub(crate) async fn delete_key(
 #[cfg(test)]
 #[expect(
     clippy::unwrap_used,
+    clippy::arithmetic_side_effects,
     reason = "test code: panic on assertion failure is acceptable"
 )]
 mod tests {

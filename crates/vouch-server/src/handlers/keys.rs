@@ -147,7 +147,7 @@ pub async fn register_start(
     let now = Timestamp::now();
     let exp = now
         .checked_add(jiff::Span::new().minutes(5))
-        .map_or(now.as_second() + 300, |t| t.as_second());
+        .map_or(now.as_second().saturating_add(300), |t| t.as_second());
     let reg_state = RegistrationState {
         user_id,
         user_name: user.email.clone(),

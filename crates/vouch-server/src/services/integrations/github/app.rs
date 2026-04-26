@@ -230,7 +230,7 @@ impl GitHubApp {
                 tracing::info!(
                     "GitHub App private key validated: {} bytes, modulus {} bits",
                     private_key.as_bytes().len(),
-                    key_pair.public_modulus_len() * 8
+                    key_pair.public_modulus_len().saturating_mul(8)
                 );
             }
             Err(e) => {
@@ -259,9 +259,9 @@ impl GitHubApp {
     pub async fn generate_app_jwt(&self) -> Result<String> {
         let now = jiff::Timestamp::now();
         // GitHub recommends setting iat to 60 seconds in the past to account for clock drift
-        let iat = now.as_second() - 60;
+        let iat = now.as_second().saturating_sub(60);
         // JWT expires in 10 minutes (GitHub maximum)
-        let exp = now.as_second() + 600;
+        let exp = now.as_second().saturating_add(600);
 
         let claims = GitHubAppJwtClaims {
             iat,
@@ -429,7 +429,7 @@ pub async fn list_user_accessible_installations(
     user_token: &str,
 ) -> Result<Vec<InstallationDetails>> {
     let mut all_installations = Vec::new();
-    let mut page = 1;
+    let mut page: u32 = 1;
 
     loop {
         let response = http_client
@@ -464,7 +464,7 @@ pub async fn list_user_accessible_installations(
         if count < 100 {
             break;
         }
-        page += 1;
+        page = page.saturating_add(1);
     }
 
     Ok(all_installations)

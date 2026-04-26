@@ -549,7 +549,7 @@ pub(crate) fn parse_scim_filter(
     };
 
     let after_attr = filter_lower
-        .get(attr_pos + attr_lower.len()..)
+        .get(attr_pos.saturating_add(attr_lower.len())..)
         .unwrap_or("");
     let after_attr_trimmed = after_attr.trim_start();
 
@@ -576,7 +576,7 @@ pub(crate) fn parse_scim_filter(
     let pattern_lower = format!("{attr_lower} {op_word} ");
 
     if let Some(lower_pos) = filter_lower.find(&pattern_lower) {
-        let lower_end = lower_pos + pattern_lower.len();
+        let lower_end = lower_pos.saturating_add(pattern_lower.len());
 
         // Map byte offset in filter_lower back to the original filter
         // by counting characters up to that offset, then converting

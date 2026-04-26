@@ -287,7 +287,7 @@ fn find_prefix_for_uri<'a>(node: roxmltree::Node<'_, 'a>, uri: &str) -> Option<&
             }
         }
         current = n.parent();
-        depth += 1;
+        depth = depth.saturating_add(1);
     }
 
     if candidates.is_empty() {

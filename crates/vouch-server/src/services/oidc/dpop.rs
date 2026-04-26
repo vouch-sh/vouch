@@ -334,7 +334,7 @@ pub fn validate_dpop_claims(
     }
 
     // Check timestamp (not too old, not in future)
-    let age = now - claims.iat;
+    let age = now.saturating_sub(claims.iat);
     if age < -60 {
         // Allow 60 seconds clock skew into future
         return Err(DpopError::Expired);

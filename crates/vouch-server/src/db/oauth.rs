@@ -591,7 +591,8 @@ pub async fn get_oauth_usage_stats(
                 continue;
             };
             if data.oauth_client_id == oauth_client_id {
-                *stats.entry(audit_event_type.to_string()).or_default() += 1;
+                let entry: &mut i64 = stats.entry(audit_event_type.to_string()).or_default();
+                *entry = entry.saturating_add(1);
             }
         }
     }
@@ -605,11 +606,12 @@ pub async fn get_oauth_usage_stats(
 /// Delete old usage events (for retention policy).
 pub async fn delete_old_oauth_usage_events(audit: &AuditStore, before: Timestamp) -> Result<u64> {
     let before_str = before.to_string();
-    let mut total = 0;
+    let mut total: u64 = 0;
     for event_type in OAuthEventType::USAGE_EVENTS {
-        total += audit
+        let deleted = audit
             .delete_old_events(event_type.audit_event_type(), &before_str)
             .await?;
+        total = total.saturating_add(deleted);
     }
     Ok(total)
 }

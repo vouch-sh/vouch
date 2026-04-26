@@ -107,7 +107,7 @@ pub fn validate_attestation_chain(
     // Verify the chain: each cert is signed by the next cert
     // (leaf at index 0, closest-to-root at last index)
     for i in 0..certs.len().saturating_sub(1) {
-        let issuer_idx = i + 1;
+        let issuer_idx = i.saturating_add(1);
         let subject = certs.get(i).ok_or(AttestationChainError::EmptyChain)?;
         let issuer = certs
             .get(issuer_idx)

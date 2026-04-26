@@ -285,7 +285,7 @@ pub async fn exchange_token(
     // Calculate expiration with policy TTL limit and subject token remaining TTL.
     // RFC 8693 Section 2.2: The exchanged token's lifetime should not exceed
     // the remaining lifetime of the subject token.
-    let default_expires_in = state.config().session_hours * 3600;
+    let default_expires_in = state.config().session_hours.saturating_mul(3600);
     let mut expires_in = match max_ttl_override {
         Some(max_ttl) => {
             let max_ttl_u64 = u64::try_from(max_ttl).map_err(|_| {

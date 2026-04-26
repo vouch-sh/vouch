@@ -121,8 +121,12 @@ pub fn country_flag(code: &str) -> Option<String> {
     if !a.is_ascii_alphabetic() || !b.is_ascii_alphabetic() {
         return None;
     }
-    let ri_a = char::from_u32(0x1F1E6_u32 + u32::from(a.to_ascii_uppercase() - b'A'))?;
-    let ri_b = char::from_u32(0x1F1E6_u32 + u32::from(b.to_ascii_uppercase() - b'A'))?;
+    let ri_a = char::from_u32(
+        0x1F1E6_u32.saturating_add(u32::from(a.to_ascii_uppercase().wrapping_sub(b'A'))),
+    )?;
+    let ri_b = char::from_u32(
+        0x1F1E6_u32.saturating_add(u32::from(b.to_ascii_uppercase().wrapping_sub(b'A'))),
+    )?;
     Some(format!("{ri_a}{ri_b}"))
 }
 

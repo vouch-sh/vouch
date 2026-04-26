@@ -157,7 +157,10 @@ pub async fn complete_login(
     };
 
     let session_hours = i64::try_from(state.config().session_hours).unwrap_or(8);
-    let cookie = create_session_cookie(session_result.token.expose_secret(), session_hours * 3600);
+    let cookie = create_session_cookie(
+        session_result.token.expose_secret(),
+        session_hours.saturating_mul(3600),
+    );
 
     // ── 6. Redirect to authorize endpoint with pending_auth ──────────────
     // This mirrors the production browser login flow: after authentication,

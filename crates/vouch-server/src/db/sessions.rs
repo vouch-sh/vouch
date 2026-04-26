@@ -118,7 +118,7 @@ pub async fn delete_oauth_sessions_for_user(store: &DocumentStore, user_id: &str
     for session in &sessions {
         if session.data.session_type == SessionPurpose::OAuthAccessToken {
             store.delete(&session.id).await?;
-            count += 1;
+            count = count.saturating_add(1);
         }
     }
     Ok(count)

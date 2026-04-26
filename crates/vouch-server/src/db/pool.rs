@@ -457,7 +457,7 @@ macro_rules! with_dsql_retry {
                         $crate::db::pool::retry_backoff(__attempt),
                     )
                     .await;
-                    __attempt += 1;
+                    __attempt = __attempt.saturating_add(1);
                 }
                 Err(e) => break Err(e),
             }
@@ -817,7 +817,12 @@ pub(crate) fn retry_backoff(attempt: u32) -> Duration {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .subsec_nanos();
-    let jitter = (u64::from(nanos) % (jitter_range * 2 + 1)).saturating_sub(jitter_range);
+    let modulus = jitter_range.saturating_mul(2).saturating_add(1);
+    // checked_rem returns None only if modulus is 0; saturating_add(1) is non-zero.
+    let jitter = u64::from(nanos)
+        .checked_rem(modulus)
+        .unwrap_or(0)
+        .saturating_sub(jitter_range);
     Duration::from_millis(base_ms.saturating_add(jitter))
 }
 

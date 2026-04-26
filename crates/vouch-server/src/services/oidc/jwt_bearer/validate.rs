@@ -186,7 +186,7 @@ pub fn validate_jwt_assertion(
     let now = Timestamp::now().as_second();
 
     // Validate expiration (RFC 7523 Section 3: MUST reject expired JWTs)
-    if claims.exp < now - CLOCK_SKEW_SECONDS {
+    if claims.exp < now.saturating_sub(CLOCK_SKEW_SECONDS) {
         return Err(ServiceError::oauth(
             OAuthErrorCode::InvalidClient,
             "JWT assertion has expired",
@@ -195,7 +195,7 @@ pub fn validate_jwt_assertion(
 
     // Validate not-before if present
     if let Some(nbf) = claims.nbf
-        && nbf > now + CLOCK_SKEW_SECONDS
+        && nbf > now.saturating_add(CLOCK_SKEW_SECONDS)
     {
         return Err(ServiceError::oauth(
             OAuthErrorCode::InvalidClient,
@@ -205,7 +205,7 @@ pub fn validate_jwt_assertion(
 
     // Validate iat if present
     if let Some(iat) = claims.iat
-        && iat > now + CLOCK_SKEW_SECONDS
+        && iat > now.saturating_add(CLOCK_SKEW_SECONDS)
     {
         return Err(ServiceError::oauth(
             OAuthErrorCode::InvalidClient,
@@ -215,7 +215,7 @@ pub fn validate_jwt_assertion(
 
     // Validate max lifetime: exp - iat (or exp - now if no iat)
     let effective_iat = claims.iat.unwrap_or(now);
-    let lifetime = claims.exp - effective_iat;
+    let lifetime = claims.exp.saturating_sub(effective_iat);
     if lifetime > max_lifetime_seconds {
         return Err(ServiceError::oauth(
             OAuthErrorCode::InvalidClient,
@@ -293,6 +293,7 @@ pub fn map_algorithm(alg: &str) -> ServiceResult<jsonwebtoken::Algorithm> {
     clippy::unwrap_used,
     clippy::expect_used,
     clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
     reason = "test code: panic on assertion failure is acceptable"
 )]
 mod tests {

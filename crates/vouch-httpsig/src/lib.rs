@@ -13,7 +13,6 @@
 //! - `hmac-sha256` — HMAC with SHA-256
 //! - `rsa-pss-sha512` — RSASSA-PSS with SHA-512
 //! - `rsa-v1_5-sha256` — RSASSA-PKCS1-v1.5 with SHA-256
-#![deny(clippy::arithmetic_side_effects)]
 
 pub mod algorithm;
 pub mod component;

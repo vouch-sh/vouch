@@ -429,7 +429,7 @@ pub async fn revoke_all_ssh_certificates_for_user(
             revoked_by: revoked_by.map(String::from),
         };
         tx.insert(&doc).await?;
-        count += 1;
+        count = count.saturating_add(1);
     }
     tx.commit().await?;
     Ok(count)

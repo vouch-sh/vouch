@@ -103,7 +103,7 @@ pub async fn issue_aws_token(
     let authenticator = get_authenticator(store, authenticator_id).await?;
 
     // Token validity matches session duration
-    let expires_in = session_hours * 3600;
+    let expires_in = session_hours.saturating_mul(3600);
 
     // Build AWS session tags for ABAC and CloudTrail attribution.
     // Tags are embedded in the JWT so AWS extracts them during

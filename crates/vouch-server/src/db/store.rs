@@ -536,7 +536,7 @@ impl DocumentStore {
         // Fetch one extra to detect whether there are more pages.
         let stmt = query
             .order_by((Documents::Table, Documents::Id), Order::Asc)
-            .limit(limit + 1)
+            .limit(limit.saturating_add(1))
             .to_owned();
 
         let rows: Vec<RawDocumentRow> = crate::db_fetch_all!(&self.pool, stmt, RawDocumentRow)?;
@@ -723,7 +723,10 @@ impl DocumentStore {
                         Expr::val(T::CURRENT_VERSION as i32),
                     )
                     .value(Documents::UpdatedAt, Expr::val(now_str.as_str()))
-                    .value(Documents::Version, Expr::val(expected_version + 1))
+                    .value(
+                        Documents::Version,
+                        Expr::val(expected_version.saturating_add(1)),
+                    )
                     .and_where(Expr::col(Documents::Id).eq(id))
                     .and_where(Expr::col(Documents::Version).eq(expected_version));
                 q.to_owned()
@@ -993,7 +996,7 @@ impl DocumentStore {
 
         let stmt = query
             .order_by(Documents::Id, Order::Asc)
-            .limit(limit + 1)
+            .limit(limit.saturating_add(1))
             .to_owned();
 
         let rows: Vec<RawDocumentRow> = crate::db_fetch_all!(&self.pool, stmt, RawDocumentRow)?;
@@ -1518,7 +1521,10 @@ impl StoreTransaction<'_> {
                     Expr::val(T::CURRENT_VERSION as i32),
                 )
                 .value(Documents::UpdatedAt, Expr::val(now_str.as_str()))
-                .value(Documents::Version, Expr::val(expected_version + 1))
+                .value(
+                    Documents::Version,
+                    Expr::val(expected_version.saturating_add(1)),
+                )
                 .and_where(Expr::col(Documents::Id).eq(id))
                 .and_where(Expr::col(Documents::Version).eq(expected_version));
             q.to_owned()

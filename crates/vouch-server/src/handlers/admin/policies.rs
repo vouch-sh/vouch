@@ -171,7 +171,7 @@ pub async fn toggle_preconfigured_policy(
             .await
             .map_err(|e| ServiceError::Internal(format!("Failed to count policies: {e}")))?
             .len();
-        let total_active = active_slugs.len() + custom_active_count;
+        let total_active = active_slugs.len().saturating_add(custom_active_count);
 
         if total_active >= posture::MAX_ACTIVE_POLICIES {
             return Ok(Redirect::to(&format!(
@@ -513,7 +513,9 @@ pub async fn toggle_custom_policy(
             .map_err(|e| ServiceError::Internal(format!("Failed to count policies: {e}")))?
             .len();
         // Subtract 1 if this policy was already counted as active
-        let other_active = preconfigured_count + custom_active_count - usize::from(policy.active);
+        let other_active = preconfigured_count
+            .saturating_add(custom_active_count)
+            .saturating_sub(usize::from(policy.active));
 
         if other_active >= posture::MAX_ACTIVE_POLICIES {
             return Ok(Redirect::to(&format!(
