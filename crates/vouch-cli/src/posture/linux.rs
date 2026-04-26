@@ -156,7 +156,7 @@ fn detect_screen_lock_kde(posture: &mut DevicePosture) {
         posture.screen_lock_idle_timeout_secs = timeout_output
             .as_deref()
             .and_then(|s| s.trim().parse::<u64>().ok())
-            .map(|mins| mins * 60);
+            .map(|mins: u64| mins.saturating_mul(60));
     }
 }
 

@@ -43,7 +43,7 @@ fn detect_elevated() -> bool {
 #[cfg(target_os = "linux")]
 fn parse_ppid_from_proc_stat(stat: &str) -> Option<String> {
     let after_comm = stat.rfind(')')?;
-    let rest = stat.get(after_comm + 2..)?;
+    let rest = stat.get(after_comm.saturating_add(2)..)?;
     let mut fields = rest.split_whitespace();
     let _state = fields.next()?;
     let ppid = fields.next()?;
