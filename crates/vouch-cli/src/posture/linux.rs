@@ -275,7 +275,7 @@ fn read_proc_uptime() -> Option<u64> {
     let content = std::fs::read_to_string("/proc/uptime").ok()?;
     let secs_str = content.split_whitespace().next()?;
     let secs_f64: f64 = secs_str.parse().ok()?;
-    if !secs_f64.is_finite() || secs_f64 < 0.0 || secs_f64 > MAX_UPTIME_SECS {
+    if !secs_f64.is_finite() || !(0.0..=MAX_UPTIME_SECS).contains(&secs_f64) {
         return None;
     }
     #[expect(
