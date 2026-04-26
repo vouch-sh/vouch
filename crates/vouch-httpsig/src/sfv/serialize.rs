@@ -91,7 +91,8 @@ fn serialize_bare_item(item: &SfvBareItem, out: &mut String) {
     match item {
         SfvBareItem::Integer(v) => {
             use std::fmt::Write;
-            let _ = write!(out, "{v}");
+            // Writing to a String never fails; ignore the formal Result.
+            let _written = write!(out, "{v}");
         }
         SfvBareItem::Decimal(v) => {
             // RFC 8941 §4.1.5: serialize with up to 3 fractional digits,

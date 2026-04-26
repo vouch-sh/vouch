@@ -197,7 +197,7 @@ pub async fn toggle_preconfigured_policy(
         "slug": &slug,
         "admin_user_id": admin.id,
     });
-    let _ = state
+    if let Err(e) = state
         .audit
         .insert_event(
             "admin_policy_toggle",
@@ -205,7 +205,10 @@ pub async fn toggle_preconfigured_policy(
             Some(&slug),
             &data.to_string(),
         )
-        .await;
+        .await
+    {
+        tracing::warn!(error = %e, "failed to write admin_policy_toggle audit event");
+    }
 
     tracing::info!(
         "Admin {} {} preconfigured policy '{}'",
@@ -309,7 +312,7 @@ pub async fn create_custom_policy(
         "admin_user_id": admin.id,
         "cel_expression_hash": cel_hash,
     });
-    let _ = state
+    if let Err(e) = state
         .audit
         .insert_event(
             "admin_policy_create",
@@ -317,7 +320,10 @@ pub async fn create_custom_policy(
             Some(&policy.name),
             &data.to_string(),
         )
-        .await;
+        .await
+    {
+        tracing::warn!(error = %e, "failed to write admin_policy_create audit event");
+    }
 
     tracing::info!(
         "Admin {} created custom policy '{}'",
@@ -397,7 +403,7 @@ pub async fn update_custom_policy(
         "admin_user_id": admin.id,
         "cel_expression_hash": cel_hash,
     });
-    let _ = state
+    if let Err(e) = state
         .audit
         .insert_event(
             "admin_policy_update",
@@ -405,7 +411,10 @@ pub async fn update_custom_policy(
             Some(&form.name),
             &data.to_string(),
         )
-        .await;
+        .await
+    {
+        tracing::warn!(error = %e, "failed to write admin_policy_update audit event");
+    }
 
     tracing::info!("Admin {} updated custom policy '{}'", admin.email, id);
 
@@ -443,7 +452,7 @@ pub async fn delete_custom_policy(
         "policy_id": &*id,
         "admin_user_id": admin.id,
     });
-    let _ = state
+    if let Err(e) = state
         .audit
         .insert_event(
             "admin_policy_delete",
@@ -451,7 +460,10 @@ pub async fn delete_custom_policy(
             Some(&*id),
             &data.to_string(),
         )
-        .await;
+        .await
+    {
+        tracing::warn!(error = %e, "failed to write admin_policy_delete audit event");
+    }
 
     tracing::info!("Admin {} deleted custom policy '{}'", admin.email, id);
 
@@ -539,7 +551,7 @@ pub async fn toggle_custom_policy(
         "admin_user_id": admin.id,
         "cel_expression_hash": cel_hash,
     });
-    let _ = state
+    if let Err(e) = state
         .audit
         .insert_event(
             "admin_policy_toggle",
@@ -547,7 +559,10 @@ pub async fn toggle_custom_policy(
             Some(&policy.name),
             &data.to_string(),
         )
-        .await;
+        .await
+    {
+        tracing::warn!(error = %e, "failed to write admin_policy_toggle audit event");
+    }
 
     tracing::info!(
         "Admin {} {} custom policy '{}'",

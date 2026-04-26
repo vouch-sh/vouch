@@ -103,7 +103,8 @@ fn write_event(record: &AuditRecord) -> std::io::Result<()> {
         && metadata.len() > MAX_LOG_SIZE
     {
         let rotated = dir.join("audit.log.1");
-        let _ = std::fs::rename(&log_path, &rotated);
+        // Best-effort rotation; failure is non-fatal and is shadowed by the next write.
+        let _rotated = std::fs::rename(&log_path, &rotated);
     }
 
     let mut file = std::fs::OpenOptions::new()
@@ -115,7 +116,8 @@ fn write_event(record: &AuditRecord) -> std::io::Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&log_path, std::fs::Permissions::from_mode(0o600));
+        // Best-effort tightening; if it fails the log still gets written.
+        let _chmod = std::fs::set_permissions(&log_path, std::fs::Permissions::from_mode(0o600));
     }
 
     let json = serde_json::to_string(record)

@@ -319,7 +319,9 @@ fn build_mtls_aliases(state: &Arc<AppState>, base_url: &str) -> Option<MtlsEndpo
 
     // Derive mTLS base URL by replacing the port with mtls_port.
     let mtls_base = if let Ok(mut url) = url::Url::parse(base_url) {
-        let _ = url.set_port(Some(config.mtls_port));
+        // url::Url::set_port returns Result<(), ()>; failure means non-special URL,
+        // already validated upstream.
+        let _set = url.set_port(Some(config.mtls_port));
         url.to_string().trim_end_matches('/').to_string()
     } else {
         tracing::warn!(

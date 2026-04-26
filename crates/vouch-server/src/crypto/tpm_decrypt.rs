@@ -621,7 +621,7 @@ mod tests {
         // the binary should not be in PATH.
         // If it IS installed (unlikely on dev), the test still passes
         // since we only assert the function doesn't panic.
-        let _ = is_attest_binary_available();
+        let _checked = is_attest_binary_available();
     }
 
     /// End-to-end CMS EnvelopedData parsing + decryption with a hand-crafted structure.

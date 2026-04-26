@@ -3,7 +3,8 @@
 
 #![expect(
     clippy::unwrap_used,
-    reason = "test code: panic on assertion failure is acceptable"
+    clippy::let_underscore_must_use,
+    reason = "test code: panic on assertion failure is acceptable; proptest fuzz harness intentionally discards parse results"
 )]
 
 use proptest::prelude::*;

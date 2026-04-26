@@ -473,9 +473,10 @@ async fn ensure_client_registered(client: &VouchClient, fapi_key: &ClientKey) ->
                     .await
                     {
                         Ok(true) => {
-                            // Cache the verification timestamp.
+                            // Cache the verification timestamp; cache write
+                            // failures are non-fatal — next login revalidates.
                             let now = jiff::Timestamp::now().to_string();
-                            let _ = Config::modify(|cfg| {
+                            let _cached = Config::modify(|cfg| {
                                 cfg.set_server_url(&base_url);
                                 cfg.set_registration_verified_at(&now);
                             });

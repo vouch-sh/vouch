@@ -58,6 +58,9 @@ rc_buffer = "deny"
 # Style: prefer .map_or(default, f) over .map(f).unwrap_or(default)
 map_unwrap_or = "deny"
 
+# Silent drops of #[must_use] (mostly Result) hide real failures
+let_underscore_must_use = "deny"
+
 module_name_repetitions = "allow"
 similar_names = "allow"
 

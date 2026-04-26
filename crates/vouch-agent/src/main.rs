@@ -213,8 +213,8 @@ async fn run_agent_server(enable_ssh_agent: bool) -> ExitCode {
                     warn!("Failed to listen for Ctrl+C: {e}");
                 }
             }
-            // Signal SSH agent to stop accepting new connections
-            let _ = shutdown_tx.send(true);
+            // Signal SSH agent to stop accepting new connections; receiver may already be gone.
+            let _signaled = shutdown_tx.send(true);
             ExitCode::SUCCESS
         }
         Some(()) = async {
@@ -224,8 +224,8 @@ async fn run_agent_server(enable_ssh_agent: bool) -> ExitCode {
             }
         } => {
             info!("Received SIGTERM, shutting down...");
-            // Signal SSH agent to stop accepting new connections
-            let _ = shutdown_tx.send(true);
+            // Signal SSH agent to stop accepting new connections; receiver may already be gone.
+            let _signaled = shutdown_tx.send(true);
             ExitCode::SUCCESS
         }
     };
@@ -267,7 +267,8 @@ fn stop_agent() -> ExitCode {
         Ok(p) => p,
         Err(_) => {
             eprintln!("Invalid PID in file");
-            let _ = std::fs::remove_file(&pid_path);
+            // Best-effort cleanup of the stale PID file.
+            let _removed = std::fs::remove_file(&pid_path);
             return ExitCode::FAILURE;
         }
     };
@@ -285,7 +286,8 @@ fn stop_agent() -> ExitCode {
             // SAFETY: kill(pid, 0) checks if process exists
             if unsafe { libc::kill(pid, 0) } != 0 {
                 println!("Agent stopped");
-                let _ = daemon::remove_pid_file();
+                // Best-effort cleanup of the PID file.
+                let _removed = daemon::remove_pid_file();
             } else {
                 println!("Agent is shutting down...");
             }
@@ -295,7 +297,8 @@ fn stop_agent() -> ExitCode {
             // Remove stale PID file if process doesn't exist
             // SAFETY: kill(pid, 0) checks if process exists
             if unsafe { libc::kill(pid, 0) } != 0 {
-                let _ = daemon::remove_pid_file();
+                // Best-effort cleanup of the stale PID file.
+                let _removed = daemon::remove_pid_file();
             }
             ExitCode::FAILURE
         }

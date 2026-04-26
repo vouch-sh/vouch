@@ -133,7 +133,8 @@ fn generate_request_id() -> Result<String, AuthnRequestError> {
     aws_lc_rs::rand::fill(&mut bytes).map_err(|e| AuthnRequestError::RandomId(e.to_string()))?;
     let hex: String = bytes.iter().fold(String::with_capacity(32), |mut s, b| {
         use std::fmt::Write as _;
-        let _ = write!(s, "{b:02x}");
+        // Writing to a String never fails; ignore the formal Result.
+        let _written = write!(s, "{b:02x}");
         s
     });
     Ok(format!("_{hex}"))

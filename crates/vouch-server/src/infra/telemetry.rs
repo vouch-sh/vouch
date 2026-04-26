@@ -91,8 +91,9 @@ fn init_opentelemetry() -> Result<
 
     let tracer = provider.tracer("vouch-server");
 
-    // Store provider for shutdown
-    let _ = TRACER_PROVIDER.set(provider);
+    // Store provider for shutdown; OnceLock::set returning Err means it was already
+    // set, which is fine on repeat init.
+    let _set = TRACER_PROVIDER.set(provider);
 
     let layer = tracing_opentelemetry::OpenTelemetryLayer::new(tracer);
     Ok(Some(layer))

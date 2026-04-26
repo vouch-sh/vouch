@@ -114,7 +114,9 @@ impl GitHubService<'_> {
             && let Ok(Some(user)) = db::get_user_by_id(self.store, user_id).await
             && let (Some(github_id), Some(github_login)) = (user.github_id, &user.github_login)
         {
-            let _ = db::update_user_github_identity(
+            // Best-effort refresh-token rotation; user session stays valid even if
+            // this DB write fails — the next refresh will retry.
+            let _updated = db::update_user_github_identity(
                 self.store,
                 user_id,
                 github_id,

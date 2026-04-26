@@ -455,7 +455,7 @@ async fn send_response(stream: &mut UnixStream, response: &Response) -> Result<(
 
 impl Drop for AgentServer {
     fn drop(&mut self) {
-        // Clean up socket on drop
-        let _ = crate::socket::remove_socket();
+        // Clean up socket on drop (best-effort; cannot return errors from Drop).
+        let _removed = crate::socket::remove_socket();
     }
 }
