@@ -267,14 +267,24 @@ fn detect_uptime(posture: &mut DevicePosture) {
 }
 
 fn read_proc_uptime() -> Option<u64> {
+    // /proc/uptime cannot reasonably exceed a few decades; bound generously at
+    // 100 years to reject NaN, infinity, negatives, or absurd values from a
+    // corrupted procfs read.
+    const MAX_UPTIME_SECS: f64 = 100.0 * 365.25 * 24.0 * 3600.0;
+
     let content = std::fs::read_to_string("/proc/uptime").ok()?;
     let secs_str = content.split_whitespace().next()?;
     let secs_f64: f64 = secs_str.parse().ok()?;
-    if secs_f64 >= 0.0 {
-        Some(secs_f64 as u64)
-    } else {
-        None
+    if !secs_f64.is_finite() || !(0.0..=MAX_UPTIME_SECS).contains(&secs_f64) {
+        return None;
     }
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "bounded above by MAX_UPTIME_SECS and >= 0.0 by guard above"
+    )]
+    let secs = secs_f64 as u64;
+    Some(secs)
 }
 
 /// Detect mandatory access control policy (SELinux or AppArmor).

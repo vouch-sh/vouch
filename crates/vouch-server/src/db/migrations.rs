@@ -120,6 +120,8 @@ async fn record_migration(
         .as_ref()
         .to_vec();
 
+    let elapsed_nanos = i64::try_from(elapsed.as_nanos())
+        .context("migration elapsed time exceeds i64 nanoseconds")?;
     sqlx::query(
         r#"
         INSERT INTO _sqlx_migrations (version, description, success, checksum, execution_time)
@@ -130,7 +132,7 @@ async fn record_migration(
     .bind(&*migration.description)
     .bind(true)
     .bind(&checksum)
-    .bind(elapsed.as_nanos() as i64)
+    .bind(elapsed_nanos)
     .execute(pool)
     .await
     .context("failed to insert migration record")?;

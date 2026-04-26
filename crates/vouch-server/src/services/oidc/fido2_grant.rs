@@ -250,10 +250,12 @@ pub async fn exchange_fido2_assertion(
     );
 
     // 7. Update counter in database
+    // WebAuthn counter is u32; stored bit-identical as i32. Real authenticators never
+    // approach 2^31 uses, and bitwise reinterpret preserves DB monotonicity comparisons.
     db::update_authenticator_counter(
         &state.store,
         &authenticator.id,
-        assertion_result.new_counter as i32,
+        assertion_result.new_counter.cast_signed(),
     )
     .await
     .map_err(|e| ServiceError::Internal(format!("Failed to update counter: {e}")))?;

@@ -7,7 +7,9 @@
 #[cfg(test)]
 #[expect(
     clippy::unwrap_used,
-    reason = "test code: panic on assertion failure is acceptable"
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "test code: panic on assertion failure is acceptable; cast bounds are obvious in test fixtures"
 )]
 mod tests {
     use crate::api::*;

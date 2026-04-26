@@ -7,6 +7,7 @@ use super::documents::audit::ScimAuditData;
 use super::documents::scim::{ScimGroupDoc, ScimGroupMemberDoc, ScimTokenDoc};
 use super::documents::user::UserDoc;
 use super::store::DocumentStore;
+use anyhow::Context;
 use anyhow::Result;
 use jiff::Timestamp;
 
@@ -347,7 +348,7 @@ pub async fn list_scim_users(
         .await?;
     Ok((
         docs.into_iter().map(ScimUserRecord::from).collect(),
-        total_count as usize,
+        usize::try_from(total_count).context("SCIM user total_count out of range")?,
     ))
 }
 
@@ -729,7 +730,7 @@ pub async fn list_scim_groups(
         .await?;
     Ok((
         docs.into_iter().map(ScimGroupRecord::from).collect(),
-        total_count as usize,
+        usize::try_from(total_count).context("SCIM group total_count out of range")?,
     ))
 }
 

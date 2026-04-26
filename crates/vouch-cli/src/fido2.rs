@@ -836,19 +836,24 @@ pub struct MockFidoDevice {
 )]
 impl MockFidoDevice {
     /// Create a new mock FIDO2 device with random keys.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the system RNG fails. Test-utils only.
     #[must_use]
+    #[expect(
+        clippy::expect_used,
+        reason = "test-utils mock; RNG failure is unrecoverable, panic is the right fail-fast"
+    )]
     pub fn new() -> Self {
         use ed25519_dalek::SigningKey;
-        use ssh_key::rand_core::OsRng;
 
-        let signing_key = SigningKey::generate(&mut OsRng);
+        let mut seed = [0u8; 32];
+        aws_lc_rs::rand::fill(&mut seed).expect("system RNG failure");
+        let signing_key = SigningKey::from_bytes(&seed);
+
         let mut credential_id = vec![0u8; 32];
-        // Generate random credential ID
-        for (i, byte) in credential_id.iter_mut().enumerate() {
-            *byte = (i as u8)
-                .wrapping_mul(17)
-                .wrapping_add(signing_key.to_bytes().get(i % 32).copied().unwrap_or(0));
-        }
+        aws_lc_rs::rand::fill(&mut credential_id).expect("system RNG failure");
 
         Self {
             signing_key,

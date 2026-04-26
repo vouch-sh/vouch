@@ -654,6 +654,10 @@ mod tests {
         let cbc_context = enc.encrypt(&mut cbc_out).unwrap();
         let iv: &[u8] = (&cbc_context).try_into().unwrap();
 
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "DER short-form length: each `as u8` is guarded by an explicit branch bound"
+        )]
         fn der_tlv(tag: u8, value: &[u8]) -> Vec<u8> {
             let mut out = vec![tag];
             let len = value.len();

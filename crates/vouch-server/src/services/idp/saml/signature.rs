@@ -886,6 +886,10 @@ mod tests {
         content.extend_from_slice(value);
         der_wrap(0x03, &content)
     }
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "DER short-form length: each `as u8` is guarded by an explicit branch bound"
+    )]
     fn der_wrap(tag: u8, content: &[u8]) -> Vec<u8> {
         let len = content.len();
         let mut out = vec![tag];

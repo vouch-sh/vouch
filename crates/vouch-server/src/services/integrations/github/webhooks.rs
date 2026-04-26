@@ -186,7 +186,7 @@ impl GitHubService<'_> {
                 repositories,
                 ..
             } => {
-                let installation_id = installation.id as i64;
+                let installation_id = installation.id.cast_signed();
                 let repo_names: Vec<String> = repositories.iter().map(|r| r.name.clone()).collect();
 
                 if repo_names.is_empty() {
@@ -218,7 +218,7 @@ impl GitHubService<'_> {
                 }
             }
             InstallationEvent::Deleted { installation, .. } => {
-                let installation_id = installation.id as i64;
+                let installation_id = installation.id.cast_signed();
                 tracing::info!(
                     "GitHub installation deleted: {} ({})",
                     installation_id,
@@ -232,7 +232,7 @@ impl GitHubService<'_> {
                 }
             }
             InstallationEvent::Suspend { installation } => {
-                let installation_id = installation.id as i64;
+                let installation_id = installation.id.cast_signed();
                 tracing::info!(
                     "GitHub installation suspended: {} ({})",
                     installation_id,
@@ -243,7 +243,7 @@ impl GitHubService<'_> {
                 }
             }
             InstallationEvent::Unsuspend { installation } => {
-                let installation_id = installation.id as i64;
+                let installation_id = installation.id.cast_signed();
                 tracing::info!(
                     "GitHub installation unsuspended: {} ({})",
                     installation_id,
@@ -300,7 +300,7 @@ impl GitHubService<'_> {
             }
         };
 
-        let installation_id = installation.id as i64;
+        let installation_id = installation.id.cast_signed();
         let added_names: Vec<String> = added.iter().map(|r| r.name.clone()).collect();
         let removed_names: Vec<String> = removed.iter().map(|r| r.name.clone()).collect();
 

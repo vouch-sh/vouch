@@ -80,7 +80,7 @@ impl GitHubService<'_> {
         db::create_github_installation(
             self.store,
             params.org_id,
-            params.installation_id as i64,
+            params.installation_id.cast_signed(),
             &details.account.login,
             &details.account.account_type,
             &details.permissions,
@@ -148,10 +148,13 @@ impl GitHubService<'_> {
             .ok_or(GitHubError::InstallationAccessDenied)?;
 
         // Verify installation is not already linked
-        if db::get_github_installation_by_installation_id(self.store, params.installation_id as i64)
-            .await
-            .map_err(GitHubError::Database)?
-            .is_some()
+        if db::get_github_installation_by_installation_id(
+            self.store,
+            params.installation_id.cast_signed(),
+        )
+        .await
+        .map_err(GitHubError::Database)?
+        .is_some()
         {
             return Err(GitHubError::InstallationAlreadyConnected);
         }
@@ -166,7 +169,7 @@ impl GitHubService<'_> {
         db::create_github_installation(
             self.store,
             params.org_id,
-            params.installation_id as i64,
+            params.installation_id.cast_signed(),
             &user_installation.account.login,
             &user_installation.account.account_type,
             &details.permissions,
@@ -246,7 +249,7 @@ impl GitHubService<'_> {
         // Filter to unlinked installations only
         let unlinked = installations
             .into_iter()
-            .filter(|i| !linked_ids.contains(&(i.id as i64)))
+            .filter(|i| !linked_ids.contains(&i.id.cast_signed()))
             .map(|i| UnlinkedInstallation {
                 id: i.id,
                 account_login: i.account.login,
@@ -299,7 +302,7 @@ impl GitHubService<'_> {
             GitHubCredentialAuditData {
                 event_type: event_type.to_string(),
                 org_id: Some(org_id.to_string()),
-                installation_id: Some(installation_id as i64),
+                installation_id: Some(installation_id.cast_signed()),
                 permissions: permissions.cloned(),
                 success: true,
                 ..Default::default()
