@@ -131,7 +131,7 @@ async fn resolve_jwks_uri(
     if let (Some(cache), Some(cached_at)) = (cached_jwks, cached_at)
         && let Ok(ts) = cached_at.parse::<Timestamp>()
     {
-        let cache_age = Timestamp::now().as_second() - ts.as_second();
+        let cache_age = Timestamp::now().as_second().saturating_sub(ts.as_second());
         if cache_age < JWKS_CACHE_TTL_SECONDS {
             return parse_jwks_value(cache);
         }
@@ -151,7 +151,7 @@ async fn resolve_jwks_uri(
             if let (Some(cache), Some(cached_at)) = (cached_jwks, cached_at)
                 && let Ok(ts) = cached_at.parse::<Timestamp>()
             {
-                let stale_age = Timestamp::now().as_second() - ts.as_second();
+                let stale_age = Timestamp::now().as_second().saturating_sub(ts.as_second());
                 if stale_age < JWKS_STALE_MAX_AGE_SECONDS {
                     tracing::warn!("JWKS fetch failed, using stale cache: {e}");
                     return parse_jwks_value(cache);
@@ -176,7 +176,7 @@ async fn resolve_jwks_uri_for_issuer(
     if let (Some(cache), Some(cached_at)) = (cached_jwks, cached_at)
         && let Ok(ts) = cached_at.parse::<Timestamp>()
     {
-        let cache_age = Timestamp::now().as_second() - ts.as_second();
+        let cache_age = Timestamp::now().as_second().saturating_sub(ts.as_second());
         if cache_age < JWKS_CACHE_TTL_SECONDS {
             return parse_jwks_value(cache);
         }
@@ -195,7 +195,7 @@ async fn resolve_jwks_uri_for_issuer(
             if let (Some(cache), Some(cached_at)) = (cached_jwks, cached_at)
                 && let Ok(ts) = cached_at.parse::<Timestamp>()
             {
-                let stale_age = Timestamp::now().as_second() - ts.as_second();
+                let stale_age = Timestamp::now().as_second().saturating_sub(ts.as_second());
                 if stale_age < JWKS_STALE_MAX_AGE_SECONDS {
                     tracing::warn!("JWKS fetch failed, using stale cache: {e}");
                     return parse_jwks_value(cache);
@@ -392,7 +392,7 @@ pub async fn find_matching_key_with_refresh_client(
     if let Some(cached_at) = jwks_uri_cached_at
         && let Ok(ts) = cached_at.parse::<Timestamp>()
     {
-        let age = Timestamp::now().as_second() - ts.as_second();
+        let age = Timestamp::now().as_second().saturating_sub(ts.as_second());
         if age < JWKS_FORCE_REFRESH_MIN_INTERVAL_SECONDS {
             tracing::debug!(
                 "Skipping JWKS force-refresh for client {client_id}: refreshed {age}s ago"
@@ -437,7 +437,7 @@ pub async fn find_matching_key_with_refresh_issuer(
     if let Some(cached_at) = jwks_cached_at
         && let Ok(ts) = cached_at.parse::<Timestamp>()
     {
-        let age = Timestamp::now().as_second() - ts.as_second();
+        let age = Timestamp::now().as_second().saturating_sub(ts.as_second());
         if age < JWKS_FORCE_REFRESH_MIN_INTERVAL_SECONDS {
             tracing::debug!(
                 "Skipping JWKS force-refresh for issuer {issuer_id}: refreshed {age}s ago"

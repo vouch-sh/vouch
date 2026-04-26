@@ -56,24 +56,28 @@ impl<'a> DerParser<'a> {
         }
 
         let tag = *self.data.get(self.pos).context("DER: missing tag byte")?;
-        self.pos += 1;
+        self.pos = self.pos.saturating_add(1);
 
         let length = self.read_length()?;
 
-        if self.pos + length > self.data.len() {
+        let value_end = self
+            .pos
+            .checked_add(length)
+            .context("DER: position overflow")?;
+        if value_end > self.data.len() {
             anyhow::bail!(
                 "DER: value length {} exceeds remaining data {} at position {}",
                 length,
-                self.data.len() - self.pos,
+                self.data.len().saturating_sub(self.pos),
                 self.pos
             );
         }
 
         let value = self
             .data
-            .get(self.pos..self.pos + length)
+            .get(self.pos..value_end)
             .context("DER: failed to read value bytes")?;
-        self.pos += length;
+        self.pos = value_end;
 
         Ok((tag, value))
     }
@@ -90,7 +94,7 @@ impl<'a> DerParser<'a> {
         }
 
         let tag = *self.data.get(self.pos).context("BER: missing tag byte")?;
-        self.pos += 1;
+        self.pos = self.pos.saturating_add(1);
 
         let first = *self
             .data
@@ -99,25 +103,29 @@ impl<'a> DerParser<'a> {
 
         if first == 0x80 {
             // Indefinite length: scan for end-of-contents (0x00 0x00)
-            self.pos += 1; // consume the 0x80 length byte
+            self.pos = self.pos.saturating_add(1); // consume the 0x80 length byte
             let content_start = self.pos;
 
             // Walk nested TLVs to find the matching EOC
             loop {
-                if self.pos + 1 >= self.data.len() {
+                if self.pos.saturating_add(1) >= self.data.len() {
                     anyhow::bail!(
                         "BER: unterminated indefinite length at position {content_start}"
                     );
                 }
                 let b0 = self.data.get(self.pos).copied().unwrap_or(1);
-                let b1 = self.data.get(self.pos + 1).copied().unwrap_or(1);
+                let b1 = self
+                    .data
+                    .get(self.pos.saturating_add(1))
+                    .copied()
+                    .unwrap_or(1);
                 if b0 == 0x00 && b1 == 0x00 {
                     // Found end-of-contents
                     let value = self
                         .data
                         .get(content_start..self.pos)
                         .context("BER: failed to extract indefinite content")?;
-                    self.pos += 2; // skip the EOC bytes
+                    self.pos = self.pos.saturating_add(2); // skip the EOC bytes
                     return Ok((tag, value));
                 }
                 // Skip one nested TLV element (start at depth 0)
@@ -127,20 +135,24 @@ impl<'a> DerParser<'a> {
             // Definite length -- delegate to normal read_length
             let length = self.read_length()?;
 
-            if self.pos + length > self.data.len() {
+            let value_end = self
+                .pos
+                .checked_add(length)
+                .context("BER: position overflow")?;
+            if value_end > self.data.len() {
                 anyhow::bail!(
                     "BER: value length {} exceeds remaining data {} at position {}",
                     length,
-                    self.data.len() - self.pos,
+                    self.data.len().saturating_sub(self.pos),
                     self.pos
                 );
             }
 
             let value = self
                 .data
-                .get(self.pos..self.pos + length)
+                .get(self.pos..value_end)
                 .context("BER: failed to read value bytes")?;
-            self.pos += length;
+            self.pos = value_end;
 
             Ok((tag, value))
         }
@@ -159,7 +171,7 @@ impl<'a> DerParser<'a> {
         }
 
         // Skip tag
-        self.pos += 1;
+        self.pos = self.pos.saturating_add(1);
 
         let first = *self
             .data
@@ -168,26 +180,34 @@ impl<'a> DerParser<'a> {
 
         if first == 0x80 {
             // Nested indefinite length -- recurse by scanning for EOC
-            self.pos += 1;
+            self.pos = self.pos.saturating_add(1);
             loop {
-                if self.pos + 1 >= self.data.len() {
+                if self.pos.saturating_add(1) >= self.data.len() {
                     anyhow::bail!("BER: unterminated nested indefinite length");
                 }
                 let b0 = self.data.get(self.pos).copied().unwrap_or(1);
-                let b1 = self.data.get(self.pos + 1).copied().unwrap_or(1);
+                let b1 = self
+                    .data
+                    .get(self.pos.saturating_add(1))
+                    .copied()
+                    .unwrap_or(1);
                 if b0 == 0x00 && b1 == 0x00 {
-                    self.pos += 2;
+                    self.pos = self.pos.saturating_add(2);
                     return Ok(());
                 }
-                self.skip_ber_element_bounded(depth + 1)?;
+                self.skip_ber_element_bounded(depth.saturating_add(1))?;
             }
         } else {
             // Definite length
             let length = self.read_length()?;
-            if self.pos + length > self.data.len() {
+            let new_pos = self
+                .pos
+                .checked_add(length)
+                .context("BER: position overflow in skip")?;
+            if new_pos > self.data.len() {
                 anyhow::bail!("BER: skip exceeds data bounds");
             }
-            self.pos += length;
+            self.pos = new_pos;
             Ok(())
         }
     }
@@ -198,7 +218,7 @@ impl<'a> DerParser<'a> {
             .data
             .get(self.pos)
             .context("DER: missing length byte")?;
-        self.pos += 1;
+        self.pos = self.pos.saturating_add(1);
 
         if first < 0x80 {
             // Short form
@@ -218,7 +238,7 @@ impl<'a> DerParser<'a> {
                     .data
                     .get(self.pos)
                     .context("DER: truncated length field")?;
-                self.pos += 1;
+                self.pos = self.pos.saturating_add(1);
                 length = length.checked_shl(8).context("DER: length overflow")? | (byte as usize);
             }
 

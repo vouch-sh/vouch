@@ -325,7 +325,7 @@ fn find_vpce_position(parts: &[&str]) -> Option<usize> {
     parts
         .iter()
         .position(|&p| p == "vpce")
-        .filter(|&i| parts.get(i + 1) == Some(&"amazonaws"))
+        .filter(|&i| parts.get(i.saturating_add(1)) == Some(&"amazonaws"))
 }
 
 /// Extract the AWS region from a VPC endpoint hostname.
@@ -339,7 +339,9 @@ fn extract_region_from_vpc_endpoint(host: &str) -> Option<String> {
     if vpce_idx == 0 {
         return None;
     }
-    parts.get(vpce_idx - 1).map(|s| (*s).to_string())
+    parts
+        .get(vpce_idx.saturating_sub(1))
+        .map(|s| (*s).to_string())
 }
 
 /// Extract the DSQL service ID from a VPC endpoint hostname.

@@ -145,7 +145,7 @@ impl GitHubStateToken {
             org_id: org_id.to_string(),
             user_id: user_id.to_string(),
             iat: now,
-            exp: now + 600, // 10 minutes
+            exp: now.saturating_add(600), // 10 minutes
             nonce,
             flow_type,
         })

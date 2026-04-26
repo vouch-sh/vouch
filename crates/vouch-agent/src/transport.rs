@@ -120,16 +120,18 @@ impl TestTransport {
         while filled < buf.len() {
             // If we have buffered data, use it first
             if self.read_pos < self.read_buffer.len() {
-                let available = self.read_buffer.len() - self.read_pos;
-                let needed = buf.len() - filled;
+                let available = self.read_buffer.len().saturating_sub(self.read_pos);
+                let needed = buf.len().saturating_sub(filled);
                 let to_copy = available.min(needed);
+                let dest_end = filled.saturating_add(to_copy);
+                let src_end = self.read_pos.saturating_add(to_copy);
 
-                if let Some(dest) = buf.get_mut(filled..filled + to_copy)
-                    && let Some(src) = self.read_buffer.get(self.read_pos..self.read_pos + to_copy)
+                if let Some(dest) = buf.get_mut(filled..dest_end)
+                    && let Some(src) = self.read_buffer.get(self.read_pos..src_end)
                 {
                     dest.copy_from_slice(src);
-                    self.read_pos += to_copy;
-                    filled += to_copy;
+                    self.read_pos = self.read_pos.saturating_add(to_copy);
+                    filled = filled.saturating_add(to_copy);
                 }
 
                 // Clear buffer if fully consumed

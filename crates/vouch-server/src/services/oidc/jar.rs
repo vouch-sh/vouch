@@ -411,7 +411,7 @@ pub async fn validate_request_object(
     let now = Timestamp::now().as_second();
 
     if let Some(exp) = claims.exp
-        && exp < now - clock_skew
+        && exp < now.saturating_sub(clock_skew)
     {
         return Err(ServiceError::oauth(
             OAuthErrorCode::InvalidRequestObject,
@@ -420,14 +420,14 @@ pub async fn validate_request_object(
     }
 
     if let Some(nbf) = claims.nbf {
-        if nbf > now + clock_skew {
+        if nbf > now.saturating_add(clock_skew) {
             return Err(ServiceError::oauth(
                 OAuthErrorCode::InvalidRequestObject,
                 "Request Object is not yet valid (nbf claim)",
             ));
         }
         // FAPI 2.0: nbf must not be more than 60 minutes in the past.
-        if client.is_fapi() && nbf < now - 3600 - clock_skew {
+        if client.is_fapi() && nbf < now.saturating_sub(3600).saturating_sub(clock_skew) {
             return Err(ServiceError::oauth(
                 OAuthErrorCode::InvalidRequestObject,
                 "Request Object nbf is too far in the past (more than 60 minutes)",
@@ -436,7 +436,7 @@ pub async fn validate_request_object(
     }
 
     if let Some(iat) = claims.iat
-        && iat > now + clock_skew
+        && iat > now.saturating_add(clock_skew)
     {
         return Err(ServiceError::oauth(
             OAuthErrorCode::InvalidRequestObject,
@@ -495,7 +495,7 @@ pub async fn validate_request_object(
         // FAPI 2.0 Message Signing: exp must not be more than 60 minutes
         // after nbf (prevents long-lived request objects).
         if let (Some(exp), Some(nbf)) = (claims.exp, claims.nbf) {
-            let window = exp - nbf;
+            let window = exp.saturating_sub(nbf);
             if window > 3600 {
                 return Err(ServiceError::oauth(
                     OAuthErrorCode::InvalidRequestObject,
@@ -615,6 +615,7 @@ pub async fn validate_request_object(
     clippy::unwrap_used,
     clippy::expect_used,
     clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
     reason = "test code: panic on assertion failure is acceptable"
 )]
 mod tests {

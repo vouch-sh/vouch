@@ -6,6 +6,7 @@
     clippy::unwrap_used,
     clippy::indexing_slicing,
     clippy::string_slice,
+    clippy::arithmetic_side_effects,
     reason = "test code: panic on assertion failure is acceptable"
 )]
 

@@ -579,8 +579,10 @@ impl OidcRsaSigningKey {
         // but from_pem() accepts any PKCS#8 RSA key — reject undersized keys.
         // Use bit-counting (not byte length) to handle edge cases where
         // strip_leading_zeros may remove DER sign-padding bytes.
-        let key_bits =
-            n_bytes.len() * 8 - n_bytes.first().map_or(0, |b| b.leading_zeros() as usize);
+        let key_bits = n_bytes
+            .len()
+            .saturating_mul(8)
+            .saturating_sub(n_bytes.first().map_or(0, |b| b.leading_zeros() as usize));
         if key_bits < 3072 {
             bail!("RSA key must be at least 3072 bits, got {key_bits} bits");
         }

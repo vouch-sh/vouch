@@ -100,7 +100,7 @@ pub async fn status(
     // Calculate time remaining
     let now = Timestamp::now().as_second();
     let expires_in = if access_claims.exp > now {
-        u64::try_from(access_claims.exp - now).ok()
+        u64::try_from(access_claims.exp.saturating_sub(now)).ok()
     } else {
         None
     };

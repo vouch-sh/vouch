@@ -335,7 +335,7 @@ async fn build_signed_userinfo_response(
         sub: response_body.sub.clone(),
         aud,
         iat: now,
-        exp: now + 300,
+        exp: now.saturating_add(300),
         email: response_body.email.clone(),
         email_verified: response_body.email_verified,
     };

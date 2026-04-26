@@ -696,7 +696,7 @@ pub(crate) async fn complete_enrollment_after_identity(
     tracing::debug!("Setting session cookie and redirecting to /enroll/keys");
 
     // Create session cookie and redirect to keys page
-    let cookie = create_session_cookie(token.expose_secret(), session_hours * 3600);
+    let cookie = create_session_cookie(token.expose_secret(), session_hours.saturating_mul(3600));
 
     Response::builder()
         .status(StatusCode::SEE_OTHER)
@@ -881,7 +881,7 @@ pub async fn browser_register_start(
     let now = jiff::Timestamp::now();
     let reg_exp = now
         .checked_add(jiff::Span::new().minutes(5))
-        .map_or(now.as_second() + 300, |t| t.as_second());
+        .map_or(now.as_second().saturating_add(300), |t| t.as_second());
     let reg_state = BrowserRegistrationState {
         device_auth_id,
         user_id,
@@ -1290,7 +1290,7 @@ pub async fn browser_register_complete(
     let token = session_result.token;
 
     // Return success template with session cookie
-    let cookie = create_session_cookie(token.expose_secret(), session_hours * 3600);
+    let cookie = create_session_cookie(token.expose_secret(), session_hours.saturating_mul(3600));
     let html = SuccessTemplate.render().map_err(|e| {
         tracing::error!("Template render error: {}", e);
         ServiceError::api(
@@ -1465,6 +1465,7 @@ fn is_valid_user_code_format(code: &str) -> bool {
 mod tests {
     #![expect(
         clippy::expect_used,
+        clippy::arithmetic_side_effects,
         reason = "test code: panic on assertion failure is acceptable"
     )]
 

@@ -49,8 +49,40 @@ modulo_arithmetic = "deny"
 # Integer division panics on /0 — pair with modulo_arithmetic
 integer_division = "deny"
 
+# `+`, `-`, `*` panic in debug on overflow and wrap silently in release.
+# Use checked_*/saturating_*/wrapping_* explicitly to declare intent.
+arithmetic_side_effects = "deny"
+
 # Time/Duration subtraction panics on negative result — use checked_sub or saturating_sub
 unchecked_time_subtraction = "deny"
+
+# Float equality is unreliable — use abs(a - b) < epsilon
+float_cmp = "deny"
+float_cmp_const = "deny"
+
+# Lossy float literals (e.g. 16_777_217f32) silently lose precision
+lossy_float_literal = "deny"
+
+# 0.0 / 0.0 is NaN, almost always a bug
+zero_divided_by_zero = "deny"
+
+# `From` impls must be infallible — fallible conversions belong in `TryFrom`
+fallible_impl_from = "deny"
+
+# Recursive Display/Debug impls cause stack-overflow panics
+recursive_format_impl = "deny"
+
+# Stack-overflow risk
+large_stack_arrays = "deny"
+large_stack_frames = "deny"
+
+# Infinite iteration / hangs
+infinite_iter = "deny"
+
+# Undefined behavior (belt-and-braces alongside unsafe_code = "deny")
+mem_replace_with_uninit = "deny"
+uninit_assumed_init = "deny"
+uninit_vec = "deny"
 
 # Code hygiene
 dbg_macro = "deny"

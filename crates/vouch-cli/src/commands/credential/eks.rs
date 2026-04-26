@@ -111,7 +111,7 @@ fn expiration_rfc3339() -> Result<String> {
         clippy::cast_possible_wrap,
         reason = "EKS_TOKEN_EXPIRES_SECONDS is bounded to <2^63 by AWS EKS token TTL"
     )]
-    let ttl_seconds = EKS_TOKEN_EXPIRES_SECONDS as i64 - EKS_EXPIRY_MARGIN_SECONDS;
+    let ttl_seconds = (EKS_TOKEN_EXPIRES_SECONDS as i64).saturating_sub(EKS_EXPIRY_MARGIN_SECONDS);
     let expires = jiff::Timestamp::now()
         .checked_add(jiff::SignedDuration::from_secs(ttl_seconds))
         .context("failed to compute EKS token expiration")?;

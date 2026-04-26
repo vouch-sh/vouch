@@ -489,7 +489,7 @@ pub fn extract_public_key_from_auth_data(auth_data: &[u8]) -> Option<Vec<u8>> {
     let cred_id_len = u16::from_be_bytes(cred_id_len_bytes) as usize;
 
     // Public key starts after credId
-    let public_key_offset = 55 + cred_id_len;
+    let public_key_offset = 55_usize.checked_add(cred_id_len)?;
 
     // The rest of auth_data is the COSE-encoded public key
     auth_data.get(public_key_offset..).map(|s| s.to_vec())

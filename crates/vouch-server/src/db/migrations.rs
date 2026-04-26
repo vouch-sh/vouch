@@ -82,7 +82,7 @@ pub async fn run_dsql_migrations(pool: &PgPool) -> Result<MigrationResult> {
             "migration complete"
         );
 
-        newly_applied += 1;
+        newly_applied = newly_applied.saturating_add(1);
     }
 
     Ok((newly_applied, total))

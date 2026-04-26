@@ -115,7 +115,10 @@ pub(crate) async fn assume_role_with_web_identity(
     // Attach managed session policies (intersection model — only restricts).
     for (i, policy_name) in req.session_policy_names.iter().enumerate() {
         let arn = format!("arn:{}:iam::aws:policy/{}", partition.as_str(), policy_name);
-        form_params.push((format!("PolicyArns.member.{}.arn", i + 1), arn));
+        form_params.push((
+            format!("PolicyArns.member.{}.arn", i.saturating_add(1)),
+            arn,
+        ));
     }
 
     // Attach inline session policy if provided.
@@ -190,7 +193,7 @@ pub(crate) async fn assume_role(
 
     // Attach managed session policies (intersection model — only restricts).
     let policy_keys: Vec<String> = (0..policy_arns.len())
-        .map(|i| format!("PolicyArns.member.{}.arn", i + 1))
+        .map(|i| format!("PolicyArns.member.{}.arn", i.saturating_add(1)))
         .collect();
     for (key, arn) in policy_keys.iter().zip(policy_arns.iter()) {
         params.push((key.as_str(), arn.as_str()));

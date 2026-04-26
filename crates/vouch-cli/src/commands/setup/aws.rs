@@ -221,7 +221,7 @@ async fn run_discover(profile_prefix: Option<&str>, region: Option<&str>) -> Res
 
         if config.profile_exists(&profile_name) {
             println!("Skipped [{profile_name}] — already exists");
-            skipped_count += 1;
+            skipped_count = skipped_count.saturating_add(1);
             continue;
         }
 
@@ -236,7 +236,7 @@ async fn run_discover(profile_prefix: Option<&str>, region: Option<&str>) -> Res
         });
 
         println!("Added profile [{profile_name}] → {role_arn}");
-        created_count += 1;
+        created_count = created_count.saturating_add(1);
     }
 
     if created_count > 0 {

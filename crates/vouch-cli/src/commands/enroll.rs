@@ -243,7 +243,7 @@ async fn poll_for_token(
     let timeout = std::time::Duration::from_secs(device_response.expires_in);
     let start = std::time::Instant::now();
 
-    let mut dots = 0;
+    let mut dots: usize = 0;
     // Track server-provided DPoP nonce for RFC 9449 nonce binding
     let mut dpop_nonce: Option<String> = None;
 
@@ -262,9 +262,9 @@ async fn poll_for_token(
 
         // Show progress (only on interactive terminals)
         if stdout().is_terminal() {
-            dots = (dots + 1) % 4;
+            dots = dots.saturating_add(1) % 4;
             print!("\rWaiting for browser authorization{}", ".".repeat(dots));
-            print!("{}", " ".repeat(3 - dots));
+            print!("{}", " ".repeat(3_usize.saturating_sub(dots)));
             stdout().flush().ok();
         }
 

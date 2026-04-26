@@ -264,7 +264,7 @@ pub async fn update_device_auth_poll_time(
 
     // Check if polling too fast
     if let Some(last_poll) = doc.data.last_poll_at {
-        let elapsed = now.as_second() - last_poll.as_second();
+        let elapsed = now.as_second().saturating_sub(last_poll.as_second());
         if elapsed < i64::from(interval_seconds) {
             return Ok(false);
         }

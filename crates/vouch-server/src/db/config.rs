@@ -118,11 +118,12 @@ pub async fn insert_auth_event(
 pub async fn delete_old_auth_events(audit: &AuditStore, before: jiff::Timestamp) -> Result<u64> {
     let before_str = before.to_string();
     // Delete all auth event types.
-    let mut total = 0;
+    let mut total: u64 = 0;
     for event_type in AuthEventType::ALL {
-        total += audit
+        let deleted = audit
             .delete_old_events(event_type.as_str(), &before_str)
             .await?;
+        total = total.saturating_add(deleted);
     }
     Ok(total)
 }

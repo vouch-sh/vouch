@@ -197,7 +197,7 @@ pub(crate) fn run(args: DiagArgs) -> Result<()> {
     }
 
     let cred_id_len = u16::from_be_bytes([auth_data[53], auth_data[54]]) as usize;
-    let cose_key_start = 55 + cred_id_len;
+    let cose_key_start = 55_usize.saturating_add(cred_id_len);
     let cose_key_bytes = &auth_data[cose_key_start..];
 
     out!(
@@ -360,7 +360,7 @@ pub(crate) fn run(args: DiagArgs) -> Result<()> {
     // Build the message: authenticator_data || SHA256(raw_challenge)
     // The library uses SHA256(challenge) directly, not SHA256(clientDataJSON)
     let challenge_hash = digest(&SHA256, &auth_challenge);
-    let mut message = Vec::with_capacity(assertion.auth_data.len() + 32);
+    let mut message = Vec::with_capacity(assertion.auth_data.len().saturating_add(32));
     message.extend_from_slice(&assertion.auth_data);
     message.extend_from_slice(challenge_hash.as_ref());
 
@@ -455,14 +455,14 @@ pub(crate) fn run(args: DiagArgs) -> Result<()> {
         out!("DER SEQUENCE length: {}", seq_len);
         if sig.len() >= 4 && sig[2] == 0x02 {
             let r_len = sig[3] as usize;
-            let r_start = 4;
-            let r_end = r_start + r_len;
+            let r_start = 4_usize;
+            let r_end = r_start.saturating_add(r_len);
             if sig.len() >= r_end {
                 out!("r ({} bytes): {}", r_len, hex::encode(&sig[r_start..r_end]));
-                if sig.len() > r_end + 1 && sig[r_end] == 0x02 {
-                    let s_len = sig[r_end + 1] as usize;
-                    let s_start = r_end + 2;
-                    let s_end = s_start + s_len;
+                if sig.len() > r_end.saturating_add(1) && sig[r_end] == 0x02 {
+                    let s_len = sig[r_end.saturating_add(1)] as usize;
+                    let s_start = r_end.saturating_add(2);
+                    let s_end = s_start.saturating_add(s_len);
                     if sig.len() >= s_end {
                         out!("s ({} bytes): {}", s_len, hex::encode(&sig[s_start..s_end]));
                     }

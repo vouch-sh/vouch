@@ -137,7 +137,7 @@ async fn check_pnpm_tokenhelper_invocation(argv0: &str) -> Result<bool> {
         let flag = |name: &str| {
             args.iter()
                 .position(|a| a == name)
-                .and_then(|i| args.get(i + 1))
+                .and_then(|i| args.get(i.saturating_add(1)))
         };
         let domain = flag("--domain");
         let domain_owner = flag("--domain-owner");

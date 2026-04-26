@@ -447,18 +447,21 @@ pub fn parse_www_authenticate(header: &str) -> Option<StepUpChallenge> {
         let prefix = format!("{name}=\"");
         let mut search_from = 0;
         loop {
-            let start = header.get(search_from..)?.find(&prefix)? + search_from;
+            let start = header
+                .get(search_from..)?
+                .find(&prefix)?
+                .saturating_add(search_from);
             // Verify boundary: the character before the match must be a delimiter
             // (comma, space) or the start of the string.
             if start > 0 {
                 let prev = header.as_bytes().get(start.wrapping_sub(1)).copied()?;
                 if prev != b',' && prev != b' ' {
                     // Not a real parameter boundary — keep searching
-                    search_from = start + 1;
+                    search_from = start.saturating_add(1);
                     continue;
                 }
             }
-            let value_start = start + prefix.len();
+            let value_start = start.saturating_add(prefix.len());
             let rest = header.get(value_start..)?;
             let end = rest.find('"')?;
             return rest.get(..end).map(String::from);

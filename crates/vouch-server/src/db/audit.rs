@@ -239,7 +239,7 @@ impl AuditStore {
             email_domain: filter.email_domain.clone(),
             since: filter.since.clone(),
             before_id: filter.before_id.clone(),
-            limit: Some(page_size + 1),
+            limit: Some(page_size.saturating_add(1)),
         };
         let mut events = self.query_events(&f).await?;
         let has_more = events.len() as u64 > page_size;

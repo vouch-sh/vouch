@@ -192,7 +192,7 @@ pub(crate) fn resolve_client_ip(
     let addrs: Vec<&str> = xff.split(',').map(str::trim).collect();
     let mut idx = addrs.len();
     while idx > 0 {
-        idx -= 1;
+        idx = idx.saturating_sub(1);
         let addr_str = addrs.get(idx).copied().unwrap_or("");
         if let Ok(addr) = addr_str.parse::<IpAddr>() {
             let addr = addr.to_canonical();

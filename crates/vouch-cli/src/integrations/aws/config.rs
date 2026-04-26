@@ -272,7 +272,9 @@ impl AwsConfig {
 pub(crate) fn extract_role_from_credential_process(credential_process: &str) -> Option<String> {
     // Find --role and extract the next token
     if let Some(role_start) = credential_process.find("--role") {
-        let after_flag = credential_process.get(role_start + 6..)?.trim_start();
+        let after_flag = credential_process
+            .get(role_start.saturating_add(6)..)?
+            .trim_start();
         // Role ARN is the next whitespace-delimited token
         let role_arn = after_flag.split_whitespace().next()?;
         if role_arn.starts_with("arn:aws") {

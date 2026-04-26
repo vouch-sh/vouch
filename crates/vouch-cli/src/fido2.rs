@@ -1009,7 +1009,7 @@ impl FidoDevice for MockFidoDevice {
         let auth_data = self.build_authenticator_data(rp_id, 0x05);
 
         // Build signed data: authenticator_data || SHA-256(client_data_json)
-        let mut signed_data = Vec::with_capacity(auth_data.len() + 32);
+        let mut signed_data = Vec::with_capacity(auth_data.len().saturating_add(32));
         signed_data.extend_from_slice(&auth_data);
         signed_data.extend_from_slice(&client_data_hash);
 

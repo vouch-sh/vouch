@@ -30,7 +30,7 @@ impl<'a> Parser<'a> {
     }
 
     fn advance(&mut self) {
-        self.pos += 1;
+        self.pos = self.pos.saturating_add(1);
     }
 
     fn skip_sp(&mut self) {
@@ -245,7 +245,7 @@ impl<'a> Parser<'a> {
             self.advance();
         }
 
-        let frac_len = self.pos - frac_start;
+        let frac_len = self.pos.saturating_sub(frac_start);
         if frac_len == 0 || frac_len > 3 {
             return Err(HttpSigError::SfvParse(format!(
                 "decimal fractional part must be 1-3 digits, got {frac_len}"
@@ -260,10 +260,10 @@ impl<'a> Parser<'a> {
             .map_err(|e| HttpSigError::SfvParse(format!("decimal parse error: {e}")))?;
 
         // RFC 8941 §3.3.2: integer component up to 12 digits
-        let int_part_len = (frac_start - 1) - start; // -1 for the '.'
+        let int_part_len = frac_start.saturating_sub(1).saturating_sub(start); // -1 for the '.'
         let has_sign = self.input.get(start).is_some_and(|&b| b == b'-');
         let digit_len = if has_sign {
-            int_part_len - 1
+            int_part_len.saturating_sub(1)
         } else {
             int_part_len
         };

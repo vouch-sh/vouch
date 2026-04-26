@@ -146,22 +146,22 @@ fn has_resource_metadata_parameter(header: &str) -> bool {
     if needle.is_empty() || lower_bytes.len() < needle.len() {
         return false;
     }
-    let last_start = lower_bytes.len() - needle.len();
+    let last_start = lower_bytes.len().saturating_sub(needle.len());
     let mut i = 0usize;
     while i <= last_start {
-        if lower_bytes.get(i..i + needle.len()) == Some(needle) {
+        let end = i.saturating_add(needle.len());
+        if lower_bytes.get(i..end) == Some(needle) {
             let before_ok = i == 0
                 || matches!(
                     lower_bytes.get(i.saturating_sub(1)),
                     Some(b' ' | b',' | b'\t'),
                 );
-            let after_idx = i + needle.len();
-            let after_ok = matches!(lower_bytes.get(after_idx), Some(b'=') | None);
+            let after_ok = matches!(lower_bytes.get(end), Some(b'=') | None);
             if before_ok && after_ok {
                 return true;
             }
         }
-        i += 1;
+        i = i.saturating_add(1);
     }
     false
 }

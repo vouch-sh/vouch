@@ -84,7 +84,7 @@ pub async fn issue_ssh_certificate(
     }
 
     // Certificate validity matches session duration
-    let valid_seconds = state.config().session_hours * 3600;
+    let valid_seconds = state.config().session_hours.saturating_mul(3600);
 
     // Sign the certificate on a blocking thread to avoid deadlocking
     // the tokio runtime. The ssh-key crate's sign path uses

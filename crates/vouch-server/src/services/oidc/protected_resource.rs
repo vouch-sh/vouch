@@ -249,7 +249,7 @@ pub fn classify_sub_path(raw_tail: &str) -> SubPathClassification {
         // `oauth/register/{client_id}` under the `oauth/register`
         // prefix). We require a `/` boundary to avoid
         // `oauth/registerX` matching `oauth/register`.
-        let mut bounded = String::with_capacity(prefix.len() + 1);
+        let mut bounded = String::with_capacity(prefix.len().saturating_add(1));
         bounded.push_str(prefix);
         bounded.push('/');
         if tail.starts_with(&bounded) {

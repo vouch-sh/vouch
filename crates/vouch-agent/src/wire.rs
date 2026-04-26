@@ -55,15 +55,18 @@ pub async fn write_message<W: AsyncWrite + Unpin>(writer: &mut W, data: &[u8]) -
 
 /// Read a u32 from a buffer at the given offset (advances offset).
 pub fn read_u32(buf: &[u8], offset: &mut usize) -> Result<u32> {
-    if *offset + 4 > buf.len() {
+    let end = offset
+        .checked_add(4)
+        .ok_or_else(|| AgentError::Protocol("buffer underflow".to_string()))?;
+    if end > buf.len() {
         return Err(AgentError::Protocol("buffer underflow".to_string()));
     }
     let bytes: [u8; 4] = buf
-        .get(*offset..*offset + 4)
+        .get(*offset..end)
         .ok_or_else(|| AgentError::Protocol("buffer underflow".to_string()))?
         .try_into()
         .map_err(|_| AgentError::Protocol("buffer underflow".to_string()))?;
-    *offset += 4;
+    *offset = end;
     Ok(u32::from_be_bytes(bytes))
 }
 
@@ -82,7 +85,7 @@ pub fn encode_string(s: &str) -> Result<Vec<u8>> {
     let bytes = s.as_bytes();
     let len = u32::try_from(bytes.len())
         .map_err(|_| AgentError::Protocol("string too large for wire format".to_string()))?;
-    let mut buf = Vec::with_capacity(4 + bytes.len());
+    let mut buf = Vec::with_capacity(bytes.len().saturating_add(4));
     buf.extend_from_slice(&len.to_be_bytes());
     buf.extend_from_slice(bytes);
     Ok(buf)
@@ -96,7 +99,7 @@ pub fn encode_string(s: &str) -> Result<Vec<u8>> {
 pub fn encode_bytes(data: &[u8]) -> Result<Vec<u8>> {
     let len = u32::try_from(data.len())
         .map_err(|_| AgentError::Protocol("data too large for wire format".to_string()))?;
-    let mut buf = Vec::with_capacity(4 + data.len());
+    let mut buf = Vec::with_capacity(data.len().saturating_add(4));
     buf.extend_from_slice(&len.to_be_bytes());
     buf.extend_from_slice(data);
     Ok(buf)

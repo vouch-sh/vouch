@@ -344,7 +344,7 @@ pub fn verify_assertion_with_verifier<V: CoseVerifier>(
 
     // 7. Build signed data: authenticator_data || SHA-256(client_data_json)
     let client_data_hash = digest::digest(&SHA256, client_data_json);
-    let mut signed_data = Vec::with_capacity(authenticator_data.len() + 32);
+    let mut signed_data = Vec::with_capacity(authenticator_data.len().saturating_add(32));
     signed_data.extend_from_slice(authenticator_data);
     signed_data.extend_from_slice(client_data_hash.as_ref());
 
@@ -576,18 +576,21 @@ pub fn verify_registration_with_verifier<V: CoseVerifier>(
         .map_err(|_| VerifyError::InvalidAuthDataLength)?;
     let cred_id_len = u16::from_be_bytes(cred_id_len_bytes) as usize;
 
-    if attested_data.len() < 18 + cred_id_len {
+    let cose_key_start = 18_usize
+        .checked_add(cred_id_len)
+        .ok_or(VerifyError::InvalidAuthDataLength)?;
+    if attested_data.len() < cose_key_start {
         return Err(VerifyError::InvalidAuthDataLength);
     }
 
     let credential_id = attested_data
-        .get(18..18 + cred_id_len)
+        .get(18..cose_key_start)
         .ok_or(VerifyError::InvalidAuthDataLength)?
         .to_vec();
 
     // The COSE public key starts after the credential ID
     let cose_key_bytes = attested_data
-        .get(18 + cred_id_len..)
+        .get(cose_key_start..)
         .ok_or(VerifyError::InvalidAuthDataLength)?
         .to_vec();
 
@@ -740,7 +743,7 @@ fn verify_packed_attestation<V: CoseVerifier>(
 
         // Build signed data: authData || SHA-256(clientDataJSON)
         let client_data_hash = digest::digest(&SHA256, client_data_json);
-        let mut signed_data = Vec::with_capacity(auth_data_bytes.len() + 32);
+        let mut signed_data = Vec::with_capacity(auth_data_bytes.len().saturating_add(32));
         signed_data.extend_from_slice(auth_data_bytes);
         signed_data.extend_from_slice(client_data_hash.as_ref());
 
@@ -776,7 +779,7 @@ fn verify_packed_attestation<V: CoseVerifier>(
 
     // Build signed data: authData || SHA-256(clientDataJSON)
     let client_data_hash = digest::digest(&SHA256, client_data_json);
-    let mut signed_data = Vec::with_capacity(auth_data_bytes.len() + 32);
+    let mut signed_data = Vec::with_capacity(auth_data_bytes.len().saturating_add(32));
     signed_data.extend_from_slice(auth_data_bytes);
     signed_data.extend_from_slice(client_data_hash.as_ref());
 
@@ -1013,7 +1016,7 @@ fn verify_es256(
     let y = get_cose_bytes(map, -3)?;
 
     // Build uncompressed SEC1 point: 0x04 || x || y
-    let mut point = Vec::with_capacity(1 + x.len() + y.len());
+    let mut point = Vec::with_capacity(x.len().saturating_add(y.len()).saturating_add(1));
     point.push(0x04);
     point.extend_from_slice(&x);
     point.extend_from_slice(&y);

@@ -60,7 +60,7 @@ impl AgentClient {
         params: Option<serde_json::Value>,
     ) -> Result<Response> {
         let id = self.next_id;
-        self.next_id += 1;
+        self.next_id = self.next_id.wrapping_add(1);
 
         let request = Request {
             jsonrpc: JSONRPC_VERSION.to_string(),

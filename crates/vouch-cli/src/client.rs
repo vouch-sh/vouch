@@ -421,7 +421,7 @@ impl<H: HttpClient> VouchClient<H> {
             match retry_delay(&response, attempt) {
                 Some(wait) => {
                     tokio::time::sleep(wait).await;
-                    attempt += 1;
+                    attempt = attempt.saturating_add(1);
                 }
                 None => return Self::handle_response(response),
             }
@@ -562,7 +562,7 @@ fn retry_delay(response: &HttpResponse, attempt: u32) -> Option<std::time::Durat
             eprintln!(
                 "Rate limited by server, retrying in {secs}s \
                  (attempt {}/{MAX_RETRIES})...",
-                attempt + 1,
+                attempt.saturating_add(1),
             );
             Some(std::time::Duration::from_secs(secs))
         }
@@ -573,7 +573,7 @@ fn retry_delay(response: &HttpResponse, attempt: u32) -> Option<std::time::Durat
                  (attempt {}/{MAX_RETRIES})...",
                 response.status,
                 delay.as_secs_f64(),
-                attempt + 1,
+                attempt.saturating_add(1),
             );
             Some(delay)
         }
@@ -598,7 +598,7 @@ fn backoff_with_jitter(attempt: u32) -> std::time::Duration {
 
     let jitter_ms = random_u64_in_range(half_ms);
 
-    std::time::Duration::from_millis(half_ms + jitter_ms)
+    std::time::Duration::from_millis(half_ms.saturating_add(jitter_ms))
 }
 
 /// Return a random `u64` in `0..=max` using `aws-lc-rs` CSPRNG.
@@ -611,7 +611,12 @@ fn random_u64_in_range(max: u64) -> u64 {
         // 2 is non-zero; unwrap_or arm is unreachable.
         return max.checked_div(2).unwrap_or(0); // deterministic fallback
     }
-    u64::from_le_bytes(buf) % (max + 1)
+    let value = u64::from_le_bytes(buf);
+    match max.checked_add(1) {
+        // checked_rem returns None only if modulus is 0; checked_add(1) is non-zero.
+        Some(modulus) => value.checked_rem(modulus).unwrap_or(0),
+        None => value, // max == u64::MAX: full range
+    }
 }
 
 /// Classification of HTTP error responses from the server.

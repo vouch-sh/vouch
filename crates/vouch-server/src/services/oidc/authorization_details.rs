@@ -191,8 +191,12 @@ fn validate_depth(value: &serde_json::Value, max_depth: usize) -> bool {
         return !value.is_array() && !value.is_object();
     }
     match value {
-        serde_json::Value::Array(arr) => arr.iter().all(|v| validate_depth(v, max_depth - 1)),
-        serde_json::Value::Object(map) => map.values().all(|v| validate_depth(v, max_depth - 1)),
+        serde_json::Value::Array(arr) => arr
+            .iter()
+            .all(|v| validate_depth(v, max_depth.saturating_sub(1))),
+        serde_json::Value::Object(map) => map
+            .values()
+            .all(|v| validate_depth(v, max_depth.saturating_sub(1))),
         _ => true,
     }
 }

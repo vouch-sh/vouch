@@ -249,7 +249,12 @@ fn cel_semver(ftx: &FunctionContext, value: Arc<String>) -> Result<Value, Execut
     if parts.next().is_some() {
         return Err(ftx.error("expected 1-3 version components"));
     }
-    Ok(Value::Int(major * 1_000_000 + minor * 1_000 + patch))
+    Ok(Value::Int(
+        major
+            .saturating_mul(1_000_000)
+            .saturating_add(minor.saturating_mul(1_000))
+            .saturating_add(patch),
+    ))
 }
 
 /// Convert a `serde_json::Value` to a CEL `Value`.

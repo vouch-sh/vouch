@@ -71,7 +71,7 @@ pub async fn fido2_challenge(State(state): State<Arc<AppState>>) -> Response {
     let now = Timestamp::now();
     let exp = now
         .checked_add(jiff::Span::new().minutes(5))
-        .map_or(now.as_second() + 300, |t| t.as_second());
+        .map_or(now.as_second().saturating_add(300), |t| t.as_second());
 
     let challenge_state = Fido2ChallengeState {
         challenge: challenge.clone(),

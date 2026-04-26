@@ -141,7 +141,7 @@ fn check_existing_certificate(key_path: &Path) -> Option<SshProvisionResult> {
         return None;
     }
 
-    let remaining_secs = valid_before_i64 - now_unix;
+    let remaining_secs = valid_before_i64.saturating_sub(now_unix);
     if remaining_secs <= vouch_common::SSH_CERT_REFRESH_THRESHOLD_SECS {
         tracing::debug!(
             remaining_secs,
