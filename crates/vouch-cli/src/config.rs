@@ -32,11 +32,35 @@ pub(crate) struct SsoSessionConfig {
     /// Role name to assume in member accounts.
     #[serde(default = "default_member_role_name")]
     pub member_role_name: String,
-    /// IAM Path of the member-account role. Canonical form starts and ends
-    /// with `/` (e.g. `/teams/sec/`). `/` means no path. Use
-    /// [`normalize_member_role_path`] to coerce user input.
-    #[serde(default = "default_member_role_path")]
+    /// IAM Path of the member-account role, always canonical (starts and
+    /// ends with `/`, e.g. `/teams/sec/`; `/` means no path). User input is
+    /// normalized at deserialization via [`normalize_member_role_path`].
+    #[serde(
+        default = "default_member_role_path",
+        deserialize_with = "deserialize_member_role_path"
+    )]
     pub member_role_path: String,
+}
+
+impl Default for SsoSessionConfig {
+    fn default() -> Self {
+        Self {
+            management_role: String::new(),
+            member_role_name: default_member_role_name(),
+            member_role_path: default_member_role_path(),
+        }
+    }
+}
+
+impl SsoSessionConfig {
+    /// Build the assumable member-account role ARN for the given account.
+    pub(crate) fn role_arn_in(&self, partition: &str, account_id: &str) -> String {
+        format!(
+            "arn:{partition}:iam::{account_id}:role{path}{name}",
+            path = self.member_role_path,
+            name = self.member_role_name,
+        )
+    }
 }
 
 fn default_member_role_name() -> String {
@@ -45,6 +69,14 @@ fn default_member_role_name() -> String {
 
 fn default_member_role_path() -> String {
     "/".to_string()
+}
+
+fn deserialize_member_role_path<'de, D>(deserializer: D) -> std::result::Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = String::deserialize(deserializer)?;
+    normalize_member_role_path(&raw).map_err(serde::de::Error::custom)
 }
 
 /// Normalize an IAM Path string so it starts and ends with `/`.
@@ -1237,6 +1269,84 @@ mod tests {
         assert!(normalize_member_role_path("teams sec").is_err());
         assert!(normalize_member_role_path("//teams//sec").is_err());
         assert!(normalize_member_role_path("arn:aws:iam::1:role/foo").is_err());
+    }
+
+    #[test]
+    fn test_sso_session_config_default() {
+        let cfg = SsoSessionConfig::default();
+        assert_eq!(cfg.management_role, "");
+        assert_eq!(cfg.member_role_name, "VouchAccess");
+        assert_eq!(cfg.member_role_path, "/");
+    }
+
+    #[test]
+    fn test_role_arn_in_no_path() {
+        let cfg = SsoSessionConfig::default();
+        assert_eq!(
+            cfg.role_arn_in("aws", "123456789012"),
+            "arn:aws:iam::123456789012:role/VouchAccess"
+        );
+    }
+
+    #[test]
+    fn test_role_arn_in_with_path() {
+        let cfg = SsoSessionConfig {
+            member_role_path: "/teams/sec/".to_string(),
+            ..SsoSessionConfig::default()
+        };
+        assert_eq!(
+            cfg.role_arn_in("aws", "123456789012"),
+            "arn:aws:iam::123456789012:role/teams/sec/VouchAccess"
+        );
+    }
+
+    #[test]
+    fn test_role_arn_in_partition_govcloud() {
+        let cfg = SsoSessionConfig {
+            member_role_path: "/teams/".to_string(),
+            ..SsoSessionConfig::default()
+        };
+        assert_eq!(
+            cfg.role_arn_in("aws-us-gov", "123"),
+            "arn:aws-us-gov:iam::123:role/teams/VouchAccess"
+        );
+    }
+
+    #[test]
+    fn test_member_role_path_normalized_on_deserialize() {
+        let json = r#"{
+            "aws": {
+                "sso_sessions": {
+                    "my-session": {
+                        "management_role": "arn:aws:iam::1:role/Mgmt",
+                        "member_role_path": "teams/sec"
+                    }
+                }
+            }
+        }"#;
+
+        let file: ConfigFile = serde_json::from_str(json).unwrap();
+        let config = Config::from(file);
+        let aws = config.aws().expect("aws config should exist");
+        let session = aws.sso_sessions.get("my-session").expect("session");
+        assert_eq!(session.member_role_path, "/teams/sec/");
+    }
+
+    #[test]
+    fn test_member_role_path_invalid_rejected_on_deserialize() {
+        let json = r#"{
+            "aws": {
+                "sso_sessions": {
+                    "my-session": {
+                        "management_role": "arn:aws:iam::1:role/Mgmt",
+                        "member_role_path": "arn:aws:iam::1:role/foo"
+                    }
+                }
+            }
+        }"#;
+
+        let result: std::result::Result<ConfigFile, _> = serde_json::from_str(json);
+        assert!(result.is_err(), "ARN-shaped paths must be rejected");
     }
 
     #[test]
