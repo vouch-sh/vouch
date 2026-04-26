@@ -12,6 +12,11 @@ repository = "https://github.com/vouch-sh/vouch"
 [workspace.lints.rust]
 unsafe_code = "deny"
 unreachable_pub = "warn"
+non_ascii_idents = "deny"
+trivial_casts = "warn"
+trivial_numeric_casts = "warn"
+unused_lifetimes = "warn"
+single_use_lifetimes = "warn"
 
 [workspace.lints.clippy]
 # Panic-prevention lints
@@ -40,6 +45,12 @@ string_slice = "deny"
 
 # Modulo by zero panics — use checked_rem or guard the divisor
 modulo_arithmetic = "deny"
+
+# Integer division panics on /0 — pair with modulo_arithmetic
+integer_division = "deny"
+
+# Time/Duration subtraction panics on negative result — use checked_sub or saturating_sub
+unchecked_time_subtraction = "deny"
 
 # Code hygiene
 dbg_macro = "deny"

@@ -277,8 +277,9 @@ fn print_agent_session(server: &str, session: &SessionInfo) {
 ///
 /// Returns `"in Xh Ym"` or `"in Ym"` depending on whether hours > 0.
 pub(crate) fn format_remaining_time(expires_in: u64) -> String {
-    let remaining_mins = expires_in / 60;
-    let hours = remaining_mins / 60;
+    // 60 is non-zero; unwrap_or arms are unreachable.
+    let remaining_mins = expires_in.checked_div(60).unwrap_or(0);
+    let hours = remaining_mins.checked_div(60).unwrap_or(0);
     let mins = remaining_mins % 60;
 
     if hours > 0 {

@@ -811,7 +811,8 @@ pub(crate) fn is_unique_violation(err: &anyhow::Error) -> bool {
 pub(crate) fn retry_backoff(attempt: u32) -> Duration {
     let base_ms = 100u64.saturating_mul(1u64 << attempt);
     // ±25% jitter using simple xorshift on timestamp
-    let jitter_range = base_ms / 4;
+    // 4 is non-zero; unwrap_or arm is unreachable.
+    let jitter_range = base_ms.checked_div(4).unwrap_or(0);
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()

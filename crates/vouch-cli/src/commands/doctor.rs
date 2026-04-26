@@ -270,8 +270,11 @@ async fn check_session() -> CheckResult {
         return match client.get_session().await {
             Ok(session) => {
                 if session.expires_in_seconds > 0 {
-                    let hours = session.expires_in_seconds / 3600;
-                    let mins = (session.expires_in_seconds % 3600) / 60;
+                    // 3600 and 60 are non-zero; unwrap_or arms are unreachable.
+                    let hours = session.expires_in_seconds.checked_div(3600).unwrap_or(0);
+                    let mins = (session.expires_in_seconds % 3600)
+                        .checked_div(60)
+                        .unwrap_or(0);
                     CheckResult::pass(
                         "session",
                         format!(

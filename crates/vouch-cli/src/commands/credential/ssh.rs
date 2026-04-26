@@ -107,8 +107,9 @@ pub(crate) struct SshProvisionResult {
 
 /// Format seconds as a human-readable "Xh Ym" duration string.
 fn format_duration(secs: u64) -> String {
-    let hours = secs / 3600;
-    let minutes = (secs % 3600) / 60;
+    // 3600 and 60 are non-zero; unwrap_or arms are unreachable.
+    let hours = secs.checked_div(3600).unwrap_or(0);
+    let minutes = (secs % 3600).checked_div(60).unwrap_or(0);
     format!("{hours}h {minutes}m")
 }
 

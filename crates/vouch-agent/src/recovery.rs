@@ -108,8 +108,9 @@ async fn try_recover_inner(
     // Store server URL in SSH agent state (enables lazy loading)
     ssh_state.set_server_url(server_url).await;
 
-    let hours = expires_in / 3600;
-    let minutes = (expires_in % 3600) / 60;
+    // 3600 and 60 are non-zero; unwrap_or arms are unreachable.
+    let hours = expires_in.checked_div(3600).unwrap_or(0);
+    let minutes = (expires_in % 3600).checked_div(60).unwrap_or(0);
     info!("Session recovered for {email} (expires in {hours}h {minutes}m)");
 
     Ok(true)

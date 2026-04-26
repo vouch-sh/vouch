@@ -75,7 +75,8 @@ pub fn start_cleanup_task(
     tokio::spawn(async move {
         let base_secs = interval_minutes * 60;
         // Jitter of up to 20% of the base interval
-        let max_jitter_secs = base_secs / 5;
+        // 5 is non-zero; unwrap_or arm is unreachable.
+        let max_jitter_secs = base_secs.checked_div(5).unwrap_or(0);
 
         // Initial delay with jitter so instances started simultaneously don't
         // all fire their first cleanup at the same time.

@@ -1083,7 +1083,7 @@ pub struct StoreTransaction<'a> {
     crypto: &'a Arc<dyn DocumentCrypto>,
 }
 
-impl<'a> StoreTransaction<'a> {
+impl StoreTransaction<'_> {
     /// Commit the transaction.
     ///
     /// # Errors
