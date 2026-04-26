@@ -87,7 +87,7 @@ impl IntegrationCheck for SshIntegration {
             };
         }
 
-        let remaining_secs = valid_before_i64 - now_unix;
+        let remaining_secs = valid_before_i64.saturating_sub(now_unix);
         // 60 is non-zero; unwrap_or arm is unreachable.
         let remaining =
             jiff::SignedDuration::from_mins(remaining_secs.checked_div(60).unwrap_or(0));

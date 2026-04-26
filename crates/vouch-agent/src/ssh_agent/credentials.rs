@@ -70,14 +70,15 @@ impl CertificateMetadata {
     pub fn is_expiring_soon(&self) -> bool {
         let now = Timestamp::now();
         let threshold =
-            Timestamp::from_second(now.as_second() + REFRESH_THRESHOLD_SECONDS).unwrap_or(now);
+            Timestamp::from_second(now.as_second().saturating_add(REFRESH_THRESHOLD_SECONDS))
+                .unwrap_or(now);
         self.expires_at < threshold
     }
 
     /// Get remaining validity in seconds.
     pub fn remaining_seconds(&self) -> i64 {
         let now = Timestamp::now();
-        self.expires_at.as_second() - now.as_second()
+        self.expires_at.as_second().saturating_sub(now.as_second())
     }
 }
 

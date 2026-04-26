@@ -286,7 +286,7 @@ fn parse_github_remote_url(url: &str) -> Option<(String, String)> {
     if url.contains("github") || url.contains("ghe.com") {
         // Try to extract path after the host (SSH format: git@host:path)
         if let Some(colon_pos) = url.rfind(':')
-            && let Some(path) = url.get(colon_pos + 1..)
+            && let Some(path) = url.get(colon_pos.saturating_add(1)..)
             && !path.starts_with("//")
         {
             return parse_owner_repo_path(path);

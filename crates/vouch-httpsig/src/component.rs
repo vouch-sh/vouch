@@ -654,16 +654,16 @@ fn url_decode(input: &str) -> String {
 
     while let Some(&c) = bytes.get(i) {
         if c == b'%' {
-            let hi = bytes.get(i + 1).copied().and_then(hex_val);
-            let lo = bytes.get(i + 2).copied().and_then(hex_val);
+            let hi = bytes.get(i.saturating_add(1)).copied().and_then(hex_val);
+            let lo = bytes.get(i.saturating_add(2)).copied().and_then(hex_val);
             if let (Some(h), Some(l)) = (hi, lo) {
                 result.push(char::from(h << 4 | l));
-                i += 3;
+                i = i.saturating_add(3);
                 continue;
             }
         }
         result.push(char::from(c));
-        i += 1;
+        i = i.saturating_add(1);
     }
 
     result
@@ -671,9 +671,9 @@ fn url_decode(input: &str) -> String {
 
 fn hex_val(c: u8) -> Option<u8> {
     match c {
-        b'0'..=b'9' => Some(c - b'0'),
-        b'a'..=b'f' => Some(c - b'a' + 10),
-        b'A'..=b'F' => Some(c - b'A' + 10),
+        b'0'..=b'9' => Some(c.wrapping_sub(b'0')),
+        b'a'..=b'f' => Some(c.wrapping_sub(b'a').wrapping_add(10)),
+        b'A'..=b'F' => Some(c.wrapping_sub(b'A').wrapping_add(10)),
         _ => None,
     }
 }

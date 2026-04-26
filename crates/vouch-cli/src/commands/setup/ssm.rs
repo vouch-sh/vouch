@@ -100,22 +100,23 @@ fn strip_ssm_block(content: &str) -> String {
     };
 
     // Walk backwards from the marker to consume the leading newline
-    let block_start = if start > 0 && content.as_bytes().get(start - 1) == Some(&b'\n') {
-        start - 1
-    } else {
-        start
-    };
+    let block_start =
+        if start > 0 && content.as_bytes().get(start.saturating_sub(1)) == Some(&b'\n') {
+            start.saturating_sub(1)
+        } else {
+            start
+        };
 
     // Split safely at ASCII boundaries (SSM_MARKER and newlines are ASCII)
     let (before, from_marker) = content.split_at(block_start);
 
     // Find the end of the block in the remaining content: look for a blank
     // line or treat everything as the block.
-    let marker_offset = start - block_start;
+    let marker_offset = start.saturating_sub(block_start);
     let after_marker = from_marker.get(marker_offset..).unwrap_or("");
-    let block_rest_len = after_marker
-        .find("\n\n")
-        .map_or(from_marker.len(), |pos| marker_offset + pos + 1);
+    let block_rest_len = after_marker.find("\n\n").map_or(from_marker.len(), |pos| {
+        marker_offset.saturating_add(pos).saturating_add(1)
+    });
 
     let after = from_marker.get(block_rest_len..).unwrap_or("");
 

@@ -226,7 +226,7 @@ fn validate_timestamps(params: &SignatureParams, max_age: Option<i64>) -> Result
 
     // Reject future-dated signatures regardless of max_age
     if let Some(created) = params.created
-        && created > now + 60
+        && created > now.saturating_add(60)
     {
         return Err(HttpSigError::Expired(format!(
             "signature created in the future: {created} (now={now})"
@@ -238,7 +238,7 @@ fn validate_timestamps(params: &SignatureParams, max_age: Option<i64>) -> Result
         let created = params.created.ok_or_else(|| {
             HttpSigError::Expired("max_age enforced but signature has no created timestamp".into())
         })?;
-        if now - created > max_age {
+        if now.saturating_sub(created) > max_age {
             return Err(HttpSigError::Expired(format!(
                 "signature created at {created} exceeds max age {max_age}s (now={now})"
             )));

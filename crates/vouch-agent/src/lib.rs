@@ -26,6 +26,7 @@
 //!     Ok(())
 //! }
 //! ```
+#![deny(clippy::arithmetic_side_effects)]
 
 pub mod audit;
 #[cfg(unix)]

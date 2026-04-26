@@ -202,6 +202,10 @@ fn classify_message(msg: &str) -> ExitCode {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::arithmetic_side_effects,
+    reason = "test code: bounded loop over Debug string length"
+)]
 mod tests {
     use super::*;
 

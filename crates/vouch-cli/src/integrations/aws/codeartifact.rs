@@ -82,7 +82,7 @@ pub(crate) fn parse_codeartifact_url(url: &str) -> Option<CodeArtifactRegistry> 
     // The owner is the last segment after the final hyphen (since domain names can contain hyphens)
     let last_hyphen = domain_owner_part.rfind('-')?;
     let domain = domain_owner_part.get(..last_hyphen)?;
-    let domain_owner = domain_owner_part.get(last_hyphen + 1..)?;
+    let domain_owner = domain_owner_part.get(last_hyphen.saturating_add(1)..)?;
 
     if domain.is_empty() || domain_owner.is_empty() {
         return None;

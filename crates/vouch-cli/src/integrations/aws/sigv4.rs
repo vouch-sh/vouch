@@ -520,7 +520,7 @@ fn truncate_error_body(body: &str, max_len: usize) -> &str {
     // Find the last char boundary at or before max_len
     let mut end = max_len;
     while !body.is_char_boundary(end) && end > 0 {
-        end -= 1;
+        end = end.saturating_sub(1);
     }
     body.get(..end).unwrap_or(body)
 }

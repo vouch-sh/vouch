@@ -150,7 +150,7 @@ fn write_session_cookie_file(server: &str, token: &str, expires_at_ts: Option<ji
     };
 
     let expires = expires_at_ts.map_or_else(
-        || jiff::Timestamp::now().as_second() + 28_800,
+        || jiff::Timestamp::now().as_second().saturating_add(28_800),
         |ts| ts.as_second(),
     );
 

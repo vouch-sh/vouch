@@ -172,7 +172,7 @@ pub(crate) fn parse_sso_timestamp(s: &str) -> Result<jiff::Timestamp> {
         // Handle optional microseconds: strip them and parse without
         let normalized = if let Some(dot_pos) = stripped.rfind('.') {
             // Check if the fractional part is all digits
-            let frac = stripped.get(dot_pos + 1..).unwrap_or("");
+            let frac = stripped.get(dot_pos.saturating_add(1)..).unwrap_or("");
             if frac.chars().all(|c| c.is_ascii_digit()) {
                 // Remove fractional seconds — jiff handles "...T18:30:45" directly
                 stripped.get(..dot_pos).unwrap_or(stripped).to_string()
@@ -563,7 +563,7 @@ pub(crate) async fn poll_for_token(
             )
             .into());
         }
-        iteration += 1;
+        iteration = iteration.saturating_add(1);
 
         tokio::time::sleep(Duration::from_secs(interval_secs)).await;
 
@@ -628,7 +628,7 @@ pub(crate) async fn poll_for_token(
             }
             "slow_down" => {
                 // Server requesting slower polling
-                interval_secs += 5;
+                interval_secs = interval_secs.saturating_add(5);
                 tracing::debug!("SSO slow_down: increasing interval to {interval_secs}s");
             }
             "access_denied" => {

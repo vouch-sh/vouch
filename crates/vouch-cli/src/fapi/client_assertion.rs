@@ -91,7 +91,7 @@ impl ClientAssertionBuilder {
             aud: self.audience,
             jti: uuid::Uuid::now_v7().to_string(),
             iat: now,
-            exp: now + 60,
+            exp: now.saturating_add(60),
         };
 
         let token = jsonwebtoken::encode(&header, &claims, &key.encoding_key())

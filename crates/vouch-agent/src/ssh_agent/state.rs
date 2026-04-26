@@ -125,7 +125,7 @@ impl SshAgentState {
         match guard.last_refresh_at {
             Some(last) => {
                 let now = Timestamp::now();
-                let elapsed = now.as_second() - last.as_second();
+                let elapsed = now.as_second().saturating_sub(last.as_second());
                 elapsed >= MIN_REFRESH_INTERVAL_SECONDS
             }
             None => true,

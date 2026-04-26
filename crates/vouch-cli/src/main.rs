@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Vouch CLI - Hardware-backed identity for developers.
+#![deny(clippy::arithmetic_side_effects)]
 
 // Avoid musl's default allocator due to lackluster performance
 // https://nickb.dev/blog/default-musl-allocator-considered-harmful-to-performance
@@ -137,7 +138,7 @@ async fn check_pnpm_tokenhelper_invocation(argv0: &str) -> Result<bool> {
         let flag = |name: &str| {
             args.iter()
                 .position(|a| a == name)
-                .and_then(|i| args.get(i + 1))
+                .and_then(|i| args.get(i.saturating_add(1)))
         };
         let domain = flag("--domain");
         let domain_owner = flag("--domain-owner");

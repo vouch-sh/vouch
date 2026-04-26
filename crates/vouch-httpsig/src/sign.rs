@@ -125,7 +125,7 @@ impl SignatureBuilder {
         let base = self
             .created
             .unwrap_or_else(|| jiff::Timestamp::now().as_second());
-        self.expires = Some(base + seconds);
+        self.expires = Some(base.saturating_add(seconds));
         self
     }
 

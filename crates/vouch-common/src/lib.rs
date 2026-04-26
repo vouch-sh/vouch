@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Shared types for vouch CLI and server.
+#![deny(clippy::arithmetic_side_effects)]
 
 pub mod aaguid;
 pub(crate) mod api;
