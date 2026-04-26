@@ -58,7 +58,10 @@ impl KeyResolver for OAuthClientKeyResolver {
                 .ok()
                 .flatten()?;
 
-            let jwks = client.jwks.as_ref().or(client.jwks_uri_cache.as_ref())?;
+            let jwks = client
+                .jwks
+                .as_ref()
+                .or_else(|| client.jwks_uri_cache.as_ref().map(|c| &c.value))?;
             let keys = jwks.get("keys")?.as_array()?;
 
             for jwk in keys {

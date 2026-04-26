@@ -354,6 +354,38 @@ impl RegistrationSource {
 // Document Types
 // ============================================================================
 
+/// Cached JWKS fetched from a client's `jwks_uri`.
+///
+/// Grouping the value with its fetch timestamp makes the
+/// "present together or absent together" invariant compiler-enforced.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JwksUriCache {
+    pub value: serde_json::Value,
+    pub cached_at: Timestamp,
+}
+
+impl JwksUriCache {
+    /// Returns true if the cache is younger than `ttl_seconds`.
+    #[must_use]
+    pub fn is_fresh(&self, ttl_seconds: i64) -> bool {
+        self.age_seconds() < ttl_seconds
+    }
+
+    /// Returns true if the cache is within the maximum stale window.
+    #[must_use]
+    pub fn is_within_stale_window(&self, max_age_seconds: i64) -> bool {
+        self.age_seconds() < max_age_seconds
+    }
+
+    /// Age of the cache in seconds (saturating at 0).
+    #[must_use]
+    pub fn age_seconds(&self) -> i64 {
+        Timestamp::now()
+            .as_second()
+            .saturating_sub(self.cached_at.as_second())
+    }
+}
+
 /// An OAuth 2.0 client application.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OAuthClientDoc {
@@ -370,8 +402,9 @@ pub struct OAuthClientDoc {
     /// Inline JWKS JSON (RFC 7523).
     pub jwks: Option<serde_json::Value>,
     pub jwks_uri: Option<String>,
-    pub jwks_uri_cached_at: Option<Timestamp>,
-    pub jwks_uri_cache: Option<serde_json::Value>,
+    /// Cached JWKS fetched from `jwks_uri`. Cleared when the URI changes.
+    #[serde(default)]
+    pub jwks_uri_cache: Option<JwksUriCache>,
     pub token_endpoint_auth_method: TokenEndpointAuthMethod,
     /// RFC 9101 request object signing algorithm.
     pub request_object_signing_alg: Option<JwsAlgorithm>,
@@ -660,7 +693,6 @@ mod tests {
             "resource_uris": [],
             "jwks": null,
             "jwks_uri": null,
-            "jwks_uri_cached_at": null,
             "jwks_uri_cache": null,
             "token_endpoint_auth_method": "none",
             "request_object_signing_alg": null,

@@ -2,7 +2,7 @@
 //! Trusted JWT issuer database operations (RFC 7523).
 
 use super::document_type::Document;
-use super::documents::jwt_issuer::TrustedJwtIssuerDoc;
+use super::documents::jwt_issuer::{JwksCache, TrustedJwtIssuerDoc};
 use super::store::DocumentStore;
 use anyhow::Result;
 use jiff::Timestamp;
@@ -21,8 +21,7 @@ pub struct TrustedJwtIssuer {
     pub name: String,
     pub description: Option<String>,
     pub jwks_uri: String,
-    pub jwks_cache: Option<serde_json::Value>,
-    pub jwks_cached_at: Option<String>,
+    pub jwks_cache: Option<JwksCache>,
     pub subject_claim_mapping: String,
     pub allowed_scopes: Option<String>,
     pub max_token_lifetime_seconds: i32,
@@ -40,7 +39,6 @@ impl From<Document<TrustedJwtIssuerDoc>> for TrustedJwtIssuer {
             description: doc.data.description,
             jwks_uri: doc.data.jwks_uri,
             jwks_cache: doc.data.jwks_cache,
-            jwks_cached_at: doc.data.jwks_cached_at.map(|t| t.to_string()),
             subject_claim_mapping: doc.data.subject_claim_mapping,
             allowed_scopes: doc.data.allowed_scopes,
             max_token_lifetime_seconds: doc.data.max_token_lifetime_seconds,
@@ -75,7 +73,6 @@ pub async fn create_trusted_jwt_issuer(
         description: description.map(String::from),
         jwks_uri: jwks_uri.to_string(),
         jwks_cache: None,
-        jwks_cached_at: None,
         subject_claim_mapping: mapping.to_string(),
         allowed_scopes: allowed_scopes.map(String::from),
         max_token_lifetime_seconds: max_lifetime,
@@ -146,8 +143,10 @@ pub async fn update_issuer_jwks_cache(
 ) -> Result<()> {
     if let Some(doc) = store.get::<TrustedJwtIssuerDoc>(id).await? {
         let mut data = doc.data;
-        data.jwks_cache = Some(jwks_value.clone());
-        data.jwks_cached_at = Some(jiff::Timestamp::now());
+        data.jwks_cache = Some(JwksCache {
+            value: jwks_value.clone(),
+            cached_at: Timestamp::now(),
+        });
         store.update(id, &data).await?;
     }
     Ok(())

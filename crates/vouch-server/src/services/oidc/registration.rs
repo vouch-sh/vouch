@@ -1454,9 +1454,13 @@ async fn verify_software_statement_jwt(
         )
     })?;
 
-    let keys = jwks.get("keys").and_then(|k| k.as_array()).ok_or_else(|| {
-        ServiceError::Internal("Trusted issuer JWKS has no keys array".to_string())
-    })?;
+    let keys = jwks
+        .value
+        .get("keys")
+        .and_then(|k| k.as_array())
+        .ok_or_else(|| {
+            ServiceError::Internal("Trusted issuer JWKS has no keys array".to_string())
+        })?;
 
     let algorithm = map_algorithm(&header.alg).map_err(|_| {
         ServiceError::oauth(

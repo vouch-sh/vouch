@@ -6,8 +6,8 @@ use super::document_type::{Document, DocumentType};
 use super::documents::audit::OAuthUsageData;
 use super::documents::jwt_assertion_jti::JwtAssertionJtiDoc;
 use super::documents::oauth::{
-    AccessScope, FapiProfile, JwsAlgorithm, OAuthClientDoc, OAuthClientSecretDoc, OAuthClientType,
-    RegistrationSource, TokenEndpointAuthMethod,
+    AccessScope, FapiProfile, JwksUriCache, JwsAlgorithm, OAuthClientDoc, OAuthClientSecretDoc,
+    OAuthClientType, RegistrationSource, TokenEndpointAuthMethod,
 };
 use super::store::DocumentStore;
 use anyhow::Result;
@@ -36,8 +36,7 @@ pub struct OAuthClient {
     pub resource_uris: Vec<String>,
     pub jwks: Option<serde_json::Value>,
     pub jwks_uri: Option<String>,
-    pub jwks_uri_cached_at: Option<Timestamp>,
-    pub jwks_uri_cache: Option<serde_json::Value>,
+    pub jwks_uri_cache: Option<JwksUriCache>,
     pub token_endpoint_auth_method: TokenEndpointAuthMethod,
     pub request_object_signing_alg: Option<JwsAlgorithm>,
     pub require_signed_request_object: Option<bool>,
@@ -97,7 +96,6 @@ impl From<Document<OAuthClientDoc>> for OAuthClient {
             resource_uris: doc.data.resource_uris,
             jwks: doc.data.jwks,
             jwks_uri: doc.data.jwks_uri,
-            jwks_uri_cached_at: doc.data.jwks_uri_cached_at,
             jwks_uri_cache: doc.data.jwks_uri_cache,
             token_endpoint_auth_method: doc.data.token_endpoint_auth_method,
             request_object_signing_alg: doc.data.request_object_signing_alg,
@@ -212,7 +210,6 @@ pub async fn create_oauth_client(
         resource_uris: params.resource_uris.to_vec(),
         jwks: params.jwks.cloned(),
         jwks_uri: params.jwks_uri.map(String::from),
-        jwks_uri_cached_at: None,
         jwks_uri_cache: None,
         token_endpoint_auth_method: params.token_endpoint_auth_method.unwrap_or_default(),
         request_object_signing_alg: params.request_object_signing_alg,
@@ -633,8 +630,10 @@ pub async fn update_client_jwks_cache(
     let jwks_owned = jwks_value.clone();
     store
         .modify::<OAuthClientDoc, _>(id, |data| {
-            data.jwks_uri_cache = Some(jwks_owned.clone());
-            data.jwks_uri_cached_at = Some(Timestamp::now());
+            data.jwks_uri_cache = Some(JwksUriCache {
+                value: jwks_owned.clone(),
+                cached_at: Timestamp::now(),
+            });
         })
         .await?;
     Ok(())
@@ -774,7 +773,6 @@ pub async fn update_oauth_client_registration(
             // Compare before overwriting so the check sees the old value.
             if data.jwks_uri.as_deref() != params.jwks_uri {
                 data.jwks_uri_cache = None;
-                data.jwks_uri_cached_at = None;
             }
             data.jwks_uri = params.jwks_uri.map(String::from);
             data.registration_access_token_hash =

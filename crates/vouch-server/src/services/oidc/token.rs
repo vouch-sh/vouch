@@ -843,7 +843,7 @@ pub(crate) fn authenticate_client_mtls(
             let jwks = client
                 .jwks
                 .as_ref()
-                .or(client.jwks_uri_cache.as_ref())
+                .or_else(|| client.jwks_uri_cache.as_ref().map(|c| &c.value))
                 .ok_or_else(|| {
                     ClientAuthError::MtlsVerificationFailed(
                         "self_signed_tls_client_auth requires JWKS with x5c".to_string(),
@@ -1471,7 +1471,6 @@ mod tests {
             resource_uris: vec![],
             jwks: None,
             jwks_uri: None,
-            jwks_uri_cached_at: None,
             jwks_uri_cache: None,
             token_endpoint_auth_method: auth_method,
             request_object_signing_alg: None,

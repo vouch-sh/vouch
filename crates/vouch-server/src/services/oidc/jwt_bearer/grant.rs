@@ -79,7 +79,6 @@ pub async fn exchange_jwt_bearer_grant(
         &issuer.id,
         &issuer.jwks_uri,
         issuer.jwks_cache.as_ref(),
-        issuer.jwks_cached_at.as_deref(),
         &state.http_client,
     )
     .await?;
@@ -89,7 +88,7 @@ pub async fn exchange_jwt_bearer_grant(
         &state.store,
         &issuer.id,
         &issuer.jwks_uri,
-        issuer.jwks_cached_at.as_deref(),
+        issuer.jwks_cache.as_ref(),
         &state.http_client,
         &jwks,
         &header,

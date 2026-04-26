@@ -130,18 +130,16 @@ pub async fn authenticate_client_jwt(
     }
 
     // 5. Resolve client's JWKS (inline or from URI)
-    // Note: `jwks_uri_cached_at` is captured before `resolve_client_jwks` runs. If
-    // `resolve_client_jwks` performs a TTL-based refresh, the timestamp passed to
+    // Note: `client.jwks_uri_cache` is captured before `resolve_client_jwks` runs. If
+    // `resolve_client_jwks` performs a TTL-based refresh, the cache passed to
     // `find_matching_key_with_refresh_client` below will be stale. Worst case: one
     // extra JWKS fetch when a TTL-refresh and kid-miss coincide. Acceptable trade-off.
-    let jwks_uri_cached_at = client.jwks_uri_cached_at.map(|ts| ts.to_string());
     let jwks = resolve_client_jwks(
         &state.store,
         &client.id,
         client.jwks.as_ref(),
         client.jwks_uri.as_deref(),
         client.jwks_uri_cache.as_ref(),
-        jwks_uri_cached_at.as_deref(),
         &state.http_client,
     )
     .await
@@ -158,7 +156,7 @@ pub async fn authenticate_client_jwt(
         &state.store,
         &client.id,
         client.jwks_uri.as_deref(),
-        jwks_uri_cached_at.as_deref(),
+        client.jwks_uri_cache.as_ref(),
         &state.http_client,
         &jwks,
         &header,
