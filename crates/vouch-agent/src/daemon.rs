@@ -62,8 +62,8 @@ pub fn is_running() -> Result<bool> {
     let pid: i32 = match contents.trim().parse() {
         Ok(p) => p,
         Err(_) => {
-            // Invalid PID file, remove it
-            let _ = fs::remove_file(&pid_path);
+            // Invalid PID file, remove it (best-effort cleanup).
+            let _removed = fs::remove_file(&pid_path);
             return Ok(false);
         }
     };
@@ -72,8 +72,8 @@ pub fn is_running() -> Result<bool> {
     if is_process_running(pid) {
         Ok(true)
     } else {
-        // Stale PID file, remove it
-        let _ = fs::remove_file(&pid_path);
+        // Stale PID file, remove it (best-effort cleanup).
+        let _removed = fs::remove_file(&pid_path);
         Ok(false)
     }
 }
@@ -182,8 +182,8 @@ pub fn daemonize() -> Result<DaemonizeResult> {
         return Ok(DaemonizeResult::Parent);
     }
 
-    // Change working directory to root
-    let _ = std::env::set_current_dir("/");
+    // Change working directory to root (best-effort; non-fatal if it fails).
+    let _chdir = std::env::set_current_dir("/");
 
     // Close standard file descriptors and redirect to /dev/null or log file
     let log_path = log_file_path()?;

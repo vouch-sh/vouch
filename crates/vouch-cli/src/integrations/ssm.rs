@@ -32,7 +32,8 @@ pub(crate) fn is_plugin_available() -> bool {
         .spawn()
     {
         Ok(mut child) => {
-            let _ = child.wait();
+            // Best-effort cleanup of the spawned probe process.
+            let _waited = child.wait();
             true
         }
         Err(e) if e.kind() == ErrorKind::NotFound => false,

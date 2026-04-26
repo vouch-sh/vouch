@@ -121,7 +121,7 @@ pub async fn create_scim_token(
         "token_id": token_id,
         "admin_user_id": user.id,
     });
-    let _ = state
+    if let Err(e) = state
         .audit
         .insert_event(
             "admin_create_scim_token",
@@ -129,7 +129,10 @@ pub async fn create_scim_token(
             Some(&user.email),
             &data.to_string(),
         )
-        .await;
+        .await
+    {
+        tracing::warn!(error = %e, "failed to write admin_create_scim_token audit event");
+    }
 
     tracing::info!("Created SCIM token: {} for org: {}", token_id, org_id);
 
@@ -197,7 +200,7 @@ pub async fn delete_scim_token(
         "token_id": &*token_id,
         "admin_user_id": user.id,
     });
-    let _ = state
+    if let Err(e) = state
         .audit
         .insert_event(
             "admin_delete_scim_token",
@@ -205,7 +208,10 @@ pub async fn delete_scim_token(
             Some(&user.email),
             &data.to_string(),
         )
-        .await;
+        .await
+    {
+        tracing::warn!(error = %e, "failed to write admin_delete_scim_token audit event");
+    }
 
     tracing::info!("Deleted SCIM token: {}", token_id);
 
@@ -373,7 +379,7 @@ pub async fn admin_create_scim_token(
         "token_id": token_id,
         "admin_user_id": admin.id,
     });
-    let _ = state
+    if let Err(e) = state
         .audit
         .insert_event(
             "admin_create_scim_token",
@@ -381,7 +387,10 @@ pub async fn admin_create_scim_token(
             Some(&admin.email),
             &data.to_string(),
         )
-        .await;
+        .await
+    {
+        tracing::warn!(error = %e, "failed to write admin_create_scim_token audit event");
+    }
 
     tracing::info!(
         "Admin {} created SCIM token {} for org {}",
@@ -440,7 +449,7 @@ pub async fn admin_revoke_scim_token(
         "token_id": &*token_id,
         "admin_user_id": admin.id,
     });
-    let _ = state
+    if let Err(e) = state
         .audit
         .insert_event(
             "admin_revoke_scim_token",
@@ -448,7 +457,10 @@ pub async fn admin_revoke_scim_token(
             Some(&admin.email),
             &data.to_string(),
         )
-        .await;
+        .await
+    {
+        tracing::warn!(error = %e, "failed to write admin_revoke_scim_token audit event");
+    }
 
     tracing::info!(
         "Admin {} revoked SCIM token {} for org {}",

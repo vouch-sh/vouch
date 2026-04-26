@@ -196,12 +196,12 @@ pub async fn serve(components: ServerComponents, app: Router) -> Result<()> {
             .serve(app.into_make_service_with_connect_info::<std::net::SocketAddr>())
             .await?;
 
-        // Wait for HTTP redirect server to finish
-        let _ = http_handle.await;
+        // Wait for HTTP redirect server to finish; ignore JoinError on shutdown.
+        let _http = http_handle.await;
 
-        // Wait for mTLS listener to finish
+        // Wait for mTLS listener to finish; ignore JoinError on shutdown.
         if let Some(handle) = mtls_handle {
-            let _ = handle.await;
+            let _mtls = handle.await;
         }
     } else {
         // Start S3 config polling task if configured (no TLS)

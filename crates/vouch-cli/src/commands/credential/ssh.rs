@@ -248,7 +248,8 @@ pub(crate) async fn auto_provision(
             // Store in agent with session linkage (Unix only)
             #[cfg(unix)]
             if let Ok(mut agent) = vouch_agent::AgentClient::connect().await {
-                let _ = agent
+                // Best-effort agent push; SSH cert is already on disk.
+                let _stored = agent
                     .store_ssh_credentials_with_session(
                         &result.key_path.to_string_lossy(),
                         &result.cert_path.to_string_lossy(),
@@ -318,7 +319,8 @@ pub(crate) async fn run(server: &str, key_path: Option<&str>, force: bool) -> Re
         if let Ok(mut agent_client) = vouch_agent::AgentClient::connect().await {
             let key_str = result.key_path.to_string_lossy().to_string();
             let cert_str = result.cert_path.to_string_lossy().to_string();
-            let _ = agent_client
+            // Best-effort agent push; SSH cert is already on disk.
+            let _stored = agent_client
                 .store_ssh_credentials(&key_str, &cert_str)
                 .await;
         }

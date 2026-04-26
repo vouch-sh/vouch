@@ -674,8 +674,9 @@ pub(crate) fn redact_database_url(url: &str) -> String {
     match url::Url::parse(url) {
         Ok(mut parsed) => {
             if parsed.password().is_some() {
-                // url::Url::set_password returns Result<(), ()>
-                let _ = parsed.set_password(Some("***"));
+                // url::Url::set_password returns Result<(), ()>; failure is impossible
+                // here because we just confirmed the URL is parsed.
+                let _set = parsed.set_password(Some("***"));
             }
             parsed.to_string()
         }

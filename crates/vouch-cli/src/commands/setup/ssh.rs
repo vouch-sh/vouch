@@ -251,7 +251,8 @@ fn add_trusted_ca_to_known_hosts(ca_path: &std::path::Path, host_patterns: &str)
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let _ = fs::set_permissions(&lock_path, fs::Permissions::from_mode(0o600));
+        // Best-effort tightening of lock file permissions.
+        let _chmod = fs::set_permissions(&lock_path, fs::Permissions::from_mode(0o600));
     }
 
     #[cfg(unix)]

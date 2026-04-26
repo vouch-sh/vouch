@@ -889,7 +889,9 @@ pub async fn validate_dpop_if_present(
     if config.tls_configured()
         && let Ok(mut url) = url::Url::parse(&config.base_url)
     {
-        let _ = url.set_port(Some(config.mtls_port));
+        // url::Url::set_port returns Result<(), ()>; failure means non-special URL,
+        // already validated upstream.
+        let _set = url.set_port(Some(config.mtls_port));
         let mtls_uri = format!("{}{}", url.as_str().trim_end_matches('/'), uri);
         accepted_uris.push(mtls_uri);
     }

@@ -362,7 +362,9 @@ impl Config {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&lock_path, std::fs::Permissions::from_mode(0o600));
+            // Best-effort tightening of lock file permissions.
+            let _chmod =
+                std::fs::set_permissions(&lock_path, std::fs::Permissions::from_mode(0o600));
         }
 
         crate::utils::flock_exclusive(&lock_file).context("failed to acquire config file lock")?;

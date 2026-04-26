@@ -31,7 +31,8 @@ pub(crate) fn init(choice: ColorChoice) {
             std::io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none()
         }
     };
-    let _ = COLOR_ENABLED.set(enabled);
+    // OnceLock::set returning Err means it was already set, which is fine on repeat init.
+    let _set = COLOR_ENABLED.set(enabled);
 }
 
 /// Whether color is currently enabled.

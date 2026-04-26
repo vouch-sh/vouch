@@ -86,7 +86,7 @@ pub(crate) async fn run(operation: &str) -> Result<()> {
         "store" | "erase" => {
             // These operations are no-ops for Vouch since we don't store credentials
             // Just consume stdin to avoid broken pipe
-            let _ = read_server_url();
+            let _consumed = read_server_url();
             Ok(())
         }
         "list" => {

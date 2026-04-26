@@ -156,7 +156,7 @@ pub async fn promote_member(
         "target_user_id": &*target_id,
         "admin_user_id": admin.id,
     });
-    let _ = state
+    if let Err(e) = state
         .audit
         .insert_event(
             "admin_promote",
@@ -164,7 +164,10 @@ pub async fn promote_member(
             Some(&target.email),
             &data.to_string(),
         )
-        .await;
+        .await
+    {
+        tracing::warn!(error = %e, "failed to write admin_promote audit event");
+    }
 
     tracing::info!(
         "Admin {} promoted {} to org admin",
@@ -213,7 +216,7 @@ pub async fn demote_member(
         "target_user_id": &*target_id,
         "admin_user_id": admin.id,
     });
-    let _ = state
+    if let Err(e) = state
         .audit
         .insert_event(
             "admin_demote",
@@ -221,7 +224,10 @@ pub async fn demote_member(
             Some(&target.email),
             &data.to_string(),
         )
-        .await;
+        .await
+    {
+        tracing::warn!(error = %e, "failed to write admin_demote audit event");
+    }
 
     tracing::info!(
         "Admin {} demoted {} from org admin",
@@ -290,7 +296,7 @@ pub async fn deactivate_member(
         "target_user_id": &*target_id,
         "admin_user_id": admin.id,
     });
-    let _ = state
+    if let Err(e) = state
         .audit
         .insert_event(
             "admin_deactivate",
@@ -298,7 +304,10 @@ pub async fn deactivate_member(
             Some(&target.email),
             &data.to_string(),
         )
-        .await;
+        .await
+    {
+        tracing::warn!(error = %e, "failed to write admin_deactivate audit event");
+    }
 
     tracing::info!("Admin {} deactivated user {}", admin.email, target.email);
 
@@ -334,7 +343,7 @@ pub async fn activate_member(
         "target_user_id": &*target_id,
         "admin_user_id": admin.id,
     });
-    let _ = state
+    if let Err(e) = state
         .audit
         .insert_event(
             "admin_activate",
@@ -342,7 +351,10 @@ pub async fn activate_member(
             Some(&target.email),
             &data.to_string(),
         )
-        .await;
+        .await
+    {
+        tracing::warn!(error = %e, "failed to write admin_activate audit event");
+    }
 
     tracing::info!("Admin {} reactivated user {}", admin.email, target.email);
 
@@ -414,7 +426,7 @@ pub async fn revoke_member_credentials(
         "admin_user_id": admin.id,
         "keys_revoked": key_count,
     });
-    let _ = state
+    if let Err(e) = state
         .audit
         .insert_event(
             "admin_revoke_credentials",
@@ -422,7 +434,10 @@ pub async fn revoke_member_credentials(
             Some(&target.email),
             &data.to_string(),
         )
-        .await;
+        .await
+    {
+        tracing::warn!(error = %e, "failed to write admin_revoke_credentials audit event");
+    }
 
     tracing::info!(
         "Admin {} revoked {} credentials for user {}",
@@ -493,7 +508,7 @@ pub async fn remove_member(
         "target_user_id": &*target_id,
         "admin_user_id": admin.id,
     });
-    let _ = state
+    if let Err(e) = state
         .audit
         .insert_event(
             "admin_remove_user",
@@ -501,7 +516,10 @@ pub async fn remove_member(
             Some(&target_email),
             &data.to_string(),
         )
-        .await;
+        .await
+    {
+        tracing::warn!(error = %e, "failed to write admin_remove_user audit event");
+    }
 
     tracing::info!(
         "Admin {} removed user {} from organization",

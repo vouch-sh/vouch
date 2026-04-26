@@ -179,7 +179,8 @@ where
 {
     let (tx, rx) = tokio::sync::oneshot::channel();
     std::thread::spawn(move || {
-        let _ = tx.send(f());
+        // Receiver dropping (caller cancelled) is fine; nothing to do.
+        let _sent = tx.send(f());
     });
     rx.await.context("FIDO2 thread panicked")?
 }
@@ -1166,12 +1167,12 @@ mod tests {
         assert_eq!(device.counter(), 0);
 
         // First authentication increments to 1
-        let _ = device.authenticate("example.com", &challenge, "1234");
+        let _auth = device.authenticate("example.com", &challenge, "1234");
         // Counter was read as 0 and incremented to 1 during auth
         assert_eq!(device.counter(), 1);
 
         // Second authentication increments to 2
-        let _ = device.authenticate("example.com", &challenge, "1234");
+        let _auth = device.authenticate("example.com", &challenge, "1234");
         assert_eq!(device.counter(), 2);
     }
 }
