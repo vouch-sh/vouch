@@ -82,14 +82,15 @@ make docker-run
 
 ### Strict No-Panic Policy
 
-The workspace enforces panic-free code via clippy lints in `Cargo.toml`. These are **deny** (not warn):
-- `unwrap_used`, `expect_used`, `panic`, `unreachable`, `todo`, `unimplemented` — use `?` and proper error handling
-- `indexing_slicing` — use `.get()` instead of `[]`
-- `unwrap_in_result`, `panic_in_result_fn`, `get_unwrap` — no panics in Result-returning functions
-- `exit` — no `std::process::exit()` calls; return errors instead
-- `unsafe_code` — denied at the Rust lint level
+The workspace enforces panic-free code via clippy lints in `Cargo.toml`. Key categories denied (not warn):
+- **Explicit panics**: `unwrap_used`, `expect_used`, `panic`, `unreachable`, `todo`, `unimplemented`, `exit`
+- **Indexing**: `indexing_slicing`, `string_slice` — use `.get()` instead of `[]`
+- **Panics in Result fns**: `unwrap_in_result`, `panic_in_result_fn`, `get_unwrap`
+- **Arithmetic**: `arithmetic_side_effects`, `integer_division`, `modulo_arithmetic` — use `checked_*`, `saturating_*`, or `wrapping_*`
+- **Numeric casts**: `cast_possible_truncation`, `cast_sign_loss`, `cast_possible_wrap`, `cast_precision_loss`, `checked_conversions` — use `try_from`, `try_into`, or checked conversions
+- **Unsafe code**: denied at the Rust lint level
 
-The `vouch-tests` crate overrides these to allow unwrap/expect/panic in test code.
+See `Cargo.toml` for the complete list. The `vouch-tests` crate overrides these to allow unwrap/expect/panic in test code.
 
 ### Rust Style
 
@@ -227,10 +228,11 @@ cargo test --features yubikey-tests -- --ignored
 1. **Don't add dependencies without justification** — Each dep is attack surface
 2. **Don't store secrets in plain types** — Use `SecretString`, `Zeroizing`
 3. **Don't use `unwrap()`, `expect()`, `panic!()`, or `[]` indexing** — These are deny-linted. Use `?`, `.get()`, and proper error propagation
-4. **Don't skip FIDO2 user verification** — `userVerification: required` always
-5. **Don't implement crypto yourself** — Use audited libraries
-6. **Don't use `chrono`** — Use `jiff` for time
-7. **Don't use `ring`** — Use `aws-lc-rs` for crypto
+4. **Don't use `as` for numeric casts** — Use `try_from()`, `try_into()`, or explicit checked conversions to avoid silent truncation/wrapping
+5. **Don't skip FIDO2 user verification** — `userVerification: required` always
+6. **Don't implement crypto yourself** — Use audited libraries
+7. **Don't use `chrono`** — Use `jiff` for time
+8. **Don't use `ring`** — Use `aws-lc-rs` for crypto
 
 ## File Locations
 
