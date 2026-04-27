@@ -158,7 +158,7 @@ Configuration is in `.rustfmt.toml`: edition 2024, max width 100, Unix newlines.
 make lint   # cargo clippy --all-targets --all-features -- -D warnings
 ```
 
-The workspace enforces strict no-panic lints (see `Cargo.toml`). In production code, `unwrap()`, `expect()`, `panic!()`, `todo!()`, and `[]` indexing are **denied**. Use `?` for error propagation and `.get()` for indexing. The `vouch-tests` crate overrides these for test code.
+The workspace enforces strict no-panic lints (see `Cargo.toml`). In production code, `unwrap()`, `expect()`, `panic!()`, `todo!()`, and `[]` indexing are **denied**. Use `?` for error propagation and `.get()` for indexing. Arithmetic operations (`+`, `-`, `*`) must use explicit `checked_*`, `saturating_*`, or `wrapping_*` methods. The `vouch-tests` crate overrides these for test code.
 
 ### Dependencies
 
