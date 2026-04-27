@@ -1780,7 +1780,6 @@ mod tests {
             resource_uris: vec![],
             jwks: None,
             jwks_uri: None,
-            jwks_uri_cache: None,
             token_endpoint_auth_method: TokenEndpointAuthMethod::None,
             request_object_signing_alg: None,
             require_signed_request_object: None,

@@ -822,10 +822,12 @@ async fn generate_id_token(
 /// Authenticate a client using mTLS certificate (RFC 8705 Section 2).
 ///
 /// Dispatches to the appropriate verification method based on the client's
-/// registered `token_endpoint_auth_method`.
+/// registered `token_endpoint_auth_method`. For `self_signed_tls_client_auth`,
+/// callers should pre-load the JWKS cache and pass it as `jwks_cache_value`.
 pub(crate) fn authenticate_client_mtls(
     client: &crate::db::OAuthClient,
     cert: &crate::services::oidc::mtls::ClientCertificate,
+    jwks_cache_value: Option<&serde_json::Value>,
 ) -> Result<(), ClientAuthError> {
     match client.token_endpoint_auth_method {
         crate::db::TokenEndpointAuthMethod::TlsClientAuth => {
@@ -840,15 +842,11 @@ pub(crate) fn authenticate_client_mtls(
             .map_err(|e| ClientAuthError::MtlsVerificationFailed(e.to_string()))
         }
         crate::db::TokenEndpointAuthMethod::SelfSignedTlsClientAuth => {
-            let jwks = client
-                .jwks
-                .as_ref()
-                .or_else(|| client.jwks_uri_cache.as_ref().map(|c| &c.value))
-                .ok_or_else(|| {
-                    ClientAuthError::MtlsVerificationFailed(
-                        "self_signed_tls_client_auth requires JWKS with x5c".to_string(),
-                    )
-                })?;
+            let jwks = client.jwks.as_ref().or(jwks_cache_value).ok_or_else(|| {
+                ClientAuthError::MtlsVerificationFailed(
+                    "self_signed_tls_client_auth requires JWKS with x5c".to_string(),
+                )
+            })?;
             crate::services::oidc::mtls::verify_self_signed_tls_client_auth(cert, jwks)
                 .map_err(|e| ClientAuthError::MtlsVerificationFailed(e.to_string()))
         }
@@ -1471,7 +1469,6 @@ mod tests {
             resource_uris: vec![],
             jwks: None,
             jwks_uri: None,
-            jwks_uri_cache: None,
             token_endpoint_auth_method: auth_method,
             request_object_signing_alg: None,
             require_signed_request_object: None,
@@ -1558,7 +1555,7 @@ mod tests {
         let subject_dn = cert.subject_dn.as_deref().expect("cert has subject_dn");
         let client = make_mtls_client(TokenEndpointAuthMethod::TlsClientAuth, Some(subject_dn));
 
-        let result = authenticate_client_mtls(&client, &cert);
+        let result = authenticate_client_mtls(&client, &cert, None);
         assert!(
             result.is_ok(),
             "matching subject_dn must authenticate successfully, got: {result:?}"
@@ -1574,7 +1571,7 @@ mod tests {
             Some("CN=expected-different-client"),
         );
 
-        let result = authenticate_client_mtls(&client, &cert);
+        let result = authenticate_client_mtls(&client, &cert, None);
         assert!(
             result.is_err(),
             "non-matching subject_dn must fail authentication"
@@ -1591,7 +1588,7 @@ mod tests {
         let cert = make_cert_with_cn("wrong-method-client");
         let client = make_mtls_client(TokenEndpointAuthMethod::ClientSecretBasic, None);
 
-        let result = authenticate_client_mtls(&client, &cert);
+        let result = authenticate_client_mtls(&client, &cert, None);
         assert!(
             result.is_err(),
             "non-mTLS auth method must fail mTLS authentication"
@@ -1621,7 +1618,7 @@ mod tests {
         let mut client = make_mtls_client(TokenEndpointAuthMethod::SelfSignedTlsClientAuth, None);
         client.jwks = Some(jwks);
 
-        let result = authenticate_client_mtls(&client, &cert);
+        let result = authenticate_client_mtls(&client, &cert, None);
         assert!(
             result.is_ok(),
             "matching x5c must authenticate successfully: {result:?}"
@@ -1635,7 +1632,7 @@ mod tests {
         let client = make_mtls_client(TokenEndpointAuthMethod::SelfSignedTlsClientAuth, None);
         // client.jwks is None (default from make_mtls_client)
 
-        let result = authenticate_client_mtls(&client, &cert);
+        let result = authenticate_client_mtls(&client, &cert, None);
         assert!(
             matches!(result, Err(ClientAuthError::MtlsVerificationFailed(_))),
             "missing JWKS must return MtlsVerificationFailed: {result:?}"
@@ -1661,7 +1658,7 @@ mod tests {
         let mut client = make_mtls_client(TokenEndpointAuthMethod::SelfSignedTlsClientAuth, None);
         client.jwks = Some(jwks);
 
-        let result = authenticate_client_mtls(&client, &cert);
+        let result = authenticate_client_mtls(&client, &cert, None);
         assert!(
             matches!(result, Err(ClientAuthError::MtlsVerificationFailed(_))),
             "non-matching x5c must return MtlsVerificationFailed: {result:?}"

@@ -1447,14 +1447,20 @@ async fn verify_software_statement_jwt(
         ));
     }
 
-    let jwks = issuer.jwks_cache.as_ref().ok_or_else(|| {
-        ServiceError::oauth(
-            OAuthErrorCode::UnapprovedSoftwareStatement,
-            "No JWKS available for software statement issuer",
-        )
-    })?;
+    let jwks_cache = db::get_jwks_cache(&state.store, &issuer.id)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to look up JWKS cache for issuer: {e}");
+            ServiceError::Internal("Database error".to_string())
+        })?
+        .ok_or_else(|| {
+            ServiceError::oauth(
+                OAuthErrorCode::UnapprovedSoftwareStatement,
+                "No JWKS available for software statement issuer",
+            )
+        })?;
 
-    let keys = jwks
+    let keys = jwks_cache
         .value
         .get("keys")
         .and_then(|k| k.as_array())

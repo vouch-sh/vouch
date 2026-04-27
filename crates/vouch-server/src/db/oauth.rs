@@ -6,8 +6,8 @@ use super::document_type::{Document, DocumentType};
 use super::documents::audit::OAuthUsageData;
 use super::documents::jwt_assertion_jti::JwtAssertionJtiDoc;
 use super::documents::oauth::{
-    AccessScope, FapiProfile, JwksUriCache, JwsAlgorithm, OAuthClientDoc, OAuthClientSecretDoc,
-    OAuthClientType, RegistrationSource, TokenEndpointAuthMethod,
+    AccessScope, FapiProfile, JwsAlgorithm, OAuthClientDoc, OAuthClientSecretDoc, OAuthClientType,
+    RegistrationSource, TokenEndpointAuthMethod,
 };
 use super::store::DocumentStore;
 use anyhow::Result;
@@ -36,7 +36,6 @@ pub struct OAuthClient {
     pub resource_uris: Vec<String>,
     pub jwks: Option<serde_json::Value>,
     pub jwks_uri: Option<String>,
-    pub jwks_uri_cache: Option<JwksUriCache>,
     pub token_endpoint_auth_method: TokenEndpointAuthMethod,
     pub request_object_signing_alg: Option<JwsAlgorithm>,
     pub require_signed_request_object: Option<bool>,
@@ -96,7 +95,6 @@ impl From<Document<OAuthClientDoc>> for OAuthClient {
             resource_uris: doc.data.resource_uris,
             jwks: doc.data.jwks,
             jwks_uri: doc.data.jwks_uri,
-            jwks_uri_cache: doc.data.jwks_uri_cache,
             token_endpoint_auth_method: doc.data.token_endpoint_auth_method,
             request_object_signing_alg: doc.data.request_object_signing_alg,
             require_signed_request_object: doc.data.require_signed_request_object,
@@ -210,7 +208,6 @@ pub async fn create_oauth_client(
         resource_uris: params.resource_uris.to_vec(),
         jwks: params.jwks.cloned(),
         jwks_uri: params.jwks_uri.map(String::from),
-        jwks_uri_cache: None,
         token_endpoint_auth_method: params.token_endpoint_auth_method.unwrap_or_default(),
         request_object_signing_alg: params.request_object_signing_alg,
         require_signed_request_object: params.require_signed_request_object,
@@ -328,6 +325,9 @@ pub async fn delete_oauth_client(store: &DocumentStore, id: &str) -> Result<u64>
     // Delete secrets
     tx.delete_by_index::<OAuthClientSecretDoc>("oauth_client_id", id)
         .await?;
+
+    // Delete JWKS cache (was embedded in OAuthClientDoc pre-refactor; must stay atomic)
+    tx.delete(&super::jwks_cache::cache_id(id)).await?;
 
     // Delete the client
     tx.delete(id).await?;
@@ -613,32 +613,6 @@ pub async fn delete_old_oauth_usage_events(audit: &AuditStore, before: Timestamp
     Ok(total)
 }
 
-// ============================================================================
-// JWKS Cache Operations (RFC 7523)
-// ============================================================================
-
-/// Update the cached JWKS fetched from a client's `jwks_uri`.
-///
-/// Uses optimistic concurrency control. A version conflict on this
-/// cache update is logged and silently ignored — the next request
-/// will re-fetch the JWKS.
-pub async fn update_client_jwks_cache(
-    store: &DocumentStore,
-    id: &str,
-    jwks_value: &serde_json::Value,
-) -> Result<()> {
-    let jwks_owned = jwks_value.clone();
-    store
-        .modify::<OAuthClientDoc, _>(id, |data| {
-            data.jwks_uri_cache = Some(JwksUriCache {
-                value: jwks_owned.clone(),
-                cached_at: Timestamp::now(),
-            });
-        })
-        .await?;
-    Ok(())
-}
-
 /// Test-only helpers for modifying OAuth clients.
 #[cfg(test)]
 pub(super) mod test_helpers {
@@ -758,6 +732,23 @@ pub async fn update_oauth_client_registration(
     id: &str,
     params: &UpdateClientRegistrationParams<'_>,
 ) -> Result<OAuthClient> {
+    // Check whether jwks_uri is changing BEFORE modifying the parent doc so we
+    // can delete the stale cache first. A reader that races between the cache
+    // delete and the parent update will re-fetch (safe). A reader that sees the
+    // new URI with the old cache (reverse order) would validate the wrong keys
+    // — hence delete-then-update ordering.
+    // Bounded race: a concurrent JWKS refresh that completes between this delete
+    // and the modify's internal re-fetch can repopulate the cache with old-URI
+    // keys. Worst-case window is one TTL (~1h); next cache miss self-corrects.
+    let jwks_uri_changing = store
+        .get::<OAuthClientDoc>(id)
+        .await?
+        .is_some_and(|doc| doc.data.jwks_uri.as_deref() != params.jwks_uri);
+
+    if jwks_uri_changing {
+        super::jwks_cache::delete_jwks_cache(store, id).await?;
+    }
+
     store
         .modify::<OAuthClientDoc, _>(id, |data| {
             data.redirect_uris = params.redirect_uris.to_vec();
@@ -769,11 +760,6 @@ pub async fn update_oauth_client_registration(
             }
             // RFC 7592: PUT is a full replacement — clear fields not present.
             data.jwks = params.jwks.cloned();
-            // Clear JWKS URI cache when the URI changes or is removed.
-            // Compare before overwriting so the check sees the old value.
-            if data.jwks_uri.as_deref() != params.jwks_uri {
-                data.jwks_uri_cache = None;
-            }
             data.jwks_uri = params.jwks_uri.map(String::from);
             data.registration_access_token_hash =
                 Some(params.registration_access_token_hash.to_string());

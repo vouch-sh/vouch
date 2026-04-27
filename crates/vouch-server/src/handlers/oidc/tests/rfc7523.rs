@@ -751,7 +751,7 @@ async fn test_rfc7523_jwt_bearer_grant_with_trusted_issuer() {
     let jwks_value = serde_json::json!({
         "keys": [jwk]
     });
-    db::update_issuer_jwks_cache(&state.store, &issuer.id, &jwks_value)
+    db::upsert_jwks_cache(&state.store, &issuer.id, &jwks_value)
         .await
         .expect("Failed to update JWKS cache");
 
@@ -816,7 +816,7 @@ async fn test_rfc7523_jwt_bearer_grant_jti_replay() {
     .expect("Failed to create issuer");
 
     let jwks_value = serde_json::json!({ "keys": [jwk] });
-    db::update_issuer_jwks_cache(&state.store, &issuer.id, &jwks_value)
+    db::upsert_jwks_cache(&state.store, &issuer.id, &jwks_value)
         .await
         .expect("Failed to update cache");
 
@@ -911,7 +911,7 @@ async fn test_rfc7523_jwt_bearer_grant_user_not_found() {
     .expect("Failed to create issuer");
 
     let jwks_value = serde_json::json!({ "keys": [jwk] });
-    db::update_issuer_jwks_cache(&state.store, &issuer.id, &jwks_value)
+    db::upsert_jwks_cache(&state.store, &issuer.id, &jwks_value)
         .await
         .expect("Failed to update cache");
 
@@ -981,7 +981,7 @@ async fn test_rfc7523_jwt_bearer_grant_lifetime_exceeded() {
     .expect("Failed to create issuer");
 
     let jwks_value = serde_json::json!({ "keys": [jwk] });
-    db::update_issuer_jwks_cache(&state.store, &issuer.id, &jwks_value)
+    db::upsert_jwks_cache(&state.store, &issuer.id, &jwks_value)
         .await
         .expect("Failed to update cache");
 
@@ -1162,7 +1162,7 @@ async fn test_rfc7523_jwt_bearer_grant_deactivated_user_rejected() {
     let jwks_value = serde_json::json!({
         "keys": [jwk]
     });
-    db::update_issuer_jwks_cache(&state.store, &issuer.id, &jwks_value)
+    db::upsert_jwks_cache(&state.store, &issuer.id, &jwks_value)
         .await
         .expect("Failed to update JWKS cache");
 

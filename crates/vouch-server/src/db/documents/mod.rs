@@ -12,6 +12,7 @@ pub(crate) mod credential;
 pub(crate) mod device_auth;
 pub(crate) mod dpop;
 pub(crate) mod github;
+pub(crate) mod jwks_cache;
 pub(crate) mod jwt_assertion_jti;
 pub(crate) mod jwt_issuer;
 pub(crate) mod oauth;

@@ -27,6 +27,7 @@ mod dpop;
 pub mod dsql;
 mod enrollment;
 mod github;
+mod jwks_cache;
 mod jwt_issuer;
 pub mod migrations;
 mod oauth;
@@ -121,8 +122,8 @@ pub use oauth::{
     get_oauth_client_secret_by_id, get_oauth_client_secrets, get_oauth_clients_for_user,
     get_oauth_secret_by_hash, get_oauth_usage_stats, record_oauth_event,
     revoke_all_oauth_client_secrets, revoke_oauth_client_secret, store_jwt_assertion_jti,
-    update_client_jwks_cache, update_oauth_client, update_oauth_client_last_used,
-    update_oauth_client_registration, validate_oauth_client_credentials,
+    update_oauth_client, update_oauth_client_last_used, update_oauth_client_registration,
+    validate_oauth_client_credentials,
 };
 
 // Re-export test-only OAuth client helpers
@@ -132,11 +133,16 @@ pub use oauth::test_helpers::{
     update_oauth_client_fapi_settings, update_oauth_client_jar_settings, update_oauth_client_jwks,
 };
 
+// Re-export JWKS cache functions
+pub use jwks_cache::{
+    delete_expired_jwks_caches, delete_jwks_cache, get_jwks_cache, upsert_jwks_cache,
+};
+
 // Re-export JWT issuer types and functions (RFC 7523)
 pub use jwt_issuer::{
     DEFAULT_MAX_TOKEN_LIFETIME_SECONDS, DEFAULT_SUBJECT_CLAIM_MAPPING, TrustedJwtIssuer,
     create_trusted_jwt_issuer, delete_trusted_jwt_issuer, get_trusted_jwt_issuer_by_issuer,
-    list_trusted_jwt_issuers, update_issuer_jwks_cache, update_trusted_jwt_issuer,
+    list_trusted_jwt_issuers, update_trusted_jwt_issuer,
 };
 
 // Re-export DPoP types and functions (RFC 9449)
