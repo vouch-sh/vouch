@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Trusted JWT issuer document type (RFC 7523).
 
-use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 
 use crate::db::document_type::{DocumentType, IndexEntry};
@@ -13,8 +12,6 @@ pub struct TrustedJwtIssuerDoc {
     pub name: String,
     pub description: Option<String>,
     pub jwks_uri: String,
-    pub jwks_cache: Option<serde_json::Value>,
-    pub jwks_cached_at: Option<Timestamp>,
     pub subject_claim_mapping: String,
     /// JSON array of allowed scopes.
     pub allowed_scopes: Option<String>,

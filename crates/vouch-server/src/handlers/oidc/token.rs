@@ -478,14 +478,24 @@ async fn handle_authorization_code_grant(
                             | crate::db::TokenEndpointAuthMethod::SelfSignedTlsClientAuth
                     ) =>
                 {
-                    // Validate the certificate against registered identity
-                    if let Some(ref cert) = client_cert.0
-                        && let Err(e) = crate::services::oidc::token::authenticate_client_mtls(
+                    // Validate the certificate against registered identity.
+                    if let Some(ref cert) = client_cert.0 {
+                        let jwks_cache_value =
+                            crate::db::get_jwks_cache(&state.store, &client.client.id)
+                                .await
+                                .map_err(|e| {
+                                    tracing::warn!("JWKS cache lookup failed: {e}");
+                                })
+                                .ok()
+                                .flatten()
+                                .map(|c| c.value);
+                        if let Err(e) = crate::services::oidc::token::authenticate_client_mtls(
                             &client.client,
                             cert,
-                        )
-                    {
-                        return e.into_service_error().into_oauth_response().into_response();
+                            jwks_cache_value.as_ref(),
+                        ) {
+                            return e.into_service_error().into_oauth_response().into_response();
+                        }
                     }
                     Some(client)
                 }
@@ -547,7 +557,7 @@ async fn handle_authorization_code_grant(
     let has_mtls_cert = client_cert.0.is_some();
     if let Some(ref auth) = jwt_authenticated
         && mtls_authenticated.is_none()
-        && let Err(resp) = validate_mtls_client_auth(auth, &client_cert)
+        && let Err(resp) = validate_mtls_client_auth(&state.store, auth, &client_cert).await
     {
         return *resp;
     }
@@ -697,7 +707,9 @@ async fn handle_client_credentials_grant(
     }
 
     // RFC 8705 Section 2: Validate mTLS client auth if the client uses it.
-    if let Err(resp) = validate_mtls_client_auth(&authenticated_client, &client_cert) {
+    if let Err(resp) =
+        validate_mtls_client_auth(&state.store, &authenticated_client, &client_cert).await
+    {
         return *resp;
     }
 
@@ -820,7 +832,9 @@ async fn handle_token_exchange_grant(
     let dpop_jkt = dpop_proof.as_ref().map(|p| p.jkt.clone());
 
     // RFC 8705 Section 2: Validate mTLS client auth if the client uses it.
-    if let Err(resp) = validate_mtls_client_auth(&authenticated_client, &client_cert) {
+    if let Err(resp) =
+        validate_mtls_client_auth(&state.store, &authenticated_client, &client_cert).await
+    {
         return *resp;
     }
 
@@ -1061,7 +1075,8 @@ async fn handle_jwt_bearer_grant(
 /// Returns `Ok(())` if the auth method is not mTLS-based, or if the cert
 /// is present and validates successfully. Returns `Err(Box<Response>)` with a
 /// 401-equivalent OAuth error response if the cert is absent or invalid.
-fn validate_mtls_client_auth(
+async fn validate_mtls_client_auth(
+    store: &crate::db::store::DocumentStore,
     client: &crate::services::oidc::token::AuthenticatedClient,
     client_cert: &crate::handlers::extractors::OptionalClientCert,
 ) -> Result<(), Box<Response>> {
@@ -1081,8 +1096,20 @@ fn validate_mtls_client_auth(
             .into_response(),
         ));
     };
-    crate::services::oidc::token::authenticate_client_mtls(&client.client, cert)
-        .map_err(|e| Box::new(e.into_service_error().into_oauth_response().into_response()))
+    let jwks_cache_value = crate::db::get_jwks_cache(store, &client.client.id)
+        .await
+        .map_err(|e| {
+            tracing::warn!("JWKS cache lookup failed: {e}");
+        })
+        .ok()
+        .flatten()
+        .map(|c| c.value);
+    crate::services::oidc::token::authenticate_client_mtls(
+        &client.client,
+        cert,
+        jwks_cache_value.as_ref(),
+    )
+    .map_err(|e| Box::new(e.into_service_error().into_oauth_response().into_response()))
 }
 
 /// Extract mTLS certificate thumbprint for certificate-bound access tokens

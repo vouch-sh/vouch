@@ -342,14 +342,23 @@ pub async fn validate_request_object(
     }
 
     // 3. Resolve client JWKS and find matching key
-    let jwks_uri_cached_at = client.jwks_uri_cached_at.map(|ts| ts.to_string());
+    // Load cache once; pass to both resolver calls (pre-refresh timestamp matches prior behavior).
+    let jwks_cache = crate::db::get_jwks_cache(&state.store, &client.id)
+        .await
+        .map_err(|e| {
+            tracing::debug!("JWKS cache lookup failed for Request Object: {e}");
+            ServiceError::oauth(
+                OAuthErrorCode::InvalidRequestObject,
+                "Failed to load JWKS cache for Request Object verification",
+            )
+        })?;
+
     let jwks = resolve_client_jwks(
         &state.store,
         &client.id,
         client.jwks.as_ref(),
         client.jwks_uri.as_deref(),
-        client.jwks_uri_cache.as_ref(),
-        jwks_uri_cached_at.as_deref(),
+        jwks_cache.as_ref(),
         &state.http_client,
     )
     .await
@@ -366,7 +375,7 @@ pub async fn validate_request_object(
         &state.store,
         &client.id,
         client.jwks_uri.as_deref(),
-        jwks_uri_cached_at.as_deref(),
+        jwks_cache.as_ref(),
         &state.http_client,
         &jwks,
         &assertion_header,

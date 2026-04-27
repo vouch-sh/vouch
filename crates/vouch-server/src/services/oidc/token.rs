@@ -485,7 +485,7 @@ fn validate_code_bindings(
         }
     }
 
-    validate_pkce(auth_code, code_verifier)?;
+    auth_code.validate_pkce(code_verifier)?;
 
     // FAPI 2.0 / RFC 9449 Section 10: Verify DPoP authorization code binding
     if let Some(ref bound_jkt) = auth_code.dpop_jkt {
@@ -597,44 +597,46 @@ async fn resolve_authorization_details(
     })
 }
 
-/// Validate PKCE code verifier against code challenge (RFC 7636 Section 4.6).
-///
-/// Uses constant-time comparison to prevent timing side-channel attacks.
-fn validate_pkce(auth_code: &AuthorizationCode, code_verifier: Option<&str>) -> ServiceResult<()> {
-    let Some(code_challenge) = &auth_code.code_challenge else {
-        // No PKCE challenge in authorization code
-        return Ok(());
-    };
+impl AuthorizationCode {
+    /// Validate PKCE code verifier against code challenge (RFC 7636 Section 4.6).
+    ///
+    /// Uses constant-time comparison to prevent timing side-channel attacks.
+    fn validate_pkce(&self, code_verifier: Option<&str>) -> ServiceResult<()> {
+        let Some(code_challenge) = &self.code_challenge else {
+            // No PKCE challenge in authorization code
+            return Ok(());
+        };
 
-    let code_verifier = code_verifier.ok_or_else(|| {
-        ServiceError::oauth(OAuthErrorCode::InvalidGrant, "Missing code_verifier")
-    })?;
+        let code_verifier = code_verifier.ok_or_else(|| {
+            ServiceError::oauth(OAuthErrorCode::InvalidGrant, "Missing code_verifier")
+        })?;
 
-    // RFC 9700 Section 2.1.1: Only S256 is supported.
-    // Default to S256 for backward compatibility with codes that don't store the method.
-    let _method = auth_code
-        .code_challenge_method
-        .unwrap_or(CodeChallengeMethod::S256);
+        // RFC 9700 Section 2.1.1: Only S256 is supported.
+        // Default to S256 for backward compatibility with codes that don't store the method.
+        let _method = self
+            .code_challenge_method
+            .unwrap_or(CodeChallengeMethod::S256);
 
-    let computed_challenge = {
-        let hash = digest::digest(&SHA256, code_verifier.as_bytes());
-        URL_SAFE_NO_PAD.encode(hash.as_ref())
-    };
+        let computed_challenge = {
+            let hash = digest::digest(&SHA256, code_verifier.as_bytes());
+            URL_SAFE_NO_PAD.encode(hash.as_ref())
+        };
 
-    // Use constant-time comparison to prevent timing side-channel attacks
-    let is_valid: bool = computed_challenge
-        .as_bytes()
-        .ct_eq(code_challenge.as_bytes())
-        .into();
+        // Use constant-time comparison to prevent timing side-channel attacks
+        let is_valid: bool = computed_challenge
+            .as_bytes()
+            .ct_eq(code_challenge.as_bytes())
+            .into();
 
-    if !is_valid {
-        return Err(ServiceError::oauth(
-            OAuthErrorCode::InvalidGrant,
-            "Invalid code_verifier",
-        ));
+        if !is_valid {
+            return Err(ServiceError::oauth(
+                OAuthErrorCode::InvalidGrant,
+                "Invalid code_verifier",
+            ));
+        }
+
+        Ok(())
     }
-
-    Ok(())
 }
 
 /// Authenticate an OAuth client using client credentials (RFC 6749 Section 2.3).
@@ -820,10 +822,12 @@ async fn generate_id_token(
 /// Authenticate a client using mTLS certificate (RFC 8705 Section 2).
 ///
 /// Dispatches to the appropriate verification method based on the client's
-/// registered `token_endpoint_auth_method`.
+/// registered `token_endpoint_auth_method`. For `self_signed_tls_client_auth`,
+/// callers should pre-load the JWKS cache and pass it as `jwks_cache_value`.
 pub(crate) fn authenticate_client_mtls(
     client: &crate::db::OAuthClient,
     cert: &crate::services::oidc::mtls::ClientCertificate,
+    jwks_cache_value: Option<&serde_json::Value>,
 ) -> Result<(), ClientAuthError> {
     match client.token_endpoint_auth_method {
         crate::db::TokenEndpointAuthMethod::TlsClientAuth => {
@@ -838,15 +842,11 @@ pub(crate) fn authenticate_client_mtls(
             .map_err(|e| ClientAuthError::MtlsVerificationFailed(e.to_string()))
         }
         crate::db::TokenEndpointAuthMethod::SelfSignedTlsClientAuth => {
-            let jwks = client
-                .jwks
-                .as_ref()
-                .or(client.jwks_uri_cache.as_ref())
-                .ok_or_else(|| {
-                    ClientAuthError::MtlsVerificationFailed(
-                        "self_signed_tls_client_auth requires JWKS with x5c".to_string(),
-                    )
-                })?;
+            let jwks = client.jwks.as_ref().or(jwks_cache_value).ok_or_else(|| {
+                ClientAuthError::MtlsVerificationFailed(
+                    "self_signed_tls_client_auth requires JWKS with x5c".to_string(),
+                )
+            })?;
             crate::services::oidc::mtls::verify_self_signed_tls_client_auth(cert, jwks)
                 .map_err(|e| ClientAuthError::MtlsVerificationFailed(e.to_string()))
         }
@@ -1234,7 +1234,7 @@ mod tests {
             auth_time: None,
         };
 
-        let result = validate_pkce(&auth_code, Some(code_verifier));
+        let result = auth_code.validate_pkce(Some(code_verifier));
         assert!(result.is_ok(), "RFC 7636 test vector should validate");
     }
 
@@ -1261,7 +1261,7 @@ mod tests {
             auth_time: None,
         };
 
-        let result = validate_pkce(&auth_code, Some("wrong_verifier"));
+        let result = auth_code.validate_pkce(Some("wrong_verifier"));
         assert!(result.is_err());
     }
 
@@ -1288,7 +1288,7 @@ mod tests {
             auth_time: None,
         };
 
-        let result = validate_pkce(&auth_code, None);
+        let result = auth_code.validate_pkce(None);
         // RFC 7636 Section 4.6: missing code_verifier when a challenge was registered
         // must return invalid_grant, not invalid_request or any other error code.
         assert_oauth_error(result, OAuthErrorCode::InvalidGrant);
@@ -1318,7 +1318,7 @@ mod tests {
             auth_time: None,
         };
 
-        let result = validate_pkce(&auth_code, None);
+        let result = auth_code.validate_pkce(None);
         assert!(result.is_ok());
     }
 
@@ -1469,8 +1469,6 @@ mod tests {
             resource_uris: vec![],
             jwks: None,
             jwks_uri: None,
-            jwks_uri_cached_at: None,
-            jwks_uri_cache: None,
             token_endpoint_auth_method: auth_method,
             request_object_signing_alg: None,
             require_signed_request_object: None,
@@ -1557,7 +1555,7 @@ mod tests {
         let subject_dn = cert.subject_dn.as_deref().expect("cert has subject_dn");
         let client = make_mtls_client(TokenEndpointAuthMethod::TlsClientAuth, Some(subject_dn));
 
-        let result = authenticate_client_mtls(&client, &cert);
+        let result = authenticate_client_mtls(&client, &cert, None);
         assert!(
             result.is_ok(),
             "matching subject_dn must authenticate successfully, got: {result:?}"
@@ -1573,7 +1571,7 @@ mod tests {
             Some("CN=expected-different-client"),
         );
 
-        let result = authenticate_client_mtls(&client, &cert);
+        let result = authenticate_client_mtls(&client, &cert, None);
         assert!(
             result.is_err(),
             "non-matching subject_dn must fail authentication"
@@ -1590,7 +1588,7 @@ mod tests {
         let cert = make_cert_with_cn("wrong-method-client");
         let client = make_mtls_client(TokenEndpointAuthMethod::ClientSecretBasic, None);
 
-        let result = authenticate_client_mtls(&client, &cert);
+        let result = authenticate_client_mtls(&client, &cert, None);
         assert!(
             result.is_err(),
             "non-mTLS auth method must fail mTLS authentication"
@@ -1620,7 +1618,7 @@ mod tests {
         let mut client = make_mtls_client(TokenEndpointAuthMethod::SelfSignedTlsClientAuth, None);
         client.jwks = Some(jwks);
 
-        let result = authenticate_client_mtls(&client, &cert);
+        let result = authenticate_client_mtls(&client, &cert, None);
         assert!(
             result.is_ok(),
             "matching x5c must authenticate successfully: {result:?}"
@@ -1634,7 +1632,7 @@ mod tests {
         let client = make_mtls_client(TokenEndpointAuthMethod::SelfSignedTlsClientAuth, None);
         // client.jwks is None (default from make_mtls_client)
 
-        let result = authenticate_client_mtls(&client, &cert);
+        let result = authenticate_client_mtls(&client, &cert, None);
         assert!(
             matches!(result, Err(ClientAuthError::MtlsVerificationFailed(_))),
             "missing JWKS must return MtlsVerificationFailed: {result:?}"
@@ -1660,7 +1658,7 @@ mod tests {
         let mut client = make_mtls_client(TokenEndpointAuthMethod::SelfSignedTlsClientAuth, None);
         client.jwks = Some(jwks);
 
-        let result = authenticate_client_mtls(&client, &cert);
+        let result = authenticate_client_mtls(&client, &cert, None);
         assert!(
             matches!(result, Err(ClientAuthError::MtlsVerificationFailed(_))),
             "non-matching x5c must return MtlsVerificationFailed: {result:?}"

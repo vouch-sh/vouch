@@ -370,8 +370,6 @@ pub struct OAuthClientDoc {
     /// Inline JWKS JSON (RFC 7523).
     pub jwks: Option<serde_json::Value>,
     pub jwks_uri: Option<String>,
-    pub jwks_uri_cached_at: Option<Timestamp>,
-    pub jwks_uri_cache: Option<serde_json::Value>,
     pub token_endpoint_auth_method: TokenEndpointAuthMethod,
     /// RFC 9101 request object signing algorithm.
     pub request_object_signing_alg: Option<JwsAlgorithm>,
@@ -660,8 +658,6 @@ mod tests {
             "resource_uris": [],
             "jwks": null,
             "jwks_uri": null,
-            "jwks_uri_cached_at": null,
-            "jwks_uri_cache": null,
             "token_endpoint_auth_method": "none",
             "request_object_signing_alg": null,
             "require_signed_request_object": null,

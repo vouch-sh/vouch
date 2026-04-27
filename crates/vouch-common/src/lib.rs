@@ -26,9 +26,7 @@ pub use aaguid::{
     extract_public_key_from_auth_data, is_fips, is_yubikey_5, lookup_device_model,
 };
 pub use api::*;
-pub use cookie::{
-    SessionCookie, clear_cookie, cookie_path, is_cookie_expired, read_cookie, write_cookie,
-};
+pub use cookie::{SessionCookie, clear_cookie, cookie_path, read_cookie, write_cookie};
 pub use error::*;
 pub use url::{UrlSecurity, check_url_security, is_loopback_host};
 

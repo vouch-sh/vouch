@@ -73,13 +73,15 @@ pub async fn exchange_jwt_bearer_grant(
         ));
     }
 
-    // 4. Resolve issuer's JWKS
+    // 4. Resolve issuer's JWKS.
+    // Load cache once; pass to both resolver calls (pre-refresh timestamp matches prior behavior).
+    let jwks_cache = crate::db::get_jwks_cache(&state.store, &issuer.id).await?;
+
     let jwks = resolve_issuer_jwks(
         &state.store,
         &issuer.id,
         &issuer.jwks_uri,
-        issuer.jwks_cache.as_ref(),
-        issuer.jwks_cached_at.as_deref(),
+        jwks_cache.as_ref(),
         &state.http_client,
     )
     .await?;
@@ -89,7 +91,7 @@ pub async fn exchange_jwt_bearer_grant(
         &state.store,
         &issuer.id,
         &issuer.jwks_uri,
-        issuer.jwks_cached_at.as_deref(),
+        jwks_cache.as_ref(),
         &state.http_client,
         &jwks,
         &header,

@@ -224,6 +224,9 @@ pub async fn run_cleanup(
         "expired SSH issued certificate records"
     );
 
+    // Clean up expired JWKS cache entries (standalone cache docs)
+    cleanup_and_log!(db::delete_expired_jwks_caches(store), "expired JWKS caches");
+
     tracing::debug!("Background cleanup tasks complete");
 }
 

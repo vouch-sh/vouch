@@ -129,19 +129,24 @@ pub async fn authenticate_client_jwt(
         return Err(ClientAuthError::InvalidCredentials);
     }
 
-    // 5. Resolve client's JWKS (inline or from URI)
-    // Note: `jwks_uri_cached_at` is captured before `resolve_client_jwks` runs. If
-    // `resolve_client_jwks` performs a TTL-based refresh, the timestamp passed to
-    // `find_matching_key_with_refresh_client` below will be stale. Worst case: one
-    // extra JWKS fetch when a TTL-refresh and kid-miss coincide. Acceptable trade-off.
-    let jwks_uri_cached_at = client.jwks_uri_cached_at.map(|ts| ts.to_string());
+    // 5. Resolve client's JWKS (inline or from URI).
+    // Load cache once; pass to both resolver calls (pre-refresh timestamp matches prior behavior).
+    let jwks_cache = crate::db::get_jwks_cache(&state.store, &client.id)
+        .await
+        .map_err(|e| {
+            tracing::debug!(
+                "JWKS cache lookup failed for client {}: {e}",
+                client.client_id
+            );
+            ClientAuthError::InvalidCredentials
+        })?;
+
     let jwks = resolve_client_jwks(
         &state.store,
         &client.id,
         client.jwks.as_ref(),
         client.jwks_uri.as_deref(),
-        client.jwks_uri_cache.as_ref(),
-        jwks_uri_cached_at.as_deref(),
+        jwks_cache.as_ref(),
         &state.http_client,
     )
     .await
@@ -158,7 +163,7 @@ pub async fn authenticate_client_jwt(
         &state.store,
         &client.id,
         client.jwks_uri.as_deref(),
-        jwks_uri_cached_at.as_deref(),
+        jwks_cache.as_ref(),
         &state.http_client,
         &jwks,
         &header,

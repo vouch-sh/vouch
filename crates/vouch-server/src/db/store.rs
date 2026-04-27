@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use jiff::Timestamp;
-use sea_query::{Cond, Expr, Iden, Order, Query};
+use sea_query::{Cond, Expr, Iden, OnConflict, Order, Query};
 
 use super::document_type::{Document, DocumentType};
 use super::pool::Pool;
@@ -365,6 +365,70 @@ impl DocumentStore {
             let result = tx.insert_with_id(id, doc).await?;
             tx.commit().await?;
             Ok(result)
+        })
+    }
+
+    /// Insert or update a document with a caller-specified ID (last-write-wins).
+    ///
+    /// Uses `INSERT ... ON CONFLICT (id) DO UPDATE` for atomic, race-free
+    /// semantics in a single round-trip. Only documents with no index entries
+    /// should use this method — index entries are not re-written on conflict.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if serialization, encryption, or the database write fails.
+    pub async fn upsert<T: DocumentType>(&self, id: &str, doc: &T) -> Result<()> {
+        crate::with_dsql_retry!(async {
+            let SerializedDoc {
+                encrypted,
+                expires_str,
+                indexes,
+                ..
+            } = serialize_and_encrypt(&self.crypto, id, doc)?;
+
+            if !indexes.is_empty() {
+                anyhow::bail!(
+                    "upsert called on indexed doc type '{}'; use insert or modify instead",
+                    T::DOC_TYPE
+                );
+            }
+
+            let now_str = Timestamp::now().to_string();
+
+            let encapped: Option<&str> = encrypted.encapped_key.as_deref();
+            let expires_ref: Option<&str> = expires_str.as_deref();
+
+            let stmt = Query::insert()
+                .into_table(Documents::Table)
+                .columns(DOC_COLUMNS)
+                .values([
+                    id.into(),
+                    T::DOC_TYPE.into(),
+                    (T::CURRENT_VERSION.cast_signed()).into(),
+                    encapped.into(),
+                    encrypted.data.as_str().into(),
+                    expires_ref.into(),
+                    now_str.as_str().into(),
+                    now_str.as_str().into(),
+                    1_i32.into(),
+                    Option::<&str>::None.into(),
+                ])?
+                .on_conflict(
+                    OnConflict::column(Documents::Id)
+                        .update_columns([
+                            Documents::SchemaVersion,
+                            Documents::EncappedKey,
+                            Documents::Data,
+                            Documents::ExpiresAt,
+                            Documents::UpdatedAt,
+                        ])
+                        .to_owned(),
+                )
+                .to_owned();
+
+            let mut tx = self.begin().await?;
+            crate::tx_execute!(tx.tx, stmt)?;
+            tx.commit().await
         })
     }
 

@@ -5,9 +5,9 @@
 //! with database-backed caching for multi-instance deployments.
 
 use super::validate::JwtAssertionHeader;
+use crate::db::documents::jwks_cache::{JWKS_STALE_MAX_AGE_SECONDS, JwksCacheDoc};
 use crate::db::{self, store::DocumentStore};
 use crate::services::{OAuthErrorCode, ServiceError, ServiceResult};
-use jiff::Timestamp;
 use serde::Deserialize;
 
 /// Maximum JWKS response size (256KB).
@@ -15,10 +15,6 @@ const MAX_JWKS_RESPONSE_SIZE: usize = 256 * 1024;
 
 /// JWKS URI cache TTL in seconds (1 hour).
 const JWKS_CACHE_TTL_SECONDS: i64 = 3600;
-
-/// Maximum age for stale JWKS cache before rejecting (24 hours).
-/// Prevents indefinite use of revoked keys on persistent fetch failures.
-const JWKS_STALE_MAX_AGE_SECONDS: i64 = 86400;
 
 /// A JSON Web Key Set (RFC 7517 Section 5).
 #[derive(Debug, Deserialize)]
@@ -70,8 +66,7 @@ pub async fn resolve_client_jwks(
     client_id: &str,
     jwks: Option<&serde_json::Value>,
     jwks_uri: Option<&str>,
-    jwks_uri_cache: Option<&serde_json::Value>,
-    jwks_uri_cached_at: Option<&str>,
+    jwks_cache: Option<&JwksCacheDoc>,
     http_client: &reqwest::Client,
 ) -> ServiceResult<JwkSet> {
     // Inline JWKS takes priority
@@ -81,15 +76,7 @@ pub async fn resolve_client_jwks(
 
     // JWKS URI with caching
     if let Some(uri) = jwks_uri {
-        return resolve_jwks_uri(
-            store,
-            client_id,
-            uri,
-            jwks_uri_cache,
-            jwks_uri_cached_at,
-            http_client,
-        )
-        .await;
+        return resolve_jwks_uri(store, client_id, uri, jwks_cache, http_client).await;
     }
 
     Err(ServiceError::oauth(
@@ -103,104 +90,46 @@ pub async fn resolve_issuer_jwks(
     store: &DocumentStore,
     issuer_id: &str,
     jwks_uri: &str,
-    jwks_cache: Option<&serde_json::Value>,
-    jwks_cached_at: Option<&str>,
+    jwks_cache: Option<&JwksCacheDoc>,
     http_client: &reqwest::Client,
 ) -> ServiceResult<JwkSet> {
-    resolve_jwks_uri_for_issuer(
-        store,
-        issuer_id,
-        jwks_uri,
-        jwks_cache,
-        jwks_cached_at,
-        http_client,
-    )
-    .await
+    resolve_jwks_uri(store, issuer_id, jwks_uri, jwks_cache, http_client).await
 }
 
-/// Fetch JWKS from a URI with caching (for clients).
+/// Fetch JWKS from a URI with caching.
 async fn resolve_jwks_uri(
     store: &DocumentStore,
-    client_id: &str,
+    parent_id: &str,
     uri: &str,
-    cached_jwks: Option<&serde_json::Value>,
-    cached_at: Option<&str>,
+    cached: Option<&JwksCacheDoc>,
     http_client: &reqwest::Client,
 ) -> ServiceResult<JwkSet> {
     // Check cache freshness
-    if let (Some(cache), Some(cached_at)) = (cached_jwks, cached_at)
-        && let Ok(ts) = cached_at.parse::<Timestamp>()
+    if let Some(cache) = cached
+        && cache.is_fresh(JWKS_CACHE_TTL_SECONDS)
     {
-        let cache_age = Timestamp::now().as_second().saturating_sub(ts.as_second());
-        if cache_age < JWKS_CACHE_TTL_SECONDS {
-            return parse_jwks_value(cache);
-        }
+        return parse_jwks_value(&cache.value);
     }
 
     // Cache is stale or missing — attempt fetch
     match fetch_and_parse_jwks(uri, http_client).await {
         Ok((jwks_value, jwks_set)) => {
-            // Update cache in database
-            if let Err(e) = db::update_client_jwks_cache(store, client_id, &jwks_value).await {
-                tracing::warn!("Failed to update JWKS cache for client {client_id}: {e}");
+            if let Err(e) = db::upsert_jwks_cache(store, parent_id, &jwks_value).await {
+                tracing::warn!("Failed to update JWKS cache for {parent_id}: {e}");
             }
             Ok(jwks_set)
         }
         Err(e) => {
             // Stale-while-revalidate: use stale cache on fetch failure (with max age cap)
-            if let (Some(cache), Some(cached_at)) = (cached_jwks, cached_at)
-                && let Ok(ts) = cached_at.parse::<Timestamp>()
-            {
-                let stale_age = Timestamp::now().as_second().saturating_sub(ts.as_second());
-                if stale_age < JWKS_STALE_MAX_AGE_SECONDS {
+            if let Some(cache) = cached {
+                if cache.is_within_stale_window(JWKS_STALE_MAX_AGE_SECONDS) {
                     tracing::warn!("JWKS fetch failed, using stale cache: {e}");
-                    return parse_jwks_value(cache);
+                    return parse_jwks_value(&cache.value);
                 }
-                tracing::warn!("JWKS fetch failed and stale cache too old ({stale_age}s)");
-            }
-            Err(e)
-        }
-    }
-}
-
-/// Fetch JWKS from a URI with caching (for issuers).
-async fn resolve_jwks_uri_for_issuer(
-    store: &DocumentStore,
-    issuer_id: &str,
-    uri: &str,
-    cached_jwks: Option<&serde_json::Value>,
-    cached_at: Option<&str>,
-    http_client: &reqwest::Client,
-) -> ServiceResult<JwkSet> {
-    // Check cache freshness
-    if let (Some(cache), Some(cached_at)) = (cached_jwks, cached_at)
-        && let Ok(ts) = cached_at.parse::<Timestamp>()
-    {
-        let cache_age = Timestamp::now().as_second().saturating_sub(ts.as_second());
-        if cache_age < JWKS_CACHE_TTL_SECONDS {
-            return parse_jwks_value(cache);
-        }
-    }
-
-    // Cache is stale or missing — attempt fetch
-    match fetch_and_parse_jwks(uri, http_client).await {
-        Ok((jwks_value, jwks_set)) => {
-            if let Err(e) = db::update_issuer_jwks_cache(store, issuer_id, &jwks_value).await {
-                tracing::warn!("Failed to update JWKS cache for issuer {issuer_id}: {e}");
-            }
-            Ok(jwks_set)
-        }
-        Err(e) => {
-            // Stale-while-revalidate: use stale cache on fetch failure (with max age cap)
-            if let (Some(cache), Some(cached_at)) = (cached_jwks, cached_at)
-                && let Ok(ts) = cached_at.parse::<Timestamp>()
-            {
-                let stale_age = Timestamp::now().as_second().saturating_sub(ts.as_second());
-                if stale_age < JWKS_STALE_MAX_AGE_SECONDS {
-                    tracing::warn!("JWKS fetch failed, using stale cache: {e}");
-                    return parse_jwks_value(cache);
-                }
-                tracing::warn!("JWKS fetch failed and stale cache too old ({stale_age}s)");
+                tracing::warn!(
+                    "JWKS fetch failed and stale cache too old ({}s)",
+                    cache.age_seconds()
+                );
             }
             Err(e)
         }
@@ -369,7 +298,8 @@ pub async fn find_matching_key_with_refresh_client(
     store: &DocumentStore,
     client_id: &str,
     jwks_uri: Option<&str>,
-    jwks_uri_cached_at: Option<&str>,
+    // Load once before calling resolve_client_jwks; pre-refresh timestamp matches prior behavior.
+    jwks_cache: Option<&JwksCacheDoc>,
     http_client: &reqwest::Client,
     jwks: &JwkSet,
     header: &JwtAssertionHeader,
@@ -385,26 +315,20 @@ pub async fn find_matching_key_with_refresh_client(
     };
 
     // Rate-limit: skip force-refresh if cached within the last 10 seconds.
-    // Note: `jwks_uri_cached_at` is read by the caller before `resolve_client_jwks` runs.
-    // If `resolve_client_jwks` performed a TTL-based refresh on this same request, the
-    // timestamp here reflects the pre-refresh value. Worst case: one extra JWKS fetch in
-    // the narrow window where TTL-refresh and kid-miss coincide. Acceptable blast radius.
-    if let Some(cached_at) = jwks_uri_cached_at
-        && let Ok(ts) = cached_at.parse::<Timestamp>()
+    if let Some(cache) = jwks_cache
+        && cache.is_fresh(JWKS_FORCE_REFRESH_MIN_INTERVAL_SECONDS)
     {
-        let age = Timestamp::now().as_second().saturating_sub(ts.as_second());
-        if age < JWKS_FORCE_REFRESH_MIN_INTERVAL_SECONDS {
-            tracing::debug!(
-                "Skipping JWKS force-refresh for client {client_id}: refreshed {age}s ago"
-            );
-            return find_matching_key(jwks, header);
-        }
+        tracing::debug!(
+            "Skipping JWKS force-refresh for client {client_id}: refreshed {}s ago",
+            cache.age_seconds()
+        );
+        return find_matching_key(jwks, header);
     }
 
     tracing::debug!("Key not found in JWKS cache for client {client_id}; force-refreshing");
     match fetch_and_parse_jwks(uri, http_client).await {
         Ok((jwks_value, fresh_jwks)) => {
-            if let Err(e) = db::update_client_jwks_cache(store, client_id, &jwks_value).await {
+            if let Err(e) = db::upsert_jwks_cache(store, client_id, &jwks_value).await {
                 tracing::warn!("Failed to update JWKS cache for client {client_id}: {e}");
             }
             find_matching_key(&fresh_jwks, header)
@@ -423,7 +347,8 @@ pub async fn find_matching_key_with_refresh_issuer(
     store: &DocumentStore,
     issuer_id: &str,
     jwks_uri: &str,
-    jwks_cached_at: Option<&str>,
+    // Load once before calling resolve_issuer_jwks; pre-refresh timestamp matches prior behavior.
+    jwks_cache: Option<&JwksCacheDoc>,
     http_client: &reqwest::Client,
     jwks: &JwkSet,
     header: &JwtAssertionHeader,
@@ -434,22 +359,20 @@ pub async fn find_matching_key_with_refresh_issuer(
     }
 
     // Rate-limit: skip force-refresh if cached within the last 10 seconds
-    if let Some(cached_at) = jwks_cached_at
-        && let Ok(ts) = cached_at.parse::<Timestamp>()
+    if let Some(cache) = jwks_cache
+        && cache.is_fresh(JWKS_FORCE_REFRESH_MIN_INTERVAL_SECONDS)
     {
-        let age = Timestamp::now().as_second().saturating_sub(ts.as_second());
-        if age < JWKS_FORCE_REFRESH_MIN_INTERVAL_SECONDS {
-            tracing::debug!(
-                "Skipping JWKS force-refresh for issuer {issuer_id}: refreshed {age}s ago"
-            );
-            return find_matching_key(jwks, header);
-        }
+        tracing::debug!(
+            "Skipping JWKS force-refresh for issuer {issuer_id}: refreshed {}s ago",
+            cache.age_seconds()
+        );
+        return find_matching_key(jwks, header);
     }
 
     tracing::debug!("Key not found in JWKS cache for issuer {issuer_id}; force-refreshing");
     match fetch_and_parse_jwks(jwks_uri, http_client).await {
         Ok((jwks_value, fresh_jwks)) => {
-            if let Err(e) = db::update_issuer_jwks_cache(store, issuer_id, &jwks_value).await {
+            if let Err(e) = db::upsert_jwks_cache(store, issuer_id, &jwks_value).await {
                 tracing::warn!("Failed to update JWKS cache for issuer {issuer_id}: {e}");
             }
             find_matching_key(&fresh_jwks, header)
@@ -1221,14 +1144,17 @@ mod tests {
         let hdr = header("ES256", Some("missing-kid"));
 
         // cached_at = now (0 seconds ago) — within the 10-second rate limit window
-        let recent = Timestamp::now().to_string();
+        let recent = JwksCacheDoc {
+            value: serde_json::json!({"keys": []}),
+            cached_at: Timestamp::now(),
+        };
 
         // Port 1 is unreachable; if the HTTP client is called the test would hang/error.
         let result = find_matching_key_with_refresh_client(
             &state.store,
             "client-rate-limited",
             Some("https://127.0.0.1:1/jwks"),
-            Some(recent.as_str()),
+            Some(&recent),
             &http_client,
             &jwks,
             &hdr,
@@ -1254,7 +1180,10 @@ mod tests {
         let hdr = header("ES256", Some("fresh-kid"));
 
         // cached_at 60 seconds ago — well outside the 10-second rate-limit window
-        let old_ts = (jiff::Timestamp::now() - jiff::SignedDuration::from_secs(60)).to_string();
+        let old_cache = JwksCacheDoc {
+            value: serde_json::json!({"keys": []}),
+            cached_at: jiff::Timestamp::now() - jiff::SignedDuration::from_secs(60),
+        };
 
         // Use an http URI (wiremock) so fetch_and_parse_jwks rejects it with an HTTPS error.
         // The wrapper logs a warning and falls back to the stale JWKS → kid not found → error.
@@ -1262,7 +1191,7 @@ mod tests {
             &state.store,
             "client-fetch-test",
             Some("http://127.0.0.1:1/jwks"),
-            Some(&old_ts),
+            Some(&old_cache),
             &http_client,
             &stale_jwks,
             &hdr,
