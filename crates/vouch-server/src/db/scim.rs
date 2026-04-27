@@ -474,12 +474,9 @@ pub async fn get_scim_user(
 /// Returns [`ScimUserError::DuplicateEmail`] if a user with the same email
 /// already exists in the same org. The duplicate check and insert run within
 /// a single transaction to prevent concurrent duplicate inserts.
-///
-/// `org_id`: `Some` for SCIM-provisioned users (always set); `None` for the
-/// certification test path (single-tenant, intentionally orphan).
 pub async fn create_scim_user(
     store: &DocumentStore,
-    org_id: Option<&str>,
+    org_id: &str,
     email: &str,
     name: Option<&str>,
     external_id: Option<&str>,
@@ -490,12 +487,9 @@ pub async fn create_scim_user(
     // Org-scoped duplicate check — cross-org email reuse is legal.
     let collision = {
         let existing = tx.find_all::<UserDoc>("email", email).await?;
-        match org_id {
-            Some(oid) => existing
-                .into_iter()
-                .any(|d| d.data.org_id.as_deref() == Some(oid)),
-            None => existing.into_iter().any(|d| d.data.org_id.is_none()),
-        }
+        existing
+            .into_iter()
+            .any(|d| d.data.org_id.as_deref() == Some(org_id))
     };
     if collision {
         return Err(ScimUserError::DuplicateEmail.into());
@@ -504,7 +498,7 @@ pub async fn create_scim_user(
     let doc = UserDoc {
         email: email.to_string(),
         name: name.map(String::from),
-        org_id: org_id.map(String::from),
+        org_id: Some(org_id.to_string()),
         is_org_admin: false,
         active,
         external_id: external_id.map(String::from),

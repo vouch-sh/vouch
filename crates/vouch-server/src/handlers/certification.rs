@@ -31,6 +31,11 @@ use crate::{
 /// Test user email used by the certification endpoint (never a real user).
 const CERT_USER_EMAIL: &str = "cert-test@vouch.sh";
 
+/// Stable org ID for the certification test org. This org is not a real
+/// customer org — it exists only to satisfy the org_id requirement so
+/// that user lookups are properly scoped.
+const CERT_ORG_ID: &str = "cert-test-org";
+
 /// Query parameters for `GET /certification/complete-login`.
 #[derive(Debug, Deserialize)]
 pub struct CompleteLoginQuery {
@@ -265,15 +270,20 @@ pub async fn deny_login(
 /// Get the certification test user, creating it if it doesn't exist.
 async fn get_or_create_cert_user(state: &Arc<AppState>) -> anyhow::Result<db::User> {
     // Try to find existing user first.
-    if let Some(user) = db::get_user_by_email_global(&state.store, CERT_USER_EMAIL).await? {
+    if let Some(user) =
+        db::get_user_by_email_in_org(&state.store, CERT_USER_EMAIL, CERT_ORG_ID).await?
+    {
         return Ok(user);
     }
 
-    // Create new cert user via SCIM (no cfg gate, no special permissions).
-    // Cert path is single-tenant by design; org_id is intentionally None.
+    // Create the cert org if it doesn't exist yet (idempotent — org creation
+    // only runs in test/certification mode, never in production).
+    db::ensure_cert_org(&state.store, CERT_ORG_ID).await?;
+
+    // Create new cert user scoped to the cert org.
     if let Err(e) = db::create_scim_user(
         &state.store,
-        None,
+        CERT_ORG_ID,
         CERT_USER_EMAIL,
         Some("Certification Test User"),
         Some("cert-test"),
@@ -283,14 +293,16 @@ async fn get_or_create_cert_user(state: &Arc<AppState>) -> anyhow::Result<db::Us
     {
         // Handle concurrent create races by re-fetching and returning the
         // existing user if another request created it first.
-        if let Some(user) = db::get_user_by_email_global(&state.store, CERT_USER_EMAIL).await? {
+        if let Some(user) =
+            db::get_user_by_email_in_org(&state.store, CERT_USER_EMAIL, CERT_ORG_ID).await?
+        {
             return Ok(user);
         }
         return Err(e);
     }
 
     // Fetch the newly created user to get a full `User` record.
-    db::get_user_by_email_global(&state.store, CERT_USER_EMAIL)
+    db::get_user_by_email_in_org(&state.store, CERT_USER_EMAIL, CERT_ORG_ID)
         .await?
         .ok_or_else(|| anyhow::anyhow!("cert user not found after creation"))
 }

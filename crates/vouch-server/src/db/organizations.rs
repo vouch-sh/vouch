@@ -48,6 +48,30 @@ pub async fn create_organization(
     Ok(Organization::from(result))
 }
 
+/// Ensure an org document with the given ID exists, creating it if absent.
+///
+/// Used only by the certification test path to seed a stable org record
+/// for the cert test user. The ID is treated as both the document ID and
+/// domain so that it is deterministic and idempotent across test runs.
+pub async fn ensure_cert_org(store: &DocumentStore, org_id: &str) -> Result<()> {
+    if store.get::<OrganizationDoc>(org_id).await?.is_some() {
+        return Ok(());
+    }
+    let doc = OrganizationDoc {
+        domain: org_id.to_string(),
+        name: Some("Certification Test Org".to_string()),
+        created_by_user_id: None,
+    };
+    // Insert with a deterministic ID so concurrent callers converge.
+    if let Err(e) = store.insert_with_id(org_id, &doc).await {
+        // If another task raced us and won, the org now exists — that's fine.
+        if store.get::<OrganizationDoc>(org_id).await?.is_none() {
+            return Err(e);
+        }
+    }
+    Ok(())
+}
+
 /// Get an organization's domain by ID.
 pub async fn get_organization_domain(
     store: &DocumentStore,

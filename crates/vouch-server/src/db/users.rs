@@ -110,10 +110,11 @@ pub async fn get_user_by_email_in_org(
     Ok(docs.into_iter().next().map(User::from))
 }
 
-/// Look up a user by email anywhere — discouraged for new code.
+/// Look up a user by email without org scoping — for test use only.
 ///
-/// Returns the newest matching row (by index insertion order).
-/// Do NOT use for new code. Prefer `get_user_by_email_in_org` whenever org context is available.
+/// Returns the first matching row by index insertion order.
+/// Only available in test builds; production code must use `get_user_by_email_in_org`.
+#[cfg(any(test, feature = "test-utils"))]
 pub async fn get_user_by_email_global(store: &DocumentStore, email: &str) -> Result<Option<User>> {
     let doc = store.find_one::<UserDoc>("email", email).await?;
     Ok(doc.map(User::from))

@@ -160,7 +160,7 @@ pub async fn create_user(
     // Create user
     let db_user = match db::create_scim_user(
         &state.store,
-        Some(auth.org_id.as_str()),
+        auth.org_id.as_str(),
         &email,
         name.as_deref(),
         user.external_id.as_deref(),

@@ -129,25 +129,10 @@ pub async fn exchange_jwt_bearer_grant(
     // 8. Map subject claim to Vouch user
     let user = match issuer.subject_claim_mapping.as_str() {
         "email" => {
-            // sub claim is the user's email
-            match issuer.org_id.as_deref() {
-                Some(org_id) => {
-                    db::get_user_by_email_in_org(&state.store, &validated.claims.sub, org_id)
-                        .await
-                        .map_err(|e| ServiceError::Internal(format!("Database error: {e}")))?
-                }
-                None => {
-                    tracing::warn!(
-                        target: "security",
-                        issuer = %issuer.issuer,
-                        "JWT-Bearer issuer has no org_id; using global email lookup \
-                         (deprecated, multi-tenant unsafe)"
-                    );
-                    db::get_user_by_email_global(&state.store, &validated.claims.sub)
-                        .await
-                        .map_err(|e| ServiceError::Internal(format!("Database error: {e}")))?
-                }
-            }
+            // sub claim is the user's email; look up within the issuer's org
+            db::get_user_by_email_in_org(&state.store, &validated.claims.sub, &issuer.org_id)
+                .await
+                .map_err(|e| ServiceError::Internal(format!("Database error: {e}")))?
         }
         "user_id" => db::get_user_by_id(&state.store, &validated.claims.sub)
             .await

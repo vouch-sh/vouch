@@ -47,15 +47,14 @@ pub use store::StoreTransaction;
 
 // Re-export user types and functions
 pub use users::{
-    User, clear_user_github_refresh_token, delete_user, get_user_by_email_global,
-    get_user_by_email_in_org, get_user_by_id, get_user_github_refresh_token,
-    get_users_by_org_paginated, update_user_active_status, update_user_admin_status,
-    update_user_github_identity,
+    User, clear_user_github_refresh_token, delete_user, get_user_by_email_in_org, get_user_by_id,
+    get_user_github_refresh_token, get_users_by_org_paginated, update_user_active_status,
+    update_user_admin_status, update_user_github_identity,
 };
 
 // Re-export user test helpers (only available in tests)
 #[cfg(any(test, feature = "test-utils"))]
-pub use users::{upsert_user, upsert_user_with_org};
+pub use users::{get_user_by_email_global, upsert_user, upsert_user_with_org};
 
 // Re-export session types and functions
 pub use sessions::{
@@ -74,7 +73,9 @@ pub use authenticators::{
 };
 
 // Re-export organization types and functions
-pub use organizations::{Organization, delete_organization, get_organization_domain};
+pub use organizations::{
+    Organization, delete_organization, ensure_cert_org, get_organization_domain,
+};
 
 // Re-export organization test helpers (only available in tests)
 #[cfg(any(test, feature = "test-utils"))]

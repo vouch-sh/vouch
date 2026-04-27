@@ -1203,7 +1203,7 @@ async fn test_scim_user_crud() {
     // Create SCIM user
     let user = create_scim_user(
         &store,
-        Some(ORG),
+        ORG,
         "scim@example.com",
         Some("SCIM User"),
         Some("ext-123"),
@@ -1256,7 +1256,7 @@ async fn test_scim_user_list_and_filter() {
     for i in 0..5 {
         create_scim_user(
             &store,
-            Some(ORG),
+            ORG,
             &format!("user{}@example.com", i),
             None,
             None,
@@ -1305,7 +1305,7 @@ async fn test_scim_session_invalidation_on_deactivation() {
     // Create user with session
     let user = create_scim_user(
         &store,
-        Some("test-org"),
+        "test-org",
         "invalidate@example.com",
         None,
         None,
@@ -2053,21 +2053,14 @@ async fn test_create_scim_user_duplicate_email_rejected() {
     const ORG: &str = "test-org";
 
     // First creation succeeds
-    create_scim_user(
-        &store,
-        Some(ORG),
-        "dup@example.com",
-        Some("Original"),
-        None,
-        true,
-    )
-    .await
-    .expect("First creation should succeed");
+    create_scim_user(&store, ORG, "dup@example.com", Some("Original"), None, true)
+        .await
+        .expect("First creation should succeed");
 
     // Second creation with the same email in the same org must fail
     let result = create_scim_user(
         &store,
-        Some(ORG),
+        ORG,
         "dup@example.com",
         Some("Duplicate"),
         None,
@@ -2160,7 +2153,7 @@ async fn test_scim_group_member_add_remove() {
     let group = create_scim_group(&store, ORG, "Beta", None)
         .await
         .expect("create group");
-    let user = create_scim_user(&store, Some(ORG), "member@example.com", None, None, true)
+    let user = create_scim_user(&store, ORG, "member@example.com", None, None, true)
         .await
         .expect("create user");
 
@@ -2224,13 +2217,13 @@ async fn test_scim_group_replace_members() {
     let group = create_scim_group(&store, ORG, "Gamma", None)
         .await
         .expect("create group");
-    let user1 = create_scim_user(&store, Some(ORG), "u1@example.com", None, None, true)
+    let user1 = create_scim_user(&store, ORG, "u1@example.com", None, None, true)
         .await
         .expect("create user1");
-    let user2 = create_scim_user(&store, Some(ORG), "u2@example.com", None, None, true)
+    let user2 = create_scim_user(&store, ORG, "u2@example.com", None, None, true)
         .await
         .expect("create user2");
-    let user3 = create_scim_user(&store, Some(ORG), "u3@example.com", None, None, true)
+    let user3 = create_scim_user(&store, ORG, "u3@example.com", None, None, true)
         .await
         .expect("create user3");
 
@@ -2277,16 +2270,9 @@ async fn test_scim_group_delete_cascades_members() {
     let group = create_scim_group(&store, ORG, "ToBeCascaded", None)
         .await
         .expect("create group");
-    let user = create_scim_user(
-        &store,
-        Some(ORG),
-        "cascade-member@example.com",
-        None,
-        None,
-        true,
-    )
-    .await
-    .expect("create user");
+    let user = create_scim_user(&store, ORG, "cascade-member@example.com", None, None, true)
+        .await
+        .expect("create user");
 
     add_scim_group_member(&store, ORG, &group.id, &user.id)
         .await
@@ -2325,27 +2311,13 @@ async fn test_create_scim_user_same_email_different_org_succeeds() {
     let (store, _audit) = test_db().await;
 
     // Same email in different orgs must not conflict.
-    let user_a = create_scim_user(
-        &store,
-        Some("org-a"),
-        "shared@example.com",
-        None,
-        None,
-        true,
-    )
-    .await
-    .expect("first creation (org-a) should succeed");
+    let user_a = create_scim_user(&store, "org-a", "shared@example.com", None, None, true)
+        .await
+        .expect("first creation (org-a) should succeed");
 
-    let user_b = create_scim_user(
-        &store,
-        Some("org-b"),
-        "shared@example.com",
-        None,
-        None,
-        true,
-    )
-    .await
-    .expect("second creation (org-b) should succeed — different org, not a duplicate");
+    let user_b = create_scim_user(&store, "org-b", "shared@example.com", None, None, true)
+        .await
+        .expect("second creation (org-b) should succeed — different org, not a duplicate");
 
     // Both rows must exist with distinct IDs and the correct org_id.
     assert_ne!(user_a.id, user_b.id, "rows must have distinct IDs");
@@ -2365,15 +2337,7 @@ async fn test_create_scim_user_same_email_different_org_succeeds() {
     );
 
     // A third creation in org-a with the same email must still be rejected.
-    let dup = create_scim_user(
-        &store,
-        Some("org-a"),
-        "shared@example.com",
-        None,
-        None,
-        true,
-    )
-    .await;
+    let dup = create_scim_user(&store, "org-a", "shared@example.com", None, None, true).await;
     assert!(dup.is_err(), "duplicate in same org must be rejected");
     assert!(
         dup.unwrap_err().downcast_ref::<ScimUserError>().is_some(),
@@ -2413,16 +2377,9 @@ async fn test_replace_group_members_cross_org_user_no_write() {
     let group_a = create_scim_group(&store, "org-a", "Group A", None)
         .await
         .expect("create group_a");
-    let user_b = create_scim_user(
-        &store,
-        Some("org-b"),
-        "user-b@example.com",
-        None,
-        None,
-        true,
-    )
-    .await
-    .expect("create user_b");
+    let user_b = create_scim_user(&store, "org-b", "user-b@example.com", None, None, true)
+        .await
+        .expect("create user_b");
 
     let result = replace_scim_group_members(
         &store,
@@ -2848,13 +2805,13 @@ async fn test_scim_user_list_filter_co_operator() {
 
     const ORG: &str = "test-org";
 
-    create_scim_user(&store, Some(ORG), "alice@example.com", None, None, true)
+    create_scim_user(&store, ORG, "alice@example.com", None, None, true)
         .await
         .expect("create alice");
-    create_scim_user(&store, Some(ORG), "bob@example.com", None, None, true)
+    create_scim_user(&store, ORG, "bob@example.com", None, None, true)
         .await
         .expect("create bob");
-    create_scim_user(&store, Some(ORG), "alicia@example.com", None, None, true)
+    create_scim_user(&store, ORG, "alicia@example.com", None, None, true)
         .await
         .expect("create alicia");
 
@@ -2879,13 +2836,13 @@ async fn test_scim_user_list_filter_sw_operator() {
 
     const ORG: &str = "test-org";
 
-    create_scim_user(&store, Some(ORG), "zara@example.com", None, None, true)
+    create_scim_user(&store, ORG, "zara@example.com", None, None, true)
         .await
         .expect("create zara");
-    create_scim_user(&store, Some(ORG), "zebra@example.com", None, None, true)
+    create_scim_user(&store, ORG, "zebra@example.com", None, None, true)
         .await
         .expect("create zebra");
-    create_scim_user(&store, Some(ORG), "anna@example.com", None, None, true)
+    create_scim_user(&store, ORG, "anna@example.com", None, None, true)
         .await
         .expect("create anna");
 
@@ -3110,7 +3067,7 @@ async fn test_update_trusted_jwt_issuer_jwks_uri_clears_cache() {
         None,
         None,
         None,
-        None,
+        "test-org",
     )
     .await
     .expect("create_trusted_jwt_issuer failed");
@@ -3138,7 +3095,7 @@ async fn test_update_trusted_jwt_issuer_jwks_uri_clears_cache() {
         issuer.allowed_scopes.as_deref(),
         issuer.max_token_lifetime_seconds,
         issuer.enabled,
-        issuer.org_id.as_deref(),
+        &issuer.org_id,
     )
     .await
     .expect("update_trusted_jwt_issuer failed");
@@ -3232,7 +3189,7 @@ async fn test_jwks_refresh_does_not_modify_trusted_jwt_issuer_doc() {
         None,
         None,
         None,
-        None,
+        "test-org",
     )
     .await
     .expect("create_trusted_jwt_issuer failed");

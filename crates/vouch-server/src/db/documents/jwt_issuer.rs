@@ -17,24 +17,23 @@ pub struct TrustedJwtIssuerDoc {
     pub allowed_scopes: Option<String>,
     pub max_token_lifetime_seconds: i32,
     pub enabled: bool,
-    /// Organization this issuer is scoped to. `None` means globally trusted (all orgs).
-    pub org_id: Option<String>,
+    /// Organization this issuer is scoped to.
+    pub org_id: String,
 }
 
 impl DocumentType for TrustedJwtIssuerDoc {
     const DOC_TYPE: &'static str = "trusted_jwt_issuer";
 
     fn index_entries(&self) -> Vec<IndexEntry> {
-        let mut entries = vec![IndexEntry {
-            field: "issuer",
-            value: self.issuer.clone(),
-        }];
-        if let Some(ref org_id) = self.org_id {
-            entries.push(IndexEntry {
+        vec![
+            IndexEntry {
+                field: "issuer",
+                value: self.issuer.clone(),
+            },
+            IndexEntry {
                 field: "org_id",
-                value: org_id.clone(),
-            });
-        }
-        entries
+                value: self.org_id.clone(),
+            },
+        ]
     }
 }

@@ -726,8 +726,11 @@ async fn test_rfc7523_jwt_bearer_grant_with_trusted_issuer() {
     // assertion, and exchange it at /oauth/token.
     let (app, state) = test_app().await;
 
-    // Create user that the JWT subject will map to
-    let user = create_test_user(&state.store, "jwt-bearer-user@example.com").await;
+    const ORG: &str = "jwt-bearer-grant-org";
+
+    // Create user scoped to the issuer's org so the email lookup finds it.
+    let user =
+        create_test_user_in_org(&state.store, "jwt-bearer-user@example.com", ORG, false).await;
 
     // Generate ES256 key pair for the trusted issuer
     let (pkcs8_bytes, jwk) = generate_es256_signing_key();
@@ -743,7 +746,7 @@ async fn test_rfc7523_jwt_bearer_grant_with_trusted_issuer() {
         Some("email"), // Map sub claim to email
         Some("openid email"),
         Some(3600),
-        None,
+        ORG,
     )
     .await
     .expect("Failed to create trusted issuer");
@@ -799,7 +802,9 @@ async fn test_rfc7523_jwt_bearer_grant_jti_replay() {
     // RFC 7523 Section 3: JTI replay detection for JWT bearer grants.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.store, "jwt-bearer-replay@example.com").await;
+    const ORG: &str = "bearer-replay-org";
+    let user =
+        create_test_user_in_org(&state.store, "jwt-bearer-replay@example.com", ORG, false).await;
     let (pkcs8_bytes, jwk) = generate_es256_signing_key();
 
     let issuer_url = "https://replay-issuer.example.com";
@@ -812,7 +817,7 @@ async fn test_rfc7523_jwt_bearer_grant_jti_replay() {
         Some("email"),
         Some("openid"),
         Some(3600),
-        None,
+        ORG,
     )
     .await
     .expect("Failed to create issuer");
@@ -908,7 +913,7 @@ async fn test_rfc7523_jwt_bearer_grant_user_not_found() {
         Some("email"),
         Some("openid"),
         Some(3600),
-        None,
+        "no-user-org",
     )
     .await
     .expect("Failed to create issuer");
@@ -966,7 +971,9 @@ async fn test_rfc7523_jwt_bearer_grant_lifetime_exceeded() {
     // RFC 7523 Section 3: JWT assertion lifetime exceeding issuer max must be rejected.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.store, "jwt-bearer-long@example.com").await;
+    const ORG: &str = "short-lifetime-org";
+    let user =
+        create_test_user_in_org(&state.store, "jwt-bearer-long@example.com", ORG, false).await;
     let (pkcs8_bytes, jwk) = generate_es256_signing_key();
 
     let issuer_url = "https://short-lifetime-issuer.example.com";
@@ -979,7 +986,7 @@ async fn test_rfc7523_jwt_bearer_grant_lifetime_exceeded() {
         Some("email"),
         Some("openid"),
         Some(60), // Max 60 seconds
-        None,
+        ORG,
     )
     .await
     .expect("Failed to create issuer");
@@ -1145,7 +1152,9 @@ async fn test_rfc7523_jwt_bearer_grant_deactivated_user_rejected() {
     // GH#275: Deactivated user cannot obtain tokens via JWT bearer grant.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.store, "deactivated-bearer@example.com").await;
+    const ORG: &str = "deactivated-issuer-org";
+    let user =
+        create_test_user_in_org(&state.store, "deactivated-bearer@example.com", ORG, false).await;
 
     let (pkcs8_bytes, jwk) = generate_es256_signing_key();
 
@@ -1159,7 +1168,7 @@ async fn test_rfc7523_jwt_bearer_grant_deactivated_user_rejected() {
         Some("email"),
         Some("openid email"),
         Some(3600),
-        None,
+        ORG,
     )
     .await
     .expect("Failed to create trusted issuer");
