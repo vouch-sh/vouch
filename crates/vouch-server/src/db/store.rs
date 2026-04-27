@@ -1099,48 +1099,14 @@ impl DocumentStore {
     ///
     /// Callers must validate `offset` before calling; large offsets
     /// will degrade performance on big tables.
-    pub async fn list_all_paginated_with_count<T: DocumentType>(
-        &self,
-        offset: u64,
-        limit: u64,
-    ) -> Result<(Vec<Document<T>>, i64)> {
-        let stmt = Query::select()
-            .columns(DOC_COLUMNS)
-            .expr_as(
-                Expr::cust("COUNT(*) OVER()"),
-                sea_query::Alias::new("total_count"),
-            )
-            .from(Documents::Table)
-            .and_where(Expr::col(Documents::DocType).eq(T::DOC_TYPE))
-            .order_by(Documents::Id, Order::Asc)
-            .offset(offset)
-            .limit(limit)
-            .to_owned();
-
-        let rows: Vec<RawDocumentRow> = crate::db_fetch_all!(&self.pool, stmt, RawDocumentRow)?;
-
-        let total_count = if let Some(total) = rows.first().and_then(|r| r.total_count) {
-            total
-        } else {
-            // OFFSET can produce an empty page even when matching rows exist.
-            self.count_all::<T>().await?
-        };
-
-        let mut results = Vec::with_capacity(rows.len());
-        for row in rows {
-            results.push(raw_to_document::<T>(&self.crypto, row)?);
-        }
-        Ok((results, total_count))
-    }
-
     /// Find documents matching an indexed field with offset pagination
     /// and a total count, all in one query.
     ///
-    /// Uses the same `COUNT(*) OVER()` window function as
-    /// [`list_all_paginated_with_count`] so callers get total count for
-    /// SCIM-style `totalResults` without a separate query, and the page
-    /// is bounded by `limit` so an org with millions of rows doesn't
-    /// load everything into memory.
+    /// Uses a `COUNT(*) OVER()` window function so callers get the
+    /// total matching row count alongside the page (for SCIM-style
+    /// `totalResults`) without a second query, and the result set is
+    /// bounded by `limit` so an org with millions of rows does not
+    /// load every match into memory.
     ///
     /// Results ordered by `id ASC` (UUIDv7 = insertion order).
     ///
@@ -2215,26 +2181,6 @@ mod tests {
             .unwrap();
         assert_eq!(page3.len(), 1);
         assert!(!has_more3);
-    }
-
-    #[tokio::test]
-    async fn list_all_paginated_with_count_preserves_total_past_end() {
-        let store = test_store().await;
-
-        for i in 0..3 {
-            let doc = TestDoc {
-                name: format!("offset-count-{i}"),
-                value: i,
-            };
-            store.insert(&doc).await.unwrap();
-        }
-
-        let (page, total_count) = store
-            .list_all_paginated_with_count::<TestDoc>(10, 2)
-            .await
-            .unwrap();
-        assert!(page.is_empty());
-        assert_eq!(total_count, 3);
     }
 
     #[tokio::test]
