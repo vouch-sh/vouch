@@ -133,8 +133,13 @@ pub async fn update_trusted_jwt_issuer(
 }
 
 /// Delete a trusted JWT issuer.
+///
+/// Cascade-deletes the JWKS cache row and the issuer in a single transaction
+/// so no orphaned cache row remains on partial failure.
 pub async fn delete_trusted_jwt_issuer(store: &DocumentStore, id: &str) -> Result<u64> {
-    super::jwks_cache::delete_jwks_cache(store, id).await?;
-    store.delete(id).await?;
+    let mut tx = store.begin().await?;
+    tx.delete(&super::jwks_cache::cache_id(id)).await?;
+    tx.delete(id).await?;
+    tx.commit().await?;
     Ok(1)
 }
