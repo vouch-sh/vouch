@@ -1231,8 +1231,12 @@ mod scim {
     async fn test_scim_list_users() {
         let harness = TestHarness::new().await;
 
+        let org = harness
+            .create_org("scim-list.example.com")
+            .await
+            .expect("Failed to create org");
         let scim_token = harness
-            .create_scim_token("Test SCIM Token")
+            .create_scim_token("Test SCIM Token", &org.id)
             .await
             .expect("Failed to create SCIM token");
 
@@ -1298,8 +1302,12 @@ mod scim {
     async fn test_scim_create_user() {
         let harness = TestHarness::new().await;
 
+        let org = harness
+            .create_org("scim-create.example.com")
+            .await
+            .expect("Failed to create org");
         let scim_token = harness
-            .create_scim_token("Test SCIM Token")
+            .create_scim_token("Test SCIM Token", &org.id)
             .await
             .expect("Failed to create SCIM token");
 
@@ -1333,25 +1341,46 @@ mod scim {
     async fn test_scim_get_user() {
         let harness = TestHarness::new().await;
 
-        // Create a user first
-        let user = harness
-            .create_user("scim-get@example.com")
+        let org = harness
+            .create_org("scim-get.example.com")
             .await
-            .expect("Failed to create user");
-
+            .expect("Failed to create org");
         let scim_token = harness
-            .create_scim_token("Test SCIM Token")
+            .create_scim_token("Test SCIM Token", &org.id)
             .await
             .expect("Failed to create SCIM token");
 
+        // Create user via SCIM (which binds them to the org) so that the
+        // org-scoped GET finds them.
+        #[derive(serde::Serialize)]
+        struct ScimUserCreate {
+            schemas: Vec<String>,
+            #[serde(rename = "userName")]
+            user_name: String,
+        }
+        let create_resp = harness
+            .post_json_authenticated(
+                "/scim/v2/Users",
+                &ScimUserCreate {
+                    schemas: vec!["urn:ietf:params:scim:schemas:core:2.0:User".to_string()],
+                    user_name: "scim-get@example.com".to_string(),
+                },
+                &scim_token,
+            )
+            .await
+            .expect("Failed to create SCIM user");
+        assert_eq!(create_resp.status, 201);
+        let created: serde_json::Value = create_resp.json().expect("Failed to parse response");
+        let user_id = created["id"].as_str().expect("user id");
+
         let response = harness
-            .get_authenticated(&format!("/scim/v2/Users/{}", user.id), &scim_token)
+            .get_authenticated(&format!("/scim/v2/Users/{}", user_id), &scim_token)
             .await
             .expect("Failed to get SCIM user");
 
         assert_eq!(response.status, 200);
         let resp: serde_json::Value = response.json().expect("Failed to parse response");
-        assert_eq!(resp["id"], user.id);
+        assert_eq!(resp["id"], user_id);
     }
 
     /// Test SCIM get user not found.
@@ -1359,8 +1388,12 @@ mod scim {
     async fn test_scim_get_user_not_found() {
         let harness = TestHarness::new().await;
 
+        let org = harness
+            .create_org("scim-notfound.example.com")
+            .await
+            .expect("Failed to create org");
         let scim_token = harness
-            .create_scim_token("Test SCIM Token")
+            .create_scim_token("Test SCIM Token", &org.id)
             .await
             .expect("Failed to create SCIM token");
 
@@ -1380,19 +1413,39 @@ mod scim {
     async fn test_scim_delete_user() {
         let harness = TestHarness::new().await;
 
-        // Create a user first
-        let user = harness
-            .create_user("scim-delete@example.com")
+        let org = harness
+            .create_org("scim-delete.example.com")
             .await
-            .expect("Failed to create user");
-
+            .expect("Failed to create org");
         let scim_token = harness
-            .create_scim_token("Test SCIM Token")
+            .create_scim_token("Test SCIM Token", &org.id)
             .await
             .expect("Failed to create SCIM token");
 
+        // Create the user via SCIM so they are bound to the org.
+        #[derive(serde::Serialize)]
+        struct ScimUserCreate {
+            schemas: Vec<String>,
+            #[serde(rename = "userName")]
+            user_name: String,
+        }
+        let create_resp = harness
+            .post_json_authenticated(
+                "/scim/v2/Users",
+                &ScimUserCreate {
+                    schemas: vec!["urn:ietf:params:scim:schemas:core:2.0:User".to_string()],
+                    user_name: "scim-delete@example.com".to_string(),
+                },
+                &scim_token,
+            )
+            .await
+            .expect("Failed to create SCIM user");
+        assert_eq!(create_resp.status, 201);
+        let created: serde_json::Value = create_resp.json().expect("Failed to parse response");
+        let user_id = created["id"].as_str().expect("user id");
+
         let response = harness
-            .delete_authenticated(&format!("/scim/v2/Users/{}", user.id), &scim_token)
+            .delete_authenticated(&format!("/scim/v2/Users/{}", user_id), &scim_token)
             .await
             .expect("Failed to delete SCIM user");
 
@@ -1401,7 +1454,7 @@ mod scim {
 
         // Verify user is gone
         let response = harness
-            .get_authenticated(&format!("/scim/v2/Users/{}", user.id), &scim_token)
+            .get_authenticated(&format!("/scim/v2/Users/{}", user_id), &scim_token)
             .await
             .expect("Failed to get SCIM user");
         assert_eq!(response.status, 404);

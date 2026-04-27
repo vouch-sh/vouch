@@ -47,6 +47,7 @@ pub async fn list_users(
     // Get users from database (returns page + total count in one call)
     let (users, total) = match db::list_scim_users(
         &state.store,
+        &auth.org_id,
         query.filter.as_deref(),
         start_index,
         count,
@@ -162,6 +163,7 @@ pub async fn create_user(
     // Create user
     let db_user = match db::create_scim_user(
         &state.store,
+        Some(&auth.org_id),
         &email,
         name.as_deref(),
         user.external_id.as_deref(),
@@ -228,7 +230,7 @@ pub async fn get_user(
         return (status, json).into_response();
     }
 
-    let user = match db::get_scim_user(&state.store, &id).await {
+    let user = match db::get_scim_user(&state.store, &id, &auth.org_id).await {
         Ok(Some(u)) => u,
         Ok(None) => {
             return (
@@ -280,7 +282,7 @@ pub async fn patch_user(
     }
 
     // Get existing user
-    let user = match db::get_scim_user(&state.store, &id).await {
+    let user = match db::get_scim_user(&state.store, &id, &auth.org_id).await {
         Ok(Some(u)) => u,
         Ok(None) => {
             return (
@@ -385,21 +387,32 @@ pub async fn patch_user(
     }
 
     // Update user in database
-    if let Err(e) = db::update_scim_user(
+    match db::update_scim_user(
         &state.store,
         &id,
+        &auth.org_id,
         name.as_deref(),
         external_id.as_deref(),
         active,
     )
     .await
     {
-        tracing::error!("Failed to update user: {e}");
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ScimError::new(500, "Failed to update user")),
-        )
-            .into_response();
+        Ok(true) => {}
+        Ok(false) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(ScimError::new(404, "User not found")),
+            )
+                .into_response();
+        }
+        Err(e) => {
+            tracing::error!("Failed to update user: {e}");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ScimError::new(500, "Failed to update user")),
+            )
+                .into_response();
+        }
     }
 
     // If user was deactivated, invalidate all their sessions and revoke SSH certificates
@@ -445,7 +458,7 @@ pub async fn patch_user(
     }
 
     // Return updated user
-    let updated = match db::get_scim_user(&state.store, &id).await {
+    let updated = match db::get_scim_user(&state.store, &id, &auth.org_id).await {
         Ok(Some(u)) => u,
         Ok(None) | Err(_) => {
             return (
@@ -484,7 +497,7 @@ pub async fn delete_user(
     };
 
     // Check user exists
-    let user = match db::get_scim_user(&state.store, &id).await {
+    let user = match db::get_scim_user(&state.store, &id, &auth.org_id).await {
         Ok(Some(u)) => u,
         Ok(None) => {
             return (

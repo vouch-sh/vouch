@@ -272,6 +272,7 @@ async fn get_or_create_cert_user(state: &Arc<AppState>) -> anyhow::Result<db::Us
     // Create new cert user via SCIM (no cfg gate, no special permissions).
     if let Err(e) = db::create_scim_user(
         &state.store,
+        None,
         CERT_USER_EMAIL,
         Some("Certification Test User"),
         Some("cert-test"),

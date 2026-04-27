@@ -391,13 +391,18 @@ impl TestHarness {
         Ok(client)
     }
 
-    /// Create a SCIM bearer token for testing.
+    /// Create a SCIM bearer token for testing, bound to the given org.
+    ///
+    /// `authenticate_scim` rejects tokens that have no `org_id`, so an
+    /// org_id is required for any test that authenticates against SCIM
+    /// endpoints.
     ///
     /// # Errors
     ///
     /// Returns an error if token creation fails.
-    pub async fn create_scim_token(&self, description: &str) -> Result<String> {
-        let token = test_utils::create_test_scim_token(&self.state.store, description).await;
+    pub async fn create_scim_token(&self, description: &str, org_id: &str) -> Result<String> {
+        let token =
+            test_utils::create_test_scim_token(&self.state.store, description, org_id).await;
         Ok(token)
     }
 

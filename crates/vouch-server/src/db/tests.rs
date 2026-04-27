@@ -1194,6 +1194,8 @@ async fn test_oauth_usage_recording() {
 // SCIM User Tests (RFC 7643/7644)
 // ========================================================================
 
+const TEST_ORG_ID: &str = "test-org";
+
 #[tokio::test]
 async fn test_scim_user_crud() {
     let (store, _audit) = test_db().await;
@@ -1201,6 +1203,7 @@ async fn test_scim_user_crud() {
     // Create SCIM user
     let user = create_scim_user(
         &store,
+        Some(TEST_ORG_ID),
         "scim@example.com",
         Some("SCIM User"),
         Some("ext-123"),
@@ -1216,16 +1219,17 @@ async fn test_scim_user_crud() {
     assert!(user.active);
 
     // Get SCIM user
-    let fetched = get_scim_user(&store, &user.id)
+    let fetched = get_scim_user(&store, &user.id, TEST_ORG_ID)
         .await
         .expect("Failed to get SCIM user")
         .expect("User should exist");
     assert_eq!(fetched.email, "scim@example.com");
 
     // Update SCIM user
-    update_scim_user(
+    let _ = update_scim_user(
         &store,
         &user.id,
+        TEST_ORG_ID,
         Some("Updated Name"),
         Some("ext-456"),
         false,
@@ -1233,7 +1237,7 @@ async fn test_scim_user_crud() {
     .await
     .expect("Failed to update SCIM user");
 
-    let updated = get_scim_user(&store, &user.id)
+    let updated = get_scim_user(&store, &user.id, TEST_ORG_ID)
         .await
         .expect("Failed to get user")
         .expect("User should exist");
@@ -1248,32 +1252,45 @@ async fn test_scim_user_list_and_filter() {
 
     // Create multiple users
     for i in 0..5 {
-        create_scim_user(&store, &format!("user{}@example.com", i), None, None, true)
-            .await
-            .expect("Failed to create user");
+        create_scim_user(
+            &store,
+            Some(TEST_ORG_ID),
+            &format!("user{}@example.com", i),
+            None,
+            None,
+            true,
+        )
+        .await
+        .expect("Failed to create user");
     }
 
     // List all users
-    let (users, total) = list_scim_users(&store, None, 1, 100)
+    let (users, total) = list_scim_users(&store, TEST_ORG_ID, None, 1, 100)
         .await
         .expect("Failed to list users");
     assert_eq!(users.len(), 5);
     assert_eq!(total, 5);
 
     // Filter by userName (email)
-    let (users, _) = list_scim_users(&store, Some("userName eq \"user2@example.com\""), 1, 100)
-        .await
-        .expect("Failed to filter users");
+    let (users, _) = list_scim_users(
+        &store,
+        TEST_ORG_ID,
+        Some("userName eq \"user2@example.com\""),
+        1,
+        100,
+    )
+    .await
+    .expect("Failed to filter users");
     assert_eq!(users.len(), 1);
     assert_eq!(users[0].email, "user2@example.com");
 
     // Pagination
-    let (page1, _) = list_scim_users(&store, None, 1, 2)
+    let (page1, _) = list_scim_users(&store, TEST_ORG_ID, None, 1, 2)
         .await
         .expect("Failed to paginate");
     assert_eq!(page1.len(), 2);
 
-    let (page2, _) = list_scim_users(&store, None, 3, 2)
+    let (page2, _) = list_scim_users(&store, TEST_ORG_ID, None, 3, 2)
         .await
         .expect("Failed to paginate");
     assert_eq!(page2.len(), 2);
@@ -1284,9 +1301,16 @@ async fn test_scim_session_invalidation_on_deactivation() {
     let (store, _audit) = test_db().await;
 
     // Create user with session
-    let user = create_scim_user(&store, "invalidate@example.com", None, None, true)
-        .await
-        .expect("Failed to create user");
+    let user = create_scim_user(
+        &store,
+        Some(TEST_ORG_ID),
+        "invalidate@example.com",
+        None,
+        None,
+        true,
+    )
+    .await
+    .expect("Failed to create user");
 
     // Create authenticator (with user_email parameter)
     let auth_id = create_authenticator(
@@ -2023,12 +2047,27 @@ async fn test_create_scim_user_duplicate_email_rejected() {
     let (store, _audit) = test_db().await;
 
     // First creation succeeds
-    create_scim_user(&store, "dup@example.com", Some("Original"), None, true)
-        .await
-        .expect("First creation should succeed");
+    create_scim_user(
+        &store,
+        Some(TEST_ORG_ID),
+        "dup@example.com",
+        Some("Original"),
+        None,
+        true,
+    )
+    .await
+    .expect("First creation should succeed");
 
     // Second creation with the same email must fail with a UNIQUE error
-    let result = create_scim_user(&store, "dup@example.com", Some("Duplicate"), None, true).await;
+    let result = create_scim_user(
+        &store,
+        Some(TEST_ORG_ID),
+        "dup@example.com",
+        Some("Duplicate"),
+        None,
+        true,
+    )
+    .await;
     assert!(result.is_err(), "Duplicate email should be rejected");
     let err = result.unwrap_err();
     assert!(
@@ -2046,7 +2085,7 @@ async fn test_scim_group_lifecycle() {
     let (store, _audit) = test_db().await;
 
     // Create
-    let group = create_scim_group(&store, "Engineering", Some("ext-grp-1"))
+    let group = create_scim_group(&store, TEST_ORG_ID, "Engineering", Some("ext-grp-1"))
         .await
         .expect("create_scim_group failed");
     assert!(!group.id.is_empty());
@@ -2054,24 +2093,30 @@ async fn test_scim_group_lifecycle() {
     assert_eq!(group.external_id.as_deref(), Some("ext-grp-1"));
 
     // Get by ID
-    let fetched = get_scim_group(&store, &group.id)
+    let fetched = get_scim_group(&store, &group.id, TEST_ORG_ID)
         .await
         .expect("get_scim_group failed")
         .expect("group should exist");
     assert_eq!(fetched.display_name, "Engineering");
 
     // Get by display name
-    let by_name = get_scim_group_by_name(&store, "Engineering")
+    let by_name = get_scim_group_by_name(&store, TEST_ORG_ID, "Engineering")
         .await
         .expect("get_scim_group_by_name failed")
         .expect("should find by name");
     assert_eq!(by_name.id, group.id);
 
     // Update
-    update_scim_group(&store, &group.id, Some("Platform"), Some("ext-grp-2"))
-        .await
-        .expect("update_scim_group failed");
-    let updated = get_scim_group(&store, &group.id)
+    let _ = update_scim_group(
+        &store,
+        &group.id,
+        TEST_ORG_ID,
+        Some("Platform"),
+        Some("ext-grp-2"),
+    )
+    .await
+    .expect("update_scim_group failed");
+    let updated = get_scim_group(&store, &group.id, TEST_ORG_ID)
         .await
         .expect("get_scim_group failed")
         .expect("group should still exist");
@@ -2079,26 +2124,26 @@ async fn test_scim_group_lifecycle() {
     assert_eq!(updated.external_id.as_deref(), Some("ext-grp-2"));
 
     // List
-    let (groups, total) = list_scim_groups(&store, None, 1, 100)
+    let (groups, total) = list_scim_groups(&store, TEST_ORG_ID, None, 1, 100)
         .await
         .expect("list_scim_groups failed");
     assert_eq!(groups.len(), 1);
     assert_eq!(total, 1);
 
     // Delete
-    let deleted = delete_scim_group(&store, &group.id)
+    let deleted = delete_scim_group(&store, &group.id, TEST_ORG_ID)
         .await
         .expect("delete_scim_group failed");
     assert!(deleted);
 
     // Gone
-    let missing = get_scim_group(&store, &group.id)
+    let missing = get_scim_group(&store, &group.id, TEST_ORG_ID)
         .await
         .expect("query should succeed");
     assert!(missing.is_none());
 
     // Delete again returns false
-    let deleted_again = delete_scim_group(&store, &group.id)
+    let deleted_again = delete_scim_group(&store, &group.id, TEST_ORG_ID)
         .await
         .expect("delete should not error");
     assert!(!deleted_again);
@@ -2108,32 +2153,41 @@ async fn test_scim_group_lifecycle() {
 async fn test_scim_group_member_add_remove() {
     let (store, _audit) = test_db().await;
 
-    let group = create_scim_group(&store, "Beta", None)
+    let group = create_scim_group(&store, TEST_ORG_ID, "Beta", None)
         .await
         .expect("create group");
-    let user = create_scim_user(&store, "member@example.com", None, None, true)
-        .await
-        .expect("create user");
+    let user = create_scim_user(
+        &store,
+        Some(TEST_ORG_ID),
+        "member@example.com",
+        None,
+        None,
+        true,
+    )
+    .await
+    .expect("create user");
 
     // Add member
-    add_scim_group_member(&store, &group.id, &user.id)
+    let _ = add_scim_group_member(&store, &group.id, TEST_ORG_ID, &user.id)
         .await
         .expect("add_scim_group_member failed");
 
     // Member appears in group
-    let members = get_scim_group_members(&store, &group.id)
+    let members = get_scim_group_members(&store, &group.id, TEST_ORG_ID)
         .await
-        .expect("get_scim_group_members failed");
+        .expect("get_scim_group_members failed")
+        .unwrap_or_default();
     assert_eq!(members.len(), 1);
     assert_eq!(members[0].id, user.id);
 
     // Add again is idempotent
-    add_scim_group_member(&store, &group.id, &user.id)
+    let _ = add_scim_group_member(&store, &group.id, TEST_ORG_ID, &user.id)
         .await
         .expect("idempotent add failed");
-    let members_after = get_scim_group_members(&store, &group.id)
+    let members_after = get_scim_group_members(&store, &group.id, TEST_ORG_ID)
         .await
-        .expect("get members");
+        .expect("get members")
+        .unwrap_or_default();
     assert_eq!(
         members_after.len(),
         1,
@@ -2141,26 +2195,27 @@ async fn test_scim_group_member_add_remove() {
     );
 
     // User's groups
-    let user_groups = get_user_scim_groups(&store, &user.id)
+    let user_groups = get_user_scim_groups(&store, &user.id, TEST_ORG_ID)
         .await
         .expect("get_user_scim_groups failed");
     assert_eq!(user_groups.len(), 1);
     assert_eq!(user_groups[0].id, group.id);
 
     // Remove member
-    let removed = remove_scim_group_member(&store, &group.id, &user.id)
+    let removed = remove_scim_group_member(&store, &group.id, TEST_ORG_ID, &user.id)
         .await
         .expect("remove_scim_group_member failed");
     assert!(removed);
 
     // Group is now empty
-    let members_final = get_scim_group_members(&store, &group.id)
+    let members_final = get_scim_group_members(&store, &group.id, TEST_ORG_ID)
         .await
-        .expect("get members after remove");
+        .expect("get members after remove")
+        .unwrap_or_default();
     assert!(members_final.is_empty());
 
     // Remove again returns false
-    let removed_again = remove_scim_group_member(&store, &group.id, &user.id)
+    let removed_again = remove_scim_group_member(&store, &group.id, TEST_ORG_ID, &user.id)
         .await
         .expect("remove should not error");
     assert!(!removed_again);
@@ -2170,45 +2225,79 @@ async fn test_scim_group_member_add_remove() {
 async fn test_scim_group_replace_members() {
     let (store, _audit) = test_db().await;
 
-    let group = create_scim_group(&store, "Gamma", None)
+    let group = create_scim_group(&store, TEST_ORG_ID, "Gamma", None)
         .await
         .expect("create group");
-    let user1 = create_scim_user(&store, "u1@example.com", None, None, true)
-        .await
-        .expect("create user1");
-    let user2 = create_scim_user(&store, "u2@example.com", None, None, true)
-        .await
-        .expect("create user2");
-    let user3 = create_scim_user(&store, "u3@example.com", None, None, true)
-        .await
-        .expect("create user3");
+    let user1 = create_scim_user(
+        &store,
+        Some(TEST_ORG_ID),
+        "u1@example.com",
+        None,
+        None,
+        true,
+    )
+    .await
+    .expect("create user1");
+    let user2 = create_scim_user(
+        &store,
+        Some(TEST_ORG_ID),
+        "u2@example.com",
+        None,
+        None,
+        true,
+    )
+    .await
+    .expect("create user2");
+    let user3 = create_scim_user(
+        &store,
+        Some(TEST_ORG_ID),
+        "u3@example.com",
+        None,
+        None,
+        true,
+    )
+    .await
+    .expect("create user3");
 
     // Start with user1 and user2
-    replace_scim_group_members(&store, &group.id, &[user1.id.clone(), user2.id.clone()])
+    let _ = replace_scim_group_members(
+        &store,
+        &group.id,
+        TEST_ORG_ID,
+        &[user1.id.clone(), user2.id.clone()],
+    )
+    .await
+    .expect("replace members");
+    let members = get_scim_group_members(&store, &group.id, TEST_ORG_ID)
         .await
-        .expect("replace members");
-    let members = get_scim_group_members(&store, &group.id)
-        .await
-        .expect("get members");
+        .expect("get members")
+        .unwrap_or_default();
     assert_eq!(members.len(), 2);
 
     // Replace with just user3
-    replace_scim_group_members(&store, &group.id, std::slice::from_ref(&user3.id))
+    let _ = replace_scim_group_members(
+        &store,
+        &group.id,
+        TEST_ORG_ID,
+        std::slice::from_ref(&user3.id),
+    )
+    .await
+    .expect("replace members");
+    let members_after = get_scim_group_members(&store, &group.id, TEST_ORG_ID)
         .await
-        .expect("replace members");
-    let members_after = get_scim_group_members(&store, &group.id)
-        .await
-        .expect("get members");
+        .expect("get members")
+        .unwrap_or_default();
     assert_eq!(members_after.len(), 1);
     assert_eq!(members_after[0].id, user3.id);
 
     // Replace with empty list
-    replace_scim_group_members(&store, &group.id, &[])
+    let _ = replace_scim_group_members(&store, &group.id, TEST_ORG_ID, &[])
         .await
         .expect("replace with empty");
-    let empty = get_scim_group_members(&store, &group.id)
+    let empty = get_scim_group_members(&store, &group.id, TEST_ORG_ID)
         .await
-        .expect("get members");
+        .expect("get members")
+        .unwrap_or_default();
     assert!(empty.is_empty());
 }
 
@@ -2216,31 +2305,40 @@ async fn test_scim_group_replace_members() {
 async fn test_scim_group_delete_cascades_members() {
     let (store, _audit) = test_db().await;
 
-    let group = create_scim_group(&store, "ToBeCascaded", None)
+    let group = create_scim_group(&store, TEST_ORG_ID, "ToBeCascaded", None)
         .await
         .expect("create group");
-    let user = create_scim_user(&store, "cascade-member@example.com", None, None, true)
-        .await
-        .expect("create user");
+    let user = create_scim_user(
+        &store,
+        Some(TEST_ORG_ID),
+        "cascade-member@example.com",
+        None,
+        None,
+        true,
+    )
+    .await
+    .expect("create user");
 
-    add_scim_group_member(&store, &group.id, &user.id)
+    let _ = add_scim_group_member(&store, &group.id, TEST_ORG_ID, &user.id)
         .await
         .expect("add member");
 
     // Delete the group
-    delete_scim_group(&store, &group.id)
+    let _ = delete_scim_group(&store, &group.id, TEST_ORG_ID)
         .await
         .expect("delete group");
 
     // User should still exist
-    let user_exists = get_scim_user(&store, &user.id).await.expect("query user");
+    let user_exists = get_scim_user(&store, &user.id, TEST_ORG_ID)
+        .await
+        .expect("query user");
     assert!(
         user_exists.is_some(),
         "user should not be deleted when group is deleted"
     );
 
     // User's group memberships should be cleaned up
-    let user_groups = get_user_scim_groups(&store, &user.id)
+    let user_groups = get_user_scim_groups(&store, &user.id, TEST_ORG_ID)
         .await
         .expect("get user groups");
     assert!(
@@ -2646,18 +2744,39 @@ fn test_scim_filter_parse_no_match_for_other_attribute() {
 async fn test_scim_user_list_filter_co_operator() {
     let (store, _audit) = test_db().await;
 
-    create_scim_user(&store, "alice@example.com", None, None, true)
-        .await
-        .expect("create alice");
-    create_scim_user(&store, "bob@example.com", None, None, true)
-        .await
-        .expect("create bob");
-    create_scim_user(&store, "alicia@example.com", None, None, true)
-        .await
-        .expect("create alicia");
+    create_scim_user(
+        &store,
+        Some(TEST_ORG_ID),
+        "alice@example.com",
+        None,
+        None,
+        true,
+    )
+    .await
+    .expect("create alice");
+    create_scim_user(
+        &store,
+        Some(TEST_ORG_ID),
+        "bob@example.com",
+        None,
+        None,
+        true,
+    )
+    .await
+    .expect("create bob");
+    create_scim_user(
+        &store,
+        Some(TEST_ORG_ID),
+        "alicia@example.com",
+        None,
+        None,
+        true,
+    )
+    .await
+    .expect("create alicia");
 
     // "userName co \"alic\"" should match alice and alicia
-    let (results, _) = list_scim_users(&store, Some(r#"userName co "alic""#), 1, 100)
+    let (results, _) = list_scim_users(&store, TEST_ORG_ID, Some(r#"userName co "alic""#), 1, 100)
         .await
         .expect("list_scim_users failed");
     assert_eq!(
@@ -2675,18 +2794,39 @@ async fn test_scim_user_list_filter_co_operator() {
 async fn test_scim_user_list_filter_sw_operator() {
     let (store, _audit) = test_db().await;
 
-    create_scim_user(&store, "zara@example.com", None, None, true)
-        .await
-        .expect("create zara");
-    create_scim_user(&store, "zebra@example.com", None, None, true)
-        .await
-        .expect("create zebra");
-    create_scim_user(&store, "anna@example.com", None, None, true)
-        .await
-        .expect("create anna");
+    create_scim_user(
+        &store,
+        Some(TEST_ORG_ID),
+        "zara@example.com",
+        None,
+        None,
+        true,
+    )
+    .await
+    .expect("create zara");
+    create_scim_user(
+        &store,
+        Some(TEST_ORG_ID),
+        "zebra@example.com",
+        None,
+        None,
+        true,
+    )
+    .await
+    .expect("create zebra");
+    create_scim_user(
+        &store,
+        Some(TEST_ORG_ID),
+        "anna@example.com",
+        None,
+        None,
+        true,
+    )
+    .await
+    .expect("create anna");
 
     // "userName sw \"ze\"" should match zara? no — "ze" prefix: zebra matches, zara does not.
-    let (results, _) = list_scim_users(&store, Some(r#"userName sw "ze""#), 1, 100)
+    let (results, _) = list_scim_users(&store, TEST_ORG_ID, Some(r#"userName sw "ze""#), 1, 100)
         .await
         .expect("list_scim_users failed");
     assert_eq!(results.len(), 1, "sw filter should match zebra only");
