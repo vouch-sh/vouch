@@ -322,24 +322,38 @@ pub async fn list_scim_users(
         return Ok((page, total));
     }
 
-    // Org-scoped scan via the org_id index; sort in-memory.
-    let mut records: Vec<ScimUserRecord> = store
-        .find_all::<UserDoc>("org_id", org_id)
-        .await?
-        .into_iter()
-        .map(ScimUserRecord::from)
-        .collect();
+    // Non-indexed filter: must load org-scoped rows and filter in-app.
+    // Bounded by 10k so an org with millions of users does not load every
+    // record into memory for an unrecognized filter expression.
+    if filter.is_some() {
+        let total_in_org = store.count::<UserDoc>("org_id", org_id).await?;
+        if total_in_org > 10_000 {
+            return Err(ScimFilterError::FilterTooBroad.into());
+        }
+        let all = store.find_all::<UserDoc>("org_id", org_id).await?;
+        let mut records: Vec<ScimUserRecord> =
+            all.into_iter().map(ScimUserRecord::from).collect();
+        if let Some(f) = filter {
+            records = apply_scim_user_filter(records, f)?;
+        }
+        records.sort_by(|a, b| a.email.cmp(&b.email));
+        let total = records.len();
+        let page = records.into_iter().skip(offset).take(count).collect();
+        return Ok((page, total));
+    }
 
-    if records.len() > 10_000 {
-        return Err(ScimFilterError::FilterTooBroad.into());
+    // Unfiltered: push pagination to the DB so an org with millions of
+    // users does not load every record into memory.
+    if offset > 10_000 {
+        return Err(ScimFilterError::OffsetTooLarge.into());
     }
-    if let Some(f) = filter {
-        records = apply_scim_user_filter(records, f)?;
-    }
-    records.sort_by(|a, b| a.email.cmp(&b.email));
-    let total = records.len();
-    let page = records.into_iter().skip(offset).take(count).collect();
-    Ok((page, total))
+    let (docs, total_count) = store
+        .find_paginated_with_count::<UserDoc>("org_id", org_id, offset as u64, count as u64)
+        .await?;
+    Ok((
+        docs.into_iter().map(ScimUserRecord::from).collect(),
+        usize::try_from(total_count).unwrap_or(usize::MAX),
+    ))
 }
 
 /// Try indexed eq lookups for SCIM user filters, scoped to org.
@@ -730,23 +744,36 @@ pub async fn list_scim_groups(
         return Ok((page, total));
     }
 
-    let mut records: Vec<ScimGroupRecord> = store
-        .find_all::<ScimGroupDoc>("org_id", org_id)
-        .await?
-        .into_iter()
-        .map(ScimGroupRecord::from)
-        .collect();
+    // Non-indexed filter: bounded by 10k so a large org does not load
+    // every group into memory for an unrecognized filter expression.
+    if filter.is_some() {
+        let total_in_org = store.count::<ScimGroupDoc>("org_id", org_id).await?;
+        if total_in_org > 10_000 {
+            return Err(ScimFilterError::FilterTooBroad.into());
+        }
+        let all = store.find_all::<ScimGroupDoc>("org_id", org_id).await?;
+        let mut records: Vec<ScimGroupRecord> =
+            all.into_iter().map(ScimGroupRecord::from).collect();
+        if let Some(f) = filter {
+            records = apply_scim_group_filter(records, f)?;
+        }
+        records.sort_by_key(|b| std::cmp::Reverse(b.created_at));
+        let total = records.len();
+        let page = records.into_iter().skip(offset).take(count).collect();
+        return Ok((page, total));
+    }
 
-    if records.len() > 10_000 {
-        return Err(ScimFilterError::FilterTooBroad.into());
+    // Unfiltered: push pagination to the DB.
+    if offset > 10_000 {
+        return Err(ScimFilterError::OffsetTooLarge.into());
     }
-    if let Some(f) = filter {
-        records = apply_scim_group_filter(records, f)?;
-    }
-    records.sort_by_key(|b| std::cmp::Reverse(b.created_at));
-    let total = records.len();
-    let page = records.into_iter().skip(offset).take(count).collect();
-    Ok((page, total))
+    let (docs, total_count) = store
+        .find_paginated_with_count::<ScimGroupDoc>("org_id", org_id, offset as u64, count as u64)
+        .await?;
+    Ok((
+        docs.into_iter().map(ScimGroupRecord::from).collect(),
+        usize::try_from(total_count).unwrap_or(usize::MAX),
+    ))
 }
 
 /// Try indexed eq lookups for SCIM group filters, scoped to org.

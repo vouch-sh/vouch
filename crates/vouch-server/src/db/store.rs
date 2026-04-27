@@ -1132,6 +1132,65 @@ impl DocumentStore {
         }
         Ok((results, total_count))
     }
+
+    /// Find documents matching an indexed field with offset pagination
+    /// and a total count, all in one query.
+    ///
+    /// Uses the same `COUNT(*) OVER()` window function as
+    /// [`list_all_paginated_with_count`] so callers get total count for
+    /// SCIM-style `totalResults` without a separate query, and the page
+    /// is bounded by `limit` so an org with millions of rows doesn't
+    /// load everything into memory.
+    ///
+    /// Results ordered by `id ASC` (UUIDv7 = insertion order).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if decryption or deserialization fails.
+    pub async fn find_paginated_with_count<T: DocumentType>(
+        &self,
+        field: &str,
+        value: &str,
+        offset: u64,
+        limit: u64,
+    ) -> Result<(Vec<Document<T>>, i64)> {
+        let index_cond = index_value_condition(&*self.crypto, value);
+
+        let stmt = Query::select()
+            .columns(DOC_TABLE_COLUMNS)
+            .expr_as(
+                Expr::cust("COUNT(*) OVER()"),
+                sea_query::Alias::new("total_count"),
+            )
+            .from(Documents::Table)
+            .inner_join(
+                DocumentIndexes::Table,
+                Expr::col((Documents::Table, Documents::Id))
+                    .equals((DocumentIndexes::Table, DocumentIndexes::DocumentId)),
+            )
+            .and_where(Expr::col((Documents::Table, Documents::DocType)).eq(T::DOC_TYPE))
+            .and_where(Expr::col((DocumentIndexes::Table, DocumentIndexes::IndexField)).eq(field))
+            .and_where(index_cond)
+            .order_by((Documents::Table, Documents::Id), Order::Asc)
+            .offset(offset)
+            .limit(limit)
+            .to_owned();
+
+        let rows: Vec<RawDocumentRow> = crate::db_fetch_all!(&self.pool, stmt, RawDocumentRow)?;
+
+        let total_count = if let Some(total) = rows.first().and_then(|r| r.total_count) {
+            total
+        } else {
+            // OFFSET can produce an empty page even when matching rows exist.
+            self.count::<T>(field, value).await?
+        };
+
+        let mut results = Vec::with_capacity(rows.len());
+        for row in rows {
+            results.push(raw_to_document::<T>(&self.crypto, row)?);
+        }
+        Ok((results, total_count))
+    }
 }
 
 // Implement Debug manually to avoid exposing crypto internals.
