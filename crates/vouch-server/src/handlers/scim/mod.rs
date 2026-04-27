@@ -90,6 +90,9 @@ fn validate_list_params(
 pub struct ScimAuth {
     /// Token ID.
     pub token_id: String,
+    /// Organization the token is scoped to. Required; SCIM tokens
+    /// without an `org_id` are rejected at authentication.
+    pub org_id: String,
     /// Parsed scope set.
     pub scope: ScimScopeSet,
 }
@@ -158,6 +161,18 @@ pub async fn authenticate_scim(
             )
         })?;
 
+    // SCIM is multi-tenant; reject tokens that aren't bound to an org.
+    let org_id = token_record.org_id.ok_or_else(|| {
+        tracing::warn!(
+            token_id = %token_record.id,
+            "SCIM token has no org_id; rejecting"
+        );
+        (
+            StatusCode::UNAUTHORIZED,
+            Json(ScimError::new(401, "Invalid token")),
+        )
+    })?;
+
     // Update last_used_at
     if let Err(e) = db::update_scim_token_last_used(&state.store, &token_record.id).await {
         tracing::warn!("Failed to update SCIM token last_used_at: {e}");
@@ -176,6 +191,7 @@ pub async fn authenticate_scim(
 
     Ok(ScimAuth {
         token_id: token_record.id,
+        org_id,
         scope,
     })
 }

@@ -42,9 +42,11 @@ impl DocumentType for ScimTokenDoc {
     }
 }
 
-/// A SCIM group.
+/// A SCIM group. Always belongs to exactly one organization (the
+/// org of the SCIM token that created it).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScimGroupDoc {
+    pub org_id: String,
     pub display_name: String,
     pub external_id: Option<String>,
 }
@@ -53,10 +55,16 @@ impl DocumentType for ScimGroupDoc {
     const DOC_TYPE: &'static str = "scim_group";
 
     fn index_entries(&self) -> Vec<IndexEntry> {
-        let mut entries = vec![IndexEntry {
-            field: "display_name",
-            value: self.display_name.clone(),
-        }];
+        let mut entries = vec![
+            IndexEntry {
+                field: "display_name",
+                value: self.display_name.clone(),
+            },
+            IndexEntry {
+                field: "org_id",
+                value: self.org_id.clone(),
+            },
+        ];
         if let Some(ref ext_id) = self.external_id {
             entries.push(IndexEntry {
                 field: "external_id",

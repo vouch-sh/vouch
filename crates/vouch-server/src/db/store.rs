@@ -1083,36 +1083,45 @@ impl DocumentStore {
         Ok((results, has_more))
     }
 
-    /// List documents with OFFSET pagination and a total count in one query.
+    /// Find documents matching an indexed field with offset pagination
+    /// and a total count, all in one query.
     ///
-    /// Uses `COUNT(*) OVER()` window function to return the total matching row
-    /// count alongside the page results. Offset is capped at 10,000; requests
-    /// beyond that return an error.
+    /// Uses a `COUNT(*) OVER()` window function so callers get the
+    /// total matching row count alongside the page (for SCIM-style
+    /// `totalResults`) without a second query, and the result set is
+    /// bounded by `limit` so an org with millions of rows does not
+    /// load every match into memory.
     ///
-    /// Results are ordered by `id ASC` (UUIDv7 = insertion order).
+    /// Results ordered by `id ASC` (UUIDv7 = insertion order).
     ///
     /// # Errors
     ///
     /// Returns an error if decryption or deserialization fails.
-    ///
-    /// # Panics safety
-    ///
-    /// Callers must validate `offset` before calling; large offsets
-    /// will degrade performance on big tables.
-    pub async fn list_all_paginated_with_count<T: DocumentType>(
+    pub async fn find_paginated_with_count<T: DocumentType>(
         &self,
+        field: &str,
+        value: &str,
         offset: u64,
         limit: u64,
     ) -> Result<(Vec<Document<T>>, i64)> {
+        let index_cond = index_value_condition(&*self.crypto, value);
+
         let stmt = Query::select()
-            .columns(DOC_COLUMNS)
+            .columns(DOC_TABLE_COLUMNS)
             .expr_as(
                 Expr::cust("COUNT(*) OVER()"),
                 sea_query::Alias::new("total_count"),
             )
             .from(Documents::Table)
-            .and_where(Expr::col(Documents::DocType).eq(T::DOC_TYPE))
-            .order_by(Documents::Id, Order::Asc)
+            .inner_join(
+                DocumentIndexes::Table,
+                Expr::col((Documents::Table, Documents::Id))
+                    .equals((DocumentIndexes::Table, DocumentIndexes::DocumentId)),
+            )
+            .and_where(Expr::col((Documents::Table, Documents::DocType)).eq(T::DOC_TYPE))
+            .and_where(Expr::col((DocumentIndexes::Table, DocumentIndexes::IndexField)).eq(field))
+            .and_where(index_cond)
+            .order_by((Documents::Table, Documents::Id), Order::Asc)
             .offset(offset)
             .limit(limit)
             .to_owned();
@@ -1123,7 +1132,7 @@ impl DocumentStore {
             total
         } else {
             // OFFSET can produce an empty page even when matching rows exist.
-            self.count_all::<T>().await?
+            self.count::<T>(field, value).await?
         };
 
         let mut results = Vec::with_capacity(rows.len());
@@ -2156,26 +2165,6 @@ mod tests {
             .unwrap();
         assert_eq!(page3.len(), 1);
         assert!(!has_more3);
-    }
-
-    #[tokio::test]
-    async fn list_all_paginated_with_count_preserves_total_past_end() {
-        let store = test_store().await;
-
-        for i in 0..3 {
-            let doc = TestDoc {
-                name: format!("offset-count-{i}"),
-                value: i,
-            };
-            store.insert(&doc).await.unwrap();
-        }
-
-        let (page, total_count) = store
-            .list_all_paginated_with_count::<TestDoc>(10, 2)
-            .await
-            .unwrap();
-        assert!(page.is_empty());
-        assert_eq!(total_count, 3);
     }
 
     #[tokio::test]
