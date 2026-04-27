@@ -659,8 +659,12 @@ pub async fn create_test_session_with_mtls(
     result.token.expose_secret().to_string()
 }
 
-/// Create a SCIM bearer token for testing.
-pub async fn create_test_scim_token(store: &DocumentStore, description: &str) -> String {
+/// Create a SCIM bearer token for testing, scoped to the given org.
+pub async fn create_test_scim_token(
+    store: &DocumentStore,
+    description: &str,
+    org_id: &str,
+) -> String {
     use aws_lc_rs::digest::{self, SHA256};
     use aws_lc_rs::rand as aws_rand;
     use base64::Engine;
@@ -675,7 +679,7 @@ pub async fn create_test_scim_token(store: &DocumentStore, description: &str) ->
     let token_hash = hex::encode(digest::digest(&SHA256, token.as_bytes()));
 
     // Store in database
-    crate::db::create_scim_token(store, &token_hash, Some(description), None, None, None)
+    crate::db::create_scim_token(store, &token_hash, Some(description), None, org_id, None)
         .await
         .expect("Failed to create SCIM token");
 

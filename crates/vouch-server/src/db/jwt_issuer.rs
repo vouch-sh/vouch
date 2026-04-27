@@ -27,6 +27,8 @@ pub struct TrustedJwtIssuer {
     pub enabled: bool,
     pub created_at: Timestamp,
     pub updated_at: Timestamp,
+    /// Organization this issuer is scoped to. None means legacy/unscoped (emit warn-log on use).
+    pub org_id: Option<String>,
 }
 
 impl From<Document<TrustedJwtIssuerDoc>> for TrustedJwtIssuer {
@@ -43,6 +45,7 @@ impl From<Document<TrustedJwtIssuerDoc>> for TrustedJwtIssuer {
             enabled: doc.data.enabled,
             created_at: doc.created_at,
             updated_at: doc.updated_at,
+            org_id: doc.data.org_id,
         }
     }
 }
@@ -61,6 +64,7 @@ pub async fn create_trusted_jwt_issuer(
     subject_claim_mapping: Option<&str>,
     allowed_scopes: Option<&str>,
     max_token_lifetime_seconds: Option<i32>,
+    org_id: Option<&str>,
 ) -> Result<TrustedJwtIssuer> {
     let mapping = subject_claim_mapping.unwrap_or(DEFAULT_SUBJECT_CLAIM_MAPPING);
     let max_lifetime = max_token_lifetime_seconds.unwrap_or(DEFAULT_MAX_TOKEN_LIFETIME_SECONDS);
@@ -74,6 +78,7 @@ pub async fn create_trusted_jwt_issuer(
         allowed_scopes: allowed_scopes.map(String::from),
         max_token_lifetime_seconds: max_lifetime,
         enabled: true,
+        org_id: org_id.map(String::from),
     };
     let result = store.insert(&doc).await?;
     Ok(TrustedJwtIssuer::from(result))
@@ -111,6 +116,7 @@ pub async fn update_trusted_jwt_issuer(
     allowed_scopes: Option<&str>,
     max_token_lifetime_seconds: i32,
     enabled: bool,
+    org_id: Option<&str>,
 ) -> Result<()> {
     if let Some(doc) = store.get::<TrustedJwtIssuerDoc>(id).await? {
         // Delete stale cache BEFORE modifying the parent doc so any
@@ -127,6 +133,7 @@ pub async fn update_trusted_jwt_issuer(
         data.allowed_scopes = allowed_scopes.map(String::from);
         data.max_token_lifetime_seconds = max_token_lifetime_seconds;
         data.enabled = enabled;
+        data.org_id = org_id.map(String::from);
         store.update(id, &data).await?;
     }
     Ok(())

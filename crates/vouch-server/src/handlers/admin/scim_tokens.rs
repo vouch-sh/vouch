@@ -124,7 +124,7 @@ pub async fn create_scim_token(
         &generated.hash,
         req.description.as_deref(),
         expires_at,
-        Some(&org_id),
+        &org_id,
         None, // Default scope: full access
     )
     .await?;
@@ -382,7 +382,7 @@ pub async fn admin_create_scim_token(
         &generated.hash,
         description.as_deref(),
         expires_at,
-        Some(&org_id),
+        &org_id,
         None,
     )
     .await?;

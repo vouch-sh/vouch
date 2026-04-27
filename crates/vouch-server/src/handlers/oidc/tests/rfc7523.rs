@@ -743,6 +743,7 @@ async fn test_rfc7523_jwt_bearer_grant_with_trusted_issuer() {
         Some("email"), // Map sub claim to email
         Some("openid email"),
         Some(3600),
+        None,
     )
     .await
     .expect("Failed to create trusted issuer");
@@ -811,6 +812,7 @@ async fn test_rfc7523_jwt_bearer_grant_jti_replay() {
         Some("email"),
         Some("openid"),
         Some(3600),
+        None,
     )
     .await
     .expect("Failed to create issuer");
@@ -906,6 +908,7 @@ async fn test_rfc7523_jwt_bearer_grant_user_not_found() {
         Some("email"),
         Some("openid"),
         Some(3600),
+        None,
     )
     .await
     .expect("Failed to create issuer");
@@ -976,6 +979,7 @@ async fn test_rfc7523_jwt_bearer_grant_lifetime_exceeded() {
         Some("email"),
         Some("openid"),
         Some(60), // Max 60 seconds
+        None,
     )
     .await
     .expect("Failed to create issuer");
@@ -1155,6 +1159,7 @@ async fn test_rfc7523_jwt_bearer_grant_deactivated_user_rejected() {
         Some("email"),
         Some("openid email"),
         Some(3600),
+        None,
     )
     .await
     .expect("Failed to create trusted issuer");

@@ -90,6 +90,8 @@ fn validate_list_params(
 pub struct ScimAuth {
     /// Token ID.
     pub token_id: String,
+    /// Organization this token belongs to.
+    pub org_id: String,
     /// Parsed scope set.
     pub scope: ScimScopeSet,
 }
@@ -158,7 +160,9 @@ pub async fn authenticate_scim(
             )
         })?;
 
-    // Update last_used_at
+    let org_id = token_record.org_id;
+
+    // Update last_used_at (only for accepted tokens)
     if let Err(e) = db::update_scim_token_last_used(&state.store, &token_record.id).await {
         tracing::warn!("Failed to update SCIM token last_used_at: {e}");
     }
@@ -176,6 +180,7 @@ pub async fn authenticate_scim(
 
     Ok(ScimAuth {
         token_id: token_record.id,
+        org_id,
         scope,
     })
 }

@@ -10,6 +10,10 @@ use crate::db::document_type::{DocumentType, IndexEntry};
 pub struct UserDoc {
     pub email: String,
     pub name: Option<String>,
+    /// Optional by design (multi-source). Browser OIDC enrollment without a domain claim,
+    /// GitHub OAuth, and the certification cert-test path all legitimately create users with
+    /// `org_id = None`. SCIM creation always supplies a value. Do NOT promote to `String`
+    /// for "consistency" with `ScimTokenDoc.org_id` — the asymmetry is the multi-tenant model.
     pub org_id: Option<String>,
     pub is_org_admin: bool,
     #[serde(default = "default_active")]

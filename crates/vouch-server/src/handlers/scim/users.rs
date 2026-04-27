@@ -16,7 +16,7 @@ use super::types::{
 };
 use crate::AppState;
 use crate::db;
-use crate::db::{ScimFilterError, ScimScope};
+use crate::db::{ScimFilterError, ScimScope, ScimUserError};
 use crate::redact_email;
 
 /// GET /scim/v2/Users (RFC 7644 Section 3.4.2).
@@ -47,6 +47,7 @@ pub async fn list_users(
     // Get users from database (returns page + total count in one call)
     let (users, total) = match db::list_scim_users(
         &state.store,
+        &auth.org_id,
         query.filter.as_deref(),
         start_index,
         count,
@@ -64,10 +65,6 @@ pub async fn list_users(
                     ScimFilterError::FilterTooBroad => (
                         "Filter is too broad; add a more specific filter",
                         "invalidFilter",
-                    ),
-                    ScimFilterError::OffsetTooLarge => (
-                        "startIndex is too large; maximum supported offset is 10000",
-                        "invalidValue",
                     ),
                 };
                 return (
@@ -97,7 +94,8 @@ pub async fn list_users(
         "list",
         "User",
         "*",
-        Some(&auth.token_id),
+        &auth.token_id,
+        &auth.org_id,
         Some(&format!("{{\"count\": {}}}", resources.len())),
     )
     .await
@@ -162,6 +160,7 @@ pub async fn create_user(
     // Create user
     let db_user = match db::create_scim_user(
         &state.store,
+        Some(auth.org_id.as_str()),
         &email,
         name.as_deref(),
         user.external_id.as_deref(),
@@ -171,16 +170,17 @@ pub async fn create_user(
     {
         Ok(u) => u,
         Err(e) => {
+            if e.downcast_ref::<ScimUserError>().is_some() {
+                return (
+                    StatusCode::CONFLICT,
+                    Json(ScimError::new(409, "User already exists").with_type("uniqueness")),
+                )
+                    .into_response();
+            }
             tracing::error!("Failed to create user: {e}");
-            // Check if it's a uniqueness constraint
-            let detail = if e.to_string().contains("UNIQUE") {
-                "User already exists"
-            } else {
-                "Failed to create user"
-            };
             return (
-                StatusCode::CONFLICT,
-                Json(ScimError::new(409, detail).with_type("uniqueness")),
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ScimError::new(500, "Failed to create user")),
             )
                 .into_response();
         }
@@ -192,7 +192,8 @@ pub async fn create_user(
         "create",
         "User",
         &db_user.id,
-        Some(&auth.token_id),
+        &auth.token_id,
+        &auth.org_id,
         Some(&serde_json::json!({"email": email}).to_string()),
     )
     .await
@@ -228,7 +229,7 @@ pub async fn get_user(
         return (status, json).into_response();
     }
 
-    let user = match db::get_scim_user(&state.store, &id).await {
+    let user = match db::get_scim_user(&state.store, &id, &auth.org_id).await {
         Ok(Some(u)) => u,
         Ok(None) => {
             return (
@@ -280,7 +281,7 @@ pub async fn patch_user(
     }
 
     // Get existing user
-    let user = match db::get_scim_user(&state.store, &id).await {
+    let user = match db::get_scim_user(&state.store, &id, &auth.org_id).await {
         Ok(Some(u)) => u,
         Ok(None) => {
             return (
@@ -385,21 +386,32 @@ pub async fn patch_user(
     }
 
     // Update user in database
-    if let Err(e) = db::update_scim_user(
+    match db::update_scim_user(
         &state.store,
         &id,
+        &auth.org_id,
         name.as_deref(),
         external_id.as_deref(),
         active,
     )
     .await
     {
-        tracing::error!("Failed to update user: {e}");
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ScimError::new(500, "Failed to update user")),
-        )
-            .into_response();
+        Ok(false) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(ScimError::new(404, "User not found")),
+            )
+                .into_response();
+        }
+        Ok(true) => {}
+        Err(e) => {
+            tracing::error!("Failed to update user: {e}");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ScimError::new(500, "Failed to update user")),
+            )
+                .into_response();
+        }
     }
 
     // If user was deactivated, invalidate all their sessions and revoke SSH certificates
@@ -436,7 +448,8 @@ pub async fn patch_user(
         "update",
         "User",
         &id,
-        Some(&auth.token_id),
+        &auth.token_id,
+        &auth.org_id,
         Some(&serde_json::json!({"active": active, "deactivated": deactivated}).to_string()),
     )
     .await
@@ -445,7 +458,7 @@ pub async fn patch_user(
     }
 
     // Return updated user
-    let updated = match db::get_scim_user(&state.store, &id).await {
+    let updated = match db::get_scim_user(&state.store, &id, &auth.org_id).await {
         Ok(Some(u)) => u,
         Ok(None) | Err(_) => {
             return (
@@ -483,8 +496,8 @@ pub async fn delete_user(
         return (status, json).into_response();
     };
 
-    // Check user exists
-    let user = match db::get_scim_user(&state.store, &id).await {
+    // Check user exists and belongs to caller's org (org-scope check before cascade)
+    let user = match db::get_scim_user(&state.store, &id, &auth.org_id).await {
         Ok(Some(u)) => u,
         Ok(None) => {
             return (
@@ -550,7 +563,8 @@ pub async fn delete_user(
         "delete",
         "User",
         &id,
-        Some(&auth.token_id),
+        &auth.token_id,
+        &auth.org_id,
         Some(&serde_json::json!({"email": user.email}).to_string()),
     )
     .await

@@ -1232,7 +1232,7 @@ mod scim {
         let harness = TestHarness::new().await;
 
         let scim_token = harness
-            .create_scim_token("Test SCIM Token")
+            .create_scim_token("Test SCIM Token", "test-org")
             .await
             .expect("Failed to create SCIM token");
 
@@ -1299,7 +1299,7 @@ mod scim {
         let harness = TestHarness::new().await;
 
         let scim_token = harness
-            .create_scim_token("Test SCIM Token")
+            .create_scim_token("Test SCIM Token", "test-org")
             .await
             .expect("Failed to create SCIM token");
 
@@ -1333,14 +1333,19 @@ mod scim {
     async fn test_scim_get_user() {
         let harness = TestHarness::new().await;
 
-        // Create a user first
+        // Create org and user in that org, then a SCIM token scoped to the same org
+        let org = harness
+            .create_org("example.com")
+            .await
+            .expect("Failed to create org");
+
         let user = harness
-            .create_user("scim-get@example.com")
+            .create_user_in_org("scim-get@example.com", &org.id, false)
             .await
             .expect("Failed to create user");
 
         let scim_token = harness
-            .create_scim_token("Test SCIM Token")
+            .create_scim_token("Test SCIM Token", &org.id)
             .await
             .expect("Failed to create SCIM token");
 
@@ -1360,7 +1365,7 @@ mod scim {
         let harness = TestHarness::new().await;
 
         let scim_token = harness
-            .create_scim_token("Test SCIM Token")
+            .create_scim_token("Test SCIM Token", "test-org")
             .await
             .expect("Failed to create SCIM token");
 
@@ -1380,14 +1385,19 @@ mod scim {
     async fn test_scim_delete_user() {
         let harness = TestHarness::new().await;
 
-        // Create a user first
+        // Create org and SCIM user in that org, then a SCIM token scoped to the same org
+        let org = harness
+            .create_org("delete-example.com")
+            .await
+            .expect("Failed to create org");
+
         let user = harness
-            .create_user("scim-delete@example.com")
+            .create_user_in_org("scim-delete@example.com", &org.id, false)
             .await
             .expect("Failed to create user");
 
         let scim_token = harness
-            .create_scim_token("Test SCIM Token")
+            .create_scim_token("Test SCIM Token", &org.id)
             .await
             .expect("Failed to create SCIM token");
 

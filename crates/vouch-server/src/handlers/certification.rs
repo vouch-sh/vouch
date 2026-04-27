@@ -265,13 +265,15 @@ pub async fn deny_login(
 /// Get the certification test user, creating it if it doesn't exist.
 async fn get_or_create_cert_user(state: &Arc<AppState>) -> anyhow::Result<db::User> {
     // Try to find existing user first.
-    if let Some(user) = db::get_user_by_email(&state.store, CERT_USER_EMAIL).await? {
+    if let Some(user) = db::get_user_by_email_global(&state.store, CERT_USER_EMAIL).await? {
         return Ok(user);
     }
 
     // Create new cert user via SCIM (no cfg gate, no special permissions).
+    // Cert path is single-tenant by design; org_id is intentionally None.
     if let Err(e) = db::create_scim_user(
         &state.store,
+        None,
         CERT_USER_EMAIL,
         Some("Certification Test User"),
         Some("cert-test"),
@@ -281,14 +283,14 @@ async fn get_or_create_cert_user(state: &Arc<AppState>) -> anyhow::Result<db::Us
     {
         // Handle concurrent create races by re-fetching and returning the
         // existing user if another request created it first.
-        if let Some(user) = db::get_user_by_email(&state.store, CERT_USER_EMAIL).await? {
+        if let Some(user) = db::get_user_by_email_global(&state.store, CERT_USER_EMAIL).await? {
             return Ok(user);
         }
         return Err(e);
     }
 
     // Fetch the newly created user to get a full `User` record.
-    db::get_user_by_email(&state.store, CERT_USER_EMAIL)
+    db::get_user_by_email_global(&state.store, CERT_USER_EMAIL)
         .await?
         .ok_or_else(|| anyhow::anyhow!("cert user not found after creation"))
 }

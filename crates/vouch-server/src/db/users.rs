@@ -95,8 +95,26 @@ pub async fn upsert_user_with_org(
     Ok((doc.id, true))
 }
 
-/// Get a user by email.
-pub async fn get_user_by_email(store: &DocumentStore, email: &str) -> Result<Option<User>> {
+/// Look up a user by email within an organization.
+///
+/// Use this when you have org context (SCIM, OAuth flows tied to an org).
+/// Returns at most one row — emails are unique per-org.
+pub async fn get_user_by_email_in_org(
+    store: &DocumentStore,
+    email: &str,
+    org_id: &str,
+) -> Result<Option<User>> {
+    let docs = store
+        .find_by_indexes::<UserDoc>(&[("email", email), ("org_id", org_id)])
+        .await?;
+    Ok(docs.into_iter().next().map(User::from))
+}
+
+/// Look up a user by email anywhere — discouraged for new code.
+///
+/// Returns the newest matching row (by index insertion order).
+/// Do NOT use for new code. Prefer `get_user_by_email_in_org` whenever org context is available.
+pub async fn get_user_by_email_global(store: &DocumentStore, email: &str) -> Result<Option<User>> {
     let doc = store.find_one::<UserDoc>("email", email).await?;
     Ok(doc.map(User::from))
 }

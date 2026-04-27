@@ -47,9 +47,10 @@ pub use store::StoreTransaction;
 
 // Re-export user types and functions
 pub use users::{
-    User, clear_user_github_refresh_token, delete_user, get_user_by_email, get_user_by_id,
-    get_user_github_refresh_token, get_users_by_org_paginated, update_user_active_status,
-    update_user_admin_status, update_user_github_identity,
+    User, clear_user_github_refresh_token, delete_user, get_user_by_email_global,
+    get_user_by_email_in_org, get_user_by_id, get_user_github_refresh_token,
+    get_users_by_org_paginated, update_user_active_status, update_user_admin_status,
+    update_user_github_identity,
 };
 
 // Re-export user test helpers (only available in tests)
@@ -97,11 +98,12 @@ pub use config::{AuthEventParams, AuthEventType, delete_old_auth_events, insert_
 
 // Re-export SCIM types and functions
 pub use scim::{
-    ScimFilterError, ScimGroupMemberRecord, ScimGroupRecord, ScimScope, ScimScopeSet, ScimToken,
-    ScimUserRecord, add_scim_group_member, create_scim_group, create_scim_token, create_scim_user,
-    delete_old_scim_audit_logs, delete_scim_group, delete_scim_token, get_scim_group,
-    get_scim_group_by_name, get_scim_group_members, get_scim_token_by_hash, get_scim_user,
-    get_user_scim_groups, insert_scim_audit, list_scim_groups, list_scim_tokens, list_scim_users,
+    ScimFilterError, ScimGroupMemberError, ScimGroupMemberRecord, ScimGroupRecord, ScimScope,
+    ScimScopeSet, ScimToken, ScimUserError, ScimUserRecord, add_scim_group_member,
+    create_scim_group, create_scim_token, create_scim_user, delete_old_scim_audit_logs,
+    delete_scim_group, delete_scim_token, delete_scim_user, get_scim_group, get_scim_group_by_name,
+    get_scim_group_members, get_scim_token_by_hash, get_scim_user, get_user_scim_groups,
+    insert_scim_audit, list_scim_groups, list_scim_tokens, list_scim_users,
     remove_scim_group_member, replace_scim_group_members, update_scim_group,
     update_scim_token_last_used, update_scim_user,
 };

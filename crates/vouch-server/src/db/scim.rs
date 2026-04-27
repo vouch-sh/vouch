@@ -7,9 +7,45 @@ use super::documents::audit::ScimAuditData;
 use super::documents::scim::{ScimGroupDoc, ScimGroupMemberDoc, ScimTokenDoc};
 use super::documents::user::UserDoc;
 use super::store::DocumentStore;
-use anyhow::Context;
 use anyhow::Result;
 use jiff::Timestamp;
+
+/// Typed error for SCIM user operations.
+#[derive(Debug)]
+pub enum ScimUserError {
+    /// A user with this email already exists in this org.
+    DuplicateEmail,
+}
+
+impl std::fmt::Display for ScimUserError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::DuplicateEmail => write!(f, "user with this email already exists in org"),
+        }
+    }
+}
+
+impl std::error::Error for ScimUserError {}
+
+/// Typed error for SCIM group member operations.
+#[derive(Debug)]
+pub enum ScimGroupMemberError {
+    /// The specified user was not found.
+    UserNotFound,
+    /// The specified user belongs to a different organization.
+    UserOutOfOrg,
+}
+
+impl std::fmt::Display for ScimGroupMemberError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UserNotFound => write!(f, "user not found"),
+            Self::UserOutOfOrg => write!(f, "user belongs to a different organization"),
+        }
+    }
+}
+
+impl std::error::Error for ScimGroupMemberError {}
 
 // ============================================================================
 // SCIM Scopes
@@ -118,7 +154,7 @@ impl Default for ScimScopeSet {
 pub struct ScimToken {
     pub id: String,
     pub token_hash: String,
-    pub org_id: Option<String>,
+    pub org_id: String,
     pub description: Option<String>,
     pub created_at: Timestamp,
     pub last_used_at: Option<Timestamp>,
@@ -181,7 +217,7 @@ pub async fn create_scim_token(
     token_hash: &str,
     description: Option<&str>,
     expires_at: Option<Timestamp>,
-    org_id: Option<&str>,
+    org_id: &str,
     scope: Option<&ScimScopeSet>,
 ) -> Result<String> {
     let default_scope = ScimScopeSet::default();
@@ -189,7 +225,7 @@ pub async fn create_scim_token(
 
     let doc = ScimTokenDoc {
         token_hash: token_hash.to_string(),
-        org_id: org_id.map(String::from),
+        org_id: org_id.to_string(),
         description: description.map(String::from),
         expires_at,
         scope: scope_val,
@@ -213,7 +249,7 @@ pub async fn delete_scim_token(
     };
 
     // Prevent cross-org deletion
-    if doc.data.org_id.as_deref() != Some(org_id) {
+    if doc.data.org_id != org_id {
         return Ok(false);
     }
 
@@ -244,14 +280,16 @@ pub async fn insert_scim_audit(
     operation: &str,
     resource_type: &str,
     resource_id: &str,
-    actor_token_id: Option<&str>,
+    actor_token_id: &str,
+    actor_org_id: &str,
     details: Option<&str>,
 ) -> Result<String> {
     let data = ScimAuditData {
         operation: operation.to_string(),
         resource_type: resource_type.to_string(),
         resource_id: resource_id.to_string(),
-        actor_token_id: actor_token_id.map(String::from),
+        actor_token_id: actor_token_id.to_string(),
+        org_id: actor_org_id.to_string(),
         details: details.map(String::from),
     };
     let data_json = serde_json::to_string(&data)?;
@@ -294,7 +332,7 @@ impl From<Document<UserDoc>> for ScimUserRecord {
     }
 }
 
-/// List users for SCIM with optional filter.
+/// List users for SCIM with optional filter, scoped to the caller's org.
 ///
 /// Returns `(records, total_count)` where `total_count` is the total number of
 /// matching users (before pagination).
@@ -302,77 +340,72 @@ impl From<Document<UserDoc>> for ScimUserRecord {
 /// # Errors
 ///
 /// Returns [`ScimFilterError::FilterTooBroad`] for non-indexed filters on
-/// tables with >10 000 rows. Returns [`ScimFilterError::OffsetTooLarge`]
-/// when the computed offset exceeds 10 000.
+/// orgs with >10 000 users.
 pub async fn list_scim_users(
     store: &DocumentStore,
+    org_id: &str,
     filter: Option<&str>,
     start_index: usize,
     count: usize,
 ) -> Result<(Vec<ScimUserRecord>, usize)> {
     let offset = start_index.saturating_sub(1); // SCIM 1-indexed
 
-    // Try indexed eq lookup first for efficiency
+    // Try indexed AND-lookup first (email/externalId + org_id at DB level)
     if let Some(f) = filter
-        && let Some(result) = try_indexed_user_lookup(store, f).await?
+        && let Some(result) = try_indexed_user_lookup(store, org_id, f).await?
     {
         let total = result.len();
         let page = result.into_iter().skip(offset).take(count).collect();
         return Ok((page, total));
     }
 
-    // Non-indexed filter: must load all and filter in app
-    if filter.is_some() {
-        let table_count = store.count_all::<UserDoc>().await?;
-        if table_count > 10_000 {
-            return Err(ScimFilterError::FilterTooBroad.into());
-        }
-        let all_docs = store.list_all::<UserDoc>().await?;
-        let mut records: Vec<ScimUserRecord> =
-            all_docs.into_iter().map(ScimUserRecord::from).collect();
-        if let Some(f) = filter {
-            records = apply_scim_user_filter(records, f)?;
-        }
-        records.sort_by(|a, b| a.email.cmp(&b.email));
-        let total = records.len();
-        let page = records.into_iter().skip(offset).take(count).collect();
-        return Ok((page, total));
+    // Org-scoped scan via the org_id index — no more table-wide list_all.
+    let mut records: Vec<ScimUserRecord> = store
+        .find_all::<UserDoc>("org_id", org_id)
+        .await?
+        .into_iter()
+        .map(ScimUserRecord::from)
+        .collect();
+
+    if let Some(f) = filter {
+        records = apply_scim_user_filter(records, f)?;
     }
 
-    // No filter: use DB-level pagination with count
-    if offset > 10_000 {
-        return Err(ScimFilterError::OffsetTooLarge.into());
+    if records.len() > 10_000 {
+        return Err(ScimFilterError::FilterTooBroad.into());
     }
-    let (docs, total_count) = store
-        .list_all_paginated_with_count::<UserDoc>(offset as u64, count as u64)
-        .await?;
-    Ok((
-        docs.into_iter().map(ScimUserRecord::from).collect(),
-        usize::try_from(total_count).context("SCIM user total_count out of range")?,
-    ))
+    records.sort_by(|a, b| a.email.cmp(&b.email));
+    let total = records.len();
+    let page = records.into_iter().skip(offset).take(count).collect();
+    Ok((page, total))
 }
 
-/// Try indexed eq lookups for SCIM user filters.
+/// Try indexed eq lookups for SCIM user filters, scoped to org.
 async fn try_indexed_user_lookup(
     store: &DocumentStore,
+    org_id: &str,
     filter: &str,
 ) -> Result<Option<Vec<ScimUserRecord>>> {
-    // userName/email eq → find_one by email index
+    // userName/email eq → find_by_indexes combining email + org_id at DB level
     for attr in &["userName", "email"] {
         if let Some(f) = parse_scim_filter(filter, attr)?
             && f.op == ScimFilterOp::Eq
         {
-            let doc = store.find_one::<UserDoc>("email", &f.value).await?;
-            return Ok(Some(doc.into_iter().map(ScimUserRecord::from).collect()));
+            let docs = store
+                .find_by_indexes::<UserDoc>(&[("email", &f.value), ("org_id", org_id)])
+                .await?;
+            return Ok(Some(docs.into_iter().map(ScimUserRecord::from).collect()));
         }
     }
 
-    // externalId eq → find_one by external_id index
+    // externalId eq → find_by_indexes combining external_id + org_id
     if let Some(f) = parse_scim_filter(filter, "externalId")?
         && f.op == ScimFilterOp::Eq
     {
-        let doc = store.find_one::<UserDoc>("external_id", &f.value).await?;
-        return Ok(Some(doc.into_iter().map(ScimUserRecord::from).collect()));
+        let docs = store
+            .find_by_indexes::<UserDoc>(&[("external_id", &f.value), ("org_id", org_id)])
+            .await?;
+        return Ok(Some(docs.into_iter().map(ScimUserRecord::from).collect()));
     }
 
     Ok(None)
@@ -418,20 +451,35 @@ fn match_filter_value(value: &str, filter: &ScimFilter) -> bool {
     }
 }
 
-/// Get a user by ID for SCIM.
-pub async fn get_scim_user(store: &DocumentStore, user_id: &str) -> Result<Option<ScimUserRecord>> {
-    let doc = store.get::<UserDoc>(user_id).await?;
-    Ok(doc.map(ScimUserRecord::from))
+/// Get a user by ID for SCIM, scoped to the caller's org.
+///
+/// Returns `None` if the user does not exist or belongs to a different org.
+/// Treats out-of-org as not-found to avoid leaking existence (D3).
+pub async fn get_scim_user(
+    store: &DocumentStore,
+    user_id: &str,
+    org_id: &str,
+) -> Result<Option<ScimUserRecord>> {
+    let Some(doc) = store.get::<UserDoc>(user_id).await? else {
+        return Ok(None);
+    };
+    if doc.data.org_id.as_deref() != Some(org_id) {
+        return Ok(None);
+    }
+    Ok(Some(ScimUserRecord::from(doc)))
 }
 
 /// Create a user via SCIM.
 ///
-/// Returns an error containing "UNIQUE" if a user with the same
-/// email already exists (application-level uniqueness enforcement).
-/// The duplicate check and insert run within a single transaction to
-/// prevent concurrent duplicate inserts.
+/// Returns [`ScimUserError::DuplicateEmail`] if a user with the same email
+/// already exists in the same org. The duplicate check and insert run within
+/// a single transaction to prevent concurrent duplicate inserts.
+///
+/// `org_id`: `Some` for SCIM-provisioned users (always set); `None` for the
+/// certification test path (single-tenant, intentionally orphan).
 pub async fn create_scim_user(
     store: &DocumentStore,
+    org_id: Option<&str>,
     email: &str,
     name: Option<&str>,
     external_id: Option<&str>,
@@ -439,15 +487,24 @@ pub async fn create_scim_user(
 ) -> Result<ScimUserRecord> {
     let mut tx = store.begin().await?;
 
-    // Check for duplicates within the transaction
-    if tx.find_one::<UserDoc>("email", email).await?.is_some() {
-        anyhow::bail!("UNIQUE constraint failed: user with email already exists");
+    // Org-scoped duplicate check — cross-org email reuse is legal.
+    let collision = {
+        let existing = tx.find_all::<UserDoc>("email", email).await?;
+        match org_id {
+            Some(oid) => existing
+                .into_iter()
+                .any(|d| d.data.org_id.as_deref() == Some(oid)),
+            None => existing.into_iter().any(|d| d.data.org_id.is_none()),
+        }
+    };
+    if collision {
+        return Err(ScimUserError::DuplicateEmail.into());
     }
 
     let doc = UserDoc {
         email: email.to_string(),
         name: name.map(String::from),
-        org_id: None,
+        org_id: org_id.map(String::from),
         is_org_admin: false,
         active,
         external_id: external_id.map(String::from),
@@ -461,22 +518,43 @@ pub async fn create_scim_user(
     Ok(ScimUserRecord::from(result))
 }
 
-/// Update a user via SCIM.
+/// Update a user via SCIM, scoped to the caller's org.
+///
+/// Returns `true` if the user was updated, `false` if not found or in a different org.
 pub async fn update_scim_user(
     store: &DocumentStore,
     user_id: &str,
+    org_id: &str,
     name: Option<&str>,
     external_id: Option<&str>,
     active: bool,
-) -> Result<()> {
-    if let Some(doc) = store.get::<UserDoc>(user_id).await? {
-        let mut data = doc.data;
-        data.name = name.map(String::from);
-        data.external_id = external_id.map(String::from);
-        data.active = active;
-        store.update(user_id, &data).await?;
+) -> Result<bool> {
+    let Some(doc) = store.get::<UserDoc>(user_id).await? else {
+        return Ok(false);
+    };
+    if doc.data.org_id.as_deref() != Some(org_id) {
+        return Ok(false);
     }
-    Ok(())
+    let mut data = doc.data;
+    data.name = name.map(String::from);
+    data.external_id = external_id.map(String::from);
+    data.active = active;
+    store.update(user_id, &data).await?;
+    Ok(true)
+}
+
+/// Delete a user via SCIM, scoped to the caller's org.
+///
+/// Performs an org-scope check before calling the cascade `delete_user`.
+/// Returns `true` if deleted, `false` if not found or in a different org.
+pub async fn delete_scim_user(store: &DocumentStore, user_id: &str, org_id: &str) -> Result<bool> {
+    let Some(doc) = store.get::<UserDoc>(user_id).await? else {
+        return Ok(false);
+    };
+    if doc.data.org_id.as_deref() != Some(org_id) {
+        return Ok(false);
+    }
+    super::users::delete_user(store, user_id).await
 }
 
 // ============================================================================
@@ -503,15 +581,13 @@ pub(crate) struct ScimFilter {
     pub value: String,
 }
 
-/// Error from SCIM filter or pagination operations.
+/// Error from SCIM filter operations.
 #[derive(Debug)]
 pub enum ScimFilterError {
     /// The filter uses an operator we don't support.
     UnsupportedOperator(String),
-    /// Non-indexed filter against a table with >10 000 rows.
+    /// Non-indexed filter against an org with >10 000 rows.
     FilterTooBroad,
-    /// Requested offset exceeds the 10 000-row cap.
-    OffsetTooLarge,
 }
 
 impl std::fmt::Display for ScimFilterError {
@@ -522,9 +598,6 @@ impl std::fmt::Display for ScimFilterError {
             }
             Self::FilterTooBroad => {
                 write!(f, "filter is too broad for the current dataset size")
-            }
-            Self::OffsetTooLarge => {
-                write!(f, "startIndex exceeds maximum supported offset")
             }
         }
     }
@@ -611,6 +684,7 @@ pub struct ScimGroupRecord {
     pub id: String,
     pub display_name: String,
     pub external_id: Option<String>,
+    pub org_id: String,
     pub created_at: Timestamp,
     pub updated_at: Timestamp,
 }
@@ -621,6 +695,7 @@ impl From<Document<ScimGroupDoc>> for ScimGroupRecord {
             id: doc.id,
             display_name: doc.data.display_name,
             external_id: doc.data.external_id,
+            org_id: doc.data.org_id,
             created_at: doc.created_at,
             updated_at: doc.updated_at,
         }
@@ -648,35 +723,49 @@ impl From<Document<ScimGroupMemberDoc>> for ScimGroupMemberRecord {
 /// Create a new SCIM group.
 pub async fn create_scim_group(
     store: &DocumentStore,
+    org_id: &str,
     display_name: &str,
     external_id: Option<&str>,
 ) -> Result<ScimGroupRecord> {
     let doc = ScimGroupDoc {
         display_name: display_name.to_string(),
         external_id: external_id.map(String::from),
+        org_id: org_id.to_string(),
     };
     let result = store.insert(&doc).await?;
     Ok(ScimGroupRecord::from(result))
 }
 
-/// Get a SCIM group by ID.
-pub async fn get_scim_group(store: &DocumentStore, id: &str) -> Result<Option<ScimGroupRecord>> {
-    let doc = store.get::<ScimGroupDoc>(id).await?;
-    Ok(doc.map(ScimGroupRecord::from))
+/// Get a SCIM group by ID, scoped to the caller's org.
+///
+/// Returns `None` if the group does not exist or belongs to a different org.
+pub async fn get_scim_group(
+    store: &DocumentStore,
+    id: &str,
+    org_id: &str,
+) -> Result<Option<ScimGroupRecord>> {
+    let Some(doc) = store.get::<ScimGroupDoc>(id).await? else {
+        return Ok(None);
+    };
+    if doc.data.org_id != org_id {
+        return Ok(None);
+    }
+    Ok(Some(ScimGroupRecord::from(doc)))
 }
 
-/// Get a SCIM group by display name.
+/// Get a SCIM group by display name, scoped to the caller's org.
 pub async fn get_scim_group_by_name(
     store: &DocumentStore,
+    org_id: &str,
     display_name: &str,
 ) -> Result<Option<ScimGroupRecord>> {
-    let doc = store
-        .find_one::<ScimGroupDoc>("display_name", display_name)
+    let docs = store
+        .find_by_indexes::<ScimGroupDoc>(&[("display_name", display_name), ("org_id", org_id)])
         .await?;
-    Ok(doc.map(ScimGroupRecord::from))
+    Ok(docs.into_iter().next().map(ScimGroupRecord::from))
 }
 
-/// List SCIM groups with pagination.
+/// List SCIM groups with pagination, scoped to the caller's org.
 ///
 /// Returns `(records, total_count)` where `total_count` is the total number of
 /// matching groups (before pagination).
@@ -684,77 +773,68 @@ pub async fn get_scim_group_by_name(
 /// # Errors
 ///
 /// Returns [`ScimFilterError::FilterTooBroad`] for non-indexed filters on
-/// tables with >10 000 rows. Returns [`ScimFilterError::OffsetTooLarge`]
-/// when the computed offset exceeds 10 000.
+/// orgs with >10 000 groups.
 pub async fn list_scim_groups(
     store: &DocumentStore,
+    org_id: &str,
     filter: Option<&str>,
     start_index: usize,
     count: usize,
 ) -> Result<(Vec<ScimGroupRecord>, usize)> {
     let offset = start_index.saturating_sub(1); // SCIM 1-indexed
 
-    // Try indexed eq lookup first
+    // Try indexed AND-lookup first (display_name/externalId + org_id at DB level)
     if let Some(f) = filter
-        && let Some(result) = try_indexed_group_lookup(store, f).await?
+        && let Some(result) = try_indexed_group_lookup(store, org_id, f).await?
     {
         let total = result.len();
         let page = result.into_iter().skip(offset).take(count).collect();
         return Ok((page, total));
     }
 
-    // Non-indexed filter: must load all and filter in app
-    if filter.is_some() {
-        let table_count = store.count_all::<ScimGroupDoc>().await?;
-        if table_count > 10_000 {
-            return Err(ScimFilterError::FilterTooBroad.into());
-        }
-        let all_docs = store.list_all::<ScimGroupDoc>().await?;
-        let mut records: Vec<ScimGroupRecord> =
-            all_docs.into_iter().map(ScimGroupRecord::from).collect();
-        if let Some(f) = filter {
-            records = apply_scim_group_filter(records, f)?;
-        }
-        records.sort_by_key(|b| std::cmp::Reverse(b.created_at));
-        let total = records.len();
-        let page = records.into_iter().skip(offset).take(count).collect();
-        return Ok((page, total));
+    // Org-scoped scan via the org_id index — no more table-wide list_all.
+    let mut records: Vec<ScimGroupRecord> = store
+        .find_all::<ScimGroupDoc>("org_id", org_id)
+        .await?
+        .into_iter()
+        .map(ScimGroupRecord::from)
+        .collect();
+
+    if let Some(f) = filter {
+        records = apply_scim_group_filter(records, f)?;
     }
 
-    // No filter: use DB-level pagination with count
-    if offset > 10_000 {
-        return Err(ScimFilterError::OffsetTooLarge.into());
+    if records.len() > 10_000 {
+        return Err(ScimFilterError::FilterTooBroad.into());
     }
-    let (docs, total_count) = store
-        .list_all_paginated_with_count::<ScimGroupDoc>(offset as u64, count as u64)
-        .await?;
-    Ok((
-        docs.into_iter().map(ScimGroupRecord::from).collect(),
-        usize::try_from(total_count).context("SCIM group total_count out of range")?,
-    ))
+    records.sort_by_key(|b| std::cmp::Reverse(b.created_at));
+    let total = records.len();
+    let page = records.into_iter().skip(offset).take(count).collect();
+    Ok((page, total))
 }
 
-/// Try indexed eq lookups for SCIM group filters.
+/// Try indexed eq lookups for SCIM group filters, scoped to org.
 async fn try_indexed_group_lookup(
     store: &DocumentStore,
+    org_id: &str,
     filter: &str,
 ) -> Result<Option<Vec<ScimGroupRecord>>> {
     if let Some(f) = parse_scim_filter(filter, "displayName")?
         && f.op == ScimFilterOp::Eq
     {
-        let doc = store
-            .find_one::<ScimGroupDoc>("display_name", &f.value)
+        let docs = store
+            .find_by_indexes::<ScimGroupDoc>(&[("display_name", &f.value), ("org_id", org_id)])
             .await?;
-        return Ok(Some(doc.into_iter().map(ScimGroupRecord::from).collect()));
+        return Ok(Some(docs.into_iter().map(ScimGroupRecord::from).collect()));
     }
 
     if let Some(f) = parse_scim_filter(filter, "externalId")?
         && f.op == ScimFilterOp::Eq
     {
-        let doc = store
-            .find_one::<ScimGroupDoc>("external_id", &f.value)
+        let docs = store
+            .find_by_indexes::<ScimGroupDoc>(&[("external_id", &f.value), ("org_id", org_id)])
             .await?;
-        return Ok(Some(doc.into_iter().map(ScimGroupRecord::from).collect()));
+        return Ok(Some(docs.into_iter().map(ScimGroupRecord::from).collect()));
     }
 
     Ok(None)
@@ -786,31 +866,46 @@ fn apply_scim_group_filter(
     Ok(records)
 }
 
-/// Update a SCIM group.
+/// Update a SCIM group, scoped to the caller's org.
+///
+/// Returns `true` if updated, `false` if not found or in a different org.
 pub async fn update_scim_group(
     store: &DocumentStore,
     id: &str,
+    org_id: &str,
     display_name: Option<&str>,
     external_id: Option<&str>,
-) -> Result<()> {
-    if let Some(doc) = store.get::<ScimGroupDoc>(id).await? {
-        let mut data = doc.data;
-        if let Some(name) = display_name {
-            data.display_name = name.to_string();
-        }
-        if let Some(ext_id) = external_id {
-            data.external_id = Some(ext_id.to_string());
-        }
-        store.update(id, &data).await?;
+) -> Result<bool> {
+    let Some(doc) = store.get::<ScimGroupDoc>(id).await? else {
+        return Ok(false);
+    };
+    if doc.data.org_id != org_id {
+        return Ok(false);
     }
-    Ok(())
+    let mut data = doc.data;
+    if let Some(name) = display_name {
+        data.display_name = name.to_string();
+    }
+    if let Some(ext_id) = external_id {
+        data.external_id = Some(ext_id.to_string());
+    }
+    store.update(id, &data).await?;
+    Ok(true)
 }
 
-/// Delete a SCIM group atomically.
+/// Delete a SCIM group atomically, scoped to the caller's org.
 ///
 /// Performs application-level cascade within a single transaction:
 /// deletes group memberships first, then the group itself.
-pub async fn delete_scim_group(store: &DocumentStore, id: &str) -> Result<bool> {
+/// Returns `true` if deleted, `false` if not found or in a different org.
+pub async fn delete_scim_group(store: &DocumentStore, id: &str, org_id: &str) -> Result<bool> {
+    let Some(doc) = store.get::<ScimGroupDoc>(id).await? else {
+        return Ok(false);
+    };
+    if doc.data.org_id != org_id {
+        return Ok(false);
+    }
+
     let mut tx = store.begin().await?;
 
     // 1. Delete group memberships
@@ -818,21 +913,38 @@ pub async fn delete_scim_group(store: &DocumentStore, id: &str) -> Result<bool> 
         .await?;
 
     // 2. Delete the group
-    let existed = tx.get::<ScimGroupDoc>(id).await?.is_some();
-    if existed {
-        tx.delete(id).await?;
-    }
+    tx.delete(id).await?;
 
     tx.commit().await?;
-    Ok(existed)
+    Ok(true)
 }
 
-/// Add a member to a SCIM group.
+/// Add a member to a SCIM group, scoped to the caller's org.
+///
+/// Verifies both the group and the user belong to the caller's org.
+/// Returns `false` if the group is not found or belongs to a different org.
 pub async fn add_scim_group_member(
     store: &DocumentStore,
+    org_id: &str,
     group_id: &str,
     user_id: &str,
-) -> Result<()> {
+) -> Result<bool> {
+    // Scope-check the group
+    let Some(group_doc) = store.get::<ScimGroupDoc>(group_id).await? else {
+        return Ok(false);
+    };
+    if group_doc.data.org_id != org_id {
+        return Ok(false);
+    }
+
+    // Scope-check the user
+    let Some(user_doc) = store.get::<UserDoc>(user_id).await? else {
+        return Ok(false);
+    };
+    if user_doc.data.org_id.as_deref() != Some(org_id) {
+        return Ok(false);
+    }
+
     // Check if already a member (idempotent)
     let existing = store
         .find_by_indexes::<ScimGroupMemberDoc>(&[("group_id", group_id), ("user_id", user_id)])
@@ -846,15 +958,26 @@ pub async fn add_scim_group_member(
         store.insert(&doc).await?;
     }
 
-    Ok(())
+    Ok(true)
 }
 
-/// Remove a member from a SCIM group.
+/// Remove a member from a SCIM group, scoped to the caller's org.
+///
+/// Returns `false` if the group is not found or belongs to a different org.
 pub async fn remove_scim_group_member(
     store: &DocumentStore,
+    org_id: &str,
     group_id: &str,
     user_id: &str,
 ) -> Result<bool> {
+    // Scope-check the group
+    let Some(group_doc) = store.get::<ScimGroupDoc>(group_id).await? else {
+        return Ok(false);
+    };
+    if group_doc.data.org_id != org_id {
+        return Ok(false);
+    }
+
     let existing = store
         .find_by_indexes::<ScimGroupMemberDoc>(&[("group_id", group_id), ("user_id", user_id)])
         .await?;
@@ -866,11 +989,23 @@ pub async fn remove_scim_group_member(
     Ok(false)
 }
 
-/// Get all members of a SCIM group.
+/// Get all members of a SCIM group, scoped to the caller's org.
+///
+/// Returns empty if the group is not found or belongs to a different org.
+/// Also filters out any cross-org member rows (defense in depth for pre-fix data).
 pub async fn get_scim_group_members(
     store: &DocumentStore,
+    org_id: &str,
     group_id: &str,
 ) -> Result<Vec<ScimUserRecord>> {
+    // Scope-check the group
+    let Some(group_doc) = store.get::<ScimGroupDoc>(group_id).await? else {
+        return Ok(Vec::new());
+    };
+    if group_doc.data.org_id != org_id {
+        return Ok(Vec::new());
+    }
+
     let member_docs = store
         .find_all::<ScimGroupMemberDoc>("group_id", group_id)
         .await?;
@@ -878,7 +1013,10 @@ pub async fn get_scim_group_members(
     let mut users = Vec::with_capacity(member_docs.len());
     for member in &member_docs {
         if let Some(user_doc) = store.get::<UserDoc>(&member.data.user_id).await? {
-            users.push(ScimUserRecord::from(user_doc));
+            // Defense in depth: drop cross-org membership rows from pre-fix era.
+            if user_doc.data.org_id.as_deref() == Some(org_id) {
+                users.push(ScimUserRecord::from(user_doc));
+            }
         }
     }
 
@@ -886,18 +1024,29 @@ pub async fn get_scim_group_members(
     Ok(users)
 }
 
-/// Get all groups a user belongs to.
+/// Get all groups a user belongs to, scoped to the caller's org.
 pub async fn get_user_scim_groups(
     store: &DocumentStore,
+    org_id: &str,
     user_id: &str,
 ) -> Result<Vec<ScimGroupRecord>> {
+    // Scope-check the user
+    let Some(user_doc) = store.get::<UserDoc>(user_id).await? else {
+        return Ok(Vec::new());
+    };
+    if user_doc.data.org_id.as_deref() != Some(org_id) {
+        return Ok(Vec::new());
+    }
+
     let member_docs = store
         .find_all::<ScimGroupMemberDoc>("user_id", user_id)
         .await?;
 
     let mut groups = Vec::with_capacity(member_docs.len());
     for member in &member_docs {
-        if let Some(group_doc) = store.get::<ScimGroupDoc>(&member.data.group_id).await? {
+        if let Some(group_doc) = store.get::<ScimGroupDoc>(&member.data.group_id).await?
+            && group_doc.data.org_id == org_id
+        {
             groups.push(ScimGroupRecord::from(group_doc));
         }
     }
@@ -906,22 +1055,51 @@ pub async fn get_user_scim_groups(
     Ok(groups)
 }
 
-/// Replace all members of a SCIM group atomically.
+/// Replace all members of a SCIM group atomically, scoped to the caller's org.
 ///
-/// Deletes all existing members and inserts the new list within a
-/// single transaction so the group is never left in a partial state.
+/// Ordering is normative (A4):
+///   STEP 1: Load group, verify it belongs to caller's org (no mutation yet).
+///   STEP 2: Verify EVERY user_id belongs to caller's org (no mutation yet).
+///   STEP 3: Delete existing members and insert new list.
+///
+/// Returns `false` if group not found or belongs to a different org.
+/// Returns [`ScimGroupMemberError::UserNotFound`] or [`ScimGroupMemberError::UserOutOfOrg`]
+/// if any user fails scope check (caller maps to 400 invalidValue).
 pub async fn replace_scim_group_members(
     store: &DocumentStore,
+    org_id: &str,
     group_id: &str,
     user_ids: &[String],
-) -> Result<()> {
+) -> Result<bool> {
     let mut tx = store.begin().await?;
 
-    // Delete all existing members
+    // STEP 1: Load the group and verify it belongs to caller's org.
+    //         Do this BEFORE any mutation. Returning Ok(false) here means the
+    //         group is unowned, in another org, or doesn't exist — caller maps
+    //         to 404. NO writes have occurred yet.
+    let Some(group_doc) = tx.get::<ScimGroupDoc>(group_id).await? else {
+        return Ok(false);
+    };
+    if group_doc.data.org_id != org_id {
+        return Ok(false);
+    }
+
+    // STEP 2: Verify EVERY proposed user_id belongs to caller's org.
+    //         Do this BEFORE any mutation. If any user is foreign or missing,
+    //         abort the entire operation. Caller maps error to 400 invalidValue.
+    for user_id in user_ids {
+        let Some(user_doc) = tx.get::<UserDoc>(user_id).await? else {
+            return Err(ScimGroupMemberError::UserNotFound.into());
+        };
+        if user_doc.data.org_id.as_deref() != Some(org_id) {
+            return Err(ScimGroupMemberError::UserOutOfOrg.into());
+        }
+    }
+
+    // STEP 3 (only after all checks pass): delete existing members, insert new.
     tx.delete_by_index::<ScimGroupMemberDoc>("group_id", group_id)
         .await?;
 
-    // Insert new members
     for user_id in user_ids {
         let doc = ScimGroupMemberDoc {
             group_id: group_id.to_string(),
@@ -931,5 +1109,5 @@ pub async fn replace_scim_group_members(
     }
 
     tx.commit().await?;
-    Ok(())
+    Ok(true)
 }

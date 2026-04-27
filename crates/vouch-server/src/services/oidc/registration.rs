@@ -1424,6 +1424,7 @@ async fn verify_software_statement_jwt(
         )
     })?;
 
+    // Software statement validation: org_id not used; signature only.
     let issuer = db::get_trusted_jwt_issuer_by_issuer(&state.store, &unverified_claims.iss)
         .await
         .map_err(|e| {

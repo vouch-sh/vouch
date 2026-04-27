@@ -26,12 +26,18 @@ pub(crate) struct OAuthUsageData {
 }
 
 /// Data payload for SCIM operation audit events.
+///
+/// Denormalized for query convenience; avoids join to ScimToken records that may be revoked.
+/// Both `actor_token_id` and `org_id` are required: SCIM audit entries are only produced
+/// on the authenticated SCIM handler path, where `ScimAuth.token_id: String` and
+/// `ScimAuth.org_id: String` are always present.
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct ScimAuditData {
     pub operation: String,
     pub resource_type: String,
     pub resource_id: String,
-    pub actor_token_id: Option<String>,
+    pub actor_token_id: String,
+    pub org_id: String,
     pub details: Option<String>,
 }
 

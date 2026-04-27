@@ -9,6 +9,8 @@
 use super::*;
 use crate::test_utils::*;
 
+const TEST_ORG: &str = "test-org";
+
 // ========================================================================
 // RFC 7644 Section 4 - Service Provider Configuration Tests
 // ========================================================================
@@ -126,7 +128,7 @@ async fn test_rfc7643_create_user_requires_username() {
     // RFC 7643 Section 4.1: userName is REQUIRED for User resource
     let (app, state) = test_app().await;
 
-    let token = create_test_scim_token(&state.store, "test-create-user").await;
+    let token = create_test_scim_token(&state.store, "test", TEST_ORG).await;
 
     // Create user with valid userName
     let (status, body) = http_post_json(
@@ -148,7 +150,7 @@ async fn test_rfc7644_create_user_conflict() {
     // RFC 7644 Section 3.3: Duplicate user returns 409 Conflict
     let (app, state) = test_app().await;
 
-    let token = create_test_scim_token(&state.store, "test-conflict").await;
+    let token = create_test_scim_token(&state.store, "test", TEST_ORG).await;
     let auth_header = format!("Bearer {}", token);
 
     // Create first user
@@ -185,7 +187,7 @@ async fn test_rfc7644_get_user_by_id() {
     // RFC 7644 Section 3.4.1: GET user by ID
     let (app, state) = test_app().await;
 
-    let token = create_test_scim_token(&state.store, "test-get-user").await;
+    let token = create_test_scim_token(&state.store, "test", TEST_ORG).await;
     let auth_header = format!("Bearer {}", token);
 
     // Create a user first
@@ -219,7 +221,7 @@ async fn test_rfc7644_get_user_not_found() {
     // RFC 7644 Section 3.4.1: Non-existent user returns 404
     let (app, state) = test_app().await;
 
-    let token = create_test_scim_token(&state.store, "test-not-found").await;
+    let token = create_test_scim_token(&state.store, "test", TEST_ORG).await;
 
     // Use a valid UUID format that doesn't exist in the database
     let (status, body) = http_get(
@@ -243,7 +245,7 @@ async fn test_rfc7644_list_users_pagination() {
     // RFC 7644 Section 3.4.2: Pagination with startIndex and count
     let (app, state) = test_app().await;
 
-    let token = create_test_scim_token(&state.store, "test-pagination").await;
+    let token = create_test_scim_token(&state.store, "test", TEST_ORG).await;
     let auth_header = format!("Bearer {}", token);
 
     // Create several users
@@ -282,7 +284,7 @@ async fn test_rfc7644_list_users_filter() {
     // RFC 7644 Section 3.4.2: Filter users by userName
     let (app, state) = test_app().await;
 
-    let token = create_test_scim_token(&state.store, "test-filter").await;
+    let token = create_test_scim_token(&state.store, "test", TEST_ORG).await;
     let auth_header = format!("Bearer {}", token);
 
     // Create users
@@ -317,7 +319,7 @@ async fn test_rfc7644_patch_user_deactivate() {
     // RFC 7644 Section 3.5.2: PATCH to deactivate user
     let (app, state) = test_app().await;
 
-    let token = create_test_scim_token(&state.store, "test-patch-deactivate").await;
+    let token = create_test_scim_token(&state.store, "test", TEST_ORG).await;
     let auth_header = format!("Bearer {}", token);
 
     // Create an active user
@@ -359,7 +361,7 @@ async fn test_rfc7644_patch_unsupported_path_returns_400() {
     // RFC 7644 Section 3.5.3: Unsupported attribute paths should return 400
     let (app, state) = test_app().await;
 
-    let token = create_test_scim_token(&state.store, "test-patch-invalid-path").await;
+    let token = create_test_scim_token(&state.store, "test", TEST_ORG).await;
     let auth_header = format!("Bearer {}", token);
 
     // Create a user first
@@ -406,7 +408,7 @@ async fn test_rfc7644_delete_user() {
     // RFC 7644 Section 3.6: DELETE removes user
     let (app, state) = test_app().await;
 
-    let token = create_test_scim_token(&state.store, "test-delete").await;
+    let token = create_test_scim_token(&state.store, "test", TEST_ORG).await;
     let auth_header = format!("Bearer {}", token);
 
     // Create a user
@@ -452,7 +454,7 @@ async fn test_rfc7644_error_format() {
     // RFC 7644 Section 3.12: Error response format
     let (app, state) = test_app().await;
 
-    let token = create_test_scim_token(&state.store, "test-error-format").await;
+    let token = create_test_scim_token(&state.store, "test", TEST_ORG).await;
 
     // Request non-existent user (valid UUID format) to get an error
     let (status, body) = http_get(
@@ -487,7 +489,7 @@ async fn test_rfc7644_filter_eq_operator() {
     // RFC 7644 Section 3.4.1: "eq" filter operator.
     let (app, state) = test_app().await;
 
-    let token = create_test_scim_token(&state.store, "test-eq-filter").await;
+    let token = create_test_scim_token(&state.store, "test", TEST_ORG).await;
     let auth_header = format!("Bearer {}", token);
 
     // Create a user to search for
@@ -523,7 +525,7 @@ async fn test_rfc7644_error_includes_scim_schema() {
     // RFC 7644 Section 3.12: SCIM errors must include correct schemas URN.
     let (app, state) = test_app().await;
 
-    let token = create_test_scim_token(&state.store, "test-error-schema").await;
+    let token = create_test_scim_token(&state.store, "test", TEST_ORG).await;
 
     // Use a valid UUID format that doesn't exist in the database
     let (status, body) = http_get(
@@ -559,7 +561,7 @@ async fn test_rfc7644_list_response_format() {
     // totalResults, startIndex, and itemsPerPage.
     let (app, state) = test_app().await;
 
-    let token = create_test_scim_token(&state.store, "test-list-format").await;
+    let token = create_test_scim_token(&state.store, "test", TEST_ORG).await;
     let auth_header = format!("Bearer {}", token);
 
     let (status, body) = http_get(&app, "/scim/v2/Users", &[("Authorization", &auth_header)]).await;
@@ -593,7 +595,7 @@ async fn test_rfc7644_filter_co_operator_contains() {
     // userName co "partial" returns all users whose userName contains "partial".
     let (app, state) = test_app().await;
 
-    let token = create_test_scim_token(&state.store, "test-co-filter").await;
+    let token = create_test_scim_token(&state.store, "test", TEST_ORG).await;
     let auth_header = format!("Bearer {}", token);
 
     // Create users with known usernames
@@ -657,7 +659,7 @@ async fn test_rfc7644_filter_sw_operator_starts_with() {
     // userName sw "prefix" returns all users whose userName starts with "prefix".
     let (app, state) = test_app().await;
 
-    let token = create_test_scim_token(&state.store, "test-sw-filter").await;
+    let token = create_test_scim_token(&state.store, "test", TEST_ORG).await;
     let auth_header = format!("Bearer {}", token);
 
     // Create users with known usernames
@@ -721,7 +723,7 @@ async fn test_rfc7644_filter_eq_still_works_alongside_new_operators() {
     // RFC 7644 Section 3.4.2: "eq" returns only exact matches.
     let (app, state) = test_app().await;
 
-    let token = create_test_scim_token(&state.store, "test-eq-regression").await;
+    let token = create_test_scim_token(&state.store, "test", TEST_ORG).await;
     let auth_header = format!("Bearer {}", token);
 
     // Create two users where one is a superstring of the other
@@ -777,7 +779,7 @@ async fn test_rfc7644_filter_unsupported_operator_returns_error() {
     // "ne" (not equal) is not supported and should produce an error response.
     let (app, state) = test_app().await;
 
-    let token = create_test_scim_token(&state.store, "test-ne-unsupported").await;
+    let token = create_test_scim_token(&state.store, "test", TEST_ORG).await;
     let auth_header = format!("Bearer {}", token);
 
     // Create a user (so there's something to filter)
@@ -827,7 +829,7 @@ async fn test_validation_get_user_invalid_uuid_returns_400() {
     // Non-UUID resource IDs must be rejected with 400 before hitting the DB
     let (app, state) = test_app().await;
 
-    let token = create_test_scim_token(&state.store, "test-invalid-uuid").await;
+    let token = create_test_scim_token(&state.store, "test", TEST_ORG).await;
     let auth_header = format!("Bearer {}", token);
 
     let (status, body) = http_get(
@@ -853,7 +855,7 @@ async fn test_validation_get_user_invalid_uuid_returns_400() {
 async fn test_validation_get_group_invalid_uuid_returns_400() {
     let (app, state) = test_app().await;
 
-    let token = create_test_scim_token(&state.store, "test-invalid-group-uuid").await;
+    let token = create_test_scim_token(&state.store, "test", TEST_ORG).await;
     let auth_header = format!("Bearer {}", token);
 
     let (status, body) = http_get(
@@ -872,7 +874,7 @@ async fn test_validation_get_group_invalid_uuid_returns_400() {
 async fn test_validation_patch_user_invalid_uuid_returns_400() {
     let (app, state) = test_app().await;
 
-    let token = create_test_scim_token(&state.store, "test-patch-invalid-uuid").await;
+    let token = create_test_scim_token(&state.store, "test", TEST_ORG).await;
     let auth_header = format!("Bearer {}", token);
 
     let (status, body) = http_request(
@@ -896,7 +898,7 @@ async fn test_validation_patch_user_invalid_uuid_returns_400() {
 async fn test_validation_delete_user_invalid_uuid_returns_400() {
     let (app, state) = test_app().await;
 
-    let token = create_test_scim_token(&state.store, "test-delete-invalid-uuid").await;
+    let token = create_test_scim_token(&state.store, "test", TEST_ORG).await;
     let auth_header = format!("Bearer {}", token);
 
     let (status, body) = http_request(
@@ -918,7 +920,7 @@ async fn test_validation_valid_uuid_passes_to_not_found() {
     // A valid UUID that doesn't exist should return 404, not 400
     let (app, state) = test_app().await;
 
-    let token = create_test_scim_token(&state.store, "test-valid-uuid-404").await;
+    let token = create_test_scim_token(&state.store, "test", TEST_ORG).await;
     let auth_header = format!("Bearer {}", token);
 
     let (status, _body) = http_get(
@@ -943,7 +945,7 @@ async fn test_validation_valid_uuid_passes_to_not_found() {
 async fn test_validation_filter_too_long_returns_400() {
     let (app, state) = test_app().await;
 
-    let token = create_test_scim_token(&state.store, "test-long-filter").await;
+    let token = create_test_scim_token(&state.store, "test", TEST_ORG).await;
     let auth_header = format!("Bearer {}", token);
 
     // Build a filter that exceeds the 1024 character limit
@@ -967,7 +969,7 @@ async fn test_validation_filter_too_long_returns_400() {
 async fn test_validation_filter_within_limit_succeeds() {
     let (app, state) = test_app().await;
 
-    let token = create_test_scim_token(&state.store, "test-normal-filter").await;
+    let token = create_test_scim_token(&state.store, "test", TEST_ORG).await;
     let auth_header = format!("Bearer {}", token);
 
     // A normal-length filter should succeed
@@ -989,7 +991,7 @@ async fn test_validation_filter_within_limit_succeeds() {
 async fn test_validation_start_index_too_large_returns_400() {
     let (app, state) = test_app().await;
 
-    let token = create_test_scim_token(&state.store, "test-large-start-index").await;
+    let token = create_test_scim_token(&state.store, "test", TEST_ORG).await;
     let auth_header = format!("Bearer {}", token);
 
     let (status, body) = http_get(
@@ -1008,7 +1010,7 @@ async fn test_validation_start_index_too_large_returns_400() {
 async fn test_validation_start_index_at_boundary_succeeds() {
     let (app, state) = test_app().await;
 
-    let token = create_test_scim_token(&state.store, "test-boundary-start-index").await;
+    let token = create_test_scim_token(&state.store, "test", TEST_ORG).await;
     let auth_header = format!("Bearer {}", token);
 
     // startIndex = 10001 is exactly at the boundary (should pass)
@@ -1114,7 +1116,7 @@ async fn test_validation_before_auth_create_group_empty_name_no_token() {
 async fn test_scim_create_group() {
     // POST /scim/v2/Groups returns 201 with id, displayName, schemas, meta
     let (app, state) = test_app().await;
-    let token = create_test_scim_token(&state.store, "test-create-group").await;
+    let token = create_test_scim_token(&state.store, "test", TEST_ORG).await;
     let auth_header = format!("Bearer {}", token);
 
     let (status, body) = http_post_json(
@@ -1137,7 +1139,7 @@ async fn test_scim_create_group() {
 async fn test_scim_create_group_with_external_id() {
     // POST with externalId should return it in the response
     let (app, state) = test_app().await;
-    let token = create_test_scim_token(&state.store, "test-create-group-extid").await;
+    let token = create_test_scim_token(&state.store, "test", TEST_ORG).await;
     let auth_header = format!("Bearer {}", token);
 
     let (status, body) = http_post_json(
@@ -1158,7 +1160,7 @@ async fn test_scim_create_group_with_external_id() {
 async fn test_scim_get_group_by_id() {
     // GET /scim/v2/Groups/{id} returns the group
     let (app, state) = test_app().await;
-    let token = create_test_scim_token(&state.store, "test-get-group").await;
+    let token = create_test_scim_token(&state.store, "test", TEST_ORG).await;
     let auth_header = format!("Bearer {}", token);
 
     // Create a group first
@@ -1191,7 +1193,7 @@ async fn test_scim_get_group_by_id() {
 async fn test_scim_list_groups_empty() {
     // GET /scim/v2/Groups on fresh DB returns empty Resources and totalResults: 0
     let (app, state) = test_app().await;
-    let token = create_test_scim_token(&state.store, "test-list-groups-empty").await;
+    let token = create_test_scim_token(&state.store, "test", TEST_ORG).await;
     let auth_header = format!("Bearer {}", token);
 
     let (status, body) =
@@ -1208,7 +1210,7 @@ async fn test_scim_list_groups_empty() {
 async fn test_scim_list_groups_returns_created() {
     // Create a group then list — it should appear in the results
     let (app, state) = test_app().await;
-    let token = create_test_scim_token(&state.store, "test-list-groups-created").await;
+    let token = create_test_scim_token(&state.store, "test", TEST_ORG).await;
     let auth_header = format!("Bearer {}", token);
 
     let (status, _) = http_post_json(
@@ -1240,7 +1242,7 @@ async fn test_scim_list_groups_returns_created() {
 async fn test_scim_delete_group() {
     // DELETE returns 204; subsequent GET returns 404
     let (app, state) = test_app().await;
-    let token = create_test_scim_token(&state.store, "test-delete-group").await;
+    let token = create_test_scim_token(&state.store, "test", TEST_ORG).await;
     let auth_header = format!("Bearer {}", token);
 
     // Create group to delete
@@ -1278,7 +1280,7 @@ async fn test_scim_delete_group() {
 async fn test_scim_patch_group_replace_display_name() {
     // PATCH replace displayName, verify the change is persisted
     let (app, state) = test_app().await;
-    let token = create_test_scim_token(&state.store, "test-patch-group-name").await;
+    let token = create_test_scim_token(&state.store, "test", TEST_ORG).await;
     let auth_header = format!("Bearer {}", token);
 
     // Create group
@@ -1315,7 +1317,7 @@ async fn test_scim_patch_group_replace_display_name() {
 async fn test_scim_patch_group_replace_external_id() {
     // PATCH replace externalId, verify the change is persisted
     let (app, state) = test_app().await;
-    let token = create_test_scim_token(&state.store, "test-patch-group-extid").await;
+    let token = create_test_scim_token(&state.store, "test", TEST_ORG).await;
     let auth_header = format!("Bearer {}", token);
 
     // Create group without externalId
@@ -1356,7 +1358,7 @@ async fn test_scim_patch_group_replace_external_id() {
 async fn test_scim_create_group_with_members() {
     // Create group with members array; verify members appear in GET response
     let (app, state) = test_app().await;
-    let token = create_test_scim_token(&state.store, "test-create-group-members").await;
+    let token = create_test_scim_token(&state.store, "test", TEST_ORG).await;
     let auth_header = format!("Bearer {}", token);
 
     // Create a user first
@@ -1406,7 +1408,7 @@ async fn test_scim_create_group_with_members() {
 async fn test_scim_patch_group_add_members() {
     // PATCH add members operation adds the user to the group
     let (app, state) = test_app().await;
-    let token = create_test_scim_token(&state.store, "test-patch-add-members").await;
+    let token = create_test_scim_token(&state.store, "test", TEST_ORG).await;
     let auth_header = format!("Bearer {}", token);
 
     // Create a user
@@ -1470,7 +1472,7 @@ async fn test_scim_patch_group_add_members() {
 async fn test_scim_patch_group_remove_member() {
     // PATCH remove with path `members[value eq "user-id"]` removes the member
     let (app, state) = test_app().await;
-    let token = create_test_scim_token(&state.store, "test-patch-remove-member").await;
+    let token = create_test_scim_token(&state.store, "test", TEST_ORG).await;
     let auth_header = format!("Bearer {}", token);
 
     // Create a user
@@ -1550,7 +1552,7 @@ async fn test_scim_patch_group_remove_member() {
 async fn test_scim_create_group_empty_display_name() {
     // Empty displayName should return 400
     let (app, state) = test_app().await;
-    let token = create_test_scim_token(&state.store, "test-create-group-empty-name").await;
+    let token = create_test_scim_token(&state.store, "test", TEST_ORG).await;
     let auth_header = format!("Bearer {}", token);
 
     let (status, body) = http_post_json(
@@ -1591,7 +1593,7 @@ async fn test_scim_create_group_requires_auth() {
 async fn test_scim_get_group_not_found() {
     // Valid UUID that doesn't exist returns 404
     let (app, state) = test_app().await;
-    let token = create_test_scim_token(&state.store, "test-group-not-found").await;
+    let token = create_test_scim_token(&state.store, "test", TEST_ORG).await;
     let auth_header = format!("Bearer {}", token);
 
     let (status, body) = http_get(
@@ -1610,7 +1612,7 @@ async fn test_scim_get_group_not_found() {
 async fn test_scim_get_group_invalid_id() {
     // Non-UUID id should return 400
     let (app, state) = test_app().await;
-    let token = create_test_scim_token(&state.store, "test-group-invalid-id").await;
+    let token = create_test_scim_token(&state.store, "test", TEST_ORG).await;
     let auth_header = format!("Bearer {}", token);
 
     let (status, body) = http_get(
@@ -1629,7 +1631,7 @@ async fn test_scim_get_group_invalid_id() {
 async fn test_scim_delete_group_not_found() {
     // DELETE on a valid UUID that doesn't exist returns 404
     let (app, state) = test_app().await;
-    let token = create_test_scim_token(&state.store, "test-delete-group-not-found").await;
+    let token = create_test_scim_token(&state.store, "test", TEST_ORG).await;
     let auth_header = format!("Bearer {}", token);
 
     let (status, body) = http_delete(
@@ -1648,7 +1650,7 @@ async fn test_scim_delete_group_not_found() {
 async fn test_scim_delete_group_invalid_id() {
     // DELETE with non-UUID id returns 400
     let (app, state) = test_app().await;
-    let token = create_test_scim_token(&state.store, "test-delete-group-invalid-id").await;
+    let token = create_test_scim_token(&state.store, "test", TEST_ORG).await;
     let auth_header = format!("Bearer {}", token);
 
     let (status, body) = http_delete(
@@ -1667,7 +1669,7 @@ async fn test_scim_delete_group_invalid_id() {
 async fn test_scim_patch_group_not_found() {
     // PATCH on a non-existent group returns 404
     let (app, state) = test_app().await;
-    let token = create_test_scim_token(&state.store, "test-patch-group-not-found").await;
+    let token = create_test_scim_token(&state.store, "test", TEST_ORG).await;
     let auth_header = format!("Bearer {}", token);
 
     let (status, body) = http_request(
@@ -1710,7 +1712,7 @@ async fn test_scim_list_groups_requires_auth() {
 async fn test_scim_group_response_has_correct_schema() {
     // Schemas array must contain the Group schema URN
     let (app, state) = test_app().await;
-    let token = create_test_scim_token(&state.store, "test-group-schema-urn").await;
+    let token = create_test_scim_token(&state.store, "test", TEST_ORG).await;
     let auth_header = format!("Bearer {}", token);
 
     let (status, body) = http_post_json(
@@ -1737,7 +1739,7 @@ async fn test_scim_group_response_has_correct_schema() {
 async fn test_scim_group_response_has_meta() {
     // meta must include resourceType, location, and created
     let (app, state) = test_app().await;
-    let token = create_test_scim_token(&state.store, "test-group-meta").await;
+    let token = create_test_scim_token(&state.store, "test", TEST_ORG).await;
     let auth_header = format!("Bearer {}", token);
 
     let (status, body) = http_post_json(
