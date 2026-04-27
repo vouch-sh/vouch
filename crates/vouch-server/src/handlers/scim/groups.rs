@@ -143,7 +143,41 @@ pub async fn create_group(
         return (status, json).into_response();
     }
 
-    // Create group
+    // STEP 1: Pre-validate all requested members exist in caller's org BEFORE
+    // persisting the group. This prevents the orphan-group bug where the group
+    // is committed but then a 400 is returned because a member is invalid.
+    if let Some(members) = &group.members {
+        let mut invalid_ids: Vec<&str> = Vec::new();
+        for member in members {
+            match db::get_scim_user(&state.store, &member.value, &auth.org_id).await {
+                Ok(Some(_)) => {}
+                // None means user doesn't exist OR belongs to a different org —
+                // SCIM spec §3.3 maps both cases to invalidValue.
+                Ok(None) => invalid_ids.push(&member.value),
+                Err(e) => {
+                    tracing::error!("Failed to validate member {}: {e}", member.value);
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(ScimError::new(500, "Failed to validate group members")),
+                    )
+                        .into_response();
+                }
+            }
+        }
+        if !invalid_ids.is_empty() {
+            let detail = format!(
+                "One or more member IDs were not found or belong to a different org: {}",
+                invalid_ids.join(", ")
+            );
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ScimError::new(400, &detail).with_type("invalidValue")),
+            )
+                .into_response();
+        }
+    }
+
+    // STEP 2: All members validated — now persist the group.
     let db_group = match db::create_scim_group(
         &state.store,
         &auth.org_id,
@@ -168,7 +202,10 @@ pub async fn create_group(
         }
     };
 
-    // Add members if provided
+    // STEP 3: Add members. Pre-validation in STEP 1 makes TOCTOU (user deleted
+    // between validate and add) extremely rare. Defense-in-depth: if Ok(false)
+    // still occurs, we log a warning and surface the 400 — the group is now an
+    // orphan, but that window is vanishingly small.
     if let Some(members) = &group.members {
         let mut failed: Vec<&str> = Vec::new();
         for member in members {
@@ -176,8 +213,16 @@ pub async fn create_group(
                 .await
             {
                 Ok(true) => {}
-                // User not found or belongs to a different org.
-                Ok(false) => failed.push(&member.value),
+                Ok(false) => {
+                    // TOCTOU: user was deleted between STEP 1 and STEP 3.
+                    tracing::warn!(
+                        group_id = %db_group.id,
+                        user_id = %member.value,
+                        "TOCTOU: member passed pre-validation but was not found during add; \
+                         user may have been deleted concurrently"
+                    );
+                    failed.push(&member.value);
+                }
                 Err(e) => tracing::warn!("Failed to add member {} to group: {e}", member.value),
             }
         }

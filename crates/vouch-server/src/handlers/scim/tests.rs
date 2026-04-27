@@ -1767,3 +1767,133 @@ async fn test_scim_group_response_has_meta() {
     );
     assert!(meta.get("created").is_some(), "meta must include created");
 }
+
+// ========================================================================
+// Group create — member pre-validation / no orphan group regression
+// ========================================================================
+
+#[tokio::test]
+async fn test_create_group_invalid_member_returns_400_and_no_group_persisted() {
+    // Creating a group with a non-existent member ID must return 400 AND
+    // must not persist the group in the database (no orphan).
+    let (app, state) = test_app().await;
+    let token = create_test_scim_token(&state.store, "test", TEST_ORG).await;
+    let auth_header = format!("Bearer {}", token);
+
+    // Confirm zero groups before the attempted create.
+    let (status, body) =
+        http_get(&app, "/scim/v2/Groups", &[("Authorization", &auth_header)]).await;
+    assert_eq!(status, StatusCode::OK);
+    let before: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let count_before = before["totalResults"].as_u64().unwrap_or(0);
+
+    // Attempt to create a group with a fabricated (non-existent) member ID.
+    let create_body = r#"{"schemas":["urn:ietf:params:scim:schemas:core:2.0:Group"],"displayName":"BadMembers","members":[{"value":"nonexistent-user-id"}]}"#;
+    let (status, body) = http_post_json(
+        &app,
+        "/scim/v2/Groups",
+        create_body,
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "invalid member must return 400; body: {body}"
+    );
+    let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(
+        error["scimType"], "invalidValue",
+        "error scimType must be invalidValue"
+    );
+
+    // Group count must be unchanged — no orphan was created.
+    let (status, body) =
+        http_get(&app, "/scim/v2/Groups", &[("Authorization", &auth_header)]).await;
+    assert_eq!(status, StatusCode::OK);
+    let after: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let count_after = after["totalResults"].as_u64().unwrap_or(0);
+    assert_eq!(
+        count_after, count_before,
+        "group count must be unchanged after failed create (no orphan group); \
+         before={count_before} after={count_after}"
+    );
+}
+
+#[tokio::test]
+async fn test_create_group_cross_org_member_returns_400_and_no_group_persisted() {
+    // Creating a group where a member belongs to a *different* org must return
+    // 400 AND must not persist the group in the database.
+    let (app, state) = test_app().await;
+    let auth_header_a = format!(
+        "Bearer {}",
+        create_test_scim_token(&state.store, "token-a", "org-alpha").await
+    );
+    let auth_header_b = format!(
+        "Bearer {}",
+        create_test_scim_token(&state.store, "token-b", "org-beta").await
+    );
+
+    // Create a user in org-beta.
+    let (status, user_body) = http_post_json(
+        &app,
+        "/scim/v2/Users",
+        r#"{"schemas":["urn:ietf:params:scim:schemas:core:2.0:User"],"userName":"beta@example.com"}"#,
+        &[("Authorization", &auth_header_b)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let user: serde_json::Value = serde_json::from_str(&user_body).expect("Valid JSON");
+    let beta_user_id = user["id"].as_str().expect("user id");
+
+    // Baseline group count for org-alpha.
+    let (status, body) = http_get(
+        &app,
+        "/scim/v2/Groups",
+        &[("Authorization", &auth_header_a)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let before: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let count_before = before["totalResults"].as_u64().unwrap_or(0);
+
+    // Attempt to create a group in org-alpha with org-beta's user as a member.
+    let create_body = format!(
+        r#"{{"schemas":["urn:ietf:params:scim:schemas:core:2.0:Group"],"displayName":"CrossOrgGroup","members":[{{"value":"{beta_user_id}"}}]}}"#
+    );
+    let (status, body) = http_post_json(
+        &app,
+        "/scim/v2/Groups",
+        &create_body,
+        &[("Authorization", &auth_header_a)],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "cross-org member must return 400; body: {body}"
+    );
+    let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(
+        error["scimType"], "invalidValue",
+        "error scimType must be invalidValue"
+    );
+
+    // Group count in org-alpha must be unchanged — no orphan was created.
+    let (status, body) = http_get(
+        &app,
+        "/scim/v2/Groups",
+        &[("Authorization", &auth_header_a)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let after: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let count_after = after["totalResults"].as_u64().unwrap_or(0);
+    assert_eq!(
+        count_after, count_before,
+        "group count in org-alpha must be unchanged after failed create (no orphan group); \
+         before={count_before} after={count_after}"
+    );
+}
