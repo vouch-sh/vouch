@@ -13,14 +13,14 @@ use jiff::Timestamp;
 /// Typed error for SCIM user operations.
 #[derive(Debug)]
 pub enum ScimUserError {
-    /// A user with this email already exists in this org.
+    /// A user with this email already exists.
     DuplicateEmail,
 }
 
 impl std::fmt::Display for ScimUserError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::DuplicateEmail => write!(f, "user with this email already exists in org"),
+            Self::DuplicateEmail => write!(f, "user with this email already exists"),
         }
     }
 }
@@ -529,20 +529,6 @@ pub async fn update_scim_user(
     data.active = active;
     store.update(user_id, &data).await?;
     Ok(true)
-}
-
-/// Delete a user via SCIM, scoped to the caller's org.
-///
-/// Performs an org-scope check before calling the cascade `delete_user`.
-/// Returns `true` if deleted, `false` if not found or in a different org.
-pub async fn delete_scim_user(store: &DocumentStore, user_id: &str, org_id: &str) -> Result<bool> {
-    let Some(doc) = store.get::<UserDoc>(user_id).await? else {
-        return Ok(false);
-    };
-    if doc.data.org_id.as_deref() != Some(org_id) {
-        return Ok(false);
-    }
-    super::users::delete_user(store, user_id).await
 }
 
 // ============================================================================

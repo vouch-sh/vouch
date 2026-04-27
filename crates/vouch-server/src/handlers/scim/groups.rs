@@ -170,13 +170,27 @@ pub async fn create_group(
 
     // Add members if provided
     if let Some(members) = &group.members {
+        let mut failed: Vec<&str> = Vec::new();
         for member in members {
-            if let Err(e) =
-                db::add_scim_group_member(&state.store, &auth.org_id, &db_group.id, &member.value)
-                    .await
+            match db::add_scim_group_member(&state.store, &auth.org_id, &db_group.id, &member.value)
+                .await
             {
-                tracing::warn!("Failed to add member {} to group: {e}", member.value);
+                Ok(true) => {}
+                // User not found or belongs to a different org.
+                Ok(false) => failed.push(&member.value),
+                Err(e) => tracing::warn!("Failed to add member {} to group: {e}", member.value),
             }
+        }
+        if !failed.is_empty() {
+            let detail = format!(
+                "One or more member IDs were not added (not found or wrong org): {}",
+                failed.join(", ")
+            );
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ScimError::new(400, &detail).with_type("invalidValue")),
+            )
+                .into_response();
         }
     }
 
@@ -418,8 +432,8 @@ pub async fn patch_group(
     }
 
     // Update group in database
-    if (display_name != group.display_name || external_id != group.external_id)
-        && let Err(e) = db::update_scim_group(
+    if display_name != group.display_name || external_id != group.external_id {
+        match db::update_scim_group(
             &state.store,
             &id,
             &auth.org_id,
@@ -427,13 +441,25 @@ pub async fn patch_group(
             external_id.as_deref(),
         )
         .await
-    {
-        tracing::error!("Failed to update group: {e}");
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ScimError::new(500, "Failed to update group")),
-        )
-            .into_response();
+        {
+            Ok(true) => {}
+            // TOCTOU: group was deleted between the get and the update.
+            Ok(false) => {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(ScimError::new(404, "Group not found")),
+                )
+                    .into_response();
+            }
+            Err(e) => {
+                tracing::error!("Failed to update group: {e}");
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ScimError::new(500, "Failed to update group")),
+                )
+                    .into_response();
+            }
+        }
     }
 
     // Audit log
