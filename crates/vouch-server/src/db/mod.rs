@@ -47,7 +47,7 @@ pub use store::StoreTransaction;
 
 // Re-export user types and functions
 pub use users::{
-    User, clear_user_github_refresh_token, delete_user, get_user_by_email_in_org, get_user_by_id,
+    User, clear_user_github_refresh_token, delete_user, get_user_by_email, get_user_by_id,
     get_user_github_refresh_token, get_users_by_org_paginated, update_user_active_status,
     update_user_admin_status, update_user_github_identity,
 };

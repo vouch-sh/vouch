@@ -129,8 +129,8 @@ pub async fn exchange_jwt_bearer_grant(
     // 8. Map subject claim to Vouch user
     let user = match issuer.subject_claim_mapping.as_str() {
         "email" => {
-            // sub claim is the user's email; look up within the issuer's org
-            db::get_user_by_email_in_org(&state.store, &validated.claims.sub, &issuer.org_id)
+            // sub claim is the user's email
+            db::get_user_by_email(&state.store, &validated.claims.sub)
                 .await
                 .map_err(|e| ServiceError::Internal(format!("Database error: {e}")))?
         }

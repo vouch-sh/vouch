@@ -2307,20 +2307,14 @@ async fn test_scim_group_delete_cascades_members() {
 // ========================================================================
 
 #[tokio::test]
-async fn test_create_scim_user_same_email_different_org_succeeds() {
+async fn test_create_scim_user_duplicate_email_globally_unique() {
     let (store, _audit) = test_db().await;
 
-    // Same email in different orgs must not conflict.
+    // First creation succeeds.
     let user_a = create_scim_user(&store, "org-a", "shared@example.com", None, None, true)
         .await
         .expect("first creation (org-a) should succeed");
 
-    let user_b = create_scim_user(&store, "org-b", "shared@example.com", None, None, true)
-        .await
-        .expect("second creation (org-b) should succeed — different org, not a duplicate");
-
-    // Both rows must exist with distinct IDs and the correct org_id.
-    assert_ne!(user_a.id, user_b.id, "rows must have distinct IDs");
     assert!(
         get_scim_user(&store, &user_a.id, "org-a")
             .await
@@ -2328,19 +2322,24 @@ async fn test_create_scim_user_same_email_different_org_succeeds() {
             .is_some(),
         "user_a must be findable in org-a"
     );
+
+    // Second creation with the same email in a different org must be rejected —
+    // emails are globally unique across all orgs.
+    let dup_b = create_scim_user(&store, "org-b", "shared@example.com", None, None, true).await;
     assert!(
-        get_scim_user(&store, &user_b.id, "org-b")
-            .await
-            .expect("query user_b")
-            .is_some(),
-        "user_b must be findable in org-b"
+        dup_b.is_err(),
+        "duplicate email in different org must be rejected"
+    );
+    assert!(
+        dup_b.unwrap_err().downcast_ref::<ScimUserError>().is_some(),
+        "error must be ScimUserError::DuplicateEmail"
     );
 
-    // A third creation in org-a with the same email must still be rejected.
-    let dup = create_scim_user(&store, "org-a", "shared@example.com", None, None, true).await;
-    assert!(dup.is_err(), "duplicate in same org must be rejected");
+    // Same-org duplicate also rejected.
+    let dup_a = create_scim_user(&store, "org-a", "shared@example.com", None, None, true).await;
+    assert!(dup_a.is_err(), "duplicate in same org must be rejected");
     assert!(
-        dup.unwrap_err().downcast_ref::<ScimUserError>().is_some(),
+        dup_a.unwrap_err().downcast_ref::<ScimUserError>().is_some(),
         "error must be ScimUserError::DuplicateEmail"
     );
 }
@@ -3067,7 +3066,6 @@ async fn test_update_trusted_jwt_issuer_jwks_uri_clears_cache() {
         None,
         None,
         None,
-        "test-org",
     )
     .await
     .expect("create_trusted_jwt_issuer failed");
@@ -3095,7 +3093,6 @@ async fn test_update_trusted_jwt_issuer_jwks_uri_clears_cache() {
         issuer.allowed_scopes.as_deref(),
         issuer.max_token_lifetime_seconds,
         issuer.enabled,
-        &issuer.org_id,
     )
     .await
     .expect("update_trusted_jwt_issuer failed");
@@ -3189,7 +3186,6 @@ async fn test_jwks_refresh_does_not_modify_trusted_jwt_issuer_doc() {
         None,
         None,
         None,
-        "test-org",
     )
     .await
     .expect("create_trusted_jwt_issuer failed");
