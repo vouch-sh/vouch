@@ -331,8 +331,7 @@ pub async fn list_scim_users(
             return Err(ScimFilterError::FilterTooBroad.into());
         }
         let all = store.find_all::<UserDoc>("org_id", org_id).await?;
-        let mut records: Vec<ScimUserRecord> =
-            all.into_iter().map(ScimUserRecord::from).collect();
+        let mut records: Vec<ScimUserRecord> = all.into_iter().map(ScimUserRecord::from).collect();
         if let Some(f) = filter {
             records = apply_scim_user_filter(records, f)?;
         }
