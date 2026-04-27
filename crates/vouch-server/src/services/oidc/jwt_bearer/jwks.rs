@@ -93,7 +93,7 @@ pub async fn resolve_issuer_jwks(
     jwks_cache: Option<&JwksCacheDoc>,
     http_client: &reqwest::Client,
 ) -> ServiceResult<JwkSet> {
-    resolve_jwks_uri_for_issuer(store, issuer_id, jwks_uri, jwks_cache, http_client).await
+    resolve_jwks_uri(store, issuer_id, jwks_uri, jwks_cache, http_client).await
 }
 
 /// Fetch JWKS from a URI with caching.
@@ -134,17 +134,6 @@ async fn resolve_jwks_uri(
             Err(e)
         }
     }
-}
-
-/// Fetch JWKS from a URI with caching (for issuers — same logic, separate entry point for clarity).
-async fn resolve_jwks_uri_for_issuer(
-    store: &DocumentStore,
-    issuer_id: &str,
-    uri: &str,
-    cached: Option<&JwksCacheDoc>,
-    http_client: &reqwest::Client,
-) -> ServiceResult<JwkSet> {
-    resolve_jwks_uri(store, issuer_id, uri, cached, http_client).await
 }
 
 /// Fetch JWKS from a remote URI.
