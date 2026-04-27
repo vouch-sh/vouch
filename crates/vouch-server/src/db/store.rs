@@ -1083,22 +1083,6 @@ impl DocumentStore {
         Ok((results, has_more))
     }
 
-    /// List documents with OFFSET pagination and a total count in one query.
-    ///
-    /// Uses `COUNT(*) OVER()` window function to return the total matching row
-    /// count alongside the page results. Offset is capped at 10,000; requests
-    /// beyond that return an error.
-    ///
-    /// Results are ordered by `id ASC` (UUIDv7 = insertion order).
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if decryption or deserialization fails.
-    ///
-    /// # Panics safety
-    ///
-    /// Callers must validate `offset` before calling; large offsets
-    /// will degrade performance on big tables.
     /// Find documents matching an indexed field with offset pagination
     /// and a total count, all in one query.
     ///
