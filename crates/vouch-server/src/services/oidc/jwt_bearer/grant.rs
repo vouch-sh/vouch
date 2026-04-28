@@ -169,6 +169,24 @@ pub async fn exchange_jwt_bearer_grant(
         ));
     }
 
+    // 8c. Enforce org binding: the resolved user must belong to the issuer's org.
+    // This prevents a trusted issuer in one org from minting tokens for users in
+    // other orgs (cross-tenant token issuance).
+    if user.org_id.as_deref() != Some(issuer.org_id.as_str()) {
+        tracing::warn!(
+            target: "security",
+            issuer = %issuer.issuer,
+            user_id = %user.id,
+            issuer_org = %issuer.org_id,
+            user_org = ?user.org_id,
+            "JWT bearer grant rejected: user does not belong to issuer's organization"
+        );
+        return Err(ServiceError::oauth(
+            OAuthErrorCode::InvalidGrant,
+            "User does not belong to issuer's organization",
+        ));
+    }
+
     // 9. Check JTI for replay (RFC 7523 Section 3)
     //    Deterministic document ID derived from (jti, issuer) ensures the
     //    PRIMARY KEY constraint prevents concurrent duplicate inserts.
