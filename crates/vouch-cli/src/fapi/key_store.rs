@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 //! OS keychain storage for the FAPI 2.0 client key.
 //!
-//! Uses the [`keyring`] crate to store and retrieve the [`ClientKeyFile`] JSON
-//! in the platform-native credential store:
+//! Uses the [`keyring_core`] crate with a platform-native credential store
+//! (registered via [`init_default_store`] at startup) to store and retrieve
+//! the [`ClientKeyFile`] JSON:
 //!
 //! - **macOS**: Security framework (Keychain)
 //! - **Linux**: Secret Service (GNOME Keyring / KDE Wallet) or `keyutils`
@@ -19,6 +20,31 @@ const SERVICE: &str = "vouch";
 /// Keyring account name for the FAPI client key.
 const ACCOUNT: &str = "client_key";
 
+/// Register the platform-native credential store as keyring-core's default.
+///
+/// Must be called once at process startup before any [`keyring_core::Entry`]
+/// is created. Failure is non-fatal: callers fall back to file-based storage
+/// in [`load_or_create_client_key`].
+///
+/// # Errors
+///
+/// Returns [`FapiError::KeychainAccess`] if the platform store cannot be
+/// instantiated.
+pub fn init_default_store() -> Result<(), FapiError> {
+    #[cfg(target_os = "macos")]
+    let store = apple_native_keyring_store::keychain::Store::new()
+        .map_err(|e| FapiError::KeychainAccess(e.to_string()))?;
+    #[cfg(target_os = "windows")]
+    let store = windows_native_keyring_store::Store::new()
+        .map_err(|e| FapiError::KeychainAccess(e.to_string()))?;
+    #[cfg(target_os = "linux")]
+    let store = linux_keyutils_keyring_store::Store::new()
+        .map_err(|e| FapiError::KeychainAccess(e.to_string()))?;
+
+    keyring_core::set_default_store(store);
+    Ok(())
+}
+
 /// Load a [`ClientKeyFile`] from the OS keychain.
 ///
 /// Returns `Ok(Some(key_file))` if the entry exists and is valid JSON,
@@ -29,7 +55,7 @@ const ACCOUNT: &str = "client_key";
 /// Returns [`FapiError::KeychainAccess`] if the keychain cannot be accessed.
 /// Returns [`FapiError::Serialization`] if the stored value is not valid JSON.
 pub fn load_from_keychain() -> Result<Option<ClientKeyFile>, FapiError> {
-    let entry = keyring::Entry::new(SERVICE, ACCOUNT)
+    let entry = keyring_core::Entry::new(SERVICE, ACCOUNT)
         .map_err(|e| FapiError::KeychainAccess(e.to_string()))?;
 
     match entry.get_password() {
@@ -37,7 +63,7 @@ pub fn load_from_keychain() -> Result<Option<ClientKeyFile>, FapiError> {
             let key_file: ClientKeyFile = serde_json::from_str(&json)?;
             Ok(Some(key_file))
         }
-        Err(keyring::Error::NoEntry) => Ok(None),
+        Err(keyring_core::Error::NoEntry) => Ok(None),
         Err(e) => Err(FapiError::KeychainAccess(e.to_string())),
     }
 }
@@ -51,7 +77,7 @@ pub fn load_from_keychain() -> Result<Option<ClientKeyFile>, FapiError> {
 pub fn save_to_keychain(key_file: &ClientKeyFile) -> Result<(), FapiError> {
     let json = serde_json::to_string(key_file)?;
 
-    let entry = keyring::Entry::new(SERVICE, ACCOUNT)
+    let entry = keyring_core::Entry::new(SERVICE, ACCOUNT)
         .map_err(|e| FapiError::KeychainAccess(e.to_string()))?;
 
     entry
@@ -67,11 +93,11 @@ pub fn save_to_keychain(key_file: &ClientKeyFile) -> Result<(), FapiError> {
 ///
 /// Returns [`FapiError::KeychainAccess`] if the keychain cannot be accessed.
 pub fn delete_from_keychain() -> Result<(), FapiError> {
-    let entry = keyring::Entry::new(SERVICE, ACCOUNT)
+    let entry = keyring_core::Entry::new(SERVICE, ACCOUNT)
         .map_err(|e| FapiError::KeychainAccess(e.to_string()))?;
 
     match entry.delete_credential() {
-        Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+        Ok(()) | Err(keyring_core::Error::NoEntry) => Ok(()),
         Err(e) => Err(FapiError::KeychainAccess(e.to_string())),
     }
 }

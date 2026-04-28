@@ -33,11 +33,7 @@ hex = { workspace = true, features = ["std"] }
 inquire = { workspace = true, features = ["crossterm"] }
 jiff = { workspace = true, features = ["std", "serde", "tz-system"] }
 jsonwebtoken = { workspace = true, features = ["aws_lc_rs"] }
-keyring = { workspace = true, features = [
-    "apple-native",   # macOS Keychain
-    "windows-native", # Windows Credential Store
-    "linux-native",   # Linux keyutils
-] }
+keyring-core = { workspace = true }
 mimalloc = { workspace = true, features = ["secure"] }
 open = { workspace = true }
 reqwest = { workspace = true, features = ["json", "rustls", "form", "query"] }
@@ -66,6 +62,13 @@ zeroize = { workspace = true }
 [target.'cfg(target_os = "linux")'.dependencies]
 aws-lc-rs = { workspace = true, features = ["fips"] }
 ctap-hid-fido2 = { workspace = true, features = ["fips"] }
+linux-keyutils-keyring-store = { workspace = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+apple-native-keyring-store = { workspace = true, features = ["keychain"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-native-keyring-store = { workspace = true }
 
 [target.'cfg(not(target_os = "linux"))'.dependencies]
 aws-lc-rs = { workspace = true }
