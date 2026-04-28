@@ -443,6 +443,12 @@ async fn main() -> ExitCode {
 async fn run() -> Result<()> {
     let argv0 = std::env::args().next().unwrap_or_default();
 
+    // Register the platform-native keyring store. Non-fatal: keychain access
+    // already falls back to file storage in fapi::key_store when unavailable.
+    if let Err(e) = vouch_cli::fapi::key_store::init_default_store() {
+        tracing::debug!("Could not initialize keyring store: {e}");
+    }
+
     // Check if invoked via symlink as a helper binary
     if check_docker_credential_invocation(&argv0).await? {
         return Ok(());
