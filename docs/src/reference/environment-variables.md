@@ -133,7 +133,7 @@ Vouch supports loading configuration from an S3 object for centralized managemen
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `VOUCH_JWT_ASSERTION_MAX_LIFETIME` | No | `300` | Maximum lifetime for JWT assertions in seconds (per RFC 7523). JWT bearer grant assertions older than this are rejected. |
+| `VOUCH_JWT_ASSERTION_MAX_LIFETIME` | No | `300` | Maximum lifetime (seconds) for `private_key_jwt` client-authentication JWT assertions (RFC 7523 §2.2 / §3). Assertions older than this are rejected. |
 
 ## Protected Resource Metadata (RFC 9728)
 

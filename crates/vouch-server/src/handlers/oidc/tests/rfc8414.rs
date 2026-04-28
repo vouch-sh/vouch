@@ -169,8 +169,8 @@ async fn test_rfc8414_grant_types_supported() {
         "Must support token-exchange"
     );
     assert!(
-        grant_strings.contains(&"urn:ietf:params:oauth:grant-type:jwt-bearer"),
-        "Must support jwt-bearer"
+        !grant_strings.contains(&"urn:ietf:params:oauth:grant-type:jwt-bearer"),
+        "JWT-Bearer grant must not be advertised in discovery (RFC 7523 §2.1 removed)"
     );
 }
 

@@ -146,10 +146,6 @@ pub enum OAuthErrorCode {
     InvalidRedirectUri,
     /// RFC 7591 Section 3.2.2: Client metadata is invalid.
     InvalidClientMetadata,
-    /// RFC 7591 Section 3.2.2: Software statement JWT is malformed or has invalid signature.
-    InvalidSoftwareStatement,
-    /// RFC 7591 Section 3.2.2: Software statement issuer is not trusted.
-    UnapprovedSoftwareStatement,
     /// RFC 9396 Section 7: The authorization_details parameter is invalid.
     InvalidAuthorizationDetails,
     /// OIDC Core Section 6.2: The request_uri parameter value is invalid.
@@ -175,8 +171,6 @@ impl OAuthErrorCode {
             | Self::InvalidRequestObject
             | Self::InvalidRedirectUri
             | Self::InvalidClientMetadata
-            | Self::InvalidSoftwareStatement
-            | Self::UnapprovedSoftwareStatement
             | Self::InvalidAuthorizationDetails
             | Self::InvalidRequestUri => StatusCode::BAD_REQUEST,
             Self::InvalidClient | Self::UnauthorizedClient => StatusCode::UNAUTHORIZED,
@@ -218,8 +212,6 @@ impl OAuthErrorCode {
             Self::InvalidRequestObject => "invalid_request_object",
             Self::InvalidRedirectUri => "invalid_redirect_uri",
             Self::InvalidClientMetadata => "invalid_client_metadata",
-            Self::InvalidSoftwareStatement => "invalid_software_statement",
-            Self::UnapprovedSoftwareStatement => "unapproved_software_statement",
             Self::InvalidAuthorizationDetails => "invalid_authorization_details",
             Self::InvalidRequestUri => "invalid_request_uri",
         }
@@ -808,14 +800,6 @@ mod tests {
             OAuthErrorCode::InvalidClientMetadata.as_str(),
             "invalid_client_metadata"
         );
-        assert_eq!(
-            OAuthErrorCode::InvalidSoftwareStatement.as_str(),
-            "invalid_software_statement"
-        );
-        assert_eq!(
-            OAuthErrorCode::UnapprovedSoftwareStatement.as_str(),
-            "unapproved_software_statement"
-        );
     }
 
     #[test]
@@ -826,14 +810,6 @@ mod tests {
         );
         assert_eq!(
             OAuthErrorCode::InvalidClientMetadata.status_code(),
-            StatusCode::BAD_REQUEST
-        );
-        assert_eq!(
-            OAuthErrorCode::InvalidSoftwareStatement.status_code(),
-            StatusCode::BAD_REQUEST
-        );
-        assert_eq!(
-            OAuthErrorCode::UnapprovedSoftwareStatement.status_code(),
             StatusCode::BAD_REQUEST
         );
     }

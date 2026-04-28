@@ -12,7 +12,6 @@ use crate::services::oidc::{
     client_credentials::exchange_client_credentials,
     exchange::{TokenExchangeParams, exchange_token},
     jwt_bearer::client_auth::{authenticate_client_jwt, commit_jti},
-    jwt_bearer::grant::exchange_jwt_bearer_grant,
     token::{AuthCodeExchangeParams, exchange_authorization_code, validate_dpop_if_present},
 };
 use crate::services::{OAuthErrorCode, ServiceError};
@@ -37,8 +36,6 @@ pub(super) enum OAuthGrantType {
     DeviceCode,
     /// Token exchange grant (RFC 8693).
     TokenExchange,
-    /// JWT bearer assertion grant (RFC 7523).
-    JwtBearer,
     /// FIDO2 assertion grant (custom extension per RFC 6749 Section 4.5).
     Fido2Assertion,
 }
@@ -67,12 +64,11 @@ impl std::fmt::Display for ParseOAuthGrantTypeError {
 impl std::error::Error for ParseOAuthGrantTypeError {}
 
 impl OAuthGrantType {
-    const SUPPORTED: [Self; 6] = [
+    const SUPPORTED: [Self; 5] = [
         Self::AuthorizationCode,
         Self::ClientCredentials,
         Self::DeviceCode,
         Self::TokenExchange,
-        Self::JwtBearer,
         Self::Fido2Assertion,
     ];
 
@@ -84,7 +80,6 @@ impl OAuthGrantType {
             Self::ClientCredentials => "client_credentials",
             Self::DeviceCode => "urn:ietf:params:oauth:grant-type:device_code",
             Self::TokenExchange => "urn:ietf:params:oauth:grant-type:token-exchange",
-            Self::JwtBearer => "urn:ietf:params:oauth:grant-type:jwt-bearer",
             Self::Fido2Assertion => "urn:ietf:params:oauth:grant-type:fido2-assertion",
         }
     }
@@ -402,7 +397,6 @@ pub async fn token(
         OAuthGrantType::TokenExchange => {
             handle_token_exchange_grant(State(state), client_cert, headers, params).await
         }
-        OAuthGrantType::JwtBearer => handle_jwt_bearer_grant(State(state), params).await,
         OAuthGrantType::Fido2Assertion => {
             handle_fido2_assertion_grant(State(state), client_info, client_cert, headers, params)
                 .await
@@ -1039,36 +1033,6 @@ async fn handle_fido2_assertion_grant(
     }
 }
 
-/// Handle JWT bearer grant (RFC 7523 Section 2.1).
-async fn handle_jwt_bearer_grant(
-    State(state): State<Arc<AppState>>,
-    params: TokenRequest,
-) -> Response {
-    // The assertion parameter is REQUIRED for jwt-bearer grants
-    let assertion = match &params.assertion {
-        Some(a) => a.clone(),
-        None => {
-            return token_error_response(
-                "invalid_request",
-                "Missing assertion parameter for jwt-bearer grant",
-            );
-        }
-    };
-
-    match exchange_jwt_bearer_grant(&state, &assertion, params.scope.as_deref()).await {
-        Ok(result) => token_success_response(TokenResponse {
-            access_token: result.access_token,
-            token_type: result.token_type,
-            expires_in: result.expires_in,
-            id_token: None,
-            scope: result.scope,
-            email: None,
-            authorization_details: None,
-        }),
-        Err(e) => e.into_oauth_response().into_response(),
-    }
-}
-
 /// Validate mTLS client authentication when the client uses `tls_client_auth`
 /// or `self_signed_tls_client_auth` (RFC 8705 Section 2).
 ///
@@ -1220,13 +1184,6 @@ mod tests {
     }
 
     #[test]
-    fn test_oauth_grant_type_from_str_jwt_bearer() {
-        let result: Result<OAuthGrantType, _> =
-            "urn:ietf:params:oauth:grant-type:jwt-bearer".parse();
-        assert_eq!(result, Ok(OAuthGrantType::JwtBearer));
-    }
-
-    #[test]
     fn test_oauth_grant_type_from_str_fido2_assertion() {
         let result: Result<OAuthGrantType, _> =
             "urn:ietf:params:oauth:grant-type:fido2-assertion".parse();
@@ -1249,5 +1206,10 @@ mod tests {
 
         let result3: Result<OAuthGrantType, _> = "jwt-bearer".parse();
         assert!(result3.is_err());
+
+        // Lock-in: §2.1 grant URN must be rejected (RFC 7523 §2.1 removed).
+        let bearer: Result<OAuthGrantType, _> =
+            "urn:ietf:params:oauth:grant-type:jwt-bearer".parse();
+        assert!(bearer.is_err());
     }
 }
