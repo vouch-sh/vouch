@@ -25,6 +25,7 @@ pub struct TrustedJwtIssuer {
     pub allowed_scopes: Option<String>,
     pub max_token_lifetime_seconds: i32,
     pub enabled: bool,
+    pub org_id: String,
     pub created_at: Timestamp,
     pub updated_at: Timestamp,
 }
@@ -41,13 +42,18 @@ impl From<Document<TrustedJwtIssuerDoc>> for TrustedJwtIssuer {
             allowed_scopes: doc.data.allowed_scopes,
             max_token_lifetime_seconds: doc.data.max_token_lifetime_seconds,
             enabled: doc.data.enabled,
+            org_id: doc.data.org_id,
             created_at: doc.created_at,
             updated_at: doc.updated_at,
         }
     }
 }
 
-/// Create a new trusted JWT issuer.
+/// Create a new trusted JWT issuer bound to a single organization.
+///
+/// The issuer is trusted only to authenticate users belonging to `org_id`.
+/// JWT-Bearer grants where the resolved user's `org_id` does not match this
+/// issuer's `org_id` are rejected (RFC 7523 §3 with multi-tenant scoping).
 #[expect(
     clippy::too_many_arguments,
     reason = "JWT issuer record requires all configuration fields"
@@ -61,6 +67,7 @@ pub async fn create_trusted_jwt_issuer(
     subject_claim_mapping: Option<&str>,
     allowed_scopes: Option<&str>,
     max_token_lifetime_seconds: Option<i32>,
+    org_id: &str,
 ) -> Result<TrustedJwtIssuer> {
     let mapping = subject_claim_mapping.unwrap_or(DEFAULT_SUBJECT_CLAIM_MAPPING);
     let max_lifetime = max_token_lifetime_seconds.unwrap_or(DEFAULT_MAX_TOKEN_LIFETIME_SECONDS);
@@ -74,6 +81,7 @@ pub async fn create_trusted_jwt_issuer(
         allowed_scopes: allowed_scopes.map(String::from),
         max_token_lifetime_seconds: max_lifetime,
         enabled: true,
+        org_id: org_id.to_string(),
     };
     let result = store.insert(&doc).await?;
     Ok(TrustedJwtIssuer::from(result))

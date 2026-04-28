@@ -726,13 +726,15 @@ async fn test_rfc7523_jwt_bearer_grant_with_trusted_issuer() {
     // assertion, and exchange it at /oauth/token.
     let (app, state) = test_app().await;
 
-    // Create user that the JWT subject will map to
-    let user = create_test_user(&state.store, "jwt-bearer-user@example.com").await;
+    // Create org and user that the JWT subject will map to
+    let org = create_test_org(&state.store, "example.com").await;
+    let user =
+        create_test_user_in_org(&state.store, "jwt-bearer-user@example.com", &org.id, false).await;
 
     // Generate ES256 key pair for the trusted issuer
     let (pkcs8_bytes, jwk) = generate_es256_signing_key();
 
-    // Create trusted issuer
+    // Create trusted issuer bound to the same org as the user
     let issuer_url = "https://trusted-issuer.example.com";
     let issuer = db::create_trusted_jwt_issuer(
         &state.store,
@@ -743,6 +745,7 @@ async fn test_rfc7523_jwt_bearer_grant_with_trusted_issuer() {
         Some("email"), // Map sub claim to email
         Some("openid email"),
         Some(3600),
+        &org.id,
     )
     .await
     .expect("Failed to create trusted issuer");
@@ -798,7 +801,14 @@ async fn test_rfc7523_jwt_bearer_grant_jti_replay() {
     // RFC 7523 Section 3: JTI replay detection for JWT bearer grants.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.store, "jwt-bearer-replay@example.com").await;
+    let org = create_test_org(&state.store, "example.com").await;
+    let user = create_test_user_in_org(
+        &state.store,
+        "jwt-bearer-replay@example.com",
+        &org.id,
+        false,
+    )
+    .await;
     let (pkcs8_bytes, jwk) = generate_es256_signing_key();
 
     let issuer_url = "https://replay-issuer.example.com";
@@ -811,6 +821,7 @@ async fn test_rfc7523_jwt_bearer_grant_jti_replay() {
         Some("email"),
         Some("openid"),
         Some(3600),
+        &org.id,
     )
     .await
     .expect("Failed to create issuer");
@@ -896,6 +907,7 @@ async fn test_rfc7523_jwt_bearer_grant_user_not_found() {
 
     let (pkcs8_bytes, jwk) = generate_es256_signing_key();
 
+    let org = create_test_org(&state.store, "example.com").await;
     let issuer_url = "https://no-user-issuer.example.com";
     let issuer = db::create_trusted_jwt_issuer(
         &state.store,
@@ -906,6 +918,7 @@ async fn test_rfc7523_jwt_bearer_grant_user_not_found() {
         Some("email"),
         Some("openid"),
         Some(3600),
+        &org.id,
     )
     .await
     .expect("Failed to create issuer");
@@ -963,7 +976,9 @@ async fn test_rfc7523_jwt_bearer_grant_lifetime_exceeded() {
     // RFC 7523 Section 3: JWT assertion lifetime exceeding issuer max must be rejected.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.store, "jwt-bearer-long@example.com").await;
+    let org = create_test_org(&state.store, "example.com").await;
+    let user =
+        create_test_user_in_org(&state.store, "jwt-bearer-long@example.com", &org.id, false).await;
     let (pkcs8_bytes, jwk) = generate_es256_signing_key();
 
     let issuer_url = "https://short-lifetime-issuer.example.com";
@@ -976,6 +991,7 @@ async fn test_rfc7523_jwt_bearer_grant_lifetime_exceeded() {
         Some("email"),
         Some("openid"),
         Some(60), // Max 60 seconds
+        &org.id,
     )
     .await
     .expect("Failed to create issuer");
@@ -1141,7 +1157,14 @@ async fn test_rfc7523_jwt_bearer_grant_deactivated_user_rejected() {
     // GH#275: Deactivated user cannot obtain tokens via JWT bearer grant.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.store, "deactivated-bearer@example.com").await;
+    let org = create_test_org(&state.store, "example.com").await;
+    let user = create_test_user_in_org(
+        &state.store,
+        "deactivated-bearer@example.com",
+        &org.id,
+        false,
+    )
+    .await;
 
     let (pkcs8_bytes, jwk) = generate_es256_signing_key();
 
@@ -1155,6 +1178,7 @@ async fn test_rfc7523_jwt_bearer_grant_deactivated_user_rejected() {
         Some("email"),
         Some("openid email"),
         Some(3600),
+        &org.id,
     )
     .await
     .expect("Failed to create trusted issuer");
@@ -1196,6 +1220,186 @@ async fn test_rfc7523_jwt_bearer_grant_deactivated_user_rejected() {
     let (status, resp_body) = http_post_form(&app, "/oauth/token", &body, &[]).await;
 
     assert_eq!(status, StatusCode::BAD_REQUEST);
+    let error: serde_json::Value = serde_json::from_str(&resp_body).expect("Valid JSON");
+    assert_eq!(error["error"], "invalid_grant");
+}
+
+// ========================================================================
+// Issue #316: org-scoping for JWT-Bearer grants. A trusted issuer is bound
+// to a single org; the resolved user must belong to that org.
+// ========================================================================
+
+#[tokio::test]
+async fn test_rfc7523_jwt_bearer_grant_cross_org_email_mapping_rejected() {
+    // Issuer is bound to org A; user belongs to org B. Grant must reject
+    // even though the email lookup would otherwise resolve to a real user.
+    let (app, state) = test_app().await;
+
+    let org_a = create_test_org(&state.store, "issuer-org.example.com").await;
+    let org_b = create_test_org(&state.store, "victim-org.example.com").await;
+    let victim =
+        create_test_user_in_org(&state.store, "ceo@victim-org.example.com", &org_b.id, false).await;
+
+    let (pkcs8_bytes, jwk) = generate_es256_signing_key();
+
+    let issuer_url = "https://cross-org-email.example.com";
+    let issuer = db::create_trusted_jwt_issuer(
+        &state.store,
+        issuer_url,
+        "Cross-Org Email Issuer",
+        None,
+        "https://cross-org-email.example.com/jwks",
+        Some("email"),
+        Some("openid email"),
+        Some(3600),
+        &org_a.id, // bound to org A
+    )
+    .await
+    .expect("create_trusted_jwt_issuer");
+
+    db::upsert_jwks_cache(
+        &state.store,
+        &issuer.id,
+        &serde_json::json!({"keys": [jwk]}),
+    )
+    .await
+    .expect("upsert_jwks_cache");
+
+    let now = jiff::Timestamp::now().as_second();
+    let header = serde_json::json!({"alg": "ES256", "typ": "JWT", "kid": "test-key-1"});
+    let claims = serde_json::json!({
+        "iss": issuer_url,
+        "sub": victim.email, // user lives in org B
+        "aud": state.config().base_url,
+        "iat": now,
+        "exp": now + 60,
+        "jti": uuid::Uuid::now_v7().to_string(),
+    });
+    let assertion = sign_jwt_assertion(&pkcs8_bytes, &header, &claims);
+
+    let body =
+        format!("grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer&assertion={assertion}");
+    let (status, resp_body) = http_post_form(&app, "/oauth/token", &body, &[]).await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{resp_body}");
+    let error: serde_json::Value = serde_json::from_str(&resp_body).expect("Valid JSON");
+    assert_eq!(error["error"], "invalid_grant");
+}
+
+#[tokio::test]
+async fn test_rfc7523_jwt_bearer_grant_cross_org_user_id_mapping_rejected() {
+    // Same as above but with subject_claim_mapping = "user_id". The user's
+    // ID is known to the attacker (or guessable); org binding still blocks it.
+    let (app, state) = test_app().await;
+
+    let org_a = create_test_org(&state.store, "issuer-org.example.com").await;
+    let org_b = create_test_org(&state.store, "victim-org.example.com").await;
+    let victim = create_test_user_in_org(
+        &state.store,
+        "victim-uid@victim-org.example.com",
+        &org_b.id,
+        false,
+    )
+    .await;
+
+    let (pkcs8_bytes, jwk) = generate_es256_signing_key();
+
+    let issuer_url = "https://cross-org-uid.example.com";
+    let issuer = db::create_trusted_jwt_issuer(
+        &state.store,
+        issuer_url,
+        "Cross-Org UID Issuer",
+        None,
+        "https://cross-org-uid.example.com/jwks",
+        Some("user_id"),
+        Some("openid"),
+        Some(3600),
+        &org_a.id,
+    )
+    .await
+    .expect("create_trusted_jwt_issuer");
+
+    db::upsert_jwks_cache(
+        &state.store,
+        &issuer.id,
+        &serde_json::json!({"keys": [jwk]}),
+    )
+    .await
+    .expect("upsert_jwks_cache");
+
+    let now = jiff::Timestamp::now().as_second();
+    let header = serde_json::json!({"alg": "ES256", "typ": "JWT", "kid": "test-key-1"});
+    let claims = serde_json::json!({
+        "iss": issuer_url,
+        "sub": victim.id,
+        "aud": state.config().base_url,
+        "iat": now,
+        "exp": now + 60,
+        "jti": uuid::Uuid::now_v7().to_string(),
+    });
+    let assertion = sign_jwt_assertion(&pkcs8_bytes, &header, &claims);
+
+    let body =
+        format!("grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer&assertion={assertion}");
+    let (status, resp_body) = http_post_form(&app, "/oauth/token", &body, &[]).await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{resp_body}");
+    let error: serde_json::Value = serde_json::from_str(&resp_body).expect("Valid JSON");
+    assert_eq!(error["error"], "invalid_grant");
+}
+
+#[tokio::test]
+async fn test_rfc7523_jwt_bearer_grant_user_without_org_rejected() {
+    // User has no org_id. Issuer is bound to an org. Grant must reject —
+    // there is no consistent org binding to evaluate.
+    let (app, state) = test_app().await;
+
+    let org = create_test_org(&state.store, "issuer-org.example.com").await;
+    // Note: create_test_user creates a user with no org_id.
+    let user = create_test_user(&state.store, "no-org-user@example.com").await;
+
+    let (pkcs8_bytes, jwk) = generate_es256_signing_key();
+
+    let issuer_url = "https://no-user-org.example.com";
+    let issuer = db::create_trusted_jwt_issuer(
+        &state.store,
+        issuer_url,
+        "No User Org Issuer",
+        None,
+        "https://no-user-org.example.com/jwks",
+        Some("email"),
+        Some("openid"),
+        Some(3600),
+        &org.id,
+    )
+    .await
+    .expect("create_trusted_jwt_issuer");
+
+    db::upsert_jwks_cache(
+        &state.store,
+        &issuer.id,
+        &serde_json::json!({"keys": [jwk]}),
+    )
+    .await
+    .expect("upsert_jwks_cache");
+
+    let now = jiff::Timestamp::now().as_second();
+    let header = serde_json::json!({"alg": "ES256", "typ": "JWT", "kid": "test-key-1"});
+    let claims = serde_json::json!({
+        "iss": issuer_url,
+        "sub": user.email,
+        "aud": state.config().base_url,
+        "iat": now,
+        "exp": now + 60,
+        "jti": uuid::Uuid::now_v7().to_string(),
+    });
+    let assertion = sign_jwt_assertion(&pkcs8_bytes, &header, &claims);
+
+    let body =
+        format!("grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer&assertion={assertion}");
+    let (status, resp_body) = http_post_form(&app, "/oauth/token", &body, &[]).await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{resp_body}");
     let error: serde_json::Value = serde_json::from_str(&resp_body).expect("Valid JSON");
     assert_eq!(error["error"], "invalid_grant");
 }

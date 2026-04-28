@@ -3046,6 +3046,7 @@ async fn test_update_trusted_jwt_issuer_jwks_uri_clears_cache() {
         None,
         None,
         None,
+        "test-org",
     )
     .await
     .expect("create_trusted_jwt_issuer failed");
@@ -3166,6 +3167,7 @@ async fn test_jwks_refresh_does_not_modify_trusted_jwt_issuer_doc() {
         None,
         None,
         None,
+        "test-org",
     )
     .await
     .expect("create_trusted_jwt_issuer failed");
