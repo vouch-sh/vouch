@@ -11,7 +11,6 @@
 //! - Redirect URI validation (delegates to existing helpers)
 //! - JWKS/JWKS_URI mutual exclusivity
 //! - FAPI 2.0 enforcement at registration time
-//! - Software statement JWT verification (against trusted_jwt_issuers)
 //! - Client creation and credential generation
 //!
 //! References:
@@ -45,7 +44,6 @@ const ALLOWED_GRANT_TYPES: &[&str] = &[
     "refresh_token",
     "urn:ietf:params:oauth:grant-type:device_code",
     "urn:ietf:params:oauth:grant-type:token-exchange",
-    "urn:ietf:params:oauth:grant-type:jwt-bearer",
     "urn:ietf:params:oauth:grant-type:fido2-assertion",
 ];
 
@@ -104,8 +102,6 @@ pub struct RegistrationRequest {
     pub software_id: Option<String>,
     /// RFC 7591 Section 2: Version of the client software.
     pub software_version: Option<String>,
-    /// RFC 7591 Section 2.3: Software statement JWT.
-    pub software_statement: Option<String>,
     /// FAPI 2.0: Whether access tokens must be DPoP-bound.
     pub dpop_bound_access_tokens: Option<bool>,
     /// OIDC Core Section 3.1.3.7: ID token signing algorithm.
@@ -272,12 +268,7 @@ pub async fn register_client(
     mut request: RegistrationRequest,
     authenticated_user_id: Option<&str>,
 ) -> Result<RegistrationResponse, ServiceError> {
-    // 1. Software statement: verify and apply precedence
-    if let Some(statement_jwt) = request.software_statement.take() {
-        apply_software_statement(state, &mut request, &statement_jwt).await?;
-    }
-
-    // 2-6. Validate grant/response types, apply defaults, check consistency
+    // 1. Validate grant/response types, apply defaults, check consistency
     let validated = validate_grant_and_response_types(&mut request)?;
 
     // 7. Validate redirect URIs
@@ -1342,199 +1333,6 @@ fn generate_registration_token() -> Result<String, ServiceError> {
 // Software Statement Verification
 // ============================================================================
 
-/// Verify a software statement JWT and apply its claims to the request.
-///
-/// Per RFC 7591 Section 2.3:
-/// - Software statement is a JWT signed by the software publisher
-/// - Claims in the statement take precedence over request body values
-/// - The issuer must be a trusted JWT issuer in our database
-async fn apply_software_statement(
-    state: &Arc<AppState>,
-    request: &mut RegistrationRequest,
-    statement_jwt: &str,
-) -> Result<(), ServiceError> {
-    let statement_claims = verify_software_statement_jwt(state, statement_jwt).await?;
-
-    // Override request fields with statement claims (RFC 7591 Section 2.3)
-    if let Some(v) = statement_claims.get("client_name").and_then(|v| v.as_str()) {
-        request.client_name = Some(v.to_string());
-    }
-    if let Some(v) = statement_claims.get("client_uri").and_then(|v| v.as_str()) {
-        request.client_uri = Some(v.to_string());
-    }
-    if let Some(v) = statement_claims
-        .get("redirect_uris")
-        .and_then(|v| v.as_array())
-    {
-        let uris: Vec<String> = v
-            .iter()
-            .filter_map(|u| u.as_str().map(String::from))
-            .collect();
-        if !uris.is_empty() {
-            request.redirect_uris = Some(uris);
-        }
-    }
-    if let Some(v) = statement_claims
-        .get("grant_types")
-        .and_then(|v| v.as_array())
-    {
-        let types: Vec<String> = v
-            .iter()
-            .filter_map(|t| t.as_str().map(String::from))
-            .collect();
-        if !types.is_empty() {
-            request.grant_types = Some(types);
-        }
-    }
-    if let Some(v) = statement_claims.get("software_id").and_then(|v| v.as_str()) {
-        request.software_id = Some(v.to_string());
-    }
-    if let Some(v) = statement_claims
-        .get("software_version")
-        .and_then(|v| v.as_str())
-    {
-        request.software_version = Some(v.to_string());
-    }
-
-    Ok(())
-}
-
-/// Verify a software statement JWT against trusted issuers.
-///
-/// Returns the verified payload claims on success.
-async fn verify_software_statement_jwt(
-    state: &Arc<AppState>,
-    statement_jwt: &str,
-) -> Result<serde_json::Value, ServiceError> {
-    use crate::services::oidc::jwt_bearer::validate::{
-        decode_claims_unverified, map_algorithm, parse_assertion_header, validate_jwt_assertion,
-    };
-
-    let header = parse_assertion_header(statement_jwt).map_err(|_| {
-        ServiceError::oauth(
-            OAuthErrorCode::InvalidSoftwareStatement,
-            "Malformed software statement JWT",
-        )
-    })?;
-
-    let unverified_claims = decode_claims_unverified(statement_jwt).map_err(|_| {
-        ServiceError::oauth(
-            OAuthErrorCode::InvalidSoftwareStatement,
-            "Cannot decode software statement claims",
-        )
-    })?;
-
-    let issuer = db::get_trusted_jwt_issuer_by_issuer(&state.store, &unverified_claims.iss)
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to look up trusted JWT issuer: {e}");
-            ServiceError::Internal("Database error".to_string())
-        })?
-        .ok_or_else(|| {
-            ServiceError::oauth(
-                OAuthErrorCode::UnapprovedSoftwareStatement,
-                format!(
-                    "Software statement issuer '{}' is not trusted",
-                    unverified_claims.iss
-                ),
-            )
-        })?;
-
-    if !issuer.enabled {
-        return Err(ServiceError::oauth(
-            OAuthErrorCode::UnapprovedSoftwareStatement,
-            "Software statement issuer is disabled",
-        ));
-    }
-
-    let jwks_cache = db::get_jwks_cache(&state.store, &issuer.id)
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to look up JWKS cache for issuer: {e}");
-            ServiceError::Internal("Database error".to_string())
-        })?
-        .ok_or_else(|| {
-            ServiceError::oauth(
-                OAuthErrorCode::UnapprovedSoftwareStatement,
-                "No JWKS available for software statement issuer",
-            )
-        })?;
-
-    let keys = jwks_cache
-        .value
-        .get("keys")
-        .and_then(|k| k.as_array())
-        .ok_or_else(|| {
-            ServiceError::Internal("Trusted issuer JWKS has no keys array".to_string())
-        })?;
-
-    let algorithm = map_algorithm(&header.alg).map_err(|_| {
-        ServiceError::oauth(
-            OAuthErrorCode::InvalidSoftwareStatement,
-            format!(
-                "Unsupported algorithm in software statement: {}",
-                header.alg
-            ),
-        )
-    })?;
-
-    let base_url = &state.config().base_url;
-    let token_endpoint = format!("{base_url}/oauth/token");
-    let audiences = [base_url.as_str(), token_endpoint.as_str()];
-    let max_lifetime = i64::from(issuer.max_token_lifetime_seconds);
-
-    let mut verified = false;
-    for key in keys {
-        if let Some(decoding_key) = serde_json::to_string(key)
-            .ok()
-            .and_then(|s| jsonwebtoken::DecodingKey::from_jwk(&serde_json::from_str(&s).ok()?).ok())
-            && validate_jwt_assertion(
-                statement_jwt,
-                &header,
-                &decoding_key,
-                algorithm,
-                &audiences,
-                max_lifetime,
-            )
-            .is_ok()
-        {
-            verified = true;
-            break;
-        }
-    }
-
-    if !verified {
-        return Err(ServiceError::oauth(
-            OAuthErrorCode::InvalidSoftwareStatement,
-            "Software statement signature verification failed",
-        ));
-    }
-
-    let payload_part = statement_jwt.split('.').nth(1).ok_or_else(|| {
-        ServiceError::oauth(
-            OAuthErrorCode::InvalidSoftwareStatement,
-            "Malformed software statement",
-        )
-    })?;
-
-    let payload_bytes = URL_SAFE_NO_PAD
-        .decode(payload_part)
-        .or_else(|_| base64::engine::general_purpose::STANDARD.decode(payload_part))
-        .map_err(|_| {
-            ServiceError::oauth(
-                OAuthErrorCode::InvalidSoftwareStatement,
-                "Invalid software statement payload encoding",
-            )
-        })?;
-
-    serde_json::from_slice(&payload_bytes).map_err(|_| {
-        ServiceError::oauth(
-            OAuthErrorCode::InvalidSoftwareStatement,
-            "Invalid software statement payload JSON",
-        )
-    })
-}
-
 // ============================================================================
 // Tests
 // ============================================================================
@@ -1746,7 +1544,6 @@ mod tests {
             jwks_uri: None,
             software_id: None,
             software_version: None,
-            software_statement: None,
             dpop_bound_access_tokens: None,
             id_token_signed_response_alg: None,
             ..Default::default()
@@ -1787,7 +1584,6 @@ mod tests {
             jwks_uri: None,
             software_id: None,
             software_version: None,
-            software_statement: None,
             dpop_bound_access_tokens: None,
             id_token_signed_response_alg: None,
             ..Default::default()
@@ -1826,7 +1622,6 @@ mod tests {
             jwks_uri: None,
             software_id: None,
             software_version: None,
-            software_statement: None,
             dpop_bound_access_tokens: None,
             id_token_signed_response_alg: None,
             ..Default::default()
@@ -1863,7 +1658,6 @@ mod tests {
             jwks_uri: None,
             software_id: None,
             software_version: None,
-            software_statement: None,
             dpop_bound_access_tokens: None,
             id_token_signed_response_alg: None,
             ..Default::default()
@@ -1897,7 +1691,6 @@ mod tests {
             jwks_uri: None,
             software_id: None,
             software_version: None,
-            software_statement: None,
             dpop_bound_access_tokens: None,
             id_token_signed_response_alg: None,
             ..Default::default()
@@ -2057,19 +1850,6 @@ mod tests {
             Some("https://example.com/.well-known/jwks.json".to_string())
         );
         assert!(req.jwks.is_none());
-    }
-
-    /// `software_statement` must deserialize as a plain string (JWT is opaque here).
-    #[test]
-    fn test_request_deserialize_software_statement() {
-        let json = r#"{"software_statement": "eyJhbGciOiJSUzI1NiJ9.eyJpc3MiOiJleGFtcGxlIn0.sig"}"#;
-        let req: RegistrationRequest = serde_json::from_str(json).unwrap();
-        assert!(req.software_statement.is_some());
-        assert!(
-            req.software_statement
-                .unwrap()
-                .starts_with("eyJhbGciOiJSUzI1NiJ9")
-        );
     }
 
     /// An empty contacts array is a valid (though unusual) value.
@@ -2368,7 +2148,6 @@ mod tests {
             jwks_uri: None,
             software_id: None,
             software_version: None,
-            software_statement: None,
             dpop_bound_access_tokens: None,
             id_token_signed_response_alg: None,
             ..Default::default()
@@ -2462,7 +2241,6 @@ mod tests {
             jwks_uri: None,
             software_id: None,
             software_version: None,
-            software_statement: None,
             dpop_bound_access_tokens: None,
             id_token_signed_response_alg: None,
             ..Default::default()
@@ -2514,7 +2292,6 @@ mod tests {
             jwks_uri: None,
             software_id: None,
             software_version: None,
-            software_statement: None,
             dpop_bound_access_tokens: None,
             id_token_signed_response_alg: None,
             ..Default::default()
@@ -2588,7 +2365,6 @@ mod tests {
             jwks_uri: jwks_uri.map(String::from),
             software_id: None,
             software_version: None,
-            software_statement: None,
             dpop_bound_access_tokens: None,
             id_token_signed_response_alg: None,
             ..Default::default()
@@ -2806,7 +2582,6 @@ mod tests {
             jwks_uri: None,
             software_id: None,
             software_version: None,
-            software_statement: None,
             dpop_bound_access_tokens: None,
             id_token_signed_response_alg: None,
             ..Default::default()

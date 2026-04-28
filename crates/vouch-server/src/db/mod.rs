@@ -28,7 +28,6 @@ pub mod dsql;
 mod enrollment;
 mod github;
 mod jwks_cache;
-mod jwt_issuer;
 pub mod migrations;
 mod oauth;
 mod organizations;
@@ -136,13 +135,6 @@ pub use oauth::test_helpers::{
 // Re-export JWKS cache functions
 pub use jwks_cache::{
     delete_expired_jwks_caches, delete_jwks_cache, get_jwks_cache, upsert_jwks_cache,
-};
-
-// Re-export JWT issuer types and functions (RFC 7523)
-pub use jwt_issuer::{
-    DEFAULT_MAX_TOKEN_LIFETIME_SECONDS, DEFAULT_SUBJECT_CLAIM_MAPPING, TrustedJwtIssuer,
-    create_trusted_jwt_issuer, delete_trusted_jwt_issuer, get_trusted_jwt_issuer_by_issuer,
-    list_trusted_jwt_issuers, update_trusted_jwt_issuer,
 };
 
 // Re-export DPoP types and functions (RFC 9449)

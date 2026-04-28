@@ -85,17 +85,6 @@ pub async fn resolve_client_jwks(
     ))
 }
 
-/// Resolve the JWKS for a trusted issuer.
-pub async fn resolve_issuer_jwks(
-    store: &DocumentStore,
-    issuer_id: &str,
-    jwks_uri: &str,
-    jwks_cache: Option<&JwksCacheDoc>,
-    http_client: &reqwest::Client,
-) -> ServiceResult<JwkSet> {
-    resolve_jwks_uri(store, issuer_id, jwks_uri, jwks_cache, http_client).await
-}
-
 /// Fetch JWKS from a URI with caching.
 async fn resolve_jwks_uri(
     store: &DocumentStore,
@@ -335,50 +324,6 @@ pub async fn find_matching_key_with_refresh_client(
         }
         Err(e) => {
             tracing::warn!("JWKS force-refresh failed for client {client_id}: {e}");
-            find_matching_key(jwks, header)
-        }
-    }
-}
-
-/// Find a matching key for a trusted issuer, force-refreshing the JWKS URI on kid-miss.
-///
-/// Same retry-on-miss semantics as `find_matching_key_with_refresh_client`.
-pub async fn find_matching_key_with_refresh_issuer(
-    store: &DocumentStore,
-    issuer_id: &str,
-    jwks_uri: &str,
-    // Load once before calling resolve_issuer_jwks; pre-refresh timestamp matches prior behavior.
-    jwks_cache: Option<&JwksCacheDoc>,
-    http_client: &reqwest::Client,
-    jwks: &JwkSet,
-    header: &JwtAssertionHeader,
-) -> ServiceResult<jsonwebtoken::DecodingKey> {
-    // Try initial match first
-    if let Ok(key) = find_matching_key(jwks, header) {
-        return Ok(key);
-    }
-
-    // Rate-limit: skip force-refresh if cached within the last 10 seconds
-    if let Some(cache) = jwks_cache
-        && cache.is_fresh(JWKS_FORCE_REFRESH_MIN_INTERVAL_SECONDS)
-    {
-        tracing::debug!(
-            "Skipping JWKS force-refresh for issuer {issuer_id}: refreshed {}s ago",
-            cache.age_seconds()
-        );
-        return find_matching_key(jwks, header);
-    }
-
-    tracing::debug!("Key not found in JWKS cache for issuer {issuer_id}; force-refreshing");
-    match fetch_and_parse_jwks(jwks_uri, http_client).await {
-        Ok((jwks_value, fresh_jwks)) => {
-            if let Err(e) = db::upsert_jwks_cache(store, issuer_id, &jwks_value).await {
-                tracing::warn!("Failed to update JWKS cache for issuer {issuer_id}: {e}");
-            }
-            find_matching_key(&fresh_jwks, header)
-        }
-        Err(e) => {
-            tracing::warn!("JWKS force-refresh failed for issuer {issuer_id}: {e}");
             find_matching_key(jwks, header)
         }
     }

@@ -3034,60 +3034,6 @@ async fn test_update_oauth_client_jwks_uri_clears_cache() {
 }
 
 #[tokio::test]
-async fn test_update_trusted_jwt_issuer_jwks_uri_clears_cache() {
-    let (store, _audit) = test_db().await;
-
-    let issuer = create_trusted_jwt_issuer(
-        &store,
-        "https://original.issuer.example.com",
-        "Test Issuer",
-        None,
-        "https://original.issuer.example.com/jwks",
-        None,
-        None,
-        None,
-        "test-org",
-    )
-    .await
-    .expect("create_trusted_jwt_issuer failed");
-
-    let jwks = serde_json::json!({"keys": [{"kty": "EC", "kid": "i1"}]});
-    upsert_jwks_cache(&store, &issuer.id, &jwks)
-        .await
-        .expect("upsert_jwks_cache failed");
-
-    assert!(
-        get_jwks_cache(&store, &issuer.id)
-            .await
-            .expect("get_jwks_cache failed")
-            .is_some(),
-        "cache should be populated before URI change"
-    );
-
-    update_trusted_jwt_issuer(
-        &store,
-        &issuer.id,
-        &issuer.name,
-        issuer.description.as_deref(),
-        "https://rotated.issuer.example.com/jwks",
-        &issuer.subject_claim_mapping,
-        issuer.allowed_scopes.as_deref(),
-        issuer.max_token_lifetime_seconds,
-        issuer.enabled,
-    )
-    .await
-    .expect("update_trusted_jwt_issuer failed");
-
-    let cache = get_jwks_cache(&store, &issuer.id)
-        .await
-        .expect("get_jwks_cache failed");
-    assert!(
-        cache.is_none(),
-        "cache must be cleared when jwks_uri changes"
-    );
-}
-
-#[tokio::test]
 async fn test_jwks_refresh_does_not_modify_oauth_client_doc() {
     let (store, _audit) = test_db().await;
 
@@ -3147,42 +3093,6 @@ async fn test_jwks_refresh_does_not_modify_oauth_client_doc() {
         .await
         .expect("get_oauth_client_by_id failed")
         .expect("client must still exist");
-
-    assert_eq!(
-        after.updated_at, snapshot_updated_at,
-        "upsert_jwks_cache must not change parent updated_at"
-    );
-}
-
-#[tokio::test]
-async fn test_jwks_refresh_does_not_modify_trusted_jwt_issuer_doc() {
-    let (store, _audit) = test_db().await;
-
-    let issuer = create_trusted_jwt_issuer(
-        &store,
-        "https://immutable.issuer.example.com",
-        "Immutable Issuer",
-        None,
-        "https://immutable.issuer.example.com/jwks",
-        None,
-        None,
-        None,
-        "test-org",
-    )
-    .await
-    .expect("create_trusted_jwt_issuer failed");
-
-    let snapshot_updated_at = issuer.updated_at;
-
-    let jwks = serde_json::json!({"keys": [{"kty": "EC", "kid": "q1"}]});
-    upsert_jwks_cache(&store, &issuer.id, &jwks)
-        .await
-        .expect("upsert_jwks_cache failed");
-
-    let after = get_trusted_jwt_issuer_by_issuer(&store, &issuer.issuer)
-        .await
-        .expect("get_trusted_jwt_issuer_by_issuer failed")
-        .expect("issuer must still exist");
 
     assert_eq!(
         after.updated_at, snapshot_updated_at,
