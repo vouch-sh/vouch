@@ -425,17 +425,17 @@ jobs:
         env:
           VERSION: ${{ steps.version.outputs.version }}
           TARGET: ${{ matrix.target }}
-          BINS: ${{ matrix.bins }}
         run: |
-          STAGING="vouch-v${VERSION}-${TARGET}"
+          ARCHIVE="vouch-v${VERSION}-${TARGET}.zip"
 
-          mkdir -p "${STAGING}"
-          for bin in ${BINS}; do
-            cp "target/${TARGET}/release/${bin}.exe" "${STAGING}/"
-          done
+          # Stage signed binary in CWD so it lands at the zip root (no versioned
+          # subdir). Users get vouch.exe directly on extract; winget can use a
+          # constant RelativeFilePath: vouch.exe across versions.
+          cp "target/${TARGET}/release/vouch.exe" vouch.exe
+          7z a "${ARCHIVE}" vouch.exe
+          rm vouch.exe
 
-          7z a "${STAGING}.zip" "${STAGING}"
-          sha256sum "${STAGING}.zip" > "${STAGING}.zip.sha256"
+          sha256sum "${ARCHIVE}" > "${ARCHIVE}.sha256"
 
       - name: Collect SBOM artifacts
         id: sbom
