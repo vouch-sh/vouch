@@ -1097,7 +1097,7 @@ jobs:
           identifier: SmokeTurner.Vouch
           installers-regex: '\.zip$'
           token: ${{ secrets.WINGET_TOKEN }}
-          fork-user: vouch-sh
+          fork-user: vouch-bot
           max-versions-to-keep: 5
 
   homebrew:
