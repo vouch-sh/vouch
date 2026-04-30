@@ -1096,6 +1096,7 @@ jobs:
         with:
           identifier: SmokeTurner.Vouch
           installers-regex: '\.zip$'
+          release-tag: ${{ github.event.inputs.tag || github.ref_name }}
           token: ${{ secrets.WINGET_TOKEN }}
           fork-user: vouch-bot
           max-versions-to-keep: 5
