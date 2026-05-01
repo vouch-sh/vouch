@@ -38,6 +38,13 @@ pub fn verify_request_signature<T>(
     validate_timestamps(&params, max_age)?;
 
     let base = build_request_base_with_params_str(req, &params, &params_str)?;
+    tracing::trace!(
+        label = %label,
+        keyid = ?params.keyid,
+        alg = ?params.alg,
+        base = %String::from_utf8_lossy(&base),
+        "verifying HTTP request signature"
+    );
     verifier.verify(&base, &signature_bytes)?;
 
     Ok(params)
@@ -61,6 +68,13 @@ pub fn verify_response_signature<T, U>(
     validate_timestamps(&params, max_age)?;
 
     let base = build_response_base_with_params_str(resp, req, &params, &params_str)?;
+    tracing::trace!(
+        label = %label,
+        keyid = ?params.keyid,
+        alg = ?params.alg,
+        base = %String::from_utf8_lossy(&base),
+        "verifying HTTP response signature"
+    );
     verifier.verify(&base, &signature_bytes)?;
 
     Ok(params)

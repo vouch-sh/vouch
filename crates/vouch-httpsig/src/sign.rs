@@ -157,6 +157,13 @@ impl SignatureBuilder {
         // Serialize the params once — used for both signature base and Signature-Input header
         let params_str = params.serialize();
         let base = build_request_base_with_params_str(req, &params, &params_str)?;
+        tracing::trace!(
+            label = %self.label,
+            keyid = ?signer.key_id(),
+            alg = %signer.algorithm_id(),
+            base = %String::from_utf8_lossy(&base),
+            "signing HTTP request"
+        );
         let signature = signer.sign(&base)?;
 
         append_signature_headers_with_params_str(
@@ -181,6 +188,13 @@ impl SignatureBuilder {
         let params = self.build_params(signer);
         let params_str = params.serialize();
         let base = build_response_base_with_params_str(resp, req, &params, &params_str)?;
+        tracing::trace!(
+            label = %self.label,
+            keyid = ?signer.key_id(),
+            alg = %signer.algorithm_id(),
+            base = %String::from_utf8_lossy(&base),
+            "signing HTTP response"
+        );
         let signature = signer.sign(&base)?;
 
         append_signature_headers_with_params_str(
