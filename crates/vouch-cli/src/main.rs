@@ -480,7 +480,7 @@ async fn run() -> Result<()> {
     let server_raw = cli
         .server
         .or_else(|| config.server_url().map(String::from))
-        .unwrap_or_else(|| "http://localhost:3000".to_string());
+        .unwrap_or_else(|| "https://us.vouch.sh".to_string());
 
     // Validate and normalize URL for commands that contact the server.
     // Offline commands (completions, init, logout, diag) skip validation
