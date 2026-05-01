@@ -619,9 +619,12 @@ fn extract_authority<T>(req: &http::Request<T>) -> Result<String, HttpSigError> 
     }
 
     // Fall back to Host header (HTTP/1.1 origin-form requests).
-    // The Host header includes the port when non-default (e.g., "localhost:3000"),
-    // so no separate default-port stripping is needed — the signer and Host header
-    // will agree on the representation.
+    // RFC 9421 §2.2.3 requires authority normalization: lowercase + strip
+    // default ports. Some HTTP/1.1 clients emit `Host: example.com:443` with
+    // an explicit default port; the URI-derived path above strips it, so this
+    // path must too — otherwise the signer (URI path) and verifier (Host
+    // fallback path) disagree on the authority component and signature
+    // verification fails.
     let host_header = req
         .headers()
         .get(http::header::HOST)
@@ -630,7 +633,13 @@ fn extract_authority<T>(req: &http::Request<T>) -> Result<String, HttpSigError> 
             HttpSigError::MissingComponent("URI has no authority and no Host header".into())
         })?;
 
-    Ok(host_header.trim().to_ascii_lowercase())
+    let normalized = host_header.trim().to_ascii_lowercase();
+    let stripped = normalized
+        .strip_suffix(":443")
+        .or_else(|| normalized.strip_suffix(":80"))
+        .map(str::to_string)
+        .unwrap_or(normalized);
+    Ok(stripped)
 }
 
 /// Extract the path from a request URI. Empty path becomes "/".
@@ -742,6 +751,52 @@ mod tests {
         let req = make_request("POST", "/v1/credentials/ssh", &[("host", "localhost:3000")]);
         let cid = ComponentIdentifier::authority();
         assert_eq!(cid.resolve_from_request(&req).unwrap(), "localhost:3000");
+    }
+
+    #[test]
+    fn test_authority_host_header_strips_default_https_port() {
+        // Some HTTP/1.1 clients emit Host with explicit :443. The URI-derived
+        // path strips it; the Host fallback must too, or the signer's authority
+        // ("example.com") will not match the verifier's ("example.com:443").
+        let req = make_request(
+            "POST",
+            "/v1/credentials/ssh",
+            &[("host", "example.com:443")],
+        );
+        let cid = ComponentIdentifier::authority();
+        assert_eq!(cid.resolve_from_request(&req).unwrap(), "example.com");
+    }
+
+    #[test]
+    fn test_authority_host_header_strips_default_http_port() {
+        let req = make_request("POST", "/v1/foo", &[("host", "example.com:80")]);
+        let cid = ComponentIdentifier::authority();
+        assert_eq!(cid.resolve_from_request(&req).unwrap(), "example.com");
+    }
+
+    #[test]
+    fn test_authority_host_header_lowercase_and_strip() {
+        let req = make_request("POST", "/v1/foo", &[("host", "Example.COM:443")]);
+        let cid = ComponentIdentifier::authority();
+        assert_eq!(cid.resolve_from_request(&req).unwrap(), "example.com");
+    }
+
+    #[test]
+    fn test_authority_uri_and_host_header_agree_on_default_port() {
+        // Cross-check: client signs via URI path with default port stripped,
+        // server verifies via Host header path with default port stripped.
+        // Both should produce the same authority string.
+        let client_req = make_request("POST", "https://dev.vouch.sh/v1/credentials/ssh", &[]);
+        let server_req = make_request(
+            "POST",
+            "/v1/credentials/ssh",
+            &[("host", "dev.vouch.sh:443")],
+        );
+        let cid = ComponentIdentifier::authority();
+        let client_authority = cid.resolve_from_request(&client_req).unwrap();
+        let server_authority = cid.resolve_from_request(&server_req).unwrap();
+        assert_eq!(client_authority, server_authority);
+        assert_eq!(client_authority, "dev.vouch.sh");
     }
 
     #[test]

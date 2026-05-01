@@ -472,12 +472,15 @@ async fn run() -> Result<()> {
 
     style::init(cli.color);
 
-    // Initialize logging: --verbose → debug, else RUST_LOG env → default warn
-    let filter = if cli.verbose {
-        EnvFilter::new("debug")
-    } else {
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn"))
-    };
+    // Initialize logging: RUST_LOG env wins if set (so trace/per-target filters
+    // work for debugging); otherwise --verbose → debug, default warn.
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+        if cli.verbose {
+            EnvFilter::new("debug")
+        } else {
+            EnvFilter::new("warn")
+        }
+    });
     tracing_subscriber::fmt().with_env_filter(filter).init();
 
     // Load config and resolve server URL

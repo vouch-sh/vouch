@@ -10,7 +10,7 @@ workspace = true
 
 [features]
 default = []
-axum = ["dep:axum", "dep:tracing"]
+axum = ["dep:axum"]
 
 [dependencies]
 aws-lc-rs = { workspace = true, features = ["aws-lc-sys"] }
@@ -19,7 +19,7 @@ base64 = { workspace = true, features = ["std"] }
 http = { workspace = true, features = ["std"] }
 jiff = { workspace = true, features = ["std"] }
 thiserror = { workspace = true }
-tracing = { workspace = true, features = ["std"], optional = true }
+tracing = { workspace = true, features = ["std"] }
 
 [dev-dependencies]
 proptest = { workspace = true, features = ["std"] }
