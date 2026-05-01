@@ -174,6 +174,10 @@ fn write_session_cookie_file(server: &str, token: &str, expires_at_ts: Option<ji
 pub(crate) async fn store_and_finalize(
     server: &str,
     token: &str,
+    #[cfg_attr(
+        not(unix),
+        expect(unused_variables, reason = "parameter consumed only under cfg(unix)")
+    )]
     email: &str,
     expires_at_str: &str,
     expires_at_ts: Option<jiff::Timestamp>,

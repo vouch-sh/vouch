@@ -382,7 +382,7 @@ impl Config {
     ///
     /// Non-Unix fallback without advisory locking.
     #[cfg(not(unix))]
-    pub fn modify(f: impl FnOnce(&mut Config)) -> Result<()> {
+    pub(crate) fn modify(f: impl FnOnce(&mut Config)) -> Result<()> {
         let mut config = Self::load()?;
         f(&mut config);
         config.save()

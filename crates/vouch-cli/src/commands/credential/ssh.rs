@@ -241,6 +241,10 @@ pub(crate) async fn provision_ssh_certificate(
 /// Returns `true` if provisioning succeeded.
 pub(crate) async fn auto_provision(
     server: &str,
+    #[cfg_attr(
+        not(unix),
+        expect(unused_variables, reason = "parameter consumed only under cfg(unix)")
+    )]
     expires_at: &str,
     fapi_key: Option<vouch_cli::fapi::ClientKey>,
 ) -> bool {
