@@ -262,12 +262,29 @@ impl UpstreamIdp {
             Self::Saml(s) => IdpBrand::from_entity_id(s.entity_id()),
         }
     }
+
+    /// Origins the browser must be allowed to redirect to or POST to during
+    /// upstream sign-in handoff.
+    ///
+    /// Used by the CSP middleware to widen `form-action` so Chromium-based
+    /// browsers don't block the 303 redirect (OIDC) or auto-submitting
+    /// SAML POST form. Returns deduplicated origins; an empty `Vec` when
+    /// the IdP exposes no http(s) endpoints (in practice unreachable, but
+    /// expressed in the type).
+    #[must_use]
+    pub fn form_action_origins(&self) -> Vec<crate::infra::csp::CspOrigin> {
+        match self {
+            Self::Oidc(p) => p.form_action_origin().into_iter().collect(),
+            Self::Saml(s) => s.form_action_origins(),
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     #![expect(
         clippy::unwrap_used,
+        clippy::indexing_slicing,
         reason = "test code: panic on assertion failure is acceptable"
     )]
 
@@ -733,5 +750,94 @@ mod tests {
             extract_email_domain("https://accounts.google.com", None, "user@gmail.com"),
             None,
         );
+    }
+
+    // =========================================================================
+    // form_action_origins tests
+    // =========================================================================
+
+    fn make_saml_provider(
+        sso_post_url: Option<&str>,
+        sso_redirect_url: Option<&str>,
+    ) -> saml::SamlProvider {
+        saml::SamlProvider {
+            idp_metadata: saml::IdpMetadata {
+                entity_id: "https://idp.example.com/saml".to_string(),
+                sso_post_url: sso_post_url.map(str::to_string),
+                sso_redirect_url: sso_redirect_url.map(str::to_string),
+                signing_certificates: vec![],
+            },
+            sp_entity_id: "https://vouch.example.com".to_string(),
+            acs_url: "https://vouch.example.com/saml/acs".to_string(),
+            email_attribute: None,
+            domain_attribute: None,
+        }
+    }
+
+    #[test]
+    fn form_action_origins_oidc_single() {
+        let provider = make_oidc_provider("https://accounts.google.com/o/oauth2/v2/auth");
+        let idp = UpstreamIdp::Oidc(Box::new(provider));
+        let origins = idp.form_action_origins();
+        assert_eq!(origins.len(), 1);
+        assert_eq!(origins[0].as_str(), "https://accounts.google.com");
+    }
+
+    #[test]
+    fn form_action_origins_oidc_custom_port() {
+        let provider = make_oidc_provider(
+            "https://idp.example.com:8443/realms/x/protocol/openid-connect/auth",
+        );
+        let idp = UpstreamIdp::Oidc(Box::new(provider));
+        let origins = idp.form_action_origins();
+        assert_eq!(origins.len(), 1);
+        assert_eq!(origins[0].as_str(), "https://idp.example.com:8443");
+    }
+
+    #[test]
+    fn form_action_origins_saml_post_only() {
+        let provider = make_saml_provider(Some("https://idp.example.com/sso/post"), None);
+        let idp = UpstreamIdp::Saml(provider);
+        let origins = idp.form_action_origins();
+        assert_eq!(origins.len(), 1);
+        assert_eq!(origins[0].as_str(), "https://idp.example.com");
+    }
+
+    #[test]
+    fn form_action_origins_saml_redirect_only() {
+        let provider = make_saml_provider(None, Some("https://idp.example.com/sso/redirect"));
+        let idp = UpstreamIdp::Saml(provider);
+        let origins = idp.form_action_origins();
+        assert_eq!(origins.len(), 1);
+        assert_eq!(origins[0].as_str(), "https://idp.example.com");
+    }
+
+    #[test]
+    fn form_action_origins_saml_dedup_same_host() {
+        let provider = make_saml_provider(
+            Some("https://idp.example.com/sso/post"),
+            Some("https://idp.example.com/sso/redirect"),
+        );
+        let idp = UpstreamIdp::Saml(provider);
+        let origins = idp.form_action_origins();
+        assert_eq!(origins.len(), 1, "duplicate origins should be collapsed");
+        assert_eq!(origins[0].as_str(), "https://idp.example.com");
+    }
+
+    #[test]
+    fn form_action_origins_saml_two_distinct_hosts() {
+        let provider = make_saml_provider(
+            Some("https://idp-a.example.com/sso/post"),
+            Some("https://idp-b.example.com/sso/redirect"),
+        );
+        let idp = UpstreamIdp::Saml(provider);
+        let origins = idp.form_action_origins();
+        let serialized: Vec<&str> = origins
+            .iter()
+            .map(crate::infra::csp::CspOrigin::as_str)
+            .collect();
+        assert_eq!(origins.len(), 2);
+        assert!(serialized.contains(&"https://idp-a.example.com"));
+        assert!(serialized.contains(&"https://idp-b.example.com"));
     }
 }

@@ -38,4 +38,29 @@ impl SamlProvider {
     pub fn entity_id(&self) -> &str {
         &self.idp_metadata.entity_id
     }
+
+    /// CSP `form-action` origins for SAML SSO URLs.
+    ///
+    /// Returns the origins of `sso_post_url` and `sso_redirect_url` (whichever
+    /// are configured), deduplicated. Used to widen `form-action` so the
+    /// auto-submitting POST form (HTTP-POST binding) and 303 redirect
+    /// (HTTP-Redirect binding) are not blocked by Chromium-based browsers.
+    #[must_use]
+    pub fn form_action_origins(&self) -> Vec<crate::infra::csp::CspOrigin> {
+        let mut origins: Vec<crate::infra::csp::CspOrigin> = Vec::new();
+        let mut push = |raw: &str| {
+            if let Some(origin) = crate::infra::csp::CspOrigin::parse(raw)
+                && !origins.iter().any(|existing| existing == &origin)
+            {
+                origins.push(origin);
+            }
+        };
+        if let Some(url) = self.idp_metadata.sso_post_url.as_deref() {
+            push(url);
+        }
+        if let Some(url) = self.idp_metadata.sso_redirect_url.as_deref() {
+            push(url);
+        }
+        origins
+    }
 }

@@ -22,6 +22,18 @@ pub struct OidcProvider {
     pub jwks_uri: Url,
 }
 
+impl OidcProvider {
+    /// CSP `form-action` origin for the authorization endpoint.
+    ///
+    /// Returns `None` if the endpoint URL has no host or a non-http(s) scheme;
+    /// in practice this never happens because `fetch_discovery` rejects such
+    /// inputs, but the type expresses the invariant.
+    #[must_use]
+    pub fn form_action_origin(&self) -> Option<crate::infra::csp::CspOrigin> {
+        crate::infra::csp::CspOrigin::from_url(&self.authorization_endpoint)
+    }
+}
+
 #[derive(Deserialize)]
 struct DiscoveryDocument {
     issuer: String,
