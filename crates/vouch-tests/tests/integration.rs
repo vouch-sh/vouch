@@ -2473,7 +2473,6 @@ mod encoding_verification {
                 &challenge,
                 &user_id,
                 "user@test.com",
-                "",
                 &[],
             )
             .unwrap();
@@ -2485,7 +2484,7 @@ mod encoding_verification {
         assert!(!reg_result.client_data_json.is_empty());
 
         // Authentication now returns typed result directly
-        let auth_result = device.authenticate("test.local", &challenge, "").unwrap();
+        let auth_result = device.authenticate("test.local", &challenge).unwrap();
 
         // Verify typed result fields
         assert!(!auth_result.credential_id.is_empty());
@@ -2514,13 +2513,12 @@ mod encoding_verification {
                 &challenge,
                 &user_id,
                 "user@test.com",
-                "",
                 &[],
             )
             .unwrap();
 
         // Authenticate
-        let auth = device.authenticate("test.local", &challenge, "").unwrap();
+        let auth = device.authenticate("test.local", &challenge).unwrap();
 
         // Verify using typed API
         let verifier = TestCoseVerifier::always_succeed();

@@ -4,6 +4,7 @@
 pub(crate) mod aws;
 pub(crate) mod completions;
 pub(crate) mod credential;
+#[cfg(not(target_os = "windows"))]
 pub(crate) mod diag;
 pub(crate) mod doctor;
 pub(crate) mod enroll;

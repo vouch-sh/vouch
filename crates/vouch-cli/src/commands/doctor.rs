@@ -2,6 +2,7 @@
 //! Doctor command - diagnostic checks for the Vouch environment.
 
 use anyhow::{Result, bail};
+#[cfg(not(target_os = "windows"))]
 use ctap_hid_fido2::{Cfg, FidoKeyHidFactory};
 use serde::Serialize;
 #[cfg(unix)]
@@ -193,11 +194,47 @@ fn print_result(result: &CheckResult) {
 }
 
 /// Check if a YubiKey is connected and accessible.
+#[cfg(not(target_os = "windows"))]
 fn check_yubikey() -> CheckResult {
     let cfg = Cfg::init();
     match FidoKeyHidFactory::create(&cfg) {
         Ok(_device) => CheckResult::pass("yubikey", "FIDO2 device found"),
         Err(e) => CheckResult::fail("yubikey", format!("No FIDO2 device found: {e}")),
+    }
+}
+
+/// Check that the Windows WebAuthn API is available.
+///
+/// Unlike the Unix backend, we cannot probe the YubiKey directly — Windows
+/// blocks non-elevated processes from opening FIDO2 HID devices, and the
+/// WebAuthn API only opens a device interactively (when the user clicks
+/// through the Windows Security modal). The best we can do is confirm the
+/// API itself is present and report its version.
+#[cfg(target_os = "windows")]
+fn check_yubikey() -> CheckResult {
+    use windows::Win32::Networking::WindowsWebServices::WebAuthNGetApiVersionNumber;
+
+    // SAFETY: WebAuthNGetApiVersionNumber takes no parameters, has no
+    // preconditions, and is available since Windows 10 1903.
+    #[expect(
+        unsafe_code,
+        reason = "WebAuthNGetApiVersionNumber is a no-arg FFI call; safety documented inline"
+    )]
+    let version = unsafe { WebAuthNGetApiVersionNumber() };
+    if version == 0 {
+        CheckResult::fail(
+            "yubikey",
+            "Windows WebAuthn API not available. Update to Windows 10 1903 or later.",
+        )
+    } else {
+        CheckResult::pass(
+            "yubikey",
+            format!(
+                "Windows WebAuthn API available (version {version}); \
+                 vouch login uses the system Security dialog to authenticate \
+                 your YubiKey — no admin privileges required."
+            ),
+        )
     }
 }
 
