@@ -1159,4 +1159,33 @@ proptest! {
 
         let _ = validate_attestation_chain(&[cert_data], Some(&aaguid));
     }
+
+    // =========================================================================
+    // CSP origin: arbitrary input must never produce an injection-prone string
+    // =========================================================================
+
+    /// `CspOrigin::parse` either rejects the input or produces a string with
+    /// no CSP-meaningful characters. The CSP `form-action` directive
+    /// concatenates origins separated by spaces; if any produced origin
+    /// contained `;`, `'`, or whitespace, the resulting header would be
+    /// malformed or could be exploited to inject an unrelated directive.
+    ///
+    /// `parse` internally calls `from_url`, so this also covers the OIDC
+    /// (already-parsed `url::Url`) path.
+    #[test]
+    fn prop_csp_origin_never_contains_injection_chars(raw in "\\PC*") {
+        use vouch_server::infra::csp::CspOrigin;
+
+        if let Some(origin) = CspOrigin::parse(&raw) {
+            let s = origin.as_str();
+            prop_assert!(!s.contains(';'), "semicolon in origin: {s}");
+            prop_assert!(!s.contains('\''), "single-quote in origin: {s}");
+            prop_assert!(!s.contains('"'), "double-quote in origin: {s}");
+            prop_assert!(
+                !s.chars().any(char::is_whitespace),
+                "whitespace in origin: {s}"
+            );
+            prop_assert!(s.is_ascii(), "non-ASCII in origin: {s}");
+        }
+    }
 }

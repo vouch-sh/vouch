@@ -13,7 +13,7 @@ use axum::{
 use tower_http::cors::CorsLayer;
 use tower_http::set_header::SetResponseHeaderLayer;
 
-use crate::{AppState, config};
+use crate::{AppState, config, services::idp::UpstreamIdp};
 
 /// Build permissive CORS layer for API endpoints (OIDC, SCIM, v1, api).
 ///
@@ -81,10 +81,24 @@ pub fn build_ui_cors_layer(config: &config::ServerConfig) -> CorsLayer {
 ///
 /// Sets X-Frame-Options, X-Content-Type-Options, Referrer-Policy, Permissions-Policy,
 /// Cross-Origin-Opener-Policy, Content-Security-Policy, and HSTS (when TLS is configured).
+///
+/// `idp` extends the CSP `form-action` source list with the configured upstream
+/// IdP's origin(s). Chromium-based browsers enforce `form-action` through
+/// redirects (CSP3 §6.4.1.1), so without this widening the `POST /device`
+/// flow's 303 redirect to the IdP would be blocked.
+///
+/// # Errors
+///
+/// Returns an error if the constructed CSP `HeaderValue` cannot be built. This
+/// is unreachable in practice -- origins from `CspOrigin` are ASCII-only -- but
+/// `Result` propagation ensures any future bug fails server startup loudly
+/// rather than silently producing a CSP without IdP origins.
 pub fn apply_security_layers(
     router: Router<Arc<AppState>>,
     config: &config::ServerConfig,
-) -> Router<Arc<AppState>> {
+    idp: Option<&UpstreamIdp>,
+) -> anyhow::Result<Router<Arc<AppState>>> {
+    let csp = build_csp_header(idp)?;
     let router = router
         .layer(SetResponseHeaderLayer::if_not_present(
             header::CACHE_CONTROL,
@@ -104,9 +118,7 @@ pub fn apply_security_layers(
         ))
         .layer(SetResponseHeaderLayer::overriding(
             HeaderName::from_static("permissions-policy"),
-            HeaderValue::from_static(
-                "camera=(), microphone=(), geolocation=(), payment=()",
-            ),
+            HeaderValue::from_static("camera=(), microphone=(), geolocation=(), payment=()"),
         ))
         .layer(SetResponseHeaderLayer::overriding(
             HeaderName::from_static("cross-origin-opener-policy"),
@@ -114,9 +126,7 @@ pub fn apply_security_layers(
         ))
         .layer(SetResponseHeaderLayer::overriding(
             HeaderName::from_static("content-security-policy"),
-            HeaderValue::from_static(
-                "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'",
-            ),
+            csp,
         ))
         .layer(SetResponseHeaderLayer::overriding(
             HeaderName::from_static("x-dns-prefetch-control"),
@@ -129,19 +139,46 @@ pub fn apply_security_layers(
 
     // HSTS only when TLS is configured.
     // `preload` enables submission to browser HSTS preload lists per RFC 6797 / FAPI 2.0.
-    if config.tls_configured() {
+    let router = if config.tls_configured() {
         router.layer(SetResponseHeaderLayer::overriding(
             header::STRICT_TRANSPORT_SECURITY,
             HeaderValue::from_static("max-age=63072000; includeSubDomains; preload"),
         ))
     } else {
         router
+    };
+
+    Ok(router)
+}
+
+/// Build the `Content-Security-Policy` header value.
+///
+/// Extends `form-action 'self'` with the configured upstream IdP's origin(s),
+/// if any. The remaining directives are static.
+fn build_csp_header(idp: Option<&UpstreamIdp>) -> anyhow::Result<HeaderValue> {
+    let origins: Vec<crate::infra::csp::CspOrigin> = idp
+        .map(UpstreamIdp::form_action_origins)
+        .unwrap_or_default();
+    let mut form_action = String::from("form-action 'self'");
+    for origin in &origins {
+        form_action.push(' ');
+        form_action.push_str(origin.as_str());
     }
+    let csp = format!(
+        "default-src 'self'; script-src 'self'; style-src 'self'; \
+         img-src 'self'; font-src 'self'; connect-src 'self'; \
+         frame-ancestors 'none'; base-uri 'self'; {form_action}"
+    );
+    HeaderValue::from_str(&csp).map_err(|e| {
+        anyhow::anyhow!("failed to build Content-Security-Policy header from {csp:?}: {e}")
+    })
 }
 
 #[cfg(test)]
 #[expect(
     clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::string_slice,
     reason = "test code: panic on assertion failure is acceptable"
 )]
 mod tests {
@@ -151,7 +188,7 @@ mod tests {
     async fn test_x_frame_options_header() {
         let state = test_app_state().await;
         let config = state.config();
-        let router = apply_security_layers_to_test_router(state.clone(), &config);
+        let router = apply_security_layers_to_test_router(state.clone(), &config, None);
 
         let resp = http_get_full(&router, "/health", &[]).await;
         assert_eq!(resp.headers.get("x-frame-options").unwrap(), "DENY");
@@ -161,7 +198,7 @@ mod tests {
     async fn test_x_content_type_options_header() {
         let state = test_app_state().await;
         let config = state.config();
-        let router = apply_security_layers_to_test_router(state.clone(), &config);
+        let router = apply_security_layers_to_test_router(state.clone(), &config, None);
 
         let resp = http_get_full(&router, "/health", &[]).await;
         assert_eq!(
@@ -174,7 +211,7 @@ mod tests {
     async fn test_content_security_policy_header() {
         let state = test_app_state().await;
         let config = state.config();
-        let router = apply_security_layers_to_test_router(state.clone(), &config);
+        let router = apply_security_layers_to_test_router(state.clone(), &config, None);
 
         let resp = http_get_full(&router, "/health", &[]).await;
         let csp = resp
@@ -185,13 +222,178 @@ mod tests {
             .unwrap();
         assert!(csp.contains("default-src 'self'"));
         assert!(csp.contains("frame-ancestors 'none'"));
+        // form-action must be present and -- because no IdP is configured --
+        // contain only 'self'. The character following 'self' must be `;` or
+        // end-of-string; any other character would indicate a stray source.
+        let needle = "form-action 'self'";
+        let idx = csp.find(needle).expect("form-action 'self' present");
+        let next = csp[idx + needle.len()..].chars().next();
+        assert!(
+            matches!(next, None | Some(';')),
+            "form-action 'self' must end the directive when no IdP is configured; \
+             next char was {next:?}; full CSP: {csp}"
+        );
+    }
+
+    /// Regression guard: with no IdP configured, the CSP header is byte-
+    /// identical to the previous static value. Catches accidental trailing
+    /// whitespace or empty source tokens introduced by future refactors.
+    #[tokio::test]
+    async fn test_csp_form_action_no_idp_byte_identical() {
+        let state = test_app_state().await;
+        let config = state.config();
+        let router = apply_security_layers_to_test_router(state.clone(), &config, None);
+
+        let resp = http_get_full(&router, "/health", &[]).await;
+        let csp = resp
+            .headers
+            .get("content-security-policy")
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert_eq!(
+            csp,
+            "default-src 'self'; script-src 'self'; style-src 'self'; \
+             img-src 'self'; font-src 'self'; connect-src 'self'; \
+             frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+        );
+    }
+
+    fn make_oidc_idp(auth_endpoint: &str) -> crate::services::idp::UpstreamIdp {
+        crate::services::idp::UpstreamIdp::Oidc(Box::new(
+            crate::services::idp::oidc::OidcProvider {
+                issuer: "https://accounts.google.com".to_string(),
+                authorization_endpoint: url::Url::parse(auth_endpoint).unwrap(),
+                token_endpoint: url::Url::parse("https://oauth2.googleapis.com/token").unwrap(),
+                jwks_uri: url::Url::parse("https://www.googleapis.com/oauth2/v3/certs").unwrap(),
+            },
+        ))
+    }
+
+    fn make_saml_idp(
+        sso_post: Option<&str>,
+        sso_redirect: Option<&str>,
+    ) -> crate::services::idp::UpstreamIdp {
+        crate::services::idp::UpstreamIdp::Saml(crate::services::idp::saml::SamlProvider {
+            idp_metadata: crate::services::idp::saml::IdpMetadata {
+                entity_id: "https://idp.example.com/saml".to_string(),
+                sso_post_url: sso_post.map(str::to_string),
+                sso_redirect_url: sso_redirect.map(str::to_string),
+                signing_certificates: vec![],
+            },
+            sp_entity_id: "https://vouch.example.com".to_string(),
+            acs_url: "https://vouch.example.com/saml/acs".to_string(),
+            email_attribute: None,
+            domain_attribute: None,
+        })
+    }
+
+    /// Extract the `form-action` directive's full value from a CSP string.
+    ///
+    /// The CSP is `directive value; directive value; ...`. This pulls out
+    /// the substring between `form-action ` and the next `;` (or end of
+    /// string), enabling an exact-equality assertion that catches mutations
+    /// the loose `.contains()` would miss (e.g. tab vs space, missing
+    /// origin, extra whitespace).
+    fn extract_form_action(csp: &str) -> &str {
+        csp.split(';')
+            .map(str::trim)
+            .find(|d| d.starts_with("form-action"))
+            .expect("form-action directive present in CSP")
+    }
+
+    #[tokio::test]
+    async fn test_csp_form_action_includes_oidc_origin() {
+        let state = test_app_state().await;
+        let config = state.config();
+        let idp = make_oidc_idp("https://accounts.google.com/o/oauth2/v2/auth");
+        let router = apply_security_layers_to_test_router(state.clone(), &config, Some(&idp));
+
+        let resp = http_get_full(&router, "/health", &[]).await;
+        let csp = resp
+            .headers
+            .get("content-security-policy")
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert_eq!(
+            extract_form_action(csp),
+            "form-action 'self' https://accounts.google.com"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_csp_form_action_oidc_custom_port() {
+        let state = test_app_state().await;
+        let config = state.config();
+        let idp = make_oidc_idp("https://idp.example.com:8443/auth");
+        let router = apply_security_layers_to_test_router(state.clone(), &config, Some(&idp));
+
+        let resp = http_get_full(&router, "/health", &[]).await;
+        let csp = resp
+            .headers
+            .get("content-security-policy")
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert_eq!(
+            extract_form_action(csp),
+            "form-action 'self' https://idp.example.com:8443"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_csp_form_action_includes_saml_post_origin() {
+        let state = test_app_state().await;
+        let config = state.config();
+        let idp = make_saml_idp(Some("https://idp.example.com/sso/post"), None);
+        let router = apply_security_layers_to_test_router(state.clone(), &config, Some(&idp));
+
+        let resp = http_get_full(&router, "/health", &[]).await;
+        let csp = resp
+            .headers
+            .get("content-security-policy")
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert_eq!(
+            extract_form_action(csp),
+            "form-action 'self' https://idp.example.com"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_csp_form_action_saml_two_distinct_hosts() {
+        let state = test_app_state().await;
+        let config = state.config();
+        let idp = make_saml_idp(
+            Some("https://idp-a.example.com/sso/post"),
+            Some("https://idp-b.example.com/sso/redirect"),
+        );
+        let router = apply_security_layers_to_test_router(state.clone(), &config, Some(&idp));
+
+        let resp = http_get_full(&router, "/health", &[]).await;
+        let csp = resp
+            .headers
+            .get("content-security-policy")
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(
+            csp.contains("https://idp-a.example.com"),
+            "missing idp-a origin; got: {csp}"
+        );
+        assert!(
+            csp.contains("https://idp-b.example.com"),
+            "missing idp-b origin; got: {csp}"
+        );
     }
 
     #[tokio::test]
     async fn test_referrer_policy_header() {
         let state = test_app_state().await;
         let config = state.config();
-        let router = apply_security_layers_to_test_router(state.clone(), &config);
+        let router = apply_security_layers_to_test_router(state.clone(), &config, None);
 
         let resp = http_get_full(&router, "/health", &[]).await;
         assert_eq!(
@@ -204,7 +406,7 @@ mod tests {
     async fn test_permissions_policy_header() {
         let state = test_app_state().await;
         let config = state.config();
-        let router = apply_security_layers_to_test_router(state.clone(), &config);
+        let router = apply_security_layers_to_test_router(state.clone(), &config, None);
 
         let resp = http_get_full(&router, "/health", &[]).await;
         let pp = resp
@@ -221,7 +423,7 @@ mod tests {
     async fn test_cross_origin_opener_policy_header() {
         let state = test_app_state().await;
         let config = state.config();
-        let router = apply_security_layers_to_test_router(state.clone(), &config);
+        let router = apply_security_layers_to_test_router(state.clone(), &config, None);
 
         let resp = http_get_full(&router, "/health", &[]).await;
         assert_eq!(
@@ -231,15 +433,21 @@ mod tests {
     }
 
     /// Build a minimal router with security headers for testing.
+    ///
+    /// `idp` is forwarded to `apply_security_layers` to widen the CSP
+    /// `form-action` directive when an upstream IdP is configured.
     fn apply_security_layers_to_test_router(
         state: std::sync::Arc<crate::AppState>,
         config: &crate::config::ServerConfig,
+        idp: Option<&crate::services::idp::UpstreamIdp>,
     ) -> axum::Router {
         use axum::routing::get;
 
         let router: axum::Router<std::sync::Arc<crate::AppState>> =
             axum::Router::new().route("/health", get(|| async { "ok" }));
 
-        super::apply_security_layers(router, config).with_state(state)
+        super::apply_security_layers(router, config, idp)
+            .expect("apply_security_layers builds CSP for test router")
+            .with_state(state)
     }
 }

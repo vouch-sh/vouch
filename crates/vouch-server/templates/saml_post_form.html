@@ -4,12 +4,13 @@
   <meta charset="utf-8">
   <title>Redirecting...</title>
 </head>
-<body onload="document.forms[0].submit()">
+<body>
   <noscript><p>Redirecting to identity provider. If you are not redirected, click the button below.</p></noscript>
   <form method="post" action="{{ action_url }}">
     <input type="hidden" name="SAMLRequest" value="{{ saml_request }}">
     <input type="hidden" name="RelayState" value="{{ relay_state }}">
     <noscript><button type="submit">Continue</button></noscript>
   </form>
+  <script src="/static/js/saml-autosubmit.js" defer></script>
 </body>
 </html>
