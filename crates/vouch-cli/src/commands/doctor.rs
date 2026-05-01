@@ -89,15 +89,22 @@ pub(crate) async fn run(server: &str, quiet: bool, json: bool) -> Result<()> {
         checks.push(agent_result);
     }
 
-    // Check 3: Server reachable
+    // Check 3: Server reachable (and clock skew, derived from same response)
     if !suppress {
         print!("Server reachable ... ");
     }
-    let server_result = check_server(server).await;
+    let (server_result, clock_result) = check_server(server).await;
     if !suppress {
         print_result(&server_result);
     }
     checks.push(server_result);
+    if let Some(clock) = clock_result {
+        if !suppress {
+            print!("Clock in sync with server ... ");
+            print_result(&clock);
+        }
+        checks.push(clock);
+    }
 
     // Check 4: Session valid
     if !suppress {
@@ -279,24 +286,70 @@ async fn check_agent() -> CheckResult {
     }
 }
 
-/// Check if the server is reachable.
-async fn check_server(server: &str) -> CheckResult {
+/// Check if the server is reachable, and use the response's `Date` header
+/// to also report clock skew between the local system and the server.
+///
+/// Returns `(reachability_result, Some(clock_skew_result))` when the request
+/// completes (skew can be computed from the `Date` header), or
+/// `(reachability_result, None)` when the request never produced a response.
+async fn check_server(server: &str) -> (CheckResult, Option<CheckResult>) {
     let client = match VouchClient::unauthenticated(server) {
         Ok(c) => c,
-        Err(e) => return CheckResult::fail("server", format!("Invalid server URL: {e}")),
+        Err(e) => {
+            return (
+                CheckResult::fail("server", format!("Invalid server URL: {e}")),
+                None,
+            );
+        }
     };
 
     let url = format!("{}/health", client.base_url());
-    match client.raw_client().get(&url).send().await {
-        Ok(resp) if resp.status().is_success() => {
-            CheckResult::pass("server", format!("Server at {server} is reachable"))
+    let response = match client.raw_client().get(&url).send().await {
+        Ok(resp) => resp,
+        Err(e) => {
+            return (
+                CheckResult::fail("server", format!("Server unreachable: {e}")),
+                None,
+            );
         }
-        Ok(resp) => CheckResult::fail(
+    };
+
+    let clock_result = build_clock_skew_result(response.headers());
+
+    let server_result = if response.status().is_success() {
+        CheckResult::pass("server", format!("Server at {server} is reachable"))
+    } else {
+        CheckResult::fail(
             "server",
-            format!("Server returned status: {}", resp.status()),
-        ),
-        Err(e) => CheckResult::fail("server", format!("Server unreachable: {e}")),
+            format!("Server returned status: {}", response.status()),
+        )
+    };
+
+    (server_result, clock_result)
+}
+
+/// Build a `CheckResult` describing the clock skew between this client and
+/// the server, derived from the response's `Date` header. Returns `None` if
+/// the server response lacks a parseable `Date` header (rare — RFC 7231
+/// requires it on every response).
+fn build_clock_skew_result(headers: &reqwest::header::HeaderMap) -> Option<CheckResult> {
+    let (skew_secs, local_behind) = vouch_cli::http::compute_clock_skew(headers)?;
+    if skew_secs < vouch_cli::http::CLOCK_SKEW_THRESHOLD_SECS {
+        return Some(CheckResult::pass(
+            "clock_skew",
+            format!("System clock within {skew_secs}s of server"),
+        ));
     }
+    let direction = if local_behind { "behind" } else { "ahead of" };
+    Some(CheckResult::fail(
+        "clock_skew",
+        format!(
+            "System clock is {skew_secs}s {direction} the server. \
+             Signed requests will fail once skew exceeds 300s. \
+             Sync your clock (Windows: Settings → Time & Language → Date & Time → \
+             \"Sync now\"; macOS: `sudo sntp -sS time.apple.com`)."
+        ),
+    ))
 }
 
 /// Check if there's a valid session.

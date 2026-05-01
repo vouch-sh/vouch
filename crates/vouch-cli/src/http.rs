@@ -77,6 +77,60 @@ impl HttpResponse {
     }
 }
 
+/// Skew threshold in seconds — well below the server's 300s max_age (RFC 9421).
+pub const CLOCK_SKEW_THRESHOLD_SECS: u64 = 60;
+
+/// Parse the response `Date` header and return the skew in seconds.
+///
+/// Returns `None` if the header is missing or unparseable. The returned
+/// value is the magnitude of the skew (always non-negative); direction is
+/// in the second tuple element (`true` if local is behind server).
+#[must_use]
+pub fn compute_clock_skew(headers: &reqwest::header::HeaderMap) -> Option<(u64, bool)> {
+    let date_str = headers.get("date").and_then(|v| v.to_str().ok())?;
+    let server_zoned = jiff::fmt::rfc2822::parse(date_str).ok()?;
+    let server_secs = server_zoned.timestamp().as_second();
+    let local_secs = jiff::Timestamp::now().as_second();
+    let skew = server_secs.saturating_sub(local_secs).unsigned_abs();
+    let local_behind = local_secs < server_secs;
+    Some((skew, local_behind))
+}
+
+/// Check the response `Date` header against the local clock and warn the
+/// user once per process if the skew exceeds the threshold.
+///
+/// Clock skew is silent until it crosses the server's signature
+/// `max_age` (300s default per RFC 9421), at which point all signed
+/// requests fail with an opaque "signature verification failed" 401.
+/// Warning at 60s gives the user a clear reason to fix it before that.
+fn check_clock_skew(headers: &reqwest::header::HeaderMap) {
+    static WARNED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    if WARNED.get().is_some() {
+        return;
+    }
+
+    let Some((skew_secs, local_behind)) = compute_clock_skew(headers) else {
+        return;
+    };
+
+    if skew_secs >= CLOCK_SKEW_THRESHOLD_SECS {
+        WARNED.get_or_init(|| {
+            let direction = if local_behind { "behind" } else { "ahead of" };
+            eprintln!(
+                "Warning: system clock is {skew_secs}s {direction} the server. \
+                 Signed requests may fail. Sync your clock — \
+                 on Windows: Settings → Time & Language → Date & Time → \"Sync now\"; \
+                 on macOS: `sudo sntp -sS time.apple.com`."
+            );
+            tracing::warn!(
+                skew_seconds = skew_secs,
+                direction,
+                "Clock skew exceeds threshold; signed requests may fail"
+            );
+        });
+    }
+}
+
 /// Extract common response headers from a `HeaderMap`.
 ///
 /// Returns `(www_authenticate, dpop_nonce, retry_after)` extracted from
@@ -250,6 +304,7 @@ impl HttpClient for ReqwestClient {
         let status = response.status().as_u16();
         let (www_authenticate, dpop_nonce, sig_nonce, retry_after) =
             extract_response_headers(status, response.headers());
+        check_clock_skew(response.headers());
 
         // Trace-level response logging
         if tracing::enabled!(tracing::Level::TRACE) {
