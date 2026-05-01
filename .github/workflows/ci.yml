@@ -177,6 +177,13 @@ jobs:
       - name: Build # zizmor: ignore[template-injection] — static matrix values
         if: runner.os != 'Linux'
         run: cargo build --release --target ${{ matrix.target }} ${{ matrix.packages }}
+      - name: Upload Windows binary
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: vouch-${{ matrix.name }}-${{ github.sha }}
+          path: target/${{ matrix.target }}/release/vouch.exe
+          retention-days: 7
 
   dependency-review:
     name: Dependency Review
