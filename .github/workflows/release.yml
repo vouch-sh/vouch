@@ -1130,9 +1130,14 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.WINGET_TOKEN }}
           VERSION: ${{ steps.release.outputs.version }}
           URLS: ${{ steps.release.outputs.urls }}
+          RELEASE_NOTES_URL: https://github.com/${{ github.repository }}/releases/tag/${{ github.event.inputs.tag || github.ref_name }}
         run: |
           # shellcheck disable=SC2086 # URLS is a space-separated list of args
-          komac update SmokeTurner.Vouch --version "${VERSION}" --submit --urls ${URLS}
+          komac update SmokeTurner.Vouch \
+            --version "${VERSION}" \
+            --release-notes-url "${RELEASE_NOTES_URL}" \
+            --submit \
+            --urls ${URLS}
 
   homebrew:
     name: Update Homebrew Tap
