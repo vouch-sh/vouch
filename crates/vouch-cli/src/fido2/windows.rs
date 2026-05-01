@@ -560,8 +560,10 @@ impl Drop for AssertionGuard {
         if !self.0.is_null() {
             // SAFETY: pointer was returned by WebAuthNAuthenticatorGetAssertion
             // and not yet freed. WebAuthNFreeAssertion is the only valid
-            // deallocator per the Windows API contract.
-            unsafe { WebAuthNFreeAssertion(Some(self.0.cast_const())) };
+            // deallocator per the Windows API contract. Unlike its sibling
+            // WebAuthNFreeCredentialAttestation, this one takes the pointer
+            // directly without an Option wrapper.
+            unsafe { WebAuthNFreeAssertion(self.0.cast_const()) };
         }
     }
 }
