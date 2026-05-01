@@ -402,6 +402,10 @@ enum Commands {
         format: commands::posture::OutputFormat,
     },
     /// Run diagnostic test of YubiKey registration + authentication (bypasses server).
+    ///
+    /// Not available on Windows: depends on the CTAP2 protocol which Windows
+    /// blocks for non-elevated processes.
+    #[cfg(not(target_os = "windows"))]
     #[command(hide = true)]
     Diag(commands::diag::DiagArgs),
 }
@@ -413,8 +417,9 @@ impl Commands {
             Commands::Aws { command } => {
                 matches!(command, AwsCommands::Console(_))
             }
+            #[cfg(not(target_os = "windows"))]
+            Commands::Diag(_) => false,
             Commands::Completions(_)
-            | Commands::Diag(_)
             | Commands::Logout
             | Commands::Init { .. }
             | Commands::Posture { .. } => false,
@@ -760,6 +765,7 @@ async fn run() -> Result<()> {
         }
         Commands::Doctor { quiet, json } => commands::doctor::run(server, quiet, json).await,
         Commands::Posture { format } => commands::posture::run(format),
+        #[cfg(not(target_os = "windows"))]
         Commands::Diag(args) => commands::diag::run(args),
     }
 }

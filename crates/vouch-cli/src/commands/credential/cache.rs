@@ -8,6 +8,7 @@
 use std::future::Future;
 
 use anyhow::Result;
+#[cfg(unix)]
 use tracing::debug;
 
 /// Try to retrieve a cached credential from the agent.

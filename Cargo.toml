@@ -122,7 +122,7 @@ allow_attributes_without_reason = "deny"
 anyhow = { version = "=1.0.102", default-features = false }
 apple-native-keyring-store = { version = "=1.0.0", default-features = false }
 arc-swap = { version = "=1.9.1", default-features = false }
-askama = { version = "=0.15.6", default-features = false }
+askama = { version = "=0.16.0", default-features = false }
 aws-config = { version = "=1.8.16", default-features = false }
 aws-lc-rs = { version = "=1.16.3", default-features = false }
 aws-sdk-dsql = { version = "=1.55.0", default-features = false }
@@ -157,8 +157,8 @@ keyring-core = { version = "=1.0.0", default-features = false }
 libc = { version = "=0.2.186", default-features = false }
 linux-keyutils-keyring-store = { version = "=1.0.0", default-features = false }
 maxminddb = { version = "=0.28.1", default-features = false }
-metrics = { version = "=0.24.4", default-features = false }
-metrics-exporter-prometheus = { version = "=0.18.2", default-features = false }
+metrics = { version = "=0.24.5", default-features = false }
+metrics-exporter-prometheus = { version = "=0.18.3", default-features = false }
 mime_guess = { version = "=2.0.5", default-features = false }
 mimalloc = { version = "=0.1.50", default-features = false }
 open = { version = "=5.3.4", default-features = false }
@@ -169,7 +169,7 @@ p256 = { version = "=0.13.2", default-features = false }
 proptest = { version = "=1.11.0", default-features = false }
 reqwest = { version = "=0.13.3", default-features = false }
 roxmltree = { version = "=0.21.1", default-features = false }
-rpassword = { version = "=7.4.0", default-features = false }
+rpassword = { version = "=7.5.1", default-features = false }
 rust-embed = { version = "=8.11.0", default-features = false }
 rust-ini = { version = "=0.21.3", default-features = false }
 rustls = { version = "=0.23.40", default-features = false }
@@ -206,8 +206,9 @@ uuid = { version = "=1.23.1", default-features = false }
 vouch-agent = { path = "crates/vouch-agent" }
 vouch-common = { path = "crates/vouch-common" }
 vouch-httpsig = { path = "crates/vouch-httpsig" }
-webauthn-rs = { version = "=0.5.4", default-features = false }
-webauthn-rs-proto = { version = "=0.5.4", default-features = false }
+webauthn-rs = { version = "=0.5.5", default-features = false }
+webauthn-rs-proto = { version = "=0.5.5", default-features = false }
+windows = { version = "=0.62.2", default-features = false }
 windows-native-keyring-store = { version = "=1.0.0", default-features = false }
 wiremock = { version = "=0.6.5" }
 x509-cert = { version = "=0.2.5", default-features = false }

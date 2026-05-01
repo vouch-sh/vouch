@@ -148,6 +148,10 @@ pub(crate) fn is_vouch_symlink(path: &Path) -> bool {
 /// Both platforms: ensures the parent directory exists, removes existing files,
 /// and warns if the directory is not in PATH.
 pub(crate) fn create_symlink_with_fallback(
+    #[cfg_attr(
+        not(unix),
+        expect(unused_variables, reason = "parameter consumed only under cfg(unix)")
+    )]
     vouch_path: &Path,
     symlink_path: &Path,
     #[cfg_attr(

@@ -27,7 +27,7 @@ use vouch_common::Fido2ChallengeResponse;
 use super::enroll::expiry_offset_seconds;
 use crate::client::VouchClient;
 use crate::config::Config;
-use crate::fido2::{self, YubiKey};
+use crate::fido2::{self, FidoDevice, YubiKey};
 use crate::session;
 
 /// Run the login command.
@@ -166,9 +166,7 @@ async fn run_fapi_login(
 
     let assertion_result = fido2::spawn_fido2(move || {
         let key = YubiKey::wait_for_device(timeout_secs)?;
-        let pin = fido2::ensure_pin_configured(&key)?;
-        println!("\nTouch your YubiKey...");
-        key.authenticate(&rp_id, &challenge_bytes, pin.expose_secret())
+        key.authenticate(&rp_id, &challenge_bytes)
     })
     .await?;
 

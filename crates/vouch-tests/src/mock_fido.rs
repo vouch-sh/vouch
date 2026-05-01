@@ -62,7 +62,7 @@ impl IntegrationMockDevice {
         user_name: &str,
     ) -> Result<RegistrationResult> {
         self.inner
-            .register(rp_id, "Test RP", challenge, user_id, user_name, "", &[])
+            .register(rp_id, "Test RP", challenge, user_id, user_name, &[])
     }
 
     /// Perform authentication with the mock device.
@@ -71,7 +71,7 @@ impl IntegrationMockDevice {
     ///
     /// Returns an error if authentication fails.
     pub fn authenticate(&self, rp_id: &str, challenge: &[u8]) -> Result<AuthenticationResult> {
-        self.inner.authenticate(rp_id, challenge, "")
+        self.inner.authenticate(rp_id, challenge)
     }
 }
 

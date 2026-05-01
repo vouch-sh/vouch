@@ -272,13 +272,10 @@ fn test_mock_device_fixture_compatibility() {
             &challenge,
             &user_id,
             "test@example.com",
-            "123456",
             &[],
         )
         .unwrap();
-    let auth = device
-        .authenticate("test.local", &challenge, "123456")
-        .unwrap();
+    let auth = device.authenticate("test.local", &challenge).unwrap();
 
     // Create a fixture from MockFidoDevice data
     let fixture = Fido2Fixture {

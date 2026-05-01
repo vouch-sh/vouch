@@ -25,7 +25,6 @@ base64 = { workspace = true, features = ["std"] }
 ciborium = { workspace = true }
 clap = { workspace = true, features = ["std", "derive", "env", "help", "usage", "error-context"] }
 clap_complete = { workspace = true }
-ctap-hid-fido2 = { workspace = true }
 dirs = { workspace = true }
 gethostname = { workspace = true }
 ed25519-dalek = { workspace = true, features = ["std"] }
@@ -66,13 +65,18 @@ linux-keyutils-keyring-store = { workspace = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 apple-native-keyring-store = { workspace = true, features = ["keychain"] }
+ctap-hid-fido2 = { workspace = true, features = ["aws-lc-rs"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-native-keyring-store = { workspace = true }
+windows = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Networking_WindowsWebServices",
+    "Win32_System_Console",
+] }
 
 [target.'cfg(not(target_os = "linux"))'.dependencies]
 aws-lc-rs = { workspace = true }
-ctap-hid-fido2 = { workspace = true, features = ["aws-lc-rs"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true }

@@ -11,7 +11,7 @@ use vouch_common::{
 
 use crate::client::VouchClient;
 use crate::config::Config;
-use crate::fido2::{self, YubiKey};
+use crate::fido2::{self, FidoDevice, YubiKey};
 use crate::session;
 
 /// Response from device token endpoint.
@@ -477,15 +477,12 @@ async fn register_current_key(server: &str, token: SecretString) -> Result<()> {
     // early above), but we pass &[] explicitly for clarity.
     let result = fido2::spawn_fido2(move || {
         let key = YubiKey::wait_for_device(10)?;
-        let pin = fido2::ensure_pin_configured(&key)?;
-        println!("Touch your YubiKey...");
         key.register(
             &rp_id,
             &rp_name,
             &challenge,
             user_id.as_bytes(),
             &user_name,
-            pin.expose_secret(),
             &[],
         )
     })

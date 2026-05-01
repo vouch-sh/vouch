@@ -9,13 +9,12 @@
 //! module-level docs in [`crate::fido2`] for why this separation is required.
 
 use anyhow::{Context, Result};
-use secrecy::ExposeSecret;
 use vouch_common::{
     RegisterCompleteRequest, RegisterCompleteResponse, RegisterStartRequest, RegisterStartResponse,
 };
 
 use crate::client::VouchClient;
-use crate::fido2::{self, YubiKey};
+use crate::fido2::{self, FidoDevice, YubiKey};
 
 /// Run the register command.
 ///
@@ -69,15 +68,12 @@ pub(crate) async fn run(server: &str, name: Option<&str>, timeout_secs: u64) -> 
     let exclude_credentials = start_resp.exclude_credential_ids.clone();
     let result = fido2::spawn_fido2(move || {
         let key = YubiKey::wait_for_device(timeout_secs)?;
-        let pin = fido2::ensure_pin_configured(&key)?;
-        println!("\nTouch your YubiKey...");
         key.register(
             &rp_id,
             &rp_name,
             &challenge,
             user_id.as_bytes(),
             &user_name,
-            pin.expose_secret(),
             &exclude_credentials,
         )
     })
