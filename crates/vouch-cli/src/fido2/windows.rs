@@ -72,9 +72,9 @@ use windows::Win32::Networking::WindowsWebServices::{
     WEBAUTHN_AUTHENTICATOR_MAKE_CREDENTIAL_OPTIONS,
     WEBAUTHN_AUTHENTICATOR_MAKE_CREDENTIAL_OPTIONS_CURRENT_VERSION, WEBAUTHN_CLIENT_DATA,
     WEBAUTHN_CLIENT_DATA_CURRENT_VERSION, WEBAUTHN_COSE_ALGORITHM_ECDSA_P256_WITH_SHA256,
-    WEBAUTHN_COSE_ALGORITHM_EDDSA, WEBAUTHN_COSE_ALGORITHM_RSASSA_PKCS1_V1_5_WITH_SHA256,
-    WEBAUTHN_COSE_CREDENTIAL_PARAMETER, WEBAUTHN_COSE_CREDENTIAL_PARAMETER_CURRENT_VERSION,
-    WEBAUTHN_COSE_CREDENTIAL_PARAMETERS, WEBAUTHN_CREDENTIAL_ATTESTATION, WEBAUTHN_CREDENTIAL_EX,
+    WEBAUTHN_COSE_ALGORITHM_RSASSA_PKCS1_V1_5_WITH_SHA256, WEBAUTHN_COSE_CREDENTIAL_PARAMETER,
+    WEBAUTHN_COSE_CREDENTIAL_PARAMETER_CURRENT_VERSION, WEBAUTHN_COSE_CREDENTIAL_PARAMETERS,
+    WEBAUTHN_CREDENTIAL_ATTESTATION, WEBAUTHN_CREDENTIAL_EX,
     WEBAUTHN_CREDENTIAL_EX_CURRENT_VERSION, WEBAUTHN_CREDENTIAL_LIST,
     WEBAUTHN_CREDENTIAL_TYPE_PUBLIC_KEY, WEBAUTHN_HASH_ALGORITHM_SHA_256,
     WEBAUTHN_RP_ENTITY_INFORMATION, WEBAUTHN_RP_ENTITY_INFORMATION_CURRENT_VERSION,
@@ -117,8 +117,12 @@ pub(super) fn cancel_current_operation() {
         // SAFETY: WebAuthNCancelCurrentOperation takes a pointer to a GUID
         // previously returned by WebAuthNGetCancellationId. The GUID is a
         // local-by-value copy here; the API reads it but does not retain the
-        // pointer beyond the call.
-        let _ = unsafe { WebAuthNCancelCurrentOperation(&id) };
+        // pointer beyond the call. Cancellation is best-effort: if it fails
+        // (e.g., the operation already completed), the pending FFI call will
+        // simply return its own error and the process will exit normally.
+        if let Err(e) = unsafe { WebAuthNCancelCurrentOperation(&id) } {
+            tracing::debug!(?e, "WebAuthn cancellation request failed");
+        }
     }
 }
 
@@ -146,10 +150,9 @@ impl Drop for CancellationSlot {
 
 /// Generate a fresh cancellation ID via the WebAuthn API.
 fn new_cancellation_id() -> Result<GUID> {
-    let mut id = GUID::default();
-    // SAFETY: WebAuthNGetCancellationId writes a 128-bit GUID to the pointer.
-    // The pointer is to a stack local owned by this function.
-    unsafe { WebAuthNGetCancellationId(&mut id) }
+    // SAFETY: WebAuthNGetCancellationId is a no-arg call that returns a fresh
+    // GUID by value (windows-rs wraps the C out-parameter form into Result<GUID>).
+    let id = unsafe { WebAuthNGetCancellationId() }
         .map_err(|e| translate_webauthn_error(e.code(), "WebAuthn cancellation init"))?;
     Ok(id)
 }
@@ -224,10 +227,13 @@ impl FidoDevice for YubiKey {
             pwszHashAlgId: WEBAUTHN_HASH_ALGORITHM_SHA_256,
         };
 
-        // Hardware-only credential parameters: ES256, EdDSA, RS256.
+        // Hardware-only credential parameters: ES256, RS256.
+        // (EdDSA / -8 has no constant in Microsoft's webauthn.h and is not
+        // supported by the Windows WebAuthn API. Existing EdDSA credentials
+        // registered on Unix still authenticate on Windows because
+        // getAssertion uses whichever key the authenticator already holds.)
         let cred_params = [
             cose_param(WEBAUTHN_COSE_ALGORITHM_ECDSA_P256_WITH_SHA256),
-            cose_param(WEBAUTHN_COSE_ALGORITHM_EDDSA),
             cose_param(WEBAUTHN_COSE_ALGORITHM_RSASSA_PKCS1_V1_5_WITH_SHA256),
         ];
         let cose_params = WEBAUTHN_COSE_CREDENTIAL_PARAMETERS {
@@ -251,8 +257,10 @@ impl FidoDevice for YubiKey {
                 })
             })
             .collect::<Result<_>>()?;
-        let mut exclude_ex_ptrs: Vec<*mut WEBAUTHN_CREDENTIAL_EX> =
-            exclude_ex_storage.iter_mut().map(|c| c as *mut _).collect();
+        let mut exclude_ex_ptrs: Vec<*mut WEBAUTHN_CREDENTIAL_EX> = exclude_ex_storage
+            .iter_mut()
+            .map(std::ptr::from_mut)
+            .collect();
         let mut exclude_list = WEBAUTHN_CREDENTIAL_LIST {
             cCredentials: u32::try_from(exclude_ex_ptrs.len())
                 .context("exclude credentials count exceeds u32")?,
@@ -539,8 +547,9 @@ impl Drop for CredentialAttestationGuard {
         if !self.0.is_null() {
             // SAFETY: pointer was returned by WebAuthNAuthenticatorMakeCredential
             // and not yet freed. WebAuthNFreeCredentialAttestation is the only
-            // valid deallocator per the Windows API contract.
-            unsafe { WebAuthNFreeCredentialAttestation(self.0) };
+            // valid deallocator per the Windows API contract. windows-rs wraps
+            // the deallocator's nullable parameter as Option<*const _>.
+            unsafe { WebAuthNFreeCredentialAttestation(Some(self.0.cast_const())) };
         }
     }
 }
@@ -552,7 +561,7 @@ impl Drop for AssertionGuard {
             // SAFETY: pointer was returned by WebAuthNAuthenticatorGetAssertion
             // and not yet freed. WebAuthNFreeAssertion is the only valid
             // deallocator per the Windows API contract.
-            unsafe { WebAuthNFreeAssertion(self.0) };
+            unsafe { WebAuthNFreeAssertion(Some(self.0.cast_const())) };
         }
     }
 }
