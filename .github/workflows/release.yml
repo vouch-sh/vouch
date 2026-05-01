@@ -1090,16 +1090,49 @@ jobs:
     needs: publish-release
     permissions:
       contents: read
+    env:
+      KOMAC_VERSION: 2.16.0
+      KOMAC_SHA256: 7d2707fa6210f2789a3702de49fbd150b736dbf426ee0b9bc8e098736f9fd82d
 
     steps:
-      - uses: vedantmgoyal9/winget-releaser@4ffc7888bffd451b357355dc214d43bb9f23917e # v2
-        with:
-          identifier: SmokeTurner.Vouch
-          installers-regex: '\.zip$'
-          release-tag: ${{ github.event.inputs.tag || github.ref_name }}
-          token: ${{ secrets.WINGET_TOKEN }}
-          fork-user: vouch-bot
-          max-versions-to-keep: 5
+      - name: Install komac
+        run: |
+          ARCHIVE="komac-${KOMAC_VERSION}-x86_64-unknown-linux-gnu.tar.gz"
+          curl -fsSL -o "${ARCHIVE}" \
+            "https://github.com/russellbanks/Komac/releases/download/v${KOMAC_VERSION}/${ARCHIVE}"
+          echo "${KOMAC_SHA256}  ${ARCHIVE}" | sha256sum -c -
+          tar -xzf "${ARCHIVE}"
+          sudo install -m 0755 komac /usr/local/bin/komac
+          komac --version
+
+      - name: Get release info
+        id: release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          URLS=$(gh api "repos/${REPOSITORY}/releases/tags/${TAG}" \
+            --jq '[.assets[] | select(.name | test("\\.zip$")) | .browser_download_url] | join(" ")')
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+          echo "urls=${URLS}" >> "$GITHUB_OUTPUT"
+
+      - name: Sync winget-pkgs fork
+        env:
+          KOMAC_FORK_OWNER: vouch-bot
+          GITHUB_TOKEN: ${{ secrets.WINGET_TOKEN }}
+        run: komac sync-fork
+
+      - name: Submit winget update
+        env:
+          KOMAC_FORK_OWNER: vouch-bot
+          KOMAC_CREATED_WITH: vouch-release-workflow
+          GITHUB_TOKEN: ${{ secrets.WINGET_TOKEN }}
+          VERSION: ${{ steps.release.outputs.version }}
+          URLS: ${{ steps.release.outputs.urls }}
+        run: |
+          # shellcheck disable=SC2086 # URLS is a space-separated list of args
+          komac update SmokeTurner.Vouch --version "${VERSION}" --submit --urls ${URLS}
 
   homebrew:
     name: Update Homebrew Tap
