@@ -5,6 +5,7 @@ pub mod aaguid;
 pub(crate) mod api;
 pub mod aws;
 pub(crate) mod cookie;
+pub mod dns;
 pub mod encoding;
 pub(crate) mod error;
 pub mod fido2_types;

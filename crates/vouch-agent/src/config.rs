@@ -10,6 +10,7 @@ use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
+use vouch_common::dns::DohConfigSerde;
 
 /// Read-only view of the Vouch CLI configuration.
 ///
@@ -28,6 +29,16 @@ pub(crate) struct VouchConfig {
     server_url: Option<String>,
     /// Legacy flat session token.
     token: Option<String>,
+    /// Global network configuration (DoH, …).
+    #[serde(default)]
+    network: Option<NetworkSection>,
+}
+
+/// Read-only view of the `network` section.
+#[derive(Debug, Default, Deserialize)]
+struct NetworkSection {
+    #[serde(default)]
+    dns_over_https: Option<DohConfigSerde>,
 }
 
 /// Read-only per-server entry within the config file.
@@ -66,6 +77,13 @@ impl VouchConfig {
             return Some(tok.as_str());
         }
         self.token.as_deref()
+    }
+
+    /// Configured DoH provider, if any.
+    pub(crate) fn doh(&self) -> Option<&DohConfigSerde> {
+        self.network
+            .as_ref()
+            .and_then(|n| n.dns_over_https.as_ref())
     }
 }
 

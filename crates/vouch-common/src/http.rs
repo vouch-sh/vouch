@@ -6,6 +6,8 @@
 
 use std::time::Duration;
 
+use crate::dns::process_resolver;
+
 /// Timeout values for different contexts.
 pub mod timeouts {
     use super::Duration;
@@ -26,11 +28,23 @@ pub mod timeouts {
     pub const SERVER_CONNECT: Duration = Duration::from_secs(5);
 }
 
+/// Apply the process-wide DoH resolver to a builder, if one is installed.
+fn with_process_doh(mut builder: reqwest::ClientBuilder) -> reqwest::ClientBuilder {
+    if let Some(resolver) = process_resolver() {
+        builder = builder.dns_resolver(resolver);
+    }
+    builder
+}
+
 /// Create an HTTP client for credential helper operations.
 ///
 /// Uses short timeouts (10s total, 5s connect) for fast failure.
 /// Credential helpers are called by tools (aws, docker, gcloud) that have
 /// their own retry logic.
+///
+/// Redirects are disabled: vouch and AWS endpoints don't redirect, and
+/// allowing them could leak traffic over plain HTTP — undermining the
+/// "TCP/443 only" property when DoH is enabled.
 ///
 /// # Arguments
 ///
@@ -40,17 +54,19 @@ pub mod timeouts {
 ///
 /// Returns an error if the client cannot be built.
 pub fn credential_client(user_agent: &str) -> Result<reqwest::Client, reqwest::Error> {
-    reqwest::Client::builder()
+    let builder = reqwest::Client::builder()
         .user_agent(user_agent)
+        .redirect(reqwest::redirect::Policy::none())
         .timeout(timeouts::CREDENTIAL_TOTAL)
-        .connect_timeout(timeouts::CREDENTIAL_CONNECT)
-        .build()
+        .connect_timeout(timeouts::CREDENTIAL_CONNECT);
+    with_process_doh(builder).build()
 }
 
 /// Create an HTTP client for agent background operations.
 ///
 /// Uses short timeouts (5s total, 3s connect) for best-effort,
-/// non-blocking background work.
+/// non-blocking background work. Redirects disabled (see
+/// [`credential_client`]).
 ///
 /// # Arguments
 ///
@@ -60,11 +76,12 @@ pub fn credential_client(user_agent: &str) -> Result<reqwest::Client, reqwest::E
 ///
 /// Returns an error if the client cannot be built.
 pub fn agent_client(user_agent: &str) -> Result<reqwest::Client, reqwest::Error> {
-    reqwest::Client::builder()
+    let builder = reqwest::Client::builder()
         .user_agent(user_agent)
+        .redirect(reqwest::redirect::Policy::none())
         .timeout(timeouts::AGENT_TOTAL)
-        .connect_timeout(timeouts::AGENT_CONNECT)
-        .build()
+        .connect_timeout(timeouts::AGENT_CONNECT);
+    with_process_doh(builder).build()
 }
 
 /// Create an HTTP client for server-side API calls.

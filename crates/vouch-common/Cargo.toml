@@ -15,6 +15,7 @@ ciborium = { workspace = true }
 dirs = { workspace = true }
 gethostname = { workspace = true }
 hex = { workspace = true, features = ["std"] }
+hickory-resolver = { workspace = true }
 jiff = { workspace = true, features = ["std", "serde", "tz-system"] }
 reqwest = { workspace = true, features = ["json", "rustls", "form"] }
 secrecy = { workspace = true, features = ["serde"] }

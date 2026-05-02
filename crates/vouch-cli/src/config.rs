@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
+use vouch_common::dns::DohConfigSerde;
 
 /// AWS multi-account configuration in ~/.vouch/config.json.
 ///
@@ -128,6 +129,19 @@ pub(crate) struct Config {
     codeartifact: Option<CodeArtifactConfig>,
     /// AWS multi-account configuration (role chaining + SSO discovery).
     aws: Option<AwsMultiAccountConfig>,
+    /// Global network configuration (DoH, …).
+    network: Option<NetworkConfig>,
+}
+
+/// Global network options.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub(crate) struct NetworkConfig {
+    /// DNS-over-HTTPS provider. Accepts a boolean (`true` = Google, `false`
+    /// = off), a keyword (`off`, `google`, `cloudflare`, `quad9`), or a
+    /// custom `https://…/dns-query` URL. Overridden at runtime by the
+    /// `VOUCH_DOH` env var.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dns_over_https: Option<DohConfigSerde>,
 }
 
 /// Per-server configuration state.
@@ -194,6 +208,9 @@ struct ConfigFile {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     aws: Option<AwsMultiAccountConfig>,
 
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    network: Option<NetworkConfig>,
+
     // Legacy flat fields — read for migration, never written back.
     #[serde(default, skip_serializing)]
     server_url: Option<String>,
@@ -239,6 +256,7 @@ impl std::fmt::Debug for ConfigFile {
             .field("servers", &"[...]")
             .field("codeartifact", &self.codeartifact)
             .field("aws", &self.aws)
+            .field("network", &self.network)
             .finish()
     }
 }
@@ -250,6 +268,7 @@ impl std::fmt::Debug for Config {
             .field("servers", &self.servers.keys().collect::<Vec<_>>())
             .field("codeartifact", &self.codeartifact)
             .field("aws", &self.aws)
+            .field("network", &self.network)
             .finish()
     }
 }
@@ -386,6 +405,17 @@ impl Config {
         let mut config = Self::load()?;
         f(&mut config);
         config.save()
+    }
+
+    // =====================================================================
+    // Network
+    // =====================================================================
+
+    /// Configured DoH provider, if any.
+    pub(crate) fn doh(&self) -> Option<&DohConfigSerde> {
+        self.network
+            .as_ref()
+            .and_then(|n| n.dns_over_https.as_ref())
     }
 
     // =====================================================================
@@ -619,6 +649,7 @@ impl From<ConfigFile> for Config {
             servers,
             codeartifact: file.codeartifact.take(),
             aws: file.aws.take(),
+            network: file.network.take(),
         }
     }
 }
@@ -653,6 +684,7 @@ impl From<&Config> for ConfigFile {
             servers,
             codeartifact: config.codeartifact.clone(),
             aws: config.aws.clone(),
+            network: config.network.clone(),
             // Legacy fields are never written.
             server_url: None,
             token: None,

@@ -15,6 +15,7 @@ use tracing_subscriber::EnvFilter;
 mod client;
 mod commands;
 mod config;
+mod dns;
 mod exit_code;
 #[expect(
     unreachable_pub,
@@ -447,6 +448,11 @@ async fn main() -> ExitCode {
 /// Inner entry point that returns `anyhow::Result`.
 async fn run() -> Result<()> {
     let argv0 = std::env::args().next().unwrap_or_default();
+
+    // Initialize the process-wide DNS-over-HTTPS resolver from config + env
+    // before any HTTP client is constructed (including from helper-binary
+    // dispatch below). Hard-fails if DoH is configured but unavailable.
+    dns::init()?;
 
     // Register the platform-native keyring store. Non-fatal: keychain access
     // already falls back to file storage in fapi::key_store when unavailable.
