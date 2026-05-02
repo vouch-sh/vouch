@@ -182,29 +182,21 @@ impl DohResolver {
     }
 }
 
-/// Process-wide DoH state.
+/// Process-wide DoH resolver slot.
 ///
 /// Set once via [`install_process_resolver`] from the binary's startup path
 /// (after loading the CLI/agent config) and read by every HTTP client
 /// factory in this crate plus `vouch_cli::http::ReqwestClient::new`.
-struct ProcessState {
-    config: DohConfig,
-    resolver: Option<Arc<DohResolver>>,
-}
-
-static PROCESS_STATE: OnceLock<ProcessState> = OnceLock::new();
+static PROCESS_RESOLVER: OnceLock<Option<Arc<DohResolver>>> = OnceLock::new();
 
 /// Install the process-wide DoH resolver. Idempotent — subsequent calls are
 /// silently ignored so that re-entry from tests doesn't panic.
 ///
-/// The binary should call this once on startup (after loading config and
-/// computing the effective [`DohConfig`]). HTTP client factories then pick
-/// up the installed resolver automatically.
-pub fn install_process_resolver(cfg: DohConfig, resolver: Option<Arc<DohResolver>>) {
-    drop(PROCESS_STATE.set(ProcessState {
-        config: cfg,
-        resolver,
-    }));
+/// The binary should call this once on startup from inside a tokio runtime
+/// context — hickory's resolver spawns background tasks at construction.
+/// HTTP client factories then pick up the installed resolver automatically.
+pub fn install_process_resolver(resolver: Option<Arc<DohResolver>>) {
+    drop(PROCESS_RESOLVER.set(resolver));
 }
 
 /// Resolver previously installed via [`install_process_resolver`].
@@ -212,35 +204,18 @@ pub fn install_process_resolver(cfg: DohConfig, resolver: Option<Arc<DohResolver
 /// If nothing has been installed yet, this falls back to the `VOUCH_DOH`
 /// environment variable so that minimal/test contexts (no config file) still
 /// honor the user's intent. Errors from env parsing or resolver construction
-/// are logged at WARN and treated as "no DoH" — they do not propagate to
-/// every HTTP call site.
+/// are silently treated as "no DoH" — the binary's startup path is the
+/// loud failure mode.
 #[must_use]
 pub fn process_resolver() -> Option<Arc<DohResolver>> {
-    if let Some(state) = PROCESS_STATE.get() {
-        return state.resolver.clone();
+    if let Some(slot) = PROCESS_RESOLVER.get() {
+        return slot.clone();
     }
-    // Lazy fallback: env-only, silent on errors.
-    //
-    // The binary's startup path (`vouch_cli::dns::init`) hard-fails on
-    // misconfiguration; this branch only fires for callers that bypass that
-    // setup (tests, library-only consumers). Falling back silently to the
-    // system resolver is the least-surprising behavior in those contexts.
     let env = std::env::var(DOH_ENV_VAR).ok();
     let cfg = resolve_doh_config(env.as_deref(), None).unwrap_or(DohConfig::Off);
     let resolver = DohResolver::for_config(&cfg).ok().flatten();
-    drop(PROCESS_STATE.set(ProcessState {
-        config: cfg,
-        resolver: resolver.clone(),
-    }));
+    drop(PROCESS_RESOLVER.set(resolver.clone()));
     resolver
-}
-
-/// Effective [`DohConfig`] for the current process (for diagnostics).
-#[must_use]
-pub fn process_config() -> DohConfig {
-    PROCESS_STATE
-        .get()
-        .map_or(DohConfig::Off, |s| s.config.clone())
 }
 
 /// Build a `ResolverConfig` for a user-supplied DoH endpoint URL.

@@ -35,6 +35,6 @@ pub fn init() -> Result<()> {
         tracing::info!(provider = %cfg.label(), "DNS-over-HTTPS enabled");
     }
 
-    install_process_resolver(cfg, resolver);
+    install_process_resolver(resolver);
     Ok(())
 }
