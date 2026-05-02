@@ -1123,7 +1123,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.WINGET_TOKEN }}
         run: komac sync-fork
 
-      - name: Submit winget update
+      - name: Generate winget manifests
         env:
           KOMAC_FORK_OWNER: vouch-bot
           KOMAC_CREATED_WITH: vouch-release-workflow
@@ -1136,8 +1136,26 @@ jobs:
           komac update SmokeTurner.Vouch \
             --version "${VERSION}" \
             --release-notes-url "${RELEASE_NOTES_URL}" \
-            --submit \
+            --output ./winget-manifests \
             --urls ${URLS}
+
+      - name: Normalize manifest line endings to CRLF
+        # Workaround for komac v2.16.0 bug: --release-notes-url value is
+        # written with LF instead of CRLF, which fails winget-pkgs validation.
+        run: |
+          find ./winget-manifests -name '*.yaml' -print0 \
+            | xargs -0 perl -i -pe 's/\r?\n/\r\n/g'
+          if grep -RPLz '\r\n$' ./winget-manifests; then
+            echo "::error::manifests still contain non-CRLF line endings"
+            exit 1
+          fi
+
+      - name: Submit winget update
+        env:
+          KOMAC_FORK_OWNER: vouch-bot
+          KOMAC_CREATED_WITH: vouch-release-workflow
+          GITHUB_TOKEN: ${{ secrets.WINGET_TOKEN }}
+        run: komac submit ./winget-manifests --yes
 
   homebrew:
     name: Update Homebrew Tap
