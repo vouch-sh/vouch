@@ -1139,6 +1139,14 @@ jobs:
             --output ./winget-manifests \
             --urls ${URLS}
 
+      - name: Strip ReleaseNotes from locale manifest
+        # komac auto-fetches the GitHub release body to populate ReleaseNotes.
+        # The fetch is unreliable (silently empty under API propagation lag)
+        # and the field is not required by winget — once present in any
+        # version it becomes sticky for all future versions. Keep manifests
+        # ReleaseNotesUrl-only to avoid that ratchet.
+        run: yq -i 'del(.ReleaseNotes)' ./winget-manifests/*.locale.*.yaml
+
       - name: Normalize manifest line endings to CRLF
         # Workaround for komac v2.16.0 bug: --release-notes-url value is
         # written with LF instead of CRLF, which fails winget-pkgs validation.
