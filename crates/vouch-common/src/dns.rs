@@ -296,7 +296,6 @@ impl DohResolver {
     /// to call outside a tokio runtime context.
     #[must_use]
     pub fn for_config(cfg: &DohConfig) -> Option<Arc<Self>> {
-        let endpoint_url = cfg.endpoint_url()?.to_string();
         let config = match cfg {
             DohConfig::Off => return None,
             DohConfig::Google => ResolverConfig::https(&GOOGLE),
@@ -304,6 +303,7 @@ impl DohResolver {
             DohConfig::Quad9 => ResolverConfig::https(&QUAD9),
             DohConfig::Custom(endpoint) => custom_https_config(endpoint),
         };
+        let endpoint_url = cfg.endpoint_url()?.to_string();
         Some(Arc::new(Self {
             config,
             label: cfg.label().to_string(),
