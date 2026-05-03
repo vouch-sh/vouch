@@ -9,7 +9,7 @@ use serde::Serialize;
 use vouch_agent::AgentClient;
 
 use crate::client::VouchClient;
-use crate::config::{Config, hostname_from_url};
+use crate::config::Config;
 use crate::style;
 
 /// Check result with status and optional message.
@@ -373,15 +373,17 @@ async fn check_doh(server: &str) -> Option<CheckResult> {
     let resolver = vouch_common::dns::process_resolver()?;
     let provider = vouch_common::dns::process_config().label();
     let label = format!("DNS-over-HTTPS ({provider}, DNSSEC)");
-    let host = match hostname_from_url(server) {
-        Ok(h) => {
-            // strip any :port for the lookup
-            h.split(':').next().unwrap_or(&h).to_string()
-        }
-        Err(e) => {
+    // Parse the URL directly so IPv6 hosts (which contain colons) survive
+    // intact — `hostname_from_url`/colon-splitting would mangle `[::1]`.
+    let host = match url::Url::parse(server)
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_string))
+    {
+        Some(h) => h,
+        None => {
             return Some(CheckResult::fail(
                 "doh",
-                format!("{label}: cannot parse server URL: {e}"),
+                format!("{label}: cannot extract host from server URL"),
             ));
         }
     };
