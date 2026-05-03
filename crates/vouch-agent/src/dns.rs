@@ -24,7 +24,8 @@ pub fn init() -> Result<()> {
     let cfg = resolve_doh_config(env.as_deref(), config.as_ref().and_then(|c| c.doh()))
         .context("invalid DNS-over-HTTPS configuration")?;
 
-    let resolver = DohResolver::for_config(&cfg).with_context(|| {
+    // DNSSEC validation is on whenever DoH is on; see vouch_cli::dns::init.
+    let resolver = DohResolver::for_config(&cfg, true).with_context(|| {
         format!(
             "failed to build DNS-over-HTTPS resolver for provider {}",
             cfg.label()
@@ -32,7 +33,7 @@ pub fn init() -> Result<()> {
     })?;
 
     if cfg.is_enabled() {
-        tracing::info!(provider = %cfg.label(), "DNS-over-HTTPS enabled");
+        tracing::info!(provider = %cfg.label(), dnssec = true, "DNS-over-HTTPS enabled");
     }
 
     install_process_resolver(cfg, resolver);

@@ -365,9 +365,14 @@ fn build_clock_skew_result(headers: &reqwest::header::HeaderMap) -> Option<Check
 /// Verify that the configured DNS-over-HTTPS provider can resolve the
 /// server hostname. Returns `None` when DoH is disabled — the regular
 /// reachability check already exercises whatever resolver is in use.
+///
+/// DNSSEC validation rides with DoH (always on), so a `[FAIL]` here may
+/// indicate either a network problem reaching the DoH provider or a
+/// DNSSEC-signed zone in the user's path that has broken signatures.
 async fn check_doh(server: &str) -> Option<CheckResult> {
     let resolver = vouch_common::dns::process_resolver()?;
     let provider = vouch_common::dns::process_config().label();
+    let label = format!("DNS-over-HTTPS ({provider}, DNSSEC)");
     let host = match hostname_from_url(server) {
         Ok(h) => {
             // strip any :port for the lookup
@@ -376,26 +381,20 @@ async fn check_doh(server: &str) -> Option<CheckResult> {
         Err(e) => {
             return Some(CheckResult::fail(
                 "doh",
-                format!("DNS-over-HTTPS ({provider}): cannot parse server URL: {e}"),
+                format!("{label}: cannot parse server URL: {e}"),
             ));
         }
     };
     match resolver.lookup_ip(&host).await {
         Ok(addrs) if addrs.is_empty() => Some(CheckResult::fail(
             "doh",
-            format!("DNS-over-HTTPS ({provider}): {host} resolved to zero addresses"),
+            format!("{label}: {host} resolved to zero addresses"),
         )),
         Ok(addrs) => Some(CheckResult::pass(
             "doh",
-            format!(
-                "DNS-over-HTTPS ({provider}): {host} resolved to {} address(es)",
-                addrs.len()
-            ),
+            format!("{label}: {host} resolved to {} address(es)", addrs.len()),
         )),
-        Err(e) => Some(CheckResult::fail(
-            "doh",
-            format!("DNS-over-HTTPS ({provider}): {e:#}"),
-        )),
+        Err(e) => Some(CheckResult::fail("doh", format!("{label}: {e:#}"))),
     }
 }
 

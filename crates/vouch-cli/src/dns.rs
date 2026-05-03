@@ -28,7 +28,12 @@ pub(crate) fn init() -> Result<()> {
     let cfg = resolve_doh_config(env.as_deref(), config.as_ref().and_then(Config::doh))
         .context("invalid DNS-over-HTTPS configuration")?;
 
-    let resolver = DohResolver::for_config(&cfg).with_context(|| {
+    // DNSSEC validation is on whenever DoH is on. There is no separate
+    // toggle: hickory only sees signed/insecure responses (unsigned zones
+    // like *.amazonaws.com pass through unchanged), so the practical
+    // failure surface is "a DNSSEC-signed zone in the user's path is
+    // misconfigured" — which is what we want to surface, not hide.
+    let resolver = DohResolver::for_config(&cfg, true).with_context(|| {
         format!(
             "failed to build DNS-over-HTTPS resolver for provider {}",
             cfg.label()
@@ -36,7 +41,7 @@ pub(crate) fn init() -> Result<()> {
     })?;
 
     if cfg.is_enabled() {
-        tracing::debug!(provider = %cfg.label(), "DNS-over-HTTPS enabled");
+        tracing::debug!(provider = %cfg.label(), dnssec = true, "DNS-over-HTTPS enabled");
     }
 
     install_process_resolver(cfg, resolver);

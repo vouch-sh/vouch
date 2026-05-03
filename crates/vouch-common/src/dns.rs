@@ -144,6 +144,7 @@ pub fn resolve_doh_config(
 pub struct DohResolver {
     config: ResolverConfig,
     label: String,
+    dnssec: bool,
     /// Lazy resolver. `Err` is captured on first build failure and replayed
     /// to every subsequent caller (since `OnceLock::get_or_try_init` is
     /// still unstable).
@@ -162,7 +163,10 @@ impl std::fmt::Debug for DohResolver {
 impl DohResolver {
     /// Build a resolver for the given configuration.
     ///
-    /// Returns `Ok(None)` when `cfg` is [`DohConfig::Off`].
+    /// Returns `Ok(None)` when `cfg` is [`DohConfig::Off`]. When `dnssec` is
+    /// true, hickory performs stub DNSSEC validation: signed responses must
+    /// validate or the lookup fails; unsigned zones (e.g. `*.amazonaws.com`)
+    /// pass through unchanged.
     ///
     /// The actual hickory resolver is constructed on first use (see
     /// [`get_or_init`](Self::get_or_init)), so this is safe to call outside a
@@ -172,9 +176,8 @@ impl DohResolver {
     ///
     /// Returns an error only if the configuration is malformed (e.g., a
     /// custom URL whose host isn't an IP literal). Network/resolver
-    /// construction failures surface from [`resolve`](Self::get_or_init) /
-    /// `Resolve::resolve` instead.
-    pub fn for_config(cfg: &DohConfig) -> Result<Option<Arc<Self>>> {
+    /// construction failures surface from `Resolve::resolve` instead.
+    pub fn for_config(cfg: &DohConfig, dnssec: bool) -> Result<Option<Arc<Self>>> {
         let config = match cfg {
             DohConfig::Off => return Ok(None),
             DohConfig::Google => ResolverConfig::https(&GOOGLE),
@@ -185,6 +188,7 @@ impl DohResolver {
         Ok(Some(Arc::new(Self {
             config,
             label: cfg.label(),
+            dnssec,
             inner: OnceLock::new(),
         })))
     }
@@ -202,7 +206,12 @@ impl DohResolver {
     fn get_or_init(&self) -> Result<&hickory_resolver::TokioResolver> {
         self.inner
             .get_or_init(|| {
-                Resolver::builder_with_config(self.config.clone(), Default::default())
+                let mut builder =
+                    Resolver::builder_with_config(self.config.clone(), Default::default());
+                if self.dnssec {
+                    builder.options_mut().validate = true;
+                }
+                builder
                     .build()
                     .map_err(|e| format!("failed to construct DoH resolver: {e}"))
             })
@@ -263,7 +272,8 @@ pub fn process_resolver() -> Option<Arc<DohResolver>> {
     }
     let env = std::env::var(DOH_ENV_VAR).ok();
     let cfg = resolve_doh_config(env.as_deref(), None).unwrap_or(DohConfig::Off);
-    let resolver = DohResolver::for_config(&cfg).ok().flatten();
+    // Lazy fallback path: DNSSEC defaults to on whenever DoH is on.
+    let resolver = DohResolver::for_config(&cfg, true).ok().flatten();
     drop(PROCESS_STATE.set(ProcessState {
         config: cfg,
         resolver: resolver.clone(),
@@ -437,12 +447,16 @@ mod tests {
 
     #[test]
     fn for_config_off_returns_none() {
-        assert!(DohResolver::for_config(&DohConfig::Off).unwrap().is_none());
+        assert!(
+            DohResolver::for_config(&DohConfig::Off, true)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
     fn for_config_google_builds_resolver() {
-        let r = DohResolver::for_config(&DohConfig::Google)
+        let r = DohResolver::for_config(&DohConfig::Google, true)
             .unwrap()
             .unwrap();
         assert_eq!(r.label(), "google");
@@ -451,13 +465,13 @@ mod tests {
     #[test]
     fn custom_url_requires_ip_literal() {
         let cfg = DohConfig::Custom(url::Url::parse("https://dns.example/dns-query").unwrap());
-        assert!(DohResolver::for_config(&cfg).is_err());
+        assert!(DohResolver::for_config(&cfg, true).is_err());
     }
 
     #[test]
     fn custom_url_with_ip_builds() {
         let cfg = DohConfig::Custom(url::Url::parse("https://1.1.1.1/dns-query").unwrap());
-        let r = DohResolver::for_config(&cfg).unwrap().unwrap();
+        let r = DohResolver::for_config(&cfg, true).unwrap().unwrap();
         assert_eq!(r.label(), "https://1.1.1.1/dns-query");
     }
 
