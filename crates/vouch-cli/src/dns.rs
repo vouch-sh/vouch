@@ -7,43 +7,21 @@
 //! DoH resolver (or none, the default).
 
 use anyhow::{Context, Result};
-use vouch_common::dns::{DOH_ENV_VAR, DohResolver, install_process_resolver, resolve_doh_config};
 
 use crate::config::Config;
 
 /// Initialize the process-wide DoH resolver.
 ///
 /// Reads `VOUCH_DOH` first, then `network.dns_over_https` from
-/// `~/.vouch/config.json`. Defaults to `Off`. **Hard-fails** when DoH is
-/// explicitly enabled and the resolver cannot be constructed — silent
-/// fallback would defeat the security intent of opting in.
+/// `~/.vouch/config.json`. Hard-fails when DoH is explicitly enabled and the
+/// resolver cannot be constructed.
 ///
 /// # Errors
 ///
-/// Returns an error if the configured provider is invalid or the resolver
-/// cannot be built.
+/// Returns an error if the configured provider is invalid.
 pub(crate) fn init() -> Result<()> {
-    let env = std::env::var(DOH_ENV_VAR).ok();
+    let env = std::env::var(vouch_common::dns::DOH_ENV_VAR).ok();
     let config = Config::load().ok();
-    let cfg = resolve_doh_config(env.as_deref(), config.as_ref().and_then(Config::doh))
-        .context("invalid DNS-over-HTTPS configuration")?;
-
-    // DNSSEC validation is on whenever DoH is on. There is no separate
-    // toggle: hickory only sees signed/insecure responses (unsigned zones
-    // like *.amazonaws.com pass through unchanged), so the practical
-    // failure surface is "a DNSSEC-signed zone in the user's path is
-    // misconfigured" — which is what we want to surface, not hide.
-    let resolver = DohResolver::for_config(&cfg, true).with_context(|| {
-        format!(
-            "failed to build DNS-over-HTTPS resolver for provider {}",
-            cfg.label()
-        )
-    })?;
-
-    if cfg.is_enabled() {
-        tracing::debug!(provider = %cfg.label(), dnssec = true, "DNS-over-HTTPS enabled");
-    }
-
-    install_process_resolver(cfg, resolver);
-    Ok(())
+    vouch_common::dns::init_from(env.as_deref(), config.as_ref().and_then(Config::doh))
+        .context("invalid DNS-over-HTTPS configuration")
 }

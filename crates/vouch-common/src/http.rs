@@ -29,7 +29,11 @@ pub mod timeouts {
 }
 
 /// Apply the process-wide DoH resolver to a builder, if one is installed.
-fn with_process_doh(mut builder: reqwest::ClientBuilder) -> reqwest::ClientBuilder {
+///
+/// Public so `vouch-cli` (which builds its own `reqwest::Client` for
+/// authenticated CLI traffic) can route through the same helper as the
+/// common factories below.
+pub fn with_process_doh(mut builder: reqwest::ClientBuilder) -> reqwest::ClientBuilder {
     if let Some(resolver) = process_resolver() {
         builder = builder.dns_resolver(resolver);
     }
@@ -120,7 +124,7 @@ pub fn server_client(
         }
     }
 
-    Ok(builder.build()?)
+    Ok(with_process_doh(builder).build()?)
 }
 
 #[cfg(test)]

@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
-use vouch_common::dns::DohConfigSerde;
+use vouch_common::dns::{DohConfigSerde, NetworkConfig};
 
 /// AWS multi-account configuration in ~/.vouch/config.json.
 ///
@@ -131,17 +131,6 @@ pub(crate) struct Config {
     aws: Option<AwsMultiAccountConfig>,
     /// Global network configuration (DoH, …).
     network: Option<NetworkConfig>,
-}
-
-/// Global network options.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub(crate) struct NetworkConfig {
-    /// DNS-over-HTTPS provider. Accepts a boolean (`true` = Google, `false`
-    /// = off), a keyword (`off`, `google`, `cloudflare`, `quad9`), or a
-    /// custom `https://…/dns-query` URL. Overridden at runtime by the
-    /// `VOUCH_DOH` env var.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub dns_over_https: Option<DohConfigSerde>,
 }
 
 /// Per-server configuration state.
@@ -413,9 +402,7 @@ impl Config {
 
     /// Configured DoH provider, if any.
     pub(crate) fn doh(&self) -> Option<&DohConfigSerde> {
-        self.network
-            .as_ref()
-            .and_then(|n| n.dns_over_https.as_ref())
+        self.network.as_ref().and_then(NetworkConfig::doh)
     }
 
     // =====================================================================

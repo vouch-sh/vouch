@@ -234,18 +234,16 @@ impl ReqwestClient {
             default_headers.insert("Vouch-Client-Hostname", v);
         }
 
-        let mut builder = reqwest::Client::builder()
+        let builder = reqwest::Client::builder()
             .user_agent(&user_agent)
             .default_headers(default_headers)
             .redirect(reqwest::redirect::Policy::none())
             .timeout(INTERACTIVE_TOTAL)
             .connect_timeout(INTERACTIVE_CONNECT);
 
-        if let Some(resolver) = vouch_common::dns::process_resolver() {
-            builder = builder.dns_resolver(resolver);
-        }
-
-        let client = builder.build().context("failed to create HTTP client")?;
+        let client = vouch_common::http::with_process_doh(builder)
+            .build()
+            .context("failed to create HTTP client")?;
 
         Ok(Self { client })
     }

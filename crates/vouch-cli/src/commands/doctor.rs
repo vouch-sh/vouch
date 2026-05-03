@@ -371,8 +371,8 @@ fn build_clock_skew_result(headers: &reqwest::header::HeaderMap) -> Option<Check
 /// DNSSEC-signed zone in the user's path that has broken signatures.
 async fn check_doh(server: &str) -> Option<CheckResult> {
     let resolver = vouch_common::dns::process_resolver()?;
-    let provider = vouch_common::dns::process_config().label();
-    let label = format!("DNS-over-HTTPS ({provider}, DNSSEC)");
+    let cfg = vouch_common::dns::process_config();
+    let label = format!("DNS-over-HTTPS ({}, DNSSEC)", cfg.label());
     // Parse the URL directly so IPv6 hosts (which contain colons) survive
     // intact — `hostname_from_url`/colon-splitting would mangle `[::1]`.
     let host = match url::Url::parse(server)
