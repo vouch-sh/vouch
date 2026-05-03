@@ -136,15 +136,25 @@ pub fn resolve_doh_config(
 }
 
 /// reqwest-compatible DoH resolver backed by `hickory-resolver`.
+///
+/// The underlying `TokioResolver` is built lazily on the first DNS query so
+/// that `for_config` can be called from any context (including outside a
+/// tokio runtime). Hickory spawns background tasks at construction; building
+/// inside `resolve()` guarantees `Handle::current()` is available.
 pub struct DohResolver {
-    inner: hickory_resolver::TokioResolver,
+    config: ResolverConfig,
     label: String,
+    /// Lazy resolver. `Err` is captured on first build failure and replayed
+    /// to every subsequent caller (since `OnceLock::get_or_try_init` is
+    /// still unstable).
+    inner: OnceLock<Result<hickory_resolver::TokioResolver, String>>,
 }
 
 impl std::fmt::Debug for DohResolver {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DohResolver")
             .field("provider", &self.label)
+            .field("initialized", &self.inner.get().is_some())
             .finish_non_exhaustive()
     }
 }
@@ -154,24 +164,28 @@ impl DohResolver {
     ///
     /// Returns `Ok(None)` when `cfg` is [`DohConfig::Off`].
     ///
+    /// The actual hickory resolver is constructed on first use (see
+    /// [`get_or_init`](Self::get_or_init)), so this is safe to call outside a
+    /// tokio runtime context.
+    ///
     /// # Errors
     ///
-    /// Returns an error if the underlying resolver cannot be constructed
-    /// (e.g., a malformed custom URL).
+    /// Returns an error only if the configuration is malformed (e.g., a
+    /// custom URL whose host isn't an IP literal). Network/resolver
+    /// construction failures surface from [`resolve`](Self::get_or_init) /
+    /// `Resolve::resolve` instead.
     pub fn for_config(cfg: &DohConfig) -> Result<Option<Arc<Self>>> {
-        let resolver_config = match cfg {
+        let config = match cfg {
             DohConfig::Off => return Ok(None),
             DohConfig::Google => ResolverConfig::https(&GOOGLE),
             DohConfig::Cloudflare => ResolverConfig::https(&CLOUDFLARE),
             DohConfig::Quad9 => ResolverConfig::https(&QUAD9),
             DohConfig::Custom(url) => custom_https_config(url)?,
         };
-        let inner = Resolver::builder_with_config(resolver_config, Default::default())
-            .build()
-            .context("failed to construct DoH resolver")?;
         Ok(Some(Arc::new(Self {
-            inner,
+            config,
             label: cfg.label(),
+            inner: OnceLock::new(),
         })))
     }
 
@@ -180,42 +194,91 @@ impl DohResolver {
     pub fn label(&self) -> &str {
         &self.label
     }
+
+    /// Get (or lazily construct) the underlying hickory resolver.
+    ///
+    /// Must be called from within a tokio runtime context — hickory spawns
+    /// background tasks at construction.
+    fn get_or_init(&self) -> Result<&hickory_resolver::TokioResolver> {
+        self.inner
+            .get_or_init(|| {
+                Resolver::builder_with_config(self.config.clone(), Default::default())
+                    .build()
+                    .map_err(|e| format!("failed to construct DoH resolver: {e}"))
+            })
+            .as_ref()
+            .map_err(|e| anyhow::anyhow!("{e}"))
+    }
+
+    /// Perform a DNS lookup through the DoH resolver.
+    ///
+    /// Used by `vouch doctor` to verify that DoH is working end-to-end.
+    /// Must be called from within a tokio runtime context.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the lookup fails (network error, NXDOMAIN, …).
+    pub async fn lookup_ip(&self, host: &str) -> Result<Vec<std::net::IpAddr>> {
+        let resolver = self.get_or_init()?;
+        let lookup = resolver
+            .lookup_ip(host)
+            .await
+            .with_context(|| format!("DoH lookup for {host:?} failed"))?;
+        Ok(lookup.iter().collect())
+    }
 }
 
-/// Process-wide DoH resolver slot.
+/// Process-wide DoH state.
 ///
 /// Set once via [`install_process_resolver`] from the binary's startup path
-/// (after loading the CLI/agent config) and read by every HTTP client
-/// factory in this crate plus `vouch_cli::http::ReqwestClient::new`.
-static PROCESS_RESOLVER: OnceLock<Option<Arc<DohResolver>>> = OnceLock::new();
+/// and read by every HTTP client factory in this crate plus
+/// `vouch_cli::http::ReqwestClient::new`. The resolver itself is lazily
+/// built on first use, so installation is safe outside a tokio runtime.
+struct ProcessState {
+    config: DohConfig,
+    resolver: Option<Arc<DohResolver>>,
+}
 
-/// Install the process-wide DoH resolver. Idempotent — subsequent calls are
+static PROCESS_STATE: OnceLock<ProcessState> = OnceLock::new();
+
+/// Install the process-wide DoH state. Idempotent — subsequent calls are
 /// silently ignored so that re-entry from tests doesn't panic.
-///
-/// The binary should call this once on startup from inside a tokio runtime
-/// context — hickory's resolver spawns background tasks at construction.
-/// HTTP client factories then pick up the installed resolver automatically.
-pub fn install_process_resolver(resolver: Option<Arc<DohResolver>>) {
-    drop(PROCESS_RESOLVER.set(resolver));
+pub fn install_process_resolver(cfg: DohConfig, resolver: Option<Arc<DohResolver>>) {
+    drop(PROCESS_STATE.set(ProcessState {
+        config: cfg,
+        resolver,
+    }));
 }
 
 /// Resolver previously installed via [`install_process_resolver`].
 ///
 /// If nothing has been installed yet, this falls back to the `VOUCH_DOH`
 /// environment variable so that minimal/test contexts (no config file) still
-/// honor the user's intent. Errors from env parsing or resolver construction
-/// are silently treated as "no DoH" — the binary's startup path is the
-/// loud failure mode.
+/// honor the user's intent. Errors are silently treated as "no DoH" — the
+/// binary's startup path is the loud failure mode.
 #[must_use]
 pub fn process_resolver() -> Option<Arc<DohResolver>> {
-    if let Some(slot) = PROCESS_RESOLVER.get() {
-        return slot.clone();
+    if let Some(state) = PROCESS_STATE.get() {
+        return state.resolver.clone();
     }
     let env = std::env::var(DOH_ENV_VAR).ok();
     let cfg = resolve_doh_config(env.as_deref(), None).unwrap_or(DohConfig::Off);
     let resolver = DohResolver::for_config(&cfg).ok().flatten();
-    drop(PROCESS_RESOLVER.set(resolver.clone()));
+    drop(PROCESS_STATE.set(ProcessState {
+        config: cfg,
+        resolver: resolver.clone(),
+    }));
     resolver
+}
+
+/// Effective [`DohConfig`] for the current process (for diagnostics).
+///
+/// Returns `Off` if no resolver has been installed and `VOUCH_DOH` is unset.
+#[must_use]
+pub fn process_config() -> DohConfig {
+    PROCESS_STATE
+        .get()
+        .map_or(DohConfig::Off, |s| s.config.clone())
 }
 
 /// Build a `ResolverConfig` for a user-supplied DoH endpoint URL.
@@ -245,7 +308,15 @@ fn custom_https_config(url: &url::Url) -> Result<ResolverConfig> {
 
 impl Resolve for DohResolver {
     fn resolve(&self, name: ReqName) -> Resolving {
-        let resolver = self.inner.clone();
+        // `get_or_init` runs the build closure inside the async context of
+        // the first request — guarantees `Handle::current()` is available.
+        let resolver = match self.get_or_init() {
+            Ok(r) => r.clone(),
+            Err(e) => {
+                let msg = e.to_string();
+                return Box::pin(async move { Err(Box::new(std::io::Error::other(msg)).into()) });
+            }
+        };
         let host = name.as_str().to_string();
         Box::pin(async move {
             let lookup = resolver.lookup_ip(host.as_str()).await.map_err(

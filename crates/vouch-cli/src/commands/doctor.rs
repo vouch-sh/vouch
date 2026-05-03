@@ -9,7 +9,7 @@ use serde::Serialize;
 use vouch_agent::AgentClient;
 
 use crate::client::VouchClient;
-use crate::config::Config;
+use crate::config::{Config, hostname_from_url};
 use crate::style;
 
 /// Check result with status and optional message.
@@ -104,6 +104,16 @@ pub(crate) async fn run(server: &str, quiet: bool, json: bool) -> Result<()> {
             print_result(&clock);
         }
         checks.push(clock);
+    }
+
+    // Check 3a: DNS-over-HTTPS resolution. Only emitted when DoH is enabled —
+    // when off, the system resolver is exercised by every other check already.
+    if let Some(doh_result) = check_doh(server).await {
+        if !suppress {
+            print!("DNS-over-HTTPS resolution ... ");
+            print_result(&doh_result);
+        }
+        checks.push(doh_result);
     }
 
     // Check 4: Session valid
@@ -350,6 +360,43 @@ fn build_clock_skew_result(headers: &reqwest::header::HeaderMap) -> Option<Check
              \"Sync now\"; macOS: `sudo sntp -sS time.apple.com`)."
         ),
     ))
+}
+
+/// Verify that the configured DNS-over-HTTPS provider can resolve the
+/// server hostname. Returns `None` when DoH is disabled — the regular
+/// reachability check already exercises whatever resolver is in use.
+async fn check_doh(server: &str) -> Option<CheckResult> {
+    let resolver = vouch_common::dns::process_resolver()?;
+    let provider = vouch_common::dns::process_config().label();
+    let host = match hostname_from_url(server) {
+        Ok(h) => {
+            // strip any :port for the lookup
+            h.split(':').next().unwrap_or(&h).to_string()
+        }
+        Err(e) => {
+            return Some(CheckResult::fail(
+                "doh",
+                format!("DNS-over-HTTPS ({provider}): cannot parse server URL: {e}"),
+            ));
+        }
+    };
+    match resolver.lookup_ip(&host).await {
+        Ok(addrs) if addrs.is_empty() => Some(CheckResult::fail(
+            "doh",
+            format!("DNS-over-HTTPS ({provider}): {host} resolved to zero addresses"),
+        )),
+        Ok(addrs) => Some(CheckResult::pass(
+            "doh",
+            format!(
+                "DNS-over-HTTPS ({provider}): {host} resolved to {} address(es)",
+                addrs.len()
+            ),
+        )),
+        Err(e) => Some(CheckResult::fail(
+            "doh",
+            format!("DNS-over-HTTPS ({provider}): {e:#}"),
+        )),
+    }
 }
 
 /// Check if there's a valid session.

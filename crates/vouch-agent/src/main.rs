@@ -131,6 +131,14 @@ fn main() -> ExitCode {
         }
     }
 
+    // Initialize the process-wide DNS-over-HTTPS resolver from config + env
+    // before any HTTP traffic. Validates the configuration eagerly; the
+    // hickory resolver itself is built lazily on first use.
+    if let Err(e) = vouch_agent::dns::init() {
+        error!("DNS-over-HTTPS initialization failed: {e:#}");
+        return ExitCode::FAILURE;
+    }
+
     // Run the server using a tokio runtime
     let runtime = match tokio::runtime::Runtime::new() {
         Ok(rt) => rt,
@@ -145,15 +153,6 @@ fn main() -> ExitCode {
 
 /// Run the agent servers.
 async fn run_agent_server(enable_ssh_agent: bool) -> ExitCode {
-    // Initialize the process-wide DNS-over-HTTPS resolver from config + env
-    // before any HTTP traffic. Must run inside the tokio runtime: hickory's
-    // resolver spawns background tasks that require an active Handle.
-    // Hard-fails if DoH is configured but the resolver cannot be constructed.
-    if let Err(e) = vouch_agent::dns::init() {
-        error!("DNS-over-HTTPS initialization failed: {e:#}");
-        return ExitCode::FAILURE;
-    }
-
     // Create agent state
     let state = AgentState::new();
 
