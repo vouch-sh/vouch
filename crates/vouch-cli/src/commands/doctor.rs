@@ -106,10 +106,13 @@ pub(crate) async fn run(server: &str, quiet: bool, json: bool) -> Result<()> {
         checks.push(clock);
     }
 
-    // Check 3a: DNS-over-HTTPS resolution. Only emitted when DoH is enabled —
-    // when off, the system resolver is exercised by every other check already.
-    // The gate is synchronous (cheap Arc clone) so the label can print *before*
-    // the network round-trip starts — matching every other check above.
+    // Check 3a: DNS-over-HTTPS resolution status.
+    //
+    // Always emit something so users discover the option. When DoH is enabled
+    // we run a real lookup through the configured provider. When disabled we
+    // print a one-line nudge — not added to `checks` so it doesn't count
+    // toward pass/fail or appear in --json output (DoH being off is a user
+    // choice, not a misconfiguration).
     if let Some(resolver) = vouch_common::dns::process_resolver() {
         if !suppress {
             print!("DNS-over-HTTPS resolution ... ");
@@ -119,6 +122,12 @@ pub(crate) async fn run(server: &str, quiet: bool, json: bool) -> Result<()> {
             print_result(&doh_result);
         }
         checks.push(doh_result);
+    } else if !suppress {
+        println!(
+            "DNS-over-HTTPS resolution ... {} disabled — DNS queries are visible to your \
+             local network. Set VOUCH_DOH=cloudflare (or google/quad9) to encrypt them.",
+            style::yellow("[INFO]"),
+        );
     }
 
     // Check 4: Session valid
