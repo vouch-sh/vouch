@@ -302,7 +302,16 @@ fn custom_https_config(url: &url::Url) -> Result<ResolverConfig> {
     } else {
         Some(Arc::from(url.path()))
     };
-    let nsc = NameServerConfig::https(ip, server_name, path);
+    let mut nsc = NameServerConfig::https(ip, server_name, path);
+    // `NameServerConfig::https` defaults to 443. `Url::port` returns `Some`
+    // only when the user wrote a non-default port, so apply it just in that
+    // case — otherwise a `https://1.1.1.1:8443/dns-query` would silently
+    // connect to 443.
+    if let Some(port) = url.port()
+        && let Some(connection) = nsc.connections.first_mut()
+    {
+        connection.port = port;
+    }
     Ok(ResolverConfig::from_parts(None, vec![], vec![nsc]))
 }
 
@@ -450,5 +459,29 @@ mod tests {
         let cfg = DohConfig::Custom(url::Url::parse("https://1.1.1.1/dns-query").unwrap());
         let r = DohResolver::for_config(&cfg).unwrap().unwrap();
         assert_eq!(r.label(), "https://1.1.1.1/dns-query");
+    }
+
+    #[test]
+    fn custom_url_preserves_non_default_port() {
+        let url = url::Url::parse("https://1.1.1.1:8443/dns-query").unwrap();
+        let cfg = custom_https_config(&url).unwrap();
+        let port = cfg
+            .name_servers()
+            .first()
+            .and_then(|ns| ns.connections.first())
+            .map(|c| c.port);
+        assert_eq!(port, Some(8443));
+    }
+
+    #[test]
+    fn custom_url_default_port_is_443() {
+        let url = url::Url::parse("https://1.1.1.1/dns-query").unwrap();
+        let cfg = custom_https_config(&url).unwrap();
+        let port = cfg
+            .name_servers()
+            .first()
+            .and_then(|ns| ns.connections.first())
+            .map(|c| c.port);
+        assert_eq!(port, Some(443));
     }
 }
