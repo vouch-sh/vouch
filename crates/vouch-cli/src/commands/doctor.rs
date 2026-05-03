@@ -108,9 +108,14 @@ pub(crate) async fn run(server: &str, quiet: bool, json: bool) -> Result<()> {
 
     // Check 3a: DNS-over-HTTPS resolution. Only emitted when DoH is enabled —
     // when off, the system resolver is exercised by every other check already.
-    if let Some(doh_result) = check_doh(server).await {
+    // The gate is synchronous (cheap Arc clone) so the label can print *before*
+    // the network round-trip starts — matching every other check above.
+    if let Some(resolver) = vouch_common::dns::process_resolver() {
         if !suppress {
             print!("DNS-over-HTTPS resolution ... ");
+        }
+        let doh_result = check_doh(&resolver, server).await;
+        if !suppress {
             print_result(&doh_result);
         }
         checks.push(doh_result);
@@ -363,16 +368,14 @@ fn build_clock_skew_result(headers: &reqwest::header::HeaderMap) -> Option<Check
 }
 
 /// Verify that the configured DNS-over-HTTPS provider can resolve the
-/// server hostname. Returns `None` when DoH is disabled — the regular
-/// reachability check already exercises whatever resolver is in use.
+/// server hostname. Caller is responsible for gating on DoH-enabled state
+/// (typically `process_resolver().is_some()`).
 ///
 /// DNSSEC validation rides with DoH (always on), so a `[FAIL]` here may
 /// indicate either a network problem reaching the DoH provider or a
 /// DNSSEC-signed zone in the user's path that has broken signatures.
-async fn check_doh(server: &str) -> Option<CheckResult> {
-    let resolver = vouch_common::dns::process_resolver()?;
-    let cfg = vouch_common::dns::process_config();
-    let label = format!("DNS-over-HTTPS ({}, DNSSEC)", cfg.label());
+async fn check_doh(resolver: &vouch_common::dns::DohResolver, server: &str) -> CheckResult {
+    let label = format!("DNS-over-HTTPS ({}, DNSSEC)", resolver.label());
     // Parse the URL directly so IPv6 hosts (which contain colons) survive
     // intact — `hostname_from_url`/colon-splitting would mangle `[::1]`.
     let host = match url::Url::parse(server)
@@ -381,22 +384,21 @@ async fn check_doh(server: &str) -> Option<CheckResult> {
     {
         Some(h) => h,
         None => {
-            return Some(CheckResult::fail(
+            return CheckResult::fail(
                 "doh",
                 format!("{label}: cannot extract host from server URL"),
-            ));
+            );
         }
     };
     match resolver.lookup_ip(&host).await {
-        Ok(addrs) if addrs.is_empty() => Some(CheckResult::fail(
-            "doh",
-            format!("{label}: {host} resolved to zero addresses"),
-        )),
-        Ok(addrs) => Some(CheckResult::pass(
+        Ok(addrs) if addrs.is_empty() => {
+            CheckResult::fail("doh", format!("{label}: {host} resolved to zero addresses"))
+        }
+        Ok(addrs) => CheckResult::pass(
             "doh",
             format!("{label}: {host} resolved to {} address(es)", addrs.len()),
-        )),
-        Err(e) => Some(CheckResult::fail("doh", format!("{label}: {e:#}"))),
+        ),
+        Err(e) => CheckResult::fail("doh", format!("{label}: {e:#}")),
     }
 }
 
