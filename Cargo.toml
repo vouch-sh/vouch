@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/*"]
 
 [workspace.package]
-version = "2026.4.9"
+version = "2026.4.10"
 edition = "2024"
 license = "Apache-2.0 OR MIT"
 rust-version = "1.95.0"
@@ -149,6 +149,7 @@ governor = { version = "=0.10.4", default-features = false }
 ipnet = { version = "=2.12.0", default-features = false }
 headers = { version = "=0.4.1", default-features = false }
 hex = { version = "=0.4.3", default-features = false }
+hickory-resolver = { version = "=0.26.1", default-features = false, features = ["dnssec-aws-lc-rs", "https-aws-lc-rs", "tokio", "webpki-roots"] }
 http = { version = "=1.4.0", default-features = false }
 inquire = { version = "=0.9.4", default-features = false }
 jiff = { version = "=0.2.24", default-features = false }

@@ -106,6 +106,30 @@ pub(crate) async fn run(server: &str, quiet: bool, json: bool) -> Result<()> {
         checks.push(clock);
     }
 
+    // Check 3a: DNS-over-HTTPS resolution status.
+    //
+    // Always emit something so users discover the option. When DoH is enabled
+    // we run a real lookup through the configured provider. When disabled we
+    // print a one-line nudge — not added to `checks` so it doesn't count
+    // toward pass/fail or appear in --json output (DoH being off is a user
+    // choice, not a misconfiguration).
+    if let Some(resolver) = vouch_common::dns::process_resolver() {
+        if !suppress {
+            print!("DNS-over-HTTPS resolution ... ");
+        }
+        let doh_result = check_doh(&resolver, server).await;
+        if !suppress {
+            print_result(&doh_result);
+        }
+        checks.push(doh_result);
+    } else if !suppress {
+        println!(
+            "DNS-over-HTTPS resolution ... {} disabled — DNS queries are visible to your \
+             local network. Set VOUCH_DOH=cloudflare (or google/quad9) to encrypt them.",
+            style::yellow("[INFO]"),
+        );
+    }
+
     // Check 4: Session valid
     if !suppress {
         print!("Session valid ... ");
@@ -350,6 +374,45 @@ fn build_clock_skew_result(headers: &reqwest::header::HeaderMap) -> Option<Check
              \"Sync now\"; macOS: `sudo sntp -sS time.apple.com`)."
         ),
     ))
+}
+
+/// Verify that the configured DNS-over-HTTPS provider can resolve the
+/// server hostname. Caller is responsible for gating on DoH-enabled state
+/// (typically `process_resolver().is_some()`).
+///
+/// DNSSEC validation rides with DoH (always on), so a `[FAIL]` here may
+/// indicate either a network problem reaching the DoH provider or a
+/// DNSSEC-signed zone in the user's path that has broken signatures.
+async fn check_doh(resolver: &vouch_common::dns::DohResolver, server: &str) -> CheckResult {
+    let label = format!(
+        "DNS-over-HTTPS via {} ({}, DNSSEC)",
+        resolver.label(),
+        resolver.endpoint_url(),
+    );
+    // Parse the URL directly so IPv6 hosts (which contain colons) survive
+    // intact — `hostname_from_url`/colon-splitting would mangle `[::1]`.
+    let host = match url::Url::parse(server)
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_string))
+    {
+        Some(h) => h,
+        None => {
+            return CheckResult::fail(
+                "doh",
+                format!("{label}: cannot extract host from server URL"),
+            );
+        }
+    };
+    match resolver.lookup_ip(&host).await {
+        Ok(addrs) if addrs.is_empty() => {
+            CheckResult::fail("doh", format!("{label}: {host} resolved to zero addresses"))
+        }
+        Ok(addrs) => CheckResult::pass(
+            "doh",
+            format!("{label}: {host} resolved to {} address(es)", addrs.len()),
+        ),
+        Err(e) => CheckResult::fail("doh", format!("{label}: {e:#}")),
+    }
 }
 
 /// Check if there's a valid session.

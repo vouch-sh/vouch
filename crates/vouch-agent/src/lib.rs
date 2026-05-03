@@ -32,6 +32,7 @@ pub mod audit;
 pub mod client;
 mod config;
 pub mod daemon;
+pub mod dns;
 pub mod error;
 #[cfg(unix)]
 pub mod expiry_monitor;
