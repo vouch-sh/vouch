@@ -384,7 +384,11 @@ fn build_clock_skew_result(headers: &reqwest::header::HeaderMap) -> Option<Check
 /// indicate either a network problem reaching the DoH provider or a
 /// DNSSEC-signed zone in the user's path that has broken signatures.
 async fn check_doh(resolver: &vouch_common::dns::DohResolver, server: &str) -> CheckResult {
-    let label = format!("DNS-over-HTTPS ({}, DNSSEC)", resolver.label());
+    let label = format!(
+        "DNS-over-HTTPS via {} ({}, DNSSEC)",
+        resolver.label(),
+        resolver.endpoint_url(),
+    );
     // Parse the URL directly so IPv6 hosts (which contain colons) survive
     // intact — `hostname_from_url`/colon-splitting would mangle `[::1]`.
     let host = match url::Url::parse(server)

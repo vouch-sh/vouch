@@ -153,6 +153,22 @@ impl DohConfig {
             Self::Custom(endpoint) => endpoint.url.as_str(),
         }
     }
+
+    /// Canonical DoH endpoint URL for diagnostics.
+    ///
+    /// Returns `None` when DoH is off. For keyword variants this is the
+    /// well-known endpoint hickory connects to (it dials the provider's
+    /// IPs with this hostname as the SNI). For `Custom`, the user's URL.
+    #[must_use]
+    pub fn endpoint_url(&self) -> Option<&str> {
+        match self {
+            Self::Off => None,
+            Self::Google => Some("https://dns.google/dns-query"),
+            Self::Cloudflare => Some("https://cloudflare-dns.com/dns-query"),
+            Self::Quad9 => Some("https://dns.quad9.net/dns-query"),
+            Self::Custom(endpoint) => Some(endpoint.url.as_str()),
+        }
+    }
 }
 
 // =============================================================================
@@ -252,6 +268,7 @@ pub fn resolve_doh_config(
 pub struct DohResolver {
     config: ResolverConfig,
     label: String,
+    endpoint_url: String,
     // FIXME: replace with `OnceLock::get_or_try_init` once stable
     // (rust-lang/rust#109737). Until then we stringify the build error so
     // every subsequent caller sees the same message.
@@ -279,6 +296,7 @@ impl DohResolver {
     /// to call outside a tokio runtime context.
     #[must_use]
     pub fn for_config(cfg: &DohConfig) -> Option<Arc<Self>> {
+        let endpoint_url = cfg.endpoint_url()?.to_string();
         let config = match cfg {
             DohConfig::Off => return None,
             DohConfig::Google => ResolverConfig::https(&GOOGLE),
@@ -289,8 +307,15 @@ impl DohResolver {
         Some(Arc::new(Self {
             config,
             label: cfg.label().to_string(),
+            endpoint_url,
             inner: OnceLock::new(),
         }))
+    }
+
+    /// Canonical DoH endpoint URL — the URL hickory dials over HTTPS.
+    #[must_use]
+    pub fn endpoint_url(&self) -> &str {
+        &self.endpoint_url
     }
 
     /// Provider label used for diagnostics.
@@ -561,6 +586,39 @@ mod tests {
     fn label_returns_url_for_custom_variant() {
         let cfg = DohConfig::parse("https://1.1.1.1/dns-query").unwrap();
         assert_eq!(cfg.label(), "https://1.1.1.1/dns-query");
+    }
+
+    #[test]
+    fn endpoint_url_off_is_none() {
+        assert!(DohConfig::Off.endpoint_url().is_none());
+    }
+
+    #[test]
+    fn endpoint_url_keyword_variants() {
+        assert_eq!(
+            DohConfig::Google.endpoint_url(),
+            Some("https://dns.google/dns-query")
+        );
+        assert_eq!(
+            DohConfig::Cloudflare.endpoint_url(),
+            Some("https://cloudflare-dns.com/dns-query")
+        );
+        assert_eq!(
+            DohConfig::Quad9.endpoint_url(),
+            Some("https://dns.quad9.net/dns-query")
+        );
+    }
+
+    #[test]
+    fn endpoint_url_custom_returns_user_url() {
+        let cfg = DohConfig::parse("https://1.1.1.1/dns-query").unwrap();
+        assert_eq!(cfg.endpoint_url(), Some("https://1.1.1.1/dns-query"));
+    }
+
+    #[test]
+    fn resolver_exposes_endpoint_url() {
+        let r = DohResolver::for_config(&DohConfig::Quad9).unwrap();
+        assert_eq!(r.endpoint_url(), "https://dns.quad9.net/dns-query");
     }
 
     #[test]
