@@ -379,7 +379,7 @@ jobs:
 
       - name: Code sign Windows binaries
         if: runner.os == 'Windows'
-        uses: skeeto/aas-sign@79a311e72cc15dda726cee96094327a13d50df1c # v1.0.0
+        uses: skeeto/aas-sign@7035c0941819749be37ee20b801447206c341fcb # v1.0.0
         with:
           version: v1.0.0
           endpoint: ${{ secrets.TRUSTED_SIGNING_ENDPOINT }}
