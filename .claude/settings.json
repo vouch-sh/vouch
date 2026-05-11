@@ -1,6 +1,8 @@
 {
   "enabledPlugins": {
-    "rust-agents@claude-rust-agents": true
+    "rust-agents@claude-rust-agents": true,
+    "rust-analyzer-lsp@claude-plugins-official": true,
+    "context7@claude-plugins-official": true
   },
   "extraKnownMarketplaces": {
     "claude-rust-agents": {
