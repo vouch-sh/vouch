@@ -566,9 +566,6 @@ pub fn verify_registration_with_verifier<V: CoseVerifier>(
         return Err(VerifyError::InvalidAuthDataLength);
     }
 
-    let aaguid_bytes = attested_data
-        .get(0..16)
-        .ok_or(VerifyError::InvalidAuthDataLength)?;
     let cred_id_len_bytes: [u8; 2] = attested_data
         .get(16..18)
         .ok_or(VerifyError::InvalidAuthDataLength)?
@@ -597,30 +594,8 @@ pub fn verify_registration_with_verifier<V: CoseVerifier>(
         ));
     }
 
-    // Format AAGUID as hex string (skip all-zero AAGUIDs)
-    let mut aaguid = if aaguid_bytes.iter().all(|&b| b == 0) {
-        None
-    } else {
-        Some(format!(
-            "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-            aaguid_bytes.first().copied().unwrap_or(0),
-            aaguid_bytes.get(1).copied().unwrap_or(0),
-            aaguid_bytes.get(2).copied().unwrap_or(0),
-            aaguid_bytes.get(3).copied().unwrap_or(0),
-            aaguid_bytes.get(4).copied().unwrap_or(0),
-            aaguid_bytes.get(5).copied().unwrap_or(0),
-            aaguid_bytes.get(6).copied().unwrap_or(0),
-            aaguid_bytes.get(7).copied().unwrap_or(0),
-            aaguid_bytes.get(8).copied().unwrap_or(0),
-            aaguid_bytes.get(9).copied().unwrap_or(0),
-            aaguid_bytes.get(10).copied().unwrap_or(0),
-            aaguid_bytes.get(11).copied().unwrap_or(0),
-            aaguid_bytes.get(12).copied().unwrap_or(0),
-            aaguid_bytes.get(13).copied().unwrap_or(0),
-            aaguid_bytes.get(14).copied().unwrap_or(0),
-            aaguid_bytes.get(15).copied().unwrap_or(0),
-        ))
-    };
+    let mut aaguid = vouch_common::extract_aaguid_from_auth_data(&auth_data_bytes)
+        .filter(|s| s != "00000000-0000-0000-0000-000000000000");
 
     // 3. Parse and verify client data
     let client_data: ClientData = serde_json::from_slice(client_data_json)
