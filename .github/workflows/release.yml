@@ -1137,6 +1137,7 @@ jobs:
             --version "${VERSION}" \
             --release-notes-url "${RELEASE_NOTES_URL}" \
             --output ./winget-manifests \
+            --dry-run \
             --urls ${URLS}
 
       - name: Strip ReleaseNotes from locale manifest
