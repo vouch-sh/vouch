@@ -588,11 +588,8 @@ pub fn verify_registration_with_verifier<V: CoseVerifier>(
         .ok_or(VerifyError::InvalidAuthDataLength)?
         .to_vec();
 
-    // The COSE public key starts after the credential ID
-    let cose_key_bytes = attested_data
-        .get(cose_key_start..)
-        .ok_or(VerifyError::InvalidAuthDataLength)?
-        .to_vec();
+    let cose_key_bytes = vouch_common::extract_public_key_from_auth_data(&auth_data_bytes)
+        .ok_or(VerifyError::InvalidAuthDataLength)?;
 
     if cose_key_bytes.is_empty() {
         return Err(VerifyError::InvalidCoseKey(
