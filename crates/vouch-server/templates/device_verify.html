@@ -13,7 +13,9 @@
         {% endif %}
 
         <form method="POST" action="/device">
-            <input type="text" name="user_code" placeholder="XXXX-XXXX" maxlength="9" required autofocus class="input-code mb-4">
+            <input type="text" name="user_code" placeholder="XXXX-XXXX" maxlength="9" required autofocus
+                   autocomplete="off" autocorrect="off" autocapitalize="characters" spellcheck="false"
+                   class="input-code mb-4">
             <button type="submit" class="btn-primary w-full">Continue</button>
         </form>
     </div>

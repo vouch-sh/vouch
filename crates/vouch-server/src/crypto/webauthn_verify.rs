@@ -566,9 +566,6 @@ pub fn verify_registration_with_verifier<V: CoseVerifier>(
         return Err(VerifyError::InvalidAuthDataLength);
     }
 
-    let aaguid_bytes = attested_data
-        .get(0..16)
-        .ok_or(VerifyError::InvalidAuthDataLength)?;
     let cred_id_len_bytes: [u8; 2] = attested_data
         .get(16..18)
         .ok_or(VerifyError::InvalidAuthDataLength)?
@@ -588,11 +585,8 @@ pub fn verify_registration_with_verifier<V: CoseVerifier>(
         .ok_or(VerifyError::InvalidAuthDataLength)?
         .to_vec();
 
-    // The COSE public key starts after the credential ID
-    let cose_key_bytes = attested_data
-        .get(cose_key_start..)
-        .ok_or(VerifyError::InvalidAuthDataLength)?
-        .to_vec();
+    let cose_key_bytes = vouch_common::extract_public_key_from_auth_data(&auth_data_bytes)
+        .ok_or(VerifyError::InvalidAuthDataLength)?;
 
     if cose_key_bytes.is_empty() {
         return Err(VerifyError::InvalidCoseKey(
@@ -600,30 +594,8 @@ pub fn verify_registration_with_verifier<V: CoseVerifier>(
         ));
     }
 
-    // Format AAGUID as hex string (skip all-zero AAGUIDs)
-    let mut aaguid = if aaguid_bytes.iter().all(|&b| b == 0) {
-        None
-    } else {
-        Some(format!(
-            "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-            aaguid_bytes.first().copied().unwrap_or(0),
-            aaguid_bytes.get(1).copied().unwrap_or(0),
-            aaguid_bytes.get(2).copied().unwrap_or(0),
-            aaguid_bytes.get(3).copied().unwrap_or(0),
-            aaguid_bytes.get(4).copied().unwrap_or(0),
-            aaguid_bytes.get(5).copied().unwrap_or(0),
-            aaguid_bytes.get(6).copied().unwrap_or(0),
-            aaguid_bytes.get(7).copied().unwrap_or(0),
-            aaguid_bytes.get(8).copied().unwrap_or(0),
-            aaguid_bytes.get(9).copied().unwrap_or(0),
-            aaguid_bytes.get(10).copied().unwrap_or(0),
-            aaguid_bytes.get(11).copied().unwrap_or(0),
-            aaguid_bytes.get(12).copied().unwrap_or(0),
-            aaguid_bytes.get(13).copied().unwrap_or(0),
-            aaguid_bytes.get(14).copied().unwrap_or(0),
-            aaguid_bytes.get(15).copied().unwrap_or(0),
-        ))
-    };
+    let mut aaguid = vouch_common::extract_aaguid_from_auth_data(&auth_data_bytes)
+        .filter(|s| s != "00000000-0000-0000-0000-000000000000");
 
     // 3. Parse and verify client data
     let client_data: ClientData = serde_json::from_slice(client_data_json)
@@ -1212,6 +1184,44 @@ mod tests {
             ),
         ]);
         ciborium::into_writer(&key, &mut buf).unwrap();
+        buf
+    }
+
+    /// Build a registration-style auth_data: rpIdHash(32) + flags(1) +
+    /// counter(4) + aaguid(16) + credIdLen(2) + credId + cose_key.
+    fn make_registration_auth_data(
+        rp_id: &str,
+        aaguid: [u8; 16],
+        credential_id: &[u8],
+        cose_key: &[u8],
+    ) -> Vec<u8> {
+        let mut auth_data = make_auth_data(rp_id, 0x45, 0); // UP + UV + AT
+        auth_data.extend_from_slice(&aaguid);
+        let cred_id_len = u16::try_from(credential_id.len()).unwrap();
+        auth_data.extend_from_slice(&cred_id_len.to_be_bytes());
+        auth_data.extend_from_slice(credential_id);
+        auth_data.extend_from_slice(cose_key);
+        auth_data
+    }
+
+    /// Wrap auth_data into a CBOR attestation object with fmt = "none".
+    fn make_attestation_object_none(auth_data: &[u8]) -> Vec<u8> {
+        let mut buf = Vec::new();
+        let value = ciborium::Value::Map(vec![
+            (
+                ciborium::Value::Text("fmt".to_string()),
+                ciborium::Value::Text("none".to_string()),
+            ),
+            (
+                ciborium::Value::Text("attStmt".to_string()),
+                ciborium::Value::Map(vec![]),
+            ),
+            (
+                ciborium::Value::Text("authData".to_string()),
+                ciborium::Value::Bytes(auth_data.to_vec()),
+            ),
+        ]);
+        ciborium::into_writer(&value, &mut buf).unwrap();
         buf
     }
 
@@ -2106,5 +2116,62 @@ mod tests {
     fn test_test_cose_verifier_default() {
         let verifier = TestCoseVerifier::default();
         assert!(verifier.verify(&[], &[], &[]).is_ok());
+    }
+
+    // =========================================================================
+    // Registration Attested-Credential-Data Parsing Tests
+    // =========================================================================
+
+    #[test]
+    fn test_verify_registration_empty_cose_key_returns_invalid_cose_key() {
+        let rp_id = "example.com";
+        let challenge = "challenge-bytes";
+        let origin = "https://example.com";
+        let auth_data = make_registration_auth_data(rp_id, [1; 16], b"cred-id", &[]);
+        let attestation = make_attestation_object_none(&auth_data);
+        let client_data = make_client_data_json("webauthn.create", challenge, origin);
+
+        let err = verify_registration_with_verifier(
+            &attestation,
+            &client_data,
+            rp_id,
+            challenge,
+            origin,
+            true,
+            &TestCoseVerifier::always_succeed(),
+        )
+        .unwrap_err();
+
+        assert!(matches!(err, VerifyError::InvalidCoseKey(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn test_verify_registration_truncated_attested_data_returns_invalid_auth_data_length() {
+        let rp_id = "example.com";
+        let challenge = "challenge-bytes";
+        let origin = "https://example.com";
+        // rpIdHash(32) + flags(1) + counter(4) + aaguid(16) + 1 byte — one byte
+        // short of a complete credIdLen field.
+        let mut auth_data = make_auth_data(rp_id, 0x45, 0);
+        auth_data.extend_from_slice(&[0u8; 16]);
+        auth_data.push(0);
+        let attestation = make_attestation_object_none(&auth_data);
+        let client_data = make_client_data_json("webauthn.create", challenge, origin);
+
+        let err = verify_registration_with_verifier(
+            &attestation,
+            &client_data,
+            rp_id,
+            challenge,
+            origin,
+            true,
+            &TestCoseVerifier::always_succeed(),
+        )
+        .unwrap_err();
+
+        assert!(
+            matches!(err, VerifyError::InvalidAuthDataLength),
+            "got {err:?}"
+        );
     }
 }

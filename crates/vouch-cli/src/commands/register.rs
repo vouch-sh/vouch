@@ -16,6 +16,59 @@ use vouch_common::{
 use crate::client::VouchClient;
 use crate::fido2::{self, FidoDevice, YubiKey};
 
+/// On macOS, Google Chrome claims YubiKeys at the USB device level the moment
+/// they enumerate (so its WebAuthn can respond instantly), which blocks every
+/// other process from doing CTAP-HID. Detect that case so we can route the
+/// user through the server's browser-based enrollment page instead — Chrome
+/// can use the device for its own WebAuthn while it holds it, even though
+/// nothing else can.
+#[cfg(target_os = "macos")]
+fn is_chrome_running() -> bool {
+    std::process::Command::new("pgrep")
+        .args(["-f", "Google Chrome.app/Contents/MacOS/Google Chrome"])
+        .output()
+        .is_ok_and(|out| out.status.success())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn is_chrome_running() -> bool {
+    false
+}
+
+fn browser_register_fallback(server: &str) -> Result<()> {
+    let url = format!("{}/enroll/keys", server.trim_end_matches('/'));
+    println!(
+        "Google Chrome is using your YubiKey, so we can't register it from\n\
+         the command line. Opening your browser to finish registration there\n\
+         instead. (Tip: quit Chrome and re-run if you'd prefer the CLI.)\n"
+    );
+    match open::that(&url) {
+        Ok(()) => {
+            println!("Opening browser to complete registration...");
+            println!();
+            println!("  URL: {url}");
+            println!();
+            println!(
+                "If the browser didn't open, visit the URL above. You may be\n\
+                 prompted to sign in again. After registration, run `vouch keys`\n\
+                 to verify."
+            );
+        }
+        Err(e) => {
+            tracing::debug!("Failed to open browser: {e}");
+            println!("To complete registration:");
+            println!();
+            println!("  1. Open this URL in your browser:");
+            println!("     {url}");
+            println!();
+            println!("  2. Sign in (if prompted) and complete the WebAuthn ceremony.");
+            println!();
+            println!("After registration, run `vouch keys` to verify.");
+        }
+    }
+    Ok(())
+}
+
 /// Run the register command.
 ///
 /// The execution order is intentional:
@@ -26,6 +79,12 @@ use crate::fido2::{self, FidoDevice, YubiKey};
 pub(crate) async fn run(server: &str, name: Option<&str>, timeout_secs: u64) -> Result<()> {
     let name = name.unwrap_or("YubiKey");
     println!("Registering additional YubiKey '{name}'...\n");
+
+    // Pre-flight: if Chrome is running on macOS, the CTAP-HID flow will fail
+    // due to Chrome's USB device claim. Route through the browser instead.
+    if is_chrome_running() {
+        return browser_register_fallback(server);
+    }
 
     // Step 1: Start registration with server (async, authenticated).
     // This fails fast if the server is unreachable or the user is not
