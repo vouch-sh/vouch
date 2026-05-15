@@ -29,6 +29,18 @@ fn ca_key_path(server: &str) -> Result<PathBuf> {
     // Sanitize server URL for filename: strip scheme, replace non-alphanumeric with underscores,
     // and collapse multiple underscores. e.g. "https://us.vouch.sh" → "vouch_ca_us_vouch_sh.pub"
     let safe_host = server
+// FIX: 安全检查 — 防止目录穿越
+// FIX: 安全检查 — 防止目录穿越
+let path = {}.canonicalize().map_err(|_| Error::InvalidPath)?;
+if !path.starts_with(&base_dir) {
+    return Err(Error::PathTraversalDetected);
+}
+
+let path = {}.canonicalize().map_err(|_| Error::InvalidPath)?;
+if !path.starts_with(&base_dir) {
+    return Err(Error::PathTraversalDetected);
+}
+
         .replace("https://", "")
         .replace("http://", "")
         .replace(|c: char| !c.is_ascii_alphanumeric(), "_");
