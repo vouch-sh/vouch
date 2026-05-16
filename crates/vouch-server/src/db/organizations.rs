@@ -2,7 +2,7 @@
 //! Organization database operations.
 
 use super::document_type::Document;
-use super::documents::organization::{AdditionalDomain, OrganizationDoc};
+use super::documents::organization::{AdditionalDomain, AdditionalDomainState, OrganizationDoc};
 use super::store::DocumentStore;
 use anyhow::{Result, bail};
 use aws_lc_rs::rand as aws_rand;
@@ -10,6 +10,19 @@ use jiff::Timestamp;
 
 /// Maximum additional (non-primary) email domains per organization.
 pub const MAX_ADDITIONAL_DOMAINS: usize = 10;
+
+/// Page size for cursor-paginated scans of organization documents.
+///
+/// Background tasks and the admin add-domain conflict check walk the org
+/// table; paging caps the per-batch memory and DB row-fetch cost regardless
+/// of total org count. A dedicated `(domain, pending)` index would replace
+/// these scans with O(log N) lookups — defer until org count justifies it.
+#[cfg(not(test))]
+const ORG_SCAN_PAGE_SIZE: u64 = 256;
+/// In tests the page size is small so the pagination loop exercises multiple
+/// iterations without needing hundreds of fixture orgs.
+#[cfg(test)]
+const ORG_SCAN_PAGE_SIZE: u64 = 3;
 
 /// Organization record for domain-based multi-tenancy.
 #[derive(Debug, Clone)]
@@ -167,6 +180,27 @@ pub fn normalize_domain(input: &str) -> Result<String> {
     Ok(lower)
 }
 
+/// Return the Unicode form of a domain that contains punycode labels, or
+/// `None` if the domain has no `xn--` labels (so the ASCII form is also the
+/// display form).
+///
+/// Used by the admin UI to surface the human-readable rendering of an IDN
+/// alongside the ASCII form, so a domain like `xn--acme-cua.com` is visibly
+/// `àcme.com` to an admin reviewing the org's claims. Decoding failures
+/// (malformed punycode) return `None` rather than erroring — display is a
+/// hint, not authoritative.
+#[must_use]
+pub fn unicode_form(domain: &str) -> Option<String> {
+    if !domain.split('.').any(|label| label.starts_with("xn--")) {
+        return None;
+    }
+    let (decoded, errors) = idna::domain_to_unicode(domain);
+    if errors.is_err() || decoded == domain {
+        return None;
+    }
+    Some(decoded)
+}
+
 /// Generate a fresh verification token suitable for use in a DNS TXT record.
 fn generate_verification_token() -> Result<String> {
     let mut bytes = [0u8; 32];
@@ -247,12 +281,10 @@ pub async fn add_additional_domain(
     data.additional_domains.push(AdditionalDomain {
         domain: normalized.clone(),
         verification_token: token.clone(),
-        verified: false,
         added_at: now,
         added_by_user_id: added_by_user_id.to_string(),
-        verified_at: None,
-        last_checked_at: None,
         consecutive_failures: 0,
+        state: AdditionalDomainState::Pending,
     });
 
     if !tx.compare_and_update(org_id, version, &data).await? {
@@ -266,10 +298,12 @@ pub async fn add_additional_domain(
     })
 }
 
-/// Re-fetch the verification token for a pending additional domain.
+/// Re-fetch the verification token for an additional domain that needs DNS
+/// verification — either a never-verified pending entry or a previously-verified
+/// entry that was flipped to unverified by background re-checks.
 ///
-/// Returns `None` if no pending entry with that domain exists.
-pub async fn get_pending_verification_token(
+/// Returns `None` if no matching non-verified entry exists.
+pub async fn get_verification_token(
     store: &DocumentStore,
     org_id: &str,
     domain: &str,
@@ -282,14 +316,18 @@ pub async fn get_pending_verification_token(
         .data
         .additional_domains
         .into_iter()
-        .find(|ad| !ad.verified && ad.domain == normalized)
+        .find(|ad| {
+            ad.domain == normalized && !matches!(ad.state, AdditionalDomainState::Verified { .. })
+        })
         .map(|ad| ad.verification_token))
 }
 
-/// Mark a pending additional domain as verified.
+/// Mark an additional domain as verified.
 ///
-/// Caller must have already confirmed the DNS TXT record matches the
-/// stored token. Re-runs the cross-org conflict check inside the
+/// Handles both first-time verification (pending entries) and re-verification
+/// of entries that were flipped to unverified by repeated DNS recheck
+/// failures. Caller must have already confirmed the DNS TXT record matches
+/// the stored token. Re-runs the cross-org conflict check inside the
 /// transaction to guard against a TOCTOU race where another org verified
 /// the same domain between add and verify.
 pub async fn mark_additional_domain_verified(
@@ -314,7 +352,7 @@ pub async fn mark_additional_domain_verified(
         .find(|ad| ad.domain == normalized)
         .ok_or_else(|| anyhow::anyhow!("domain is not attached to this organization"))?;
 
-    if entry.verified {
+    if matches!(entry.state, AdditionalDomainState::Verified { .. }) {
         // Already verified — nothing to do.
         tx.commit().await?;
         return Ok(());
@@ -330,8 +368,13 @@ pub async fn mark_additional_domain_verified(
         );
     }
 
-    entry.verified = true;
-    entry.verified_at = Some(Timestamp::now());
+    // Reset re-verification state so a freshly re-verified entry is treated
+    // identically to a brand-new verification by the background task.
+    entry.state = AdditionalDomainState::Verified {
+        verified_at: Timestamp::now(),
+        last_checked_at: None,
+    };
+    entry.consecutive_failures = 0;
 
     if !tx.compare_and_update(org_id, version, &data).await? {
         bail!("organization was modified concurrently; please retry");
@@ -340,15 +383,32 @@ pub async fn mark_additional_domain_verified(
     Ok(())
 }
 
+/// Outcome of a successful `remove_additional_domain` call.
+#[derive(Debug, Clone, Default)]
+pub struct DomainRemovalSummary {
+    /// Number of org users whose active sessions were revoked because their
+    /// email domain matched the removed entry. `org_id` is intentionally
+    /// left intact on those users — domain removal does not demote
+    /// membership; admins must do that explicitly.
+    pub revoked_user_count: u64,
+}
+
 /// Remove an additional domain from an organization.
 ///
-/// Users currently attached via this domain keep their `org_id`; only future
-/// logins stop matching.
+/// On success returns `Some` with a summary of side effects (currently: the
+/// number of users whose sessions were revoked because their email's domain
+/// matched the removed entry). Returns `None` if the domain was not attached
+/// to the organization.
+///
+/// Users keep their `org_id` and `is_org_admin` flags — admins can demote
+/// them separately via SCIM if desired. Revoking sessions forces a fresh
+/// login, at which point the now-removed domain no longer matches and the
+/// user lands wherever their email maps in the new state.
 pub async fn remove_additional_domain(
     store: &DocumentStore,
     org_id: &str,
     domain: &str,
-) -> Result<bool> {
+) -> Result<Option<DomainRemovalSummary>> {
     let normalized = normalize_domain(domain)?;
 
     let mut tx = store.begin().await?;
@@ -363,14 +423,74 @@ pub async fn remove_additional_domain(
     let original_len = data.additional_domains.len();
     data.additional_domains.retain(|ad| ad.domain != normalized);
     if data.additional_domains.len() == original_len {
-        return Ok(false);
+        return Ok(None);
     }
 
     if !tx.compare_and_update(org_id, version, &data).await? {
         bail!("organization was modified concurrently; please retry");
     }
     tx.commit().await?;
-    Ok(true)
+
+    // Revoke sessions for org users whose email's domain matches the removed
+    // entry. Done OUTSIDE the org-doc transaction: per-user session deletes
+    // touch different rows, and a failure here must not undo the removal
+    // (the domain is already gone from login matching). Log and continue.
+    let revoked = revoke_sessions_for_domain_users(store, org_id, &normalized).await;
+    let revoked_user_count = match revoked {
+        Ok(n) => n,
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                org_id = %org_id,
+                domain = %normalized,
+                "Domain removed, but session revocation for matching users failed"
+            );
+            0
+        }
+    };
+    Ok(Some(DomainRemovalSummary { revoked_user_count }))
+}
+
+/// Revoke active sessions for every user in `org_id` whose email's domain
+/// equals `domain` (case-insensitive). Returns the number of users whose
+/// sessions were deleted (count of users, not count of sessions).
+async fn revoke_sessions_for_domain_users(
+    store: &DocumentStore,
+    org_id: &str,
+    domain: &str,
+) -> Result<u64> {
+    use super::documents::user::UserDoc;
+    let users = store.find_all::<UserDoc>("org_id", org_id).await?;
+    let mut revoked: u64 = 0;
+    for user in users {
+        let matches = user
+            .data
+            .email
+            .rsplit_once('@')
+            .is_some_and(|(_, d)| d.eq_ignore_ascii_case(domain));
+        if !matches {
+            continue;
+        }
+        match super::sessions::delete_sessions_for_user(store, &user.id).await {
+            Ok(_) => {
+                tracing::info!(
+                    user_id = %user.id,
+                    org_id = %org_id,
+                    domain = %domain,
+                    "Revoked sessions for user after additional-domain removal"
+                );
+                revoked = revoked.saturating_add(1);
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    user_id = %user.id,
+                    "Failed to revoke sessions for user during domain removal"
+                );
+            }
+        }
+    }
+    Ok(revoked)
 }
 
 /// An additional-domain entry the cleanup task decided to remove.
@@ -411,64 +531,77 @@ pub async fn cleanup_stale_additional_domains(
         .checked_sub(unverified_ttl)
         .map_err(|e| anyhow::anyhow!("unverified TTL cutoff overflow: {e}"))?;
 
-    let orgs = store.list_all::<OrganizationDoc>().await?;
     let mut removed = Vec::new();
-
-    for org in orgs {
-        let mut to_remove: Vec<(String, bool)> = Vec::new();
-        for ad in &org.data.additional_domains {
-            if ad.verified {
+    let mut cursor: Option<String> = None;
+    loop {
+        let (page, has_more) = store
+            .list_all_paginated::<OrganizationDoc>(cursor.as_deref(), ORG_SCAN_PAGE_SIZE)
+            .await?;
+        if page.is_empty() {
+            return Ok(removed);
+        }
+        let next_cursor = page.last().map(|d| d.id.clone());
+        for org in &page {
+            let mut to_remove: Vec<(String, bool)> = Vec::new();
+            for ad in &org.data.additional_domains {
+                match &ad.state {
+                    AdditionalDomainState::Verified { .. } => continue,
+                    AdditionalDomainState::Pending => {
+                        if ad.added_at < pending_cutoff {
+                            to_remove.push((ad.domain.clone(), true));
+                        }
+                    }
+                    AdditionalDomainState::Unverified {
+                        last_checked_at, ..
+                    } => {
+                        // last_checked_at is the moment of the failing
+                        // recheck that caused the flip.
+                        if *last_checked_at < unverified_cutoff {
+                            to_remove.push((ad.domain.clone(), false));
+                        }
+                    }
+                }
+            }
+            if to_remove.is_empty() {
                 continue;
             }
-            if ad.verified_at.is_none() {
-                if ad.added_at < pending_cutoff {
-                    to_remove.push((ad.domain.clone(), true));
+            let domains_to_drop: std::collections::HashSet<String> =
+                to_remove.iter().map(|(d, _)| d.clone()).collect();
+            // Per-org error isolation: one failing modify (transient DB
+            // error, version conflict, etc.) must not abort cleanup for
+            // every org that follows. Log and continue; next tick retries.
+            let updated = match store
+                .modify::<OrganizationDoc, _>(&org.id, |doc| {
+                    doc.additional_domains
+                        .retain(|ad| !domains_to_drop.contains(&ad.domain));
+                })
+                .await
+            {
+                Ok(b) => b,
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        org_id = %org.id,
+                        "Failed to drop stale additional domains for org; skipping"
+                    );
+                    continue;
                 }
-            } else {
-                // Was verified, then flipped. last_checked_at is the
-                // moment of the failing recheck that caused the flip.
-                let reference = ad.last_checked_at.unwrap_or(ad.added_at);
-                if reference < unverified_cutoff {
-                    to_remove.push((ad.domain.clone(), false));
+            };
+            if updated {
+                for (domain, never_verified) in to_remove {
+                    removed.push(StaleDomainRemoval {
+                        org_id: org.id.clone(),
+                        domain,
+                        never_verified,
+                    });
                 }
             }
         }
-        if to_remove.is_empty() {
-            continue;
+        if !has_more {
+            return Ok(removed);
         }
-        let domains_to_drop: std::collections::HashSet<String> =
-            to_remove.iter().map(|(d, _)| d.clone()).collect();
-        // Per-org error isolation: one failing modify (transient DB error,
-        // version conflict, etc.) must not abort cleanup for every org that
-        // follows in the iteration. Log and continue; the next tick retries.
-        let updated = match store
-            .modify::<OrganizationDoc, _>(&org.id, |doc| {
-                doc.additional_domains
-                    .retain(|ad| !domains_to_drop.contains(&ad.domain));
-            })
-            .await
-        {
-            Ok(b) => b,
-            Err(e) => {
-                tracing::warn!(
-                    error = %e,
-                    org_id = %org.id,
-                    "Failed to drop stale additional domains for org; skipping"
-                );
-                continue;
-            }
-        };
-        if updated {
-            for (domain, never_verified) in to_remove {
-                removed.push(StaleDomainRemoval {
-                    org_id: org.id.clone(),
-                    domain,
-                    never_verified,
-                });
-            }
-        }
+        cursor = next_cursor;
     }
-    Ok(removed)
 }
 
 /// A snapshot of one verified additional-domain entry, used by the
@@ -513,22 +646,37 @@ pub enum RecheckEffect {
 pub async fn list_all_verified_additional_domains(
     store: &DocumentStore,
 ) -> Result<Vec<VerifiedDomainRecord>> {
-    let orgs = store.list_all::<OrganizationDoc>().await?;
     let mut out = Vec::new();
-    for org in orgs {
-        for ad in &org.data.additional_domains {
-            if ad.verified {
-                out.push(VerifiedDomainRecord {
-                    org_id: org.id.clone(),
-                    domain: ad.domain.clone(),
-                    verification_token: ad.verification_token.clone(),
-                    last_checked_at: ad.last_checked_at,
-                    consecutive_failures: ad.consecutive_failures,
-                });
+    let mut cursor: Option<String> = None;
+    loop {
+        let (page, has_more) = store
+            .list_all_paginated::<OrganizationDoc>(cursor.as_deref(), ORG_SCAN_PAGE_SIZE)
+            .await?;
+        if page.is_empty() {
+            return Ok(out);
+        }
+        let next_cursor = page.last().map(|d| d.id.clone());
+        for org in &page {
+            for ad in &org.data.additional_domains {
+                if let AdditionalDomainState::Verified {
+                    last_checked_at, ..
+                } = ad.state
+                {
+                    out.push(VerifiedDomainRecord {
+                        org_id: org.id.clone(),
+                        domain: ad.domain.clone(),
+                        verification_token: ad.verification_token.clone(),
+                        last_checked_at,
+                        consecutive_failures: ad.consecutive_failures,
+                    });
+                }
             }
         }
+        if !has_more {
+            return Ok(out);
+        }
+        cursor = next_cursor;
     }
-    Ok(out)
 }
 
 /// Record the result of a background re-verification attempt.
@@ -564,16 +712,20 @@ pub async fn record_recheck_result(
         return Ok(RecheckEffect::NotFound);
     };
 
-    if !entry.verified {
+    // Only verified entries are tracked by the background re-check task.
+    let AdditionalDomainState::Verified { verified_at, .. } = entry.state else {
         return Ok(RecheckEffect::NotFound);
-    }
+    };
 
     let now = Timestamp::now();
-    entry.last_checked_at = Some(now);
 
     let effect = match outcome {
         RecheckOutcome::Success => {
             entry.consecutive_failures = 0;
+            entry.state = AdditionalDomainState::Verified {
+                verified_at,
+                last_checked_at: Some(now),
+            };
             RecheckEffect::StillVerified
         }
         RecheckOutcome::Failure => {
@@ -581,10 +733,17 @@ pub async fn record_recheck_result(
             if entry.consecutive_failures
                 >= crate::db::documents::organization::UNVERIFY_FAILURE_THRESHOLD
             {
-                entry.verified = false;
                 entry.consecutive_failures = 0;
+                entry.state = AdditionalDomainState::Unverified {
+                    verified_at,
+                    last_checked_at: now,
+                };
                 RecheckEffect::FlippedToUnverified
             } else {
+                entry.state = AdditionalDomainState::Verified {
+                    verified_at,
+                    last_checked_at: Some(now),
+                };
                 RecheckEffect::StillVerified
             }
         }
@@ -602,28 +761,37 @@ pub async fn record_recheck_result(
 /// Scan organization docs and return true if any *other* org has a pending
 /// additional-domain entry for `domain`.
 ///
-/// Pending entries are not indexed, so we walk org documents. A dedicated
-/// pending-claim index is a future optimization if the org count grows.
+/// Pending entries are not indexed, so we page through org documents and
+/// short-circuit on the first match.
 async fn find_pending_claim_in_other_org(
     store: &DocumentStore,
     own_org_id: &str,
     domain: &str,
 ) -> Result<bool> {
-    let candidates: Vec<Document<OrganizationDoc>> = store.list_all::<OrganizationDoc>().await?;
-    for org in candidates {
-        if org.id == own_org_id {
-            continue;
+    let mut cursor: Option<String> = None;
+    loop {
+        let (page, has_more) = store
+            .list_all_paginated::<OrganizationDoc>(cursor.as_deref(), ORG_SCAN_PAGE_SIZE)
+            .await?;
+        if page.is_empty() {
+            return Ok(false);
         }
-        if org
-            .data
-            .additional_domains
-            .iter()
-            .any(|ad| !ad.verified && ad.domain == domain)
-        {
-            return Ok(true);
+        let next_cursor = page.last().map(|d| d.id.clone());
+        for org in &page {
+            if org.id == own_org_id {
+                continue;
+            }
+            if org.data.additional_domains.iter().any(|ad| {
+                ad.domain == domain && !matches!(ad.state, AdditionalDomainState::Verified { .. })
+            }) {
+                return Ok(true);
+            }
         }
+        if !has_more {
+            return Ok(false);
+        }
+        cursor = next_cursor;
     }
-    Ok(false)
 }
 
 /// Delete an organization and all associated data.
@@ -750,6 +918,27 @@ mod tests {
         assert!(normalize_domain("xn--acme-cua.com").is_ok());
     }
 
+    #[test]
+    fn unicode_form_decodes_punycode() {
+        // xn--bcher-kva is "bücher" in punycode.
+        assert_eq!(
+            unicode_form("xn--bcher-kva.example.com").as_deref(),
+            Some("bücher.example.com"),
+        );
+    }
+
+    #[test]
+    fn unicode_form_returns_none_for_pure_ascii() {
+        assert!(unicode_form("acme.com").is_none());
+        assert!(unicode_form("foo.bar.example.co.uk").is_none());
+    }
+
+    #[test]
+    fn unicode_form_returns_none_for_malformed_punycode() {
+        // xn-- prefix but invalid encoding — display has no useful form.
+        assert!(unicode_form("xn--.com").is_none());
+    }
+
     #[tokio::test]
     async fn add_additional_domain_succeeds_and_is_pending() {
         let store = fresh_store().await;
@@ -765,7 +954,7 @@ mod tests {
         let list = list_additional_domains(&store, &org.id).await.unwrap();
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].domain, "acme.co.uk");
-        assert!(!list[0].verified);
+        assert!(matches!(list[0].state, AdditionalDomainState::Pending));
         assert_eq!(list[0].added_by_user_id, "user-1");
 
         // Pending entry is not indexed — find_one("domain", "acme.co.uk") must return None.
@@ -844,6 +1033,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pending_conflict_check_finds_match_across_page_boundary() {
+        // Test page size is 3; create more orgs so the conflict lives on a
+        // later page than the first one fetched.
+        let store = fresh_store().await;
+        for i in 0..ORG_SCAN_PAGE_SIZE.saturating_add(2) {
+            let primary = format!("filler{i}.example.com");
+            let org = create_organization(&store, &primary, None, None)
+                .await
+                .unwrap();
+            if i == ORG_SCAN_PAGE_SIZE {
+                // Place the pending claim deep enough that a single-page scan
+                // would miss it.
+                add_additional_domain(&store, &org.id, "wanted.example.com", "u")
+                    .await
+                    .unwrap();
+            }
+        }
+        let mine = create_organization(&store, "mine.example.com", None, None)
+            .await
+            .unwrap();
+        let err = add_additional_domain(&store, &mine.id, "wanted.example.com", "u")
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("pending verification"),
+            "expected cross-page pending conflict to be detected, got: {err}"
+        );
+    }
+
+    #[tokio::test]
     async fn mark_verified_makes_domain_findable() {
         let store = fresh_store().await;
         let org = create_organization(&store, "acme.com", None, None)
@@ -858,8 +1077,10 @@ mod tests {
             .unwrap();
 
         let list = list_additional_domains(&store, &org.id).await.unwrap();
-        assert!(list[0].verified);
-        assert!(list[0].verified_at.is_some());
+        assert!(matches!(
+            list[0].state,
+            AdditionalDomainState::Verified { .. }
+        ));
 
         let found = store
             .find_one::<crate::db::documents::organization::OrganizationDoc>("domain", "acme.co.uk")
@@ -882,10 +1103,11 @@ mod tests {
             .await
             .unwrap();
 
-        let removed = remove_additional_domain(&store, &org.id, "Acme.Co.UK")
+        let summary = remove_additional_domain(&store, &org.id, "Acme.Co.UK")
             .await
             .unwrap();
-        assert!(removed);
+        let summary = summary.expect("entry was attached, must be removed");
+        assert_eq!(summary.revoked_user_count, 0);
 
         let list = list_additional_domains(&store, &org.id).await.unwrap();
         assert!(list.is_empty());
@@ -947,9 +1169,14 @@ mod tests {
         assert_eq!(effect, RecheckEffect::StillVerified);
 
         let list = list_additional_domains(&store, &org.id).await.unwrap();
-        assert!(list[0].verified);
+        assert!(matches!(
+            list[0].state,
+            AdditionalDomainState::Verified {
+                last_checked_at: Some(_),
+                ..
+            }
+        ));
         assert_eq!(list[0].consecutive_failures, 0);
-        assert!(list[0].last_checked_at.is_some());
     }
 
     #[tokio::test]
@@ -975,7 +1202,10 @@ mod tests {
         assert_eq!(last_effect, RecheckEffect::FlippedToUnverified);
 
         let list = list_additional_domains(&store, &org.id).await.unwrap();
-        assert!(!list[0].verified, "entry must be flipped to unverified");
+        assert!(
+            matches!(list[0].state, AdditionalDomainState::Unverified { .. }),
+            "entry must be flipped to unverified"
+        );
 
         // No longer indexed.
         let found = store
@@ -986,6 +1216,69 @@ mod tests {
             found.is_none(),
             "unverified domain must drop out of the index"
         );
+    }
+
+    #[tokio::test]
+    async fn mark_verified_re_verifies_auto_unverified_entry() {
+        let store = fresh_store().await;
+        let org = create_organization(&store, "acme.com", None, None)
+            .await
+            .unwrap();
+        add_additional_domain(&store, &org.id, "acme.co.uk", "u1")
+            .await
+            .unwrap();
+        mark_additional_domain_verified(&store, &org.id, "acme.co.uk")
+            .await
+            .unwrap();
+
+        // Drive the entry to auto-unverified via consecutive failures.
+        for _ in 0..crate::db::UNVERIFY_FAILURE_THRESHOLD {
+            record_recheck_result(&store, &org.id, "acme.co.uk", RecheckOutcome::Failure)
+                .await
+                .unwrap();
+        }
+        let list = list_additional_domains(&store, &org.id).await.unwrap();
+        assert!(
+            matches!(list[0].state, AdditionalDomainState::Unverified { .. }),
+            "expected flipped state"
+        );
+
+        // Token is still available for re-verification.
+        let token = get_verification_token(&store, &org.id, "acme.co.uk")
+            .await
+            .unwrap();
+        assert!(
+            token.is_some(),
+            "token must be re-fetchable after auto-unverify"
+        );
+
+        // Re-verify with the existing API.
+        mark_additional_domain_verified(&store, &org.id, "acme.co.uk")
+            .await
+            .unwrap();
+
+        let list = list_additional_domains(&store, &org.id).await.unwrap();
+        assert!(
+            matches!(
+                list[0].state,
+                AdditionalDomainState::Verified {
+                    last_checked_at: None,
+                    ..
+                }
+            ),
+            "re-verify must flip back to verified with fresh recheck state"
+        );
+        assert_eq!(
+            list[0].consecutive_failures, 0,
+            "failure counter must reset"
+        );
+
+        // Indexed again.
+        let found = store
+            .find_one::<crate::db::documents::organization::OrganizationDoc>("domain", "acme.co.uk")
+            .await
+            .unwrap();
+        assert!(found.is_some(), "re-verified domain must be re-indexed");
     }
 
     #[tokio::test]
@@ -1010,12 +1303,10 @@ mod tests {
         doc.data.additional_domains.push(AdditionalDomain {
             domain: "squatted.example.com".to_string(),
             verification_token: "tok".to_string(),
-            verified: false,
             added_at: stale_added,
             added_by_user_id: "u1".to_string(),
-            verified_at: None,
-            last_checked_at: None,
             consecutive_failures: 0,
+            state: AdditionalDomainState::Pending,
         });
         // Sanity: doc_type matches.
         assert_eq!(<OrganizationDoc as DocumentType>::DOC_TYPE, "organization");
@@ -1094,12 +1385,13 @@ mod tests {
         doc.data.additional_domains.push(AdditionalDomain {
             domain: "drifted.example.com".to_string(),
             verification_token: "tok".to_string(),
-            verified: false,
             added_at: old_verified_at,
             added_by_user_id: "u1".to_string(),
-            verified_at: Some(old_verified_at),
-            last_checked_at: Some(old_check),
             consecutive_failures: 0,
+            state: AdditionalDomainState::Unverified {
+                verified_at: old_verified_at,
+                last_checked_at: old_check,
+            },
         });
         store.update(&org.id, &doc.data).await.unwrap();
 
@@ -1165,14 +1457,107 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn remove_additional_domain_unknown_returns_false() {
+    async fn remove_additional_domain_unknown_returns_none() {
         let store = fresh_store().await;
         let org = create_organization(&store, "acme.com", None, None)
             .await
             .unwrap();
-        let removed = remove_additional_domain(&store, &org.id, "never-added.example.com")
+        let summary = remove_additional_domain(&store, &org.id, "never-added.example.com")
             .await
             .unwrap();
-        assert!(!removed);
+        assert!(summary.is_none());
+    }
+
+    #[tokio::test]
+    async fn remove_additional_domain_revokes_matching_user_sessions() {
+        use super::super::documents::session::{SessionDoc, SessionPurpose};
+        use super::super::documents::user::UserDoc;
+        use super::super::sessions::get_session_by_token_hash;
+
+        let store = fresh_store().await;
+        let org = create_organization(&store, "acme.com", None, None)
+            .await
+            .unwrap();
+        add_additional_domain(&store, &org.id, "acme.co.uk", "u-admin")
+            .await
+            .unwrap();
+        mark_additional_domain_verified(&store, &org.id, "acme.co.uk")
+            .await
+            .unwrap();
+
+        let mk_user = |email: &str| UserDoc {
+            email: email.to_string(),
+            name: None,
+            org_id: Some(org.id.clone()),
+            is_org_admin: false,
+            active: true,
+            external_id: None,
+            github_id: None,
+            github_login: None,
+            github_refresh_token: None,
+        };
+        let matched_user = store.insert(&mk_user("alice@Acme.Co.UK")).await.unwrap();
+        let other_user = store.insert(&mk_user("bob@acme.com")).await.unwrap();
+
+        let in_one_hour = jiff::Timestamp::now()
+            .checked_add(jiff::Span::new().hours(1))
+            .unwrap();
+        let mk_session = |user_id: String, email: String, hash: &str| SessionDoc {
+            user_id,
+            user_email: email,
+            token_hash: hash.to_string(),
+            authenticator_id: None,
+            session_type: SessionPurpose::OAuthAccessToken,
+            expires_at: in_one_hour,
+            authorization_details: None,
+        };
+        store
+            .insert(&mk_session(
+                matched_user.id.clone(),
+                "alice@Acme.Co.UK".to_string(),
+                "hash-alice",
+            ))
+            .await
+            .unwrap();
+        store
+            .insert(&mk_session(
+                other_user.id.clone(),
+                "bob@acme.com".to_string(),
+                "hash-bob",
+            ))
+            .await
+            .unwrap();
+
+        let summary = remove_additional_domain(&store, &org.id, "acme.co.uk")
+            .await
+            .unwrap()
+            .expect("entry was attached, must be removed");
+        assert_eq!(
+            summary.revoked_user_count, 1,
+            "only the matching user should have sessions revoked"
+        );
+
+        assert!(
+            get_session_by_token_hash(&store, "hash-alice")
+                .await
+                .unwrap()
+                .is_none(),
+            "matching user's session must be revoked"
+        );
+        assert!(
+            get_session_by_token_hash(&store, "hash-bob")
+                .await
+                .unwrap()
+                .is_some(),
+            "non-matching user's session must survive"
+        );
+
+        // Membership (org_id) is intentionally not changed.
+        let matched_after = store
+            .get::<UserDoc>(&matched_user.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(matched_after.data.org_id, Some(org.id.clone()));
     }
 }

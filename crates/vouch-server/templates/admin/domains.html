@@ -67,19 +67,29 @@
                 <tbody>
                     {% for row in domains %}
                     <tr class="border-b border-vouch-border last:border-b-0 align-top">
-                        <td class="px-4 py-3 text-gray-200 font-mono">{{ row.domain }}</td>
-                        <td class="px-4 py-3 whitespace-nowrap">
-                            {% if row.is_primary %}
-                            <span class="px-2 py-0.5 rounded bg-blue-900/40 text-blue-300 text-xs">Primary</span>
-                            {% else if row.status == "Verified" %}
-                            <span class="px-2 py-0.5 rounded bg-green-900/40 text-green-300 text-xs">Verified</span>
-                            {% else %}
-                            <span class="px-2 py-0.5 rounded bg-yellow-900/40 text-yellow-300 text-xs">Pending</span>
+                        <td class="px-4 py-3 text-gray-200 font-mono">
+                            {{ row.domain }}
+                            {% if let Some(unicode) = row.unicode %}
+                            <div class="text-xs text-gray-500 font-mono mt-0.5" title="Decoded Unicode form of the IDN domain">↳ {{ unicode }}</div>
                             {% endif %}
+                        </td>
+                        <td class="px-4 py-3 whitespace-nowrap">
+                            {% match row.status %}
+                            {% when crate::handlers::admin::domains::DomainRowStatus::Primary %}
+                            <span class="px-2 py-0.5 rounded bg-blue-900/40 text-blue-300 text-xs">Primary</span>
+                            {% when crate::handlers::admin::domains::DomainRowStatus::Verified %}
+                            <span class="px-2 py-0.5 rounded bg-green-900/40 text-green-300 text-xs">Verified</span>
+                            {% when crate::handlers::admin::domains::DomainRowStatus::Unverified %}
+                            <span class="px-2 py-0.5 rounded bg-orange-900/40 text-orange-300 text-xs">Unverified</span>
+                            {% when crate::handlers::admin::domains::DomainRowStatus::Pending %}
+                            <span class="px-2 py-0.5 rounded bg-yellow-900/40 text-yellow-300 text-xs">Pending</span>
+                            {% endmatch %}
                         </td>
                         <td class="px-4 py-3 text-gray-400 whitespace-nowrap">{{ row.added_at.as_deref().unwrap_or("—") }}</td>
                         <td class="px-4 py-3 text-right whitespace-nowrap">
-                            {% if !row.is_primary %}
+                            {% match row.status %}
+                            {% when crate::handlers::admin::domains::DomainRowStatus::Primary %}
+                            {% when _ %}
                             <div class="inline-flex gap-2">
                                 {% if let Some(token) = row.verification_token %}
                                 <form method="POST" action="/admin/domains/{{ row.domain }}/verify">
@@ -90,7 +100,7 @@
                                     <button type="submit" class="px-2 py-1 text-xs rounded bg-red-900/40 text-red-400 hover:bg-red-900/60">Remove</button>
                                 </form>
                             </div>
-                            {% endif %}
+                            {% endmatch %}
                         </td>
                     </tr>
                     {% if let Some(token) = row.verification_token %}

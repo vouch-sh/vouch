@@ -48,12 +48,19 @@ const PENDING_DOMAIN_TTL_DAYS: i64 = 7;
 /// re-verification flip before the entry is removed entirely.
 const UNVERIFIED_DOMAIN_TTL_DAYS: i64 = 14;
 
-/// Compute a retention cutoff timestamp by subtracting days from now.
+/// Build a [`Span`] for the given number of days.
 ///
-/// `jiff::Timestamp` only supports time-based units, so we convert days to hours.
+/// `jiff::Span` does not allow date-unit arithmetic on bare `Timestamp`, so
+/// we express day-scale retention windows as hours. Centralizing the
+/// conversion keeps `_TTL_DAYS` constants readable and prevents drift
+/// between call sites.
+fn days_to_span(days: i64) -> Span {
+    Span::new().hours(days.saturating_mul(24))
+}
+
+/// Compute a retention cutoff timestamp by subtracting days from now.
 fn retention_cutoff(now: Timestamp, days: i64) -> Option<Timestamp> {
-    let hours = days.checked_mul(24)?;
-    now.checked_sub(Span::new().hours(hours)).ok()
+    now.checked_sub(days_to_span(days)).ok()
 }
 
 /// Log cleanup results: info on deletions, warn on errors, silent on zero.
@@ -279,8 +286,8 @@ async fn gc_stale_additional_domains(
     audit: &AuditStore,
     now: Timestamp,
 ) -> anyhow::Result<()> {
-    let pending_ttl = Span::new().hours(PENDING_DOMAIN_TTL_DAYS.saturating_mul(24));
-    let unverified_ttl = Span::new().hours(UNVERIFIED_DOMAIN_TTL_DAYS.saturating_mul(24));
+    let pending_ttl = days_to_span(PENDING_DOMAIN_TTL_DAYS);
+    let unverified_ttl = days_to_span(UNVERIFIED_DOMAIN_TTL_DAYS);
 
     let removed =
         db::cleanup_stale_additional_domains(store, now, pending_ttl, unverified_ttl).await?;

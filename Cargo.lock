@@ -6140,6 +6140,7 @@ dependencies = [
  "hex",
  "hickory-resolver",
  "http 1.4.0",
+ "idna",
  "ipnet",
  "jiff",
  "jsonwebtoken",

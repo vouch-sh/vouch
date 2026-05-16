@@ -21,11 +21,30 @@ use axum_extra::extract::cookie::CookieJar;
 use serde::Deserialize;
 use std::sync::Arc;
 
+/// Visual status of a domain row in the admin UI.
+///
+/// Typed so template comparisons can't drift from the handler's spelling
+/// of the status string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DomainRowStatus {
+    /// The organization's primary domain (configured at org creation).
+    Primary,
+    /// Added but never verified — TXT record has not yet been observed.
+    Pending,
+    /// DNS TXT ownership confirmed.
+    Verified,
+    /// Was verified at some point but flipped back to unverified after
+    /// consecutive re-verification failures.
+    Unverified,
+}
+
 /// Display row for an organization's email domains in the template.
 pub struct DomainRow {
     pub domain: String,
-    pub status: &'static str,
-    pub is_primary: bool,
+    /// Unicode rendering of a punycode domain, if applicable. `None` for
+    /// pure-ASCII domains. Surfacing both forms makes IDN spoofing visible.
+    pub unicode: Option<String>,
+    pub status: DomainRowStatus,
     pub verification_token: Option<String>,
     pub added_at: Option<String>,
 }
@@ -72,21 +91,29 @@ fn build_rows(org: &db::Organization) -> Vec<DomainRow> {
     let mut rows = Vec::with_capacity(cap);
     rows.push(DomainRow {
         domain: org.domain.clone(),
-        status: "Primary",
-        is_primary: true,
+        unicode: db::unicode_form(&org.domain),
+        status: DomainRowStatus::Primary,
         verification_token: None,
         added_at: None,
     });
     for ad in &org.additional_domains {
+        use crate::db::documents::organization::AdditionalDomainState;
+        let (status, verification_token) = match &ad.state {
+            AdditionalDomainState::Verified { .. } => (DomainRowStatus::Verified, None),
+            AdditionalDomainState::Unverified { .. } => (
+                DomainRowStatus::Unverified,
+                Some(ad.verification_token.clone()),
+            ),
+            AdditionalDomainState::Pending => (
+                DomainRowStatus::Pending,
+                Some(ad.verification_token.clone()),
+            ),
+        };
         rows.push(DomainRow {
             domain: ad.domain.clone(),
-            status: if ad.verified { "Verified" } else { "Pending" },
-            is_primary: false,
-            verification_token: if ad.verified {
-                None
-            } else {
-                Some(ad.verification_token.clone())
-            },
+            unicode: db::unicode_form(&ad.domain),
+            status,
+            verification_token,
             added_at: Some(ad.added_at.strftime("%Y-%m-%d %H:%M UTC").to_string()),
         });
     }
@@ -212,8 +239,7 @@ pub async fn admin_verify_domain(
         Err(e) => return Ok(redirect_error(&e.to_string())),
     };
 
-    let token = match db::get_pending_verification_token(&state.store, &org_id, &normalized).await?
-    {
+    let token = match db::get_verification_token(&state.store, &org_id, &normalized).await? {
         Some(t) => t,
         None => {
             return Ok(redirect_error(
@@ -293,11 +319,13 @@ pub async fn admin_remove_domain(
     };
 
     match db::remove_additional_domain(&state.store, &org_id, &normalized).await {
-        Ok(true) => {
+        Ok(Some(summary)) => {
+            let revoked = summary.revoked_user_count;
             let data = serde_json::json!({
                 "action": "remove_org_domain",
                 "domain": normalized,
                 "admin_user_id": admin.id,
+                "revoked_user_session_count": revoked,
             });
             if let Err(e) = state
                 .audit
@@ -315,13 +343,23 @@ pub async fn admin_remove_domain(
                 admin_email = %admin.email,
                 org_id = %org_id,
                 domain = %normalized,
+                revoked_user_count = revoked,
                 "Removed additional domain"
             );
-            Ok(redirect_ok(&format!(
-                "Removed {normalized}. Existing users from that domain remain in the org."
-            )))
+            let msg = if revoked == 0 {
+                format!("Removed {normalized}. No matching users had active sessions to revoke.")
+            } else if revoked == 1 {
+                format!(
+                    "Removed {normalized}. Revoked sessions for 1 user; their org membership is unchanged."
+                )
+            } else {
+                format!(
+                    "Removed {normalized}. Revoked sessions for {revoked} users; org membership is unchanged."
+                )
+            };
+            Ok(redirect_ok(&msg))
         }
-        Ok(false) => Ok(redirect_error("Domain not found on this organization.")),
+        Ok(None) => Ok(redirect_error("Domain not found on this organization.")),
         Err(e) => Ok(redirect_error(&e.to_string())),
     }
 }

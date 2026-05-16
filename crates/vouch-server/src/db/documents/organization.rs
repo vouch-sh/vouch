@@ -21,6 +21,35 @@ pub struct OrganizationDoc {
     pub additional_domains: Vec<AdditionalDomain>,
 }
 
+/// Lifecycle state of an [`AdditionalDomain`].
+///
+/// Modeled as an enum so each state carries exactly the timestamps relevant
+/// to it — invalid combinations (e.g., "verified but never verified_at") are
+/// unrepresentable.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum AdditionalDomainState {
+    /// Added but never verified. TXT record has not been observed.
+    Pending,
+    /// DNS TXT ownership confirmed; entry participates in login matching.
+    Verified {
+        verified_at: Timestamp,
+        /// Last time the background re-verification task checked this domain.
+        /// `None` means it has not yet been re-checked since verification.
+        #[serde(default)]
+        last_checked_at: Option<Timestamp>,
+    },
+    /// Was verified at some point but flipped back to unverified after
+    /// repeated DNS recheck failures. Eligible for admin re-verification or
+    /// auto-removal after the unverified TTL elapses.
+    Unverified {
+        /// When the entry was originally verified, before being flipped.
+        verified_at: Timestamp,
+        /// When the failing re-check that caused the flip ran.
+        last_checked_at: Timestamp,
+    },
+}
+
 /// A secondary email domain claimed by an organization.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AdditionalDomain {
@@ -28,21 +57,13 @@ pub struct AdditionalDomain {
     pub domain: String,
     /// Random hex token the admin must publish as `_vouch-verification.<domain>` TXT.
     pub verification_token: String,
-    /// True once the TXT record has been observed by the verification flow.
-    #[serde(default)]
-    pub verified: bool,
     pub added_at: Timestamp,
     pub added_by_user_id: String,
-    #[serde(default)]
-    pub verified_at: Option<Timestamp>,
-    /// Last time the background re-verification task checked this domain.
-    /// `None` means it has never been re-checked since the initial verification.
-    #[serde(default)]
-    pub last_checked_at: Option<Timestamp>,
     /// Consecutive re-verification failures. Reset to 0 on a successful check.
-    /// At [`UNVERIFY_FAILURE_THRESHOLD`] the entry flips to unverified.
+    /// At [`UNVERIFY_FAILURE_THRESHOLD`] the entry flips to `Unverified`.
     #[serde(default)]
     pub consecutive_failures: u32,
+    pub state: AdditionalDomainState,
 }
 
 /// Number of consecutive failed re-verifications before an entry is flipped
@@ -60,7 +81,7 @@ impl DocumentType for OrganizationDoc {
             value: self.domain.clone(),
         });
         for ad in &self.additional_domains {
-            if ad.verified {
+            if matches!(ad.state, AdditionalDomainState::Verified { .. }) {
                 entries.push(IndexEntry {
                     field: "domain",
                     value: ad.domain.clone(),
