@@ -657,6 +657,19 @@ fn build_admin_routes(config: &config::ServerConfig) -> anyhow::Result<Router<Ar
             "/admin/scim-tokens/{id}/revoke",
             post(handlers::admin::admin_revoke_scim_token),
         )
+        // Email domain management UI
+        .route(
+            "/admin/domains",
+            get(handlers::admin::admin_domains_page).post(handlers::admin::admin_add_domain),
+        )
+        .route(
+            "/admin/domains/{domain}/verify",
+            post(handlers::admin::admin_verify_domain),
+        )
+        .route(
+            "/admin/domains/{domain}/remove",
+            post(handlers::admin::admin_remove_domain),
+        )
         .layer(maybe_rate_limit!(
             rate_limit::build_general_rate_limiter,
             config

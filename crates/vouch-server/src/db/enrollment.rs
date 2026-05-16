@@ -61,6 +61,7 @@ pub async fn enroll_user_with_org(
                     domain: domain.to_string(),
                     name: None,
                     created_by_user_id: None,
+                    additional_domains: Vec::new(),
                 };
                 let result = tx.insert(&doc).await?;
                 (Some(result.id), true)
