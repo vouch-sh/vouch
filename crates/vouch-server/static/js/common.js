@@ -10,11 +10,14 @@
 
             var text = btn.dataset.copyText;
             navigator.clipboard.writeText(text).then(function() {
-                var original = btn.textContent;
-                btn.textContent = 'Copied!';
+                // Capture innerHTML, not textContent — icon-only buttons (SVG
+                // children, no text) would otherwise be replaced by an empty
+                // string when restored.
+                var original = btn.innerHTML;
+                btn.innerHTML = 'Copied!';
                 btn.classList.add('text-vouch-success');
                 setTimeout(function() {
-                    btn.textContent = original;
+                    btn.innerHTML = original;
                     btn.classList.remove('text-vouch-success');
                 }, 2000);
             });

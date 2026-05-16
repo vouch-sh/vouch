@@ -219,6 +219,7 @@ pub async fn add_additional_domain(
     org_id: &str,
     domain: &str,
     added_by_user_id: &str,
+    added_by_email: &str,
 ) -> Result<AddedDomain> {
     let normalized = normalize_domain(domain)?;
 
@@ -290,6 +291,7 @@ pub async fn add_additional_domain(
         verification_token: token.clone(),
         added_at: now,
         added_by_user_id: added_by_user_id.to_string(),
+        added_by_email: added_by_email.to_string(),
         consecutive_failures: 0,
         state: AdditionalDomainState::Pending,
     });
@@ -968,9 +970,15 @@ mod tests {
         let org = create_organization(&store, "acme.com", None, None)
             .await
             .unwrap();
-        let added = add_additional_domain(&store, &org.id, "Acme.Co.UK", "user-1")
-            .await
-            .unwrap();
+        let added = add_additional_domain(
+            &store,
+            &org.id,
+            "Acme.Co.UK",
+            "user-1",
+            "user-1@example.com",
+        )
+        .await
+        .unwrap();
         assert_eq!(added.domain, "acme.co.uk");
         assert!(!added.verification_token.is_empty());
 
@@ -997,9 +1005,10 @@ mod tests {
         let org = create_organization(&store, "acme.com", None, None)
             .await
             .unwrap();
-        let err = add_additional_domain(&store, &org.id, "acme.com", "user-1")
-            .await
-            .unwrap_err();
+        let err =
+            add_additional_domain(&store, &org.id, "acme.com", "user-1", "user-1@example.com")
+                .await
+                .unwrap_err();
         assert!(err.to_string().contains("primary"));
     }
 
@@ -1011,13 +1020,19 @@ mod tests {
             .unwrap();
         for i in 0..MAX_ADDITIONAL_DOMAINS {
             let d = format!("alt{i}.example.com");
-            add_additional_domain(&store, &org.id, &d, "user-1")
+            add_additional_domain(&store, &org.id, &d, "user-1", "user-1@example.com")
                 .await
                 .unwrap();
         }
-        let err = add_additional_domain(&store, &org.id, "one-too-many.example.com", "user-1")
-            .await
-            .unwrap_err();
+        let err = add_additional_domain(
+            &store,
+            &org.id,
+            "one-too-many.example.com",
+            "user-1",
+            "user-1@example.com",
+        )
+        .await
+        .unwrap_err();
         assert!(err.to_string().contains("maximum"));
     }
 
@@ -1030,9 +1045,15 @@ mod tests {
         let org = create_organization(&store, "acme.com", None, None)
             .await
             .unwrap();
-        let err = add_additional_domain(&store, &org.id, "acme.co.uk", "user-1")
-            .await
-            .unwrap_err();
+        let err = add_additional_domain(
+            &store,
+            &org.id,
+            "acme.co.uk",
+            "user-1",
+            "user-1@example.com",
+        )
+        .await
+        .unwrap_err();
         assert!(err.to_string().contains("another organization"));
     }
 
@@ -1042,16 +1063,28 @@ mod tests {
         let other = create_organization(&store, "first.com", None, None)
             .await
             .unwrap();
-        add_additional_domain(&store, &other.id, "shared.example.com", "user-other")
-            .await
-            .unwrap();
+        add_additional_domain(
+            &store,
+            &other.id,
+            "shared.example.com",
+            "user-other",
+            "user-other@example.com",
+        )
+        .await
+        .unwrap();
 
         let mine = create_organization(&store, "second.com", None, None)
             .await
             .unwrap();
-        let err = add_additional_domain(&store, &mine.id, "shared.example.com", "user-mine")
-            .await
-            .unwrap_err();
+        let err = add_additional_domain(
+            &store,
+            &mine.id,
+            "shared.example.com",
+            "user-mine",
+            "user-mine@example.com",
+        )
+        .await
+        .unwrap_err();
         assert!(err.to_string().contains("pending verification"));
     }
 
@@ -1061,9 +1094,15 @@ mod tests {
         let other = create_organization(&store, "first.com", None, None)
             .await
             .unwrap();
-        add_additional_domain(&store, &other.id, "shared.example.com", "user-other")
-            .await
-            .unwrap();
+        add_additional_domain(
+            &store,
+            &other.id,
+            "shared.example.com",
+            "user-other",
+            "user-other@example.com",
+        )
+        .await
+        .unwrap();
         mark_additional_domain_verified(&store, &other.id, "shared.example.com")
             .await
             .unwrap();
@@ -1082,9 +1121,15 @@ mod tests {
         let mine = create_organization(&store, "second.com", None, None)
             .await
             .unwrap();
-        let err = add_additional_domain(&store, &mine.id, "shared.example.com", "user-mine")
-            .await
-            .unwrap_err();
+        let err = add_additional_domain(
+            &store,
+            &mine.id,
+            "shared.example.com",
+            "user-mine",
+            "user-mine@example.com",
+        )
+        .await
+        .unwrap_err();
         let msg = err.to_string();
         assert!(
             msg.contains("auto-unverified") && !msg.contains("pending verification"),
@@ -1105,7 +1150,7 @@ mod tests {
             if i == ORG_SCAN_PAGE_SIZE {
                 // Place the pending claim deep enough that a single-page scan
                 // would miss it.
-                add_additional_domain(&store, &org.id, "wanted.example.com", "u")
+                add_additional_domain(&store, &org.id, "wanted.example.com", "u", "u@example.com")
                     .await
                     .unwrap();
             }
@@ -1113,9 +1158,10 @@ mod tests {
         let mine = create_organization(&store, "mine.example.com", None, None)
             .await
             .unwrap();
-        let err = add_additional_domain(&store, &mine.id, "wanted.example.com", "u")
-            .await
-            .unwrap_err();
+        let err =
+            add_additional_domain(&store, &mine.id, "wanted.example.com", "u", "u@example.com")
+                .await
+                .unwrap_err();
         assert!(
             err.to_string().contains("pending verification"),
             "expected cross-page pending conflict to be detected, got: {err}"
@@ -1128,9 +1174,15 @@ mod tests {
         let org = create_organization(&store, "acme.com", None, None)
             .await
             .unwrap();
-        add_additional_domain(&store, &org.id, "acme.co.uk", "user-1")
-            .await
-            .unwrap();
+        add_additional_domain(
+            &store,
+            &org.id,
+            "acme.co.uk",
+            "user-1",
+            "user-1@example.com",
+        )
+        .await
+        .unwrap();
 
         mark_additional_domain_verified(&store, &org.id, "Acme.Co.UK")
             .await
@@ -1156,9 +1208,15 @@ mod tests {
         let org = create_organization(&store, "acme.com", None, None)
             .await
             .unwrap();
-        add_additional_domain(&store, &org.id, "acme.co.uk", "user-1")
-            .await
-            .unwrap();
+        add_additional_domain(
+            &store,
+            &org.id,
+            "acme.co.uk",
+            "user-1",
+            "user-1@example.com",
+        )
+        .await
+        .unwrap();
         mark_additional_domain_verified(&store, &org.id, "acme.co.uk")
             .await
             .unwrap();
@@ -1186,10 +1244,10 @@ mod tests {
         let org = create_organization(&store, "acme.com", None, None)
             .await
             .unwrap();
-        add_additional_domain(&store, &org.id, "acme.co.uk", "u1")
+        add_additional_domain(&store, &org.id, "acme.co.uk", "u1", "u1@example.com")
             .await
             .unwrap();
-        add_additional_domain(&store, &org.id, "acme.eu", "u1")
+        add_additional_domain(&store, &org.id, "acme.eu", "u1", "u1@example.com")
             .await
             .unwrap();
         mark_additional_domain_verified(&store, &org.id, "acme.co.uk")
@@ -1208,7 +1266,7 @@ mod tests {
         let org = create_organization(&store, "acme.com", None, None)
             .await
             .unwrap();
-        add_additional_domain(&store, &org.id, "acme.co.uk", "u1")
+        add_additional_domain(&store, &org.id, "acme.co.uk", "u1", "u1@example.com")
             .await
             .unwrap();
         mark_additional_domain_verified(&store, &org.id, "acme.co.uk")
@@ -1245,7 +1303,7 @@ mod tests {
         let org = create_organization(&store, "acme.com", None, None)
             .await
             .unwrap();
-        add_additional_domain(&store, &org.id, "acme.co.uk", "u1")
+        add_additional_domain(&store, &org.id, "acme.co.uk", "u1", "u1@example.com")
             .await
             .unwrap();
         mark_additional_domain_verified(&store, &org.id, "acme.co.uk")
@@ -1284,7 +1342,7 @@ mod tests {
         let org = create_organization(&store, "acme.com", None, None)
             .await
             .unwrap();
-        add_additional_domain(&store, &org.id, "acme.co.uk", "u1")
+        add_additional_domain(&store, &org.id, "acme.co.uk", "u1", "u1@example.com")
             .await
             .unwrap();
         mark_additional_domain_verified(&store, &org.id, "acme.co.uk")
@@ -1365,6 +1423,7 @@ mod tests {
             verification_token: "tok".to_string(),
             added_at: stale_added,
             added_by_user_id: "u1".to_string(),
+            added_by_email: "u1@example.com".to_string(),
             consecutive_failures: 0,
             state: AdditionalDomainState::Pending,
         });
@@ -1398,7 +1457,7 @@ mod tests {
         let org = create_organization(&store, "acme.com", None, None)
             .await
             .unwrap();
-        add_additional_domain(&store, &org.id, "fresh.example.com", "u1")
+        add_additional_domain(&store, &org.id, "fresh.example.com", "u1", "u1@example.com")
             .await
             .unwrap();
 
@@ -1447,6 +1506,7 @@ mod tests {
             verification_token: "tok".to_string(),
             added_at: old_verified_at,
             added_by_user_id: "u1".to_string(),
+            added_by_email: "u1@example.com".to_string(),
             consecutive_failures: 0,
             state: AdditionalDomainState::Unverified {
                 verified_at: old_verified_at,
@@ -1474,7 +1534,7 @@ mod tests {
         let org = create_organization(&store, "acme.com", None, None)
             .await
             .unwrap();
-        add_additional_domain(&store, &org.id, "acme.co.uk", "u1")
+        add_additional_domain(&store, &org.id, "acme.co.uk", "u1", "u1@example.com")
             .await
             .unwrap();
         mark_additional_domain_verified(&store, &org.id, "acme.co.uk")
@@ -1538,9 +1598,15 @@ mod tests {
         let org = create_organization(&store, "acme.com", None, None)
             .await
             .unwrap();
-        add_additional_domain(&store, &org.id, "acme.co.uk", "u-admin")
-            .await
-            .unwrap();
+        add_additional_domain(
+            &store,
+            &org.id,
+            "acme.co.uk",
+            "u-admin",
+            "admin@example.com",
+        )
+        .await
+        .unwrap();
         mark_additional_domain_verified(&store, &org.id, "acme.co.uk")
             .await
             .unwrap();

@@ -61,6 +61,7 @@
                         <th class="px-4 py-3 font-medium">Domain</th>
                         <th class="px-4 py-3 font-medium">Status</th>
                         <th class="px-4 py-3 font-medium">Added</th>
+                        <th class="px-4 py-3 font-medium">Added by</th>
                         <th class="px-4 py-3 font-medium text-right">Actions</th>
                     </tr>
                 </thead>
@@ -86,6 +87,7 @@
                             {% endmatch %}
                         </td>
                         <td class="px-4 py-3 text-gray-400 whitespace-nowrap">{{ row.added_at.as_deref().unwrap_or("—") }}</td>
+                        <td class="px-4 py-3 text-gray-400 whitespace-nowrap">{{ row.added_by.as_deref().unwrap_or("—") }}</td>
                         <td class="px-4 py-3 text-right whitespace-nowrap">
                             {% match row.status %}
                             {% when crate::handlers::admin::domains::DomainRowStatus::Primary %}
@@ -105,12 +107,20 @@
                     </tr>
                     {% if let Some(token) = row.verification_token %}
                     <tr class="border-b border-vouch-border last:border-b-0 bg-gray-900/40">
-                        <td colspan="4" class="px-4 py-3 text-xs text-gray-400">
+                        <td colspan="5" class="px-4 py-3 text-xs text-gray-400">
                             <p class="mb-2">Publish this TXT record on <code class="text-gray-300">{{ row.domain }}</code>, then click <em>Verify</em>:</p>
                             <div class="font-mono text-gray-200 bg-gray-950 px-3 py-2 rounded border border-gray-800 break-all">
                                 <div><span class="text-gray-500">Name:</span> _vouch-verification.{{ row.domain }}</div>
                                 <div><span class="text-gray-500">Type:</span> TXT</div>
-                                <div><span class="text-gray-500">Value:</span> {{ token }}</div>
+                                <div class="flex items-start gap-2">
+                                    <span><span class="text-gray-500">Value:</span> {{ token }}</span>
+                                    <button type="button" data-copy-text="{{ token }}" class="shrink-0 text-gray-500 hover:text-gray-200 transition-colors" title="Copy verification token">
+                                        <svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+                                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"/>
+                                        </svg>
+                                        <span class="sr-only">Copy</span>
+                                    </button>
+                                </div>
                             </div>
                         </td>
                     </tr>
@@ -128,5 +138,6 @@
 {% endblock %}
 
 {% block scripts %}
+<script src="/static/js/common.js"></script>
 <script src="/static/js/admin.js"></script>
 {% endblock %}

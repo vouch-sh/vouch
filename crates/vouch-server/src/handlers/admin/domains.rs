@@ -8,13 +8,14 @@
 use crate::AppState;
 use crate::db;
 use crate::handlers::HasVersion;
+use crate::handlers::admin::flash;
 use crate::handlers::browser_login::validate_origin;
 use crate::handlers::session::{AuthContext, extract_org_admin, get_resource_auth_context};
 use crate::impl_template_response;
 use crate::infra::dns;
 use crate::services::error::ServiceError;
 use askama::Template;
-use axum::extract::{OriginalUri, Path, Query, State};
+use axum::extract::{OriginalUri, Path, State};
 use axum::http::{HeaderMap, Method};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum_extra::extract::cookie::CookieJar;
@@ -47,6 +48,9 @@ pub struct DomainRow {
     pub status: DomainRowStatus,
     pub verification_token: Option<String>,
     pub added_at: Option<String>,
+    /// Email of the admin who added this domain. `None` for the primary
+    /// (provisioned at org creation).
+    pub added_by: Option<String>,
 }
 
 /// Email domains page template.
@@ -64,26 +68,18 @@ pub struct AdminDomainsTemplate {
 impl_template_response!(AdminDomainsTemplate);
 
 #[derive(Debug, Deserialize)]
-pub struct DomainsParams {
-    pub error: Option<String>,
-    pub ok: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
 pub struct AddDomainForm {
     pub domain: String,
 }
 
 const REDIRECT_BASE: &str = "/admin/domains";
 
-fn redirect_error(msg: &str) -> Response {
-    let encoded = urlencoding::encode(msg);
-    Redirect::to(&format!("{REDIRECT_BASE}?error={encoded}")).into_response()
+fn redirect_error(jar: CookieJar, msg: impl Into<String>) -> Response {
+    (flash::set_err(jar, msg), Redirect::to(REDIRECT_BASE)).into_response()
 }
 
-fn redirect_ok(msg: &str) -> Response {
-    let encoded = urlencoding::encode(msg);
-    Redirect::to(&format!("{REDIRECT_BASE}?ok={encoded}")).into_response()
+fn redirect_ok(jar: CookieJar, msg: impl Into<String>) -> Response {
+    (flash::set_ok(jar, msg), Redirect::to(REDIRECT_BASE)).into_response()
 }
 
 /// Build the rows shown on the admin domains page.
@@ -102,6 +98,7 @@ fn build_rows(org: &db::Organization) -> Vec<DomainRow> {
         status: DomainRowStatus::Primary,
         verification_token: None,
         added_at: None,
+        added_by: None,
     });
     for ad in &org.additional_domains {
         use crate::db::documents::organization::AdditionalDomainState;
@@ -122,17 +119,14 @@ fn build_rows(org: &db::Organization) -> Vec<DomainRow> {
             status,
             verification_token,
             added_at: Some(ad.added_at.strftime("%Y-%m-%d %H:%M UTC").to_string()),
+            added_by: Some(ad.added_by_email.clone()),
         });
     }
     rows
 }
 
 /// GET /admin/domains — list primary and additional domains.
-pub async fn admin_domains_page(
-    State(state): State<Arc<AppState>>,
-    jar: CookieJar,
-    Query(params): Query<DomainsParams>,
-) -> Response {
+pub async fn admin_domains_page(State(state): State<Arc<AppState>>, jar: CookieJar) -> Response {
     let auth = get_resource_auth_context(&state, &jar).await;
     if !auth.authenticated {
         return Redirect::to("/enroll/start").into_response();
@@ -165,15 +159,20 @@ pub async fn admin_domains_page(
     let additional_count = org.additional_domains.len();
     let domains = build_rows(&org);
 
-    AdminDomainsTemplate {
+    // Consume any flash messages set by a prior POST → redirect, then expire
+    // the cookies in the response so a refresh doesn't re-show them.
+    let messages = flash::read(&jar);
+    let jar = flash::clear(jar);
+
+    let body = AdminDomainsTemplate {
         auth,
         domains,
         max_additional: db::MAX_ADDITIONAL_DOMAINS,
         additional_count,
-        flash_message: params.error,
-        flash_success: params.ok,
-    }
-    .into_response()
+        flash_message: messages.err,
+        flash_success: messages.ok,
+    };
+    (jar, body).into_response()
 }
 
 /// POST /admin/domains — add a pending additional domain.
@@ -189,7 +188,9 @@ pub async fn admin_add_domain(
     let (admin, org_id) =
         extract_org_admin(&state, &headers, &jar, method.as_str(), uri.path(), None).await?;
 
-    let result = db::add_additional_domain(&state.store, &org_id, &form.domain, &admin.id).await;
+    let result =
+        db::add_additional_domain(&state.store, &org_id, &form.domain, &admin.id, &admin.email)
+            .await;
     match result {
         Ok(added) => {
             let data = serde_json::json!({
@@ -215,15 +216,18 @@ pub async fn admin_add_domain(
                 domain = %added.domain,
                 "Added pending additional domain"
             );
-            Ok(redirect_ok(&format!(
-                "Added {} as pending. Publish the TXT record shown below, then click Verify.",
-                added.domain
-            )))
+            Ok(redirect_ok(
+                jar,
+                format!(
+                    "Added {} as pending. Publish the TXT record shown below, then click Verify.",
+                    added.domain
+                ),
+            ))
         }
         Err(e) => {
             let msg = e.to_string();
             tracing::info!(error = %msg, org_id = %org_id, "Add additional domain rejected");
-            Ok(redirect_error(&msg))
+            Ok(redirect_error(jar, msg))
         }
     }
 }
@@ -243,13 +247,14 @@ pub async fn admin_verify_domain(
 
     let normalized = match db::normalize_domain(&domain) {
         Ok(d) => d,
-        Err(e) => return Ok(redirect_error(&e.to_string())),
+        Err(e) => return Ok(redirect_error(jar, e.to_string())),
     };
 
     let token = match db::get_verification_token(&state.store, &org_id, &normalized).await? {
         Some(t) => t,
         None => {
             return Ok(redirect_error(
+                jar,
                 "Domain is not pending verification on this org.",
             ));
         }
@@ -264,6 +269,7 @@ pub async fn admin_verify_domain(
                 "DNS TXT lookup failed during verify"
             );
             return Ok(redirect_error(
+                jar,
                 "DNS lookup failed. Check that the TXT record is published and try again.",
             ));
         }
@@ -271,6 +277,7 @@ pub async fn admin_verify_domain(
 
     if !txt_ok {
         return Ok(redirect_error(
+            jar,
             "TXT record not found or token does not match. DNS changes may take a few minutes to propagate.",
         ));
     }
@@ -301,9 +308,9 @@ pub async fn admin_verify_domain(
                 domain = %normalized,
                 "Verified additional domain"
             );
-            Ok(redirect_ok(&format!("Verified {normalized}.")))
+            Ok(redirect_ok(jar, format!("Verified domain {normalized}")))
         }
-        Err(e) => Ok(redirect_error(&e.to_string())),
+        Err(e) => Ok(redirect_error(jar, e.to_string())),
     }
 }
 
@@ -322,7 +329,7 @@ pub async fn admin_remove_domain(
 
     let normalized = match db::normalize_domain(&domain) {
         Ok(d) => d,
-        Err(e) => return Ok(redirect_error(&e.to_string())),
+        Err(e) => return Ok(redirect_error(jar, e.to_string())),
     };
 
     match db::remove_additional_domain(&state.store, &org_id, &normalized).await {
@@ -371,9 +378,12 @@ pub async fn admin_remove_domain(
                     "Removed {normalized}. Revoked sessions for {revoked} users; org membership is unchanged."
                 )
             };
-            Ok(redirect_ok(&msg))
+            Ok(redirect_ok(jar, msg))
         }
-        Ok(None) => Ok(redirect_error("Domain not found on this organization.")),
-        Err(e) => Ok(redirect_error(&e.to_string())),
+        Ok(None) => Ok(redirect_error(
+            jar,
+            "Domain not found on this organization.",
+        )),
+        Err(e) => Ok(redirect_error(jar, e.to_string())),
     }
 }

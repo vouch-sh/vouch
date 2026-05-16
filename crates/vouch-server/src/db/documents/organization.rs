@@ -59,6 +59,11 @@ pub struct AdditionalDomain {
     pub verification_token: String,
     pub added_at: Timestamp,
     pub added_by_user_id: String,
+    /// Email of the admin who added this entry, denormalized at write time
+    /// so the admin UI doesn't need a per-row user lookup. May go stale if
+    /// the user's email is changed later (acceptable: same trade-off as
+    /// `SessionDoc.user_email`).
+    pub added_by_email: String,
     /// Consecutive re-verification failures. Reset to 0 on a successful check.
     /// At [`UNVERIFY_FAILURE_THRESHOLD`] the entry flips to `Unverified`.
     #[serde(default)]

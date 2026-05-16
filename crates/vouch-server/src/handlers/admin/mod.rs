@@ -7,6 +7,7 @@
 
 mod audit;
 mod domains;
+pub(crate) mod flash;
 mod members;
 mod policies;
 mod scim_tokens;
