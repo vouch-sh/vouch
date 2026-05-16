@@ -86,12 +86,37 @@ pub struct AddedDomain {
     pub verification_token: String,
 }
 
+/// Top-level labels that must never be accepted as an additional domain.
+///
+/// Verifying a TXT record under one of these would force the server's
+/// resolver to query internal/loopback infrastructure (SSRF) or reserved
+/// namespaces with no public ownership semantics:
+///
+/// - `localhost`, `local` — loopback / mDNS (RFC 6761, RFC 6762)
+/// - `example`, `invalid`, `test` — reserved for documentation (RFC 6761)
+/// - `internal` — ICANN-reserved for private use (2024)
+/// - `arpa` — reverse-DNS root (covers `home.arpa`, `in-addr.arpa`, `ip6.arpa`)
+/// - `onion` — Tor hidden services (RFC 7686)
+/// - `alt` — pseudo-TLD reserved by RFC 9476
+const RESERVED_TLDS: &[&str] = &[
+    "localhost",
+    "local",
+    "example",
+    "invalid",
+    "test",
+    "internal",
+    "arpa",
+    "onion",
+    "alt",
+];
+
 /// Validate the syntactic shape of a domain name.
 ///
 /// Returns the normalized lowercase form on success. Rejects empty input,
 /// non-ASCII characters, leading/trailing dots, double dots, labels longer
-/// than 63 characters, total length over 253 characters, and labels with
-/// invalid characters or leading/trailing hyphens.
+/// than 63 characters, total length over 253 characters, labels with
+/// invalid characters or leading/trailing hyphens, IP-address literals, and
+/// reserved top-level labels (see [`RESERVED_TLDS`]).
 pub fn normalize_domain(input: &str) -> Result<String> {
     let trimmed = input.trim();
     if trimmed.is_empty() {
@@ -99,6 +124,12 @@ pub fn normalize_domain(input: &str) -> Result<String> {
     }
     if !trimmed.is_ascii() {
         bail!("domain must be ASCII (use punycode for internationalized domains)");
+    }
+    // Reject IP literals — these would point the resolver at a specific host
+    // and bypass any TLD-level allow/deny logic. Also covers bracketed IPv6.
+    let ip_candidate = trimmed.trim_start_matches('[').trim_end_matches(']');
+    if ip_candidate.parse::<std::net::IpAddr>().is_ok() {
+        bail!("domain must be a hostname, not an IP address");
     }
     let lower = trimmed.to_ascii_lowercase();
     if lower.len() > 253 {
@@ -127,6 +158,12 @@ pub fn normalize_domain(input: &str) -> Result<String> {
             bail!("domain label contains invalid characters");
         }
     }
+    // Reject reserved/internal top-level labels. Iterating the constant is
+    // a fixed-cost O(N) scan over a small list — clearer than a HashSet.
+    let tld = lower.rsplit('.').next().unwrap_or("");
+    if RESERVED_TLDS.contains(&tld) {
+        bail!("domain uses a reserved or internal top-level label ('.{tld}')");
+    }
     Ok(lower)
 }
 
@@ -152,9 +189,18 @@ pub async fn add_additional_domain(
     let normalized = normalize_domain(domain)?;
 
     // Pending-claim conflict check (non-transactional courtesy check).
-    // Pending entries are not indexed, so we scan organization docs. The
-    // verify step re-runs the verified-conflict check inside its own
-    // transaction, so a race here only wastes the loser's DNS setup time.
+    //
+    // Pending entries are not indexed, so we walk organization docs to look
+    // for existing pending claims on the same domain. This check runs
+    // OUTSIDE the add transaction, so a true cross-org race is possible:
+    // two admins from different orgs can both pass this check, both add the
+    // domain as pending, and both publish TXT records. Only one will win at
+    // verification time — the loser sees the "claimed by another organization"
+    // error from `mark_additional_domain_verified` and must remove the
+    // orphan from their org's domain list manually (or wait for GC).
+    //
+    // Folding this into the transaction would require a query path that
+    // can scan pending entries; deferred until org count justifies it.
     let pending_conflict = find_pending_claim_in_other_org(store, org_id, &normalized).await?;
     if pending_conflict {
         bail!("domain has a pending verification claim on another organization");
@@ -279,7 +325,9 @@ pub async fn mark_additional_domain_verified(
         .await?
         && other.id != org_id
     {
-        bail!("domain has been claimed by another organization since it was added");
+        bail!(
+            "another organization verified this domain first; remove the pending entry from this org and contact support if you believe this is in error"
+        );
     }
 
     entry.verified = true;
@@ -390,12 +438,26 @@ pub async fn cleanup_stale_additional_domains(
         }
         let domains_to_drop: std::collections::HashSet<String> =
             to_remove.iter().map(|(d, _)| d.clone()).collect();
-        let updated = store
+        // Per-org error isolation: one failing modify (transient DB error,
+        // version conflict, etc.) must not abort cleanup for every org that
+        // follows in the iteration. Log and continue; the next tick retries.
+        let updated = match store
             .modify::<OrganizationDoc, _>(&org.id, |doc| {
                 doc.additional_domains
                     .retain(|ad| !domains_to_drop.contains(&ad.domain));
             })
-            .await?;
+            .await
+        {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    org_id = %org.id,
+                    "Failed to drop stale additional domains for org; skipping"
+                );
+                continue;
+            }
+        };
         if updated {
             for (domain, never_verified) in to_remove {
                 removed.push(StaleDomainRemoval {
@@ -648,6 +710,46 @@ mod tests {
         assert!(normalize_domain("уникод.com").is_err());
     }
 
+    #[test]
+    fn normalize_domain_rejects_ip_literals() {
+        assert!(normalize_domain("127.0.0.1").is_err());
+        assert!(normalize_domain("10.0.0.5").is_err());
+        assert!(normalize_domain("169.254.169.254").is_err());
+        assert!(normalize_domain("::1").is_err());
+        assert!(normalize_domain("[::1]").is_err());
+        assert!(normalize_domain("fe80::1").is_err());
+    }
+
+    #[test]
+    fn normalize_domain_rejects_reserved_tlds() {
+        for d in [
+            "internal.corp.localhost",
+            "metadata.google.internal",
+            "service.local",
+            "anything.arpa",
+            "1.0.0.127.in-addr.arpa",
+            "hostname.home.arpa",
+            "thing.example",
+            "name.invalid",
+            "service.test",
+            "abcdef.onion",
+            "ipfs.alt",
+        ] {
+            assert!(
+                normalize_domain(d).is_err(),
+                "expected {d} to be rejected as reserved TLD"
+            );
+        }
+    }
+
+    #[test]
+    fn normalize_domain_accepts_public_domains() {
+        assert!(normalize_domain("acme.com").is_ok());
+        assert!(normalize_domain("foo.bar.example.co.uk").is_ok());
+        // xn-- punycode is allowed (homograph detection is out of scope).
+        assert!(normalize_domain("xn--acme-cua.com").is_ok());
+    }
+
     #[tokio::test]
     async fn add_additional_domain_succeeds_and_is_pending() {
         let store = fresh_store().await;
@@ -728,14 +830,14 @@ mod tests {
         let other = create_organization(&store, "first.com", None, None)
             .await
             .unwrap();
-        add_additional_domain(&store, &other.id, "shared.example", "user-other")
+        add_additional_domain(&store, &other.id, "shared.example.com", "user-other")
             .await
             .unwrap();
 
         let mine = create_organization(&store, "second.com", None, None)
             .await
             .unwrap();
-        let err = add_additional_domain(&store, &mine.id, "shared.example", "user-mine")
+        let err = add_additional_domain(&store, &mine.id, "shared.example.com", "user-mine")
             .await
             .unwrap_err();
         assert!(err.to_string().contains("pending verification"));
@@ -906,7 +1008,7 @@ mod tests {
             .unwrap()
             .unwrap();
         doc.data.additional_domains.push(AdditionalDomain {
-            domain: "squatted.example".to_string(),
+            domain: "squatted.example.com".to_string(),
             verification_token: "tok".to_string(),
             verified: false,
             added_at: stale_added,
@@ -929,7 +1031,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(removed.len(), 1);
-        assert_eq!(removed[0].domain, "squatted.example");
+        assert_eq!(removed[0].domain, "squatted.example.com");
         assert!(removed[0].never_verified);
         assert!(
             list_additional_domains(&store, &org.id)
@@ -945,7 +1047,7 @@ mod tests {
         let org = create_organization(&store, "acme.com", None, None)
             .await
             .unwrap();
-        add_additional_domain(&store, &org.id, "fresh.example", "u1")
+        add_additional_domain(&store, &org.id, "fresh.example.com", "u1")
             .await
             .unwrap();
 
@@ -990,7 +1092,7 @@ mod tests {
             .unwrap()
             .unwrap();
         doc.data.additional_domains.push(AdditionalDomain {
-            domain: "drifted.example".to_string(),
+            domain: "drifted.example.com".to_string(),
             verification_token: "tok".to_string(),
             verified: false,
             added_at: old_verified_at,
@@ -1051,10 +1153,14 @@ mod tests {
         let org = create_organization(&store, "acme.com", None, None)
             .await
             .unwrap();
-        let effect =
-            record_recheck_result(&store, &org.id, "ghost.example", RecheckOutcome::Failure)
-                .await
-                .unwrap();
+        let effect = record_recheck_result(
+            &store,
+            &org.id,
+            "ghost.example.com",
+            RecheckOutcome::Failure,
+        )
+        .await
+        .unwrap();
         assert_eq!(effect, RecheckEffect::NotFound);
     }
 
@@ -1064,7 +1170,7 @@ mod tests {
         let org = create_organization(&store, "acme.com", None, None)
             .await
             .unwrap();
-        let removed = remove_additional_domain(&store, &org.id, "never-added.example")
+        let removed = remove_additional_domain(&store, &org.id, "never-added.example.com")
             .await
             .unwrap();
         assert!(!removed);

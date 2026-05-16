@@ -6,20 +6,47 @@
 //! record format is `_vouch-verification.<domain>` with the token issued
 //! when the domain was added.
 
+use std::sync::LazyLock;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use hickory_resolver::Resolver;
+use hickory_resolver::TokioResolver;
 use hickory_resolver::proto::rr::RData;
+use subtle::ConstantTimeEq;
 
 const TXT_QUERY_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Process-wide TXT-lookup resolver, built once from system DNS config.
+///
+/// Hickory reads `/etc/resolv.conf` and spins up background tasks at build
+/// time; doing that on every `verify_txt_record` call burns file descriptors
+/// and syscalls under the per-domain re-verification loop. Build it once and
+/// reuse the handle.
+///
+/// The inner result is cached, so a transient resolv.conf parse failure at
+/// startup stays cached for the life of the process — operators must restart
+/// the server after fixing system DNS configuration. This trade matches how
+/// the resolver is loaded elsewhere in the workspace (see vouch-common DoH).
+static RESOLVER: LazyLock<std::result::Result<TokioResolver, String>> = LazyLock::new(|| {
+    let builder = Resolver::builder_tokio()
+        .map_err(|e| format!("failed to read system DNS configuration: {e}"))?;
+    builder
+        .build()
+        .map_err(|e| format!("failed to build DNS resolver: {e}"))
+});
+
+fn resolver() -> Result<&'static TokioResolver> {
+    RESOLVER.as_ref().map_err(|e| anyhow::anyhow!("{e}"))
+}
 
 /// Returns true if any TXT record at `_vouch-verification.<domain>` equals
 /// the expected token.
 ///
-/// Uses the system resolver. Records that contain multiple character-strings
-/// (RFC 1035) are concatenated before comparison so admins can publish the
-/// token in either single- or multi-string form.
+/// Uses the process-wide system resolver (see [`RESOLVER`]). Records that
+/// contain multiple character-strings (RFC 1035) are concatenated before
+/// comparison so admins can publish the token in either single- or
+/// multi-string form.
 ///
 /// # Errors
 ///
@@ -28,10 +55,7 @@ const TXT_QUERY_TIMEOUT: Duration = Duration::from_secs(5);
 /// record" so callers can present a friendly message.
 pub async fn verify_txt_record(domain: &str, expected_token: &str) -> Result<bool> {
     let query = format!("_vouch-verification.{domain}.");
-    let resolver = Resolver::builder_tokio()
-        .context("failed to read system DNS configuration")?
-        .build()
-        .context("failed to build DNS resolver")?;
+    let resolver = resolver().context("DNS resolver unavailable")?;
     let lookup_fut = resolver.txt_lookup(query.as_str());
     let lookup = match tokio::time::timeout(TXT_QUERY_TIMEOUT, lookup_fut).await {
         Ok(Ok(l)) => l,
@@ -44,6 +68,7 @@ pub async fn verify_txt_record(domain: &str, expected_token: &str) -> Result<boo
         Err(_) => anyhow::bail!("TXT lookup for {query} timed out after {TXT_QUERY_TIMEOUT:?}"),
     };
 
+    let expected_bytes = expected_token.as_bytes();
     for record in lookup.answers() {
         let RData::TXT(ref txt) = record.data else {
             continue;
@@ -54,7 +79,10 @@ pub async fn verify_txt_record(domain: &str, expected_token: &str) -> Result<boo
                 buf.push_str(s);
             }
         }
-        if buf == expected_token {
+        // Constant-time compare: the expected_token is the per-domain secret
+        // an admin publishes in DNS. Length-aware ct_eq returns false on
+        // mismatched lengths without leaking via early exit.
+        if buf.as_bytes().ct_eq(expected_bytes).into() {
             return Ok(true);
         }
     }

@@ -27,6 +27,17 @@ use tokio::task::JoinHandle;
 /// keeping DNS load proportional to the number of verified domains.
 const DOMAIN_RECHECK_MIN_INTERVAL_HOURS: i64 = 24;
 
+/// Maximum number of DNS re-verification queries in flight at once.
+///
+/// Each task does a 5s-bounded TXT lookup plus a short DB write, so a small
+/// fan-out keeps a single cleanup tick from stalling on the long tail of
+/// slow recursive resolvers without overloading the resolver or DB.
+const DOMAIN_RECHECK_CONCURRENCY: usize = 8;
+
+/// Total budget for one re-verification pass. Any domains not yet processed
+/// when this elapses are skipped and retried on the next cleanup tick.
+const DOMAIN_RECHECK_PASS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+
 /// Pending additional-domain claims older than this are deleted by the
 /// cleanup task. Prevents squatting — admins can't pre-claim domains they
 /// never intend to verify and tie up their org's 10-domain cap.
@@ -311,6 +322,10 @@ async fn gc_stale_additional_domains(
 /// index entries so new logins from that domain no longer attach to the org.
 ///
 /// Existing users keep their `org_id`; only future logins stop matching.
+///
+/// Up to [`DOMAIN_RECHECK_CONCURRENCY`] domains are checked in parallel and
+/// the whole pass is bounded by [`DOMAIN_RECHECK_PASS_TIMEOUT`]; remaining
+/// domains roll over to the next cleanup tick.
 async fn recheck_additional_domains(
     store: &DocumentStore,
     audit: &AuditStore,
@@ -325,58 +340,95 @@ async fn recheck_additional_domains(
         .checked_sub(Span::new().hours(DOMAIN_RECHECK_MIN_INTERVAL_HOURS))
         .map_err(|e| anyhow::anyhow!("recheck cutoff overflow: {e}"))?;
 
-    for rec in records {
-        // Skip domains that were re-checked recently.
-        if rec.last_checked_at.is_some_and(|ts| ts > cutoff) {
-            continue;
+    let due: Vec<db::VerifiedDomainRecord> = records
+        .into_iter()
+        .filter(|rec| rec.last_checked_at.is_none_or(|ts| ts <= cutoff))
+        .collect();
+    if due.is_empty() {
+        return Ok(());
+    }
+
+    let total = due.len();
+    let pass = async {
+        let mut iter = due.into_iter();
+        let mut set: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
+        // Seed initial batch up to the concurrency cap.
+        while set.len() < DOMAIN_RECHECK_CONCURRENCY {
+            let Some(rec) = iter.next() else { break };
+            let store = store.clone();
+            let audit = audit.clone();
+            set.spawn(async move { recheck_one(&store, &audit, rec).await });
         }
-
-        let outcome = match dns::verify_txt_record(&rec.domain, &rec.verification_token).await {
-            Ok(true) => db::RecheckOutcome::Success,
-            Ok(false) => db::RecheckOutcome::Failure,
-            Err(e) => {
-                tracing::warn!(
-                    error = %e,
-                    domain = %rec.domain,
-                    org_id = %rec.org_id,
-                    "DNS re-verification lookup failed; treating as failure"
-                );
-                db::RecheckOutcome::Failure
-            }
-        };
-
-        match db::record_recheck_result(store, &rec.org_id, &rec.domain, outcome).await {
-            Ok(db::RecheckEffect::FlippedToUnverified) => {
-                tracing::warn!(
-                    domain = %rec.domain,
-                    org_id = %rec.org_id,
-                    "Additional domain flipped to unverified after repeated DNS failures"
-                );
-                let data = serde_json::json!({
-                    "action": "auto_unverify_org_domain",
-                    "domain": rec.domain,
-                    "org_id": rec.org_id,
-                    "reason": "consecutive_dns_recheck_failures",
-                });
-                if let Err(e) = audit
-                    .insert_event("org_domain_unverified", None, None, &data.to_string())
-                    .await
-                {
-                    tracing::warn!(error = %e, "failed to write org_domain_unverified audit event");
-                }
-            }
-            Ok(_) => {}
-            Err(e) => {
-                tracing::warn!(
-                    error = %e,
-                    domain = %rec.domain,
-                    org_id = %rec.org_id,
-                    "Failed to record domain re-verification result"
-                );
+        // Top up as tasks complete so at most CONCURRENCY are in flight.
+        while set.join_next().await.is_some() {
+            if let Some(rec) = iter.next() {
+                let store = store.clone();
+                let audit = audit.clone();
+                set.spawn(async move { recheck_one(&store, &audit, rec).await });
             }
         }
+    };
+
+    if tokio::time::timeout(DOMAIN_RECHECK_PASS_TIMEOUT, pass)
+        .await
+        .is_err()
+    {
+        tracing::warn!(
+            total,
+            timeout_secs = DOMAIN_RECHECK_PASS_TIMEOUT.as_secs(),
+            "Re-verification pass timed out; remaining domains will retry on next tick"
+        );
     }
     Ok(())
+}
+
+/// Re-verify a single domain and persist the result. Errors are logged and
+/// swallowed so one bad record never aborts the surrounding pass.
+async fn recheck_one(store: &DocumentStore, audit: &AuditStore, rec: db::VerifiedDomainRecord) {
+    let outcome = match dns::verify_txt_record(&rec.domain, &rec.verification_token).await {
+        Ok(true) => db::RecheckOutcome::Success,
+        Ok(false) => db::RecheckOutcome::Failure,
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                domain = %rec.domain,
+                org_id = %rec.org_id,
+                "DNS re-verification lookup failed; treating as failure"
+            );
+            db::RecheckOutcome::Failure
+        }
+    };
+
+    match db::record_recheck_result(store, &rec.org_id, &rec.domain, outcome).await {
+        Ok(db::RecheckEffect::FlippedToUnverified) => {
+            tracing::warn!(
+                domain = %rec.domain,
+                org_id = %rec.org_id,
+                "Additional domain flipped to unverified after repeated DNS failures"
+            );
+            let data = serde_json::json!({
+                "action": "auto_unverify_org_domain",
+                "domain": rec.domain,
+                "org_id": rec.org_id,
+                "reason": "consecutive_dns_recheck_failures",
+            });
+            if let Err(e) = audit
+                .insert_event("org_domain_unverified", None, None, &data.to_string())
+                .await
+            {
+                tracing::warn!(error = %e, "failed to write org_domain_unverified audit event");
+            }
+        }
+        Ok(_) => {}
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                domain = %rec.domain,
+                org_id = %rec.org_id,
+                "Failed to record domain re-verification result"
+            );
+        }
+    }
 }
 
 #[cfg(test)]
