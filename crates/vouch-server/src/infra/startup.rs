@@ -526,84 +526,30 @@ async fn build_app_state(
     let http_client = vouch_common::http::server_client(&user_agent, extra_ca_pem.as_deref())
         .context("Failed to create shared HTTP client")?;
 
-    // Fetch upstream IdP configuration if configured (OIDC or SAML, mutually exclusive).
-    let upstream_idp = if config.oidc_configured() {
-        let issuer = config
-            .oidc_issuer_url
-            .as_deref()
-            .context("OIDC issuer URL missing")?;
-        let provider = crate::services::idp::oidc::fetch_discovery(&http_client, issuer)
-            .await
-            .context(
-                "Failed to fetch upstream OIDC discovery document. \
-                     Check that VOUCH_OIDC_ISSUER is reachable.",
-            )?;
-        let brand = crate::services::idp::IdpBrand::from_issuer(&provider.issuer);
-        let enrollment_domains = match &config.allowed_domains {
-            Some(domains) => domains.join(", "),
-            None => "(open enrollment)".to_string(),
+    // Build one ConfiguredIdp per entry in config.idps. Discovery runs
+    // sequentially and any failure aborts startup (matches previous
+    // single-IdP behaviour).
+    let upstream_idps = build_configured_idps(&config.idps, &http_client, &config.base_url).await?;
+    if upstream_idps.is_empty() {
+        tracing::info!("No upstream IdP configured; browser sign-in disabled");
+    }
+    let enrollment_domains = match &config.allowed_domains {
+        Some(domains) => domains.join(", "),
+        None => "(open enrollment)".to_string(),
+    };
+    for idp in &upstream_idps {
+        let per_idp = match &idp.allowed_domains {
+            Some(d) => d.join(", "),
+            None => "(inherits global)".to_string(),
         };
         tracing::info!(
-            "Upstream IdP: {} (OIDC), issuer={}, auth={}, token={}, jwks={}, enrollment_domains={}",
-            brand.display_name(),
-            provider.issuer,
-            provider.authorization_endpoint,
-            provider.token_endpoint,
-            provider.jwks_uri,
+            "Upstream IdP[{}]: {}, allowed_domains={} (global={})",
+            idp.slug,
+            idp.display_name,
+            per_idp,
             enrollment_domains,
         );
-        Some(crate::services::idp::UpstreamIdp::Oidc(Box::new(provider)))
-    } else if config.saml_configured() {
-        let metadata_url = config
-            .saml_idp_metadata_url
-            .as_deref()
-            .context("SAML metadata URL missing")?;
-        let metadata_xml = http_client
-            .get(metadata_url)
-            .send()
-            .await
-            .context("Failed to fetch SAML IdP metadata")?
-            .error_for_status()
-            .context("SAML IdP metadata request returned error status")?
-            .text()
-            .await
-            .context("Failed to read SAML IdP metadata body")?;
-        let idp_metadata = crate::services::idp::saml::metadata::parse_idp_metadata(&metadata_xml)
-            .context("Failed to parse SAML IdP metadata")?;
-        let brand = crate::services::idp::IdpBrand::from_entity_id(&idp_metadata.entity_id);
-        let sp_entity_id = config
-            .saml_sp_entity_id
-            .clone()
-            .unwrap_or_else(|| config.base_url.clone());
-        let acs_url = format!("{}/saml/acs", config.base_url);
-        let sso_url = idp_metadata
-            .sso_post_url
-            .as_deref()
-            .or(idp_metadata.sso_redirect_url.as_deref())
-            .unwrap_or("(none)");
-        tracing::info!(
-            "Upstream IdP: {} (SAML), entity_id={}, sso_url={}, binding={}, certs={}",
-            brand.display_name(),
-            idp_metadata.entity_id,
-            sso_url,
-            if idp_metadata.sso_post_url.is_some() {
-                "HTTP-POST"
-            } else {
-                "HTTP-Redirect"
-            },
-            idp_metadata.signing_certificates.len(),
-        );
-        let provider = crate::services::idp::saml::SamlProvider {
-            idp_metadata,
-            sp_entity_id,
-            acs_url,
-            email_attribute: config.saml_email_attribute.clone(),
-            domain_attribute: config.saml_domain_attribute.clone(),
-        };
-        Some(crate::services::idp::UpstreamIdp::Saml(provider))
-    } else {
-        None
-    };
+    }
 
     // Initialize GitHub App if configured
     let github_app = match GitHubApp::load(config, http_client.clone()) {
@@ -674,10 +620,114 @@ async fn build_app_state(
             config.session_cache_max_capacity,
             config.session_cache_ttl_secs,
         ),
-        upstream_idp,
+        upstream_idps,
     });
 
     Ok(state)
+}
+
+/// Run discovery for every configured IdP entry and produce one
+/// `ConfiguredIdp` per entry, in input order.
+///
+/// Fails fast on the first discovery failure (matches the pre-multi-IdP
+/// behaviour for the legacy single-IdP path).
+async fn build_configured_idps(
+    entries: &[config::IdpEntryConfig],
+    http_client: &reqwest::Client,
+    base_url: &str,
+) -> Result<Vec<crate::services::idp::ConfiguredIdp>> {
+    use crate::services::idp::{ConfiguredIdp, UpstreamIdp, oidc, saml};
+
+    let mut out: Vec<ConfiguredIdp> = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let provider = match entry.kind {
+            config::IdpKind::Oidc => {
+                let issuer = entry.oidc_issuer.as_deref().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "IdP '{}': internal error — OIDC kind without issuer set",
+                        entry.slug
+                    )
+                })?;
+                let client_id = entry.oidc_client_id.clone().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "IdP '{}': internal error — OIDC kind without client_id set",
+                        entry.slug
+                    )
+                })?;
+                let client_secret = entry.oidc_client_secret.clone().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "IdP '{}': internal error — OIDC kind without client_secret set",
+                        entry.slug
+                    )
+                })?;
+                let provider = oidc::fetch_discovery(
+                    http_client,
+                    issuer,
+                    client_id,
+                    client_secret,
+                    entry.allowed_tenants.clone(),
+                )
+                .await
+                .with_context(|| {
+                    format!(
+                        "Failed to fetch OIDC discovery for IdP '{}' \
+                         (issuer={issuer}). Check VOUCH_IDP_{}_ISSUER \
+                         is reachable.",
+                        entry.slug,
+                        entry.slug.to_ascii_uppercase()
+                    )
+                })?;
+                UpstreamIdp::Oidc(Box::new(provider))
+            }
+            config::IdpKind::Saml => {
+                let metadata_url = entry.saml_metadata_url.as_deref().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "IdP '{}': internal error — SAML kind without metadata_url",
+                        entry.slug
+                    )
+                })?;
+                let metadata_xml = http_client
+                    .get(metadata_url)
+                    .send()
+                    .await
+                    .with_context(|| {
+                        format!("IdP '{}': failed to fetch SAML metadata", entry.slug)
+                    })?
+                    .error_for_status()
+                    .with_context(|| {
+                        format!("IdP '{}': SAML metadata request returned error", entry.slug)
+                    })?
+                    .text()
+                    .await
+                    .with_context(|| {
+                        format!("IdP '{}': failed to read SAML metadata body", entry.slug)
+                    })?;
+                let idp_metadata =
+                    saml::metadata::parse_idp_metadata(&metadata_xml).with_context(|| {
+                        format!("IdP '{}': failed to parse SAML metadata", entry.slug)
+                    })?;
+                let sp_entity_id = entry
+                    .saml_sp_entity_id
+                    .clone()
+                    .unwrap_or_else(|| base_url.to_string());
+                let acs_url = format!("{base_url}/saml/acs");
+                let provider = saml::SamlProvider {
+                    idp_metadata,
+                    sp_entity_id,
+                    acs_url,
+                    email_attribute: entry.saml_email_attribute.clone(),
+                    domain_attribute: entry.saml_domain_attribute.clone(),
+                };
+                UpstreamIdp::Saml(provider)
+            }
+        };
+        out.push(ConfiguredIdp::new(
+            entry.slug.clone(),
+            provider,
+            entry.allowed_domains.clone(),
+        ));
+    }
+    Ok(out)
 }
 
 /// Log authenticator policy settings at startup.

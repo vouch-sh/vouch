@@ -72,3 +72,7 @@ VOUCH_ALLOWED_DOMAINS=example.com,subsidiary.com
 
 **Users from wrong domain can enroll**
 - Set `VOUCH_ALLOWED_DOMAINS` to restrict enrollment to specific email domains
+
+## Running Google alongside another IdP
+
+To offer Google Workspace plus another IdP (e.g. Microsoft Entra) on the same landing page, register additional IdPs with the slug-prefixed form. The Google entry stays under slug `default`; see [Configuring Multiple IdPs](overview.md#configuring-multiple-idps).

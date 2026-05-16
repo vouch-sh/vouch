@@ -53,11 +53,48 @@ VOUCH_ALLOWED_DOMAINS=example.com
 2. The browser should redirect to the Microsoft sign-in page
 3. After signing in, complete the WebAuthn registration with your YubiKey
 
+## Running Entra alongside another IdP
+
+To offer both Google Workspace and Entra ID on the landing page, register Entra under a slug-prefixed entry instead of replacing the legacy Google config:
+
+```bash
+# Legacy Google entry (slug = "default")
+VOUCH_OIDC_ISSUER=https://accounts.google.com
+VOUCH_OIDC_CLIENT_ID=...
+VOUCH_OIDC_CLIENT_SECRET=...
+
+# Add Entra as a second IdP (slug = "microsoft")
+VOUCH_IDPS=microsoft
+VOUCH_IDP_MICROSOFT_ISSUER=https://login.microsoftonline.com/{tenant-id}/v2.0
+VOUCH_IDP_MICROSOFT_CLIENT_ID=<application-client-id>
+VOUCH_IDP_MICROSOFT_CLIENT_SECRET=<client-secret-value>
+```
+
+The landing page now renders a button for each. See [Configuring Multiple IdPs](overview.md#configuring-multiple-idps).
+
+## Multi-tenant configuration
+
+Vouch supports Entra's multi-tenant issuers (`/common/v2.0` and `/organizations/v2.0`) — useful when you want any Entra user to sign in regardless of which tenant they belong to. The verifier checks that:
+
+1. The JWT `iss` claim has the shape `https://login.microsoftonline.com/<tenant-guid>/v2.0`.
+2. The `tid` claim is a valid GUID and matches the tenant in `iss` (defends against cross-tenant token injection).
+3. The `tid` is **not** the well-known personal-accounts tenant — `@outlook.com`, `@hotmail.com`, `@live.com`, etc. are rejected automatically.
+
+```bash
+VOUCH_IDP_MICROSOFT_ISSUER=https://login.microsoftonline.com/common/v2.0
+VOUCH_IDP_MICROSOFT_CLIENT_ID=...
+VOUCH_IDP_MICROSOFT_CLIENT_SECRET=...
+# Optional: restrict to specific tenants
+VOUCH_IDP_MICROSOFT_ALLOWED_TENANTS=<tenant-guid>,<other-tenant-guid>
+```
+
+> **Custom domains are trusted because Microsoft verifies them.** Entra requires DNS TXT verification before a tenant can issue tokens for a custom domain, so the email-domain match against `VOUCH_ALLOWED_DOMAINS` cannot be spoofed by a different tenant. For belt-and-braces tenant pinning, set `VOUCH_IDP_<SLUG>_ALLOWED_TENANTS`.
+
 ## Common Pitfalls
 
 **Single-tenant vs multi-tenant**
 
-Use single-tenant (`Accounts in this organizational directory only`) to restrict access to your organization. Multi-tenant configurations allow users from any Entra ID tenant to attempt enrollment, which is rarely desired. If you use multi-tenant, ensure `VOUCH_ALLOWED_DOMAINS` is set to restrict enrollment.
+Single-tenant (`Accounts in this organizational directory only`) restricts access to your organization at the issuer level. Multi-tenant configurations (`/common/v2.0`, `/organizations/v2.0`) allow users from any Entra tenant; the `tid` cross-check and the consumer-tenant rejection are enforced automatically, but you should still set `VOUCH_ALLOWED_DOMAINS` (or `VOUCH_IDP_<SLUG>_ALLOWED_DOMAINS` / `_ALLOWED_TENANTS`) if you want to narrow further.
 
 **v1 vs v2 endpoints**
 

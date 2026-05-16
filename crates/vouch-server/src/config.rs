@@ -54,6 +54,203 @@ fn parse_comma_list_preserve_case(s: &str) -> Vec<String> {
         .collect()
 }
 
+/// Validate a per-IdP slug: `[a-z0-9_-]+`, 1-32 chars.
+fn validate_idp_slug(slug: &str) -> Result<()> {
+    if slug.is_empty() || slug.len() > 32 {
+        anyhow::bail!("IdP slug '{slug}' invalid: must be 1-32 characters of [a-z0-9_-]");
+    }
+    if !slug
+        .bytes()
+        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
+    {
+        anyhow::bail!("IdP slug '{slug}' invalid: must match [a-z0-9_-]+ (got '{slug}')");
+    }
+    Ok(())
+}
+
+/// Parse a comma-separated allowlist of GUIDs (lowercased, validated).
+fn parse_tenant_allowlist(raw: &str) -> Result<Vec<String>> {
+    let tenants: Vec<String> = raw
+        .split(',')
+        .map(|t| t.trim().to_ascii_lowercase())
+        .filter(|t| !t.is_empty())
+        .collect();
+    for t in &tenants {
+        if !crate::services::idp::oidc::is_guid(t) {
+            anyhow::bail!("tenant '{t}' is not a valid GUID");
+        }
+    }
+    Ok(tenants)
+}
+
+/// Build the slug-prefixed env var name (e.g. `VOUCH_IDP_FOO_ISSUER`).
+fn idp_env(slug: &str, suffix: &str) -> String {
+    format!("VOUCH_IDP_{}_{}", slug.to_ascii_uppercase(), suffix)
+}
+
+/// Parse one `VOUCH_IDP_<SLUG>_*` group from the environment.
+fn parse_idp_slug_entry(slug: &str) -> Result<IdpEntryConfig> {
+    use std::env;
+
+    let issuer = env::var(idp_env(slug, "ISSUER")).ok();
+    let metadata_url = env::var(idp_env(slug, "METADATA_URL")).ok();
+
+    let kind = match (issuer.is_some(), metadata_url.is_some()) {
+        (true, true) => anyhow::bail!(
+            "IdP '{slug}' has both VOUCH_IDP_{}_ISSUER and \
+             VOUCH_IDP_{}_METADATA_URL set; pick one",
+            slug.to_ascii_uppercase(),
+            slug.to_ascii_uppercase(),
+        ),
+        (true, false) => IdpKind::Oidc,
+        (false, true) => IdpKind::Saml,
+        (false, false) => anyhow::bail!(
+            "IdP '{slug}' has neither VOUCH_IDP_{}_ISSUER (OIDC) nor \
+             VOUCH_IDP_{}_METADATA_URL (SAML) set",
+            slug.to_ascii_uppercase(),
+            slug.to_ascii_uppercase(),
+        ),
+    };
+
+    let allowed_domains = env::var(idp_env(slug, "ALLOWED_DOMAINS"))
+        .ok()
+        .map(|s| parse_comma_list(&s))
+        .filter(|v| !v.is_empty());
+    let allowed_tenants = match env::var(idp_env(slug, "ALLOWED_TENANTS")) {
+        Ok(raw) => {
+            let parsed = parse_tenant_allowlist(&raw).with_context(|| {
+                format!("VOUCH_IDP_{}_ALLOWED_TENANTS", slug.to_ascii_uppercase())
+            })?;
+            if parsed.is_empty() {
+                None
+            } else {
+                Some(parsed)
+            }
+        }
+        Err(_) => None,
+    };
+
+    let (
+        oidc_client_id,
+        oidc_client_secret,
+        saml_sp_entity_id,
+        saml_email_attribute,
+        saml_domain_attribute,
+    ) = match kind {
+        IdpKind::Oidc => {
+            let client_id = env::var(idp_env(slug, "CLIENT_ID")).ok();
+            let client_secret = env::var(idp_env(slug, "CLIENT_SECRET")).ok();
+            if client_id.is_none() || client_secret.is_none() {
+                anyhow::bail!(
+                    "IdP '{slug}' OIDC: VOUCH_IDP_{}_CLIENT_ID and \
+                     VOUCH_IDP_{}_CLIENT_SECRET are both required",
+                    slug.to_ascii_uppercase(),
+                    slug.to_ascii_uppercase(),
+                );
+            }
+            (
+                client_id,
+                client_secret.map(SecretString::from),
+                None,
+                None,
+                None,
+            )
+        }
+        IdpKind::Saml => (
+            None,
+            None,
+            env::var(idp_env(slug, "SP_ENTITY_ID")).ok(),
+            env::var(idp_env(slug, "EMAIL_ATTRIBUTE")).ok(),
+            env::var(idp_env(slug, "DOMAIN_ATTRIBUTE")).ok(),
+        ),
+    };
+
+    Ok(IdpEntryConfig {
+        slug: slug.to_string(),
+        kind,
+        allowed_domains,
+        allowed_tenants,
+        oidc_issuer: issuer,
+        oidc_client_id,
+        oidc_client_secret,
+        saml_metadata_url: metadata_url,
+        saml_sp_entity_id,
+        saml_email_attribute,
+        saml_domain_attribute,
+    })
+}
+
+/// Build the complete `Vec<IdpEntryConfig>` from the merged legacy
+/// `VOUCH_OIDC_*` / `VOUCH_SAML_*` shorthand and the slug-prefixed
+/// `VOUCH_IDP_<SLUG>_*` family.
+///
+/// The legacy entry (when present) is emitted first under slug `"default"`;
+/// subsequent slug-form entries follow in the order they appear in
+/// `idps_var` (typically `VOUCH_IDPS`).
+fn build_idps(
+    idps_var: Option<&str>,
+    partial_config: &ServerConfig,
+) -> Result<Vec<IdpEntryConfig>> {
+    let mut entries: Vec<IdpEntryConfig> = Vec::new();
+
+    if partial_config.oidc_configured() {
+        entries.push(IdpEntryConfig {
+            slug: "default".to_string(),
+            kind: IdpKind::Oidc,
+            allowed_domains: None,
+            allowed_tenants: None,
+            oidc_issuer: partial_config.oidc_issuer_url.clone(),
+            oidc_client_id: partial_config.oidc_client_id.clone(),
+            oidc_client_secret: partial_config.oidc_client_secret.clone(),
+            saml_metadata_url: None,
+            saml_sp_entity_id: None,
+            saml_email_attribute: None,
+            saml_domain_attribute: None,
+        });
+    } else if partial_config.saml_configured() {
+        entries.push(IdpEntryConfig {
+            slug: "default".to_string(),
+            kind: IdpKind::Saml,
+            allowed_domains: None,
+            allowed_tenants: None,
+            oidc_issuer: None,
+            oidc_client_id: None,
+            oidc_client_secret: None,
+            saml_metadata_url: partial_config.saml_idp_metadata_url.clone(),
+            saml_sp_entity_id: partial_config.saml_sp_entity_id.clone(),
+            saml_email_attribute: partial_config.saml_email_attribute.clone(),
+            saml_domain_attribute: partial_config.saml_domain_attribute.clone(),
+        });
+    }
+
+    if let Some(raw_slugs) = idps_var.filter(|s| !s.trim().is_empty()) {
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for entry in &entries {
+            seen.insert(entry.slug.clone());
+        }
+        for slug in raw_slugs
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            let normalized = slug.to_ascii_lowercase();
+            validate_idp_slug(&normalized).with_context(|| format!("VOUCH_IDPS slug '{slug}'"))?;
+            if normalized == "default" {
+                anyhow::bail!(
+                    "VOUCH_IDPS may not contain the reserved slug 'default' \
+                     (legacy VOUCH_OIDC_* / VOUCH_SAML_* occupies it)"
+                );
+            }
+            if !seen.insert(normalized.clone()) {
+                anyhow::bail!("VOUCH_IDPS lists slug '{normalized}' more than once");
+            }
+            entries.push(parse_idp_slug_entry(&normalized)?);
+        }
+    }
+
+    Ok(entries)
+}
+
 // ============================================================================
 // Command Line Arguments
 // ============================================================================
@@ -369,6 +566,15 @@ pub struct Args {
     /// Time-to-live for session cache entries in seconds.
     #[arg(long, env = "VOUCH_SESSION_CACHE_TTL_SECS", default_value = "30")]
     pub session_cache_ttl_secs: u64,
+
+    /// Comma-separated list of additional upstream IdP slugs.
+    ///
+    /// Each slug enables a `VOUCH_IDP_<SLUG>_*` family of env vars
+    /// (issuer, client_id, client_secret, or metadata_url, etc.).
+    /// Adds to the legacy `VOUCH_OIDC_*` / `VOUCH_SAML_*` shorthand;
+    /// both can coexist.
+    #[arg(long, env = "VOUCH_IDPS")]
+    pub idps: Option<String>,
 }
 
 // ============================================================================
@@ -524,6 +730,9 @@ pub struct ServerConfig {
     pub session_cache_max_capacity: u64,
     /// TTL for session cache entries in seconds.
     pub session_cache_ttl_secs: u64,
+    /// Configured upstream IdP entries (legacy shorthand + slug-form
+    /// `VOUCH_IDPS` merged into a single ordered list).
+    pub idps: Vec<IdpEntryConfig>,
 }
 
 /// Log output format.
@@ -534,6 +743,51 @@ pub enum LogFormat {
     Text,
     /// Structured JSON for machine consumption.
     Json,
+}
+
+/// Upstream IdP protocol.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IdpKind {
+    /// OpenID Connect (RFC 8414 discovery + OAuth 2.0 code flow).
+    Oidc,
+    /// SAML 2.0 (metadata + AuthnRequest/Response).
+    Saml,
+}
+
+/// A single configured upstream IdP, before discovery.
+///
+/// Populated either from the legacy `VOUCH_OIDC_*` / `VOUCH_SAML_*` env vars
+/// (slug = `"default"`) or from the new `VOUCH_IDPS=...` +
+/// `VOUCH_IDP_<SLUG>_*` form. Validated by [`ServerConfig::validate`] and
+/// fed into [`crate::infra::startup`] to produce one `ConfiguredIdp` per
+/// entry.
+#[derive(Debug, Clone)]
+pub struct IdpEntryConfig {
+    /// Internal slug (`[a-z0-9_-]+`, 1-32 chars). `default` is reserved for
+    /// the legacy shorthand entry.
+    pub slug: String,
+    /// OIDC or SAML.
+    pub kind: IdpKind,
+    /// Optional per-IdP allowed-domains allowlist. Narrows the global
+    /// `VOUCH_ALLOWED_DOMAINS` for this IdP only.
+    pub allowed_domains: Option<Vec<String>>,
+    /// Optional Entra tenant GUID allowlist (lowercased). Only consulted
+    /// when discovery resolves the issuer to multi-tenant Entra.
+    pub allowed_tenants: Option<Vec<String>>,
+    /// OIDC-specific: issuer URL.
+    pub oidc_issuer: Option<String>,
+    /// OIDC-specific: registered client_id.
+    pub oidc_client_id: Option<String>,
+    /// OIDC-specific: registered client secret.
+    pub oidc_client_secret: Option<SecretString>,
+    /// SAML-specific: IdP metadata URL.
+    pub saml_metadata_url: Option<String>,
+    /// SAML-specific: SP entity ID override (defaults to base_url).
+    pub saml_sp_entity_id: Option<String>,
+    /// SAML-specific: attribute name carrying email.
+    pub saml_email_attribute: Option<String>,
+    /// SAML-specific: attribute name carrying domain.
+    pub saml_domain_attribute: Option<String>,
 }
 
 impl ServerConfig {
@@ -586,16 +840,19 @@ impl ServerConfig {
         // Parse trusted proxies
         let trusted_proxies = parse_trusted_proxies(&args.trusted_proxies)?;
 
-        Ok(Self {
+        // Capture VOUCH_IDPS before `args` is partially moved into `config`.
+        let idps_var = args.idps.clone();
+
+        let mut config = Self {
             listen_addr: args.listen_addr,
             database_url: args.database_url,
             rp_id: args.rp_id,
             rp_name: args.rp_name,
             jwt_secret: SecretString::from(args.jwt_secret),
             session_hours: args.session_hours,
-            oidc_issuer_url: args.oidc_issuer,
-            oidc_client_id: args.oidc_client_id,
-            oidc_client_secret: args.oidc_client_secret.map(SecretString::from),
+            oidc_issuer_url: args.oidc_issuer.clone(),
+            oidc_client_id: args.oidc_client_id.clone(),
+            oidc_client_secret: args.oidc_client_secret.clone().map(SecretString::from),
             saml_idp_metadata_url: args.saml_idp_metadata_url,
             saml_sp_entity_id: args.saml_sp_entity_id,
             saml_email_attribute: args.saml_email_attribute,
@@ -660,7 +917,13 @@ impl ServerConfig {
             },
             session_cache_max_capacity: args.session_cache_max_capacity,
             session_cache_ttl_secs: args.session_cache_ttl_secs,
-        })
+            // Filled in below after `config` exists so build_idps can read
+            // the legacy oidc_*/saml_* fields back out as a partial view.
+            idps: Vec::new(),
+        };
+
+        config.idps = build_idps(idps_var.as_deref(), &config)?;
+        Ok(config)
     }
 
     /// Check if OIDC is configured (all required fields present).
@@ -738,14 +1001,25 @@ impl ServerConfig {
 
     /// Validate that all required configuration is present.
     /// Call this after all config sources (env, S3) have been merged.
-    pub fn validate(&self) -> Result<()> {
-        // OIDC and SAML are mutually exclusive.
+    pub fn validate(&mut self) -> Result<()> {
+        // Legacy shorthand mutual exclusivity: VOUCH_OIDC_* and VOUCH_SAML_*
+        // can't both be set, because they share the `default` slug. Mixing
+        // OIDC and SAML upstreams is supported via the slug-form
+        // `VOUCH_IDPS=...` family, where each slug stands alone.
         if self.oidc_configured() && self.saml_configured() {
             anyhow::bail!(
-                "OIDC and SAML cannot both be configured. \
-                 Set either VOUCH_OIDC_* or VOUCH_SAML_* env vars, not both."
+                "VOUCH_OIDC_* and VOUCH_SAML_* cannot both be configured. \
+                 To mix OIDC and SAML upstreams, configure additional IdPs \
+                 via VOUCH_IDPS=... + VOUCH_IDP_<SLUG>_* env vars."
             );
         }
+
+        // Re-sync the legacy entry. After an S3-config merge the legacy
+        // fields may have changed since `from_args` ran; rebuild so
+        // `idps[0]` reflects the merged values.
+        let idps_var = std::env::var("VOUCH_IDPS").ok();
+        let rebuilt = build_idps(idps_var.as_deref(), self)?;
+        self.idps = rebuilt;
 
         // Skip jwt_secret validation when KMS HMAC signing is configured.
         if self.jwt_hmac_kms_key_id.is_none() {
@@ -926,7 +1200,7 @@ mod tests {
 
     #[test]
     fn test_validate_good_secret_accepted() {
-        let config = test_config();
+        let mut config = test_config();
         assert!(config.validate().is_ok());
     }
 }

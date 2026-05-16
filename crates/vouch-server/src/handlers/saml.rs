@@ -119,12 +119,26 @@ pub async fn acs(State(state): State<Arc<AppState>>, Form(form): Form<SamlAcsFor
         .into_response();
     }
 
-    // Step 5: Require SAML IdP to be configured.
-    let Some(crate::services::idp::UpstreamIdp::Saml(saml_provider)) = state.upstream_idp.as_ref()
-    else {
+    // Step 5: Resolve the SAML IdP via the stored slug. Empty `idp_slug` is
+    // a legacy row written before multi-IdP support landed — fall back to
+    // the lone/`default` IdP.
+    let active_idp = if stored_state.idp_slug.is_empty() {
+        state.fallback_idp()
+    } else {
+        state.find_idp(&stored_state.idp_slug)
+    };
+    let Some(active_idp) = active_idp else {
         return ErrorTemplate {
             title: "Error".to_string(),
-            message: "SAML is not configured. If using OIDC, responses go to /oauth/callback."
+            message: "Identity provider for this sign-in is no longer configured.".to_string(),
+            back_url: Some("/".to_string()),
+        }
+        .into_response();
+    };
+    let crate::services::idp::UpstreamIdp::Saml(ref saml_provider) = active_idp.provider else {
+        return ErrorTemplate {
+            title: "Error".to_string(),
+            message: "Selected IdP is not SAML. If using OIDC, responses go to /oauth/callback."
                 .to_string(),
             back_url: None,
         }
@@ -155,7 +169,8 @@ pub async fn acs(State(state): State<Arc<AppState>>, Form(form): Form<SamlAcsFor
         domain: assertion.domain,
     };
 
-    complete_enrollment_after_identity(&state, &stored_state, &relay_state, identity).await
+    complete_enrollment_after_identity(&state, &stored_state, &relay_state, active_idp, identity)
+        .await
 }
 
 // ============================================================================

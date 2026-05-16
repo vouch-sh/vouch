@@ -56,6 +56,8 @@ pub struct OidcState {
     pub nonce: String,
     /// PKCE code_verifier (RFC 7636).
     pub code_verifier: String,
+    /// Slug of the IdP that initiated this state (empty for legacy rows).
+    pub idp_slug: String,
     pub expires_at: Timestamp,
 }
 
@@ -67,6 +69,7 @@ impl From<Document<OidcStateDoc>> for OidcState {
             device_auth_id: doc.data.device_auth_id,
             nonce: doc.data.nonce,
             code_verifier: doc.data.code_verifier,
+            idp_slug: doc.data.idp_slug,
             expires_at: doc.data.expires_at,
         }
     }
@@ -304,6 +307,7 @@ pub async fn create_oidc_state(
     device_auth_id: &str,
     nonce: &str,
     code_verifier: &str,
+    idp_slug: &str,
     expires_at: Timestamp,
 ) -> Result<String> {
     let doc = OidcStateDoc {
@@ -311,6 +315,7 @@ pub async fn create_oidc_state(
         device_auth_id: device_auth_id.to_string(),
         nonce: nonce.to_string(),
         code_verifier: code_verifier.to_string(),
+        idp_slug: idp_slug.to_string(),
         expires_at,
     };
     let result = store.insert(&doc).await?;

@@ -22,11 +22,11 @@ All Vouch server configuration is done via environment variables (prefixed with 
 
 ## Upstream Identity Provider
 
-Configure **one** upstream IdP for enrollment: either OIDC or SAML 2.0. They are mutually exclusive — if both are configured, the server will refuse to start.
+Vouch can be configured with **one** upstream IdP using the legacy shorthand (`VOUCH_OIDC_*` xor `VOUCH_SAML_*`), or **multiple** IdPs side-by-side using the slug-prefixed form (`VOUCH_IDPS` + `VOUCH_IDP_<SLUG>_*`). The two forms can coexist — the legacy shorthand becomes the entry with slug `default`, and slug-form entries add buttons to the landing page picker.
 
-### OIDC (External IdP)
+### OIDC (single-IdP shorthand)
 
-These variables configure an external OpenID Connect identity provider for enrollment. All three must be set together for OIDC enrollment to work. At startup, the server fetches the OIDC discovery document from `{issuer}/.well-known/openid-configuration` to auto-discover authorization, token, and JWKS endpoints.
+These variables configure a single external OpenID Connect identity provider for enrollment. All three must be set together for OIDC enrollment to work. At startup, the server fetches the OIDC discovery document from `{issuer}/.well-known/openid-configuration` to auto-discover authorization, token, and JWKS endpoints. When set, the entry is registered under slug `default`.
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
@@ -34,9 +34,9 @@ These variables configure an external OpenID Connect identity provider for enrol
 | `VOUCH_OIDC_CLIENT_ID` | No | _(none)_ | OIDC client ID from the external identity provider. |
 | `VOUCH_OIDC_CLIENT_SECRET` | No | _(none)_ | OIDC client secret from the external identity provider. |
 
-### SAML (External IdP)
+### SAML (single-IdP shorthand)
 
-These variables configure an external SAML 2.0 identity provider for enrollment. `VOUCH_SAML_IDP_METADATA_URL` is required for SAML; the others are optional.
+These variables configure a single external SAML 2.0 identity provider for enrollment. `VOUCH_SAML_IDP_METADATA_URL` is required for SAML; the others are optional. When set, the entry is registered under slug `default`. `VOUCH_OIDC_*` and `VOUCH_SAML_*` cannot both be set — to mix OIDC and SAML upstreams, use the multi-IdP form below.
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
@@ -44,6 +44,51 @@ These variables configure an external SAML 2.0 identity provider for enrollment.
 | `VOUCH_SAML_SP_ENTITY_ID` | No | `{VOUCH_BASE_URL}` | SAML SP entity ID sent in authentication requests. Defaults to the server's base URL. |
 | `VOUCH_SAML_EMAIL_ATTRIBUTE` | No | _(auto-detect)_ | SAML attribute name containing the user's email address. |
 | `VOUCH_SAML_DOMAIN_ATTRIBUTE` | No | _(none)_ | SAML attribute name containing the user's domain (for domain restriction). |
+
+### Multiple Identity Providers
+
+Set `VOUCH_IDPS` to a comma-separated list of slugs to register **additional** IdPs alongside the legacy shorthand. Each slug enables a `VOUCH_IDP_<SLUG>_*` family of variables. The landing page renders one button per registered IdP; users pick which one to sign in with.
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `VOUCH_IDPS` | No | _(none)_ | Comma-separated list of slugs. Each must match `[a-z0-9_-]+`, 1–32 chars. The slug `default` is reserved for the legacy shorthand. Duplicate slugs are rejected. |
+
+For each slug `<SLUG>` listed in `VOUCH_IDPS`, set **either** the OIDC fields or the SAML fields (presence of `_ISSUER` selects OIDC; presence of `_METADATA_URL` selects SAML). Setting both on the same slug is rejected.
+
+**OIDC slug:**
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `VOUCH_IDP_<SLUG>_ISSUER` | Yes (OIDC) | _(none)_ | OIDC issuer URL. Triggers discovery at startup. |
+| `VOUCH_IDP_<SLUG>_CLIENT_ID` | Yes (OIDC) | _(none)_ | OAuth client ID. |
+| `VOUCH_IDP_<SLUG>_CLIENT_SECRET` | Yes (OIDC) | _(none)_ | OAuth client secret. |
+| `VOUCH_IDP_<SLUG>_ALLOWED_DOMAINS` | No | _(none)_ | Comma-separated email-domain allowlist for this IdP. Narrows `VOUCH_ALLOWED_DOMAINS`; does not widen it. |
+| `VOUCH_IDP_<SLUG>_ALLOWED_TENANTS` | No | _(none)_ | Microsoft Entra only: comma-separated tenant GUID allowlist. Only consulted when the discovered issuer is multi-tenant Entra (`/common/v2.0` or `/organizations/v2.0`); silently ignored for any other IdP. |
+
+**SAML slug:**
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `VOUCH_IDP_<SLUG>_METADATA_URL` | Yes (SAML) | _(none)_ | URL to the SAML IdP metadata XML document. |
+| `VOUCH_IDP_<SLUG>_SP_ENTITY_ID` | No | `{VOUCH_BASE_URL}` | SP entity ID for this IdP. |
+| `VOUCH_IDP_<SLUG>_EMAIL_ATTRIBUTE` | No | _(auto-detect)_ | SAML attribute name carrying email. |
+| `VOUCH_IDP_<SLUG>_DOMAIN_ATTRIBUTE` | No | _(none)_ | SAML attribute name carrying domain. |
+| `VOUCH_IDP_<SLUG>_ALLOWED_DOMAINS` | No | _(none)_ | Comma-separated email-domain allowlist for this IdP. |
+
+**Example: Google (legacy) + Microsoft Entra (slug-form):**
+
+```bash
+# Legacy Google entry (slug = "default")
+VOUCH_OIDC_ISSUER=https://accounts.google.com
+VOUCH_OIDC_CLIENT_ID=...
+VOUCH_OIDC_CLIENT_SECRET=...
+
+# Add a multi-tenant Entra entry (slug = "microsoft")
+VOUCH_IDPS=microsoft
+VOUCH_IDP_MICROSOFT_ISSUER=https://login.microsoftonline.com/common/v2.0
+VOUCH_IDP_MICROSOFT_CLIENT_ID=...
+VOUCH_IDP_MICROSOFT_CLIENT_SECRET=...
+```
 
 ## Session
 

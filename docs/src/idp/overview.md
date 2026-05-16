@@ -17,7 +17,7 @@ Vouch supports two upstream IdP protocols:
 | **OIDC** (OpenID Connect) | Recommended for most deployments. Supports auto-discovery of endpoints. |
 | **SAML 2.0** | For organizations that require SAML or where OIDC is not available. |
 
-> **OIDC and SAML are mutually exclusive.** Configure one or the other, not both. If both are configured, the server will refuse to start.
+> **The legacy `VOUCH_OIDC_*` / `VOUCH_SAML_*` shorthand picks one IdP.** If both shorthand families are set, the server refuses to start. To mix OIDC and SAML upstreams — or to register multiple OIDC providers — use the multi-IdP form (see [Configuring Multiple IdPs](#configuring-multiple-idps) below).
 
 ## OIDC Discovery
 
@@ -54,6 +54,36 @@ VOUCH_SAML_SP_ENTITY_ID=https://auth.example.com
 VOUCH_SAML_EMAIL_ATTRIBUTE=http://schemas.xmlsoap.org/ws/2005/05/identity/claims/emailaddress
 VOUCH_ALLOWED_DOMAINS=company.com
 ```
+
+## Configuring Multiple IdPs
+
+Run more than one upstream IdP side-by-side using the slug-prefixed form. Each slug enumerated in `VOUCH_IDPS` registers an extra entry; the landing page then shows one "Sign in with X" button per registered IdP.
+
+```bash
+# Legacy Google entry (slug = "default")
+VOUCH_OIDC_ISSUER=https://accounts.google.com
+VOUCH_OIDC_CLIENT_ID=...
+VOUCH_OIDC_CLIENT_SECRET=...
+
+# Add multi-tenant Entra (slug = "microsoft")
+VOUCH_IDPS=microsoft
+VOUCH_IDP_MICROSOFT_ISSUER=https://login.microsoftonline.com/common/v2.0
+VOUCH_IDP_MICROSOFT_CLIENT_ID=...
+VOUCH_IDP_MICROSOFT_CLIENT_SECRET=...
+# Optional: restrict to specific Entra tenants
+VOUCH_IDP_MICROSOFT_ALLOWED_TENANTS=<tenant-guid>,<other-tenant-guid>
+# Optional: narrow VOUCH_ALLOWED_DOMAINS for just this IdP
+VOUCH_IDP_MICROSOFT_ALLOWED_DOMAINS=acme.com
+```
+
+**Rules:**
+
+- The slug `default` is reserved for the legacy shorthand entry.
+- Per-IdP `allowed_domains` **narrows** `VOUCH_ALLOWED_DOMAINS`; it cannot widen it.
+- Each slug must define **either** the OIDC fields (`_ISSUER`, `_CLIENT_ID`, `_CLIENT_SECRET`) **or** the SAML field (`_METADATA_URL`). Setting both on the same slug fails startup.
+- Mixing OIDC and SAML upstreams across different slugs is supported.
+
+See [Environment Variables](../reference/environment-variables.md#multiple-identity-providers) for the full variable list.
 
 ## Claims and Attribute Mapping
 

@@ -10,7 +10,7 @@ use askama::Template;
 use axum::{
     Form, Json,
     body::Body,
-    extract::{Query, State},
+    extract::{Path, Query, State},
     http::{StatusCode, header},
     response::{IntoResponse, Redirect, Response},
 };
@@ -246,7 +246,10 @@ pub async fn device_verify_submit(
     }
 
     // No upstream IdP → go directly to WebAuthn; otherwise → initiate auth
-    let Some(upstream) = state.upstream_idp.as_ref() else {
+    // with the first configured IdP (the CLI device-code path does not
+    // expose a picker — the operator picks at deploy time).
+    let upstream = state.idps().first();
+    let Some(idp) = upstream else {
         // No IdP configured - go directly to WebAuthn registration
         let random_bytes = match generate_random_bytes(32) {
             Ok(bytes) => bytes,
@@ -269,6 +272,7 @@ pub async fn device_verify_submit(
             &request.id,
             "", // No nonce for non-IdP flow
             "", // No PKCE for non-IdP flow
+            "", // No IdP slug for non-IdP flow
             state_expires,
         )
         .await
@@ -290,7 +294,7 @@ pub async fn device_verify_submit(
         .into_response();
     };
 
-    let auth_request = match upstream.initiate_auth(state.config().as_ref()) {
+    let auth_request = match idp.provider.initiate_auth(&state.config().base_url) {
         Ok(r) => r,
         Err(e) => {
             tracing::error!("Failed to initiate auth: {e:#}");
@@ -311,6 +315,7 @@ pub async fn device_verify_submit(
         &request.id,
         &auth_request.nonce,
         &auth_request.code_verifier,
+        &idp.slug,
         state_expires,
     )
     .await
@@ -427,22 +432,43 @@ pub async fn oidc_callback(
         .into_response();
     }
 
-    // Exchange code for tokens using discovered OIDC token endpoint.
-    // This handler is OIDC-specific: SAML responses go to POST /saml/acs (Phase 2).
-    let Some(crate::services::idp::UpstreamIdp::Oidc(oidc_provider)) = state.upstream_idp.as_ref()
-    else {
+    // Resolve which IdP issued this state. Empty `idp_slug` means a row was
+    // written before multi-IdP support landed — fall back to the lone or
+    // `default` IdP.
+    let active_idp = if stored_state.idp_slug.is_empty() {
+        state.fallback_idp()
+    } else {
+        state.find_idp(&stored_state.idp_slug)
+    };
+    let Some(active_idp) = active_idp else {
+        tracing::warn!(
+            "oidc_callback: no IdP found for state slug '{}'",
+            stored_state.idp_slug
+        );
         return ErrorTemplate {
             title: "Error".to_string(),
-            message: "OIDC not configured. If using SAML, responses should be \
-                      sent to /saml/acs, not /oauth/callback."
+            message: "Identity provider for this sign-in is no longer \
+                      configured. Please return to the home page and \
+                      start enrolment again."
+                .to_string(),
+            back_url: Some("/".to_string()),
+        }
+        .into_response();
+    };
+    let crate::services::idp::UpstreamIdp::Oidc(ref oidc_provider) = active_idp.provider else {
+        return ErrorTemplate {
+            title: "Error".to_string(),
+            message: "OIDC not configured for this IdP. If using SAML, \
+                      responses should be sent to /saml/acs, not \
+                      /oauth/callback."
                 .to_string(),
             back_url: None,
         }
         .into_response();
     };
     let config = state.config();
-    let client_id = config.oidc_client_id.as_ref().map_or("", String::as_str);
-    let client_secret = config.oidc_client_secret_exposed().unwrap_or("");
+    let client_id = oidc_provider.client_id.as_str();
+    let client_secret = oidc_provider.client_secret.expose_secret();
     let redirect_uri = format!("{}/oauth/callback", config.base_url);
 
     let token_url = oidc_provider.token_endpoint.as_str();
@@ -526,38 +552,78 @@ pub async fn oidc_callback(
         }
     };
 
-    complete_enrollment_after_identity(&state, &stored_state, &oidc_state, identity).await
+    complete_enrollment_after_identity(&state, &stored_state, &oidc_state, active_idp, identity)
+        .await
+}
+
+/// Decide whether an enrolling user's email domain is permitted by both the
+/// global and per-IdP allowlists.
+///
+/// Behaviour:
+/// - When per-IdP is `Some`, the domain MUST match it (per-IdP narrows).
+/// - When the global allowlist is `Some`, the domain MUST also match it.
+/// - When both are `Some`, both must match (intersection — per-IdP can only
+///   narrow, never widen, the global list).
+/// - When neither is set, all domains are allowed.
+pub(crate) fn is_email_domain_allowed(
+    email_domain: &str,
+    global: Option<&[String]>,
+    per_idp: Option<&[String]>,
+) -> bool {
+    let matches =
+        |list: &[String]| -> bool { list.iter().any(|d| d.eq_ignore_ascii_case(email_domain)) };
+    if let Some(per) = per_idp.filter(|l| !l.is_empty())
+        && !matches(per)
+    {
+        return false;
+    }
+    if let Some(g) = global.filter(|l| !l.is_empty())
+        && !matches(g)
+    {
+        return false;
+    }
+    true
 }
 
 pub(crate) async fn complete_enrollment_after_identity(
     state: &Arc<AppState>,
     stored_state: &db::OidcState,
     state_key: &str,
+    active_idp: &crate::services::idp::ConfiguredIdp,
     identity: IdentityResult,
 ) -> Response {
     // Check domain restriction.
     // For Google consumers (no `hd` claim), `identity.domain` is `None`,
     // so `email_domain` becomes "" and will never match an allowed domain.
-    if let Some(domains) = state
-        .config()
+    let email_domain = identity.domain.as_deref().unwrap_or("");
+    let config_snapshot = state.config();
+    let global_allowed = config_snapshot
         .allowed_domains
-        .as_ref()
-        .filter(|d| !d.is_empty())
+        .as_deref()
+        .filter(|d| !d.is_empty());
+    let per_idp_allowed = active_idp
+        .allowed_domains
+        .as_deref()
+        .filter(|d| !d.is_empty());
+    if (global_allowed.is_some() || per_idp_allowed.is_some())
+        && !is_email_domain_allowed(email_domain, global_allowed, per_idp_allowed)
     {
-        let email_domain = identity.domain.as_deref().unwrap_or("");
-        if !domains.iter().any(|d| d.eq_ignore_ascii_case(email_domain)) {
-            let allowed_list = domains.join(", ");
-            return ErrorTemplate {
-                title: "Domain Not Allowed".to_string(),
-                message: format!(
-                    "Only users from the following domains can enroll: {}. Your email ({}) is not from an allowed domain.",
-                    allowed_list,
-                    identity.email
-                ),
-                back_url: None,
-            }
-            .into_response();
+        // Build a single combined allowlist for the error message: the
+        // narrowest list the user could match against. Show the per-IdP
+        // allowlist if set, else the global one.
+        let display_list = per_idp_allowed
+            .or(global_allowed)
+            .map(|d| d.join(", "))
+            .unwrap_or_default();
+        return ErrorTemplate {
+            title: "Domain Not Allowed".to_string(),
+            message: format!(
+                "Only users from the following domains can enroll: {}. Your email ({}) is not from an allowed domain.",
+                display_list, identity.email
+            ),
+            back_url: None,
         }
+        .into_response();
     }
 
     // Enroll user with organization in a single atomic transaction.
@@ -1316,18 +1382,41 @@ pub async fn browser_register_complete(
 /// The full user_code will be `DIRECT-{random}` to ensure uniqueness.
 const DIRECT_ENROLL_PREFIX: &str = "DIRECT-";
 
-/// Start direct browser enrollment (no CLI required).
-/// GET /enroll/start
+/// Dispatch the bare `/enroll/start` request to the right handler:
 ///
-/// This initiates OIDC authentication directly from the browser,
-/// without requiring the CLI to create a device authorization request.
-/// After successful enrollment, the user can download the CLI and login.
-pub async fn direct_enroll_start(State(state): State<Arc<AppState>>) -> Response {
-    let Some(upstream) = state.upstream_idp.as_ref() else {
-        return ErrorTemplate {
+/// - 0 IdPs configured → "not configured" error page.
+/// - 1 IdP configured → 303 to `/enroll/start/{slug}` so the existing
+///   `Redirect::to("/enroll/start")` callsites still work unchanged.
+/// - 2+ IdPs configured → 303 to `/` to let the user pick.
+pub async fn direct_enroll_start_dispatch(State(state): State<Arc<AppState>>) -> Response {
+    let idps = state.idps();
+    match idps {
+        [] => ErrorTemplate {
             title: "Not Configured".to_string(),
             message: "Identity provider is not configured. Please contact your administrator."
                 .to_string(),
+            back_url: Some("/".to_string()),
+        }
+        .into_response(),
+        [only] => Redirect::to(&format!("/enroll/start/{}", only.slug)).into_response(),
+        _ => Redirect::to("/").into_response(),
+    }
+}
+
+/// Start direct browser enrollment with a specific upstream IdP.
+/// GET /enroll/start/{slug}
+///
+/// This initiates upstream authentication directly from the browser,
+/// without requiring the CLI to create a device authorization request.
+/// After successful enrollment, the user can download the CLI and login.
+pub async fn direct_enroll_start_with_slug(
+    State(state): State<Arc<AppState>>,
+    Path(slug): Path<String>,
+) -> Response {
+    let Some(idp) = state.find_idp(&slug) else {
+        return ErrorTemplate {
+            title: "Unknown Identity Provider".to_string(),
+            message: format!("No identity provider named '{slug}' is configured on this server."),
             back_url: Some("/".to_string()),
         }
         .into_response();
@@ -1382,8 +1471,7 @@ pub async fn direct_enroll_start(State(state): State<Arc<AppState>>) -> Response
         }
     };
 
-    // Initiate upstream IdP authentication (upstream is guaranteed Some from guard above)
-    let auth_request = match upstream.initiate_auth(state.config().as_ref()) {
+    let auth_request = match idp.provider.initiate_auth(&state.config().base_url) {
         Ok(r) => r,
         Err(e) => {
             tracing::error!("Failed to initiate auth for direct enrollment: {e:#}");
@@ -1404,6 +1492,7 @@ pub async fn direct_enroll_start(State(state): State<Arc<AppState>>) -> Response
         &device_auth_id,
         &auth_request.nonce,
         &auth_request.code_verifier,
+        &idp.slug,
         state_expires,
     )
     .await
@@ -1475,6 +1564,78 @@ mod tests {
     use base64::Engine;
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     use uuid::Uuid;
+
+    // ── is_email_domain_allowed tests ───────────────────────────────────────
+
+    fn domains(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    #[test]
+    fn allowlist_no_lists_set_accepts_anything() {
+        assert!(is_email_domain_allowed("anything.example", None, None));
+    }
+
+    #[test]
+    fn allowlist_global_only_accepts_listed() {
+        let global = domains(&["acme.com"]);
+        assert!(is_email_domain_allowed("acme.com", Some(&global), None));
+    }
+
+    #[test]
+    fn allowlist_global_only_rejects_unlisted() {
+        let global = domains(&["acme.com"]);
+        assert!(!is_email_domain_allowed("other.com", Some(&global), None));
+    }
+
+    #[test]
+    fn allowlist_per_idp_narrows_global() {
+        let global = domains(&["acme.com", "other.com"]);
+        let per_idp = domains(&["acme.com"]);
+        // acme.com is in both → allowed.
+        assert!(is_email_domain_allowed(
+            "acme.com",
+            Some(&global),
+            Some(&per_idp)
+        ));
+        // other.com is in global but not per-idp → rejected (narrowing).
+        assert!(!is_email_domain_allowed(
+            "other.com",
+            Some(&global),
+            Some(&per_idp)
+        ));
+    }
+
+    #[test]
+    fn allowlist_per_idp_cannot_widen_global() {
+        // per-idp lists `widened.com` but global doesn't → still rejected.
+        let global = domains(&["acme.com"]);
+        let per_idp = domains(&["widened.com"]);
+        assert!(!is_email_domain_allowed(
+            "widened.com",
+            Some(&global),
+            Some(&per_idp)
+        ));
+    }
+
+    #[test]
+    fn allowlist_only_per_idp_set_acts_as_filter() {
+        let per_idp = domains(&["acme.com"]);
+        assert!(is_email_domain_allowed("acme.com", None, Some(&per_idp)));
+        assert!(!is_email_domain_allowed("other.com", None, Some(&per_idp)));
+    }
+
+    #[test]
+    fn allowlist_match_is_case_insensitive() {
+        let global = domains(&["ACME.com"]);
+        assert!(is_email_domain_allowed("acme.COM", Some(&global), None));
+    }
+
+    #[test]
+    fn allowlist_empty_email_domain_never_matches() {
+        let global = domains(&["acme.com"]);
+        assert!(!is_email_domain_allowed("", Some(&global), None));
+    }
 
     /// Build a valid `BrowserRegistrationState` JWT using the test signer.
     ///

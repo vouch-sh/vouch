@@ -137,6 +137,49 @@ pub enum UpstreamIdp {
     Saml(saml::SamlProvider),
 }
 
+/// Picker-list entry: a single configured IdP plus its slug-keyed metadata.
+///
+/// The server can have multiple of these registered simultaneously, one per
+/// configured upstream (via `VOUCH_OIDC_*`/`VOUCH_SAML_*` legacy shorthand
+/// and/or `VOUCH_IDPS=...` + `VOUCH_IDP_<SLUG>_*` slug-form vars).
+#[derive(Debug)]
+pub struct ConfiguredIdp {
+    /// Internal slug used in URLs (`/enroll/start/{slug}`) and stored on
+    /// `oidc_state` rows.
+    pub slug: String,
+    /// User-facing display name for the picker button.
+    pub display_name: String,
+    /// Inline SVG icon markup for the picker button.
+    pub svg_icon: &'static str,
+    /// Underlying upstream provider (OIDC or SAML).
+    pub provider: UpstreamIdp,
+    /// Optional per-IdP allowed-domains allowlist. Narrows
+    /// `VOUCH_ALLOWED_DOMAINS` for this IdP; does not widen it.
+    pub allowed_domains: Option<Vec<String>>,
+}
+
+impl ConfiguredIdp {
+    /// Build a `ConfiguredIdp` from a slug + upstream, deriving display name
+    /// and icon from [`IdpBrand`] heuristics.
+    #[must_use]
+    pub fn new(slug: String, provider: UpstreamIdp, allowed_domains: Option<Vec<String>>) -> Self {
+        let brand = provider.brand();
+        Self {
+            slug,
+            display_name: brand.display_name().to_string(),
+            svg_icon: brand.svg_icon(),
+            provider,
+            allowed_domains,
+        }
+    }
+
+    /// CSP `form-action` origins for this provider's auth-endpoint URLs.
+    #[must_use]
+    pub fn form_action_origins(&self) -> Vec<crate::infra::csp::CspOrigin> {
+        self.provider.form_action_origins()
+    }
+}
+
 impl UpstreamIdp {
     /// Initiate authentication with the upstream IdP.
     ///
@@ -144,25 +187,17 @@ impl UpstreamIdp {
     /// action (redirect URL for OIDC, POST form for SAML), and returns
     /// the full `AuthRequest` to store state and redirect/render.
     ///
-    /// # Note
-    /// `initiate_auth` takes the full `ServerConfig` for simplicity in Phase 1.
-    /// Only `oidc_client_id` and `base_url` are used. This coupling can be
-    /// narrowed in Phase 2 if needed.
-    ///
-    /// # Invariant
-    /// When `Self::Oidc` is active, `config.oidc_client_id` must be `Some`.
-    /// Startup validates `oidc_configured()` before constructing `UpstreamIdp::Oidc`,
-    /// so the error path below should be unreachable in practice.
+    /// `base_url` is the server's externally-visible origin, used to
+    /// construct the OIDC `redirect_uri` (always
+    /// `{base_url}/oauth/callback`). The OIDC `client_id` is now carried on
+    /// the [`OidcProvider`] itself so multiple IdPs can each have their own
+    /// credentials.
     ///
     /// # Errors
     ///
-    /// Returns an error if random byte generation fails, or if required OIDC
-    /// config fields are missing (should be unreachable -- see invariant above).
-    /// Returns an error for the SAML variant (not yet implemented in Phase 1).
-    pub fn initiate_auth(
-        &self,
-        config: &crate::config::ServerConfig,
-    ) -> Result<AuthRequest, anyhow::Error> {
+    /// Returns an error if random byte generation fails or if the SAML
+    /// authn-request builder fails.
+    pub fn initiate_auth(&self, base_url: &str) -> Result<AuthRequest, anyhow::Error> {
         use base64::Engine;
         use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
@@ -182,14 +217,10 @@ impl UpstreamIdp {
                     aws_lc_rs::digest::digest(&aws_lc_rs::digest::SHA256, code_verifier.as_bytes());
                 let code_challenge = URL_SAFE_NO_PAD.encode(challenge_digest.as_ref());
 
-                let client_id = config
-                    .oidc_client_id
-                    .as_deref()
-                    .ok_or_else(|| anyhow::anyhow!("OIDC client_id not configured"))?;
-                let redirect_uri = format!("{}/oauth/callback", config.base_url);
+                let redirect_uri = format!("{base_url}/oauth/callback");
                 let mut url = p.authorization_endpoint.clone();
                 url.query_pairs_mut()
-                    .append_pair("client_id", client_id)
+                    .append_pair("client_id", &p.client_id)
                     .append_pair("redirect_uri", &redirect_uri)
                     .append_pair("response_type", "code")
                     .append_pair("scope", "openid email")
@@ -399,11 +430,15 @@ mod tests {
     // =========================================================================
 
     fn make_oidc_provider(auth_endpoint: &str) -> oidc::OidcProvider {
+        use secrecy::SecretString;
         oidc::OidcProvider {
             issuer: "https://accounts.google.com".to_string(),
             authorization_endpoint: url::Url::parse(auth_endpoint).unwrap(),
             token_endpoint: url::Url::parse("https://oauth2.googleapis.com/token").unwrap(),
             jwks_uri: url::Url::parse("https://www.googleapis.com/oauth2/v3/certs").unwrap(),
+            client_id: "test-client-id".to_string(),
+            client_secret: SecretString::from("test-client-secret"),
+            entra_tenant_mode: oidc::EntraTenantMode::SingleTenant,
         }
     }
 
@@ -413,7 +448,7 @@ mod tests {
         let idp = UpstreamIdp::Oidc(Box::new(provider));
         let config = test_config();
 
-        let auth = idp.initiate_auth(&config).unwrap();
+        let auth = idp.initiate_auth(&config.base_url).unwrap();
 
         assert!(
             matches!(auth.action, AuthAction::Redirect { .. }),
@@ -454,7 +489,7 @@ mod tests {
         let idp = UpstreamIdp::Oidc(Box::new(provider));
         let config = test_config();
 
-        let auth = idp.initiate_auth(&config).unwrap();
+        let auth = idp.initiate_auth(&config.base_url).unwrap();
 
         assert!(
             matches!(auth.action, AuthAction::Redirect { .. }),
@@ -479,8 +514,8 @@ mod tests {
         let idp = UpstreamIdp::Oidc(Box::new(provider));
         let config = test_config();
 
-        let auth1 = idp.initiate_auth(&config).unwrap();
-        let auth2 = idp.initiate_auth(&config).unwrap();
+        let auth1 = idp.initiate_auth(&config.base_url).unwrap();
+        let auth2 = idp.initiate_auth(&config.base_url).unwrap();
 
         assert_ne!(
             auth1.state_key, auth2.state_key,
@@ -506,7 +541,7 @@ mod tests {
         let idp = UpstreamIdp::Saml(saml_provider);
         let config = test_config();
 
-        let result = idp.initiate_auth(&config).unwrap();
+        let result = idp.initiate_auth(&config.base_url).unwrap();
         assert!(
             matches!(result.action, AuthAction::PostForm { .. }),
             "SAML with POST binding should return PostForm action"
@@ -532,7 +567,7 @@ mod tests {
         let idp = UpstreamIdp::Saml(saml_provider);
         let config = test_config();
 
-        let result = idp.initiate_auth(&config).unwrap();
+        let result = idp.initiate_auth(&config.base_url).unwrap();
         assert!(
             matches!(result.action, AuthAction::Redirect { .. }),
             "Expected AuthAction::Redirect for SAML redirect binding"
@@ -563,7 +598,7 @@ mod tests {
         let idp = UpstreamIdp::Oidc(Box::new(provider));
         let config = test_config();
 
-        let auth = idp.initiate_auth(&config).unwrap();
+        let auth = idp.initiate_auth(&config.base_url).unwrap();
 
         assert!(
             matches!(auth.action, AuthAction::Redirect { .. }),
@@ -612,7 +647,7 @@ mod tests {
         let idp = UpstreamIdp::Saml(saml_provider);
         let config = test_config();
 
-        let auth = idp.initiate_auth(&config).unwrap();
+        let auth = idp.initiate_auth(&config.base_url).unwrap();
         assert!(
             auth.code_verifier.is_empty(),
             "SAML should have empty code_verifier"
@@ -640,7 +675,7 @@ mod tests {
         let idp = UpstreamIdp::Saml(saml_provider);
         let config = test_config();
 
-        let err = idp.initiate_auth(&config).unwrap_err();
+        let err = idp.initiate_auth(&config.base_url).unwrap_err();
         assert!(
             err.to_string().contains("disallowed scheme"),
             "Expected disallowed scheme error, got: {err}"
@@ -664,7 +699,7 @@ mod tests {
         let idp = UpstreamIdp::Saml(saml_provider);
         let config = test_config();
 
-        let err = idp.initiate_auth(&config).unwrap_err();
+        let err = idp.initiate_auth(&config.base_url).unwrap_err();
         assert!(
             err.to_string().contains("disallowed scheme"),
             "Expected disallowed scheme error, got: {err}"

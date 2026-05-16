@@ -77,6 +77,11 @@ pub struct OidcStateDoc {
     /// token exchange. Empty for non-OIDC flows (SAML).
     #[serde(default)]
     pub code_verifier: String,
+    /// Slug of the IdP that initiated this state. Empty string for legacy
+    /// rows written before multi-IdP support landed; the callback handler
+    /// then falls back to the lone configured IdP.
+    #[serde(default)]
+    pub idp_slug: String,
     pub expires_at: Timestamp,
 }
 

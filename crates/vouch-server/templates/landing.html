@@ -27,19 +27,31 @@
             </a>
             {% else %}
             <!-- Not authenticated -->
-            {% if let Some(name) = idp_name %}
-            <a href="/enroll/start" class="w-full flex items-center justify-center gap-3 bg-vouch-surface border border-vouch-border text-gray-300 font-medium py-3 px-6 rounded-lg hover:bg-vouch-raised transition-colors">
-                {% if let Some(icon) = idp_svg_icon %}
-                {{ icon|safe }}
-                {% endif %}
-                Sign in with {{ name }}
+            {% if idps.is_empty() %}
+            <p class="text-center text-gray-500 text-sm">
+                Browser sign-in is not configured. Use the CLI enrollment command below.
+            </p>
+            {% else if idps.len() == 1 %}
+            {% if let Some(only) = idps.first() %}
+            <a href="{{ only.start_url }}" class="w-full flex items-center justify-center gap-3 bg-vouch-surface border border-vouch-border text-gray-300 font-medium py-3 px-6 rounded-lg hover:bg-vouch-raised transition-colors">
+                {{ only.svg_icon|safe }}
+                Sign in with {{ only.display_name }}
             </a>
             <p class="text-center text-gray-500 text-sm mt-3">
                 Register your security key using your work email
             </p>
+            {% endif %}
             {% else %}
-            <p class="text-center text-gray-500 text-sm">
-                Browser sign-in is not configured. Use the CLI enrollment command below.
+            <div class="space-y-3">
+                {% for idp in idps %}
+                <a href="{{ idp.start_url }}" class="w-full flex items-center justify-center gap-3 bg-vouch-surface border border-vouch-border text-gray-300 font-medium py-3 px-6 rounded-lg hover:bg-vouch-raised transition-colors">
+                    {{ idp.svg_icon|safe }}
+                    Sign in with {{ idp.display_name }}
+                </a>
+                {% endfor %}
+            </div>
+            <p class="text-center text-gray-500 text-sm mt-3">
+                Register your security key using your work email
             </p>
             {% endif %}
             {% endif %}

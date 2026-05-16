@@ -88,8 +88,10 @@ pub struct AppState {
     pub http_client: reqwest::Client,
     /// Session lookup cache (30s TTL).
     pub session_cache: db::SessionCache,
-    /// Upstream identity provider (discovered at startup, None if not configured).
-    pub upstream_idp: Option<services::idp::UpstreamIdp>,
+    /// Configured upstream identity providers (discovered at startup).
+    /// Empty when no IdP is configured; multiple entries when the operator
+    /// has enabled the picker via `VOUCH_IDPS`.
+    pub upstream_idps: Vec<services::idp::ConfiguredIdp>,
 }
 
 impl AppState {
@@ -101,6 +103,32 @@ impl AppState {
     #[must_use]
     pub fn config(&self) -> arc_swap::Guard<Arc<ServerConfig>> {
         self.config.load()
+    }
+
+    /// All configured upstream IdPs in registration order.
+    #[must_use]
+    pub fn idps(&self) -> &[services::idp::ConfiguredIdp] {
+        &self.upstream_idps
+    }
+
+    /// Look up a configured IdP by slug. Returns `None` if the slug doesn't
+    /// match any registered provider.
+    #[must_use]
+    pub fn find_idp(&self, slug: &str) -> Option<&services::idp::ConfiguredIdp> {
+        self.upstream_idps.iter().find(|i| i.slug == slug)
+    }
+
+    /// Pick a "default" IdP to fall back to when a state row carries an
+    /// empty `idp_slug` (legacy rows written before multi-IdP). Returns the
+    /// single configured IdP when exactly one is registered, or the entry
+    /// with slug `"default"` when multiple are present.
+    #[must_use]
+    pub fn fallback_idp(&self) -> Option<&services::idp::ConfiguredIdp> {
+        if self.upstream_idps.len() == 1 {
+            self.upstream_idps.first()
+        } else {
+            self.find_idp("default")
+        }
     }
 }
 
@@ -244,6 +272,7 @@ mod redirect_tests {
             pool_config: crate::db::pool::PoolConfig::default(),
             session_cache_max_capacity: 10_000,
             session_cache_ttl_secs: 30,
+            idps: Vec::new(),
         };
         let webauthn = webauthn_rs::WebauthnBuilder::new(
             rp_id,
@@ -274,7 +303,7 @@ mod redirect_tests {
             github_app: None,
             http_client: reqwest::Client::new(),
             session_cache: db::SessionCache::new(10_000, 30),
-            upstream_idp: None,
+            upstream_idps: Vec::new(),
         }
     }
 

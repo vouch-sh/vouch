@@ -162,7 +162,7 @@ pub fn build_app(state: Arc<AppState>, config: &config::ServerConfig) -> anyhow:
             .merge(metrics_route)
             .merge(certification_route),
         config,
-        state.upstream_idp.as_ref(),
+        state.upstream_idps.as_slice(),
     )?
     .layer(axum::middleware::from_fn(metrics_middleware))
     // Global request timeout: 30 seconds.
@@ -704,8 +704,17 @@ fn build_ui_routes(config: &config::ServerConfig) -> anyhow::Result<Router<Arc<A
         // Browser-based enrollment
         .route("/device", get(handlers::enroll::device_verify_page))
         .route("/device", post(handlers::enroll::device_verify_submit))
-        // Direct enrollment (browser-only, no CLI required)
-        .route("/enroll/start", get(handlers::enroll::direct_enroll_start))
+        // Direct enrollment (browser-only, no CLI required).
+        // `/enroll/start` dispatches to the picker or single IdP;
+        // `/enroll/start/{slug}` targets a specific IdP from the picker.
+        .route(
+            "/enroll/start",
+            get(handlers::enroll::direct_enroll_start_dispatch),
+        )
+        .route(
+            "/enroll/start/{slug}",
+            get(handlers::enroll::direct_enroll_start_with_slug),
+        )
         // Key management during enrollment (uses cookie for auth)
         .route("/enroll/keys", get(handlers::enroll::enroll_keys_page))
         .route("/logout", post(handlers::auth::logout))

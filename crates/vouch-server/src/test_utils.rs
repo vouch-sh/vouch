@@ -54,7 +54,7 @@ pub async fn test_db() -> Pool {
 
 /// Create a test configuration with sensible defaults.
 pub fn test_config() -> ServerConfig {
-    ServerConfig {
+    let mut config = ServerConfig {
         listen_addr: "127.0.0.1:0".to_string(),
         database_url: "sqlite::memory:".to_string(),
         rp_id: "test.example.com".to_string(),
@@ -117,7 +117,25 @@ pub fn test_config() -> ServerConfig {
         pool_config: crate::db::pool::PoolConfig::default(),
         session_cache_max_capacity: 10_000,
         session_cache_ttl_secs: 30,
-    }
+        idps: Vec::new(),
+    };
+    // Mirror the legacy OIDC entry into the idps list so test deployments
+    // exercising the picker path see a "default" IdP without each test
+    // having to wire one up manually.
+    config.idps = vec![crate::config::IdpEntryConfig {
+        slug: "default".to_string(),
+        kind: crate::config::IdpKind::Oidc,
+        allowed_domains: None,
+        allowed_tenants: None,
+        oidc_issuer: config.oidc_issuer_url.clone(),
+        oidc_client_id: config.oidc_client_id.clone(),
+        oidc_client_secret: config.oidc_client_secret.clone(),
+        saml_metadata_url: None,
+        saml_sp_entity_id: None,
+        saml_email_attribute: None,
+        saml_domain_attribute: None,
+    }];
+    config
 }
 
 /// Create a test AppState with in-memory database.
@@ -155,7 +173,7 @@ pub async fn test_app_state() -> Arc<AppState> {
         github_app: None,
         http_client: reqwest::Client::new(),
         session_cache: crate::db::SessionCache::new(10_000, 30),
-        upstream_idp: None,
+        upstream_idps: Vec::new(),
     })
 }
 
