@@ -72,7 +72,13 @@ pub use authenticators::{
 };
 
 // Re-export organization types and functions
-pub use organizations::{Organization, delete_organization, get_organization_domain};
+pub use documents::organization::AdditionalDomain;
+pub use organizations::{
+    AddedDomain, MAX_ADDITIONAL_DOMAINS, Organization, add_additional_domain, delete_organization,
+    get_organization, get_organization_domain, get_pending_verification_token,
+    list_additional_domains, mark_additional_domain_verified, normalize_domain,
+    remove_additional_domain,
+};
 
 // Re-export organization test helpers (only available in tests)
 #[cfg(any(test, feature = "test-utils"))]

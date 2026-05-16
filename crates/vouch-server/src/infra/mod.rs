@@ -7,6 +7,7 @@
 
 pub mod cleanup;
 pub mod csp;
+pub mod dns;
 pub mod generate_document_key;
 pub mod httpsig;
 pub mod metrics;

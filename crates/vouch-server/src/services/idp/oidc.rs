@@ -209,11 +209,14 @@ pub(crate) async fn verify_id_token(
     // - Google with `hd` claim: use it (Workspace hosted domain).
     // - Google without `hd`: None (consumer account, don't group).
     // - Non-Google: extract domain from the email address.
+    //
+    // Normalize to ASCII lowercase so that org lookups match regardless of
+    // the case the IdP returned. Org domains are stored lowercase.
     let is_google = provider.issuer.contains("accounts.google.com");
     let domain = if is_google {
-        claims.hd
+        claims.hd.as_deref().map(str::to_ascii_lowercase)
     } else {
-        claims.email.split('@').nth(1).map(str::to_string)
+        claims.email.split('@').nth(1).map(str::to_ascii_lowercase)
     };
 
     Ok(IdentityResult {

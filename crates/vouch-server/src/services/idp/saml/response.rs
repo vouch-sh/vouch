@@ -566,6 +566,9 @@ fn extract_email(
 }
 
 /// Extract the domain from the assertion or derive it from the email.
+///
+/// Normalizes the result to ASCII lowercase so org lookups match regardless
+/// of the case the IdP returned.
 fn extract_domain(
     assertion: roxmltree::Node<'_, '_>,
     domain_attribute: Option<&str>,
@@ -575,11 +578,11 @@ fn extract_domain(
     if let Some(attr_name) = domain_attribute
         && let Some(value) = find_saml_attribute(assertion, attr_name)
     {
-        return Some(value);
+        return Some(value.to_ascii_lowercase());
     }
 
     // Derive from email address
-    email.split('@').nth(1).map(str::to_string)
+    email.split('@').nth(1).map(str::to_ascii_lowercase)
 }
 
 /// Extract display name from common SAML attributes.
