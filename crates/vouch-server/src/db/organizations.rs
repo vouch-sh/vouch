@@ -235,9 +235,16 @@ pub async fn add_additional_domain(
     //
     // Folding this into the transaction would require a query path that
     // can scan pending entries; deferred until org count justifies it.
-    let pending_conflict = find_pending_claim_in_other_org(store, org_id, &normalized).await?;
-    if pending_conflict {
-        bail!("domain has a pending verification claim on another organization");
+    match find_conflicting_claim_in_other_org(store, org_id, &normalized).await? {
+        None | Some(AdditionalDomainState::Verified { .. }) => {}
+        Some(AdditionalDomainState::Pending) => {
+            bail!("domain has a pending verification claim on another organization");
+        }
+        Some(AdditionalDomainState::Unverified { .. }) => {
+            bail!(
+                "domain is held by another organization (auto-unverified after DNS failures); it must be removed or expire before this org can claim it"
+            );
+        }
     }
 
     let mut tx = store.begin().await?;
@@ -391,6 +398,10 @@ pub struct DomainRemovalSummary {
     /// left intact on those users — domain removal does not demote
     /// membership; admins must do that explicitly.
     pub revoked_user_count: u64,
+    /// True if the session-revocation pass encountered an error and was
+    /// aborted. The count above may be incomplete. The underlying error is
+    /// logged via `tracing::warn` for operator follow-up.
+    pub revocation_errored: bool,
 }
 
 /// Remove an additional domain from an organization.
@@ -435,20 +446,23 @@ pub async fn remove_additional_domain(
     // entry. Done OUTSIDE the org-doc transaction: per-user session deletes
     // touch different rows, and a failure here must not undo the removal
     // (the domain is already gone from login matching). Log and continue.
-    let revoked = revoke_sessions_for_domain_users(store, org_id, &normalized).await;
-    let revoked_user_count = match revoked {
-        Ok(n) => n,
-        Err(e) => {
-            tracing::warn!(
-                error = %e,
-                org_id = %org_id,
-                domain = %normalized,
-                "Domain removed, but session revocation for matching users failed"
-            );
-            0
-        }
-    };
-    Ok(Some(DomainRemovalSummary { revoked_user_count }))
+    let (revoked_user_count, revocation_errored) =
+        match revoke_sessions_for_domain_users(store, org_id, &normalized).await {
+            Ok(n) => (n, false),
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    org_id = %org_id,
+                    domain = %normalized,
+                    "Domain removed, but session revocation for matching users failed"
+                );
+                (0, true)
+            }
+        };
+    Ok(Some(DomainRemovalSummary {
+        revoked_user_count,
+        revocation_errored,
+    }))
 }
 
 /// Revoke active sessions for every user in `org_id` whose email's domain
@@ -507,15 +521,15 @@ pub struct StaleDomainRemoval {
 /// Garbage-collect additional-domain entries that have outlived their TTL.
 ///
 /// Two categories are removed:
-/// - **Pending squat**: `verified == false` AND `verified_at.is_none()` AND
-///   `added_at` older than `pending_ttl`. Caps the cost of an admin who adds
-///   a domain they don't own and never publishes the TXT record.
-/// - **Auto-unverified drift**: `verified == false` AND `verified_at.is_some()`
-///   AND `last_checked_at` older than `unverified_ttl`. Gives the admin a
-///   grace period to fix DNS after a flip, then cleans up.
+/// - **Pending squat** ([`AdditionalDomainState::Pending`] with `added_at`
+///   older than `pending_ttl`): caps the cost of an admin who adds a domain
+///   they don't own and never publishes the TXT record.
+/// - **Auto-unverified drift** ([`AdditionalDomainState::Unverified`] whose
+///   `last_checked_at` is older than `unverified_ttl`): gives the admin a
+///   grace window to fix DNS after a flip, then cleans up.
 ///
-/// Verified entries are never removed by this function — they are owned by
-/// the admin and re-verification handles drift detection.
+/// [`AdditionalDomainState::Verified`] entries are never removed by this
+/// function — re-verification handles drift detection for them.
 ///
 /// Returns the list of removed entries so the caller can emit audit events.
 pub async fn cleanup_stale_additional_domains(
@@ -750,45 +764,54 @@ pub async fn record_recheck_result(
     };
 
     if !tx.compare_and_update(org_id, version, &data).await? {
-        // Lost a race against another writer; the next periodic tick will
-        // re-attempt, so swallow the conflict here.
+        // Lost a race against another writer (admin re-verify, concurrent
+        // cleanup tick, or remove). The DB state reflects the winning
+        // writer's change, not ours — so the in-memory `effect` value is
+        // stale and must not be reported. Returning `StillVerified` is
+        // correct: no flip was performed by THIS task. The audit event for
+        // any actual flip is fired by whichever writer's update succeeded.
         return Ok(RecheckEffect::StillVerified);
     }
     tx.commit().await?;
     Ok(effect)
 }
 
-/// Scan organization docs and return true if any *other* org has a pending
-/// additional-domain entry for `domain`.
+/// Scan organization docs and return the [`AdditionalDomainState`] of any
+/// non-verified claim another org holds on `domain`, or `None` if no conflict
+/// exists. Verified conflicts are skipped here — they're caught by the indexed
+/// `find_one` path in add/verify.
 ///
-/// Pending entries are not indexed, so we page through org documents and
-/// short-circuit on the first match.
-async fn find_pending_claim_in_other_org(
+/// Non-verified entries are not indexed, so we page through org documents and
+/// short-circuit on the first match. Returning the state directly lets the
+/// caller emit a message specific to Pending vs Unverified.
+async fn find_conflicting_claim_in_other_org(
     store: &DocumentStore,
     own_org_id: &str,
     domain: &str,
-) -> Result<bool> {
+) -> Result<Option<AdditionalDomainState>> {
     let mut cursor: Option<String> = None;
     loop {
         let (page, has_more) = store
             .list_all_paginated::<OrganizationDoc>(cursor.as_deref(), ORG_SCAN_PAGE_SIZE)
             .await?;
         if page.is_empty() {
-            return Ok(false);
+            return Ok(None);
         }
         let next_cursor = page.last().map(|d| d.id.clone());
         for org in &page {
             if org.id == own_org_id {
                 continue;
             }
-            if org.data.additional_domains.iter().any(|ad| {
-                ad.domain == domain && !matches!(ad.state, AdditionalDomainState::Verified { .. })
-            }) {
-                return Ok(true);
+            for ad in &org.data.additional_domains {
+                if ad.domain == domain
+                    && !matches!(ad.state, AdditionalDomainState::Verified { .. })
+                {
+                    return Ok(Some(ad.state.clone()));
+                }
             }
         }
         if !has_more {
-            return Ok(false);
+            return Ok(None);
         }
         cursor = next_cursor;
     }
@@ -1030,6 +1053,43 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("pending verification"));
+    }
+
+    #[tokio::test]
+    async fn add_additional_domain_rejects_auto_unverified_conflict_with_other_org() {
+        let store = fresh_store().await;
+        let other = create_organization(&store, "first.com", None, None)
+            .await
+            .unwrap();
+        add_additional_domain(&store, &other.id, "shared.example.com", "user-other")
+            .await
+            .unwrap();
+        mark_additional_domain_verified(&store, &other.id, "shared.example.com")
+            .await
+            .unwrap();
+        // Drive the entry to auto-unverified via consecutive failures.
+        for _ in 0..crate::db::UNVERIFY_FAILURE_THRESHOLD {
+            record_recheck_result(
+                &store,
+                &other.id,
+                "shared.example.com",
+                RecheckOutcome::Failure,
+            )
+            .await
+            .unwrap();
+        }
+
+        let mine = create_organization(&store, "second.com", None, None)
+            .await
+            .unwrap();
+        let err = add_additional_domain(&store, &mine.id, "shared.example.com", "user-mine")
+            .await
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("auto-unverified") && !msg.contains("pending verification"),
+            "expected auto-unverified-specific message, got: {msg}"
+        );
     }
 
     #[tokio::test]

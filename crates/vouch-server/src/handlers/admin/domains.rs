@@ -86,6 +86,13 @@ fn redirect_ok(msg: &str) -> Response {
     Redirect::to(&format!("{REDIRECT_BASE}?ok={encoded}")).into_response()
 }
 
+/// Build the rows shown on the admin domains page.
+///
+/// `row.domain` is interpolated directly into `/admin/domains/{domain}/...`
+/// action URLs in the template. That is safe without URL-encoding because
+/// every domain on the org has been through `normalize_domain`, which rejects
+/// anything outside `[a-z0-9.-]` — no `/`, `?`, `#`, `%`, or whitespace can
+/// reach the template.
 fn build_rows(org: &db::Organization) -> Vec<DomainRow> {
     let cap = org.additional_domains.len().saturating_add(1);
     let mut rows = Vec::with_capacity(cap);
@@ -321,11 +328,13 @@ pub async fn admin_remove_domain(
     match db::remove_additional_domain(&state.store, &org_id, &normalized).await {
         Ok(Some(summary)) => {
             let revoked = summary.revoked_user_count;
+            let errored = summary.revocation_errored;
             let data = serde_json::json!({
                 "action": "remove_org_domain",
                 "domain": normalized,
                 "admin_user_id": admin.id,
                 "revoked_user_session_count": revoked,
+                "revocation_errored": errored,
             });
             if let Err(e) = state
                 .audit
@@ -344,9 +353,14 @@ pub async fn admin_remove_domain(
                 org_id = %org_id,
                 domain = %normalized,
                 revoked_user_count = revoked,
+                revocation_errored = errored,
                 "Removed additional domain"
             );
-            let msg = if revoked == 0 {
+            let msg = if errored {
+                format!(
+                    "Removed {normalized}, but session revocation for matching users failed; check server logs and revoke manually."
+                )
+            } else if revoked == 0 {
                 format!("Removed {normalized}. No matching users had active sessions to revoke.")
             } else if revoked == 1 {
                 format!(

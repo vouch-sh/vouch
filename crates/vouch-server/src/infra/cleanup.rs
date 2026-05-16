@@ -36,7 +36,7 @@ const DOMAIN_RECHECK_CONCURRENCY: usize = 8;
 
 /// Total budget for one re-verification pass. Any domains not yet processed
 /// when this elapses are skipped and retried on the next cleanup tick.
-const DOMAIN_RECHECK_PASS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+const DOMAIN_RECHECK_PASS_TIMEOUT: std::time::Duration = std::time::Duration::from_mins(5);
 
 /// Pending additional-domain claims older than this are deleted by the
 /// cleanup task. Prevents squatting — admins can't pre-claim domains they
@@ -48,12 +48,12 @@ const PENDING_DOMAIN_TTL_DAYS: i64 = 7;
 /// re-verification flip before the entry is removed entirely.
 const UNVERIFIED_DOMAIN_TTL_DAYS: i64 = 14;
 
-/// Build a [`Span`] for the given number of days.
+/// Build a [`Span`] of `days` worth of hours.
 ///
-/// `jiff::Span` does not allow date-unit arithmetic on bare `Timestamp`, so
-/// we express day-scale retention windows as hours. Centralizing the
-/// conversion keeps `_TTL_DAYS` constants readable and prevents drift
-/// between call sites.
+/// Day-unit arithmetic on a bare `Timestamp` would require a time zone (DST
+/// can change a calendar day's duration), so we express day-scale retention
+/// windows as fixed-length hour spans. Centralizing the conversion keeps the
+/// `_TTL_DAYS` constants readable and prevents drift between call sites.
 fn days_to_span(days: i64) -> Span {
     Span::new().hours(days.saturating_mul(24))
 }

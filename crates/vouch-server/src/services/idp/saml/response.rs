@@ -929,6 +929,36 @@ mod tests {
         assert_eq!(domain, Some("custom.example.com".to_string()));
     }
 
+    /// Regression: mixed-case configured-attribute value must be lowercased
+    /// so org lookups (which match against the lowercase-stored primary or
+    /// additional domain) find the right org.
+    #[test]
+    fn domain_from_configured_attribute_is_lowercased() {
+        let xml = r##"<saml:Assertion xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion">
+  <saml:AttributeStatement>
+    <saml:Attribute Name="domain">
+      <saml:AttributeValue>CORP.Example.COM</saml:AttributeValue>
+    </saml:Attribute>
+  </saml:AttributeStatement>
+</saml:Assertion>"##;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let assertion = doc.root().children().find(|n| n.is_element()).unwrap();
+        let domain = extract_domain(assertion, Some("domain"), "user@example.com");
+        assert_eq!(domain, Some("corp.example.com".to_string()));
+    }
+
+    /// Regression: when falling back to the email domain, the extracted
+    /// domain must be lowercased.
+    #[test]
+    fn domain_from_email_fallback_is_lowercased() {
+        let xml = r##"<saml:Assertion xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion"/>
+        "##;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let assertion = doc.root().children().find(|n| n.is_element()).unwrap();
+        let domain = extract_domain(assertion, None, "Alice@CORP.Example.COM");
+        assert_eq!(domain, Some("corp.example.com".to_string()));
+    }
+
     // =========================================================================
     // Destination validation tests (via validate_saml_response)
     // =========================================================================
