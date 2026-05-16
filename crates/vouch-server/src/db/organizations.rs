@@ -205,6 +205,8 @@ pub async fn add_additional_domain(
         added_at: now,
         added_by_user_id: added_by_user_id.to_string(),
         verified_at: None,
+        last_checked_at: None,
+        consecutive_failures: 0,
     });
 
     if !tx.compare_and_update(org_id, version, &data).await? {
@@ -321,6 +323,134 @@ pub async fn remove_additional_domain(
     }
     tx.commit().await?;
     Ok(true)
+}
+
+/// A snapshot of one verified additional-domain entry, used by the
+/// re-verification task to drive its DNS checks without holding the org doc
+/// open while it waits on the network.
+#[derive(Debug, Clone)]
+pub struct VerifiedDomainRecord {
+    pub org_id: String,
+    pub domain: String,
+    pub verification_token: String,
+    pub last_checked_at: Option<Timestamp>,
+    pub consecutive_failures: u32,
+}
+
+/// Outcome of a single re-verification attempt for [`record_recheck_result`].
+#[derive(Debug, Clone, Copy)]
+pub enum RecheckOutcome {
+    /// TXT record observed and matched.
+    Success,
+    /// TXT record missing, did not match, or DNS lookup failed.
+    Failure,
+}
+
+/// Result of [`record_recheck_result`] — whether the entry was flipped to
+/// unverified after this attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecheckEffect {
+    /// Counters updated, entry still verified.
+    StillVerified,
+    /// Consecutive-failure threshold reached; entry flipped to unverified.
+    FlippedToUnverified,
+    /// Entry was no longer present (removed or already unverified externally).
+    NotFound,
+}
+
+/// List every verified additional domain across all organizations.
+///
+/// Used by the background re-verification task. Returned records are snapshots
+/// — by the time the caller acts on one the underlying entry may have been
+/// modified, which is fine because [`record_recheck_result`] is a no-op when
+/// the entry no longer matches.
+pub async fn list_all_verified_additional_domains(
+    store: &DocumentStore,
+) -> Result<Vec<VerifiedDomainRecord>> {
+    let orgs = store.list_all::<OrganizationDoc>().await?;
+    let mut out = Vec::new();
+    for org in orgs {
+        for ad in &org.data.additional_domains {
+            if ad.verified {
+                out.push(VerifiedDomainRecord {
+                    org_id: org.id.clone(),
+                    domain: ad.domain.clone(),
+                    verification_token: ad.verification_token.clone(),
+                    last_checked_at: ad.last_checked_at,
+                    consecutive_failures: ad.consecutive_failures,
+                });
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Record the result of a background re-verification attempt.
+///
+/// On `Success`, resets the failure counter and stamps `last_checked_at`. On
+/// `Failure`, increments the counter. When the counter reaches
+/// [`UNVERIFY_FAILURE_THRESHOLD`] the entry is flipped to unverified — which
+/// also drops it from the document's index entries so it stops matching new
+/// logins.
+///
+/// Returns [`RecheckEffect::NotFound`] if the entry has been removed or is
+/// already unverified, so callers can stop tracking it.
+pub async fn record_recheck_result(
+    store: &DocumentStore,
+    org_id: &str,
+    domain: &str,
+    outcome: RecheckOutcome,
+) -> Result<RecheckEffect> {
+    let normalized = normalize_domain(domain)?;
+
+    let mut tx = store.begin().await?;
+    let Some(org_doc) = tx.get::<OrganizationDoc>(org_id).await? else {
+        return Ok(RecheckEffect::NotFound);
+    };
+    let version = org_doc.version;
+    let mut data = org_doc.data;
+
+    let Some(entry) = data
+        .additional_domains
+        .iter_mut()
+        .find(|ad| ad.domain == normalized)
+    else {
+        return Ok(RecheckEffect::NotFound);
+    };
+
+    if !entry.verified {
+        return Ok(RecheckEffect::NotFound);
+    }
+
+    let now = Timestamp::now();
+    entry.last_checked_at = Some(now);
+
+    let effect = match outcome {
+        RecheckOutcome::Success => {
+            entry.consecutive_failures = 0;
+            RecheckEffect::StillVerified
+        }
+        RecheckOutcome::Failure => {
+            entry.consecutive_failures = entry.consecutive_failures.saturating_add(1);
+            if entry.consecutive_failures
+                >= crate::db::documents::organization::UNVERIFY_FAILURE_THRESHOLD
+            {
+                entry.verified = false;
+                entry.consecutive_failures = 0;
+                RecheckEffect::FlippedToUnverified
+            } else {
+                RecheckEffect::StillVerified
+            }
+        }
+    };
+
+    if !tx.compare_and_update(org_id, version, &data).await? {
+        // Lost a race against another writer; the next periodic tick will
+        // re-attempt, so swallow the conflict here.
+        return Ok(RecheckEffect::StillVerified);
+    }
+    tx.commit().await?;
+    Ok(effect)
 }
 
 /// Scan organization docs and return true if any *other* org has a pending
@@ -580,6 +710,109 @@ mod tests {
             .await
             .unwrap();
         assert!(found.is_none());
+    }
+
+    #[tokio::test]
+    async fn list_all_verified_returns_only_verified_entries() {
+        let store = fresh_store().await;
+        let org = create_organization(&store, "acme.com", None, None)
+            .await
+            .unwrap();
+        add_additional_domain(&store, &org.id, "acme.co.uk", "u1")
+            .await
+            .unwrap();
+        add_additional_domain(&store, &org.id, "acme.eu", "u1")
+            .await
+            .unwrap();
+        mark_additional_domain_verified(&store, &org.id, "acme.co.uk")
+            .await
+            .unwrap();
+
+        let listed = list_all_verified_additional_domains(&store).await.unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].domain, "acme.co.uk");
+        assert_eq!(listed[0].consecutive_failures, 0);
+    }
+
+    #[tokio::test]
+    async fn recheck_success_resets_failures_and_stamps_last_checked() {
+        let store = fresh_store().await;
+        let org = create_organization(&store, "acme.com", None, None)
+            .await
+            .unwrap();
+        add_additional_domain(&store, &org.id, "acme.co.uk", "u1")
+            .await
+            .unwrap();
+        mark_additional_domain_verified(&store, &org.id, "acme.co.uk")
+            .await
+            .unwrap();
+
+        // Two failures, then a success — counter must reset.
+        record_recheck_result(&store, &org.id, "acme.co.uk", RecheckOutcome::Failure)
+            .await
+            .unwrap();
+        record_recheck_result(&store, &org.id, "acme.co.uk", RecheckOutcome::Failure)
+            .await
+            .unwrap();
+
+        let effect = record_recheck_result(&store, &org.id, "acme.co.uk", RecheckOutcome::Success)
+            .await
+            .unwrap();
+        assert_eq!(effect, RecheckEffect::StillVerified);
+
+        let list = list_additional_domains(&store, &org.id).await.unwrap();
+        assert!(list[0].verified);
+        assert_eq!(list[0].consecutive_failures, 0);
+        assert!(list[0].last_checked_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn recheck_flips_to_unverified_at_threshold() {
+        let store = fresh_store().await;
+        let org = create_organization(&store, "acme.com", None, None)
+            .await
+            .unwrap();
+        add_additional_domain(&store, &org.id, "acme.co.uk", "u1")
+            .await
+            .unwrap();
+        mark_additional_domain_verified(&store, &org.id, "acme.co.uk")
+            .await
+            .unwrap();
+
+        let mut last_effect = RecheckEffect::StillVerified;
+        for _ in 0..crate::db::UNVERIFY_FAILURE_THRESHOLD {
+            last_effect =
+                record_recheck_result(&store, &org.id, "acme.co.uk", RecheckOutcome::Failure)
+                    .await
+                    .unwrap();
+        }
+        assert_eq!(last_effect, RecheckEffect::FlippedToUnverified);
+
+        let list = list_additional_domains(&store, &org.id).await.unwrap();
+        assert!(!list[0].verified, "entry must be flipped to unverified");
+
+        // No longer indexed.
+        let found = store
+            .find_one::<crate::db::documents::organization::OrganizationDoc>("domain", "acme.co.uk")
+            .await
+            .unwrap();
+        assert!(
+            found.is_none(),
+            "unverified domain must drop out of the index"
+        );
+    }
+
+    #[tokio::test]
+    async fn recheck_unknown_domain_returns_not_found() {
+        let store = fresh_store().await;
+        let org = create_organization(&store, "acme.com", None, None)
+            .await
+            .unwrap();
+        let effect =
+            record_recheck_result(&store, &org.id, "ghost.example", RecheckOutcome::Failure)
+                .await
+                .unwrap();
+        assert_eq!(effect, RecheckEffect::NotFound);
     }
 
     #[tokio::test]

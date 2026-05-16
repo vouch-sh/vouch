@@ -35,7 +35,19 @@ pub struct AdditionalDomain {
     pub added_by_user_id: String,
     #[serde(default)]
     pub verified_at: Option<Timestamp>,
+    /// Last time the background re-verification task checked this domain.
+    /// `None` means it has never been re-checked since the initial verification.
+    #[serde(default)]
+    pub last_checked_at: Option<Timestamp>,
+    /// Consecutive re-verification failures. Reset to 0 on a successful check.
+    /// At [`UNVERIFY_FAILURE_THRESHOLD`] the entry flips to unverified.
+    #[serde(default)]
+    pub consecutive_failures: u32,
 }
+
+/// Number of consecutive failed re-verifications before an entry is flipped
+/// back to unverified.
+pub const UNVERIFY_FAILURE_THRESHOLD: u32 = 3;
 
 impl DocumentType for OrganizationDoc {
     const DOC_TYPE: &'static str = "organization";

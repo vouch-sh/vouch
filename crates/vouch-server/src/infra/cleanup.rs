@@ -15,9 +15,17 @@
 use crate::db;
 use crate::db::audit::AuditStore;
 use crate::db::store::DocumentStore;
+use crate::infra::dns;
 use aws_lc_rs::rand as aws_rand;
 use jiff::{Span, Timestamp};
 use tokio::task::JoinHandle;
+
+/// Minimum gap between consecutive DNS re-checks for the same domain.
+///
+/// Re-verification is best-effort drift detection, not real-time enforcement —
+/// 24 hours is enough to notice a missing TXT well before it matters, while
+/// keeping DNS load proportional to the number of verified domains.
+const DOMAIN_RECHECK_MIN_INTERVAL_HOURS: i64 = 24;
 
 /// Compute a retention cutoff timestamp by subtracting days from now.
 ///
@@ -227,7 +235,89 @@ pub async fn run_cleanup(
     // Clean up expired JWKS cache entries (standalone cache docs)
     cleanup_and_log!(db::delete_expired_jwks_caches(store), "expired JWKS caches");
 
+    // Re-verify organization additional domains.
+    if let Err(e) = recheck_additional_domains(store, audit, now).await {
+        tracing::warn!(error = %e, "Additional-domain re-verification pass failed");
+    }
+
     tracing::debug!("Background cleanup tasks complete");
+}
+
+/// Re-verify the DNS TXT ownership of every verified additional domain.
+///
+/// Skips domains that were checked within the last
+/// [`DOMAIN_RECHECK_MIN_INTERVAL_HOURS`]. After
+/// [`db::UNVERIFY_FAILURE_THRESHOLD`] consecutive failures the entry is
+/// flipped to unverified, which immediately drops it from the document's
+/// index entries so new logins from that domain no longer attach to the org.
+///
+/// Existing users keep their `org_id`; only future logins stop matching.
+async fn recheck_additional_domains(
+    store: &DocumentStore,
+    audit: &AuditStore,
+    now: Timestamp,
+) -> anyhow::Result<()> {
+    let records = db::list_all_verified_additional_domains(store).await?;
+    if records.is_empty() {
+        return Ok(());
+    }
+
+    let cutoff = now
+        .checked_sub(Span::new().hours(DOMAIN_RECHECK_MIN_INTERVAL_HOURS))
+        .map_err(|e| anyhow::anyhow!("recheck cutoff overflow: {e}"))?;
+
+    for rec in records {
+        // Skip domains that were re-checked recently.
+        if rec.last_checked_at.is_some_and(|ts| ts > cutoff) {
+            continue;
+        }
+
+        let outcome = match dns::verify_txt_record(&rec.domain, &rec.verification_token).await {
+            Ok(true) => db::RecheckOutcome::Success,
+            Ok(false) => db::RecheckOutcome::Failure,
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    domain = %rec.domain,
+                    org_id = %rec.org_id,
+                    "DNS re-verification lookup failed; treating as failure"
+                );
+                db::RecheckOutcome::Failure
+            }
+        };
+
+        match db::record_recheck_result(store, &rec.org_id, &rec.domain, outcome).await {
+            Ok(db::RecheckEffect::FlippedToUnverified) => {
+                tracing::warn!(
+                    domain = %rec.domain,
+                    org_id = %rec.org_id,
+                    "Additional domain flipped to unverified after repeated DNS failures"
+                );
+                let data = serde_json::json!({
+                    "action": "auto_unverify_org_domain",
+                    "domain": rec.domain,
+                    "org_id": rec.org_id,
+                    "reason": "consecutive_dns_recheck_failures",
+                });
+                if let Err(e) = audit
+                    .insert_event("org_domain_unverified", None, None, &data.to_string())
+                    .await
+                {
+                    tracing::warn!(error = %e, "failed to write org_domain_unverified audit event");
+                }
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    domain = %rec.domain,
+                    org_id = %rec.org_id,
+                    "Failed to record domain re-verification result"
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
