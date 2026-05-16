@@ -75,7 +75,8 @@ pub use authenticators::{
 pub use documents::organization::{AdditionalDomain, UNVERIFY_FAILURE_THRESHOLD};
 pub use organizations::{
     AddedDomain, MAX_ADDITIONAL_DOMAINS, Organization, RecheckEffect, RecheckOutcome,
-    VerifiedDomainRecord, add_additional_domain, delete_organization, get_organization,
+    StaleDomainRemoval, VerifiedDomainRecord, add_additional_domain,
+    cleanup_stale_additional_domains, delete_organization, get_organization,
     get_organization_domain, get_pending_verification_token, list_additional_domains,
     list_all_verified_additional_domains, mark_additional_domain_verified, normalize_domain,
     record_recheck_result, remove_additional_domain,

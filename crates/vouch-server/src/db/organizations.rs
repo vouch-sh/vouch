@@ -325,6 +325,90 @@ pub async fn remove_additional_domain(
     Ok(true)
 }
 
+/// An additional-domain entry the cleanup task decided to remove.
+#[derive(Debug, Clone)]
+pub struct StaleDomainRemoval {
+    pub org_id: String,
+    pub domain: String,
+    /// True when the entry was never verified (squatted pending claim).
+    /// False when the entry was verified at some point but later flipped
+    /// back to unverified by re-verification failure.
+    pub never_verified: bool,
+}
+
+/// Garbage-collect additional-domain entries that have outlived their TTL.
+///
+/// Two categories are removed:
+/// - **Pending squat**: `verified == false` AND `verified_at.is_none()` AND
+///   `added_at` older than `pending_ttl`. Caps the cost of an admin who adds
+///   a domain they don't own and never publishes the TXT record.
+/// - **Auto-unverified drift**: `verified == false` AND `verified_at.is_some()`
+///   AND `last_checked_at` older than `unverified_ttl`. Gives the admin a
+///   grace period to fix DNS after a flip, then cleans up.
+///
+/// Verified entries are never removed by this function — they are owned by
+/// the admin and re-verification handles drift detection.
+///
+/// Returns the list of removed entries so the caller can emit audit events.
+pub async fn cleanup_stale_additional_domains(
+    store: &DocumentStore,
+    now: Timestamp,
+    pending_ttl: jiff::Span,
+    unverified_ttl: jiff::Span,
+) -> Result<Vec<StaleDomainRemoval>> {
+    let pending_cutoff = now
+        .checked_sub(pending_ttl)
+        .map_err(|e| anyhow::anyhow!("pending TTL cutoff overflow: {e}"))?;
+    let unverified_cutoff = now
+        .checked_sub(unverified_ttl)
+        .map_err(|e| anyhow::anyhow!("unverified TTL cutoff overflow: {e}"))?;
+
+    let orgs = store.list_all::<OrganizationDoc>().await?;
+    let mut removed = Vec::new();
+
+    for org in orgs {
+        let mut to_remove: Vec<(String, bool)> = Vec::new();
+        for ad in &org.data.additional_domains {
+            if ad.verified {
+                continue;
+            }
+            if ad.verified_at.is_none() {
+                if ad.added_at < pending_cutoff {
+                    to_remove.push((ad.domain.clone(), true));
+                }
+            } else {
+                // Was verified, then flipped. last_checked_at is the
+                // moment of the failing recheck that caused the flip.
+                let reference = ad.last_checked_at.unwrap_or(ad.added_at);
+                if reference < unverified_cutoff {
+                    to_remove.push((ad.domain.clone(), false));
+                }
+            }
+        }
+        if to_remove.is_empty() {
+            continue;
+        }
+        let domains_to_drop: std::collections::HashSet<String> =
+            to_remove.iter().map(|(d, _)| d.clone()).collect();
+        let updated = store
+            .modify::<OrganizationDoc, _>(&org.id, |doc| {
+                doc.additional_domains
+                    .retain(|ad| !domains_to_drop.contains(&ad.domain));
+            })
+            .await?;
+        if updated {
+            for (domain, never_verified) in to_remove {
+                removed.push(StaleDomainRemoval {
+                    org_id: org.id.clone(),
+                    domain,
+                    never_verified,
+                });
+            }
+        }
+    }
+    Ok(removed)
+}
+
 /// A snapshot of one verified additional-domain entry, used by the
 /// re-verification task to drive its DNS checks without holding the org doc
 /// open while it waits on the network.
@@ -799,6 +883,165 @@ mod tests {
         assert!(
             found.is_none(),
             "unverified domain must drop out of the index"
+        );
+    }
+
+    #[tokio::test]
+    async fn cleanup_removes_old_pending_squat() {
+        use super::super::document_type::DocumentType;
+        use super::super::documents::organization::OrganizationDoc;
+
+        let store = fresh_store().await;
+        let org = create_organization(&store, "acme.com", None, None)
+            .await
+            .unwrap();
+
+        // Insert a stale pending entry directly (added 10 days ago, never verified).
+        let stale_added = jiff::Timestamp::now()
+            .checked_sub(jiff::Span::new().hours(10 * 24))
+            .unwrap();
+        let mut doc = store
+            .get::<OrganizationDoc>(&org.id)
+            .await
+            .unwrap()
+            .unwrap();
+        doc.data.additional_domains.push(AdditionalDomain {
+            domain: "squatted.example".to_string(),
+            verification_token: "tok".to_string(),
+            verified: false,
+            added_at: stale_added,
+            added_by_user_id: "u1".to_string(),
+            verified_at: None,
+            last_checked_at: None,
+            consecutive_failures: 0,
+        });
+        // Sanity: doc_type matches.
+        assert_eq!(<OrganizationDoc as DocumentType>::DOC_TYPE, "organization");
+        store.update(&org.id, &doc.data).await.unwrap();
+
+        let removed = cleanup_stale_additional_domains(
+            &store,
+            jiff::Timestamp::now(),
+            jiff::Span::new().hours(7 * 24),
+            jiff::Span::new().hours(14 * 24),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(removed.len(), 1);
+        assert_eq!(removed[0].domain, "squatted.example");
+        assert!(removed[0].never_verified);
+        assert!(
+            list_additional_domains(&store, &org.id)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn cleanup_keeps_fresh_pending() {
+        let store = fresh_store().await;
+        let org = create_organization(&store, "acme.com", None, None)
+            .await
+            .unwrap();
+        add_additional_domain(&store, &org.id, "fresh.example", "u1")
+            .await
+            .unwrap();
+
+        let removed = cleanup_stale_additional_domains(
+            &store,
+            jiff::Timestamp::now(),
+            jiff::Span::new().hours(7 * 24),
+            jiff::Span::new().hours(14 * 24),
+        )
+        .await
+        .unwrap();
+        assert!(removed.is_empty());
+        assert_eq!(
+            list_additional_domains(&store, &org.id)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn cleanup_removes_old_auto_unverified() {
+        use super::super::documents::organization::OrganizationDoc;
+
+        let store = fresh_store().await;
+        let org = create_organization(&store, "acme.com", None, None)
+            .await
+            .unwrap();
+
+        // Insert an entry that was once verified then flipped, with a
+        // last_checked_at older than the unverified TTL.
+        let old_verified_at = jiff::Timestamp::now()
+            .checked_sub(jiff::Span::new().hours(30 * 24))
+            .unwrap();
+        let old_check = jiff::Timestamp::now()
+            .checked_sub(jiff::Span::new().hours(20 * 24))
+            .unwrap();
+        let mut doc = store
+            .get::<OrganizationDoc>(&org.id)
+            .await
+            .unwrap()
+            .unwrap();
+        doc.data.additional_domains.push(AdditionalDomain {
+            domain: "drifted.example".to_string(),
+            verification_token: "tok".to_string(),
+            verified: false,
+            added_at: old_verified_at,
+            added_by_user_id: "u1".to_string(),
+            verified_at: Some(old_verified_at),
+            last_checked_at: Some(old_check),
+            consecutive_failures: 0,
+        });
+        store.update(&org.id, &doc.data).await.unwrap();
+
+        let removed = cleanup_stale_additional_domains(
+            &store,
+            jiff::Timestamp::now(),
+            jiff::Span::new().hours(7 * 24),
+            jiff::Span::new().hours(14 * 24),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(removed.len(), 1);
+        assert!(!removed[0].never_verified);
+    }
+
+    #[tokio::test]
+    async fn cleanup_keeps_verified_entries() {
+        let store = fresh_store().await;
+        let org = create_organization(&store, "acme.com", None, None)
+            .await
+            .unwrap();
+        add_additional_domain(&store, &org.id, "acme.co.uk", "u1")
+            .await
+            .unwrap();
+        mark_additional_domain_verified(&store, &org.id, "acme.co.uk")
+            .await
+            .unwrap();
+
+        let removed = cleanup_stale_additional_domains(
+            &store,
+            jiff::Timestamp::now(),
+            jiff::Span::new().hours(1), // aggressive TTL — verified must still be kept
+            jiff::Span::new().hours(1),
+        )
+        .await
+        .unwrap();
+        assert!(removed.is_empty());
+        assert_eq!(
+            list_additional_domains(&store, &org.id)
+                .await
+                .unwrap()
+                .len(),
+            1
         );
     }
 

@@ -27,6 +27,16 @@ use tokio::task::JoinHandle;
 /// keeping DNS load proportional to the number of verified domains.
 const DOMAIN_RECHECK_MIN_INTERVAL_HOURS: i64 = 24;
 
+/// Pending additional-domain claims older than this are deleted by the
+/// cleanup task. Prevents squatting — admins can't pre-claim domains they
+/// never intend to verify and tie up their org's 10-domain cap.
+const PENDING_DOMAIN_TTL_DAYS: i64 = 7;
+
+/// Auto-unverified additional-domain entries older than this are deleted by
+/// the cleanup task. Gives the admin a grace window to fix DNS after a
+/// re-verification flip before the entry is removed entirely.
+const UNVERIFIED_DOMAIN_TTL_DAYS: i64 = 14;
+
 /// Compute a retention cutoff timestamp by subtracting days from now.
 ///
 /// `jiff::Timestamp` only supports time-based units, so we convert days to hours.
@@ -240,7 +250,56 @@ pub async fn run_cleanup(
         tracing::warn!(error = %e, "Additional-domain re-verification pass failed");
     }
 
+    // Garbage-collect pending and auto-unverified additional domains.
+    if let Err(e) = gc_stale_additional_domains(store, audit, now).await {
+        tracing::warn!(error = %e, "Additional-domain GC pass failed");
+    }
+
     tracing::debug!("Background cleanup tasks complete");
+}
+
+/// Delete additional-domain entries whose TTL has elapsed.
+///
+/// See [`PENDING_DOMAIN_TTL_DAYS`] and [`UNVERIFIED_DOMAIN_TTL_DAYS`]. Emits
+/// an `org_domain_expired` audit event for each removal so admins can see
+/// what disappeared and why.
+async fn gc_stale_additional_domains(
+    store: &DocumentStore,
+    audit: &AuditStore,
+    now: Timestamp,
+) -> anyhow::Result<()> {
+    let pending_ttl = Span::new().hours(PENDING_DOMAIN_TTL_DAYS.saturating_mul(24));
+    let unverified_ttl = Span::new().hours(UNVERIFIED_DOMAIN_TTL_DAYS.saturating_mul(24));
+
+    let removed =
+        db::cleanup_stale_additional_domains(store, now, pending_ttl, unverified_ttl).await?;
+
+    for r in removed {
+        let reason = if r.never_verified {
+            "pending_ttl_expired"
+        } else {
+            "unverified_ttl_expired"
+        };
+        tracing::info!(
+            domain = %r.domain,
+            org_id = %r.org_id,
+            reason,
+            "Removed stale additional-domain entry"
+        );
+        let data = serde_json::json!({
+            "action": "expire_org_domain",
+            "domain": r.domain,
+            "org_id": r.org_id,
+            "reason": reason,
+        });
+        if let Err(e) = audit
+            .insert_event("org_domain_expired", None, None, &data.to_string())
+            .await
+        {
+            tracing::warn!(error = %e, "failed to write org_domain_expired audit event");
+        }
+    }
+    Ok(())
 }
 
 /// Re-verify the DNS TXT ownership of every verified additional domain.
