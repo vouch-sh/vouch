@@ -44,7 +44,9 @@ flate2 = { workspace = true }
 governor = { workspace = true, features = ["std"] }
 headers = { workspace = true }
 hex = { workspace = true, features = ["std"] }
+hickory-resolver = { workspace = true, features = ["system-config"] }
 http = { workspace = true }
+idna = { workspace = true }
 ipnet = { workspace = true, features = ["std"] }
 jiff = { workspace = true, features = ["std", "serde", "tz-system"] }
 jsonwebtoken = { workspace = true, features = ["aws_lc_rs"] }

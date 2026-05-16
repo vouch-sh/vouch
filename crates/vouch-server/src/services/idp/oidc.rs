@@ -209,11 +209,14 @@ pub(crate) async fn verify_id_token(
     // - Google with `hd` claim: use it (Workspace hosted domain).
     // - Google without `hd`: None (consumer account, don't group).
     // - Non-Google: extract domain from the email address.
+    //
+    // Normalize to ASCII lowercase so that org lookups match regardless of
+    // the case the IdP returned. Org domains are stored lowercase.
     let is_google = provider.issuer.contains("accounts.google.com");
     let domain = if is_google {
-        claims.hd
+        claims.hd.as_deref().map(str::to_ascii_lowercase)
     } else {
-        claims.email.split('@').nth(1).map(str::to_string)
+        claims.email.split('@').nth(1).map(str::to_ascii_lowercase)
     };
 
     Ok(IdentityResult {
@@ -831,6 +834,75 @@ mod tests {
             result.domain.as_deref(),
             Some("example.com"),
             "non-Google issuer should fall back to email domain"
+        );
+    }
+
+    /// Regression: mixed-case `hd` claim must be lowercased so org lookups
+    /// (which match against the lowercase-stored primary/additional domain)
+    /// find the right org. Removing the `.to_ascii_lowercase()` call would
+    /// silently break login for IdPs that return uppercase domain parts.
+    #[tokio::test]
+    async fn verify_id_token_lowercases_mixed_case_hd_claim() {
+        use wiremock::MockServer;
+
+        let server = MockServer::start().await;
+        let google_issuer = "https://accounts.google.com";
+        let client_id = "test-client";
+        let nonce = "test-nonce";
+
+        let key = crate::services::oidc::OidcSigningKey::generate().unwrap();
+        mount_jwks(&server, &key).await;
+
+        let mut claims = base_claims(google_issuer, client_id);
+        claims["nonce"] = serde_json::json!(nonce);
+        claims["hd"] = serde_json::json!("ACME.COM");
+
+        let token = sign_test_jwt(&key, claims).await;
+        let mut provider = make_test_provider(google_issuer);
+        provider.jwks_uri = url::Url::parse(&format!("{}/jwks", server.uri())).unwrap();
+        let client = reqwest::Client::new();
+
+        let result = verify_id_token(&client, &provider, &token, client_id, nonce)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            result.domain.as_deref(),
+            Some("acme.com"),
+            "uppercase hd claim must be normalized to lowercase",
+        );
+    }
+
+    /// Regression: when falling back to the email domain for non-Google
+    /// issuers, the extracted domain must be lowercased.
+    #[tokio::test]
+    async fn verify_id_token_lowercases_email_domain_fallback() {
+        use wiremock::MockServer;
+
+        let server = MockServer::start().await;
+        let issuer = server.uri();
+        let client_id = "test-client";
+        let nonce = "test-nonce";
+
+        let key = crate::services::oidc::OidcSigningKey::generate().unwrap();
+        mount_jwks(&server, &key).await;
+
+        let mut claims = base_claims(&issuer, client_id);
+        claims["nonce"] = serde_json::json!(nonce);
+        claims["email"] = serde_json::json!("Alice@CORP.Example.COM");
+
+        let token = sign_test_jwt(&key, claims).await;
+        let provider = make_test_provider(&issuer);
+        let client = reqwest::Client::new();
+
+        let result = verify_id_token(&client, &provider, &token, client_id, nonce)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            result.domain.as_deref(),
+            Some("corp.example.com"),
+            "email-fallback domain must be normalized to lowercase",
         );
     }
 
