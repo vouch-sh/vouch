@@ -1,17 +1,4 @@
 {
-  "enabledPlugins": {
-    "rust-agents@claude-rust-agents": true,
-    "rust-analyzer-lsp@claude-plugins-official": true,
-    "context7@claude-plugins-official": true
-  },
-  "extraKnownMarketplaces": {
-    "claude-rust-agents": {
-      "source": {
-        "source": "github",
-        "repo": "bug-ops/claude-plugins"
-      }
-    }
-  },
   "env": {
     "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1"
   },
@@ -30,5 +17,18 @@
         ]
       }
     ]
+  },
+  "enabledPlugins": {
+    "rust-agents@claude-rust-agents": true,
+    "rust-analyzer-lsp@claude-plugins-official": true,
+    "context7@claude-plugins-official": true
+  },
+  "extraKnownMarketplaces": {
+    "claude-rust-agents": {
+      "source": {
+        "source": "github",
+        "repo": "bug-ops/claude-plugins"
+      }
+    }
   }
 }
