@@ -183,7 +183,7 @@ The server polls S3 at the configured interval and detects changes via ETag comp
 
 Non-hot-reloadable fields include: `jwt_secret`, `database_url`, `listen_addr`, `rp_id`, `rp_name`, `session_hours`, `cors_origins`, `allowed_domains`, `dpop.*`, `idps[]`, GitHub App settings, SSH CA key, OIDC signing keys, and all KMS key IDs.
 
-> **Legacy blocks rejected at startup:** The previous top-level `oidc` and `saml` blocks (single-IdP nested objects) cause an immediate startup error. Migrate them into entries inside the `idps` array. See [IdP Overview](../idp/overview.md#migration-from-legacy-variables) for the field-by-field mapping.
+> **Legacy blocks silently ignored:** The previous top-level `oidc` and `saml` blocks (single-IdP nested objects) are no longer read by the server. They configure nothing; only entries inside the `idps` array are honored. See [IdP Overview](../idp/overview.md#migration-from-legacy-variables) for the field-by-field mapping.
 
 Changes to non-hot-reloadable fields in S3 are silently ignored. A server restart is required to apply them.
 

@@ -223,20 +223,6 @@ impl S3IdpEntry {
     }
 }
 
-/// Sentinel for legacy `oidc` block detection — presence is a startup error.
-#[derive(Debug, Deserialize, Default)]
-pub struct S3LegacyOidcSentinel {
-    #[serde(flatten)]
-    _ignored: serde_json::Value,
-}
-
-/// Sentinel for legacy `saml` block detection — presence is a startup error.
-#[derive(Debug, Deserialize, Default)]
-pub struct S3LegacySamlSentinel {
-    #[serde(flatten)]
-    _ignored: serde_json::Value,
-}
-
 /// Nested DPoP configuration from S3.
 #[derive(Debug, Deserialize, Default)]
 pub struct S3DpopConfig {
@@ -307,13 +293,6 @@ pub struct S3Config {
     /// Ordered IdP list. Each entry carries `type: "oidc" | "saml"`, `id`, and
     /// type-specific fields. Order controls login-page button order.
     pub idps: Option<Vec<S3IdpEntry>>,
-
-    // Legacy single-provider blocks — both cause startup failure if present
-    // (operators must migrate to `idps`).
-    /// Legacy single-OIDC block. No longer supported; presence = startup error.
-    pub oidc: Option<S3LegacyOidcSentinel>,
-    /// Legacy single-SAML block. No longer supported; presence = startup error.
-    pub saml: Option<S3LegacySamlSentinel>,
 
     // TLS configuration
     /// Nested TLS config.
@@ -421,8 +400,6 @@ impl std::fmt::Debug for S3Config {
             .field("jwt_secret", &"[REDACTED]")
             .field("session_hours", &self.session_hours)
             .field("idps", &self.idps)
-            .field("legacy_oidc_present", &self.oidc.is_some())
-            .field("legacy_saml_present", &self.saml.is_some())
             .field("tls", &self.tls)
             .field("acme", &self.acme)
             .field("allowed_domains", &self.allowed_domains)
@@ -795,24 +772,9 @@ impl ServerConfig {
             self.session_hours = v;
         }
 
-        // Legacy single-provider blocks: both are hard-cut to a startup error.
-        // Operators must migrate to the unified `idps` array.
-        if s3.oidc.is_some() {
-            anyhow::bail!(
-                "S3 config 'oidc' block is no longer supported. \
-                 Migrate to the 'idps' array with type=\"oidc\" entries. \
-                 See the migration guide for details."
-            );
-        }
-        if s3.saml.is_some() {
-            anyhow::bail!(
-                "S3 config 'saml' block is no longer supported. \
-                 Migrate to the 'idps' array with a type=\"saml\" entry. \
-                 See the migration guide for details."
-            );
-        }
-
-        // Unified IdP list (OIDC + SAML).
+        // Unified IdP list (OIDC + SAML). Any legacy single-provider blocks
+        // (`oidc` / `saml`) in the JSON are silently ignored by serde because
+        // there are no struct fields to deserialize into.
         if let Some(idps) = &s3.idps {
             self.idps = idps
                 .iter()
@@ -1013,54 +975,25 @@ mod tests {
     }
 
     #[test]
-    fn test_merge_s3_config_legacy_oidc_block_fails() {
-        // The legacy S3 `oidc` block must cause a startup error — migrate to `idps`.
-        let json = r#"{ "oidc": { "issuer_url": "https://x", "client_id": "y" } }"#;
+    fn test_merge_s3_config_legacy_oidc_and_saml_blocks_silently_ignored() {
+        // Legacy single-provider `oidc` / `saml` blocks in the S3 JSON are
+        // silently ignored: serde drops unknown top-level fields, the merge
+        // succeeds, and the existing `idps` on the config remain unchanged.
+        let json = r#"{
+            "oidc": { "issuer_url": "https://x", "client_id": "y" },
+            "saml": { "idp_metadata_url": "https://z" }
+        }"#;
         let s3: S3Config = serde_json::from_str(json).expect("parse");
         let mut config = crate::test_utils::test_config();
+        let original_idp_count = config.idps.len();
 
-        let result = config.merge_s3_config(&s3, false);
-        assert!(
-            result.is_err(),
-            "legacy S3 oidc block must be a startup error, got Ok"
-        );
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("no longer supported"),
-            "error must mention 'no longer supported'"
-        );
-    }
+        config.merge_s3_config(&s3, false).unwrap();
 
-    #[test]
-    fn test_merge_s3_config_legacy_saml_block_fails() {
-        // The legacy S3 `saml` block must cause a startup error — migrate to `idps`.
-        let json = r#"{ "saml": { "idp_metadata_url": "https://x" } }"#;
-        let s3: S3Config = serde_json::from_str(json).expect("parse");
-        let mut config = crate::test_utils::test_config();
-
-        let result = config.merge_s3_config(&s3, false);
-        assert!(
-            result.is_err(),
-            "legacy S3 saml block must be a startup error, got Ok"
+        assert_eq!(
+            config.idps.len(),
+            original_idp_count,
+            "legacy blocks must not alter the idps list"
         );
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("no longer supported"),
-            "error must mention 'no longer supported'"
-        );
-    }
-
-    #[test]
-    fn test_merge_s3_config_legacy_block_runtime_update_skipped() {
-        // Runtime updates skip the IdP block checks (early-return).
-        let json = r#"{ "oidc": { "issuer_url": "https://x" } }"#;
-        let s3: S3Config = serde_json::from_str(json).expect("parse");
-        let mut config = crate::test_utils::test_config();
-        config.merge_s3_config(&s3, true).unwrap();
     }
 
     #[test]
@@ -1152,6 +1085,7 @@ mod tests {
 
     #[test]
     fn test_s3_config_deserialization() {
+        // Legacy top-level `oidc` block is unknown to serde and silently dropped.
         let json = r#"{
             "version": 1,
             "rp_id": "vouch.example.com",
@@ -1172,8 +1106,11 @@ mod tests {
         assert_eq!(config.version, Some(1));
         assert_eq!(config.rp_id, Some("vouch.example.com".to_string()));
         assert_eq!(config.session_hours, Some(12));
-        assert!(config.oidc.is_some());
         assert!(config.tls.is_some());
+        assert!(
+            config.idps.is_none(),
+            "legacy 'oidc' block must not populate the new 'idps' field"
+        );
         assert_eq!(
             config.allowed_domains,
             Some(vec!["example.com".to_string(), "test.com".to_string()])

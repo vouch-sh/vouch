@@ -45,8 +45,8 @@
 - Ensure the server clock is synchronized via NTP — SAML assertions have time-based validity windows (typically 5 minutes of skew tolerance)
 - Check the IdP assertion signing algorithm matches what the server expects
 
-**"Legacy identity-provider configuration detected"**
-- The flat `VOUCH_OIDC_*` and `VOUCH_SAML_*` variables (and the legacy S3 `oidc` / `saml` blocks) are no longer supported. The startup error lists which variables to rename. See [IdP Overview](../idp/overview.md#migration-from-legacy-variables) for the full mapping.
+**Enrollment broken after upgrade, and only the old `VOUCH_OIDC_*` / `VOUCH_SAML_*` env vars or S3 `oidc` / `saml` blocks are set**
+- The flat legacy variables and S3 blocks are no longer read by the server — they are silently ignored. Migrate to the unified `VOUCH_IDPS` + `VOUCH_IDP_<SLUG>_*` env vars (or the S3 `idps` array). See [IdP Overview](../idp/overview.md#migration-from-legacy-variables) for the full mapping.
 
 **"Duplicate IdP slug"**
 - Every entry in `VOUCH_IDPS` / `idps[].id` must be unique. Rename one of them.

@@ -90,50 +90,6 @@ pub fn validate_provider_slug(slug: &str) -> Result<()> {
     Ok(())
 }
 
-/// Detect legacy single-provider env vars and fail fast with an actionable
-/// error pointing at the unified `VOUCH_IDPS` convention.
-///
-/// Covers both the old single-OIDC vars and the single-SAML flat vars.
-pub fn validate_no_legacy_idp_vars() -> Result<()> {
-    let legacy_vars = [
-        ("VOUCH_OIDC_PROVIDERS", "VOUCH_IDPS"),
-        ("VOUCH_OIDC_ISSUER", "VOUCH_IDP_<SLUG>_ISSUER"),
-        ("VOUCH_OIDC_CLIENT_ID", "VOUCH_IDP_<SLUG>_CLIENT_ID"),
-        ("VOUCH_OIDC_CLIENT_SECRET", "VOUCH_IDP_<SLUG>_CLIENT_SECRET"),
-        (
-            "VOUCH_SAML_IDP_METADATA_URL",
-            "VOUCH_IDP_<SLUG>_METADATA_URL",
-        ),
-        ("VOUCH_SAML_SP_ENTITY_ID", "VOUCH_IDP_<SLUG>_SP_ENTITY_ID"),
-        (
-            "VOUCH_SAML_EMAIL_ATTRIBUTE",
-            "VOUCH_IDP_<SLUG>_EMAIL_ATTRIBUTE",
-        ),
-        (
-            "VOUCH_SAML_DOMAIN_ATTRIBUTE",
-            "VOUCH_IDP_<SLUG>_DOMAIN_ATTRIBUTE",
-        ),
-    ];
-    let mut found = Vec::new();
-    for (old, new) in &legacy_vars {
-        if std::env::var(old).is_ok() {
-            found.push(format!("  {old}  →  {new}"));
-        }
-    }
-    if !found.is_empty() {
-        anyhow::bail!(
-            "Legacy identity-provider configuration detected. The unified \
-             VOUCH_IDPS format is now required.\n\
-             Rename these environment variables:\n{}\n\
-             Also set VOUCH_IDPS=<slug>[,<slug>...] and VOUCH_IDP_<SLUG>_TYPE=oidc|saml \
-             for each provider.\n\
-             See the migration guide for details.",
-            found.join("\n")
-        );
-    }
-    Ok(())
-}
-
 /// Parse `VOUCH_IDPS` and the per-provider env vars into a `Vec<IdpConfig>`.
 fn parse_idps(idp_list: Option<&str>) -> Result<Vec<IdpConfig>> {
     let Some(list) = idp_list else {
@@ -705,9 +661,6 @@ pub enum LogFormat {
 impl ServerConfig {
     /// Create configuration from parsed command-line arguments.
     pub fn from_args(args: Args) -> Result<Self> {
-        // Detect and reject legacy single-provider IdP env vars before anything else.
-        validate_no_legacy_idp_vars()?;
-
         // Note: Validation of rp_id and jwt_secret is deferred to validate()
         // to allow these values to come from S3 config.
 
@@ -997,9 +950,7 @@ pub fn resolve_dsql_endpoints(endpoints: &HashMap<String, String>) -> Result<Str
     reason = "test code: panic on assertion failure is acceptable"
 )]
 mod tests {
-    use crate::config::{
-        IdpConfig, SamlProviderConfig, validate_no_legacy_idp_vars, validate_provider_slug,
-    };
+    use crate::config::{IdpConfig, SamlProviderConfig, validate_provider_slug};
     use crate::test_utils::test_config;
     use secrecy::SecretString;
 
@@ -1158,29 +1109,5 @@ mod tests {
         // test_config sets one OIDC provider
         assert!(config.has_idps());
         assert!(config.has_oidc_idp());
-    }
-
-    #[test]
-    fn test_validate_no_legacy_idp_vars_clean() {
-        // Test only works if no legacy vars happen to be set in the test environment.
-        // set_var/remove_var are unsafe in Rust 1.95 and blocked by -D unsafe-code.
-        // If the test environment has these vars set, this test is skipped.
-        let probes = [
-            "VOUCH_OIDC_PROVIDERS",
-            "VOUCH_OIDC_ISSUER",
-            "VOUCH_OIDC_CLIENT_ID",
-            "VOUCH_OIDC_CLIENT_SECRET",
-            "VOUCH_SAML_IDP_METADATA_URL",
-            "VOUCH_SAML_SP_ENTITY_ID",
-            "VOUCH_SAML_EMAIL_ATTRIBUTE",
-            "VOUCH_SAML_DOMAIN_ATTRIBUTE",
-        ];
-        if probes.iter().any(|k| std::env::var(k).is_ok()) {
-            return; // Skip: legacy vars present in test environment
-        }
-        assert!(
-            validate_no_legacy_idp_vars().is_ok(),
-            "should succeed when no legacy vars are set"
-        );
     }
 }

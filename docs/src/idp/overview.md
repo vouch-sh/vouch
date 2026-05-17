@@ -116,7 +116,7 @@ Order in the `idps` array controls login-page button order.
 
 ## Migration from legacy variables
 
-The previous flat single-IdP environment variables (`VOUCH_OIDC_ISSUER`, `VOUCH_OIDC_CLIENT_ID`, `VOUCH_OIDC_CLIENT_SECRET`, `VOUCH_OIDC_PROVIDERS`, `VOUCH_SAML_IDP_METADATA_URL`, `VOUCH_SAML_SP_ENTITY_ID`, `VOUCH_SAML_EMAIL_ATTRIBUTE`, `VOUCH_SAML_DOMAIN_ATTRIBUTE`) and the legacy S3 `oidc` / `saml` nested blocks are no longer supported. The server fails to start with an actionable error if any are present.
+The previous flat single-IdP environment variables (`VOUCH_OIDC_ISSUER`, `VOUCH_OIDC_CLIENT_ID`, `VOUCH_OIDC_CLIENT_SECRET`, `VOUCH_OIDC_PROVIDERS`, `VOUCH_SAML_IDP_METADATA_URL`, `VOUCH_SAML_SP_ENTITY_ID`, `VOUCH_SAML_EMAIL_ATTRIBUTE`, `VOUCH_SAML_DOMAIN_ATTRIBUTE`) and the legacy S3 `oidc` / `saml` nested blocks are no longer read by the server. They are silently ignored if still present, but they configure nothing — only the unified `VOUCH_IDPS` / `idps[]` format below is honored. Update each legacy value to its replacement and remove the old one:
 
 | Legacy variable | Replacement |
 |---|---|

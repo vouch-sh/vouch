@@ -50,9 +50,9 @@ OIDC IdPs auto-discover authorization, token, and JWKS endpoints from `{issuer}/
 | `VOUCH_IDP_<SLUG>_EMAIL_ATTRIBUTE` | No | _(auto-detect)_ | SAML attribute name containing the user's email address. |
 | `VOUCH_IDP_<SLUG>_DOMAIN_ATTRIBUTE` | No | _(none)_ | SAML attribute name containing the user's domain (for domain restriction). |
 
-### Legacy variables (no longer supported)
+### Legacy variables (no longer read)
 
-The previous flat single-IdP variables — `VOUCH_OIDC_ISSUER`, `VOUCH_OIDC_CLIENT_ID`, `VOUCH_OIDC_CLIENT_SECRET`, `VOUCH_OIDC_PROVIDERS`, `VOUCH_SAML_IDP_METADATA_URL`, `VOUCH_SAML_SP_ENTITY_ID`, `VOUCH_SAML_EMAIL_ATTRIBUTE`, `VOUCH_SAML_DOMAIN_ATTRIBUTE` — cause a startup failure with an actionable migration message. See [IdP Overview](../idp/overview.md#migration-from-legacy-variables) for the full mapping.
+The previous flat single-IdP variables — `VOUCH_OIDC_ISSUER`, `VOUCH_OIDC_CLIENT_ID`, `VOUCH_OIDC_CLIENT_SECRET`, `VOUCH_OIDC_PROVIDERS`, `VOUCH_SAML_IDP_METADATA_URL`, `VOUCH_SAML_SP_ENTITY_ID`, `VOUCH_SAML_EMAIL_ATTRIBUTE`, `VOUCH_SAML_DOMAIN_ATTRIBUTE` — are silently ignored. Setting them configures nothing; only the unified `VOUCH_IDPS` / `VOUCH_IDP_<SLUG>_*` variables above are read. See [IdP Overview](../idp/overview.md#migration-from-legacy-variables) for the field-by-field mapping.
 
 ## Session
 
