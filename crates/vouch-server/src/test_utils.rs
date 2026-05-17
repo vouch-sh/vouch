@@ -54,7 +54,7 @@ pub async fn test_db() -> Pool {
 
 /// Create a test configuration with sensible defaults.
 pub fn test_config() -> ServerConfig {
-    let mut config = ServerConfig {
+    ServerConfig {
         listen_addr: "127.0.0.1:0".to_string(),
         database_url: "sqlite::memory:".to_string(),
         rp_id: "test.example.com".to_string(),
@@ -117,31 +117,8 @@ pub fn test_config() -> ServerConfig {
         pool_config: crate::db::pool::PoolConfig::default(),
         session_cache_max_capacity: 10_000,
         session_cache_ttl_secs: 30,
-        idps: Vec::new(),
-    };
-    // Mirror the shorthand OIDC entry into the idps list so test deployments
-    // exercising the picker path see a "default" IdP without each test
-    // having to wire one up manually.
-    config.idps = vec![crate::config::UpstreamIdpConfig {
-        slug: "default".to_string(),
-        allowed_domains: None,
-        protocol: crate::config::IdpProtocolConfig::Oidc(crate::config::OidcIdpConfig {
-            issuer: config
-                .oidc_issuer_url
-                .clone()
-                .expect("test_config sets oidc_issuer_url"),
-            client_id: config
-                .oidc_client_id
-                .clone()
-                .expect("test_config sets oidc_client_id"),
-            client_secret: config
-                .oidc_client_secret
-                .clone()
-                .expect("test_config sets oidc_client_secret"),
-            allowed_tenants: None,
-        }),
-    }];
-    config
+        idps_var: None,
+    }
 }
 
 /// Create a test AppState with in-memory database.

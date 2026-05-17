@@ -365,7 +365,7 @@ mod tests {
             pool_config: db::pool::PoolConfig::default(),
             session_cache_max_capacity: 10_000,
             session_cache_ttl_secs: 30,
-            idps: Vec::new(),
+            idps_var: None,
         };
 
         let webauthn = webauthn_rs::WebauthnBuilder::new(

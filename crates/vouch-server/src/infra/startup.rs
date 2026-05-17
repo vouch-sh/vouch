@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use arc_swap::ArcSwap;
-use secrecy::ExposeSecret;
+use secrecy::{ExposeSecret, SecretString};
 use tokio::task::JoinHandle;
 
 use crate::{
@@ -526,10 +526,10 @@ async fn build_app_state(
     let http_client = vouch_common::http::server_client(&user_agent, extra_ca_pem.as_deref())
         .context("Failed to create shared HTTP client")?;
 
-    // Build one ConfiguredIdp per entry in config.idps. Discovery runs
-    // sequentially and any failure aborts startup (matches previous
-    // single-IdP behaviour).
-    let upstream_idps = build_configured_idps(&config.idps, &http_client, &config.base_url).await?;
+    // Discover one ConfiguredIdp per configured upstream — the
+    // VOUCH_OIDC_* / VOUCH_SAML_* shorthand plus any slugs in VOUCH_IDPS.
+    // Sequential; first failure aborts startup.
+    let upstream_idps = build_configured_idps(config, &http_client).await?;
     if upstream_idps.is_empty() {
         tracing::info!("No upstream IdP configured; browser sign-in disabled");
     }
@@ -626,85 +626,271 @@ async fn build_app_state(
     Ok(state)
 }
 
-/// Run discovery for every configured IdP entry and produce one
-/// `ConfiguredIdp` per entry, in input order.
+/// Parse env vars + run discovery to produce one [`ConfiguredIdp`] per
+/// configured upstream IdP: the `VOUCH_OIDC_*` / `VOUCH_SAML_*` shorthand
+/// (slug `"default"`) plus any slugs listed in `VOUCH_IDPS`.
 ///
-/// Fails fast on the first discovery failure (matches the pre-multi-IdP
-/// behaviour).
+/// Discovery is sequential; the first failure aborts startup.
 async fn build_configured_idps(
-    entries: &[config::UpstreamIdpConfig],
+    config: &config::ServerConfig,
     http_client: &reqwest::Client,
-    base_url: &str,
 ) -> Result<Vec<crate::services::idp::ConfiguredIdp>> {
-    use crate::services::idp::{ConfiguredIdp, UpstreamIdp, oidc, saml};
+    use crate::services::idp::ConfiguredIdp;
 
-    let mut out: Vec<ConfiguredIdp> = Vec::with_capacity(entries.len());
-    for entry in entries {
-        let provider = match &entry.protocol {
-            config::IdpProtocolConfig::Oidc(oidc_cfg) => {
-                let provider = oidc::fetch_discovery(
-                    http_client,
-                    &oidc_cfg.issuer,
-                    oidc_cfg.client_id.clone(),
-                    oidc_cfg.client_secret.clone(),
-                    oidc_cfg.allowed_tenants.clone(),
-                )
-                .await
-                .with_context(|| {
-                    format!(
-                        "Failed to fetch OIDC discovery for IdP '{}' \
-                         (issuer={}). Check VOUCH_IDP_{}_ISSUER is \
-                         reachable.",
-                        entry.slug,
-                        oidc_cfg.issuer,
-                        entry.slug.to_ascii_uppercase()
-                    )
-                })?;
-                UpstreamIdp::Oidc(Box::new(provider))
-            }
-            config::IdpProtocolConfig::Saml(saml_cfg) => {
-                let metadata_xml = http_client
-                    .get(&saml_cfg.metadata_url)
-                    .send()
-                    .await
-                    .with_context(|| {
-                        format!("IdP '{}': failed to fetch SAML metadata", entry.slug)
-                    })?
-                    .error_for_status()
-                    .with_context(|| {
-                        format!("IdP '{}': SAML metadata request returned error", entry.slug)
-                    })?
-                    .text()
-                    .await
-                    .with_context(|| {
-                        format!("IdP '{}': failed to read SAML metadata body", entry.slug)
-                    })?;
-                let idp_metadata =
-                    saml::metadata::parse_idp_metadata(&metadata_xml).with_context(|| {
-                        format!("IdP '{}': failed to parse SAML metadata", entry.slug)
-                    })?;
-                let sp_entity_id = saml_cfg
-                    .sp_entity_id
-                    .clone()
-                    .unwrap_or_else(|| base_url.to_string());
-                let acs_url = format!("{base_url}/saml/acs");
-                let provider = saml::SamlProvider {
-                    idp_metadata,
-                    sp_entity_id,
-                    acs_url,
-                    email_attribute: saml_cfg.email_attribute.clone(),
-                    domain_attribute: saml_cfg.domain_attribute.clone(),
-                };
-                UpstreamIdp::Saml(provider)
-            }
-        };
-        out.push(ConfiguredIdp::new(
-            entry.slug.clone(),
-            provider,
-            entry.allowed_domains.clone(),
-        ));
+    let mut out: Vec<ConfiguredIdp> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    // Shorthand entry — VOUCH_OIDC_* or VOUCH_SAML_* (mutually exclusive,
+    // checked in `validate()`).
+    if config.oidc_configured() {
+        let issuer = config
+            .oidc_issuer_url
+            .as_deref()
+            .context("VOUCH_OIDC_ISSUER missing")?;
+        let client_id = config
+            .oidc_client_id
+            .clone()
+            .context("VOUCH_OIDC_CLIENT_ID missing")?;
+        let client_secret = config
+            .oidc_client_secret
+            .clone()
+            .context("VOUCH_OIDC_CLIENT_SECRET missing")?;
+        out.push(
+            discover_oidc_idp(
+                "default",
+                issuer,
+                client_id,
+                client_secret,
+                None,
+                http_client,
+            )
+            .await?,
+        );
+        seen.insert("default".to_string());
+    } else if config.saml_configured() {
+        let metadata_url = config
+            .saml_idp_metadata_url
+            .as_deref()
+            .context("VOUCH_SAML_IDP_METADATA_URL missing")?;
+        out.push(
+            fetch_saml_idp(
+                "default",
+                metadata_url,
+                config.saml_sp_entity_id.as_deref(),
+                config.saml_email_attribute.as_deref(),
+                config.saml_domain_attribute.as_deref(),
+                &config.base_url,
+                http_client,
+            )
+            .await?,
+        );
+        seen.insert("default".to_string());
     }
+
+    // Slug-form entries from VOUCH_IDPS.
+    if let Some(raw) = config.idps_var.as_deref()
+        && !raw.trim().is_empty()
+    {
+        for slug in raw.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+            let normalized = slug.to_ascii_lowercase();
+            validate_idp_slug(&normalized).with_context(|| format!("VOUCH_IDPS slug '{slug}'"))?;
+            if normalized == "default" {
+                anyhow::bail!(
+                    "VOUCH_IDPS may not contain the reserved slug 'default' \
+                     (VOUCH_OIDC_* / VOUCH_SAML_* shorthand occupies it)"
+                );
+            }
+            if !seen.insert(normalized.clone()) {
+                anyhow::bail!("VOUCH_IDPS lists slug '{normalized}' more than once");
+            }
+            out.push(build_slug_idp(&normalized, &config.base_url, http_client).await?);
+        }
+    }
+
     Ok(out)
+}
+
+/// Read `VOUCH_IDP_<SLUG>_*` env vars for one slug and dispatch to either
+/// OIDC discovery or SAML metadata fetch.
+async fn build_slug_idp(
+    slug: &str,
+    base_url: &str,
+    http_client: &reqwest::Client,
+) -> Result<crate::services::idp::ConfiguredIdp> {
+    use std::env;
+
+    let issuer = env::var(idp_env(slug, "ISSUER")).ok();
+    let metadata_url = env::var(idp_env(slug, "METADATA_URL")).ok();
+    let allowed_domains = env::var(idp_env(slug, "ALLOWED_DOMAINS"))
+        .ok()
+        .map(|s| {
+            s.split(',')
+                .map(|d| d.trim().to_ascii_lowercase())
+                .filter(|d| !d.is_empty())
+                .collect::<Vec<_>>()
+        })
+        .filter(|v| !v.is_empty());
+
+    match (issuer, metadata_url) {
+        (Some(_), Some(_)) => anyhow::bail!(
+            "IdP '{slug}' has both VOUCH_IDP_{}_ISSUER and \
+             VOUCH_IDP_{}_METADATA_URL set; pick one",
+            slug.to_ascii_uppercase(),
+            slug.to_ascii_uppercase(),
+        ),
+        (Some(issuer), None) => {
+            let (Some(client_id), Some(client_secret)) = (
+                env::var(idp_env(slug, "CLIENT_ID")).ok(),
+                env::var(idp_env(slug, "CLIENT_SECRET")).ok(),
+            ) else {
+                anyhow::bail!(
+                    "IdP '{slug}' OIDC: VOUCH_IDP_{}_CLIENT_ID and \
+                     VOUCH_IDP_{}_CLIENT_SECRET are both required",
+                    slug.to_ascii_uppercase(),
+                    slug.to_ascii_uppercase(),
+                );
+            };
+            let allowed_tenants = match env::var(idp_env(slug, "ALLOWED_TENANTS")) {
+                Ok(raw) => Some(parse_tenant_allowlist(&raw).with_context(|| {
+                    format!("VOUCH_IDP_{}_ALLOWED_TENANTS", slug.to_ascii_uppercase())
+                })?),
+                Err(_) => None,
+            }
+            .filter(|t: &Vec<String>| !t.is_empty());
+            let mut idp = discover_oidc_idp(
+                slug,
+                &issuer,
+                client_id,
+                SecretString::from(client_secret),
+                allowed_tenants,
+                http_client,
+            )
+            .await?;
+            idp.allowed_domains = allowed_domains;
+            Ok(idp)
+        }
+        (None, Some(metadata_url)) => {
+            let mut idp = fetch_saml_idp(
+                slug,
+                &metadata_url,
+                env::var(idp_env(slug, "SP_ENTITY_ID")).ok().as_deref(),
+                env::var(idp_env(slug, "EMAIL_ATTRIBUTE")).ok().as_deref(),
+                env::var(idp_env(slug, "DOMAIN_ATTRIBUTE")).ok().as_deref(),
+                base_url,
+                http_client,
+            )
+            .await?;
+            idp.allowed_domains = allowed_domains;
+            Ok(idp)
+        }
+        (None, None) => anyhow::bail!(
+            "IdP '{slug}' has neither VOUCH_IDP_{}_ISSUER (OIDC) nor \
+             VOUCH_IDP_{}_METADATA_URL (SAML) set",
+            slug.to_ascii_uppercase(),
+            slug.to_ascii_uppercase(),
+        ),
+    }
+}
+
+/// Build the slug-prefixed env var name (e.g. `VOUCH_IDP_FOO_ISSUER`).
+fn idp_env(slug: &str, suffix: &str) -> String {
+    format!("VOUCH_IDP_{}_{}", slug.to_ascii_uppercase(), suffix)
+}
+
+/// Validate a per-IdP slug: `[a-z0-9_-]+`, 1-32 chars.
+fn validate_idp_slug(slug: &str) -> Result<()> {
+    if slug.is_empty() || slug.len() > 32 {
+        anyhow::bail!("IdP slug '{slug}' invalid: must be 1-32 characters of [a-z0-9_-]");
+    }
+    if !slug
+        .bytes()
+        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
+    {
+        anyhow::bail!("IdP slug '{slug}' invalid: must match [a-z0-9_-]+");
+    }
+    Ok(())
+}
+
+/// Parse a comma-separated allowlist of GUIDs (lowercased, validated).
+fn parse_tenant_allowlist(raw: &str) -> Result<Vec<String>> {
+    let tenants: Vec<String> = raw
+        .split(',')
+        .map(|t| t.trim().to_ascii_lowercase())
+        .filter(|t| !t.is_empty())
+        .collect();
+    for t in &tenants {
+        if !crate::services::idp::oidc::is_guid(t) {
+            anyhow::bail!("tenant '{t}' is not a valid GUID");
+        }
+    }
+    Ok(tenants)
+}
+
+/// Run OIDC discovery and produce a [`ConfiguredIdp`].
+async fn discover_oidc_idp(
+    slug: &str,
+    issuer: &str,
+    client_id: String,
+    client_secret: SecretString,
+    allowed_tenants: Option<Vec<String>>,
+    http_client: &reqwest::Client,
+) -> Result<crate::services::idp::ConfiguredIdp> {
+    use crate::services::idp::{ConfiguredIdp, UpstreamIdp, oidc};
+
+    let provider = oidc::fetch_discovery(
+        http_client,
+        issuer,
+        client_id,
+        client_secret,
+        allowed_tenants,
+    )
+    .await
+    .with_context(|| {
+        format!("Failed to fetch OIDC discovery for IdP '{slug}' (issuer={issuer})")
+    })?;
+    Ok(ConfiguredIdp::new(
+        slug.to_string(),
+        UpstreamIdp::Oidc(Box::new(provider)),
+        None,
+    ))
+}
+
+/// Fetch SAML IdP metadata and produce a [`ConfiguredIdp`].
+async fn fetch_saml_idp(
+    slug: &str,
+    metadata_url: &str,
+    sp_entity_id: Option<&str>,
+    email_attribute: Option<&str>,
+    domain_attribute: Option<&str>,
+    base_url: &str,
+    http_client: &reqwest::Client,
+) -> Result<crate::services::idp::ConfiguredIdp> {
+    use crate::services::idp::{ConfiguredIdp, UpstreamIdp, saml};
+
+    let metadata_xml = http_client
+        .get(metadata_url)
+        .send()
+        .await
+        .with_context(|| format!("IdP '{slug}': failed to fetch SAML metadata"))?
+        .error_for_status()
+        .with_context(|| format!("IdP '{slug}': SAML metadata request returned error"))?
+        .text()
+        .await
+        .with_context(|| format!("IdP '{slug}': failed to read SAML metadata body"))?;
+    let idp_metadata = saml::metadata::parse_idp_metadata(&metadata_xml)
+        .with_context(|| format!("IdP '{slug}': failed to parse SAML metadata"))?;
+    let provider = saml::SamlProvider {
+        idp_metadata,
+        sp_entity_id: sp_entity_id.map_or_else(|| base_url.to_string(), str::to_string),
+        acs_url: format!("{base_url}/saml/acs"),
+        email_attribute: email_attribute.map(str::to_string),
+        domain_attribute: domain_attribute.map(str::to_string),
+    };
+    Ok(ConfiguredIdp::new(
+        slug.to_string(),
+        UpstreamIdp::Saml(provider),
+        None,
+    ))
 }
 
 /// Log authenticator policy settings at startup.
