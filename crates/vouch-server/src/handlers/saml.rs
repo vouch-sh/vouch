@@ -119,8 +119,8 @@ pub async fn acs(State(state): State<Arc<AppState>>, Form(form): Form<SamlAcsFor
         .into_response();
     }
 
-    // Step 5: Resolve the SAML IdP via the stored slug. Empty `idp_slug` is
-    // a legacy row written before multi-IdP support landed — fall back to
+    // Step 5: Resolve the SAML IdP via the stored slug. Empty `idp_slug`
+    // means a row written before multi-IdP support landed — fall back to
     // the lone/`default` IdP.
     let active_idp = if stored_state.idp_slug.is_empty() {
         state.fallback_idp()

@@ -119,7 +119,7 @@ impl AppState {
     }
 
     /// Pick a "default" IdP to fall back to when a state row carries an
-    /// empty `idp_slug` (legacy rows written before multi-IdP). Returns the
+    /// empty `idp_slug` (rows written before multi-IdP). Returns the
     /// single configured IdP when exactly one is registered, or the entry
     /// with slug `"default"` when multiple are present.
     #[must_use]

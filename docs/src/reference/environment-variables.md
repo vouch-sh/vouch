@@ -22,7 +22,7 @@ All Vouch server configuration is done via environment variables (prefixed with 
 
 ## Upstream Identity Provider
 
-Vouch can be configured with **one** upstream IdP using the legacy shorthand (`VOUCH_OIDC_*` xor `VOUCH_SAML_*`), or **multiple** IdPs side-by-side using the slug-prefixed form (`VOUCH_IDPS` + `VOUCH_IDP_<SLUG>_*`). The two forms can coexist — the legacy shorthand becomes the entry with slug `default`, and slug-form entries add buttons to the landing page picker.
+Vouch can be configured with **one** upstream IdP using the single-IdP shorthand (`VOUCH_OIDC_*` xor `VOUCH_SAML_*`), or **multiple** IdPs side-by-side using the slug-prefixed form (`VOUCH_IDPS` + `VOUCH_IDP_<SLUG>_*`). The two forms can coexist — the shorthand becomes the entry with slug `default`, and slug-form entries add buttons to the landing page picker.
 
 ### OIDC (single-IdP shorthand)
 
@@ -47,11 +47,11 @@ These variables configure a single external SAML 2.0 identity provider for enrol
 
 ### Multiple Identity Providers
 
-Set `VOUCH_IDPS` to a comma-separated list of slugs to register **additional** IdPs alongside the legacy shorthand. Each slug enables a `VOUCH_IDP_<SLUG>_*` family of variables. The landing page renders one button per registered IdP; users pick which one to sign in with.
+Set `VOUCH_IDPS` to a comma-separated list of slugs to register **additional** IdPs alongside the single-IdP shorthand. Each slug enables a `VOUCH_IDP_<SLUG>_*` family of variables. The landing page renders one button per registered IdP; users pick which one to sign in with.
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `VOUCH_IDPS` | No | _(none)_ | Comma-separated list of slugs. Each must match `[a-z0-9_-]+`, 1–32 chars. The slug `default` is reserved for the legacy shorthand. Duplicate slugs are rejected. |
+| `VOUCH_IDPS` | No | _(none)_ | Comma-separated list of slugs. Each must match `[a-z0-9_-]+`, 1–32 chars. The slug `default` is reserved for the `VOUCH_OIDC_*` / `VOUCH_SAML_*` shorthand. Duplicate slugs are rejected. |
 
 For each slug `<SLUG>` listed in `VOUCH_IDPS`, set **either** the OIDC fields or the SAML fields (presence of `_ISSUER` selects OIDC; presence of `_METADATA_URL` selects SAML). Setting both on the same slug is rejected.
 
@@ -75,10 +75,10 @@ For each slug `<SLUG>` listed in `VOUCH_IDPS`, set **either** the OIDC fields or
 | `VOUCH_IDP_<SLUG>_DOMAIN_ATTRIBUTE` | No | _(none)_ | SAML attribute name carrying domain. |
 | `VOUCH_IDP_<SLUG>_ALLOWED_DOMAINS` | No | _(none)_ | Comma-separated email-domain allowlist for this IdP. |
 
-**Example: Google (legacy) + Microsoft Entra (slug-form):**
+**Example: Google (shorthand) + Microsoft Entra (slug-form):**
 
 ```bash
-# Legacy Google entry (slug = "default")
+# Google via VOUCH_OIDC_* shorthand (slug = "default")
 VOUCH_OIDC_ISSUER=https://accounts.google.com
 VOUCH_OIDC_CLIENT_ID=...
 VOUCH_OIDC_CLIENT_SECRET=...

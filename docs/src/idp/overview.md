@@ -17,7 +17,7 @@ Vouch supports two upstream IdP protocols:
 | **OIDC** (OpenID Connect) | Recommended for most deployments. Supports auto-discovery of endpoints. |
 | **SAML 2.0** | For organizations that require SAML or where OIDC is not available. |
 
-> **The legacy `VOUCH_OIDC_*` / `VOUCH_SAML_*` shorthand picks one IdP.** If both shorthand families are set, the server refuses to start. To mix OIDC and SAML upstreams — or to register multiple OIDC providers — use the multi-IdP form (see [Configuring Multiple IdPs](#configuring-multiple-idps) below).
+> **The `VOUCH_OIDC_*` / `VOUCH_SAML_*` shorthand picks one IdP.** If both shorthand families are set, the server refuses to start. To mix OIDC and SAML upstreams — or to register multiple OIDC providers — use the multi-IdP form (see [Configuring Multiple IdPs](#configuring-multiple-idps) below).
 
 ## OIDC Discovery
 
@@ -60,7 +60,7 @@ VOUCH_ALLOWED_DOMAINS=company.com
 Run more than one upstream IdP side-by-side using the slug-prefixed form. Each slug enumerated in `VOUCH_IDPS` registers an extra entry; the landing page then shows one "Sign in with X" button per registered IdP.
 
 ```bash
-# Legacy Google entry (slug = "default")
+# Google via VOUCH_OIDC_* shorthand (slug = "default")
 VOUCH_OIDC_ISSUER=https://accounts.google.com
 VOUCH_OIDC_CLIENT_ID=...
 VOUCH_OIDC_CLIENT_SECRET=...
@@ -78,7 +78,7 @@ VOUCH_IDP_MICROSOFT_ALLOWED_DOMAINS=acme.com
 
 **Rules:**
 
-- The slug `default` is reserved for the legacy shorthand entry.
+- The slug `default` is reserved for the `VOUCH_OIDC_*` / `VOUCH_SAML_*` shorthand entry.
 - Per-IdP `allowed_domains` **narrows** `VOUCH_ALLOWED_DOMAINS`; it cannot widen it.
 - Each slug must define **either** the OIDC fields (`_ISSUER`, `_CLIENT_ID`, `_CLIENT_SECRET`) **or** the SAML field (`_METADATA_URL`). Setting both on the same slug fails startup.
 - Mixing OIDC and SAML upstreams across different slugs is supported.

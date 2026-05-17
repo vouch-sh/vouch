@@ -55,10 +55,10 @@ VOUCH_ALLOWED_DOMAINS=example.com
 
 ## Running Entra alongside another IdP
 
-To offer both Google Workspace and Entra ID on the landing page, register Entra under a slug-prefixed entry instead of replacing the legacy Google config:
+To offer both Google Workspace and Entra ID on the landing page, register Entra under a slug-prefixed entry alongside the existing Google shorthand config:
 
 ```bash
-# Legacy Google entry (slug = "default")
+# Google via VOUCH_OIDC_* shorthand (slug = "default")
 VOUCH_OIDC_ISSUER=https://accounts.google.com
 VOUCH_OIDC_CLIENT_ID=...
 VOUCH_OIDC_CLIENT_SECRET=...

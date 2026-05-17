@@ -140,8 +140,8 @@ pub enum UpstreamIdp {
 /// Picker-list entry: a single configured IdP plus its slug-keyed metadata.
 ///
 /// The server can have multiple of these registered simultaneously, one per
-/// configured upstream (via `VOUCH_OIDC_*`/`VOUCH_SAML_*` legacy shorthand
-/// and/or `VOUCH_IDPS=...` + `VOUCH_IDP_<SLUG>_*` slug-form vars).
+/// configured upstream (via `VOUCH_OIDC_*`/`VOUCH_SAML_*` shorthand and/or
+/// `VOUCH_IDPS=...` + `VOUCH_IDP_<SLUG>_*` slug-form vars).
 #[derive(Debug)]
 pub struct ConfiguredIdp {
     /// Internal slug used in URLs (`/enroll/start/{slug}`) and stored on

@@ -119,21 +119,27 @@ pub fn test_config() -> ServerConfig {
         session_cache_ttl_secs: 30,
         idps: Vec::new(),
     };
-    // Mirror the legacy OIDC entry into the idps list so test deployments
+    // Mirror the shorthand OIDC entry into the idps list so test deployments
     // exercising the picker path see a "default" IdP without each test
     // having to wire one up manually.
-    config.idps = vec![crate::config::IdpEntryConfig {
+    config.idps = vec![crate::config::UpstreamIdpConfig {
         slug: "default".to_string(),
-        kind: crate::config::IdpKind::Oidc,
         allowed_domains: None,
-        allowed_tenants: None,
-        oidc_issuer: config.oidc_issuer_url.clone(),
-        oidc_client_id: config.oidc_client_id.clone(),
-        oidc_client_secret: config.oidc_client_secret.clone(),
-        saml_metadata_url: None,
-        saml_sp_entity_id: None,
-        saml_email_attribute: None,
-        saml_domain_attribute: None,
+        protocol: crate::config::IdpProtocolConfig::Oidc(crate::config::OidcIdpConfig {
+            issuer: config
+                .oidc_issuer_url
+                .clone()
+                .expect("test_config sets oidc_issuer_url"),
+            client_id: config
+                .oidc_client_id
+                .clone()
+                .expect("test_config sets oidc_client_id"),
+            client_secret: config
+                .oidc_client_secret
+                .clone()
+                .expect("test_config sets oidc_client_secret"),
+            allowed_tenants: None,
+        }),
     }];
     config
 }

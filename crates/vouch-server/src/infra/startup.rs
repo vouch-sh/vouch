@@ -630,9 +630,9 @@ async fn build_app_state(
 /// `ConfiguredIdp` per entry, in input order.
 ///
 /// Fails fast on the first discovery failure (matches the pre-multi-IdP
-/// behaviour for the legacy single-IdP path).
+/// behaviour).
 async fn build_configured_idps(
-    entries: &[config::IdpEntryConfig],
+    entries: &[config::UpstreamIdpConfig],
     http_client: &reqwest::Client,
     base_url: &str,
 ) -> Result<Vec<crate::services::idp::ConfiguredIdp>> {
@@ -640,54 +640,31 @@ async fn build_configured_idps(
 
     let mut out: Vec<ConfiguredIdp> = Vec::with_capacity(entries.len());
     for entry in entries {
-        let provider = match entry.kind {
-            config::IdpKind::Oidc => {
-                let issuer = entry.oidc_issuer.as_deref().ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "IdP '{}': internal error — OIDC kind without issuer set",
-                        entry.slug
-                    )
-                })?;
-                let client_id = entry.oidc_client_id.clone().ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "IdP '{}': internal error — OIDC kind without client_id set",
-                        entry.slug
-                    )
-                })?;
-                let client_secret = entry.oidc_client_secret.clone().ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "IdP '{}': internal error — OIDC kind without client_secret set",
-                        entry.slug
-                    )
-                })?;
+        let provider = match &entry.protocol {
+            config::IdpProtocolConfig::Oidc(oidc_cfg) => {
                 let provider = oidc::fetch_discovery(
                     http_client,
-                    issuer,
-                    client_id,
-                    client_secret,
-                    entry.allowed_tenants.clone(),
+                    &oidc_cfg.issuer,
+                    oidc_cfg.client_id.clone(),
+                    oidc_cfg.client_secret.clone(),
+                    oidc_cfg.allowed_tenants.clone(),
                 )
                 .await
                 .with_context(|| {
                     format!(
                         "Failed to fetch OIDC discovery for IdP '{}' \
-                         (issuer={issuer}). Check VOUCH_IDP_{}_ISSUER \
-                         is reachable.",
+                         (issuer={}). Check VOUCH_IDP_{}_ISSUER is \
+                         reachable.",
                         entry.slug,
+                        oidc_cfg.issuer,
                         entry.slug.to_ascii_uppercase()
                     )
                 })?;
                 UpstreamIdp::Oidc(Box::new(provider))
             }
-            config::IdpKind::Saml => {
-                let metadata_url = entry.saml_metadata_url.as_deref().ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "IdP '{}': internal error — SAML kind without metadata_url",
-                        entry.slug
-                    )
-                })?;
+            config::IdpProtocolConfig::Saml(saml_cfg) => {
                 let metadata_xml = http_client
-                    .get(metadata_url)
+                    .get(&saml_cfg.metadata_url)
                     .send()
                     .await
                     .with_context(|| {
@@ -706,8 +683,8 @@ async fn build_configured_idps(
                     saml::metadata::parse_idp_metadata(&metadata_xml).with_context(|| {
                         format!("IdP '{}': failed to parse SAML metadata", entry.slug)
                     })?;
-                let sp_entity_id = entry
-                    .saml_sp_entity_id
+                let sp_entity_id = saml_cfg
+                    .sp_entity_id
                     .clone()
                     .unwrap_or_else(|| base_url.to_string());
                 let acs_url = format!("{base_url}/saml/acs");
@@ -715,8 +692,8 @@ async fn build_configured_idps(
                     idp_metadata,
                     sp_entity_id,
                     acs_url,
-                    email_attribute: entry.saml_email_attribute.clone(),
-                    domain_attribute: entry.saml_domain_attribute.clone(),
+                    email_attribute: saml_cfg.email_attribute.clone(),
+                    domain_attribute: saml_cfg.domain_attribute.clone(),
                 };
                 UpstreamIdp::Saml(provider)
             }

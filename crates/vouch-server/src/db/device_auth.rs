@@ -56,7 +56,8 @@ pub struct OidcState {
     pub nonce: String,
     /// PKCE code_verifier (RFC 7636).
     pub code_verifier: String,
-    /// Slug of the IdP that initiated this state (empty for legacy rows).
+    /// Slug of the IdP that initiated this state (empty for rows written
+    /// before multi-IdP support landed).
     pub idp_slug: String,
     pub expires_at: Timestamp,
 }
