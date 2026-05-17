@@ -8,9 +8,11 @@ pub(crate) mod icons;
 pub(crate) mod oidc;
 pub(crate) mod saml;
 
+pub(crate) use oidc::ConfiguredOidcProvider;
+
 /// Known identity provider for UI branding.
 #[derive(Debug)]
-pub enum IdpBrand {
+pub(crate) enum IdpBrand {
     Google,
     Okta,
     Entra,
@@ -22,7 +24,7 @@ pub enum IdpBrand {
 impl IdpBrand {
     /// Detect provider from OIDC issuer URL.
     #[must_use]
-    pub fn from_issuer(issuer: &str) -> Self {
+    pub(crate) fn from_issuer(issuer: &str) -> Self {
         if issuer.contains("accounts.google.com") {
             Self::Google
         } else if issuer.contains(".okta.com") {
@@ -44,7 +46,7 @@ impl IdpBrand {
     /// not necessarily the hostname. We check both for consistency with
     /// `from_issuer()`.
     #[must_use]
-    pub fn from_entity_id(entity_id: &str) -> Self {
+    pub(crate) fn from_entity_id(entity_id: &str) -> Self {
         if entity_id.contains(".okta.com") {
             Self::Okta
         } else if entity_id.contains("sts.windows.net")
@@ -64,7 +66,7 @@ impl IdpBrand {
 
     /// Display name for button text ("Sign in with {name}").
     #[must_use]
-    pub fn display_name(&self) -> &'static str {
+    pub(crate) fn display_name(&self) -> &'static str {
         match self {
             Self::Google => "Google",
             Self::Okta => "Okta",
@@ -77,7 +79,7 @@ impl IdpBrand {
 
     /// Inline SVG icon markup.
     #[must_use]
-    pub fn svg_icon(&self) -> &'static str {
+    pub(crate) fn svg_icon(&self) -> &'static str {
         match self {
             Self::Google => icons::GOOGLE,
             Self::Okta => icons::OKTA,
@@ -103,7 +105,7 @@ pub(crate) struct IdentityResult {
 
 /// How to send the user to the upstream IdP.
 #[derive(Debug)]
-pub enum AuthAction {
+pub(crate) enum AuthAction {
     /// HTTP 303 redirect (OIDC, SAML Redirect binding).
     Redirect { url: String },
     /// Auto-submitting HTML form (SAML POST binding).
@@ -116,97 +118,50 @@ pub enum AuthAction {
 
 /// Protocol-agnostic result of initiating upstream auth.
 #[derive(Debug)]
-pub struct AuthRequest {
+pub(crate) struct AuthRequest {
     /// How to send the user to the IdP.
-    pub action: AuthAction,
+    pub(crate) action: AuthAction,
     /// Opaque state token (stored as `state` in oidc_state table).
     /// OIDC: random base64url token. SAML: RelayState token.
-    pub state_key: String,
+    pub(crate) state_key: String,
     /// Protocol-specific request identifier (stored as `nonce` in DB).
     /// OIDC: nonce for ID token binding. SAML: AuthnRequest ID.
-    pub nonce: String,
+    pub(crate) nonce: String,
     /// PKCE code_verifier (RFC 7636). Only set for OIDC flows.
     /// Empty for SAML. Stored in DB and sent during token exchange.
-    pub code_verifier: String,
+    pub(crate) code_verifier: String,
 }
 
 /// Configured upstream identity provider.
+///
+/// OIDC providers are stored separately in `AppState::oidc_providers` as
+/// `ConfiguredOidcProvider` values. This enum only covers SAML, which is
+/// still the single-provider case.
 #[derive(Debug)]
-pub enum UpstreamIdp {
-    Oidc(Box<oidc::OidcProvider>),
+pub(crate) enum UpstreamIdp {
     Saml(saml::SamlProvider),
 }
 
 impl UpstreamIdp {
-    /// Initiate authentication with the upstream IdP.
+    /// Initiate authentication with the upstream SAML IdP.
     ///
     /// Generates state and nonce internally, builds the appropriate auth
-    /// action (redirect URL for OIDC, POST form for SAML), and returns
+    /// action (redirect URL or POST form for SAML POST binding), and returns
     /// the full `AuthRequest` to store state and redirect/render.
-    ///
-    /// # Note
-    /// `initiate_auth` takes the full `ServerConfig` for simplicity in Phase 1.
-    /// Only `oidc_client_id` and `base_url` are used. This coupling can be
-    /// narrowed in Phase 2 if needed.
-    ///
-    /// # Invariant
-    /// When `Self::Oidc` is active, `config.oidc_client_id` must be `Some`.
-    /// Startup validates `oidc_configured()` before constructing `UpstreamIdp::Oidc`,
-    /// so the error path below should be unreachable in practice.
     ///
     /// # Errors
     ///
-    /// Returns an error if random byte generation fails, or if required OIDC
-    /// config fields are missing (should be unreachable -- see invariant above).
-    /// Returns an error for the SAML variant (not yet implemented in Phase 1).
-    pub fn initiate_auth(
+    /// Returns an error if random byte generation fails or if the SSO URL
+    /// has a disallowed scheme.
+    pub(crate) fn initiate_auth(
         &self,
         config: &crate::config::ServerConfig,
     ) -> Result<AuthRequest, anyhow::Error> {
         use base64::Engine;
         use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
+        let _ = config; // config retained in signature for future use
         match self {
-            Self::Oidc(p) => {
-                let state_bytes = crate::crypto::generate_random_bytes(32)?;
-                let nonce_bytes = crate::crypto::generate_random_bytes(32)?;
-                let state_key = URL_SAFE_NO_PAD.encode(state_bytes);
-                let nonce = URL_SAFE_NO_PAD.encode(nonce_bytes);
-
-                // RFC 7636 (PKCE): Generate code_verifier (43-128 chars, base64url)
-                // and derive code_challenge = BASE64URL(SHA256(code_verifier)).
-                // RFC 9700 mandates PKCE for all OAuth clients.
-                let verifier_bytes = crate::crypto::generate_random_bytes(32)?;
-                let code_verifier = URL_SAFE_NO_PAD.encode(verifier_bytes);
-                let challenge_digest =
-                    aws_lc_rs::digest::digest(&aws_lc_rs::digest::SHA256, code_verifier.as_bytes());
-                let code_challenge = URL_SAFE_NO_PAD.encode(challenge_digest.as_ref());
-
-                let client_id = config
-                    .oidc_client_id
-                    .as_deref()
-                    .ok_or_else(|| anyhow::anyhow!("OIDC client_id not configured"))?;
-                let redirect_uri = format!("{}/oauth/callback", config.base_url);
-                let mut url = p.authorization_endpoint.clone();
-                url.query_pairs_mut()
-                    .append_pair("client_id", client_id)
-                    .append_pair("redirect_uri", &redirect_uri)
-                    .append_pair("response_type", "code")
-                    .append_pair("scope", "openid email")
-                    .append_pair("state", &state_key)
-                    .append_pair("nonce", &nonce)
-                    .append_pair("code_challenge", &code_challenge)
-                    .append_pair("code_challenge_method", "S256")
-                    .append_pair("prompt", "login");
-                Ok(AuthRequest {
-                    action: AuthAction::Redirect {
-                        url: url.to_string(),
-                    },
-                    state_key,
-                    nonce,
-                    code_verifier,
-                })
-            }
             Self::Saml(saml) => {
                 let authn = saml::authn_request::build_authn_request(saml)
                     .map_err(|e| anyhow::anyhow!("Failed to build SAML AuthnRequest: {e}"))?;
@@ -251,31 +206,6 @@ impl UpstreamIdp {
                     })
                 }
             }
-        }
-    }
-
-    /// Detect the IdP brand for UI display.
-    #[must_use]
-    pub fn brand(&self) -> IdpBrand {
-        match self {
-            Self::Oidc(p) => IdpBrand::from_issuer(&p.issuer),
-            Self::Saml(s) => IdpBrand::from_entity_id(s.entity_id()),
-        }
-    }
-
-    /// Origins the browser must be allowed to redirect to or POST to during
-    /// upstream sign-in handoff.
-    ///
-    /// Used by the CSP middleware to widen `form-action` so Chromium-based
-    /// browsers don't block the 303 redirect (OIDC) or auto-submitting
-    /// SAML POST form. Returns deduplicated origins; an empty `Vec` when
-    /// the IdP exposes no http(s) endpoints (in practice unreachable, but
-    /// expressed in the type).
-    #[must_use]
-    pub fn form_action_origins(&self) -> Vec<crate::infra::csp::CspOrigin> {
-        match self {
-            Self::Oidc(p) => p.form_action_origin().into_iter().collect(),
-            Self::Saml(s) => s.form_action_origins(),
         }
     }
 }
@@ -407,13 +337,23 @@ mod tests {
         }
     }
 
+    fn make_configured_oidc_provider(auth_endpoint: &str) -> oidc::ConfiguredOidcProvider {
+        use secrecy::SecretString;
+        oidc::ConfiguredOidcProvider {
+            id: "google".to_string(),
+            client_id: "test-client-id".to_string(),
+            client_secret: SecretString::from("test-client-secret"),
+            provider: make_oidc_provider(auth_endpoint),
+        }
+    }
+
     #[test]
     fn initiate_auth_oidc_returns_redirect() {
-        let provider = make_oidc_provider("https://accounts.google.com/o/oauth2/v2/auth");
-        let idp = UpstreamIdp::Oidc(Box::new(provider));
+        let provider =
+            make_configured_oidc_provider("https://accounts.google.com/o/oauth2/v2/auth");
         let config = test_config();
 
-        let auth = idp.initiate_auth(&config).unwrap();
+        let auth = provider.initiate_auth(&config.base_url).unwrap();
 
         assert!(
             matches!(auth.action, AuthAction::Redirect { .. }),
@@ -450,11 +390,10 @@ mod tests {
     #[test]
     fn initiate_auth_oidc_handles_existing_query_params() {
         // Covers SO-1: endpoints with pre-existing query parameters
-        let provider = make_oidc_provider("https://example.com/auth?existing=param");
-        let idp = UpstreamIdp::Oidc(Box::new(provider));
+        let provider = make_configured_oidc_provider("https://example.com/auth?existing=param");
         let config = test_config();
 
-        let auth = idp.initiate_auth(&config).unwrap();
+        let auth = provider.initiate_auth(&config.base_url).unwrap();
 
         assert!(
             matches!(auth.action, AuthAction::Redirect { .. }),
@@ -475,12 +414,12 @@ mod tests {
 
     #[test]
     fn initiate_auth_generates_unique_state_and_nonce() {
-        let provider = make_oidc_provider("https://accounts.google.com/o/oauth2/v2/auth");
-        let idp = UpstreamIdp::Oidc(Box::new(provider));
+        let provider =
+            make_configured_oidc_provider("https://accounts.google.com/o/oauth2/v2/auth");
         let config = test_config();
 
-        let auth1 = idp.initiate_auth(&config).unwrap();
-        let auth2 = idp.initiate_auth(&config).unwrap();
+        let auth1 = provider.initiate_auth(&config.base_url).unwrap();
+        let auth2 = provider.initiate_auth(&config.base_url).unwrap();
 
         assert_ne!(
             auth1.state_key, auth2.state_key,
@@ -559,11 +498,11 @@ mod tests {
         use base64::Engine;
         use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
-        let provider = make_oidc_provider("https://accounts.google.com/o/oauth2/v2/auth");
-        let idp = UpstreamIdp::Oidc(Box::new(provider));
+        let provider =
+            make_configured_oidc_provider("https://accounts.google.com/o/oauth2/v2/auth");
         let config = test_config();
 
-        let auth = idp.initiate_auth(&config).unwrap();
+        let auth = provider.initiate_auth(&config.base_url).unwrap();
 
         assert!(
             matches!(auth.action, AuthAction::Redirect { .. }),
@@ -777,10 +716,8 @@ mod tests {
     #[test]
     fn form_action_origins_oidc_single() {
         let provider = make_oidc_provider("https://accounts.google.com/o/oauth2/v2/auth");
-        let idp = UpstreamIdp::Oidc(Box::new(provider));
-        let origins = idp.form_action_origins();
-        assert_eq!(origins.len(), 1);
-        assert_eq!(origins[0].as_str(), "https://accounts.google.com");
+        let origin = provider.form_action_origin().unwrap();
+        assert_eq!(origin.as_str(), "https://accounts.google.com");
     }
 
     #[test]
@@ -788,17 +725,14 @@ mod tests {
         let provider = make_oidc_provider(
             "https://idp.example.com:8443/realms/x/protocol/openid-connect/auth",
         );
-        let idp = UpstreamIdp::Oidc(Box::new(provider));
-        let origins = idp.form_action_origins();
-        assert_eq!(origins.len(), 1);
-        assert_eq!(origins[0].as_str(), "https://idp.example.com:8443");
+        let origin = provider.form_action_origin().unwrap();
+        assert_eq!(origin.as_str(), "https://idp.example.com:8443");
     }
 
     #[test]
     fn form_action_origins_saml_post_only() {
         let provider = make_saml_provider(Some("https://idp.example.com/sso/post"), None);
-        let idp = UpstreamIdp::Saml(provider);
-        let origins = idp.form_action_origins();
+        let origins = provider.form_action_origins();
         assert_eq!(origins.len(), 1);
         assert_eq!(origins[0].as_str(), "https://idp.example.com");
     }
@@ -806,8 +740,7 @@ mod tests {
     #[test]
     fn form_action_origins_saml_redirect_only() {
         let provider = make_saml_provider(None, Some("https://idp.example.com/sso/redirect"));
-        let idp = UpstreamIdp::Saml(provider);
-        let origins = idp.form_action_origins();
+        let origins = provider.form_action_origins();
         assert_eq!(origins.len(), 1);
         assert_eq!(origins[0].as_str(), "https://idp.example.com");
     }
@@ -818,8 +751,7 @@ mod tests {
             Some("https://idp.example.com/sso/post"),
             Some("https://idp.example.com/sso/redirect"),
         );
-        let idp = UpstreamIdp::Saml(provider);
-        let origins = idp.form_action_origins();
+        let origins = provider.form_action_origins();
         assert_eq!(origins.len(), 1, "duplicate origins should be collapsed");
         assert_eq!(origins[0].as_str(), "https://idp.example.com");
     }
@@ -830,8 +762,7 @@ mod tests {
             Some("https://idp-a.example.com/sso/post"),
             Some("https://idp-b.example.com/sso/redirect"),
         );
-        let idp = UpstreamIdp::Saml(provider);
-        let origins = idp.form_action_origins();
+        let origins = provider.form_action_origins();
         let serialized: Vec<&str> = origins
             .iter()
             .map(crate::infra::csp::CspOrigin::as_str)

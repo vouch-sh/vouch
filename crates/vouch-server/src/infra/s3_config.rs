@@ -619,8 +619,8 @@ async fn apply_config_update(
         .as_ref()
         .map(|s| s.expose_secret().to_string());
 
-    // Merge S3 config
-    new_config.merge_s3_config(&s3_config, true); // Runtime update - block sensitive fields
+    // Merge S3 config (runtime update — oidc block check is skipped for runtime updates)
+    new_config.merge_s3_config(&s3_config, true)?;
 
     // Check if TLS config changed
     let tls_changed = new_config.tls_cert != old_tls_cert
@@ -656,7 +656,11 @@ impl ServerConfig {
     /// # Runtime Updates
     /// Only TLS certificates can be updated at runtime (for hot-reload).
     /// All other configuration changes require a server restart.
-    pub fn merge_s3_config(&mut self, s3: &S3Config, is_runtime_update: bool) {
+    pub fn merge_s3_config(
+        &mut self,
+        s3: &S3Config,
+        is_runtime_update: bool,
+    ) -> anyhow::Result<()> {
         // Runtime updates: ONLY allow TLS changes
         if is_runtime_update {
             if let Some(tls) = &s3.tls {
@@ -668,7 +672,7 @@ impl ServerConfig {
                 }
             }
             // All other fields are ignored at runtime
-            return;
+            return Ok(());
         }
 
         // Initial startup: apply all config
@@ -717,17 +721,14 @@ impl ServerConfig {
             self.session_hours = v;
         }
 
-        // OIDC configuration
-        if let Some(oidc) = &s3.oidc {
-            if let Some(v) = &oidc.issuer_url {
-                self.oidc_issuer_url = Some(v.clone());
-            }
-            if let Some(v) = &oidc.client_id {
-                self.oidc_client_id = Some(v.clone());
-            }
-            if let Some(v) = &oidc.client_secret {
-                self.oidc_client_secret = Some(SecretString::from(v.clone()));
-            }
+        // OIDC configuration via S3 `oidc` block is no longer supported (M4).
+        // Use VOUCH_OIDC_PROVIDERS environment variable instead.
+        if s3.oidc.is_some() {
+            anyhow::bail!(
+                "S3 config 'oidc' block is no longer supported. \
+                 Migrate to VOUCH_OIDC_PROVIDERS environment variable. \
+                 See the migration guide for details."
+            );
         }
 
         // SAML configuration
@@ -877,6 +878,8 @@ impl ServerConfig {
         if let Some(v) = s3.device_poll_interval_seconds {
             self.device_poll_interval_seconds = v;
         }
+
+        Ok(())
     }
 }
 
@@ -895,7 +898,7 @@ mod tests {
         let s3 = S3Config::default();
 
         let original_rp_id = config.rp_id.clone();
-        config.merge_s3_config(&s3, false);
+        config.merge_s3_config(&s3, false).unwrap();
 
         // Should be unchanged
         assert_eq!(config.rp_id, original_rp_id);
@@ -910,7 +913,7 @@ mod tests {
             ..Default::default()
         };
 
-        config.merge_s3_config(&s3, false);
+        config.merge_s3_config(&s3, false).unwrap();
 
         assert_eq!(config.rp_id, "new.example.com");
         assert_eq!(config.session_hours, 12);
@@ -927,14 +930,15 @@ mod tests {
             ..Default::default()
         };
 
-        config.merge_s3_config(&s3, false);
+        config.merge_s3_config(&s3, false).unwrap();
 
         assert_eq!(config.tls_cert, Some("base64cert".to_string()));
         assert!(config.tls_key.is_some());
     }
 
     #[test]
-    fn test_merge_s3_config_nested_oidc() {
+    fn test_merge_s3_config_nested_oidc_fails() {
+        // M4: the S3 `oidc` block must cause a startup error — use VOUCH_OIDC_PROVIDERS instead.
         let mut config = crate::test_utils::test_config();
         let s3 = S3Config {
             oidc: Some(S3OidcConfig {
@@ -945,13 +949,34 @@ mod tests {
             ..Default::default()
         };
 
-        config.merge_s3_config(&s3, false);
-
-        assert_eq!(
-            config.oidc_issuer_url,
-            Some("https://new-issuer.com".to_string())
+        let result = config.merge_s3_config(&s3, false);
+        assert!(
+            result.is_err(),
+            "S3 oidc block must be a startup error, got Ok"
         );
-        assert_eq!(config.oidc_client_id, Some("new-client-id".to_string()));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("no longer supported"),
+            "error must mention 'no longer supported'"
+        );
+    }
+
+    #[test]
+    fn test_merge_s3_config_nested_oidc_runtime_update_skipped() {
+        // M4: runtime updates skip the oidc block check (returns before that path)
+        let mut config = crate::test_utils::test_config();
+        let s3 = S3Config {
+            oidc: Some(S3OidcConfig {
+                issuer_url: Some("https://new-issuer.com".to_string()),
+                client_id: Some("new-client-id".to_string()),
+                client_secret: Some("new-secret".to_string()),
+            }),
+            ..Default::default()
+        };
+        // Runtime update: early-return before oidc check, should succeed
+        config.merge_s3_config(&s3, true).unwrap();
     }
 
     #[test]
@@ -964,7 +989,7 @@ mod tests {
             ..Default::default()
         };
 
-        config.merge_s3_config(&s3, false);
+        config.merge_s3_config(&s3, false).unwrap();
 
         assert_eq!(config.dpop_max_age_seconds, 600);
     }
@@ -984,7 +1009,7 @@ mod tests {
             ..Default::default()
         };
 
-        config.merge_s3_config(&s3, false);
+        config.merge_s3_config(&s3, false).unwrap();
 
         assert_eq!(config.github_app_id, Some(12345));
         assert_eq!(config.github_app_name, Some("my-app".to_string()));
@@ -1008,7 +1033,7 @@ mod tests {
         };
 
         // Runtime update - only TLS should change
-        config.merge_s3_config(&s3, true);
+        config.merge_s3_config(&s3, true).unwrap();
 
         // rp_id and session_hours should be UNCHANGED
         assert_eq!(config.rp_id, original_rp_id);
@@ -1034,7 +1059,7 @@ mod tests {
         };
 
         // Startup (not runtime) - all fields should update
-        config.merge_s3_config(&s3, false);
+        config.merge_s3_config(&s3, false).unwrap();
 
         assert_eq!(config.rp_id, "new.example.com");
         assert_eq!(config.session_hours, 24);
@@ -1162,7 +1187,7 @@ mod tests {
             ..Default::default()
         };
 
-        config.merge_s3_config(&s3, false);
+        config.merge_s3_config(&s3, false).unwrap();
 
         assert_eq!(config.ssh_ca_kms_key_id, Some("mrk-ssh-key".to_string()));
         assert_eq!(
@@ -1226,7 +1251,7 @@ mod tests {
         };
 
         // Runtime update should NOT apply KMS key IDs
-        config.merge_s3_config(&s3, true);
+        config.merge_s3_config(&s3, true).unwrap();
 
         assert!(config.ssh_ca_kms_key_id.is_none());
         assert!(config.oidc_signing_kms_key_id.is_none());
@@ -1267,7 +1292,7 @@ mod tests {
         };
 
         // Startup merge should apply RSA key fields
-        config.merge_s3_config(&s3, false);
+        config.merge_s3_config(&s3, false).unwrap();
 
         assert!(config.oidc_rsa_signing_key.is_some());
         assert_eq!(
@@ -1287,7 +1312,7 @@ mod tests {
         };
 
         // Runtime update should NOT apply RSA signing key fields
-        config.merge_s3_config(&s3, true);
+        config.merge_s3_config(&s3, true).unwrap();
 
         assert!(config.oidc_rsa_signing_key.is_none());
         assert!(config.oidc_rsa_signing_kms_key_id.is_none());
@@ -1338,7 +1363,7 @@ mod tests {
             ..Default::default()
         };
 
-        config.merge_s3_config(&s3, false);
+        config.merge_s3_config(&s3, false).unwrap();
 
         assert_eq!(
             config.saml_idp_metadata_url,

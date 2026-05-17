@@ -8,6 +8,117 @@ use secrecy::{ExposeSecret, SecretString};
 use std::collections::HashMap;
 
 // ============================================================================
+// OIDC Provider Config
+// ============================================================================
+
+/// Per-provider OIDC configuration (issuer + client credentials).
+#[derive(Debug, Clone)]
+pub struct OidcProviderConfig {
+    /// Operator-chosen slug (validated: `[a-z0-9-]{1,32}`).
+    pub id: String,
+    /// OIDC issuer URL (e.g., "<https://accounts.google.com>").
+    pub issuer_url: String,
+    /// OIDC client ID.
+    pub client_id: String,
+    /// OIDC client secret.
+    pub client_secret: SecretString,
+}
+
+/// Validate that a provider slug matches `[a-z0-9-]{1,32}`.
+pub fn validate_provider_slug(slug: &str) -> Result<()> {
+    if slug.is_empty() || slug.len() > 32 {
+        anyhow::bail!("Provider slug '{}' must be 1-32 characters long", slug);
+    }
+    if !slug
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+    {
+        anyhow::bail!(
+            "Provider slug '{}' must match [a-z0-9-] (lowercase letters, digits, hyphens)",
+            slug
+        );
+    }
+    if slug.starts_with('-') || slug.ends_with('-') {
+        anyhow::bail!(
+            "Provider slug '{}' must not start or end with a hyphen",
+            slug
+        );
+    }
+    Ok(())
+}
+
+/// Detect legacy OIDC env vars and fail fast with an actionable error.
+///
+/// The old single-provider vars (`VOUCH_OIDC_ISSUER`, `VOUCH_OIDC_CLIENT_ID`,
+/// `VOUCH_OIDC_CLIENT_SECRET`) are no longer supported. Operators must migrate
+/// to the multi-provider format.
+pub fn validate_no_legacy_oidc_vars() -> Result<()> {
+    let legacy_vars = [
+        ("VOUCH_OIDC_ISSUER", "VOUCH_OIDC_{SLUG}_ISSUER"),
+        ("VOUCH_OIDC_CLIENT_ID", "VOUCH_OIDC_{SLUG}_CLIENT_ID"),
+        (
+            "VOUCH_OIDC_CLIENT_SECRET",
+            "VOUCH_OIDC_{SLUG}_CLIENT_SECRET",
+        ),
+    ];
+    let mut found = Vec::new();
+    for (old, new) in &legacy_vars {
+        if std::env::var(old).is_ok() {
+            found.push(format!("  {old}  →  {new}"));
+        }
+    }
+    if !found.is_empty() {
+        anyhow::bail!(
+            "Legacy OIDC configuration detected. Multi-provider format is now required.\n\
+             Rename these environment variables:\n{}\n\
+             Also set VOUCH_OIDC_PROVIDERS=<slug> (e.g. VOUCH_OIDC_PROVIDERS=google)\n\
+             See the migration guide for details.",
+            found.join("\n")
+        );
+    }
+    Ok(())
+}
+
+/// Parse `VOUCH_OIDC_PROVIDERS` and the per-provider env vars into a `Vec<OidcProviderConfig>`.
+fn parse_oidc_providers(provider_list: Option<&str>) -> Result<Vec<OidcProviderConfig>> {
+    let Some(list) = provider_list else {
+        return Ok(Vec::new());
+    };
+    let slugs: Vec<&str> = list
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+    if slugs.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut providers = Vec::with_capacity(slugs.len());
+    for slug in slugs {
+        validate_provider_slug(slug)?;
+        let upper = slug.to_uppercase().replace('-', "_");
+        let issuer_key = format!("VOUCH_OIDC_{upper}_ISSUER");
+        let client_id_key = format!("VOUCH_OIDC_{upper}_CLIENT_ID");
+        let secret_key = format!("VOUCH_OIDC_{upper}_CLIENT_SECRET");
+
+        let issuer_url = std::env::var(&issuer_key)
+            .with_context(|| format!("OIDC provider '{slug}' requires {issuer_key} to be set"))?;
+        let client_id = std::env::var(&client_id_key).with_context(|| {
+            format!("OIDC provider '{slug}' requires {client_id_key} to be set")
+        })?;
+        let client_secret = std::env::var(&secret_key)
+            .with_context(|| format!("OIDC provider '{slug}' requires {secret_key} to be set"))?;
+
+        providers.push(OidcProviderConfig {
+            id: slug.to_string(),
+            issuer_url,
+            client_id,
+            client_secret: SecretString::from(client_secret),
+        });
+    }
+    Ok(providers)
+}
+
+// ============================================================================
 // Custom Value Parsers
 // ============================================================================
 
@@ -90,17 +201,11 @@ pub struct Args {
     #[arg(long, env = "VOUCH_SESSION_HOURS", default_value = "8")]
     pub session_hours: u64,
 
-    /// OIDC issuer URL (e.g., "https://accounts.google.com").
-    #[arg(long, env = "VOUCH_OIDC_ISSUER")]
-    pub oidc_issuer: Option<String>,
-
-    /// OIDC client ID.
-    #[arg(long, env = "VOUCH_OIDC_CLIENT_ID")]
-    pub oidc_client_id: Option<String>,
-
-    /// OIDC client secret.
-    #[arg(long, env = "VOUCH_OIDC_CLIENT_SECRET")]
-    pub oidc_client_secret: Option<String>,
+    /// Comma-separated list of OIDC provider slugs (e.g., "google,entra").
+    /// Each slug must have corresponding VOUCH_OIDC_{SLUG}_ISSUER,
+    /// VOUCH_OIDC_{SLUG}_CLIENT_ID, and VOUCH_OIDC_{SLUG}_CLIENT_SECRET env vars.
+    #[arg(long, env = "VOUCH_OIDC_PROVIDERS")]
+    pub oidc_providers: Option<String>,
 
     /// SAML IdP metadata URL.
     #[arg(long, env = "VOUCH_SAML_IDP_METADATA_URL")]
@@ -390,12 +495,8 @@ pub struct ServerConfig {
     pub jwt_secret: SecretString,
     /// Session duration in hours (default: 8).
     pub session_hours: u64,
-    /// OIDC issuer URL (e.g., "<https://accounts.google.com>").
-    pub oidc_issuer_url: Option<String>,
-    /// OIDC client ID.
-    pub oidc_client_id: Option<String>,
-    /// OIDC client secret.
-    pub oidc_client_secret: Option<SecretString>,
+    /// Configured OIDC providers (ordered, indexed by slug).
+    pub oidc_providers: Vec<OidcProviderConfig>,
     /// SAML IdP metadata URL.
     pub saml_idp_metadata_url: Option<String>,
     /// SAML SP entity ID (defaults to base_url if not set).
@@ -539,6 +640,9 @@ pub enum LogFormat {
 impl ServerConfig {
     /// Create configuration from parsed command-line arguments.
     pub fn from_args(args: Args) -> Result<Self> {
+        // Detect and reject legacy single-provider OIDC env vars before anything else.
+        validate_no_legacy_oidc_vars()?;
+
         // Note: Validation of rp_id and jwt_secret is deferred to validate()
         // to allow these values to come from S3 config.
 
@@ -586,6 +690,9 @@ impl ServerConfig {
         // Parse trusted proxies
         let trusted_proxies = parse_trusted_proxies(&args.trusted_proxies)?;
 
+        // Parse OIDC providers
+        let oidc_providers = parse_oidc_providers(args.oidc_providers.as_deref())?;
+
         Ok(Self {
             listen_addr: args.listen_addr,
             database_url: args.database_url,
@@ -593,9 +700,7 @@ impl ServerConfig {
             rp_name: args.rp_name,
             jwt_secret: SecretString::from(args.jwt_secret),
             session_hours: args.session_hours,
-            oidc_issuer_url: args.oidc_issuer,
-            oidc_client_id: args.oidc_client_id,
-            oidc_client_secret: args.oidc_client_secret.map(SecretString::from),
+            oidc_providers,
             saml_idp_metadata_url: args.saml_idp_metadata_url,
             saml_sp_entity_id: args.saml_sp_entity_id,
             saml_email_attribute: args.saml_email_attribute,
@@ -663,12 +768,10 @@ impl ServerConfig {
         })
     }
 
-    /// Check if OIDC is configured (all required fields present).
+    /// Check if at least one OIDC provider is configured.
     #[must_use]
-    pub fn oidc_configured(&self) -> bool {
-        self.oidc_issuer_url.is_some()
-            && self.oidc_client_id.is_some()
-            && self.oidc_client_secret.is_some()
+    pub fn has_oidc_providers(&self) -> bool {
+        !self.oidc_providers.is_empty()
     }
 
     /// Check if SAML is configured.
@@ -688,12 +791,6 @@ impl ServerConfig {
     #[must_use]
     pub fn jwt_secret_bytes(&self) -> &[u8] {
         self.jwt_secret.expose_secret().as_bytes()
-    }
-
-    /// Get the OIDC client secret (exposed) if configured.
-    #[must_use]
-    pub fn oidc_client_secret_exposed(&self) -> Option<&str> {
-        self.oidc_client_secret.as_ref().map(|s| s.expose_secret())
     }
 
     /// Check if GitHub App is configured (all required fields present).
@@ -740,7 +837,7 @@ impl ServerConfig {
     /// Call this after all config sources (env, S3) have been merged.
     pub fn validate(&self) -> Result<()> {
         // OIDC and SAML are mutually exclusive.
-        if self.oidc_configured() && self.saml_configured() {
+        if self.has_oidc_providers() && self.saml_configured() {
             anyhow::bail!(
                 "OIDC and SAML cannot both be configured. \
                  Set either VOUCH_OIDC_* or VOUCH_SAML_* env vars, not both."
@@ -829,6 +926,7 @@ pub fn resolve_dsql_endpoints(endpoints: &HashMap<String, String>) -> Result<Str
     reason = "test code: panic on assertion failure is acceptable"
 )]
 mod tests {
+    use crate::config::validate_provider_slug;
     use crate::test_utils::test_config;
     use secrecy::SecretString;
 
@@ -851,7 +949,7 @@ mod tests {
     #[test]
     fn test_validate_mutual_exclusivity_oidc_and_saml() {
         let mut config = test_config();
-        // test_config already sets OIDC fields; add SAML too
+        // test_config already sets OIDC providers; add SAML too
         config.saml_idp_metadata_url = Some("https://idp.example.com/saml/metadata".to_string());
 
         let err = config.validate().unwrap_err();
@@ -864,10 +962,8 @@ mod tests {
     #[test]
     fn test_validate_saml_only_passes() {
         let mut config = test_config();
-        // Remove OIDC fields, keep only SAML
-        config.oidc_issuer_url = None;
-        config.oidc_client_id = None;
-        config.oidc_client_secret = None;
+        // Remove OIDC providers, keep only SAML
+        config.oidc_providers = Vec::new();
         config.saml_idp_metadata_url = Some("https://idp.example.com/saml/metadata".to_string());
 
         assert!(config.validate().is_ok());
@@ -875,16 +971,14 @@ mod tests {
 
     #[test]
     fn test_saml_configured_implies_oidc_not_configured() {
-        // Covers CC-2: when only SAML is set, oidc_configured() must be false.
+        // Covers CC-2: when only SAML is set, has_oidc_providers() must be false.
         let mut config = test_config();
-        config.oidc_issuer_url = None;
-        config.oidc_client_id = None;
-        config.oidc_client_secret = None;
+        config.oidc_providers = Vec::new();
         config.saml_idp_metadata_url = Some("https://idp.example.com/saml/metadata".to_string());
 
         assert!(
-            !config.oidc_configured(),
-            "oidc_configured should be false when only SAML set"
+            !config.has_oidc_providers(),
+            "has_oidc_providers should be false when only SAML set"
         );
         assert!(config.saml_configured(), "saml_configured should be true");
     }
@@ -928,5 +1022,73 @@ mod tests {
     fn test_validate_good_secret_accepted() {
         let config = test_config();
         assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_provider_slug_valid() {
+        assert!(validate_provider_slug("google").is_ok());
+        assert!(validate_provider_slug("entra").is_ok());
+        assert!(validate_provider_slug("my-idp-2").is_ok());
+        assert!(validate_provider_slug("a").is_ok());
+        let long_slug = "a".repeat(32);
+        assert!(validate_provider_slug(&long_slug).is_ok());
+    }
+
+    #[test]
+    fn test_validate_provider_slug_invalid() {
+        assert!(validate_provider_slug("").is_err(), "empty slug must fail");
+        let too_long = "a".repeat(33);
+        assert!(
+            validate_provider_slug(&too_long).is_err(),
+            "33 chars must fail"
+        );
+        assert!(
+            validate_provider_slug("Google").is_err(),
+            "uppercase must fail"
+        );
+        assert!(
+            validate_provider_slug("my_idp").is_err(),
+            "underscore must fail"
+        );
+        assert!(validate_provider_slug("my idp").is_err(), "space must fail");
+        assert!(
+            validate_provider_slug("-google").is_err(),
+            "leading hyphen must fail"
+        );
+        assert!(
+            validate_provider_slug("google-").is_err(),
+            "trailing hyphen must fail"
+        );
+    }
+
+    #[test]
+    fn test_has_oidc_providers_empty() {
+        let mut config = test_config();
+        config.oidc_providers = Vec::new();
+        assert!(!config.has_oidc_providers());
+    }
+
+    #[test]
+    fn test_has_oidc_providers_with_providers() {
+        let config = test_config();
+        // test_config sets one provider
+        assert!(config.has_oidc_providers());
+    }
+
+    #[test]
+    fn test_validate_no_legacy_oidc_vars_clean() {
+        // Test only works if no legacy vars happen to be set in the test environment.
+        // set_var/remove_var are unsafe in Rust 1.95 and blocked by -D unsafe-code.
+        // If the test environment has these vars set, this test is skipped.
+        if std::env::var("VOUCH_OIDC_ISSUER").is_ok()
+            || std::env::var("VOUCH_OIDC_CLIENT_ID").is_ok()
+            || std::env::var("VOUCH_OIDC_CLIENT_SECRET").is_ok()
+        {
+            return; // Skip: legacy vars present in test environment
+        }
+        assert!(
+            crate::config::validate_no_legacy_oidc_vars().is_ok(),
+            "should succeed when no legacy vars are set"
+        );
     }
 }

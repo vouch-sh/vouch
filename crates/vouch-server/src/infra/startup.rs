@@ -139,10 +139,10 @@ pub async fn initialize(args: config::Args) -> Result<ServerComponents> {
 
     log_authenticator_policy(&config);
 
-    if !config.oidc_configured() && !config.saml_configured() {
+    if !config.has_oidc_providers() && !config.saml_configured() {
         tracing::warn!(
             "No upstream IdP configured -- enrollment (vouch enroll) will not work. \
-             Set VOUCH_OIDC_* for OIDC or VOUCH_SAML_* for SAML."
+             Set VOUCH_OIDC_PROVIDERS + per-provider vars for OIDC or VOUCH_SAML_* for SAML."
         );
     }
 
@@ -286,8 +286,8 @@ async fn load_s3_config(
             .await
             .context("Failed to fetch S3 configuration")?;
 
-    // Merge S3 config (S3 wins over env vars)
-    config.merge_s3_config(&s3_cfg, false); // Initial merge - all fields allowed
+    // Merge S3 config (S3 wins over env vars) — fail fast if oidc block present
+    config.merge_s3_config(&s3_cfg, false)?;
     tracing::info!("S3 configuration merged (etag: {etag})");
 
     Ok((
@@ -526,34 +526,48 @@ async fn build_app_state(
     let http_client = vouch_common::http::server_client(&user_agent, extra_ca_pem.as_deref())
         .context("Failed to create shared HTTP client")?;
 
-    // Fetch upstream IdP configuration if configured (OIDC or SAML, mutually exclusive).
-    let upstream_idp = if config.oidc_configured() {
-        let issuer = config
-            .oidc_issuer_url
-            .as_deref()
-            .context("OIDC issuer URL missing")?;
-        let provider = crate::services::idp::oidc::fetch_discovery(&http_client, issuer)
-            .await
-            .context(
-                "Failed to fetch upstream OIDC discovery document. \
-                     Check that VOUCH_OIDC_ISSUER is reachable.",
-            )?;
-        let brand = crate::services::idp::IdpBrand::from_issuer(&provider.issuer);
-        let enrollment_domains = match &config.allowed_domains {
-            Some(domains) => domains.join(", "),
-            None => "(open enrollment)".to_string(),
-        };
+    // Fetch upstream IdP configuration (OIDC providers loop + optional SAML).
+    let mut oidc_providers: indexmap::IndexMap<
+        String,
+        crate::services::idp::ConfiguredOidcProvider,
+    > = indexmap::IndexMap::new();
+    let enrollment_domains = match &config.allowed_domains {
+        Some(domains) => domains.join(", "),
+        None => "(open enrollment)".to_string(),
+    };
+    for provider_cfg in &config.oidc_providers {
+        let discovered =
+            crate::services::idp::oidc::fetch_discovery(&http_client, &provider_cfg.issuer_url)
+                .await
+                .with_context(|| {
+                    format!(
+                        "Failed to fetch OIDC discovery for provider '{}' (issuer: {}). \
+                     Check that the issuer URL is reachable.",
+                        provider_cfg.id, provider_cfg.issuer_url
+                    )
+                })?;
+        let brand = crate::services::idp::IdpBrand::from_issuer(&discovered.issuer);
         tracing::info!(
-            "Upstream IdP: {} (OIDC), issuer={}, auth={}, token={}, jwks={}, enrollment_domains={}",
+            "OIDC provider '{}': brand={}, issuer={}, auth={}, token={}, jwks={}, \
+             enrollment_domains={}",
+            provider_cfg.id,
             brand.display_name(),
-            provider.issuer,
-            provider.authorization_endpoint,
-            provider.token_endpoint,
-            provider.jwks_uri,
+            discovered.issuer,
+            discovered.authorization_endpoint,
+            discovered.token_endpoint,
+            discovered.jwks_uri,
             enrollment_domains,
         );
-        Some(crate::services::idp::UpstreamIdp::Oidc(Box::new(provider)))
-    } else if config.saml_configured() {
+        let configured = crate::services::idp::ConfiguredOidcProvider {
+            id: provider_cfg.id.clone(),
+            client_id: provider_cfg.client_id.clone(),
+            client_secret: provider_cfg.client_secret.clone(),
+            provider: discovered,
+        };
+        oidc_providers.insert(provider_cfg.id.clone(), configured);
+    }
+
+    let upstream_saml = if config.saml_configured() {
         let metadata_url = config
             .saml_idp_metadata_url
             .as_deref()
@@ -593,14 +607,13 @@ async fn build_app_state(
             },
             idp_metadata.signing_certificates.len(),
         );
-        let provider = crate::services::idp::saml::SamlProvider {
+        Some(crate::services::idp::saml::SamlProvider {
             idp_metadata,
             sp_entity_id,
             acs_url,
             email_attribute: config.saml_email_attribute.clone(),
             domain_attribute: config.saml_domain_attribute.clone(),
-        };
-        Some(crate::services::idp::UpstreamIdp::Saml(provider))
+        })
     } else {
         None
     };
@@ -674,7 +687,8 @@ async fn build_app_state(
             config.session_cache_max_capacity,
             config.session_cache_ttl_secs,
         ),
-        upstream_idp,
+        oidc_providers,
+        upstream_saml,
     });
 
     Ok(state)

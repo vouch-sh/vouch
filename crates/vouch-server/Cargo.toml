@@ -44,6 +44,7 @@ flate2 = { workspace = true }
 governor = { workspace = true, features = ["std"] }
 headers = { workspace = true }
 hex = { workspace = true, features = ["std"] }
+indexmap = { workspace = true, features = ["std", "serde"] }
 hickory-resolver = { workspace = true, features = ["system-config"] }
 http = { workspace = true }
 idna = { workspace = true }

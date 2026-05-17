@@ -13,7 +13,7 @@ use axum::{
 use tower_http::cors::CorsLayer;
 use tower_http::set_header::SetResponseHeaderLayer;
 
-use crate::{AppState, config, services::idp::UpstreamIdp};
+use crate::{AppState, config, services::idp};
 
 /// Build permissive CORS layer for API endpoints (OIDC, SCIM, v1, api).
 ///
@@ -96,9 +96,10 @@ pub fn build_ui_cors_layer(config: &config::ServerConfig) -> CorsLayer {
 pub fn apply_security_layers(
     router: Router<Arc<AppState>>,
     config: &config::ServerConfig,
-    idp: Option<&UpstreamIdp>,
+    oidc_providers: &indexmap::IndexMap<String, idp::ConfiguredOidcProvider>,
+    upstream_saml: Option<&idp::saml::SamlProvider>,
 ) -> anyhow::Result<Router<Arc<AppState>>> {
-    let csp = build_csp_header(idp)?;
+    let csp = build_csp_header(oidc_providers, upstream_saml)?;
     let router = router
         .layer(SetResponseHeaderLayer::if_not_present(
             header::CACHE_CONTROL,
@@ -153,12 +154,27 @@ pub fn apply_security_layers(
 
 /// Build the `Content-Security-Policy` header value.
 ///
-/// Extends `form-action 'self'` with the configured upstream IdP's origin(s),
-/// if any. The remaining directives are static.
-fn build_csp_header(idp: Option<&UpstreamIdp>) -> anyhow::Result<HeaderValue> {
-    let origins: Vec<crate::infra::csp::CspOrigin> = idp
-        .map(UpstreamIdp::form_action_origins)
-        .unwrap_or_default();
+/// Extends `form-action 'self'` with origins from all configured OIDC providers
+/// and the optional SAML provider. The remaining directives are static.
+fn build_csp_header(
+    oidc_providers: &indexmap::IndexMap<String, idp::ConfiguredOidcProvider>,
+    upstream_saml: Option<&idp::saml::SamlProvider>,
+) -> anyhow::Result<HeaderValue> {
+    let mut origins: Vec<crate::infra::csp::CspOrigin> = Vec::new();
+    for p in oidc_providers.values() {
+        if let Some(origin) = p.provider.form_action_origin()
+            && !origins.contains(&origin)
+        {
+            origins.push(origin);
+        }
+    }
+    if let Some(saml) = upstream_saml {
+        for origin in saml.form_action_origins() {
+            if !origins.contains(&origin) {
+                origins.push(origin);
+            }
+        }
+    }
     let mut form_action = String::from("form-action 'self'");
     for origin in &origins {
         form_action.push(' ');
@@ -188,7 +204,12 @@ mod tests {
     async fn test_x_frame_options_header() {
         let state = test_app_state().await;
         let config = state.config();
-        let router = apply_security_layers_to_test_router(state.clone(), &config, None);
+        let router = apply_security_layers_to_test_router(
+            state.clone(),
+            &config,
+            &indexmap::IndexMap::new(),
+            None,
+        );
 
         let resp = http_get_full(&router, "/health", &[]).await;
         assert_eq!(resp.headers.get("x-frame-options").unwrap(), "DENY");
@@ -198,7 +219,12 @@ mod tests {
     async fn test_x_content_type_options_header() {
         let state = test_app_state().await;
         let config = state.config();
-        let router = apply_security_layers_to_test_router(state.clone(), &config, None);
+        let router = apply_security_layers_to_test_router(
+            state.clone(),
+            &config,
+            &indexmap::IndexMap::new(),
+            None,
+        );
 
         let resp = http_get_full(&router, "/health", &[]).await;
         assert_eq!(
@@ -211,7 +237,12 @@ mod tests {
     async fn test_content_security_policy_header() {
         let state = test_app_state().await;
         let config = state.config();
-        let router = apply_security_layers_to_test_router(state.clone(), &config, None);
+        let router = apply_security_layers_to_test_router(
+            state.clone(),
+            &config,
+            &indexmap::IndexMap::new(),
+            None,
+        );
 
         let resp = http_get_full(&router, "/health", &[]).await;
         let csp = resp
@@ -242,7 +273,12 @@ mod tests {
     async fn test_csp_form_action_no_idp_byte_identical() {
         let state = test_app_state().await;
         let config = state.config();
-        let router = apply_security_layers_to_test_router(state.clone(), &config, None);
+        let router = apply_security_layers_to_test_router(
+            state.clone(),
+            &config,
+            &indexmap::IndexMap::new(),
+            None,
+        );
 
         let resp = http_get_full(&router, "/health", &[]).await;
         let csp = resp
@@ -259,22 +295,33 @@ mod tests {
         );
     }
 
-    fn make_oidc_idp(auth_endpoint: &str) -> crate::services::idp::UpstreamIdp {
-        crate::services::idp::UpstreamIdp::Oidc(Box::new(
-            crate::services::idp::oidc::OidcProvider {
-                issuer: "https://accounts.google.com".to_string(),
-                authorization_endpoint: url::Url::parse(auth_endpoint).unwrap(),
-                token_endpoint: url::Url::parse("https://oauth2.googleapis.com/token").unwrap(),
-                jwks_uri: url::Url::parse("https://www.googleapis.com/oauth2/v3/certs").unwrap(),
+    fn make_oidc_providers(
+        auth_endpoint: &str,
+    ) -> indexmap::IndexMap<String, crate::services::idp::ConfiguredOidcProvider> {
+        let mut map = indexmap::IndexMap::new();
+        map.insert(
+            "google".to_string(),
+            crate::services::idp::ConfiguredOidcProvider {
+                id: "google".to_string(),
+                client_id: "test-client-id".to_string(),
+                client_secret: secrecy::SecretString::from("test-secret"),
+                provider: crate::services::idp::oidc::OidcProvider {
+                    issuer: "https://accounts.google.com".to_string(),
+                    authorization_endpoint: url::Url::parse(auth_endpoint).unwrap(),
+                    token_endpoint: url::Url::parse("https://oauth2.googleapis.com/token").unwrap(),
+                    jwks_uri: url::Url::parse("https://www.googleapis.com/oauth2/v3/certs")
+                        .unwrap(),
+                },
             },
-        ))
+        );
+        map
     }
 
-    fn make_saml_idp(
+    fn make_saml_provider(
         sso_post: Option<&str>,
         sso_redirect: Option<&str>,
-    ) -> crate::services::idp::UpstreamIdp {
-        crate::services::idp::UpstreamIdp::Saml(crate::services::idp::saml::SamlProvider {
+    ) -> crate::services::idp::saml::SamlProvider {
+        crate::services::idp::saml::SamlProvider {
             idp_metadata: crate::services::idp::saml::IdpMetadata {
                 entity_id: "https://idp.example.com/saml".to_string(),
                 sso_post_url: sso_post.map(str::to_string),
@@ -285,7 +332,7 @@ mod tests {
             acs_url: "https://vouch.example.com/saml/acs".to_string(),
             email_attribute: None,
             domain_attribute: None,
-        })
+        }
     }
 
     /// Extract the `form-action` directive's full value from a CSP string.
@@ -306,8 +353,8 @@ mod tests {
     async fn test_csp_form_action_includes_oidc_origin() {
         let state = test_app_state().await;
         let config = state.config();
-        let idp = make_oidc_idp("https://accounts.google.com/o/oauth2/v2/auth");
-        let router = apply_security_layers_to_test_router(state.clone(), &config, Some(&idp));
+        let providers = make_oidc_providers("https://accounts.google.com/o/oauth2/v2/auth");
+        let router = apply_security_layers_to_test_router(state.clone(), &config, &providers, None);
 
         let resp = http_get_full(&router, "/health", &[]).await;
         let csp = resp
@@ -326,8 +373,8 @@ mod tests {
     async fn test_csp_form_action_oidc_custom_port() {
         let state = test_app_state().await;
         let config = state.config();
-        let idp = make_oidc_idp("https://idp.example.com:8443/auth");
-        let router = apply_security_layers_to_test_router(state.clone(), &config, Some(&idp));
+        let providers = make_oidc_providers("https://idp.example.com:8443/auth");
+        let router = apply_security_layers_to_test_router(state.clone(), &config, &providers, None);
 
         let resp = http_get_full(&router, "/health", &[]).await;
         let csp = resp
@@ -346,8 +393,13 @@ mod tests {
     async fn test_csp_form_action_includes_saml_post_origin() {
         let state = test_app_state().await;
         let config = state.config();
-        let idp = make_saml_idp(Some("https://idp.example.com/sso/post"), None);
-        let router = apply_security_layers_to_test_router(state.clone(), &config, Some(&idp));
+        let saml = make_saml_provider(Some("https://idp.example.com/sso/post"), None);
+        let router = apply_security_layers_to_test_router(
+            state.clone(),
+            &config,
+            &indexmap::IndexMap::new(),
+            Some(&saml),
+        );
 
         let resp = http_get_full(&router, "/health", &[]).await;
         let csp = resp
@@ -366,11 +418,16 @@ mod tests {
     async fn test_csp_form_action_saml_two_distinct_hosts() {
         let state = test_app_state().await;
         let config = state.config();
-        let idp = make_saml_idp(
+        let saml = make_saml_provider(
             Some("https://idp-a.example.com/sso/post"),
             Some("https://idp-b.example.com/sso/redirect"),
         );
-        let router = apply_security_layers_to_test_router(state.clone(), &config, Some(&idp));
+        let router = apply_security_layers_to_test_router(
+            state.clone(),
+            &config,
+            &indexmap::IndexMap::new(),
+            Some(&saml),
+        );
 
         let resp = http_get_full(&router, "/health", &[]).await;
         let csp = resp
@@ -393,7 +450,12 @@ mod tests {
     async fn test_referrer_policy_header() {
         let state = test_app_state().await;
         let config = state.config();
-        let router = apply_security_layers_to_test_router(state.clone(), &config, None);
+        let router = apply_security_layers_to_test_router(
+            state.clone(),
+            &config,
+            &indexmap::IndexMap::new(),
+            None,
+        );
 
         let resp = http_get_full(&router, "/health", &[]).await;
         assert_eq!(
@@ -406,7 +468,12 @@ mod tests {
     async fn test_permissions_policy_header() {
         let state = test_app_state().await;
         let config = state.config();
-        let router = apply_security_layers_to_test_router(state.clone(), &config, None);
+        let router = apply_security_layers_to_test_router(
+            state.clone(),
+            &config,
+            &indexmap::IndexMap::new(),
+            None,
+        );
 
         let resp = http_get_full(&router, "/health", &[]).await;
         let pp = resp
@@ -423,7 +490,12 @@ mod tests {
     async fn test_cross_origin_opener_policy_header() {
         let state = test_app_state().await;
         let config = state.config();
-        let router = apply_security_layers_to_test_router(state.clone(), &config, None);
+        let router = apply_security_layers_to_test_router(
+            state.clone(),
+            &config,
+            &indexmap::IndexMap::new(),
+            None,
+        );
 
         let resp = http_get_full(&router, "/health", &[]).await;
         assert_eq!(
@@ -433,20 +505,18 @@ mod tests {
     }
 
     /// Build a minimal router with security headers for testing.
-    ///
-    /// `idp` is forwarded to `apply_security_layers` to widen the CSP
-    /// `form-action` directive when an upstream IdP is configured.
     fn apply_security_layers_to_test_router(
         state: std::sync::Arc<crate::AppState>,
         config: &crate::config::ServerConfig,
-        idp: Option<&crate::services::idp::UpstreamIdp>,
+        oidc_providers: &indexmap::IndexMap<String, crate::services::idp::ConfiguredOidcProvider>,
+        upstream_saml: Option<&crate::services::idp::saml::SamlProvider>,
     ) -> axum::Router {
         use axum::routing::get;
 
         let router: axum::Router<std::sync::Arc<crate::AppState>> =
             axum::Router::new().route("/health", get(|| async { "ok" }));
 
-        super::apply_security_layers(router, config, idp)
+        super::apply_security_layers(router, config, oidc_providers, upstream_saml)
             .expect("apply_security_layers builds CSP for test router")
             .with_state(state)
     }

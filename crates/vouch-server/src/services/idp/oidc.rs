@@ -4,13 +4,82 @@
 //! Fetches and caches the OpenID Connect discovery document (RFC 8414)
 //! at startup to discover authorization, token, and JWKS endpoints.
 
+use secrecy::SecretString;
 use serde::Deserialize;
 use url::Url;
 
 use super::IdentityResult;
 
+/// A fully configured OIDC provider: discovery endpoints + client credentials.
+///
+/// Built at startup by calling `fetch_discovery` for each `OidcProviderConfig`
+/// and storing the result together with credentials in `AppState::oidc_providers`.
+#[derive(Debug, Clone)]
+pub struct ConfiguredOidcProvider {
+    /// Operator-chosen slug (e.g., "google", "entra").
+    pub id: String,
+    /// Client ID for this provider.
+    pub client_id: String,
+    /// Client secret for this provider.
+    pub client_secret: SecretString,
+    /// Discovered OIDC endpoints.
+    pub provider: OidcProvider,
+}
+
+impl ConfiguredOidcProvider {
+    /// Initiate an OIDC authorization code flow for this provider.
+    ///
+    /// Returns an `AuthRequest` with the redirect URL, state key, nonce, and
+    /// PKCE code_verifier (RFC 7636). The caller must store the state key in
+    /// the database before redirecting the user.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if random byte generation fails.
+    pub(crate) fn initiate_auth(
+        &self,
+        base_url: &str,
+    ) -> Result<super::AuthRequest, anyhow::Error> {
+        use base64::Engine;
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+
+        let state_bytes = crate::crypto::generate_random_bytes(32)?;
+        let nonce_bytes = crate::crypto::generate_random_bytes(32)?;
+        let state_key = URL_SAFE_NO_PAD.encode(state_bytes);
+        let nonce = URL_SAFE_NO_PAD.encode(nonce_bytes);
+
+        let verifier_bytes = crate::crypto::generate_random_bytes(32)?;
+        let code_verifier = URL_SAFE_NO_PAD.encode(verifier_bytes);
+        let challenge_digest =
+            aws_lc_rs::digest::digest(&aws_lc_rs::digest::SHA256, code_verifier.as_bytes());
+        let code_challenge = URL_SAFE_NO_PAD.encode(challenge_digest.as_ref());
+
+        let redirect_uri = format!("{base_url}/oauth/callback");
+        let mut url = self.provider.authorization_endpoint.clone();
+        url.query_pairs_mut()
+            .append_pair("client_id", &self.client_id)
+            .append_pair("redirect_uri", &redirect_uri)
+            .append_pair("response_type", "code")
+            .append_pair("scope", "openid email")
+            .append_pair("state", &state_key)
+            .append_pair("nonce", &nonce)
+            .append_pair("code_challenge", &code_challenge)
+            .append_pair("code_challenge_method", "S256")
+            .append_pair("prompt", "login");
+
+        Ok(super::AuthRequest {
+            action: super::AuthAction::Redirect {
+                url: url.to_string(),
+            },
+            state_key,
+            nonce,
+            code_verifier,
+        })
+    }
+}
+
 /// Cached OIDC discovery endpoints (RFC 8414).
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct OidcProvider {
     /// The issuer identifier (must match the configured issuer).
     pub issuer: String,
@@ -45,12 +114,75 @@ struct DiscoveryDocument {
 /// Raw OIDC ID token claims (deserialization target, not exposed).
 #[derive(Debug, Deserialize)]
 struct IdTokenClaims {
+    /// Token issuer — used for Entra cross-tenant validation (M2).
+    iss: String,
     email: String,
     #[serde(default)]
     email_verified: bool,
     nonce: Option<String>,
     /// Google Workspace hosted domain claim.
     hd: Option<String>,
+    /// Entra ID tenant ID claim (present in tokens from Microsoft).
+    tid: Option<String>,
+}
+
+/// MSA (Microsoft consumer accounts) meta-tenant ID.
+///
+/// Tokens from this tenant are personal Microsoft accounts, not work/school
+/// accounts. The `/common/` endpoint issues them; we reject them explicitly
+/// because they have no organizational identity and should never be allowed
+/// to enroll with VOUCH_OIDC_PROVIDERS-based configs (M3).
+const ENTRA_MSA_TENANT_ID: &str = "9188040d-6c67-4c5b-b112-36a304b66dad";
+
+/// Check whether an issuer URL is an Entra `/organizations/` endpoint.
+///
+/// Returns `true` for both
+/// `https://login.microsoftonline.com/organizations/v2.0` (Entra) and
+/// `https://login.microsoftonline.com/organizations` variants.
+fn is_entra_organizations_issuer(issuer: &str) -> bool {
+    issuer.contains("login.microsoftonline.com")
+        && (issuer.contains("/organizations/") || issuer.ends_with("/organizations"))
+}
+
+/// Check whether an issuer URL is an Entra `/common/` endpoint (M3).
+fn is_entra_common_issuer(issuer: &str) -> bool {
+    issuer.contains("login.microsoftonline.com")
+        && (issuer.contains("/common/") || issuer.ends_with("/common"))
+}
+
+/// Validate that the discovered issuer matches the configured issuer,
+/// with special handling for Entra `/organizations/v2.0` which returns
+/// a per-tenant issuer template `{tenantid}` (M1).
+///
+/// For Entra `/organizations/`, the discovered issuer is of the form
+/// `https://login.microsoftonline.com/{tenant-uuid}/v2.0`
+/// while the configured issuer is
+/// `https://login.microsoftonline.com/organizations/v2.0`.
+/// We accept the mismatch iff the discovered issuer matches the
+/// Entra per-tenant pattern and the configured issuer is `/organizations/`.
+fn validate_discovered_issuer(configured: &str, discovered: &str) -> anyhow::Result<()> {
+    let configured = configured.trim_end_matches('/');
+    let discovered = discovered.trim_end_matches('/');
+
+    if discovered == configured {
+        return Ok(());
+    }
+
+    // M1: Entra /organizations/ and /common/ endpoints return a per-tenant issuer.
+    // Accept it iff:
+    //   - configured issuer is an /organizations/ or /common/ URL
+    //   - discovered issuer is login.microsoftonline.com/<uuid>/v2.0
+    if (is_entra_organizations_issuer(configured) || is_entra_common_issuer(configured))
+        && discovered.starts_with("https://login.microsoftonline.com/")
+        && discovered.ends_with("/v2.0")
+    {
+        return Ok(());
+    }
+
+    anyhow::bail!(
+        "Issuer mismatch: configured '{configured}' but discovery \
+         document reports '{discovered}'"
+    )
 }
 
 /// Fetch discovery from `{issuer}/.well-known/openid-configuration`.
@@ -76,6 +208,19 @@ pub(crate) async fn fetch_discovery(
         );
     }
 
+    // M3: Warn at startup if /common/ endpoint is configured.
+    // The /common/ endpoint issues both work-account and personal-account tokens;
+    // it is unsafe for access control because tid claims from personal accounts
+    // use the MSA meta-tenant ID, not the customer's tenant.
+    if is_entra_common_issuer(issuer) {
+        tracing::warn!(
+            "Entra /common/ endpoint configured. This allows personal Microsoft \
+             accounts to authenticate. Use /organizations/v2.0 for work accounts only. \
+             Personal-account tokens (tid={}) will be rejected at login.",
+            ENTRA_MSA_TENANT_ID
+        );
+    }
+
     let discovery_url = format!("{issuer}/.well-known/openid-configuration");
 
     let response = http_client.get(&discovery_url).send().await.map_err(|e| {
@@ -94,15 +239,10 @@ pub(crate) async fn fetch_discovery(
         .await
         .map_err(|e| anyhow::anyhow!("Failed to parse discovery document: {e}"))?;
 
-    // RFC 8414 Section 3.3: The issuer in the discovery document MUST match
-    // the configured issuer. This prevents SSRF and issuer confusion attacks.
-    let discovered_issuer = doc.issuer.trim_end_matches('/');
-    if discovered_issuer != issuer {
-        anyhow::bail!(
-            "Issuer mismatch: configured '{issuer}' but discovery \
-             document reports '{discovered_issuer}'"
-        );
-    }
+    // RFC 8414 Section 3.3 + M1: Validate discovered issuer against configured issuer.
+    // Entra /organizations/ endpoint returns a per-tenant issuer; validate_discovered_issuer
+    // accepts that template expansion.
+    validate_discovered_issuer(issuer, &doc.issuer)?;
 
     let authorization_endpoint = Url::parse(&doc.authorization_endpoint).map_err(|e| {
         anyhow::anyhow!(
@@ -175,13 +315,35 @@ pub(crate) async fn verify_id_token(
 
     // Validate the token: signature, exp, iss, aud
     let mut validation = jsonwebtoken::Validation::new(alg);
-    validation.set_issuer(&[&provider.issuer]);
+    // Entra /organizations/ and /common/ discovery returns the literal template
+    // `{tenantid}` as the issuer in OidcProvider::issuer. Real tokens contain a
+    // per-tenant UUID. Leave validation.iss = None (skip library check) and validate
+    // the issuer manually in the M1/M2 block below.
+    if !is_entra_organizations_issuer(&provider.issuer) && !is_entra_common_issuer(&provider.issuer)
+    {
+        validation.set_issuer(&[&provider.issuer]);
+    }
     validation.set_audience(&[expected_client_id]);
 
     let token_data = jsonwebtoken::decode::<IdTokenClaims>(id_token, &decoding_key, &validation)
         .map_err(|e| anyhow::anyhow!("ID token verification failed: {e}"))?;
 
     let claims = token_data.claims;
+
+    // M1: For Entra /organizations/ and /common/, the library issuer check was skipped.
+    // Manually verify the token's iss is a valid Entra per-tenant issuer URL — not an
+    // arbitrary host. This rejects tokens where `iss` is something other than
+    // `https://login.microsoftonline.com/<uuid>/v2.0`.
+    if (is_entra_organizations_issuer(&provider.issuer) || is_entra_common_issuer(&provider.issuer))
+        && (!claims.iss.starts_with("https://login.microsoftonline.com/")
+            || extract_entra_tenant_from_issuer(&claims.iss).is_none())
+    {
+        anyhow::bail!(
+            "Entra token issuer '{}' is not a valid per-tenant issuer. \
+             Expected https://login.microsoftonline.com/<uuid>/v2.0",
+            claims.iss
+        );
+    }
 
     // OIDC Core Section 3.1.3.7: Verify nonce matches the value sent
     // in the authentication request to prevent replay attacks.
@@ -205,6 +367,40 @@ pub(crate) async fn verify_id_token(
         anyhow::bail!("Email address is not verified by the identity provider");
     }
 
+    // M2 + M3: Entra-specific tenant validation.
+    // For Entra issuers (`login.microsoftonline.com`), check the `tid` claim:
+    //   - M3: Reject tokens from the MSA meta-tenant (personal accounts).
+    //   - M2: Cross-check tid against the tenant UUID in the token's `iss` claim
+    //     to prevent cross-tenant token injection. When /organizations/ or /common/
+    //     is configured, provider.issuer holds the template; claims.iss holds the
+    //     real per-tenant UUID from the validated token.
+    let is_entra = provider.issuer.contains("login.microsoftonline.com");
+    if is_entra {
+        let tid = claims.tid.as_deref().unwrap_or("");
+
+        // M3: Reject MSA personal-account tokens.
+        if tid == ENTRA_MSA_TENANT_ID {
+            anyhow::bail!(
+                "Personal Microsoft account tokens are not allowed. \
+                 Configure an Entra tenant-specific or /organizations/ issuer."
+            );
+        }
+
+        // M2: Cross-check tid against the tenant UUID in the token's iss claim.
+        // Use claims.iss (the real per-tenant issuer from the signed token) rather
+        // than provider.issuer (which may be the /organizations/ template string).
+        if let Some(expected_tid) = extract_entra_tenant_from_issuer(&claims.iss)
+            && !tid.eq_ignore_ascii_case(expected_tid)
+        {
+            anyhow::bail!(
+                "Entra tid claim '{tid}' does not match issuer tenant '{expected_tid}'. \
+                 Possible cross-tenant token injection."
+            );
+        }
+
+        tracing::info!(tid = %tid, iss = %claims.iss, "Entra tenant validated");
+    }
+
     // Domain extraction:
     // - Google with `hd` claim: use it (Workspace hosted domain).
     // - Google without `hd`: None (consumer account, don't group).
@@ -223,6 +419,27 @@ pub(crate) async fn verify_id_token(
         email: claims.email,
         domain,
     })
+}
+
+/// Extract the tenant UUID from an Entra issuer URL.
+///
+/// Returns the path segment after `login.microsoftonline.com/` that is
+/// a UUID-shaped string. Returns `None` for `/organizations/` and `/common/`
+/// endpoints (no static tenant to cross-check against).
+fn extract_entra_tenant_from_issuer(issuer: &str) -> Option<&str> {
+    // Issuer pattern: https://login.microsoftonline.com/{tenant-uuid}/v2.0
+    // We extract the segment between the first `/` after the hostname and the next `/`.
+    let after_host = issuer.strip_prefix("https://login.microsoftonline.com/")?;
+    let segment = after_host.split('/').next()?;
+    // Skip well-known non-UUID segments (organizations, common, consumers, etc.)
+    if matches!(segment, "organizations" | "common" | "consumers" | "") {
+        return None;
+    }
+    // Accept as tenant UUID: must look like a UUID (contains hyphens, length 36)
+    if segment.len() == 36 && segment.chars().filter(|c| *c == '-').count() == 4 {
+        return Some(segment);
+    }
+    None
 }
 
 /// Find a `DecodingKey` from a JWKS matching the given `kid` and algorithm.
@@ -473,6 +690,106 @@ mod tests {
             configured.trim_end_matches('/'),
             discovered.trim_end_matches('/')
         );
+    }
+
+    // ── M1: Entra /organizations/ issuer template tests ────────────────────
+
+    #[test]
+    fn validate_discovered_issuer_exact_match() {
+        assert!(
+            validate_discovered_issuer(
+                "https://accounts.google.com",
+                "https://accounts.google.com"
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn validate_discovered_issuer_mismatch_rejected() {
+        assert!(
+            validate_discovered_issuer("https://accounts.google.com", "https://evil.example.com")
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn validate_discovered_issuer_entra_organizations_accepts_tenant_issuer() {
+        // M1: /organizations/ configured; discovered issuer is per-tenant
+        assert!(
+            validate_discovered_issuer(
+                "https://login.microsoftonline.com/organizations/v2.0",
+                "https://login.microsoftonline.com/11111111-2222-3333-4444-555555555555/v2.0"
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn validate_discovered_issuer_entra_specific_tenant_rejects_different_tenant() {
+        // A tenant-specific configured issuer must match exactly
+        assert!(
+            validate_discovered_issuer(
+                "https://login.microsoftonline.com/11111111-2222-3333-4444-555555555555/v2.0",
+                "https://login.microsoftonline.com/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/v2.0"
+            )
+            .is_err()
+        );
+    }
+
+    // ── M1: extract_entra_tenant_from_issuer tests ─────────────────────────
+
+    #[test]
+    fn extract_tenant_from_specific_issuer() {
+        let issuer = "https://login.microsoftonline.com/11111111-2222-3333-4444-555555555555/v2.0";
+        assert_eq!(
+            extract_entra_tenant_from_issuer(issuer),
+            Some("11111111-2222-3333-4444-555555555555")
+        );
+    }
+
+    #[test]
+    fn extract_tenant_returns_none_for_organizations() {
+        let issuer = "https://login.microsoftonline.com/organizations/v2.0";
+        assert_eq!(extract_entra_tenant_from_issuer(issuer), None);
+    }
+
+    #[test]
+    fn extract_tenant_returns_none_for_common() {
+        let issuer = "https://login.microsoftonline.com/common/v2.0";
+        assert_eq!(extract_entra_tenant_from_issuer(issuer), None);
+    }
+
+    #[test]
+    fn extract_tenant_returns_none_for_google() {
+        assert_eq!(
+            extract_entra_tenant_from_issuer("https://accounts.google.com"),
+            None
+        );
+    }
+
+    // ── M3: is_entra_common_issuer tests ───────────────────────────────────
+
+    #[test]
+    fn is_entra_common_issuer_detects_common() {
+        assert!(is_entra_common_issuer(
+            "https://login.microsoftonline.com/common/v2.0"
+        ));
+        assert!(is_entra_common_issuer(
+            "https://login.microsoftonline.com/common"
+        ));
+    }
+
+    #[test]
+    fn is_entra_common_issuer_does_not_match_organizations() {
+        assert!(!is_entra_common_issuer(
+            "https://login.microsoftonline.com/organizations/v2.0"
+        ));
+    }
+
+    #[test]
+    fn is_entra_common_issuer_does_not_match_google() {
+        assert!(!is_entra_common_issuer("https://accounts.google.com"));
     }
 
     // ── wiremock integration tests for fetch_discovery ──────────────────
@@ -938,6 +1255,218 @@ mod tests {
             result.domain.is_none(),
             "Google consumer should have domain=None, got: {:?}",
             result.domain
+        );
+    }
+
+    // ── M2/M3: Entra tid claim validation ──────────────────────────────────
+
+    /// M3: Token with MSA meta-tenant tid must be rejected.
+    #[tokio::test]
+    async fn verify_id_token_entra_msa_tenant_rejected() {
+        use wiremock::MockServer;
+
+        let server = MockServer::start().await;
+        let tenant_id = "11111111-2222-3333-4444-555555555555";
+        let entra_issuer = format!("https://login.microsoftonline.com/{tenant_id}/v2.0");
+        let client_id = "test-client";
+        let nonce = "test-nonce";
+
+        let key = crate::services::oidc::OidcSigningKey::generate().unwrap();
+        mount_jwks(&server, &key).await;
+
+        let mut claims = base_claims(&entra_issuer, client_id);
+        claims["nonce"] = serde_json::json!(nonce);
+        // MSA meta-tenant tid (personal accounts)
+        claims["tid"] = serde_json::json!(ENTRA_MSA_TENANT_ID);
+
+        let token = sign_test_jwt(&key, claims).await;
+        let mut provider = make_test_provider(&entra_issuer);
+        provider.issuer = entra_issuer.clone();
+        provider.jwks_uri = url::Url::parse(&format!("{}/jwks", server.uri())).unwrap();
+        let client = reqwest::Client::new();
+
+        let err = verify_id_token(&client, &provider, &token, client_id, nonce)
+            .await
+            .unwrap_err();
+
+        assert!(
+            err.to_string().contains("Personal Microsoft account"),
+            "expected MSA rejection, got: {err}"
+        );
+    }
+
+    /// M2: Token tid must match the tenant UUID in the issuer URL.
+    #[tokio::test]
+    async fn verify_id_token_entra_tid_mismatch_rejected() {
+        use wiremock::MockServer;
+
+        let server = MockServer::start().await;
+        let issuer_tenant = "11111111-2222-3333-4444-555555555555";
+        let other_tenant = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+        let entra_issuer = format!("https://login.microsoftonline.com/{issuer_tenant}/v2.0");
+        let client_id = "test-client";
+        let nonce = "test-nonce";
+
+        let key = crate::services::oidc::OidcSigningKey::generate().unwrap();
+        mount_jwks(&server, &key).await;
+
+        let mut claims = base_claims(&entra_issuer, client_id);
+        claims["nonce"] = serde_json::json!(nonce);
+        // tid from a different tenant — cross-tenant injection attempt
+        claims["tid"] = serde_json::json!(other_tenant);
+
+        let token = sign_test_jwt(&key, claims).await;
+        let mut provider = make_test_provider(&entra_issuer);
+        provider.issuer = entra_issuer.clone();
+        provider.jwks_uri = url::Url::parse(&format!("{}/jwks", server.uri())).unwrap();
+        let client = reqwest::Client::new();
+
+        let err = verify_id_token(&client, &provider, &token, client_id, nonce)
+            .await
+            .unwrap_err();
+
+        assert!(
+            err.to_string().contains("cross-tenant token injection"),
+            "expected cross-tenant rejection, got: {err}"
+        );
+    }
+
+    /// M2: Token with matching tid succeeds (tenant-specific issuer in provider).
+    #[tokio::test]
+    async fn verify_id_token_entra_tid_matches_issuer_succeeds() {
+        use wiremock::MockServer;
+
+        let server = MockServer::start().await;
+        let tenant_id = "11111111-2222-3333-4444-555555555555";
+        let entra_issuer = format!("https://login.microsoftonline.com/{tenant_id}/v2.0");
+        let client_id = "test-client";
+        let nonce = "test-nonce";
+
+        let key = crate::services::oidc::OidcSigningKey::generate().unwrap();
+        mount_jwks(&server, &key).await;
+
+        let mut claims = base_claims(&entra_issuer, client_id);
+        claims["nonce"] = serde_json::json!(nonce);
+        claims["tid"] = serde_json::json!(tenant_id);
+
+        let token = sign_test_jwt(&key, claims).await;
+        let mut provider = make_test_provider(&entra_issuer);
+        provider.issuer = entra_issuer.clone();
+        provider.jwks_uri = url::Url::parse(&format!("{}/jwks", server.uri())).unwrap();
+        let client = reqwest::Client::new();
+
+        let result = verify_id_token(&client, &provider, &token, client_id, nonce)
+            .await
+            .unwrap();
+
+        assert_eq!(result.email, "alice@example.com");
+    }
+
+    // ── Fix 1: /organizations/ provider.issuer with real per-tenant token iss ──
+
+    /// Fix 1: When provider.issuer is the /organizations/ template, the library
+    /// issuer check is disabled. A token with a real per-tenant iss and matching
+    /// tid must succeed.
+    #[tokio::test]
+    async fn verify_id_token_entra_organizations_provider_with_tenant_token_succeeds() {
+        use wiremock::MockServer;
+
+        let server = MockServer::start().await;
+        let tenant_id = "11111111-2222-3333-4444-555555555555";
+        // This is what OidcProvider::issuer holds after fetch_discovery from /organizations/
+        let organizations_issuer =
+            "https://login.microsoftonline.com/organizations/v2.0".to_string();
+        // Real tokens have the per-tenant UUID in their iss claim
+        let token_iss = format!("https://login.microsoftonline.com/{tenant_id}/v2.0");
+        let client_id = "test-client";
+        let nonce = "test-nonce";
+
+        let key = crate::services::oidc::OidcSigningKey::generate().unwrap();
+        mount_jwks(&server, &key).await;
+
+        // Token claims use the per-tenant issuer (as Entra actually issues them)
+        let mut claims = base_claims(&token_iss, client_id);
+        claims["nonce"] = serde_json::json!(nonce);
+        claims["tid"] = serde_json::json!(tenant_id);
+
+        let token = sign_test_jwt(&key, claims).await;
+
+        // provider.issuer is the /organizations/ template (as stored after discovery)
+        let mut provider = make_test_provider(&organizations_issuer);
+        provider.issuer = organizations_issuer.clone();
+        provider.jwks_uri = url::Url::parse(&format!("{}/jwks", server.uri())).unwrap();
+        let client = reqwest::Client::new();
+
+        let result = verify_id_token(&client, &provider, &token, client_id, nonce)
+            .await
+            .unwrap();
+
+        assert_eq!(result.email, "alice@example.com");
+    }
+
+    /// Fix 1 / M2: When provider.issuer is /organizations/, a token whose tid
+    /// does not match the per-tenant UUID in its own iss claim must be rejected.
+    #[tokio::test]
+    async fn verify_id_token_entra_organizations_tid_mismatch_rejected() {
+        use wiremock::MockServer;
+
+        let server = MockServer::start().await;
+        let token_tenant = "11111111-2222-3333-4444-555555555555";
+        let other_tenant = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+        let organizations_issuer =
+            "https://login.microsoftonline.com/organizations/v2.0".to_string();
+        let token_iss = format!("https://login.microsoftonline.com/{token_tenant}/v2.0");
+        let client_id = "test-client";
+        let nonce = "test-nonce";
+
+        let key = crate::services::oidc::OidcSigningKey::generate().unwrap();
+        mount_jwks(&server, &key).await;
+
+        let mut claims = base_claims(&token_iss, client_id);
+        claims["nonce"] = serde_json::json!(nonce);
+        // tid from a different tenant — cross-tenant injection attempt
+        claims["tid"] = serde_json::json!(other_tenant);
+
+        let token = sign_test_jwt(&key, claims).await;
+
+        let mut provider = make_test_provider(&organizations_issuer);
+        provider.issuer = organizations_issuer.clone();
+        provider.jwks_uri = url::Url::parse(&format!("{}/jwks", server.uri())).unwrap();
+        let client = reqwest::Client::new();
+
+        let err = verify_id_token(&client, &provider, &token, client_id, nonce)
+            .await
+            .unwrap_err();
+
+        assert!(
+            err.to_string().contains("cross-tenant token injection"),
+            "expected cross-tenant rejection, got: {err}"
+        );
+    }
+
+    // ── Fix 3: validate_discovered_issuer handles /common/ ─────────────────
+
+    #[test]
+    fn validate_discovered_issuer_entra_common_accepts_tenant_issuer() {
+        // Fix 3: /common/ configured; discovered issuer is per-tenant (same as /organizations/)
+        assert!(
+            validate_discovered_issuer(
+                "https://login.microsoftonline.com/common/v2.0",
+                "https://login.microsoftonline.com/11111111-2222-3333-4444-555555555555/v2.0"
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn validate_discovered_issuer_entra_common_rejects_non_tenant_issuer() {
+        // /common/ configured but discovered issuer is a completely different host
+        assert!(
+            validate_discovered_issuer(
+                "https://login.microsoftonline.com/common/v2.0",
+                "https://evil.example.com/token"
+            )
+            .is_err()
         );
     }
 }

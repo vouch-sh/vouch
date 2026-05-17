@@ -120,8 +120,7 @@ pub async fn acs(State(state): State<Arc<AppState>>, Form(form): Form<SamlAcsFor
     }
 
     // Step 5: Require SAML IdP to be configured.
-    let Some(crate::services::idp::UpstreamIdp::Saml(saml_provider)) = state.upstream_idp.as_ref()
-    else {
+    let Some(saml_provider) = state.upstream_saml.as_ref() else {
         return ErrorTemplate {
             title: "Error".to_string(),
             message: "SAML is not configured. If using OIDC, responses go to /oauth/callback."

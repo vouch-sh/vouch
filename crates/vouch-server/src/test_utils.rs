@@ -28,7 +28,7 @@ use crate::db::{CreateOAuthClientParams, JwsAlgorithm, Pool, RegistrationSource}
 use crate::infra::router::build_app;
 
 use crate::AppState;
-use crate::config::ServerConfig;
+use crate::config::{OidcProviderConfig, ServerConfig};
 use crate::services::oidc::OidcSigningKey;
 
 /// Create an in-memory SQLite database with migrations for testing.
@@ -61,9 +61,12 @@ pub fn test_config() -> ServerConfig {
         rp_name: "Test RP".to_string(),
         jwt_secret: SecretString::from("test_jwt_secret_must_be_at_least_32_characters_long"),
         session_hours: 8,
-        oidc_issuer_url: Some("https://accounts.google.com".to_string()),
-        oidc_client_id: Some("test-client-id".to_string()),
-        oidc_client_secret: Some(SecretString::from("test-client-secret")),
+        oidc_providers: vec![OidcProviderConfig {
+            id: "google".to_string(),
+            issuer_url: "https://accounts.google.com".to_string(),
+            client_id: "test-client-id".to_string(),
+            client_secret: SecretString::from("test-client-secret"),
+        }],
         saml_idp_metadata_url: None,
         saml_sp_entity_id: None,
         saml_email_attribute: None,
@@ -155,7 +158,8 @@ pub async fn test_app_state() -> Arc<AppState> {
         github_app: None,
         http_client: reqwest::Client::new(),
         session_cache: crate::db::SessionCache::new(10_000, 30),
-        upstream_idp: None,
+        oidc_providers: indexmap::IndexMap::new(),
+        upstream_saml: None,
     })
 }
 

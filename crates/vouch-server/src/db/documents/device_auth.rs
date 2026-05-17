@@ -78,6 +78,10 @@ pub struct OidcStateDoc {
     #[serde(default)]
     pub code_verifier: String,
     pub expires_at: Timestamp,
+    /// Slug of the OIDC provider that initiated this flow.
+    /// Empty string for SAML flows or pre-multi-provider state docs (rolling deploy compat).
+    #[serde(default)]
+    pub provider_id: String,
 }
 
 impl DocumentType for OidcStateDoc {

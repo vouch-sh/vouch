@@ -18,7 +18,7 @@ pub(crate) use metadata::IdpMetadata;
 /// Holds parsed IdP metadata (signing certs, SSO URLs) and SP configuration
 /// (entity ID, ACS URL, attribute mapping) needed to initiate auth requests
 /// and validate responses.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SamlProvider {
     /// Parsed IdP metadata (entity ID, SSO URLs, signing certs).
     pub idp_metadata: IdpMetadata,
