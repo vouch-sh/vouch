@@ -114,7 +114,7 @@ struct DiscoveryDocument {
 /// Raw OIDC ID token claims (deserialization target, not exposed).
 #[derive(Debug, Deserialize)]
 struct IdTokenClaims {
-    /// Token issuer — used for Entra cross-tenant validation (M2).
+    /// Token issuer — used for Entra cross-tenant validation.
     iss: String,
     email: String,
     #[serde(default)]
@@ -131,7 +131,7 @@ struct IdTokenClaims {
 /// Tokens from this tenant are personal Microsoft accounts, not work/school
 /// accounts. The `/common/` endpoint issues them; we reject them explicitly
 /// because they have no organizational identity and should never be allowed
-/// to enroll with VOUCH_OIDC_PROVIDERS-based configs (M3).
+/// to enroll with VOUCH_OIDC_PROVIDERS-based configs.
 const ENTRA_MSA_TENANT_ID: &str = "9188040d-6c67-4c5b-b112-36a304b66dad";
 
 /// Check whether an issuer URL is an Entra `/organizations/` endpoint.
@@ -144,7 +144,7 @@ fn is_entra_organizations_issuer(issuer: &str) -> bool {
         && (issuer.contains("/organizations/") || issuer.ends_with("/organizations"))
 }
 
-/// Check whether an issuer URL is an Entra `/common/` endpoint (M3).
+/// Check whether an issuer URL is an Entra `/common/` endpoint.
 fn is_entra_common_issuer(issuer: &str) -> bool {
     issuer.contains("login.microsoftonline.com")
         && (issuer.contains("/common/") || issuer.ends_with("/common"))
@@ -152,7 +152,7 @@ fn is_entra_common_issuer(issuer: &str) -> bool {
 
 /// Validate that the discovered issuer matches the configured issuer,
 /// with special handling for Entra `/organizations/v2.0` which returns
-/// a per-tenant issuer template `{tenantid}` (M1).
+/// a per-tenant issuer template `{tenantid}`.
 ///
 /// For Entra `/organizations/`, the discovered issuer is of the form
 /// `https://login.microsoftonline.com/{tenant-uuid}/v2.0`
@@ -168,7 +168,7 @@ fn validate_discovered_issuer(configured: &str, discovered: &str) -> anyhow::Res
         return Ok(());
     }
 
-    // M1: Entra /organizations/ and /common/ endpoints return a per-tenant issuer.
+    // Entra /organizations/ and /common/ endpoints return a per-tenant issuer.
     // Accept it iff:
     //   - configured issuer is an /organizations/ or /common/ URL
     //   - discovered issuer is login.microsoftonline.com/<uuid>/v2.0
@@ -208,7 +208,7 @@ pub(crate) async fn fetch_discovery(
         );
     }
 
-    // M3: Warn at startup if /common/ endpoint is configured.
+    // Warn at startup if /common/ endpoint is configured.
     // The /common/ endpoint issues both work-account and personal-account tokens;
     // it is unsafe for access control because tid claims from personal accounts
     // use the MSA meta-tenant ID, not the customer's tenant.
@@ -239,7 +239,7 @@ pub(crate) async fn fetch_discovery(
         .await
         .map_err(|e| anyhow::anyhow!("Failed to parse discovery document: {e}"))?;
 
-    // RFC 8414 Section 3.3 + M1: Validate discovered issuer against configured issuer.
+    // RFC 8414 Section 3.3: validate discovered issuer against configured issuer.
     // Entra /organizations/ endpoint returns a per-tenant issuer; validate_discovered_issuer
     // accepts that template expansion.
     validate_discovered_issuer(issuer, &doc.issuer)?;
@@ -318,7 +318,7 @@ pub(crate) async fn verify_id_token(
     // Entra /organizations/ and /common/ discovery returns the literal template
     // `{tenantid}` as the issuer in OidcProvider::issuer. Real tokens contain a
     // per-tenant UUID. Leave validation.iss = None (skip library check) and validate
-    // the issuer manually in the M1/M2 block below.
+    // the issuer manually in the Entra-specific blocks below.
     if !is_entra_organizations_issuer(&provider.issuer) && !is_entra_common_issuer(&provider.issuer)
     {
         validation.set_issuer(&[&provider.issuer]);
@@ -330,7 +330,7 @@ pub(crate) async fn verify_id_token(
 
     let claims = token_data.claims;
 
-    // M1: For Entra /organizations/ and /common/, the library issuer check was skipped.
+    // For Entra /organizations/ and /common/, the library issuer check was skipped.
     // Manually verify the token's iss is a valid Entra per-tenant issuer URL — not an
     // arbitrary host. This rejects tokens where `iss` is something other than
     // `https://login.microsoftonline.com/<uuid>/v2.0`.
@@ -367,10 +367,10 @@ pub(crate) async fn verify_id_token(
         anyhow::bail!("Email address is not verified by the identity provider");
     }
 
-    // M2 + M3: Entra-specific tenant validation.
+    // Entra-specific tenant validation.
     // For Entra issuers (`login.microsoftonline.com`), check the `tid` claim:
-    //   - M3: Reject tokens from the MSA meta-tenant (personal accounts).
-    //   - M2: Cross-check tid against the tenant UUID in the token's `iss` claim
+    //   - Reject tokens from the MSA meta-tenant (personal accounts).
+    //   - Cross-check tid against the tenant UUID in the token's `iss` claim
     //     to prevent cross-tenant token injection. When /organizations/ or /common/
     //     is configured, provider.issuer holds the template; claims.iss holds the
     //     real per-tenant UUID from the validated token.
@@ -378,7 +378,7 @@ pub(crate) async fn verify_id_token(
     if is_entra {
         let tid = claims.tid.as_deref().unwrap_or("");
 
-        // M3: Reject MSA personal-account tokens.
+        // Reject MSA personal-account tokens.
         if tid == ENTRA_MSA_TENANT_ID {
             anyhow::bail!(
                 "Personal Microsoft account tokens are not allowed. \
@@ -386,7 +386,7 @@ pub(crate) async fn verify_id_token(
             );
         }
 
-        // M2: Cross-check tid against the tenant UUID in the token's iss claim.
+        // Cross-check tid against the tenant UUID in the token's iss claim.
         // Use claims.iss (the real per-tenant issuer from the signed token) rather
         // than provider.issuer (which may be the /organizations/ template string).
         if let Some(expected_tid) = extract_entra_tenant_from_issuer(&claims.iss)
@@ -692,7 +692,7 @@ mod tests {
         );
     }
 
-    // ── M1: Entra /organizations/ issuer template tests ────────────────────
+    // ── Entra /organizations/ issuer template tests ────────────────────────
 
     #[test]
     fn validate_discovered_issuer_exact_match() {
@@ -715,7 +715,7 @@ mod tests {
 
     #[test]
     fn validate_discovered_issuer_entra_organizations_accepts_tenant_issuer() {
-        // M1: /organizations/ configured; discovered issuer is per-tenant
+        // /organizations/ configured; discovered issuer is per-tenant
         assert!(
             validate_discovered_issuer(
                 "https://login.microsoftonline.com/organizations/v2.0",
@@ -737,7 +737,7 @@ mod tests {
         );
     }
 
-    // ── M1: extract_entra_tenant_from_issuer tests ─────────────────────────
+    // ── extract_entra_tenant_from_issuer tests ─────────────────────────────
 
     #[test]
     fn extract_tenant_from_specific_issuer() {
@@ -768,7 +768,7 @@ mod tests {
         );
     }
 
-    // ── M3: is_entra_common_issuer tests ───────────────────────────────────
+    // ── is_entra_common_issuer tests ───────────────────────────────────────
 
     #[test]
     fn is_entra_common_issuer_detects_common() {
@@ -1258,9 +1258,9 @@ mod tests {
         );
     }
 
-    // ── M2/M3: Entra tid claim validation ──────────────────────────────────
+    // ── Entra tid claim validation ─────────────────────────────────────────
 
-    /// M3: Token with MSA meta-tenant tid must be rejected.
+    /// Token with MSA meta-tenant tid must be rejected.
     #[tokio::test]
     async fn verify_id_token_entra_msa_tenant_rejected() {
         use wiremock::MockServer;
@@ -1295,7 +1295,7 @@ mod tests {
         );
     }
 
-    /// M2: Token tid must match the tenant UUID in the issuer URL.
+    /// Token tid must match the tenant UUID in the issuer URL.
     #[tokio::test]
     async fn verify_id_token_entra_tid_mismatch_rejected() {
         use wiremock::MockServer;
@@ -1331,7 +1331,7 @@ mod tests {
         );
     }
 
-    /// M2: Token with matching tid succeeds (tenant-specific issuer in provider).
+    /// Token with matching tid succeeds (tenant-specific issuer in provider).
     #[tokio::test]
     async fn verify_id_token_entra_tid_matches_issuer_succeeds() {
         use wiremock::MockServer;
@@ -1362,11 +1362,11 @@ mod tests {
         assert_eq!(result.email, "alice@example.com");
     }
 
-    // ── Fix 1: /organizations/ provider.issuer with real per-tenant token iss ──
+    // ── /organizations/ provider.issuer with real per-tenant token iss ─────
 
-    /// Fix 1: When provider.issuer is the /organizations/ template, the library
-    /// issuer check is disabled. A token with a real per-tenant iss and matching
-    /// tid must succeed.
+    /// When provider.issuer is the /organizations/ template, the library issuer
+    /// check is disabled. A token with a real per-tenant iss and matching tid
+    /// must succeed.
     #[tokio::test]
     async fn verify_id_token_entra_organizations_provider_with_tenant_token_succeeds() {
         use wiremock::MockServer;
@@ -1404,8 +1404,8 @@ mod tests {
         assert_eq!(result.email, "alice@example.com");
     }
 
-    /// Fix 1 / M2: When provider.issuer is /organizations/, a token whose tid
-    /// does not match the per-tenant UUID in its own iss claim must be rejected.
+    /// When provider.issuer is /organizations/, a token whose tid does not match
+    /// the per-tenant UUID in its own iss claim must be rejected.
     #[tokio::test]
     async fn verify_id_token_entra_organizations_tid_mismatch_rejected() {
         use wiremock::MockServer;

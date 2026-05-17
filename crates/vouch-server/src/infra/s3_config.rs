@@ -721,7 +721,7 @@ impl ServerConfig {
             self.session_hours = v;
         }
 
-        // OIDC configuration via S3 `oidc` block is no longer supported (M4).
+        // OIDC configuration via S3 `oidc` block is no longer supported.
         // Use VOUCH_OIDC_PROVIDERS environment variable instead.
         if s3.oidc.is_some() {
             anyhow::bail!(
@@ -938,7 +938,7 @@ mod tests {
 
     #[test]
     fn test_merge_s3_config_nested_oidc_fails() {
-        // M4: the S3 `oidc` block must cause a startup error — use VOUCH_OIDC_PROVIDERS instead.
+        // The S3 `oidc` block must cause a startup error — use VOUCH_OIDC_PROVIDERS instead.
         let mut config = crate::test_utils::test_config();
         let s3 = S3Config {
             oidc: Some(S3OidcConfig {
@@ -965,7 +965,7 @@ mod tests {
 
     #[test]
     fn test_merge_s3_config_nested_oidc_runtime_update_skipped() {
-        // M4: runtime updates skip the oidc block check (returns before that path)
+        // Runtime updates skip the oidc block check (returns before that path).
         let mut config = crate::test_utils::test_config();
         let s3 = S3Config {
             oidc: Some(S3OidcConfig {

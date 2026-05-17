@@ -459,7 +459,7 @@ pub async fn oidc_callback(
     //
     // Look up provider by the slug stored in the OIDC state doc. Fall back to the
     // first configured provider for state docs written before multi-IdP support
-    // (rolling deploy compatibility — M8).
+    // (rolling deploy compatibility).
     let oidc_provider = if stored_state.provider_id.is_empty() {
         state.oidc_providers.values().next()
     } else {
