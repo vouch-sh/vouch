@@ -6141,7 +6141,6 @@ dependencies = [
  "hickory-resolver",
  "http 1.4.0",
  "idna",
- "indexmap",
  "ipnet",
  "jiff",
  "jsonwebtoken",

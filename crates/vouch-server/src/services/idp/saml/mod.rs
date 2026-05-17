@@ -20,6 +20,9 @@ pub(crate) use metadata::IdpMetadata;
 /// and validate responses.
 #[derive(Debug, Clone)]
 pub struct SamlProvider {
+    /// Operator-chosen slug (e.g., "corp-saml"). Used as lookup key in
+    /// `AppState::idps` and stored in the OIDC state row at auth-initiate time.
+    pub id: String,
     /// Parsed IdP metadata (entity ID, SSO URLs, signing certs).
     pub idp_metadata: IdpMetadata,
     /// SP entity ID (audience restriction value in assertions).

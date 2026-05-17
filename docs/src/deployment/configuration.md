@@ -52,15 +52,21 @@ VOUCH_S3_CONFIG_POLL_INTERVAL=60
     "cert": "<base64-encoded PEM certificate>",
     "key": "<base64-encoded PEM private key>"
   },
-  "oidc": {
-    "issuer_url": "https://accounts.google.com",
-    "client_id": "...",
-    "client_secret": "..."
-  },
-  "saml": {
-    "idp_metadata_url": "https://idp.example.com/saml/metadata",
-    "sp_entity_id": "https://vouch.example.com"
-  },
+  "idps": [
+    {
+      "id": "google",
+      "type": "oidc",
+      "issuer": "https://accounts.google.com",
+      "client_id": "...",
+      "client_secret": "..."
+    },
+    {
+      "id": "corp-saml",
+      "type": "saml",
+      "metadata_url": "https://idp.example.com/saml/metadata",
+      "sp_entity_id": "https://vouch.example.com"
+    }
+  ],
   "allowed_domains": ["example.com"],
   "ssh_ca_key": "<base64-encoded PEM Ed25519 private key>",
   "ssh_ca_kms_key_id": "mrk-...",

@@ -8,7 +8,6 @@
 
 use crate::handlers::HasVersion;
 use crate::handlers::session::{AuthContext, get_auth_context};
-use crate::services::idp::IdpBrand;
 use crate::{AppState, impl_template_response};
 use askama::Template;
 use axum::{extract::State, response::IntoResponse};
@@ -17,7 +16,7 @@ use std::sync::Arc;
 
 /// A single identity provider entry for the sign-in button list.
 pub struct IdpEntry {
-    /// Operator-chosen slug or empty string for SAML.
+    /// Operator-chosen slug.
     pub id: String,
     /// Display name for the button (e.g., "Google", "Microsoft").
     pub display_name: String,
@@ -52,27 +51,18 @@ pub async fn home_page(State(state): State<Arc<AppState>>, jar: CookieJar) -> im
         || state.config().cli_download_linux.is_some()
         || state.config().cli_download_windows.is_some();
 
-    let mut idp_entries: Vec<IdpEntry> = state
-        .oidc_providers
-        .values()
-        .map(|p| {
-            let brand = IdpBrand::from_issuer(&p.provider.issuer);
+    let idp_entries: Vec<IdpEntry> = state
+        .idps
+        .iter()
+        .map(|idp| {
+            let brand = idp.brand();
             IdpEntry {
-                id: p.id.clone(),
+                id: idp.id().to_string(),
                 display_name: brand.display_name().to_string(),
                 svg_icon: brand.svg_icon().to_string(),
             }
         })
         .collect();
-
-    if let Some(saml) = state.upstream_saml.as_ref() {
-        let brand = IdpBrand::from_entity_id(saml.entity_id());
-        idp_entries.push(IdpEntry {
-            id: String::new(),
-            display_name: brand.display_name().to_string(),
-            svg_icon: brand.svg_icon().to_string(),
-        });
-    }
 
     HomeTemplate {
         server_url: state.config().base_url.clone(),

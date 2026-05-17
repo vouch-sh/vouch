@@ -8,7 +8,7 @@ use secrecy::{ExposeSecret, SecretString};
 use std::collections::HashMap;
 
 // ============================================================================
-// OIDC Provider Config
+// IdP Config (unified OIDC + SAML)
 // ============================================================================
 
 /// Per-provider OIDC configuration (issuer + client credentials).
@@ -24,7 +24,50 @@ pub struct OidcProviderConfig {
     pub client_secret: SecretString,
 }
 
-/// Validate that a provider slug matches `[a-z0-9-]{1,32}`.
+/// Per-provider SAML configuration (metadata URL + SP details).
+#[derive(Debug, Clone)]
+pub struct SamlProviderConfig {
+    /// Operator-chosen slug (validated: `[a-z0-9-]{1,32}`).
+    pub id: String,
+    /// SAML IdP metadata URL.
+    pub metadata_url: String,
+    /// SP entity ID (defaults to `base_url` at startup if `None`).
+    pub sp_entity_id: Option<String>,
+    /// SAML attribute name for email (None = use NameID).
+    pub email_attribute: Option<String>,
+    /// SAML attribute name for domain (None = extract from email).
+    pub domain_attribute: Option<String>,
+}
+
+/// Unified identity provider configuration (OIDC or SAML).
+#[derive(Debug, Clone)]
+pub enum IdpConfig {
+    Oidc(OidcProviderConfig),
+    Saml(SamlProviderConfig),
+}
+
+impl IdpConfig {
+    /// Operator-chosen slug.
+    #[must_use]
+    pub fn id(&self) -> &str {
+        match self {
+            Self::Oidc(c) => &c.id,
+            Self::Saml(c) => &c.id,
+        }
+    }
+
+    /// Kind name (`"oidc"` or `"saml"`) — matches the `type` field operators set.
+    #[must_use]
+    pub fn kind_str(&self) -> &'static str {
+        match self {
+            Self::Oidc(_) => "oidc",
+            Self::Saml(_) => "saml",
+        }
+    }
+}
+
+/// Validate that a provider slug matches `[a-z0-9-]{1,32}` and does not start
+/// or end with a hyphen.
 pub fn validate_provider_slug(slug: &str) -> Result<()> {
     if slug.is_empty() || slug.len() > 32 {
         anyhow::bail!("Provider slug '{}' must be 1-32 characters long", slug);
@@ -47,18 +90,28 @@ pub fn validate_provider_slug(slug: &str) -> Result<()> {
     Ok(())
 }
 
-/// Detect legacy OIDC env vars and fail fast with an actionable error.
+/// Detect legacy single-provider env vars and fail fast with an actionable
+/// error pointing at the unified `VOUCH_IDPS` convention.
 ///
-/// The old single-provider vars (`VOUCH_OIDC_ISSUER`, `VOUCH_OIDC_CLIENT_ID`,
-/// `VOUCH_OIDC_CLIENT_SECRET`) are no longer supported. Operators must migrate
-/// to the multi-provider format.
-pub fn validate_no_legacy_oidc_vars() -> Result<()> {
+/// Covers both the old single-OIDC vars and the single-SAML flat vars.
+pub fn validate_no_legacy_idp_vars() -> Result<()> {
     let legacy_vars = [
-        ("VOUCH_OIDC_ISSUER", "VOUCH_OIDC_{SLUG}_ISSUER"),
-        ("VOUCH_OIDC_CLIENT_ID", "VOUCH_OIDC_{SLUG}_CLIENT_ID"),
+        ("VOUCH_OIDC_PROVIDERS", "VOUCH_IDPS"),
+        ("VOUCH_OIDC_ISSUER", "VOUCH_IDP_<SLUG>_ISSUER"),
+        ("VOUCH_OIDC_CLIENT_ID", "VOUCH_IDP_<SLUG>_CLIENT_ID"),
+        ("VOUCH_OIDC_CLIENT_SECRET", "VOUCH_IDP_<SLUG>_CLIENT_SECRET"),
         (
-            "VOUCH_OIDC_CLIENT_SECRET",
-            "VOUCH_OIDC_{SLUG}_CLIENT_SECRET",
+            "VOUCH_SAML_IDP_METADATA_URL",
+            "VOUCH_IDP_<SLUG>_METADATA_URL",
+        ),
+        ("VOUCH_SAML_SP_ENTITY_ID", "VOUCH_IDP_<SLUG>_SP_ENTITY_ID"),
+        (
+            "VOUCH_SAML_EMAIL_ATTRIBUTE",
+            "VOUCH_IDP_<SLUG>_EMAIL_ATTRIBUTE",
+        ),
+        (
+            "VOUCH_SAML_DOMAIN_ATTRIBUTE",
+            "VOUCH_IDP_<SLUG>_DOMAIN_ATTRIBUTE",
         ),
     ];
     let mut found = Vec::new();
@@ -69,9 +122,11 @@ pub fn validate_no_legacy_oidc_vars() -> Result<()> {
     }
     if !found.is_empty() {
         anyhow::bail!(
-            "Legacy OIDC configuration detected. Multi-provider format is now required.\n\
+            "Legacy identity-provider configuration detected. The unified \
+             VOUCH_IDPS format is now required.\n\
              Rename these environment variables:\n{}\n\
-             Also set VOUCH_OIDC_PROVIDERS=<slug> (e.g. VOUCH_OIDC_PROVIDERS=google)\n\
+             Also set VOUCH_IDPS=<slug>[,<slug>...] and VOUCH_IDP_<SLUG>_TYPE=oidc|saml \
+             for each provider.\n\
              See the migration guide for details.",
             found.join("\n")
         );
@@ -79,9 +134,9 @@ pub fn validate_no_legacy_oidc_vars() -> Result<()> {
     Ok(())
 }
 
-/// Parse `VOUCH_OIDC_PROVIDERS` and the per-provider env vars into a `Vec<OidcProviderConfig>`.
-fn parse_oidc_providers(provider_list: Option<&str>) -> Result<Vec<OidcProviderConfig>> {
-    let Some(list) = provider_list else {
+/// Parse `VOUCH_IDPS` and the per-provider env vars into a `Vec<IdpConfig>`.
+fn parse_idps(idp_list: Option<&str>) -> Result<Vec<IdpConfig>> {
+    let Some(list) = idp_list else {
         return Ok(Vec::new());
     };
     let slugs: Vec<&str> = list
@@ -92,30 +147,64 @@ fn parse_oidc_providers(provider_list: Option<&str>) -> Result<Vec<OidcProviderC
     if slugs.is_empty() {
         return Ok(Vec::new());
     }
-    let mut providers = Vec::with_capacity(slugs.len());
+    let mut idps = Vec::with_capacity(slugs.len());
     for slug in slugs {
         validate_provider_slug(slug)?;
-        let upper = slug.to_uppercase().replace('-', "_");
-        let issuer_key = format!("VOUCH_OIDC_{upper}_ISSUER");
-        let client_id_key = format!("VOUCH_OIDC_{upper}_CLIENT_ID");
-        let secret_key = format!("VOUCH_OIDC_{upper}_CLIENT_SECRET");
-
-        let issuer_url = std::env::var(&issuer_key)
-            .with_context(|| format!("OIDC provider '{slug}' requires {issuer_key} to be set"))?;
-        let client_id = std::env::var(&client_id_key).with_context(|| {
-            format!("OIDC provider '{slug}' requires {client_id_key} to be set")
-        })?;
-        let client_secret = std::env::var(&secret_key)
-            .with_context(|| format!("OIDC provider '{slug}' requires {secret_key} to be set"))?;
-
-        providers.push(OidcProviderConfig {
-            id: slug.to_string(),
-            issuer_url,
-            client_id,
-            client_secret: SecretString::from(client_secret),
-        });
+        idps.push(parse_idp_from_env(slug)?);
     }
-    Ok(providers)
+    Ok(idps)
+}
+
+/// Parse a single IdP's env vars based on its `_TYPE` discriminator.
+fn parse_idp_from_env(slug: &str) -> Result<IdpConfig> {
+    let upper = slug.to_uppercase().replace('-', "_");
+    let type_key = format!("VOUCH_IDP_{upper}_TYPE");
+    let kind = std::env::var(&type_key)
+        .with_context(|| format!("IdP '{slug}' requires {type_key} to be set (oidc|saml)"))?;
+    match kind.trim().to_ascii_lowercase().as_str() {
+        "oidc" => parse_oidc_idp_env(slug, &upper).map(IdpConfig::Oidc),
+        "saml" => parse_saml_idp_env(slug, &upper).map(IdpConfig::Saml),
+        other => anyhow::bail!(
+            "IdP '{slug}' has invalid {type_key}='{other}' (expected 'oidc' or 'saml')"
+        ),
+    }
+}
+
+fn parse_oidc_idp_env(slug: &str, upper: &str) -> Result<OidcProviderConfig> {
+    let issuer_key = format!("VOUCH_IDP_{upper}_ISSUER");
+    let client_id_key = format!("VOUCH_IDP_{upper}_CLIENT_ID");
+    let secret_key = format!("VOUCH_IDP_{upper}_CLIENT_SECRET");
+
+    let issuer_url = std::env::var(&issuer_key)
+        .with_context(|| format!("OIDC IdP '{slug}' requires {issuer_key} to be set"))?;
+    let client_id = std::env::var(&client_id_key)
+        .with_context(|| format!("OIDC IdP '{slug}' requires {client_id_key} to be set"))?;
+    let client_secret = std::env::var(&secret_key)
+        .with_context(|| format!("OIDC IdP '{slug}' requires {secret_key} to be set"))?;
+
+    Ok(OidcProviderConfig {
+        id: slug.to_string(),
+        issuer_url,
+        client_id,
+        client_secret: SecretString::from(client_secret),
+    })
+}
+
+fn parse_saml_idp_env(slug: &str, upper: &str) -> Result<SamlProviderConfig> {
+    let metadata_key = format!("VOUCH_IDP_{upper}_METADATA_URL");
+    let metadata_url = std::env::var(&metadata_key)
+        .with_context(|| format!("SAML IdP '{slug}' requires {metadata_key} to be set"))?;
+    let sp_entity_id = std::env::var(format!("VOUCH_IDP_{upper}_SP_ENTITY_ID")).ok();
+    let email_attribute = std::env::var(format!("VOUCH_IDP_{upper}_EMAIL_ATTRIBUTE")).ok();
+    let domain_attribute = std::env::var(format!("VOUCH_IDP_{upper}_DOMAIN_ATTRIBUTE")).ok();
+
+    Ok(SamlProviderConfig {
+        id: slug.to_string(),
+        metadata_url,
+        sp_entity_id,
+        email_attribute,
+        domain_attribute,
+    })
 }
 
 // ============================================================================
@@ -201,27 +290,11 @@ pub struct Args {
     #[arg(long, env = "VOUCH_SESSION_HOURS", default_value = "8")]
     pub session_hours: u64,
 
-    /// Comma-separated list of OIDC provider slugs (e.g., "google,entra").
-    /// Each slug must have corresponding VOUCH_OIDC_{SLUG}_ISSUER,
-    /// VOUCH_OIDC_{SLUG}_CLIENT_ID, and VOUCH_OIDC_{SLUG}_CLIENT_SECRET env vars.
-    #[arg(long, env = "VOUCH_OIDC_PROVIDERS")]
-    pub oidc_providers: Option<String>,
-
-    /// SAML IdP metadata URL.
-    #[arg(long, env = "VOUCH_SAML_IDP_METADATA_URL")]
-    pub saml_idp_metadata_url: Option<String>,
-
-    /// SAML SP entity ID (defaults to base_url if not set).
-    #[arg(long, env = "VOUCH_SAML_SP_ENTITY_ID")]
-    pub saml_sp_entity_id: Option<String>,
-
-    /// SAML attribute name for email extraction.
-    #[arg(long, env = "VOUCH_SAML_EMAIL_ATTRIBUTE")]
-    pub saml_email_attribute: Option<String>,
-
-    /// SAML attribute name for domain extraction.
-    #[arg(long, env = "VOUCH_SAML_DOMAIN_ATTRIBUTE")]
-    pub saml_domain_attribute: Option<String>,
+    /// Comma-separated list of IdP slugs (e.g., "google,entra,corp-saml").
+    /// Each slug must have a corresponding `VOUCH_IDP_<SLUG>_TYPE=oidc|saml` env
+    /// var plus the type-specific vars (see docs/src/idp/overview.md).
+    #[arg(long, env = "VOUCH_IDPS")]
+    pub idps: Option<String>,
 
     /// Base URL for this server (defaults to https://{rp_id}).
     #[arg(long, env = "VOUCH_BASE_URL")]
@@ -495,16 +568,8 @@ pub struct ServerConfig {
     pub jwt_secret: SecretString,
     /// Session duration in hours (default: 8).
     pub session_hours: u64,
-    /// Configured OIDC providers (ordered, indexed by slug).
-    pub oidc_providers: Vec<OidcProviderConfig>,
-    /// SAML IdP metadata URL.
-    pub saml_idp_metadata_url: Option<String>,
-    /// SAML SP entity ID (defaults to base_url if not set).
-    pub saml_sp_entity_id: Option<String>,
-    /// SAML attribute name for email extraction.
-    pub saml_email_attribute: Option<String>,
-    /// SAML attribute name for domain extraction.
-    pub saml_domain_attribute: Option<String>,
+    /// Configured identity providers (OIDC + SAML), in operator-specified order.
+    pub idps: Vec<IdpConfig>,
     /// Base URL for this server (defaults to `https://{rp_id}`, or `http://localhost:port` for local dev).
     pub base_url: String,
     /// Device code expiration in seconds (default: 600).
@@ -640,8 +705,8 @@ pub enum LogFormat {
 impl ServerConfig {
     /// Create configuration from parsed command-line arguments.
     pub fn from_args(args: Args) -> Result<Self> {
-        // Detect and reject legacy single-provider OIDC env vars before anything else.
-        validate_no_legacy_oidc_vars()?;
+        // Detect and reject legacy single-provider IdP env vars before anything else.
+        validate_no_legacy_idp_vars()?;
 
         // Note: Validation of rp_id and jwt_secret is deferred to validate()
         // to allow these values to come from S3 config.
@@ -690,8 +755,8 @@ impl ServerConfig {
         // Parse trusted proxies
         let trusted_proxies = parse_trusted_proxies(&args.trusted_proxies)?;
 
-        // Parse OIDC providers
-        let oidc_providers = parse_oidc_providers(args.oidc_providers.as_deref())?;
+        // Parse unified IdP list (OIDC + SAML).
+        let idps = parse_idps(args.idps.as_deref())?;
 
         Ok(Self {
             listen_addr: args.listen_addr,
@@ -700,11 +765,7 @@ impl ServerConfig {
             rp_name: args.rp_name,
             jwt_secret: SecretString::from(args.jwt_secret),
             session_hours: args.session_hours,
-            oidc_providers,
-            saml_idp_metadata_url: args.saml_idp_metadata_url,
-            saml_sp_entity_id: args.saml_sp_entity_id,
-            saml_email_attribute: args.saml_email_attribute,
-            saml_domain_attribute: args.saml_domain_attribute,
+            idps,
             base_url,
             device_code_expires_seconds: args.device_code_expires,
             device_poll_interval_seconds: args.device_poll_interval,
@@ -768,16 +829,22 @@ impl ServerConfig {
         })
     }
 
-    /// Check if at least one OIDC provider is configured.
+    /// Check if at least one IdP (of any kind) is configured.
     #[must_use]
-    pub fn has_oidc_providers(&self) -> bool {
-        !self.oidc_providers.is_empty()
+    pub fn has_idps(&self) -> bool {
+        !self.idps.is_empty()
     }
 
-    /// Check if SAML is configured.
+    /// Check if at least one OIDC IdP is configured.
     #[must_use]
-    pub fn saml_configured(&self) -> bool {
-        self.saml_idp_metadata_url.is_some()
+    pub fn has_oidc_idp(&self) -> bool {
+        self.idps.iter().any(|i| matches!(i, IdpConfig::Oidc(_)))
+    }
+
+    /// Check if at least one SAML IdP is configured.
+    #[must_use]
+    pub fn has_saml_idp(&self) -> bool {
+        self.idps.iter().any(|i| matches!(i, IdpConfig::Saml(_)))
     }
 
     /// Get the organization display name.
@@ -836,12 +903,15 @@ impl ServerConfig {
     /// Validate that all required configuration is present.
     /// Call this after all config sources (env, S3) have been merged.
     pub fn validate(&self) -> Result<()> {
-        // OIDC and SAML are mutually exclusive.
-        if self.has_oidc_providers() && self.saml_configured() {
-            anyhow::bail!(
-                "OIDC and SAML cannot both be configured. \
-                 Set either VOUCH_OIDC_* or VOUCH_SAML_* env vars, not both."
-            );
+        // Reject duplicate IdP slugs — order matters for UI but ids must be unique.
+        let mut seen = std::collections::HashSet::new();
+        for idp in &self.idps {
+            if !seen.insert(idp.id()) {
+                anyhow::bail!(
+                    "Duplicate IdP slug '{}' in VOUCH_IDPS / idps[].id",
+                    idp.id()
+                );
+            }
         }
 
         // Skip jwt_secret validation when KMS HMAC signing is configured.
@@ -923,64 +993,76 @@ pub fn resolve_dsql_endpoints(endpoints: &HashMap<String, String>) -> Result<Str
 #[cfg(test)]
 #[expect(
     clippy::unwrap_used,
+    clippy::indexing_slicing,
     reason = "test code: panic on assertion failure is acceptable"
 )]
 mod tests {
-    use crate::config::validate_provider_slug;
+    use crate::config::{
+        IdpConfig, SamlProviderConfig, validate_no_legacy_idp_vars, validate_provider_slug,
+    };
     use crate::test_utils::test_config;
     use secrecy::SecretString;
 
-    #[test]
-    fn test_saml_configured_returns_true_when_metadata_url_set() {
-        let mut config = test_config();
-        config.saml_idp_metadata_url = Some("https://idp.example.com/saml/metadata".to_string());
-
-        assert!(config.saml_configured());
+    fn saml_provider_for_tests() -> SamlProviderConfig {
+        SamlProviderConfig {
+            id: "corp-saml".to_string(),
+            metadata_url: "https://idp.example.com/saml/metadata".to_string(),
+            sp_entity_id: None,
+            email_attribute: None,
+            domain_attribute: None,
+        }
     }
 
     #[test]
-    fn test_saml_configured_returns_false_when_none() {
+    fn test_has_saml_idp_when_configured() {
         let mut config = test_config();
-        config.saml_idp_metadata_url = None;
-
-        assert!(!config.saml_configured());
+        config.idps.push(IdpConfig::Saml(saml_provider_for_tests()));
+        assert!(config.has_saml_idp());
     }
 
     #[test]
-    fn test_validate_mutual_exclusivity_oidc_and_saml() {
+    fn test_has_saml_idp_returns_false_when_none() {
         let mut config = test_config();
-        // test_config already sets OIDC providers; add SAML too
-        config.saml_idp_metadata_url = Some("https://idp.example.com/saml/metadata".to_string());
+        config.idps.retain(|i| matches!(i, IdpConfig::Oidc(_)));
+        assert!(!config.has_saml_idp());
+    }
 
+    #[test]
+    fn test_validate_accepts_mixed_oidc_and_saml() {
+        // Mutual exclusivity removed — both kinds can coexist in the same idps list.
+        let mut config = test_config();
+        config.idps.push(IdpConfig::Saml(saml_provider_for_tests()));
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_rejects_duplicate_idp_slugs() {
+        let mut config = test_config();
+        let dup = SamlProviderConfig {
+            id: config.idps[0].id().to_string(),
+            ..saml_provider_for_tests()
+        };
+        config.idps.push(IdpConfig::Saml(dup));
         let err = config.validate().unwrap_err();
         assert!(
-            err.to_string().contains("cannot both be configured"),
-            "Error should mention mutual exclusivity: {err}"
+            err.to_string().contains("Duplicate IdP slug"),
+            "expected duplicate-slug error, got: {err}"
         );
     }
 
     #[test]
     fn test_validate_saml_only_passes() {
         let mut config = test_config();
-        // Remove OIDC providers, keep only SAML
-        config.oidc_providers = Vec::new();
-        config.saml_idp_metadata_url = Some("https://idp.example.com/saml/metadata".to_string());
-
+        config.idps = vec![IdpConfig::Saml(saml_provider_for_tests())];
         assert!(config.validate().is_ok());
     }
 
     #[test]
-    fn test_saml_configured_implies_oidc_not_configured() {
-        // Covers CC-2: when only SAML is set, has_oidc_providers() must be false.
+    fn test_has_oidc_idp_false_when_only_saml() {
         let mut config = test_config();
-        config.oidc_providers = Vec::new();
-        config.saml_idp_metadata_url = Some("https://idp.example.com/saml/metadata".to_string());
-
-        assert!(
-            !config.has_oidc_providers(),
-            "has_oidc_providers should be false when only SAML set"
-        );
-        assert!(config.saml_configured(), "saml_configured should be true");
+        config.idps = vec![IdpConfig::Saml(saml_provider_for_tests())];
+        assert!(!config.has_oidc_idp(), "should be false when only SAML set");
+        assert!(config.has_saml_idp(), "has_saml_idp should be true");
     }
 
     #[test]
@@ -1062,32 +1144,42 @@ mod tests {
     }
 
     #[test]
-    fn test_has_oidc_providers_empty() {
+    fn test_has_idps_empty() {
         let mut config = test_config();
-        config.oidc_providers = Vec::new();
-        assert!(!config.has_oidc_providers());
+        config.idps = Vec::new();
+        assert!(!config.has_idps());
+        assert!(!config.has_oidc_idp());
+        assert!(!config.has_saml_idp());
     }
 
     #[test]
-    fn test_has_oidc_providers_with_providers() {
+    fn test_has_idps_with_providers() {
         let config = test_config();
-        // test_config sets one provider
-        assert!(config.has_oidc_providers());
+        // test_config sets one OIDC provider
+        assert!(config.has_idps());
+        assert!(config.has_oidc_idp());
     }
 
     #[test]
-    fn test_validate_no_legacy_oidc_vars_clean() {
+    fn test_validate_no_legacy_idp_vars_clean() {
         // Test only works if no legacy vars happen to be set in the test environment.
         // set_var/remove_var are unsafe in Rust 1.95 and blocked by -D unsafe-code.
         // If the test environment has these vars set, this test is skipped.
-        if std::env::var("VOUCH_OIDC_ISSUER").is_ok()
-            || std::env::var("VOUCH_OIDC_CLIENT_ID").is_ok()
-            || std::env::var("VOUCH_OIDC_CLIENT_SECRET").is_ok()
-        {
+        let probes = [
+            "VOUCH_OIDC_PROVIDERS",
+            "VOUCH_OIDC_ISSUER",
+            "VOUCH_OIDC_CLIENT_ID",
+            "VOUCH_OIDC_CLIENT_SECRET",
+            "VOUCH_SAML_IDP_METADATA_URL",
+            "VOUCH_SAML_SP_ENTITY_ID",
+            "VOUCH_SAML_EMAIL_ATTRIBUTE",
+            "VOUCH_SAML_DOMAIN_ATTRIBUTE",
+        ];
+        if probes.iter().any(|k| std::env::var(k).is_ok()) {
             return; // Skip: legacy vars present in test environment
         }
         assert!(
-            crate::config::validate_no_legacy_oidc_vars().is_ok(),
+            validate_no_legacy_idp_vars().is_ok(),
             "should succeed when no legacy vars are set"
         );
     }

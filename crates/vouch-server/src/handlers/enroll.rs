@@ -245,31 +245,17 @@ pub async fn device_verify_submit(
         .into_response();
     }
 
-    // No upstream IdP → go directly to WebAuthn; otherwise → initiate auth.
-    // Prefer OIDC (first configured provider) over SAML.
+    // No upstream IdP → go directly to WebAuthn; otherwise → initiate auth
+    // with the first configured IdP (any kind). Order in VOUCH_IDPS / idps[]
+    // controls which provider is used here.
+    let base_url = state.config().base_url.clone();
     let auth_request_result: Option<(
         Result<crate::services::idp::AuthRequest, anyhow::Error>,
         String,
-    )> = state
-        .oidc_providers
-        .values()
-        .next()
-        .map(|oidc_provider| {
-            let provider_id = oidc_provider.id.clone();
-            (
-                oidc_provider.initiate_auth(&state.config().base_url),
-                provider_id,
-            )
-        })
-        .or_else(|| {
-            state.upstream_saml.as_ref().map(|saml_provider| {
-                (
-                    crate::services::idp::UpstreamIdp::Saml(saml_provider.clone())
-                        .initiate_auth(state.config().as_ref()),
-                    String::new(),
-                )
-            })
-        });
+    )> = state.idps.first().map(|idp| {
+        let provider_id = idp.id().to_string();
+        (idp.initiate_auth(&base_url), provider_id)
+    });
 
     let Some((auth_request_result, auth_provider_id)) = auth_request_result else {
         // No IdP configured - go directly to WebAuthn registration
@@ -455,15 +441,21 @@ pub async fn oidc_callback(
     }
 
     // Exchange code for tokens using discovered OIDC token endpoint.
-    // This handler is OIDC-specific: SAML responses go to POST /saml/acs (Phase 2).
+    // This handler is OIDC-specific: SAML responses go to POST /saml/acs.
     //
-    // Look up provider by the slug stored in the OIDC state doc. Fall back to the
-    // first configured provider for state docs written before multi-IdP support
+    // Look up the IdP by the slug stored in the OIDC state doc. Fall back to the
+    // first configured OIDC IdP for state docs written before multi-IdP support
     // (rolling deploy compatibility).
     let oidc_provider = if stored_state.provider_id.is_empty() {
-        state.oidc_providers.values().next()
+        state.idps.iter().find_map(|i| match i {
+            crate::services::idp::ConfiguredIdp::Oidc(p) => Some(p),
+            crate::services::idp::ConfiguredIdp::Saml(_) => None,
+        })
     } else {
-        state.oidc_providers.get(&stored_state.provider_id)
+        state.idp(&stored_state.provider_id).and_then(|i| match i {
+            crate::services::idp::ConfiguredIdp::Oidc(p) => Some(p),
+            crate::services::idp::ConfiguredIdp::Saml(_) => None,
+        })
     };
     let Some(oidc_provider) = oidc_provider else {
         return ErrorTemplate {
@@ -1418,12 +1410,12 @@ pub async fn direct_enroll_start(
     };
 
     // Initiate upstream IdP authentication.
-    // If a provider slug was specified, require it to exist — do not fall through to SAML.
+    // If a provider slug was specified, require it to exist — do not fall through.
     let base_url = state.config().base_url.clone();
-    let (auth_request, provider_id) = {
-        let oidc_provider = if let Some(ref slug) = query.provider {
-            match state.oidc_providers.get(slug.as_str()) {
-                Some(p) => Some(p),
+    let chosen_idp: Option<&crate::services::idp::ConfiguredIdp> =
+        if let Some(ref slug) = query.provider {
+            match state.idp(slug.as_str()) {
+                Some(i) => Some(i),
                 None => {
                     return ErrorTemplate {
                         title: "Unknown Provider".to_string(),
@@ -1434,47 +1426,37 @@ pub async fn direct_enroll_start(
                 }
             }
         } else {
-            state.oidc_providers.values().next()
+            state.idps.first()
         };
-        if let Some(oidc_provider) = oidc_provider {
-            let id = oidc_provider.id.clone();
-            match oidc_provider.initiate_auth(&base_url) {
-                Ok(r) => (r, id),
-                Err(e) => {
-                    tracing::error!("Failed to initiate OIDC auth for direct enrollment: {e:#}");
-                    return ErrorTemplate {
-                        title: "Error".to_string(),
-                        message: "Failed to start enrollment. Please try again.".to_string(),
-                        back_url: Some("/".to_string()),
-                    }
-                    .into_response();
-                }
-            }
-        } else if let Some(saml_provider) = state.upstream_saml.as_ref() {
-            match crate::services::idp::UpstreamIdp::Saml(saml_provider.clone())
-                .initiate_auth(state.config().as_ref())
-            {
-                Ok(r) => (r, String::new()),
-                Err(e) => {
-                    tracing::error!("Failed to initiate SAML auth for direct enrollment: {e:#}");
-                    return ErrorTemplate {
-                        title: "Error".to_string(),
-                        message: "Failed to start enrollment. Please try again.".to_string(),
-                        back_url: Some("/".to_string()),
-                    }
-                    .into_response();
-                }
-            }
-        } else {
+
+    let Some(idp) = chosen_idp else {
+        return ErrorTemplate {
+            title: "Not Configured".to_string(),
+            message: "Identity provider is not configured. Please contact your administrator."
+                .to_string(),
+            back_url: Some("/".to_string()),
+        }
+        .into_response();
+    };
+
+    let provider_id = idp.id().to_string();
+    let auth_request = match idp.initiate_auth(&base_url) {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::error!(
+                "Failed to initiate {} auth for IdP '{}' (direct enrollment): {e:#}",
+                idp.kind().as_str(),
+                provider_id
+            );
             return ErrorTemplate {
-                title: "Not Configured".to_string(),
-                message: "Identity provider is not configured. Please contact your administrator."
-                    .to_string(),
+                title: "Error".to_string(),
+                message: "Failed to start enrollment. Please try again.".to_string(),
                 back_url: Some("/".to_string()),
             }
             .into_response();
         }
     };
+    let (auth_request, provider_id) = (auth_request, provider_id);
 
     let state_expires = now.checked_add(Span::new().minutes(10)).unwrap_or(now);
 

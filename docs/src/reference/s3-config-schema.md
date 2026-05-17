@@ -49,17 +49,23 @@ The S3 configuration file is a JSON document with the following schema:
     "cert": "<base64-encoded PEM certificate>",
     "key": "<base64-encoded PEM private key>"
   },
-  "oidc": {
-    "issuer_url": "https://accounts.google.com",
-    "client_id": "...",
-    "client_secret": "..."
-  },
-  "saml": {
-    "idp_metadata_url": "https://idp.example.com/saml/metadata",
-    "sp_entity_id": "https://vouch.example.com",
-    "email_attribute": "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/emailaddress",
-    "domain_attribute": "department"
-  },
+  "idps": [
+    {
+      "id": "google",
+      "type": "oidc",
+      "issuer": "https://accounts.google.com",
+      "client_id": "...",
+      "client_secret": "..."
+    },
+    {
+      "id": "corp-saml",
+      "type": "saml",
+      "metadata_url": "https://idp.example.com/saml/metadata",
+      "sp_entity_id": "https://vouch.example.com",
+      "email_attribute": "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/emailaddress",
+      "domain_attribute": "department"
+    }
+  ],
   "allowed_domains": ["example.com"],
   "ssh_ca_key": "<base64-encoded PEM Ed25519 private key>",
   "ssh_ca_kms_key_id": "mrk-1234abcd5678efgh",
@@ -115,13 +121,16 @@ The S3 configuration file is a JSON document with the following schema:
 | `org_name` | string | Organization display name for branding in the UI. |
 | `tls.cert` | string | TLS certificate (base64-encoded PEM). |
 | `tls.key` | string | TLS private key (base64-encoded PEM). |
-| `oidc.issuer_url` | string | External OIDC issuer URL for enrollment. |
-| `oidc.client_id` | string | OIDC client ID from the external identity provider. |
-| `oidc.client_secret` | string | OIDC client secret from the external identity provider. |
-| `saml.idp_metadata_url` | string | URL to the SAML IdP metadata XML document. |
-| `saml.sp_entity_id` | string | SAML SP entity ID (defaults to `base_url`). |
-| `saml.email_attribute` | string | SAML attribute name for email extraction. |
-| `saml.domain_attribute` | string | SAML attribute name for domain extraction. |
+| `idps[]` | array of objects | Configured identity providers (OIDC + SAML). Order controls login-page button order. Each entry has `id`, `type` (`"oidc"` or `"saml"`), and type-specific fields. |
+| `idps[].id` | string | Operator-chosen slug (`[a-z0-9-]{1,32}`, no leading/trailing hyphen, unique). Used in the state table, callback routing, and audit logs. |
+| `idps[].type` | string | `"oidc"` or `"saml"`. |
+| `idps[].issuer` (OIDC) | string | OIDC issuer URL. The server auto-discovers endpoints. |
+| `idps[].client_id` (OIDC) | string | OIDC client ID from the IdP. |
+| `idps[].client_secret` (OIDC) | string | OIDC client secret from the IdP. |
+| `idps[].metadata_url` (SAML) | string | URL to the SAML IdP metadata XML document. |
+| `idps[].sp_entity_id` (SAML) | string | SP entity ID (defaults to `base_url`). |
+| `idps[].email_attribute` (SAML) | string | SAML attribute name for email extraction. |
+| `idps[].domain_attribute` (SAML) | string | SAML attribute name for domain extraction. |
 | `allowed_domains` | array of strings | Allowed email domains for enrollment. |
 | `ssh_ca_key` | string | SSH CA private key (base64-encoded PEM, Ed25519). |
 | `ssh_ca_kms_key_id` | string | AWS KMS key ID for SSH CA signing (Ed25519). Overrides `ssh_ca_key`. |
@@ -172,9 +181,9 @@ The server polls S3 at the configured interval and detects changes via ETag comp
 | `tls.cert`, `tls.key` | **Yes** | Automatic reload on change |
 | All other fields | **No** | Requires server restart |
 
-Non-hot-reloadable fields include: `jwt_secret`, `database_url`, `listen_addr`, `rp_id`, `rp_name`, `session_hours`, `cors_origins`, `allowed_domains`, `dpop.*`, OIDC settings, SAML settings, GitHub App settings, SSH CA key, OIDC signing keys, and all KMS key IDs.
+Non-hot-reloadable fields include: `jwt_secret`, `database_url`, `listen_addr`, `rp_id`, `rp_name`, `session_hours`, `cors_origins`, `allowed_domains`, `dpop.*`, `idps[]`, GitHub App settings, SSH CA key, OIDC signing keys, and all KMS key IDs.
 
-> **Note:** The `oidc` and `saml` blocks are mutually exclusive. If both are present, the server will refuse to start.
+> **Legacy blocks rejected at startup:** The previous top-level `oidc` and `saml` blocks (single-IdP nested objects) cause an immediate startup error. Migrate them into entries inside the `idps` array. See [IdP Overview](../idp/overview.md#migration-from-legacy-variables) for the field-by-field mapping.
 
 Changes to non-hot-reloadable fields in S3 are silently ignored. A server restart is required to apply them.
 

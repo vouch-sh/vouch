@@ -12,8 +12,8 @@ use super::IdentityResult;
 
 /// A fully configured OIDC provider: discovery endpoints + client credentials.
 ///
-/// Built at startup by calling `fetch_discovery` for each `OidcProviderConfig`
-/// and storing the result together with credentials in `AppState::oidc_providers`.
+/// Built at startup by calling `fetch_discovery` for each OIDC provider and
+/// storing the result together with credentials in `AppState::idps`.
 #[derive(Debug, Clone)]
 pub struct ConfiguredOidcProvider {
     /// Operator-chosen slug (e.g., "google", "entra").
@@ -128,10 +128,11 @@ struct IdTokenClaims {
 
 /// MSA (Microsoft consumer accounts) meta-tenant ID.
 ///
-/// Tokens from this tenant are personal Microsoft accounts, not work/school
-/// accounts. The `/common/` endpoint issues them; we reject them explicitly
-/// because they have no organizational identity and should never be allowed
-/// to enroll with VOUCH_OIDC_PROVIDERS-based configs.
+/// Tokens from this tenant are personal Microsoft accounts (outlook.com,
+/// hotmail.com, live.com, or external emails bound to an MSA), not work/school
+/// accounts. They are allowed to sign in but receive no auto-created
+/// organization — domain extraction returns `None` for them, matching the
+/// behavior of Google consumer accounts that lack the `hd` claim.
 const ENTRA_MSA_TENANT_ID: &str = "9188040d-6c67-4c5b-b112-36a304b66dad";
 
 /// Check whether an issuer URL is an Entra `/organizations/` endpoint.
@@ -208,15 +209,16 @@ pub(crate) async fn fetch_discovery(
         );
     }
 
-    // Warn at startup if /common/ endpoint is configured.
-    // The /common/ endpoint issues both work-account and personal-account tokens;
-    // it is unsafe for access control because tid claims from personal accounts
-    // use the MSA meta-tenant ID, not the customer's tenant.
+    // Note at startup if /common/ endpoint is configured. /common/ accepts
+    // both work/school and personal Microsoft accounts; personal accounts are
+    // allowed to sign in but have no auto-created organization (their domain
+    // is reported as `None`, matching Google consumer accounts without `hd`).
+    // Use /organizations/v2.0 if you want to restrict to AAD work/school
+    // tenants only.
     if is_entra_common_issuer(issuer) {
-        tracing::warn!(
-            "Entra /common/ endpoint configured. This allows personal Microsoft \
-             accounts to authenticate. Use /organizations/v2.0 for work accounts only. \
-             Personal-account tokens (tid={}) will be rejected at login.",
+        tracing::info!(
+            "Entra /common/ endpoint configured. Personal Microsoft accounts \
+             (tid={}) can sign in; they will not be grouped into an organization.",
             ENTRA_MSA_TENANT_ID
         );
     }
@@ -369,22 +371,15 @@ pub(crate) async fn verify_id_token(
 
     // Entra-specific tenant validation.
     // For Entra issuers (`login.microsoftonline.com`), check the `tid` claim:
-    //   - Reject tokens from the MSA meta-tenant (personal accounts).
     //   - Cross-check tid against the tenant UUID in the token's `iss` claim
     //     to prevent cross-tenant token injection. When /organizations/ or /common/
     //     is configured, provider.issuer holds the template; claims.iss holds the
     //     real per-tenant UUID from the validated token.
+    //   - The MSA meta-tenant is allowed (personal Microsoft accounts), but its
+    //     tokens get domain=None below so no organization is auto-created.
     let is_entra = provider.issuer.contains("login.microsoftonline.com");
-    if is_entra {
+    let entra_tid = if is_entra {
         let tid = claims.tid.as_deref().unwrap_or("");
-
-        // Reject MSA personal-account tokens.
-        if tid == ENTRA_MSA_TENANT_ID {
-            anyhow::bail!(
-                "Personal Microsoft account tokens are not allowed. \
-                 Configure an Entra tenant-specific or /organizations/ issuer."
-            );
-        }
 
         // Cross-check tid against the tenant UUID in the token's iss claim.
         // Use claims.iss (the real per-tenant issuer from the signed token) rather
@@ -399,18 +394,25 @@ pub(crate) async fn verify_id_token(
         }
 
         tracing::info!(tid = %tid, iss = %claims.iss, "Entra tenant validated");
-    }
+        Some(tid.to_string())
+    } else {
+        None
+    };
 
     // Domain extraction:
     // - Google with `hd` claim: use it (Workspace hosted domain).
     // - Google without `hd`: None (consumer account, don't group).
-    // - Non-Google: extract domain from the email address.
+    // - Entra MSA meta-tenant: None (personal account, don't group).
+    // - All other providers: extract domain from the email address.
     //
     // Normalize to ASCII lowercase so that org lookups match regardless of
     // the case the IdP returned. Org domains are stored lowercase.
     let is_google = provider.issuer.contains("accounts.google.com");
+    let is_entra_msa = entra_tid.as_deref() == Some(ENTRA_MSA_TENANT_ID);
     let domain = if is_google {
         claims.hd.as_deref().map(str::to_ascii_lowercase)
+    } else if is_entra_msa {
+        None
     } else {
         claims.email.split('@').nth(1).map(str::to_ascii_lowercase)
     };
@@ -1260,38 +1262,46 @@ mod tests {
 
     // ── Entra tid claim validation ─────────────────────────────────────────
 
-    /// Token with MSA meta-tenant tid must be rejected.
+    /// Token from the MSA meta-tenant (personal Microsoft account) succeeds
+    /// but `IdentityResult.domain` is `None` — matching Google consumer-account
+    /// behavior, so no organization is auto-created from the email domain.
     #[tokio::test]
-    async fn verify_id_token_entra_msa_tenant_rejected() {
+    async fn verify_id_token_entra_msa_account_allowed_no_domain() {
         use wiremock::MockServer;
 
         let server = MockServer::start().await;
-        let tenant_id = "11111111-2222-3333-4444-555555555555";
-        let entra_issuer = format!("https://login.microsoftonline.com/{tenant_id}/v2.0");
+        // /common/ template: provider holds template, token holds real per-tenant
+        // issuer with the MSA meta-tenant UUID.
+        let provider_issuer = "https://login.microsoftonline.com/common/v2.0".to_string();
+        let token_iss = format!("https://login.microsoftonline.com/{ENTRA_MSA_TENANT_ID}/v2.0");
         let client_id = "test-client";
         let nonce = "test-nonce";
 
         let key = crate::services::oidc::OidcSigningKey::generate().unwrap();
         mount_jwks(&server, &key).await;
 
-        let mut claims = base_claims(&entra_issuer, client_id);
+        let mut claims = base_claims(&token_iss, client_id);
         claims["nonce"] = serde_json::json!(nonce);
-        // MSA meta-tenant tid (personal accounts)
         claims["tid"] = serde_json::json!(ENTRA_MSA_TENANT_ID);
+        // Personal account using an external email — still gets domain=None
+        // because the tid identifies it as MSA, not because of the email domain.
+        claims["email"] = serde_json::json!("personal-user@outlook.com");
 
         let token = sign_test_jwt(&key, claims).await;
-        let mut provider = make_test_provider(&entra_issuer);
-        provider.issuer = entra_issuer.clone();
+        let mut provider = make_test_provider(&provider_issuer);
+        provider.issuer = provider_issuer.clone();
         provider.jwks_uri = url::Url::parse(&format!("{}/jwks", server.uri())).unwrap();
         let client = reqwest::Client::new();
 
-        let err = verify_id_token(&client, &provider, &token, client_id, nonce)
+        let result = verify_id_token(&client, &provider, &token, client_id, nonce)
             .await
-            .unwrap_err();
+            .unwrap();
 
+        assert_eq!(result.email, "personal-user@outlook.com");
         assert!(
-            err.to_string().contains("Personal Microsoft account"),
-            "expected MSA rejection, got: {err}"
+            result.domain.is_none(),
+            "MSA personal account must have domain=None, got: {:?}",
+            result.domain
         );
     }
 

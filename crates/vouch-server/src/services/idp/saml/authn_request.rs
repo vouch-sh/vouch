@@ -228,6 +228,7 @@ mod tests {
 
     fn make_provider(post_url: Option<&str>, redirect_url: Option<&str>) -> SamlProvider {
         SamlProvider {
+            id: "corp-saml".to_string(),
             idp_metadata: IdpMetadata {
                 entity_id: "https://idp.example.com".to_string(),
                 sso_post_url: post_url.map(str::to_string),

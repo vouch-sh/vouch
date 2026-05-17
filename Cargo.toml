@@ -149,7 +149,6 @@ governor = { version = "=0.10.4", default-features = false }
 ipnet = { version = "=2.12.0", default-features = false }
 headers = { version = "=0.4.1", default-features = false }
 hex = { version = "=0.4.3", default-features = false }
-indexmap = { version = "=2.14.0", default-features = false }
 hickory-resolver = { version = "=0.26.1", default-features = false, features = ["dnssec-aws-lc-rs", "https-aws-lc-rs", "tokio", "webpki-roots"] }
 http = { version = "=1.4.0", default-features = false }
 idna = { version = "=1.1.0", default-features = false, features = ["compiled_data"] }

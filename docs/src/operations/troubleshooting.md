@@ -26,16 +26,17 @@
 
 **"Failed to fetch upstream OIDC discovery document"**
 
-1. Verify `VOUCH_OIDC_ISSUER` is correct and reachable from the server: `curl -s $VOUCH_OIDC_ISSUER/.well-known/openid-configuration | jq .issuer`
+1. Verify the configured `VOUCH_IDP_<SLUG>_ISSUER` is correct and reachable: `curl -s $VOUCH_IDP_<SLUG>_ISSUER/.well-known/openid-configuration | jq .issuer`
 2. Check that the issuer URL uses HTTPS (HTTP is only allowed for `localhost`)
 3. Ensure the server can make outbound HTTPS requests (check firewall/proxy)
 
 **"Issuer mismatch" during OIDC discovery**
-- The `issuer` field in the discovery document must exactly match `VOUCH_OIDC_ISSUER` (trailing slashes matter)
+- The `issuer` field in the discovery document must exactly match `VOUCH_IDP_<SLUG>_ISSUER` (trailing slashes matter)
 - Some providers require a trailing slash (e.g., Auth0: `https://tenant.auth0.com/`)
+- Entra `/organizations/v2.0` and `/common/v2.0` are special-cased automatically — the per-tenant template issuer is accepted
 
 **"Failed to fetch SAML IdP metadata"**
-- Verify `VOUCH_SAML_IDP_METADATA_URL` is correct and reachable
+- Verify the configured `VOUCH_IDP_<SLUG>_METADATA_URL` is correct and reachable
 - Check that the URL returns XML, not an HTML login page
 - Ensure the server can make outbound HTTPS requests
 
@@ -44,9 +45,11 @@
 - Ensure the server clock is synchronized via NTP — SAML assertions have time-based validity windows (typically 5 minutes of skew tolerance)
 - Check the IdP assertion signing algorithm matches what the server expects
 
-**"Both OIDC and SAML are configured"**
-- OIDC and SAML are mutually exclusive — remove either the `VOUCH_OIDC_*` or `VOUCH_SAML_*` variables
-- In S3 config, remove either the `oidc` or `saml` block
+**"Legacy identity-provider configuration detected"**
+- The flat `VOUCH_OIDC_*` and `VOUCH_SAML_*` variables (and the legacy S3 `oidc` / `saml` blocks) are no longer supported. The startup error lists which variables to rename. See [IdP Overview](../idp/overview.md#migration-from-legacy-variables) for the full mapping.
+
+**"Duplicate IdP slug"**
+- Every entry in `VOUCH_IDPS` / `idps[].id` must be unique. Rename one of them.
 
 ## Debug Logging
 

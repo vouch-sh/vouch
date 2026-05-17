@@ -88,10 +88,10 @@ pub struct AppState {
     pub http_client: reqwest::Client,
     /// Session lookup cache (30s TTL).
     pub session_cache: db::SessionCache,
-    /// Configured OIDC providers (discovered at startup, keyed by slug).
-    pub oidc_providers: indexmap::IndexMap<String, services::idp::ConfiguredOidcProvider>,
-    /// Configured SAML provider (discovered at startup, None if not configured).
-    pub upstream_saml: Option<services::idp::saml::SamlProvider>,
+    /// Configured upstream identity providers (OIDC and/or SAML), in the order
+    /// operators listed them in `VOUCH_IDPS` (or the S3 `idps` array). Order
+    /// controls login page button order; `id` is the lookup key at callback time.
+    pub idps: Vec<services::idp::ConfiguredIdp>,
 }
 
 impl AppState {
@@ -103,6 +103,12 @@ impl AppState {
     #[must_use]
     pub fn config(&self) -> arc_swap::Guard<Arc<ServerConfig>> {
         self.config.load()
+    }
+
+    /// Look up an IdP by slug. Returns `None` if not configured.
+    #[must_use]
+    pub fn idp(&self, id: &str) -> Option<&services::idp::ConfiguredIdp> {
+        self.idps.iter().find(|i| i.id() == id)
     }
 }
 
@@ -190,11 +196,7 @@ mod redirect_tests {
             rp_name: "Test RP".to_string(),
             jwt_secret: SecretString::from("test_jwt_secret_must_be_at_least_32_characters_long"),
             session_hours: 8,
-            oidc_providers: Vec::new(),
-            saml_idp_metadata_url: None,
-            saml_sp_entity_id: None,
-            saml_email_attribute: None,
-            saml_domain_attribute: None,
+            idps: Vec::new(),
             base_url: format!("https://{rp_id}"),
             device_code_expires_seconds: 600,
             device_poll_interval_seconds: 5,
@@ -274,8 +276,7 @@ mod redirect_tests {
             github_app: None,
             http_client: reqwest::Client::new(),
             session_cache: db::SessionCache::new(10_000, 30),
-            oidc_providers: indexmap::IndexMap::new(),
-            upstream_saml: None,
+            idps: Vec::new(),
         }
     }
 

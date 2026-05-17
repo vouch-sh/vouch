@@ -1012,6 +1012,7 @@ mod tests {
         use crate::services::idp::saml::SamlProvider;
 
         let provider = SamlProvider {
+            id: "corp-saml".to_string(),
             idp_metadata: IdpMetadata {
                 entity_id: "https://idp.example.com".to_string(),
                 sso_post_url: Some("https://idp.example.com/sso".to_string()),
@@ -1039,6 +1040,7 @@ mod tests {
         use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 
         let provider = SamlProvider {
+            id: "corp-saml".to_string(),
             idp_metadata: IdpMetadata {
                 entity_id: "https://idp.example.com".to_string(),
                 sso_post_url: Some("https://idp.example.com/sso".to_string()),
@@ -1522,6 +1524,7 @@ mod tests {
     fn test_provider(cert_der: Vec<u8>) -> super::super::SamlProvider {
         use crate::services::idp::saml::IdpMetadata;
         super::super::SamlProvider {
+            id: "corp-saml".to_string(),
             idp_metadata: IdpMetadata {
                 entity_id: "https://idp.example.com".to_string(),
                 sso_post_url: Some("https://idp.example.com/sso".to_string()),
@@ -1776,6 +1779,7 @@ mod tests {
         use crate::services::idp::saml::SamlProvider;
 
         let provider = SamlProvider {
+            id: "corp-saml".to_string(),
             idp_metadata: IdpMetadata {
                 entity_id: "https://idp.example.com".to_string(),
                 sso_post_url: Some("https://idp.example.com/sso".to_string()),

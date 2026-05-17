@@ -1037,8 +1037,7 @@ async fn test_discovery_tls_client_auth_in_auth_methods_with_tls() {
         github_app: None,
         http_client: reqwest::Client::new(),
         session_cache: crate::db::SessionCache::new(10_000, 30),
-        oidc_providers: indexmap::IndexMap::new(),
-        upstream_saml: None,
+        idps: Vec::new(),
     });
 
     let doc = build_discovery_document(&state);
