@@ -14,6 +14,16 @@ use axum::{extract::State, response::IntoResponse};
 use axum_extra::extract::cookie::CookieJar;
 use std::sync::Arc;
 
+/// A single identity provider entry for the sign-in button list.
+pub struct IdpEntry {
+    /// Operator-chosen slug.
+    pub id: String,
+    /// Display name for the button (e.g., "Google", "Microsoft").
+    pub display_name: String,
+    /// Inline SVG icon markup.
+    pub svg_icon: String,
+}
+
 /// Home page template.
 #[derive(Template)]
 #[template(path = "landing.html")]
@@ -26,10 +36,8 @@ pub struct HomeTemplate {
     pub download_windows: Option<String>,
     /// Authentication context for header display.
     pub auth: AuthContext,
-    /// Identity provider display name (e.g., "Google", "Okta").
-    pub idp_name: Option<String>,
-    /// Identity provider SVG icon markup.
-    pub idp_svg_icon: Option<String>,
+    /// All configured identity providers for multi-button sign-in UI.
+    pub idp_entries: Vec<IdpEntry>,
 }
 
 impl_template_response!(HomeTemplate);
@@ -43,16 +51,18 @@ pub async fn home_page(State(state): State<Arc<AppState>>, jar: CookieJar) -> im
         || state.config().cli_download_linux.is_some()
         || state.config().cli_download_windows.is_some();
 
-    let (idp_name, idp_svg_icon) = match state.upstream_idp.as_ref() {
-        Some(idp) => {
+    let idp_entries: Vec<IdpEntry> = state
+        .idps
+        .iter()
+        .map(|idp| {
             let brand = idp.brand();
-            (
-                Some(brand.display_name().to_string()),
-                Some(brand.svg_icon().to_string()),
-            )
-        }
-        None => (None, None),
-    };
+            IdpEntry {
+                id: idp.id().to_string(),
+                display_name: brand.display_name().to_string(),
+                svg_icon: brand.svg_icon().to_string(),
+            }
+        })
+        .collect();
 
     HomeTemplate {
         server_url: state.config().base_url.clone(),
@@ -62,7 +72,6 @@ pub async fn home_page(State(state): State<Arc<AppState>>, jar: CookieJar) -> im
         download_linux: state.config().cli_download_linux.clone(),
         download_windows: state.config().cli_download_windows.clone(),
         auth,
-        idp_name,
-        idp_svg_icon,
+        idp_entries,
     }
 }

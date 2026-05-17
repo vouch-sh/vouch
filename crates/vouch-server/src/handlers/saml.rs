@@ -43,11 +43,20 @@ pub struct SamlAcsForm {
 
 /// Return SP metadata XML.
 /// GET /saml/metadata
+///
+/// Returns the SP entity ID from the first configured SAML IdP. If multiple
+/// SAML IdPs are configured with different SP entity IDs, this returns the
+/// first one's; operators can fetch per-IdP metadata via `?idp=<slug>` if
+/// that becomes a real need.
 pub async fn metadata(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let config = state.config();
-    let sp_entity_id = config
-        .saml_sp_entity_id
-        .clone()
+    let sp_entity_id = state
+        .idps
+        .iter()
+        .find_map(|i| match i {
+            crate::services::idp::ConfiguredIdp::Saml(p) => Some(p.sp_entity_id.clone()),
+            crate::services::idp::ConfiguredIdp::Oidc(_) => None,
+        })
         .unwrap_or_else(|| config.base_url.clone());
     let acs_url = format!("{}/saml/acs", config.base_url);
     let xml = crate::services::idp::saml::metadata::generate_sp_metadata(&sp_entity_id, &acs_url);
@@ -119,12 +128,25 @@ pub async fn acs(State(state): State<Arc<AppState>>, Form(form): Form<SamlAcsFor
         .into_response();
     }
 
-    // Step 5: Require SAML IdP to be configured.
-    let Some(crate::services::idp::UpstreamIdp::Saml(saml_provider)) = state.upstream_idp.as_ref()
-    else {
+    // Step 5: Look up the SAML IdP by the slug stored in the state row.
+    // Fall back to the first configured SAML IdP for state docs written before
+    // multi-IdP support (rolling deploy compatibility).
+    let saml_provider = if stored_state.provider_id.is_empty() {
+        state.idps.iter().find_map(|i| match i {
+            crate::services::idp::ConfiguredIdp::Saml(p) => Some(p),
+            crate::services::idp::ConfiguredIdp::Oidc(_) => None,
+        })
+    } else {
+        state.idp(&stored_state.provider_id).and_then(|i| match i {
+            crate::services::idp::ConfiguredIdp::Saml(p) => Some(p),
+            crate::services::idp::ConfiguredIdp::Oidc(_) => None,
+        })
+    };
+    let Some(saml_provider) = saml_provider else {
         return ErrorTemplate {
             title: "Error".to_string(),
-            message: "SAML is not configured. If using OIDC, responses go to /oauth/callback."
+            message: "SAML IdP not configured for this state. If using OIDC, \
+                      responses go to /oauth/callback."
                 .to_string(),
             back_url: None,
         }

@@ -32,7 +32,7 @@ use tokio::task::JoinHandle;
 
 use rustls::crypto::hpke::{HpkePrivateKey, HpkePublicKey};
 
-use crate::config::ServerConfig;
+use crate::config::{IdpConfig, OidcProviderConfig, SamlProviderConfig, ServerConfig};
 use crate::crypto::tpm_decrypt;
 use crate::infra::kms_arn::KmsArnResolver;
 
@@ -134,39 +134,94 @@ impl std::fmt::Debug for DocumentKeyMaterial {
     }
 }
 
-/// Nested OIDC configuration from S3.
-#[derive(Deserialize, Default)]
-pub struct S3OidcConfig {
-    /// OIDC issuer URL.
-    pub issuer_url: Option<String>,
-    /// OIDC client ID.
-    pub client_id: Option<String>,
-    /// OIDC client secret.
-    pub client_secret: Option<String>,
+/// One identity provider entry inside the S3 config `idps` array.
+///
+/// Uses an internally-tagged enum: each object carries a `type` field whose
+/// value is `"oidc"` or `"saml"`, plus the type-specific fields. The `id` is
+/// a top-level field on every variant.
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum S3IdpEntry {
+    Oidc {
+        id: String,
+        issuer: String,
+        client_id: String,
+        client_secret: String,
+    },
+    Saml {
+        id: String,
+        metadata_url: String,
+        #[serde(default)]
+        sp_entity_id: Option<String>,
+        #[serde(default)]
+        email_attribute: Option<String>,
+        #[serde(default)]
+        domain_attribute: Option<String>,
+    },
 }
 
-// Custom Debug that redacts client_secret to prevent accidental log exposure.
-impl std::fmt::Debug for S3OidcConfig {
+impl std::fmt::Debug for S3IdpEntry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("S3OidcConfig")
-            .field("issuer_url", &self.issuer_url)
-            .field("client_id", &self.client_id)
-            .field("client_secret", &"[REDACTED]")
-            .finish()
+        match self {
+            Self::Oidc {
+                id,
+                issuer,
+                client_id,
+                ..
+            } => f
+                .debug_struct("S3IdpEntry::Oidc")
+                .field("id", id)
+                .field("issuer", issuer)
+                .field("client_id", client_id)
+                .field("client_secret", &"[REDACTED]")
+                .finish(),
+            Self::Saml {
+                id,
+                metadata_url,
+                sp_entity_id,
+                email_attribute,
+                domain_attribute,
+            } => f
+                .debug_struct("S3IdpEntry::Saml")
+                .field("id", id)
+                .field("metadata_url", metadata_url)
+                .field("sp_entity_id", sp_entity_id)
+                .field("email_attribute", email_attribute)
+                .field("domain_attribute", domain_attribute)
+                .finish(),
+        }
     }
 }
 
-/// Nested SAML configuration from S3.
-#[derive(Debug, Deserialize, Default)]
-pub struct S3SamlConfig {
-    /// SAML IdP metadata URL.
-    pub idp_metadata_url: Option<String>,
-    /// SAML SP entity ID (defaults to base_url if not set).
-    pub sp_entity_id: Option<String>,
-    /// SAML attribute name for email extraction.
-    pub email_attribute: Option<String>,
-    /// SAML attribute name for domain extraction.
-    pub domain_attribute: Option<String>,
+impl S3IdpEntry {
+    fn into_idp_config(self) -> IdpConfig {
+        match self {
+            Self::Oidc {
+                id,
+                issuer,
+                client_id,
+                client_secret,
+            } => IdpConfig::Oidc(OidcProviderConfig {
+                id,
+                issuer_url: issuer,
+                client_id,
+                client_secret: SecretString::from(client_secret),
+            }),
+            Self::Saml {
+                id,
+                metadata_url,
+                sp_entity_id,
+                email_attribute,
+                domain_attribute,
+            } => IdpConfig::Saml(SamlProviderConfig {
+                id,
+                metadata_url,
+                sp_entity_id,
+                email_attribute,
+                domain_attribute,
+            }),
+        }
+    }
 }
 
 /// Nested DPoP configuration from S3.
@@ -235,13 +290,10 @@ pub struct S3Config {
     /// Session duration in hours.
     pub session_hours: Option<u64>,
 
-    // OIDC configuration
-    /// Nested OIDC config.
-    pub oidc: Option<S3OidcConfig>,
-
-    // SAML configuration
-    /// Nested SAML config.
-    pub saml: Option<S3SamlConfig>,
+    // Identity providers (OIDC + SAML unified).
+    /// Ordered IdP list. Each entry carries `type: "oidc" | "saml"`, `id`, and
+    /// type-specific fields. Order controls login-page button order.
+    pub idps: Option<Vec<S3IdpEntry>>,
 
     // TLS configuration
     /// Nested TLS config.
@@ -356,8 +408,7 @@ impl std::fmt::Debug for S3Config {
             .field("dsql_endpoints", &self.dsql_endpoints)
             .field("jwt_secret", &"[REDACTED]")
             .field("session_hours", &self.session_hours)
-            .field("oidc", &self.oidc)
-            .field("saml", &self.saml)
+            .field("idps", &self.idps)
             .field("tls", &self.tls)
             .field("acme", &self.acme)
             .field("allowed_domains", &self.allowed_domains)
@@ -631,8 +682,8 @@ async fn apply_config_update(
         .as_ref()
         .map(|s| s.expose_secret().to_string());
 
-    // Merge S3 config
-    new_config.merge_s3_config(&s3_config, true); // Runtime update - block sensitive fields
+    // Merge S3 config (runtime update — oidc block check is skipped for runtime updates)
+    new_config.merge_s3_config(&s3_config, true)?;
 
     // Check if TLS config changed
     let tls_changed = new_config.tls_cert != old_tls_cert
@@ -668,7 +719,11 @@ impl ServerConfig {
     /// # Runtime Updates
     /// Only TLS certificates can be updated at runtime (for hot-reload).
     /// All other configuration changes require a server restart.
-    pub fn merge_s3_config(&mut self, s3: &S3Config, is_runtime_update: bool) {
+    pub fn merge_s3_config(
+        &mut self,
+        s3: &S3Config,
+        is_runtime_update: bool,
+    ) -> anyhow::Result<()> {
         // Runtime updates: ONLY allow TLS changes
         if is_runtime_update {
             if let Some(tls) = &s3.tls {
@@ -680,7 +735,7 @@ impl ServerConfig {
                 }
             }
             // All other fields are ignored at runtime
-            return;
+            return Ok(());
         }
 
         // Initial startup: apply all config
@@ -729,33 +784,15 @@ impl ServerConfig {
             self.session_hours = v;
         }
 
-        // OIDC configuration
-        if let Some(oidc) = &s3.oidc {
-            if let Some(v) = &oidc.issuer_url {
-                self.oidc_issuer_url = Some(v.clone());
-            }
-            if let Some(v) = &oidc.client_id {
-                self.oidc_client_id = Some(v.clone());
-            }
-            if let Some(v) = &oidc.client_secret {
-                self.oidc_client_secret = Some(SecretString::from(v.clone()));
-            }
-        }
-
-        // SAML configuration
-        if let Some(saml) = &s3.saml {
-            if let Some(v) = &saml.idp_metadata_url {
-                self.saml_idp_metadata_url = Some(v.clone());
-            }
-            if let Some(v) = &saml.sp_entity_id {
-                self.saml_sp_entity_id = Some(v.clone());
-            }
-            if let Some(v) = &saml.email_attribute {
-                self.saml_email_attribute = Some(v.clone());
-            }
-            if let Some(v) = &saml.domain_attribute {
-                self.saml_domain_attribute = Some(v.clone());
-            }
+        // Unified IdP list (OIDC + SAML). Any legacy single-provider blocks
+        // (`oidc` / `saml`) in the JSON are silently ignored by serde because
+        // there are no struct fields to deserialize into.
+        if let Some(idps) = &s3.idps {
+            self.idps = idps
+                .iter()
+                .cloned()
+                .map(S3IdpEntry::into_idp_config)
+                .collect();
         }
 
         // TLS configuration
@@ -894,6 +931,8 @@ impl ServerConfig {
         if let Some(v) = s3.device_poll_interval_seconds {
             self.device_poll_interval_seconds = v;
         }
+
+        Ok(())
     }
 }
 
@@ -902,6 +941,8 @@ mod tests {
     #![expect(
         clippy::unwrap_used,
         clippy::expect_used,
+        clippy::indexing_slicing,
+        clippy::panic,
         reason = "test code: panic on assertion failure is acceptable"
     )]
     use super::*;
@@ -912,7 +953,7 @@ mod tests {
         let s3 = S3Config::default();
 
         let original_rp_id = config.rp_id.clone();
-        config.merge_s3_config(&s3, false);
+        config.merge_s3_config(&s3, false).unwrap();
 
         // Should be unchanged
         assert_eq!(config.rp_id, original_rp_id);
@@ -927,7 +968,7 @@ mod tests {
             ..Default::default()
         };
 
-        config.merge_s3_config(&s3, false);
+        config.merge_s3_config(&s3, false).unwrap();
 
         assert_eq!(config.rp_id, "new.example.com");
         assert_eq!(config.session_hours, 12);
@@ -944,31 +985,32 @@ mod tests {
             ..Default::default()
         };
 
-        config.merge_s3_config(&s3, false);
+        config.merge_s3_config(&s3, false).unwrap();
 
         assert_eq!(config.tls_cert, Some("base64cert".to_string()));
         assert!(config.tls_key.is_some());
     }
 
     #[test]
-    fn test_merge_s3_config_nested_oidc() {
+    fn test_merge_s3_config_legacy_oidc_and_saml_blocks_silently_ignored() {
+        // Legacy single-provider `oidc` / `saml` blocks in the S3 JSON are
+        // silently ignored: serde drops unknown top-level fields, the merge
+        // succeeds, and the existing `idps` on the config remain unchanged.
+        let json = r#"{
+            "oidc": { "issuer_url": "https://x", "client_id": "y" },
+            "saml": { "idp_metadata_url": "https://z" }
+        }"#;
+        let s3: S3Config = serde_json::from_str(json).expect("parse");
         let mut config = crate::test_utils::test_config();
-        let s3 = S3Config {
-            oidc: Some(S3OidcConfig {
-                issuer_url: Some("https://new-issuer.com".to_string()),
-                client_id: Some("new-client-id".to_string()),
-                client_secret: Some("new-secret".to_string()),
-            }),
-            ..Default::default()
-        };
+        let original_idp_count = config.idps.len();
 
-        config.merge_s3_config(&s3, false);
+        config.merge_s3_config(&s3, false).unwrap();
 
         assert_eq!(
-            config.oidc_issuer_url,
-            Some("https://new-issuer.com".to_string())
+            config.idps.len(),
+            original_idp_count,
+            "legacy blocks must not alter the idps list"
         );
-        assert_eq!(config.oidc_client_id, Some("new-client-id".to_string()));
     }
 
     #[test]
@@ -981,7 +1023,7 @@ mod tests {
             ..Default::default()
         };
 
-        config.merge_s3_config(&s3, false);
+        config.merge_s3_config(&s3, false).unwrap();
 
         assert_eq!(config.dpop_max_age_seconds, 600);
     }
@@ -1001,7 +1043,7 @@ mod tests {
             ..Default::default()
         };
 
-        config.merge_s3_config(&s3, false);
+        config.merge_s3_config(&s3, false).unwrap();
 
         assert_eq!(config.github_app_id, Some(12345));
         assert_eq!(config.github_app_name, Some("my-app".to_string()));
@@ -1025,7 +1067,7 @@ mod tests {
         };
 
         // Runtime update - only TLS should change
-        config.merge_s3_config(&s3, true);
+        config.merge_s3_config(&s3, true).unwrap();
 
         // rp_id and session_hours should be UNCHANGED
         assert_eq!(config.rp_id, original_rp_id);
@@ -1051,7 +1093,7 @@ mod tests {
         };
 
         // Startup (not runtime) - all fields should update
-        config.merge_s3_config(&s3, false);
+        config.merge_s3_config(&s3, false).unwrap();
 
         assert_eq!(config.rp_id, "new.example.com");
         assert_eq!(config.session_hours, 24);
@@ -1060,6 +1102,7 @@ mod tests {
 
     #[test]
     fn test_s3_config_deserialization() {
+        // Legacy top-level `oidc` block is unknown to serde and silently dropped.
         let json = r#"{
             "version": 1,
             "rp_id": "vouch.example.com",
@@ -1080,8 +1123,11 @@ mod tests {
         assert_eq!(config.version, Some(1));
         assert_eq!(config.rp_id, Some("vouch.example.com".to_string()));
         assert_eq!(config.session_hours, Some(12));
-        assert!(config.oidc.is_some());
         assert!(config.tls.is_some());
+        assert!(
+            config.idps.is_none(),
+            "legacy 'oidc' block must not populate the new 'idps' field"
+        );
         assert_eq!(
             config.allowed_domains,
             Some(vec!["example.com".to_string(), "test.com".to_string()])
@@ -1179,7 +1225,7 @@ mod tests {
             ..Default::default()
         };
 
-        config.merge_s3_config(&s3, false);
+        config.merge_s3_config(&s3, false).unwrap();
 
         assert_eq!(config.ssh_ca_kms_key_id, Some("mrk-ssh-key".to_string()));
         assert_eq!(
@@ -1243,7 +1289,7 @@ mod tests {
         };
 
         // Runtime update should NOT apply KMS key IDs
-        config.merge_s3_config(&s3, true);
+        config.merge_s3_config(&s3, true).unwrap();
 
         assert!(config.ssh_ca_kms_key_id.is_none());
         assert!(config.oidc_signing_kms_key_id.is_none());
@@ -1284,7 +1330,7 @@ mod tests {
         };
 
         // Startup merge should apply RSA key fields
-        config.merge_s3_config(&s3, false);
+        config.merge_s3_config(&s3, false).unwrap();
 
         assert!(config.oidc_rsa_signing_key.is_some());
         assert_eq!(
@@ -1304,7 +1350,7 @@ mod tests {
         };
 
         // Runtime update should NOT apply RSA signing key fields
-        config.merge_s3_config(&s3, true);
+        config.merge_s3_config(&s3, true).unwrap();
 
         assert!(config.oidc_rsa_signing_key.is_none());
         assert!(config.oidc_rsa_signing_kms_key_id.is_none());
@@ -1337,65 +1383,72 @@ mod tests {
     }
 
     #[test]
-    fn test_merge_s3_config_nested_saml() {
+    fn test_merge_s3_config_idps_array_oidc_and_saml() {
+        let json = r#"{
+            "idps": [
+                {
+                    "id": "google",
+                    "type": "oidc",
+                    "issuer": "https://accounts.google.com",
+                    "client_id": "client-abc",
+                    "client_secret": "secret-xyz"
+                },
+                {
+                    "id": "corp-saml",
+                    "type": "saml",
+                    "metadata_url": "https://idp.example.com/saml/metadata",
+                    "sp_entity_id": "https://vouch.example.com",
+                    "email_attribute": "email",
+                    "domain_attribute": "department"
+                }
+            ]
+        }"#;
+        let s3: S3Config = serde_json::from_str(json).expect("parse");
         let mut config = crate::test_utils::test_config();
-        assert!(config.saml_idp_metadata_url.is_none());
-        assert!(config.saml_sp_entity_id.is_none());
+        config.idps.clear();
 
-        let s3 = S3Config {
-            saml: Some(S3SamlConfig {
-                idp_metadata_url: Some("https://idp.example.com/saml/metadata".to_string()),
-                sp_entity_id: Some("https://vouch.example.com".to_string()),
-                email_attribute: Some(
-                    "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/emailaddress"
-                        .to_string(),
-                ),
-                domain_attribute: Some("department".to_string()),
-            }),
-            ..Default::default()
-        };
+        config.merge_s3_config(&s3, false).unwrap();
 
-        config.merge_s3_config(&s3, false);
-
-        assert_eq!(
-            config.saml_idp_metadata_url,
-            Some("https://idp.example.com/saml/metadata".to_string())
-        );
-        assert_eq!(
-            config.saml_sp_entity_id,
-            Some("https://vouch.example.com".to_string())
-        );
-        assert_eq!(
-            config.saml_email_attribute,
-            Some("http://schemas.xmlsoap.org/ws/2005/05/identity/claims/emailaddress".to_string())
-        );
-        assert_eq!(config.saml_domain_attribute, Some("department".to_string()));
+        assert_eq!(config.idps.len(), 2);
+        assert_eq!(config.idps[0].id(), "google");
+        assert_eq!(config.idps[0].kind_str(), "oidc");
+        assert_eq!(config.idps[1].id(), "corp-saml");
+        assert_eq!(config.idps[1].kind_str(), "saml");
     }
 
     #[test]
-    fn test_s3_config_deserialization_with_saml() {
+    fn test_s3_config_deserialization_with_idps_saml_only() {
         let json = r#"{
             "version": 1,
             "rp_id": "vouch.example.com",
-            "saml": {
-                "idp_metadata_url": "https://idp.example.com/saml/metadata",
-                "sp_entity_id": "https://vouch.example.com"
-            }
+            "idps": [
+                {
+                    "id": "corp-saml",
+                    "type": "saml",
+                    "metadata_url": "https://idp.example.com/saml/metadata",
+                    "sp_entity_id": "https://vouch.example.com"
+                }
+            ]
         }"#;
 
         let config: S3Config = serde_json::from_str(json).expect("Failed to parse");
-
-        assert!(config.saml.is_some());
-        let saml = config.saml.unwrap();
-        assert_eq!(
-            saml.idp_metadata_url,
-            Some("https://idp.example.com/saml/metadata".to_string())
-        );
-        assert_eq!(
-            saml.sp_entity_id,
-            Some("https://vouch.example.com".to_string())
-        );
-        assert!(saml.email_attribute.is_none());
-        assert!(saml.domain_attribute.is_none());
+        let idps = config.idps.expect("idps present");
+        assert_eq!(idps.len(), 1);
+        match &idps[0] {
+            S3IdpEntry::Saml {
+                id,
+                metadata_url,
+                sp_entity_id,
+                email_attribute,
+                domain_attribute,
+            } => {
+                assert_eq!(id, "corp-saml");
+                assert_eq!(metadata_url, "https://idp.example.com/saml/metadata");
+                assert_eq!(sp_entity_id.as_deref(), Some("https://vouch.example.com"));
+                assert!(email_attribute.is_none());
+                assert!(domain_attribute.is_none());
+            }
+            other => panic!("expected SAML entry, got {other:?}"),
+        }
     }
 }

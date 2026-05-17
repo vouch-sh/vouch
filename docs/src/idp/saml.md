@@ -1,17 +1,22 @@
 # SAML 2.0
 
-Configure a SAML 2.0 identity provider for Vouch enrollment. Vouch acts as a SAML Service Provider (SP) with HTTP-POST and HTTP-Redirect bindings.
+Configure one or more SAML 2.0 identity providers for Vouch enrollment. Vouch acts as a SAML Service Provider (SP) with HTTP-POST and HTTP-Redirect bindings.
 
-> **SAML and OIDC are mutually exclusive.** Configure one or the other, not both. If both `VOUCH_OIDC_ISSUER` and `VOUCH_SAML_IDP_METADATA_URL` are set, the server will refuse to start.
+SAML IdPs are configured under the same `VOUCH_IDPS` list as OIDC IdPs and can coexist with OIDC providers in any combination.
 
 ## Environment Variables
 
+Pick a slug for the IdP (e.g., `corp-saml`, `partner-saml`) and add it to `VOUCH_IDPS`. Slug rules: `[a-z0-9-]{1,32}`, no leading/trailing hyphen, unique across IdPs.
+
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `VOUCH_SAML_IDP_METADATA_URL` | Yes | _(none)_ | URL to the IdP's SAML metadata XML document. Fetched at server startup. |
-| `VOUCH_SAML_SP_ENTITY_ID` | No | `{VOUCH_BASE_URL}` | SP entity ID sent in authentication requests. Defaults to the server's base URL. |
-| `VOUCH_SAML_EMAIL_ATTRIBUTE` | No | _(auto-detect)_ | SAML attribute name containing the user's email address. |
-| `VOUCH_SAML_DOMAIN_ATTRIBUTE` | No | _(none)_ | SAML attribute name containing the user's domain (for domain restriction). |
+| `VOUCH_IDP_<SLUG>_TYPE` | Yes | _(none)_ | Must be `saml` for a SAML IdP. |
+| `VOUCH_IDP_<SLUG>_METADATA_URL` | Yes | _(none)_ | URL to the IdP's SAML metadata XML document. Fetched at server startup. |
+| `VOUCH_IDP_<SLUG>_SP_ENTITY_ID` | No | `{VOUCH_BASE_URL}` | SP entity ID sent in authentication requests. Defaults to the server's base URL. |
+| `VOUCH_IDP_<SLUG>_EMAIL_ATTRIBUTE` | No | _(auto-detect)_ | SAML attribute name containing the user's email address. |
+| `VOUCH_IDP_<SLUG>_DOMAIN_ATTRIBUTE` | No | _(none)_ | SAML attribute name containing the user's domain (for domain restriction). |
+
+Hyphens in the slug become underscores in env-var names: a slug of `corp-saml` becomes `VOUCH_IDP_CORP_SAML_*`.
 
 ## SP Metadata
 
@@ -21,31 +26,53 @@ The Vouch server exposes SP metadata for configuring your IdP:
 GET https://auth.example.com/saml/metadata
 ```
 
-This returns an XML document containing the SP entity ID, Assertion Consumer Service (ACS) URL, and supported bindings. Import this into your IdP or configure the following values manually:
+This returns an XML document containing the SP entity ID, Assertion Consumer Service (ACS) URL, and supported bindings. The SP entity ID comes from the first configured SAML IdP (or the server's base URL if none is set). Import the metadata into your IdP or configure the following values manually:
 
-- **SP Entity ID**: `https://auth.example.com` (or the value of `VOUCH_SAML_SP_ENTITY_ID`)
+- **SP Entity ID**: `https://auth.example.com` (or the value of `VOUCH_IDP_<SLUG>_SP_ENTITY_ID`)
 - **ACS URL**: `https://auth.example.com/saml/acs`
 - **Bindings**: HTTP-POST (ACS), HTTP-Redirect (AuthnRequest)
 
+All configured SAML IdPs share the single ACS URL; Vouch identifies the originating IdP via the per-request `RelayState` stored in the state table.
+
 ## Attribute Mapping
 
-Vouch extracts user identity from SAML assertion attributes. By default, it looks for the email address in common attribute names. You can override this with `VOUCH_SAML_EMAIL_ATTRIBUTE`:
+Vouch extracts user identity from SAML assertion attributes. By default, it looks for the email address in common attribute names. You can override this per-IdP with `VOUCH_IDP_<SLUG>_EMAIL_ATTRIBUTE`:
 
 | Use Case | Attribute Example |
 |----------|-------------------|
 | Standard email | `http://schemas.xmlsoap.org/ws/2005/05/identity/claims/emailaddress` |
 | NameID | _(used automatically if no attribute match)_ |
-| Custom | Set `VOUCH_SAML_EMAIL_ATTRIBUTE` to your IdP's attribute name |
+| Custom | Set `VOUCH_IDP_<SLUG>_EMAIL_ATTRIBUTE` to your IdP's attribute name |
 
-For domain-based enrollment restrictions, set `VOUCH_SAML_DOMAIN_ATTRIBUTE` to the attribute name containing the user's domain. If not set, the domain is extracted from the email address.
+For domain-based enrollment restrictions, set `VOUCH_IDP_<SLUG>_DOMAIN_ATTRIBUTE` to the attribute name containing the user's domain. If not set, the domain is extracted from the email address.
 
 ## Configuration Example
 
 ```bash
-VOUCH_SAML_IDP_METADATA_URL=https://login.microsoftonline.com/{tenant-id}/federationmetadata/2007-06/federationmetadata.xml
-VOUCH_SAML_SP_ENTITY_ID=https://auth.example.com
-VOUCH_SAML_EMAIL_ATTRIBUTE=http://schemas.xmlsoap.org/ws/2005/05/identity/claims/emailaddress
+VOUCH_IDPS=corp-saml
+
+VOUCH_IDP_CORP_SAML_TYPE=saml
+VOUCH_IDP_CORP_SAML_METADATA_URL=https://login.microsoftonline.com/{tenant-id}/federationmetadata/2007-06/federationmetadata.xml
+VOUCH_IDP_CORP_SAML_SP_ENTITY_ID=https://auth.example.com
+VOUCH_IDP_CORP_SAML_EMAIL_ATTRIBUTE=http://schemas.xmlsoap.org/ws/2005/05/identity/claims/emailaddress
+
 VOUCH_ALLOWED_DOMAINS=example.com
+```
+
+### S3 configuration
+
+```json
+{
+  "idps": [
+    {
+      "id": "corp-saml",
+      "type": "saml",
+      "metadata_url": "https://login.microsoftonline.com/{tenant-id}/federationmetadata/2007-06/federationmetadata.xml",
+      "sp_entity_id": "https://auth.example.com",
+      "email_attribute": "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/emailaddress"
+    }
+  ]
+}
 ```
 
 ## Provider-Specific Notes
@@ -81,7 +108,7 @@ VOUCH_ALLOWED_DOMAINS=example.com
 
 **Email not extracted from assertion**
 - Check the SAML assertion attributes using debug logging (`RUST_LOG=vouch_server=debug`)
-- Set `VOUCH_SAML_EMAIL_ATTRIBUTE` to the exact attribute name used by your IdP
+- Set `VOUCH_IDP_<SLUG>_EMAIL_ATTRIBUTE` to the exact attribute name used by your IdP
 
-**"Both OIDC and SAML are configured"**
-- Only one upstream IdP protocol can be active. Remove either the `VOUCH_OIDC_*` or `VOUCH_SAML_*` variables.
+**"Legacy identity-provider configuration detected"**
+- The flat `VOUCH_SAML_*` variables are no longer accepted. Migrate to the per-IdP `VOUCH_IDP_<SLUG>_*` format. See [Overview](overview.md#migration-from-legacy-variables) for the full mapping.
