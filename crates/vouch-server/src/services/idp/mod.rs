@@ -1,12 +1,17 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Upstream identity provider abstraction.
 //!
-//! Supports OIDC and SAML (stub) upstream identity providers with
-//! protocol-agnostic auth initiation and provider-specific UI branding.
+//! Supports OIDC and SAML upstream identity providers with protocol-agnostic
+//! auth initiation and provider-specific UI branding. Multiple providers of
+//! either kind can be configured simultaneously and are stored as a single
+//! ordered list in `AppState::idps`.
 
 pub(crate) mod icons;
 pub(crate) mod oidc;
 pub(crate) mod saml;
+
+pub(crate) use oidc::ConfiguredOidcProvider;
+pub(crate) use saml::SamlProvider;
 
 /// Known identity provider for UI branding.
 #[derive(Debug)]
@@ -130,153 +135,131 @@ pub struct AuthRequest {
     pub code_verifier: String,
 }
 
-/// Configured upstream identity provider.
-#[derive(Debug)]
-pub enum UpstreamIdp {
-    Oidc(Box<oidc::OidcProvider>),
-    Saml(saml::SamlProvider),
+/// Identity provider kind discriminator (used in config and audit logging).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IdpKind {
+    Oidc,
+    Saml,
 }
 
-impl UpstreamIdp {
-    /// Initiate authentication with the upstream IdP.
-    ///
-    /// Generates state and nonce internally, builds the appropriate auth
-    /// action (redirect URL for OIDC, POST form for SAML), and returns
-    /// the full `AuthRequest` to store state and redirect/render.
-    ///
-    /// # Note
-    /// `initiate_auth` takes the full `ServerConfig` for simplicity in Phase 1.
-    /// Only `oidc_client_id` and `base_url` are used. This coupling can be
-    /// narrowed in Phase 2 if needed.
-    ///
-    /// # Invariant
-    /// When `Self::Oidc` is active, `config.oidc_client_id` must be `Some`.
-    /// Startup validates `oidc_configured()` before constructing `UpstreamIdp::Oidc`,
-    /// so the error path below should be unreachable in practice.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if random byte generation fails, or if required OIDC
-    /// config fields are missing (should be unreachable -- see invariant above).
-    /// Returns an error for the SAML variant (not yet implemented in Phase 1).
-    pub fn initiate_auth(
-        &self,
-        config: &crate::config::ServerConfig,
-    ) -> Result<AuthRequest, anyhow::Error> {
-        use base64::Engine;
-        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-
+impl IdpKind {
+    /// Serialize as lowercase string (matches env-var / S3 config values).
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
         match self {
-            Self::Oidc(p) => {
-                let state_bytes = crate::crypto::generate_random_bytes(32)?;
-                let nonce_bytes = crate::crypto::generate_random_bytes(32)?;
-                let state_key = URL_SAFE_NO_PAD.encode(state_bytes);
-                let nonce = URL_SAFE_NO_PAD.encode(nonce_bytes);
+            Self::Oidc => "oidc",
+            Self::Saml => "saml",
+        }
+    }
+}
 
-                // RFC 7636 (PKCE): Generate code_verifier (43-128 chars, base64url)
-                // and derive code_challenge = BASE64URL(SHA256(code_verifier)).
-                // RFC 9700 mandates PKCE for all OAuth clients.
-                let verifier_bytes = crate::crypto::generate_random_bytes(32)?;
-                let code_verifier = URL_SAFE_NO_PAD.encode(verifier_bytes);
-                let challenge_digest =
-                    aws_lc_rs::digest::digest(&aws_lc_rs::digest::SHA256, code_verifier.as_bytes());
-                let code_challenge = URL_SAFE_NO_PAD.encode(challenge_digest.as_ref());
+/// A fully configured upstream identity provider, ready to initiate auth.
+///
+/// Stored as `Vec<ConfiguredIdp>` in `AppState::idps` in the order operators
+/// listed them in `VOUCH_IDPS` (or the S3 `idps` array). Order controls the
+/// login page button order; `id` is the lookup key at callback time.
+#[derive(Debug, Clone)]
+pub enum ConfiguredIdp {
+    Oidc(ConfiguredOidcProvider),
+    Saml(SamlProvider),
+}
 
-                let client_id = config
-                    .oidc_client_id
-                    .as_deref()
-                    .ok_or_else(|| anyhow::anyhow!("OIDC client_id not configured"))?;
-                let redirect_uri = format!("{}/oauth/callback", config.base_url);
-                let mut url = p.authorization_endpoint.clone();
-                url.query_pairs_mut()
-                    .append_pair("client_id", client_id)
-                    .append_pair("redirect_uri", &redirect_uri)
-                    .append_pair("response_type", "code")
-                    .append_pair("scope", "openid email")
-                    .append_pair("state", &state_key)
-                    .append_pair("nonce", &nonce)
-                    .append_pair("code_challenge", &code_challenge)
-                    .append_pair("code_challenge_method", "S256")
-                    .append_pair("prompt", "login");
-                Ok(AuthRequest {
-                    action: AuthAction::Redirect {
-                        url: url.to_string(),
-                    },
-                    state_key,
-                    nonce,
-                    code_verifier,
-                })
-            }
-            Self::Saml(saml) => {
-                let authn = saml::authn_request::build_authn_request(saml)
-                    .map_err(|e| anyhow::anyhow!("Failed to build SAML AuthnRequest: {e}"))?;
-                // state_key = RelayState token (browser-carried through IdP)
-                // nonce = AuthnRequest ID (for InResponseTo validation)
-                let state_key = URL_SAFE_NO_PAD.encode(crate::crypto::generate_random_bytes(32)?);
-                // Validate SSO URL scheme (reject javascript:, data:, etc.)
-                let parsed_sso = url::Url::parse(&authn.sso_url)
-                    .map_err(|e| anyhow::anyhow!("Invalid SAML SSO URL: {e}"))?;
-                let scheme = parsed_sso.scheme();
-                if scheme != "https" && scheme != "http" {
-                    anyhow::bail!(
-                        "SAML SSO URL has disallowed scheme '{scheme}': {}",
-                        authn.sso_url
-                    );
-                }
-                if authn.is_post_binding {
-                    Ok(AuthRequest {
-                        action: AuthAction::PostForm {
-                            action_url: authn.sso_url,
-                            saml_request: authn.encoded_request,
-                            relay_state: state_key.clone(),
-                        },
-                        state_key,
-                        nonce: authn.request_id,
-                        code_verifier: String::new(),
-                    })
-                } else {
-                    // Redirect binding: append SAMLRequest and RelayState to URL
-                    let mut url = url::Url::parse(&authn.sso_url)
-                        .map_err(|e| anyhow::anyhow!("Invalid SAML SSO URL: {e}"))?;
-                    url.query_pairs_mut()
-                        .append_pair("SAMLRequest", &authn.encoded_request)
-                        .append_pair("RelayState", &state_key);
-                    Ok(AuthRequest {
-                        action: AuthAction::Redirect {
-                            url: url.to_string(),
-                        },
-                        state_key,
-                        nonce: authn.request_id,
-                        code_verifier: String::new(),
-                    })
-                }
-            }
+impl ConfiguredIdp {
+    /// Operator-chosen slug (e.g., "google", "entra", "corp-saml").
+    #[must_use]
+    pub fn id(&self) -> &str {
+        match self {
+            Self::Oidc(p) => &p.id,
+            Self::Saml(p) => &p.id,
         }
     }
 
-    /// Detect the IdP brand for UI display.
+    /// Protocol kind for this provider.
+    #[must_use]
+    pub fn kind(&self) -> IdpKind {
+        match self {
+            Self::Oidc(_) => IdpKind::Oidc,
+            Self::Saml(_) => IdpKind::Saml,
+        }
+    }
+
+    /// Brand for UI display (icon + display name).
     #[must_use]
     pub fn brand(&self) -> IdpBrand {
         match self {
-            Self::Oidc(p) => IdpBrand::from_issuer(&p.issuer),
-            Self::Saml(s) => IdpBrand::from_entity_id(s.entity_id()),
+            Self::Oidc(p) => IdpBrand::from_issuer(&p.provider.issuer),
+            Self::Saml(p) => IdpBrand::from_entity_id(p.entity_id()),
         }
     }
 
-    /// Origins the browser must be allowed to redirect to or POST to during
-    /// upstream sign-in handoff.
-    ///
-    /// Used by the CSP middleware to widen `form-action` so Chromium-based
-    /// browsers don't block the 303 redirect (OIDC) or auto-submitting
-    /// SAML POST form. Returns deduplicated origins; an empty `Vec` when
-    /// the IdP exposes no http(s) endpoints (in practice unreachable, but
-    /// expressed in the type).
+    /// CSP `form-action` origins this IdP needs the browser to be allowed to
+    /// redirect or POST to during sign-in handoff. Always returns at least
+    /// one origin in practice (empty `Vec` only if all URLs are malformed).
     #[must_use]
     pub fn form_action_origins(&self) -> Vec<crate::infra::csp::CspOrigin> {
         match self {
-            Self::Oidc(p) => p.form_action_origin().into_iter().collect(),
-            Self::Saml(s) => s.form_action_origins(),
+            Self::Oidc(p) => p.provider.form_action_origin().into_iter().collect(),
+            Self::Saml(p) => p.form_action_origins(),
         }
+    }
+
+    /// Initiate authentication with this provider.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if random byte generation fails (OIDC), if the SAML
+    /// AuthnRequest cannot be built, or if the SAML SSO URL has a disallowed
+    /// scheme.
+    pub fn initiate_auth(&self, base_url: &str) -> Result<AuthRequest, anyhow::Error> {
+        match self {
+            Self::Oidc(p) => p.initiate_auth(base_url),
+            Self::Saml(p) => initiate_saml_auth(p),
+        }
+    }
+}
+
+/// Initiate a SAML AuthnRequest for the given provider.
+fn initiate_saml_auth(saml: &SamlProvider) -> Result<AuthRequest, anyhow::Error> {
+    use base64::Engine;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+
+    let authn = saml::authn_request::build_authn_request(saml)
+        .map_err(|e| anyhow::anyhow!("Failed to build SAML AuthnRequest: {e}"))?;
+    let state_key = URL_SAFE_NO_PAD.encode(crate::crypto::generate_random_bytes(32)?);
+    let parsed_sso = url::Url::parse(&authn.sso_url)
+        .map_err(|e| anyhow::anyhow!("Invalid SAML SSO URL: {e}"))?;
+    let scheme = parsed_sso.scheme();
+    if scheme != "https" && scheme != "http" {
+        anyhow::bail!(
+            "SAML SSO URL has disallowed scheme '{scheme}': {}",
+            authn.sso_url
+        );
+    }
+    if authn.is_post_binding {
+        Ok(AuthRequest {
+            action: AuthAction::PostForm {
+                action_url: authn.sso_url,
+                saml_request: authn.encoded_request,
+                relay_state: state_key.clone(),
+            },
+            state_key,
+            nonce: authn.request_id,
+            code_verifier: String::new(),
+        })
+    } else {
+        let mut url = url::Url::parse(&authn.sso_url)
+            .map_err(|e| anyhow::anyhow!("Invalid SAML SSO URL: {e}"))?;
+        url.query_pairs_mut()
+            .append_pair("SAMLRequest", &authn.encoded_request)
+            .append_pair("RelayState", &state_key);
+        Ok(AuthRequest {
+            action: AuthAction::Redirect {
+                url: url.to_string(),
+            },
+            state_key,
+            nonce: authn.request_id,
+            code_verifier: String::new(),
+        })
     }
 }
 
@@ -395,7 +378,7 @@ mod tests {
     }
 
     // =========================================================================
-    // UpstreamIdp::initiate_auth tests
+    // ConfiguredIdp::initiate_auth tests
     // =========================================================================
 
     fn make_oidc_provider(auth_endpoint: &str) -> oidc::OidcProvider {
@@ -407,13 +390,23 @@ mod tests {
         }
     }
 
+    fn make_configured_oidc_provider(auth_endpoint: &str) -> oidc::ConfiguredOidcProvider {
+        use secrecy::SecretString;
+        oidc::ConfiguredOidcProvider {
+            id: "google".to_string(),
+            client_id: "test-client-id".to_string(),
+            client_secret: SecretString::from("test-client-secret"),
+            provider: make_oidc_provider(auth_endpoint),
+        }
+    }
+
     #[test]
     fn initiate_auth_oidc_returns_redirect() {
-        let provider = make_oidc_provider("https://accounts.google.com/o/oauth2/v2/auth");
-        let idp = UpstreamIdp::Oidc(Box::new(provider));
+        let provider =
+            make_configured_oidc_provider("https://accounts.google.com/o/oauth2/v2/auth");
         let config = test_config();
 
-        let auth = idp.initiate_auth(&config).unwrap();
+        let auth = provider.initiate_auth(&config.base_url).unwrap();
 
         assert!(
             matches!(auth.action, AuthAction::Redirect { .. }),
@@ -450,11 +443,10 @@ mod tests {
     #[test]
     fn initiate_auth_oidc_handles_existing_query_params() {
         // Covers SO-1: endpoints with pre-existing query parameters
-        let provider = make_oidc_provider("https://example.com/auth?existing=param");
-        let idp = UpstreamIdp::Oidc(Box::new(provider));
+        let provider = make_configured_oidc_provider("https://example.com/auth?existing=param");
         let config = test_config();
 
-        let auth = idp.initiate_auth(&config).unwrap();
+        let auth = provider.initiate_auth(&config.base_url).unwrap();
 
         assert!(
             matches!(auth.action, AuthAction::Redirect { .. }),
@@ -475,12 +467,12 @@ mod tests {
 
     #[test]
     fn initiate_auth_generates_unique_state_and_nonce() {
-        let provider = make_oidc_provider("https://accounts.google.com/o/oauth2/v2/auth");
-        let idp = UpstreamIdp::Oidc(Box::new(provider));
+        let provider =
+            make_configured_oidc_provider("https://accounts.google.com/o/oauth2/v2/auth");
         let config = test_config();
 
-        let auth1 = idp.initiate_auth(&config).unwrap();
-        let auth2 = idp.initiate_auth(&config).unwrap();
+        let auth1 = provider.initiate_auth(&config.base_url).unwrap();
+        let auth2 = provider.initiate_auth(&config.base_url).unwrap();
 
         assert_ne!(
             auth1.state_key, auth2.state_key,
@@ -489,24 +481,33 @@ mod tests {
         assert_ne!(auth1.nonce, auth2.nonce, "Nonces should be unique");
     }
 
-    #[test]
-    fn initiate_auth_saml_post_binding_returns_post_form() {
-        let saml_provider = saml::SamlProvider {
+    fn make_saml_provider_with_endpoints(
+        sso_post_url: Option<&str>,
+        sso_redirect_url: Option<&str>,
+    ) -> saml::SamlProvider {
+        saml::SamlProvider {
+            id: "corp-saml".to_string(),
             idp_metadata: saml::IdpMetadata {
                 entity_id: "https://idp.example.com/saml".to_string(),
-                sso_post_url: Some("https://idp.example.com/sso".to_string()),
-                sso_redirect_url: None,
+                sso_post_url: sso_post_url.map(str::to_string),
+                sso_redirect_url: sso_redirect_url.map(str::to_string),
                 signing_certificates: vec![],
             },
             sp_entity_id: "https://vouch.example.com".to_string(),
             acs_url: "https://vouch.example.com/saml/acs".to_string(),
             email_attribute: None,
             domain_attribute: None,
-        };
-        let idp = UpstreamIdp::Saml(saml_provider);
+        }
+    }
+
+    #[test]
+    fn initiate_auth_saml_post_binding_returns_post_form() {
+        let saml_provider =
+            make_saml_provider_with_endpoints(Some("https://idp.example.com/sso"), None);
+        let idp = ConfiguredIdp::Saml(saml_provider);
         let config = test_config();
 
-        let result = idp.initiate_auth(&config).unwrap();
+        let result = idp.initiate_auth(&config.base_url).unwrap();
         assert!(
             matches!(result.action, AuthAction::PostForm { .. }),
             "SAML with POST binding should return PostForm action"
@@ -517,22 +518,12 @@ mod tests {
 
     #[test]
     fn initiate_auth_saml_redirect_binding_returns_redirect() {
-        let saml_provider = saml::SamlProvider {
-            idp_metadata: saml::IdpMetadata {
-                entity_id: "https://idp.example.com/saml".to_string(),
-                sso_post_url: None,
-                sso_redirect_url: Some("https://idp.example.com/sso/redirect".to_string()),
-                signing_certificates: vec![],
-            },
-            sp_entity_id: "https://vouch.example.com".to_string(),
-            acs_url: "https://vouch.example.com/saml/acs".to_string(),
-            email_attribute: None,
-            domain_attribute: None,
-        };
-        let idp = UpstreamIdp::Saml(saml_provider);
+        let saml_provider =
+            make_saml_provider_with_endpoints(None, Some("https://idp.example.com/sso/redirect"));
+        let idp = ConfiguredIdp::Saml(saml_provider);
         let config = test_config();
 
-        let result = idp.initiate_auth(&config).unwrap();
+        let result = idp.initiate_auth(&config.base_url).unwrap();
         assert!(
             matches!(result.action, AuthAction::Redirect { .. }),
             "Expected AuthAction::Redirect for SAML redirect binding"
@@ -559,11 +550,11 @@ mod tests {
         use base64::Engine;
         use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
-        let provider = make_oidc_provider("https://accounts.google.com/o/oauth2/v2/auth");
-        let idp = UpstreamIdp::Oidc(Box::new(provider));
+        let provider =
+            make_configured_oidc_provider("https://accounts.google.com/o/oauth2/v2/auth");
         let config = test_config();
 
-        let auth = idp.initiate_auth(&config).unwrap();
+        let auth = provider.initiate_auth(&config.base_url).unwrap();
 
         assert!(
             matches!(auth.action, AuthAction::Redirect { .. }),
@@ -597,22 +588,12 @@ mod tests {
 
     #[test]
     fn initiate_auth_saml_code_verifier_is_empty() {
-        let saml_provider = saml::SamlProvider {
-            idp_metadata: saml::IdpMetadata {
-                entity_id: "https://idp.example.com/saml".to_string(),
-                sso_post_url: Some("https://idp.example.com/sso".to_string()),
-                sso_redirect_url: None,
-                signing_certificates: vec![],
-            },
-            sp_entity_id: "https://vouch.example.com".to_string(),
-            acs_url: "https://vouch.example.com/saml/acs".to_string(),
-            email_attribute: None,
-            domain_attribute: None,
-        };
-        let idp = UpstreamIdp::Saml(saml_provider);
+        let saml_provider =
+            make_saml_provider_with_endpoints(Some("https://idp.example.com/sso"), None);
+        let idp = ConfiguredIdp::Saml(saml_provider);
         let config = test_config();
 
-        let auth = idp.initiate_auth(&config).unwrap();
+        let auth = idp.initiate_auth(&config.base_url).unwrap();
         assert!(
             auth.code_verifier.is_empty(),
             "SAML should have empty code_verifier"
@@ -625,22 +606,11 @@ mod tests {
 
     #[test]
     fn initiate_auth_saml_javascript_scheme_rejected() {
-        let saml_provider = saml::SamlProvider {
-            idp_metadata: saml::IdpMetadata {
-                entity_id: "https://idp.example.com/saml".to_string(),
-                sso_post_url: Some("javascript:alert(1)".to_string()),
-                sso_redirect_url: None,
-                signing_certificates: vec![],
-            },
-            sp_entity_id: "https://vouch.example.com".to_string(),
-            acs_url: "https://vouch.example.com/saml/acs".to_string(),
-            email_attribute: None,
-            domain_attribute: None,
-        };
-        let idp = UpstreamIdp::Saml(saml_provider);
+        let saml_provider = make_saml_provider_with_endpoints(Some("javascript:alert(1)"), None);
+        let idp = ConfiguredIdp::Saml(saml_provider);
         let config = test_config();
 
-        let err = idp.initiate_auth(&config).unwrap_err();
+        let err = idp.initiate_auth(&config.base_url).unwrap_err();
         assert!(
             err.to_string().contains("disallowed scheme"),
             "Expected disallowed scheme error, got: {err}"
@@ -649,22 +619,12 @@ mod tests {
 
     #[test]
     fn initiate_auth_saml_data_scheme_rejected() {
-        let saml_provider = saml::SamlProvider {
-            idp_metadata: saml::IdpMetadata {
-                entity_id: "https://idp.example.com/saml".to_string(),
-                sso_post_url: Some("data:text/html,<h1>hi</h1>".to_string()),
-                sso_redirect_url: None,
-                signing_certificates: vec![],
-            },
-            sp_entity_id: "https://vouch.example.com".to_string(),
-            acs_url: "https://vouch.example.com/saml/acs".to_string(),
-            email_attribute: None,
-            domain_attribute: None,
-        };
-        let idp = UpstreamIdp::Saml(saml_provider);
+        let saml_provider =
+            make_saml_provider_with_endpoints(Some("data:text/html,<h1>hi</h1>"), None);
+        let idp = ConfiguredIdp::Saml(saml_provider);
         let config = test_config();
 
-        let err = idp.initiate_auth(&config).unwrap_err();
+        let err = idp.initiate_auth(&config.base_url).unwrap_err();
         assert!(
             err.to_string().contains("disallowed scheme"),
             "Expected disallowed scheme error, got: {err}"
@@ -760,27 +720,14 @@ mod tests {
         sso_post_url: Option<&str>,
         sso_redirect_url: Option<&str>,
     ) -> saml::SamlProvider {
-        saml::SamlProvider {
-            idp_metadata: saml::IdpMetadata {
-                entity_id: "https://idp.example.com/saml".to_string(),
-                sso_post_url: sso_post_url.map(str::to_string),
-                sso_redirect_url: sso_redirect_url.map(str::to_string),
-                signing_certificates: vec![],
-            },
-            sp_entity_id: "https://vouch.example.com".to_string(),
-            acs_url: "https://vouch.example.com/saml/acs".to_string(),
-            email_attribute: None,
-            domain_attribute: None,
-        }
+        make_saml_provider_with_endpoints(sso_post_url, sso_redirect_url)
     }
 
     #[test]
     fn form_action_origins_oidc_single() {
         let provider = make_oidc_provider("https://accounts.google.com/o/oauth2/v2/auth");
-        let idp = UpstreamIdp::Oidc(Box::new(provider));
-        let origins = idp.form_action_origins();
-        assert_eq!(origins.len(), 1);
-        assert_eq!(origins[0].as_str(), "https://accounts.google.com");
+        let origin = provider.form_action_origin().unwrap();
+        assert_eq!(origin.as_str(), "https://accounts.google.com");
     }
 
     #[test]
@@ -788,17 +735,14 @@ mod tests {
         let provider = make_oidc_provider(
             "https://idp.example.com:8443/realms/x/protocol/openid-connect/auth",
         );
-        let idp = UpstreamIdp::Oidc(Box::new(provider));
-        let origins = idp.form_action_origins();
-        assert_eq!(origins.len(), 1);
-        assert_eq!(origins[0].as_str(), "https://idp.example.com:8443");
+        let origin = provider.form_action_origin().unwrap();
+        assert_eq!(origin.as_str(), "https://idp.example.com:8443");
     }
 
     #[test]
     fn form_action_origins_saml_post_only() {
         let provider = make_saml_provider(Some("https://idp.example.com/sso/post"), None);
-        let idp = UpstreamIdp::Saml(provider);
-        let origins = idp.form_action_origins();
+        let origins = provider.form_action_origins();
         assert_eq!(origins.len(), 1);
         assert_eq!(origins[0].as_str(), "https://idp.example.com");
     }
@@ -806,8 +750,7 @@ mod tests {
     #[test]
     fn form_action_origins_saml_redirect_only() {
         let provider = make_saml_provider(None, Some("https://idp.example.com/sso/redirect"));
-        let idp = UpstreamIdp::Saml(provider);
-        let origins = idp.form_action_origins();
+        let origins = provider.form_action_origins();
         assert_eq!(origins.len(), 1);
         assert_eq!(origins[0].as_str(), "https://idp.example.com");
     }
@@ -818,8 +761,7 @@ mod tests {
             Some("https://idp.example.com/sso/post"),
             Some("https://idp.example.com/sso/redirect"),
         );
-        let idp = UpstreamIdp::Saml(provider);
-        let origins = idp.form_action_origins();
+        let origins = provider.form_action_origins();
         assert_eq!(origins.len(), 1, "duplicate origins should be collapsed");
         assert_eq!(origins[0].as_str(), "https://idp.example.com");
     }
@@ -830,8 +772,7 @@ mod tests {
             Some("https://idp-a.example.com/sso/post"),
             Some("https://idp-b.example.com/sso/redirect"),
         );
-        let idp = UpstreamIdp::Saml(provider);
-        let origins = idp.form_action_origins();
+        let origins = provider.form_action_origins();
         let serialized: Vec<&str> = origins
             .iter()
             .map(crate::infra::csp::CspOrigin::as_str)

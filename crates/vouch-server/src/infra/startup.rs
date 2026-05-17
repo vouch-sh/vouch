@@ -16,7 +16,7 @@ use crate::{
     AppState, config,
     crypto::{ssh_ca, tpm_decrypt},
     db::{Pool, dsql::DsqlEndpoint, migrations::run_dsql_migrations, pool::redact_database_url},
-    infra::{cleanup, s3_config, s3_config::DocumentKeyMaterial},
+    infra::{cleanup, kms_arn::KmsArnResolver, s3_config, s3_config::DocumentKeyMaterial},
     services::{
         integrations::github::GitHubApp,
         oidc::{OidcRsaSigningKey, OidcSigningKey},
@@ -139,10 +139,11 @@ pub async fn initialize(args: config::Args) -> Result<ServerComponents> {
 
     log_authenticator_policy(&config);
 
-    if !config.oidc_configured() && !config.saml_configured() {
+    if !config.has_idps() {
         tracing::warn!(
             "No upstream IdP configured -- enrollment (vouch enroll) will not work. \
-             Set VOUCH_OIDC_* for OIDC or VOUCH_SAML_* for SAML."
+             Set VOUCH_IDPS=<slug>[,<slug>...] with per-provider VOUCH_IDP_<SLUG>_TYPE \
+             plus type-specific vars."
         );
     }
 
@@ -286,8 +287,8 @@ async fn load_s3_config(
             .await
             .context("Failed to fetch S3 configuration")?;
 
-    // Merge S3 config (S3 wins over env vars)
-    config.merge_s3_config(&s3_cfg, false); // Initial merge - all fields allowed
+    // Merge S3 config (S3 wins over env vars) — fail fast if oidc block present
+    config.merge_s3_config(&s3_cfg, false)?;
     tracing::info!("S3 configuration merged (etag: {etag})");
 
     Ok((
@@ -406,6 +407,11 @@ async fn build_app_state(
         kms_client
     };
 
+    // Build the KMS ARN resolver once. When `kms_account_id` is set, raw key
+    // IDs from config are wrapped into full cross-account ARNs using
+    // AWS_PARTITION/AWS_REGION from the environment.
+    let kms_arn_resolver = KmsArnResolver::from_env(config.kms_account_id.as_deref());
+
     // Initialize SSH CA if configured
     // Priority: KMS key ID > PEM content (VOUCH_SSH_CA_KEY) > file path (VOUCH_SSH_CA_KEY_PATH)
     let ssh_ca = if let Some(key_id) = &config.ssh_ca_kms_key_id {
@@ -413,7 +419,8 @@ async fn build_app_state(
             .as_ref()
             .context("KMS client required for SSH CA KMS signing")?
             .clone();
-        let ca = ssh_ca::SshCa::from_kms(client, key_id.clone(), &config.rp_id)
+        let key_arn = kms_arn_resolver.resolve(key_id);
+        let ca = ssh_ca::SshCa::from_kms(client, key_arn, &config.rp_id)
             .await
             .context("Failed to initialize KMS SSH CA")?;
         let pub_key = ca
@@ -452,7 +459,8 @@ async fn build_app_state(
             .as_ref()
             .context("KMS client required for OIDC KMS signing")?
             .clone();
-        let key = OidcSigningKey::from_kms(client, key_id.clone())
+        let key_arn = kms_arn_resolver.resolve(key_id);
+        let key = OidcSigningKey::from_kms(client, key_arn)
             .await
             .context("Failed to initialize KMS OIDC signing key")?;
         tracing::info!("OIDC signing key initialized (KMS): {}", key.key_id());
@@ -479,7 +487,8 @@ async fn build_app_state(
             .as_ref()
             .context("KMS client required for OIDC RSA KMS signing")?
             .clone();
-        let key = OidcRsaSigningKey::from_kms(client, key_id.clone())
+        let key_arn = kms_arn_resolver.resolve(key_id);
+        let key = OidcRsaSigningKey::from_kms(client, key_arn)
             .await
             .context("Failed to initialize KMS OIDC RSA signing key")?;
         tracing::info!("OIDC RSA signing key initialized (KMS): {}", key.key_id());
@@ -506,8 +515,9 @@ async fn build_app_state(
             .as_ref()
             .context("KMS client required for HMAC state token signing")?
             .clone();
-        tracing::info!("State token signer initialized (KMS HMAC): {key_id}");
-        crate::crypto::jwt::StateTokenSigner::from_kms(client, key_id.clone())
+        let key_arn = kms_arn_resolver.resolve(key_id);
+        tracing::info!("State token signer initialized (KMS HMAC): {key_arn}");
+        crate::crypto::jwt::StateTokenSigner::from_kms(client, key_arn)
     } else {
         crate::crypto::jwt::StateTokenSigner::local(config.jwt_secret_bytes().to_vec())
     };
@@ -526,84 +536,18 @@ async fn build_app_state(
     let http_client = vouch_common::http::server_client(&user_agent, extra_ca_pem.as_deref())
         .context("Failed to create shared HTTP client")?;
 
-    // Fetch upstream IdP configuration if configured (OIDC or SAML, mutually exclusive).
-    let upstream_idp = if config.oidc_configured() {
-        let issuer = config
-            .oidc_issuer_url
-            .as_deref()
-            .context("OIDC issuer URL missing")?;
-        let provider = crate::services::idp::oidc::fetch_discovery(&http_client, issuer)
-            .await
-            .context(
-                "Failed to fetch upstream OIDC discovery document. \
-                     Check that VOUCH_OIDC_ISSUER is reachable.",
-            )?;
-        let brand = crate::services::idp::IdpBrand::from_issuer(&provider.issuer);
-        let enrollment_domains = match &config.allowed_domains {
-            Some(domains) => domains.join(", "),
-            None => "(open enrollment)".to_string(),
-        };
-        tracing::info!(
-            "Upstream IdP: {} (OIDC), issuer={}, auth={}, token={}, jwks={}, enrollment_domains={}",
-            brand.display_name(),
-            provider.issuer,
-            provider.authorization_endpoint,
-            provider.token_endpoint,
-            provider.jwks_uri,
-            enrollment_domains,
-        );
-        Some(crate::services::idp::UpstreamIdp::Oidc(Box::new(provider)))
-    } else if config.saml_configured() {
-        let metadata_url = config
-            .saml_idp_metadata_url
-            .as_deref()
-            .context("SAML metadata URL missing")?;
-        let metadata_xml = http_client
-            .get(metadata_url)
-            .send()
-            .await
-            .context("Failed to fetch SAML IdP metadata")?
-            .error_for_status()
-            .context("SAML IdP metadata request returned error status")?
-            .text()
-            .await
-            .context("Failed to read SAML IdP metadata body")?;
-        let idp_metadata = crate::services::idp::saml::metadata::parse_idp_metadata(&metadata_xml)
-            .context("Failed to parse SAML IdP metadata")?;
-        let brand = crate::services::idp::IdpBrand::from_entity_id(&idp_metadata.entity_id);
-        let sp_entity_id = config
-            .saml_sp_entity_id
-            .clone()
-            .unwrap_or_else(|| config.base_url.clone());
-        let acs_url = format!("{}/saml/acs", config.base_url);
-        let sso_url = idp_metadata
-            .sso_post_url
-            .as_deref()
-            .or(idp_metadata.sso_redirect_url.as_deref())
-            .unwrap_or("(none)");
-        tracing::info!(
-            "Upstream IdP: {} (SAML), entity_id={}, sso_url={}, binding={}, certs={}",
-            brand.display_name(),
-            idp_metadata.entity_id,
-            sso_url,
-            if idp_metadata.sso_post_url.is_some() {
-                "HTTP-POST"
-            } else {
-                "HTTP-Redirect"
-            },
-            idp_metadata.signing_certificates.len(),
-        );
-        let provider = crate::services::idp::saml::SamlProvider {
-            idp_metadata,
-            sp_entity_id,
-            acs_url,
-            email_attribute: config.saml_email_attribute.clone(),
-            domain_attribute: config.saml_domain_attribute.clone(),
-        };
-        Some(crate::services::idp::UpstreamIdp::Saml(provider))
-    } else {
-        None
+    // Build unified IdP list (OIDC + SAML) from the configured `idps` Vec.
+    let enrollment_domains = match &config.allowed_domains {
+        Some(domains) => domains.join(", "),
+        None => "(open enrollment)".to_string(),
     };
+    let mut idps: Vec<crate::services::idp::ConfiguredIdp> = Vec::with_capacity(config.idps.len());
+    for idp_cfg in &config.idps {
+        let configured = build_configured_idp(idp_cfg, &http_client, config, &enrollment_domains)
+            .await
+            .with_context(|| format!("Failed to configure IdP '{}'", idp_cfg.id()))?;
+        idps.push(configured);
+    }
 
     // Initialize GitHub App if configured
     let github_app = match GitHubApp::load(config, http_client.clone()) {
@@ -674,10 +618,117 @@ async fn build_app_state(
             config.session_cache_max_capacity,
             config.session_cache_ttl_secs,
         ),
-        upstream_idp,
+        idps,
     });
 
     Ok(state)
+}
+
+/// Build a `ConfiguredIdp` from an `IdpConfig` entry by performing the
+/// type-specific discovery step (OIDC discovery, SAML metadata fetch).
+async fn build_configured_idp(
+    idp_cfg: &crate::config::IdpConfig,
+    http_client: &reqwest::Client,
+    config: &crate::config::ServerConfig,
+    enrollment_domains: &str,
+) -> Result<crate::services::idp::ConfiguredIdp> {
+    match idp_cfg {
+        crate::config::IdpConfig::Oidc(oidc_cfg) => {
+            let discovered =
+                crate::services::idp::oidc::fetch_discovery(http_client, &oidc_cfg.issuer_url)
+                    .await
+                    .with_context(|| {
+                        format!(
+                            "Failed to fetch OIDC discovery for IdP '{}' (issuer: {}). \
+                             Check that the issuer URL is reachable.",
+                            oidc_cfg.id, oidc_cfg.issuer_url
+                        )
+                    })?;
+            let brand = crate::services::idp::IdpBrand::from_issuer(&discovered.issuer);
+            tracing::info!(
+                "IdP '{}' (oidc): brand={}, issuer={}, auth={}, token={}, jwks={}, \
+                 enrollment_domains={}",
+                oidc_cfg.id,
+                brand.display_name(),
+                discovered.issuer,
+                discovered.authorization_endpoint,
+                discovered.token_endpoint,
+                discovered.jwks_uri,
+                enrollment_domains,
+            );
+            Ok(crate::services::idp::ConfiguredIdp::Oidc(
+                crate::services::idp::ConfiguredOidcProvider {
+                    id: oidc_cfg.id.clone(),
+                    client_id: oidc_cfg.client_id.clone(),
+                    client_secret: oidc_cfg.client_secret.clone(),
+                    provider: discovered,
+                },
+            ))
+        }
+        crate::config::IdpConfig::Saml(saml_cfg) => {
+            let metadata_xml = http_client
+                .get(&saml_cfg.metadata_url)
+                .send()
+                .await
+                .with_context(|| {
+                    format!("Failed to fetch SAML metadata for IdP '{}'", saml_cfg.id)
+                })?
+                .error_for_status()
+                .with_context(|| {
+                    format!(
+                        "SAML metadata fetch returned error for IdP '{}'",
+                        saml_cfg.id
+                    )
+                })?
+                .text()
+                .await
+                .with_context(|| {
+                    format!(
+                        "Failed to read SAML metadata body for IdP '{}'",
+                        saml_cfg.id
+                    )
+                })?;
+            let idp_metadata =
+                crate::services::idp::saml::metadata::parse_idp_metadata(&metadata_xml)
+                    .with_context(|| {
+                        format!("Failed to parse SAML metadata for IdP '{}'", saml_cfg.id)
+                    })?;
+            let brand = crate::services::idp::IdpBrand::from_entity_id(&idp_metadata.entity_id);
+            let sp_entity_id = saml_cfg
+                .sp_entity_id
+                .clone()
+                .unwrap_or_else(|| config.base_url.clone());
+            let acs_url = format!("{}/saml/acs", config.base_url);
+            let sso_url = idp_metadata
+                .sso_post_url
+                .as_deref()
+                .or(idp_metadata.sso_redirect_url.as_deref())
+                .unwrap_or("(none)");
+            tracing::info!(
+                "IdP '{}' (saml): brand={}, entity_id={}, sso_url={}, binding={}, certs={}",
+                saml_cfg.id,
+                brand.display_name(),
+                idp_metadata.entity_id,
+                sso_url,
+                if idp_metadata.sso_post_url.is_some() {
+                    "HTTP-POST"
+                } else {
+                    "HTTP-Redirect"
+                },
+                idp_metadata.signing_certificates.len(),
+            );
+            Ok(crate::services::idp::ConfiguredIdp::Saml(
+                crate::services::idp::saml::SamlProvider {
+                    id: saml_cfg.id.clone(),
+                    idp_metadata,
+                    sp_entity_id,
+                    acs_url,
+                    email_attribute: saml_cfg.email_attribute.clone(),
+                    domain_attribute: saml_cfg.domain_attribute.clone(),
+                },
+            ))
+        }
+    }
 }
 
 /// Log authenticator policy settings at startup.

@@ -28,15 +28,35 @@ Common issuer URL patterns:
 
 ## Configuration
 
-Set the following environment variables:
+Pick a slug for the IdP (e.g., `okta`, `keycloak`, `auth0-corp`) and add it to `VOUCH_IDPS`. Slug rules: `[a-z0-9-]{1,32}`, no leading or trailing hyphen, unique across IdPs.
 
 ```bash
-VOUCH_OIDC_ISSUER=https://your-idp.example.com
-VOUCH_OIDC_CLIENT_ID=<your-client-id>
-VOUCH_OIDC_CLIENT_SECRET=<your-client-secret>
+VOUCH_IDPS=okta
+VOUCH_IDP_OKTA_TYPE=oidc
+VOUCH_IDP_OKTA_ISSUER=https://your-idp.example.com
+VOUCH_IDP_OKTA_CLIENT_ID=<your-client-id>
+VOUCH_IDP_OKTA_CLIENT_SECRET=<your-client-secret>
 ```
 
+Hyphens in the slug become underscores in env-var names: a slug of `auth0-corp` becomes `VOUCH_IDP_AUTH0_CORP_*`.
+
 At startup, the server fetches the discovery document from `{issuer}/.well-known/openid-configuration` and automatically discovers the authorization, token, and JWKS endpoints. No manual endpoint configuration is needed.
+
+### S3 configuration
+
+```json
+{
+  "idps": [
+    {
+      "id": "okta",
+      "type": "oidc",
+      "issuer": "https://your-idp.example.com",
+      "client_id": "<your-client-id>",
+      "client_secret": "<your-client-secret>"
+    }
+  ]
+}
+```
 
 ## Domain Restrictions
 
@@ -68,7 +88,7 @@ The following providers have been tested with Vouch:
 - Confirm the discovery endpoint returns valid JSON
 
 **"Issuer mismatch"**
-- The `issuer` field in the discovery document must exactly match the configured `VOUCH_OIDC_ISSUER` value (trailing slashes matter)
+- The `issuer` field in the discovery document must exactly match the configured `VOUCH_IDP_<SLUG>_ISSUER` value (trailing slashes matter). Entra `/organizations/v2.0` and `/common/v2.0` are special-cased automatically.
 
 **Token errors after authentication**
 - Ensure the client secret is correct and not expired

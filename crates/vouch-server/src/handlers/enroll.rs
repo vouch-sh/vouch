@@ -246,7 +246,18 @@ pub async fn device_verify_submit(
     }
 
     // No upstream IdP → go directly to WebAuthn; otherwise → initiate auth
-    let Some(upstream) = state.upstream_idp.as_ref() else {
+    // with the first configured IdP (any kind). Order in VOUCH_IDPS / idps[]
+    // controls which provider is used here.
+    let base_url = state.config().base_url.clone();
+    let auth_request_result: Option<(
+        Result<crate::services::idp::AuthRequest, anyhow::Error>,
+        String,
+    )> = state.idps.first().map(|idp| {
+        let provider_id = idp.id().to_string();
+        (idp.initiate_auth(&base_url), provider_id)
+    });
+
+    let Some((auth_request_result, auth_provider_id)) = auth_request_result else {
         // No IdP configured - go directly to WebAuthn registration
         let random_bytes = match generate_random_bytes(32) {
             Ok(bytes) => bytes,
@@ -270,6 +281,7 @@ pub async fn device_verify_submit(
             "", // No nonce for non-IdP flow
             "", // No PKCE for non-IdP flow
             state_expires,
+            "", // No provider_id for non-IdP flow
         )
         .await
         {
@@ -290,7 +302,7 @@ pub async fn device_verify_submit(
         .into_response();
     };
 
-    let auth_request = match upstream.initiate_auth(state.config().as_ref()) {
+    let auth_request = match auth_request_result {
         Ok(r) => r,
         Err(e) => {
             tracing::error!("Failed to initiate auth: {e:#}");
@@ -312,6 +324,7 @@ pub async fn device_verify_submit(
         &auth_request.nonce,
         &auth_request.code_verifier,
         state_expires,
+        &auth_provider_id,
     )
     .await
     {
@@ -428,9 +441,23 @@ pub async fn oidc_callback(
     }
 
     // Exchange code for tokens using discovered OIDC token endpoint.
-    // This handler is OIDC-specific: SAML responses go to POST /saml/acs (Phase 2).
-    let Some(crate::services::idp::UpstreamIdp::Oidc(oidc_provider)) = state.upstream_idp.as_ref()
-    else {
+    // This handler is OIDC-specific: SAML responses go to POST /saml/acs.
+    //
+    // Look up the IdP by the slug stored in the OIDC state doc. Fall back to the
+    // first configured OIDC IdP for state docs written before multi-IdP support
+    // (rolling deploy compatibility).
+    let oidc_provider = if stored_state.provider_id.is_empty() {
+        state.idps.iter().find_map(|i| match i {
+            crate::services::idp::ConfiguredIdp::Oidc(p) => Some(p),
+            crate::services::idp::ConfiguredIdp::Saml(_) => None,
+        })
+    } else {
+        state.idp(&stored_state.provider_id).and_then(|i| match i {
+            crate::services::idp::ConfiguredIdp::Oidc(p) => Some(p),
+            crate::services::idp::ConfiguredIdp::Saml(_) => None,
+        })
+    };
+    let Some(oidc_provider) = oidc_provider else {
         return ErrorTemplate {
             title: "Error".to_string(),
             message: "OIDC not configured. If using SAML, responses should be \
@@ -441,11 +468,11 @@ pub async fn oidc_callback(
         .into_response();
     };
     let config = state.config();
-    let client_id = config.oidc_client_id.as_ref().map_or("", String::as_str);
-    let client_secret = config.oidc_client_secret_exposed().unwrap_or("");
+    let client_id = oidc_provider.client_id.as_str();
+    let client_secret = oidc_provider.client_secret.expose_secret();
     let redirect_uri = format!("{}/oauth/callback", config.base_url);
 
-    let token_url = oidc_provider.token_endpoint.as_str();
+    let token_url = oidc_provider.provider.token_endpoint.as_str();
 
     // RFC 7636: Include code_verifier in token exchange (PKCE).
     // Build form params dynamically to only include code_verifier when present.
@@ -507,7 +534,7 @@ pub async fn oidc_callback(
     // and extract domain (OIDC Core Section 3.1.3.7).
     let identity = match crate::services::idp::oidc::verify_id_token(
         &state.http_client,
-        oidc_provider,
+        &oidc_provider.provider,
         &tokens.id_token,
         client_id,
         &stored_state.nonce,
@@ -1316,23 +1343,23 @@ pub async fn browser_register_complete(
 /// The full user_code will be `DIRECT-{random}` to ensure uniqueness.
 const DIRECT_ENROLL_PREFIX: &str = "DIRECT-";
 
+/// Query parameters for direct enrollment start.
+#[derive(Deserialize)]
+pub struct DirectEnrollQuery {
+    /// Optional OIDC provider slug (e.g. "google"). If absent, uses first provider.
+    pub provider: Option<String>,
+}
+
 /// Start direct browser enrollment (no CLI required).
-/// GET /enroll/start
+/// GET /enroll/start[?provider=<slug>]
 ///
 /// This initiates OIDC authentication directly from the browser,
 /// without requiring the CLI to create a device authorization request.
 /// After successful enrollment, the user can download the CLI and login.
-pub async fn direct_enroll_start(State(state): State<Arc<AppState>>) -> Response {
-    let Some(upstream) = state.upstream_idp.as_ref() else {
-        return ErrorTemplate {
-            title: "Not Configured".to_string(),
-            message: "Identity provider is not configured. Please contact your administrator."
-                .to_string(),
-            back_url: Some("/".to_string()),
-        }
-        .into_response();
-    };
-
+pub async fn direct_enroll_start(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<DirectEnrollQuery>,
+) -> Response {
     let now = Timestamp::now();
 
     // Create a "virtual" device auth request for direct enrollment
@@ -1382,11 +1409,45 @@ pub async fn direct_enroll_start(State(state): State<Arc<AppState>>) -> Response
         }
     };
 
-    // Initiate upstream IdP authentication (upstream is guaranteed Some from guard above)
-    let auth_request = match upstream.initiate_auth(state.config().as_ref()) {
+    // Initiate upstream IdP authentication.
+    // If a provider slug was specified, require it to exist — do not fall through.
+    let base_url = state.config().base_url.clone();
+    let chosen_idp: Option<&crate::services::idp::ConfiguredIdp> =
+        if let Some(ref slug) = query.provider {
+            match state.idp(slug.as_str()) {
+                Some(i) => Some(i),
+                None => {
+                    return ErrorTemplate {
+                        title: "Unknown Provider".to_string(),
+                        message: format!("Identity provider '{slug}' is not configured."),
+                        back_url: Some("/".to_string()),
+                    }
+                    .into_response();
+                }
+            }
+        } else {
+            state.idps.first()
+        };
+
+    let Some(idp) = chosen_idp else {
+        return ErrorTemplate {
+            title: "Not Configured".to_string(),
+            message: "Identity provider is not configured. Please contact your administrator."
+                .to_string(),
+            back_url: Some("/".to_string()),
+        }
+        .into_response();
+    };
+
+    let provider_id = idp.id().to_string();
+    let auth_request = match idp.initiate_auth(&base_url) {
         Ok(r) => r,
         Err(e) => {
-            tracing::error!("Failed to initiate auth for direct enrollment: {e:#}");
+            tracing::error!(
+                "Failed to initiate {} auth for IdP '{}' (direct enrollment): {e:#}",
+                idp.kind().as_str(),
+                provider_id
+            );
             return ErrorTemplate {
                 title: "Error".to_string(),
                 message: "Failed to start enrollment. Please try again.".to_string(),
@@ -1395,6 +1456,7 @@ pub async fn direct_enroll_start(State(state): State<Arc<AppState>>) -> Response
             .into_response();
         }
     };
+    let (auth_request, provider_id) = (auth_request, provider_id);
 
     let state_expires = now.checked_add(Span::new().minutes(10)).unwrap_or(now);
 
@@ -1405,6 +1467,7 @@ pub async fn direct_enroll_start(State(state): State<Arc<AppState>>) -> Response
         &auth_request.nonce,
         &auth_request.code_verifier,
         state_expires,
+        &provider_id,
     )
     .await
     {

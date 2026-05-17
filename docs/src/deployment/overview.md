@@ -71,9 +71,11 @@ For production, you'll also want:
 VOUCH_TLS_CERT=<base64-encoded-pem>  # TLS certificate
 VOUCH_TLS_KEY=<base64-encoded-pem>   # TLS private key
 VOUCH_SSH_CA_KEY=<base64-encoded-pem> # SSH CA key (or VOUCH_SSH_CA_KMS_KEY_ID)
-VOUCH_OIDC_ISSUER=https://accounts.google.com  # External IdP
-VOUCH_OIDC_CLIENT_ID=...
-VOUCH_OIDC_CLIENT_SECRET=...
+VOUCH_IDPS=google                                    # External IdP(s)
+VOUCH_IDP_GOOGLE_TYPE=oidc
+VOUCH_IDP_GOOGLE_ISSUER=https://accounts.google.com
+VOUCH_IDP_GOOGLE_CLIENT_ID=...
+VOUCH_IDP_GOOGLE_CLIENT_SECRET=...
 ```
 
 For AWS deployments, you can use KMS for all signing operations instead of managing local keys. See the [Configuration Reference](configuration.md) for KMS options.

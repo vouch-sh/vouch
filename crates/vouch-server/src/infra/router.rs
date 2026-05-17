@@ -162,7 +162,7 @@ pub fn build_app(state: Arc<AppState>, config: &config::ServerConfig) -> anyhow:
             .merge(metrics_route)
             .merge(certification_route),
         config,
-        state.upstream_idp.as_ref(),
+        &state.idps,
     )?
     .layer(axum::middleware::from_fn(metrics_middleware))
     // Global request timeout: 30 seconds.

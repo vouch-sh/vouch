@@ -63,9 +63,11 @@ env:
 # Secret environment variables
 # Reference an existing secret containing keys like:
 # - VOUCH_JWT_SECRET
-# - VOUCH_OIDC_ISSUER
-# - VOUCH_OIDC_CLIENT_ID
-# - VOUCH_OIDC_CLIENT_SECRET
+# - VOUCH_IDPS                          (e.g., "google")
+# - VOUCH_IDP_GOOGLE_TYPE               (oidc|saml)
+# - VOUCH_IDP_GOOGLE_ISSUER
+# - VOUCH_IDP_GOOGLE_CLIENT_ID
+# - VOUCH_IDP_GOOGLE_CLIENT_SECRET
 existingSecret: ""
 
 # Or create a new secret (not recommended for production)
@@ -123,9 +125,11 @@ Create secrets for sensitive values:
 kubectl create secret generic vouch-secrets \
   --namespace vouch \
   --from-literal=VOUCH_JWT_SECRET='<your-64-character-secret>' \
-  --from-literal=VOUCH_OIDC_ISSUER='https://accounts.google.com' \
-  --from-literal=VOUCH_OIDC_CLIENT_ID='...' \
-  --from-literal=VOUCH_OIDC_CLIENT_SECRET='...'
+  --from-literal=VOUCH_IDPS='google' \
+  --from-literal=VOUCH_IDP_GOOGLE_TYPE='oidc' \
+  --from-literal=VOUCH_IDP_GOOGLE_ISSUER='https://accounts.google.com' \
+  --from-literal=VOUCH_IDP_GOOGLE_CLIENT_ID='...' \
+  --from-literal=VOUCH_IDP_GOOGLE_CLIENT_SECRET='...'
 ```
 
 Then reference in values:

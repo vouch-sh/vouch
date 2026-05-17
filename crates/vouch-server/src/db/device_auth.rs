@@ -57,6 +57,8 @@ pub struct OidcState {
     /// PKCE code_verifier (RFC 7636).
     pub code_verifier: String,
     pub expires_at: Timestamp,
+    /// Slug of the OIDC provider that initiated this flow (empty for SAML).
+    pub provider_id: String,
 }
 
 impl From<Document<OidcStateDoc>> for OidcState {
@@ -68,6 +70,7 @@ impl From<Document<OidcStateDoc>> for OidcState {
             nonce: doc.data.nonce,
             code_verifier: doc.data.code_verifier,
             expires_at: doc.data.expires_at,
+            provider_id: doc.data.provider_id,
         }
     }
 }
@@ -305,6 +308,7 @@ pub async fn create_oidc_state(
     nonce: &str,
     code_verifier: &str,
     expires_at: Timestamp,
+    provider_id: &str,
 ) -> Result<String> {
     let doc = OidcStateDoc {
         state: state.to_string(),
@@ -312,6 +316,7 @@ pub async fn create_oidc_state(
         nonce: nonce.to_string(),
         code_verifier: code_verifier.to_string(),
         expires_at,
+        provider_id: provider_id.to_string(),
     };
     let result = store.insert(&doc).await?;
     Ok(result.id)

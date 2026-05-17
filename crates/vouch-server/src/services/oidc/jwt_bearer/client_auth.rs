@@ -309,13 +309,7 @@ mod tests {
             rp_name: "Test".to_string(),
             jwt_secret: SecretString::from("test_jwt_secret_must_be_at_least_32_characters_long"),
             session_hours: 8,
-            oidc_issuer_url: None,
-            oidc_client_id: None,
-            oidc_client_secret: None,
-            saml_idp_metadata_url: None,
-            saml_sp_entity_id: None,
-            saml_email_attribute: None,
-            saml_domain_attribute: None,
+            idps: Vec::new(),
             base_url: "https://test.example.com".to_string(),
             device_code_expires_seconds: 600,
             device_poll_interval_seconds: 5,
@@ -336,6 +330,7 @@ mod tests {
             oidc_rsa_signing_key: None,
             oidc_rsa_signing_kms_key_id: None,
             jwt_hmac_kms_key_id: None,
+            kms_account_id: None,
             mtls_port: 8443,
             dpop_max_age_seconds: 300,
             cleanup_interval_minutes: 0,
@@ -390,7 +385,7 @@ mod tests {
             github_app: None,
             http_client: reqwest::Client::new(),
             session_cache: db::SessionCache::new(10_000, 30),
-            upstream_idp: None,
+            idps: Vec::new(),
         })
     }
 

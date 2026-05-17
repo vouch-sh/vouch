@@ -32,13 +32,17 @@ Configure Google Workspace as your external identity provider for Vouch enrollme
 
 ## Step 3: Configure Vouch
 
-Set the following environment variables on your Vouch server:
+Add Google to the `VOUCH_IDPS` list with type `oidc`:
 
 ```bash
-VOUCH_OIDC_ISSUER=https://accounts.google.com
-VOUCH_OIDC_CLIENT_ID=<your-client-id>.apps.googleusercontent.com
-VOUCH_OIDC_CLIENT_SECRET=<your-client-secret>
+VOUCH_IDPS=google
+VOUCH_IDP_GOOGLE_TYPE=oidc
+VOUCH_IDP_GOOGLE_ISSUER=https://accounts.google.com
+VOUCH_IDP_GOOGLE_CLIENT_ID=<your-client-id>.apps.googleusercontent.com
+VOUCH_IDP_GOOGLE_CLIENT_SECRET=<your-client-secret>
 ```
+
+To run Google alongside another IdP (e.g., Microsoft Entra), append both slugs to `VOUCH_IDPS` — both buttons appear on the login page in list order.
 
 The server automatically discovers Google's authorization, token, and JWKS endpoints via [OIDC Discovery](https://openid.net/specs/openid-connect-discovery-1_0.html). No manual endpoint configuration is needed.
 
@@ -46,6 +50,22 @@ Optionally restrict enrollment to specific domains:
 
 ```bash
 VOUCH_ALLOWED_DOMAINS=example.com,subsidiary.com
+```
+
+### S3 configuration
+
+```json
+{
+  "idps": [
+    {
+      "id": "google",
+      "type": "oidc",
+      "issuer": "https://accounts.google.com",
+      "client_id": "<your-client-id>.apps.googleusercontent.com",
+      "client_secret": "<your-client-secret>"
+    }
+  ]
+}
 ```
 
 ## Step 4: Test
