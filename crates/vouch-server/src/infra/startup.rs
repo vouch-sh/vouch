@@ -16,7 +16,7 @@ use crate::{
     AppState, config,
     crypto::{ssh_ca, tpm_decrypt},
     db::{Pool, dsql::DsqlEndpoint, migrations::run_dsql_migrations, pool::redact_database_url},
-    infra::{cleanup, s3_config, s3_config::DocumentKeyMaterial},
+    infra::{cleanup, kms_arn::KmsArnResolver, s3_config, s3_config::DocumentKeyMaterial},
     services::{
         integrations::github::GitHubApp,
         oidc::{OidcRsaSigningKey, OidcSigningKey},
@@ -407,6 +407,11 @@ async fn build_app_state(
         kms_client
     };
 
+    // Build the KMS ARN resolver once. When `kms_account_id` is set, raw key
+    // IDs from config are wrapped into full cross-account ARNs using
+    // AWS_PARTITION/AWS_REGION from the environment.
+    let kms_arn_resolver = KmsArnResolver::from_env(config.kms_account_id.as_deref());
+
     // Initialize SSH CA if configured
     // Priority: KMS key ID > PEM content (VOUCH_SSH_CA_KEY) > file path (VOUCH_SSH_CA_KEY_PATH)
     let ssh_ca = if let Some(key_id) = &config.ssh_ca_kms_key_id {
@@ -414,7 +419,8 @@ async fn build_app_state(
             .as_ref()
             .context("KMS client required for SSH CA KMS signing")?
             .clone();
-        let ca = ssh_ca::SshCa::from_kms(client, key_id.clone(), &config.rp_id)
+        let key_arn = kms_arn_resolver.resolve(key_id);
+        let ca = ssh_ca::SshCa::from_kms(client, key_arn, &config.rp_id)
             .await
             .context("Failed to initialize KMS SSH CA")?;
         let pub_key = ca
@@ -453,7 +459,8 @@ async fn build_app_state(
             .as_ref()
             .context("KMS client required for OIDC KMS signing")?
             .clone();
-        let key = OidcSigningKey::from_kms(client, key_id.clone())
+        let key_arn = kms_arn_resolver.resolve(key_id);
+        let key = OidcSigningKey::from_kms(client, key_arn)
             .await
             .context("Failed to initialize KMS OIDC signing key")?;
         tracing::info!("OIDC signing key initialized (KMS): {}", key.key_id());
@@ -480,7 +487,8 @@ async fn build_app_state(
             .as_ref()
             .context("KMS client required for OIDC RSA KMS signing")?
             .clone();
-        let key = OidcRsaSigningKey::from_kms(client, key_id.clone())
+        let key_arn = kms_arn_resolver.resolve(key_id);
+        let key = OidcRsaSigningKey::from_kms(client, key_arn)
             .await
             .context("Failed to initialize KMS OIDC RSA signing key")?;
         tracing::info!("OIDC RSA signing key initialized (KMS): {}", key.key_id());
@@ -507,8 +515,9 @@ async fn build_app_state(
             .as_ref()
             .context("KMS client required for HMAC state token signing")?
             .clone();
-        tracing::info!("State token signer initialized (KMS HMAC): {key_id}");
-        crate::crypto::jwt::StateTokenSigner::from_kms(client, key_id.clone())
+        let key_arn = kms_arn_resolver.resolve(key_id);
+        tracing::info!("State token signer initialized (KMS HMAC): {key_arn}");
+        crate::crypto::jwt::StateTokenSigner::from_kms(client, key_arn)
     } else {
         crate::crypto::jwt::StateTokenSigner::local(config.jwt_secret_bytes().to_vec())
     };

@@ -581,6 +581,10 @@ pub struct ServerConfig {
     /// AWS KMS key ID for HMAC state token signing.
     /// When set, KMS HMAC-SHA256 is used instead of local `jwt_secret`.
     pub jwt_hmac_kms_key_id: Option<String>,
+    /// AWS account ID that owns the KMS keys configured above (for
+    /// cross-account access). When set, bare key IDs are wrapped into full
+    /// ARNs using `AWS_PARTITION` and `AWS_REGION` from the environment.
+    pub kms_account_id: Option<String>,
     /// mTLS listener port (default: 8443).
     pub mtls_port: u16,
     /// Maximum age of DPoP proofs in seconds (default: 300).
@@ -745,6 +749,7 @@ impl ServerConfig {
             oidc_rsa_signing_key: args.oidc_rsa_signing_key.map(SecretString::from),
             oidc_rsa_signing_kms_key_id: args.oidc_rsa_signing_kms_key_id,
             jwt_hmac_kms_key_id: args.jwt_hmac_kms_key_id,
+            kms_account_id: None,
             mtls_port: args.mtls_port,
             dpop_max_age_seconds: args.dpop_max_age,
             cleanup_interval_minutes: args.cleanup_interval,

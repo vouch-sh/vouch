@@ -34,6 +34,7 @@ use rustls::crypto::hpke::{HpkePrivateKey, HpkePublicKey};
 
 use crate::config::{IdpConfig, OidcProviderConfig, SamlProviderConfig, ServerConfig};
 use crate::crypto::tpm_decrypt;
+use crate::infra::kms_arn::KmsArnResolver;
 
 /// S3 configuration source settings.
 #[derive(Debug, Clone)]
@@ -356,6 +357,14 @@ pub struct S3Config {
     /// AWS KMS key ID for HMAC state token signing.
     pub jwt_hmac_kms_key_id: Option<String>,
 
+    /// AWS account ID that owns the KMS keys configured above.
+    ///
+    /// When set, the server constructs full KMS ARNs at startup using
+    /// `AWS_PARTITION`, `AWS_REGION`, and this account ID so it can address
+    /// keys in a different account. Bare values that are already ARNs
+    /// (`arn:...`) are passed through unchanged.
+    pub kms_account_id: Option<String>,
+
     /// mTLS listener port.
     pub mtls_port: Option<u16>,
 
@@ -421,6 +430,7 @@ impl std::fmt::Debug for S3Config {
                 &self.oidc_rsa_signing_kms_key_id,
             )
             .field("jwt_hmac_kms_key_id", &self.jwt_hmac_kms_key_id)
+            .field("kms_account_id", &self.kms_account_id)
             .field("mtls_port", &self.mtls_port)
             .field("cleanup_interval_minutes", &self.cleanup_interval_minutes)
             .field(
@@ -477,9 +487,13 @@ async fn fetch_s3_raw(client: &S3Client, source: &S3ConfigSource) -> Result<(Vec
 ///
 /// Calls `kms:Decrypt` (uses NitroTPM attestation when available) to decrypt
 /// the private key ciphertext, then derives the HPKE key pair from the DER.
+///
+/// `key_arn` is the already-resolved KMS key identifier (full ARN when
+/// `kms_account_id` is configured, otherwise the raw value from S3 config).
 async fn decrypt_document_key(
     kms_client: &KmsClient,
     doc_key: &S3DocumentKeyConfig,
+    key_arn: &str,
     use_attestation: bool,
 ) -> Result<DocumentKeyMaterial> {
     use base64::Engine;
@@ -489,14 +503,10 @@ async fn decrypt_document_key(
         .decode(&doc_key.encrypted_private_key)
         .context("Failed to base64-decode document_key.encrypted_private_key")?;
 
-    let plaintext = tpm_decrypt::kms_decrypt(
-        kms_client,
-        &doc_key.kms_key_id,
-        &encrypted_bytes,
-        use_attestation,
-    )
-    .await
-    .context("KMS Decrypt for document_key failed")?;
+    let plaintext =
+        tpm_decrypt::kms_decrypt(kms_client, key_arn, &encrypted_bytes, use_attestation)
+            .await
+            .context("KMS Decrypt for document_key failed")?;
 
     let (public_key, private_key) =
         crate::crypto::document_crypto::p384_hpke_keys_from_private_key_der(&plaintext)
@@ -539,7 +549,9 @@ pub async fn fetch_s3_config(
         let kms = kms_client.ok_or_else(|| {
             anyhow::anyhow!("S3 config has document_key but no KMS client is available")
         })?;
-        Some(decrypt_document_key(kms, doc_key_config, use_attestation).await?)
+        let resolver = KmsArnResolver::from_env(config.kms_account_id.as_deref());
+        let key_arn = resolver.resolve(&doc_key_config.kms_key_id);
+        Some(decrypt_document_key(kms, doc_key_config, &key_arn, use_attestation).await?)
     } else {
         None
     };
@@ -878,6 +890,11 @@ impl ServerConfig {
         // JWT HMAC KMS key ID
         if let Some(v) = &s3.jwt_hmac_kms_key_id {
             self.jwt_hmac_kms_key_id = Some(v.clone());
+        }
+
+        // KMS account ID (for cross-account ARN construction)
+        if let Some(v) = &s3.kms_account_id {
+            self.kms_account_id = Some(v.clone());
         }
 
         // mTLS port
