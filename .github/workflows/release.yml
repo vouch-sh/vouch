@@ -1088,6 +1088,10 @@ jobs:
     name: Publish to winget
     runs-on: ubuntu-latest
     needs: publish-release
+    # Don't fail the Release workflow if winget submission fails — downstream
+    # workflows (e.g. Build AMI) are gated on Release succeeding and have no
+    # dependency on winget output.
+    continue-on-error: true
     permissions:
       contents: read
     env:
@@ -1146,7 +1150,12 @@ jobs:
         # and the field is not required by winget — once present in any
         # version it becomes sticky for all future versions. Keep manifests
         # ReleaseNotesUrl-only to avoid that ratchet.
-        run: yq -i 'del(.ReleaseNotes)' ./winget-manifests/*.locale.*.yaml
+        # komac --output writes to the nested winget-pkgs layout
+        # (./winget-manifests/manifests/s/SmokeTurner/Vouch/<version>/),
+        # so recurse via find.
+        run: |
+          find ./winget-manifests -name '*.locale.*.yaml' -print0 \
+            | xargs -0 -r yq -i 'del(.ReleaseNotes)'
 
       - name: Normalize manifest line endings to CRLF
         # Workaround for komac v2.16.0 bug: --release-notes-url value is
