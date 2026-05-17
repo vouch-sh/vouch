@@ -3,9 +3,9 @@
 //!
 //! When KMS keys live in a different AWS account than the server, the AWS SDK
 //! must be given the full ARN rather than a bare key ID. This module reads
-//! `AWS_PARTITION`, `AWS_REGION`/`AWS_DEFAULT_REGION`, and `AWS_ACCOUNT_ID`
-//! from the environment, combines them with a configured `kms_account_id`,
-//! and wraps raw key IDs into full ARNs.
+//! `AWS_PARTITION` and `AWS_REGION`/`AWS_DEFAULT_REGION` from the environment,
+//! combines them with the `kms_account_id` field from config, and wraps raw
+//! key IDs into full ARNs.
 //!
 //! Pass-through cases (return the raw value unchanged):
 //! - The configured value already starts with `arn:`.
@@ -162,5 +162,26 @@ mod tests {
     fn pass_through_when_partition_missing() {
         let r = resolver(Some("111122223333"), None, Some("us-east-1"));
         assert_eq!(r.resolve("mrk-abc"), "mrk-abc");
+    }
+
+    #[test]
+    fn empty_input_wraps_into_malformed_arn() {
+        // Empty string falls through to the `key/` branch. KMS will reject
+        // the resulting ARN, so the failure is loud — but the behavior is
+        // pinned here so a future refactor doesn't silently change it.
+        let r = resolver(Some("111122223333"), Some("aws"), Some("us-east-1"));
+        assert_eq!(r.resolve(""), "arn:aws:kms:us-east-1:111122223333:key/");
+    }
+
+    #[test]
+    fn bare_alias_prefix_wraps_into_malformed_arn() {
+        // `alias/` with no name falls through the `alias/` branch and
+        // produces an ARN with an empty alias name. KMS will reject it,
+        // but document the behavior.
+        let r = resolver(Some("111122223333"), Some("aws"), Some("us-east-1"));
+        assert_eq!(
+            r.resolve("alias/"),
+            "arn:aws:kms:us-east-1:111122223333:alias/",
+        );
     }
 }
