@@ -336,6 +336,7 @@ mod tests {
             oidc_rsa_signing_key: None,
             oidc_rsa_signing_kms_key_id: None,
             jwt_hmac_kms_key_id: None,
+            kms_account_id: None,
             mtls_port: 8443,
             dpop_max_age_seconds: 300,
             cleanup_interval_minutes: 0,
