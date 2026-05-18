@@ -38,7 +38,13 @@ Two route groups sharing `AppState`:
 - **API routes** (`/v1/`, `/oauth/`, `/scim/`, `/api/v1/`) - JSON responses, JWT Bearer auth
 - **UI routes** (`/`, `/login`, `/enroll/*`, `/docs/*`, `/applications/*`) - HTML via Askama templates, cookie-based sessions
 
-**Database:** SQLite (dev), PostgreSQL (prod), Aurora DSQL. Pool enum dispatches at runtime. Query building uses `sea-query`. Migrations in `crates/vouch-server/migrations/{sqlite,postgres}/`.
+**Database:** SQLite for local development, in-memory SQLite for tests, Aurora DSQL in production. The `Pool` enum dispatches at runtime based on `DATABASE_URL` scheme. Query building uses `sea-query`. Migrations in `crates/vouch-server/migrations/{sqlite,postgres}/`.
+
+The data model is document-oriented by design:
+- Minimizes schema migrations (important for a multi-tenant production service)
+- Supports client-side encryption via HPKE (Hybrid Public Key Encryption) -- encrypted document payloads stored as opaque blobs
+- Maintains indexes on non-encrypted fields for query performance
+- Supports document expiration (TTL) for automatic cleanup of short-lived records (sessions, nonces, etc.)
 
 **Services layer** (`crates/vouch-server/src/services/`): Business logic -- `oidc/`, `integrations/`, `auth.rs`.
 
