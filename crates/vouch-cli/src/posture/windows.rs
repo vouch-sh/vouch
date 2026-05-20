@@ -271,16 +271,30 @@ fn auto_update_from_service_start_type(start_type: Option<&str>) -> Option<bool>
     }
 }
 
-/// Detect system uptime via WMI `LastBootUpTime`.
+/// Detect system uptime.
+///
+/// With fast startup (hybrid hibernation) enabled — the default on Win10/11 —
+/// `Win32_OperatingSystem.LastBootUpTime` only updates on cold boots, not on
+/// resumes from a fast-startup shutdown. That produces multi-hundred-day
+/// uptime readings for users who power-cycle daily (see issue #327).
+///
+/// Prefer the most recent System event log entry 6005 ("Event Log service
+/// started"), which fires on every Windows start including fast-startup
+/// resumes. Fall back to `LastBootUpTime` if the event isn't readable.
 fn detect_uptime(posture: &mut DevicePosture) {
-    if let Some(output) = run_powershell(
-        "((Get-Date) - (Get-CimInstance Win32_OperatingSystem).LastBootUpTime).TotalSeconds",
-    ) {
-        if let Ok(secs) = output.trim().parse::<f64>() {
-            if secs >= 0.0 {
-                posture.uptime_secs = Some(secs as u64);
-            }
-        }
+    // Compute and truncate to an integer on the PowerShell side so the Rust
+    // side stays clear of float→int casts.
+    let script = "$evt = Get-WinEvent -FilterHashtable @{LogName='System'; ID=6005} \
+                  -MaxEvents 1 -ErrorAction SilentlyContinue; \
+                  $secs = if ($evt) { ((Get-Date) - $evt.TimeCreated).TotalSeconds } \
+                  else { ((Get-Date) - (Get-CimInstance Win32_OperatingSystem)\
+                  .LastBootUpTime).TotalSeconds }; \
+                  [int64][Math]::Floor($secs)";
+
+    if let Some(output) = run_powershell(script)
+        && let Ok(secs) = output.trim().parse::<u64>()
+    {
+        posture.uptime_secs = Some(secs);
     }
 }
 
