@@ -123,7 +123,7 @@ anyhow = { version = "=1.0.102", default-features = false }
 apple-native-keyring-store = { version = "=1.0.0", default-features = false }
 arc-swap = { version = "=1.9.1", default-features = false }
 askama = { version = "=0.16.0", default-features = false }
-aws-config = { version = "=1.8.16", default-features = false }
+aws-config = { version = "=1.8.17", default-features = false }
 aws-lc-rs = { version = "=1.17.0", default-features = false }
 aws-sdk-dsql = { version = "=1.56.0", default-features = false }
 aws-sdk-kms = { version = "=1.106.0", default-features = false }
