@@ -49,14 +49,24 @@ fn detect_os_version(posture: &mut DevicePosture) {
 }
 
 /// Detect BitLocker status via WMI.
+///
+/// The `Win32_EncryptableVolume` WMI class requires administrator privileges;
+/// without elevation the query returns `Access denied` (no usable non-admin
+/// alternative exists — `manage-bde`, `Get-BitLockerVolume`, and the WMI class
+/// all gate on admin). Skip the check entirely when not elevated so the field
+/// is correctly reported as "not checked" rather than silently failing.
 fn detect_bitlocker(posture: &mut DevicePosture) {
+    if !matches!(posture.elevated, Some(true)) {
+        return;
+    }
+
     let output = run_powershell(
         "(Get-CimInstance -Namespace 'Root\\CIMV2\\Security\\MicrosoftVolumeEncryption' \
          -ClassName Win32_EncryptableVolume -Filter \"DriveLetter='C:'\" \
          -ErrorAction SilentlyContinue).ProtectionStatus",
     );
 
-    if let Some(status) = output.as_deref().map(|s| s.trim()) {
+    if let Some(status) = output.as_deref().map(str::trim) {
         match status {
             "1" => {
                 posture.disk_encryption_enabled = Some(true);
@@ -124,71 +134,167 @@ fn detect_firewall(posture: &mut DevicePosture) {
 }
 
 /// Detect Secure Boot and TPM on Windows.
+///
+/// TPM detection uses the `Win32_PnPEntity` security-devices class, which is
+/// queryable without elevation. The `Win32_Tpm` WMI class under
+/// `Root\CIMV2\Security\MicrosoftTpm` is admin-gated, so we only consult it
+/// as an enrichment when running elevated.
 fn detect_secure_boot(posture: &mut DevicePosture) {
     let sb_output = run_powershell("Confirm-SecureBootUEFI");
     posture.secure_boot_enabled = sb_output
         .as_deref()
         .map(|s| s.trim().eq_ignore_ascii_case("true"));
 
-    let tpm_output = run_powershell(
-        "(Get-CimInstance -ClassName Win32_Tpm -Namespace 'Root\\CIMV2\\Security\\MicrosoftTpm' \
-         -ErrorAction SilentlyContinue).IsActivated_InitialValue",
+    // Primary path: PnP enumeration (no admin required). Returns a literal
+    // marker so we can distinguish "TPM present" from "no TPM" from "query failed".
+    let pnp_output = run_powershell(
+        "$tpm = Get-CimInstance -ClassName Win32_PnPEntity -ErrorAction SilentlyContinue | \
+         Where-Object { $_.PNPClass -eq 'SecurityDevices' -and \
+         $_.Name -match 'Trusted Platform Module' } | Select-Object -First 1; \
+         if ($null -eq $tpm) { 'ABSENT' } else { 'PRESENT:' + $tpm.Name }",
     );
-    let tpm_present = tpm_output
-        .as_deref()
-        .is_some_and(|s| s.trim().eq_ignore_ascii_case("true"));
-    posture.tpm_present = Some(tpm_present);
 
-    if tpm_present {
-        posture.tpm_version = run_powershell(
+    match pnp_output.as_deref().map(str::trim) {
+        Some("ABSENT") => {
+            posture.tpm_present = Some(false);
+        }
+        Some(s) if s.starts_with("PRESENT:") => {
+            posture.tpm_present = Some(true);
+            let name = s.get("PRESENT:".len()..).unwrap_or("");
+            if let Some(ver) = parse_tpm_version_from_pnp_name(name) {
+                posture.tpm_version = Some(ver);
+            }
+        }
+        _ => {
+            // Leave tpm_present as None — query did not return a usable answer.
+        }
+    }
+
+    // Enrichment when elevated: prefer the WMI `SpecVersion` if we don't yet
+    // have a version. Skipped without admin.
+    if matches!(posture.elevated, Some(true))
+        && posture.tpm_present == Some(true)
+        && posture.tpm_version.is_none()
+        && let Some(spec) = run_powershell(
             "(Get-CimInstance -ClassName Win32_Tpm -Namespace 'Root\\CIMV2\\Security\\MicrosoftTpm' \
              -ErrorAction SilentlyContinue).SpecVersion",
         )
-        .map(|s| {
-            // SpecVersion returns "2.0, 0, 1.38" — take the first part
-            s.trim()
-                .split(',')
-                .next()
-                .unwrap_or(s.trim())
-                .trim()
-                .to_string()
-        })
-        .filter(|s| !s.is_empty());
+        // SpecVersion returns "2.0, 0, 1.38" — take the first part.
+        && let Some(first) = spec.trim().split(',').next()
+    {
+        let trimmed = first.trim();
+        if !trimmed.is_empty() {
+            posture.tpm_version = Some(trimmed.to_string());
+        }
+    }
+}
+
+/// Extract a TPM version string from a PnP entity friendly name.
+///
+/// Examples:
+/// - `"Trusted Platform Module 2.0"` → `Some("2.0")`
+/// - `"Trusted Platform Module 1.2"` → `Some("1.2")`
+/// - `"Trusted Platform Module"` → `None`
+fn parse_tpm_version_from_pnp_name(name: &str) -> Option<String> {
+    let after = name.trim().strip_prefix("Trusted Platform Module")?.trim();
+    let token = after.split_whitespace().next()?;
+    if token.chars().any(|c| c.is_ascii_digit()) {
+        Some(token.to_string())
+    } else {
+        None
     }
 }
 
 /// Detect Windows Update automatic update configuration.
 ///
-/// Reads the `AUOptions` registry value. Values:
-/// - 2: Notify before download
-/// - 3: Auto download, notify install
-/// - 4: Auto download and install
+/// Signals are consulted in priority order:
+///
+/// 1. `HKLM\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU\NoAutoUpdate`:
+///    if `= 1`, auto-update is explicitly disabled by policy.
+/// 2. `HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\AUOptions`:
+///    legacy value. `>= 2` (notify, auto-download, auto-install) ⇒ enabled;
+///    `<= 1` ⇒ disabled. If the value is *absent*, fall through — modern
+///    Win10/11 installs do not set this key by default.
+/// 3. `Get-Service wuauserv` start type: `Disabled` ⇒ disabled, anything else
+///    (including the trigger-started `Manual` default on Win10/11) ⇒ enabled.
 fn detect_os_auto_update(posture: &mut DevicePosture) {
-    let output = run_powershell(
+    let mark = |p: &mut DevicePosture, enabled: bool| {
+        p.auto_update_enabled = Some(enabled);
+        p.auto_update_technology = Some("Windows Update".to_string());
+    };
+
+    // 1. Explicit policy disable.
+    let no_auto = run_powershell(
+        "(Get-ItemProperty \
+         'HKLM:\\SOFTWARE\\Policies\\Microsoft\\Windows\\WindowsUpdate\\AU' \
+         -ErrorAction SilentlyContinue).NoAutoUpdate",
+    );
+    if no_auto.as_deref().map(str::trim) == Some("1") {
+        mark(posture, false);
+        return;
+    }
+
+    // 2. Legacy AUOptions, only when explicitly present.
+    let au_options = run_powershell(
         "(Get-ItemProperty \
          'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\WindowsUpdate\\Auto Update' \
          -ErrorAction SilentlyContinue).AUOptions",
     );
-
-    let enabled = output
+    if let Some(val) = au_options
         .as_deref()
         .and_then(|s| s.trim().parse::<u32>().ok())
-        .is_some_and(|v| v >= 3);
+    {
+        mark(posture, val >= 2);
+        return;
+    }
 
-    posture.auto_update_enabled = Some(enabled);
-    posture.auto_update_technology = Some("Windows Update".to_string());
+    // 3. Service start type fallback. On default Win10/11 wuauserv is
+    //    trigger-started with `Manual` — that is the auto-update-on case.
+    let svc =
+        run_powershell("(Get-Service -Name wuauserv -ErrorAction SilentlyContinue).StartType");
+    if let Some(start_type) = auto_update_from_service_start_type(svc.as_deref()) {
+        mark(posture, start_type);
+    }
 }
 
-/// Detect system uptime via WMI `LastBootUpTime`.
+/// Map a `Get-Service ... StartType` string to an auto-update enabled flag.
+///
+/// `Disabled` ⇒ `Some(false)`. Any other recognised start type ⇒ `Some(true)`.
+/// Empty or unrecognised ⇒ `None` (treat as "couldn't determine").
+fn auto_update_from_service_start_type(start_type: Option<&str>) -> Option<bool> {
+    let value = start_type?.trim();
+    match value {
+        "" => None,
+        "Disabled" => Some(false),
+        "Automatic" | "AutomaticDelayedStart" | "Manual" | "Boot" | "System" => Some(true),
+        _ => None,
+    }
+}
+
+/// Detect system uptime.
+///
+/// With fast startup (hybrid hibernation) enabled — the default on Win10/11 —
+/// `Win32_OperatingSystem.LastBootUpTime` only updates on cold boots, not on
+/// resumes from a fast-startup shutdown. That produces multi-hundred-day
+/// uptime readings for users who power-cycle daily (see issue #327).
+///
+/// Prefer the most recent System event log entry 6005 ("Event Log service
+/// started"), which fires on every Windows start including fast-startup
+/// resumes. Fall back to `LastBootUpTime` if the event isn't readable.
 fn detect_uptime(posture: &mut DevicePosture) {
-    if let Some(output) = run_powershell(
-        "((Get-Date) - (Get-CimInstance Win32_OperatingSystem).LastBootUpTime).TotalSeconds",
-    ) {
-        if let Ok(secs) = output.trim().parse::<f64>() {
-            if secs >= 0.0 {
-                posture.uptime_secs = Some(secs as u64);
-            }
-        }
+    // Compute and truncate to an integer on the PowerShell side so the Rust
+    // side stays clear of float→int casts.
+    let script = "$evt = Get-WinEvent -FilterHashtable @{LogName='System'; ID=6005} \
+                  -MaxEvents 1 -ErrorAction SilentlyContinue; \
+                  $secs = if ($evt) { ((Get-Date) - $evt.TimeCreated).TotalSeconds } \
+                  else { ((Get-Date) - (Get-CimInstance Win32_OperatingSystem)\
+                  .LastBootUpTime).TotalSeconds }; \
+                  [int64][Math]::Floor($secs)";
+
+    if let Some(output) = run_powershell(script)
+        && let Ok(secs) = output.trim().parse::<u64>()
+    {
+        posture.uptime_secs = Some(secs);
     }
 }
 
@@ -272,4 +378,74 @@ fn run_powershell(script: &str) -> Option<String> {
     }
 
     Some(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{auto_update_from_service_start_type, parse_tpm_version_from_pnp_name};
+
+    #[test]
+    fn tpm_version_from_pnp_name_v2() {
+        assert_eq!(
+            parse_tpm_version_from_pnp_name("Trusted Platform Module 2.0").as_deref(),
+            Some("2.0")
+        );
+    }
+
+    #[test]
+    fn tpm_version_from_pnp_name_v12() {
+        assert_eq!(
+            parse_tpm_version_from_pnp_name("Trusted Platform Module 1.2").as_deref(),
+            Some("1.2")
+        );
+    }
+
+    #[test]
+    fn tpm_version_from_pnp_name_no_version_token() {
+        assert_eq!(
+            parse_tpm_version_from_pnp_name("Trusted Platform Module"),
+            None
+        );
+    }
+
+    #[test]
+    fn tpm_version_from_pnp_name_unrelated() {
+        assert_eq!(parse_tpm_version_from_pnp_name("AMD PSP 11.0 Device"), None);
+    }
+
+    #[test]
+    fn auto_update_start_type_disabled() {
+        assert_eq!(
+            auto_update_from_service_start_type(Some("Disabled")),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn auto_update_start_type_manual_is_enabled() {
+        // Win10/11 default for wuauserv is `Manual` (trigger-started).
+        assert_eq!(
+            auto_update_from_service_start_type(Some("Manual")),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn auto_update_start_type_automatic_is_enabled() {
+        assert_eq!(
+            auto_update_from_service_start_type(Some("Automatic")),
+            Some(true)
+        );
+        assert_eq!(
+            auto_update_from_service_start_type(Some("AutomaticDelayedStart")),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn auto_update_start_type_missing_or_unknown() {
+        assert_eq!(auto_update_from_service_start_type(None), None);
+        assert_eq!(auto_update_from_service_start_type(Some("")), None);
+        assert_eq!(auto_update_from_service_start_type(Some("Bogus")), None);
+    }
 }
