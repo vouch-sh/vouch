@@ -4,11 +4,12 @@
 use crate::AppState;
 use crate::db;
 use crate::handlers::HasVersion;
+use crate::handlers::admin::flash;
 use crate::impl_template_response;
 use crate::services::error::ServiceError;
 use askama::Template;
 use axum::Json;
-use axum::extract::{OriginalUri, Query, State};
+use axum::extract::{OriginalUri, State};
 use axum::http::{HeaderMap, Method, StatusCode};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum_extra::extract::cookie::CookieJar;
@@ -256,12 +257,6 @@ pub struct AdminScimTokensTemplate {
 
 impl_template_response!(AdminScimTokensTemplate);
 
-/// Query parameters for the SCIM tokens page.
-#[derive(Debug, Deserialize)]
-pub struct ScimTokensParams {
-    pub error: Option<String>,
-}
-
 /// Form data for creating a SCIM token.
 #[derive(Debug, Deserialize)]
 pub struct CreateScimTokenForm {
@@ -269,11 +264,16 @@ pub struct CreateScimTokenForm {
     pub expires_in_days: i64,
 }
 
+const REDIRECT_BASE: &str = "/admin/scim-tokens";
+
+fn redirect_error(jar: CookieJar, msg: impl Into<String>) -> Response {
+    (flash::set_err(jar, msg), Redirect::to(REDIRECT_BASE)).into_response()
+}
+
 /// GET /admin/scim-tokens — SCIM token management page.
 pub async fn admin_scim_tokens_page(
     State(state): State<Arc<AppState>>,
     jar: CookieJar,
-    Query(params): Query<ScimTokensParams>,
 ) -> Response {
     let auth = get_resource_auth_context(&state, &jar).await;
 
@@ -316,13 +316,18 @@ pub async fn admin_scim_tokens_page(
         })
         .collect();
 
-    AdminScimTokensTemplate {
+    // Consume any flash messages set by a prior POST → redirect, then expire
+    // the cookies in the response so a refresh doesn't re-show them.
+    let messages = flash::read(&jar);
+    let jar = flash::clear(jar);
+
+    let body = AdminScimTokensTemplate {
         auth,
         tokens,
-        flash_message: params.error,
+        flash_message: messages.err,
         new_token: None,
-    }
-    .into_response()
+    };
+    (jar, body).into_response()
 }
 
 /// POST /admin/scim-tokens — Create a new SCIM token (UI form).
@@ -340,17 +345,17 @@ pub async fn admin_create_scim_token(
     if let Some(ref desc) = form.description
         && desc.len() > 256
     {
-        return Ok(Redirect::to(
-            "/admin/scim-tokens?error=Description must be 256 characters or less",
-        )
-        .into_response());
+        return Ok(redirect_error(
+            jar,
+            "Description must be 256 characters or less",
+        ));
     }
 
     if form.expires_in_days < 1 || form.expires_in_days > 365 {
-        return Ok(Redirect::to(
-            "/admin/scim-tokens?error=Expiration must be between 1 and 365 days",
-        )
-        .into_response());
+        return Ok(redirect_error(
+            jar,
+            "Expiration must be between 1 and 365 days",
+        ));
     }
 
     let (admin, org_id) =
@@ -360,10 +365,10 @@ pub async fn admin_create_scim_token(
     let existing = db::list_scim_tokens(&state.store, Some(&org_id)).await?;
 
     if existing.len() >= MAX_SCIM_TOKENS {
-        return Ok(Redirect::to(
-            "/admin/scim-tokens?error=Maximum of 2 SCIM tokens. Revoke one before creating another.",
-        )
-        .into_response());
+        return Ok(redirect_error(
+            jar,
+            "Maximum of 2 SCIM tokens. Revoke one before creating another.",
+        ));
     }
 
     let generated = generate_scim_token()?;
@@ -454,7 +459,7 @@ pub async fn admin_revoke_scim_token(
     let deleted = db::delete_scim_token(&state.store, &token_id, &org_id).await?;
 
     if !deleted {
-        return Ok(Redirect::to("/admin/scim-tokens?error=SCIM token not found").into_response());
+        return Ok(redirect_error(jar, "SCIM token not found"));
     }
 
     let data = serde_json::json!({

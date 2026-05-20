@@ -4,13 +4,14 @@
 use crate::AppState;
 use crate::db;
 use crate::handlers::HasVersion;
+use crate::handlers::admin::flash;
 use crate::impl_template_response;
 use crate::services::error::ServiceError;
 use crate::services::posture;
 use askama::Template;
 use aws_lc_rs::digest::{self, SHA256};
 use axum::Json;
-use axum::extract::{OriginalUri, Query, State};
+use axum::extract::{OriginalUri, State};
 use axum::http::{HeaderMap, Method, StatusCode};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum_extra::extract::cookie::CookieJar;
@@ -20,6 +21,12 @@ use std::sync::Arc;
 use crate::handlers::ValidPath;
 use crate::handlers::browser_login::validate_origin;
 use crate::handlers::session::{AuthContext, extract_org_admin, get_resource_auth_context};
+
+const REDIRECT_BASE: &str = "/admin/policies";
+
+fn redirect_error(jar: CookieJar, msg: impl Into<String>) -> Response {
+    (flash::set_err(jar, msg), Redirect::to(REDIRECT_BASE)).into_response()
+}
 
 /// Maximum number of custom policies per org (active + inactive).
 const MAX_CUSTOM_POLICIES: usize = 20;
@@ -54,18 +61,8 @@ pub struct AdminPoliciesTemplate {
 
 impl_template_response!(AdminPoliciesTemplate);
 
-/// Query parameters for the policies page (error flash).
-#[derive(Debug, Deserialize)]
-pub struct PoliciesParams {
-    pub error: Option<String>,
-}
-
 /// GET /admin/policies — Device posture policies page.
-pub async fn admin_policies_page(
-    State(state): State<Arc<AppState>>,
-    jar: CookieJar,
-    Query(params): Query<PoliciesParams>,
-) -> Response {
+pub async fn admin_policies_page(State(state): State<Arc<AppState>>, jar: CookieJar) -> Response {
     let auth = get_resource_auth_context(&state, &jar).await;
 
     if !auth.authenticated {
@@ -125,13 +122,18 @@ pub async fn admin_policies_page(
             }
         };
 
-    AdminPoliciesTemplate {
+    // Consume any flash messages set by a prior POST → redirect, then expire
+    // the cookies in the response so a refresh doesn't re-show them.
+    let messages = flash::read(&jar);
+    let jar = flash::clear(jar);
+
+    let body = AdminPoliciesTemplate {
         auth,
         preconfigured_policies,
         custom_policies,
-        flash_message: params.error,
-    }
-    .into_response()
+        flash_message: messages.err,
+    };
+    (jar, body).into_response()
 }
 
 /// POST /admin/policies/preconfigured/{slug}/toggle
@@ -174,11 +176,13 @@ pub async fn toggle_preconfigured_policy(
         let total_active = active_slugs.len().saturating_add(custom_active_count);
 
         if total_active >= posture::MAX_ACTIVE_POLICIES {
-            return Ok(Redirect::to(&format!(
-                "/admin/policies?error=Maximum of {} active policies allowed",
-                posture::MAX_ACTIVE_POLICIES
-            ))
-            .into_response());
+            return Ok(redirect_error(
+                jar,
+                format!(
+                    "Maximum of {} active policies allowed",
+                    posture::MAX_ACTIVE_POLICIES
+                ),
+            ));
         }
         active_slugs.push(slug.clone());
     }
@@ -243,26 +247,26 @@ pub async fn create_custom_policy(
 
     // Validate inputs before auth
     if form.name.is_empty() || form.name.len() > 100 {
-        return Ok(
-            Redirect::to("/admin/policies?error=Name must be between 1 and 100 characters")
-                .into_response(),
-        );
+        return Ok(redirect_error(
+            jar,
+            "Name must be between 1 and 100 characters",
+        ));
     }
 
     if form.cel_expression.is_empty() || form.cel_expression.len() > 1024 {
-        return Ok(Redirect::to(
-            "/admin/policies?error=CEL expression must be between 1 and 1024 characters",
-        )
-        .into_response());
+        return Ok(redirect_error(
+            jar,
+            "CEL expression must be between 1 and 1024 characters",
+        ));
     }
 
     if let Some(ref desc) = form.description
         && desc.len() > 500
     {
-        return Ok(Redirect::to(
-            "/admin/policies?error=Description must be 500 characters or less",
-        )
-        .into_response());
+        return Ok(redirect_error(
+            jar,
+            "Description must be 500 characters or less",
+        ));
     }
 
     // Auth before CEL compilation (fixes security finding F-04)
@@ -271,10 +275,7 @@ pub async fn create_custom_policy(
 
     // Validate CEL syntax
     if let Err(e) = posture::validate_cel_expression(&form.cel_expression) {
-        return Ok(Redirect::to(&format!(
-            "/admin/policies?error=Invalid CEL expression: {e}"
-        ))
-        .into_response());
+        return Ok(redirect_error(jar, format!("Invalid CEL expression: {e}")));
     }
 
     // Check total custom policy count limit
@@ -284,10 +285,10 @@ pub async fn create_custom_policy(
         .len();
 
     if custom_count >= MAX_CUSTOM_POLICIES {
-        return Ok(Redirect::to(&format!(
-            "/admin/policies?error=Maximum of {MAX_CUSTOM_POLICIES} custom policies allowed"
-        ))
-        .into_response());
+        return Ok(redirect_error(
+            jar,
+            format!("Maximum of {MAX_CUSTOM_POLICIES} custom policies allowed"),
+        ));
     }
 
     let description = form.description.filter(|d| !d.is_empty());
@@ -347,17 +348,17 @@ pub async fn update_custom_policy(
     validate_origin(&headers, &state.config().base_url)?;
 
     if form.name.is_empty() || form.name.len() > 100 {
-        return Ok(
-            Redirect::to("/admin/policies?error=Name must be between 1 and 100 characters")
-                .into_response(),
-        );
+        return Ok(redirect_error(
+            jar,
+            "Name must be between 1 and 100 characters",
+        ));
     }
 
     if form.cel_expression.is_empty() || form.cel_expression.len() > 1024 {
-        return Ok(Redirect::to(
-            "/admin/policies?error=CEL expression must be between 1 and 1024 characters",
-        )
-        .into_response());
+        return Ok(redirect_error(
+            jar,
+            "CEL expression must be between 1 and 1024 characters",
+        ));
     }
 
     // Auth before CEL compilation
@@ -365,10 +366,7 @@ pub async fn update_custom_policy(
         extract_org_admin(&state, &headers, &jar, method.as_str(), uri.path(), None).await?;
 
     if let Err(e) = posture::validate_cel_expression(&form.cel_expression) {
-        return Ok(Redirect::to(&format!(
-            "/admin/policies?error=Invalid CEL expression: {e}"
-        ))
-        .into_response());
+        return Ok(redirect_error(jar, format!("Invalid CEL expression: {e}")));
     }
 
     let description = form.description.filter(|d| !d.is_empty());
@@ -518,11 +516,13 @@ pub async fn toggle_custom_policy(
             .saturating_sub(usize::from(policy.active));
 
         if other_active >= posture::MAX_ACTIVE_POLICIES {
-            return Ok(Redirect::to(&format!(
-                "/admin/policies?error=Maximum of {} active policies allowed",
-                posture::MAX_ACTIVE_POLICIES
-            ))
-            .into_response());
+            return Ok(redirect_error(
+                jar,
+                format!(
+                    "Maximum of {} active policies allowed",
+                    posture::MAX_ACTIVE_POLICIES
+                ),
+            ));
         }
     }
 
