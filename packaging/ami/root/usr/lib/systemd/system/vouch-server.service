@@ -16,6 +16,7 @@ Environment=AWS_CONFIG_FILE=/dev/null
 Environment=AWS_SHARED_CREDENTIALS_FILE=/dev/null
 Environment=AWS_USE_DUALSTACK_ENDPOINT=true
 Environment=AWS_STS_REGIONAL_ENDPOINTS=regional
+Environment=AWS_NEW_RETRIES_2026=true
 Environment=AWS_DEFAULTS_MODE=in-region
 ExecStart=/usr/bin/vouch-server
 Restart=always
