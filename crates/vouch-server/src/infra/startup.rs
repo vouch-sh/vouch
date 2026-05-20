@@ -420,13 +420,13 @@ async fn build_app_state(
             .context("KMS client required for SSH CA KMS signing")?
             .clone();
         let key_arn = kms_arn_resolver.resolve(key_id);
-        let ca = ssh_ca::SshCa::from_kms(client, key_arn, &config.rp_id)
+        let ca = ssh_ca::SshCa::from_kms(client, key_arn.clone(), &config.rp_id)
             .await
             .context("Failed to initialize KMS SSH CA")?;
         let pub_key = ca
             .public_key()
             .context("KMS SSH CA loaded but public key is not extractable")?;
-        tracing::info!("SSH CA initialized (KMS): {}", pub_key);
+        tracing::info!("SSH CA initialized (KMS): {} ({})", key_arn, pub_key);
         Some(ca)
     } else {
         match ssh_ca::SshCa::load(
@@ -460,10 +460,14 @@ async fn build_app_state(
             .context("KMS client required for OIDC KMS signing")?
             .clone();
         let key_arn = kms_arn_resolver.resolve(key_id);
-        let key = OidcSigningKey::from_kms(client, key_arn)
+        let key = OidcSigningKey::from_kms(client, key_arn.clone())
             .await
             .context("Failed to initialize KMS OIDC signing key")?;
-        tracing::info!("OIDC signing key initialized (KMS): {}", key.key_id());
+        tracing::info!(
+            "OIDC ES256 signing key initialized (KMS): {} (kid={})",
+            key_arn,
+            key.key_id(),
+        );
         key
     } else {
         let key = OidcSigningKey::load_or_generate(
@@ -488,10 +492,14 @@ async fn build_app_state(
             .context("KMS client required for OIDC RSA KMS signing")?
             .clone();
         let key_arn = kms_arn_resolver.resolve(key_id);
-        let key = OidcRsaSigningKey::from_kms(client, key_arn)
+        let key = OidcRsaSigningKey::from_kms(client, key_arn.clone())
             .await
             .context("Failed to initialize KMS OIDC RSA signing key")?;
-        tracing::info!("OIDC RSA signing key initialized (KMS): {}", key.key_id());
+        tracing::info!(
+            "OIDC RS256 signing key initialized (KMS): {} (kid={})",
+            key_arn,
+            key.key_id(),
+        );
         Some(key)
     } else {
         // Clone the PEM content (or None) before crossing the spawn_blocking boundary.
@@ -587,7 +595,7 @@ async fn build_app_state(
     // back to PlaintextDocumentCrypto for development.
     let crypto: std::sync::Arc<dyn crate::crypto::document_crypto::DocumentCrypto> =
         if let Some(keys) = doc_keys {
-            tracing::info!("Document encryption: HPKE (P-384 key pair from KMS)");
+            tracing::info!("Document encryption initialized (KMS HPKE): P-384 key pair");
             std::sync::Arc::new(
                 crate::crypto::document_crypto::HpkeDocumentCrypto::new(
                     keys.public_key,
