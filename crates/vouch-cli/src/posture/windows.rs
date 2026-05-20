@@ -250,9 +250,8 @@ fn detect_os_auto_update(posture: &mut DevicePosture) {
 
     // 3. Service start type fallback. On default Win10/11 wuauserv is
     //    trigger-started with `Manual` — that is the auto-update-on case.
-    let svc = run_powershell(
-        "(Get-Service -Name wuauserv -ErrorAction SilentlyContinue).StartType",
-    );
+    let svc =
+        run_powershell("(Get-Service -Name wuauserv -ErrorAction SilentlyContinue).StartType");
     if let Some(start_type) = auto_update_from_service_start_type(svc.as_deref()) {
         mark(posture, start_type);
     }
@@ -389,7 +388,10 @@ mod tests {
 
     #[test]
     fn tpm_version_from_pnp_name_no_version_token() {
-        assert_eq!(parse_tpm_version_from_pnp_name("Trusted Platform Module"), None);
+        assert_eq!(
+            parse_tpm_version_from_pnp_name("Trusted Platform Module"),
+            None
+        );
     }
 
     #[test]
@@ -399,18 +401,27 @@ mod tests {
 
     #[test]
     fn auto_update_start_type_disabled() {
-        assert_eq!(auto_update_from_service_start_type(Some("Disabled")), Some(false));
+        assert_eq!(
+            auto_update_from_service_start_type(Some("Disabled")),
+            Some(false)
+        );
     }
 
     #[test]
     fn auto_update_start_type_manual_is_enabled() {
         // Win10/11 default for wuauserv is `Manual` (trigger-started).
-        assert_eq!(auto_update_from_service_start_type(Some("Manual")), Some(true));
+        assert_eq!(
+            auto_update_from_service_start_type(Some("Manual")),
+            Some(true)
+        );
     }
 
     #[test]
     fn auto_update_start_type_automatic_is_enabled() {
-        assert_eq!(auto_update_from_service_start_type(Some("Automatic")), Some(true));
+        assert_eq!(
+            auto_update_from_service_start_type(Some("Automatic")),
+            Some(true)
+        );
         assert_eq!(
             auto_update_from_service_start_type(Some("AutomaticDelayedStart")),
             Some(true)
