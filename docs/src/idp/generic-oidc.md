@@ -88,7 +88,7 @@ The following providers have been tested with Vouch:
 - Confirm the discovery endpoint returns valid JSON
 
 **"Issuer mismatch"**
-- The `issuer` field in the discovery document must exactly match the configured `VOUCH_IDP_<SLUG>_ISSUER` value (trailing slashes matter). Entra `/organizations/v2.0` and `/common/v2.0` are special-cased automatically.
+- The `issuer` field in the discovery document must exactly match the configured `VOUCH_IDP_<SLUG>_ISSUER` value (trailing slashes matter). Entra `/organizations/v2.0` is special-cased automatically — its discovery document returns a `{tenantid}` template that vouch handles transparently. The `/common/v2.0` endpoint is not supported; see [Microsoft Entra ID](./entra-id.md#why-personal-microsoft-accounts-arent-supported).
 
 **Token errors after authentication**
 - Ensure the client secret is correct and not expired

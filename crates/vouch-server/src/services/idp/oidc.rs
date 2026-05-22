@@ -124,16 +124,16 @@ struct IdTokenClaims {
     hd: Option<String>,
     /// Entra ID tenant ID claim (present in tokens from Microsoft).
     tid: Option<String>,
+    /// Entra "Email Domain Owner Verified" optional claim. Entra does not emit
+    /// the OIDC standard `email_verified` claim; instead, operators must add
+    /// `xms_edov` under the app registration's Token configuration. `true`
+    /// means the email's domain is admin-verified in the user's tenant.
+    /// Required because vouch only accepts `/organizations/v2.0` or
+    /// single-tenant Entra issuers (the `/common/` endpoint cannot emit
+    /// optional claims and is rejected at discovery).
+    /// See: <https://learn.microsoft.com/en-us/entra/identity-platform/optional-claims-reference>
+    xms_edov: Option<bool>,
 }
-
-/// MSA (Microsoft consumer accounts) meta-tenant ID.
-///
-/// Tokens from this tenant are personal Microsoft accounts (outlook.com,
-/// hotmail.com, live.com, or external emails bound to an MSA), not work/school
-/// accounts. They are allowed to sign in but receive no auto-created
-/// organization — domain extraction returns `None` for them, matching the
-/// behavior of Google consumer accounts that lack the `hd` claim.
-const ENTRA_MSA_TENANT_ID: &str = "9188040d-6c67-4c5b-b112-36a304b66dad";
 
 /// Check whether an issuer URL is an Entra `/organizations/` endpoint.
 ///
@@ -149,6 +149,18 @@ fn is_entra_organizations_issuer(issuer: &str) -> bool {
 fn is_entra_common_issuer(issuer: &str) -> bool {
     issuer.contains("login.microsoftonline.com")
         && (issuer.contains("/common/") || issuer.ends_with("/common"))
+}
+
+/// Check whether an issuer URL is the Entra per-tenant template returned by
+/// `/organizations/` discovery (literal `{tenantid}` placeholder).
+///
+/// This is the form stored in `OidcProvider::issuer` after `fetch_discovery`
+/// for multi-tenant Entra endpoints — Microsoft returns the literal string
+/// `https://login.microsoftonline.com/{tenantid}/v2.0` as the discovery
+/// document's `issuer`, not a concrete tenant URL.
+fn is_entra_tenant_template_issuer(issuer: &str) -> bool {
+    issuer.contains("login.microsoftonline.com")
+        && (issuer.contains("/{tenantid}/") || issuer.ends_with("/{tenantid}"))
 }
 
 /// Validate that the discovered issuer matches the configured issuer,
@@ -169,13 +181,13 @@ fn validate_discovered_issuer(configured: &str, discovered: &str) -> anyhow::Res
         return Ok(());
     }
 
-    // Entra /organizations/ and /common/ endpoints return a per-tenant issuer.
-    // Accept it iff:
-    //   - configured issuer is an /organizations/ or /common/ URL
-    //   - discovered issuer is login.microsoftonline.com/<uuid>/v2.0
-    if (is_entra_organizations_issuer(configured) || is_entra_common_issuer(configured))
-        && discovered.starts_with("https://login.microsoftonline.com/")
-        && discovered.ends_with("/v2.0")
+    // Entra `/organizations/` discovery returns either the literal placeholder
+    // `https://login.microsoftonline.com/{tenantid}/v2.0` (per Microsoft docs)
+    // or a concrete per-tenant URL. Accept either form when configured is an
+    // `/organizations/` URL. `/common/` is rejected earlier in fetch_discovery.
+    if is_entra_organizations_issuer(configured)
+        && (is_entra_tenant_template_issuer(discovered)
+            || extract_entra_tenant_from_issuer(discovered).is_some())
     {
         return Ok(());
     }
@@ -209,17 +221,19 @@ pub(crate) async fn fetch_discovery(
         );
     }
 
-    // Note at startup if /common/ endpoint is configured. /common/ accepts
-    // both work/school and personal Microsoft accounts; personal accounts are
-    // allowed to sign in but have no auto-created organization (their domain
-    // is reported as `None`, matching Google consumer accounts without `hd`).
-    // Use /organizations/v2.0 if you want to restrict to AAD work/school
-    // tenants only.
+    // Reject Entra `/common/` outright. Apps that include personal Microsoft
+    // accounts cannot configure optional claims (per Microsoft docs), so the
+    // `xms_edov` email-verification signal vouch requires can never be emitted.
+    // Operators wanting any-tenant sign-in must use `/organizations/v2.0`.
     if is_entra_common_issuer(issuer) {
-        tracing::info!(
-            "Entra /common/ endpoint configured. Personal Microsoft accounts \
-             (tid={}) can sign in; they will not be grouped into an organization.",
-            ENTRA_MSA_TENANT_ID
+        anyhow::bail!(
+            "Entra `/common/` issuer is not supported: app registrations that \
+             include personal Microsoft accounts cannot emit the `xms_edov` \
+             email-verification claim required by vouch. Use \
+             `https://login.microsoftonline.com/organizations/v2.0` for any \
+             work/school tenant, or \
+             `https://login.microsoftonline.com/<tenant-id>/v2.0` to restrict \
+             to a single tenant."
         );
     }
 
@@ -315,14 +329,15 @@ pub(crate) async fn verify_id_token(
     // Find matching key by kid, then by algorithm
     let decoding_key = find_decoding_key(&jwks, header.kid.as_deref(), alg)?;
 
-    // Validate the token: signature, exp, iss, aud
+    // Entra `/organizations/v2.0` discovery stores the literal `{tenantid}`
+    // placeholder in `provider.issuer`; real tokens carry a concrete tenant
+    // UUID. In that case skip the jsonwebtoken `iss` check and validate the
+    // shape of `claims.iss` after decoding. Single-tenant Entra and other
+    // IdPs use the standard check.
+    let entra_template_issuer = is_entra_tenant_template_issuer(&provider.issuer);
+
     let mut validation = jsonwebtoken::Validation::new(alg);
-    // Entra /organizations/ and /common/ discovery returns the literal template
-    // `{tenantid}` as the issuer in OidcProvider::issuer. Real tokens contain a
-    // per-tenant UUID. Leave validation.iss = None (skip library check) and validate
-    // the issuer manually in the Entra-specific blocks below.
-    if !is_entra_organizations_issuer(&provider.issuer) && !is_entra_common_issuer(&provider.issuer)
-    {
+    if !entra_template_issuer {
         validation.set_issuer(&[&provider.issuer]);
     }
     validation.set_audience(&[expected_client_id]);
@@ -332,14 +347,7 @@ pub(crate) async fn verify_id_token(
 
     let claims = token_data.claims;
 
-    // For Entra /organizations/ and /common/, the library issuer check was skipped.
-    // Manually verify the token's iss is a valid Entra per-tenant issuer URL — not an
-    // arbitrary host. This rejects tokens where `iss` is something other than
-    // `https://login.microsoftonline.com/<uuid>/v2.0`.
-    if (is_entra_organizations_issuer(&provider.issuer) || is_entra_common_issuer(&provider.issuer))
-        && (!claims.iss.starts_with("https://login.microsoftonline.com/")
-            || extract_entra_tenant_from_issuer(&claims.iss).is_none())
-    {
+    if entra_template_issuer && extract_entra_tenant_from_issuer(&claims.iss).is_none() {
         anyhow::bail!(
             "Entra token issuer '{}' is not a valid per-tenant issuer. \
              Expected https://login.microsoftonline.com/<uuid>/v2.0",
@@ -365,25 +373,37 @@ pub(crate) async fn verify_id_token(
         }
     }
 
-    if !claims.email_verified {
+    // Verify email is asserted-verified by the IdP. Standard OIDC providers
+    // emit `email_verified`; Entra never does and instead uses the optional
+    // `xms_edov` (Email Domain Owner Verified) claim. `xms_edov` is honored
+    // only for Entra issuers — it's an Entra-specific signal.
+    let is_entra_issuer = provider.issuer.contains("login.microsoftonline.com");
+    let email_is_verified =
+        claims.email_verified || (is_entra_issuer && claims.xms_edov == Some(true));
+    if !email_is_verified {
+        if is_entra_issuer {
+            anyhow::bail!(
+                "Email address is not verified by the identity provider. \
+                 Microsoft Entra does not emit `email_verified`; configure the \
+                 `xms_edov` optional claim on your app registration (Azure \
+                 portal → App registrations → your app → Token configuration → \
+                 Add optional claim → ID → xms_edov) and re-attempt enrollment. \
+                 Note: the app's supported account types must exclude personal \
+                 Microsoft accounts — `/common/v2.0` is not supported."
+            );
+        }
         anyhow::bail!("Email address is not verified by the identity provider");
     }
 
     // Entra-specific tenant validation.
-    // For Entra issuers (`login.microsoftonline.com`), check the `tid` claim:
-    //   - Cross-check tid against the tenant UUID in the token's `iss` claim
-    //     to prevent cross-tenant token injection. When /organizations/ or /common/
-    //     is configured, provider.issuer holds the template; claims.iss holds the
-    //     real per-tenant UUID from the validated token.
-    //   - The MSA meta-tenant is allowed (personal Microsoft accounts), but its
-    //     tokens get domain=None below so no organization is auto-created.
-    let is_entra = provider.issuer.contains("login.microsoftonline.com");
-    let entra_tid = if is_entra {
+    // For Entra issuers, cross-check the `tid` claim against the tenant UUID
+    // in the token's `iss` claim to prevent cross-tenant token injection. When
+    // `/organizations/` is configured, provider.issuer holds the `{tenantid}`
+    // template; claims.iss holds the real per-tenant UUID from the validated
+    // token.
+    if is_entra_issuer {
         let tid = claims.tid.as_deref().unwrap_or("");
 
-        // Cross-check tid against the tenant UUID in the token's iss claim.
-        // Use claims.iss (the real per-tenant issuer from the signed token) rather
-        // than provider.issuer (which may be the /organizations/ template string).
         if let Some(expected_tid) = extract_entra_tenant_from_issuer(&claims.iss)
             && !tid.eq_ignore_ascii_case(expected_tid)
         {
@@ -394,25 +414,20 @@ pub(crate) async fn verify_id_token(
         }
 
         tracing::info!(tid = %tid, iss = %claims.iss, "Entra tenant validated");
-        Some(tid.to_string())
-    } else {
-        None
-    };
+    }
 
     // Domain extraction:
     // - Google with `hd` claim: use it (Workspace hosted domain).
     // - Google without `hd`: None (consumer account, don't group).
-    // - Entra MSA meta-tenant: None (personal account, don't group).
-    // - All other providers: extract domain from the email address.
+    // - All other providers (including Entra): extract domain from the email
+    //   address. Personal Microsoft accounts cannot reach this point because
+    //   `/common/` is rejected at discovery and `/organizations/` excludes MSA.
     //
     // Normalize to ASCII lowercase so that org lookups match regardless of
     // the case the IdP returned. Org domains are stored lowercase.
     let is_google = provider.issuer.contains("accounts.google.com");
-    let is_entra_msa = entra_tid.as_deref() == Some(ENTRA_MSA_TENANT_ID);
     let domain = if is_google {
         claims.hd.as_deref().map(str::to_ascii_lowercase)
-    } else if is_entra_msa {
-        None
     } else {
         claims.email.split('@').nth(1).map(str::to_ascii_lowercase)
     };
@@ -724,6 +739,31 @@ mod tests {
                 "https://login.microsoftonline.com/11111111-2222-3333-4444-555555555555/v2.0"
             )
             .is_ok()
+        );
+    }
+
+    #[test]
+    fn validate_discovered_issuer_entra_organizations_accepts_literal_placeholder() {
+        // Microsoft's discovery doc literally returns the `{tenantid}` placeholder.
+        assert!(
+            validate_discovered_issuer(
+                "https://login.microsoftonline.com/organizations/v2.0",
+                "https://login.microsoftonline.com/{tenantid}/v2.0"
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn validate_discovered_issuer_entra_organizations_rejects_non_uuid_path_segment() {
+        // The tightened check should reject arbitrary path segments that are
+        // neither the literal placeholder nor a UUID.
+        assert!(
+            validate_discovered_issuer(
+                "https://login.microsoftonline.com/organizations/v2.0",
+                "https://login.microsoftonline.com/notauuid/v2.0"
+            )
+            .is_err()
         );
     }
 
@@ -1262,49 +1302,6 @@ mod tests {
 
     // ── Entra tid claim validation ─────────────────────────────────────────
 
-    /// Token from the MSA meta-tenant (personal Microsoft account) succeeds
-    /// but `IdentityResult.domain` is `None` — matching Google consumer-account
-    /// behavior, so no organization is auto-created from the email domain.
-    #[tokio::test]
-    async fn verify_id_token_entra_msa_account_allowed_no_domain() {
-        use wiremock::MockServer;
-
-        let server = MockServer::start().await;
-        // /common/ template: provider holds template, token holds real per-tenant
-        // issuer with the MSA meta-tenant UUID.
-        let provider_issuer = "https://login.microsoftonline.com/common/v2.0".to_string();
-        let token_iss = format!("https://login.microsoftonline.com/{ENTRA_MSA_TENANT_ID}/v2.0");
-        let client_id = "test-client";
-        let nonce = "test-nonce";
-
-        let key = crate::services::oidc::OidcSigningKey::generate().unwrap();
-        mount_jwks(&server, &key).await;
-
-        let mut claims = base_claims(&token_iss, client_id);
-        claims["nonce"] = serde_json::json!(nonce);
-        claims["tid"] = serde_json::json!(ENTRA_MSA_TENANT_ID);
-        // Personal account using an external email — still gets domain=None
-        // because the tid identifies it as MSA, not because of the email domain.
-        claims["email"] = serde_json::json!("personal-user@outlook.com");
-
-        let token = sign_test_jwt(&key, claims).await;
-        let mut provider = make_test_provider(&provider_issuer);
-        provider.issuer = provider_issuer.clone();
-        provider.jwks_uri = url::Url::parse(&format!("{}/jwks", server.uri())).unwrap();
-        let client = reqwest::Client::new();
-
-        let result = verify_id_token(&client, &provider, &token, client_id, nonce)
-            .await
-            .unwrap();
-
-        assert_eq!(result.email, "personal-user@outlook.com");
-        assert!(
-            result.domain.is_none(),
-            "MSA personal account must have domain=None, got: {:?}",
-            result.domain
-        );
-    }
-
     /// Token tid must match the tenant UUID in the issuer URL.
     #[tokio::test]
     async fn verify_id_token_entra_tid_mismatch_rejected() {
@@ -1372,20 +1369,28 @@ mod tests {
         assert_eq!(result.email, "alice@example.com");
     }
 
-    // ── /organizations/ provider.issuer with real per-tenant token iss ─────
+    // ── {tenantid}-template provider.issuer with real per-tenant token iss ──
+    //
+    // After fetch_discovery() hits /common/v2.0/.well-known/openid-configuration
+    // or /organizations/v2.0/.well-known/openid-configuration, Microsoft returns
+    // the literal placeholder `https://login.microsoftonline.com/{tenantid}/v2.0`
+    // as the discovery document's `issuer`. That literal string is what gets
+    // stored in OidcProvider::issuer — these tests exercise that post-discovery
+    // state, not the configured /common/ or /organizations/ URL.
 
-    /// When provider.issuer is the /organizations/ template, the library issuer
-    /// check is disabled. A token with a real per-tenant iss and matching tid
-    /// must succeed.
+    /// When provider.issuer is the literal `{tenantid}` template (the form
+    /// Microsoft returns from /common/ and /organizations/ discovery), the
+    /// library issuer check must be disabled. A token with a real per-tenant
+    /// iss and matching tid must succeed.
     #[tokio::test]
-    async fn verify_id_token_entra_organizations_provider_with_tenant_token_succeeds() {
+    async fn verify_id_token_entra_tenant_template_with_per_tenant_token_succeeds() {
         use wiremock::MockServer;
 
         let server = MockServer::start().await;
         let tenant_id = "11111111-2222-3333-4444-555555555555";
-        // This is what OidcProvider::issuer holds after fetch_discovery from /organizations/
-        let organizations_issuer =
-            "https://login.microsoftonline.com/organizations/v2.0".to_string();
+        // This is exactly what OidcProvider::issuer holds after fetch_discovery
+        // from either /common/v2.0 or /organizations/v2.0.
+        let template_issuer = "https://login.microsoftonline.com/{tenantid}/v2.0".to_string();
         // Real tokens have the per-tenant UUID in their iss claim
         let token_iss = format!("https://login.microsoftonline.com/{tenant_id}/v2.0");
         let client_id = "test-client";
@@ -1401,9 +1406,9 @@ mod tests {
 
         let token = sign_test_jwt(&key, claims).await;
 
-        // provider.issuer is the /organizations/ template (as stored after discovery)
-        let mut provider = make_test_provider(&organizations_issuer);
-        provider.issuer = organizations_issuer.clone();
+        // provider.issuer is the literal {tenantid} template (as stored after discovery)
+        let mut provider = make_test_provider(&template_issuer);
+        provider.issuer = template_issuer.clone();
         provider.jwks_uri = url::Url::parse(&format!("{}/jwks", server.uri())).unwrap();
         let client = reqwest::Client::new();
 
@@ -1414,17 +1419,17 @@ mod tests {
         assert_eq!(result.email, "alice@example.com");
     }
 
-    /// When provider.issuer is /organizations/, a token whose tid does not match
-    /// the per-tenant UUID in its own iss claim must be rejected.
+    /// When provider.issuer is the `{tenantid}` template, a token whose tid
+    /// does not match the per-tenant UUID in its own iss claim must be
+    /// rejected as a cross-tenant injection attempt.
     #[tokio::test]
-    async fn verify_id_token_entra_organizations_tid_mismatch_rejected() {
+    async fn verify_id_token_entra_tenant_template_tid_mismatch_rejected() {
         use wiremock::MockServer;
 
         let server = MockServer::start().await;
         let token_tenant = "11111111-2222-3333-4444-555555555555";
         let other_tenant = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
-        let organizations_issuer =
-            "https://login.microsoftonline.com/organizations/v2.0".to_string();
+        let template_issuer = "https://login.microsoftonline.com/{tenantid}/v2.0".to_string();
         let token_iss = format!("https://login.microsoftonline.com/{token_tenant}/v2.0");
         let client_id = "test-client";
         let nonce = "test-nonce";
@@ -1439,8 +1444,8 @@ mod tests {
 
         let token = sign_test_jwt(&key, claims).await;
 
-        let mut provider = make_test_provider(&organizations_issuer);
-        provider.issuer = organizations_issuer.clone();
+        let mut provider = make_test_provider(&template_issuer);
+        provider.issuer = template_issuer.clone();
         provider.jwks_uri = url::Url::parse(&format!("{}/jwks", server.uri())).unwrap();
         let client = reqwest::Client::new();
 
@@ -1454,29 +1459,250 @@ mod tests {
         );
     }
 
-    // ── Fix 3: validate_discovered_issuer handles /common/ ─────────────────
+    /// Regression test for /common/ login `InvalidIssuer` failure: when
+    /// provider.issuer is the `{tenantid}` template, a token with an arbitrary
+    /// non-Entra issuer must be rejected with the manual Entra check (not pass
+    /// through silently because the library check was disabled).
+    #[tokio::test]
+    async fn verify_id_token_entra_tenant_template_rejects_non_entra_issuer() {
+        use wiremock::MockServer;
 
-    #[test]
-    fn validate_discovered_issuer_entra_common_accepts_tenant_issuer() {
-        // Fix 3: /common/ configured; discovered issuer is per-tenant (same as /organizations/)
+        let server = MockServer::start().await;
+        let template_issuer = "https://login.microsoftonline.com/{tenantid}/v2.0".to_string();
+        let token_iss = "https://evil.example.com/".to_string();
+        let client_id = "test-client";
+        let nonce = "test-nonce";
+
+        let key = crate::services::oidc::OidcSigningKey::generate().unwrap();
+        mount_jwks(&server, &key).await;
+
+        let mut claims = base_claims(&token_iss, client_id);
+        claims["nonce"] = serde_json::json!(nonce);
+
+        let token = sign_test_jwt(&key, claims).await;
+
+        let mut provider = make_test_provider(&template_issuer);
+        provider.issuer = template_issuer.clone();
+        provider.jwks_uri = url::Url::parse(&format!("{}/jwks", server.uri())).unwrap();
+        let client = reqwest::Client::new();
+
+        let err = verify_id_token(&client, &provider, &token, client_id, nonce)
+            .await
+            .unwrap_err();
+
         assert!(
-            validate_discovered_issuer(
-                "https://login.microsoftonline.com/common/v2.0",
-                "https://login.microsoftonline.com/11111111-2222-3333-4444-555555555555/v2.0"
-            )
-            .is_ok()
+            err.to_string().contains("not a valid per-tenant issuer"),
+            "expected per-tenant issuer rejection, got: {err}"
+        );
+    }
+
+    // ── /common/ is rejected at discovery time ─────────────────────────────
+
+    /// `fetch_discovery` must reject `/common/v2.0` outright, before any HTTP
+    /// fetch is attempted. Apps with personal-MSA support cannot emit
+    /// `xms_edov`, so vouch refuses to start with such an issuer.
+    #[tokio::test]
+    async fn fetch_discovery_rejects_entra_common_issuer() {
+        let client = reqwest::Client::new();
+        let err = fetch_discovery(&client, "https://login.microsoftonline.com/common/v2.0")
+            .await
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("/common/") || msg.contains("not supported") || msg.contains("xms_edov"),
+            "expected /common/ rejection message, got: {msg}"
+        );
+        assert!(
+            msg.contains("organizations") || msg.contains("tenant"),
+            "error must point operators at /organizations/ or single-tenant, got: {msg}"
+        );
+    }
+
+    /// Entra tokens lack `email_verified` but include `xms_edov=true` when the
+    /// optional claim is configured. Verification must succeed.
+    #[tokio::test]
+    async fn verify_id_token_entra_xms_edov_true_accepted_without_email_verified() {
+        use wiremock::MockServer;
+
+        let server = MockServer::start().await;
+        let tenant_id = "11111111-2222-3333-4444-555555555555";
+        let template_issuer = "https://login.microsoftonline.com/{tenantid}/v2.0".to_string();
+        let token_iss = format!("https://login.microsoftonline.com/{tenant_id}/v2.0");
+        let client_id = "test-client";
+        let nonce = "test-nonce";
+
+        let key = crate::services::oidc::OidcSigningKey::generate().unwrap();
+        mount_jwks(&server, &key).await;
+
+        let mut claims = base_claims(&token_iss, client_id);
+        claims["nonce"] = serde_json::json!(nonce);
+        claims["tid"] = serde_json::json!(tenant_id);
+        // Entra never emits `email_verified` — explicitly remove it to
+        // reproduce real production tokens.
+        claims.as_object_mut().unwrap().remove("email_verified");
+        claims["xms_edov"] = serde_json::json!(true);
+
+        let token = sign_test_jwt(&key, claims).await;
+        let mut provider = make_test_provider(&template_issuer);
+        provider.issuer = template_issuer.clone();
+        provider.jwks_uri = url::Url::parse(&format!("{}/jwks", server.uri())).unwrap();
+        let client = reqwest::Client::new();
+
+        let result = verify_id_token(&client, &provider, &token, client_id, nonce)
+            .await
+            .unwrap();
+
+        assert_eq!(result.email, "alice@example.com");
+    }
+
+    /// Entra token with `xms_edov=false` (domain unverified) must be rejected
+    /// with an Entra-specific error message that points at the optional claim
+    /// configuration.
+    #[tokio::test]
+    async fn verify_id_token_entra_xms_edov_false_rejected_with_guidance() {
+        use wiremock::MockServer;
+
+        let server = MockServer::start().await;
+        let tenant_id = "11111111-2222-3333-4444-555555555555";
+        let template_issuer = "https://login.microsoftonline.com/{tenantid}/v2.0".to_string();
+        let token_iss = format!("https://login.microsoftonline.com/{tenant_id}/v2.0");
+        let client_id = "test-client";
+        let nonce = "test-nonce";
+
+        let key = crate::services::oidc::OidcSigningKey::generate().unwrap();
+        mount_jwks(&server, &key).await;
+
+        let mut claims = base_claims(&token_iss, client_id);
+        claims["nonce"] = serde_json::json!(nonce);
+        claims["tid"] = serde_json::json!(tenant_id);
+        claims.as_object_mut().unwrap().remove("email_verified");
+        claims["xms_edov"] = serde_json::json!(false);
+
+        let token = sign_test_jwt(&key, claims).await;
+        let mut provider = make_test_provider(&template_issuer);
+        provider.issuer = template_issuer.clone();
+        provider.jwks_uri = url::Url::parse(&format!("{}/jwks", server.uri())).unwrap();
+        let client = reqwest::Client::new();
+
+        let err = verify_id_token(&client, &provider, &token, client_id, nonce)
+            .await
+            .unwrap_err();
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("xms_edov"),
+            "expected xms_edov guidance, got: {msg}"
+        );
+        assert!(
+            msg.contains("not verified"),
+            "expected 'not verified', got: {msg}"
+        );
+    }
+
+    /// Entra token missing both `email_verified` and `xms_edov` (operator did
+    /// not configure the optional claim) must be rejected with guidance.
+    #[tokio::test]
+    async fn verify_id_token_entra_missing_xms_edov_rejected_with_guidance() {
+        use wiremock::MockServer;
+
+        let server = MockServer::start().await;
+        let tenant_id = "11111111-2222-3333-4444-555555555555";
+        let template_issuer = "https://login.microsoftonline.com/{tenantid}/v2.0".to_string();
+        let token_iss = format!("https://login.microsoftonline.com/{tenant_id}/v2.0");
+        let client_id = "test-client";
+        let nonce = "test-nonce";
+
+        let key = crate::services::oidc::OidcSigningKey::generate().unwrap();
+        mount_jwks(&server, &key).await;
+
+        let mut claims = base_claims(&token_iss, client_id);
+        claims["nonce"] = serde_json::json!(nonce);
+        claims["tid"] = serde_json::json!(tenant_id);
+        claims.as_object_mut().unwrap().remove("email_verified");
+        // No xms_edov claim — operator forgot to configure it in Azure.
+
+        let token = sign_test_jwt(&key, claims).await;
+        let mut provider = make_test_provider(&template_issuer);
+        provider.issuer = template_issuer.clone();
+        provider.jwks_uri = url::Url::parse(&format!("{}/jwks", server.uri())).unwrap();
+        let client = reqwest::Client::new();
+
+        let err = verify_id_token(&client, &provider, &token, client_id, nonce)
+            .await
+            .unwrap_err();
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("xms_edov"),
+            "expected xms_edov guidance, got: {msg}"
+        );
+        assert!(
+            msg.contains("Token configuration"),
+            "expected Azure setup guidance, got: {msg}"
+        );
+    }
+
+    /// `xms_edov` is an Entra-specific signal. A non-Entra token with
+    /// `xms_edov=true` and `email_verified=false` must still be rejected.
+    #[tokio::test]
+    async fn verify_id_token_non_entra_xms_edov_does_not_override_email_verified() {
+        use wiremock::MockServer;
+
+        let server = MockServer::start().await;
+        let issuer = server.uri();
+        let client_id = "test-client";
+        let nonce = "test-nonce";
+
+        let key = crate::services::oidc::OidcSigningKey::generate().unwrap();
+        mount_jwks(&server, &key).await;
+
+        let mut claims = base_claims(&issuer, client_id);
+        claims["nonce"] = serde_json::json!(nonce);
+        claims["email_verified"] = serde_json::json!(false);
+        claims["xms_edov"] = serde_json::json!(true);
+
+        let token = sign_test_jwt(&key, claims).await;
+        let provider = make_test_provider(&issuer);
+        let client = reqwest::Client::new();
+
+        let err = verify_id_token(&client, &provider, &token, client_id, nonce)
+            .await
+            .unwrap_err();
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("not verified"),
+            "expected 'not verified', got: {msg}"
+        );
+        // Non-Entra error message must not include Entra-specific guidance.
+        assert!(
+            !msg.contains("xms_edov"),
+            "non-Entra error must not mention xms_edov, got: {msg}"
         );
     }
 
     #[test]
-    fn validate_discovered_issuer_entra_common_rejects_non_tenant_issuer() {
-        // /common/ configured but discovered issuer is a completely different host
-        assert!(
-            validate_discovered_issuer(
-                "https://login.microsoftonline.com/common/v2.0",
-                "https://evil.example.com/token"
-            )
-            .is_err()
-        );
+    fn is_entra_tenant_template_issuer_detects_post_discovery_form() {
+        // Both /v2.0 and bare tail variants of the literal placeholder
+        assert!(is_entra_tenant_template_issuer(
+            "https://login.microsoftonline.com/{tenantid}/v2.0"
+        ));
+        assert!(is_entra_tenant_template_issuer(
+            "https://login.microsoftonline.com/{tenantid}"
+        ));
+        // Concrete per-tenant UUIDs and configured /common/ form must NOT match
+        assert!(!is_entra_tenant_template_issuer(
+            "https://login.microsoftonline.com/11111111-2222-3333-4444-555555555555/v2.0"
+        ));
+        assert!(!is_entra_tenant_template_issuer(
+            "https://login.microsoftonline.com/common/v2.0"
+        ));
+        assert!(!is_entra_tenant_template_issuer(
+            "https://login.microsoftonline.com/organizations/v2.0"
+        ));
+        // Other hosts must not match even if they contain {tenantid}
+        assert!(!is_entra_tenant_template_issuer(
+            "https://evil.example.com/{tenantid}/v2.0"
+        ));
     }
 }
