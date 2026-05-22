@@ -141,7 +141,7 @@ The previous flat single-IdP environment variables (`VOUCH_OIDC_ISSUER`, `VOUCH_
 | `email` | User email / principal | Yes |
 | `email_verified` | Email verification status | Yes (must be `true`) |
 | `hd` | Google Workspace hosted domain | No (Google-specific) |
-| `tid` | Entra tenant ID | No (Entra-specific, cross-checked against issuer; MSA meta-tenant → no org auto-created) |
+| `tid` | Entra tenant ID | No (Entra-specific, cross-checked against issuer UUID to prevent cross-tenant token injection) |
 
 ### SAML Attributes
 
