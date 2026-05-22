@@ -520,6 +520,42 @@ pub struct StaleDomainRemoval {
     pub never_verified: bool,
 }
 
+/// Drop additional-domain entries from `doc` whose name appears in
+/// `drop_candidates`, **except** for entries currently in the
+/// [`AdditionalDomainState::Verified`] state, which are always preserved.
+///
+/// Returns `(domain, never_verified)` for each entry that was actually
+/// removed, where `never_verified` mirrors the value supplied in
+/// `drop_candidates` (true for pending-squat removals, false for
+/// auto-unverified drift).
+///
+/// This is the body of the [`DocumentStore::modify`] closure inside
+/// [`cleanup_stale_additional_domains`]. It is factored out so the
+/// "never remove verified" invariant can be tested in isolation. That
+/// invariant matters because the candidate set is computed from an earlier
+/// `list_all_paginated` snapshot and the doc may have been mutated (e.g.
+/// admin verification) between the read and the write — see issue #380.
+fn retain_non_verified_dropped(
+    doc: &mut OrganizationDoc,
+    drop_candidates: &std::collections::HashMap<String, bool>,
+) -> Vec<(String, bool)> {
+    let mut removed_this_attempt = Vec::new();
+    doc.additional_domains.retain(|ad| {
+        // Re-check state on the fresh doc body: never remove an entry that
+        // has flipped to Verified since list_all_paginated.
+        if matches!(ad.state, AdditionalDomainState::Verified { .. }) {
+            return true;
+        }
+        if let Some(&never_verified) = drop_candidates.get(&ad.domain) {
+            removed_this_attempt.push((ad.domain.clone(), never_verified));
+            false
+        } else {
+            true
+        }
+    });
+    removed_this_attempt
+}
+
 /// Garbage-collect additional-domain entries that have outlived their TTL.
 ///
 /// Two categories are removed:
@@ -581,15 +617,29 @@ pub async fn cleanup_stale_additional_domains(
             if to_remove.is_empty() {
                 continue;
             }
-            let domains_to_drop: std::collections::HashSet<String> =
-                to_remove.iter().map(|(d, _)| d.clone()).collect();
+            let drop_candidates: std::collections::HashMap<String, bool> =
+                to_remove.iter().cloned().collect();
+            // Captured by the modify closure so we can record which entries
+            // were actually removed on the committed attempt. modify re-reads
+            // fresh data on every retry and re-invokes the closure, so we
+            // rewrite this on each call; when modify returns Ok(true) the
+            // final contents reflect the committed write. Mutex (not RefCell)
+            // because the surrounding future must be Send for tokio::spawn.
+            let actually_removed: std::sync::Mutex<Vec<(String, bool)>> =
+                std::sync::Mutex::new(Vec::new());
             // Per-org error isolation: one failing modify (transient DB
             // error, version conflict, etc.) must not abort cleanup for
             // every org that follows. Log and continue; next tick retries.
             let updated = match store
                 .modify::<OrganizationDoc, _>(&org.id, |doc| {
-                    doc.additional_domains
-                        .retain(|ad| !domains_to_drop.contains(&ad.domain));
+                    let removed_this_attempt = retain_non_verified_dropped(doc, &drop_candidates);
+                    // Recover from poisoning rather than panic: the lock is
+                    // only held in this synchronous closure and a previous
+                    // panic here would already have aborted the modify call.
+                    match actually_removed.lock() {
+                        Ok(mut guard) => *guard = removed_this_attempt,
+                        Err(poisoned) => *poisoned.into_inner() = removed_this_attempt,
+                    }
                 })
                 .await
             {
@@ -604,7 +654,10 @@ pub async fn cleanup_stale_additional_domains(
                 }
             };
             if updated {
-                for (domain, never_verified) in to_remove {
+                let committed = actually_removed
+                    .into_inner()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                for (domain, never_verified) in committed {
                     removed.push(StaleDomainRemoval {
                         org_id: org.id.clone(),
                         domain,
@@ -1557,6 +1610,80 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    /// Regression for issue #380. `cleanup_stale_additional_domains` computes
+    /// its removal candidate set from a [`list_all_paginated`] snapshot, but
+    /// the actual delete happens later inside [`DocumentStore::modify`]. If
+    /// the domain transitions Pending → Verified between those two phases,
+    /// the modify closure must still preserve it. The closure body
+    /// [`retain_non_verified_dropped`] enforces this invariant; this test
+    /// exercises it directly with a `drop_candidates` set that targets a
+    /// domain whose fresh state is `Verified`.
+    #[test]
+    fn retain_non_verified_dropped_preserves_freshly_verified_entry() {
+        use super::super::documents::organization::{
+            AdditionalDomain, AdditionalDomainState, OrganizationDoc,
+        };
+
+        let verified_at = jiff::Timestamp::now();
+        let added_at = verified_at
+            .checked_sub(jiff::Span::new().hours(10 * 24))
+            .unwrap();
+        let mut doc = OrganizationDoc {
+            domain: "acme.com".to_string(),
+            name: None,
+            created_by_user_id: None,
+            additional_domains: vec![
+                AdditionalDomain {
+                    // Modeled as "was Pending when the snapshot was taken,
+                    // now Verified" — i.e., the admin verified it during
+                    // the race window.
+                    domain: "racy.example.com".to_string(),
+                    verification_token: "tok".to_string(),
+                    added_at,
+                    added_by_user_id: "u1".to_string(),
+                    added_by_email: "u1@example.com".to_string(),
+                    consecutive_failures: 0,
+                    state: AdditionalDomainState::Verified {
+                        verified_at,
+                        last_checked_at: None,
+                    },
+                },
+                AdditionalDomain {
+                    // A genuinely stale Pending entry that should still be
+                    // removed even when other candidates are spared.
+                    domain: "squat.example.com".to_string(),
+                    verification_token: "tok2".to_string(),
+                    added_at,
+                    added_by_user_id: "u1".to_string(),
+                    added_by_email: "u1@example.com".to_string(),
+                    consecutive_failures: 0,
+                    state: AdditionalDomainState::Pending,
+                },
+            ],
+        };
+
+        let drop_candidates: std::collections::HashMap<String, bool> = vec![
+            ("racy.example.com".to_string(), true),
+            ("squat.example.com".to_string(), true),
+        ]
+        .into_iter()
+        .collect();
+
+        let removed = retain_non_verified_dropped(&mut doc, &drop_candidates);
+
+        assert_eq!(
+            removed,
+            vec![("squat.example.com".to_string(), true)],
+            "only the still-Pending entry should be reported as removed",
+        );
+        assert_eq!(doc.additional_domains.len(), 1);
+        assert_eq!(doc.additional_domains[0].domain, "racy.example.com");
+        assert!(matches!(
+            doc.additional_domains[0].state,
+            AdditionalDomainState::Verified { .. }
+        ));
     }
 
     #[tokio::test]
