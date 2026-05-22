@@ -140,15 +140,27 @@ struct IdTokenClaims {
 /// Returns `true` for both
 /// `https://login.microsoftonline.com/organizations/v2.0` (Entra) and
 /// `https://login.microsoftonline.com/organizations` variants.
+///
+/// Parses the URL and matches on `host_str()` to avoid substring spoofing
+/// (e.g., `login.microsoftonline.com.evil.com`).
 fn is_entra_organizations_issuer(issuer: &str) -> bool {
-    issuer.contains("login.microsoftonline.com")
-        && (issuer.contains("/organizations/") || issuer.ends_with("/organizations"))
+    let Ok(url) = Url::parse(issuer) else {
+        return false;
+    };
+    url.host_str() == Some("login.microsoftonline.com")
+        && (url.path().starts_with("/organizations/") || url.path() == "/organizations")
 }
 
 /// Check whether an issuer URL is an Entra `/common/` endpoint.
+///
+/// Parses the URL and matches on `host_str()` to avoid substring spoofing
+/// (e.g., `login.microsoftonline.com.evil.com`).
 fn is_entra_common_issuer(issuer: &str) -> bool {
-    issuer.contains("login.microsoftonline.com")
-        && (issuer.contains("/common/") || issuer.ends_with("/common"))
+    let Ok(url) = Url::parse(issuer) else {
+        return false;
+    };
+    url.host_str() == Some("login.microsoftonline.com")
+        && (url.path().starts_with("/common/") || url.path() == "/common")
 }
 
 /// Check whether an issuer URL is the Entra per-tenant template returned by
@@ -158,9 +170,19 @@ fn is_entra_common_issuer(issuer: &str) -> bool {
 /// for multi-tenant Entra endpoints — Microsoft returns the literal string
 /// `https://login.microsoftonline.com/{tenantid}/v2.0` as the discovery
 /// document's `issuer`, not a concrete tenant URL.
+///
+/// Parses the URL and matches on `host_str()` to avoid substring spoofing
+/// (e.g., `login.microsoftonline.com.evil.com`). The `url` crate
+/// percent-encodes `{` and `}` in paths, so we match the encoded form.
 fn is_entra_tenant_template_issuer(issuer: &str) -> bool {
-    issuer.contains("login.microsoftonline.com")
-        && (issuer.contains("/{tenantid}/") || issuer.ends_with("/{tenantid}"))
+    let Ok(url) = Url::parse(issuer) else {
+        return false;
+    };
+    if url.host_str() != Some("login.microsoftonline.com") {
+        return false;
+    }
+    let path = url.path();
+    path == "/%7Btenantid%7D" || path.starts_with("/%7Btenantid%7D/")
 }
 
 /// Validate that the discovered issuer matches the configured issuer,
@@ -832,6 +854,88 @@ mod tests {
     #[test]
     fn is_entra_common_issuer_does_not_match_google() {
         assert!(!is_entra_common_issuer("https://accounts.google.com"));
+    }
+
+    // ── lookalike-domain rejection tests (host-based matching) ─────────────
+
+    #[test]
+    fn is_entra_organizations_issuer_rejects_evil_subdomain() {
+        // These URLs contain "login.microsoftonline.com" as a substring but the
+        // host is NOT Microsoft. The previous `contains()` check would have
+        // accepted these.
+        assert!(!is_entra_organizations_issuer(
+            "https://login.microsoftonline.com.evil.com/organizations/v2.0"
+        ));
+        assert!(!is_entra_organizations_issuer(
+            "https://login.microsoftonline.com.attacker.org/organizations/v2.0"
+        ));
+        // Path-based spoof: host is attacker-controlled, microsoft string in path.
+        assert!(!is_entra_organizations_issuer(
+            "https://evil.com/login.microsoftonline.com/organizations/v2.0"
+        ));
+    }
+
+    #[test]
+    fn is_entra_organizations_issuer_rejects_malformed_urls() {
+        assert!(!is_entra_organizations_issuer("not a url"));
+        assert!(!is_entra_organizations_issuer(""));
+    }
+
+    #[test]
+    fn is_entra_organizations_issuer_accepts_legitimate_microsoft() {
+        assert!(is_entra_organizations_issuer(
+            "https://login.microsoftonline.com/organizations/v2.0"
+        ));
+        assert!(is_entra_organizations_issuer(
+            "https://login.microsoftonline.com/organizations"
+        ));
+    }
+
+    #[test]
+    fn is_entra_common_issuer_rejects_evil_subdomain() {
+        assert!(!is_entra_common_issuer(
+            "https://login.microsoftonline.com.evil.com/common/v2.0"
+        ));
+        assert!(!is_entra_common_issuer(
+            "https://evil.com/login.microsoftonline.com/common/v2.0"
+        ));
+    }
+
+    #[test]
+    fn is_entra_tenant_template_issuer_rejects_evil_subdomain() {
+        assert!(!is_entra_tenant_template_issuer(
+            "https://login.microsoftonline.com.evil.com/{tenantid}/v2.0"
+        ));
+    }
+
+    #[test]
+    fn validate_discovered_issuer_rejects_evil_subdomain_discovery_bypass() {
+        // Configured issuer is on an attacker-controlled lookalike subdomain.
+        // The discovered issuer is the real Microsoft URL. The Entra fallback
+        // must NOT trigger here — the configured host must be Microsoft.
+        assert!(
+            validate_discovered_issuer(
+                "https://login.microsoftonline.com.evil.com/organizations/v2.0",
+                "https://login.microsoftonline.com/00000000-0000-0000-0000-000000000000/v2.0",
+            )
+            .is_err()
+        );
+        // The reverse: configured is real Microsoft, but discovered host is
+        // attacker-controlled. Tenant template / tenant extraction must reject.
+        assert!(
+            validate_discovered_issuer(
+                "https://login.microsoftonline.com/organizations/v2.0",
+                "https://login.microsoftonline.com.evil.com/{tenantid}/v2.0",
+            )
+            .is_err()
+        );
+        assert!(
+            validate_discovered_issuer(
+                "https://login.microsoftonline.com/organizations/v2.0",
+                "https://login.microsoftonline.com.evil.com/00000000-0000-0000-0000-000000000000/v2.0",
+            )
+            .is_err()
+        );
     }
 
     // ── wiremock integration tests for fetch_discovery ──────────────────
