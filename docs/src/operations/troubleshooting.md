@@ -33,7 +33,8 @@
 **"Issuer mismatch" during OIDC discovery**
 - The `issuer` field in the discovery document must exactly match `VOUCH_IDP_<SLUG>_ISSUER` (trailing slashes matter)
 - Some providers require a trailing slash (e.g., Auth0: `https://tenant.auth0.com/`)
-- Entra `/organizations/v2.0` and `/common/v2.0` are special-cased automatically — the per-tenant template issuer is accepted
+- Entra `/organizations/v2.0` is special-cased — its `{tenantid}` template issuer is accepted
+- Entra `/common/v2.0` is rejected at startup; use `/organizations/v2.0` or a single-tenant URL (see [Microsoft Entra ID](../idp/entra-id.md))
 
 **"Failed to fetch SAML IdP metadata"**
 - Verify the configured `VOUCH_IDP_<SLUG>_METADATA_URL` is correct and reachable
