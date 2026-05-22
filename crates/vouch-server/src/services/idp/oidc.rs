@@ -181,12 +181,13 @@ fn validate_discovered_issuer(configured: &str, discovered: &str) -> anyhow::Res
         return Ok(());
     }
 
-    // Entra `/organizations/v2.0` returns a per-tenant issuer template. Accept
-    // it iff configured is `/organizations/` and discovered matches the
-    // expected pattern. `/common/` is rejected before reaching this function.
+    // Entra `/organizations/` discovery returns either the literal placeholder
+    // `https://login.microsoftonline.com/{tenantid}/v2.0` (per Microsoft docs)
+    // or a concrete per-tenant URL. Accept either form when configured is an
+    // `/organizations/` URL. `/common/` is rejected earlier in fetch_discovery.
     if is_entra_organizations_issuer(configured)
-        && discovered.starts_with("https://login.microsoftonline.com/")
-        && discovered.ends_with("/v2.0")
+        && (is_entra_tenant_template_issuer(discovered)
+            || extract_entra_tenant_from_issuer(discovered).is_some())
     {
         return Ok(());
     }
@@ -328,14 +329,15 @@ pub(crate) async fn verify_id_token(
     // Find matching key by kid, then by algorithm
     let decoding_key = find_decoding_key(&jwks, header.kid.as_deref(), alg)?;
 
-    // Validate the token: signature, exp, iss, aud
+    // Entra `/organizations/v2.0` discovery stores the literal `{tenantid}`
+    // placeholder in `provider.issuer`; real tokens carry a concrete tenant
+    // UUID. In that case skip the jsonwebtoken `iss` check and validate the
+    // shape of `claims.iss` after decoding. Single-tenant Entra and other
+    // IdPs use the standard check.
+    let entra_template_issuer = is_entra_tenant_template_issuer(&provider.issuer);
+
     let mut validation = jsonwebtoken::Validation::new(alg);
-    // Entra `/organizations/v2.0` discovery returns the literal template
-    // `{tenantid}` as the issuer in OidcProvider::issuer; real tokens contain
-    // a per-tenant UUID. For that case, leave validation.iss = None (skip
-    // library check) and validate the issuer manually below. Single-tenant
-    // Entra configs and other IdPs fall through to the standard check.
-    if !is_entra_tenant_template_issuer(&provider.issuer) {
+    if !entra_template_issuer {
         validation.set_issuer(&[&provider.issuer]);
     }
     validation.set_audience(&[expected_client_id]);
@@ -345,14 +347,7 @@ pub(crate) async fn verify_id_token(
 
     let claims = token_data.claims;
 
-    // For the `{tenantid}` template case the library issuer check was skipped.
-    // Manually verify the token's iss is a valid Entra per-tenant issuer URL,
-    // not an arbitrary host. Rejects anything that isn't
-    // `https://login.microsoftonline.com/<uuid>/v2.0`.
-    if is_entra_tenant_template_issuer(&provider.issuer)
-        && (!claims.iss.starts_with("https://login.microsoftonline.com/")
-            || extract_entra_tenant_from_issuer(&claims.iss).is_none())
-    {
+    if entra_template_issuer && extract_entra_tenant_from_issuer(&claims.iss).is_none() {
         anyhow::bail!(
             "Entra token issuer '{}' is not a valid per-tenant issuer. \
              Expected https://login.microsoftonline.com/<uuid>/v2.0",
@@ -744,6 +739,31 @@ mod tests {
                 "https://login.microsoftonline.com/11111111-2222-3333-4444-555555555555/v2.0"
             )
             .is_ok()
+        );
+    }
+
+    #[test]
+    fn validate_discovered_issuer_entra_organizations_accepts_literal_placeholder() {
+        // Microsoft's discovery doc literally returns the `{tenantid}` placeholder.
+        assert!(
+            validate_discovered_issuer(
+                "https://login.microsoftonline.com/organizations/v2.0",
+                "https://login.microsoftonline.com/{tenantid}/v2.0"
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn validate_discovered_issuer_entra_organizations_rejects_non_uuid_path_segment() {
+        // The tightened check should reject arbitrary path segments that are
+        // neither the literal placeholder nor a UUID.
+        assert!(
+            validate_discovered_issuer(
+                "https://login.microsoftonline.com/organizations/v2.0",
+                "https://login.microsoftonline.com/notauuid/v2.0"
+            )
+            .is_err()
         );
     }
 
