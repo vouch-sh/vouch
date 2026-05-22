@@ -862,8 +862,12 @@ impl ServerConfig {
     /// Call this after all config sources (env, S3) have been merged.
     pub fn validate(&self) -> Result<()> {
         // Reject duplicate IdP slugs — order matters for UI but ids must be unique.
+        // Also enforce slug format here so all merged sources (env, S3) are
+        // checked consistently — env parsing already runs validate_provider_slug,
+        // but S3-sourced IdPs would otherwise bypass it.
         let mut seen = std::collections::HashSet::new();
         for idp in &self.idps {
+            validate_provider_slug(idp.id())?;
             if !seen.insert(idp.id()) {
                 anyhow::bail!(
                     "Duplicate IdP slug '{}' in VOUCH_IDPS / idps[].id",

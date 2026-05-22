@@ -1416,6 +1416,62 @@ mod tests {
         assert_eq!(config.idps[1].kind_str(), "saml");
     }
 
+    /// Regression: S3-sourced IdP slugs must be checked against the documented
+    /// `[a-z0-9-]{1,32}` format, just like env-var-sourced slugs. Before the
+    /// fix, an uppercase id like `MyProvider` would pass validate() while the
+    /// same id via VOUCH_IDPS was rejected. See issue #382.
+    #[test]
+    fn test_merge_s3_config_validates_idp_slug_format() {
+        let json = r#"{
+            "idps": [
+                {
+                    "id": "MyProvider",
+                    "type": "oidc",
+                    "issuer": "https://accounts.google.com",
+                    "client_id": "client-abc",
+                    "client_secret": "secret-xyz"
+                }
+            ]
+        }"#;
+        let s3: S3Config = serde_json::from_str(json).expect("parse");
+        let mut config = crate::test_utils::test_config();
+        config.idps.clear();
+
+        config.merge_s3_config(&s3, false).unwrap();
+
+        let err = config
+            .validate()
+            .expect_err("uppercase slug must be rejected")
+            .to_string();
+        assert!(
+            err.contains("must match [a-z0-9-]"),
+            "expected slug format error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_merge_s3_config_rejects_underscore_in_idp_slug() {
+        let json = r#"{
+            "idps": [
+                {
+                    "id": "corp_saml",
+                    "type": "saml",
+                    "metadata_url": "https://idp.example.com/saml/metadata"
+                }
+            ]
+        }"#;
+        let s3: S3Config = serde_json::from_str(json).expect("parse");
+        let mut config = crate::test_utils::test_config();
+        config.idps.clear();
+
+        config.merge_s3_config(&s3, false).unwrap();
+
+        assert!(
+            config.validate().is_err(),
+            "underscore in slug must be rejected"
+        );
+    }
+
     #[test]
     fn test_s3_config_deserialization_with_idps_saml_only() {
         let json = r#"{
