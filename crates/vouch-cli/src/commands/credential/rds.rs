@@ -17,7 +17,7 @@
 use anyhow::{Context, Result};
 use secrecy::{ExposeSecret, SecretString};
 
-use crate::commands::credential::aws::exchange_for_sts_credentials;
+use crate::commands::credential::aws::{StsRequest, exchange_for_sts_credentials};
 use crate::commands::credential::cache;
 use crate::integrations::aws;
 use crate::integrations::aws::sigv4::{
@@ -92,7 +92,15 @@ async fn generate_rds_token(
     region: &str,
     role_arn: &str,
 ) -> Result<String> {
-    let result = exchange_for_sts_credentials(server, role_arn, region, None).await?;
+    let agent_source = crate::commands::credential::aws::detect_agent_source();
+    let result = exchange_for_sts_credentials(StsRequest {
+        server,
+        role_arn,
+        region,
+        management_role: None,
+        agent_source: agent_source.as_deref(),
+    })
+    .await?;
 
     // Build presigned URL for RDS IAM auth
     let endpoint = format!("https://{hostname}:{port}");
