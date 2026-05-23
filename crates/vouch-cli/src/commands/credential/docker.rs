@@ -216,7 +216,10 @@ async fn get_ecr_credential(
         )
     })?;
 
-    let result = exchange_for_sts_credentials(server, &role_arn, region, None).await?;
+    let agent_source = crate::commands::credential::aws::detect_agent_source();
+    let result =
+        exchange_for_sts_credentials(server, &role_arn, region, None, agent_source.as_deref())
+            .await?;
 
     // Call ECR GetAuthorizationToken
     let ecr_token = get_ecr_authorization_token(

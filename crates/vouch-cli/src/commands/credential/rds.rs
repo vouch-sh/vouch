@@ -92,7 +92,10 @@ async fn generate_rds_token(
     region: &str,
     role_arn: &str,
 ) -> Result<String> {
-    let result = exchange_for_sts_credentials(server, role_arn, region, None).await?;
+    let agent_source = crate::commands::credential::aws::detect_agent_source();
+    let result =
+        exchange_for_sts_credentials(server, role_arn, region, None, agent_source.as_deref())
+            .await?;
 
     // Build presigned URL for RDS IAM auth
     let endpoint = format!("https://{hostname}:{port}");

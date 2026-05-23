@@ -138,8 +138,25 @@ pub(crate) struct StsExchangeResult {
 /// - `ANTIGRAVITY_AGENT`: <https://github.com/vercel/vercel/blob/main/packages/detect-agent/src/index.ts>
 /// - `OPENCODE_CLIENT`: <https://github.com/vercel/vercel/blob/main/packages/detect-agent/src/index.ts>
 /// - `CLINE_ACTIVE`: <https://github.com/cline/cline/discussions/5366>
-fn detect_agent_source() -> Option<String> {
+pub(crate) fn detect_agent_source() -> Option<String> {
     detect_agent_source_from(|k| std::env::var(k).ok())
+}
+
+/// Build the cache key for AWS STS credentials.
+///
+/// The agent source is folded into the key so that agent and non-agent
+/// invocations (and invocations from different agents) never share a
+/// cached entry — they receive credentials with different session
+/// policies and principal tags. See issue #398.
+fn build_cache_key(role_arn: &str, mgmt: Option<&str>, agent: Option<&str>) -> String {
+    let suffix = match agent {
+        Some(src) => format!(":agent:{src}"),
+        None => String::new(),
+    };
+    match mgmt {
+        Some(mgmt_role) => format!("aws:chain:{mgmt_role}:{role_arn}{suffix}"),
+        None => format!("aws:{role_arn}{suffix}"),
+    }
 }
 
 /// Inner implementation of [`detect_agent_source`] parameterised over the env
@@ -225,6 +242,7 @@ pub(crate) async fn exchange_for_sts_credentials(
     role_arn: &str,
     region: &str,
     management_role: Option<&str>,
+    agent_source: Option<&str>,
 ) -> Result<StsExchangeResult> {
     use crate::integrations::aws::sts::{
         WebIdentityRequest, assume_role, assume_role_with_web_identity, parse_role_arn,
@@ -246,8 +264,10 @@ pub(crate) async fn exchange_for_sts_credentials(
     let arn = parse_role_arn(role_arn)?;
     let domain_suffix = arn.partition.dns_suffix();
 
-    // Detect AI agent environment and apply restrictions automatically
-    let agent_source = detect_agent_source();
+    // Apply AI-agent restrictions when the caller detected an agent context.
+    // Detection must happen at the caller — and, for cached callers, before
+    // the cache lookup — otherwise a cache hit would silently return
+    // credentials minted in the wrong context (issue #398).
     let agent_policies: &[&str] = if agent_source.is_some() {
         &["ReadOnlyAccess"]
     } else {
@@ -258,7 +278,7 @@ pub(crate) async fn exchange_for_sts_credentials(
 
     // Set DPoP source claim for agent attribution (tamperproof via DPoP signature).
     // Server extracts this to add AI-specific session tags to the JWT.
-    if let Some(source) = agent_source.as_deref() {
+    if let Some(source) = agent_source {
         tracing::info!("AI agent detected ({source}), applying ReadOnlyAccess session policy");
         client.set_dpop_source(source);
     }
@@ -402,15 +422,18 @@ pub(crate) fn resolve_management_role(
 pub(crate) async fn get_aws_credentials(server: &str, role_arn: &str) -> Result<serde_json::Value> {
     let vouch_config = crate::config::Config::load()?;
     let management_role = resolve_management_role(&vouch_config)?.filter(|m| m != role_arn);
-    let cache_key = if let Some(ref mgmt_role) = management_role {
-        format!("aws:chain:{mgmt_role}:{role_arn}")
-    } else {
-        format!("aws:{role_arn}")
-    };
+
+    // Detect agent context BEFORE the cache lookup. Folding the source into
+    // the cache key ensures agent and non-agent invocations never share a
+    // cached entry, which would otherwise hand the agent credentials minted
+    // without ReadOnlyAccess / `vouch:AccessType=ai` tags (issue #398).
+    let agent_source = detect_agent_source();
+    let cache_key = build_cache_key(role_arn, management_role.as_deref(), agent_source.as_deref());
 
     let mgmt = management_role;
+    let agent = agent_source;
     super::cache::get_or_fetch(&cache_key, "AWS credentials", || async move {
-        let output = fetch_and_assume(server, role_arn, mgmt.as_deref()).await?;
+        let output = fetch_and_assume(server, role_arn, mgmt.as_deref(), agent.as_deref()).await?;
         let expires_at = output.expiration.clone();
         Ok((output.to_json(), expires_at))
     })
@@ -435,10 +458,12 @@ async fn fetch_and_assume(
     server: &str,
     role_arn: &str,
     mgmt_role: Option<&str>,
+    agent_source: Option<&str>,
 ) -> Result<CredentialProcessOutput> {
     let region = crate::integrations::aws::resolve_region_with_fallback(role_arn)?;
 
-    let result = exchange_for_sts_credentials(server, role_arn, &region, mgmt_role).await?;
+    let result =
+        exchange_for_sts_credentials(server, role_arn, &region, mgmt_role, agent_source).await?;
     let creds = &result.credentials;
     Ok(CredentialProcessOutput {
         version: 1,
@@ -647,5 +672,52 @@ mod tests {
     fn test_detect_agent_claudecode_only() {
         let got = detect_agent_source_from(env(&[("CLAUDECODE", "1")]));
         assert_eq!(got.as_deref(), Some("claude-code"));
+    }
+
+    const ROLE: &str = "arn:aws:iam::123456789012:role/target";
+    const MGMT: &str = "arn:aws:iam::123456789012:role/mgmt";
+
+    /// Direct (no chaining), no agent: backward-compatible key format.
+    #[test]
+    fn test_build_cache_key_direct_no_agent() {
+        assert_eq!(build_cache_key(ROLE, None, None), format!("aws:{ROLE}"));
+    }
+
+    /// Chained (management role), no agent: backward-compatible key format.
+    #[test]
+    fn test_build_cache_key_chain_no_agent() {
+        assert_eq!(
+            build_cache_key(ROLE, Some(MGMT), None),
+            format!("aws:chain:{MGMT}:{ROLE}")
+        );
+    }
+
+    /// Agent context produces a different key than no-agent — this is the
+    /// invariant that prevents issue #398's cache-confusion bypass.
+    #[test]
+    fn test_build_cache_key_differs_when_agent_detected() {
+        let without = build_cache_key(ROLE, None, None);
+        let with = build_cache_key(ROLE, None, Some("claude-code"));
+        assert_ne!(without, with);
+    }
+
+    /// Different agents must not share a cached entry: each agent's identity
+    /// flows into the `vouch:Agent` principal tag, so the credentials are
+    /// distinguishable in IAM and CloudTrail.
+    #[test]
+    fn test_build_cache_key_differs_between_agents() {
+        let claude = build_cache_key(ROLE, None, Some("claude-code"));
+        let cursor = build_cache_key(ROLE, None, Some("cursor"));
+        assert_ne!(claude, cursor);
+    }
+
+    /// Same inputs → same key. Lock the format so accidental refactors that
+    /// drop fields from the key are caught.
+    #[test]
+    fn test_build_cache_key_stable_for_same_agent() {
+        let a = build_cache_key(ROLE, Some(MGMT), Some("claude-code"));
+        let b = build_cache_key(ROLE, Some(MGMT), Some("claude-code"));
+        assert_eq!(a, b);
+        assert_eq!(a, format!("aws:chain:{MGMT}:{ROLE}:agent:claude-code"));
     }
 }

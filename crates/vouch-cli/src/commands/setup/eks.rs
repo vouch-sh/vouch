@@ -49,7 +49,10 @@ async fn describe_cluster(
     region: &str,
     role_arn: &str,
 ) -> Result<(String, String)> {
-    let result = exchange_for_sts_credentials(server, role_arn, region, None).await?;
+    let agent_source = crate::commands::credential::aws::detect_agent_source();
+    let result =
+        exchange_for_sts_credentials(server, role_arn, region, None, agent_source.as_deref())
+            .await?;
 
     // Call EKS DescribeCluster REST API
     let endpoint = format!("https://eks.{region}.{}", result.domain_suffix);
