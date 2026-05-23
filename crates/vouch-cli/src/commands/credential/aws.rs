@@ -428,7 +428,11 @@ pub(crate) async fn get_aws_credentials(server: &str, role_arn: &str) -> Result<
     // cached entry, which would otherwise hand the agent credentials minted
     // without ReadOnlyAccess / `vouch:AccessType=ai` tags (issue #398).
     let agent_source = detect_agent_source();
-    let cache_key = build_cache_key(role_arn, management_role.as_deref(), agent_source.as_deref());
+    let cache_key = build_cache_key(
+        role_arn,
+        management_role.as_deref(),
+        agent_source.as_deref(),
+    );
 
     let mgmt = management_role;
     let agent = agent_source;
