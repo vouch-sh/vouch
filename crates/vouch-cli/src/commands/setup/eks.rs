@@ -8,7 +8,7 @@ use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::path::PathBuf;
 
-use crate::commands::credential::aws::exchange_for_sts_credentials;
+use crate::commands::credential::aws::{StsRequest, exchange_for_sts_credentials};
 use crate::integrations::aws;
 use crate::integrations::aws::sigv4::sign_and_send_rest;
 
@@ -50,9 +50,14 @@ async fn describe_cluster(
     role_arn: &str,
 ) -> Result<(String, String)> {
     let agent_source = crate::commands::credential::aws::detect_agent_source();
-    let result =
-        exchange_for_sts_credentials(server, role_arn, region, None, agent_source.as_deref())
-            .await?;
+    let result = exchange_for_sts_credentials(StsRequest {
+        server,
+        role_arn,
+        region,
+        management_role: None,
+        agent_source: agent_source.as_deref(),
+    })
+    .await?;
 
     // Call EKS DescribeCluster REST API
     let endpoint = format!("https://eks.{region}.{}", result.domain_suffix);

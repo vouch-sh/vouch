@@ -13,7 +13,7 @@
 use anyhow::{Context, Result, bail};
 use secrecy::ExposeSecret;
 
-use crate::commands::credential::aws::exchange_for_sts_credentials;
+use crate::commands::credential::aws::{StsRequest, exchange_for_sts_credentials};
 use crate::commands::credential::cache;
 use crate::integrations::aws;
 use crate::integrations::aws::redshift::{get_cluster_credentials, get_serverless_credentials};
@@ -99,9 +99,14 @@ pub(crate) async fn fetch_redshift_credentials(
     role_arn: &str,
 ) -> Result<crate::integrations::aws::redshift::RedshiftCredentials> {
     let agent_source = crate::commands::credential::aws::detect_agent_source();
-    let result =
-        exchange_for_sts_credentials(server, role_arn, region, None, agent_source.as_deref())
-            .await?;
+    let result = exchange_for_sts_credentials(StsRequest {
+        server,
+        role_arn,
+        region,
+        management_role: None,
+        agent_source: agent_source.as_deref(),
+    })
+    .await?;
 
     match target {
         RedshiftTarget::Cluster {

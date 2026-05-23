@@ -109,6 +109,22 @@ pub(crate) struct StsExchangeResult {
     pub(crate) domain_suffix: &'static str,
 }
 
+/// Inputs to a single AWS STS credential exchange.
+///
+/// All fields are borrowed for the duration of the call. `management_role`,
+/// when `Some`, triggers role chaining; `agent_source`, when `Some`, applies
+/// AI-agent restrictions (`ReadOnlyAccess` session policy and the DPoP
+/// source claim the server turns into `vouch:AccessType=ai` /
+/// `vouch:Agent=<name>` principal tags). Contains no secrets.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct StsRequest<'a> {
+    pub(crate) server: &'a str,
+    pub(crate) role_arn: &'a str,
+    pub(crate) region: &'a str,
+    pub(crate) management_role: Option<&'a str>,
+    pub(crate) agent_source: Option<&'a str>,
+}
+
 /// Exchange a Vouch session for AWS STS credentials.
 ///
 /// Handles the full flow: OIDC token fetch → JWT decode for session tags →
@@ -237,16 +253,18 @@ where
 /// variables like `CLAUDECODE`, `CURSOR_AGENT`, etc.), automatically
 /// attaches `ReadOnlyAccess` session policy and sets a DPoP source
 /// claim for CloudTrail attribution.
-pub(crate) async fn exchange_for_sts_credentials(
-    server: &str,
-    role_arn: &str,
-    region: &str,
-    management_role: Option<&str>,
-    agent_source: Option<&str>,
-) -> Result<StsExchangeResult> {
+pub(crate) async fn exchange_for_sts_credentials(req: StsRequest<'_>) -> Result<StsExchangeResult> {
     use crate::integrations::aws::sts::{
         WebIdentityRequest, assume_role, assume_role_with_web_identity, parse_role_arn,
     };
+
+    let StsRequest {
+        server,
+        role_arn,
+        region,
+        management_role,
+        agent_source,
+    } = req;
 
     // If caller didn't pre-resolve, resolve now from config
     let resolved;
@@ -466,8 +484,14 @@ async fn fetch_and_assume(
 ) -> Result<CredentialProcessOutput> {
     let region = crate::integrations::aws::resolve_region_with_fallback(role_arn)?;
 
-    let result =
-        exchange_for_sts_credentials(server, role_arn, &region, mgmt_role, agent_source).await?;
+    let result = exchange_for_sts_credentials(StsRequest {
+        server,
+        role_arn,
+        region: &region,
+        management_role: mgmt_role,
+        agent_source,
+    })
+    .await?;
     let creds = &result.credentials;
     Ok(CredentialProcessOutput {
         version: 1,
