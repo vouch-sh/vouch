@@ -81,6 +81,14 @@ pub enum GitHubError {
     #[error("State token is for a different flow type")]
     WrongFlowType,
 
+    /// Callback received without an authenticated session cookie.
+    #[error("Please sign in before completing the GitHub connection")]
+    SessionRequired,
+
+    /// Authenticated session does not match the user/org bound to the state token.
+    #[error("This GitHub callback does not match your current session")]
+    SessionMismatch,
+
     /// User not found.
     #[error("User not found")]
     UserNotFound,
@@ -129,6 +137,8 @@ impl GitHubError {
             Self::InvalidSignature => "Unauthorized",
             Self::InvalidStateToken => "Invalid State",
             Self::WrongFlowType => "Invalid Flow",
+            Self::SessionRequired => "Sign In Required",
+            Self::SessionMismatch => "Session Mismatch",
             Self::UserNotFound => "Error",
             Self::OrganizationRequired => "Organization Required",
             Self::NotOrgAdmin => "Admin Required",

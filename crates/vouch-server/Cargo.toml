@@ -24,7 +24,7 @@ anyhow = { workspace = true, features = ["std"] }
 arc-swap = { workspace = true }
 askama = { workspace = true, features = ["derive", "config", "alloc"] }
 aws-config = { workspace = true, features = ["rt-tokio", "default-https-client", "behavior-version-latest", "sso"] }
-aws-lc-rs = { workspace = true, features = ["fips"] }
+aws-lc-rs = { workspace = true }
 aws-sdk-dsql = { workspace = true, features = ["rt-tokio", "default-https-client", "behavior-version-latest"] }
 aws-sdk-kms = { workspace = true, features = ["rt-tokio", "default-https-client", "behavior-version-latest"] }
 aws-sdk-s3 = { workspace = true, features = ["rt-tokio", "default-https-client", "behavior-version-latest"] }
@@ -97,6 +97,9 @@ webauthn-rs = { workspace = true, features = ["danger-allow-state-serialisation"
 webauthn-rs-proto = { workspace = true }
 x509-cert = { workspace = true, features = ["std", "pem", "builder"] }
 zeroize = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+aws-lc-rs = { workspace = true, features = ["fips"] }
 
 [dev-dependencies]
 wiremock = { workspace = true }
