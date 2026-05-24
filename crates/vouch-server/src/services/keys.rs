@@ -7,10 +7,36 @@
 
 use crate::db::{self, store::DocumentStore};
 use crate::services::error::ServiceError;
+use jiff::Timestamp;
 use vouch_common::{KeyInfo, lookup_device_model};
 
 /// Maximum session age (in seconds) for destructive key operations.
 pub(crate) const KEY_DELETE_MAX_AGE_SECS: i64 = 60;
+
+/// Atomically consume a registration state JWT for single-use enforcement.
+///
+/// Returns `Ok(true)` on first use, `Ok(false)` if already consumed (replay).
+/// The caller is responsible for constructing the appropriate error response and
+/// emitting the audit event, since only the handler has access to the user
+/// context and the audit store.
+///
+/// # Errors
+///
+/// Returns `ServiceError::Internal` if the persistence check itself fails.
+pub(crate) async fn consume_registration_state(
+    store: &DocumentStore,
+    state_jwt: &str,
+    exp_seconds: i64,
+) -> Result<bool, ServiceError> {
+    let expires_at = Timestamp::from_second(exp_seconds).unwrap_or_else(|_| Timestamp::now());
+
+    db::try_mark_challenge_used(store, state_jwt, expires_at)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to mark registration state used: {e}");
+            ServiceError::Internal("Failed to mark registration state used".to_string())
+        })
+}
 
 /// Require the given issued-at or auth timestamp to be within `max_age_secs` seconds.
 ///
