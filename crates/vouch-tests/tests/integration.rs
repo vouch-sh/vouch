@@ -908,12 +908,10 @@ mod keys {
             "both deletes must not succeed (got {s1} and {s2})"
         );
 
-        let remaining = vouch_server::db::get_authenticators_for_user(
-            &harness.state.store,
-            &user.id,
-        )
-        .await
-        .expect("Failed to query remaining authenticators");
+        let remaining =
+            vouch_server::db::get_authenticators_for_user(&harness.state.store, &user.id)
+                .await
+                .expect("Failed to query remaining authenticators");
         assert_eq!(
             remaining.len(),
             1,
