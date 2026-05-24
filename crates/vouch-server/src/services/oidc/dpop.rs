@@ -521,16 +521,27 @@ async fn validate_dpop_common(
         expected_ath,
     )?;
 
-    // Validate nonce via database if provided — atomic DELETE WHERE nonce=? AND expires_at > now
+    // Atomically consume the nonce via the database. A successful return
+    // means a single DELETE statement decided the claim — no TOCTOU window
+    // between read and consume. The witness is dropped here; its only
+    // purpose at present is the compile-time guarantee that the consume
+    // happened, which future code can require by holding a `DpopNonceClaim`.
     if let Some(nonce) = claims.nonce.as_deref() {
-        let valid = db::validate_and_consume_dpop_nonce(store, nonce)
-            .await
-            .map_err(|e| DpopError::InvalidFormat(format!("nonce validation failed: {e}")))?;
-        if !valid {
-            let new_nonce = db::generate_dpop_nonce(store, NONCE_VALIDITY_SECONDS)
-                .await
-                .map_err(|e| DpopError::InvalidFormat(format!("nonce generation failed: {e}")))?;
-            return Err(DpopError::UseNonce(new_nonce));
+        match db::validate_and_consume_dpop_nonce(store, nonce).await {
+            Ok(_claim) => {}
+            Err(db::claim::ClaimError::AlreadyConsumed) => {
+                let new_nonce = db::generate_dpop_nonce(store, NONCE_VALIDITY_SECONDS)
+                    .await
+                    .map_err(|e| {
+                        DpopError::InvalidFormat(format!("nonce generation failed: {e}"))
+                    })?;
+                return Err(DpopError::UseNonce(new_nonce));
+            }
+            Err(e) => {
+                return Err(DpopError::InvalidFormat(format!(
+                    "nonce validation failed: {e}"
+                )));
+            }
         }
     }
 

@@ -875,6 +875,21 @@ impl DocumentStore {
         })
     }
 
+    /// Atomically delete a document by ID if it exists and is not expired.
+    /// See [`StoreTransaction::delete_if_not_expired`] for semantics.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database operation fails.
+    pub async fn delete_if_not_expired(&self, id: &str, now: &Timestamp) -> Result<bool> {
+        crate::with_dsql_retry!(async {
+            let mut tx = self.begin().await?;
+            let won = tx.delete_if_not_expired(id, now).await?;
+            tx.commit().await?;
+            Ok(won)
+        })
+    }
+
     /// Delete all documents matching an index entry.
     ///
     /// Returns the number of documents deleted.
@@ -1446,6 +1461,51 @@ impl StoreTransaction<'_> {
         crate::tx_execute!(self.tx, delete_doc_stmt)?;
 
         Ok(())
+    }
+
+    /// Atomically delete a document by ID if it exists and is not expired.
+    ///
+    /// Used by consume-once primitives (DPoP nonces, PAR records, challenge
+    /// states, etc.) to claim a single-use record without a find-then-delete
+    /// TOCTOU window. The whole "is it present and unexpired" check happens
+    /// in a single SQL DELETE statement; the returned row count is the
+    /// atomic claim witness.
+    ///
+    /// Returns `true` when exactly one document row was deleted (the caller
+    /// "won" the consume). `false` covers all losing cases: the document
+    /// never existed, it has no expiry, it has already expired, or another
+    /// concurrent caller claimed it first. From a security standpoint these
+    /// are indistinguishable — every loss is rejected the same way.
+    ///
+    /// Index entries for the document are also deleted (best-effort cleanup),
+    /// regardless of whether the document delete won. Orphan index entries
+    /// from a prior partial delete would be cleaned up by this call.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database operation fails.
+    pub async fn delete_if_not_expired(&mut self, id: &str, now: &Timestamp) -> Result<bool> {
+        let delete_doc_stmt = Query::delete()
+            .from_table(Documents::Table)
+            .and_where(Expr::col(Documents::Id).eq(id))
+            .and_where(Expr::col(Documents::ExpiresAt).is_not_null())
+            .and_where(Expr::col(Documents::ExpiresAt).gt(now.to_string()))
+            .to_owned();
+        let result = crate::tx_execute!(self.tx, delete_doc_stmt)?;
+        let won = result.rows_affected() == 1;
+
+        // Best-effort: clear any index entries associated with this id.
+        // Safe to run unconditionally — if the doc delete didn't win, there
+        // are typically no index entries to remove either.
+        if won {
+            let delete_idx_stmt = Query::delete()
+                .from_table(DocumentIndexes::Table)
+                .and_where(Expr::col(DocumentIndexes::DocumentId).eq(id))
+                .to_owned();
+            crate::tx_execute!(self.tx, delete_idx_stmt)?;
+        }
+
+        Ok(won)
     }
 
     /// Delete all documents matching an index entry within this transaction.

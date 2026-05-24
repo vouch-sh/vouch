@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 //! DPoP nonce and JTI database operations (RFC 9449).
 
+use super::claim::ClaimError;
 use super::document_type::DocumentType;
 use super::documents::dpop::{DpopJtiDoc, DpopNonceDoc};
 use super::store::DocumentStore;
@@ -27,6 +28,17 @@ fn deterministic_dpop_jti_id(jti: &str) -> String {
     hex::encode(ctx.finish().as_ref())
 }
 
+/// Derive a deterministic document ID from a DPoP nonce. Separate domain
+/// from JTIs so the two types' IDs can never collide.
+fn deterministic_dpop_nonce_id(nonce: &str) -> String {
+    use aws_lc_rs::digest::{self, SHA256};
+
+    let mut ctx = digest::Context::new(&SHA256);
+    ctx.update(b"dpop_nonce\0");
+    ctx.update(nonce.as_bytes());
+    hex::encode(ctx.finish().as_ref())
+}
+
 /// Generate a random URL-safe string.
 fn generate_random_string(len: usize) -> Result<String> {
     let mut bytes = vec![0u8; len];
@@ -34,7 +46,30 @@ fn generate_random_string(len: usize) -> Result<String> {
     Ok(URL_SAFE_NO_PAD.encode(&bytes))
 }
 
+/// Witness that a DPoP nonce (RFC 9449 §8) has been atomically consumed.
+///
+/// Construction is private to this module — the only path to an instance is
+/// a successful return from [`validate_and_consume_dpop_nonce`], which runs
+/// a single `DELETE WHERE id = ? AND expires_at > ?` SQL statement.
+/// Returning the witness means *this caller* was the one whose DELETE
+/// affected a row — no concurrent consumer can hold the same witness.
+///
+/// Intentionally not `Clone`. The `#[must_use]` ensures it is bound at the
+/// call site even when it isn't threaded further downstream (today its only
+/// consumer is the DPoP validation pipeline itself, but the witness exists
+/// so future code can require it as a precondition).
+#[must_use = "the DPoP nonce was atomically consumed; bind this witness so \
+              future code can require it as a precondition"]
+#[derive(Debug)]
+pub struct DpopNonceClaim {
+    _private: (),
+}
+
 /// Generate and store a DPoP nonce. Returns the nonce string.
+///
+/// Stores the nonce under a deterministic document ID derived from the
+/// nonce itself, so [`validate_and_consume_dpop_nonce`] can perform an
+/// atomic primary-key DELETE without a find-then-delete TOCTOU window.
 pub async fn generate_dpop_nonce(store: &DocumentStore, validity_seconds: i64) -> Result<String> {
     let nonce = generate_random_string(32)?;
     let now = Timestamp::now();
@@ -42,36 +77,38 @@ pub async fn generate_dpop_nonce(store: &DocumentStore, validity_seconds: i64) -
         .checked_add(validity_seconds.seconds())
         .context("DPoP nonce expiry timestamp overflow")?;
 
+    let id = deterministic_dpop_nonce_id(&nonce);
     let doc = DpopNonceDoc {
         nonce: nonce.clone(),
         expires_at,
     };
-    store.insert(&doc).await?;
+    store.insert_with_id(&id, &doc).await?;
     Ok(nonce)
 }
 
-/// Validate and consume a nonce.
+/// Atomically validate and consume a DPoP nonce.
 ///
-/// Returns `true` if valid and consumed, `false` if not found or expired.
-pub async fn validate_and_consume_dpop_nonce(store: &DocumentStore, nonce: &str) -> Result<bool> {
+/// Uses a single `DELETE WHERE id = ? AND expires_at > ?` statement, so the
+/// claim is decided by the database row count — no find-then-delete race.
+/// On success returns a [`DpopNonceClaim`] witness; on a "lost" race (nonce
+/// not found, expired, or already consumed by a concurrent caller) returns
+/// [`ClaimError::AlreadyConsumed`]. The three "lost" cases are deliberately
+/// indistinguishable: each is rejected the same way by RFC 9449.
+pub async fn validate_and_consume_dpop_nonce(
+    store: &DocumentStore,
+    nonce: &str,
+) -> std::result::Result<DpopNonceClaim, ClaimError> {
+    let id = deterministic_dpop_nonce_id(nonce);
     let now = Timestamp::now();
-
-    let doc = store.find_one::<DpopNonceDoc>("nonce", nonce).await?;
-
-    let Some(doc) = doc else {
-        return Ok(false);
-    };
-
-    // Check expiry
-    if doc.data.expires_at <= now {
-        // Expired — delete it and return false
-        store.delete(&doc.id).await?;
-        return Ok(false);
+    let won = store
+        .delete_if_not_expired(&id, &now)
+        .await
+        .map_err(|e| ClaimError::Database(e.to_string()))?;
+    if won {
+        Ok(DpopNonceClaim { _private: () })
+    } else {
+        Err(ClaimError::AlreadyConsumed)
     }
-
-    // Valid — consume by deleting
-    store.delete(&doc.id).await?;
-    Ok(true)
 }
 
 /// Check if JTI exists (replay) and store it atomically.
