@@ -428,19 +428,6 @@ async fn commit_optional_jti(
     })
 }
 
-/// Pick the non-JWT client-auth witness for a request, given the auth methods
-/// that succeeded. The JWT case is handled by [`commit_optional_jti`] + the
-/// `from_jti_or` combinator at each call site.
-fn fallback_client_auth(has_mtls: bool, has_client_secret: bool) -> ClientAuthProof {
-    if has_mtls {
-        ClientAuthProof::UnconvertedMutualTls
-    } else if has_client_secret {
-        ClientAuthProof::UnconvertedClientSecret
-    } else {
-        ClientAuthProof::None
-    }
-}
-
 /// Handle authorization code grant.
 async fn handle_authorization_code_grant(
     State(state): State<Arc<AppState>>,
@@ -669,17 +656,31 @@ async fn handle_authorization_code_grant(
         Ok(c) => c,
         Err(r) => return r,
     };
+    // Resolve the non-JWT fallback. When the client authenticated via JWT or
+    // mTLS we already have the AuthenticatedClient and use its registered
+    // method. The secret-auth path doesn't carry an OAuthClient at this
+    // layer, but any `credentials.client_secret.is_some()` came through
+    // `client_secret_basic`/`client_secret_post`, so the variant is
+    // unambiguous. Public clients (no auth) fall through to `None`.
+    let fallback = jwt_authenticated
+        .as_ref()
+        .or(mtls_authenticated.as_ref())
+        .map_or_else(
+            || {
+                if credentials
+                    .as_ref()
+                    .is_some_and(|c| c.client_secret.is_some())
+                {
+                    ClientAuthProof::UnconvertedClientSecret
+                } else {
+                    ClientAuthProof::None
+                }
+            },
+            |c| ClientAuthProof::from_auth_method(c.client.token_endpoint_auth_method),
+        );
     let proof = TokenIssuanceProof {
         grant: GrantProof::UnconvertedAuthorizationCode,
-        client_auth: ClientAuthProof::from_jti_or(
-            jti_claim,
-            fallback_client_auth(
-                mtls_authenticated.is_some(),
-                credentials
-                    .as_ref()
-                    .is_some_and(|c| c.client_secret.is_some()),
-            ),
-        ),
+        client_auth: ClientAuthProof::from_jti_or(jti_claim, fallback),
     };
 
     match exchange_authorization_code(&state, exchange_params, proof).await {
@@ -761,7 +762,9 @@ async fn handle_client_credentials_grant(
         grant: GrantProof::ClientCredentials,
         client_auth: ClientAuthProof::from_jti_or(
             jti_claim,
-            fallback_client_auth(client_cert.0.is_some(), true),
+            ClientAuthProof::from_auth_method(
+                authenticated_client.client.token_endpoint_auth_method,
+            ),
         ),
     };
 
@@ -916,7 +919,9 @@ async fn handle_token_exchange_grant(
         grant: GrantProof::TokenExchange,
         client_auth: ClientAuthProof::from_jti_or(
             jti_claim,
-            fallback_client_auth(mtls_thumbprint.is_some(), false),
+            ClientAuthProof::from_auth_method(
+                authenticated_client.client.token_endpoint_auth_method,
+            ),
         ),
     };
 
