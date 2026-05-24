@@ -864,6 +864,62 @@ mod keys {
 
         assert_eq!(response.status, 401);
     }
+
+    /// Regression test for issue #388: two concurrent DELETEs against a user
+    /// with exactly two authenticators must not both succeed. The fix uses a
+    /// transactional delete-then-check plus an optimistic-concurrency version
+    /// bump on the User doc, so one of the two requests is guaranteed to fail
+    /// (400 last_key on SQLite/DSQL, or 409 conflict if the PostgreSQL READ
+    /// COMMITTED race interleaving is hit). The user must retain exactly one
+    /// authenticator afterwards.
+    #[tokio::test]
+    async fn test_concurrent_delete_last_two_keys_prevented() {
+        let harness = TestHarness::new().await;
+
+        let (user, auth_id1, token1) = harness
+            .create_authenticated_user("race-test@example.com")
+            .await
+            .expect("Failed to create authenticated user");
+
+        let auth_id2 = harness
+            .create_authenticator(&user.id)
+            .await
+            .expect("Failed to create second authenticator");
+        let token2 = harness
+            .create_session(&user.id, "race-test@example.com", &auth_id2)
+            .await
+            .expect("Failed to create second session");
+
+        let path1 = format!("/v1/keys/{}", auth_id1);
+        let path2 = format!("/v1/keys/{}", auth_id2);
+        let (r1, r2) = tokio::join!(
+            harness.delete_authenticated(&path1, &token1),
+            harness.delete_authenticated(&path2, &token2),
+        );
+        let s1 = r1.expect("Failed to send delete 1").status;
+        let s2 = r2.expect("Failed to send delete 2").status;
+
+        assert!(
+            s1 == 200 || s2 == 200,
+            "at least one delete should succeed (got {s1} and {s2})"
+        );
+        assert!(
+            !(s1 == 200 && s2 == 200),
+            "both deletes must not succeed (got {s1} and {s2})"
+        );
+
+        let remaining = vouch_server::db::get_authenticators_for_user(
+            &harness.state.store,
+            &user.id,
+        )
+        .await
+        .expect("Failed to query remaining authenticators");
+        assert_eq!(
+            remaining.len(),
+            1,
+            "user must retain exactly one authenticator after concurrent deletes"
+        );
+    }
 }
 
 // ============================================================================

@@ -5,6 +5,9 @@
 //! It is used by both the API key handlers (Bearer token auth) and the enrollment
 //! key handlers (cookie-based auth).
 
+use crate::db::documents::authenticator::AuthenticatorDoc;
+use crate::db::documents::session::SessionDoc;
+use crate::db::documents::user::UserDoc;
 use crate::db::{self, store::DocumentStore};
 use crate::services::error::ServiceError;
 use jiff::Timestamp;
@@ -186,15 +189,35 @@ pub(crate) async fn delete_key(
     user_id: &str,
     key_id: &str,
 ) -> Result<(String, u64), ServiceError> {
-    // Validate key_id is a UUID before DB lookup
+    // Validate key_id is a UUID before opening a transaction.
     if uuid::Uuid::try_parse(key_id).is_err() {
         return Err(ServiceError::Validation(
             "Invalid key ID format".to_string(),
         ));
     }
 
-    // Get the authenticator to verify ownership
-    let authenticator = db::get_authenticator_by_id(store, key_id)
+    let mut tx = store.begin().await.map_err(|e| {
+        tracing::error!("Failed to begin transaction for delete_key: {e}");
+        ServiceError::Internal("Failed to start transaction".to_string())
+    })?;
+
+    // Load the User doc with its version. The version is bumped at the end of
+    // the transaction so that two concurrent deletes against the same user
+    // serialise on a write-write conflict (needed for PostgreSQL READ COMMITTED;
+    // SQLite and Aurora DSQL are already safe via writer serialisation and
+    // SERIALIZABLE isolation respectively).
+    let user_doc = tx
+        .get::<UserDoc>(user_id)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to load user {user_id}: {e}");
+            ServiceError::Internal("Failed to load user".to_string())
+        })?
+        .ok_or(ServiceError::NotFound("User"))?;
+
+    // Load the authenticator and verify ownership within the transaction.
+    let auth_doc = tx
+        .get::<AuthenticatorDoc>(key_id)
         .await
         .map_err(|e| {
             tracing::error!("Failed to get authenticator {key_id}: {e}");
@@ -202,24 +225,25 @@ pub(crate) async fn delete_key(
         })?
         .ok_or(ServiceError::NotFound("Key"))?;
 
-    // Verify the key belongs to the user
-    if authenticator.user_id != user_id {
+    if auth_doc.data.user_id != user_id {
         return Err(ServiceError::api(
             axum::http::StatusCode::FORBIDDEN,
             "forbidden",
             "Key does not belong to this user",
         ));
     }
+    let key_name = auth_doc.data.name.clone();
 
-    // Check that this isn't the user's last key
-    let key_count = db::count_authenticators_for_user(store, user_id)
+    // Pre-flight "last key" guard — fast-paths the common single-request case
+    // and preserves the 400 / "last_key" response semantics.
+    let count_before = tx
+        .count::<AuthenticatorDoc>("user_id", user_id)
         .await
         .map_err(|e| {
             tracing::error!("Failed to count authenticators for user {user_id}: {e}");
             ServiceError::Internal("Failed to check key count".to_string())
         })?;
-
-    if key_count <= 1 {
+    if count_before <= 1 {
         return Err(ServiceError::api(
             axum::http::StatusCode::BAD_REQUEST,
             "last_key",
@@ -227,24 +251,69 @@ pub(crate) async fn delete_key(
         ));
     }
 
-    // Count sessions that will be revoked
-    let sessions_revoked = db::count_sessions_for_authenticator(store, key_id)
+    // Count sessions to report in the response payload.
+    let sessions_revoked = tx
+        .count::<SessionDoc>("authenticator_id", key_id)
         .await
         .map_err(|e| {
             tracing::error!("Failed to count sessions for authenticator {key_id}: {e}");
             ServiceError::Internal("Failed to count sessions".to_string())
         })?;
 
-    // Delete the authenticator (CASCADE will delete sessions)
-    db::delete_authenticator(store, key_id).await.map_err(|e| {
-        tracing::error!("Failed to delete authenticator {key_id}: {e}");
-        ServiceError::Internal("Failed to delete key".to_string())
+    // Cascade-delete the authenticator (device_auth refs, sessions, doc).
+    db::delete_authenticator_in_tx(&mut tx, key_id)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to delete authenticator {key_id}: {e}");
+            ServiceError::Internal("Failed to delete key".to_string())
+        })?;
+
+    // Post-delete invariant. Under PostgreSQL READ COMMITTED both concurrent
+    // transactions would still see count_after == 1 (each observes the other's
+    // uncommitted key), so this guard only catches SQLite/DSQL races; the
+    // version bump below is what serialises PostgreSQL.
+    let count_after = tx
+        .count::<AuthenticatorDoc>("user_id", user_id)
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                "Failed to recount authenticators for user {user_id} after delete: {e}"
+            );
+            ServiceError::Internal("Failed to verify key count".to_string())
+        })?;
+    if count_after < 1 {
+        return Err(ServiceError::api(
+            axum::http::StatusCode::BAD_REQUEST,
+            "last_key",
+            "Cannot delete your last key. Register another key first.",
+        ));
+    }
+
+    // Version-bump the User doc to serialise concurrent deletes on the user row.
+    let ok = tx
+        .compare_and_update::<UserDoc>(user_id, user_doc.version, &user_doc.data)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to bump user {user_id} version on key delete: {e}");
+            ServiceError::Internal("Failed to commit key deletion".to_string())
+        })?;
+    if !ok {
+        return Err(ServiceError::api(
+            axum::http::StatusCode::CONFLICT,
+            "conflict",
+            "Key deletion conflicted with a concurrent operation. Please retry.",
+        ));
+    }
+
+    tx.commit().await.map_err(|e| {
+        tracing::error!("Failed to commit delete_key transaction for {key_id}: {e}");
+        ServiceError::Internal("Failed to commit key deletion".to_string())
     })?;
 
     let sessions = u64::try_from(sessions_revoked).unwrap_or_default();
     tracing::info!("Deleted key {key_id} for user {user_id}, revoked {sessions} sessions");
 
-    Ok((authenticator.name, sessions))
+    Ok((key_name, sessions))
 }
 
 #[cfg(test)]

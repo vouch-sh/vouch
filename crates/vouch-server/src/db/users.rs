@@ -127,7 +127,6 @@ pub async fn get_user_by_id(store: &DocumentStore, user_id: &str) -> Result<Opti
 pub async fn delete_user(store: &DocumentStore, user_id: &str) -> Result<bool> {
     use super::documents::authenticator::AuthenticatorDoc;
     use super::documents::credential::{EnrollmentSessionDoc, SshIssuedCertDoc};
-    use super::documents::device_auth::DeviceAuthRequestDoc;
     use super::documents::oauth::OAuthClientDoc;
     use super::documents::oauth::TokenExchangeDoc;
     use super::documents::session::SessionDoc;
@@ -141,17 +140,12 @@ pub async fn delete_user(store: &DocumentStore, user_id: &str) -> Result<bool> {
     tx.delete_by_index::<EnrollmentSessionDoc>("user_id", user_id)
         .await?;
 
-    // 3. Clear authenticator_id references in device_auth_requests,
-    //    then delete all authenticators in one batch.
+    // 3. Cascade-delete each authenticator (clears device_auth references and
+    //    removes the authenticator doc). Sessions were already removed in step 1.
     let authenticators = tx.find_all::<AuthenticatorDoc>("user_id", user_id).await?;
     for auth in &authenticators {
-        tx.update_by_index::<DeviceAuthRequestDoc, _>("authenticator_id", &auth.id, |d| {
-            d.authenticator_id = None;
-        })
-        .await?;
+        super::authenticators::delete_authenticator_in_tx(&mut tx, &auth.id).await?;
     }
-    tx.delete_by_index::<AuthenticatorDoc>("user_id", user_id)
-        .await?;
 
     // 4. Delete SSH issued certificate records
     tx.delete_by_index::<SshIssuedCertDoc>("user_id", user_id)
