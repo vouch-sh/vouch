@@ -637,12 +637,10 @@ async fn handle_authorization_code_grant(
         && let Err(e) = commit_jti(&state, pending_jti).await
     {
         tracing::warn!("JTI commit failed for authorization_code: {e:?}");
-        return ServiceError::oauth(
-            OAuthErrorCode::InvalidClient,
-            "Client authentication failed",
-        )
-        .into_oauth_response()
-        .into_response();
+        // InvalidCredentials (JTI replay) -> 401 invalid_client; DatabaseError
+        // (transient) -> 5xx internal_error. ClientAuthError::into_service_error
+        // already discriminates correctly.
+        return e.into_service_error().into_oauth_response().into_response();
     }
 
     match exchange_authorization_code(&state, exchange_params).await {
@@ -725,12 +723,7 @@ async fn handle_client_credentials_grant(
         && let Err(e) = commit_jti(&state, jti).await
     {
         tracing::warn!("JTI commit failed for client_credentials: {e:?}");
-        return ServiceError::oauth(
-            OAuthErrorCode::InvalidClient,
-            "Client authentication failed",
-        )
-        .into_oauth_response()
-        .into_response();
+        return e.into_service_error().into_oauth_response().into_response();
     }
 
     match exchange_client_credentials(
@@ -884,12 +877,7 @@ async fn handle_token_exchange_grant(
         && let Err(e) = commit_jti(&state, jti).await
     {
         tracing::warn!("JTI commit failed for token_exchange: {e:?}");
-        return ServiceError::oauth(
-            OAuthErrorCode::InvalidClient,
-            "Client authentication failed",
-        )
-        .into_oauth_response()
-        .into_response();
+        return e.into_service_error().into_oauth_response().into_response();
     }
 
     match exchange_token(&state, exchange_params).await {
@@ -1022,12 +1010,7 @@ async fn handle_fido2_assertion_grant(
     // TokenIssuanceProof witness type consumed by create_oauth_access_token.
     if let Err(e) = commit_jti(&state, &jwt_pending_jti).await {
         tracing::warn!("JTI commit failed for fido2_assertion: {e:?}");
-        return ServiceError::oauth(
-            OAuthErrorCode::InvalidClient,
-            "Client authentication failed",
-        )
-        .into_oauth_response()
-        .into_response();
+        return e.into_service_error().into_oauth_response().into_response();
     }
 
     match crate::services::oidc::fido2_grant::exchange_fido2_assertion(&state, exchange_params)

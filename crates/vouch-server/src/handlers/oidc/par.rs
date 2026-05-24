@@ -13,7 +13,7 @@ use crate::services::oidc::authorization::{
 };
 use crate::services::oidc::jar::{validate_request_object, validate_request_object_header};
 use crate::services::oidc::jwt_bearer::commit_jti;
-use crate::services::oidc::token::validate_dpop_if_present;
+use crate::services::oidc::token::{ClientAuthError, validate_dpop_if_present};
 use axum::{
     Json,
     extract::State,
@@ -456,15 +456,22 @@ pub async fn par(
         && let Err(e) = commit_jti(&state, pjti).await
     {
         tracing::warn!("JTI commit failed for PAR: {e:?}");
-        // commit_jti failure here means a JWT-assertion JTI replay was
-        // detected (RFC 7523 §3). That's a client-auth failure, not a server
-        // error — match the four token-grant arms (invalid_client / 401) so
-        // well-behaved clients don't retry-loop with the same consumed JTI.
-        return par_error_response(
-            StatusCode::UNAUTHORIZED,
-            "invalid_client",
-            "Client authentication failed",
-        );
+        // Distinguish replay (client-auth failure) from transient DB error
+        // (server problem). Returning 401 for a DB outage tells well-behaved
+        // clients to abandon credentials they should reuse on retry; returning
+        // 500 for a replay tempts them to retry-loop with a consumed JTI.
+        return match e {
+            ClientAuthError::InvalidCredentials => par_error_response(
+                StatusCode::UNAUTHORIZED,
+                "invalid_client",
+                "Client authentication failed",
+            ),
+            _ => par_error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "server_error",
+                "Failed to complete client authentication",
+            ),
+        };
     }
 
     // RFC 9126 Section 2.2: Return 201 Created
