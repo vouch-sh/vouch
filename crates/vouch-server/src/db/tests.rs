@@ -2425,34 +2425,32 @@ fn test_oauth_client_secret_is_valid_no_expiry() {
 
 #[tokio::test]
 async fn test_store_jwt_assertion_jti_replay_prevention() {
+    use crate::db::claim::ClaimError;
     let (store, _audit) = test_db().await;
 
     let expires: jiff::Timestamp = "2099-01-01T00:00:00Z".parse().unwrap();
 
-    // First use returns true
-    let stored = store_jwt_assertion_jti(&store, "jti-abc", "client-1", expires)
+    // First use returns the witness
+    let _claim = store_jwt_assertion_jti(&store, "jti-abc", "client-1", expires)
         .await
-        .expect("first store should not error");
-    assert!(stored, "First use of a JTI should be accepted");
+        .expect("First use of a JTI should be accepted");
 
-    // Replay with same jti + client_id returns false
-    let replayed = store_jwt_assertion_jti(&store, "jti-abc", "client-1", expires)
-        .await
-        .expect("replay check should not error");
-    assert!(!replayed, "Replay of same JTI+client_id should be rejected");
+    // Replay with same jti + client_id returns AlreadyConsumed
+    let replayed = store_jwt_assertion_jti(&store, "jti-abc", "client-1", expires).await;
+    assert!(
+        matches!(replayed, Err(ClaimError::AlreadyConsumed)),
+        "Replay of same JTI+client_id should be rejected: got {replayed:?}"
+    );
 
     // Same JTI from a different client_id is allowed
-    let different_client = store_jwt_assertion_jti(&store, "jti-abc", "client-2", expires)
+    let _different_client = store_jwt_assertion_jti(&store, "jti-abc", "client-2", expires)
         .await
-        .expect("different client should not error");
-    assert!(
-        different_client,
-        "Same JTI from a different client should be accepted"
-    );
+        .expect("Same JTI from a different client should be accepted");
 }
 
 #[tokio::test]
 async fn test_store_jwt_assertion_jti_too_long() {
+    use crate::db::claim::ClaimError;
     let (store, _audit) = test_db().await;
 
     // JTI longer than MAX_JTI_LENGTH (256) must be rejected immediately
@@ -2465,26 +2463,26 @@ async fn test_store_jwt_assertion_jti_too_long() {
     )
     .await;
     assert!(
-        result.is_err(),
-        "JTI exceeding max length must return an error"
+        matches!(result, Err(ClaimError::Database(_))),
+        "JTI exceeding max length must return a Database error: got {result:?}"
     );
 }
 
 #[tokio::test]
 async fn test_store_jwt_assertion_jti_at_max_length() {
+    use crate::db::claim::ClaimError;
     let (store, _audit) = test_db().await;
 
     // Exactly MAX_JTI_LENGTH (256) must be accepted
     let max_jti = "j".repeat(256);
-    let stored = store_jwt_assertion_jti(
+    let _claim = store_jwt_assertion_jti(
         &store,
         &max_jti,
         "client-1",
         "2099-01-01T00:00:00Z".parse().unwrap(),
     )
     .await
-    .expect("256-char JTI should not error");
-    assert!(stored, "JTI at max length should be accepted");
+    .expect("JTI at max length should be accepted");
 
     // Replay still detected
     let replayed = store_jwt_assertion_jti(
@@ -2493,58 +2491,53 @@ async fn test_store_jwt_assertion_jti_at_max_length() {
         "client-1",
         "2099-01-01T00:00:00Z".parse().unwrap(),
     )
-    .await
-    .expect("replay check should not error");
-    assert!(!replayed, "Replay of max-length JTI should be rejected");
+    .await;
+    assert!(
+        matches!(replayed, Err(ClaimError::AlreadyConsumed)),
+        "Replay of max-length JTI should be rejected: got {replayed:?}"
+    );
 }
 
 #[tokio::test]
 async fn test_store_jwt_assertion_jti_client_isolation() {
+    use crate::db::claim::ClaimError;
     let (store, _audit) = test_db().await;
 
     let expires: jiff::Timestamp = "2099-01-01T00:00:00Z".parse().unwrap();
 
     // Three independent (jti, client_id) pairs must all succeed
-    let a = store_jwt_assertion_jti(&store, "jti-xyz", "client-A", expires)
+    let _a = store_jwt_assertion_jti(&store, "jti-xyz", "client-A", expires)
         .await
-        .expect("pair A should not error");
-    let b = store_jwt_assertion_jti(&store, "jti-xyz", "client-B", expires)
+        .expect("First pair should be accepted");
+    let _b = store_jwt_assertion_jti(&store, "jti-xyz", "client-B", expires)
         .await
-        .expect("pair B should not error");
-    let c = store_jwt_assertion_jti(&store, "jti-pqr", "client-A", expires)
+        .expect("Same JTI, different client should be accepted");
+    let _c = store_jwt_assertion_jti(&store, "jti-pqr", "client-A", expires)
         .await
-        .expect("pair C should not error");
-    assert!(a, "First pair should be accepted");
-    assert!(b, "Same JTI, different client should be accepted");
-    assert!(c, "Different JTI, same client should be accepted");
+        .expect("Different JTI, same client should be accepted");
 
-    // Each pair replays to false independently
-    let a2 = store_jwt_assertion_jti(&store, "jti-xyz", "client-A", expires)
-        .await
-        .expect("replay A");
-    let b2 = store_jwt_assertion_jti(&store, "jti-xyz", "client-B", expires)
-        .await
-        .expect("replay B");
-    let c2 = store_jwt_assertion_jti(&store, "jti-pqr", "client-A", expires)
-        .await
-        .expect("replay C");
-    assert!(!a2, "Replay of pair A should be rejected");
-    assert!(!b2, "Replay of pair B should be rejected");
-    assert!(!c2, "Replay of pair C should be rejected");
+    // Each pair replays to AlreadyConsumed independently
+    let a2 = store_jwt_assertion_jti(&store, "jti-xyz", "client-A", expires).await;
+    let b2 = store_jwt_assertion_jti(&store, "jti-xyz", "client-B", expires).await;
+    let c2 = store_jwt_assertion_jti(&store, "jti-pqr", "client-A", expires).await;
+    assert!(matches!(a2, Err(ClaimError::AlreadyConsumed)));
+    assert!(matches!(b2, Err(ClaimError::AlreadyConsumed)));
+    assert!(matches!(c2, Err(ClaimError::AlreadyConsumed)));
 }
 
 #[tokio::test]
 async fn test_delete_expired_jwt_assertion_jtis() {
+    use crate::db::claim::ClaimError;
     let (store, _audit) = test_db().await;
 
     let past_expires: jiff::Timestamp = "2020-01-01T00:00:00Z".parse().unwrap();
     let future_expires: jiff::Timestamp = "2099-01-01T00:00:00Z".parse().unwrap();
 
     // Insert one expired and one valid JTI
-    store_jwt_assertion_jti(&store, "expired-jti", "c1", past_expires)
+    let _expired_claim = store_jwt_assertion_jti(&store, "expired-jti", "c1", past_expires)
         .await
         .expect("insert expired");
-    store_jwt_assertion_jti(&store, "valid-jti", "c1", future_expires)
+    let _valid_claim = store_jwt_assertion_jti(&store, "valid-jti", "c1", future_expires)
         .await
         .expect("insert valid");
 
@@ -2553,20 +2546,17 @@ async fn test_delete_expired_jwt_assertion_jtis() {
         .expect("delete_expired should not error");
     assert!(deleted >= 1, "Should delete at least the expired JTI");
 
-    // The valid one is still usable (replay returns false only if it exists)
-    let still_stored = store_jwt_assertion_jti(&store, "valid-jti", "c1", future_expires)
-        .await
-        .expect("check");
-    assert!(!still_stored, "Valid JTI should still block replay");
+    // The valid one is still in place — replay returns AlreadyConsumed
+    let still_stored = store_jwt_assertion_jti(&store, "valid-jti", "c1", future_expires).await;
+    assert!(
+        matches!(still_stored, Err(ClaimError::AlreadyConsumed)),
+        "Valid JTI should still block replay: got {still_stored:?}"
+    );
 
     // The expired one was deleted and can be reused
-    let reused = store_jwt_assertion_jti(&store, "expired-jti", "c1", future_expires)
+    let _reused = store_jwt_assertion_jti(&store, "expired-jti", "c1", future_expires)
         .await
-        .expect("reuse after expiry cleanup");
-    assert!(
-        reused,
-        "Expired+deleted JTI should be accepted again after cleanup"
-    );
+        .expect("Expired+deleted JTI should be accepted again after cleanup");
 }
 
 // ========================================================================

@@ -11,7 +11,6 @@ use crate::services::oidc::introspection::{
     IntrospectionResult, introspect_token as svc_introspect, revoke_token as svc_revoke,
     wrap_introspection_jwt,
 };
-use crate::services::oidc::jwt_bearer::commit_jti;
 use crate::services::oidc::token::ClientAuthError;
 use axum::{
     Json,
@@ -152,9 +151,9 @@ pub async fn revoke(
     .await;
 
     // Commit JTI after revocation so clients can retry on failure.
-    if let Some(ref jti) = pending_jti {
-        match commit_jti(&state, jti).await {
-            Ok(()) => {}
+    if let Some(p) = pending_jti {
+        match p.commit(&state).await {
+            Ok(_claim) => {}
             Err(ClientAuthError::InvalidCredentials) => {
                 // JTI was already used — reject so the client generates a new assertion.
                 return StatusCode::UNAUTHORIZED.into_response();
@@ -218,9 +217,9 @@ pub async fn introspect(
     };
 
     // Commit JTI after introspection so clients can retry on failure.
-    if let Some(ref jti) = pending_jti {
-        match commit_jti(&state, jti).await {
-            Ok(()) => {}
+    if let Some(p) = pending_jti {
+        match p.commit(&state).await {
+            Ok(_claim) => {}
             Err(ClientAuthError::InvalidCredentials) => {
                 // JTI was already used — reject so the client generates a new assertion.
                 return StatusCode::UNAUTHORIZED.into_response();

@@ -9,56 +9,77 @@ use super::validate::{
     decode_claims_unverified, map_algorithm, parse_assertion_header, validate_jwt_assertion,
 };
 use crate::AppState;
-use crate::db::{self, TokenEndpointAuthMethod};
+use crate::db::claim::ClaimError;
+use crate::db::{self, JwtAssertionJtiClaim, TokenEndpointAuthMethod};
 use crate::services::oidc::token::{AuthenticatedClient, ClientAuthError};
 use jiff::{Timestamp, ToSpan};
 use std::sync::Arc;
 
 /// A JTI that has been validated but not yet committed to the database.
 ///
-/// Call [`commit_jti`] immediately before any grant-state persistence
-/// (`exchange_*` / `store_par_request`) so concurrent replays serialize on
-/// the JTI uniqueness constraint. Commit MUST run after any validator that
-/// returns a retryable error (in particular DPoP `use_dpop_nonce`, RFC 9449
-/// §4.3) so that those failures leave the JTI unconsumed and the client can
-/// retry with the same assertion.
-#[must_use = "JTI must be committed via commit_jti() before token issuance"]
+/// Call [`PendingJti::commit`] immediately before any grant-state
+/// persistence (`exchange_*` / `store_par_request`) so concurrent replays
+/// serialize on the JTI uniqueness constraint. The commit MUST run after
+/// any validator that returns a retryable error (in particular DPoP
+/// `use_dpop_nonce`, RFC 9449 §4.3) so that those failures leave the JTI
+/// unconsumed and the client can retry with the same assertion.
+///
+/// `PendingJti` is not `Clone` and `commit` takes `self` by value, so the
+/// type system prevents double-commit and ensures the value is either
+/// committed or dropped — dropping without committing is the correct
+/// behavior for retryable error paths.
 pub struct PendingJti {
     jti: Option<String>,
     client_id: String,
     max_lifetime: i64,
 }
 
-/// Commit a pending JTI to the replay-prevention database.
-///
-/// Must be called immediately before the grant-state persistence step
-/// (`exchange_*` / `store_par_request`) so that the atomic
-/// `db::store_jwt_assertion_jti` insert is the serializing point under
-/// concurrent replay of the same assertion.
-pub async fn commit_jti(
-    state: &Arc<AppState>,
-    pending: &PendingJti,
-) -> Result<(), ClientAuthError> {
-    let Some(ref jti) = pending.jti else {
-        return Ok(());
-    };
-    let expires_at = Timestamp::now()
-        .checked_add(pending.max_lifetime.seconds())
-        .map_err(|e| ClientAuthError::DatabaseError(e.to_string()))?;
+impl PendingJti {
+    /// Commit this pending JTI to the replay-prevention database.
+    ///
+    /// On success returns a [`JwtAssertionJtiClaim`] witness — proof that
+    /// the atomic INSERT serialized this caller as the first to claim the
+    /// JTI. The witness is `#[must_use]` so callers must bind it (typically
+    /// to thread it to a downstream consumer like token issuance).
+    ///
+    /// Consumes `self` by value — a `PendingJti` can be committed at most
+    /// once, and dropping it without committing is the intended behavior
+    /// for retryable error paths.
+    ///
+    /// Returns `Ok(Some(claim))` when the assertion carried a `jti` and
+    /// the atomic insert succeeded, `Ok(None)` when the assertion omitted
+    /// `jti` (non-FAPI clients — the commit is a no-op), and
+    /// `Err(InvalidCredentials)` when a concurrent caller already claimed
+    /// the same JTI.
+    pub async fn commit(
+        self,
+        state: &Arc<AppState>,
+    ) -> Result<Option<JwtAssertionJtiClaim>, ClientAuthError> {
+        let Some(jti) = self.jti else {
+            return Ok(None);
+        };
+        let expires_at = Timestamp::now()
+            .checked_add(self.max_lifetime.seconds())
+            .map_err(|e| ClientAuthError::DatabaseError(e.to_string()))?;
 
-    let is_new = db::store_jwt_assertion_jti(&state.store, jti, &pending.client_id, expires_at)
-        .await
-        .map_err(|e| ClientAuthError::DatabaseError(e.to_string()))?;
-
-    if !is_new {
-        tracing::warn!(
-            target: "security",
-            client_id = %pending.client_id,
-            "JWT assertion JTI replay detected"
-        );
-        return Err(ClientAuthError::InvalidCredentials);
+        db::store_jwt_assertion_jti(&state.store, &jti, &self.client_id, expires_at)
+            .await
+            .map(Some)
+            .map_err(|e| match e {
+                ClaimError::AlreadyConsumed => {
+                    tracing::warn!(
+                        target: "security",
+                        client_id = %self.client_id,
+                        "JWT assertion JTI replay detected"
+                    );
+                    ClientAuthError::InvalidCredentials
+                }
+                ClaimError::Expired | ClaimError::NotFound => {
+                    ClientAuthError::InvalidCredentials
+                }
+                ClaimError::Database(msg) => ClientAuthError::DatabaseError(msg),
+            })
     }
-    Ok(())
 }
 
 /// Authenticate a client using a JWT assertion (RFC 7523 Section 2.2).
@@ -70,11 +91,11 @@ pub async fn commit_jti(
 ///
 /// # Returns
 /// The authenticated client and a pending JTI that MUST be committed via
-/// [`commit_jti`] immediately before grant-state persistence (`exchange_*` /
-/// `store_par_request`). If a validator earlier in the request rejects with
-/// a retryable error (in particular DPoP `use_dpop_nonce`, RFC 9449 §4.3),
-/// drop the [`PendingJti`] without committing so the client can retry with
-/// the same assertion.
+/// [`PendingJti::commit`] immediately before grant-state persistence
+/// (`exchange_*` / `store_par_request`). If a validator earlier in the
+/// request rejects with a retryable error (in particular DPoP
+/// `use_dpop_nonce`, RFC 9449 §4.3), drop the [`PendingJti`] without
+/// committing so the client can retry with the same assertion.
 pub async fn authenticate_client_jwt(
     state: &Arc<AppState>,
     client_assertion: &str,
@@ -406,7 +427,7 @@ mod tests {
     // ========================================================================
 
     #[tokio::test]
-    async fn test_commit_jti_succeeds_on_first_call() {
+    async fn test_commit_succeeds_on_first_call() {
         let state = make_state().await;
         let pending = PendingJti {
             jti: Some("unique-jti-abc".to_string()),
@@ -414,30 +435,37 @@ mod tests {
             max_lifetime: 300,
         };
 
-        let result = commit_jti(&state, &pending).await;
+        let result = pending.commit(&state).await;
 
         assert!(
-            result.is_ok(),
-            "First commit_jti call must succeed: {result:?}"
+            matches!(result, Ok(Some(_))),
+            "First commit must return Ok(Some(claim)): {result:?}"
         );
     }
 
     #[tokio::test]
-    async fn test_commit_jti_replay_returns_error_on_second_call() {
+    async fn test_commit_replay_returns_error_on_second_call() {
         let state = make_state().await;
-        let pending = PendingJti {
+        let first = PendingJti {
             jti: Some("replay-jti-xyz".to_string()),
             client_id: "client-replay".to_string(),
             max_lifetime: 300,
         };
 
         // First commit succeeds.
-        commit_jti(&state, &pending)
+        let _first_claim = first
+            .commit(&state)
             .await
             .expect("first commit must succeed");
 
         // Second commit with the same JTI is a replay — must fail.
-        let result = commit_jti(&state, &pending).await;
+        // PendingJti is not Clone, so we construct a second one with the same data.
+        let second = PendingJti {
+            jti: Some("replay-jti-xyz".to_string()),
+            client_id: "client-replay".to_string(),
+            max_lifetime: 300,
+        };
+        let result = second.commit(&state).await;
 
         assert!(
             matches!(result, Err(ClientAuthError::InvalidCredentials)),
@@ -446,9 +474,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_commit_jti_none_jti_is_noop() {
+    async fn test_commit_none_jti_returns_none() {
         // When jti is None (e.g. the assertion omitted the jti claim),
-        // commit_jti must return Ok without touching the database.
+        // commit must return Ok(None) without touching the database.
         let state = make_state().await;
         let pending = PendingJti {
             jti: None,
@@ -456,11 +484,11 @@ mod tests {
             max_lifetime: 300,
         };
 
-        let result = commit_jti(&state, &pending).await;
+        let result = pending.commit(&state).await;
 
         assert!(
-            result.is_ok(),
-            "commit_jti with None jti must be a no-op: {result:?}"
+            matches!(result, Ok(None)),
+            "commit with None jti must return Ok(None): {result:?}"
         );
     }
 
@@ -468,34 +496,34 @@ mod tests {
     async fn test_uncommitted_pending_jti_does_not_prevent_later_commit() {
         // Simulates the use_dpop_nonce retry scenario:
         // 1. authenticate_client_jwt returns a PendingJti.
-        // 2. The handler returns use_dpop_nonce WITHOUT calling commit_jti.
+        // 2. The handler returns use_dpop_nonce WITHOUT calling commit.
         // 3. The client retries with the same assertion.
-        // 4. commit_jti on the retry must succeed because the JTI was never stored.
+        // 4. commit on the retry must succeed because the JTI was never stored.
         let state = make_state().await;
 
         let jti = "retry-jti-001".to_string();
 
         // First attempt: PendingJti is built but NOT committed (dropped here).
-        let _first_pending = PendingJti {
+        let first_pending = PendingJti {
             jti: Some(jti.clone()),
             client_id: "client-retry".to_string(),
             max_lifetime: 300,
         };
-        // Intentionally do NOT call commit_jti — simulates a retryable error path.
-        drop(_first_pending);
+        // Intentionally do NOT call commit — simulates a retryable error path.
+        drop(first_pending);
 
-        // Second attempt (retry): commit_jti is called with the same JTI.
+        // Second attempt (retry): commit is called with the same JTI.
         // Because the first PendingJti was never committed, this must succeed.
         let second_pending = PendingJti {
             jti: Some(jti),
             client_id: "client-retry".to_string(),
             max_lifetime: 300,
         };
-        let result = commit_jti(&state, &second_pending).await;
+        let result = second_pending.commit(&state).await;
 
         assert!(
-            result.is_ok(),
-            "commit_jti on retry must succeed when the first PendingJti was not committed: {result:?}"
+            matches!(result, Ok(Some(_))),
+            "commit on retry must succeed when the first PendingJti was not committed: {result:?}"
         );
     }
 }

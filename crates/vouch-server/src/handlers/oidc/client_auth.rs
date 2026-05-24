@@ -160,9 +160,9 @@ pub(crate) fn extract_client_auth<T: ClientAuthFields>(
 /// the extracted authentication method.
 ///
 /// For JWT assertions, returns a [`PendingJti`] that MUST be committed via
-/// [`crate::services::oidc::jwt_bearer::client_auth::commit_jti`] after the
-/// full request succeeds. For all other auth methods, returns `None` for the
-/// pending JTI.
+/// [`PendingJti::commit`](crate::services::oidc::jwt_bearer::client_auth::PendingJti::commit)
+/// after the full request succeeds. For all other auth methods, returns
+/// `None` for the pending JTI.
 pub(crate) async fn authenticate_client_any(
     state: &Arc<AppState>,
     auth: ExtractedClientAuth,

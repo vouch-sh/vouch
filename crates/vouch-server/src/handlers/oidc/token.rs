@@ -11,7 +11,7 @@ use crate::services::oidc::{
     ScopeSet,
     client_credentials::exchange_client_credentials,
     exchange::{TokenExchangeParams, exchange_token},
-    jwt_bearer::client_auth::{authenticate_client_jwt, commit_jti},
+    jwt_bearer::client_auth::authenticate_client_jwt,
     token::{AuthCodeExchangeParams, exchange_authorization_code, validate_dpop_if_present},
 };
 use crate::services::{OAuthErrorCode, ServiceError};
@@ -628,20 +628,25 @@ async fn handle_authorization_code_grant(
         mtls_cert_thumbprint: mtls_thumbprint.as_deref(),
     };
 
-    // SAFETY: commit_jti() MUST run AFTER DPoP nonce validation (so use_dpop_nonce
-    // retry leaves the JTI unconsumed) and BEFORE exchange_*() / store_par_request()
-    // (so concurrent replays of the same assertion cannot persist multiple tokens —
-    // see issue #391). A follow-up will replace this comment with a TokenIssuanceProof
-    // witness type consumed by create_oauth_access_token.
-    if let Some(ref pending_jti) = jwt_pending_jti
-        && let Err(e) = commit_jti(&state, pending_jti).await
-    {
-        tracing::warn!("JTI commit failed for authorization_code: {e:?}");
-        // InvalidCredentials (JTI replay) -> 401 invalid_client; DatabaseError
-        // (transient) -> 5xx internal_error. ClientAuthError::into_service_error
-        // already discriminates correctly.
-        return e.into_service_error().into_oauth_response().into_response();
-    }
+    // SAFETY: PendingJti::commit MUST run AFTER DPoP nonce validation (so a
+    // use_dpop_nonce retry leaves the JTI unconsumed) and BEFORE exchange_*()
+    // / store_par_request() (so concurrent replays of the same assertion cannot
+    // persist multiple tokens — see issue #391). The returned claim is
+    // discarded here; a future change will thread it into create_oauth_access_token
+    // as part of a TokenIssuanceProof witness.
+    let _jwt_jti_claim = match jwt_pending_jti {
+        Some(p) => match p.commit(&state).await {
+            Ok(claim) => claim,
+            Err(e) => {
+                tracing::warn!("JTI commit failed for authorization_code: {e:?}");
+                // InvalidCredentials (JTI replay) -> 401 invalid_client;
+                // DatabaseError (transient) -> 5xx internal_error.
+                // ClientAuthError::into_service_error discriminates correctly.
+                return e.into_service_error().into_oauth_response().into_response();
+            }
+        },
+        None => None,
+    };
 
     match exchange_authorization_code(&state, exchange_params).await {
         Ok(result) => {
@@ -714,17 +719,20 @@ async fn handle_client_credentials_grant(
     // RFC 8705 Section 3: Bind access token to cert thumbprint only when opted in.
     let mtls_thumbprint = extract_mtls_thumbprint(&authenticated_client, &client_cert);
 
-    // SAFETY: commit_jti() MUST run AFTER DPoP nonce validation (no DPoP path here,
-    // so the constraint is vacuous in this arm) and BEFORE exchange_*() so that
-    // concurrent replays of the same assertion cannot persist multiple tokens —
-    // see issue #391. A follow-up will replace this comment with a
-    // TokenIssuanceProof witness type consumed by create_oauth_access_token.
-    if let Some(ref jti) = pending_jti
-        && let Err(e) = commit_jti(&state, jti).await
-    {
-        tracing::warn!("JTI commit failed for client_credentials: {e:?}");
-        return e.into_service_error().into_oauth_response().into_response();
-    }
+    // SAFETY: PendingJti::commit MUST run BEFORE exchange_*() so that
+    // concurrent replays of the same assertion cannot persist multiple
+    // tokens — see issue #391. No DPoP path here, so the
+    // "after DPoP nonce validation" half of the invariant is vacuous.
+    let _jwt_jti_claim = match pending_jti {
+        Some(p) => match p.commit(&state).await {
+            Ok(claim) => claim,
+            Err(e) => {
+                tracing::warn!("JTI commit failed for client_credentials: {e:?}");
+                return e.into_service_error().into_oauth_response().into_response();
+            }
+        },
+        None => None,
+    };
 
     match exchange_client_credentials(
         &state,
@@ -868,17 +876,20 @@ async fn handle_token_exchange_grant(
         mtls_cert_thumbprint: mtls_thumbprint.as_deref(),
     };
 
-    // SAFETY: commit_jti() MUST run AFTER DPoP nonce validation (so use_dpop_nonce
-    // retry leaves the JTI unconsumed) and BEFORE exchange_*() so that concurrent
-    // replays of the same assertion cannot persist multiple tokens —
-    // see issue #391. A follow-up will replace this comment with a
-    // TokenIssuanceProof witness type consumed by create_oauth_access_token.
-    if let Some(ref jti) = pending_jti
-        && let Err(e) = commit_jti(&state, jti).await
-    {
-        tracing::warn!("JTI commit failed for token_exchange: {e:?}");
-        return e.into_service_error().into_oauth_response().into_response();
-    }
+    // SAFETY: PendingJti::commit MUST run AFTER DPoP nonce validation (so a
+    // use_dpop_nonce retry leaves the JTI unconsumed) and BEFORE exchange_*()
+    // (so concurrent replays of the same assertion cannot persist multiple
+    // tokens — see issue #391).
+    let _jwt_jti_claim = match pending_jti {
+        Some(p) => match p.commit(&state).await {
+            Ok(claim) => claim,
+            Err(e) => {
+                tracing::warn!("JTI commit failed for token_exchange: {e:?}");
+                return e.into_service_error().into_oauth_response().into_response();
+            }
+        },
+        None => None,
+    };
 
     match exchange_token(&state, exchange_params).await {
         Ok(result) => token_success_response(TokenExchangeResponse {
@@ -1003,15 +1014,17 @@ async fn handle_fido2_assertion_grant(
         mtls_cert_thumbprint: mtls_thumbprint.as_deref(),
     };
 
-    // SAFETY: commit_jti() MUST run AFTER DPoP nonce validation (so use_dpop_nonce
-    // retry leaves the JTI unconsumed) and BEFORE exchange_*() so that concurrent
-    // replays of the same assertion cannot persist multiple tokens —
-    // see issue #391. A follow-up will replace this comment with a
-    // TokenIssuanceProof witness type consumed by create_oauth_access_token.
-    if let Err(e) = commit_jti(&state, &jwt_pending_jti).await {
-        tracing::warn!("JTI commit failed for fido2_assertion: {e:?}");
-        return e.into_service_error().into_oauth_response().into_response();
-    }
+    // SAFETY: PendingJti::commit MUST run AFTER DPoP nonce validation (so a
+    // use_dpop_nonce retry leaves the JTI unconsumed) and BEFORE exchange_*()
+    // (so concurrent replays of the same assertion cannot persist multiple
+    // tokens — see issue #391).
+    let _jwt_jti_claim = match jwt_pending_jti.commit(&state).await {
+        Ok(claim) => claim,
+        Err(e) => {
+            tracing::warn!("JTI commit failed for fido2_assertion: {e:?}");
+            return e.into_service_error().into_oauth_response().into_response();
+        }
+    };
 
     match crate::services::oidc::fido2_grant::exchange_fido2_assertion(&state, exchange_params)
         .await

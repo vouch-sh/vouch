@@ -12,7 +12,6 @@ use crate::services::oidc::authorization::{
     AuthorizeRequestParams, Prompt, require_pkce_for_client, validate_authorize_request,
 };
 use crate::services::oidc::jar::{validate_request_object, validate_request_object_header};
-use crate::services::oidc::jwt_bearer::commit_jti;
 use crate::services::oidc::token::{ClientAuthError, validate_dpop_if_present};
 use axum::{
     Json,
@@ -447,32 +446,35 @@ pub async fn par(
         response_mode,
     };
 
-    // SAFETY: commit_jti() MUST run AFTER DPoP nonce validation (so use_dpop_nonce
-    // retry leaves the JTI unconsumed) and BEFORE store_par_request() so that
-    // concurrent replays of the same assertion cannot persist multiple PAR
-    // requests — see issue #391. A follow-up will replace this comment with a
-    // ParCreation witness type.
-    if let Some(ref pjti) = pending_jti
-        && let Err(e) = commit_jti(&state, pjti).await
-    {
-        tracing::warn!("JTI commit failed for PAR: {e:?}");
-        // Distinguish replay (client-auth failure) from transient DB error
-        // (server problem). Returning 401 for a DB outage tells well-behaved
-        // clients to abandon credentials they should reuse on retry; returning
-        // 500 for a replay tempts them to retry-loop with a consumed JTI.
-        return match e {
-            ClientAuthError::InvalidCredentials => par_error_response(
-                StatusCode::UNAUTHORIZED,
-                "invalid_client",
-                "Client authentication failed",
-            ),
-            _ => par_error_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "server_error",
-                "Failed to complete client authentication",
-            ),
-        };
-    }
+    // SAFETY: PendingJti::commit MUST run AFTER DPoP nonce validation (so a
+    // use_dpop_nonce retry leaves the JTI unconsumed) and BEFORE
+    // store_par_request() (so concurrent replays of the same assertion cannot
+    // persist multiple PAR requests — see issue #391).
+    let _jwt_jti_claim = match pending_jti {
+        Some(p) => match p.commit(&state).await {
+            Ok(claim) => claim,
+            Err(e) => {
+                tracing::warn!("JTI commit failed for PAR: {e:?}");
+                // Distinguish replay (client-auth failure) from transient DB error
+                // (server problem). Returning 401 for a DB outage tells well-behaved
+                // clients to abandon credentials they should reuse on retry; returning
+                // 500 for a replay tempts them to retry-loop with a consumed JTI.
+                return match e {
+                    ClientAuthError::InvalidCredentials => par_error_response(
+                        StatusCode::UNAUTHORIZED,
+                        "invalid_client",
+                        "Client authentication failed",
+                    ),
+                    _ => par_error_response(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "server_error",
+                        "Failed to complete client authentication",
+                    ),
+                };
+            }
+        },
+        None => None,
+    };
 
     // RFC 9126 Section 2.2: Return 201 Created
     match db::create_pushed_authorization_request(&state.store, create_params).await {
