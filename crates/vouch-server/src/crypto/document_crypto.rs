@@ -148,14 +148,10 @@ impl DocumentCrypto for HpkeDocumentCrypto {
     fn open(&self, info: &[u8], aad: &[u8], doc: &EncryptedDocument) -> Result<Vec<u8>> {
         use rustls::crypto::hpke::Hpke;
 
-        let Some(enc_bytes) = doc.encapped_key.as_ref() else {
-            tracing::debug!(
-                doc_type = %String::from_utf8_lossy(info),
-                doc_id = %String::from_utf8_lossy(aad),
-                "no encapped_key found; returning as unencrypted plaintext"
-            );
-            return Ok(doc.data.as_bytes().to_vec());
-        };
+        let enc_bytes = doc
+            .encapped_key
+            .as_ref()
+            .context("encrypted document missing encapped_key")?;
         let enc_decoded = BASE64
             .decode(enc_bytes)
             .context("invalid base64 in encapped_key")?;
@@ -411,39 +407,37 @@ mod tests {
     }
 
     #[test]
-    fn hpke_plaintext_fallback() {
-        let crypto = make_test_crypto();
-        let doc = EncryptedDocument {
-            encapped_key: None,
-            data: r#"{"email":"test@example.com"}"#.to_string(),
-        };
-        let opened = crypto.open(b"user", b"doc-123", &doc).unwrap();
-        assert_eq!(opened, br#"{"email":"test@example.com"}"#);
-    }
-
-    #[test]
-    fn hpke_plaintext_fallback_ignores_info_and_aad() {
+    fn hpke_open_rejects_null_encapped_key() {
         let crypto = make_test_crypto();
         let doc = EncryptedDocument {
             encapped_key: None,
             data: "hello".to_string(),
         };
-        // Different info/aad values should not affect fallback
-        let a = crypto.open(b"user", b"doc-1", &doc).unwrap();
-        let b = crypto.open(b"session", b"doc-999", &doc).unwrap();
-        assert_eq!(a, b);
-        assert_eq!(a, b"hello");
+        let err = crypto.open(b"user", b"doc-1", &doc).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("encapped_key"),
+            "expected encapped_key error, got: {err:#}"
+        );
     }
 
     #[test]
-    fn hpke_plaintext_fallback_empty_data() {
+    fn hpke_open_rejects_null_encapped_key_with_injected_payload() {
+        // Guards against the privilege-escalation scenario from issue #387: an attacker
+        // with DB write access sets encapped_key=NULL and injects an admin payload.
+        // The error must not echo the injected data (defense against future log
+        // regressions that include doc.data in error context).
         let crypto = make_test_crypto();
         let doc = EncryptedDocument {
             encapped_key: None,
-            data: String::new(),
+            data: r#"{"is_org_admin":true}"#.to_string(),
         };
-        let opened = crypto.open(b"user", b"doc-1", &doc).unwrap();
-        assert!(opened.is_empty());
+        let err = crypto.open(b"user", b"doc-123", &doc).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("encapped_key"));
+        assert!(
+            !msg.contains("is_org_admin"),
+            "error must not echo injected payload: {msg}"
+        );
     }
 
     #[test]
