@@ -74,9 +74,7 @@ impl PendingJti {
                     );
                     ClientAuthError::InvalidCredentials
                 }
-                ClaimError::Expired | ClaimError::NotFound => {
-                    ClientAuthError::InvalidCredentials
-                }
+                ClaimError::Expired | ClaimError::NotFound => ClientAuthError::InvalidCredentials,
                 ClaimError::Database(msg) => ClientAuthError::DatabaseError(msg),
             })
     }
