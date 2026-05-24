@@ -30,7 +30,10 @@ use super::{
     validate_registration_attestation,
 };
 use crate::redact_email;
-use crate::services::auth::{CreateOAuthTokenParams, create_oauth_access_token};
+use crate::services::auth::{
+    ClientAuthProof, CreateOAuthTokenParams, GrantProof, TokenIssuanceProof,
+    create_oauth_access_token,
+};
 use crate::services::error::ServiceError;
 use crate::services::idp::IdentityResult;
 use crate::services::keys as key_svc;
@@ -656,6 +659,10 @@ pub(crate) async fn complete_enrollment_after_identity(
             hardware_verification: crate::services::auth::HardwareVerification::NotVerified,
             session_purpose: db::SessionPurpose::OAuthAccessToken,
             authorization_details: None,
+        },
+        TokenIssuanceProof {
+            grant: GrantProof::UnconvertedEnrollmentBootstrap,
+            client_auth: ClientAuthProof::None,
         },
     )
     .await
@@ -1336,6 +1343,10 @@ pub async fn browser_register_complete(
             hardware_verification: crate::services::auth::HardwareVerification::Verified,
             session_purpose: db::SessionPurpose::OAuthAccessToken,
             authorization_details: None,
+        },
+        TokenIssuanceProof {
+            grant: GrantProof::UnconvertedEnrollmentComplete,
+            client_auth: ClientAuthProof::None,
         },
     )
     .await

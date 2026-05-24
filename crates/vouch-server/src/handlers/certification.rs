@@ -24,7 +24,10 @@ use crate::{
     AppState, db,
     handlers::browser_login::hmac_sha256_base64url,
     handlers::session::create_session_cookie,
-    services::auth::{CreateOAuthTokenParams, create_oauth_access_token},
+    services::auth::{
+        ClientAuthProof, CreateOAuthTokenParams, GrantProof, TokenIssuanceProof,
+        create_oauth_access_token,
+    },
     services::oidc::ScopeSet,
 };
 
@@ -145,6 +148,10 @@ pub async fn complete_login(
             hardware_verification: crate::services::auth::HardwareVerification::Verified,
             session_purpose: db::SessionPurpose::OAuthAccessToken,
             authorization_details: None,
+        },
+        TokenIssuanceProof {
+            grant: GrantProof::CertificationBypass,
+            client_auth: ClientAuthProof::None,
         },
     )
     .await

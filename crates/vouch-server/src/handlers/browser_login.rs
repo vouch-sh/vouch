@@ -27,7 +27,10 @@ use crate::handlers::HasVersion;
 use crate::handlers::session::{create_session_cookie, get_auth_context};
 use crate::impl_template_response;
 use crate::redact_email;
-use crate::services::auth::{CreateOAuthTokenParams, create_oauth_access_token};
+use crate::services::auth::{
+    ClientAuthProof, CreateOAuthTokenParams, GrantProof, TokenIssuanceProof,
+    create_oauth_access_token,
+};
 use crate::services::error::ServiceError;
 use crate::services::oidc::ScopeSet;
 use askama::Template;
@@ -655,6 +658,10 @@ pub async fn browser_login_complete(
             hardware_verification: crate::services::auth::HardwareVerification::Verified,
             session_purpose: db::SessionPurpose::OAuthAccessToken,
             authorization_details: None,
+        },
+        TokenIssuanceProof {
+            grant: GrantProof::UnconvertedBrowserLogin,
+            client_auth: ClientAuthProof::None,
         },
     )
     .await

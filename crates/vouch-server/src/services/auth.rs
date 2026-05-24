@@ -307,6 +307,144 @@ impl ActorClaim {
 /// Prevents unbounded nesting in token exchange delegation chains.
 pub(crate) const MAX_DELEGATION_DEPTH: usize = 5;
 
+// ============================================================================
+// Token Issuance Proof (single-use witness chokepoint)
+// ============================================================================
+
+/// Proof that a token-issuance request has consumed its replay-prevention
+/// primitives. Required parameter to [`create_oauth_access_token`].
+///
+/// The presence of a `TokenIssuanceProof` value is compile-time evidence that
+/// the caller has consumed the relevant grant-level and client-authentication
+/// replay primitives, in the correct order, before invoking the chokepoint.
+/// The proof is constructed only at call sites that have already executed
+/// those consume-once operations.
+///
+/// `TokenIssuanceProof` is not `Clone` — the proof represents a one-shot
+/// authorization to issue a token and cannot be duplicated.
+#[must_use = "the proof was constructed to authorize a single token issuance; \
+              dropping it without calling create_oauth_access_token is a bug"]
+#[derive(Debug)]
+pub(crate) struct TokenIssuanceProof {
+    pub(crate) grant: GrantProof,
+    pub(crate) client_auth: ClientAuthProof,
+}
+
+/// Witness for the grant-level replay primitive consumed during token issuance.
+///
+/// `Unconverted*` variants are transitional placeholders that will be
+/// replaced by typed claim witnesses in subsequent slices. See
+/// `.local/handoff/single-use-witness-consolidation-plan.md` for the
+/// migration plan.
+#[derive(Debug)]
+pub(crate) enum GrantProof {
+    /// `authorization_code` grant.
+    /// TODO(slice-2): carry an `AuthCodeClaim` from `db::try_consume_auth_code`.
+    UnconvertedAuthorizationCode,
+
+    /// `client_credentials` grant — no grant-level replay primitive; the
+    /// single-use guarantee is enforced entirely via [`ClientAuthProof`].
+    ClientCredentials,
+
+    /// `urn:ietf:params:oauth:grant-type:token-exchange` — RFC 8693 does not
+    /// require single-use of the subject token; replay protection is via
+    /// [`ClientAuthProof`].
+    TokenExchange,
+
+    /// FIDO2 assertion grant.
+    /// TODO(slice-4): carry a `Fido2ChallengeClaim`.
+    UnconvertedFido2Assertion,
+
+    /// Device authorization grant (RFC 8628).
+    /// TODO(slice-5): carry a `DeviceCodeClaim` from `db::try_consume_device_auth`.
+    UnconvertedDeviceCode,
+
+    /// Enrollment bootstrap session — issued post-IdP authentication and
+    /// pre-FIDO2 registration. `hardware_verified` is false here.
+    /// TODO(slice-6): carry an `OidcStateClaim`.
+    UnconvertedEnrollmentBootstrap,
+
+    /// Enrollment complete session — issued after WebAuthn registration.
+    /// TODO(slice-6): carry a `RegistrationStateClaim`.
+    UnconvertedEnrollmentComplete,
+
+    /// Browser WebAuthn login.
+    /// TODO(slice-7): carry a `WebauthnChallengeClaim`.
+    UnconvertedBrowserLogin,
+
+    /// Certification test bypass (only available when
+    /// `VOUCH_CERTIFICATION_TEST_TOKEN` is configured). Deliberately does
+    /// not consume the pending authorization — the authorize endpoint
+    /// handles consumption on the subsequent redirect.
+    CertificationBypass,
+
+    /// Test-only variant used by `test_utils` session helpers. Gated by
+    /// the same `cfg` as the `test_utils` module so it cannot appear in
+    /// production builds.
+    #[cfg(any(test, feature = "test-utils"))]
+    TestingOnly,
+}
+
+/// Witness for the client-authentication replay primitive consumed during
+/// token issuance.
+///
+/// `Unconverted*` variants are transitional placeholders; see
+/// `GrantProof` documentation.
+#[derive(Debug)]
+pub(crate) enum ClientAuthProof {
+    /// `private_key_jwt` (RFC 7523) — the JTI was atomically committed to
+    /// the replay-prevention table. The carried `JwtAssertionJtiClaim` is
+    /// the witness returned from `db::store_jwt_assertion_jti`.
+    PrivateKeyJwt(crate::db::JwtAssertionJtiClaim),
+
+    /// `client_secret_basic` / `client_secret_post`.
+    /// TODO(slice-8): carry a `ClientSecretVerification` witness.
+    UnconvertedClientSecret,
+
+    /// `tls_client_auth` / `self_signed_tls_client_auth` (RFC 8705).
+    /// TODO(slice-8): carry an `MtlsCertVerification` witness.
+    UnconvertedMutualTls,
+
+    /// Public client — no client authentication was performed.
+    None,
+}
+
+impl ClientAuthProof {
+    /// Compose a `ClientAuthProof` from an optional JTI claim and a fallback
+    /// for the case where the client did not use `private_key_jwt`.
+    ///
+    /// Call sites typically receive `Option<JwtAssertionJtiClaim>` from
+    /// `PendingJti::commit` — `Some(claim)` means the JTI was atomically
+    /// committed, `None` means either the assertion omitted `jti` or the
+    /// client did not use JWT auth. The fallback covers the latter case.
+    pub(crate) fn from_jti_or(
+        jti_claim: Option<crate::db::JwtAssertionJtiClaim>,
+        fallback: Self,
+    ) -> Self {
+        match jti_claim {
+            Some(claim) => Self::PrivateKeyJwt(claim),
+            None => fallback,
+        }
+    }
+}
+
+/// Proof that a PAR (RFC 9126) creation request has consumed its
+/// client-authentication replay primitive. Required parameter to
+/// [`crate::db::create_pushed_authorization_request`].
+///
+/// PAR does not issue an access token, so the [`TokenIssuanceProof`]
+/// chokepoint does not fit. `ParCreationProof` is the analog for the
+/// PAR-storage chokepoint: a caller must construct one before persisting
+/// a PAR record, and the only path to a `ClientAuthProof::PrivateKeyJwt`
+/// is via a committed [`crate::db::JwtAssertionJtiClaim`].
+#[must_use = "the proof was constructed to authorize a single PAR creation; \
+              dropping it without calling create_pushed_authorization_request \
+              is a bug"]
+#[derive(Debug)]
+pub(crate) struct ParCreationProof {
+    pub(crate) client_auth: ClientAuthProof,
+}
+
 /// JWT Access Token claims per RFC 9068 Section 2.2.
 ///
 /// These claims are included in OAuth 2.0 access tokens signed with ES256.
@@ -412,13 +550,25 @@ pub(crate) struct CreateSessionResult {
 /// The `authenticator_id` is stored server-side in the session record
 /// and NOT included in the JWT to prevent information leakage.
 ///
+/// The `proof` parameter is a compile-time witness that the caller has
+/// consumed the relevant single-use replay-prevention primitives in the
+/// correct order. It is dropped immediately on entry — its only purpose
+/// is to make the chokepoint unforgeable from outside the crate.
+///
 /// # Errors
 ///
 /// Returns `ServiceError::Internal` if token signing or database operations fail.
 pub(crate) async fn create_oauth_access_token(
     state: &AppState,
     params: CreateOAuthTokenParams<'_>,
+    proof: TokenIssuanceProof,
 ) -> ServiceResult<CreateSessionResult> {
+    // Consume the witness. Its presence is the structural guarantee that the
+    // caller has consumed the required replay primitives — once consumed
+    // here, the proof cannot be reused for another token issuance.
+    let TokenIssuanceProof { grant, client_auth } = proof;
+    tracing::debug!(?grant, ?client_auth, "token issuance proof consumed");
+
     let now = Timestamp::now();
     let session_hours = i64::try_from(state.config().session_hours)
         .map_err(|_| ServiceError::Internal("Invalid session hours".to_string()))?;

@@ -17,7 +17,7 @@ use crate::AppState;
 use crate::crypto::jwt::JwtType;
 use crate::db::{self, AuthEventParams, AuthEventType};
 use crate::services::auth::{
-    AuthenticatorLookupParams, CreateOAuthTokenParams, LoginAssertionParams,
+    AuthenticatorLookupParams, CreateOAuthTokenParams, LoginAssertionParams, TokenIssuanceProof,
     create_oauth_access_token, lookup_and_verify_authenticator, verify_login_assertion,
 };
 use crate::services::oidc::authorization_details::AuthorizationDetails;
@@ -110,9 +110,10 @@ pub struct Fido2AssertionResult {
     clippy::too_many_lines,
     reason = "FIDO2 grant: parse assertion, verify, bind tokens, audit"
 )]
-pub async fn exchange_fido2_assertion(
+pub(crate) async fn exchange_fido2_assertion(
     state: &Arc<AppState>,
     params: Fido2AssertionParams<'_>,
+    proof: TokenIssuanceProof,
 ) -> ServiceResult<Fido2AssertionResult> {
     // 1. Base64url-decode and parse the assertion JSON
     let assertion_bytes = URL_SAFE_NO_PAD.decode(params.assertion).map_err(|_| {
@@ -317,6 +318,7 @@ pub async fn exchange_fido2_assertion(
             session_purpose: db::SessionPurpose::OAuthAccessToken,
             authorization_details: ad_value.as_ref(),
         },
+        proof,
     )
     .await?;
 

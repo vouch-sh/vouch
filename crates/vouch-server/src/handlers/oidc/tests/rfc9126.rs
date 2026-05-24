@@ -961,6 +961,9 @@ async fn test_rfc9126_consume_par_with_stale_version_returns_false() {
             authorization_details: None,
             response_mode: Default::default(),
         },
+        crate::services::auth::ParCreationProof {
+            client_auth: crate::services::auth::ClientAuthProof::None,
+        },
     )
     .await
     .unwrap();

@@ -15,7 +15,7 @@ use crate::crypto::hash_token;
 use crate::db::{self, Authenticator, OAuthClient, Session, User};
 use crate::redact_email;
 use crate::services::auth::{
-    AuthMethod, CreateOAuthTokenParams, create_oauth_access_token, decode_token,
+    AuthMethod, CreateOAuthTokenParams, TokenIssuanceProof, create_oauth_access_token, decode_token,
 };
 use crate::services::{OAuthErrorCode, ServiceError, ServiceResult};
 use aws_lc_rs::digest::{self, SHA256};
@@ -194,9 +194,10 @@ pub struct IdTokenClaims {
 ///
 /// # Errors
 /// Returns `ServiceError` for invalid requests.
-pub async fn exchange_authorization_code(
+pub(crate) async fn exchange_authorization_code(
     state: &Arc<AppState>,
     params: AuthCodeExchangeParams<'_>,
+    proof: TokenIssuanceProof,
 ) -> ServiceResult<AuthCodeExchangeResult> {
     // Decode and validate the authorization code
     let auth_code = decode_authorization_code(state, params.code, params.client_id).await?;
@@ -272,6 +273,7 @@ pub async fn exchange_authorization_code(
             session_purpose: db::SessionPurpose::OAuthAccessToken,
             authorization_details: grants.authorization_details_value.as_ref(),
         },
+        proof,
     )
     .await?;
     let access_token = session_result.token;

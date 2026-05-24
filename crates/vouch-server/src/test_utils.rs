@@ -475,7 +475,10 @@ pub async fn create_test_session(
     email: &str,
     auth_id: &str,
 ) -> String {
-    use crate::services::auth::{CreateOAuthTokenParams, create_oauth_access_token};
+    use crate::services::auth::{
+        ClientAuthProof, CreateOAuthTokenParams, GrantProof, TokenIssuanceProof,
+        create_oauth_access_token,
+    };
     use crate::services::oidc::ScopeSet;
     use secrecy::ExposeSecret;
 
@@ -496,6 +499,10 @@ pub async fn create_test_session(
             session_purpose: crate::db::SessionPurpose::OAuthAccessToken,
             authorization_details: None,
         },
+        TokenIssuanceProof {
+            grant: GrantProof::TestingOnly,
+            client_auth: ClientAuthProof::None,
+        },
     )
     .await
     .expect("Failed to create test session");
@@ -514,7 +521,10 @@ pub async fn create_test_session_with_iat(
     auth_id: &str,
     iat: i64,
 ) -> String {
-    use crate::services::auth::{CreateOAuthTokenParams, create_oauth_access_token};
+    use crate::services::auth::{
+        ClientAuthProof, CreateOAuthTokenParams, GrantProof, TokenIssuanceProof,
+        create_oauth_access_token,
+    };
     use crate::services::oidc::ScopeSet;
     use secrecy::ExposeSecret;
 
@@ -535,6 +545,10 @@ pub async fn create_test_session_with_iat(
             session_purpose: crate::db::SessionPurpose::OAuthAccessToken,
             authorization_details: None,
         },
+        TokenIssuanceProof {
+            grant: GrantProof::TestingOnly,
+            client_auth: ClientAuthProof::None,
+        },
     )
     .await
     .expect("Failed to create test session");
@@ -553,7 +567,10 @@ pub async fn create_test_session_for_client(
     auth_id: &str,
     client_id: &str,
 ) -> String {
-    use crate::services::auth::{CreateOAuthTokenParams, create_oauth_access_token};
+    use crate::services::auth::{
+        ClientAuthProof, CreateOAuthTokenParams, GrantProof, TokenIssuanceProof,
+        create_oauth_access_token,
+    };
     use crate::services::oidc::ScopeSet;
     use secrecy::ExposeSecret;
 
@@ -574,6 +591,10 @@ pub async fn create_test_session_for_client(
             session_purpose: crate::db::SessionPurpose::OAuthAccessToken,
             authorization_details: None,
         },
+        TokenIssuanceProof {
+            grant: GrantProof::TestingOnly,
+            client_auth: ClientAuthProof::None,
+        },
     )
     .await
     .expect("Failed to create test session");
@@ -592,7 +613,10 @@ pub async fn create_test_session_with_dpop(
     auth_id: &str,
     dpop_jkt: &str,
 ) -> String {
-    use crate::services::auth::{CreateOAuthTokenParams, create_oauth_access_token};
+    use crate::services::auth::{
+        ClientAuthProof, CreateOAuthTokenParams, GrantProof, TokenIssuanceProof,
+        create_oauth_access_token,
+    };
     use crate::services::oidc::ScopeSet;
     use secrecy::ExposeSecret;
 
@@ -613,6 +637,10 @@ pub async fn create_test_session_with_dpop(
             session_purpose: crate::db::SessionPurpose::OAuthAccessToken,
             authorization_details: None,
         },
+        TokenIssuanceProof {
+            grant: GrantProof::TestingOnly,
+            client_auth: ClientAuthProof::None,
+        },
     )
     .await
     .expect("Failed to create DPoP-bound test session");
@@ -631,7 +659,10 @@ pub async fn create_test_session_with_mtls(
     auth_id: &str,
     mtls_cert_thumbprint: &str,
 ) -> String {
-    use crate::services::auth::{CreateOAuthTokenParams, create_oauth_access_token};
+    use crate::services::auth::{
+        ClientAuthProof, CreateOAuthTokenParams, GrantProof, TokenIssuanceProof,
+        create_oauth_access_token,
+    };
     use crate::services::oidc::ScopeSet;
     use secrecy::ExposeSecret;
 
@@ -651,6 +682,10 @@ pub async fn create_test_session_with_mtls(
             hardware_verification: crate::services::auth::HardwareVerification::Verified,
             session_purpose: crate::db::SessionPurpose::OAuthAccessToken,
             authorization_details: None,
+        },
+        TokenIssuanceProof {
+            grant: GrantProof::TestingOnly,
+            client_auth: ClientAuthProof::None,
         },
     )
     .await

@@ -126,10 +126,20 @@ fn generate_request_uri() -> Result<String> {
 ///
 /// Returns `(id, request_uri)` for the created record.
 /// The PAR expires after [`PAR_EXPIRES_IN`] seconds.
-pub async fn create_pushed_authorization_request(
+///
+/// The `proof` parameter is a compile-time witness that the caller has
+/// consumed the relevant single-use client-authentication primitive
+/// (typically a JWT assertion JTI) before persisting the PAR record.
+/// It is dropped immediately on entry — its only purpose is to make this
+/// PAR storage chokepoint unforgeable from outside the crate.
+pub(crate) async fn create_pushed_authorization_request(
     store: &DocumentStore,
     params: CreateParParams<'_>,
+    proof: crate::services::auth::ParCreationProof,
 ) -> Result<(String, String)> {
+    let crate::services::auth::ParCreationProof { client_auth } = proof;
+    tracing::debug!(?client_auth, "PAR creation proof consumed");
+
     let request_uri = generate_request_uri()?;
     let now = Timestamp::now();
     let expires_at = now

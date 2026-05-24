@@ -17,6 +17,7 @@ use std::fmt;
 /// `Expired` and `NotFound` are operational cases — the claim was never
 /// valid or has aged out. `Database` wraps an unexpected backend failure.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum ClaimError {
     /// A prior caller already claimed this token. Replay detected.
     AlreadyConsumed,

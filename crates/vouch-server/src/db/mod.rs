@@ -122,9 +122,10 @@ pub use documents::oauth::{
 };
 
 // Re-export OAuth domain types and functions
+pub(crate) use oauth::JwtAssertionJtiClaim;
 pub use oauth::{
-    CreateOAuthClientParams, JwtAssertionJtiClaim, OAuthClient, OAuthClientSecret, OAuthEventType,
-    OAuthUsageStats, UpdateClientRegistrationParams, UpdateOAuthClientParams, create_oauth_client,
+    CreateOAuthClientParams, OAuthClient, OAuthClientSecret, OAuthEventType, OAuthUsageStats,
+    UpdateClientRegistrationParams, UpdateOAuthClientParams, create_oauth_client,
     create_oauth_client_secret, delete_expired_jwt_assertion_jtis, delete_oauth_client,
     delete_old_oauth_usage_events, get_oauth_client_by_client_id, get_oauth_client_by_id,
     get_oauth_client_secret_by_id, get_oauth_client_secrets, get_oauth_clients_for_user,
@@ -175,10 +176,11 @@ pub use github::{
 };
 
 // Re-export PAR types and functions (RFC 9126)
+pub(crate) use par::create_pushed_authorization_request;
 pub use par::{
     CreateParParams, PAR_EXPIRES_IN, ParConsumptionMode, PushedAuthorizationRequest,
-    consume_pushed_authorization_request, create_pushed_authorization_request,
-    delete_expired_pushed_authorization_requests, get_pushed_authorization_request,
+    consume_pushed_authorization_request, delete_expired_pushed_authorization_requests,
+    get_pushed_authorization_request,
 };
 
 // Re-export pending OAuth types and functions (RFC 6749, RFC 9700)

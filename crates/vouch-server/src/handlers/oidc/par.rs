@@ -6,6 +6,7 @@ use crate::AppState;
 use crate::db::par::PAR_EXPIRES_IN;
 use crate::db::{self, CreateParParams};
 use crate::services::ServiceError;
+use crate::services::auth::{ClientAuthProof, ParCreationProof};
 use crate::services::error::OAuthErrorResponse;
 use crate::services::oidc::DpopError;
 use crate::services::oidc::authorization::{
@@ -446,11 +447,7 @@ pub async fn par(
         response_mode,
     };
 
-    // SAFETY: PendingJti::commit MUST run AFTER DPoP nonce validation (so a
-    // use_dpop_nonce retry leaves the JTI unconsumed) and BEFORE
-    // store_par_request() (so concurrent replays of the same assertion cannot
-    // persist multiple PAR requests — see issue #391).
-    let _jwt_jti_claim = match pending_jti {
+    let jti_claim = match pending_jti {
         Some(p) => match p.commit(&state).await {
             Ok(claim) => claim,
             Err(e) => {
@@ -475,9 +472,12 @@ pub async fn par(
         },
         None => None,
     };
+    let proof = ParCreationProof {
+        client_auth: ClientAuthProof::from_jti_or(jti_claim, ClientAuthProof::None),
+    };
 
     // RFC 9126 Section 2.2: Return 201 Created
-    match db::create_pushed_authorization_request(&state.store, create_params).await {
+    match db::create_pushed_authorization_request(&state.store, create_params, proof).await {
         Ok((_id, request_uri)) => (
             StatusCode::CREATED,
             Json(ParResponse {

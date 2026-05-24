@@ -3,7 +3,10 @@
 
 use crate::AppState;
 use crate::db::{self, DeviceAuthStatus};
-use crate::services::auth::{CreateOAuthTokenParams, create_oauth_access_token};
+use crate::services::auth::{
+    ClientAuthProof, CreateOAuthTokenParams, GrantProof, TokenIssuanceProof,
+    create_oauth_access_token,
+};
 use crate::services::oidc::ScopeSet;
 use aws_lc_rs::digest::{self, SHA256};
 use axum::{Json, extract::State, http::StatusCode};
@@ -329,6 +332,10 @@ pub async fn device_token(
                     hardware_verification: crate::services::auth::HardwareVerification::Verified,
                     session_purpose: crate::db::SessionPurpose::OAuthAccessToken,
                     authorization_details: None,
+                },
+                TokenIssuanceProof {
+                    grant: GrantProof::UnconvertedDeviceCode,
+                    client_auth: ClientAuthProof::None,
                 },
             )
             .await
