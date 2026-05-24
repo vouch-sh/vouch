@@ -177,12 +177,19 @@ pub(crate) async fn rename_key(
 /// along with any associated sessions (via CASCADE). Returns the deleted key
 /// name and the number of revoked sessions.
 ///
+/// The flow runs inside a single transaction with a delete-then-check guard
+/// and a `compare_and_update` version bump on the User doc, so two concurrent
+/// deletes against the same user serialise on a write-write conflict — the
+/// loser sees the conflict at commit time and rolls back.
+///
 /// # Errors
 ///
 /// Returns:
-/// - `ServiceError::NotFound` if the key does not exist.
+/// - `ServiceError::NotFound` if the key (or user) does not exist.
 /// - `ServiceError::Forbidden` if the key does not belong to the user.
-/// - `ServiceError::Validation` if this is the user's last key.
+/// - `ServiceError::Api(400 "last_key")` if this is the user's last key.
+/// - `ServiceError::Api(409 "conflict")` if a concurrent delete won the race
+///   on the User doc's optimistic-concurrency version.
 /// - `ServiceError::Internal` on database errors.
 pub(crate) async fn delete_key(
     store: &DocumentStore,
@@ -196,10 +203,28 @@ pub(crate) async fn delete_key(
         ));
     }
 
-    let mut tx = store.begin().await.map_err(|e| {
-        tracing::error!("Failed to begin transaction for delete_key: {e}");
-        ServiceError::Internal("Failed to start transaction".to_string())
-    })?;
+    // Map a DB error from any tx operation into either a 409 conflict (if it
+    // signals contention with a concurrent writer — Postgres serialization
+    // failure, Aurora DSQL OC000/OC001, SQLite BUSY/LOCKED) or a generic 500.
+    // The contention case is the loser of the same race that the version
+    // bump below would catch on commit — it just surfaces earlier.
+    let map_db_err = |e: anyhow::Error, msg: &'static str| -> ServiceError {
+        tracing::error!("{msg}: {e}");
+        if crate::db::pool::is_retryable_db_error(&e) {
+            ServiceError::api(
+                axum::http::StatusCode::CONFLICT,
+                "conflict",
+                "Key deletion conflicted with a concurrent operation. Please retry.",
+            )
+        } else {
+            ServiceError::Internal(msg.to_string())
+        }
+    };
+
+    let mut tx = store
+        .begin()
+        .await
+        .map_err(|e| map_db_err(e, "Failed to start transaction"))?;
 
     // Load the User doc with its version. The version is bumped at the end of
     // the transaction so that two concurrent deletes against the same user
@@ -209,20 +234,14 @@ pub(crate) async fn delete_key(
     let user_doc = tx
         .get::<UserDoc>(user_id)
         .await
-        .map_err(|e| {
-            tracing::error!("Failed to load user {user_id}: {e}");
-            ServiceError::Internal("Failed to load user".to_string())
-        })?
+        .map_err(|e| map_db_err(e, "Failed to load user"))?
         .ok_or(ServiceError::NotFound("User"))?;
 
     // Load the authenticator and verify ownership within the transaction.
     let auth_doc = tx
         .get::<AuthenticatorDoc>(key_id)
         .await
-        .map_err(|e| {
-            tracing::error!("Failed to get authenticator {key_id}: {e}");
-            ServiceError::Internal("Failed to retrieve key".to_string())
-        })?
+        .map_err(|e| map_db_err(e, "Failed to retrieve key"))?
         .ok_or(ServiceError::NotFound("Key"))?;
 
     if auth_doc.data.user_id != user_id {
@@ -235,14 +254,13 @@ pub(crate) async fn delete_key(
     let key_name = auth_doc.data.name.clone();
 
     // Pre-flight "last key" guard — fast-paths the common single-request case
-    // and preserves the 400 / "last_key" response semantics.
+    // and preserves the 400 / "last_key" response semantics. The count
+    // includes the key about to be deleted, so `<= 1` means "this is the only
+    // key the user owns."
     let count_before = tx
         .count::<AuthenticatorDoc>("user_id", user_id)
         .await
-        .map_err(|e| {
-            tracing::error!("Failed to count authenticators for user {user_id}: {e}");
-            ServiceError::Internal("Failed to check key count".to_string())
-        })?;
+        .map_err(|e| map_db_err(e, "Failed to check key count"))?;
     if count_before <= 1 {
         return Err(ServiceError::api(
             axum::http::StatusCode::BAD_REQUEST,
@@ -251,22 +269,17 @@ pub(crate) async fn delete_key(
         ));
     }
 
-    // Count sessions to report in the response payload.
+    // Count sessions to report in the response payload. Snapshot taken before
+    // the cascade — represents the sessions that will be revoked.
     let sessions_revoked = tx
         .count::<SessionDoc>("authenticator_id", key_id)
         .await
-        .map_err(|e| {
-            tracing::error!("Failed to count sessions for authenticator {key_id}: {e}");
-            ServiceError::Internal("Failed to count sessions".to_string())
-        })?;
+        .map_err(|e| map_db_err(e, "Failed to count sessions"))?;
 
     // Cascade-delete the authenticator (device_auth refs, sessions, doc).
     db::delete_authenticator_in_tx(&mut tx, key_id)
         .await
-        .map_err(|e| {
-            tracing::error!("Failed to delete authenticator {key_id}: {e}");
-            ServiceError::Internal("Failed to delete key".to_string())
-        })?;
+        .map_err(|e| map_db_err(e, "Failed to delete key"))?;
 
     // Post-delete invariant. Under PostgreSQL READ COMMITTED both concurrent
     // transactions would still see count_after == 1 (each observes the other's
@@ -275,12 +288,7 @@ pub(crate) async fn delete_key(
     let count_after = tx
         .count::<AuthenticatorDoc>("user_id", user_id)
         .await
-        .map_err(|e| {
-            tracing::error!(
-                "Failed to recount authenticators for user {user_id} after delete: {e}"
-            );
-            ServiceError::Internal("Failed to verify key count".to_string())
-        })?;
+        .map_err(|e| map_db_err(e, "Failed to verify key count"))?;
     if count_after < 1 {
         return Err(ServiceError::api(
             axum::http::StatusCode::BAD_REQUEST,
@@ -293,10 +301,7 @@ pub(crate) async fn delete_key(
     let ok = tx
         .compare_and_update::<UserDoc>(user_id, user_doc.version, &user_doc.data)
         .await
-        .map_err(|e| {
-            tracing::error!("Failed to bump user {user_id} version on key delete: {e}");
-            ServiceError::Internal("Failed to commit key deletion".to_string())
-        })?;
+        .map_err(|e| map_db_err(e, "Failed to commit key deletion"))?;
     if !ok {
         return Err(ServiceError::api(
             axum::http::StatusCode::CONFLICT,
@@ -305,10 +310,9 @@ pub(crate) async fn delete_key(
         ));
     }
 
-    tx.commit().await.map_err(|e| {
-        tracing::error!("Failed to commit delete_key transaction for {key_id}: {e}");
-        ServiceError::Internal("Failed to commit key deletion".to_string())
-    })?;
+    tx.commit()
+        .await
+        .map_err(|e| map_db_err(e, "Failed to commit key deletion"))?;
 
     let sessions = u64::try_from(sessions_revoked).unwrap_or_default();
     tracing::info!("Deleted key {key_id} for user {user_id}, revoked {sessions} sessions");

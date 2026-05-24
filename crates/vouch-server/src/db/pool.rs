@@ -775,7 +775,13 @@ pub(crate) const MAX_DSQL_RETRIES: u32 = 3;
 /// - `40001`: Serialization failure (standard SQL)
 /// - `OC000`: Aurora DSQL optimistic concurrency conflict
 /// - `OC001`: Aurora DSQL transaction conflict
-const RETRYABLE_SQL_STATES: &[&str] = &["40001", "OC000", "OC001"];
+/// - `5`: SQLite `SQLITE_BUSY` — writer contention
+/// - `6`: SQLite `SQLITE_LOCKED` — deadlock between concurrent transactions
+///
+/// SQLite returns its primary error code as a single-digit string via
+/// `sqlx::Error::code()`; Postgres always returns a 5-char SQLSTATE so
+/// there is no collision.
+const RETRYABLE_SQL_STATES: &[&str] = &["40001", "OC000", "OC001", "5", "6"];
 
 /// Check whether an error is a transient database error worth retrying.
 ///

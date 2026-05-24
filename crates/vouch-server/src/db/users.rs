@@ -140,8 +140,11 @@ pub async fn delete_user(store: &DocumentStore, user_id: &str) -> Result<bool> {
     tx.delete_by_index::<EnrollmentSessionDoc>("user_id", user_id)
         .await?;
 
-    // 3. Cascade-delete each authenticator (clears device_auth references and
-    //    removes the authenticator doc). Sessions were already removed in step 1.
+    // 3. Cascade-delete each authenticator (clears device_auth references,
+    //    removes the authenticator doc). The helper also issues a session
+    //    delete-by-index per authenticator; that is redundant here because
+    //    step 1 already removed all the user's sessions, but the duplicate
+    //    no-op delete is cheap and keeps the cascade logic in one place.
     let authenticators = tx.find_all::<AuthenticatorDoc>("user_id", user_id).await?;
     for auth in &authenticators {
         super::authenticators::delete_authenticator_in_tx(&mut tx, &auth.id).await?;

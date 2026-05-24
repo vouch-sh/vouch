@@ -907,6 +907,14 @@ mod keys {
             !(s1 == 200 && s2 == 200),
             "both deletes must not succeed (got {s1} and {s2})"
         );
+        // The losing request must be either 400 (last_key, caught by the
+        // pre/post count check) or 409 (conflict, caught by the User-doc
+        // version bump). Anything else (500, panic) is a regression.
+        let loser = if s1 == 200 { s2 } else { s1 };
+        assert!(
+            loser == 400 || loser == 409,
+            "losing delete must return 400 or 409, got {loser} (s1={s1} s2={s2})"
+        );
 
         let remaining =
             vouch_server::db::get_authenticators_for_user(&harness.state.store, &user.id)
