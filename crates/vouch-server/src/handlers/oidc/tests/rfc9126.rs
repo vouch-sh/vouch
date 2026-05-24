@@ -1311,3 +1311,73 @@ async fn test_rfc9126_par_already_consumed_returns_error_not_login() {
         "Pre-consumed PAR must not redirect to /login"
     );
 }
+
+#[tokio::test]
+async fn test_rfc9126_par_jti_replay_returns_invalid_client() {
+    // Regression: PAR's commit_jti() failure must return 401 invalid_client
+    // (the JTI replay is a client-auth failure), not 500 server_error.
+    // Returning 500 would tempt well-behaved clients to retry-loop with the
+    // same already-consumed JTI. The four token-grant arms in
+    // handlers/oidc/token.rs return invalid_client for the same failure;
+    // PAR must match.
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "par-jti-replay@example.com").await;
+    let (client, pkcs8_bytes) = create_test_jwt_client(&state.store, &user.id).await;
+
+    let par_endpoint = format!("{}/oauth/par", state.config().base_url);
+    let fixed_jti = "par-replay-jti-12345";
+    let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+    let challenge = sha256_base64url(verifier);
+
+    let build_body = |assertion: &str| {
+        format!(
+            "response_type=code\
+             &client_id={}\
+             &redirect_uri={}\
+             &code_challenge={}\
+             &code_challenge_method=S256\
+             &scope=openid\
+             &client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer\
+             &client_assertion={}",
+            client.client_id,
+            urlencoding::encode("https://example.com/callback"),
+            challenge,
+            assertion,
+        )
+    };
+
+    let assertion1 = build_client_assertion(
+        &client.client_id,
+        &par_endpoint,
+        &pkcs8_bytes,
+        Some(fixed_jti),
+    );
+    let (status1, body1) = http_post_form(&app, "/oauth/par", &build_body(&assertion1), &[]).await;
+    assert_eq!(
+        status1,
+        StatusCode::CREATED,
+        "First PAR with JWT assertion must succeed: {body1}"
+    );
+
+    // Replay the same JTI in a new assertion (re-signed for freshness on iat/exp,
+    // but with the same jti — JTI uniqueness is per (client_id, jti)).
+    let assertion2 = build_client_assertion(
+        &client.client_id,
+        &par_endpoint,
+        &pkcs8_bytes,
+        Some(fixed_jti),
+    );
+    let (status2, body2) = http_post_form(&app, "/oauth/par", &build_body(&assertion2), &[]).await;
+
+    assert_eq!(
+        status2,
+        StatusCode::UNAUTHORIZED,
+        "PAR JTI replay must return 401 (invalid_client), not 500 (server_error): {body2}"
+    );
+    let err: serde_json::Value = serde_json::from_str(&body2).expect("Valid JSON");
+    assert_eq!(
+        err["error"], "invalid_client",
+        "PAR JTI replay must return error=invalid_client, got: {body2}"
+    );
+}

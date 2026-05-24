@@ -456,10 +456,14 @@ pub async fn par(
         && let Err(e) = commit_jti(&state, pjti).await
     {
         tracing::warn!("JTI commit failed for PAR: {e:?}");
+        // commit_jti failure here means a JWT-assertion JTI replay was
+        // detected (RFC 7523 §3). That's a client-auth failure, not a server
+        // error — match the four token-grant arms (invalid_client / 401) so
+        // well-behaved clients don't retry-loop with the same consumed JTI.
         return par_error_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "server_error",
-            "Failed to complete client authentication",
+            StatusCode::UNAUTHORIZED,
+            "invalid_client",
+            "Client authentication failed",
         );
     }
 
