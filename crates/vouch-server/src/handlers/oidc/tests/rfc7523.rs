@@ -847,8 +847,10 @@ async fn fan_out_token_requests(
             .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
             .collect();
         set.spawn(async move {
-            let header_refs: Vec<(&str, &str)> =
-                headers.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+            let header_refs: Vec<(&str, &str)> = headers
+                .iter()
+                .map(|(k, v)| (k.as_str(), v.as_str()))
+                .collect();
             http_post_form(&app, "/oauth/token", &body, &header_refs).await
         });
     }
@@ -913,10 +915,7 @@ async fn test_jwt_assertion_jti_concurrent_replay_client_credentials() {
 
     let results = fan_out_token_requests(&app, &body, &[], CONCURRENT_N).await;
 
-    let successes = results
-        .iter()
-        .filter(|(s, _)| *s == StatusCode::OK)
-        .count();
+    let successes = results.iter().filter(|(s, _)| *s == StatusCode::OK).count();
     assert!(
         successes <= 1,
         "At most one concurrent replay may succeed, got {successes}. \
@@ -988,10 +987,7 @@ async fn test_jwt_assertion_jti_concurrent_replay_authorization_code() {
 
     let results = fan_out_token_requests(&app, &body, &[], CONCURRENT_N).await;
 
-    let successes = results
-        .iter()
-        .filter(|(s, _)| *s == StatusCode::OK)
-        .count();
+    let successes = results.iter().filter(|(s, _)| *s == StatusCode::OK).count();
     assert!(
         successes <= 1,
         "At most one concurrent replay may succeed, got {successes}. \
@@ -1065,9 +1061,16 @@ async fn test_jwt_assertion_jti_concurrent_replay_token_exchange() {
         urlencoding::encode("https://example.com/callback")
     );
     let (seed_status, seed_resp) = http_post_form(&app, "/oauth/token", &seed_body, &[]).await;
-    assert_eq!(seed_status, StatusCode::OK, "seed token must issue: {seed_resp}");
+    assert_eq!(
+        seed_status,
+        StatusCode::OK,
+        "seed token must issue: {seed_resp}"
+    );
     let seed_json: serde_json::Value = serde_json::from_str(&seed_resp).expect("Valid JSON");
-    let subject_token = seed_json["access_token"].as_str().expect("access_token").to_string();
+    let subject_token = seed_json["access_token"]
+        .as_str()
+        .expect("access_token")
+        .to_string();
 
     // Sessions persisted so far: the one from the seed exchange.
     let baseline_sessions = count_sessions_for_user(&state.store, &user.id).await;
@@ -1089,10 +1092,7 @@ async fn test_jwt_assertion_jti_concurrent_replay_token_exchange() {
 
     let results = fan_out_token_requests(&app, &body, &[], CONCURRENT_N).await;
 
-    let successes = results
-        .iter()
-        .filter(|(s, _)| *s == StatusCode::OK)
-        .count();
+    let successes = results.iter().filter(|(s, _)| *s == StatusCode::OK).count();
     assert!(
         successes <= 1,
         "At most one concurrent replay may succeed, got {successes}. \
@@ -1285,7 +1285,8 @@ async fn test_jwt_assertion_dpop_use_nonce_retry_succeeds() {
     // Step 1: DPoP proof without nonce. Server returns use_dpop_nonce + a
     // DPoP-Nonce header. The JTI must NOT be committed at this point.
     let no_nonce_proof = create_dpop_proof(&dpop_key, &dpop_jwk, "POST", &token_endpoint, None);
-    let first = http_post_form_full(&app, "/oauth/token", &body, &[("DPoP", &no_nonce_proof)]).await;
+    let first =
+        http_post_form_full(&app, "/oauth/token", &body, &[("DPoP", &no_nonce_proof)]).await;
     assert!(
         first.status == StatusCode::BAD_REQUEST || first.status == StatusCode::UNAUTHORIZED,
         "First DPoP request without nonce must be rejected, got {} : {}",
@@ -1311,8 +1312,7 @@ async fn test_jwt_assertion_dpop_use_nonce_retry_succeeds() {
         &token_endpoint,
         Some(&server_nonce),
     );
-    let second =
-        http_post_form_full(&app, "/oauth/token", &body, &[("DPoP", &nonce_proof)]).await;
+    let second = http_post_form_full(&app, "/oauth/token", &body, &[("DPoP", &nonce_proof)]).await;
     assert_eq!(
         second.status,
         StatusCode::OK,

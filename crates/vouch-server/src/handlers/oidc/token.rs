@@ -893,19 +893,17 @@ async fn handle_token_exchange_grant(
     }
 
     match exchange_token(&state, exchange_params).await {
-        Ok(result) => {
-            token_success_response(TokenExchangeResponse {
-                access_token: result.access_token,
-                issued_token_type: result.issued_token_type,
-                token_type: result.token_type,
-                expires_in: result.expires_in,
-                scope: result.scope,
-                authorization_details: result
-                    .authorization_details
-                    .as_ref()
-                    .map(serde_json::Value::from),
-            })
-        }
+        Ok(result) => token_success_response(TokenExchangeResponse {
+            access_token: result.access_token,
+            issued_token_type: result.issued_token_type,
+            token_type: result.token_type,
+            expires_in: result.expires_in,
+            scope: result.scope,
+            authorization_details: result
+                .authorization_details
+                .as_ref()
+                .map(serde_json::Value::from),
+        }),
         Err(e) => e.into_oauth_response().into_response(),
     }
 }
