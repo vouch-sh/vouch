@@ -5,7 +5,7 @@ use super::document_type::Document;
 use super::documents::authenticator::AuthenticatorDoc;
 use super::documents::device_auth::DeviceAuthRequestDoc;
 use super::documents::session::SessionDoc;
-use super::store::DocumentStore;
+use super::store::{DocumentStore, StoreTransaction};
 use super::users::User;
 use anyhow::{Context, Result};
 use base64::Engine;
@@ -219,6 +219,25 @@ pub async fn delete_authenticator(store: &DocumentStore, authenticator_id: &str)
     // 3. Delete the authenticator
     store.delete(authenticator_id).await?;
     Ok(1)
+}
+
+/// Cascade-delete an authenticator within an open transaction.
+///
+/// Same steps as [`delete_authenticator`], but executed against a caller-owned
+/// `StoreTransaction` so the cascade can be composed with additional checks
+/// (e.g. last-key guard plus User-doc version bump) in a single atomic unit.
+pub async fn delete_authenticator_in_tx(
+    tx: &mut StoreTransaction<'_>,
+    authenticator_id: &str,
+) -> Result<()> {
+    tx.update_by_index::<DeviceAuthRequestDoc, _>("authenticator_id", authenticator_id, |d| {
+        d.authenticator_id = None;
+    })
+    .await?;
+    tx.delete_by_index::<SessionDoc>("authenticator_id", authenticator_id)
+        .await?;
+    tx.delete(authenticator_id).await?;
+    Ok(())
 }
 
 /// Update an authenticator's name.
