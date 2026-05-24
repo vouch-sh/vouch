@@ -673,7 +673,12 @@ async fn handle_authorization_code_grant(
         grant: GrantProof::UnconvertedAuthorizationCode,
         client_auth: ClientAuthProof::from_jti_or(
             jti_claim,
-            fallback_client_auth(mtls_authenticated.is_some(), credentials.is_some()),
+            fallback_client_auth(
+                mtls_authenticated.is_some(),
+                credentials
+                    .as_ref()
+                    .is_some_and(|c| c.client_secret.is_some()),
+            ),
         ),
     };
 

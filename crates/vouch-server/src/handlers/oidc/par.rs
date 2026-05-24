@@ -473,7 +473,12 @@ pub async fn par(
         None => None,
     };
     let proof = ParCreationProof {
-        client_auth: ClientAuthProof::from_jti_or(jti_claim, ClientAuthProof::None),
+        client_auth: ClientAuthProof::from_jti_or(
+            jti_claim,
+            ClientAuthProof::from_auth_method(
+                authenticated_client.client.token_endpoint_auth_method,
+            ),
+        ),
     };
 
     // RFC 9126 Section 2.2: Return 201 Created

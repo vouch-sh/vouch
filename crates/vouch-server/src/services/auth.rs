@@ -410,13 +410,15 @@ pub(crate) enum ClientAuthProof {
 }
 
 impl ClientAuthProof {
-    /// Compose a `ClientAuthProof` from an optional JTI claim and a fallback
-    /// for the case where the client did not use `private_key_jwt`.
+    /// Compose a `ClientAuthProof` from an optional JTI claim and a fallback.
     ///
-    /// Call sites typically receive `Option<JwtAssertionJtiClaim>` from
-    /// `PendingJti::commit` — `Some(claim)` means the JTI was atomically
-    /// committed, `None` means either the assertion omitted `jti` or the
-    /// client did not use JWT auth. The fallback covers the latter case.
+    /// `Some(claim)` produces `PrivateKeyJwt(claim)` — the only path to that
+    /// variant, since `JwtAssertionJtiClaim` has no public constructor. `None`
+    /// is *any* non-`private_key_jwt` case: the assertion omitted `jti`, the
+    /// client used `client_secret_basic`/`client_secret_post`, the client
+    /// used `tls_client_auth`/`self_signed_tls_client_auth`, or the client is
+    /// public (no auth). The caller supplies the appropriate fallback variant
+    /// describing whichever non-JWT method actually succeeded.
     pub(crate) fn from_jti_or(
         jti_claim: Option<crate::db::JwtAssertionJtiClaim>,
         fallback: Self,
@@ -424,6 +426,23 @@ impl ClientAuthProof {
         match jti_claim {
             Some(claim) => Self::PrivateKeyJwt(claim),
             None => fallback,
+        }
+    }
+
+    /// Map a registered `TokenEndpointAuthMethod` to the matching placeholder
+    /// variant. Used by call sites that don't separately track which auth
+    /// method succeeded but do hold the authenticated client's registered
+    /// method (e.g., PAR). The `PrivateKeyJwt` arm returns `None` here because
+    /// the JTI claim is the only valid construction path — callers with a JWT
+    /// client must use [`Self::from_jti_or`] with the committed claim.
+    pub(crate) fn from_auth_method(method: crate::db::TokenEndpointAuthMethod) -> Self {
+        use crate::db::TokenEndpointAuthMethod;
+        match method {
+            TokenEndpointAuthMethod::ClientSecretBasic
+            | TokenEndpointAuthMethod::ClientSecretPost => Self::UnconvertedClientSecret,
+            TokenEndpointAuthMethod::TlsClientAuth
+            | TokenEndpointAuthMethod::SelfSignedTlsClientAuth => Self::UnconvertedMutualTls,
+            TokenEndpointAuthMethod::PrivateKeyJwt | TokenEndpointAuthMethod::None => Self::None,
         }
     }
 }
@@ -566,6 +585,9 @@ pub(crate) async fn create_oauth_access_token(
     // Consume the witness. Its presence is the structural guarantee that the
     // caller has consumed the required replay primitives — once consumed
     // here, the proof cannot be reused for another token issuance.
+    //
+    // `JwtAssertionJtiClaim` holds only `_private: ()` — the JTI string is
+    // not retained in the witness, so the Debug log cannot leak it.
     let TokenIssuanceProof { grant, client_auth } = proof;
     tracing::debug!(?grant, ?client_auth, "token issuance proof consumed");
 
