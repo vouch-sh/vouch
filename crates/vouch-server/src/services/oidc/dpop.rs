@@ -194,17 +194,54 @@ impl std::fmt::Display for DpopError {
 
 impl std::error::Error for DpopError {}
 
-/// Validated DPoP proof information.
-#[derive(Debug, Clone)]
+/// Witness that a DPoP proof (RFC 9449) has been fully validated AND its
+/// `jti` has been atomically committed to the replay-prevention table.
+///
+/// Construction is private to this module — the only path to an instance is
+/// a successful return from [`validate_dpop_proof`] (or its userinfo-bound
+/// variant), both of which call [`validate_dpop_common`], which performs
+/// signature verification, claim validation (`htm`/`htu`/`exp`/`nonce`),
+/// and an atomic insert into the DPoP JTI table. Callers that hold a
+/// `ValidatedDpopProof` can rely on it as compile-time evidence that the
+/// proof was not a replay and is bound to the carried `jkt`.
+///
+/// The carried `jkt`/`jti`/`source` are the validation metadata downstream
+/// consumers need (e.g., binding the access token via `cnf.jkt`, recording
+/// `source` in audit logs). Reading those fields is fine; the sealing only
+/// prevents *fabrication* of a witness without going through validation.
+///
+/// Intentionally not `Clone` — the witness represents a single one-shot
+/// validation. The `#[must_use]` ensures it is bound at the call site.
+#[must_use = "the DPoP proof was validated and its JTI atomically committed; \
+              bind this witness so it can be threaded into downstream consumers"]
+#[derive(Debug)]
 pub struct ValidatedDpopProof {
-    /// JWK thumbprint of the sender's key.
-    pub jkt: String,
-    /// The public key from the proof.
-    pub jwk: DpopJwk,
+    /// JWK thumbprint of the sender's key. Used to bind access tokens
+    /// via `cnf.jkt` (RFC 9449 §6).
+    pub(crate) jkt: String,
     /// Unique identifier from the proof.
-    pub jti: String,
+    pub(crate) jti: String,
     /// Credential source identifier from the DPoP proof (custom claim).
-    pub source: Option<String>,
+    pub(crate) source: Option<String>,
+    /// Seals construction to this module — without setting this field,
+    /// code outside `services::oidc::dpop` cannot build a
+    /// `ValidatedDpopProof` via struct literal. Stronger than
+    /// `#[non_exhaustive]`, which would still allow in-crate construction.
+    _private: (),
+}
+
+impl ValidatedDpopProof {
+    /// Test-only constructor. Production code must obtain a witness via
+    /// [`validate_dpop_proof`] / [`validate_userinfo_dpop_proof`].
+    #[cfg(test)]
+    pub(crate) fn for_testing(jkt: String, jti: String, source: Option<String>) -> Self {
+        Self {
+            jkt,
+            jti,
+            source,
+            _private: (),
+        }
+    }
 }
 
 /// Compute the access token hash (`ath`) for DPoP (RFC 9449 Section 4.2).
@@ -500,9 +537,9 @@ async fn validate_dpop_common(
     let jkt = header.jwk.thumbprint()?;
     Ok(ValidatedDpopProof {
         jkt,
-        jwk: header.jwk,
         jti: claims.jti,
         source: claims.source,
+        _private: (),
     })
 }
 

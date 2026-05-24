@@ -1113,17 +1113,7 @@ mod tests {
     }
 
     fn make_dpop_proof(jkt: &str) -> ValidatedDpopProof {
-        ValidatedDpopProof {
-            jkt: jkt.to_string(),
-            jwk: dpop::DpopJwk::Ec(dpop::EcJwk {
-                kty: "EC".to_string(),
-                crv: "P-256".to_string(),
-                x: "test-x".to_string(),
-                y: "test-y".to_string(),
-            }),
-            jti: "jti-value".to_string(),
-            source: None,
-        }
+        ValidatedDpopProof::for_testing(jkt.to_string(), "jti-value".to_string(), None)
     }
 
     #[test]
