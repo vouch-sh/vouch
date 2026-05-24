@@ -16,10 +16,13 @@ use std::sync::Arc;
 
 /// A JTI that has been validated but not yet committed to the database.
 ///
-/// Call [`commit_jti`] after the full request succeeds to prevent replay.
-/// If the request fails with a retryable error (e.g., `use_dpop_nonce`),
-/// drop this without committing so the client can retry.
-#[must_use = "JTI must be committed via commit_jti() after the request succeeds"]
+/// Call [`commit_jti`] immediately before any grant-state persistence
+/// (`exchange_*` / `store_par_request`) so concurrent replays serialize on
+/// the JTI uniqueness constraint. Commit MUST run after any validator that
+/// returns a retryable error (in particular DPoP `use_dpop_nonce`, RFC 9449
+/// §4.3) so that those failures leave the JTI unconsumed and the client can
+/// retry with the same assertion.
+#[must_use = "JTI must be committed via commit_jti() before token issuance"]
 pub struct PendingJti {
     jti: Option<String>,
     client_id: String,
@@ -28,7 +31,10 @@ pub struct PendingJti {
 
 /// Commit a pending JTI to the replay-prevention database.
 ///
-/// Must be called after the token/PAR request fully succeeds.
+/// Must be called immediately before the grant-state persistence step
+/// (`exchange_*` / `store_par_request`) so that the atomic
+/// `db::store_jwt_assertion_jti` insert is the serializing point under
+/// concurrent replay of the same assertion.
 pub async fn commit_jti(
     state: &Arc<AppState>,
     pending: &PendingJti,
@@ -63,10 +69,12 @@ pub async fn commit_jti(
 /// * `client_id_hint` - Optional client_id from the request body (for lookup)
 ///
 /// # Returns
-/// The authenticated client and a pending JTI that MUST be committed
-/// via [`commit_jti`] after the request succeeds. If the request fails
-/// (e.g., `use_dpop_nonce`), the JTI is NOT consumed and the client
-/// can retry with the same assertion.
+/// The authenticated client and a pending JTI that MUST be committed via
+/// [`commit_jti`] immediately before grant-state persistence (`exchange_*` /
+/// `store_par_request`). If a validator earlier in the request rejects with
+/// a retryable error (in particular DPoP `use_dpop_nonce`, RFC 9449 §4.3),
+/// drop the [`PendingJti`] without committing so the client can retry with
+/// the same assertion.
 pub async fn authenticate_client_jwt(
     state: &Arc<AppState>,
     client_assertion: &str,

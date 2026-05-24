@@ -809,3 +809,520 @@ async fn test_non_fapi_client_accepts_token_endpoint_audience() {
         "Non-FAPI client with aud=token_endpoint_url must pass client auth (status={status}): {resp_body}"
     );
 }
+
+// ========================================================================
+// Issue #391 — concurrent JTI replay must not produce multiple tokens.
+//
+// Before the fix, `commit_jti()` ran AFTER `exchange_*()`, so N concurrent
+// requests with the same JWT assertion could each persist a token before any
+// of them committed the JTI. One won the JTI insert and returned 200; the
+// others returned `invalid_client` but their tokens remained valid in the DB.
+//
+// The fix moves `commit_jti()` to immediately before `exchange_*()`, so the
+// atomic `(jti, client_id)` insert is the serialization point. Concurrent
+// replayers either win the JTI and proceed to exchange, or lose and return
+// `invalid_client` before any token is persisted.
+//
+// Each test below fires N concurrent requests with the same JWT assertion
+// (fixed `jti`) and asserts that AT MOST one HTTP 200 is returned and AT MOST
+// one session (token) ends up in the DB.
+// ========================================================================
+
+const CONCURRENT_N: usize = 8;
+
+/// Fan out N identical POSTs to `/oauth/token` and return the response status
+/// for each. The body and headers are constant across all requests.
+async fn fan_out_token_requests(
+    app: &axum::Router,
+    body: &str,
+    headers: &[(&str, &str)],
+    n: usize,
+) -> Vec<(StatusCode, String)> {
+    let mut set = tokio::task::JoinSet::new();
+    for _ in 0..n {
+        let app = app.clone();
+        let body = body.to_string();
+        let headers: Vec<(String, String)> = headers
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .collect();
+        set.spawn(async move {
+            let header_refs: Vec<(&str, &str)> =
+                headers.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+            http_post_form(&app, "/oauth/token", &body, &header_refs).await
+        });
+    }
+    let mut results = Vec::with_capacity(n);
+    while let Some(res) = set.join_next().await {
+        results.push(res.expect("Task panicked"));
+    }
+    results
+}
+
+/// Enable a list of grant types on an OAuth client.
+async fn enable_grant_types(store: &db::store::DocumentStore, client_id: &str, grants: &[&str]) {
+    let oauth_client = db::get_oauth_client_by_client_id(store, client_id)
+        .await
+        .expect("DB error")
+        .expect("Client not found");
+    let grants: Vec<String> = grants.iter().map(|s| (*s).to_string()).collect();
+    store
+        .modify::<crate::db::documents::oauth::OAuthClientDoc, _>(&oauth_client.id, |data| {
+            data.grant_types = Some(grants.clone());
+        })
+        .await
+        .expect("Failed to update grant_types");
+}
+
+/// Count `SessionDoc` rows indexed under a given user_id. For client_credentials
+/// grants the session's `user_id` is the client_id; for authorization_code it
+/// is the actual user's id.
+async fn count_sessions_for_user(store: &db::store::DocumentStore, user_id: &str) -> i64 {
+    store
+        .count::<crate::db::documents::session::SessionDoc>("user_id", user_id)
+        .await
+        .expect("count must not error")
+}
+
+#[tokio::test]
+async fn test_jwt_assertion_jti_concurrent_replay_client_credentials() {
+    // Strongest of the four concurrent-replay tests: no per-request resource
+    // (no auth code) to gate concurrency. Without the fix, every concurrent
+    // request reaches `exchange_client_credentials` and persists a session
+    // before any of them commits the JTI.
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "jti-race-cc@example.com").await;
+    let (client, pkcs8_bytes) = create_test_jwt_client(&state.store, &user.id).await;
+    enable_grant_types(&state.store, &client.client_id, &["client_credentials"]).await;
+
+    let token_endpoint = format!("{}/oauth/token", state.config().base_url);
+    let fixed_jti = "race-cc-jti-12345";
+    let assertion = build_client_assertion(
+        &client.client_id,
+        &token_endpoint,
+        &pkcs8_bytes,
+        Some(fixed_jti),
+    );
+
+    let body = format!(
+        "grant_type=client_credentials\
+         &client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer\
+         &client_assertion={assertion}"
+    );
+
+    let results = fan_out_token_requests(&app, &body, &[], CONCURRENT_N).await;
+
+    let successes = results
+        .iter()
+        .filter(|(s, _)| *s == StatusCode::OK)
+        .count();
+    assert!(
+        successes <= 1,
+        "At most one concurrent replay may succeed, got {successes}. \
+         Responses: {results:?}"
+    );
+
+    // The session's `user_id` field for a client_credentials grant is the
+    // client_id (RFC 9068 Section 2.2). At most one session must exist.
+    let session_count = count_sessions_for_user(&state.store, &client.client_id).await;
+    assert!(
+        session_count <= 1,
+        "At most one access-token session may be persisted, got {session_count}"
+    );
+}
+
+#[tokio::test]
+async fn test_jwt_assertion_jti_concurrent_replay_authorization_code() {
+    // Concurrent replay against the authorization_code grant. The auth code
+    // itself is single-use, so even without the JTI fix you'd see at most one
+    // success — but you'd see multiple persisted sessions if the JTI race were
+    // the only protection. The combined check below verifies both invariants.
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "jti-race-ac@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let (client, pkcs8_bytes) = create_test_jwt_client(&state.store, &user.id).await;
+
+    let scope_set = ScopeSet::parse("openid");
+    let code = issue_authorization_code(
+        &state,
+        AuthorizationCodeParams {
+            client_id: &client.client_id,
+            redirect_uri: "https://example.com/callback",
+            user_id: &user.id,
+            email: &user.email,
+            authenticator_id: &auth_id,
+            aaguid: None,
+            scope: &scope_set,
+            nonce: None,
+            code_challenge: None,
+            code_challenge_method: None,
+            resource: None,
+            acr_values: None,
+            dpop_jkt: None,
+            auth_code_lifetime_seconds:
+                crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
+            authorization_details: None,
+            auth_time: None,
+        },
+    )
+    .await
+    .expect("Failed to issue authorization code");
+
+    let token_endpoint = format!("{}/oauth/token", state.config().base_url);
+    let fixed_jti = "race-ac-jti-12345";
+    let assertion = build_client_assertion(
+        &client.client_id,
+        &token_endpoint,
+        &pkcs8_bytes,
+        Some(fixed_jti),
+    );
+
+    let body = format!(
+        "grant_type=authorization_code&code={code}&redirect_uri={}\
+         &client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer\
+         &client_assertion={assertion}",
+        urlencoding::encode("https://example.com/callback")
+    );
+
+    let results = fan_out_token_requests(&app, &body, &[], CONCURRENT_N).await;
+
+    let successes = results
+        .iter()
+        .filter(|(s, _)| *s == StatusCode::OK)
+        .count();
+    assert!(
+        successes <= 1,
+        "At most one concurrent replay may succeed, got {successes}. \
+         Responses: {results:?}"
+    );
+
+    let session_count = count_sessions_for_user(&state.store, &user.id).await;
+    assert!(
+        session_count <= 1,
+        "At most one access-token session may be persisted, got {session_count}"
+    );
+}
+
+#[tokio::test]
+async fn test_jwt_assertion_jti_concurrent_replay_token_exchange() {
+    // Concurrent replay against the token-exchange grant. The subject_token
+    // can be reused across exchanges, so the JTI uniqueness is the sole
+    // serialization point.
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "jti-race-tx@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let (client, pkcs8_bytes) = create_test_jwt_client(&state.store, &user.id).await;
+    // Allow both grants on the same client: authorization_code to seed the
+    // subject_token, token-exchange for the replay.
+    enable_grant_types(
+        &state.store,
+        &client.client_id,
+        &[
+            "authorization_code",
+            "urn:ietf:params:oauth:grant-type:token-exchange",
+        ],
+    )
+    .await;
+
+    // Seed an access token to use as subject_token via a one-shot
+    // authorization_code exchange (single-use, unique JTI).
+    let scope_set = ScopeSet::parse("openid");
+    let seed_code = issue_authorization_code(
+        &state,
+        AuthorizationCodeParams {
+            client_id: &client.client_id,
+            redirect_uri: "https://example.com/callback",
+            user_id: &user.id,
+            email: &user.email,
+            authenticator_id: &auth_id,
+            aaguid: None,
+            scope: &scope_set,
+            nonce: None,
+            code_challenge: None,
+            code_challenge_method: None,
+            resource: None,
+            acr_values: None,
+            dpop_jkt: None,
+            auth_code_lifetime_seconds:
+                crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
+            authorization_details: None,
+            auth_time: None,
+        },
+    )
+    .await
+    .expect("Failed to issue seed code");
+
+    let token_endpoint = format!("{}/oauth/token", state.config().base_url);
+    let seed_assertion =
+        build_client_assertion(&client.client_id, &token_endpoint, &pkcs8_bytes, None);
+    let seed_body = format!(
+        "grant_type=authorization_code&code={seed_code}&redirect_uri={}\
+         &client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer\
+         &client_assertion={seed_assertion}",
+        urlencoding::encode("https://example.com/callback")
+    );
+    let (seed_status, seed_resp) = http_post_form(&app, "/oauth/token", &seed_body, &[]).await;
+    assert_eq!(seed_status, StatusCode::OK, "seed token must issue: {seed_resp}");
+    let seed_json: serde_json::Value = serde_json::from_str(&seed_resp).expect("Valid JSON");
+    let subject_token = seed_json["access_token"].as_str().expect("access_token").to_string();
+
+    // Sessions persisted so far: the one from the seed exchange.
+    let baseline_sessions = count_sessions_for_user(&state.store, &user.id).await;
+
+    let fixed_jti = "race-tx-jti-12345";
+    let replay_assertion = build_client_assertion(
+        &client.client_id,
+        &token_endpoint,
+        &pkcs8_bytes,
+        Some(fixed_jti),
+    );
+    let body = format!(
+        "grant_type=urn:ietf:params:oauth:grant-type:token-exchange\
+         &subject_token={subject_token}\
+         &subject_token_type=urn:ietf:params:oauth:token-type:access_token\
+         &client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer\
+         &client_assertion={replay_assertion}"
+    );
+
+    let results = fan_out_token_requests(&app, &body, &[], CONCURRENT_N).await;
+
+    let successes = results
+        .iter()
+        .filter(|(s, _)| *s == StatusCode::OK)
+        .count();
+    assert!(
+        successes <= 1,
+        "At most one concurrent replay may succeed, got {successes}. \
+         Responses: {results:?}"
+    );
+
+    let new_sessions = count_sessions_for_user(&state.store, &user.id).await - baseline_sessions;
+    assert!(
+        new_sessions <= 1,
+        "At most one new exchanged-token session may be persisted, got {new_sessions}"
+    );
+}
+
+#[tokio::test]
+async fn test_jwt_assertion_jti_concurrent_replay_fido2_assertion() {
+    // The fido2-assertion grant requires a real WebAuthn signature, which
+    // can't be faked in unit tests. We use a garbage assertion so that
+    // `exchange_fido2_assertion` will fail with `invalid_grant` for any
+    // request that reaches it. The point of THIS test is to prove that
+    // `commit_jti` runs BEFORE `exchange_fido2_assertion`: with the fix, at
+    // most one of N concurrent requests can pass the JTI commit, so at most
+    // one can reach (and fail at) the exchange step, returning `invalid_grant`.
+    // The other N-1 lose the JTI race and return `invalid_client`.
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "jti-race-fido2@example.com").await;
+    let (client, pkcs8_bytes) = create_test_jwt_client(&state.store, &user.id).await;
+
+    let token_endpoint = format!("{}/oauth/token", state.config().base_url);
+    let fixed_jti = "race-fido2-jti-12345";
+    let assertion = build_client_assertion(
+        &client.client_id,
+        &token_endpoint,
+        &pkcs8_bytes,
+        Some(fixed_jti),
+    );
+
+    // Garbage FIDO2 assertion — base64url of empty JSON object will fail at
+    // state-JWT verification, returning invalid_grant from exchange_fido2_assertion.
+    let garbage_assertion = URL_SAFE_NO_PAD.encode(b"{}");
+
+    let body = format!(
+        "grant_type=urn:ietf:params:oauth:grant-type:fido2-assertion\
+         &assertion={garbage_assertion}\
+         &client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer\
+         &client_assertion={assertion}"
+    );
+
+    let results = fan_out_token_requests(&app, &body, &[], CONCURRENT_N).await;
+
+    // No request can succeed (garbage assertion), but the SHAPE of errors
+    // tells us where the JTI commit sat:
+    //   - With the fix: at most one `invalid_grant` (reached exchange), the
+    //     rest `invalid_client` (lost JTI race).
+    //   - Without the fix: all N would return `invalid_grant` because every
+    //     request reaches exchange before any one of them tries to commit,
+    //     and exchange fails for all of them on the garbage assertion before
+    //     `commit_jti` ever runs.
+    let invalid_grants = results
+        .iter()
+        .filter_map(|(_, body)| serde_json::from_str::<serde_json::Value>(body).ok())
+        .filter(|j| j["error"] == "invalid_grant")
+        .count();
+    assert!(
+        invalid_grants <= 1,
+        "At most one concurrent replay may reach exchange_fido2_assertion (and fail), \
+         got {invalid_grants} `invalid_grant` responses out of {}. Responses: {results:?}",
+        results.len()
+    );
+}
+
+// ========================================================================
+// Issue #391 — DPoP nonce retry MUST still leave the JTI unconsumed.
+//
+// The fix moves `commit_jti()` to before `exchange_*()`, but DPoP nonce
+// validation runs even earlier in the handler. If a request is rejected
+// with `use_dpop_nonce` (RFC 9449 §4.3), the JTI must NOT have been
+// committed — so the client can retry with the same JWT assertion and a
+// DPoP proof that carries the new nonce.
+//
+// The pre-existing `test_rfc9449_dpop_nonce_required_retry_with_nonce_succeeds`
+// covers this for basic_auth clients. This test seals the contract for the
+// `private_key_jwt` (JWT-assertion) client auth path.
+// ========================================================================
+
+fn generate_dpop_key_pair() -> (EcdsaKeyPair, serde_json::Value) {
+    use aws_lc_rs::signature::KeyPair;
+
+    let rng = aws_lc_rs::rand::SystemRandom::new();
+    let pkcs8 = EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, &rng)
+        .expect("Failed to generate DPoP key");
+    let key_pair = EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, pkcs8.as_ref())
+        .expect("Failed to parse DPoP key");
+
+    let pub_bytes = key_pair.public_key().as_ref();
+    let x = URL_SAFE_NO_PAD.encode(&pub_bytes[1..33]);
+    let y = URL_SAFE_NO_PAD.encode(&pub_bytes[33..65]);
+    let jwk = serde_json::json!({ "kty": "EC", "crv": "P-256", "x": x, "y": y });
+    (key_pair, jwk)
+}
+
+fn create_dpop_proof(
+    key_pair: &EcdsaKeyPair,
+    jwk: &serde_json::Value,
+    method: &str,
+    uri: &str,
+    nonce: Option<&str>,
+) -> String {
+    let header = serde_json::json!({
+        "typ": "dpop+jwt",
+        "alg": "ES256",
+        "jwk": jwk,
+    });
+    let now = jiff::Timestamp::now().as_second();
+    let mut claims = serde_json::json!({
+        "jti": uuid::Uuid::now_v7().to_string(),
+        "htm": method,
+        "htu": uri,
+        "iat": now,
+    });
+    if let Some(n) = nonce {
+        claims["nonce"] = serde_json::json!(n);
+    }
+    let header_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&header).expect("JSON encode"));
+    let claims_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).expect("JSON encode"));
+    let signing_input = format!("{header_b64}.{claims_b64}");
+    let rng = aws_lc_rs::rand::SystemRandom::new();
+    let sig = key_pair
+        .sign(&rng, signing_input.as_bytes())
+        .expect("Failed to sign DPoP proof");
+    let sig_b64 = URL_SAFE_NO_PAD.encode(sig.as_ref());
+    format!("{header_b64}.{claims_b64}.{sig_b64}")
+}
+
+#[tokio::test]
+async fn test_jwt_assertion_dpop_use_nonce_retry_succeeds() {
+    // Setup: private_key_jwt client + authorization_code grant + DPoP.
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "jti-dpop-retry@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let (client, pkcs8_bytes) = create_test_jwt_client(&state.store, &user.id).await;
+
+    let scope_set = ScopeSet::parse("openid");
+    let code = issue_authorization_code(
+        &state,
+        AuthorizationCodeParams {
+            client_id: &client.client_id,
+            redirect_uri: "https://example.com/callback",
+            user_id: &user.id,
+            email: &user.email,
+            authenticator_id: &auth_id,
+            aaguid: None,
+            scope: &scope_set,
+            nonce: None,
+            code_challenge: None,
+            code_challenge_method: None,
+            resource: None,
+            acr_values: None,
+            dpop_jkt: None,
+            auth_code_lifetime_seconds:
+                crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
+            authorization_details: None,
+            auth_time: None,
+        },
+    )
+    .await
+    .expect("Failed to issue authorization code");
+
+    let token_endpoint = format!("{}/oauth/token", state.config().base_url);
+    let (dpop_key, dpop_jwk) = generate_dpop_key_pair();
+
+    // The SAME JTI is used for both attempts. If `commit_jti` ran before
+    // DPoP validation, the second attempt would be rejected as a replay.
+    let fixed_jti = "dpop-retry-jti-12345";
+    let assertion = build_client_assertion(
+        &client.client_id,
+        &token_endpoint,
+        &pkcs8_bytes,
+        Some(fixed_jti),
+    );
+
+    let body = format!(
+        "grant_type=authorization_code&code={code}&redirect_uri={}\
+         &client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer\
+         &client_assertion={assertion}",
+        urlencoding::encode("https://example.com/callback")
+    );
+
+    // Step 1: DPoP proof without nonce. Server returns use_dpop_nonce + a
+    // DPoP-Nonce header. The JTI must NOT be committed at this point.
+    let no_nonce_proof = create_dpop_proof(&dpop_key, &dpop_jwk, "POST", &token_endpoint, None);
+    let first = http_post_form_full(&app, "/oauth/token", &body, &[("DPoP", &no_nonce_proof)]).await;
+    assert!(
+        first.status == StatusCode::BAD_REQUEST || first.status == StatusCode::UNAUTHORIZED,
+        "First DPoP request without nonce must be rejected, got {} : {}",
+        first.status,
+        first.body
+    );
+    let server_nonce = first
+        .headers
+        .get("DPoP-Nonce")
+        .expect("DPoP-Nonce header must be present in use_dpop_nonce response")
+        .to_str()
+        .expect("DPoP-Nonce must be valid UTF-8")
+        .to_string();
+
+    // Step 2: Retry with the server-provided nonce, SAME JWT assertion
+    // (same jti). If `commit_jti` had run on the first attempt, this would
+    // fail with `invalid_client` (replay). With the fix, the JTI is committed
+    // only after DPoP validation, so the retry succeeds.
+    let nonce_proof = create_dpop_proof(
+        &dpop_key,
+        &dpop_jwk,
+        "POST",
+        &token_endpoint,
+        Some(&server_nonce),
+    );
+    let second =
+        http_post_form_full(&app, "/oauth/token", &body, &[("DPoP", &nonce_proof)]).await;
+    assert_eq!(
+        second.status,
+        StatusCode::OK,
+        "DPoP-nonce retry with same JWT assertion must succeed: {}",
+        second.body
+    );
+    let token_resp: serde_json::Value = serde_json::from_str(&second.body).expect("Valid JSON");
+    assert!(
+        token_resp.get("access_token").is_some(),
+        "Successful retry must return access_token: {}",
+        second.body
+    );
+}

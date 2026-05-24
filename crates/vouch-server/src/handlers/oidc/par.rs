@@ -447,28 +447,32 @@ pub async fn par(
         response_mode,
     };
 
+    // SAFETY: commit_jti() MUST run AFTER DPoP nonce validation (so use_dpop_nonce
+    // retry leaves the JTI unconsumed) and BEFORE store_par_request() so that
+    // concurrent replays of the same assertion cannot persist multiple PAR
+    // requests — see issue #391. A follow-up will replace this comment with a
+    // ParCreation witness type.
+    if let Some(ref pjti) = pending_jti
+        && let Err(e) = commit_jti(&state, pjti).await
+    {
+        tracing::warn!("JTI commit failed for PAR: {e:?}");
+        return par_error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "server_error",
+            "Failed to complete client authentication",
+        );
+    }
+
     // RFC 9126 Section 2.2: Return 201 Created
     match db::create_pushed_authorization_request(&state.store, create_params).await {
-        Ok((_id, request_uri)) => {
-            if let Some(ref pjti) = pending_jti
-                && let Err(e) = commit_jti(&state, pjti).await
-            {
-                tracing::warn!("JTI commit failed for PAR: {e:?}");
-                return par_error_response(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "server_error",
-                    "Failed to complete client authentication",
-                );
-            }
-            (
-                StatusCode::CREATED,
-                Json(ParResponse {
-                    request_uri,
-                    expires_in: PAR_EXPIRES_IN,
-                }),
-            )
-                .into_response()
-        }
+        Ok((_id, request_uri)) => (
+            StatusCode::CREATED,
+            Json(ParResponse {
+                request_uri,
+                expires_in: PAR_EXPIRES_IN,
+            }),
+        )
+            .into_response(),
         Err(e) => {
             tracing::error!("Failed to create pushed authorization request: {}", e);
             par_error_response(
