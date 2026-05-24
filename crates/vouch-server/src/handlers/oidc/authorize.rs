@@ -1116,8 +1116,8 @@ async fn complete_pending_auth(
         )
         .await
         {
-            Ok(true) => {} // successfully consumed
-            Ok(false) => {
+            Ok(_claim) => {} // successfully consumed
+            Err(db::claim::ClaimError::AlreadyConsumed) => {
                 return resolved
                     .error_redirect(
                         state,
@@ -1507,8 +1507,8 @@ async fn issue_code_after_reauth_check(
         )
         .await
         {
-            Ok(true) => {} // Successfully consumed
-            Ok(false) => {
+            Ok(_claim) => {} // Successfully consumed
+            Err(db::claim::ClaimError::AlreadyConsumed) => {
                 return oauth_error_response(
                     state,
                     oauth_client,

@@ -969,15 +969,14 @@ async fn test_rfc9126_consume_par_with_stale_version_returns_false() {
     .unwrap();
 
     // First consumption should succeed.
-    let result = db::consume_pushed_authorization_request(
+    let _claim = db::consume_pushed_authorization_request(
         &state.store,
         &request_uri,
         &client.client_id,
         db::ParConsumptionMode::EnforceExpiry,
     )
     .await
-    .unwrap();
-    assert!(result, "First consumption should succeed");
+    .expect("First consumption should succeed");
 
     // Verify the PAR is now consumed.
     let doc = state
@@ -998,9 +997,11 @@ async fn test_rfc9126_consume_par_with_stale_version_returns_false() {
         &client.client_id,
         db::ParConsumptionMode::EnforceExpiry,
     )
-    .await
-    .unwrap();
-    assert!(!result, "Second consumption should fail (already consumed)");
+    .await;
+    assert!(
+        matches!(result, Err(crate::db::claim::ClaimError::AlreadyConsumed)),
+        "Second consumption should fail with AlreadyConsumed, got: {result:?}"
+    );
 }
 
 // ========================================================================
@@ -1250,15 +1251,14 @@ async fn test_rfc9126_par_already_consumed_returns_error_not_login() {
     let request_uri = create_par_request(&app, &client).await;
 
     // Consume the PAR directly via DB before the authorize request arrives.
-    let consumed = crate::db::consume_pushed_authorization_request(
+    let _claim = crate::db::consume_pushed_authorization_request(
         &state.store,
         &request_uri,
         &client.client_id,
         crate::db::ParConsumptionMode::EnforceExpiry,
     )
     .await
-    .unwrap();
-    assert!(consumed, "Pre-consumption should succeed");
+    .expect("Pre-consumption should succeed");
 
     // Confirm consumed_at is set.
     let doc = state

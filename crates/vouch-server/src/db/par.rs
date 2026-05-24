@@ -4,6 +4,7 @@
 //! Stores authorization request parameters pushed by authenticated clients
 //! before the browser-based authorization flow begins.
 
+use super::claim::ClaimError;
 use super::document_type::{Document, DocumentType};
 use super::documents::par::PushedAuthorizationRequestDoc;
 use super::store::DocumentStore;
@@ -183,10 +184,34 @@ pub enum ParConsumptionMode {
     SkipExpiry,
 }
 
+/// Witness that a PAR record (RFC 9126) was atomically consumed by this
+/// caller. Construction is private to this module — the only path to an
+/// instance is a successful return from
+/// [`consume_pushed_authorization_request`], whose
+/// optimistic-concurrency `compare_and_update` guarantees that at most one
+/// concurrent caller succeeds. Holding a `ParStateClaim` is compile-time
+/// evidence that this caller's PAR consume "won" the OCC race.
+///
+/// Intentionally not `Clone`. The `#[must_use]` ensures the witness is
+/// bound at the call site; today it is dropped immediately after
+/// consumption (the immediate consumer issues an auth code rather than a
+/// token), but the type exists so future code can require it as a
+/// precondition for PAR-derived downstream operations.
+#[must_use = "the PAR record was atomically consumed; bind this witness so \
+              future code can require it as a precondition"]
+#[derive(Debug)]
+pub struct ParStateClaim {
+    _private: (),
+}
+
 /// Consume a pushed authorization request (single-use).
 ///
-/// Returns `Ok(true)` if successfully consumed, `Ok(false)` if not
-/// found, already consumed, or bound to a different client.
+/// On success returns a [`ParStateClaim`] witness — proof that this caller
+/// won the optimistic-concurrency consume. On any "lost" case (PAR not
+/// found, client_id mismatch, already consumed, or expired when expiry is
+/// enforced) returns [`ClaimError::AlreadyConsumed`]. These cases are
+/// deliberately indistinguishable from the caller's perspective: each is
+/// rejected as an invalid request_uri.
 ///
 /// # Client Binding
 ///
@@ -198,31 +223,41 @@ pub async fn consume_pushed_authorization_request(
     request_uri: &str,
     client_id: &str,
     mode: ParConsumptionMode,
-) -> Result<bool> {
+) -> std::result::Result<ParStateClaim, ClaimError> {
     let now = Timestamp::now();
 
     let doc = store
         .find_one::<PushedAuthorizationRequestDoc>("request_uri", request_uri)
-        .await?;
+        .await
+        .map_err(|e| ClaimError::Database(e.to_string()))?;
 
     let Some(doc) = doc else {
-        return Ok(false);
+        return Err(ClaimError::AlreadyConsumed);
     };
 
     if doc.data.client_id != client_id || doc.data.consumed_at.is_some() {
-        return Ok(false);
+        return Err(ClaimError::AlreadyConsumed);
     }
 
     if mode == ParConsumptionMode::EnforceExpiry && doc.data.expires_at <= now {
-        return Ok(false);
+        return Err(ClaimError::AlreadyConsumed);
     }
 
-    // Consume with optimistic concurrency — if another request already
-    // consumed this PAR between our read and write, compare_and_update
-    // returns false (version mismatch).
+    // Atomic consume via optimistic concurrency. If a concurrent caller
+    // already consumed this PAR between our read and write,
+    // compare_and_update returns false (version mismatch) — that caller
+    // wins the race and we report AlreadyConsumed.
     let mut data = doc.data;
     data.consumed_at = Some(now);
-    store.compare_and_update(&doc.id, doc.version, &data).await
+    let won = store
+        .compare_and_update(&doc.id, doc.version, &data)
+        .await
+        .map_err(|e| ClaimError::Database(e.to_string()))?;
+    if won {
+        Ok(ParStateClaim { _private: () })
+    } else {
+        Err(ClaimError::AlreadyConsumed)
+    }
 }
 
 /// Look up a pushed authorization request without consuming it.
