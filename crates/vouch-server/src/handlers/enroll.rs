@@ -20,7 +20,6 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use jiff::{Span, Timestamp};
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
-use serde_json;
 use std::sync::Arc;
 use uuid::Uuid;
 use vouch_common::{BrowserRegisterCompleteRequest, BrowserRegisterStartResponse};
@@ -34,6 +33,7 @@ use crate::redact_email;
 use crate::services::auth::{CreateOAuthTokenParams, create_oauth_access_token};
 use crate::services::error::ServiceError;
 use crate::services::idp::IdentityResult;
+use crate::services::keys as key_svc;
 use crate::services::oidc::ScopeSet;
 
 // ============================================================================
@@ -1024,6 +1024,38 @@ pub async fn browser_register_complete(
         .await
         .map_err(|e| ServiceError::api(StatusCode::BAD_REQUEST, "invalid_state", e.to_string()))?;
 
+    // ── Phase 2b: Single-use enforcement ───────────────────────────────
+    // Consume the state token before any WebAuthn work so that a captured
+    // state JWT cannot be replayed within the 5-minute validity window.
+    if !key_svc::consume_registration_state(&state.store, &req.state, reg_state.exp).await? {
+        tracing::warn!(
+            user_id = %reg_state.user_id,
+            "browser registration state replay rejected"
+        );
+        let audit_data = serde_json::json!({
+            "flow": "browser_register",
+            "success": false,
+            "error_code": "state_already_used",
+        });
+        if let Err(e) = state
+            .audit
+            .insert_event(
+                "key_registration_replay",
+                Some(&reg_state.user_id.to_string()),
+                Some(&reg_state.user_email),
+                &audit_data.to_string(),
+            )
+            .await
+        {
+            tracing::warn!(error = %e, "failed to write key_registration_replay audit event");
+        }
+        return Err(ServiceError::api(
+            StatusCode::BAD_REQUEST,
+            "state_already_used",
+            "This registration link has already been used",
+        ));
+    }
+
     // ── Phase 3: Base64url decode all fields ────────────────────────────
     let credential_id_bytes = URL_SAFE_NO_PAD.decode(&req.credential_id).map_err(|e| {
         ServiceError::api(StatusCode::BAD_REQUEST, "invalid_credential", e.to_string())
@@ -1675,6 +1707,62 @@ mod tests {
         assert!(
             resp_body.contains("invalid_credential"),
             "expected 'invalid_credential' in body, got: {resp_body}"
+        );
+    }
+
+    // ── test_browser_register_complete_rejects_replayed_state ───────────────
+
+    #[tokio::test]
+    async fn test_browser_register_complete_rejects_replayed_state() {
+        let (app, state) = test_app().await;
+
+        // Build a valid BrowserRegistrationState JWT and record its expiry.
+        let user_id = Uuid::now_v7();
+        let (_ccr, webauthn_state) = state
+            .webauthn
+            .start_passkey_registration(user_id, "replay@example.com", "replay@example.com", None)
+            .expect("start_passkey_registration");
+
+        let now = jiff::Timestamp::now();
+        let exp = now.as_second() + 300;
+        let reg_state = BrowserRegistrationState {
+            device_auth_id: String::new(),
+            user_id,
+            user_email: "replay@example.com".to_string(),
+            webauthn_state,
+            iat: now.as_second(),
+            exp,
+        };
+        let state_jwt = reg_state
+            .encode(&state.state_signer)
+            .await
+            .expect("encode state");
+
+        // Pre-consume the state token to simulate prior use.
+        let expires_at = jiff::Timestamp::from_second(exp).expect("valid exp");
+        let consumed = crate::db::try_mark_challenge_used(&state.store, &state_jwt, expires_at)
+            .await
+            .expect("pre-consume must succeed");
+        assert!(consumed, "pre-consume should return true on first use");
+
+        // POST to the complete endpoint with the already-consumed state.
+        // The replay check runs before any base64 decoding, so non-empty base64
+        // strings are sufficient for the request to reach the replay check.
+        let body = serde_json::json!({
+            "state": state_jwt,
+            "credential_id": valid_credential_id(),
+            "attestation_object": valid_attestation_object(),
+            "client_data_json": valid_client_data_json(),
+        })
+        .to_string();
+
+        let (status, resp_body) =
+            http_post_json(&app, "/enroll/webauthn/complete", &body, &[]).await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(
+            resp_body.contains("state_already_used"),
+            "expected 'state_already_used' in body, got: {resp_body}"
         );
     }
 

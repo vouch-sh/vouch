@@ -34,6 +34,11 @@ use crate::crypto::webauthn_verify;
 // Registration State (stored temporarily between start and complete)
 // ============================================================================
 
+/// Maximum accepted length of the registration state JWT (defense-in-depth).
+/// Matches the bounds used by `browser_register_complete` (`handlers/enroll.rs`)
+/// and the browser login handler.
+const MAX_STATE_TOKEN_LEN: usize = 8 * 1024;
+
 /// Registration state stored between start and complete.
 #[derive(Debug, Serialize, Deserialize)]
 struct RegistrationState {
@@ -186,10 +191,49 @@ pub async fn register_complete(
 ) -> Result<Json<RegisterCompleteResponse>, ServiceError> {
     tracing::info!("Registration complete");
 
+    if req.state.len() > MAX_STATE_TOKEN_LEN {
+        return Err(ServiceError::api(
+            StatusCode::BAD_REQUEST,
+            "invalid_state",
+            "State token exceeds maximum length",
+        ));
+    }
+
     // Decode state
     let reg_state = RegistrationState::decode(&req.state, &state.state_signer)
         .await
         .map_err(|e| ServiceError::api(StatusCode::BAD_REQUEST, "invalid_state", e.to_string()))?;
+
+    // Single-use enforcement: consume the state token before any WebAuthn work.
+    // A captured state JWT cannot be replayed within the 5-minute validity window.
+    if !key_svc::consume_registration_state(&state.store, &req.state, reg_state.exp).await? {
+        tracing::warn!(
+            user_id = %reg_state.user_id,
+            "CLI registration state replay rejected"
+        );
+        let audit_data = serde_json::json!({
+            "flow": "cli_register",
+            "success": false,
+            "error_code": "state_already_used",
+        });
+        if let Err(e) = state
+            .audit
+            .insert_event(
+                "key_registration_replay",
+                Some(&reg_state.user_id.to_string()),
+                Some(&reg_state.user_name),
+                &audit_data.to_string(),
+            )
+            .await
+        {
+            tracing::warn!(error = %e, "failed to write key_registration_replay audit event");
+        }
+        return Err(ServiceError::api(
+            StatusCode::BAD_REQUEST,
+            "state_already_used",
+            "This registration link has already been used",
+        ));
+    }
 
     // Server-side WebAuthn attestation verification
     // Verify the attestation object, client data, RP ID, challenge, and origin
@@ -651,6 +695,60 @@ mod tests {
         assert_eq!(status, StatusCode::BAD_REQUEST);
         let json: serde_json::Value = serde_json::from_str(&resp_body).expect("valid JSON");
         assert_eq!(json["code"], "invalid_state");
+    }
+
+    // ========================================================================
+    // Register Complete — Replay Rejection
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_register_complete_rejects_replayed_state() {
+        let (app, state) = test_app().await;
+
+        // Build a valid RegistrationState JWT with a far-future expiry.
+        let signer = &state.state_signer;
+        let challenge = Challenge::from(vec![2u8; 32]);
+        let now = jiff::Timestamp::now();
+        let exp = now
+            .checked_add(jiff::Span::new().minutes(5))
+            .map_or(now.as_second().saturating_add(300), |t| t.as_second());
+        let reg_state = RegistrationState {
+            user_id: Uuid::new_v4(),
+            user_name: "replay-test@example.com".to_string(),
+            device_name: "Test Device".to_string(),
+            challenge,
+            rp_id: "localhost".to_string(),
+            iat: now.as_second(),
+            exp,
+        };
+        let state_jwt = reg_state.encode(signer).await.expect("encode state");
+
+        // Pre-consume the state token to simulate prior use.
+        let expires_at = jiff::Timestamp::from_second(exp).expect("valid exp");
+        let consumed = crate::db::try_mark_challenge_used(&state.store, &state_jwt, expires_at)
+            .await
+            .expect("pre-consume must succeed");
+        assert!(consumed, "pre-consume should return true on first use");
+
+        // POST to register/complete with the already-consumed state and dummy bytes.
+        // consume_registration_state runs before WebAuthn verification, so dummy
+        // attestation bytes are sufficient to trigger the replay rejection.
+        let body = serde_json::json!({
+            "state": state_jwt,
+            "credential_id": [],
+            "public_key": [],
+            "attestation_object": [],
+            "client_data_json": [],
+        });
+        let (status, resp_body) =
+            http_post_json(&app, "/v1/keys/register/complete", &body.to_string(), &[]).await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let json: serde_json::Value = serde_json::from_str(&resp_body).expect("valid JSON");
+        assert_eq!(
+            json["code"], "state_already_used",
+            "replayed state must return state_already_used, got: {json}"
+        );
     }
 
     // ========================================================================

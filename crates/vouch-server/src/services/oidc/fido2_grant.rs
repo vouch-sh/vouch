@@ -142,7 +142,6 @@ pub async fn exchange_fido2_assertion(
         })?;
 
     // 2b. Prepare single-use challenge check
-    let state_hash = crate::crypto::hash_token(&payload.state);
     let expires_at = jiff::Timestamp::from_second(challenge_state.exp)
         .unwrap_or_else(|_| jiff::Timestamp::now());
 
@@ -192,7 +191,7 @@ pub async fn exchange_fido2_assertion(
     //    (independent DB operations on different tables)
     let (consumed_result, lookup_result) = tokio::try_join!(
         async {
-            db::try_mark_challenge_used(&state.store, &state_hash, expires_at)
+            db::try_mark_challenge_used(&state.store, &payload.state, expires_at)
                 .await
                 .map_err(|e| ServiceError::Internal(format!("Failed to mark challenge used: {e}")))
         },

@@ -2878,13 +2878,13 @@ fn test_scim_filter_parse_emoji_value() {
 async fn test_challenge_state_mark_used() {
     let (store, _audit) = test_db().await;
 
-    let state_hash = "sha256_test_hash_mark_used";
+    let state_jwt = "test-jwt-mark-used";
     let expires_at = jiff::Timestamp::now()
         .checked_add(jiff::SignedDuration::from_secs(300))
         .unwrap();
 
     // First use should succeed
-    let used = try_mark_challenge_used(&store, state_hash, expires_at)
+    let used = try_mark_challenge_used(&store, state_jwt, expires_at)
         .await
         .expect("Failed to mark challenge used");
     assert!(used, "First use should succeed");
@@ -2894,19 +2894,19 @@ async fn test_challenge_state_mark_used() {
 async fn test_challenge_state_replay_rejected() {
     let (store, _audit) = test_db().await;
 
-    let state_hash = "sha256_test_hash_replay";
+    let state_jwt = "test-jwt-replay";
     let expires_at = jiff::Timestamp::now()
         .checked_add(jiff::SignedDuration::from_secs(300))
         .unwrap();
 
     // First use succeeds
-    let first = try_mark_challenge_used(&store, state_hash, expires_at)
+    let first = try_mark_challenge_used(&store, state_jwt, expires_at)
         .await
         .expect("Failed on first use");
     assert!(first, "First use should succeed");
 
     // Second use must fail (replay)
-    let second = try_mark_challenge_used(&store, state_hash, expires_at)
+    let second = try_mark_challenge_used(&store, state_jwt, expires_at)
         .await
         .expect("Failed on second use");
     assert!(!second, "Second use (replay) should be rejected");
@@ -2927,6 +2927,35 @@ async fn test_challenge_state_new_hash_succeeds() {
     .await
     .expect("Failed to mark challenge used");
     assert!(used, "New challenge hash should succeed");
+}
+
+#[tokio::test]
+async fn test_challenge_state_concurrent_calls_produce_one_row() {
+    // Two concurrent calls with the same state_jwt must produce exactly one
+    // document row — deterministic ID ensures they collide on the PRIMARY KEY
+    // rather than creating two rows.
+    let (store, _audit) = test_db().await;
+
+    let state_jwt = "concurrent-state-jwt-test-value";
+    let expires_at = jiff::Timestamp::now()
+        .checked_add(jiff::SignedDuration::from_secs(300))
+        .unwrap();
+
+    let store_a = store.clone();
+    let store_b = store.clone();
+    let (result_a, result_b) = tokio::join!(
+        try_mark_challenge_used(&store_a, state_jwt, expires_at),
+        try_mark_challenge_used(&store_b, state_jwt, expires_at),
+    );
+
+    let a = result_a.expect("first concurrent call must not error");
+    let b = result_b.expect("second concurrent call must not error");
+
+    // Exactly one winner and one loser — the sum of the two booleans is 1.
+    assert!(
+        a ^ b,
+        "exactly one concurrent call should return true (winner), got a={a}, b={b}"
+    );
 }
 
 #[test]
