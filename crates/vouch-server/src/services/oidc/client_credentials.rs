@@ -191,7 +191,9 @@ mod tests {
             Some(thumbprint),
             TokenIssuanceProof {
                 grant: GrantProof::ClientCredentials,
-                client_auth: ClientAuthProof::UnconvertedMutualTls,
+                client_auth: ClientAuthProof::MutualTls(
+                    crate::services::oidc::token::MtlsCertVerification::for_testing(),
+                ),
             },
         )
         .await

@@ -399,13 +399,15 @@ pub(crate) enum ClientAuthProof {
     /// the witness returned from `db::store_jwt_assertion_jti`.
     PrivateKeyJwt(crate::db::JwtAssertionJtiClaim),
 
-    /// `client_secret_basic` / `client_secret_post`.
-    /// TODO(slice-8): carry a `ClientSecretVerification` witness.
-    UnconvertedClientSecret,
+    /// `client_secret_basic` / `client_secret_post` (RFC 6749 §2.3.1).
+    /// Carries the verification witness from
+    /// [`crate::services::oidc::token::authenticate_client`].
+    ClientSecret(crate::services::oidc::token::ClientSecretVerification),
 
-    /// `tls_client_auth` / `self_signed_tls_client_auth` (RFC 8705).
-    /// TODO(slice-8): carry an `MtlsCertVerification` witness.
-    UnconvertedMutualTls,
+    /// `tls_client_auth` / `self_signed_tls_client_auth` (RFC 8705 §2).
+    /// Carries the verification witness from
+    /// [`crate::services::oidc::token::authenticate_client_mtls`].
+    MutualTls(crate::services::oidc::token::MtlsCertVerification),
 
     /// Public client — no client authentication was performed.
     None,
@@ -431,20 +433,25 @@ impl ClientAuthProof {
         }
     }
 
-    /// Map a registered `TokenEndpointAuthMethod` to the matching placeholder
-    /// variant. Used by call sites that don't separately track which auth
-    /// method succeeded but do hold the authenticated client's registered
-    /// method (e.g., PAR). The `PrivateKeyJwt` arm returns `None` here because
-    /// the JTI claim is the only valid construction path — callers with a JWT
-    /// client must use [`Self::from_jti_or`] with the committed claim.
-    pub(crate) fn from_auth_method(method: crate::db::TokenEndpointAuthMethod) -> Self {
-        use crate::db::TokenEndpointAuthMethod;
-        match method {
-            TokenEndpointAuthMethod::ClientSecretBasic
-            | TokenEndpointAuthMethod::ClientSecretPost => Self::UnconvertedClientSecret,
-            TokenEndpointAuthMethod::TlsClientAuth
-            | TokenEndpointAuthMethod::SelfSignedTlsClientAuth => Self::UnconvertedMutualTls,
-            TokenEndpointAuthMethod::PrivateKeyJwt | TokenEndpointAuthMethod::None => Self::None,
+    /// Compose a non-JWT [`ClientAuthProof`] from the two verification
+    /// witnesses produced by the handler-level auth flow. Single named
+    /// place for the precedence rule:
+    ///
+    /// - `Some(secret)` → `ClientSecret(secret)` (client_secret_basic/post)
+    /// - `Some(mtls)` (no secret) → `MutualTls(mtls)` (RFC 8705)
+    /// - neither → `None` (public client)
+    ///
+    /// JWT-authenticated clients are handled separately by [`Self::from_jti_or`]
+    /// because the JTI claim and the verification are produced at different
+    /// points in the flow.
+    pub(crate) fn from_verifications(
+        secret: Option<crate::services::oidc::token::ClientSecretVerification>,
+        mtls: Option<crate::services::oidc::token::MtlsCertVerification>,
+    ) -> Self {
+        match (secret, mtls) {
+            (Some(s), _) => Self::ClientSecret(s),
+            (None, Some(m)) => Self::MutualTls(m),
+            (None, None) => Self::None,
         }
     }
 }

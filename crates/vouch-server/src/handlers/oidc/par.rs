@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Pushed Authorization Request (PAR) endpoint handler (RFC 9126).
 
-use super::client_auth::{ClientAuthFields, authenticate_client_any, extract_client_auth};
+use super::client_auth::{ClientAuthFields, complete_client_auth, extract_client_auth};
 use crate::AppState;
 use crate::db::par::PAR_EXPIRES_IN;
 use crate::db::{self, CreateParParams};
@@ -179,18 +179,19 @@ pub async fn par(
     };
 
     // RFC 9126 Section 2: Client authentication is REQUIRED
-    let Some((authenticated_client, _client_id, pending_jti)) =
-        (match authenticate_client_any(&state, client_auth).await {
-            Ok(result) => result,
-            Err(resp) => return resp,
-        })
-    else {
+    let Some(any_auth) = (match complete_client_auth(&state, client_auth).await {
+        Ok(result) => result,
+        Err(resp) => return resp,
+    }) else {
         return par_error_response(
             StatusCode::UNAUTHORIZED,
             "invalid_client",
             "Client authentication is required for pushed authorization requests",
         );
     };
+    let authenticated_client = any_auth.client;
+    let pending_jti = any_auth.pending_jti;
+    let secret_verification = any_auth.secret_verification;
 
     // FAPI 2.0: Validate client authentication method.
     //
@@ -472,12 +473,14 @@ pub async fn par(
         },
         None => None,
     };
+    // PAR doesn't currently validate mTLS (FAPI 2.0 §5.2.2 requires
+    // private_key_jwt anyway; non-FAPI mTLS at PAR isn't supported here).
+    // If/when PAR-mTLS lands, capture the MtlsCertVerification and pass it
+    // as the second argument instead of None.
     let proof = ParCreationProof {
         client_auth: ClientAuthProof::from_jti_or(
             jti_claim,
-            ClientAuthProof::from_auth_method(
-                authenticated_client.client.token_endpoint_auth_method,
-            ),
+            ClientAuthProof::from_verifications(secret_verification, None),
         ),
     };
 

@@ -97,6 +97,53 @@ pub struct AuthenticatedClient {
     pub is_public: bool,
 }
 
+/// Witness that an OAuth client successfully authenticated via
+/// `client_secret_basic` / `client_secret_post` (RFC 6749 Section 2.3.1).
+///
+/// Construction is private to this module — the only path to an instance
+/// is a successful return from [`authenticate_client`] when the client's
+/// stored secret hash matched the constant-time comparison against the
+/// caller-supplied secret. Holding this witness is compile-time evidence
+/// that secret-based client auth succeeded for this request.
+///
+/// Intentionally not `Clone`. The `#[must_use]` ensures the witness is
+/// bound at the call site (typically threaded into
+/// `ClientAuthProof::ClientSecret(verification)`).
+#[must_use = "client_secret authentication succeeded; bind this witness so \
+              it can be threaded into the ClientAuthProof"]
+#[derive(Debug)]
+pub struct ClientSecretVerification {
+    _private: (),
+}
+
+/// Witness that an OAuth client successfully authenticated via mTLS
+/// (RFC 8705 Section 2) — either PKI (`tls_client_auth`) or self-signed
+/// (`self_signed_tls_client_auth`).
+///
+/// Construction is private to this module — the only path to an instance
+/// is a successful return from [`authenticate_client_mtls`] after the
+/// presented certificate validated against the client's registered
+/// identity (subject DN / SAN) or its self-signed x5c JWKS entry.
+///
+/// Intentionally not `Clone`. The `#[must_use]` ensures the witness is
+/// bound at the call site (typically threaded into
+/// `ClientAuthProof::MutualTls(verification)`).
+#[must_use = "mTLS client authentication succeeded; bind this witness so \
+              it can be threaded into the ClientAuthProof"]
+#[derive(Debug)]
+pub struct MtlsCertVerification {
+    _private: (),
+}
+
+impl MtlsCertVerification {
+    /// Test-only constructor. Production code must obtain a verification via
+    /// [`authenticate_client_mtls`].
+    #[cfg(test)]
+    pub(crate) fn for_testing() -> Self {
+        Self { _private: () }
+    }
+}
+
 /// Client authentication error.
 #[derive(Debug)]
 pub enum ClientAuthError {
@@ -235,9 +282,17 @@ pub(crate) async fn exchange_authorization_code(
             "Authenticator not found",
         ))?;
 
-    // RFC 6749 Section 4.1.3: Authenticate the client (if credentials provided)
-    let authenticated_client =
+    // RFC 6749 Section 4.1.3: Authenticate the client (if credentials provided).
+    // If a `client_secret` was just verified, promote the caller-supplied
+    // `ClientAuthProof::None` to `ClientSecret(verification)`. The handler
+    // passes `None` for the secret case because the secret check happens
+    // here (after `enforce_single_use_code`, per RFC 6749 §10.5 ordering).
+    let (authenticated_client, secret_verification) =
         authenticate_and_validate_client(state, params.credentials, &auth_code).await?;
+    let client_auth = match (client_auth, secret_verification) {
+        (ClientAuthProof::None, Some(v)) => ClientAuthProof::ClientSecret(v),
+        (other, _) => other,
+    };
 
     // Validate redirect_uri, PKCE, DPoP binding, and ACR
     validate_code_bindings(
@@ -432,12 +487,15 @@ async fn authenticate_and_validate_client(
     state: &Arc<AppState>,
     credentials: Option<&ClientCredentials>,
     auth_code: &AuthorizationCode,
-) -> ServiceResult<Option<AuthenticatedClient>> {
+) -> ServiceResult<(
+    Option<AuthenticatedClient>,
+    Option<ClientSecretVerification>,
+)> {
     let Some(creds) = credentials else {
-        return Ok(None);
+        return Ok((None, None));
     };
     match authenticate_client(state, creds).await {
-        Ok(client) => {
+        Ok((client, secret_verification)) => {
             if client.client.client_id != auth_code.client_id {
                 tracing::warn!(
                     "Client ID mismatch: token request from {} but code was issued to {}",
@@ -460,7 +518,7 @@ async fn authenticate_and_validate_client(
                     "PKCE required for this client type",
                 ));
             }
-            Ok(Some(client))
+            Ok((Some(client), secret_verification))
         }
         Err(ClientAuthError::InvalidClient | ClientAuthError::MissingClientId) => {
             Err(ServiceError::oauth(
@@ -658,10 +716,16 @@ impl AuthorizationCode {
 /// Supports:
 /// - Confidential clients with `client_secret` (RFC 6749 Section 2.3.1)
 /// - Public clients (native/SPA) without secret (must use PKCE per RFC 7636)
+///
+/// The returned `Option<ClientSecretVerification>` is `Some` only when the
+/// client_secret was validated against its stored hash. For mTLS-registered
+/// clients (whose secret is intentionally skipped here and the cert
+/// validated separately by [`authenticate_client_mtls`]) and public
+/// clients (no auth), the option is `None`.
 pub async fn authenticate_client(
     state: &Arc<AppState>,
     credentials: &ClientCredentials,
-) -> Result<AuthenticatedClient, ClientAuthError> {
+) -> Result<(AuthenticatedClient, Option<ClientSecretVerification>), ClientAuthError> {
     // Look up the client
     let client = db::get_oauth_client_by_client_id(&state.store, &credentials.client_id)
         .await
@@ -691,10 +755,13 @@ pub async fn authenticate_client(
         if let Err(e) = db::update_oauth_client_last_used(&state.store, &client.id).await {
             tracing::warn!("Failed to update OAuth client last_used: {e}");
         }
-        return Ok(AuthenticatedClient {
-            client,
-            is_public: false,
-        });
+        return Ok((
+            AuthenticatedClient {
+                client,
+                is_public: false,
+            },
+            None,
+        ));
     }
 
     if requires_secret {
@@ -720,10 +787,13 @@ pub async fn authenticate_client(
             return Err(ClientAuthError::InvalidCredentials);
         }
 
-        Ok(AuthenticatedClient {
-            client,
-            is_public: false,
-        })
+        Ok((
+            AuthenticatedClient {
+                client,
+                is_public: false,
+            },
+            Some(ClientSecretVerification { _private: () }),
+        ))
     } else {
         // Public client - no secret required, but PKCE should be used
         // Update last used timestamp
@@ -731,10 +801,13 @@ pub async fn authenticate_client(
             tracing::warn!("Failed to update OAuth client last_used: {e}");
         }
 
-        Ok(AuthenticatedClient {
-            client,
-            is_public: true,
-        })
+        Ok((
+            AuthenticatedClient {
+                client,
+                is_public: true,
+            },
+            None,
+        ))
     }
 }
 
@@ -842,7 +915,7 @@ pub(crate) fn authenticate_client_mtls(
     client: &crate::db::OAuthClient,
     cert: &crate::services::oidc::mtls::ClientCertificate,
     jwks_cache_value: Option<&serde_json::Value>,
-) -> Result<(), ClientAuthError> {
+) -> Result<MtlsCertVerification, ClientAuthError> {
     match client.token_endpoint_auth_method {
         crate::db::TokenEndpointAuthMethod::TlsClientAuth => {
             crate::services::oidc::mtls::verify_tls_client_auth(
@@ -853,6 +926,7 @@ pub(crate) fn authenticate_client_mtls(
                 client.tls_client_auth_san_uri.as_deref(),
                 client.tls_client_auth_san_ip.as_deref(),
             )
+            .map(|()| MtlsCertVerification { _private: () })
             .map_err(|e| ClientAuthError::MtlsVerificationFailed(e.to_string()))
         }
         crate::db::TokenEndpointAuthMethod::SelfSignedTlsClientAuth => {
@@ -862,6 +936,7 @@ pub(crate) fn authenticate_client_mtls(
                 )
             })?;
             crate::services::oidc::mtls::verify_self_signed_tls_client_auth(cert, jwks)
+                .map(|()| MtlsCertVerification { _private: () })
                 .map_err(|e| ClientAuthError::MtlsVerificationFailed(e.to_string()))
         }
         _ => Err(ClientAuthError::MtlsVerificationFailed(

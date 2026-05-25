@@ -22,7 +22,7 @@ use secrecy::SecretString;
 use serde::Deserialize;
 use std::sync::Arc;
 
-use super::client_auth::{ClientAuthFields, authenticate_client_any, extract_client_auth};
+use super::client_auth::{ClientAuthFields, complete_client_auth, extract_client_auth};
 
 /// Token revocation request (RFC 7009 Section 2.1).
 ///
@@ -132,8 +132,8 @@ pub async fn revoke(
         Err(response) => return response,
     };
 
-    let (caller_client_id, pending_jti) = match authenticate_client_any(&state, auth).await {
-        Ok(Some((_client, client_id, jti))) => (client_id, jti),
+    let (caller_client_id, pending_jti) = match complete_client_auth(&state, auth).await {
+        Ok(Some(a)) => (a.client_id, a.pending_jti),
         Ok(None) => {
             // No credentials provided → 401
             return (StatusCode::UNAUTHORIZED, [("www-authenticate", "Basic")]).into_response();
@@ -188,8 +188,8 @@ pub async fn introspect(
         Err(response) => return response,
     };
 
-    let (authenticated_client, pending_jti) = match authenticate_client_any(&state, auth).await {
-        Ok(Some((client, _client_id, jti))) => (client.client, jti),
+    let (authenticated_client, pending_jti) = match complete_client_auth(&state, auth).await {
+        Ok(Some(a)) => (a.client.client, a.pending_jti),
         Ok(None) => {
             // No credentials provided → 401
             return (StatusCode::UNAUTHORIZED, [("www-authenticate", "Basic")]).into_response();

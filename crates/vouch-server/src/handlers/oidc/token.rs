@@ -2,7 +2,7 @@
 //! Token endpoint handler.
 
 use super::client_auth::{
-    ClientAuthFields, ExtractedClientAuth, authenticate_client_any, extract_client_auth,
+    ClientAuthFields, ExtractedClientAuth, complete_client_auth, extract_client_auth,
     extract_client_credentials,
 };
 use crate::AppState;
@@ -477,62 +477,57 @@ async fn handle_authorization_code_grant(
     };
 
     // For non-JWT auth, extract traditional credentials or mTLS auth.
-    let (credentials, mtls_authenticated) = if !has_jwt_assertion {
+    let (credentials, mtls_authenticated, mtls_verification) = if !has_jwt_assertion {
         let creds =
             extract_client_credentials(&headers, params.client_id.as_deref(), params.client_secret);
 
-        // RFC 8705: If only client_id (no secret) and a cert is present,
-        // try mTLS authentication. authenticate_client() will skip secret
-        // validation for mTLS-registered clients.
-        let mtls_auth = if let Some(ref c) = creds
+        // RFC 8705: For client_id-only requests (no client_secret), look up
+        // the registered token_endpoint_auth_method once and dispatch:
+        //   - mTLS-registered + cert present → validate the cert
+        //   - mTLS-registered + no cert      → reject (cert required)
+        //   - not mTLS-registered            → fall through; exchange does
+        //                                      secret/public auth
+        let (mtls_auth, mtls_v) = if let Some(ref c) = creds
             && c.client_secret.is_none()
-            && client_cert.0.is_some()
         {
-            match crate::services::oidc::token::authenticate_client(&state, c).await {
-                Ok(client)
-                    if matches!(
-                        client.client.token_endpoint_auth_method,
-                        crate::db::TokenEndpointAuthMethod::TlsClientAuth
-                            | crate::db::TokenEndpointAuthMethod::SelfSignedTlsClientAuth
-                    ) =>
-                {
-                    // Validate the certificate against registered identity.
-                    if let Some(ref cert) = client_cert.0 {
-                        let jwks_cache_value =
-                            crate::db::get_jwks_cache(&state.store, &client.client.id)
-                                .await
-                                .map_err(|e| {
-                                    tracing::warn!("JWKS cache lookup failed: {e}");
-                                })
-                                .ok()
-                                .flatten()
-                                .map(|c| c.value);
-                        if let Err(e) = crate::services::oidc::token::authenticate_client_mtls(
-                            &client.client,
-                            cert,
-                            jwks_cache_value.as_ref(),
-                        ) {
+            let client_lookup =
+                crate::db::get_oauth_client_by_client_id(&state.store, &c.client_id)
+                    .await
+                    .ok()
+                    .flatten()
+                    .filter(|oc| oc.active);
+            let is_mtls_registered = client_lookup.as_ref().is_some_and(|oc| {
+                matches!(
+                    oc.token_endpoint_auth_method,
+                    crate::db::TokenEndpointAuthMethod::TlsClientAuth
+                        | crate::db::TokenEndpointAuthMethod::SelfSignedTlsClientAuth
+                )
+            });
+            match (client_lookup, is_mtls_registered, client_cert.0.as_ref()) {
+                (Some(client), true, Some(cert)) => {
+                    let jwks_cache_value = crate::db::get_jwks_cache(&state.store, &client.id)
+                        .await
+                        .ok()
+                        .flatten()
+                        .map(|c| c.value);
+                    match crate::services::oidc::token::authenticate_client_mtls(
+                        &client,
+                        cert,
+                        jwks_cache_value.as_ref(),
+                    ) {
+                        Ok(mtls_verification) => (
+                            Some(crate::services::oidc::token::AuthenticatedClient {
+                                client,
+                                is_public: false,
+                            }),
+                            Some(mtls_verification),
+                        ),
+                        Err(e) => {
                             return e.into_service_error().into_oauth_response().into_response();
                         }
                     }
-                    Some(client)
                 }
-                Ok(_) => None, // Not an mTLS client, fall through
-                Err(_) => None,
-            }
-        } else if let Some(ref c) = creds
-            && c.client_secret.is_none()
-        {
-            // No secret and no certificate — check if this client requires mTLS.
-            // If so, reject immediately per RFC 8705 Section 2.
-            match crate::services::oidc::token::authenticate_client(&state, c).await {
-                Ok(client)
-                    if matches!(
-                        client.client.token_endpoint_auth_method,
-                        crate::db::TokenEndpointAuthMethod::TlsClientAuth
-                            | crate::db::TokenEndpointAuthMethod::SelfSignedTlsClientAuth
-                    ) =>
-                {
+                (Some(_), true, None) => {
                     return ServiceError::oauth(
                         OAuthErrorCode::InvalidClient,
                         "mTLS client certificate required",
@@ -540,15 +535,15 @@ async fn handle_authorization_code_grant(
                     .into_oauth_response()
                     .into_response();
                 }
-                _ => None,
+                _ => (None, None), // Not mTLS-registered (or client not found) — exchange handles it.
             }
         } else {
-            None
+            (None, None)
         };
 
-        (creds, mtls_auth)
+        (creds, mtls_auth, mtls_v)
     } else {
-        (None, None)
+        (None, None, None)
     };
 
     // Resolve the authenticated client from either path
@@ -665,24 +660,18 @@ async fn handle_authorization_code_grant(
     // The `GrantProof::AuthorizationCode` half of the chokepoint is
     // produced inside `exchange_authorization_code` (only that function
     // has access to the `AuthCodeClaim` from `enforce_single_use_code`).
-    // The handler supplies only the client-auth axis.
-    let fallback = jwt_authenticated
-        .as_ref()
-        .or(mtls_authenticated.as_ref())
-        .map_or_else(
-            || {
-                if credentials
-                    .as_ref()
-                    .is_some_and(|c| c.client_secret.is_some())
-                {
-                    ClientAuthProof::UnconvertedClientSecret
-                } else {
-                    ClientAuthProof::None
-                }
-            },
-            |c| ClientAuthProof::from_auth_method(c.client.token_endpoint_auth_method),
-        );
-    let client_auth = ClientAuthProof::from_jti_or(jti_claim, fallback);
+    // The handler supplies only the client-auth axis using the witnesses
+    // it has produced so far:
+    //   - JWT auth → PrivateKeyJwt(jti_claim) via from_jti_or
+    //   - mTLS auth → MutualTls(mtls_verification) via from_verifications
+    //   - secret auth → handler doesn't run authenticate_client (that
+    //     happens inside exchange), so pass None here; the exchange
+    //     function promotes None → ClientSecret(verification) using the
+    //     witness from authenticate_and_validate_client.
+    let client_auth = ClientAuthProof::from_jti_or(
+        jti_claim,
+        ClientAuthProof::from_verifications(None, mtls_verification),
+    );
 
     match exchange_authorization_code(&state, exchange_params, client_auth).await {
         Ok(result) => {
@@ -721,12 +710,10 @@ async fn handle_client_credentials_grant(
         Err(resp) => return resp,
     };
 
-    let Some((authenticated_client, _client_id, pending_jti)) =
-        (match authenticate_client_any(&state, client_auth).await {
-            Ok(result) => result,
-            Err(resp) => return resp,
-        })
-    else {
+    let Some(any_auth) = (match complete_client_auth(&state, client_auth).await {
+        Ok(result) => result,
+        Err(resp) => return resp,
+    }) else {
         return ServiceError::oauth(
             OAuthErrorCode::InvalidClient,
             "Client authentication required for client_credentials grant",
@@ -734,6 +721,9 @@ async fn handle_client_credentials_grant(
         .into_oauth_response()
         .into_response();
     };
+    let authenticated_client = any_auth.client;
+    let pending_jti = any_auth.pending_jti;
+    let secret_verification = any_auth.secret_verification;
 
     // RFC 6749 Section 4.4: client_credentials requires a confidential client
     if authenticated_client.is_public {
@@ -746,11 +736,11 @@ async fn handle_client_credentials_grant(
     }
 
     // RFC 8705 Section 2: Validate mTLS client auth if the client uses it.
-    if let Err(resp) =
-        validate_mtls_client_auth(&state.store, &authenticated_client, &client_cert).await
-    {
-        return *resp;
-    }
+    let mtls_verification =
+        match validate_mtls_client_auth(&state.store, &authenticated_client, &client_cert).await {
+            Ok(v) => v,
+            Err(resp) => return *resp,
+        };
 
     // RFC 8705 Section 3: Bind access token to cert thumbprint only when opted in.
     let mtls_thumbprint = extract_mtls_thumbprint(&authenticated_client, &client_cert);
@@ -763,9 +753,7 @@ async fn handle_client_credentials_grant(
         grant: GrantProof::ClientCredentials,
         client_auth: ClientAuthProof::from_jti_or(
             jti_claim,
-            ClientAuthProof::from_auth_method(
-                authenticated_client.client.token_endpoint_auth_method,
-            ),
+            ClientAuthProof::from_verifications(secret_verification, mtls_verification),
         ),
     };
 
@@ -841,12 +829,10 @@ async fn handle_token_exchange_grant(
     };
 
     // Authenticate client (required for token exchange)
-    let Some((authenticated_client, _client_id, pending_jti)) =
-        (match authenticate_client_any(&state, client_auth).await {
-            Ok(result) => result,
-            Err(resp) => return resp,
-        })
-    else {
+    let Some(any_auth) = (match complete_client_auth(&state, client_auth).await {
+        Ok(result) => result,
+        Err(resp) => return resp,
+    }) else {
         return ServiceError::oauth(
             OAuthErrorCode::InvalidClient,
             "Client authentication required for token exchange",
@@ -854,6 +840,9 @@ async fn handle_token_exchange_grant(
         .into_oauth_response()
         .into_response();
     };
+    let authenticated_client = any_auth.client;
+    let pending_jti = any_auth.pending_jti;
+    let secret_verification = any_auth.secret_verification;
 
     // RFC 9449 Section 5: Validate DPoP proof if present at the token endpoint
     let dpop_header = headers.get("DPoP").and_then(|v| v.to_str().ok());
@@ -873,11 +862,11 @@ async fn handle_token_exchange_grant(
     let dpop_jkt = dpop_proof.as_ref().map(|p| p.jkt.clone());
 
     // RFC 8705 Section 2: Validate mTLS client auth if the client uses it.
-    if let Err(resp) =
-        validate_mtls_client_auth(&state.store, &authenticated_client, &client_cert).await
-    {
-        return *resp;
-    }
+    let mtls_verification =
+        match validate_mtls_client_auth(&state.store, &authenticated_client, &client_cert).await {
+            Ok(v) => v,
+            Err(resp) => return *resp,
+        };
 
     // RFC 8705 Section 3: Bind access token to cert thumbprint only when opted in.
     let mtls_thumbprint = extract_mtls_thumbprint(&authenticated_client, &client_cert);
@@ -920,9 +909,7 @@ async fn handle_token_exchange_grant(
         grant: GrantProof::TokenExchange,
         client_auth: ClientAuthProof::from_jti_or(
             jti_claim,
-            ClientAuthProof::from_auth_method(
-                authenticated_client.client.token_endpoint_auth_method,
-            ),
+            ClientAuthProof::from_verifications(secret_verification, mtls_verification),
         ),
     };
 
@@ -1088,19 +1075,20 @@ async fn handle_fido2_assertion_grant(
 /// Validate mTLS client authentication when the client uses `tls_client_auth`
 /// or `self_signed_tls_client_auth` (RFC 8705 Section 2).
 ///
-/// Returns `Ok(())` if the auth method is not mTLS-based, or if the cert
-/// is present and validates successfully. Returns `Err(Box<Response>)` with a
-/// 401-equivalent OAuth error response if the cert is absent or invalid.
+/// Returns `Ok(None)` if the auth method is not mTLS-based (no verification
+/// performed); `Ok(Some(verification))` if the cert validated successfully.
+/// Returns `Err(Box<Response>)` with a 401-equivalent OAuth error if the
+/// cert is absent or invalid.
 async fn validate_mtls_client_auth(
     store: &crate::db::store::DocumentStore,
     client: &crate::services::oidc::token::AuthenticatedClient,
     client_cert: &crate::handlers::extractors::OptionalClientCert,
-) -> Result<(), Box<Response>> {
+) -> Result<Option<crate::services::oidc::token::MtlsCertVerification>, Box<Response>> {
     if client.client.token_endpoint_auth_method != crate::db::TokenEndpointAuthMethod::TlsClientAuth
         && client.client.token_endpoint_auth_method
             != crate::db::TokenEndpointAuthMethod::SelfSignedTlsClientAuth
     {
-        return Ok(());
+        return Ok(None);
     }
     let Some(ref cert) = client_cert.0 else {
         return Err(Box::new(
@@ -1125,6 +1113,7 @@ async fn validate_mtls_client_auth(
         cert,
         jwks_cache_value.as_ref(),
     )
+    .map(Some)
     .map_err(|e| Box::new(e.into_service_error().into_oauth_response().into_response()))
 }
 

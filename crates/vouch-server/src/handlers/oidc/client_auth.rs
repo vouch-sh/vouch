@@ -154,24 +154,38 @@ pub(crate) fn extract_client_auth<T: ClientAuthFields>(
     Ok(ExtractedClientAuth::None)
 }
 
+/// Result of a successful `complete_client_auth` dispatch.
+pub(crate) struct ClientAuthOutcome {
+    pub(crate) client: AuthenticatedClient,
+    pub(crate) client_id: String,
+    /// `Some` only for JWT-authenticated clients — caller must commit.
+    pub(crate) pending_jti: Option<PendingJti>,
+    /// `Some` only when a `client_secret` was validated.
+    pub(crate) secret_verification: Option<crate::services::oidc::token::ClientSecretVerification>,
+}
+
 /// Authenticate a client using any supported method.
 ///
 /// Dispatches to secret-based or JWT-based authentication depending on
-/// the extracted authentication method.
-///
-/// For JWT assertions, returns a [`PendingJti`] that MUST be committed via
-/// [`PendingJti::commit`](crate::services::oidc::jwt_bearer::client_auth::PendingJti::commit)
-/// after the full request succeeds. For all other auth methods, returns
-/// `None` for the pending JTI.
-pub(crate) async fn authenticate_client_any(
+/// the extracted authentication method. Returns the verification witnesses
+/// produced by the dispatched method (JTI claim for JWT, secret-verification
+/// for client_secret_basic/post). mTLS verification is performed separately
+/// by the handler via [`validate_mtls_client_auth`] because it requires the
+/// client certificate from the request extractor.
+pub(crate) async fn complete_client_auth(
     state: &Arc<AppState>,
     auth: ExtractedClientAuth,
-) -> Result<Option<(AuthenticatedClient, String, Option<PendingJti>)>, Response> {
+) -> Result<Option<ClientAuthOutcome>, Response> {
     match auth {
         ExtractedClientAuth::Secret(creds) => {
             let client_id = creds.client_id.clone();
             match authenticate_client(state, &creds).await {
-                Ok(client) => Ok(Some((client, client_id, None))),
+                Ok((client, secret_verification)) => Ok(Some(ClientAuthOutcome {
+                    client,
+                    client_id,
+                    pending_jti: None,
+                    secret_verification,
+                })),
                 Err(e) => Err(e.into_service_error().into_oauth_response().into_response()),
             }
         }
@@ -181,7 +195,12 @@ pub(crate) async fn authenticate_client_any(
         } => match authenticate_client_jwt(state, &client_assertion, client_id.as_deref()).await {
             Ok((client, pending_jti)) => {
                 let cid = client.client.client_id.clone();
-                Ok(Some((client, cid, Some(pending_jti))))
+                Ok(Some(ClientAuthOutcome {
+                    client,
+                    client_id: cid,
+                    pending_jti: Some(pending_jti),
+                    secret_verification: None,
+                }))
             }
             Err(e) => Err(e.into_service_error().into_oauth_response().into_response()),
         },
@@ -192,7 +211,12 @@ pub(crate) async fn authenticate_client_any(
                 client_secret: None,
             };
             match authenticate_client(state, &creds).await {
-                Ok(client) => Ok(Some((client, client_id, None))),
+                Ok((client, secret_verification)) => Ok(Some(ClientAuthOutcome {
+                    client,
+                    client_id,
+                    pending_jti: None,
+                    secret_verification,
+                })),
                 Err(e) => Err(e.into_service_error().into_oauth_response().into_response()),
             }
         }
