@@ -1637,3 +1637,1146 @@ async fn test_rfc9126_par_rejects_mtls_with_non_matching_cert() {
     let json: serde_json::Value = serde_json::from_str(&response_body).expect("Valid JSON");
     assert_eq!(json["error"], "invalid_client");
 }
+
+// ========================================================================
+// FAPI 2.0 / JAR / DPoP at PAR — conformance coverage
+//
+// Tests in this section cover the 39 scenarios captured in the
+// OpenID conformance suite handoff for `POST /oauth/par`. Each test
+// exercises a distinct handler branch and lists the conformance
+// scenario IDs it satisfies. See PAR_TEST_HANDOFF.md in the
+// vouch-conformance repository.
+// ========================================================================
+
+/// Kid used by [`generate_es256_signing_key`] and [`build_client_assertion`] from helpers.rs.
+/// FAPI request-object signing must use the same kid so the JWKS lookup matches.
+const PAR_FAPI_JWK_KID: &str = "test-key-1";
+
+/// Create a FAPI 2.0 OAuth client authenticated via `private_key_jwt`.
+/// Returns (client, pkcs8 signing key) — caller signs client_assertions / Request Objects.
+async fn create_fapi_jwt_client(
+    store: &db::store::DocumentStore,
+    user_id: &str,
+) -> (TestOAuthClient, Vec<u8>) {
+    let (client, pkcs8_bytes) = create_test_jwt_client(store, user_id).await;
+    db::update_oauth_client_fapi_settings(
+        store,
+        &client.app_id,
+        crate::db::FapiProfile::Fapi2Security,
+        false,
+    )
+    .await
+    .expect("Failed to set FAPI profile");
+    (client, pkcs8_bytes)
+}
+
+/// FAPI client that additionally requires a signed Request Object (RFC 9101).
+async fn create_fapi_jwt_client_requiring_request_object(
+    store: &db::store::DocumentStore,
+    user_id: &str,
+) -> (TestOAuthClient, Vec<u8>) {
+    let (client, pkcs8_bytes) = create_fapi_jwt_client(store, user_id).await;
+    db::update_oauth_client_jar_settings(store, &client.app_id, None, true)
+        .await
+        .expect("Failed to set require_signed_request_object");
+    (client, pkcs8_bytes)
+}
+
+/// Create a FAPI mTLS-authenticated OAuth client bound to the given subject DN.
+/// JWKS is also attached so Request Objects can be verified against the same key.
+async fn create_fapi_mtls_client(
+    store: &db::store::DocumentStore,
+    user_id: &str,
+    subject_dn: &str,
+) -> (String, Vec<u8>) {
+    let (pkcs8_bytes, jwk) = generate_es256_signing_key();
+    let jwks_value = serde_json::json!({ "keys": [jwk] });
+    let (_doc, client_id) = crate::db::create_oauth_client(
+        store,
+        &crate::db::CreateOAuthClientParams {
+            user_id: Some(user_id),
+            name: "Test FAPI mTLS PAR Client",
+            description: None,
+            application_type: crate::db::OAuthClientType::Web,
+            redirect_uris: &["https://example.com/callback".to_string()],
+            access_scope: crate::db::AccessScope::Public,
+            org_id: None,
+            resource_uris: &[],
+            token_endpoint_auth_method: Some(crate::db::TokenEndpointAuthMethod::TlsClientAuth),
+            jwks: Some(&jwks_value),
+            jwks_uri: None,
+            fapi_profile: Some(crate::db::FapiProfile::Fapi2Security),
+            dpop_bound_access_tokens: None,
+            grant_types: None,
+            response_types: None,
+            software_id: None,
+            software_version: None,
+            registration_source: crate::db::RegistrationSource::Manual,
+            registration_access_token_hash: None,
+            registration_metadata: None,
+            id_token_signed_response_alg: crate::db::JwsAlgorithm::Rs256,
+            tls_client_auth_subject_dn: Some(subject_dn),
+            tls_client_auth_san_dns: None,
+            tls_client_auth_san_uri: None,
+            tls_client_auth_san_ip: None,
+            tls_client_auth_san_email: None,
+            tls_client_certificate_bound_access_tokens: None,
+            authorization_signed_response_alg: None,
+            introspection_signed_response_alg: None,
+            request_object_signing_alg: None,
+            require_signed_request_object: None,
+            userinfo_signed_response_alg: None,
+            request_uris: None,
+        },
+    )
+    .await
+    .expect("Failed to create FAPI mTLS test client");
+    (client_id, pkcs8_bytes)
+}
+
+/// Build a FAPI 2.0 Request Object JWT with all required claims.
+/// `override_claims` lets a test mutate the claims (e.g. remove `exp`, oversize `nonce`)
+/// before signing.
+fn build_fapi_request_object<F>(
+    client_id: &str,
+    issuer: &str,
+    pkcs8_bytes: &[u8],
+    code_challenge: &str,
+    override_claims: F,
+) -> String
+where
+    F: FnOnce(&mut serde_json::Value),
+{
+    let now = jiff::Timestamp::now().as_second();
+    let header = serde_json::json!({
+        "alg": "ES256",
+        "typ": "oauth-authz-req+jwt",
+        "kid": PAR_FAPI_JWK_KID,
+    });
+    let mut claims = serde_json::json!({
+        "iss": client_id,
+        "aud": issuer,
+        "exp": now + 60,
+        "nbf": now,
+        "iat": now,
+        "response_type": "code",
+        "client_id": client_id,
+        "redirect_uri": "https://example.com/callback",
+        "scope": "openid",
+        "state": "par-fapi-state",
+        "nonce": "par-fapi-nonce",
+        "code_challenge": code_challenge,
+        "code_challenge_method": "S256",
+    });
+    override_claims(&mut claims);
+    sign_jwt_assertion(pkcs8_bytes, &header, &claims)
+}
+
+/// Build a DPoP proof JWT bound to the given key pair, with `htm`, `htu`, optional
+/// `nonce`. Returns the proof string and the JWK thumbprint (base64url SHA-256).
+fn build_dpop_proof_with_jkt(
+    pkcs8_bytes: &[u8],
+    method: &str,
+    uri: &str,
+    nonce: Option<&str>,
+) -> (String, String) {
+    use aws_lc_rs::digest;
+    use aws_lc_rs::signature::{ECDSA_P256_SHA256_FIXED_SIGNING, EcdsaKeyPair, KeyPair};
+
+    let key_pair = EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, pkcs8_bytes)
+        .expect("Failed to parse DPoP key");
+    let pub_bytes = key_pair.public_key().as_ref();
+    let x = URL_SAFE_NO_PAD.encode(&pub_bytes[1..33]);
+    let y = URL_SAFE_NO_PAD.encode(&pub_bytes[33..65]);
+    let jwk = serde_json::json!({
+        "kty": "EC",
+        "crv": "P-256",
+        "x": x.clone(),
+        "y": y.clone(),
+    });
+    // JWK thumbprint per RFC 7638: SHA-256 of canonical JSON {crv,kty,x,y}.
+    let thumbprint_input = format!(r#"{{"crv":"P-256","kty":"EC","x":"{x}","y":"{y}"}}"#);
+    let jkt = URL_SAFE_NO_PAD
+        .encode(digest::digest(&digest::SHA256, thumbprint_input.as_bytes()).as_ref());
+
+    let header = serde_json::json!({
+        "typ": "dpop+jwt",
+        "alg": "ES256",
+        "jwk": jwk,
+    });
+
+    let now = jiff::Timestamp::now().as_second();
+    let mut claims = serde_json::json!({
+        "jti": uuid::Uuid::now_v7().to_string(),
+        "htm": method,
+        "htu": uri,
+        "iat": now,
+    });
+    if let Some(n) = nonce {
+        claims["nonce"] = serde_json::json!(n);
+    }
+
+    let header_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&header).unwrap());
+    let claims_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).unwrap());
+    let signing_input = format!("{header_b64}.{claims_b64}");
+    let rng = aws_lc_rs::rand::SystemRandom::new();
+    let sig = key_pair.sign(&rng, signing_input.as_bytes()).expect("sign");
+    let sig_b64 = URL_SAFE_NO_PAD.encode(sig.as_ref());
+    (format!("{header_b64}.{claims_b64}.{sig_b64}"), jkt)
+}
+
+/// Generate a fresh ES256 pkcs8 byte vector for DPoP keys.
+fn generate_dpop_pkcs8() -> Vec<u8> {
+    use aws_lc_rs::signature::{ECDSA_P256_SHA256_FIXED_SIGNING, EcdsaKeyPair};
+    let rng = aws_lc_rs::rand::SystemRandom::new();
+    let pkcs8 = EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, &rng)
+        .expect("Failed to generate DPoP key");
+    pkcs8.as_ref().to_vec()
+}
+
+/// POST a form to `/oauth/par` with optional DPoP proof and optional mTLS cert,
+/// returning status, body and headers. This bridges a small gap in `test_utils`:
+/// `http_post_form_with_cert` strips headers, and `http_post_form_full` strips certs.
+async fn par_post_full(
+    app: &axum::Router,
+    body: &str,
+    dpop_proof: Option<&str>,
+    cert_der: Option<Vec<u8>>,
+    extra_headers: &[(&str, &str)],
+) -> crate::test_utils::HttpResponse {
+    use tower::ServiceExt;
+
+    let mut req_builder = axum::http::Request::builder()
+        .method("POST")
+        .uri("/oauth/par")
+        .header("Content-Type", "application/x-www-form-urlencoded");
+    if let Some(p) = dpop_proof {
+        req_builder = req_builder.header("DPoP", p);
+    }
+    for (name, value) in extra_headers {
+        req_builder = req_builder.header(*name, *value);
+    }
+    let request = req_builder
+        .body(axum::body::Body::from(body.to_string()))
+        .expect("Failed to build request");
+    let (mut parts, body_inner) = request.into_parts();
+    parts
+        .extensions
+        .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+            [127, 0, 0, 1],
+            0,
+        ))));
+    parts.extensions.insert(axum::extract::ConnectInfo(
+        crate::infra::mtls_listener::PeerClientCert(cert_der),
+    ));
+    let request = axum::http::Request::from_parts(parts, body_inner);
+    let response = app
+        .clone()
+        .oneshot(request)
+        .await
+        .expect("Failed to execute request");
+    let status = response.status();
+    let response_headers = response.headers().clone();
+    let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("Failed to read response body");
+    crate::test_utils::HttpResponse {
+        status,
+        body: String::from_utf8_lossy(&body_bytes).to_string(),
+        headers: response_headers,
+    }
+}
+
+/// Acquire a DPoP nonce from the PAR endpoint by submitting a proof without one.
+/// The first request returns `400 use_dpop_nonce` with a `DPoP-Nonce` header;
+/// the second request uses that nonce.
+async fn acquire_par_dpop_nonce(
+    app: &axum::Router,
+    pkcs8_bytes: &[u8],
+    par_uri: &str,
+    body_with_no_dpop: &str,
+    cert_der: Option<Vec<u8>>,
+) -> String {
+    let (proof, _jkt) = build_dpop_proof_with_jkt(pkcs8_bytes, "POST", par_uri, None);
+    let response = par_post_full(app, body_with_no_dpop, Some(&proof), cert_der, &[]).await;
+    assert_eq!(
+        response.status,
+        StatusCode::BAD_REQUEST,
+        "expected use_dpop_nonce: {}",
+        response.body
+    );
+    response
+        .headers
+        .get("dpop-nonce")
+        .expect("server must return dpop-nonce header")
+        .to_str()
+        .expect("dpop-nonce header must be utf-8")
+        .to_string()
+}
+
+/// Submit a form POST to `/oauth/par` with a DPoP header.
+async fn par_post_with_dpop(
+    app: &axum::Router,
+    body: &str,
+    dpop_proof: &str,
+    extra_headers: &[(&str, &str)],
+) -> (StatusCode, String) {
+    let mut all = vec![("DPoP", dpop_proof)];
+    all.extend_from_slice(extra_headers);
+    http_post_form(app, "/oauth/par", body, &all).await
+}
+
+// ------------------------------------------------------------------------
+// Negative-path tests
+// ------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_rfc9126_par_rejects_missing_pkce_for_fapi_client() {
+    // FAPI 2.0 §5.3.2.1: PKCE is required for FAPI clients.
+    // Covers conformance scenarios:
+    //   - mtls | plain | 400 invalid_request
+    //   - private_key_jwt | plain | 400 invalid_request
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "par-fapi-pkce@example.com").await;
+    let (client, pkcs8_bytes) = create_fapi_jwt_client(&state.store, &user.id).await;
+
+    let assertion = build_client_assertion(
+        &client.client_id,
+        &state.config().base_url,
+        &pkcs8_bytes,
+        None,
+    );
+    let body = format!(
+        "response_type=code\
+         &client_id={}\
+         &redirect_uri={}\
+         &scope=openid\
+         &client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer\
+         &client_assertion={assertion}",
+        client.client_id,
+        urlencoding::encode("https://example.com/callback"),
+    );
+
+    let (status, response_body) = http_post_form(&app, "/oauth/par", &body, &[]).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "FAPI client without PKCE must be rejected: {response_body}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&response_body).expect("Valid JSON");
+    assert_eq!(json["error"], "invalid_request");
+    assert_eq!(
+        json["error_description"],
+        "PKCE is required: code_challenge and code_challenge_method=S256 must be provided"
+    );
+}
+
+#[tokio::test]
+async fn test_rfc9126_par_rejects_plain_pkce_method() {
+    // FAPI 2.0 / RFC 9700: Only S256 is supported as code_challenge_method.
+    // Covers conformance scenarios:
+    //   - mtls | has_pkce,pkce_plain | 400 invalid_request
+    //   - private_key_jwt | has_pkce,pkce_plain | 400 invalid_request
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "par-plain-pkce@example.com").await;
+    let (client, pkcs8_bytes) = create_fapi_jwt_client(&state.store, &user.id).await;
+
+    let assertion = build_client_assertion(
+        &client.client_id,
+        &state.config().base_url,
+        &pkcs8_bytes,
+        None,
+    );
+    // Per RFC 7636 §4.2 the plain verifier itself can be the challenge.
+    let plain_challenge = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+    let body = format!(
+        "response_type=code\
+         &client_id={}\
+         &redirect_uri={}\
+         &scope=openid\
+         &code_challenge={plain_challenge}\
+         &code_challenge_method=plain\
+         &client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer\
+         &client_assertion={assertion}",
+        client.client_id,
+        urlencoding::encode("https://example.com/callback"),
+    );
+
+    let (status, response_body) = http_post_form(&app, "/oauth/par", &body, &[]).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "plain PKCE method must be rejected: {response_body}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&response_body).expect("Valid JSON");
+    assert_eq!(json["error"], "invalid_request");
+    assert_eq!(
+        json["error_description"],
+        "Unsupported code_challenge_method. Only S256 is supported"
+    );
+}
+
+#[tokio::test]
+async fn test_rfc9126_par_rejects_missing_request_object_when_required() {
+    // RFC 9101: If client.require_signed_request_object is true, the `request`
+    // parameter is mandatory at PAR.
+    // Covers conformance scenarios:
+    //   - mtls | has_pkce | 400 invalid_request (description "This client requires a signed Request Object (RFC 9101)")
+    //   - private_key_jwt | has_pkce | 400 invalid_request (same description)
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "par-needs-ro@example.com").await;
+    let (client, pkcs8_bytes) =
+        create_fapi_jwt_client_requiring_request_object(&state.store, &user.id).await;
+
+    let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+    let challenge = sha256_base64url(verifier);
+    let assertion = build_client_assertion(
+        &client.client_id,
+        &state.config().base_url,
+        &pkcs8_bytes,
+        None,
+    );
+
+    let body = format!(
+        "response_type=code\
+         &client_id={}\
+         &redirect_uri={}\
+         &scope=openid\
+         &code_challenge={challenge}\
+         &code_challenge_method=S256\
+         &client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer\
+         &client_assertion={assertion}",
+        client.client_id,
+        urlencoding::encode("https://example.com/callback"),
+    );
+
+    let (status, response_body) = http_post_form(&app, "/oauth/par", &body, &[]).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "client requiring signed Request Object must reject plain PAR: {response_body}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&response_body).expect("Valid JSON");
+    assert_eq!(json["error"], "invalid_request");
+    assert_eq!(
+        json["error_description"],
+        "This client requires a signed Request Object (RFC 9101)"
+    );
+}
+
+#[tokio::test]
+async fn test_rfc9126_par_rejects_unsupported_response_type() {
+    // Only response_type=code is supported. `code id_token` and `token` are rejected.
+    // Covers conformance scenarios across all 4 auth methods × form/JAR shapes:
+    //   - mtls | has_pkce | 400 unsupported_response_type
+    //   - mtls | has_request_jwt | 400 unsupported_response_type
+    //   - private_key_jwt | has_pkce | 400 unsupported_response_type
+    //   - private_key_jwt | has_request_jwt | 400 unsupported_response_type
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "par-bad-rt@example.com").await;
+    let (client, pkcs8_bytes) = create_fapi_jwt_client(&state.store, &user.id).await;
+
+    let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+    let challenge = sha256_base64url(verifier);
+    let assertion = build_client_assertion(
+        &client.client_id,
+        &state.config().base_url,
+        &pkcs8_bytes,
+        None,
+    );
+
+    let body = format!(
+        "response_type={}\
+         &client_id={}\
+         &redirect_uri={}\
+         &scope=openid\
+         &code_challenge={challenge}\
+         &code_challenge_method=S256\
+         &client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer\
+         &client_assertion={assertion}",
+        urlencoding::encode("code id_token"),
+        client.client_id,
+        urlencoding::encode("https://example.com/callback"),
+    );
+
+    let (status, response_body) = http_post_form(&app, "/oauth/par", &body, &[]).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "non-`code` response_type must be rejected: {response_body}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&response_body).expect("Valid JSON");
+    assert_eq!(json["error"], "unsupported_response_type");
+    assert_eq!(
+        json["error_description"],
+        "Only 'code' response type is supported"
+    );
+}
+
+#[tokio::test]
+async fn test_rfc9126_par_rejects_nonce_over_max_length_in_request_object() {
+    // Authorization-request param length enforcement (256 bytes for nonce/state).
+    // Exercised through a JAR with an oversized nonce so the JAR validation path
+    // unwraps the claim and applies the length check.
+    // Covers conformance scenarios:
+    //   - mtls | has_request_jwt | 400 invalid_request ("nonce exceeds maximum length of 256")
+    //   - private_key_jwt | has_request_jwt | 400 invalid_request (same)
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "par-long-nonce@example.com").await;
+    let (client, pkcs8_bytes) = create_fapi_jwt_client(&state.store, &user.id).await;
+
+    let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+    let challenge = sha256_base64url(verifier);
+    let oversized_nonce = "n".repeat(300);
+    let request_jwt = build_fapi_request_object(
+        &client.client_id,
+        &state.config().base_url,
+        &pkcs8_bytes,
+        &challenge,
+        |claims| {
+            claims["nonce"] = serde_json::Value::String(oversized_nonce.clone());
+        },
+    );
+    let assertion = build_client_assertion(
+        &client.client_id,
+        &state.config().base_url,
+        &pkcs8_bytes,
+        None,
+    );
+
+    let body = format!(
+        "request={request_jwt}\
+         &client_id={}\
+         &client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer\
+         &client_assertion={assertion}",
+        client.client_id,
+    );
+
+    let (status, response_body) = http_post_form(&app, "/oauth/par", &body, &[]).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "oversized nonce in JAR must be rejected: {response_body}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&response_body).expect("Valid JSON");
+    assert_eq!(json["error"], "invalid_request");
+    assert_eq!(
+        json["error_description"],
+        "nonce exceeds maximum length of 256"
+    );
+}
+
+#[tokio::test]
+async fn test_rfc9126_par_rejects_request_object_missing_exp() {
+    // FAPI 2.0: Request Object must contain `exp`, `nbf`, `iss`, `aud`.
+    // Covers conformance scenarios:
+    //   - mtls | has_request_jwt | 400 invalid_request_object
+    //   - private_key_jwt | has_request_jwt | 400 invalid_request_object
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "par-noexp-ro@example.com").await;
+    let (client, pkcs8_bytes) = create_fapi_jwt_client(&state.store, &user.id).await;
+
+    let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+    let challenge = sha256_base64url(verifier);
+    let request_jwt = build_fapi_request_object(
+        &client.client_id,
+        &state.config().base_url,
+        &pkcs8_bytes,
+        &challenge,
+        |claims| {
+            // Drop the required `exp` claim.
+            if let Some(obj) = claims.as_object_mut() {
+                obj.remove("exp");
+            }
+        },
+    );
+    let assertion = build_client_assertion(
+        &client.client_id,
+        &state.config().base_url,
+        &pkcs8_bytes,
+        None,
+    );
+
+    let body = format!(
+        "request={request_jwt}\
+         &client_id={}\
+         &client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer\
+         &client_assertion={assertion}",
+        client.client_id,
+    );
+
+    let (status, response_body) = http_post_form(&app, "/oauth/par", &body, &[]).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "Request Object without exp must be rejected: {response_body}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&response_body).expect("Valid JSON");
+    assert_eq!(json["error"], "invalid_request_object");
+    assert_eq!(
+        json["error_description"],
+        "FAPI 2.0: Request Object must contain 'exp' claim"
+    );
+}
+
+#[tokio::test]
+async fn test_rfc9126_par_rejects_dpop_jkt_form_mismatch() {
+    // RFC 9449 §10: When `dpop_jkt` form param is provided alongside a DPoP proof,
+    // the two thumbprints MUST match.
+    // Covers conformance scenarios:
+    //   - mtls | has_dpop_header,has_pkce | 400 invalid_dpop_proof (form-param branch)
+    //   - private_key_jwt | has_dpop_header,has_pkce | 400 invalid_dpop_proof
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "par-dpop-jkt-form@example.com").await;
+    let (client, pkcs8_bytes) = create_fapi_jwt_client(&state.store, &user.id).await;
+
+    let par_uri = format!("{}/oauth/par", state.config().base_url);
+    let dpop_key = generate_dpop_pkcs8();
+
+    let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+    let challenge = sha256_base64url(verifier);
+    let assertion = build_client_assertion(
+        &client.client_id,
+        &state.config().base_url,
+        &pkcs8_bytes,
+        None,
+    );
+    let body_no_dpop = format!(
+        "response_type=code\
+         &client_id={}\
+         &redirect_uri={}\
+         &scope=openid\
+         &code_challenge={challenge}\
+         &code_challenge_method=S256\
+         &dpop_jkt=not-the-actual-thumbprint\
+         &client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer\
+         &client_assertion={assertion}",
+        client.client_id,
+        urlencoding::encode("https://example.com/callback"),
+    );
+
+    let nonce = acquire_par_dpop_nonce(&app, &dpop_key, &par_uri, &body_no_dpop, None).await;
+    let (proof, _jkt) = build_dpop_proof_with_jkt(&dpop_key, "POST", &par_uri, Some(&nonce));
+
+    let (status, response_body) = par_post_with_dpop(&app, &body_no_dpop, &proof, &[]).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "dpop_jkt form-param mismatch must be rejected: {response_body}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&response_body).expect("Valid JSON");
+    assert_eq!(json["error"], "invalid_dpop_proof");
+    assert_eq!(
+        json["error_description"],
+        "dpop_jkt parameter does not match DPoP proof JWK thumbprint"
+    );
+}
+
+#[tokio::test]
+async fn test_rfc9126_par_rejects_dpop_jkt_jar_claim_mismatch() {
+    // RFC 9449 §10: When `dpop_jkt` appears as a JAR claim alongside a DPoP proof,
+    // the two thumbprints MUST match. The handler reports this with a slightly
+    // different description than the form-param branch.
+    // Covers conformance scenarios:
+    //   - private_key_jwt | has_dpop_header,has_request_jwt | 400 invalid_dpop_proof
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "par-dpop-jkt-jar@example.com").await;
+    let (client, pkcs8_bytes) = create_fapi_jwt_client(&state.store, &user.id).await;
+
+    let par_uri = format!("{}/oauth/par", state.config().base_url);
+    let dpop_key = generate_dpop_pkcs8();
+
+    let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+    let challenge = sha256_base64url(verifier);
+
+    // Build a Request Object that carries a dpop_jkt claim NOT matching the DPoP proof.
+    let request_jwt = build_fapi_request_object(
+        &client.client_id,
+        &state.config().base_url,
+        &pkcs8_bytes,
+        &challenge,
+        |claims| {
+            claims["dpop_jkt"] = serde_json::Value::String(
+                "wrong-thumbprint-aaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+            );
+        },
+    );
+    let assertion = build_client_assertion(
+        &client.client_id,
+        &state.config().base_url,
+        &pkcs8_bytes,
+        None,
+    );
+
+    let body_no_dpop = format!(
+        "request={request_jwt}\
+         &client_id={}\
+         &client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer\
+         &client_assertion={assertion}",
+        client.client_id,
+    );
+
+    let nonce = acquire_par_dpop_nonce(&app, &dpop_key, &par_uri, &body_no_dpop, None).await;
+    let (proof, _jkt) = build_dpop_proof_with_jkt(&dpop_key, "POST", &par_uri, Some(&nonce));
+
+    let (status, response_body) = par_post_with_dpop(&app, &body_no_dpop, &proof, &[]).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "JAR dpop_jkt mismatch must be rejected: {response_body}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&response_body).expect("Valid JSON");
+    assert_eq!(json["error"], "invalid_dpop_proof");
+    assert_eq!(
+        json["error_description"],
+        "dpop_jkt does not match DPoP proof JWK thumbprint"
+    );
+}
+
+#[tokio::test]
+async fn test_rfc9126_par_requires_dpop_nonce_returns_use_dpop_nonce() {
+    // RFC 9449 §8: The token endpoint (and PAR, which shares DPoP enforcement)
+    // requires a nonce in the DPoP proof; first request returns `use_dpop_nonce`
+    // and a `DPoP-Nonce` header for the client to retry with.
+    // Covers conformance scenarios:
+    //   - mtls | has_dpop_header,has_pkce | 400 use_dpop_nonce
+    //   - private_key_jwt | has_dpop_header,has_pkce | 400 use_dpop_nonce
+    //   - private_key_jwt | has_dpop_header,has_request_jwt | 400 use_dpop_nonce
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "par-use-dpop-nonce@example.com").await;
+    let (client, pkcs8_bytes) = create_fapi_jwt_client(&state.store, &user.id).await;
+
+    let par_uri = format!("{}/oauth/par", state.config().base_url);
+    let dpop_key = generate_dpop_pkcs8();
+    let (proof, _jkt) = build_dpop_proof_with_jkt(&dpop_key, "POST", &par_uri, None);
+
+    let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+    let challenge = sha256_base64url(verifier);
+    let assertion = build_client_assertion(
+        &client.client_id,
+        &state.config().base_url,
+        &pkcs8_bytes,
+        None,
+    );
+
+    let body = format!(
+        "response_type=code\
+         &client_id={}\
+         &redirect_uri={}\
+         &scope=openid\
+         &code_challenge={challenge}\
+         &code_challenge_method=S256\
+         &client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer\
+         &client_assertion={assertion}",
+        client.client_id,
+        urlencoding::encode("https://example.com/callback"),
+    );
+
+    let response = crate::test_utils::http_post_form_full(
+        &app,
+        "/oauth/par",
+        &body,
+        &[("DPoP", proof.as_str())],
+    )
+    .await;
+    assert_eq!(
+        response.status,
+        StatusCode::BAD_REQUEST,
+        "DPoP without nonce must return use_dpop_nonce: {}",
+        response.body
+    );
+    assert!(
+        response.headers.get("dpop-nonce").is_some(),
+        "response must include DPoP-Nonce header"
+    );
+    let json: serde_json::Value = serde_json::from_str(&response.body).expect("Valid JSON");
+    assert_eq!(json["error"], "use_dpop_nonce");
+    assert_eq!(
+        json["error_description"],
+        "Authorization server requires nonce in DPoP proof"
+    );
+}
+
+#[tokio::test]
+async fn test_rfc9126_par_rejects_private_key_jwt_with_bad_aud() {
+    // RFC 7523 / FAPI 2.0: client_assertion `aud` must match the issuer URL for
+    // FAPI clients. A wrong audience causes the assertion to fail validation,
+    // returning 401 invalid_client.
+    // Covers conformance scenarios:
+    //   - private_key_jwt | has_pkce | 401 invalid_client (par-test-token-endpoint-url-as-audience-fails et al.)
+    //   - private_key_jwt | has_request_jwt | 401 invalid_client
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "par-bad-aud@example.com").await;
+    let (client, pkcs8_bytes) = create_fapi_jwt_client(&state.store, &user.id).await;
+
+    let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+    let challenge = sha256_base64url(verifier);
+    let wrong_aud = "https://attacker.example.com";
+    let assertion = build_client_assertion(&client.client_id, wrong_aud, &pkcs8_bytes, None);
+
+    let body = format!(
+        "response_type=code\
+         &client_id={}\
+         &redirect_uri={}\
+         &scope=openid\
+         &code_challenge={challenge}\
+         &code_challenge_method=S256\
+         &client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer\
+         &client_assertion={assertion}",
+        client.client_id,
+        urlencoding::encode("https://example.com/callback"),
+    );
+
+    let (status, response_body) = http_post_form(&app, "/oauth/par", &body, &[]).await;
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "client_assertion with wrong aud must return 401: {response_body}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&response_body).expect("Valid JSON");
+    assert_eq!(json["error"], "invalid_client");
+}
+
+#[tokio::test]
+async fn test_rfc9126_par_rejects_private_key_jwt_with_nbf_too_far_future() {
+    // RFC 7523 / FAPI 2.0: client_assertion `nbf` must be within clock-skew
+    // tolerance of "now". An `nbf` 70 seconds in the future exceeds the FAPI
+    // 10-second window and fails validation.
+    // Covers conformance scenarios:
+    //   - private_key_jwt | has_pkce | 401 invalid_client (nbf-over-60-seconds-in-the-future-fails)
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "par-bad-nbf@example.com").await;
+    let (client, pkcs8_bytes) = create_fapi_jwt_client(&state.store, &user.id).await;
+
+    let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+    let challenge = sha256_base64url(verifier);
+
+    // Hand-craft a client assertion with future nbf.
+    let now = jiff::Timestamp::now().as_second();
+    let header = serde_json::json!({
+        "alg": "ES256",
+        "typ": "JWT",
+        "kid": PAR_FAPI_JWK_KID,
+    });
+    let claims = serde_json::json!({
+        "iss": client.client_id,
+        "sub": client.client_id,
+        "aud": state.config().base_url,
+        "iat": now,
+        "nbf": now + 120,
+        "exp": now + 300,
+        "jti": uuid::Uuid::now_v7().to_string(),
+    });
+    let assertion = sign_jwt_assertion(&pkcs8_bytes, &header, &claims);
+
+    let body = format!(
+        "response_type=code\
+         &client_id={}\
+         &redirect_uri={}\
+         &scope=openid\
+         &code_challenge={challenge}\
+         &code_challenge_method=S256\
+         &client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer\
+         &client_assertion={assertion}",
+        client.client_id,
+        urlencoding::encode("https://example.com/callback"),
+    );
+
+    let (status, response_body) = http_post_form(&app, "/oauth/par", &body, &[]).await;
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "client_assertion with future nbf must return 401: {response_body}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&response_body).expect("Valid JSON");
+    assert_eq!(json["error"], "invalid_client");
+}
+
+#[tokio::test]
+async fn test_rfc9126_par_get_returns_method_not_allowed() {
+    // The PAR endpoint is POST-only. GET MUST return 405 Method Not Allowed.
+    // Covers conformance scenarios:
+    //   - mtls | has_pkce | 405
+    //   - mtls | has_request_jwt | 405
+    //   - mtls+private_key_jwt | has_pkce | 405
+    //   - private_key_jwt | has_pkce | 405
+    //   - private_key_jwt | has_request_jwt | 405
+    let (app, _state) = test_app().await;
+    let (status, _body) = http_get(&app, "/oauth/par", &[]).await;
+    assert_eq!(
+        status,
+        StatusCode::METHOD_NOT_ALLOWED,
+        "GET /oauth/par must return 405"
+    );
+}
+
+// ------------------------------------------------------------------------
+// Positive-path tests — happy paths for auth/feature compositions not
+// already covered by the existing 34 tests.
+// ------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_rfc9126_par_accepts_private_key_jwt_with_pkce() {
+    // Covers conformance scenarios:
+    //   - private_key_jwt | has_pkce | 201
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "par-pkjwt-pkce@example.com").await;
+    let (client, pkcs8_bytes) = create_fapi_jwt_client(&state.store, &user.id).await;
+
+    let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+    let challenge = sha256_base64url(verifier);
+    let assertion = build_client_assertion(
+        &client.client_id,
+        &state.config().base_url,
+        &pkcs8_bytes,
+        None,
+    );
+    let body = format!(
+        "response_type=code\
+         &client_id={}\
+         &redirect_uri={}\
+         &scope=openid\
+         &code_challenge={challenge}\
+         &code_challenge_method=S256\
+         &client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer\
+         &client_assertion={assertion}",
+        client.client_id,
+        urlencoding::encode("https://example.com/callback"),
+    );
+
+    let (status, response_body) = http_post_form(&app, "/oauth/par", &body, &[]).await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "private_key_jwt + PKCE PAR must succeed: {response_body}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&response_body).expect("Valid JSON");
+    assert!(json["request_uri"].is_string());
+    assert!(json["expires_in"].is_number());
+}
+
+#[tokio::test]
+async fn test_rfc9126_par_accepts_private_key_jwt_with_request_object() {
+    // Covers conformance scenarios:
+    //   - private_key_jwt | has_request_jwt | 201
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "par-pkjwt-ro@example.com").await;
+    let (client, pkcs8_bytes) = create_fapi_jwt_client(&state.store, &user.id).await;
+
+    let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+    let challenge = sha256_base64url(verifier);
+    let request_jwt = build_fapi_request_object(
+        &client.client_id,
+        &state.config().base_url,
+        &pkcs8_bytes,
+        &challenge,
+        |_| {},
+    );
+    let assertion = build_client_assertion(
+        &client.client_id,
+        &state.config().base_url,
+        &pkcs8_bytes,
+        None,
+    );
+    let body = format!(
+        "request={request_jwt}\
+         &client_id={}\
+         &client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer\
+         &client_assertion={assertion}",
+        client.client_id,
+    );
+
+    let (status, response_body) = http_post_form(&app, "/oauth/par", &body, &[]).await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "private_key_jwt + Request Object PAR must succeed: {response_body}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&response_body).expect("Valid JSON");
+    assert!(json["request_uri"].is_string());
+}
+
+#[tokio::test]
+async fn test_rfc9126_par_accepts_private_key_jwt_with_dpop_and_pkce() {
+    // Covers conformance scenarios:
+    //   - private_key_jwt | has_dpop_header,has_pkce | 201
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "par-pkjwt-dpop-pkce@example.com").await;
+    let (client, pkcs8_bytes) = create_fapi_jwt_client(&state.store, &user.id).await;
+
+    let par_uri = format!("{}/oauth/par", state.config().base_url);
+    let dpop_key = generate_dpop_pkcs8();
+
+    let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+    let challenge = sha256_base64url(verifier);
+    let assertion = build_client_assertion(
+        &client.client_id,
+        &state.config().base_url,
+        &pkcs8_bytes,
+        None,
+    );
+
+    let body = format!(
+        "response_type=code\
+         &client_id={}\
+         &redirect_uri={}\
+         &scope=openid\
+         &code_challenge={challenge}\
+         &code_challenge_method=S256\
+         &client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer\
+         &client_assertion={assertion}",
+        client.client_id,
+        urlencoding::encode("https://example.com/callback"),
+    );
+
+    let nonce = acquire_par_dpop_nonce(&app, &dpop_key, &par_uri, &body, None).await;
+    let (proof, _jkt) = build_dpop_proof_with_jkt(&dpop_key, "POST", &par_uri, Some(&nonce));
+    let (status, response_body) = par_post_with_dpop(&app, &body, &proof, &[]).await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "private_key_jwt + DPoP + PKCE PAR must succeed: {response_body}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&response_body).expect("Valid JSON");
+    assert!(json["request_uri"].is_string());
+}
+
+#[tokio::test]
+async fn test_rfc9126_par_accepts_private_key_jwt_with_dpop_and_request_object() {
+    // Covers conformance scenarios:
+    //   - private_key_jwt | has_dpop_header,has_request_jwt | 201
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "par-pkjwt-dpop-ro@example.com").await;
+    let (client, pkcs8_bytes) = create_fapi_jwt_client(&state.store, &user.id).await;
+
+    let par_uri = format!("{}/oauth/par", state.config().base_url);
+    let dpop_key = generate_dpop_pkcs8();
+
+    let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+    let challenge = sha256_base64url(verifier);
+    let request_jwt = build_fapi_request_object(
+        &client.client_id,
+        &state.config().base_url,
+        &pkcs8_bytes,
+        &challenge,
+        |_| {},
+    );
+    let assertion = build_client_assertion(
+        &client.client_id,
+        &state.config().base_url,
+        &pkcs8_bytes,
+        None,
+    );
+    let body = format!(
+        "request={request_jwt}\
+         &client_id={}\
+         &client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer\
+         &client_assertion={assertion}",
+        client.client_id,
+    );
+
+    let nonce = acquire_par_dpop_nonce(&app, &dpop_key, &par_uri, &body, None).await;
+    let (proof, _jkt) = build_dpop_proof_with_jkt(&dpop_key, "POST", &par_uri, Some(&nonce));
+    let (status, response_body) = par_post_with_dpop(&app, &body, &proof, &[]).await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "private_key_jwt + DPoP + Request Object PAR must succeed: {response_body}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&response_body).expect("Valid JSON");
+    assert!(json["request_uri"].is_string());
+}
+
+#[tokio::test]
+async fn test_rfc9126_par_accepts_mtls_with_request_object() {
+    // Covers conformance scenarios:
+    //   - mtls | has_request_jwt | 201
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "par-mtls-ro@example.com").await;
+    let _auth_id = create_test_authenticator(&state.store, &user.id).await;
+
+    let cert_der = super::rfc8705::make_test_cert_der("par-mtls-ro-client");
+    let parsed = crate::services::oidc::mtls::parse_client_certificate(&cert_der)
+        .expect("parse generated cert");
+    let subject_dn = parsed.subject_dn.expect("generated cert has subject DN");
+
+    let (client_id, pkcs8_bytes) =
+        create_fapi_mtls_client(&state.store, &user.id, &subject_dn).await;
+
+    let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+    let challenge = sha256_base64url(verifier);
+    let request_jwt = build_fapi_request_object(
+        &client_id,
+        &state.config().base_url,
+        &pkcs8_bytes,
+        &challenge,
+        |_| {},
+    );
+
+    let body = format!("request={request_jwt}&client_id={client_id}");
+    let (status, response_body) =
+        http_post_form_with_cert(&app, "/oauth/par", &body, &[], Some(cert_der)).await;
+
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "mTLS + Request Object PAR must succeed: {response_body}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&response_body).expect("Valid JSON");
+    assert!(json["request_uri"].is_string());
+}
+
+#[tokio::test]
+async fn test_rfc9126_par_accepts_mtls_with_dpop_and_pkce() {
+    // Covers conformance scenarios:
+    //   - mtls | has_dpop_header,has_pkce | 201
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "par-mtls-dpop-pkce@example.com").await;
+    let _auth_id = create_test_authenticator(&state.store, &user.id).await;
+
+    let cert_der = super::rfc8705::make_test_cert_der("par-mtls-dpop-client");
+    let parsed = crate::services::oidc::mtls::parse_client_certificate(&cert_der)
+        .expect("parse generated cert");
+    let subject_dn = parsed.subject_dn.expect("generated cert has subject DN");
+
+    let (client_id, _pkcs8) = create_fapi_mtls_client(&state.store, &user.id, &subject_dn).await;
+
+    let par_uri = format!("{}/oauth/par", state.config().base_url);
+    let dpop_key = generate_dpop_pkcs8();
+
+    let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+    let challenge = sha256_base64url(verifier);
+    let body = format!(
+        "response_type=code\
+         &client_id={client_id}\
+         &redirect_uri={}\
+         &scope=openid\
+         &code_challenge={challenge}\
+         &code_challenge_method=S256",
+        urlencoding::encode("https://example.com/callback"),
+    );
+
+    let nonce =
+        acquire_par_dpop_nonce(&app, &dpop_key, &par_uri, &body, Some(cert_der.clone())).await;
+    let (proof, _jkt) = build_dpop_proof_with_jkt(&dpop_key, "POST", &par_uri, Some(&nonce));
+    let response = par_post_full(&app, &body, Some(&proof), Some(cert_der), &[]).await;
+    assert_eq!(
+        response.status,
+        StatusCode::CREATED,
+        "mTLS + DPoP + PKCE PAR must succeed: {}",
+        response.body
+    );
+    let json: serde_json::Value = serde_json::from_str(&response.body).expect("Valid JSON");
+    assert!(json["request_uri"].is_string());
+}
