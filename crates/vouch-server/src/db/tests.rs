@@ -3455,3 +3455,213 @@ async fn test_pending_oauth_consume_concurrent() {
         }
     }
 }
+
+// ============================================================================
+// Concurrent CAS regression tests for state-transition helpers
+// (non-consume helpers that share the same outer-tx + read + compare_and_update
+// pattern — included to empirically confirm whether each site exhibits the
+// SQLite shared-cache deadlock or not).
+// ============================================================================
+
+#[tokio::test]
+async fn test_authorize_device_auth_concurrent() {
+    let (store, _audit) = test_db().await;
+
+    let expires_at: jiff::Timestamp = "2099-12-31T23:59:59Z".parse().unwrap();
+    let device_code_hash = "race-authorize-hash";
+    let id = create_device_auth_request(&store, device_code_hash, "RACE-AUTH", None, expires_at, 5)
+        .await
+        .expect("create device auth");
+    let (user_id, _) = upsert_user(&store, "race-authorize@example.com", Some("Test"))
+        .await
+        .expect("upsert user");
+    let auth_id = create_authenticator(
+        &store,
+        &user_id,
+        "race-authorize@example.com",
+        "Key",
+        b"cred-race-authorize",
+        &[0u8; 32],
+        None,
+        None,
+        false,
+    )
+    .await
+    .expect("create authenticator");
+
+    let store_a = store.clone();
+    let store_b = store.clone();
+    let id_a = id.clone();
+    let id_b = id.clone();
+    let uid_a = user_id.clone();
+    let uid_b = user_id.clone();
+    let aid_a = auth_id.clone();
+    let aid_b = auth_id.clone();
+    let (result_a, result_b) = tokio::join!(
+        async move { authorize_device_auth(&store_a, &id_a, &uid_a, "race-authorize@example.com", &aid_a).await },
+        async move { authorize_device_auth(&store_b, &id_b, &uid_b, "race-authorize@example.com", &aid_b).await },
+    );
+
+    for (label, r) in [("a", &result_a), ("b", &result_b)] {
+        if let Err(e) = r {
+            let msg = format!("{e:#}");
+            assert!(
+                !msg.contains("deadlock"),
+                "task {label} should not fail with a DB deadlock: {msg}"
+            );
+        }
+    }
+    let a_won = result_a.is_ok();
+    let b_won = result_b.is_ok();
+    assert!(
+        a_won ^ b_won,
+        "exactly one authorize must win, got a={a_won}, b={b_won}"
+    );
+}
+
+#[tokio::test]
+async fn test_deny_device_auth_concurrent() {
+    let (store, _audit) = test_db().await;
+
+    let expires_at: jiff::Timestamp = "2099-12-31T23:59:59Z".parse().unwrap();
+    let device_code_hash = "race-deny-hash";
+    let id = create_device_auth_request(&store, device_code_hash, "RACE-DENY", None, expires_at, 5)
+        .await
+        .expect("create device auth");
+
+    let store_a = store.clone();
+    let store_b = store.clone();
+    let id_a = id.clone();
+    let id_b = id.clone();
+    let (result_a, result_b) = tokio::join!(
+        async move { deny_device_auth(&store_a, &id_a).await },
+        async move { deny_device_auth(&store_b, &id_b).await },
+    );
+
+    for (label, r) in [("a", &result_a), ("b", &result_b)] {
+        if let Err(e) = r {
+            let msg = format!("{e:#}");
+            assert!(
+                !msg.contains("deadlock"),
+                "task {label} should not fail with a DB deadlock: {msg}"
+            );
+        }
+    }
+    let a_won = result_a.is_ok();
+    let b_won = result_b.is_ok();
+    assert!(
+        a_won ^ b_won,
+        "exactly one deny must win, got a={a_won}, b={b_won}"
+    );
+}
+
+#[tokio::test]
+async fn test_remove_additional_domain_concurrent() {
+    use crate::db::organizations::{
+        add_additional_domain, mark_additional_domain_verified, remove_additional_domain,
+    };
+
+    let (store, _audit) = test_db().await;
+    let org = create_organization(&store, "race-remove.com", Some("Race Org"), None)
+        .await
+        .expect("create org");
+    let (uid, _) = upsert_user(&store, "race-remove-admin@race-remove.com", Some("Admin"))
+        .await
+        .expect("upsert admin");
+    add_additional_domain(
+        &store,
+        &org.id,
+        "extra-remove.com",
+        &uid,
+        "race-remove-admin@race-remove.com",
+    )
+    .await
+    .expect("add additional domain");
+    mark_additional_domain_verified(&store, &org.id, "extra-remove.com")
+        .await
+        .expect("verify additional domain");
+
+    let store_a = store.clone();
+    let store_b = store.clone();
+    let org_a = org.id.clone();
+    let org_b = org.id.clone();
+    let (result_a, result_b) = tokio::join!(
+        async move { remove_additional_domain(&store_a, &org_a, "extra-remove.com").await },
+        async move { remove_additional_domain(&store_b, &org_b, "extra-remove.com").await },
+    );
+
+    for (label, r) in [("a", &result_a), ("b", &result_b)] {
+        if let Err(e) = r {
+            let msg = format!("{e:#}");
+            assert!(
+                !msg.contains("deadlock"),
+                "task {label} should not fail with a DB deadlock: {msg}"
+            );
+        }
+    }
+    let some_count = [&result_a, &result_b]
+        .iter()
+        .filter(|r| matches!(r, Ok(Some(_))))
+        .count();
+    assert!(
+        some_count == 1,
+        "exactly one remove must return Ok(Some), got a={result_a:?}, b={result_b:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_record_recheck_result_concurrent() {
+    use crate::db::organizations::{
+        add_additional_domain, mark_additional_domain_verified, record_recheck_result,
+        RecheckOutcome,
+    };
+
+    let (store, _audit) = test_db().await;
+    let org = create_organization(&store, "race-recheck.com", Some("Race Org"), None)
+        .await
+        .expect("create org");
+    let (uid, _) = upsert_user(&store, "race-recheck-admin@race-recheck.com", Some("Admin"))
+        .await
+        .expect("upsert admin");
+    add_additional_domain(
+        &store,
+        &org.id,
+        "extra-recheck.com",
+        &uid,
+        "race-recheck-admin@race-recheck.com",
+    )
+    .await
+    .expect("add additional domain");
+    mark_additional_domain_verified(&store, &org.id, "extra-recheck.com")
+        .await
+        .expect("verify additional domain");
+
+    let store_a = store.clone();
+    let store_b = store.clone();
+    let org_a = org.id.clone();
+    let org_b = org.id.clone();
+    let (result_a, result_b) = tokio::join!(
+        async move {
+            record_recheck_result(&store_a, &org_a, "extra-recheck.com", RecheckOutcome::Success)
+                .await
+        },
+        async move {
+            record_recheck_result(&store_b, &org_b, "extra-recheck.com", RecheckOutcome::Success)
+                .await
+        },
+    );
+
+    for (label, r) in [("a", &result_a), ("b", &result_b)] {
+        if let Err(e) = r {
+            let msg = format!("{e:#}");
+            assert!(
+                !msg.contains("deadlock"),
+                "task {label} should not fail with a DB deadlock: {msg}"
+            );
+        }
+    }
+    assert!(
+        result_a.is_ok() && result_b.is_ok(),
+        "both record_recheck_result calls must succeed (CAS loser returns Ok(StillVerified))"
+    );
+}

@@ -173,9 +173,7 @@ pub async fn authorize_device_auth(
         bail!("authorize_device_auth called with empty id");
     }
 
-    let mut tx = store.begin().await?;
-
-    let doc = tx.get::<DeviceAuthRequestDoc>(id).await?;
+    let doc = store.get::<DeviceAuthRequestDoc>(id).await?;
     let Some(doc) = doc else {
         bail!(
             "authorize_device_auth: no device auth request \
@@ -199,7 +197,7 @@ pub async fn authorize_device_auth(
     data.user_id = Some(user_id.to_string());
     data.user_email = Some(user_email.to_string());
     data.authenticator_id = Some(authenticator_id.to_string());
-    let won = tx.compare_and_update(id, version, &data).await?;
+    let won = store.compare_and_update(id, version, &data).await?;
     if !won {
         bail!(
             "authorize_device_auth: device auth request '{}' was \
@@ -208,7 +206,6 @@ pub async fn authorize_device_auth(
         );
     }
 
-    tx.commit().await?;
     Ok(())
 }
 
@@ -222,9 +219,7 @@ pub async fn deny_device_auth(store: &DocumentStore, id: &str) -> Result<()> {
         bail!("deny_device_auth called with empty id");
     }
 
-    let mut tx = store.begin().await?;
-
-    let doc = tx.get::<DeviceAuthRequestDoc>(id).await?;
+    let doc = store.get::<DeviceAuthRequestDoc>(id).await?;
     let Some(doc) = doc else {
         bail!(
             "deny_device_auth: no device auth request \
@@ -245,7 +240,7 @@ pub async fn deny_device_auth(store: &DocumentStore, id: &str) -> Result<()> {
     let version = doc.version;
     let mut data = doc.data;
     data.status = DeviceAuthStatus::Denied;
-    let won = tx.compare_and_update(id, version, &data).await?;
+    let won = store.compare_and_update(id, version, &data).await?;
     if !won {
         bail!(
             "deny_device_auth: device auth request '{}' was \
@@ -254,7 +249,6 @@ pub async fn deny_device_auth(store: &DocumentStore, id: &str) -> Result<()> {
         );
     }
 
-    tx.commit().await?;
     Ok(())
 }
 

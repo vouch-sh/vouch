@@ -181,12 +181,7 @@ pub(crate) async fn consume_pending_oauth_authorization(
 ) -> std::result::Result<(PendingOAuthAuthorization, PendingOauthClaim), ClaimError> {
     let now = Timestamp::now();
 
-    let mut tx = store
-        .begin()
-        .await
-        .map_err(|e| ClaimError::Database(e.to_string()))?;
-
-    let doc = tx
+    let doc = store
         .get::<PendingOAuthAuthDoc>(id)
         .await
         .map_err(|e| ClaimError::Database(e.to_string()))?;
@@ -202,16 +197,13 @@ pub(crate) async fn consume_pending_oauth_authorization(
     let version = doc.version;
     let mut data = doc.data;
     data.consumed_at = Some(now);
-    let won = tx
+    let won = store
         .compare_and_update(id, version, &data)
         .await
         .map_err(|e| ClaimError::Database(e.to_string()))?;
     if !won {
         return Err(ClaimError::AlreadyConsumed);
     }
-    tx.commit()
-        .await
-        .map_err(|e| ClaimError::Database(e.to_string()))?;
 
     // Build the result from the in-memory mutated `data` rather than
     // re-reading. The fields we care about are either already in `data`
