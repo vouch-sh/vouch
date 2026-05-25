@@ -1011,10 +1011,10 @@ mod tests {
     async fn test_browser_login_complete_rejects_replayed_state() {
         // Pre-consume a valid state JWT, then submit `POST
         // /login/webauthn/complete` with that JWT. The Phase 3b consume
-        // (added in slice 7a) must reject the request with 400 +
-        // `state_already_used` before any base64 decoding, DB lookup, or
-        // WebAuthn verification work happens. This guards against a
-        // regression where the consume call is reordered or removed.
+        // must reject the request with 400 + `state_already_used` before
+        // any base64 decoding, DB lookup, or WebAuthn verification work
+        // happens. This guards against a regression where the consume
+        // call is reordered or removed.
         let (app, state) = crate::test_utils::test_app().await;
 
         // Build a valid BrowserAuthenticationState JWT signed by the test

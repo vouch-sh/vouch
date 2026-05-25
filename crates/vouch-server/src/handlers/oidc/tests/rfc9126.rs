@@ -1006,9 +1006,9 @@ async fn test_rfc9126_consume_par_with_stale_version_returns_false() {
 
 #[tokio::test]
 async fn test_rfc9126_consume_par_concurrent_replay() {
-    // Mirrors the slice 7a pattern: two concurrent consume calls must
-    // produce exactly one winner; the loser must be AlreadyConsumed (not
-    // a Database error from the OCC version-mismatch path).
+    // Two concurrent consume calls must produce exactly one winner; the
+    // loser must be AlreadyConsumed (not a Database error from the OCC
+    // version-mismatch path).
     use crate::db::claim::ClaimError;
 
     let (_app, state) = test_app().await;

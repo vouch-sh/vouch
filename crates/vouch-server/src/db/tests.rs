@@ -3132,7 +3132,6 @@ async fn test_jwks_refresh_does_not_modify_oauth_client_doc() {
 
 // ========================================================================
 // OIDC state — atomic consume + concurrent-replay regression coverage
-// (slice 7b)
 // ========================================================================
 
 /// Seed a fresh OIDC state row tied to a fresh device-auth row.
@@ -3259,12 +3258,12 @@ async fn test_oidc_state_consume_concurrent() {
 }
 
 // ========================================================================
-// Concurrent-replay regression coverage for the older single-use
-// primitives. Mirrors the slice 7a pattern (`tokio::join` two consume
-// calls, assert exactly one wins + loser is AlreadyConsumed). SQLite-only;
-// the underlying OCC patterns are race-safe by construction on the other
-// backends as well, but these tests guard against accidental regressions
-// in the helper functions themselves.
+// Concurrent-replay regression coverage for single-use primitives:
+// `tokio::join` two consume calls, assert exactly one wins and the loser
+// is AlreadyConsumed. SQLite-only; the underlying OCC patterns are
+// race-safe by construction on the other backends as well, but these
+// tests guard against accidental regressions in the helper functions
+// themselves.
 // ========================================================================
 
 #[tokio::test]

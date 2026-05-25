@@ -1811,13 +1811,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_oidc_callback_rejects_replayed_state() {
-        // GET /oauth/callback must reject a replayed `state` query param —
-        // the atomic `try_consume_oidc_state` (slice 7b) closes the
-        // read-vs-consume TOCTOU that previously let two concurrent
-        // callbacks both pass validation. We pre-consume the state in the
-        // DB, then submit the callback — the handler must fail at the
-        // consume step and return the "Invalid or expired state" error
-        // template WITHOUT calling the upstream IdP `/token` endpoint.
+        // GET /oauth/callback must reject a replayed `state` query param.
+        // `try_consume_oidc_state` closes the read-vs-consume TOCTOU that
+        // would otherwise let two concurrent callbacks both pass
+        // validation. Pre-consume the state in the DB, then submit the
+        // callback — the handler must fail at the consume step and return
+        // the "Invalid or expired state" error template WITHOUT calling
+        // the upstream IdP `/token` endpoint.
         use crate::test_utils::http_get;
 
         let (app, state) = test_app().await;
