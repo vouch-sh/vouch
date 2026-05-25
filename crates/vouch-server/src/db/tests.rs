@@ -3498,8 +3498,26 @@ async fn test_authorize_device_auth_concurrent() {
     let aid_a = auth_id.clone();
     let aid_b = auth_id.clone();
     let (result_a, result_b) = tokio::join!(
-        async move { authorize_device_auth(&store_a, &id_a, &uid_a, "race-authorize@example.com", &aid_a).await },
-        async move { authorize_device_auth(&store_b, &id_b, &uid_b, "race-authorize@example.com", &aid_b).await },
+        async move {
+            authorize_device_auth(
+                &store_a,
+                &id_a,
+                &uid_a,
+                "race-authorize@example.com",
+                &aid_a,
+            )
+            .await
+        },
+        async move {
+            authorize_device_auth(
+                &store_b,
+                &id_b,
+                &uid_b,
+                "race-authorize@example.com",
+                &aid_b,
+            )
+            .await
+        },
     );
 
     for (label, r) in [("a", &result_a), ("b", &result_b)] {
@@ -3612,8 +3630,8 @@ async fn test_remove_additional_domain_concurrent() {
 #[tokio::test]
 async fn test_record_recheck_result_concurrent() {
     use crate::db::organizations::{
-        add_additional_domain, mark_additional_domain_verified, record_recheck_result,
-        RecheckOutcome,
+        RecheckOutcome, add_additional_domain, mark_additional_domain_verified,
+        record_recheck_result,
     };
 
     let (store, _audit) = test_db().await;
@@ -3642,12 +3660,22 @@ async fn test_record_recheck_result_concurrent() {
     let org_b = org.id.clone();
     let (result_a, result_b) = tokio::join!(
         async move {
-            record_recheck_result(&store_a, &org_a, "extra-recheck.com", RecheckOutcome::Success)
-                .await
+            record_recheck_result(
+                &store_a,
+                &org_a,
+                "extra-recheck.com",
+                RecheckOutcome::Success,
+            )
+            .await
         },
         async move {
-            record_recheck_result(&store_b, &org_b, "extra-recheck.com", RecheckOutcome::Success)
-                .await
+            record_recheck_result(
+                &store_b,
+                &org_b,
+                "extra-recheck.com",
+                RecheckOutcome::Success,
+            )
+            .await
         },
     );
 
