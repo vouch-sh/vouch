@@ -837,7 +837,7 @@ pub async fn store_jwt_assertion_jti(
     use super::claim::ClaimError;
 
     if jti.len() > MAX_JTI_LENGTH {
-        return Err(ClaimError::Database(format!(
+        return Err(ClaimError::InvalidInput(format!(
             "JTI exceeds maximum length ({MAX_JTI_LENGTH})"
         )));
     }

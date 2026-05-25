@@ -74,6 +74,20 @@ impl PendingJti {
                     );
                     ClientAuthError::InvalidCredentials
                 }
+                // Client-supplied input violated a validation bound (e.g.,
+                // oversized JTI). Map to 401 invalid_client so the client
+                // fixes its assertion rather than retrying.
+                ClaimError::InvalidInput(msg) => {
+                    tracing::warn!(
+                        target: "security",
+                        client_id = %self.client_id,
+                        error = %msg,
+                        "JWT assertion JTI rejected: invalid input"
+                    );
+                    ClientAuthError::InvalidCredentials
+                }
+                // Not produced by `store_jwt_assertion_jti` today; map
+                // defensively to invalid_client if a future variant lands here.
                 ClaimError::Expired | ClaimError::NotFound => ClientAuthError::InvalidCredentials,
                 ClaimError::Database(msg) => ClientAuthError::DatabaseError(msg),
             })

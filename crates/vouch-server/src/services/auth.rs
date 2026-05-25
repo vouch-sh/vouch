@@ -355,9 +355,10 @@ pub(crate) enum GrantProof {
     /// TODO(slice-4): carry a `Fido2ChallengeClaim`.
     UnconvertedFido2Assertion,
 
-    /// Device authorization grant (RFC 8628).
-    /// TODO(slice-5): carry a `DeviceCodeClaim` from `db::try_consume_device_auth`.
-    UnconvertedDeviceCode,
+    /// Device authorization grant (RFC 8628). Carries a [`crate::db::DeviceCodeClaim`]
+    /// witness — proof that the device code was atomically transitioned to
+    /// `Consumed` before this token issuance.
+    DeviceCode(crate::db::DeviceCodeClaim),
 
     /// Enrollment bootstrap session — issued post-IdP authentication and
     /// pre-FIDO2 registration. `hardware_verified` is false here.

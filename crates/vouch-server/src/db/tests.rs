@@ -374,11 +374,10 @@ async fn test_try_consume_device_auth_authorized_succeeds() {
         .await
         .expect("authorize");
 
-    // Consume
-    let consumed = try_consume_device_auth(&store, device_code_hash)
+    // Consume — claim binding satisfies #[must_use].
+    let _claim = try_consume_device_auth(&store, device_code_hash)
         .await
-        .expect("consume");
-    assert!(consumed, "First consumption should succeed");
+        .expect("First consumption should succeed");
 
     // Verify status and consumed_at
     let request = get_device_auth_by_code_hash(&store, device_code_hash)
@@ -426,15 +425,15 @@ async fn test_try_consume_device_auth_already_consumed_returns_false() {
         .await
         .expect("authorize");
 
-    let first = try_consume_device_auth(&store, device_code_hash)
+    let _first = try_consume_device_auth(&store, device_code_hash)
         .await
-        .expect("first consume");
-    assert!(first, "First consumption should succeed");
+        .expect("First consumption should succeed");
 
-    let second = try_consume_device_auth(&store, device_code_hash)
-        .await
-        .expect("second consume");
-    assert!(!second, "Second consumption must return false");
+    let second = try_consume_device_auth(&store, device_code_hash).await;
+    assert!(
+        matches!(second, Err(crate::db::claim::ClaimError::AlreadyConsumed)),
+        "Second consumption must fail with AlreadyConsumed, got: {second:?}"
+    );
 }
 
 #[tokio::test]
@@ -454,10 +453,11 @@ async fn test_try_consume_device_auth_pending_returns_false() {
     .expect("create");
 
     // Attempt to consume a Pending request (never authorized)
-    let consumed = try_consume_device_auth(&store, device_code_hash)
-        .await
-        .expect("consume");
-    assert!(!consumed, "Pending device code must not be consumable");
+    let consumed = try_consume_device_auth(&store, device_code_hash).await;
+    assert!(
+        matches!(consumed, Err(crate::db::claim::ClaimError::AlreadyConsumed)),
+        "Pending device code must not be consumable, got: {consumed:?}"
+    );
 }
 
 #[tokio::test]
@@ -492,20 +492,22 @@ async fn test_try_consume_device_auth_expired_returns_false() {
         .await
         .expect("authorize");
 
-    let consumed = try_consume_device_auth(&store, device_code_hash)
-        .await
-        .expect("consume");
-    assert!(!consumed, "Expired device code must not be consumable");
+    let consumed = try_consume_device_auth(&store, device_code_hash).await;
+    assert!(
+        matches!(consumed, Err(crate::db::claim::ClaimError::AlreadyConsumed)),
+        "Expired device code must not be consumable, got: {consumed:?}"
+    );
 }
 
 #[tokio::test]
 async fn test_try_consume_device_auth_not_found_returns_false() {
     let (store, _audit) = test_db().await;
 
-    let consumed = try_consume_device_auth(&store, "nonexistent_hash")
-        .await
-        .expect("consume");
-    assert!(!consumed, "Nonexistent hash must return false");
+    let consumed = try_consume_device_auth(&store, "nonexistent_hash").await;
+    assert!(
+        matches!(consumed, Err(crate::db::claim::ClaimError::AlreadyConsumed)),
+        "Nonexistent hash must fail with AlreadyConsumed, got: {consumed:?}"
+    );
 }
 
 #[tokio::test]
@@ -2463,8 +2465,10 @@ async fn test_store_jwt_assertion_jti_too_long() {
     )
     .await;
     assert!(
-        matches!(result, Err(ClaimError::Database(_))),
-        "JTI exceeding max length must return a Database error: got {result:?}"
+        matches!(result, Err(ClaimError::InvalidInput(_))),
+        "JTI exceeding max length must return InvalidInput (client error, \
+         not Database — a Database error would tell well-behaved clients to \
+         retry the oversized JTI): got {result:?}"
     );
 }
 

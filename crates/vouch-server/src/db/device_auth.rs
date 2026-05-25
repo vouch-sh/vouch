@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Device Authorization (RFC 8628) database operations.
 
+use super::claim::ClaimError;
 use super::document_type::Document;
 use super::documents::device_auth::{DeviceAuthRequestDoc, OidcStateDoc};
 use super::store::DocumentStore;
@@ -219,36 +220,64 @@ pub async fn deny_device_auth(store: &DocumentStore, id: &str) -> Result<()> {
     Ok(())
 }
 
+/// Witness that an authorized device code (RFC 8628 Section 3.5) was
+/// atomically transitioned to `Consumed` by this caller. Construction is
+/// private to this module — the only path to an instance is a successful
+/// return from [`try_consume_device_auth`], whose optimistic-concurrency
+/// `compare_and_update` guarantees that at most one concurrent caller
+/// succeeds. Holding a `DeviceCodeClaim` is compile-time evidence that
+/// this caller "won" the consume.
+///
+/// Intentionally not `Clone`. The `#[must_use]` ensures the witness is
+/// bound at the call site even when threaded into a downstream consumer
+/// (e.g., `GrantProof::DeviceCode(claim)`).
+#[must_use = "the device code was atomically consumed; bind this witness so \
+              it can be threaded into TokenIssuanceProof"]
+#[derive(Debug)]
+pub struct DeviceCodeClaim {
+    _private: (),
+}
+
 /// Try to consume an authorized device code (RFC 8628 Section 3.5).
 ///
-/// Returns `true` if the code was successfully consumed (first use).
-/// Returns `false` if already consumed, not authorized, expired,
-/// or was concurrently consumed by another request (optimistic lock).
+/// On success returns a [`DeviceCodeClaim`] witness — proof that this caller
+/// won the optimistic-concurrency consume. All "lost" cases (not found,
+/// not currently `Authorized`, expired, or concurrent consumer won via
+/// version mismatch) map to [`ClaimError::AlreadyConsumed`] — deliberately
+/// indistinguishable, each rejected as an invalid_grant.
 pub async fn try_consume_device_auth(
     store: &DocumentStore,
     device_code_hash: &str,
-) -> Result<bool> {
+) -> std::result::Result<DeviceCodeClaim, ClaimError> {
     let now = Timestamp::now();
 
     let doc = store
         .find_one::<DeviceAuthRequestDoc>("device_code_hash", device_code_hash)
-        .await?;
+        .await
+        .map_err(|e| ClaimError::Database(e.to_string()))?;
     let Some(doc) = doc else {
-        return Ok(false);
+        return Err(ClaimError::AlreadyConsumed);
     };
 
-    // Only consume if currently Authorized and not expired
+    // Only consume if currently Authorized and not expired.
     if doc.data.status != DeviceAuthStatus::Authorized || doc.data.expires_at <= now {
-        return Ok(false);
+        return Err(ClaimError::AlreadyConsumed);
     }
 
-    // Atomically transition to Consumed with optimistic concurrency.
-    // If another request consumed between our read and write,
-    // compare_and_update returns false (version mismatch).
+    // Atomic transition: compare_and_update returns false on version mismatch
+    // (a concurrent caller wrote a newer version first).
     let mut data = doc.data;
     data.status = DeviceAuthStatus::Consumed;
     data.consumed_at = Some(now);
-    store.compare_and_update(&doc.id, doc.version, &data).await
+    let won = store
+        .compare_and_update(&doc.id, doc.version, &data)
+        .await
+        .map_err(|e| ClaimError::Database(e.to_string()))?;
+    if won {
+        Ok(DeviceCodeClaim { _private: () })
+    } else {
+        Err(ClaimError::AlreadyConsumed)
+    }
 }
 
 /// Update the last poll time for a device auth request.

@@ -15,7 +15,10 @@ use std::fmt;
 ///
 /// `AlreadyConsumed` is the security-relevant case (replay detected).
 /// `Expired` and `NotFound` are operational cases — the claim was never
-/// valid or has aged out. `Database` wraps an unexpected backend failure.
+/// valid or has aged out. `InvalidInput` is a client-input validation
+/// failure (e.g., oversized JTI) — callers should map it to the
+/// equivalent of `invalid_client`/400, not a 500 retry-prompting error.
+/// `Database` wraps an unexpected backend failure.
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum ClaimError {
@@ -25,6 +28,9 @@ pub enum ClaimError {
     Expired,
     /// No record exists for the supplied key.
     NotFound,
+    /// Caller-supplied input violated a validation bound (length, format,
+    /// etc.). Not a database failure — the client must fix its request.
+    InvalidInput(String),
     /// Backend database failure unrelated to claim semantics.
     Database(String),
 }
@@ -35,6 +41,7 @@ impl fmt::Display for ClaimError {
             Self::AlreadyConsumed => write!(f, "already consumed (replay detected)"),
             Self::Expired => write!(f, "claim expired"),
             Self::NotFound => write!(f, "claim not found"),
+            Self::InvalidInput(msg) => write!(f, "invalid input: {msg}"),
             Self::Database(msg) => write!(f, "database error: {msg}"),
         }
     }

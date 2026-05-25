@@ -272,23 +272,20 @@ pub async fn device_token(
         }
         DeviceAuthStatus::Authorized => {
             // RFC 8628 Section 3.5: Atomically consume the device
-            // code before issuing a token.
-            let consumed = db::try_consume_device_auth(&state.store, &device_code_hash)
+            // code before issuing a token. The returned claim is the
+            // structural proof that this caller won the consume; it is
+            // threaded into TokenIssuanceProof below.
+            let device_claim = db::try_consume_device_auth(&state.store, &device_code_hash)
                 .await
-                .map_err(|_| {
-                    oauth_error(
+                .map_err(|e| match e {
+                    db::claim::ClaimError::AlreadyConsumed => {
+                        oauth_error(StatusCode::BAD_REQUEST, OAuthError::invalid_grant())
+                    }
+                    _ => oauth_error(
                         StatusCode::INTERNAL_SERVER_ERROR,
                         OAuthError::invalid_grant(),
-                    )
+                    ),
                 })?;
-
-            if !consumed {
-                // Lost the race — another request consumed first.
-                return Err(oauth_error(
-                    StatusCode::BAD_REQUEST,
-                    OAuthError::invalid_grant(),
-                ));
-            }
 
             // Get user info and create OAuth access token
             let user_id = request.user_id.ok_or_else(|| {
@@ -334,7 +331,7 @@ pub async fn device_token(
                     authorization_details: None,
                 },
                 TokenIssuanceProof {
-                    grant: GrantProof::UnconvertedDeviceCode,
+                    grant: GrantProof::DeviceCode(device_claim),
                     client_auth: ClientAuthProof::None,
                 },
             )
@@ -960,10 +957,9 @@ mod tests {
             .await
             .expect("authorize");
 
-        let consumed = crate::db::try_consume_device_auth(&state.store, &device_code_hash)
+        let _claim = crate::db::try_consume_device_auth(&state.store, &device_code_hash)
             .await
-            .expect("consume");
-        assert!(consumed, "Consumption should succeed");
+            .expect("Consumption should succeed");
 
         // Poll — must return invalid_grant
         let body = format!(

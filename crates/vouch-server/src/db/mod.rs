@@ -88,6 +88,7 @@ pub use organizations::{
 pub use organizations::create_organization;
 
 // Re-export device auth types and functions
+pub(crate) use device_auth::DeviceCodeClaim;
 pub use device_auth::{
     DeviceAuthRequest, DeviceAuthStatus, OidcState, authorize_device_auth,
     create_device_auth_request, create_oidc_state, delete_expired_device_auth_requests,
