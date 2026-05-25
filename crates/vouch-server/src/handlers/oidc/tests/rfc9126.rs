@@ -1609,8 +1609,8 @@ async fn test_rfc9126_par_rejects_mtls_with_non_matching_cert() {
 
     // Client is registered against cert A's subject DN.
     let cert_a_der = super::rfc8705::make_test_cert_der("par-mtls-registered");
-    let parsed_a = crate::services::oidc::mtls::parse_client_certificate(&cert_a_der)
-        .expect("parse cert A");
+    let parsed_a =
+        crate::services::oidc::mtls::parse_client_certificate(&cert_a_der).expect("parse cert A");
     let subject_dn_a = parsed_a.subject_dn.expect("cert A has subject DN");
     let client_id = create_mtls_oauth_client(&state.store, &user.id, &subject_dn_a).await;
 

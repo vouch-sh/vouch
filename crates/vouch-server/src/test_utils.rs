@@ -403,13 +403,8 @@ pub async fn http_post_form_with_cert(
 ) -> (StatusCode, String) {
     let mut all_headers = vec![("Content-Type", "application/x-www-form-urlencoded")];
     all_headers.extend_from_slice(headers);
-    let request = build_test_request_with_cert(
-        "POST",
-        uri,
-        Some(body.to_string()),
-        &all_headers,
-        cert_der,
-    );
+    let request =
+        build_test_request_with_cert("POST", uri, Some(body.to_string()), &all_headers, cert_der);
     let response: axum::response::Response = app
         .clone()
         .oneshot(request)
