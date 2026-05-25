@@ -142,6 +142,7 @@ impl ClientAuthFields for ParRequest {
 /// Returns 201 Created with a JSON body containing `request_uri` and `expires_in`.
 pub async fn par(
     State(state): State<Arc<AppState>>,
+    client_cert: crate::handlers::extractors::OptionalClientCert,
     headers: HeaderMap,
     axum::Form(params): axum::Form<ParRequest>,
 ) -> Response {
@@ -192,6 +193,43 @@ pub async fn par(
     let authenticated_client = any_auth.client;
     let pending_jti = any_auth.pending_jti;
     let secret_verification = any_auth.secret_verification;
+
+    // RFC 8705 §2 / FAPI 2.0 §5.2.2: mTLS dispatch. When the client is
+    // registered with `tls_client_auth` or `self_signed_tls_client_auth`
+    // and no body-level credential has authenticated it, verify the TLS
+    // client certificate. Must run before FAPI auth-method validation so
+    // a successfully mTLS-authenticated client is accepted by that gate.
+    let mtls_verification = if pending_jti.is_none()
+        && secret_verification.is_none()
+        && matches!(
+            authenticated_client.client.token_endpoint_auth_method,
+            crate::db::TokenEndpointAuthMethod::TlsClientAuth
+                | crate::db::TokenEndpointAuthMethod::SelfSignedTlsClientAuth
+        ) {
+        let Some(cert) = client_cert.0.as_ref() else {
+            return par_error_response(
+                StatusCode::UNAUTHORIZED,
+                "invalid_client",
+                "mTLS client certificate required",
+            );
+        };
+        let jwks_cache_value =
+            crate::db::get_jwks_cache(&state.store, &authenticated_client.client.id)
+                .await
+                .ok()
+                .flatten()
+                .map(|c| c.value);
+        match crate::services::oidc::token::authenticate_client_mtls(
+            &authenticated_client.client,
+            cert,
+            jwks_cache_value.as_ref(),
+        ) {
+            Ok(verification) => Some(verification),
+            Err(e) => return e.into_service_error().into_oauth_response().into_response(),
+        }
+    } else {
+        None
+    };
 
     // FAPI 2.0: Validate client authentication method.
     //
@@ -473,15 +511,15 @@ pub async fn par(
         },
         None => None,
     };
-    // PAR doesn't currently validate mTLS (FAPI 2.0 §5.2.2 requires
-    // private_key_jwt anyway; non-FAPI mTLS at PAR isn't supported here).
-    // Resolve client-auth proof by precedence: JWT → secret. If neither
-    // succeeded, fall back to `for_public_client` against the loaded
+    // Resolve client-auth proof by precedence: JWT → secret → mTLS. If
+    // none succeeded, fall back to `for_public_client` against the loaded
     // client — fails for confidential clients that should have authed.
     let par_client_auth = if let Some(claim) = jti_claim {
         ClientAuthProof::PrivateKeyJwt(claim)
     } else if let Some(s) = secret_verification {
         ClientAuthProof::ClientSecret(s)
+    } else if let Some(v) = mtls_verification {
+        ClientAuthProof::MutualTls(v)
     } else {
         let witness = match crate::services::auth::NoClientAuth::for_public_client(
             &authenticated_client.client,

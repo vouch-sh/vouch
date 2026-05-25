@@ -1469,3 +1469,171 @@ async fn test_rfc9126_par_jti_replay_returns_invalid_client() {
         "PAR JTI replay must return error=invalid_client, got: {body2}"
     );
 }
+
+// ========================================================================
+// RFC 8705 §2 / FAPI 2.0 §5.2.2 — mTLS Client Authentication at PAR
+//
+// Regressions for the gap that conformance caught: PAR previously never
+// validated the TLS client certificate for clients registered with
+// tls_client_auth, so mTLS-registered clients were either silently
+// accepted by client_id alone (pre-refactor, fail-open) or rejected at
+// the for_public_client chokepoint (post-refactor, 401). The fix adds
+// the same mTLS dispatch the token endpoint has.
+// ========================================================================
+
+/// Register an OAuth client with `tls_client_auth` bound to the given subject DN.
+async fn create_mtls_oauth_client(
+    store: &crate::db::store::DocumentStore,
+    user_id: &str,
+    subject_dn: &str,
+) -> String {
+    let (_client_doc, client_id) = crate::db::create_oauth_client(
+        store,
+        &crate::db::CreateOAuthClientParams {
+            user_id: Some(user_id),
+            name: "Test mTLS PAR Client",
+            description: None,
+            application_type: crate::db::OAuthClientType::Web,
+            redirect_uris: &["https://example.com/callback".to_string()],
+            access_scope: crate::db::AccessScope::Public,
+            org_id: None,
+            resource_uris: &[],
+            token_endpoint_auth_method: Some(crate::db::TokenEndpointAuthMethod::TlsClientAuth),
+            jwks: None,
+            jwks_uri: None,
+            fapi_profile: None,
+            dpop_bound_access_tokens: None,
+            grant_types: None,
+            response_types: None,
+            software_id: None,
+            software_version: None,
+            registration_source: crate::db::RegistrationSource::Manual,
+            registration_access_token_hash: None,
+            registration_metadata: None,
+            id_token_signed_response_alg: crate::db::JwsAlgorithm::Rs256,
+            tls_client_auth_subject_dn: Some(subject_dn),
+            tls_client_auth_san_dns: None,
+            tls_client_auth_san_uri: None,
+            tls_client_auth_san_ip: None,
+            tls_client_auth_san_email: None,
+            tls_client_certificate_bound_access_tokens: None,
+            authorization_signed_response_alg: None,
+            introspection_signed_response_alg: None,
+            request_object_signing_alg: None,
+            require_signed_request_object: None,
+            userinfo_signed_response_alg: None,
+            request_uris: None,
+        },
+    )
+    .await
+    .expect("Failed to create mTLS test client");
+    client_id
+}
+
+#[tokio::test]
+async fn test_rfc9126_par_accepts_mtls_with_matching_cert() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "par-mtls-ok@example.com").await;
+    let _auth_id = create_test_authenticator(&state.store, &user.id).await;
+
+    let cert_der = super::rfc8705::make_test_cert_der("par-mtls-client");
+    let parsed = crate::services::oidc::mtls::parse_client_certificate(&cert_der)
+        .expect("parse generated cert");
+    let subject_dn = parsed.subject_dn.expect("generated cert has subject DN");
+
+    let client_id = create_mtls_oauth_client(&state.store, &user.id, &subject_dn).await;
+
+    let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+    let challenge = sha256_base64url(verifier);
+    let body = format!(
+        "response_type=code\
+         &client_id={client_id}\
+         &redirect_uri={}\
+         &code_challenge={challenge}\
+         &code_challenge_method=S256\
+         &scope=openid",
+        urlencoding::encode("https://example.com/callback"),
+    );
+
+    let (status, response_body) =
+        http_post_form_with_cert(&app, "/oauth/par", &body, &[], Some(cert_der)).await;
+
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "mTLS client with matching cert at PAR must return 201: {response_body}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&response_body).expect("Valid JSON");
+    assert!(json["request_uri"].is_string());
+}
+
+#[tokio::test]
+async fn test_rfc9126_par_rejects_mtls_without_cert() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "par-mtls-nocert@example.com").await;
+    let _auth_id = create_test_authenticator(&state.store, &user.id).await;
+
+    let cert_der = super::rfc8705::make_test_cert_der("par-mtls-nocert-client");
+    let parsed = crate::services::oidc::mtls::parse_client_certificate(&cert_der)
+        .expect("parse generated cert");
+    let subject_dn = parsed.subject_dn.expect("generated cert has subject DN");
+
+    let client_id = create_mtls_oauth_client(&state.store, &user.id, &subject_dn).await;
+
+    let body = format!(
+        "response_type=code\
+         &client_id={client_id}\
+         &redirect_uri={}\
+         &code_challenge=E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM\
+         &code_challenge_method=S256",
+        urlencoding::encode("https://example.com/callback"),
+    );
+
+    let (status, response_body) =
+        http_post_form_with_cert(&app, "/oauth/par", &body, &[], None).await;
+
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "mTLS-registered client without a cert at PAR must return 401: {response_body}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&response_body).expect("Valid JSON");
+    assert_eq!(json["error"], "invalid_client");
+}
+
+#[tokio::test]
+async fn test_rfc9126_par_rejects_mtls_with_non_matching_cert() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "par-mtls-wrong@example.com").await;
+    let _auth_id = create_test_authenticator(&state.store, &user.id).await;
+
+    // Client is registered against cert A's subject DN.
+    let cert_a_der = super::rfc8705::make_test_cert_der("par-mtls-registered");
+    let parsed_a = crate::services::oidc::mtls::parse_client_certificate(&cert_a_der)
+        .expect("parse cert A");
+    let subject_dn_a = parsed_a.subject_dn.expect("cert A has subject DN");
+    let client_id = create_mtls_oauth_client(&state.store, &user.id, &subject_dn_a).await;
+
+    // Caller presents cert B — different subject DN.
+    let cert_b_der = super::rfc8705::make_test_cert_der("par-mtls-imposter");
+
+    let body = format!(
+        "response_type=code\
+         &client_id={client_id}\
+         &redirect_uri={}\
+         &code_challenge=E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM\
+         &code_challenge_method=S256",
+        urlencoding::encode("https://example.com/callback"),
+    );
+
+    let (status, response_body) =
+        http_post_form_with_cert(&app, "/oauth/par", &body, &[], Some(cert_b_der)).await;
+
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "mTLS-registered client with wrong cert at PAR must return 401: {response_body}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&response_body).expect("Valid JSON");
+    assert_eq!(json["error"], "invalid_client");
+}
