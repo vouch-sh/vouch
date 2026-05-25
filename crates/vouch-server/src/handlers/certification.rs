@@ -214,8 +214,10 @@ pub async fn deny_login(
     // Consume pending authorization.
     let pending =
         match db::consume_pending_oauth_authorization(&state.store, &query.pending_auth).await {
-            Ok(Some(p)) => p,
-            Ok(None) => return StatusCode::NOT_FOUND.into_response(),
+            Ok(claim) => claim,
+            Err(db::claim::ClaimError::AlreadyConsumed) => {
+                return StatusCode::NOT_FOUND.into_response();
+            }
             Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
         };
 

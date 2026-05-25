@@ -979,8 +979,8 @@ async fn fetch_and_resolve_request_uri(
 async fn handle_pending_auth(state: &Arc<AppState>, pending_id: &str, jar: &CookieJar) -> Response {
     // Consume the pending auth (single-use).
     let pending = match db::consume_pending_oauth_authorization(&state.store, pending_id).await {
-        Ok(Some(p)) => p,
-        Ok(None) => {
+        Ok(claim) => claim,
+        Err(db::claim::ClaimError::AlreadyConsumed) => {
             tracing::warn!(
                 pending_id,
                 "Pending OAuth authorization not found or expired"

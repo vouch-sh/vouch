@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Pending OAuth authorization database operations.
 
+use super::claim::ClaimError;
 use super::document_type::{Document, DocumentType};
 use super::documents::pending_oauth::PendingOAuthAuthDoc;
 use super::store::DocumentStore;
 use anyhow::Result;
 use jiff::{Span, Timestamp};
+use std::ops::Deref;
 
 /// Pending OAuth authorization record.
 #[derive(Debug)]
@@ -143,40 +145,101 @@ pub async fn get_pending_oauth_authorization(
     }
 }
 
-/// Consume a pending OAuth authorization (single-use).
+/// Witness that a pending OAuth authorization was atomically consumed.
 ///
-/// The read and mark-as-consumed execute within a single transaction
-/// to prevent a double-spend race between concurrent requests.
+/// Construction is private to this module — the only path to an instance
+/// is a successful return from [`consume_pending_oauth_authorization`],
+/// which uses optimistic-concurrency `compare_and_update` to ensure at
+/// most one concurrent caller succeeds. The carried
+/// [`PendingOAuthAuthorization`] is the consumed record's data, exposed
+/// via [`Deref`] so call sites can read fields naturally.
 ///
-/// Returns None if not found, expired, or already consumed.
+/// Intentionally not `Clone`. The `#[must_use]` ensures the witness is
+/// bound at the call site.
+#[must_use = "the pending OAuth authorization was atomically consumed; bind \
+              this witness so the data can be read and downstream code can \
+              require it as a precondition"]
+#[derive(Debug)]
+pub struct PendingOauthClaim {
+    auth: PendingOAuthAuthorization,
+    _private: (),
+}
+
+impl Deref for PendingOauthClaim {
+    type Target = PendingOAuthAuthorization;
+    fn deref(&self) -> &Self::Target {
+        &self.auth
+    }
+}
+
+impl PendingOauthClaim {
+    /// Consume the witness and return the underlying authorization record.
+    pub fn into_inner(self) -> PendingOAuthAuthorization {
+        self.auth
+    }
+}
+
+/// Atomically consume a pending OAuth authorization (single-use).
+///
+/// Runs `get` + `compare_and_update` + `get` inside a single transaction
+/// (same as the prior implementation, one round-trip). The
+/// `compare_and_update` version check ensures at most one concurrent
+/// caller wins the write, preventing a double-consume race regardless of
+/// DB isolation level (the prior `tx.update` had no version predicate, so
+/// two concurrent READ-COMMITTED transactions could both lost-update).
+///
+/// All "lost" cases (not found, expired, already consumed, concurrent
+/// consumer won) map to [`ClaimError::AlreadyConsumed`] — deliberately
+/// indistinguishable, each rejected as an invalid `pending_auth`.
 pub async fn consume_pending_oauth_authorization(
     store: &DocumentStore,
     id: &str,
-) -> Result<Option<PendingOAuthAuthorization>> {
+) -> std::result::Result<PendingOauthClaim, ClaimError> {
     let now = Timestamp::now();
 
-    let mut tx = store.begin().await?;
+    let mut tx = store
+        .begin()
+        .await
+        .map_err(|e| ClaimError::Database(e.to_string()))?;
 
-    let doc = tx.get::<PendingOAuthAuthDoc>(id).await?;
+    let doc = tx
+        .get::<PendingOAuthAuthDoc>(id)
+        .await
+        .map_err(|e| ClaimError::Database(e.to_string()))?;
     let Some(doc) = doc else {
-        return Ok(None);
+        return Err(ClaimError::AlreadyConsumed);
     };
 
-    // Check conditions
     if doc.data.consumed_at.is_some() || doc.data.expires_at <= now {
-        return Ok(None);
+        return Err(ClaimError::AlreadyConsumed);
     }
 
-    // Mark as consumed
+    let version = doc.version;
     let mut data = doc.data;
     data.consumed_at = Some(now);
-    tx.update(id, &data).await?;
+    let won = tx
+        .compare_and_update(id, version, &data)
+        .await
+        .map_err(|e| ClaimError::Database(e.to_string()))?;
+    if !won {
+        return Err(ClaimError::AlreadyConsumed);
+    }
 
-    // Snapshot the consumed record before committing
-    let updated = tx.get::<PendingOAuthAuthDoc>(id).await?;
-    tx.commit().await?;
+    let updated = tx
+        .get::<PendingOAuthAuthDoc>(id)
+        .await
+        .map_err(|e| ClaimError::Database(e.to_string()))?
+        .ok_or_else(|| {
+            ClaimError::Database("consumed record disappeared after update".to_string())
+        })?;
+    tx.commit()
+        .await
+        .map_err(|e| ClaimError::Database(e.to_string()))?;
 
-    Ok(updated.map(PendingOAuthAuthorization::from))
+    Ok(PendingOauthClaim {
+        auth: PendingOAuthAuthorization::from(updated),
+        _private: (),
+    })
 }
 
 /// Delete expired pending OAuth authorizations.
