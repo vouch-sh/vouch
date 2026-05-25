@@ -1041,15 +1041,12 @@ async fn handle_fido2_assertion_grant(
             Ok(c) => c,
             Err(r) => return r,
         };
-    let proof = TokenIssuanceProof {
-        grant: GrantProof::UnconvertedFido2Assertion,
-        client_auth: ClientAuthProof::from_jti_or(jti_claim, ClientAuthProof::None),
-    };
+    let client_auth = ClientAuthProof::from_jti_or(jti_claim, ClientAuthProof::None);
 
     match crate::services::oidc::fido2_grant::exchange_fido2_assertion(
         &state,
         exchange_params,
-        proof,
+        client_auth,
     )
     .await
     {

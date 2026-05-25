@@ -206,34 +206,42 @@ pub async fn register_complete(
 
     // Single-use enforcement: consume the state token before any WebAuthn work.
     // A captured state JWT cannot be replayed within the 5-minute validity window.
-    if !key_svc::consume_registration_state(&state.store, &req.state, reg_state.exp).await? {
-        tracing::warn!(
-            user_id = %reg_state.user_id,
-            "CLI registration state replay rejected"
-        );
-        let audit_data = serde_json::json!({
-            "flow": "cli_register",
-            "success": false,
-            "error_code": "state_already_used",
-        });
-        if let Err(e) = state
-            .audit
-            .insert_event(
-                "key_registration_replay",
-                Some(&reg_state.user_id.to_string()),
-                Some(&reg_state.user_name),
-                &audit_data.to_string(),
-            )
-            .await
-        {
-            tracing::warn!(error = %e, "failed to write key_registration_replay audit event");
+    // CLI registration adds an authenticator without issuing a token, so the
+    // returned witness is dropped — sealing is enforced by `#[must_use]` plus
+    // the binding to `_claim`.
+    let _claim = match key_svc::consume_registration_state(&state.store, &req.state, reg_state.exp)
+        .await?
+    {
+        key_svc::RegistrationStateConsumed::Won(claim) => claim,
+        key_svc::RegistrationStateConsumed::Replay => {
+            tracing::warn!(
+                user_id = %reg_state.user_id,
+                "CLI registration state replay rejected"
+            );
+            let audit_data = serde_json::json!({
+                "flow": "cli_register",
+                "success": false,
+                "error_code": "state_already_used",
+            });
+            if let Err(e) = state
+                .audit
+                .insert_event(
+                    "key_registration_replay",
+                    Some(&reg_state.user_id.to_string()),
+                    Some(&reg_state.user_name),
+                    &audit_data.to_string(),
+                )
+                .await
+            {
+                tracing::warn!(error = %e, "failed to write key_registration_replay audit event");
+            }
+            return Err(ServiceError::api(
+                StatusCode::BAD_REQUEST,
+                "state_already_used",
+                "This registration link has already been used",
+            ));
         }
-        return Err(ServiceError::api(
-            StatusCode::BAD_REQUEST,
-            "state_already_used",
-            "This registration link has already been used",
-        ));
-    }
+    };
 
     // Server-side WebAuthn attestation verification
     // Verify the attestation object, client data, RP ID, challenge, and origin
@@ -725,10 +733,9 @@ mod tests {
 
         // Pre-consume the state token to simulate prior use.
         let expires_at = jiff::Timestamp::from_second(exp).expect("valid exp");
-        let consumed = crate::db::try_mark_challenge_used(&state.store, &state_jwt, expires_at)
+        let _claim = crate::db::try_consume_challenge_state(&state.store, &state_jwt, expires_at)
             .await
             .expect("pre-consume must succeed");
-        assert!(consumed, "pre-consume should return true on first use");
 
         // POST to register/complete with the already-consumed state and dummy bytes.
         // consume_registration_state runs before WebAuthn verification, so dummy

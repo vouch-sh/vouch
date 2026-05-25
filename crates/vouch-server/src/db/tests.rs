@@ -2877,15 +2877,15 @@ async fn test_challenge_state_mark_used() {
         .checked_add(jiff::SignedDuration::from_secs(300))
         .unwrap();
 
-    // First use should succeed
-    let used = try_mark_challenge_used(&store, state_jwt, expires_at)
+    // First use should succeed and return a witness
+    let _claim = try_consume_challenge_state(&store, state_jwt, expires_at)
         .await
-        .expect("Failed to mark challenge used");
-    assert!(used, "First use should succeed");
+        .expect("First use should succeed");
 }
 
 #[tokio::test]
 async fn test_challenge_state_replay_rejected() {
+    use crate::db::claim::ClaimError;
     let (store, _audit) = test_db().await;
 
     let state_jwt = "test-jwt-replay";
@@ -2894,16 +2894,16 @@ async fn test_challenge_state_replay_rejected() {
         .unwrap();
 
     // First use succeeds
-    let first = try_mark_challenge_used(&store, state_jwt, expires_at)
+    let _first = try_consume_challenge_state(&store, state_jwt, expires_at)
         .await
-        .expect("Failed on first use");
-    assert!(first, "First use should succeed");
+        .expect("First use should succeed");
 
     // Second use must fail (replay)
-    let second = try_mark_challenge_used(&store, state_jwt, expires_at)
-        .await
-        .expect("Failed on second use");
-    assert!(!second, "Second use (replay) should be rejected");
+    let second = try_consume_challenge_state(&store, state_jwt, expires_at).await;
+    assert!(
+        matches!(second, Err(ClaimError::AlreadyConsumed)),
+        "Second use (replay) should be rejected, got: {second:?}"
+    );
 }
 
 #[tokio::test]
@@ -2911,7 +2911,7 @@ async fn test_challenge_state_new_hash_succeeds() {
     let (store, _audit) = test_db().await;
 
     // A never-seen hash should succeed on first use
-    let used = try_mark_challenge_used(
+    let _claim = try_consume_challenge_state(
         &store,
         "never_seen_hash",
         jiff::Timestamp::now()
@@ -2919,14 +2919,14 @@ async fn test_challenge_state_new_hash_succeeds() {
             .unwrap(),
     )
     .await
-    .expect("Failed to mark challenge used");
-    assert!(used, "New challenge hash should succeed");
+    .expect("New challenge hash should succeed");
 }
 
 #[tokio::test]
 async fn test_challenge_state_concurrent_calls_produce_one_row() {
+    use crate::db::claim::ClaimError;
     // Two concurrent calls with the same state_jwt must produce exactly one
-    // document row — deterministic ID ensures they collide on the PRIMARY KEY
+    // winner — deterministic ID ensures they collide on the PRIMARY KEY
     // rather than creating two rows.
     let (store, _audit) = test_db().await;
 
@@ -2938,18 +2938,25 @@ async fn test_challenge_state_concurrent_calls_produce_one_row() {
     let store_a = store.clone();
     let store_b = store.clone();
     let (result_a, result_b) = tokio::join!(
-        try_mark_challenge_used(&store_a, state_jwt, expires_at),
-        try_mark_challenge_used(&store_b, state_jwt, expires_at),
+        try_consume_challenge_state(&store_a, state_jwt, expires_at),
+        try_consume_challenge_state(&store_b, state_jwt, expires_at),
     );
 
-    let a = result_a.expect("first concurrent call must not error");
-    let b = result_b.expect("second concurrent call must not error");
-
-    // Exactly one winner and one loser — the sum of the two booleans is 1.
+    let a_won = result_a.is_ok();
+    let b_won = result_b.is_ok();
     assert!(
-        a ^ b,
-        "exactly one concurrent call should return true (winner), got a={a}, b={b}"
+        a_won ^ b_won,
+        "exactly one concurrent call should win, got a={a_won}, b={b_won}"
     );
+    // The loser must report AlreadyConsumed (not a database error).
+    for r in [result_a, result_b] {
+        if let Err(e) = r {
+            assert!(
+                matches!(e, ClaimError::AlreadyConsumed),
+                "loser must be AlreadyConsumed, got: {e:?}"
+            );
+        }
+    }
 }
 
 #[test]

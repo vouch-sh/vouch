@@ -76,6 +76,24 @@ impl From<Document<OidcStateDoc>> for OidcState {
     }
 }
 
+/// Witness that an OIDC state record was atomically transitioned to
+/// `consumed_at = Some(now)` by this caller. Construction is private to
+/// this module — the only path to an instance is a successful return from
+/// [`try_consume_oidc_state`], whose optimistic-concurrency
+/// `compare_and_update` guarantees that at most one concurrent caller
+/// succeeds. Holding an `OidcStateClaim` is compile-time evidence that
+/// this caller "won" the consume.
+///
+/// Intentionally not `Clone`. The `#[must_use]` ensures the witness is
+/// bound at the call site (threaded into
+/// `GrantProof::EnrollmentBootstrap(claim)`).
+#[must_use = "the OIDC state was atomically consumed; bind this witness so \
+              it can be threaded into TokenIssuanceProof"]
+#[derive(Debug)]
+pub struct OidcStateClaim {
+    _private: (),
+}
+
 /// Create a new device authorization request.
 pub async fn create_device_auth_request(
     store: &DocumentStore,
@@ -346,6 +364,7 @@ pub async fn create_oidc_state(
         code_verifier: code_verifier.to_string(),
         expires_at,
         provider_id: provider_id.to_string(),
+        consumed_at: None,
     };
     let result = store.insert(&doc).await?;
     Ok(result.id)
@@ -355,6 +374,62 @@ pub async fn create_oidc_state(
 pub async fn get_oidc_state(store: &DocumentStore, state: &str) -> Result<Option<OidcState>> {
     let doc = store.find_one::<OidcStateDoc>("state", state).await?;
     Ok(doc.map(OidcState::from))
+}
+
+/// Atomically consume an OIDC state record.
+///
+/// On success returns `(OidcState, OidcStateClaim)` — the state data
+/// needed for downstream processing plus the witness proving this caller
+/// won the OCC consume. All "lost" cases (state not found, already
+/// consumed, expired, concurrent consumer won via version mismatch) map
+/// to [`ClaimError::AlreadyConsumed`] — deliberately indistinguishable,
+/// each rejected the same way at the handler.
+///
+/// This closes the read-vs-consume TOCTOU window that existed when
+/// callers used `get_oidc_state` + `delete_oidc_state` as separate steps:
+/// two concurrent enrollment-callback requests could both read the same
+/// state, both pass validation, and both proceed to issue tokens before
+/// either delete completed.
+pub async fn try_consume_oidc_state(
+    store: &DocumentStore,
+    state: &str,
+) -> std::result::Result<(OidcState, OidcStateClaim), ClaimError> {
+    let now = Timestamp::now();
+
+    let doc = store
+        .find_one::<OidcStateDoc>("state", state)
+        .await
+        .map_err(|e| ClaimError::Database(e.to_string()))?;
+    let Some(doc) = doc else {
+        return Err(ClaimError::AlreadyConsumed);
+    };
+
+    if doc.data.consumed_at.is_some() || doc.data.expires_at <= now {
+        return Err(ClaimError::AlreadyConsumed);
+    }
+
+    let mut data = doc.data;
+    data.consumed_at = Some(now);
+    let won = store
+        .compare_and_update(&doc.id, doc.version, &data)
+        .await
+        .map_err(|e| ClaimError::Database(e.to_string()))?;
+    if won {
+        Ok((
+            OidcState {
+                id: doc.id,
+                state: data.state,
+                device_auth_id: data.device_auth_id,
+                nonce: data.nonce,
+                code_verifier: data.code_verifier,
+                expires_at: data.expires_at,
+                provider_id: data.provider_id,
+            },
+            OidcStateClaim { _private: () },
+        ))
+    } else {
+        Err(ClaimError::AlreadyConsumed)
+    }
 }
 
 /// Delete an OIDC state.

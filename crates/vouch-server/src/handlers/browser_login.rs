@@ -449,6 +449,31 @@ pub async fn browser_login_complete(
         ));
     }
 
+    // ── Phase 3b: Atomic single-use challenge consume ─────────────────────
+    // Mark the authentication state JWT consumed before any side effects.
+    // The returned `WebauthnChallengeClaim` witness is the structural proof
+    // threaded into the TokenIssuanceProof below — the only path to
+    // `GrantProof::BrowserLogin`. Two concurrent requests with the same
+    // state JWT collide on the deterministic PRIMARY KEY; only one wins.
+    let expires_at = Timestamp::from_second(auth_state.exp).unwrap_or_else(|_| Timestamp::now());
+    let challenge_claim =
+        match db::try_consume_challenge_state(&state.store, &req.state, expires_at).await {
+            Ok(claim) => claim,
+            Err(db::ClaimError::AlreadyConsumed) => {
+                return Err(ServiceError::api(
+                    StatusCode::BAD_REQUEST,
+                    "state_already_used",
+                    "Authentication state has already been used",
+                ));
+            }
+            Err(e) => {
+                tracing::error!("Failed to mark browser login state used: {e}");
+                return Err(ServiceError::Internal(
+                    "Failed to mark authentication state used".to_string(),
+                ));
+            }
+        };
+
     // ── Phase 4: Base64url decode all fields ─────────────────────────────
     let credential_id = URL_SAFE_NO_PAD.decode(&req.credential_id).map_err(|_| {
         ServiceError::api(
@@ -660,7 +685,7 @@ pub async fn browser_login_complete(
             authorization_details: None,
         },
         TokenIssuanceProof {
-            grant: GrantProof::UnconvertedBrowserLogin,
+            grant: GrantProof::BrowserLogin(challenge_claim),
             client_auth: ClientAuthProof::None,
         },
     )

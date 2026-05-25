@@ -16,10 +16,20 @@ use vouch_common::{KeyInfo, lookup_device_model};
 /// Maximum session age (in seconds) for destructive key operations.
 pub(crate) const KEY_DELETE_MAX_AGE_SECS: i64 = 60;
 
+/// Outcome of a [`consume_registration_state`] call.
+pub(crate) enum RegistrationStateConsumed {
+    /// First use — returns the witness for the chokepoint.
+    Won(db::ChallengeStateClaim),
+    /// Already consumed (replay). The handler emits the audit event and
+    /// HTTP error response.
+    Replay,
+}
+
 /// Atomically consume a registration state JWT for single-use enforcement.
 ///
-/// Returns `Ok(true)` on first use, `Ok(false)` if already consumed (replay).
-/// The caller is responsible for constructing the appropriate error response and
+/// Returns [`RegistrationStateConsumed::Won`] with the witness on first use,
+/// or [`RegistrationStateConsumed::Replay`] if already consumed. The caller
+/// is responsible for constructing the appropriate error response and
 /// emitting the audit event, since only the handler has access to the user
 /// context and the audit store.
 ///
@@ -30,15 +40,19 @@ pub(crate) async fn consume_registration_state(
     store: &DocumentStore,
     state_jwt: &str,
     exp_seconds: i64,
-) -> Result<bool, ServiceError> {
+) -> Result<RegistrationStateConsumed, ServiceError> {
     let expires_at = Timestamp::from_second(exp_seconds).unwrap_or_else(|_| Timestamp::now());
 
-    db::try_mark_challenge_used(store, state_jwt, expires_at)
-        .await
-        .map_err(|e| {
+    match db::try_consume_challenge_state(store, state_jwt, expires_at).await {
+        Ok(claim) => Ok(RegistrationStateConsumed::Won(claim)),
+        Err(db::ClaimError::AlreadyConsumed) => Ok(RegistrationStateConsumed::Replay),
+        Err(e) => {
             tracing::error!("Failed to mark registration state used: {e}");
-            ServiceError::Internal("Failed to mark registration state used".to_string())
-        })
+            Err(ServiceError::Internal(
+                "Failed to mark registration state used".to_string(),
+            ))
+        }
+    }
 }
 
 /// Require the given issued-at or auth timestamp to be within `max_age_secs` seconds.

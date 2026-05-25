@@ -88,14 +88,14 @@ pub use organizations::{
 pub use organizations::create_organization;
 
 // Re-export device auth types and functions
-pub(crate) use device_auth::DeviceCodeClaim;
 pub use device_auth::{
     DeviceAuthRequest, DeviceAuthStatus, OidcState, authorize_device_auth,
     create_device_auth_request, create_oidc_state, delete_expired_device_auth_requests,
     delete_expired_oidc_states, delete_oidc_state, deny_device_auth, get_device_auth_by_code_hash,
-    get_device_auth_by_user_code, get_oidc_state, try_consume_device_auth,
+    get_device_auth_by_user_code, get_oidc_state, try_consume_device_auth, try_consume_oidc_state,
     update_device_auth_poll_time,
 };
+pub(crate) use device_auth::{DeviceCodeClaim, OidcStateClaim};
 
 // Re-export device auth test helpers (only available in tests)
 #[cfg(test)]
@@ -192,7 +192,11 @@ pub use pending_oauth::{
 };
 
 // Re-export challenge state functions (FIDO2 single-use enforcement)
-pub use challenge_states::{delete_expired_challenge_states, try_mark_challenge_used};
+pub(crate) use challenge_states::ChallengeStateClaim;
+pub use challenge_states::{delete_expired_challenge_states, try_consume_challenge_state};
+
+// Re-export claim error type so handlers can pattern-match on it.
+pub(crate) use claim::ClaimError;
 
 // Re-export authorization code functions (RFC 6749 Section 10.5)
 pub(crate) use authorization_codes::AuthCodeClaim;

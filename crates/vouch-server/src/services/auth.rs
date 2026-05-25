@@ -332,10 +332,11 @@ pub(crate) struct TokenIssuanceProof {
 
 /// Witness for the grant-level replay primitive consumed during token issuance.
 ///
-/// `Unconverted*` variants are transitional placeholders that will be
-/// replaced by typed claim witnesses in subsequent slices. See
-/// `.local/handoff/single-use-witness-consolidation-plan.md` for the
-/// migration plan.
+/// Every variant either carries a sealed claim witness produced by an
+/// atomic consume-once operation, or is explicitly a no-replay-primitive
+/// variant (`ClientCredentials`, `TokenExchange` — protected via
+/// `ClientAuthProof`; `CertificationBypass` — gated by env-var; and
+/// `TestingOnly` — `cfg`-gated to test builds).
 #[derive(Debug)]
 pub(crate) enum GrantProof {
     /// `authorization_code` grant. Carries a [`crate::db::AuthCodeClaim`]
@@ -352,9 +353,10 @@ pub(crate) enum GrantProof {
     /// [`ClientAuthProof`].
     TokenExchange,
 
-    /// FIDO2 assertion grant.
-    /// TODO(slice-4): carry a `Fido2ChallengeClaim`.
-    UnconvertedFido2Assertion,
+    /// FIDO2 assertion grant. Carries a [`crate::db::ChallengeStateClaim`]
+    /// witness — proof that the challenge state JWT was atomically marked
+    /// consumed before this token issuance.
+    Fido2Assertion(crate::db::ChallengeStateClaim),
 
     /// Device authorization grant (RFC 8628). Carries a [`crate::db::DeviceCodeClaim`]
     /// witness — proof that the device code was atomically transitioned to
@@ -362,17 +364,24 @@ pub(crate) enum GrantProof {
     DeviceCode(crate::db::DeviceCodeClaim),
 
     /// Enrollment bootstrap session — issued post-IdP authentication and
-    /// pre-FIDO2 registration. `hardware_verified` is false here.
-    /// TODO(slice-6): carry an `OidcStateClaim`.
-    UnconvertedEnrollmentBootstrap,
+    /// pre-FIDO2 registration. `hardware_verified` is false here. Carries
+    /// an [`crate::db::OidcStateClaim`] witness — proof that the OIDC
+    /// state record was atomically transitioned to `consumed_at = Some(_)`
+    /// before this token issuance, closing the read-vs-consume TOCTOU
+    /// window that existed when callers used `get_oidc_state` +
+    /// `delete_oidc_state` as separate steps.
+    EnrollmentBootstrap(crate::db::OidcStateClaim),
 
     /// Enrollment complete session — issued after WebAuthn registration.
-    /// TODO(slice-6): carry a `RegistrationStateClaim`.
-    UnconvertedEnrollmentComplete,
+    /// Carries a [`crate::db::ChallengeStateClaim`] witness — proof that
+    /// the registration state JWT was atomically marked consumed before
+    /// this token issuance.
+    EnrollmentComplete(crate::db::ChallengeStateClaim),
 
-    /// Browser WebAuthn login.
-    /// TODO(slice-7): carry a `WebauthnChallengeClaim`.
-    UnconvertedBrowserLogin,
+    /// Browser WebAuthn login. Carries a [`crate::db::ChallengeStateClaim`]
+    /// witness — proof that the authentication state JWT was atomically
+    /// marked consumed before this token issuance.
+    BrowserLogin(crate::db::ChallengeStateClaim),
 
     /// Certification test bypass (only available when
     /// `VOUCH_CERTIFICATION_TEST_TOKEN` is configured). Deliberately does
@@ -389,9 +398,6 @@ pub(crate) enum GrantProof {
 
 /// Witness for the client-authentication replay primitive consumed during
 /// token issuance.
-///
-/// `Unconverted*` variants are transitional placeholders; see
-/// `GrantProof` documentation.
 #[derive(Debug)]
 pub(crate) enum ClientAuthProof {
     /// `private_key_jwt` (RFC 7523) — the JTI was atomically committed to
