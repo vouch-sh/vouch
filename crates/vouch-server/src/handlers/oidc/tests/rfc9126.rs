@@ -1004,6 +1004,87 @@ async fn test_rfc9126_consume_par_with_stale_version_returns_false() {
     );
 }
 
+#[tokio::test]
+async fn test_rfc9126_consume_par_concurrent_replay() {
+    // Mirrors the slice 7a pattern: two concurrent consume calls must
+    // produce exactly one winner; the loser must be AlreadyConsumed (not
+    // a Database error from the OCC version-mismatch path).
+    use crate::db::claim::ClaimError;
+
+    let (_app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "par-race@example.com").await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+
+    let (_, request_uri) = db::create_pushed_authorization_request(
+        &state.store,
+        db::CreateParParams {
+            client_id: &client.client_id,
+            response_type: "code",
+            redirect_uri: "https://example.com/callback",
+            scope: Some("openid"),
+            state: None,
+            nonce: None,
+            code_challenge: None,
+            code_challenge_method: None,
+            resource: None,
+            acr_values: None,
+            max_age: None,
+            prompt: None,
+            dpop_jkt: None,
+            authorization_details: None,
+            response_mode: Default::default(),
+        },
+        crate::services::auth::ParCreationProof {
+            client_auth: crate::services::auth::ClientAuthProof::None,
+        },
+    )
+    .await
+    .unwrap();
+
+    let store_a = state.store.clone();
+    let store_b = state.store.clone();
+    let request_uri_a = request_uri.clone();
+    let request_uri_b = request_uri.clone();
+    let client_id_a = client.client_id.clone();
+    let client_id_b = client.client_id.clone();
+    let (result_a, result_b) = tokio::join!(
+        async move {
+            db::consume_pushed_authorization_request(
+                &store_a,
+                &request_uri_a,
+                &client_id_a,
+                db::ParConsumptionMode::EnforceExpiry,
+            )
+            .await
+        },
+        async move {
+            db::consume_pushed_authorization_request(
+                &store_b,
+                &request_uri_b,
+                &client_id_b,
+                db::ParConsumptionMode::EnforceExpiry,
+            )
+            .await
+        },
+    );
+
+    let a_won = result_a.is_ok();
+    let b_won = result_b.is_ok();
+    assert!(
+        a_won ^ b_won,
+        "exactly one concurrent PAR consume must win, got a={a_won}, b={b_won}"
+    );
+    for r in [result_a, result_b] {
+        if let Err(e) = r {
+            assert!(
+                matches!(e, ClaimError::AlreadyConsumed),
+                "loser must be AlreadyConsumed, got: {e:?}"
+            );
+        }
+    }
+}
+
 // ========================================================================
 // FAPI 2.0 Section 5.3.2.2 — PAR Reuse Before Auth Completion
 // ========================================================================

@@ -3129,3 +3129,322 @@ async fn test_jwks_refresh_does_not_modify_oauth_client_doc() {
         "upsert_jwks_cache must not change parent updated_at"
     );
 }
+
+// ========================================================================
+// OIDC state — atomic consume + concurrent-replay regression coverage
+// (slice 7b)
+// ========================================================================
+
+/// Seed a fresh OIDC state row tied to a fresh device-auth row.
+async fn seed_oidc_state(
+    store: &DocumentStore,
+    state_value: &str,
+    expires_at: jiff::Timestamp,
+) -> String {
+    let device_auth_id = create_device_auth_request(
+        store,
+        &format!("device_hash_for_{state_value}"),
+        &format!("UC-{state_value}"),
+        None,
+        expires_at,
+        5,
+    )
+    .await
+    .expect("create_device_auth_request");
+
+    create_oidc_state(
+        store,
+        state_value,
+        &device_auth_id,
+        "nonce-value",
+        "",
+        expires_at,
+        "",
+    )
+    .await
+    .expect("create_oidc_state");
+
+    device_auth_id
+}
+
+#[tokio::test]
+async fn test_oidc_state_consume_happy_path() {
+    let (store, _audit) = test_db().await;
+    let expires_at: jiff::Timestamp = "2099-12-31T23:59:59Z".parse().unwrap();
+    let device_auth_id = seed_oidc_state(&store, "happy-state", expires_at).await;
+
+    let (data, _claim) = try_consume_oidc_state(&store, "happy-state")
+        .await
+        .expect("first consume must succeed");
+
+    assert_eq!(data.state, "happy-state");
+    assert_eq!(data.device_auth_id, device_auth_id);
+    assert_eq!(data.nonce, "nonce-value");
+}
+
+#[tokio::test]
+async fn test_oidc_state_consume_replay_rejected() {
+    use crate::db::claim::ClaimError;
+    let (store, _audit) = test_db().await;
+    let expires_at: jiff::Timestamp = "2099-12-31T23:59:59Z".parse().unwrap();
+    seed_oidc_state(&store, "replay-state", expires_at).await;
+
+    let _first = try_consume_oidc_state(&store, "replay-state")
+        .await
+        .expect("first consume must succeed");
+
+    let replayed = try_consume_oidc_state(&store, "replay-state").await;
+    assert!(
+        matches!(replayed, Err(ClaimError::AlreadyConsumed)),
+        "second consume must be rejected as AlreadyConsumed, got: {replayed:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_oidc_state_consume_expired_rejected() {
+    use crate::db::claim::ClaimError;
+    let (store, _audit) = test_db().await;
+    // Past expiry.
+    let expires_at: jiff::Timestamp = "2000-01-01T00:00:00Z".parse().unwrap();
+    seed_oidc_state(&store, "expired-state", expires_at).await;
+
+    let result = try_consume_oidc_state(&store, "expired-state").await;
+    assert!(
+        matches!(result, Err(ClaimError::AlreadyConsumed)),
+        "expired state must be reported as AlreadyConsumed (indistinguishable \
+         from replay so the caller cannot probe state existence): got {result:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_oidc_state_consume_not_found_rejected() {
+    use crate::db::claim::ClaimError;
+    let (store, _audit) = test_db().await;
+
+    let result = try_consume_oidc_state(&store, "never-existed").await;
+    assert!(
+        matches!(result, Err(ClaimError::AlreadyConsumed)),
+        "missing state must be reported as AlreadyConsumed: got {result:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_oidc_state_consume_concurrent() {
+    use crate::db::claim::ClaimError;
+    let (store, _audit) = test_db().await;
+    let expires_at: jiff::Timestamp = "2099-12-31T23:59:59Z".parse().unwrap();
+    seed_oidc_state(&store, "race-state", expires_at).await;
+
+    let store_a = store.clone();
+    let store_b = store.clone();
+    let (result_a, result_b) = tokio::join!(
+        try_consume_oidc_state(&store_a, "race-state"),
+        try_consume_oidc_state(&store_b, "race-state"),
+    );
+
+    let a_won = result_a.is_ok();
+    let b_won = result_b.is_ok();
+    assert!(
+        a_won ^ b_won,
+        "exactly one concurrent consume must win, got a={a_won}, b={b_won}"
+    );
+    for r in [result_a, result_b] {
+        if let Err(e) = r {
+            assert!(
+                matches!(e, ClaimError::AlreadyConsumed),
+                "loser must be AlreadyConsumed (not Database), got: {e:?}"
+            );
+        }
+    }
+}
+
+// ========================================================================
+// Concurrent-replay regression coverage for the older single-use
+// primitives. Mirrors the slice 7a pattern (`tokio::join` two consume
+// calls, assert exactly one wins + loser is AlreadyConsumed). SQLite-only;
+// the underlying OCC patterns are race-safe by construction on the other
+// backends as well, but these tests guard against accidental regressions
+// in the helper functions themselves.
+// ========================================================================
+
+#[tokio::test]
+async fn test_authorization_code_consume_concurrent() {
+    use crate::db::claim::ClaimError;
+    let (store, _audit) = test_db().await;
+
+    let expires_at: jiff::Timestamp = "2099-12-31T23:59:59Z".parse().unwrap();
+    store_authorization_code(
+        &store,
+        "race-code-hash",
+        "client-race",
+        "user-race",
+        expires_at,
+        None,
+    )
+    .await
+    .expect("seed authorization code");
+
+    let store_a = store.clone();
+    let store_b = store.clone();
+    let (result_a, result_b) = tokio::join!(
+        try_consume_authorization_code(&store_a, "race-code-hash"),
+        try_consume_authorization_code(&store_b, "race-code-hash"),
+    );
+
+    let a_won = result_a.is_ok();
+    let b_won = result_b.is_ok();
+    assert!(
+        a_won ^ b_won,
+        "exactly one auth-code consume must win, got a={a_won}, b={b_won}"
+    );
+    for r in [result_a, result_b] {
+        if let Err(e) = r {
+            assert!(
+                matches!(e, ClaimError::AlreadyConsumed),
+                "loser must be AlreadyConsumed, got: {e:?}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_device_auth_consume_concurrent() {
+    use crate::db::claim::ClaimError;
+    let (store, _audit) = test_db().await;
+
+    let expires_at: jiff::Timestamp = "2099-12-31T23:59:59Z".parse().unwrap();
+    let device_code_hash = "race-device-hash";
+    let id = create_device_auth_request(&store, device_code_hash, "RACE-DC", None, expires_at, 5)
+        .await
+        .expect("create device auth");
+    let (user_id, _) = upsert_user(&store, "race-device@example.com", Some("Test"))
+        .await
+        .expect("upsert user");
+    let auth_id = create_authenticator(
+        &store,
+        &user_id,
+        "race-device@example.com",
+        "Key",
+        b"cred-race-device",
+        &[0u8; 32],
+        None,
+        None,
+        false,
+    )
+    .await
+    .expect("create authenticator");
+    authorize_device_auth(&store, &id, &user_id, "race-device@example.com", &auth_id)
+        .await
+        .expect("authorize");
+
+    let store_a = store.clone();
+    let store_b = store.clone();
+    let (result_a, result_b) = tokio::join!(
+        try_consume_device_auth(&store_a, device_code_hash),
+        try_consume_device_auth(&store_b, device_code_hash),
+    );
+
+    let a_won = result_a.is_ok();
+    let b_won = result_b.is_ok();
+    assert!(
+        a_won ^ b_won,
+        "exactly one device-auth consume must win, got a={a_won}, b={b_won}"
+    );
+    for r in [result_a, result_b] {
+        if let Err(e) = r {
+            assert!(
+                matches!(e, ClaimError::AlreadyConsumed),
+                "loser must be AlreadyConsumed, got: {e:?}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_dpop_nonce_consume_concurrent() {
+    use crate::db::claim::ClaimError;
+    let (store, _audit) = test_db().await;
+
+    // Seed a fresh nonce; the function returns the nonce string.
+    let nonce = generate_dpop_nonce(&store, 300)
+        .await
+        .expect("generate_dpop_nonce");
+
+    let store_a = store.clone();
+    let store_b = store.clone();
+    let nonce_a = nonce.clone();
+    let nonce_b = nonce.clone();
+    let (result_a, result_b) = tokio::join!(
+        async move { validate_and_consume_dpop_nonce(&store_a, &nonce_a).await },
+        async move { validate_and_consume_dpop_nonce(&store_b, &nonce_b).await },
+    );
+
+    let a_won = result_a.is_ok();
+    let b_won = result_b.is_ok();
+    assert!(
+        a_won ^ b_won,
+        "exactly one DPoP-nonce consume must win, got a={a_won}, b={b_won}"
+    );
+    for r in [result_a, result_b] {
+        if let Err(e) = r {
+            assert!(
+                matches!(e, ClaimError::AlreadyConsumed),
+                "loser must be AlreadyConsumed, got: {e:?}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_pending_oauth_consume_concurrent() {
+    use crate::db::claim::ClaimError;
+    let (store, _audit) = test_db().await;
+
+    let id = create_pending_oauth_authorization(
+        &store,
+        CreatePendingOAuthParams {
+            client_id: "race-pending-client",
+            redirect_uri: "https://example.com/cb",
+            response_type: "code",
+            state: None,
+            scope: Some("openid"),
+            nonce: None,
+            code_challenge: None,
+            code_challenge_method: None,
+            resource: None,
+            acr_values: None,
+            max_age: None,
+            prompt: None,
+            dpop_jkt: None,
+            authorization_details: None,
+            response_mode: Default::default(),
+            par_request_uri: None,
+        },
+    )
+    .await
+    .expect("create pending_oauth");
+
+    let store_a = store.clone();
+    let store_b = store.clone();
+    let id_a = id.clone();
+    let id_b = id.clone();
+    let (result_a, result_b) = tokio::join!(
+        async move { consume_pending_oauth_authorization(&store_a, &id_a).await },
+        async move { consume_pending_oauth_authorization(&store_b, &id_b).await },
+    );
+
+    let a_won = result_a.is_ok();
+    let b_won = result_b.is_ok();
+    assert!(
+        a_won ^ b_won,
+        "exactly one pending_oauth consume must win, got a={a_won}, b={b_won}"
+    );
+    for r in [result_a, result_b] {
+        if let Err(e) = r {
+            assert!(
+                matches!(e, ClaimError::AlreadyConsumed),
+                "loser must be AlreadyConsumed, got: {e:?}"
+            );
+        }
+    }
+}

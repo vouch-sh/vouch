@@ -1806,4 +1806,71 @@ mod tests {
             "expected 'invalid_credential' in body, got: {resp_body}"
         );
     }
+
+    // ── test_oidc_callback_rejects_replayed_state ───────────────────────────
+
+    #[tokio::test]
+    async fn test_oidc_callback_rejects_replayed_state() {
+        // GET /oauth/callback must reject a replayed `state` query param —
+        // the atomic `try_consume_oidc_state` (slice 7b) closes the
+        // read-vs-consume TOCTOU that previously let two concurrent
+        // callbacks both pass validation. We pre-consume the state in the
+        // DB, then submit the callback — the handler must fail at the
+        // consume step and return the "Invalid or expired state" error
+        // template WITHOUT calling the upstream IdP `/token` endpoint.
+        use crate::test_utils::http_get;
+
+        let (app, state) = test_app().await;
+
+        // Seed a fresh OIDC state row + the device-auth row it FKs to.
+        let expires_at: jiff::Timestamp = "2099-12-31T23:59:59Z".parse().expect("valid timestamp");
+        let device_auth_id = crate::db::create_device_auth_request(
+            &state.store,
+            "callback-replay-device-hash",
+            "CBRP-CODE",
+            None,
+            expires_at,
+            5,
+        )
+        .await
+        .expect("create_device_auth_request");
+
+        let oidc_state_value = "callback-replay-state-12345";
+        crate::db::create_oidc_state(
+            &state.store,
+            oidc_state_value,
+            &device_auth_id,
+            "test-nonce",
+            "",
+            expires_at,
+            "",
+        )
+        .await
+        .expect("create_oidc_state");
+
+        // Pre-consume to simulate a successful prior callback.
+        let _claim = crate::db::try_consume_oidc_state(&state.store, oidc_state_value)
+            .await
+            .expect("pre-consume must succeed");
+
+        // Submit the callback with the now-consumed state. The handler
+        // calls `try_consume_oidc_state` first, which returns
+        // AlreadyConsumed, so the upstream IdP is never reached.
+        let (status, body) = http_get(
+            &app,
+            &format!("/oauth/callback?state={oidc_state_value}&code=dummy-auth-code"),
+            &[],
+        )
+        .await;
+
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "error template renders with 200 OK; got {status}: {body}"
+        );
+        assert!(
+            body.contains("Invalid or expired state"),
+            "expected 'Invalid or expired state' in body, got: {body}"
+        );
+    }
 }

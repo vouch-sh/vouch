@@ -1006,4 +1006,70 @@ mod tests {
 
         assert!(result.is_err());
     }
+
+    #[tokio::test]
+    async fn test_browser_login_complete_rejects_replayed_state() {
+        // Pre-consume a valid state JWT, then submit `POST
+        // /login/webauthn/complete` with that JWT. The Phase 3b consume
+        // (added in slice 7a) must reject the request with 400 +
+        // `state_already_used` before any base64 decoding, DB lookup, or
+        // WebAuthn verification work happens. This guards against a
+        // regression where the consume call is reordered or removed.
+        let (app, state) = crate::test_utils::test_app().await;
+
+        // Build a valid BrowserAuthenticationState JWT signed by the test
+        // signer, with a far-future expiry.
+        let now = jiff::Timestamp::now();
+        let exp = now.as_second().saturating_add(300);
+        let auth_state = BrowserAuthenticationState {
+            challenge: vec![0u8; 32],
+            rp_id: state.config().rp_id.clone(),
+            created_at: now.as_second(),
+            exp,
+            pending_auth: None,
+        };
+        let state_jwt = auth_state
+            .encode(&state.state_signer)
+            .await
+            .expect("encode auth state");
+
+        // Pre-consume the state JWT to simulate a prior successful login.
+        let expires_at = jiff::Timestamp::from_second(exp).expect("valid exp");
+        let _claim = crate::db::try_consume_challenge_state(&state.store, &state_jwt, expires_at)
+            .await
+            .expect("pre-consume must succeed");
+
+        // POST to `/login/webauthn/complete` with the already-consumed state
+        // and length-bounded dummy fields. The replay check runs in Phase
+        // 3b (after state decode, before base64 decode), so plain
+        // base64url-of-zero-bytes fields are sufficient to reach it.
+        let dummy = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(vec![0u8; 32]);
+        let body = serde_json::json!({
+            "state": state_jwt,
+            "credential_id": dummy,
+            "authenticator_data": dummy,
+            "client_data_json": dummy,
+            "signature": dummy,
+            "user_handle": dummy,
+        })
+        .to_string();
+
+        let (status, resp_body) = crate::test_utils::http_post_json(
+            &app,
+            "/login/webauthn/complete",
+            &body,
+            &[("Origin", state.config().base_url.as_str())],
+        )
+        .await;
+
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "replay must be rejected with 400, got {status}: {resp_body}"
+        );
+        assert!(
+            resp_body.contains("state_already_used"),
+            "expected 'state_already_used' in response body, got: {resp_body}"
+        );
+    }
 }
