@@ -2569,61 +2569,67 @@ async fn test_delete_expired_jwt_assertion_jtis() {
 
 #[tokio::test]
 async fn test_dpop_jti_replay_prevention() {
+    use crate::db::claim::ClaimError;
     let (store, _audit) = test_db().await;
 
-    // First use returns true
-    let stored = check_and_store_dpop_jti(&store, "dpop-jti-1", 600)
+    // First use returns the witness
+    let _claim = check_and_store_dpop_jti(&store, "dpop-jti-1", 600)
         .await
-        .expect("first store should not error");
-    assert!(stored, "First use of a JTI should be accepted");
+        .expect("First use of a JTI should be accepted");
 
-    // Replay returns false
-    let replayed = check_and_store_dpop_jti(&store, "dpop-jti-1", 600)
-        .await
-        .expect("replay check should not error");
-    assert!(!replayed, "Replay of same JTI should be rejected");
+    // Replay returns AlreadyConsumed
+    let replayed = check_and_store_dpop_jti(&store, "dpop-jti-1", 600).await;
+    assert!(
+        matches!(replayed, Err(ClaimError::AlreadyConsumed)),
+        "Replay of same JTI should be AlreadyConsumed, got: {replayed:?}"
+    );
 
     // Different JTI succeeds
-    let different = check_and_store_dpop_jti(&store, "dpop-jti-2", 600)
+    let _different = check_and_store_dpop_jti(&store, "dpop-jti-2", 600)
         .await
-        .expect("different JTI should not error");
-    assert!(different, "Different JTI should be accepted");
+        .expect("Different JTI should be accepted");
 }
 
 #[tokio::test]
 async fn test_dpop_jti_empty() {
+    use crate::db::claim::ClaimError;
     let (store, _audit) = test_db().await;
 
     let result = check_and_store_dpop_jti(&store, "", 600).await;
-    assert!(result.is_err(), "Empty JTI must return an error");
+    assert!(
+        matches!(result, Err(ClaimError::InvalidInput(_))),
+        "Empty JTI must return InvalidInput, got: {result:?}"
+    );
 }
 
 #[tokio::test]
 async fn test_dpop_jti_too_long() {
+    use crate::db::claim::ClaimError;
     let (store, _audit) = test_db().await;
 
     let long_jti = "x".repeat(257);
     let result = check_and_store_dpop_jti(&store, &long_jti, 600).await;
     assert!(
-        result.is_err(),
-        "JTI exceeding max length must return an error"
+        matches!(result, Err(ClaimError::InvalidInput(_))),
+        "JTI exceeding max length must return InvalidInput, got: {result:?}"
     );
 }
 
 #[tokio::test]
 async fn test_dpop_jti_at_max_length() {
+    use crate::db::claim::ClaimError;
     let (store, _audit) = test_db().await;
 
     let max_jti = "d".repeat(256);
-    let stored = check_and_store_dpop_jti(&store, &max_jti, 600)
+    let _stored = check_and_store_dpop_jti(&store, &max_jti, 600)
         .await
-        .expect("256-char JTI should not error");
-    assert!(stored, "JTI at max length should be accepted");
+        .expect("JTI at max length should be accepted");
 
-    let replayed = check_and_store_dpop_jti(&store, &max_jti, 600)
-        .await
-        .expect("replay check should not error");
-    assert!(!replayed, "Replay of max-length JTI should be rejected");
+    let replayed = check_and_store_dpop_jti(&store, &max_jti, 600).await;
+    assert!(
+        matches!(replayed, Err(ClaimError::AlreadyConsumed)),
+        "Replay of max-length JTI should be AlreadyConsumed, got: {replayed:?}"
+    );
 }
 
 #[tokio::test]
@@ -2644,7 +2650,7 @@ async fn test_dpop_jti_concurrent_insert_rejects_duplicates() {
     let mut successes = 0u32;
     for handle in handles {
         let result = handle.await.expect("task should not panic");
-        if let Ok(true) = result {
+        if result.is_ok() {
             successes += 1;
         }
     }
@@ -2662,7 +2668,7 @@ async fn test_delete_expired_dpop_jtis() {
     // Insert one with past expiry (validity_seconds=0 won't work since
     // it computes from now; instead insert directly with short validity
     // and rely on the fact that we can test cleanup.)
-    check_and_store_dpop_jti(&store, "valid-dpop-jti", 3600)
+    let _valid = check_and_store_dpop_jti(&store, "valid-dpop-jti", 3600)
         .await
         .expect("insert valid");
 
@@ -2673,10 +2679,12 @@ async fn test_delete_expired_dpop_jtis() {
     assert_eq!(deleted, 0, "No expired JTIs to delete");
 
     // The valid one should still block replay
-    let still_blocked = check_and_store_dpop_jti(&store, "valid-dpop-jti", 3600)
-        .await
-        .expect("check");
-    assert!(!still_blocked, "Valid JTI should still block replay");
+    use crate::db::claim::ClaimError;
+    let result = check_and_store_dpop_jti(&store, "valid-dpop-jti", 3600).await;
+    assert!(
+        matches!(result, Err(ClaimError::AlreadyConsumed)),
+        "Valid JTI should still block replay, got: {result:?}"
+    );
 }
 
 // ========================================================================

@@ -143,9 +143,13 @@ pub(crate) async fn exchange_fido2_assertion(
             )
         })?;
 
-    // 2b. Prepare single-use challenge check
-    let expires_at = jiff::Timestamp::from_second(challenge_state.exp)
-        .unwrap_or_else(|_| jiff::Timestamp::now());
+    // 2b. Prepare single-use challenge check. A malformed `exp` is a
+    // security-relevant signal — a captured token with garbage `exp`
+    // must not be silently accepted with a "now" fallback that would
+    // extend its validity. Reject as InvalidGrant.
+    let expires_at = jiff::Timestamp::from_second(challenge_state.exp).map_err(|_| {
+        ServiceError::oauth(OAuthErrorCode::InvalidGrant, "Invalid challenge state exp")
+    })?;
 
     // 3. Decode assertion fields from base64url (CPU-only, no I/O)
     let credential_id_bytes = URL_SAFE_NO_PAD
@@ -307,8 +311,8 @@ pub(crate) async fn exchange_fido2_assertion(
     let now = jiff::Timestamp::now().as_second();
 
     // Build the chokepoint proof here: `GrantProof::Fido2Assertion` can
-    // only be constructed by code that holds a WebauthnChallengeClaim,
-    // produced above by `try_consume_webauthn_challenge`.
+    // only be constructed by code that holds a `ChallengeStateClaim`,
+    // produced above by `try_consume_challenge_state`.
     let proof = TokenIssuanceProof {
         grant: GrantProof::Fido2Assertion(challenge_claim),
         client_auth,

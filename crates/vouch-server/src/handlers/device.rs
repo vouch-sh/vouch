@@ -332,7 +332,13 @@ pub async fn device_token(
                 },
                 TokenIssuanceProof {
                     grant: GrantProof::DeviceCode(device_claim),
-                    client_auth: ClientAuthProof::None,
+                    // RFC 8628 device authorization grant: the consumed
+                    // `device_code` is itself the client credential at
+                    // this endpoint — see GrantProof::DeviceCode above.
+                    // No separate external client-auth step takes place.
+                    client_auth: ClientAuthProof::NoAuth(
+                        crate::services::auth::NoClientAuth::internal_endpoint(),
+                    ),
                 },
             )
             .await

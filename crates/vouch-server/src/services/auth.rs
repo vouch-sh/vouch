@@ -415,50 +415,65 @@ pub(crate) enum ClientAuthProof {
     /// [`crate::services::oidc::token::authenticate_client_mtls`].
     MutualTls(crate::services::oidc::token::MtlsCertVerification),
 
-    /// Public client — no client authentication was performed.
-    None,
+    /// No external client authentication was performed. Carries a
+    /// [`NoClientAuth`] witness whose two named constructors document
+    /// why client auth is absent — either the client is a registered
+    /// public OAuth client (RFC 6749 §2.1), or the request originates
+    /// from an internal flow where the server is both issuer and client
+    /// (browser login, enrollment, device polling).
+    NoAuth(NoClientAuth),
 }
 
-impl ClientAuthProof {
-    /// Compose a `ClientAuthProof` from an optional JTI claim and a fallback.
-    ///
-    /// `Some(claim)` produces `PrivateKeyJwt(claim)` — the only path to that
-    /// variant, since `JwtAssertionJtiClaim` has no public constructor. `None`
-    /// is *any* non-`private_key_jwt` case: the assertion omitted `jti`, the
-    /// client used `client_secret_basic`/`client_secret_post`, the client
-    /// used `tls_client_auth`/`self_signed_tls_client_auth`, or the client is
-    /// public (no auth). The caller supplies the appropriate fallback variant
-    /// describing whichever non-JWT method actually succeeded.
-    pub(crate) fn from_jti_or(
-        jti_claim: Option<crate::db::JwtAssertionJtiClaim>,
-        fallback: Self,
-    ) -> Self {
-        match jti_claim {
-            Some(claim) => Self::PrivateKeyJwt(claim),
-            None => fallback,
+/// Witness justifying a [`ClientAuthProof::NoAuth`] variant. The two
+/// named constructors split the legitimate cases:
+///
+/// - [`Self::for_public_client`] — the request carries a `client_id`
+///   for a registered OAuth client whose `token_endpoint_auth_method`
+///   is `None` (public client, RFC 6749 §2.1).
+/// - [`Self::internal_endpoint`] — the request originates from a
+///   server-internal endpoint (browser login, enrollment callbacks,
+///   device-code polling) where there is no external OAuth client and
+///   the server itself is the client.
+///
+/// A confidential client's grant arm cannot accidentally satisfy the
+/// chokepoint with this witness — `for_public_client` rejects clients
+/// registered with a non-`None` auth method, and `internal_endpoint`
+/// is a grep-auditable explicit choice. Future grant arms for
+/// confidential clients must construct `PrivateKeyJwt`, `ClientSecret`,
+/// or `MutualTls` instead.
+#[derive(Debug)]
+pub(crate) struct NoClientAuth {
+    _private: (),
+}
+
+impl NoClientAuth {
+    /// Construct evidence that the request is for a public OAuth client
+    /// (RFC 6749 §2.1 — `token_endpoint_auth_method = None`). Returns
+    /// `Err` if the client is registered as confidential; in that case
+    /// the caller must produce a real verification witness instead.
+    pub(crate) fn for_public_client(
+        client: &crate::db::OAuthClient,
+    ) -> Result<Self, crate::services::ServiceError> {
+        if client.token_endpoint_auth_method == crate::db::TokenEndpointAuthMethod::None {
+            Ok(Self { _private: () })
+        } else {
+            Err(crate::services::ServiceError::oauth(
+                crate::services::OAuthErrorCode::InvalidClient,
+                "client authentication required",
+            ))
         }
     }
 
-    /// Compose a non-JWT [`ClientAuthProof`] from the two verification
-    /// witnesses produced by the handler-level auth flow. Single named
-    /// place for the precedence rule:
+    /// Construct evidence that the request originates from a
+    /// server-internal endpoint where there is no external OAuth client.
     ///
-    /// - `Some(secret)` → `ClientSecret(secret)` (client_secret_basic/post)
-    /// - `Some(mtls)` (no secret) → `MutualTls(mtls)` (RFC 8705)
-    /// - neither → `None` (public client)
-    ///
-    /// JWT-authenticated clients are handled separately by [`Self::from_jti_or`]
-    /// because the JTI claim and the verification are produced at different
-    /// points in the flow.
-    pub(crate) fn from_verifications(
-        secret: Option<crate::services::oidc::token::ClientSecretVerification>,
-        mtls: Option<crate::services::oidc::token::MtlsCertVerification>,
-    ) -> Self {
-        match (secret, mtls) {
-            (Some(s), _) => Self::ClientSecret(s),
-            (None, Some(m)) => Self::MutualTls(m),
-            (None, None) => Self::None,
-        }
+    /// Use **only** for endpoints where the server is acting as both
+    /// issuer and client — browser login, enrollment callbacks, device
+    /// polling, certification test bypass. Adding new call sites is an
+    /// audit-relevant decision: grep for this constructor before merging
+    /// any change that introduces a new caller.
+    pub(crate) fn internal_endpoint() -> Self {
+        Self { _private: () }
     }
 }
 

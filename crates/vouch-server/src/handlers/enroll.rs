@@ -656,7 +656,9 @@ pub(crate) async fn complete_enrollment_after_identity(
         },
         TokenIssuanceProof {
             grant: GrantProof::EnrollmentBootstrap(oidc_state_claim),
-            client_auth: ClientAuthProof::None,
+            client_auth: ClientAuthProof::NoAuth(
+                crate::services::auth::NoClientAuth::internal_endpoint(),
+            ),
         },
     )
     .await
@@ -1350,7 +1352,9 @@ pub async fn browser_register_complete(
         },
         TokenIssuanceProof {
             grant: GrantProof::EnrollmentComplete(registration_claim),
-            client_auth: ClientAuthProof::None,
+            client_auth: ClientAuthProof::NoAuth(
+                crate::services::auth::NoClientAuth::internal_endpoint(),
+            ),
         },
     )
     .await

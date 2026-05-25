@@ -475,13 +475,24 @@ pub async fn par(
     };
     // PAR doesn't currently validate mTLS (FAPI 2.0 §5.2.2 requires
     // private_key_jwt anyway; non-FAPI mTLS at PAR isn't supported here).
-    // If/when PAR-mTLS lands, capture the MtlsCertVerification and pass it
-    // as the second argument instead of None.
+    // Resolve client-auth proof by precedence: JWT → secret. If neither
+    // succeeded, fall back to `for_public_client` against the loaded
+    // client — fails for confidential clients that should have authed.
+    let par_client_auth = if let Some(claim) = jti_claim {
+        ClientAuthProof::PrivateKeyJwt(claim)
+    } else if let Some(s) = secret_verification {
+        ClientAuthProof::ClientSecret(s)
+    } else {
+        let witness = match crate::services::auth::NoClientAuth::for_public_client(
+            &authenticated_client.client,
+        ) {
+            Ok(w) => w,
+            Err(svc) => return svc.into_oauth_response().into_response(),
+        };
+        ClientAuthProof::NoAuth(witness)
+    };
     let proof = ParCreationProof {
-        client_auth: ClientAuthProof::from_jti_or(
-            jti_claim,
-            ClientAuthProof::from_verifications(secret_verification, None),
-        ),
+        client_auth: par_client_auth,
     };
 
     // RFC 9126 Section 2.2: Return 201 Created

@@ -157,8 +157,11 @@ pub(crate) async fn get_device_auth_by_id(
 
 /// Authorize a device auth request.
 ///
-/// The read and status update execute within a single transaction so
-/// concurrent authorization attempts are serialized correctly.
+/// Uses `compare_and_update` (OCC) so two concurrent authorization
+/// attempts cannot both succeed under PostgreSQL READ COMMITTED — the
+/// loser sees a version mismatch and is reported as a conflict. The
+/// blind `tx.update` it replaced would have let both writers commit,
+/// each clobbering the other's user attribution.
 pub async fn authorize_device_auth(
     store: &DocumentStore,
     id: &str,
@@ -190,12 +193,20 @@ pub async fn authorize_device_auth(
         );
     }
 
+    let version = doc.version;
     let mut data = doc.data;
     data.status = DeviceAuthStatus::Authorized;
     data.user_id = Some(user_id.to_string());
     data.user_email = Some(user_email.to_string());
     data.authenticator_id = Some(authenticator_id.to_string());
-    tx.update(id, &data).await?;
+    let won = tx.compare_and_update(id, version, &data).await?;
+    if !won {
+        bail!(
+            "authorize_device_auth: device auth request '{}' was \
+             concurrently modified",
+            id
+        );
+    }
 
     tx.commit().await?;
     Ok(())
@@ -203,8 +214,9 @@ pub async fn authorize_device_auth(
 
 /// Deny a device auth request.
 ///
-/// The read and status update execute within a single transaction so
-/// concurrent denial attempts are serialized correctly.
+/// Uses `compare_and_update` (OCC) for the same reason as
+/// [`authorize_device_auth`]: two concurrent denials (or a concurrent
+/// authorize + deny) cannot both win under READ COMMITTED.
 pub async fn deny_device_auth(store: &DocumentStore, id: &str) -> Result<()> {
     if id.is_empty() {
         bail!("deny_device_auth called with empty id");
@@ -230,9 +242,17 @@ pub async fn deny_device_auth(store: &DocumentStore, id: &str) -> Result<()> {
         );
     }
 
+    let version = doc.version;
     let mut data = doc.data;
     data.status = DeviceAuthStatus::Denied;
-    tx.update(id, &data).await?;
+    let won = tx.compare_and_update(id, version, &data).await?;
+    if !won {
+        bail!(
+            "deny_device_auth: device auth request '{}' was \
+             concurrently modified",
+            id
+        );
+    }
 
     tx.commit().await?;
     Ok(())

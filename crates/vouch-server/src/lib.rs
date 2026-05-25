@@ -4,6 +4,15 @@
 //! This crate provides the Vouch identity server with OIDC provider,
 //! WebAuthn authentication, and credential issuance.
 
+// Prevent test-utils from being enabled in any release build of this
+// library. The feature exposes `test_utils` (helpers that bypass FIDO2
+// and construct `GrantProof::TestingOnly` / `TestCoseVerifier`) — none
+// of which should ever reach production code. Release builds disable
+// `debug_assertions`, so this guard fires for `cargo build --release
+// --features test-utils` on either the binary or any consumer.
+#[cfg(all(feature = "test-utils", not(debug_assertions)))]
+compile_error!("test-utils feature must not be enabled in release builds");
+
 pub mod attestation;
 pub mod config;
 pub mod crypto;

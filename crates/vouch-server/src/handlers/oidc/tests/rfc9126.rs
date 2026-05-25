@@ -962,7 +962,9 @@ async fn test_rfc9126_consume_par_with_stale_version_returns_false() {
             response_mode: Default::default(),
         },
         crate::services::auth::ParCreationProof {
-            client_auth: crate::services::auth::ClientAuthProof::None,
+            client_auth: crate::services::auth::ClientAuthProof::NoAuth(
+                crate::services::auth::NoClientAuth::internal_endpoint(),
+            ),
         },
     )
     .await
@@ -1036,7 +1038,9 @@ async fn test_rfc9126_consume_par_concurrent_replay() {
             response_mode: Default::default(),
         },
         crate::services::auth::ParCreationProof {
-            client_auth: crate::services::auth::ClientAuthProof::None,
+            client_auth: crate::services::auth::ClientAuthProof::NoAuth(
+                crate::services::auth::NoClientAuth::internal_endpoint(),
+            ),
         },
     )
     .await

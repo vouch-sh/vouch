@@ -151,7 +151,9 @@ pub async fn complete_login(
         },
         TokenIssuanceProof {
             grant: GrantProof::CertificationBypass,
-            client_auth: ClientAuthProof::None,
+            client_auth: ClientAuthProof::NoAuth(
+                crate::services::auth::NoClientAuth::internal_endpoint(),
+            ),
         },
     )
     .await
@@ -211,10 +213,11 @@ pub async fn deny_login(
         return StatusCode::FORBIDDEN.into_response();
     }
 
-    // Consume pending authorization.
-    let pending =
+    // Consume pending authorization. The `_claim` witness is bound to
+    // satisfy `#[must_use]`; downstream code uses `pending` directly.
+    let (pending, _claim) =
         match db::consume_pending_oauth_authorization(&state.store, &query.pending_auth).await {
-            Ok(claim) => claim,
+            Ok(pair) => pair,
             Err(db::claim::ClaimError::AlreadyConsumed) => {
                 return StatusCode::NOT_FOUND.into_response();
             }

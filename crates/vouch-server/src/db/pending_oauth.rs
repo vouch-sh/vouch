@@ -7,7 +7,6 @@ use super::documents::pending_oauth::PendingOAuthAuthDoc;
 use super::store::DocumentStore;
 use anyhow::Result;
 use jiff::{Span, Timestamp};
-use std::ops::Deref;
 
 /// Pending OAuth authorization record.
 #[derive(Debug)]
@@ -150,33 +149,18 @@ pub async fn get_pending_oauth_authorization(
 /// Construction is private to this module — the only path to an instance
 /// is a successful return from [`consume_pending_oauth_authorization`],
 /// which uses optimistic-concurrency `compare_and_update` to ensure at
-/// most one concurrent caller succeeds. The carried
-/// [`PendingOAuthAuthorization`] is the consumed record's data, exposed
-/// via [`Deref`] so call sites can read fields naturally.
+/// most one concurrent caller succeeds.
 ///
 /// Intentionally not `Clone`. The `#[must_use]` ensures the witness is
-/// bound at the call site.
+/// bound at the call site. Same shape as the other consume-once
+/// witnesses (`AuthCodeClaim`, `ParStateClaim`, `OidcStateClaim`, etc.) —
+/// the consumed record's data is returned alongside the witness rather
+/// than carried inside it, matching the codebase convention.
 #[must_use = "the pending OAuth authorization was atomically consumed; bind \
-              this witness so the data can be read and downstream code can \
-              require it as a precondition"]
+              this witness so downstream code can require it as a precondition"]
 #[derive(Debug)]
-pub struct PendingOauthClaim {
-    auth: PendingOAuthAuthorization,
+pub(crate) struct PendingOauthClaim {
     _private: (),
-}
-
-impl Deref for PendingOauthClaim {
-    type Target = PendingOAuthAuthorization;
-    fn deref(&self) -> &Self::Target {
-        &self.auth
-    }
-}
-
-impl PendingOauthClaim {
-    /// Consume the witness and return the underlying authorization record.
-    pub fn into_inner(self) -> PendingOAuthAuthorization {
-        self.auth
-    }
 }
 
 /// Atomically consume a pending OAuth authorization (single-use).
@@ -191,10 +175,10 @@ impl PendingOauthClaim {
 /// All "lost" cases (not found, expired, already consumed, concurrent
 /// consumer won) map to [`ClaimError::AlreadyConsumed`] — deliberately
 /// indistinguishable, each rejected as an invalid `pending_auth`.
-pub async fn consume_pending_oauth_authorization(
+pub(crate) async fn consume_pending_oauth_authorization(
     store: &DocumentStore,
     id: &str,
-) -> std::result::Result<PendingOauthClaim, ClaimError> {
+) -> std::result::Result<(PendingOAuthAuthorization, PendingOauthClaim), ClaimError> {
     let now = Timestamp::now();
 
     let mut tx = store
@@ -214,6 +198,7 @@ pub async fn consume_pending_oauth_authorization(
         return Err(ClaimError::AlreadyConsumed);
     }
 
+    let created_at = doc.created_at;
     let version = doc.version;
     let mut data = doc.data;
     data.consumed_at = Some(now);
@@ -224,22 +209,37 @@ pub async fn consume_pending_oauth_authorization(
     if !won {
         return Err(ClaimError::AlreadyConsumed);
     }
-
-    let updated = tx
-        .get::<PendingOAuthAuthDoc>(id)
-        .await
-        .map_err(|e| ClaimError::Database(e.to_string()))?
-        .ok_or_else(|| {
-            ClaimError::Database("consumed record disappeared after update".to_string())
-        })?;
     tx.commit()
         .await
         .map_err(|e| ClaimError::Database(e.to_string()))?;
 
-    Ok(PendingOauthClaim {
-        auth: PendingOAuthAuthorization::from(updated),
-        _private: (),
-    })
+    // Build the result from the in-memory mutated `data` rather than
+    // re-reading. The fields we care about are either already in `data`
+    // (mutated copy of the row we read) or are the document metadata
+    // (`id`, `created_at`) captured from the first read.
+    let auth = PendingOAuthAuthorization {
+        id: id.to_string(),
+        client_id: data.client_id,
+        redirect_uri: data.redirect_uri,
+        response_type: data.response_type,
+        state: data.state,
+        scope: data.scope,
+        nonce: data.nonce,
+        code_challenge: data.code_challenge,
+        code_challenge_method: data.code_challenge_method,
+        created_at,
+        expires_at: data.expires_at,
+        consumed_at: data.consumed_at,
+        resource: data.resource,
+        acr_values: data.acr_values,
+        max_age: data.max_age,
+        prompt: data.prompt,
+        dpop_jkt: data.dpop_jkt,
+        authorization_details: data.authorization_details,
+        response_mode: data.response_mode,
+        par_request_uri: data.par_request_uri,
+    };
+    Ok((auth, PendingOauthClaim { _private: () }))
 }
 
 /// Delete expired pending OAuth authorizations.

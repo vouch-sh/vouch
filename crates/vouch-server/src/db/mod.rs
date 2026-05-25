@@ -185,10 +185,10 @@ pub use par::{
 };
 
 // Re-export pending OAuth types and functions (RFC 6749, RFC 9700)
+pub(crate) use pending_oauth::consume_pending_oauth_authorization;
 pub use pending_oauth::{
-    CreatePendingOAuthParams, PendingOAuthAuthorization, consume_pending_oauth_authorization,
-    create_pending_oauth_authorization, delete_expired_pending_oauth_authorizations,
-    get_pending_oauth_authorization,
+    CreatePendingOAuthParams, PendingOAuthAuthorization, create_pending_oauth_authorization,
+    delete_expired_pending_oauth_authorizations, get_pending_oauth_authorization,
 };
 
 // Re-export challenge state functions (FIDO2 single-use enforcement)

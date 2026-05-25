@@ -686,7 +686,9 @@ pub async fn browser_login_complete(
         },
         TokenIssuanceProof {
             grant: GrantProof::BrowserLogin(challenge_claim),
-            client_auth: ClientAuthProof::None,
+            client_auth: ClientAuthProof::NoAuth(
+                crate::services::auth::NoClientAuth::internal_endpoint(),
+            ),
         },
     )
     .await

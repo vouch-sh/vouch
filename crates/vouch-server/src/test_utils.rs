@@ -501,7 +501,9 @@ pub async fn create_test_session(
         },
         TokenIssuanceProof {
             grant: GrantProof::TestingOnly,
-            client_auth: ClientAuthProof::None,
+            client_auth: ClientAuthProof::NoAuth(
+                crate::services::auth::NoClientAuth::internal_endpoint(),
+            ),
         },
     )
     .await
@@ -547,7 +549,9 @@ pub async fn create_test_session_with_iat(
         },
         TokenIssuanceProof {
             grant: GrantProof::TestingOnly,
-            client_auth: ClientAuthProof::None,
+            client_auth: ClientAuthProof::NoAuth(
+                crate::services::auth::NoClientAuth::internal_endpoint(),
+            ),
         },
     )
     .await
@@ -593,7 +597,9 @@ pub async fn create_test_session_for_client(
         },
         TokenIssuanceProof {
             grant: GrantProof::TestingOnly,
-            client_auth: ClientAuthProof::None,
+            client_auth: ClientAuthProof::NoAuth(
+                crate::services::auth::NoClientAuth::internal_endpoint(),
+            ),
         },
     )
     .await
@@ -639,7 +645,9 @@ pub async fn create_test_session_with_dpop(
         },
         TokenIssuanceProof {
             grant: GrantProof::TestingOnly,
-            client_auth: ClientAuthProof::None,
+            client_auth: ClientAuthProof::NoAuth(
+                crate::services::auth::NoClientAuth::internal_endpoint(),
+            ),
         },
     )
     .await
@@ -685,7 +693,9 @@ pub async fn create_test_session_with_mtls(
         },
         TokenIssuanceProof {
             grant: GrantProof::TestingOnly,
-            client_auth: ClientAuthProof::None,
+            client_auth: ClientAuthProof::NoAuth(
+                crate::services::auth::NoClientAuth::internal_endpoint(),
+            ),
         },
     )
     .await

@@ -871,6 +871,14 @@ pub async fn delete_expired_jwt_assertion_jtis(store: &DocumentStore) -> Result<
 // ============================================================================
 
 /// Validate client credentials (client_id + client_secret).
+///
+/// The presented secret is hashed by the caller (SHA-256, via `hash_token`)
+/// and looked up by hash. There is no application-level `ct_eq` call
+/// because the comparison happens inside the SQL engine on an indexed
+/// column — the timing of "row found" vs "row not found" is not
+/// distinguishable from the HTTP client's perspective, and we never see
+/// the raw stored secret in application code. Do NOT replace this with
+/// a fetch-then-compare pattern; that would reintroduce a timing channel.
 pub async fn validate_oauth_client_credentials(
     store: &DocumentStore,
     client_id: &str,

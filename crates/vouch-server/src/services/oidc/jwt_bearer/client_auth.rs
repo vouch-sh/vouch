@@ -86,9 +86,6 @@ impl PendingJti {
                     );
                     ClientAuthError::InvalidCredentials
                 }
-                // Not produced by `store_jwt_assertion_jti` today; map
-                // defensively to invalid_client if a future variant lands here.
-                ClaimError::Expired | ClaimError::NotFound => ClientAuthError::InvalidCredentials,
                 ClaimError::Database(msg) => ClientAuthError::DatabaseError(msg),
             })
     }

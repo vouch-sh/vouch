@@ -46,25 +46,6 @@ fn generate_random_string(len: usize) -> Result<String> {
     Ok(URL_SAFE_NO_PAD.encode(&bytes))
 }
 
-/// Witness that a DPoP nonce (RFC 9449 §8) has been atomically consumed.
-///
-/// Construction is private to this module — the only path to an instance is
-/// a successful return from [`validate_and_consume_dpop_nonce`], which runs
-/// a single `DELETE WHERE id = ? AND expires_at > ?` SQL statement.
-/// Returning the witness means *this caller* was the one whose DELETE
-/// affected a row — no concurrent consumer can hold the same witness.
-///
-/// Intentionally not `Clone`. The `#[must_use]` ensures it is bound at the
-/// call site even when it isn't threaded further downstream (today its only
-/// consumer is the DPoP validation pipeline itself, but the witness exists
-/// so future code can require it as a precondition).
-#[must_use = "the DPoP nonce was atomically consumed; bind this witness so \
-              future code can require it as a precondition"]
-#[derive(Debug)]
-pub struct DpopNonceClaim {
-    _private: (),
-}
-
 /// Generate and store a DPoP nonce. Returns the nonce string.
 ///
 /// Stores the nonce under a deterministic document ID derived from the
@@ -89,15 +70,21 @@ pub async fn generate_dpop_nonce(store: &DocumentStore, validity_seconds: i64) -
 /// Atomically validate and consume a DPoP nonce.
 ///
 /// Uses a single `DELETE WHERE id = ? AND expires_at > ?` statement, so the
-/// claim is decided by the database row count — no find-then-delete race.
-/// On success returns a [`DpopNonceClaim`] witness; on a "lost" race (nonce
-/// not found, expired, or already consumed by a concurrent caller) returns
-/// [`ClaimError::AlreadyConsumed`]. The three "lost" cases are deliberately
-/// indistinguishable: each is rejected the same way by RFC 9449.
+/// outcome is decided by the database row count — no find-then-delete race.
+/// On a "lost" race (nonce not found, expired, or already consumed by a
+/// concurrent caller) returns [`ClaimError::AlreadyConsumed`]. The three
+/// lost cases are deliberately indistinguishable: each is rejected the
+/// same way by RFC 9449.
+///
+/// No witness type is returned because `ValidatedDpopProof` already
+/// carries the "DPoP validation succeeded" marker at the call site
+/// ([`crate::services::oidc::dpop::validate_dpop_common`]); a separate
+/// `DpopNonceClaim` would duplicate that guarantee without any
+/// downstream consumer requiring it.
 pub async fn validate_and_consume_dpop_nonce(
     store: &DocumentStore,
     nonce: &str,
-) -> std::result::Result<DpopNonceClaim, ClaimError> {
+) -> std::result::Result<(), ClaimError> {
     let id = deterministic_dpop_nonce_id(nonce);
     let now = Timestamp::now();
     let won = store
@@ -105,36 +92,59 @@ pub async fn validate_and_consume_dpop_nonce(
         .await
         .map_err(|e| ClaimError::Database(e.to_string()))?;
     if won {
-        Ok(DpopNonceClaim { _private: () })
+        Ok(())
     } else {
         Err(ClaimError::AlreadyConsumed)
     }
 }
 
-/// Check if JTI exists (replay) and store it atomically.
-/// Returns `true` if new, `false` if replay.
+/// Witness that a DPoP JTI (RFC 9449 §11.1) was atomically committed by
+/// this caller. Construction is private to this module — the only path
+/// to an instance is a successful return from [`check_and_store_dpop_jti`],
+/// whose atomic INSERT on the deterministic PRIMARY KEY guarantees that
+/// at most one concurrent caller's insert commits.
+///
+/// Intentionally not `Clone`. The `#[must_use]` ensures the witness is
+/// bound at the call site; today it is carried into `ValidatedDpopProof`
+/// by `validate_dpop_common` so the structural guarantee flows through
+/// to downstream code that requires a validated proof.
+#[must_use = "the DPoP JTI was atomically committed; bind this witness so \
+              it can be carried into ValidatedDpopProof"]
+#[derive(Debug)]
+pub struct DpopJtiClaim {
+    _private: (),
+}
+
+/// Atomically commit a DPoP JTI to the replay-prevention table.
 ///
 /// Uses a deterministic document ID derived from the JTI so that
-/// concurrent inserts collide on the PRIMARY KEY constraint,
-/// preventing TOCTOU races.
+/// concurrent inserts collide on the PRIMARY KEY constraint, preventing
+/// TOCTOU races across SQLite, Postgres, and DSQL.
+///
+/// On success returns a [`DpopJtiClaim`] witness; on replay returns
+/// [`ClaimError::AlreadyConsumed`]. Oversized or empty JTI is
+/// `ClaimError::InvalidInput` (client error → 401, not a 500 that would
+/// prompt retry).
 pub async fn check_and_store_dpop_jti(
     store: &DocumentStore,
     jti: &str,
     validity_seconds: i64,
-) -> Result<bool> {
+) -> std::result::Result<DpopJtiClaim, ClaimError> {
     if jti.is_empty() {
-        return Err(anyhow::anyhow!("DPoP JTI must not be empty"));
+        return Err(ClaimError::InvalidInput(
+            "DPoP JTI must not be empty".to_string(),
+        ));
     }
     if jti.len() > MAX_JTI_LENGTH {
-        return Err(anyhow::anyhow!(
+        return Err(ClaimError::InvalidInput(format!(
             "DPoP JTI exceeds maximum length ({MAX_JTI_LENGTH})"
-        ));
+        )));
     }
 
     let now = Timestamp::now();
     let expires_at = now
         .checked_add(validity_seconds.seconds())
-        .context("DPoP JTI expiry timestamp overflow")?;
+        .map_err(|e| ClaimError::Database(format!("DPoP JTI expiry overflow: {e}")))?;
 
     let id = deterministic_dpop_jti_id(jti);
     let doc = DpopJtiDoc {
@@ -143,14 +153,9 @@ pub async fn check_and_store_dpop_jti(
     };
 
     match store.insert_with_id(&id, &doc).await {
-        Ok(_) => Ok(true),
-        Err(e) => {
-            if super::pool::is_unique_violation(&e) {
-                Ok(false)
-            } else {
-                Err(e)
-            }
-        }
+        Ok(_) => Ok(DpopJtiClaim { _private: () }),
+        Err(e) if super::pool::is_unique_violation(&e) => Err(ClaimError::AlreadyConsumed),
+        Err(e) => Err(ClaimError::Database(e.to_string())),
     }
 }
 

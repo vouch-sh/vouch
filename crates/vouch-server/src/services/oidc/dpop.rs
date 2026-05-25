@@ -491,13 +491,17 @@ async fn validate_dpop_common(
     // Parse header, verify signature, and extract claims in a single pass
     let (header, claims) = parse_and_verify_dpop_proof(proof)?;
 
-    // Check for replay (JTI must be unique) — atomic INSERT on PRIMARY KEY
-    let is_new = db::check_and_store_dpop_jti(store, &claims.jti, config_max_age)
-        .await
-        .map_err(|e| DpopError::InvalidFormat(format!("JTI check failed: {e}")))?;
-    if !is_new {
-        return Err(DpopError::ReplayDetected);
-    }
+    // Check for replay (JTI must be unique) — atomic INSERT on PRIMARY KEY.
+    // The returned `DpopJtiClaim` witness is bound to `_jti_claim` and
+    // dropped at function return; its compile-time guarantee that the JTI
+    // commit happened flows forward via the `ValidatedDpopProof` `_private:
+    // ()` marker constructed below.
+    let _jti_claim = match db::check_and_store_dpop_jti(store, &claims.jti, config_max_age).await {
+        Ok(claim) => claim,
+        Err(db::claim::ClaimError::AlreadyConsumed) => return Err(DpopError::ReplayDetected),
+        Err(db::claim::ClaimError::InvalidInput(msg)) => return Err(DpopError::InvalidFormat(msg)),
+        Err(e) => return Err(DpopError::InvalidFormat(format!("JTI check failed: {e}"))),
+    };
 
     // Nonce requirement: enforced at token endpoint (RFC 9449 Section 8)
     // where precomputation attacks are a concern. Resource endpoints use
@@ -522,13 +526,13 @@ async fn validate_dpop_common(
     )?;
 
     // Atomically consume the nonce via the database. A successful return
-    // means a single DELETE statement decided the claim — no TOCTOU window
-    // between read and consume. The witness is dropped here; its only
-    // purpose at present is the compile-time guarantee that the consume
-    // happened, which future code can require by holding a `DpopNonceClaim`.
+    // means a single DELETE statement decided the outcome — no TOCTOU
+    // window between read and consume. The "this DPoP proof validated
+    // successfully" guarantee is carried forward by the returned
+    // `ValidatedDpopProof` (`_private: ()` marker).
     if let Some(nonce) = claims.nonce.as_deref() {
         match db::validate_and_consume_dpop_nonce(store, nonce).await {
-            Ok(_claim) => {}
+            Ok(()) => {}
             Err(db::claim::ClaimError::AlreadyConsumed) => {
                 let new_nonce = db::generate_dpop_nonce(store, NONCE_VALIDITY_SECONDS)
                     .await

@@ -13,21 +13,22 @@ use std::fmt;
 
 /// Outcome of a failed single-use claim attempt.
 ///
-/// `AlreadyConsumed` is the security-relevant case (replay detected).
-/// `Expired` and `NotFound` are operational cases — the claim was never
-/// valid or has aged out. `InvalidInput` is a client-input validation
-/// failure (e.g., oversized JTI) — callers should map it to the
-/// equivalent of `invalid_client`/400, not a 500 retry-prompting error.
-/// `Database` wraps an unexpected backend failure.
+/// Every primitive deliberately collapses its "lost" cases (not found,
+/// expired, already consumed, concurrent race loser) into the single
+/// `AlreadyConsumed` variant — the cases are indistinguishable from the
+/// caller's perspective and each is rejected the same way (invalid_grant
+/// / invalid_client). `InvalidInput` is a client-input validation
+/// failure (e.g., oversized JTI) — callers should map it to a 4xx so
+/// the client fixes its request rather than retrying. `Database` wraps
+/// an unexpected backend failure.
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum ClaimError {
-    /// A prior caller already claimed this token. Replay detected.
+    /// A prior caller already claimed this token, OR the token never
+    /// existed, OR has expired. Deliberately indistinguishable — callers
+    /// must not be able to probe state existence via response timing or
+    /// error messages.
     AlreadyConsumed,
-    /// The claim TTL has elapsed.
-    Expired,
-    /// No record exists for the supplied key.
-    NotFound,
     /// Caller-supplied input violated a validation bound (length, format,
     /// etc.). Not a database failure — the client must fix its request.
     InvalidInput(String),
@@ -39,8 +40,6 @@ impl fmt::Display for ClaimError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::AlreadyConsumed => write!(f, "already consumed (replay detected)"),
-            Self::Expired => write!(f, "claim expired"),
-            Self::NotFound => write!(f, "claim not found"),
             Self::InvalidInput(msg) => write!(f, "invalid input: {msg}"),
             Self::Database(msg) => write!(f, "database error: {msg}"),
         }

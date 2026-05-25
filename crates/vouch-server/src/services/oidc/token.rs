@@ -31,16 +31,28 @@ use subtle::ConstantTimeEq;
 use super::authorization::{AuthorizationCode, decode_authorization_code};
 
 /// Parameters for exchanging an authorization code for tokens (RFC 6749 Section 4.1.3).
+///
+/// The handler runs all client authentication (JWT, mTLS, secret, public-client
+/// validation) BEFORE calling `exchange_authorization_code`, then passes the
+/// fully-resolved [`AuthenticatedClient`] here. The exchange function only
+/// re-checks that the authenticated client matches the auth code's recorded
+/// client_id — it never runs an authentication step of its own.
 #[derive(Debug)]
 pub struct AuthCodeExchangeParams<'a> {
     /// RFC 6749 Section 4.1.3: The authorization code received from the authorization server.
     pub code: &'a str,
     /// RFC 6749 Section 4.1.3: The redirect URI (REQUIRED if included in authorization request).
     pub redirect_uri: Option<&'a str>,
-    /// RFC 6749 Section 2.3: Client credentials for authentication.
-    pub credentials: Option<&'a ClientCredentials>,
-    /// RFC 7523 Section 2.2: JWT-authenticated client (private_key_jwt), if used.
-    pub jwt_authenticated_client: Option<&'a AuthenticatedClient>,
+    /// RFC 6749 Section 2.3 / RFC 7523 Section 2.2 / RFC 8705 Section 2:
+    /// The client resolved by the handler, regardless of which
+    /// authentication method (`client_secret_basic`/`client_secret_post`,
+    /// `private_key_jwt`, `tls_client_auth`/`self_signed_tls_client_auth`,
+    /// or public-client validation) succeeded. The handler runs all
+    /// authentication so that `exchange_authorization_code` receives a
+    /// fully-resolved `AuthenticatedClient` and never re-runs an auth
+    /// step. `None` only when the handler was unable to determine the
+    /// client — exchange treats that as invalid_client.
+    pub authenticated_client: Option<&'a AuthenticatedClient>,
     /// RFC 7636 Section 4.5: The PKCE code verifier.
     pub code_verifier: Option<&'a str>,
     /// RFC 9449 Section 5: Validated DPoP proof (if present).
@@ -282,17 +294,39 @@ pub(crate) async fn exchange_authorization_code(
             "Authenticator not found",
         ))?;
 
-    // RFC 6749 Section 4.1.3: Authenticate the client (if credentials provided).
-    // If a `client_secret` was just verified, promote the caller-supplied
-    // `ClientAuthProof::None` to `ClientSecret(verification)`. The handler
-    // passes `None` for the secret case because the secret check happens
-    // here (after `enforce_single_use_code`, per RFC 6749 §10.5 ordering).
-    let (authenticated_client, secret_verification) =
-        authenticate_and_validate_client(state, params.credentials, &auth_code).await?;
-    let client_auth = match (client_auth, secret_verification) {
-        (ClientAuthProof::None, Some(v)) => ClientAuthProof::ClientSecret(v),
-        (other, _) => other,
-    };
+    // RFC 6749 Section 4.1.3: Verify the handler-authenticated client
+    // matches the authorization code's recorded client_id, and that PKCE
+    // (RFC 7636) is present when required for this client type. Client
+    // authentication itself (RFC 6749 §2.3 / RFC 7523 §2.2 / RFC 8705)
+    // ran at the handler before this function was called; here we only
+    // check consistency with the auth code.
+    let authenticated_client = params.authenticated_client;
+    if let Some(client) = authenticated_client
+        && client.client.client_id != auth_code.client_id
+    {
+        tracing::warn!(
+            "Client ID mismatch: token request from {} but code was issued to {}",
+            client.client.client_id,
+            auth_code.client_id
+        );
+        return Err(ServiceError::oauth(
+            OAuthErrorCode::InvalidGrant,
+            "Client ID mismatch",
+        ));
+    }
+    if let Some(client) = authenticated_client {
+        let pkce_required = client.is_public || client.client.application_type.requires_pkce();
+        if pkce_required && auth_code.code_challenge.is_none() {
+            tracing::warn!(
+                "Client {} requires PKCE but no code_challenge was present",
+                client.client.client_id
+            );
+            return Err(ServiceError::oauth(
+                OAuthErrorCode::InvalidRequest,
+                "PKCE required for this client type",
+            ));
+        }
+    }
 
     // Validate redirect_uri, PKCE, DPoP binding, and ACR
     validate_code_bindings(
@@ -346,15 +380,8 @@ pub(crate) async fn exchange_authorization_code(
 
     // Extract the per-client ID token signing algorithm.
     // Public/unauthenticated clients fall back to "RS256" per OIDC Core default.
-    let id_token_alg = authenticated_client
-        .as_ref()
-        .map(|c| c.client.id_token_signed_response_alg.as_str())
-        .or_else(|| {
-            params
-                .jwt_authenticated_client
-                .map(|c| c.client.id_token_signed_response_alg.as_str())
-        })
-        .unwrap_or("RS256");
+    let id_token_alg =
+        authenticated_client.map_or("RS256", |c| c.client.id_token_signed_response_alg.as_str());
 
     // Generate ID token (with at_hash computed from the access token)
     let id_token = generate_id_token(
@@ -376,7 +403,7 @@ pub(crate) async fn exchange_authorization_code(
     .await?;
 
     // Record usage event for registered clients
-    if let Some(ref auth_client) = authenticated_client
+    if let Some(auth_client) = authenticated_client
         && let Err(e) = db::record_oauth_event(
             &state.audit,
             &auth_client.client.id,
@@ -476,57 +503,6 @@ async fn enforce_single_use_code(
                 "Failed to validate authorization code".to_string(),
             ))
         }
-    }
-}
-
-/// Authenticate client credentials and validate against the authorization code.
-///
-/// Verifies the client_id matches the code's client_id and that PKCE is
-/// present when required for the client type.
-async fn authenticate_and_validate_client(
-    state: &Arc<AppState>,
-    credentials: Option<&ClientCredentials>,
-    auth_code: &AuthorizationCode,
-) -> ServiceResult<(
-    Option<AuthenticatedClient>,
-    Option<ClientSecretVerification>,
-)> {
-    let Some(creds) = credentials else {
-        return Ok((None, None));
-    };
-    match authenticate_client(state, creds).await {
-        Ok((client, secret_verification)) => {
-            if client.client.client_id != auth_code.client_id {
-                tracing::warn!(
-                    "Client ID mismatch: token request from {} but code was issued to {}",
-                    client.client.client_id,
-                    auth_code.client_id
-                );
-                return Err(ServiceError::oauth(
-                    OAuthErrorCode::InvalidGrant,
-                    "Client ID mismatch",
-                ));
-            }
-            let pkce_required = client.is_public || client.client.application_type.requires_pkce();
-            if pkce_required && auth_code.code_challenge.is_none() {
-                tracing::warn!(
-                    "Client {} requires PKCE but no code_challenge was present",
-                    client.client.client_id
-                );
-                return Err(ServiceError::oauth(
-                    OAuthErrorCode::InvalidRequest,
-                    "PKCE required for this client type",
-                ));
-            }
-            Ok((Some(client), secret_verification))
-        }
-        Err(ClientAuthError::InvalidClient | ClientAuthError::MissingClientId) => {
-            Err(ServiceError::oauth(
-                OAuthErrorCode::InvalidClient,
-                "Client authentication required",
-            ))
-        }
-        Err(e) => Err(e.into_service_error()),
     }
 }
 
