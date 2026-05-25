@@ -1401,6 +1401,46 @@ async fn test_rfc9126_par_already_consumed_returns_error_not_login() {
 }
 
 #[tokio::test]
+async fn test_rfc9126_par_accepts_non_fapi_private_key_jwt_without_jti() {
+    // RFC 7523 §3: `jti` is OPTIONAL. A non-FAPI `private_key_jwt` client
+    // that submits a valid assertion without a `jti` claim MUST be
+    // authenticated successfully. Regression test for PR #409 cursor-bot
+    // finding 3299722437 — the proof-resolution previously conflated
+    // "JTI committed" with "JWT auth happened" and rejected this client.
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "par-no-jti@example.com").await;
+    let (client, pkcs8_bytes) = create_test_jwt_client(&state.store, &user.id).await;
+
+    let assertion =
+        build_client_assertion_omit_jti(&client.client_id, &state.config().base_url, &pkcs8_bytes);
+
+    let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+    let challenge = sha256_base64url(verifier);
+    let body = format!(
+        "response_type=code\
+         &client_id={}\
+         &redirect_uri={}\
+         &scope=openid\
+         &code_challenge={challenge}\
+         &code_challenge_method=S256\
+         &client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer\
+         &client_assertion={assertion}",
+        client.client_id,
+        urlencoding::encode("https://example.com/callback"),
+    );
+
+    let (status, response_body) = http_post_form(&app, "/oauth/par", &body, &[]).await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "non-FAPI private_key_jwt without jti must succeed at PAR (RFC 7523 §3): {response_body}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&response_body).expect("Valid JSON");
+    assert!(json["request_uri"].is_string());
+}
+
+#[tokio::test]
 async fn test_rfc9126_par_jti_replay_returns_invalid_client() {
     // Regression: PAR's commit_jti() failure must return 401 invalid_client
     // (the JTI replay is a client-auth failure), not 500 server_error.

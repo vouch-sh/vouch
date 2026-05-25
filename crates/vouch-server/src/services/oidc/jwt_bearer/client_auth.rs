@@ -34,6 +34,23 @@ pub struct PendingJti {
     max_lifetime: i64,
 }
 
+/// Witness that a JWT client assertion passed RFC 7523 §3 validation
+/// (signature verified against the client's JWKS, audience matched, exp/nbf
+/// within clock skew, `iss == sub == client_id`, client is registered for
+/// `private_key_jwt`).
+///
+/// Constructible only inside this module — returned exclusively by
+/// [`authenticate_client_jwt`]. This is the structural answer to
+/// "did JWT client authentication happen?", separate from
+/// [`JwtAssertionJtiClaim`] which answers "was the JTI atomically
+/// committed for replay prevention?". The two are independent because
+/// RFC 7523 §3 makes `jti` OPTIONAL for non-FAPI clients — auth can
+/// succeed without a JTI commit.
+#[derive(Debug)]
+pub struct JwtAuthSucceeded {
+    _private: (),
+}
+
 impl PendingJti {
     /// Commit this pending JTI to the replay-prevention database.
     ///
@@ -99,17 +116,22 @@ impl PendingJti {
 /// * `client_id_hint` - Optional client_id from the request body (for lookup)
 ///
 /// # Returns
-/// The authenticated client and a pending JTI that MUST be committed via
-/// [`PendingJti::commit`] immediately before grant-state persistence
-/// (`exchange_*` / `store_par_request`). If a validator earlier in the
-/// request rejects with a retryable error (in particular DPoP
-/// `use_dpop_nonce`, RFC 9449 §4.3), drop the [`PendingJti`] without
-/// committing so the client can retry with the same assertion.
+/// On success, returns:
+/// - `AuthenticatedClient` — the resolved OAuth client record;
+/// - `PendingJti` — caller MUST `.commit()` it immediately before grant-state
+///   persistence (`exchange_*` / `store_par_request`). If a later validator
+///   returns a retryable error (notably DPoP `use_dpop_nonce`, RFC 9449 §4.3),
+///   drop the [`PendingJti`] without committing so the client can retry with
+///   the same assertion;
+/// - [`JwtAuthSucceeded`] — the structural witness that RFC 7523 §3 validation
+///   passed. Thread it forward to construct
+///   [`crate::services::auth::ClientAuthProof::PrivateKeyJwt`] regardless of
+///   whether the assertion carried a `jti`.
 pub async fn authenticate_client_jwt(
     state: &Arc<AppState>,
     client_assertion: &str,
     client_id_hint: Option<&str>,
-) -> Result<(AuthenticatedClient, PendingJti), ClientAuthError> {
+) -> Result<(AuthenticatedClient, PendingJti, JwtAuthSucceeded), ClientAuthError> {
     // 1. Parse JWT header to get algorithm and kid
     let header = parse_assertion_header(client_assertion).map_err(|e| {
         tracing::debug!("JWT assertion header parse failed: {e}");
@@ -297,6 +319,7 @@ pub async fn authenticate_client_jwt(
             is_public: false,
         },
         pending_jti,
+        JwtAuthSucceeded { _private: () },
     ))
 }
 

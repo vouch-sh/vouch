@@ -811,6 +811,132 @@ async fn test_non_fapi_client_accepts_token_endpoint_audience() {
 }
 
 // ========================================================================
+// RFC 7523 §3 — `jti` is OPTIONAL for non-FAPI clients
+//
+// Regression tests for PR #409 cursor-bot finding 3299919906. Previously
+// the proof-resolution in each grant handler conflated "JTI committed"
+// with "JWT auth happened" — a non-FAPI client legitimately omitting
+// `jti` was authenticated by `authenticate_client_jwt` but then rejected
+// by the downstream proof construction (fell through to NoClientAuth /
+// "Client authentication required").
+// ========================================================================
+
+#[tokio::test]
+async fn test_rfc7523_authorization_code_grant_accepts_non_fapi_jwt_without_jti() {
+    // Non-FAPI private_key_jwt + authorization_code grant + no jti → 200.
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "no-jti-authcode@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let (client, pkcs8_bytes) = create_test_jwt_client(&state.store, &user.id).await;
+
+    let scope_set = ScopeSet::parse("openid");
+    let code = issue_authorization_code(
+        &state,
+        AuthorizationCodeParams {
+            client_id: &client.client_id,
+            redirect_uri: "https://example.com/callback",
+            user_id: &user.id,
+            email: &user.email,
+            authenticator_id: &auth_id,
+            aaguid: None,
+            scope: &scope_set,
+            nonce: None,
+            code_challenge: None,
+            code_challenge_method: None,
+            resource: None,
+            acr_values: None,
+            dpop_jkt: None,
+            auth_code_lifetime_seconds:
+                crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
+            authorization_details: None,
+            auth_time: None,
+        },
+    )
+    .await
+    .expect("issue authorization code");
+
+    let token_endpoint = format!("{}/oauth/token", state.config().base_url);
+    let assertion =
+        build_client_assertion_omit_jti(&client.client_id, &token_endpoint, &pkcs8_bytes);
+
+    let body = format!(
+        "grant_type=authorization_code&code={}&redirect_uri={}\
+         &client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer\
+         &client_assertion={assertion}",
+        code,
+        urlencoding::encode("https://example.com/callback"),
+    );
+
+    let (status, resp_body) = http_post_form(&app, "/oauth/token", &body, &[]).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "authorization_code + private_key_jwt without jti must succeed (RFC 7523 §3): {resp_body}"
+    );
+    let response: serde_json::Value = serde_json::from_str(&resp_body).expect("Valid JSON");
+    assert!(response.get("access_token").is_some());
+}
+
+#[tokio::test]
+async fn test_rfc7523_client_credentials_grant_accepts_non_fapi_jwt_without_jti() {
+    // Non-FAPI private_key_jwt + client_credentials grant + no jti → not 401.
+    // The grant itself may be denied (unauthorized_client) because the test
+    // client isn't enabled for client_credentials, but client auth itself
+    // must succeed — `invalid_client` would mean auth was rejected.
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "no-jti-cc@example.com").await;
+    let (client, pkcs8_bytes) = create_test_jwt_client(&state.store, &user.id).await;
+
+    let token_endpoint = format!("{}/oauth/token", state.config().base_url);
+    let assertion =
+        build_client_assertion_omit_jti(&client.client_id, &token_endpoint, &pkcs8_bytes);
+
+    let body = format!(
+        "grant_type=client_credentials\
+         &client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer\
+         &client_assertion={assertion}",
+    );
+
+    let (status, resp_body) = http_post_form(&app, "/oauth/token", &body, &[]).await;
+    let error: serde_json::Value = serde_json::from_str(&resp_body).expect("Valid JSON");
+    assert_ne!(
+        error["error"], "invalid_client",
+        "client_credentials + private_key_jwt without jti must pass client auth \
+         (status={status}, RFC 7523 §3): {resp_body}"
+    );
+}
+
+#[tokio::test]
+async fn test_rfc7523_token_exchange_grant_accepts_non_fapi_jwt_without_jti() {
+    // Non-FAPI private_key_jwt + token_exchange grant + no jti → not 401.
+    // Grant may fail downstream on subject_token validation, but client
+    // auth itself must succeed.
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "no-jti-exchange@example.com").await;
+    let (client, pkcs8_bytes) = create_test_jwt_client(&state.store, &user.id).await;
+
+    let token_endpoint = format!("{}/oauth/token", state.config().base_url);
+    let assertion =
+        build_client_assertion_omit_jti(&client.client_id, &token_endpoint, &pkcs8_bytes);
+
+    let body = format!(
+        "grant_type=urn:ietf:params:oauth:grant-type:token-exchange\
+         &subject_token=dummy\
+         &subject_token_type=urn:ietf:params:oauth:token-type:access_token\
+         &client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer\
+         &client_assertion={assertion}",
+    );
+
+    let (status, resp_body) = http_post_form(&app, "/oauth/token", &body, &[]).await;
+    let error: serde_json::Value = serde_json::from_str(&resp_body).expect("Valid JSON");
+    assert_ne!(
+        error["error"], "invalid_client",
+        "token_exchange + private_key_jwt without jti must pass client auth \
+         (status={status}, RFC 7523 §3): {resp_body}"
+    );
+}
+
+// ========================================================================
 // Issue #391 — concurrent JTI replay must not produce multiple tokens.
 //
 // Before the fix, `commit_jti()` ran AFTER `exchange_*()`, so N concurrent

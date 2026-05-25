@@ -396,14 +396,49 @@ pub(crate) enum GrantProof {
     TestingOnly,
 }
 
+/// Witness bundle for a `private_key_jwt` (RFC 7523) client authentication.
+///
+/// Composes the two independent invariants:
+/// - **auth** — RFC 7523 §3 validation passed (signature, audience, timing,
+///   `iss == sub == client_id`, client configured for `private_key_jwt`).
+///   Constructible only by
+///   [`crate::services::oidc::jwt_bearer::client_auth::authenticate_client_jwt`].
+/// - **jti** — present when the assertion carried a `jti` claim and the atomic
+///   replay-prevention insert succeeded. `None` is valid for non-FAPI clients
+///   (RFC 7523 §3 makes `jti` OPTIONAL); FAPI 2.0 §5.3.2.1 enforces presence
+///   upstream so a FAPI client reaching this struct cannot have `jti: None`.
+///
+/// Fields are private; construction goes through [`Self::new`] so callers
+/// must supply both witnesses. Witnesses are consumed by drop.
+#[derive(Debug)]
+pub(crate) struct JwtClientAuthProof {
+    _auth: crate::services::oidc::jwt_bearer::client_auth::JwtAuthSucceeded,
+    _jti: Option<crate::db::JwtAssertionJtiClaim>,
+}
+
+impl JwtClientAuthProof {
+    pub(crate) fn new(
+        auth: crate::services::oidc::jwt_bearer::client_auth::JwtAuthSucceeded,
+        jti: Option<crate::db::JwtAssertionJtiClaim>,
+    ) -> Self {
+        Self {
+            _auth: auth,
+            _jti: jti,
+        }
+    }
+}
+
 /// Witness for the client-authentication replay primitive consumed during
 /// token issuance.
 #[derive(Debug)]
 pub(crate) enum ClientAuthProof {
-    /// `private_key_jwt` (RFC 7523) — the JTI was atomically committed to
-    /// the replay-prevention table. The carried `JwtAssertionJtiClaim` is
-    /// the witness returned from `db::store_jwt_assertion_jti`.
-    PrivateKeyJwt(crate::db::JwtAssertionJtiClaim),
+    /// `private_key_jwt` (RFC 7523). Carries the auth-succeeded witness plus
+    /// an optional JTI replay-prevention claim — see [`JwtClientAuthProof`].
+    #[expect(
+        dead_code,
+        reason = "witness payload is consumed by drop, not by field access"
+    )]
+    PrivateKeyJwt(JwtClientAuthProof),
 
     /// `client_secret_basic` / `client_secret_post` (RFC 6749 §2.3.1).
     /// Carries the verification witness from

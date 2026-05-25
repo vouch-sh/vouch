@@ -160,6 +160,10 @@ pub(crate) struct ClientAuthOutcome {
     pub(crate) client_id: String,
     /// `Some` only for JWT-authenticated clients — caller must commit.
     pub(crate) pending_jti: Option<PendingJti>,
+    /// `Some` only for JWT-authenticated clients — pair with `pending_jti.commit()`
+    /// to construct `ClientAuthProof::PrivateKeyJwt`. Independent of jti presence
+    /// because RFC 7523 §3 makes `jti` OPTIONAL for non-FAPI clients.
+    pub(crate) jwt_auth: Option<crate::services::oidc::jwt_bearer::client_auth::JwtAuthSucceeded>,
     /// `Some` only when a `client_secret` was validated.
     pub(crate) secret_verification: Option<crate::services::oidc::token::ClientSecretVerification>,
 }
@@ -184,6 +188,7 @@ pub(crate) async fn complete_client_auth(
                     client,
                     client_id,
                     pending_jti: None,
+                    jwt_auth: None,
                     secret_verification,
                 })),
                 Err(e) => Err(e.into_service_error().into_oauth_response().into_response()),
@@ -193,12 +198,13 @@ pub(crate) async fn complete_client_auth(
             client_assertion,
             client_id,
         } => match authenticate_client_jwt(state, &client_assertion, client_id.as_deref()).await {
-            Ok((client, pending_jti)) => {
+            Ok((client, pending_jti, jwt_auth)) => {
                 let cid = client.client.client_id.clone();
                 Ok(Some(ClientAuthOutcome {
                     client,
                     client_id: cid,
                     pending_jti: Some(pending_jti),
+                    jwt_auth: Some(jwt_auth),
                     secret_verification: None,
                 }))
             }
@@ -215,6 +221,7 @@ pub(crate) async fn complete_client_auth(
                     client,
                     client_id,
                     pending_jti: None,
+                    jwt_auth: None,
                     secret_verification,
                 })),
                 Err(e) => Err(e.into_service_error().into_oauth_response().into_response()),

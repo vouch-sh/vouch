@@ -578,7 +578,7 @@ async fn handle_authorization_code_grant(
     let has_jwt_assertion = params.client_assertion.is_some();
 
     // For JWT assertion, authenticate and extract the client
-    let (jwt_authenticated, jwt_pending_jti) = if has_jwt_assertion {
+    let (jwt_authenticated, jwt_pending_jti, jwt_auth) = if has_jwt_assertion {
         let client_auth = match extract_client_auth(&headers, &params) {
             Ok(auth) => auth,
             Err(resp) => return resp,
@@ -589,14 +589,14 @@ async fn handle_authorization_code_grant(
         } = client_auth
         {
             match authenticate_client_jwt(&state, &client_assertion, client_id.as_deref()).await {
-                Ok((client, pending_jti)) => (Some(client), Some(pending_jti)),
+                Ok((client, pending_jti, auth)) => (Some(client), Some(pending_jti), Some(auth)),
                 Err(e) => return e.into_service_error().into_oauth_response().into_response(),
             }
         } else {
-            (None, None)
+            (None, None, None)
         }
     } else {
-        (None, None)
+        (None, None, None)
     };
 
     // RFC 9449 Section 5: Validate DPoP proof if present. Must happen
@@ -639,8 +639,16 @@ async fn handle_authorization_code_grant(
         Ok(c) => c,
         Err(r) => return r,
     };
-    let (authenticated_client, client_auth) = match (jti_claim, jwt_authenticated, non_jwt_auth) {
-        (Some(claim), Some(client), _) => (client, ClientAuthProof::PrivateKeyJwt(claim)),
+    // RFC 7523 §3: `jti` is OPTIONAL. Gate on `jwt_auth` (the auth-succeeded
+    // witness), not on `jti_claim` — a non-FAPI client may legitimately omit
+    // `jti`, in which case `jti_claim == None` but JWT auth still succeeded.
+    let (authenticated_client, client_auth) = match (jwt_authenticated, jwt_auth, non_jwt_auth) {
+        (Some(client), Some(auth), _) => (
+            client,
+            ClientAuthProof::PrivateKeyJwt(crate::services::auth::JwtClientAuthProof::new(
+                auth, jti_claim,
+            )),
+        ),
         (_, _, Some(pair)) => pair,
         _ => {
             return ServiceError::oauth(
@@ -773,6 +781,7 @@ async fn handle_client_credentials_grant(
     };
     let authenticated_client = any_auth.client;
     let pending_jti = any_auth.pending_jti;
+    let jwt_auth = any_auth.jwt_auth;
     let secret_verification = any_auth.secret_verification;
 
     // RFC 6749 Section 4.4: client_credentials requires a confidential client
@@ -805,8 +814,13 @@ async fn handle_client_credentials_grant(
     // as public via `NoClientAuth::for_public_client` (which fails if
     // the client is confidential — closing the "developer forgot to
     // authenticate" hole).
-    let client_auth = if let Some(claim) = jti_claim {
-        ClientAuthProof::PrivateKeyJwt(claim)
+    //
+    // RFC 7523 §3: `jti` is OPTIONAL — gate the JWT arm on `jwt_auth`,
+    // not on `jti_claim`, so a non-FAPI client without `jti` is accepted.
+    let client_auth = if let Some(auth) = jwt_auth {
+        ClientAuthProof::PrivateKeyJwt(crate::services::auth::JwtClientAuthProof::new(
+            auth, jti_claim,
+        ))
     } else {
         match (secret_verification, mtls_verification) {
             (Some(_), Some(_)) => {
@@ -921,6 +935,7 @@ async fn handle_token_exchange_grant(
     };
     let authenticated_client = any_auth.client;
     let pending_jti = any_auth.pending_jti;
+    let jwt_auth = any_auth.jwt_auth;
     let secret_verification = any_auth.secret_verification;
 
     // RFC 9449 Section 5: Validate DPoP proof if present at the token endpoint
@@ -989,8 +1004,13 @@ async fn handle_token_exchange_grant(
     // clients per RFC 8693, but `NoClientAuth::for_public_client` is
     // still the right check for the "no method succeeded" case — a
     // confidential client must authenticate.
-    let client_auth = if let Some(claim) = jti_claim {
-        ClientAuthProof::PrivateKeyJwt(claim)
+    //
+    // RFC 7523 §3: `jti` is OPTIONAL — gate the JWT arm on `jwt_auth`,
+    // not on `jti_claim`, so a non-FAPI client without `jti` is accepted.
+    let client_auth = if let Some(auth) = jwt_auth {
+        ClientAuthProof::PrivateKeyJwt(crate::services::auth::JwtClientAuthProof::new(
+            auth, jti_claim,
+        ))
     } else {
         match (secret_verification, mtls_verification) {
             (Some(_), Some(_)) => {
@@ -1084,12 +1104,12 @@ async fn handle_fido2_assertion_grant(
         Err(resp) => return resp,
     };
 
-    let (jwt_authenticated, jwt_pending_jti) = match client_auth {
+    let (jwt_authenticated, jwt_pending_jti, jwt_auth) = match client_auth {
         ExtractedClientAuth::JwtAssertion {
             client_assertion,
             client_id,
         } => match authenticate_client_jwt(&state, &client_assertion, client_id.as_deref()).await {
-            Ok((client, pending_jti)) => (client, pending_jti),
+            Ok((client, pending_jti, auth)) => (client, pending_jti, auth),
             Err(e) => return e.into_service_error().into_oauth_response().into_response(),
         },
         _ => {
@@ -1144,22 +1164,19 @@ async fn handle_fido2_assertion_grant(
     };
 
     // FIDO2 assertion grant requires `private_key_jwt` client auth (the
-    // CLI signs assertions with its FAPI key). `jwt_pending_jti` is
-    // always present here — `commit_optional_jti(Some(_))` cannot return
-    // `Ok(None)`.
-    let jti_claim = match commit_optional_jti(&state, Some(jwt_pending_jti), "fido2_assertion")
-        .await
-    {
-        Ok(Some(c)) => c,
-        Ok(None) => {
-            tracing::error!("fido2_assertion: commit_optional_jti returned None for Some input");
-            return ServiceError::Internal("internal_error".to_string())
-                .into_oauth_response()
-                .into_response();
-        }
-        Err(r) => return r,
-    };
-    let client_auth = ClientAuthProof::PrivateKeyJwt(jti_claim);
+    // CLI signs assertions with its FAPI key). The CLI is a FAPI client
+    // and therefore always emits `jti`, so `jti_claim` is expected to be
+    // `Some` — but the proof construction does not depend on it:
+    // `jwt_auth` is the structural witness for "RFC 7523 §3 validation
+    // passed", and `jti` is an additive replay-prevention witness.
+    let jti_claim =
+        match commit_optional_jti(&state, Some(jwt_pending_jti), "fido2_assertion").await {
+            Ok(c) => c,
+            Err(r) => return r,
+        };
+    let client_auth = ClientAuthProof::PrivateKeyJwt(
+        crate::services::auth::JwtClientAuthProof::new(jwt_auth, jti_claim),
+    );
 
     match crate::services::oidc::fido2_grant::exchange_fido2_assertion(
         &state,

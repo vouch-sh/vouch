@@ -192,6 +192,7 @@ pub async fn par(
     };
     let authenticated_client = any_auth.client;
     let pending_jti = any_auth.pending_jti;
+    let jwt_auth = any_auth.jwt_auth;
     let secret_verification = any_auth.secret_verification;
 
     // RFC 8705 §2 / FAPI 2.0 §5.2.2: mTLS dispatch. When the client is
@@ -514,8 +515,15 @@ pub async fn par(
     // Resolve client-auth proof by precedence: JWT → secret → mTLS. If
     // none succeeded, fall back to `for_public_client` against the loaded
     // client — fails for confidential clients that should have authed.
-    let par_client_auth = if let Some(claim) = jti_claim {
-        ClientAuthProof::PrivateKeyJwt(claim)
+    //
+    // RFC 7523 §3 makes `jti` OPTIONAL — so JWT auth can succeed with
+    // `jti_claim == None`. We gate on the `jwt_auth` witness, not on
+    // `jti_claim`, to avoid silently rejecting a non-FAPI client that
+    // legitimately omitted `jti`.
+    let par_client_auth = if let Some(auth) = jwt_auth {
+        ClientAuthProof::PrivateKeyJwt(crate::services::auth::JwtClientAuthProof::new(
+            auth, jti_claim,
+        ))
     } else if let Some(s) = secret_verification {
         ClientAuthProof::ClientSecret(s)
     } else if let Some(v) = mtls_verification {
