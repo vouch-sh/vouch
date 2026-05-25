@@ -14,6 +14,5 @@ pub mod client_auth;
 pub mod jwks;
 pub mod validate;
 
-pub use client_auth::commit_jti;
 pub use jwks::{find_matching_key_with_refresh_client, resolve_client_jwks};
 pub use validate::SUPPORTED_ALGORITHMS;

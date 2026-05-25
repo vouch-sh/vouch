@@ -1,18 +1,18 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Pushed Authorization Request (PAR) endpoint handler (RFC 9126).
 
-use super::client_auth::{ClientAuthFields, authenticate_client_any, extract_client_auth};
+use super::client_auth::{ClientAuthFields, complete_client_auth, extract_client_auth};
 use crate::AppState;
 use crate::db::par::PAR_EXPIRES_IN;
 use crate::db::{self, CreateParParams};
 use crate::services::ServiceError;
+use crate::services::auth::{ClientAuthProof, ParCreationProof};
 use crate::services::error::OAuthErrorResponse;
 use crate::services::oidc::DpopError;
 use crate::services::oidc::authorization::{
     AuthorizeRequestParams, Prompt, require_pkce_for_client, validate_authorize_request,
 };
 use crate::services::oidc::jar::{validate_request_object, validate_request_object_header};
-use crate::services::oidc::jwt_bearer::commit_jti;
 use crate::services::oidc::token::{ClientAuthError, validate_dpop_if_present};
 use axum::{
     Json,
@@ -142,6 +142,7 @@ impl ClientAuthFields for ParRequest {
 /// Returns 201 Created with a JSON body containing `request_uri` and `expires_in`.
 pub async fn par(
     State(state): State<Arc<AppState>>,
+    client_cert: crate::handlers::extractors::OptionalClientCert,
     headers: HeaderMap,
     axum::Form(params): axum::Form<ParRequest>,
 ) -> Response {
@@ -179,17 +180,56 @@ pub async fn par(
     };
 
     // RFC 9126 Section 2: Client authentication is REQUIRED
-    let Some((authenticated_client, _client_id, pending_jti)) =
-        (match authenticate_client_any(&state, client_auth).await {
-            Ok(result) => result,
-            Err(resp) => return resp,
-        })
-    else {
+    let Some(any_auth) = (match complete_client_auth(&state, client_auth).await {
+        Ok(result) => result,
+        Err(resp) => return resp,
+    }) else {
         return par_error_response(
             StatusCode::UNAUTHORIZED,
             "invalid_client",
             "Client authentication is required for pushed authorization requests",
         );
+    };
+    let authenticated_client = any_auth.client;
+    let pending_jti = any_auth.pending_jti;
+    let jwt_auth = any_auth.jwt_auth;
+    let secret_verification = any_auth.secret_verification;
+
+    // RFC 8705 §2 / FAPI 2.0 §5.2.2: mTLS dispatch. When the client is
+    // registered with `tls_client_auth` or `self_signed_tls_client_auth`
+    // and no body-level credential has authenticated it, verify the TLS
+    // client certificate. Must run before FAPI auth-method validation so
+    // a successfully mTLS-authenticated client is accepted by that gate.
+    let mtls_verification = if pending_jti.is_none()
+        && secret_verification.is_none()
+        && matches!(
+            authenticated_client.client.token_endpoint_auth_method,
+            crate::db::TokenEndpointAuthMethod::TlsClientAuth
+                | crate::db::TokenEndpointAuthMethod::SelfSignedTlsClientAuth
+        ) {
+        let Some(cert) = client_cert.0.as_ref() else {
+            return par_error_response(
+                StatusCode::UNAUTHORIZED,
+                "invalid_client",
+                "mTLS client certificate required",
+            );
+        };
+        let jwks_cache_value =
+            crate::db::get_jwks_cache(&state.store, &authenticated_client.client.id)
+                .await
+                .ok()
+                .flatten()
+                .map(|c| c.value);
+        match crate::services::oidc::token::authenticate_client_mtls(
+            &authenticated_client.client,
+            cert,
+            jwks_cache_value.as_ref(),
+        ) {
+            Ok(verification) => Some(verification),
+            Err(e) => return e.into_service_error().into_oauth_response().into_response(),
+        }
+    } else {
+        None
     };
 
     // FAPI 2.0: Validate client authentication method.
@@ -447,35 +487,62 @@ pub async fn par(
         response_mode,
     };
 
-    // SAFETY: commit_jti() MUST run AFTER DPoP nonce validation (so use_dpop_nonce
-    // retry leaves the JTI unconsumed) and BEFORE store_par_request() so that
-    // concurrent replays of the same assertion cannot persist multiple PAR
-    // requests — see issue #391. A follow-up will replace this comment with a
-    // ParCreation witness type.
-    if let Some(ref pjti) = pending_jti
-        && let Err(e) = commit_jti(&state, pjti).await
-    {
-        tracing::warn!("JTI commit failed for PAR: {e:?}");
-        // Distinguish replay (client-auth failure) from transient DB error
-        // (server problem). Returning 401 for a DB outage tells well-behaved
-        // clients to abandon credentials they should reuse on retry; returning
-        // 500 for a replay tempts them to retry-loop with a consumed JTI.
-        return match e {
-            ClientAuthError::InvalidCredentials => par_error_response(
-                StatusCode::UNAUTHORIZED,
-                "invalid_client",
-                "Client authentication failed",
-            ),
-            _ => par_error_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "server_error",
-                "Failed to complete client authentication",
-            ),
+    let jti_claim = match pending_jti {
+        Some(p) => match p.commit(&state).await {
+            Ok(claim) => claim,
+            Err(e) => {
+                tracing::warn!("JTI commit failed for PAR: {e:?}");
+                // Distinguish replay (client-auth failure) from transient DB error
+                // (server problem). Returning 401 for a DB outage tells well-behaved
+                // clients to abandon credentials they should reuse on retry; returning
+                // 500 for a replay tempts them to retry-loop with a consumed JTI.
+                return match e {
+                    ClientAuthError::InvalidCredentials => par_error_response(
+                        StatusCode::UNAUTHORIZED,
+                        "invalid_client",
+                        "Client authentication failed",
+                    ),
+                    _ => par_error_response(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "server_error",
+                        "Failed to complete client authentication",
+                    ),
+                };
+            }
+        },
+        None => None,
+    };
+    // Resolve client-auth proof by precedence: JWT → secret → mTLS. If
+    // none succeeded, fall back to `for_public_client` against the loaded
+    // client — fails for confidential clients that should have authed.
+    //
+    // RFC 7523 §3 makes `jti` OPTIONAL — so JWT auth can succeed with
+    // `jti_claim == None`. We gate on the `jwt_auth` witness, not on
+    // `jti_claim`, to avoid silently rejecting a non-FAPI client that
+    // legitimately omitted `jti`.
+    let par_client_auth = if let Some(auth) = jwt_auth {
+        ClientAuthProof::PrivateKeyJwt(crate::services::auth::JwtClientAuthProof::new(
+            auth, jti_claim,
+        ))
+    } else if let Some(s) = secret_verification {
+        ClientAuthProof::ClientSecret(s)
+    } else if let Some(v) = mtls_verification {
+        ClientAuthProof::MutualTls(v)
+    } else {
+        let witness = match crate::services::auth::NoClientAuth::for_public_client(
+            &authenticated_client.client,
+        ) {
+            Ok(w) => w,
+            Err(svc) => return svc.into_oauth_response().into_response(),
         };
-    }
+        ClientAuthProof::NoAuth(witness)
+    };
+    let proof = ParCreationProof {
+        client_auth: par_client_auth,
+    };
 
     // RFC 9126 Section 2.2: Return 201 Created
-    match db::create_pushed_authorization_request(&state.store, create_params).await {
+    match db::create_pushed_authorization_request(&state.store, create_params, proof).await {
         Ok((_id, request_uri)) => (
             StatusCode::CREATED,
             Json(ParResponse {

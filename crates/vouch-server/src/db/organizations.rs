@@ -424,9 +424,7 @@ pub async fn remove_additional_domain(
 ) -> Result<Option<DomainRemovalSummary>> {
     let normalized = normalize_domain(domain)?;
 
-    let mut tx = store.begin().await?;
-
-    let org_doc = tx
+    let org_doc = store
         .get::<OrganizationDoc>(org_id)
         .await?
         .ok_or_else(|| anyhow::anyhow!("organization not found"))?;
@@ -439,10 +437,9 @@ pub async fn remove_additional_domain(
         return Ok(None);
     }
 
-    if !tx.compare_and_update(org_id, version, &data).await? {
+    if !store.compare_and_update(org_id, version, &data).await? {
         bail!("organization was modified concurrently; please retry");
     }
-    tx.commit().await?;
 
     // Revoke sessions for org users whose email's domain matches the removed
     // entry. Done OUTSIDE the org-doc transaction: per-user session deletes
@@ -766,8 +763,7 @@ pub async fn record_recheck_result(
 ) -> Result<RecheckEffect> {
     let normalized = normalize_domain(domain)?;
 
-    let mut tx = store.begin().await?;
-    let Some(org_doc) = tx.get::<OrganizationDoc>(org_id).await? else {
+    let Some(org_doc) = store.get::<OrganizationDoc>(org_id).await? else {
         return Ok(RecheckEffect::NotFound);
     };
     let version = org_doc.version;
@@ -818,7 +814,7 @@ pub async fn record_recheck_result(
         }
     };
 
-    if !tx.compare_and_update(org_id, version, &data).await? {
+    if !store.compare_and_update(org_id, version, &data).await? {
         // Lost a race against another writer (admin re-verify, concurrent
         // cleanup tick, or remove). The DB state reflects the winning
         // writer's change, not ours — so the in-memory `effect` value is
@@ -827,7 +823,6 @@ pub async fn record_recheck_result(
         // any actual flip is fired by whichever writer's update succeeded.
         return Ok(RecheckEffect::StillVerified);
     }
-    tx.commit().await?;
     Ok(effect)
 }
 

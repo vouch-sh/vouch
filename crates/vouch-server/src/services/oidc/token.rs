@@ -15,7 +15,8 @@ use crate::crypto::hash_token;
 use crate::db::{self, Authenticator, OAuthClient, Session, User};
 use crate::redact_email;
 use crate::services::auth::{
-    AuthMethod, CreateOAuthTokenParams, create_oauth_access_token, decode_token,
+    AuthMethod, ClientAuthProof, CreateOAuthTokenParams, GrantProof, TokenIssuanceProof,
+    create_oauth_access_token, decode_token,
 };
 use crate::services::{OAuthErrorCode, ServiceError, ServiceResult};
 use aws_lc_rs::digest::{self, SHA256};
@@ -30,16 +31,28 @@ use subtle::ConstantTimeEq;
 use super::authorization::{AuthorizationCode, decode_authorization_code};
 
 /// Parameters for exchanging an authorization code for tokens (RFC 6749 Section 4.1.3).
+///
+/// The handler runs all client authentication (JWT, mTLS, secret, public-client
+/// validation) BEFORE calling `exchange_authorization_code`, then passes the
+/// fully-resolved [`AuthenticatedClient`] here. The exchange function only
+/// re-checks that the authenticated client matches the auth code's recorded
+/// client_id — it never runs an authentication step of its own.
 #[derive(Debug)]
 pub struct AuthCodeExchangeParams<'a> {
     /// RFC 6749 Section 4.1.3: The authorization code received from the authorization server.
     pub code: &'a str,
     /// RFC 6749 Section 4.1.3: The redirect URI (REQUIRED if included in authorization request).
     pub redirect_uri: Option<&'a str>,
-    /// RFC 6749 Section 2.3: Client credentials for authentication.
-    pub credentials: Option<&'a ClientCredentials>,
-    /// RFC 7523 Section 2.2: JWT-authenticated client (private_key_jwt), if used.
-    pub jwt_authenticated_client: Option<&'a AuthenticatedClient>,
+    /// RFC 6749 Section 2.3 / RFC 7523 Section 2.2 / RFC 8705 Section 2:
+    /// The client resolved by the handler, regardless of which
+    /// authentication method (`client_secret_basic`/`client_secret_post`,
+    /// `private_key_jwt`, `tls_client_auth`/`self_signed_tls_client_auth`,
+    /// or public-client validation) succeeded. The handler runs all
+    /// authentication so that `exchange_authorization_code` receives a
+    /// fully-resolved `AuthenticatedClient` and never re-runs an auth
+    /// step. `None` only when the handler was unable to determine the
+    /// client — exchange treats that as invalid_client.
+    pub authenticated_client: Option<&'a AuthenticatedClient>,
     /// RFC 7636 Section 4.5: The PKCE code verifier.
     pub code_verifier: Option<&'a str>,
     /// RFC 9449 Section 5: Validated DPoP proof (if present).
@@ -94,6 +107,53 @@ pub struct AuthenticatedClient {
     pub client: OAuthClient,
     /// Whether this is a public client (no secret required).
     pub is_public: bool,
+}
+
+/// Witness that an OAuth client successfully authenticated via
+/// `client_secret_basic` / `client_secret_post` (RFC 6749 Section 2.3.1).
+///
+/// Construction is private to this module — the only path to an instance
+/// is a successful return from [`authenticate_client`] when the client's
+/// stored secret hash matched the constant-time comparison against the
+/// caller-supplied secret. Holding this witness is compile-time evidence
+/// that secret-based client auth succeeded for this request.
+///
+/// Intentionally not `Clone`. The `#[must_use]` ensures the witness is
+/// bound at the call site (typically threaded into
+/// `ClientAuthProof::ClientSecret(verification)`).
+#[must_use = "client_secret authentication succeeded; bind this witness so \
+              it can be threaded into the ClientAuthProof"]
+#[derive(Debug)]
+pub struct ClientSecretVerification {
+    _private: (),
+}
+
+/// Witness that an OAuth client successfully authenticated via mTLS
+/// (RFC 8705 Section 2) — either PKI (`tls_client_auth`) or self-signed
+/// (`self_signed_tls_client_auth`).
+///
+/// Construction is private to this module — the only path to an instance
+/// is a successful return from [`authenticate_client_mtls`] after the
+/// presented certificate validated against the client's registered
+/// identity (subject DN / SAN) or its self-signed x5c JWKS entry.
+///
+/// Intentionally not `Clone`. The `#[must_use]` ensures the witness is
+/// bound at the call site (typically threaded into
+/// `ClientAuthProof::MutualTls(verification)`).
+#[must_use = "mTLS client authentication succeeded; bind this witness so \
+              it can be threaded into the ClientAuthProof"]
+#[derive(Debug)]
+pub struct MtlsCertVerification {
+    _private: (),
+}
+
+impl MtlsCertVerification {
+    /// Test-only constructor. Production code must obtain a verification via
+    /// [`authenticate_client_mtls`].
+    #[cfg(test)]
+    pub(crate) fn for_testing() -> Self {
+        Self { _private: () }
+    }
 }
 
 /// Client authentication error.
@@ -194,9 +254,10 @@ pub struct IdTokenClaims {
 ///
 /// # Errors
 /// Returns `ServiceError` for invalid requests.
-pub async fn exchange_authorization_code(
+pub(crate) async fn exchange_authorization_code(
     state: &Arc<AppState>,
     params: AuthCodeExchangeParams<'_>,
+    client_auth: ClientAuthProof,
 ) -> ServiceResult<AuthCodeExchangeResult> {
     // Decode and validate the authorization code
     let auth_code = decode_authorization_code(state, params.code, params.client_id).await?;
@@ -204,8 +265,10 @@ pub async fn exchange_authorization_code(
     // RFC 6749 Section 10.5: Enforce single-use authorization codes.
     // This MUST happen before any other validation to ensure codes are always
     // consumed, enabling replay detection regardless of subsequent check outcomes.
+    // The returned witness is the structural proof threaded into the
+    // TokenIssuanceProof below — the only path to `GrantProof::AuthorizationCode`.
     let code_hash = hash_token(params.code);
-    enforce_single_use_code(state, &code_hash, &auth_code).await?;
+    let auth_code_claim = enforce_single_use_code(state, &code_hash, &auth_code).await?;
 
     // Reject deactivated users before issuing tokens
     let user = db::get_user_by_id(&state.store, &auth_code.user_id)
@@ -231,9 +294,39 @@ pub async fn exchange_authorization_code(
             "Authenticator not found",
         ))?;
 
-    // RFC 6749 Section 4.1.3: Authenticate the client (if credentials provided)
-    let authenticated_client =
-        authenticate_and_validate_client(state, params.credentials, &auth_code).await?;
+    // RFC 6749 Section 4.1.3: Verify the handler-authenticated client
+    // matches the authorization code's recorded client_id, and that PKCE
+    // (RFC 7636) is present when required for this client type. Client
+    // authentication itself (RFC 6749 §2.3 / RFC 7523 §2.2 / RFC 8705)
+    // ran at the handler before this function was called; here we only
+    // check consistency with the auth code.
+    let authenticated_client = params.authenticated_client;
+    if let Some(client) = authenticated_client
+        && client.client.client_id != auth_code.client_id
+    {
+        tracing::warn!(
+            "Client ID mismatch: token request from {} but code was issued to {}",
+            client.client.client_id,
+            auth_code.client_id
+        );
+        return Err(ServiceError::oauth(
+            OAuthErrorCode::InvalidGrant,
+            "Client ID mismatch",
+        ));
+    }
+    if let Some(client) = authenticated_client {
+        let pkce_required = client.is_public || client.client.application_type.requires_pkce();
+        if pkce_required && auth_code.code_challenge.is_none() {
+            tracing::warn!(
+                "Client {} requires PKCE but no code_challenge was present",
+                client.client.client_id
+            );
+            return Err(ServiceError::oauth(
+                OAuthErrorCode::InvalidRequest,
+                "PKCE required for this client type",
+            ));
+        }
+    }
 
     // Validate redirect_uri, PKCE, DPoP binding, and ACR
     validate_code_bindings(
@@ -253,8 +346,15 @@ pub async fn exchange_authorization_code(
     )
     .await?;
 
-    // Generate access token as an RFC 9068 JWT (ES256, verifiable via JWKS)
+    // Generate access token as an RFC 9068 JWT (ES256, verifiable via JWKS).
+    // Build the chokepoint proof here: `GrantProof::AuthorizationCode` can
+    // only be constructed by code that holds an AuthCodeClaim, which is
+    // produced by `enforce_single_use_code` above.
     let dpop_jkt = params.dpop_proof.as_ref().map(|p| p.jkt.as_str());
+    let proof = TokenIssuanceProof {
+        grant: GrantProof::AuthorizationCode(auth_code_claim),
+        client_auth,
+    };
     let session_result = create_oauth_access_token(
         state,
         CreateOAuthTokenParams {
@@ -272,6 +372,7 @@ pub async fn exchange_authorization_code(
             session_purpose: db::SessionPurpose::OAuthAccessToken,
             authorization_details: grants.authorization_details_value.as_ref(),
         },
+        proof,
     )
     .await?;
     let access_token = session_result.token;
@@ -279,15 +380,8 @@ pub async fn exchange_authorization_code(
 
     // Extract the per-client ID token signing algorithm.
     // Public/unauthenticated clients fall back to "RS256" per OIDC Core default.
-    let id_token_alg = authenticated_client
-        .as_ref()
-        .map(|c| c.client.id_token_signed_response_alg.as_str())
-        .or_else(|| {
-            params
-                .jwt_authenticated_client
-                .map(|c| c.client.id_token_signed_response_alg.as_str())
-        })
-        .unwrap_or("RS256");
+    let id_token_alg =
+        authenticated_client.map_or("RS256", |c| c.client.id_token_signed_response_alg.as_str());
 
     // Generate ID token (with at_hash computed from the access token)
     let id_token = generate_id_token(
@@ -309,7 +403,7 @@ pub async fn exchange_authorization_code(
     .await?;
 
     // Record usage event for registered clients
-    if let Some(ref auth_client) = authenticated_client
+    if let Some(auth_client) = authenticated_client
         && let Err(e) = db::record_oauth_event(
             &state.audit,
             &auth_client.client.id,
@@ -362,16 +456,18 @@ struct ResolvedGrants {
 
 /// RFC 6749 Section 10.5: Enforce single-use authorization codes.
 ///
-/// Tries to consume the code atomically. If it was already consumed,
-/// revoke all tokens issued under the compromised code (replay defense).
+/// Atomically consumes the code; on success returns an [`crate::db::AuthCodeClaim`]
+/// witness. On a replay (`ClaimError::AlreadyConsumed`), revokes all tokens
+/// for the user the original code was issued to before returning the OAuth
+/// `invalid_grant` error.
 async fn enforce_single_use_code(
     state: &Arc<AppState>,
     code_hash: &str,
     auth_code: &AuthorizationCode,
-) -> ServiceResult<()> {
+) -> ServiceResult<crate::db::AuthCodeClaim> {
     match db::try_consume_authorization_code(&state.store, code_hash).await {
-        Ok(true) => Ok(()),
-        Ok(false) => {
+        Ok(claim) => Ok(claim),
+        Err(db::claim::ClaimError::AlreadyConsumed) => {
             if let Ok(Some((user_id, _client_id))) =
                 db::get_consumed_code_owner(&state.store, code_hash).await
             {
@@ -407,54 +503,6 @@ async fn enforce_single_use_code(
                 "Failed to validate authorization code".to_string(),
             ))
         }
-    }
-}
-
-/// Authenticate client credentials and validate against the authorization code.
-///
-/// Verifies the client_id matches the code's client_id and that PKCE is
-/// present when required for the client type.
-async fn authenticate_and_validate_client(
-    state: &Arc<AppState>,
-    credentials: Option<&ClientCredentials>,
-    auth_code: &AuthorizationCode,
-) -> ServiceResult<Option<AuthenticatedClient>> {
-    let Some(creds) = credentials else {
-        return Ok(None);
-    };
-    match authenticate_client(state, creds).await {
-        Ok(client) => {
-            if client.client.client_id != auth_code.client_id {
-                tracing::warn!(
-                    "Client ID mismatch: token request from {} but code was issued to {}",
-                    client.client.client_id,
-                    auth_code.client_id
-                );
-                return Err(ServiceError::oauth(
-                    OAuthErrorCode::InvalidGrant,
-                    "Client ID mismatch",
-                ));
-            }
-            let pkce_required = client.is_public || client.client.application_type.requires_pkce();
-            if pkce_required && auth_code.code_challenge.is_none() {
-                tracing::warn!(
-                    "Client {} requires PKCE but no code_challenge was present",
-                    client.client.client_id
-                );
-                return Err(ServiceError::oauth(
-                    OAuthErrorCode::InvalidRequest,
-                    "PKCE required for this client type",
-                ));
-            }
-            Ok(Some(client))
-        }
-        Err(ClientAuthError::InvalidClient | ClientAuthError::MissingClientId) => {
-            Err(ServiceError::oauth(
-                OAuthErrorCode::InvalidClient,
-                "Client authentication required",
-            ))
-        }
-        Err(e) => Err(e.into_service_error()),
     }
 }
 
@@ -644,10 +692,16 @@ impl AuthorizationCode {
 /// Supports:
 /// - Confidential clients with `client_secret` (RFC 6749 Section 2.3.1)
 /// - Public clients (native/SPA) without secret (must use PKCE per RFC 7636)
+///
+/// The returned `Option<ClientSecretVerification>` is `Some` only when the
+/// client_secret was validated against its stored hash. For mTLS-registered
+/// clients (whose secret is intentionally skipped here and the cert
+/// validated separately by [`authenticate_client_mtls`]) and public
+/// clients (no auth), the option is `None`.
 pub async fn authenticate_client(
     state: &Arc<AppState>,
     credentials: &ClientCredentials,
-) -> Result<AuthenticatedClient, ClientAuthError> {
+) -> Result<(AuthenticatedClient, Option<ClientSecretVerification>), ClientAuthError> {
     // Look up the client
     let client = db::get_oauth_client_by_client_id(&state.store, &credentials.client_id)
         .await
@@ -677,10 +731,13 @@ pub async fn authenticate_client(
         if let Err(e) = db::update_oauth_client_last_used(&state.store, &client.id).await {
             tracing::warn!("Failed to update OAuth client last_used: {e}");
         }
-        return Ok(AuthenticatedClient {
-            client,
-            is_public: false,
-        });
+        return Ok((
+            AuthenticatedClient {
+                client,
+                is_public: false,
+            },
+            None,
+        ));
     }
 
     if requires_secret {
@@ -706,10 +763,13 @@ pub async fn authenticate_client(
             return Err(ClientAuthError::InvalidCredentials);
         }
 
-        Ok(AuthenticatedClient {
-            client,
-            is_public: false,
-        })
+        Ok((
+            AuthenticatedClient {
+                client,
+                is_public: false,
+            },
+            Some(ClientSecretVerification { _private: () }),
+        ))
     } else {
         // Public client - no secret required, but PKCE should be used
         // Update last used timestamp
@@ -717,10 +777,13 @@ pub async fn authenticate_client(
             tracing::warn!("Failed to update OAuth client last_used: {e}");
         }
 
-        Ok(AuthenticatedClient {
-            client,
-            is_public: true,
-        })
+        Ok((
+            AuthenticatedClient {
+                client,
+                is_public: true,
+            },
+            None,
+        ))
     }
 }
 
@@ -828,7 +891,7 @@ pub(crate) fn authenticate_client_mtls(
     client: &crate::db::OAuthClient,
     cert: &crate::services::oidc::mtls::ClientCertificate,
     jwks_cache_value: Option<&serde_json::Value>,
-) -> Result<(), ClientAuthError> {
+) -> Result<MtlsCertVerification, ClientAuthError> {
     match client.token_endpoint_auth_method {
         crate::db::TokenEndpointAuthMethod::TlsClientAuth => {
             crate::services::oidc::mtls::verify_tls_client_auth(
@@ -839,6 +902,7 @@ pub(crate) fn authenticate_client_mtls(
                 client.tls_client_auth_san_uri.as_deref(),
                 client.tls_client_auth_san_ip.as_deref(),
             )
+            .map(|()| MtlsCertVerification { _private: () })
             .map_err(|e| ClientAuthError::MtlsVerificationFailed(e.to_string()))
         }
         crate::db::TokenEndpointAuthMethod::SelfSignedTlsClientAuth => {
@@ -848,6 +912,7 @@ pub(crate) fn authenticate_client_mtls(
                 )
             })?;
             crate::services::oidc::mtls::verify_self_signed_tls_client_auth(cert, jwks)
+                .map(|()| MtlsCertVerification { _private: () })
                 .map_err(|e| ClientAuthError::MtlsVerificationFailed(e.to_string()))
         }
         _ => Err(ClientAuthError::MtlsVerificationFailed(
@@ -1111,17 +1176,7 @@ mod tests {
     }
 
     fn make_dpop_proof(jkt: &str) -> ValidatedDpopProof {
-        ValidatedDpopProof {
-            jkt: jkt.to_string(),
-            jwk: dpop::DpopJwk::Ec(dpop::EcJwk {
-                kty: "EC".to_string(),
-                crv: "P-256".to_string(),
-                x: "test-x".to_string(),
-                y: "test-y".to_string(),
-            }),
-            jti: "jti-value".to_string(),
-            source: None,
-        }
+        ValidatedDpopProof::for_testing(jkt.to_string(), "jti-value".to_string(), None)
     }
 
     #[test]

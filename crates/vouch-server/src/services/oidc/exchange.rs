@@ -9,8 +9,8 @@ use crate::crypto::hash_token;
 use crate::db;
 use crate::redact_email;
 use crate::services::auth::{
-    ActorClaim, CreateOAuthTokenParams, MAX_DELEGATION_DEPTH, create_oauth_access_token,
-    decode_token,
+    ActorClaim, CreateOAuthTokenParams, MAX_DELEGATION_DEPTH, TokenIssuanceProof,
+    create_oauth_access_token, decode_token,
 };
 use crate::services::oidc::ScopeSet;
 use crate::services::oidc::authorization_details::AuthorizationDetails;
@@ -92,9 +92,10 @@ pub struct TokenExchangeResult {
     clippy::too_many_lines,
     reason = "RFC 8693 token exchange: validate all params, resolve subject, issue tokens"
 )]
-pub async fn exchange_token(
+pub(crate) async fn exchange_token(
     state: &Arc<AppState>,
     params: TokenExchangeParams<'_>,
+    proof: TokenIssuanceProof,
 ) -> ServiceResult<TokenExchangeResult> {
     // Validate subject token type
     let valid_token_types = [
@@ -371,6 +372,7 @@ pub async fn exchange_token(
             session_purpose: crate::db::SessionPurpose::OAuthAccessToken,
             authorization_details: effective_ad_value.as_ref(),
         },
+        proof,
     )
     .await?;
 

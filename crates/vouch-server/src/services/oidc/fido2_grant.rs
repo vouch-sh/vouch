@@ -17,8 +17,9 @@ use crate::AppState;
 use crate::crypto::jwt::JwtType;
 use crate::db::{self, AuthEventParams, AuthEventType};
 use crate::services::auth::{
-    AuthenticatorLookupParams, CreateOAuthTokenParams, LoginAssertionParams,
-    create_oauth_access_token, lookup_and_verify_authenticator, verify_login_assertion,
+    AuthenticatorLookupParams, ClientAuthProof, CreateOAuthTokenParams, GrantProof,
+    LoginAssertionParams, TokenIssuanceProof, create_oauth_access_token,
+    lookup_and_verify_authenticator, verify_login_assertion,
 };
 use crate::services::oidc::authorization_details::AuthorizationDetails;
 use crate::services::oidc::token::AuthenticatedClient;
@@ -110,9 +111,10 @@ pub struct Fido2AssertionResult {
     clippy::too_many_lines,
     reason = "FIDO2 grant: parse assertion, verify, bind tokens, audit"
 )]
-pub async fn exchange_fido2_assertion(
+pub(crate) async fn exchange_fido2_assertion(
     state: &Arc<AppState>,
     params: Fido2AssertionParams<'_>,
+    client_auth: ClientAuthProof,
 ) -> ServiceResult<Fido2AssertionResult> {
     // 1. Base64url-decode and parse the assertion JSON
     let assertion_bytes = URL_SAFE_NO_PAD.decode(params.assertion).map_err(|_| {
@@ -141,9 +143,13 @@ pub async fn exchange_fido2_assertion(
             )
         })?;
 
-    // 2b. Prepare single-use challenge check
-    let expires_at = jiff::Timestamp::from_second(challenge_state.exp)
-        .unwrap_or_else(|_| jiff::Timestamp::now());
+    // 2b. Prepare single-use challenge check. A malformed `exp` is a
+    // security-relevant signal — a captured token with garbage `exp`
+    // must not be silently accepted with a "now" fallback that would
+    // extend its validity. Reject as InvalidGrant.
+    let expires_at = jiff::Timestamp::from_second(challenge_state.exp).map_err(|_| {
+        ServiceError::oauth(OAuthErrorCode::InvalidGrant, "Invalid challenge state exp")
+    })?;
 
     // 3. Decode assertion fields from base64url (CPU-only, no I/O)
     let credential_id_bytes = URL_SAFE_NO_PAD
@@ -188,12 +194,22 @@ pub async fn exchange_fido2_assertion(
     })?;
 
     // 5. Mark challenge used + look up authenticator in parallel
-    //    (independent DB operations on different tables)
-    let (consumed_result, lookup_result) = tokio::try_join!(
+    //    (independent DB operations on different tables). The returned
+    //    `WebauthnChallengeClaim` witness is the structural proof threaded
+    //    into the TokenIssuanceProof below — the only path to
+    //    `GrantProof::Fido2Assertion`.
+    let (challenge_claim_result, lookup_result) = tokio::try_join!(
         async {
-            db::try_mark_challenge_used(&state.store, &payload.state, expires_at)
-                .await
-                .map_err(|e| ServiceError::Internal(format!("Failed to mark challenge used: {e}")))
+            match db::try_consume_challenge_state(&state.store, &payload.state, expires_at).await {
+                Ok(claim) => Ok(claim),
+                Err(db::ClaimError::AlreadyConsumed) => Err(ServiceError::oauth(
+                    OAuthErrorCode::InvalidGrant,
+                    "Challenge state has already been used or expired",
+                )),
+                Err(e) => Err(ServiceError::Internal(format!(
+                    "Failed to mark challenge used: {e}"
+                ))),
+            }
         },
         async {
             lookup_and_verify_authenticator(
@@ -211,13 +227,7 @@ pub async fn exchange_fido2_assertion(
         },
     )?;
 
-    if !consumed_result {
-        return Err(ServiceError::oauth(
-            OAuthErrorCode::InvalidGrant,
-            "Challenge state has already been used or expired",
-        ));
-    }
-
+    let challenge_claim = challenge_claim_result;
     let authenticator = lookup_result.authenticator;
     let user = lookup_result.user;
 
@@ -300,6 +310,13 @@ pub async fn exchange_fido2_assertion(
     let dpop_jkt = params.dpop_proof.as_ref().map(|p| p.jkt.as_str());
     let now = jiff::Timestamp::now().as_second();
 
+    // Build the chokepoint proof here: `GrantProof::Fido2Assertion` can
+    // only be constructed by code that holds a `ChallengeStateClaim`,
+    // produced above by `try_consume_challenge_state`.
+    let proof = TokenIssuanceProof {
+        grant: GrantProof::Fido2Assertion(challenge_claim),
+        client_auth,
+    };
     let session_result = create_oauth_access_token(
         state,
         CreateOAuthTokenParams {
@@ -317,6 +334,7 @@ pub async fn exchange_fido2_assertion(
             session_purpose: db::SessionPurpose::OAuthAccessToken,
             authorization_details: ad_value.as_ref(),
         },
+        proof,
     )
     .await?;
 

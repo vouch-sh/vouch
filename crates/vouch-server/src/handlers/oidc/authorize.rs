@@ -977,29 +977,32 @@ async fn fetch_and_resolve_request_uri(
 /// Phase A: consume pending → resolve client (lookup + active + redirect_uri re-validation).
 /// Phase C: session check + max_age check + code issuance.
 async fn handle_pending_auth(state: &Arc<AppState>, pending_id: &str, jar: &CookieJar) -> Response {
-    // Consume the pending auth (single-use).
-    let pending = match db::consume_pending_oauth_authorization(&state.store, pending_id).await {
-        Ok(Some(p)) => p,
-        Ok(None) => {
-            tracing::warn!(
-                pending_id,
-                "Pending OAuth authorization not found or expired"
-            );
-            return AuthorizeDeniedTemplate {
-                client_name: "Unknown Application".to_string(),
-                error_message: "Authorization session expired. Please try again.".to_string(),
+    // Consume the pending auth (single-use). The `_claim` witness is
+    // bound to satisfy `#[must_use]`; downstream code uses `pending`
+    // (the consumed record's data) directly.
+    let (pending, _claim) =
+        match db::consume_pending_oauth_authorization(&state.store, pending_id).await {
+            Ok(pair) => pair,
+            Err(db::claim::ClaimError::AlreadyConsumed) => {
+                tracing::warn!(
+                    pending_id,
+                    "Pending OAuth authorization not found or expired"
+                );
+                return AuthorizeDeniedTemplate {
+                    client_name: "Unknown Application".to_string(),
+                    error_message: "Authorization session expired. Please try again.".to_string(),
+                }
+                .into_response();
             }
-            .into_response();
-        }
-        Err(e) => {
-            tracing::error!("Failed to retrieve pending OAuth authorization: {}", e);
-            return AuthorizeDeniedTemplate {
-                client_name: "Unknown Application".to_string(),
-                error_message: "An error occurred. Please try again.".to_string(),
+            Err(e) => {
+                tracing::error!("Failed to retrieve pending OAuth authorization: {}", e);
+                return AuthorizeDeniedTemplate {
+                    client_name: "Unknown Application".to_string(),
+                    error_message: "An error occurred. Please try again.".to_string(),
+                }
+                .into_response();
             }
-            .into_response();
-        }
-    };
+        };
 
     // Phase A: re-validate client active + redirect_uri (errors → page).
     // This guards against the client being deactivated or redirect_uri removed
@@ -1116,8 +1119,8 @@ async fn complete_pending_auth(
         )
         .await
         {
-            Ok(true) => {} // successfully consumed
-            Ok(false) => {
+            Ok(_claim) => {} // successfully consumed
+            Err(db::claim::ClaimError::AlreadyConsumed) => {
                 return resolved
                     .error_redirect(
                         state,
@@ -1507,8 +1510,8 @@ async fn issue_code_after_reauth_check(
         )
         .await
         {
-            Ok(true) => {} // Successfully consumed
-            Ok(false) => {
+            Ok(_claim) => {} // Successfully consumed
+            Err(db::claim::ClaimError::AlreadyConsumed) => {
                 return oauth_error_response(
                     state,
                     oauth_client,

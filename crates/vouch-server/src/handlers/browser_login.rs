@@ -27,7 +27,10 @@ use crate::handlers::HasVersion;
 use crate::handlers::session::{create_session_cookie, get_auth_context};
 use crate::impl_template_response;
 use crate::redact_email;
-use crate::services::auth::{CreateOAuthTokenParams, create_oauth_access_token};
+use crate::services::auth::{
+    ClientAuthProof, CreateOAuthTokenParams, GrantProof, TokenIssuanceProof,
+    create_oauth_access_token,
+};
 use crate::services::error::ServiceError;
 use crate::services::oidc::ScopeSet;
 use askama::Template;
@@ -446,6 +449,31 @@ pub async fn browser_login_complete(
         ));
     }
 
+    // ── Phase 3b: Atomic single-use challenge consume ─────────────────────
+    // Mark the authentication state JWT consumed before any side effects.
+    // The returned `WebauthnChallengeClaim` witness is the structural proof
+    // threaded into the TokenIssuanceProof below — the only path to
+    // `GrantProof::BrowserLogin`. Two concurrent requests with the same
+    // state JWT collide on the deterministic PRIMARY KEY; only one wins.
+    let expires_at = Timestamp::from_second(auth_state.exp).unwrap_or_else(|_| Timestamp::now());
+    let challenge_claim =
+        match db::try_consume_challenge_state(&state.store, &req.state, expires_at).await {
+            Ok(claim) => claim,
+            Err(db::ClaimError::AlreadyConsumed) => {
+                return Err(ServiceError::api(
+                    StatusCode::BAD_REQUEST,
+                    "state_already_used",
+                    "Authentication state has already been used",
+                ));
+            }
+            Err(e) => {
+                tracing::error!("Failed to mark browser login state used: {e}");
+                return Err(ServiceError::Internal(
+                    "Failed to mark authentication state used".to_string(),
+                ));
+            }
+        };
+
     // ── Phase 4: Base64url decode all fields ─────────────────────────────
     let credential_id = URL_SAFE_NO_PAD.decode(&req.credential_id).map_err(|_| {
         ServiceError::api(
@@ -655,6 +683,12 @@ pub async fn browser_login_complete(
             hardware_verification: crate::services::auth::HardwareVerification::Verified,
             session_purpose: db::SessionPurpose::OAuthAccessToken,
             authorization_details: None,
+        },
+        TokenIssuanceProof {
+            grant: GrantProof::BrowserLogin(challenge_claim),
+            client_auth: ClientAuthProof::NoAuth(
+                crate::services::auth::NoClientAuth::internal_endpoint(),
+            ),
         },
     )
     .await
@@ -973,5 +1007,71 @@ mod tests {
         let result = BrowserAuthenticationState::decode(&encoded, &wrong_signer).await;
 
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_browser_login_complete_rejects_replayed_state() {
+        // Pre-consume a valid state JWT, then submit `POST
+        // /login/webauthn/complete` with that JWT. The Phase 3b consume
+        // must reject the request with 400 + `state_already_used` before
+        // any base64 decoding, DB lookup, or WebAuthn verification work
+        // happens. This guards against a regression where the consume
+        // call is reordered or removed.
+        let (app, state) = crate::test_utils::test_app().await;
+
+        // Build a valid BrowserAuthenticationState JWT signed by the test
+        // signer, with a far-future expiry.
+        let now = jiff::Timestamp::now();
+        let exp = now.as_second().saturating_add(300);
+        let auth_state = BrowserAuthenticationState {
+            challenge: vec![0u8; 32],
+            rp_id: state.config().rp_id.clone(),
+            created_at: now.as_second(),
+            exp,
+            pending_auth: None,
+        };
+        let state_jwt = auth_state
+            .encode(&state.state_signer)
+            .await
+            .expect("encode auth state");
+
+        // Pre-consume the state JWT to simulate a prior successful login.
+        let expires_at = jiff::Timestamp::from_second(exp).expect("valid exp");
+        let _claim = crate::db::try_consume_challenge_state(&state.store, &state_jwt, expires_at)
+            .await
+            .expect("pre-consume must succeed");
+
+        // POST to `/login/webauthn/complete` with the already-consumed state
+        // and length-bounded dummy fields. The replay check runs in Phase
+        // 3b (after state decode, before base64 decode), so plain
+        // base64url-of-zero-bytes fields are sufficient to reach it.
+        let dummy = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(vec![0u8; 32]);
+        let body = serde_json::json!({
+            "state": state_jwt,
+            "credential_id": dummy,
+            "authenticator_data": dummy,
+            "client_data_json": dummy,
+            "signature": dummy,
+            "user_handle": dummy,
+        })
+        .to_string();
+
+        let (status, resp_body) = crate::test_utils::http_post_json(
+            &app,
+            "/login/webauthn/complete",
+            &body,
+            &[("Origin", state.config().base_url.as_str())],
+        )
+        .await;
+
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "replay must be rejected with 400, got {status}: {resp_body}"
+        );
+        assert!(
+            resp_body.contains("state_already_used"),
+            "expected 'state_already_used' in response body, got: {resp_body}"
+        );
     }
 }

@@ -10,7 +10,9 @@
 
 use crate::AppState;
 use crate::db::{OAuthClient, SessionPurpose};
-use crate::services::auth::{CreateOAuthTokenParams, create_oauth_access_token};
+use crate::services::auth::{
+    CreateOAuthTokenParams, TokenIssuanceProof, create_oauth_access_token,
+};
 use crate::services::oidc::ScopeSet;
 use crate::services::{OAuthErrorCode, ServiceError, ServiceResult};
 use secrecy::ExposeSecret;
@@ -39,11 +41,12 @@ pub struct ClientCredentialsResult {
 /// # Errors
 /// Returns `unauthorized_client` if the client does not have the
 /// `client_credentials` grant type registered.
-pub async fn exchange_client_credentials(
+pub(crate) async fn exchange_client_credentials(
     state: &Arc<AppState>,
     client: &OAuthClient,
     requested_scope: Option<&str>,
     mtls_cert_thumbprint: Option<&str>,
+    proof: TokenIssuanceProof,
 ) -> ServiceResult<ClientCredentialsResult> {
     // Verify client has client_credentials in its registered grant_types
     let has_grant = client
@@ -84,6 +87,7 @@ pub async fn exchange_client_credentials(
             session_purpose: SessionPurpose::M2MAccessToken,
             authorization_details: None,
         },
+        proof,
     )
     .await?;
 
@@ -107,6 +111,7 @@ pub async fn exchange_client_credentials(
 )]
 mod tests {
     use super::*;
+    use crate::services::auth::{ClientAuthProof, GrantProof};
     use crate::services::oidc::OAuthScope;
 
     #[test]
@@ -179,9 +184,20 @@ mod tests {
         let client = client_record;
 
         let thumbprint = "test-mtls-thumbprint-xxxxxxxxxxxxxxxxxxxxxxxxxxx";
-        let result = exchange_client_credentials(&state, &client, None, Some(thumbprint))
-            .await
-            .expect("exchange_client_credentials");
+        let result = exchange_client_credentials(
+            &state,
+            &client,
+            None,
+            Some(thumbprint),
+            TokenIssuanceProof {
+                grant: GrantProof::ClientCredentials,
+                client_auth: ClientAuthProof::MutualTls(
+                    crate::services::oidc::token::MtlsCertVerification::for_testing(),
+                ),
+            },
+        )
+        .await
+        .expect("exchange_client_credentials");
 
         // Decode the access token JWT and verify the cnf claim
         let config = state.config();

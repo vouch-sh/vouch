@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Device Authorization (RFC 8628) database operations.
 
+use super::claim::ClaimError;
 use super::document_type::Document;
 use super::documents::device_auth::{DeviceAuthRequestDoc, OidcStateDoc};
 use super::store::DocumentStore;
@@ -75,6 +76,24 @@ impl From<Document<OidcStateDoc>> for OidcState {
     }
 }
 
+/// Witness that an OIDC state record was atomically transitioned to
+/// `consumed_at = Some(now)` by this caller. Construction is private to
+/// this module — the only path to an instance is a successful return from
+/// [`try_consume_oidc_state`], whose optimistic-concurrency
+/// `compare_and_update` guarantees that at most one concurrent caller
+/// succeeds. Holding an `OidcStateClaim` is compile-time evidence that
+/// this caller "won" the consume.
+///
+/// Intentionally not `Clone`. The `#[must_use]` ensures the witness is
+/// bound at the call site (threaded into
+/// `GrantProof::EnrollmentBootstrap(claim)`).
+#[must_use = "the OIDC state was atomically consumed; bind this witness so \
+              it can be threaded into TokenIssuanceProof"]
+#[derive(Debug)]
+pub struct OidcStateClaim {
+    _private: (),
+}
+
 /// Create a new device authorization request.
 pub async fn create_device_auth_request(
     store: &DocumentStore,
@@ -138,8 +157,11 @@ pub(crate) async fn get_device_auth_by_id(
 
 /// Authorize a device auth request.
 ///
-/// The read and status update execute within a single transaction so
-/// concurrent authorization attempts are serialized correctly.
+/// Uses `compare_and_update` (OCC) so two concurrent authorization
+/// attempts cannot both succeed under PostgreSQL READ COMMITTED — the
+/// loser sees a version mismatch and is reported as a conflict. The
+/// blind `tx.update` it replaced would have let both writers commit,
+/// each clobbering the other's user attribution.
 pub async fn authorize_device_auth(
     store: &DocumentStore,
     id: &str,
@@ -151,9 +173,7 @@ pub async fn authorize_device_auth(
         bail!("authorize_device_auth called with empty id");
     }
 
-    let mut tx = store.begin().await?;
-
-    let doc = tx.get::<DeviceAuthRequestDoc>(id).await?;
+    let doc = store.get::<DeviceAuthRequestDoc>(id).await?;
     let Some(doc) = doc else {
         bail!(
             "authorize_device_auth: no device auth request \
@@ -171,29 +191,35 @@ pub async fn authorize_device_auth(
         );
     }
 
+    let version = doc.version;
     let mut data = doc.data;
     data.status = DeviceAuthStatus::Authorized;
     data.user_id = Some(user_id.to_string());
     data.user_email = Some(user_email.to_string());
     data.authenticator_id = Some(authenticator_id.to_string());
-    tx.update(id, &data).await?;
+    let won = store.compare_and_update(id, version, &data).await?;
+    if !won {
+        bail!(
+            "authorize_device_auth: device auth request '{}' was \
+             concurrently modified",
+            id
+        );
+    }
 
-    tx.commit().await?;
     Ok(())
 }
 
 /// Deny a device auth request.
 ///
-/// The read and status update execute within a single transaction so
-/// concurrent denial attempts are serialized correctly.
+/// Uses `compare_and_update` (OCC) for the same reason as
+/// [`authorize_device_auth`]: two concurrent denials (or a concurrent
+/// authorize + deny) cannot both win under READ COMMITTED.
 pub async fn deny_device_auth(store: &DocumentStore, id: &str) -> Result<()> {
     if id.is_empty() {
         bail!("deny_device_auth called with empty id");
     }
 
-    let mut tx = store.begin().await?;
-
-    let doc = tx.get::<DeviceAuthRequestDoc>(id).await?;
+    let doc = store.get::<DeviceAuthRequestDoc>(id).await?;
     let Some(doc) = doc else {
         bail!(
             "deny_device_auth: no device auth request \
@@ -211,44 +237,79 @@ pub async fn deny_device_auth(store: &DocumentStore, id: &str) -> Result<()> {
         );
     }
 
+    let version = doc.version;
     let mut data = doc.data;
     data.status = DeviceAuthStatus::Denied;
-    tx.update(id, &data).await?;
+    let won = store.compare_and_update(id, version, &data).await?;
+    if !won {
+        bail!(
+            "deny_device_auth: device auth request '{}' was \
+             concurrently modified",
+            id
+        );
+    }
 
-    tx.commit().await?;
     Ok(())
+}
+
+/// Witness that an authorized device code (RFC 8628 Section 3.5) was
+/// atomically transitioned to `Consumed` by this caller. Construction is
+/// private to this module — the only path to an instance is a successful
+/// return from [`try_consume_device_auth`], whose optimistic-concurrency
+/// `compare_and_update` guarantees that at most one concurrent caller
+/// succeeds. Holding a `DeviceCodeClaim` is compile-time evidence that
+/// this caller "won" the consume.
+///
+/// Intentionally not `Clone`. The `#[must_use]` ensures the witness is
+/// bound at the call site even when threaded into a downstream consumer
+/// (e.g., `GrantProof::DeviceCode(claim)`).
+#[must_use = "the device code was atomically consumed; bind this witness so \
+              it can be threaded into TokenIssuanceProof"]
+#[derive(Debug)]
+pub struct DeviceCodeClaim {
+    _private: (),
 }
 
 /// Try to consume an authorized device code (RFC 8628 Section 3.5).
 ///
-/// Returns `true` if the code was successfully consumed (first use).
-/// Returns `false` if already consumed, not authorized, expired,
-/// or was concurrently consumed by another request (optimistic lock).
+/// On success returns a [`DeviceCodeClaim`] witness — proof that this caller
+/// won the optimistic-concurrency consume. All "lost" cases (not found,
+/// not currently `Authorized`, expired, or concurrent consumer won via
+/// version mismatch) map to [`ClaimError::AlreadyConsumed`] — deliberately
+/// indistinguishable, each rejected as an invalid_grant.
 pub async fn try_consume_device_auth(
     store: &DocumentStore,
     device_code_hash: &str,
-) -> Result<bool> {
+) -> std::result::Result<DeviceCodeClaim, ClaimError> {
     let now = Timestamp::now();
 
     let doc = store
         .find_one::<DeviceAuthRequestDoc>("device_code_hash", device_code_hash)
-        .await?;
+        .await
+        .map_err(|e| ClaimError::Database(e.to_string()))?;
     let Some(doc) = doc else {
-        return Ok(false);
+        return Err(ClaimError::AlreadyConsumed);
     };
 
-    // Only consume if currently Authorized and not expired
+    // Only consume if currently Authorized and not expired.
     if doc.data.status != DeviceAuthStatus::Authorized || doc.data.expires_at <= now {
-        return Ok(false);
+        return Err(ClaimError::AlreadyConsumed);
     }
 
-    // Atomically transition to Consumed with optimistic concurrency.
-    // If another request consumed between our read and write,
-    // compare_and_update returns false (version mismatch).
+    // Atomic transition: compare_and_update returns false on version mismatch
+    // (a concurrent caller wrote a newer version first).
     let mut data = doc.data;
     data.status = DeviceAuthStatus::Consumed;
     data.consumed_at = Some(now);
-    store.compare_and_update(&doc.id, doc.version, &data).await
+    let won = store
+        .compare_and_update(&doc.id, doc.version, &data)
+        .await
+        .map_err(|e| ClaimError::Database(e.to_string()))?;
+    if won {
+        Ok(DeviceCodeClaim { _private: () })
+    } else {
+        Err(ClaimError::AlreadyConsumed)
+    }
 }
 
 /// Update the last poll time for a device auth request.
@@ -317,6 +378,7 @@ pub async fn create_oidc_state(
         code_verifier: code_verifier.to_string(),
         expires_at,
         provider_id: provider_id.to_string(),
+        consumed_at: None,
     };
     let result = store.insert(&doc).await?;
     Ok(result.id)
@@ -326,6 +388,62 @@ pub async fn create_oidc_state(
 pub async fn get_oidc_state(store: &DocumentStore, state: &str) -> Result<Option<OidcState>> {
     let doc = store.find_one::<OidcStateDoc>("state", state).await?;
     Ok(doc.map(OidcState::from))
+}
+
+/// Atomically consume an OIDC state record.
+///
+/// On success returns `(OidcState, OidcStateClaim)` — the state data
+/// needed for downstream processing plus the witness proving this caller
+/// won the OCC consume. All "lost" cases (state not found, already
+/// consumed, expired, concurrent consumer won via version mismatch) map
+/// to [`ClaimError::AlreadyConsumed`] — deliberately indistinguishable,
+/// each rejected the same way at the handler.
+///
+/// This closes the read-vs-consume TOCTOU window that existed when
+/// callers used `get_oidc_state` + `delete_oidc_state` as separate steps:
+/// two concurrent enrollment-callback requests could both read the same
+/// state, both pass validation, and both proceed to issue tokens before
+/// either delete completed.
+pub async fn try_consume_oidc_state(
+    store: &DocumentStore,
+    state: &str,
+) -> std::result::Result<(OidcState, OidcStateClaim), ClaimError> {
+    let now = Timestamp::now();
+
+    let doc = store
+        .find_one::<OidcStateDoc>("state", state)
+        .await
+        .map_err(|e| ClaimError::Database(e.to_string()))?;
+    let Some(doc) = doc else {
+        return Err(ClaimError::AlreadyConsumed);
+    };
+
+    if doc.data.consumed_at.is_some() || doc.data.expires_at <= now {
+        return Err(ClaimError::AlreadyConsumed);
+    }
+
+    let mut data = doc.data;
+    data.consumed_at = Some(now);
+    let won = store
+        .compare_and_update(&doc.id, doc.version, &data)
+        .await
+        .map_err(|e| ClaimError::Database(e.to_string()))?;
+    if won {
+        Ok((
+            OidcState {
+                id: doc.id,
+                state: data.state,
+                device_auth_id: data.device_auth_id,
+                nonce: data.nonce,
+                code_verifier: data.code_verifier,
+                expires_at: data.expires_at,
+                provider_id: data.provider_id,
+            },
+            OidcStateClaim { _private: () },
+        ))
+    } else {
+        Err(ClaimError::AlreadyConsumed)
+    }
 }
 
 /// Delete an OIDC state.

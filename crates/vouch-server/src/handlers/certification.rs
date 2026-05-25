@@ -24,7 +24,10 @@ use crate::{
     AppState, db,
     handlers::browser_login::hmac_sha256_base64url,
     handlers::session::create_session_cookie,
-    services::auth::{CreateOAuthTokenParams, create_oauth_access_token},
+    services::auth::{
+        ClientAuthProof, CreateOAuthTokenParams, GrantProof, TokenIssuanceProof,
+        create_oauth_access_token,
+    },
     services::oidc::ScopeSet,
 };
 
@@ -146,6 +149,12 @@ pub async fn complete_login(
             session_purpose: db::SessionPurpose::OAuthAccessToken,
             authorization_details: None,
         },
+        TokenIssuanceProof {
+            grant: GrantProof::CertificationBypass,
+            client_auth: ClientAuthProof::NoAuth(
+                crate::services::auth::NoClientAuth::internal_endpoint(),
+            ),
+        },
     )
     .await
     {
@@ -204,11 +213,14 @@ pub async fn deny_login(
         return StatusCode::FORBIDDEN.into_response();
     }
 
-    // Consume pending authorization.
-    let pending =
+    // Consume pending authorization. The `_claim` witness is bound to
+    // satisfy `#[must_use]`; downstream code uses `pending` directly.
+    let (pending, _claim) =
         match db::consume_pending_oauth_authorization(&state.store, &query.pending_auth).await {
-            Ok(Some(p)) => p,
-            Ok(None) => return StatusCode::NOT_FOUND.into_response(),
+            Ok(pair) => pair,
+            Err(db::claim::ClaimError::AlreadyConsumed) => {
+                return StatusCode::NOT_FOUND.into_response();
+            }
             Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
         };
 

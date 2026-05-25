@@ -307,6 +307,228 @@ impl ActorClaim {
 /// Prevents unbounded nesting in token exchange delegation chains.
 pub(crate) const MAX_DELEGATION_DEPTH: usize = 5;
 
+// ============================================================================
+// Token Issuance Proof (single-use witness chokepoint)
+// ============================================================================
+
+/// Proof that a token-issuance request has consumed its replay-prevention
+/// primitives. Required parameter to [`create_oauth_access_token`].
+///
+/// The presence of a `TokenIssuanceProof` value is compile-time evidence that
+/// the caller has consumed the relevant grant-level and client-authentication
+/// replay primitives, in the correct order, before invoking the chokepoint.
+/// The proof is constructed only at call sites that have already executed
+/// those consume-once operations.
+///
+/// `TokenIssuanceProof` is not `Clone` — the proof represents a one-shot
+/// authorization to issue a token and cannot be duplicated.
+#[must_use = "the proof was constructed to authorize a single token issuance; \
+              dropping it without calling create_oauth_access_token is a bug"]
+#[derive(Debug)]
+pub(crate) struct TokenIssuanceProof {
+    pub(crate) grant: GrantProof,
+    pub(crate) client_auth: ClientAuthProof,
+}
+
+/// Witness for the grant-level replay primitive consumed during token issuance.
+///
+/// Every variant either carries a sealed claim witness produced by an
+/// atomic consume-once operation, or is explicitly a no-replay-primitive
+/// variant (`ClientCredentials`, `TokenExchange` — protected via
+/// `ClientAuthProof`; `CertificationBypass` — gated by env-var; and
+/// `TestingOnly` — `cfg`-gated to test builds).
+#[derive(Debug)]
+pub(crate) enum GrantProof {
+    /// `authorization_code` grant. Carries a [`crate::db::AuthCodeClaim`]
+    /// witness — proof that the authorization code was atomically consumed
+    /// before this token issuance.
+    AuthorizationCode(crate::db::AuthCodeClaim),
+
+    /// `client_credentials` grant — no grant-level replay primitive; the
+    /// single-use guarantee is enforced entirely via [`ClientAuthProof`].
+    ClientCredentials,
+
+    /// `urn:ietf:params:oauth:grant-type:token-exchange` — RFC 8693 does not
+    /// require single-use of the subject token; replay protection is via
+    /// [`ClientAuthProof`].
+    TokenExchange,
+
+    /// FIDO2 assertion grant. Carries a [`crate::db::ChallengeStateClaim`]
+    /// witness — proof that the challenge state JWT was atomically marked
+    /// consumed before this token issuance.
+    Fido2Assertion(crate::db::ChallengeStateClaim),
+
+    /// Device authorization grant (RFC 8628). Carries a [`crate::db::DeviceCodeClaim`]
+    /// witness — proof that the device code was atomically transitioned to
+    /// `Consumed` before this token issuance.
+    DeviceCode(crate::db::DeviceCodeClaim),
+
+    /// Enrollment bootstrap session — issued post-IdP authentication and
+    /// pre-FIDO2 registration. `hardware_verified` is false here. Carries
+    /// an [`crate::db::OidcStateClaim`] witness — proof that the OIDC
+    /// state record was atomically transitioned to `consumed_at = Some(_)`
+    /// before this token issuance, closing the read-vs-consume TOCTOU
+    /// window that existed when callers used `get_oidc_state` +
+    /// `delete_oidc_state` as separate steps.
+    EnrollmentBootstrap(crate::db::OidcStateClaim),
+
+    /// Enrollment complete session — issued after WebAuthn registration.
+    /// Carries a [`crate::db::ChallengeStateClaim`] witness — proof that
+    /// the registration state JWT was atomically marked consumed before
+    /// this token issuance.
+    EnrollmentComplete(crate::db::ChallengeStateClaim),
+
+    /// Browser WebAuthn login. Carries a [`crate::db::ChallengeStateClaim`]
+    /// witness — proof that the authentication state JWT was atomically
+    /// marked consumed before this token issuance.
+    BrowserLogin(crate::db::ChallengeStateClaim),
+
+    /// Certification test bypass (only available when
+    /// `VOUCH_CERTIFICATION_TEST_TOKEN` is configured). Deliberately does
+    /// not consume the pending authorization — the authorize endpoint
+    /// handles consumption on the subsequent redirect.
+    CertificationBypass,
+
+    /// Test-only variant used by `test_utils` session helpers. Gated by
+    /// the same `cfg` as the `test_utils` module so it cannot appear in
+    /// production builds.
+    #[cfg(any(test, feature = "test-utils"))]
+    TestingOnly,
+}
+
+/// Witness bundle for a `private_key_jwt` (RFC 7523) client authentication.
+///
+/// Composes the two independent invariants:
+/// - **auth** — RFC 7523 §3 validation passed (signature, audience, timing,
+///   `iss == sub == client_id`, client configured for `private_key_jwt`).
+///   Constructible only by
+///   [`crate::services::oidc::jwt_bearer::client_auth::authenticate_client_jwt`].
+/// - **jti** — present when the assertion carried a `jti` claim and the atomic
+///   replay-prevention insert succeeded. `None` is valid for non-FAPI clients
+///   (RFC 7523 §3 makes `jti` OPTIONAL); FAPI 2.0 §5.3.2.1 enforces presence
+///   upstream so a FAPI client reaching this struct cannot have `jti: None`.
+///
+/// Fields are private; construction goes through [`Self::new`] so callers
+/// must supply both witnesses. Witnesses are consumed by drop.
+#[derive(Debug)]
+pub(crate) struct JwtClientAuthProof {
+    _auth: crate::services::oidc::jwt_bearer::client_auth::JwtAuthSucceeded,
+    _jti: Option<crate::db::JwtAssertionJtiClaim>,
+}
+
+impl JwtClientAuthProof {
+    pub(crate) fn new(
+        auth: crate::services::oidc::jwt_bearer::client_auth::JwtAuthSucceeded,
+        jti: Option<crate::db::JwtAssertionJtiClaim>,
+    ) -> Self {
+        Self {
+            _auth: auth,
+            _jti: jti,
+        }
+    }
+}
+
+/// Witness for the client-authentication replay primitive consumed during
+/// token issuance.
+#[derive(Debug)]
+pub(crate) enum ClientAuthProof {
+    /// `private_key_jwt` (RFC 7523). Carries the auth-succeeded witness plus
+    /// an optional JTI replay-prevention claim — see [`JwtClientAuthProof`].
+    #[expect(
+        dead_code,
+        reason = "witness payload is consumed by drop, not by field access"
+    )]
+    PrivateKeyJwt(JwtClientAuthProof),
+
+    /// `client_secret_basic` / `client_secret_post` (RFC 6749 §2.3.1).
+    /// Carries the verification witness from
+    /// [`crate::services::oidc::token::authenticate_client`].
+    ClientSecret(crate::services::oidc::token::ClientSecretVerification),
+
+    /// `tls_client_auth` / `self_signed_tls_client_auth` (RFC 8705 §2).
+    /// Carries the verification witness from
+    /// [`crate::services::oidc::token::authenticate_client_mtls`].
+    MutualTls(crate::services::oidc::token::MtlsCertVerification),
+
+    /// No external client authentication was performed. Carries a
+    /// [`NoClientAuth`] witness whose two named constructors document
+    /// why client auth is absent — either the client is a registered
+    /// public OAuth client (RFC 6749 §2.1), or the request originates
+    /// from an internal flow where the server is both issuer and client
+    /// (browser login, enrollment, device polling).
+    NoAuth(NoClientAuth),
+}
+
+/// Witness justifying a [`ClientAuthProof::NoAuth`] variant. The two
+/// named constructors split the legitimate cases:
+///
+/// - [`Self::for_public_client`] — the request carries a `client_id`
+///   for a registered OAuth client whose `token_endpoint_auth_method`
+///   is `None` (public client, RFC 6749 §2.1).
+/// - [`Self::internal_endpoint`] — the request originates from a
+///   server-internal endpoint (browser login, enrollment callbacks,
+///   device-code polling) where there is no external OAuth client and
+///   the server itself is the client.
+///
+/// A confidential client's grant arm cannot accidentally satisfy the
+/// chokepoint with this witness — `for_public_client` rejects clients
+/// registered with a non-`None` auth method, and `internal_endpoint`
+/// is a grep-auditable explicit choice. Future grant arms for
+/// confidential clients must construct `PrivateKeyJwt`, `ClientSecret`,
+/// or `MutualTls` instead.
+#[derive(Debug)]
+pub(crate) struct NoClientAuth {
+    _private: (),
+}
+
+impl NoClientAuth {
+    /// Construct evidence that the request is for a public OAuth client
+    /// (RFC 6749 §2.1 — `token_endpoint_auth_method = None`). Returns
+    /// `Err` if the client is registered as confidential; in that case
+    /// the caller must produce a real verification witness instead.
+    pub(crate) fn for_public_client(
+        client: &crate::db::OAuthClient,
+    ) -> Result<Self, crate::services::ServiceError> {
+        if client.token_endpoint_auth_method == crate::db::TokenEndpointAuthMethod::None {
+            Ok(Self { _private: () })
+        } else {
+            Err(crate::services::ServiceError::oauth(
+                crate::services::OAuthErrorCode::InvalidClient,
+                "client authentication required",
+            ))
+        }
+    }
+
+    /// Construct evidence that the request originates from a
+    /// server-internal endpoint where there is no external OAuth client.
+    ///
+    /// Use **only** for endpoints where the server is acting as both
+    /// issuer and client — browser login, enrollment callbacks, device
+    /// polling, certification test bypass. Adding new call sites is an
+    /// audit-relevant decision: grep for this constructor before merging
+    /// any change that introduces a new caller.
+    pub(crate) fn internal_endpoint() -> Self {
+        Self { _private: () }
+    }
+}
+
+/// Proof that a PAR (RFC 9126) creation request has consumed its
+/// client-authentication replay primitive. Required parameter to
+/// [`crate::db::create_pushed_authorization_request`].
+///
+/// PAR does not issue an access token, so the [`TokenIssuanceProof`]
+/// chokepoint does not fit. `ParCreationProof` is the analog for the
+/// PAR-storage chokepoint: a caller must construct one before persisting
+/// a PAR record, and the only path to a `ClientAuthProof::PrivateKeyJwt`
+/// is via a committed [`crate::db::JwtAssertionJtiClaim`].
+#[must_use = "the proof was constructed to authorize a single PAR creation; \
+              dropping it without calling create_pushed_authorization_request \
+              is a bug"]
+#[derive(Debug)]
+pub(crate) struct ParCreationProof {
+    pub(crate) client_auth: ClientAuthProof,
+}
+
 /// JWT Access Token claims per RFC 9068 Section 2.2.
 ///
 /// These claims are included in OAuth 2.0 access tokens signed with ES256.
@@ -412,13 +634,28 @@ pub(crate) struct CreateSessionResult {
 /// The `authenticator_id` is stored server-side in the session record
 /// and NOT included in the JWT to prevent information leakage.
 ///
+/// The `proof` parameter is a compile-time witness that the caller has
+/// consumed the relevant single-use replay-prevention primitives in the
+/// correct order. It is dropped immediately on entry — its only purpose
+/// is to make the chokepoint unforgeable from outside the crate.
+///
 /// # Errors
 ///
 /// Returns `ServiceError::Internal` if token signing or database operations fail.
 pub(crate) async fn create_oauth_access_token(
     state: &AppState,
     params: CreateOAuthTokenParams<'_>,
+    proof: TokenIssuanceProof,
 ) -> ServiceResult<CreateSessionResult> {
+    // Consume the witness. Its presence is the structural guarantee that the
+    // caller has consumed the required replay primitives — once consumed
+    // here, the proof cannot be reused for another token issuance.
+    //
+    // `JwtAssertionJtiClaim` holds only `_private: ()` — the JTI string is
+    // not retained in the witness, so the Debug log cannot leak it.
+    let TokenIssuanceProof { grant, client_auth } = proof;
+    tracing::debug!(?grant, ?client_auth, "token issuance proof consumed");
+
     let now = Timestamp::now();
     let session_hours = i64::try_from(state.config().session_hours)
         .map_err(|_| ServiceError::Internal("Invalid session hours".to_string()))?;

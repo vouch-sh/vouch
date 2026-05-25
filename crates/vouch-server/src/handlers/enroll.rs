@@ -30,7 +30,10 @@ use super::{
     validate_registration_attestation,
 };
 use crate::redact_email;
-use crate::services::auth::{CreateOAuthTokenParams, create_oauth_access_token};
+use crate::services::auth::{
+    ClientAuthProof, CreateOAuthTokenParams, GrantProof, TokenIssuanceProof,
+    create_oauth_access_token,
+};
 use crate::services::error::ServiceError;
 use crate::services::idp::IdentityResult;
 use crate::services::keys as key_svc;
@@ -407,38 +410,32 @@ pub async fn oidc_callback(
         .into_response();
     }
 
-    // Verify state
-    let stored_state = match db::get_oidc_state(&state.store, &oidc_state).await {
-        Ok(Some(s)) => s,
-        Ok(None) => {
-            return ErrorTemplate {
-                title: "Error".to_string(),
-                message: "Invalid state".to_string(),
-                back_url: None,
+    // Atomically consume the OIDC state. The returned witness is the
+    // structural proof threaded into TokenIssuanceProof below — the only
+    // path to `GrantProof::EnrollmentBootstrap`. Replaces the prior
+    // get-then-delete pattern, closing the read-vs-consume TOCTOU that
+    // let two concurrent callbacks both pass validation and issue tokens.
+    let (stored_state, oidc_state_claim) =
+        match db::try_consume_oidc_state(&state.store, &oidc_state).await {
+            Ok(pair) => pair,
+            Err(db::ClaimError::AlreadyConsumed) => {
+                return ErrorTemplate {
+                    title: "Error".to_string(),
+                    message: "Invalid or expired state".to_string(),
+                    back_url: None,
+                }
+                .into_response();
             }
-            .into_response();
-        }
-        Err(e) => {
-            tracing::error!("Failed to verify OIDC state: {e:#}");
-            return ErrorTemplate {
-                title: "Error".to_string(),
-                message: "Failed to verify state".to_string(),
-                back_url: None,
+            Err(e) => {
+                tracing::error!("Failed to consume OIDC state: {e:#}");
+                return ErrorTemplate {
+                    title: "Error".to_string(),
+                    message: "Failed to verify state".to_string(),
+                    back_url: None,
+                }
+                .into_response();
             }
-            .into_response();
-        }
-    };
-
-    // Check if state expired
-    let now = Timestamp::now();
-    if now > stored_state.expires_at {
-        return ErrorTemplate {
-            title: "Error".to_string(),
-            message: "State has expired".to_string(),
-            back_url: None,
-        }
-        .into_response();
-    }
+        };
 
     // Exchange code for tokens using discovered OIDC token endpoint.
     // This handler is OIDC-specific: SAML responses go to POST /saml/acs.
@@ -553,14 +550,14 @@ pub async fn oidc_callback(
         }
     };
 
-    complete_enrollment_after_identity(&state, &stored_state, &oidc_state, identity).await
+    complete_enrollment_after_identity(&state, &stored_state, identity, oidc_state_claim).await
 }
 
 pub(crate) async fn complete_enrollment_after_identity(
     state: &Arc<AppState>,
     stored_state: &db::OidcState,
-    state_key: &str,
     identity: IdentityResult,
+    oidc_state_claim: db::OidcStateClaim,
 ) -> Response {
     // Check domain restriction.
     // For Google consumers (no `hd` claim), `identity.domain` is `None`,
@@ -657,6 +654,12 @@ pub(crate) async fn complete_enrollment_after_identity(
             session_purpose: db::SessionPurpose::OAuthAccessToken,
             authorization_details: None,
         },
+        TokenIssuanceProof {
+            grant: GrantProof::EnrollmentBootstrap(oidc_state_claim),
+            client_auth: ClientAuthProof::NoAuth(
+                crate::services::auth::NoClientAuth::internal_endpoint(),
+            ),
+        },
     )
     .await
     {
@@ -711,10 +714,9 @@ pub(crate) async fn complete_enrollment_after_identity(
         }
     }
 
-    // Delete state only after enrollment/session creation succeeds.
-    if let Err(e) = db::delete_oidc_state(&state.store, state_key).await {
-        tracing::warn!("Failed to delete state: {e}");
-    }
+    // No explicit state delete here — `try_consume_oidc_state` already
+    // marked the row `consumed_at = Some(now)` (replay-blocking) and
+    // `delete_expired_oidc_states` will reclaim the row at expiry.
 
     tracing::info!(
         "Session created for user: {}",
@@ -1027,34 +1029,45 @@ pub async fn browser_register_complete(
     // ── Phase 2b: Single-use enforcement ───────────────────────────────
     // Consume the state token before any WebAuthn work so that a captured
     // state JWT cannot be replayed within the 5-minute validity window.
-    if !key_svc::consume_registration_state(&state.store, &req.state, reg_state.exp).await? {
-        tracing::warn!(
-            user_id = %reg_state.user_id,
-            "browser registration state replay rejected"
-        );
-        let audit_data = serde_json::json!({
-            "flow": "browser_register",
-            "success": false,
-            "error_code": "state_already_used",
-        });
-        if let Err(e) = state
-            .audit
-            .insert_event(
-                "key_registration_replay",
-                Some(&reg_state.user_id.to_string()),
-                Some(&reg_state.user_email),
-                &audit_data.to_string(),
-            )
-            .await
-        {
-            tracing::warn!(error = %e, "failed to write key_registration_replay audit event");
+    // The witness is threaded into TokenIssuanceProof below — the only
+    // path to `GrantProof::EnrollmentComplete`.
+    let registration_claim = match key_svc::consume_registration_state(
+        &state.store,
+        &req.state,
+        reg_state.exp,
+    )
+    .await?
+    {
+        key_svc::RegistrationStateConsumed::Won(claim) => claim,
+        key_svc::RegistrationStateConsumed::Replay => {
+            tracing::warn!(
+                user_id = %reg_state.user_id,
+                "browser registration state replay rejected"
+            );
+            let audit_data = serde_json::json!({
+                "flow": "browser_register",
+                "success": false,
+                "error_code": "state_already_used",
+            });
+            if let Err(e) = state
+                .audit
+                .insert_event(
+                    "key_registration_replay",
+                    Some(&reg_state.user_id.to_string()),
+                    Some(&reg_state.user_email),
+                    &audit_data.to_string(),
+                )
+                .await
+            {
+                tracing::warn!(error = %e, "failed to write key_registration_replay audit event");
+            }
+            return Err(ServiceError::api(
+                StatusCode::BAD_REQUEST,
+                "state_already_used",
+                "This registration link has already been used",
+            ));
         }
-        return Err(ServiceError::api(
-            StatusCode::BAD_REQUEST,
-            "state_already_used",
-            "This registration link has already been used",
-        ));
-    }
+    };
 
     // ── Phase 3: Base64url decode all fields ────────────────────────────
     let credential_id_bytes = URL_SAFE_NO_PAD.decode(&req.credential_id).map_err(|e| {
@@ -1336,6 +1349,12 @@ pub async fn browser_register_complete(
             hardware_verification: crate::services::auth::HardwareVerification::Verified,
             session_purpose: db::SessionPurpose::OAuthAccessToken,
             authorization_details: None,
+        },
+        TokenIssuanceProof {
+            grant: GrantProof::EnrollmentComplete(registration_claim),
+            client_auth: ClientAuthProof::NoAuth(
+                crate::services::auth::NoClientAuth::internal_endpoint(),
+            ),
         },
     )
     .await
@@ -1740,10 +1759,9 @@ mod tests {
 
         // Pre-consume the state token to simulate prior use.
         let expires_at = jiff::Timestamp::from_second(exp).expect("valid exp");
-        let consumed = crate::db::try_mark_challenge_used(&state.store, &state_jwt, expires_at)
+        let _claim = crate::db::try_consume_challenge_state(&state.store, &state_jwt, expires_at)
             .await
             .expect("pre-consume must succeed");
-        assert!(consumed, "pre-consume should return true on first use");
 
         // POST to the complete endpoint with the already-consumed state.
         // The replay check runs before any base64 decoding, so non-empty base64
@@ -1790,6 +1808,73 @@ mod tests {
         assert!(
             resp_body.contains("invalid_credential"),
             "expected 'invalid_credential' in body, got: {resp_body}"
+        );
+    }
+
+    // ── test_oidc_callback_rejects_replayed_state ───────────────────────────
+
+    #[tokio::test]
+    async fn test_oidc_callback_rejects_replayed_state() {
+        // GET /oauth/callback must reject a replayed `state` query param.
+        // `try_consume_oidc_state` closes the read-vs-consume TOCTOU that
+        // would otherwise let two concurrent callbacks both pass
+        // validation. Pre-consume the state in the DB, then submit the
+        // callback — the handler must fail at the consume step and return
+        // the "Invalid or expired state" error template WITHOUT calling
+        // the upstream IdP `/token` endpoint.
+        use crate::test_utils::http_get;
+
+        let (app, state) = test_app().await;
+
+        // Seed a fresh OIDC state row + the device-auth row it FKs to.
+        let expires_at: jiff::Timestamp = "2099-12-31T23:59:59Z".parse().expect("valid timestamp");
+        let device_auth_id = crate::db::create_device_auth_request(
+            &state.store,
+            "callback-replay-device-hash",
+            "CBRP-CODE",
+            None,
+            expires_at,
+            5,
+        )
+        .await
+        .expect("create_device_auth_request");
+
+        let oidc_state_value = "callback-replay-state-12345";
+        crate::db::create_oidc_state(
+            &state.store,
+            oidc_state_value,
+            &device_auth_id,
+            "test-nonce",
+            "",
+            expires_at,
+            "",
+        )
+        .await
+        .expect("create_oidc_state");
+
+        // Pre-consume to simulate a successful prior callback.
+        let _claim = crate::db::try_consume_oidc_state(&state.store, oidc_state_value)
+            .await
+            .expect("pre-consume must succeed");
+
+        // Submit the callback with the now-consumed state. The handler
+        // calls `try_consume_oidc_state` first, which returns
+        // AlreadyConsumed, so the upstream IdP is never reached.
+        let (status, body) = http_get(
+            &app,
+            &format!("/oauth/callback?state={oidc_state_value}&code=dummy-auth-code"),
+            &[],
+        )
+        .await;
+
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "error template renders with 200 OK; got {status}: {body}"
+        );
+        assert!(
+            body.contains("Invalid or expired state"),
+            "expected 'Invalid or expired state' in body, got: {body}"
         );
     }
 }

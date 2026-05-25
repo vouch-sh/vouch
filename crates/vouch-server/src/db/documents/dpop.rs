@@ -17,10 +17,9 @@ impl DocumentType for DpopNonceDoc {
     const DOC_TYPE: &'static str = "dpop_nonce";
 
     fn index_entries(&self) -> Vec<IndexEntry> {
-        vec![IndexEntry {
-            field: "nonce",
-            value: self.nonce.clone(),
-        }]
+        // No index needed — consumption uses deterministic document IDs
+        // (atomic DELETE by primary key), not index lookups.
+        Vec::new()
     }
 
     fn expires_at(&self) -> Option<Timestamp> {

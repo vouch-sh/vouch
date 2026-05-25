@@ -8,7 +8,7 @@ use super::helpers::*;
 // ========================================================================
 
 /// Generate a self-signed P-256 certificate DER for testing.
-fn make_test_cert_der(cn: &str) -> Vec<u8> {
+pub(super) fn make_test_cert_der(cn: &str) -> Vec<u8> {
     use der::{Decode as _, Encode, asn1::Utf8StringRef};
     use p256::ecdsa::SigningKey;
     use spki::EncodePublicKey as _;

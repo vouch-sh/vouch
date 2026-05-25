@@ -802,23 +802,44 @@ fn deterministic_jti_id(jti: &str, client_id: &str) -> String {
     hex::encode(ctx.finish().as_ref())
 }
 
+/// Witness that the atomic JTI insert in [`store_jwt_assertion_jti`]
+/// succeeded for a specific `(jti, client_id)` pair.
+///
+/// Construction is private to this module — the only way to obtain a
+/// `JwtAssertionJtiClaim` is to call `store_jwt_assertion_jti` and receive
+/// `Ok(_)`, which means the atomic INSERT serialized this caller as the
+/// first/only one to claim the JTI. Callers that hold this witness can
+/// rely on it as compile-time evidence that the RFC 7523 single-use
+/// requirement was enforced for the corresponding assertion.
+///
+/// Intentionally not `Clone` or `Copy` — the witness represents a one-shot
+/// claim. The `#[must_use]` ensures the value is bound at the call site
+/// even when the caller does not yet thread it into a downstream consumer.
+#[derive(Debug)]
+#[must_use = "the JTI was atomically claimed; bind this witness so future code can require it"]
+pub struct JwtAssertionJtiClaim {
+    _private: (),
+}
+
 /// Store a JWT assertion JTI for replay prevention.
 ///
-/// Returns `true` if the JTI was stored (first use), `false` if it
-/// already exists (replay). Uses a deterministic document ID derived
-/// from (jti, client_id) so that concurrent inserts collide on the
-/// PRIMARY KEY constraint, preventing TOCTOU races regardless of
-/// transaction isolation level or database backend.
+/// On success, returns a [`JwtAssertionJtiClaim`] witness — the atomic
+/// INSERT with the PRIMARY KEY derived from `(jti, client_id)` serialized
+/// this caller as the first to claim the JTI. Concurrent replayers receive
+/// [`ClaimError::AlreadyConsumed`] regardless of transaction isolation
+/// level or database backend.
 pub async fn store_jwt_assertion_jti(
     store: &DocumentStore,
     jti: &str,
     client_id: &str,
     expires_at: Timestamp,
-) -> Result<bool> {
+) -> std::result::Result<JwtAssertionJtiClaim, super::claim::ClaimError> {
+    use super::claim::ClaimError;
+
     if jti.len() > MAX_JTI_LENGTH {
-        return Err(anyhow::anyhow!(
+        return Err(ClaimError::InvalidInput(format!(
             "JTI exceeds maximum length ({MAX_JTI_LENGTH})"
-        ));
+        )));
     }
 
     let id = deterministic_jti_id(jti, client_id);
@@ -829,12 +850,12 @@ pub async fn store_jwt_assertion_jti(
     };
 
     match store.insert_with_id(&id, &doc).await {
-        Ok(_) => Ok(true),
+        Ok(_) => Ok(JwtAssertionJtiClaim { _private: () }),
         Err(e) => {
             if super::pool::is_unique_violation(&e) {
-                Ok(false)
+                Err(ClaimError::AlreadyConsumed)
             } else {
-                Err(e)
+                Err(ClaimError::Database(e.to_string()))
             }
         }
     }
@@ -850,6 +871,14 @@ pub async fn delete_expired_jwt_assertion_jtis(store: &DocumentStore) -> Result<
 // ============================================================================
 
 /// Validate client credentials (client_id + client_secret).
+///
+/// The presented secret is hashed by the caller (SHA-256, via `hash_token`)
+/// and looked up by hash. There is no application-level `ct_eq` call
+/// because the comparison happens inside the SQL engine on an indexed
+/// column — the timing of "row found" vs "row not found" is not
+/// distinguishable from the HTTP client's perspective, and we never see
+/// the raw stored secret in application code. Do NOT replace this with
+/// a fetch-then-compare pattern; that would reintroduce a timing channel.
 pub async fn validate_oauth_client_credentials(
     store: &DocumentStore,
     client_id: &str,

@@ -18,6 +18,7 @@ pub(crate) mod audit;
 mod authenticators;
 mod authorization_codes;
 mod challenge_states;
+pub(crate) mod claim;
 mod config;
 mod credentials;
 mod device_auth;
@@ -91,9 +92,10 @@ pub use device_auth::{
     DeviceAuthRequest, DeviceAuthStatus, OidcState, authorize_device_auth,
     create_device_auth_request, create_oidc_state, delete_expired_device_auth_requests,
     delete_expired_oidc_states, delete_oidc_state, deny_device_auth, get_device_auth_by_code_hash,
-    get_device_auth_by_user_code, get_oidc_state, try_consume_device_auth,
+    get_device_auth_by_user_code, get_oidc_state, try_consume_device_auth, try_consume_oidc_state,
     update_device_auth_poll_time,
 };
+pub(crate) use device_auth::{DeviceCodeClaim, OidcStateClaim};
 
 // Re-export device auth test helpers (only available in tests)
 #[cfg(test)]
@@ -121,6 +123,7 @@ pub use documents::oauth::{
 };
 
 // Re-export OAuth domain types and functions
+pub(crate) use oauth::JwtAssertionJtiClaim;
 pub use oauth::{
     CreateOAuthClientParams, OAuthClient, OAuthClientSecret, OAuthEventType, OAuthUsageStats,
     UpdateClientRegistrationParams, UpdateOAuthClientParams, create_oauth_client,
@@ -174,23 +177,29 @@ pub use github::{
 };
 
 // Re-export PAR types and functions (RFC 9126)
+pub(crate) use par::create_pushed_authorization_request;
 pub use par::{
     CreateParParams, PAR_EXPIRES_IN, ParConsumptionMode, PushedAuthorizationRequest,
-    consume_pushed_authorization_request, create_pushed_authorization_request,
-    delete_expired_pushed_authorization_requests, get_pushed_authorization_request,
+    consume_pushed_authorization_request, delete_expired_pushed_authorization_requests,
+    get_pushed_authorization_request,
 };
 
 // Re-export pending OAuth types and functions (RFC 6749, RFC 9700)
+pub(crate) use pending_oauth::consume_pending_oauth_authorization;
 pub use pending_oauth::{
-    CreatePendingOAuthParams, PendingOAuthAuthorization, consume_pending_oauth_authorization,
-    create_pending_oauth_authorization, delete_expired_pending_oauth_authorizations,
-    get_pending_oauth_authorization,
+    CreatePendingOAuthParams, PendingOAuthAuthorization, create_pending_oauth_authorization,
+    delete_expired_pending_oauth_authorizations, get_pending_oauth_authorization,
 };
 
 // Re-export challenge state functions (FIDO2 single-use enforcement)
-pub use challenge_states::{delete_expired_challenge_states, try_mark_challenge_used};
+pub(crate) use challenge_states::ChallengeStateClaim;
+pub use challenge_states::{delete_expired_challenge_states, try_consume_challenge_state};
+
+// Re-export claim error type so handlers can pattern-match on it.
+pub(crate) use claim::ClaimError;
 
 // Re-export authorization code functions (RFC 6749 Section 10.5)
+pub(crate) use authorization_codes::AuthCodeClaim;
 pub use authorization_codes::{
     delete_expired_authorization_codes, get_authorization_code_details,
     get_authorization_code_owner, get_consumed_code_owner, is_authorization_code_consumed,

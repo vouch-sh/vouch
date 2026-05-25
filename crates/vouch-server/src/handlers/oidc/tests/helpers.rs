@@ -210,6 +210,31 @@ pub(super) fn build_client_assertion(
     sign_jwt_assertion(pkcs8_bytes, &header, &claims)
 }
 
+/// Build a JWT assertion for `private_key_jwt` client auth, deliberately
+/// omitting the `jti` claim. RFC 7523 §3 makes `jti` OPTIONAL for non-FAPI
+/// clients; this helper exercises that path. Use only with non-FAPI clients —
+/// FAPI 2.0 §5.3.2.1 requires `jti`.
+pub(super) fn build_client_assertion_omit_jti(
+    client_id: &str,
+    audience: &str,
+    pkcs8_bytes: &[u8],
+) -> String {
+    let now = jiff::Timestamp::now().as_second();
+    let header = serde_json::json!({
+        "alg": "ES256",
+        "typ": "JWT",
+        "kid": "test-key-1"
+    });
+    let claims = serde_json::json!({
+        "iss": client_id,
+        "sub": client_id,
+        "aud": audience,
+        "iat": now,
+        "exp": now + 60
+    });
+    sign_jwt_assertion(pkcs8_bytes, &header, &claims)
+}
+
 /// Decode a JWT payload (middle part) without signature verification.
 pub(super) fn decode_jwt_payload(token: &str) -> serde_json::Value {
     let parts: Vec<&str> = token.split('.').collect();

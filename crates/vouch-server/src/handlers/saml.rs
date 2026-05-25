@@ -14,7 +14,6 @@ use axum::{
     http::header,
     response::{IntoResponse, Response},
 };
-use jiff::Timestamp;
 use serde::Deserialize;
 
 use crate::AppState;
@@ -95,38 +94,32 @@ pub async fn acs(State(state): State<Arc<AppState>>, Form(form): Form<SamlAcsFor
         .into_response();
     }
 
-    // Step 3: Look up stored SAML state by RelayState (= state column in oidc_state table).
-    let stored_state = match db::get_oidc_state(&state.store, &relay_state).await {
-        Ok(Some(s)) => s,
-        Ok(None) => {
-            return ErrorTemplate {
-                title: "Error".to_string(),
-                message: "Invalid or expired state".to_string(),
-                back_url: None,
+    // Step 3: Atomically consume the SAML state record (stored in the
+    // shared oidc_state table). The returned witness is threaded into the
+    // downstream TokenIssuanceProof and is the only path to
+    // `GrantProof::EnrollmentBootstrap`. Replaces the prior
+    // get-then-delete pattern, closing the read-vs-consume TOCTOU.
+    let (stored_state, oidc_state_claim) =
+        match db::try_consume_oidc_state(&state.store, &relay_state).await {
+            Ok(pair) => pair,
+            Err(db::ClaimError::AlreadyConsumed) => {
+                return ErrorTemplate {
+                    title: "Error".to_string(),
+                    message: "Invalid or expired state".to_string(),
+                    back_url: None,
+                }
+                .into_response();
             }
-            .into_response();
-        }
-        Err(e) => {
-            tracing::error!("Failed to look up SAML state: {e:#}");
-            return ErrorTemplate {
-                title: "Error".to_string(),
-                message: "Failed to verify state".to_string(),
-                back_url: None,
+            Err(e) => {
+                tracing::error!("Failed to consume SAML state: {e:#}");
+                return ErrorTemplate {
+                    title: "Error".to_string(),
+                    message: "Failed to verify state".to_string(),
+                    back_url: None,
+                }
+                .into_response();
             }
-            .into_response();
-        }
-    };
-
-    // Step 4: Check if state has expired.
-    let now = Timestamp::now();
-    if now > stored_state.expires_at {
-        return ErrorTemplate {
-            title: "Error".to_string(),
-            message: "State has expired. Please start the enrollment process again.".to_string(),
-            back_url: None,
-        }
-        .into_response();
-    }
+        };
 
     // Step 5: Look up the SAML IdP by the slug stored in the state row.
     // Fall back to the first configured SAML IdP for state docs written before
@@ -177,7 +170,7 @@ pub async fn acs(State(state): State<Arc<AppState>>, Form(form): Form<SamlAcsFor
         domain: assertion.domain,
     };
 
-    complete_enrollment_after_identity(&state, &stored_state, &relay_state, identity).await
+    complete_enrollment_after_identity(&state, &stored_state, identity, oidc_state_claim).await
 }
 
 // ============================================================================

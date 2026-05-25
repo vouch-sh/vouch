@@ -374,11 +374,10 @@ async fn test_try_consume_device_auth_authorized_succeeds() {
         .await
         .expect("authorize");
 
-    // Consume
-    let consumed = try_consume_device_auth(&store, device_code_hash)
+    // Consume — claim binding satisfies #[must_use].
+    let _claim = try_consume_device_auth(&store, device_code_hash)
         .await
-        .expect("consume");
-    assert!(consumed, "First consumption should succeed");
+        .expect("First consumption should succeed");
 
     // Verify status and consumed_at
     let request = get_device_auth_by_code_hash(&store, device_code_hash)
@@ -426,15 +425,15 @@ async fn test_try_consume_device_auth_already_consumed_returns_false() {
         .await
         .expect("authorize");
 
-    let first = try_consume_device_auth(&store, device_code_hash)
+    let _first = try_consume_device_auth(&store, device_code_hash)
         .await
-        .expect("first consume");
-    assert!(first, "First consumption should succeed");
+        .expect("First consumption should succeed");
 
-    let second = try_consume_device_auth(&store, device_code_hash)
-        .await
-        .expect("second consume");
-    assert!(!second, "Second consumption must return false");
+    let second = try_consume_device_auth(&store, device_code_hash).await;
+    assert!(
+        matches!(second, Err(crate::db::claim::ClaimError::AlreadyConsumed)),
+        "Second consumption must fail with AlreadyConsumed, got: {second:?}"
+    );
 }
 
 #[tokio::test]
@@ -454,10 +453,11 @@ async fn test_try_consume_device_auth_pending_returns_false() {
     .expect("create");
 
     // Attempt to consume a Pending request (never authorized)
-    let consumed = try_consume_device_auth(&store, device_code_hash)
-        .await
-        .expect("consume");
-    assert!(!consumed, "Pending device code must not be consumable");
+    let consumed = try_consume_device_auth(&store, device_code_hash).await;
+    assert!(
+        matches!(consumed, Err(crate::db::claim::ClaimError::AlreadyConsumed)),
+        "Pending device code must not be consumable, got: {consumed:?}"
+    );
 }
 
 #[tokio::test]
@@ -492,20 +492,22 @@ async fn test_try_consume_device_auth_expired_returns_false() {
         .await
         .expect("authorize");
 
-    let consumed = try_consume_device_auth(&store, device_code_hash)
-        .await
-        .expect("consume");
-    assert!(!consumed, "Expired device code must not be consumable");
+    let consumed = try_consume_device_auth(&store, device_code_hash).await;
+    assert!(
+        matches!(consumed, Err(crate::db::claim::ClaimError::AlreadyConsumed)),
+        "Expired device code must not be consumable, got: {consumed:?}"
+    );
 }
 
 #[tokio::test]
 async fn test_try_consume_device_auth_not_found_returns_false() {
     let (store, _audit) = test_db().await;
 
-    let consumed = try_consume_device_auth(&store, "nonexistent_hash")
-        .await
-        .expect("consume");
-    assert!(!consumed, "Nonexistent hash must return false");
+    let consumed = try_consume_device_auth(&store, "nonexistent_hash").await;
+    assert!(
+        matches!(consumed, Err(crate::db::claim::ClaimError::AlreadyConsumed)),
+        "Nonexistent hash must fail with AlreadyConsumed, got: {consumed:?}"
+    );
 }
 
 #[tokio::test]
@@ -2425,34 +2427,32 @@ fn test_oauth_client_secret_is_valid_no_expiry() {
 
 #[tokio::test]
 async fn test_store_jwt_assertion_jti_replay_prevention() {
+    use crate::db::claim::ClaimError;
     let (store, _audit) = test_db().await;
 
     let expires: jiff::Timestamp = "2099-01-01T00:00:00Z".parse().unwrap();
 
-    // First use returns true
-    let stored = store_jwt_assertion_jti(&store, "jti-abc", "client-1", expires)
+    // First use returns the witness
+    let _claim = store_jwt_assertion_jti(&store, "jti-abc", "client-1", expires)
         .await
-        .expect("first store should not error");
-    assert!(stored, "First use of a JTI should be accepted");
+        .expect("First use of a JTI should be accepted");
 
-    // Replay with same jti + client_id returns false
-    let replayed = store_jwt_assertion_jti(&store, "jti-abc", "client-1", expires)
-        .await
-        .expect("replay check should not error");
-    assert!(!replayed, "Replay of same JTI+client_id should be rejected");
+    // Replay with same jti + client_id returns AlreadyConsumed
+    let replayed = store_jwt_assertion_jti(&store, "jti-abc", "client-1", expires).await;
+    assert!(
+        matches!(replayed, Err(ClaimError::AlreadyConsumed)),
+        "Replay of same JTI+client_id should be rejected: got {replayed:?}"
+    );
 
     // Same JTI from a different client_id is allowed
-    let different_client = store_jwt_assertion_jti(&store, "jti-abc", "client-2", expires)
+    let _different_client = store_jwt_assertion_jti(&store, "jti-abc", "client-2", expires)
         .await
-        .expect("different client should not error");
-    assert!(
-        different_client,
-        "Same JTI from a different client should be accepted"
-    );
+        .expect("Same JTI from a different client should be accepted");
 }
 
 #[tokio::test]
 async fn test_store_jwt_assertion_jti_too_long() {
+    use crate::db::claim::ClaimError;
     let (store, _audit) = test_db().await;
 
     // JTI longer than MAX_JTI_LENGTH (256) must be rejected immediately
@@ -2465,26 +2465,28 @@ async fn test_store_jwt_assertion_jti_too_long() {
     )
     .await;
     assert!(
-        result.is_err(),
-        "JTI exceeding max length must return an error"
+        matches!(result, Err(ClaimError::InvalidInput(_))),
+        "JTI exceeding max length must return InvalidInput (client error, \
+         not Database — a Database error would tell well-behaved clients to \
+         retry the oversized JTI): got {result:?}"
     );
 }
 
 #[tokio::test]
 async fn test_store_jwt_assertion_jti_at_max_length() {
+    use crate::db::claim::ClaimError;
     let (store, _audit) = test_db().await;
 
     // Exactly MAX_JTI_LENGTH (256) must be accepted
     let max_jti = "j".repeat(256);
-    let stored = store_jwt_assertion_jti(
+    let _claim = store_jwt_assertion_jti(
         &store,
         &max_jti,
         "client-1",
         "2099-01-01T00:00:00Z".parse().unwrap(),
     )
     .await
-    .expect("256-char JTI should not error");
-    assert!(stored, "JTI at max length should be accepted");
+    .expect("JTI at max length should be accepted");
 
     // Replay still detected
     let replayed = store_jwt_assertion_jti(
@@ -2493,58 +2495,53 @@ async fn test_store_jwt_assertion_jti_at_max_length() {
         "client-1",
         "2099-01-01T00:00:00Z".parse().unwrap(),
     )
-    .await
-    .expect("replay check should not error");
-    assert!(!replayed, "Replay of max-length JTI should be rejected");
+    .await;
+    assert!(
+        matches!(replayed, Err(ClaimError::AlreadyConsumed)),
+        "Replay of max-length JTI should be rejected: got {replayed:?}"
+    );
 }
 
 #[tokio::test]
 async fn test_store_jwt_assertion_jti_client_isolation() {
+    use crate::db::claim::ClaimError;
     let (store, _audit) = test_db().await;
 
     let expires: jiff::Timestamp = "2099-01-01T00:00:00Z".parse().unwrap();
 
     // Three independent (jti, client_id) pairs must all succeed
-    let a = store_jwt_assertion_jti(&store, "jti-xyz", "client-A", expires)
+    let _a = store_jwt_assertion_jti(&store, "jti-xyz", "client-A", expires)
         .await
-        .expect("pair A should not error");
-    let b = store_jwt_assertion_jti(&store, "jti-xyz", "client-B", expires)
+        .expect("First pair should be accepted");
+    let _b = store_jwt_assertion_jti(&store, "jti-xyz", "client-B", expires)
         .await
-        .expect("pair B should not error");
-    let c = store_jwt_assertion_jti(&store, "jti-pqr", "client-A", expires)
+        .expect("Same JTI, different client should be accepted");
+    let _c = store_jwt_assertion_jti(&store, "jti-pqr", "client-A", expires)
         .await
-        .expect("pair C should not error");
-    assert!(a, "First pair should be accepted");
-    assert!(b, "Same JTI, different client should be accepted");
-    assert!(c, "Different JTI, same client should be accepted");
+        .expect("Different JTI, same client should be accepted");
 
-    // Each pair replays to false independently
-    let a2 = store_jwt_assertion_jti(&store, "jti-xyz", "client-A", expires)
-        .await
-        .expect("replay A");
-    let b2 = store_jwt_assertion_jti(&store, "jti-xyz", "client-B", expires)
-        .await
-        .expect("replay B");
-    let c2 = store_jwt_assertion_jti(&store, "jti-pqr", "client-A", expires)
-        .await
-        .expect("replay C");
-    assert!(!a2, "Replay of pair A should be rejected");
-    assert!(!b2, "Replay of pair B should be rejected");
-    assert!(!c2, "Replay of pair C should be rejected");
+    // Each pair replays to AlreadyConsumed independently
+    let a2 = store_jwt_assertion_jti(&store, "jti-xyz", "client-A", expires).await;
+    let b2 = store_jwt_assertion_jti(&store, "jti-xyz", "client-B", expires).await;
+    let c2 = store_jwt_assertion_jti(&store, "jti-pqr", "client-A", expires).await;
+    assert!(matches!(a2, Err(ClaimError::AlreadyConsumed)));
+    assert!(matches!(b2, Err(ClaimError::AlreadyConsumed)));
+    assert!(matches!(c2, Err(ClaimError::AlreadyConsumed)));
 }
 
 #[tokio::test]
 async fn test_delete_expired_jwt_assertion_jtis() {
+    use crate::db::claim::ClaimError;
     let (store, _audit) = test_db().await;
 
     let past_expires: jiff::Timestamp = "2020-01-01T00:00:00Z".parse().unwrap();
     let future_expires: jiff::Timestamp = "2099-01-01T00:00:00Z".parse().unwrap();
 
     // Insert one expired and one valid JTI
-    store_jwt_assertion_jti(&store, "expired-jti", "c1", past_expires)
+    let _expired_claim = store_jwt_assertion_jti(&store, "expired-jti", "c1", past_expires)
         .await
         .expect("insert expired");
-    store_jwt_assertion_jti(&store, "valid-jti", "c1", future_expires)
+    let _valid_claim = store_jwt_assertion_jti(&store, "valid-jti", "c1", future_expires)
         .await
         .expect("insert valid");
 
@@ -2553,20 +2550,17 @@ async fn test_delete_expired_jwt_assertion_jtis() {
         .expect("delete_expired should not error");
     assert!(deleted >= 1, "Should delete at least the expired JTI");
 
-    // The valid one is still usable (replay returns false only if it exists)
-    let still_stored = store_jwt_assertion_jti(&store, "valid-jti", "c1", future_expires)
-        .await
-        .expect("check");
-    assert!(!still_stored, "Valid JTI should still block replay");
+    // The valid one is still in place — replay returns AlreadyConsumed
+    let still_stored = store_jwt_assertion_jti(&store, "valid-jti", "c1", future_expires).await;
+    assert!(
+        matches!(still_stored, Err(ClaimError::AlreadyConsumed)),
+        "Valid JTI should still block replay: got {still_stored:?}"
+    );
 
     // The expired one was deleted and can be reused
-    let reused = store_jwt_assertion_jti(&store, "expired-jti", "c1", future_expires)
+    let _reused = store_jwt_assertion_jti(&store, "expired-jti", "c1", future_expires)
         .await
-        .expect("reuse after expiry cleanup");
-    assert!(
-        reused,
-        "Expired+deleted JTI should be accepted again after cleanup"
-    );
+        .expect("Expired+deleted JTI should be accepted again after cleanup");
 }
 
 // ========================================================================
@@ -2575,61 +2569,67 @@ async fn test_delete_expired_jwt_assertion_jtis() {
 
 #[tokio::test]
 async fn test_dpop_jti_replay_prevention() {
+    use crate::db::claim::ClaimError;
     let (store, _audit) = test_db().await;
 
-    // First use returns true
-    let stored = check_and_store_dpop_jti(&store, "dpop-jti-1", 600)
+    // First use returns the witness
+    let _claim = check_and_store_dpop_jti(&store, "dpop-jti-1", 600)
         .await
-        .expect("first store should not error");
-    assert!(stored, "First use of a JTI should be accepted");
+        .expect("First use of a JTI should be accepted");
 
-    // Replay returns false
-    let replayed = check_and_store_dpop_jti(&store, "dpop-jti-1", 600)
-        .await
-        .expect("replay check should not error");
-    assert!(!replayed, "Replay of same JTI should be rejected");
+    // Replay returns AlreadyConsumed
+    let replayed = check_and_store_dpop_jti(&store, "dpop-jti-1", 600).await;
+    assert!(
+        matches!(replayed, Err(ClaimError::AlreadyConsumed)),
+        "Replay of same JTI should be AlreadyConsumed, got: {replayed:?}"
+    );
 
     // Different JTI succeeds
-    let different = check_and_store_dpop_jti(&store, "dpop-jti-2", 600)
+    let _different = check_and_store_dpop_jti(&store, "dpop-jti-2", 600)
         .await
-        .expect("different JTI should not error");
-    assert!(different, "Different JTI should be accepted");
+        .expect("Different JTI should be accepted");
 }
 
 #[tokio::test]
 async fn test_dpop_jti_empty() {
+    use crate::db::claim::ClaimError;
     let (store, _audit) = test_db().await;
 
     let result = check_and_store_dpop_jti(&store, "", 600).await;
-    assert!(result.is_err(), "Empty JTI must return an error");
+    assert!(
+        matches!(result, Err(ClaimError::InvalidInput(_))),
+        "Empty JTI must return InvalidInput, got: {result:?}"
+    );
 }
 
 #[tokio::test]
 async fn test_dpop_jti_too_long() {
+    use crate::db::claim::ClaimError;
     let (store, _audit) = test_db().await;
 
     let long_jti = "x".repeat(257);
     let result = check_and_store_dpop_jti(&store, &long_jti, 600).await;
     assert!(
-        result.is_err(),
-        "JTI exceeding max length must return an error"
+        matches!(result, Err(ClaimError::InvalidInput(_))),
+        "JTI exceeding max length must return InvalidInput, got: {result:?}"
     );
 }
 
 #[tokio::test]
 async fn test_dpop_jti_at_max_length() {
+    use crate::db::claim::ClaimError;
     let (store, _audit) = test_db().await;
 
     let max_jti = "d".repeat(256);
-    let stored = check_and_store_dpop_jti(&store, &max_jti, 600)
+    let _stored = check_and_store_dpop_jti(&store, &max_jti, 600)
         .await
-        .expect("256-char JTI should not error");
-    assert!(stored, "JTI at max length should be accepted");
+        .expect("JTI at max length should be accepted");
 
-    let replayed = check_and_store_dpop_jti(&store, &max_jti, 600)
-        .await
-        .expect("replay check should not error");
-    assert!(!replayed, "Replay of max-length JTI should be rejected");
+    let replayed = check_and_store_dpop_jti(&store, &max_jti, 600).await;
+    assert!(
+        matches!(replayed, Err(ClaimError::AlreadyConsumed)),
+        "Replay of max-length JTI should be AlreadyConsumed, got: {replayed:?}"
+    );
 }
 
 #[tokio::test]
@@ -2650,7 +2650,7 @@ async fn test_dpop_jti_concurrent_insert_rejects_duplicates() {
     let mut successes = 0u32;
     for handle in handles {
         let result = handle.await.expect("task should not panic");
-        if let Ok(true) = result {
+        if result.is_ok() {
             successes += 1;
         }
     }
@@ -2668,7 +2668,7 @@ async fn test_delete_expired_dpop_jtis() {
     // Insert one with past expiry (validity_seconds=0 won't work since
     // it computes from now; instead insert directly with short validity
     // and rely on the fact that we can test cleanup.)
-    check_and_store_dpop_jti(&store, "valid-dpop-jti", 3600)
+    let _valid = check_and_store_dpop_jti(&store, "valid-dpop-jti", 3600)
         .await
         .expect("insert valid");
 
@@ -2679,10 +2679,12 @@ async fn test_delete_expired_dpop_jtis() {
     assert_eq!(deleted, 0, "No expired JTIs to delete");
 
     // The valid one should still block replay
-    let still_blocked = check_and_store_dpop_jti(&store, "valid-dpop-jti", 3600)
-        .await
-        .expect("check");
-    assert!(!still_blocked, "Valid JTI should still block replay");
+    use crate::db::claim::ClaimError;
+    let result = check_and_store_dpop_jti(&store, "valid-dpop-jti", 3600).await;
+    assert!(
+        matches!(result, Err(ClaimError::AlreadyConsumed)),
+        "Valid JTI should still block replay, got: {result:?}"
+    );
 }
 
 // ========================================================================
@@ -2883,15 +2885,15 @@ async fn test_challenge_state_mark_used() {
         .checked_add(jiff::SignedDuration::from_secs(300))
         .unwrap();
 
-    // First use should succeed
-    let used = try_mark_challenge_used(&store, state_jwt, expires_at)
+    // First use should succeed and return a witness
+    let _claim = try_consume_challenge_state(&store, state_jwt, expires_at)
         .await
-        .expect("Failed to mark challenge used");
-    assert!(used, "First use should succeed");
+        .expect("First use should succeed");
 }
 
 #[tokio::test]
 async fn test_challenge_state_replay_rejected() {
+    use crate::db::claim::ClaimError;
     let (store, _audit) = test_db().await;
 
     let state_jwt = "test-jwt-replay";
@@ -2900,16 +2902,16 @@ async fn test_challenge_state_replay_rejected() {
         .unwrap();
 
     // First use succeeds
-    let first = try_mark_challenge_used(&store, state_jwt, expires_at)
+    let _first = try_consume_challenge_state(&store, state_jwt, expires_at)
         .await
-        .expect("Failed on first use");
-    assert!(first, "First use should succeed");
+        .expect("First use should succeed");
 
     // Second use must fail (replay)
-    let second = try_mark_challenge_used(&store, state_jwt, expires_at)
-        .await
-        .expect("Failed on second use");
-    assert!(!second, "Second use (replay) should be rejected");
+    let second = try_consume_challenge_state(&store, state_jwt, expires_at).await;
+    assert!(
+        matches!(second, Err(ClaimError::AlreadyConsumed)),
+        "Second use (replay) should be rejected, got: {second:?}"
+    );
 }
 
 #[tokio::test]
@@ -2917,7 +2919,7 @@ async fn test_challenge_state_new_hash_succeeds() {
     let (store, _audit) = test_db().await;
 
     // A never-seen hash should succeed on first use
-    let used = try_mark_challenge_used(
+    let _claim = try_consume_challenge_state(
         &store,
         "never_seen_hash",
         jiff::Timestamp::now()
@@ -2925,14 +2927,14 @@ async fn test_challenge_state_new_hash_succeeds() {
             .unwrap(),
     )
     .await
-    .expect("Failed to mark challenge used");
-    assert!(used, "New challenge hash should succeed");
+    .expect("New challenge hash should succeed");
 }
 
 #[tokio::test]
 async fn test_challenge_state_concurrent_calls_produce_one_row() {
+    use crate::db::claim::ClaimError;
     // Two concurrent calls with the same state_jwt must produce exactly one
-    // document row — deterministic ID ensures they collide on the PRIMARY KEY
+    // winner — deterministic ID ensures they collide on the PRIMARY KEY
     // rather than creating two rows.
     let (store, _audit) = test_db().await;
 
@@ -2944,18 +2946,25 @@ async fn test_challenge_state_concurrent_calls_produce_one_row() {
     let store_a = store.clone();
     let store_b = store.clone();
     let (result_a, result_b) = tokio::join!(
-        try_mark_challenge_used(&store_a, state_jwt, expires_at),
-        try_mark_challenge_used(&store_b, state_jwt, expires_at),
+        try_consume_challenge_state(&store_a, state_jwt, expires_at),
+        try_consume_challenge_state(&store_b, state_jwt, expires_at),
     );
 
-    let a = result_a.expect("first concurrent call must not error");
-    let b = result_b.expect("second concurrent call must not error");
-
-    // Exactly one winner and one loser — the sum of the two booleans is 1.
+    let a_won = result_a.is_ok();
+    let b_won = result_b.is_ok();
     assert!(
-        a ^ b,
-        "exactly one concurrent call should return true (winner), got a={a}, b={b}"
+        a_won ^ b_won,
+        "exactly one concurrent call should win, got a={a_won}, b={b_won}"
     );
+    // The loser must report AlreadyConsumed (not a database error).
+    for r in [result_a, result_b] {
+        if let Err(e) = r {
+            assert!(
+                matches!(e, ClaimError::AlreadyConsumed),
+                "loser must be AlreadyConsumed, got: {e:?}"
+            );
+        }
+    }
 }
 
 #[test]
@@ -3126,5 +3135,561 @@ async fn test_jwks_refresh_does_not_modify_oauth_client_doc() {
     assert_eq!(
         after.updated_at, snapshot_updated_at,
         "upsert_jwks_cache must not change parent updated_at"
+    );
+}
+
+// ========================================================================
+// OIDC state — atomic consume + concurrent-replay regression coverage
+// ========================================================================
+
+/// Seed a fresh OIDC state row tied to a fresh device-auth row.
+async fn seed_oidc_state(
+    store: &DocumentStore,
+    state_value: &str,
+    expires_at: jiff::Timestamp,
+) -> String {
+    let device_auth_id = create_device_auth_request(
+        store,
+        &format!("device_hash_for_{state_value}"),
+        &format!("UC-{state_value}"),
+        None,
+        expires_at,
+        5,
+    )
+    .await
+    .expect("create_device_auth_request");
+
+    create_oidc_state(
+        store,
+        state_value,
+        &device_auth_id,
+        "nonce-value",
+        "",
+        expires_at,
+        "",
+    )
+    .await
+    .expect("create_oidc_state");
+
+    device_auth_id
+}
+
+#[tokio::test]
+async fn test_oidc_state_consume_happy_path() {
+    let (store, _audit) = test_db().await;
+    let expires_at: jiff::Timestamp = "2099-12-31T23:59:59Z".parse().unwrap();
+    let device_auth_id = seed_oidc_state(&store, "happy-state", expires_at).await;
+
+    let (data, _claim) = try_consume_oidc_state(&store, "happy-state")
+        .await
+        .expect("first consume must succeed");
+
+    assert_eq!(data.state, "happy-state");
+    assert_eq!(data.device_auth_id, device_auth_id);
+    assert_eq!(data.nonce, "nonce-value");
+}
+
+#[tokio::test]
+async fn test_oidc_state_consume_replay_rejected() {
+    use crate::db::claim::ClaimError;
+    let (store, _audit) = test_db().await;
+    let expires_at: jiff::Timestamp = "2099-12-31T23:59:59Z".parse().unwrap();
+    seed_oidc_state(&store, "replay-state", expires_at).await;
+
+    let _first = try_consume_oidc_state(&store, "replay-state")
+        .await
+        .expect("first consume must succeed");
+
+    let replayed = try_consume_oidc_state(&store, "replay-state").await;
+    assert!(
+        matches!(replayed, Err(ClaimError::AlreadyConsumed)),
+        "second consume must be rejected as AlreadyConsumed, got: {replayed:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_oidc_state_consume_expired_rejected() {
+    use crate::db::claim::ClaimError;
+    let (store, _audit) = test_db().await;
+    // Past expiry.
+    let expires_at: jiff::Timestamp = "2000-01-01T00:00:00Z".parse().unwrap();
+    seed_oidc_state(&store, "expired-state", expires_at).await;
+
+    let result = try_consume_oidc_state(&store, "expired-state").await;
+    assert!(
+        matches!(result, Err(ClaimError::AlreadyConsumed)),
+        "expired state must be reported as AlreadyConsumed (indistinguishable \
+         from replay so the caller cannot probe state existence): got {result:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_oidc_state_consume_not_found_rejected() {
+    use crate::db::claim::ClaimError;
+    let (store, _audit) = test_db().await;
+
+    let result = try_consume_oidc_state(&store, "never-existed").await;
+    assert!(
+        matches!(result, Err(ClaimError::AlreadyConsumed)),
+        "missing state must be reported as AlreadyConsumed: got {result:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_oidc_state_consume_concurrent() {
+    use crate::db::claim::ClaimError;
+    let (store, _audit) = test_db().await;
+    let expires_at: jiff::Timestamp = "2099-12-31T23:59:59Z".parse().unwrap();
+    seed_oidc_state(&store, "race-state", expires_at).await;
+
+    let store_a = store.clone();
+    let store_b = store.clone();
+    let (result_a, result_b) = tokio::join!(
+        try_consume_oidc_state(&store_a, "race-state"),
+        try_consume_oidc_state(&store_b, "race-state"),
+    );
+
+    let a_won = result_a.is_ok();
+    let b_won = result_b.is_ok();
+    assert!(
+        a_won ^ b_won,
+        "exactly one concurrent consume must win, got a={a_won}, b={b_won}"
+    );
+    for r in [result_a, result_b] {
+        if let Err(e) = r {
+            assert!(
+                matches!(e, ClaimError::AlreadyConsumed),
+                "loser must be AlreadyConsumed (not Database), got: {e:?}"
+            );
+        }
+    }
+}
+
+// ========================================================================
+// Concurrent-replay regression coverage for single-use primitives:
+// `tokio::join` two consume calls, assert exactly one wins and the loser
+// is AlreadyConsumed. SQLite-only; the underlying OCC patterns are
+// race-safe by construction on the other backends as well, but these
+// tests guard against accidental regressions in the helper functions
+// themselves.
+// ========================================================================
+
+#[tokio::test]
+async fn test_authorization_code_consume_concurrent() {
+    use crate::db::claim::ClaimError;
+    let (store, _audit) = test_db().await;
+
+    let expires_at: jiff::Timestamp = "2099-12-31T23:59:59Z".parse().unwrap();
+    store_authorization_code(
+        &store,
+        "race-code-hash",
+        "client-race",
+        "user-race",
+        expires_at,
+        None,
+    )
+    .await
+    .expect("seed authorization code");
+
+    let store_a = store.clone();
+    let store_b = store.clone();
+    let (result_a, result_b) = tokio::join!(
+        try_consume_authorization_code(&store_a, "race-code-hash"),
+        try_consume_authorization_code(&store_b, "race-code-hash"),
+    );
+
+    let a_won = result_a.is_ok();
+    let b_won = result_b.is_ok();
+    assert!(
+        a_won ^ b_won,
+        "exactly one auth-code consume must win, got a={a_won}, b={b_won}"
+    );
+    for r in [result_a, result_b] {
+        if let Err(e) = r {
+            assert!(
+                matches!(e, ClaimError::AlreadyConsumed),
+                "loser must be AlreadyConsumed, got: {e:?}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_device_auth_consume_concurrent() {
+    use crate::db::claim::ClaimError;
+    let (store, _audit) = test_db().await;
+
+    let expires_at: jiff::Timestamp = "2099-12-31T23:59:59Z".parse().unwrap();
+    let device_code_hash = "race-device-hash";
+    let id = create_device_auth_request(&store, device_code_hash, "RACE-DC", None, expires_at, 5)
+        .await
+        .expect("create device auth");
+    let (user_id, _) = upsert_user(&store, "race-device@example.com", Some("Test"))
+        .await
+        .expect("upsert user");
+    let auth_id = create_authenticator(
+        &store,
+        &user_id,
+        "race-device@example.com",
+        "Key",
+        b"cred-race-device",
+        &[0u8; 32],
+        None,
+        None,
+        false,
+    )
+    .await
+    .expect("create authenticator");
+    authorize_device_auth(&store, &id, &user_id, "race-device@example.com", &auth_id)
+        .await
+        .expect("authorize");
+
+    let store_a = store.clone();
+    let store_b = store.clone();
+    let (result_a, result_b) = tokio::join!(
+        try_consume_device_auth(&store_a, device_code_hash),
+        try_consume_device_auth(&store_b, device_code_hash),
+    );
+
+    let a_won = result_a.is_ok();
+    let b_won = result_b.is_ok();
+    assert!(
+        a_won ^ b_won,
+        "exactly one device-auth consume must win, got a={a_won}, b={b_won}"
+    );
+    for r in [result_a, result_b] {
+        if let Err(e) = r {
+            assert!(
+                matches!(e, ClaimError::AlreadyConsumed),
+                "loser must be AlreadyConsumed, got: {e:?}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_dpop_nonce_consume_concurrent() {
+    use crate::db::claim::ClaimError;
+    let (store, _audit) = test_db().await;
+
+    // Seed a fresh nonce; the function returns the nonce string.
+    let nonce = generate_dpop_nonce(&store, 300)
+        .await
+        .expect("generate_dpop_nonce");
+
+    let store_a = store.clone();
+    let store_b = store.clone();
+    let nonce_a = nonce.clone();
+    let nonce_b = nonce.clone();
+    let (result_a, result_b) = tokio::join!(
+        async move { validate_and_consume_dpop_nonce(&store_a, &nonce_a).await },
+        async move { validate_and_consume_dpop_nonce(&store_b, &nonce_b).await },
+    );
+
+    let a_won = result_a.is_ok();
+    let b_won = result_b.is_ok();
+    assert!(
+        a_won ^ b_won,
+        "exactly one DPoP-nonce consume must win, got a={a_won}, b={b_won}"
+    );
+    for r in [result_a, result_b] {
+        if let Err(e) = r {
+            assert!(
+                matches!(e, ClaimError::AlreadyConsumed),
+                "loser must be AlreadyConsumed, got: {e:?}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_pending_oauth_consume_concurrent() {
+    use crate::db::claim::ClaimError;
+    let (store, _audit) = test_db().await;
+
+    let id = create_pending_oauth_authorization(
+        &store,
+        CreatePendingOAuthParams {
+            client_id: "race-pending-client",
+            redirect_uri: "https://example.com/cb",
+            response_type: "code",
+            state: None,
+            scope: Some("openid"),
+            nonce: None,
+            code_challenge: None,
+            code_challenge_method: None,
+            resource: None,
+            acr_values: None,
+            max_age: None,
+            prompt: None,
+            dpop_jkt: None,
+            authorization_details: None,
+            response_mode: Default::default(),
+            par_request_uri: None,
+        },
+    )
+    .await
+    .expect("create pending_oauth");
+
+    let store_a = store.clone();
+    let store_b = store.clone();
+    let id_a = id.clone();
+    let id_b = id.clone();
+    let (result_a, result_b) = tokio::join!(
+        async move { consume_pending_oauth_authorization(&store_a, &id_a).await },
+        async move { consume_pending_oauth_authorization(&store_b, &id_b).await },
+    );
+
+    let a_won = result_a.is_ok();
+    let b_won = result_b.is_ok();
+    assert!(
+        a_won ^ b_won,
+        "exactly one pending_oauth consume must win, got a={a_won}, b={b_won}"
+    );
+    for r in [result_a, result_b] {
+        if let Err(e) = r {
+            assert!(
+                matches!(e, ClaimError::AlreadyConsumed),
+                "loser must be AlreadyConsumed, got: {e:?}"
+            );
+        }
+    }
+}
+
+// ============================================================================
+// Concurrent CAS regression tests for state-transition helpers
+// (non-consume helpers that share the same outer-tx + read + compare_and_update
+// pattern — included to empirically confirm whether each site exhibits the
+// SQLite shared-cache deadlock or not).
+// ============================================================================
+
+#[tokio::test]
+async fn test_authorize_device_auth_concurrent() {
+    let (store, _audit) = test_db().await;
+
+    let expires_at: jiff::Timestamp = "2099-12-31T23:59:59Z".parse().unwrap();
+    let device_code_hash = "race-authorize-hash";
+    let id = create_device_auth_request(&store, device_code_hash, "RACE-AUTH", None, expires_at, 5)
+        .await
+        .expect("create device auth");
+    let (user_id, _) = upsert_user(&store, "race-authorize@example.com", Some("Test"))
+        .await
+        .expect("upsert user");
+    let auth_id = create_authenticator(
+        &store,
+        &user_id,
+        "race-authorize@example.com",
+        "Key",
+        b"cred-race-authorize",
+        &[0u8; 32],
+        None,
+        None,
+        false,
+    )
+    .await
+    .expect("create authenticator");
+
+    let store_a = store.clone();
+    let store_b = store.clone();
+    let id_a = id.clone();
+    let id_b = id.clone();
+    let uid_a = user_id.clone();
+    let uid_b = user_id.clone();
+    let aid_a = auth_id.clone();
+    let aid_b = auth_id.clone();
+    let (result_a, result_b) = tokio::join!(
+        async move {
+            authorize_device_auth(
+                &store_a,
+                &id_a,
+                &uid_a,
+                "race-authorize@example.com",
+                &aid_a,
+            )
+            .await
+        },
+        async move {
+            authorize_device_auth(
+                &store_b,
+                &id_b,
+                &uid_b,
+                "race-authorize@example.com",
+                &aid_b,
+            )
+            .await
+        },
+    );
+
+    for (label, r) in [("a", &result_a), ("b", &result_b)] {
+        if let Err(e) = r {
+            let msg = format!("{e:#}");
+            assert!(
+                !msg.contains("deadlock"),
+                "task {label} should not fail with a DB deadlock: {msg}"
+            );
+        }
+    }
+    let a_won = result_a.is_ok();
+    let b_won = result_b.is_ok();
+    assert!(
+        a_won ^ b_won,
+        "exactly one authorize must win, got a={a_won}, b={b_won}"
+    );
+}
+
+#[tokio::test]
+async fn test_deny_device_auth_concurrent() {
+    let (store, _audit) = test_db().await;
+
+    let expires_at: jiff::Timestamp = "2099-12-31T23:59:59Z".parse().unwrap();
+    let device_code_hash = "race-deny-hash";
+    let id = create_device_auth_request(&store, device_code_hash, "RACE-DENY", None, expires_at, 5)
+        .await
+        .expect("create device auth");
+
+    let store_a = store.clone();
+    let store_b = store.clone();
+    let id_a = id.clone();
+    let id_b = id.clone();
+    let (result_a, result_b) = tokio::join!(
+        async move { deny_device_auth(&store_a, &id_a).await },
+        async move { deny_device_auth(&store_b, &id_b).await },
+    );
+
+    for (label, r) in [("a", &result_a), ("b", &result_b)] {
+        if let Err(e) = r {
+            let msg = format!("{e:#}");
+            assert!(
+                !msg.contains("deadlock"),
+                "task {label} should not fail with a DB deadlock: {msg}"
+            );
+        }
+    }
+    let a_won = result_a.is_ok();
+    let b_won = result_b.is_ok();
+    assert!(
+        a_won ^ b_won,
+        "exactly one deny must win, got a={a_won}, b={b_won}"
+    );
+}
+
+#[tokio::test]
+async fn test_remove_additional_domain_concurrent() {
+    use crate::db::organizations::{
+        add_additional_domain, mark_additional_domain_verified, remove_additional_domain,
+    };
+
+    let (store, _audit) = test_db().await;
+    let org = create_organization(&store, "race-remove.com", Some("Race Org"), None)
+        .await
+        .expect("create org");
+    let (uid, _) = upsert_user(&store, "race-remove-admin@race-remove.com", Some("Admin"))
+        .await
+        .expect("upsert admin");
+    add_additional_domain(
+        &store,
+        &org.id,
+        "extra-remove.com",
+        &uid,
+        "race-remove-admin@race-remove.com",
+    )
+    .await
+    .expect("add additional domain");
+    mark_additional_domain_verified(&store, &org.id, "extra-remove.com")
+        .await
+        .expect("verify additional domain");
+
+    let store_a = store.clone();
+    let store_b = store.clone();
+    let org_a = org.id.clone();
+    let org_b = org.id.clone();
+    let (result_a, result_b) = tokio::join!(
+        async move { remove_additional_domain(&store_a, &org_a, "extra-remove.com").await },
+        async move { remove_additional_domain(&store_b, &org_b, "extra-remove.com").await },
+    );
+
+    for (label, r) in [("a", &result_a), ("b", &result_b)] {
+        if let Err(e) = r {
+            let msg = format!("{e:#}");
+            assert!(
+                !msg.contains("deadlock"),
+                "task {label} should not fail with a DB deadlock: {msg}"
+            );
+        }
+    }
+    let some_count = [&result_a, &result_b]
+        .iter()
+        .filter(|r| matches!(r, Ok(Some(_))))
+        .count();
+    assert!(
+        some_count == 1,
+        "exactly one remove must return Ok(Some), got a={result_a:?}, b={result_b:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_record_recheck_result_concurrent() {
+    use crate::db::organizations::{
+        RecheckOutcome, add_additional_domain, mark_additional_domain_verified,
+        record_recheck_result,
+    };
+
+    let (store, _audit) = test_db().await;
+    let org = create_organization(&store, "race-recheck.com", Some("Race Org"), None)
+        .await
+        .expect("create org");
+    let (uid, _) = upsert_user(&store, "race-recheck-admin@race-recheck.com", Some("Admin"))
+        .await
+        .expect("upsert admin");
+    add_additional_domain(
+        &store,
+        &org.id,
+        "extra-recheck.com",
+        &uid,
+        "race-recheck-admin@race-recheck.com",
+    )
+    .await
+    .expect("add additional domain");
+    mark_additional_domain_verified(&store, &org.id, "extra-recheck.com")
+        .await
+        .expect("verify additional domain");
+
+    let store_a = store.clone();
+    let store_b = store.clone();
+    let org_a = org.id.clone();
+    let org_b = org.id.clone();
+    let (result_a, result_b) = tokio::join!(
+        async move {
+            record_recheck_result(
+                &store_a,
+                &org_a,
+                "extra-recheck.com",
+                RecheckOutcome::Success,
+            )
+            .await
+        },
+        async move {
+            record_recheck_result(
+                &store_b,
+                &org_b,
+                "extra-recheck.com",
+                RecheckOutcome::Success,
+            )
+            .await
+        },
+    );
+
+    for (label, r) in [("a", &result_a), ("b", &result_b)] {
+        if let Err(e) = r {
+            let msg = format!("{e:#}");
+            assert!(
+                !msg.contains("deadlock"),
+                "task {label} should not fail with a DB deadlock: {msg}"
+            );
+        }
+    }
+    assert!(
+        result_a.is_ok() && result_b.is_ok(),
+        "both record_recheck_result calls must succeed (CAS loser returns Ok(StillVerified))"
     );
 }

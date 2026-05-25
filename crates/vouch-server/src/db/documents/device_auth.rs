@@ -82,6 +82,11 @@ pub struct OidcStateDoc {
     /// Empty string for SAML flows or pre-multi-provider state docs (rolling deploy compat).
     #[serde(default)]
     pub provider_id: String,
+    /// Timestamp at which the state was atomically consumed (single-use).
+    /// Set by `try_consume_oidc_state`. A state with `consumed_at: Some(_)`
+    /// is treated as already-used for replay protection.
+    #[serde(default)]
+    pub consumed_at: Option<Timestamp>,
 }
 
 impl DocumentType for OidcStateDoc {
