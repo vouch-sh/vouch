@@ -195,6 +195,7 @@ pub use pending_oauth::{
 pub use challenge_states::{delete_expired_challenge_states, try_mark_challenge_used};
 
 // Re-export authorization code functions (RFC 6749 Section 10.5)
+pub(crate) use authorization_codes::AuthCodeClaim;
 pub use authorization_codes::{
     delete_expired_authorization_codes, get_authorization_code_details,
     get_authorization_code_owner, get_consumed_code_owner, is_authorization_code_consumed,

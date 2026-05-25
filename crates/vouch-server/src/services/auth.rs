@@ -338,9 +338,10 @@ pub(crate) struct TokenIssuanceProof {
 /// migration plan.
 #[derive(Debug)]
 pub(crate) enum GrantProof {
-    /// `authorization_code` grant.
-    /// TODO(slice-2): carry an `AuthCodeClaim` from `db::try_consume_auth_code`.
-    UnconvertedAuthorizationCode,
+    /// `authorization_code` grant. Carries a [`crate::db::AuthCodeClaim`]
+    /// witness — proof that the authorization code was atomically consumed
+    /// before this token issuance.
+    AuthorizationCode(crate::db::AuthCodeClaim),
 
     /// `client_credentials` grant — no grant-level replay primitive; the
     /// single-use guarantee is enforced entirely via [`ClientAuthProof`].

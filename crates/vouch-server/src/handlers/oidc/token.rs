@@ -662,6 +662,10 @@ async fn handle_authorization_code_grant(
     // layer, but any `credentials.client_secret.is_some()` came through
     // `client_secret_basic`/`client_secret_post`, so the variant is
     // unambiguous. Public clients (no auth) fall through to `None`.
+    // The `GrantProof::AuthorizationCode` half of the chokepoint is
+    // produced inside `exchange_authorization_code` (only that function
+    // has access to the `AuthCodeClaim` from `enforce_single_use_code`).
+    // The handler supplies only the client-auth axis.
     let fallback = jwt_authenticated
         .as_ref()
         .or(mtls_authenticated.as_ref())
@@ -678,12 +682,9 @@ async fn handle_authorization_code_grant(
             },
             |c| ClientAuthProof::from_auth_method(c.client.token_endpoint_auth_method),
         );
-    let proof = TokenIssuanceProof {
-        grant: GrantProof::UnconvertedAuthorizationCode,
-        client_auth: ClientAuthProof::from_jti_or(jti_claim, fallback),
-    };
+    let client_auth = ClientAuthProof::from_jti_or(jti_claim, fallback);
 
-    match exchange_authorization_code(&state, exchange_params, proof).await {
+    match exchange_authorization_code(&state, exchange_params, client_auth).await {
         Ok(result) => {
             crate::infra::metrics::record_auth_event("authorization_code_success");
             token_success_response(TokenResponse {

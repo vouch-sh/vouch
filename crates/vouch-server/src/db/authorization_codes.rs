@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Authorization code single-use enforcement (RFC 6749 Section 10.5).
 
+use super::claim::ClaimError;
 use super::document_type::DocumentType;
 use super::documents::authorization_code::AuthorizationCodeDoc;
 use super::store::DocumentStore;
@@ -28,35 +29,62 @@ pub async fn store_authorization_code(
     Ok(())
 }
 
-/// Try to consume an authorization code.
+/// Witness that an authorization code (RFC 6749 Section 10.5) was
+/// atomically marked consumed by this caller. Construction is private to
+/// this module — the only path to an instance is a successful return from
+/// [`try_consume_authorization_code`], whose optimistic-concurrency
+/// `compare_and_update` guarantees that at most one concurrent caller
+/// succeeds. Holding an `AuthCodeClaim` is compile-time evidence that
+/// this caller "won" the consume.
 ///
-/// Returns `true` if the code was successfully consumed (first use).
-/// Returns `false` if already consumed, does not exist, or was
-/// concurrently consumed by another request (optimistic lock).
+/// Intentionally not `Clone`. The `#[must_use]` ensures the witness is
+/// bound at the call site (typically threaded into
+/// `GrantProof::AuthorizationCode(claim)`).
+#[must_use = "the authorization code was atomically consumed; bind this \
+              witness so it can be threaded into TokenIssuanceProof"]
+#[derive(Debug)]
+pub struct AuthCodeClaim {
+    _private: (),
+}
+
+/// Atomically consume an authorization code.
+///
+/// On success returns an [`AuthCodeClaim`] witness — proof that this caller
+/// won the OCC consume. All "lost" cases (code not found, expired,
+/// already consumed, concurrent consumer won via version mismatch) map to
+/// [`ClaimError::AlreadyConsumed`] — deliberately indistinguishable, each
+/// rejected as `invalid_grant`. The caller is responsible for replay
+/// detection follow-up (revoking tokens for the affected user) based on
+/// the `AlreadyConsumed` signal.
 pub async fn try_consume_authorization_code(
     store: &DocumentStore,
     code_hash: &str,
-) -> Result<bool> {
+) -> std::result::Result<AuthCodeClaim, ClaimError> {
     let now = Timestamp::now();
 
     let doc = store
         .find_one::<AuthorizationCodeDoc>("code_hash", code_hash)
-        .await?;
+        .await
+        .map_err(|e| ClaimError::Database(e.to_string()))?;
     let Some(doc) = doc else {
-        return Ok(false);
+        return Err(ClaimError::AlreadyConsumed);
     };
 
-    // Check: not consumed and not expired
     if doc.data.consumed_at.is_some() || doc.data.expires_at <= now {
-        return Ok(false);
+        return Err(ClaimError::AlreadyConsumed);
     }
 
-    // Consume with optimistic concurrency — if another request already
-    // consumed this code between our read and write, compare_and_update
-    // returns false (version mismatch).
     let mut data = doc.data;
     data.consumed_at = Some(now);
-    store.compare_and_update(&doc.id, doc.version, &data).await
+    let won = store
+        .compare_and_update(&doc.id, doc.version, &data)
+        .await
+        .map_err(|e| ClaimError::Database(e.to_string()))?;
+    if won {
+        Ok(AuthCodeClaim { _private: () })
+    } else {
+        Err(ClaimError::AlreadyConsumed)
+    }
 }
 
 /// Check if an authorization code has already been consumed.

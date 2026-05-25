@@ -15,7 +15,8 @@ use crate::crypto::hash_token;
 use crate::db::{self, Authenticator, OAuthClient, Session, User};
 use crate::redact_email;
 use crate::services::auth::{
-    AuthMethod, CreateOAuthTokenParams, TokenIssuanceProof, create_oauth_access_token, decode_token,
+    AuthMethod, ClientAuthProof, CreateOAuthTokenParams, GrantProof, TokenIssuanceProof,
+    create_oauth_access_token, decode_token,
 };
 use crate::services::{OAuthErrorCode, ServiceError, ServiceResult};
 use aws_lc_rs::digest::{self, SHA256};
@@ -197,7 +198,7 @@ pub struct IdTokenClaims {
 pub(crate) async fn exchange_authorization_code(
     state: &Arc<AppState>,
     params: AuthCodeExchangeParams<'_>,
-    proof: TokenIssuanceProof,
+    client_auth: ClientAuthProof,
 ) -> ServiceResult<AuthCodeExchangeResult> {
     // Decode and validate the authorization code
     let auth_code = decode_authorization_code(state, params.code, params.client_id).await?;
@@ -205,8 +206,10 @@ pub(crate) async fn exchange_authorization_code(
     // RFC 6749 Section 10.5: Enforce single-use authorization codes.
     // This MUST happen before any other validation to ensure codes are always
     // consumed, enabling replay detection regardless of subsequent check outcomes.
+    // The returned witness is the structural proof threaded into the
+    // TokenIssuanceProof below — the only path to `GrantProof::AuthorizationCode`.
     let code_hash = hash_token(params.code);
-    enforce_single_use_code(state, &code_hash, &auth_code).await?;
+    let auth_code_claim = enforce_single_use_code(state, &code_hash, &auth_code).await?;
 
     // Reject deactivated users before issuing tokens
     let user = db::get_user_by_id(&state.store, &auth_code.user_id)
@@ -254,8 +257,15 @@ pub(crate) async fn exchange_authorization_code(
     )
     .await?;
 
-    // Generate access token as an RFC 9068 JWT (ES256, verifiable via JWKS)
+    // Generate access token as an RFC 9068 JWT (ES256, verifiable via JWKS).
+    // Build the chokepoint proof here: `GrantProof::AuthorizationCode` can
+    // only be constructed by code that holds an AuthCodeClaim, which is
+    // produced by `enforce_single_use_code` above.
     let dpop_jkt = params.dpop_proof.as_ref().map(|p| p.jkt.as_str());
+    let proof = TokenIssuanceProof {
+        grant: GrantProof::AuthorizationCode(auth_code_claim),
+        client_auth,
+    };
     let session_result = create_oauth_access_token(
         state,
         CreateOAuthTokenParams {
@@ -364,16 +374,18 @@ struct ResolvedGrants {
 
 /// RFC 6749 Section 10.5: Enforce single-use authorization codes.
 ///
-/// Tries to consume the code atomically. If it was already consumed,
-/// revoke all tokens issued under the compromised code (replay defense).
+/// Atomically consumes the code; on success returns an [`crate::db::AuthCodeClaim`]
+/// witness. On a replay (`ClaimError::AlreadyConsumed`), revokes all tokens
+/// for the user the original code was issued to before returning the OAuth
+/// `invalid_grant` error.
 async fn enforce_single_use_code(
     state: &Arc<AppState>,
     code_hash: &str,
     auth_code: &AuthorizationCode,
-) -> ServiceResult<()> {
+) -> ServiceResult<crate::db::AuthCodeClaim> {
     match db::try_consume_authorization_code(&state.store, code_hash).await {
-        Ok(true) => Ok(()),
-        Ok(false) => {
+        Ok(claim) => Ok(claim),
+        Err(db::claim::ClaimError::AlreadyConsumed) => {
             if let Ok(Some((user_id, _client_id))) =
                 db::get_consumed_code_owner(&state.store, code_hash).await
             {
