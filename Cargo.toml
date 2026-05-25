@@ -137,9 +137,9 @@ cel = { version = "=0.13.0", default-features = false }
 ciborium = { version = "=0.2.2", default-features = false }
 clap = { version = "=4.6.1", default-features = false }
 clap_complete = { version = "=4.6.5", default-features = false }
-const-oid = { version = "=0.9.6", default-features = false }
+const-oid = { version = "=0.10.2", default-features = false }
 ctap-hid-fido2 = { version = "=3.5.11", default-features = false }
-der = { version = "=0.7.10", default-features = false }
+der = { version = "=0.8.0", default-features = false }
 dirs = { version = "=6.0.0", default-features = false }
 dotenvy = { version = "=0.15.7", default-features = false }
 ed25519-dalek = { version = "=2.2.0", default-features = false }
@@ -150,10 +150,10 @@ ipnet = { version = "=2.12.0", default-features = false }
 headers = { version = "=0.4.1", default-features = false }
 hex = { version = "=0.4.3", default-features = false }
 hickory-resolver = { version = "=0.26.1", default-features = false, features = ["dnssec-aws-lc-rs", "https-aws-lc-rs", "tokio", "webpki-roots"] }
-http = { version = "=1.4.0", default-features = false }
+http = { version = "=1.4.1", default-features = false }
 idna = { version = "=1.1.0", default-features = false, features = ["compiled_data"] }
 inquire = { version = "=0.9.4", default-features = false }
-jiff = { version = "=0.2.24", default-features = false }
+jiff = { version = "=0.2.25", default-features = false }
 jsonwebtoken = { version = "=10.4.0", default-features = false }
 keyring-core = { version = "=1.0.0", default-features = false }
 libc = { version = "=0.2.186", default-features = false }
@@ -169,7 +169,7 @@ opentelemetry_sdk = { version = "=0.32.0", default-features = false }
 opentelemetry-otlp = { version = "=0.32.0", default-features = false }
 p256 = { version = "=0.13.2", default-features = false }
 proptest = { version = "=1.11.0", default-features = false }
-reqwest = { version = "=0.13.3", default-features = false }
+reqwest = { version = "=0.13.4", default-features = false }
 roxmltree = { version = "=0.21.1", default-features = false }
 rpassword = { version = "=7.5.3", default-features = false }
 rust-embed = { version = "=8.11.0", default-features = false }
@@ -178,15 +178,15 @@ rustls = { version = "=0.23.40", default-features = false }
 rustls-pemfile = { version = "=2.2.0", default-features = false }
 sea-query = { version = "=0.32.7", default-features = false }
 sea-query-binder = { version = "=0.7.0", default-features = false }
-sha2 = { version = "=0.10.9", default-features = false }
+sha2 = { version = "=0.11.0", default-features = false }
 secrecy = { version = "=0.10.3", default-features = false }
 serde = { version = "=1.0.228", default-features = false }
 serde_json = { version = "=1.0.150", default-features = false }
 serde_urlencoded = { version = "=0.7.1", default-features = false }
 serde_yaml = { version = "=0.9.34", default-features = false }
-sqlx = { version = "=0.8.6", default-features = false }
-signature = { version = "=2.2.0", default-features = false }
-spki = { version = "=0.7.3", default-features = false }
+sqlx = { version = "=0.9.0", default-features = false }
+signature = { version = "=3.0.0", default-features = false }
+spki = { version = "=0.8.0", default-features = false }
 ssh-key = { version = "=0.6.7", default-features = false }
 subtle = { version = "=2.6.1", default-features = false }
 tempfile = { version = "=3.27.0", default-features = false }
@@ -211,7 +211,7 @@ vouch-httpsig = { path = "crates/vouch-httpsig" }
 webauthn-rs = { version = "=0.5.5", default-features = false }
 webauthn-rs-proto = { version = "=0.5.5", default-features = false }
 windows = { version = "=0.62.2", default-features = false }
-windows-native-keyring-store = { version = "=1.0.0", default-features = false }
+windows-native-keyring-store = { version = "=1.1.0", default-features = false }
 wiremock = { version = "=0.6.5" }
 x509-cert = { version = "=0.2.5", default-features = false }
 zeroize = { version = "=1.8.2", default-features = false }
