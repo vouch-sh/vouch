@@ -12,8 +12,8 @@ pub mod http;
 pub mod posture;
 
 // Re-export commonly used types
-pub use fido2::{AuthenticationResult, FidoDevice, RegistrationResult, YubiKey};
-pub use http::{HttpClient, HttpClientExt, HttpResponse, ReqwestClient};
+pub use fido2::{AuthenticationResult, FidoDevice, RegistrationResult};
+pub use http::{HttpClient, HttpResponse};
 
 #[cfg(feature = "test-utils")]
 pub use fido2::MockFidoDevice;
