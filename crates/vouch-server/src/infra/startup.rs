@@ -139,14 +139,6 @@ pub async fn initialize(args: config::Args) -> Result<ServerComponents> {
 
     log_authenticator_policy(&config);
 
-    if !config.has_idps() {
-        tracing::warn!(
-            "No upstream IdP configured -- enrollment (vouch enroll) will not work. \
-             Set VOUCH_IDPS=<slug>[,<slug>...] with per-provider VOUCH_IDP_<SLUG>_TYPE \
-             plus type-specific vars."
-        );
-    }
-
     match &config.cors_origins {
         Some(origins) => tracing::info!("CORS: origins={}", origins.join(", ")),
         None => tracing::info!("CORS: same-origin only"),
