@@ -92,7 +92,7 @@ struct IntrospectionJwtClaims {
     token_introspection: serde_json::Value,
 }
 
-/// Wrap an introspection result in a signed JWT per RFC 9701.
+/// Sign an introspection result as a JWT per RFC 9701.
 ///
 /// The JWT structure:
 /// - Header: `typ: "token-introspection+jwt"`, `alg: "ES256"`
@@ -100,7 +100,7 @@ struct IntrospectionJwtClaims {
 /// - Token data inside `token_introspection` claim
 /// - For inactive tokens: `{"token_introspection": {"active": false}}`
 /// - No top-level `sub` or `exp` (RFC 9701 Section 5.4)
-pub(crate) async fn wrap_introspection_jwt(
+pub(crate) async fn sign_introspection_jwt(
     result: &IntrospectionResult,
     issuer: &str,
     audience: &str,
