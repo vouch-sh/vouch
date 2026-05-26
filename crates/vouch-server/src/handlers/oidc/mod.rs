@@ -83,17 +83,17 @@ pub(crate) fn build_redirect_url_with_params(
 }
 
 // Re-export handler functions
-pub use authorize::{authorize, authorize_post};
-pub use discovery::{discovery, jwks};
-pub use fido2_challenge::fido2_challenge;
-pub use introspect::{introspect, revoke};
-pub use par::par;
-pub use protected_resource::{
+pub(crate) use authorize::{authorize, authorize_post};
+pub(crate) use discovery::{discovery, jwks};
+pub(crate) use fido2_challenge::fido2_challenge;
+pub(crate) use introspect::{introspect, revoke};
+pub(crate) use par::par;
+pub(crate) use protected_resource::{
     protected_resource_metadata_root, protected_resource_metadata_subpath,
 };
-pub use register::{delete_client, read_client, register, update_client};
-pub use token::token;
-pub use userinfo::userinfo;
+pub(crate) use register::{delete_client, read_client, register, update_client};
+pub(crate) use token::token;
+pub(crate) use userinfo::userinfo;
 
 #[cfg(test)]
 mod tests;

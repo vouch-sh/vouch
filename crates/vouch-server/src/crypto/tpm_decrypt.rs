@@ -45,7 +45,7 @@ const ATTEST_BINARY: &str = "nitro-tpm-attest";
 
 /// Check if NitroTPM is available on this instance.
 #[must_use]
-pub fn is_nitro_tpm_available() -> bool {
+pub(crate) fn is_nitro_tpm_available() -> bool {
     std::path::Path::new(TPM_DEVICE_PATH).exists()
 }
 
@@ -54,7 +54,7 @@ pub fn is_nitro_tpm_available() -> bool {
 /// Searches PATH entries directly instead of shelling out to `which`
 /// (which is not POSIX and may not be present on minimal AMIs).
 #[must_use]
-pub fn is_attest_binary_available() -> bool {
+pub(crate) fn is_attest_binary_available() -> bool {
     std::env::var_os("PATH")
         .map(|paths| std::env::split_paths(&paths).any(|dir| dir.join(ATTEST_BINARY).is_file()))
         .is_some_and(|found| found)
@@ -71,7 +71,7 @@ pub fn is_attest_binary_available() -> bool {
 ///
 /// Returns an error if key generation fails, the attestation binary is
 /// missing, or the TPM device rejects the request.
-pub fn probe_attestation() -> Result<usize> {
+pub(crate) fn probe_attestation() -> Result<usize> {
     let keypair = generate_ephemeral_rsa_keypair()?;
     let doc = get_attestation_document(&keypair.public_key_der)?;
     Ok(doc.len())
@@ -185,7 +185,7 @@ fn get_attestation_document(public_key_der: &[u8]) -> Result<Vec<u8>> {
 ///
 /// The caller determines `use_attestation` from the startup probe result
 /// (see `probe_attestation()`), not from per-call device checks.
-pub async fn kms_decrypt(
+pub(crate) async fn kms_decrypt(
     kms_client: &KmsClient,
     key_id: &str,
     ciphertext_blob: &[u8],

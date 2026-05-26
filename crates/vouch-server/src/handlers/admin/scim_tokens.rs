@@ -29,7 +29,7 @@ use crate::handlers::{ValidPath, ValidUuid};
 
 /// Request to create a SCIM token.
 #[derive(Debug, Deserialize)]
-pub struct CreateScimTokenRequest {
+pub(crate) struct CreateScimTokenRequest {
     pub description: Option<String>,
     /// Token expiration in days (required, 1-365 days).
     pub expires_in_days: i64,
@@ -39,7 +39,7 @@ pub struct CreateScimTokenRequest {
 ///
 /// `Debug` is hand-implemented to redact the bearer token; do not derive.
 #[derive(serde::Serialize)]
-pub struct CreateScimTokenResponse {
+pub(crate) struct CreateScimTokenResponse {
     pub id: String,
     pub token: String,
     pub description: Option<String>,
@@ -59,7 +59,7 @@ impl std::fmt::Debug for CreateScimTokenResponse {
 
 /// SCIM token info for listing.
 #[derive(Debug, serde::Serialize)]
-pub struct ScimTokenInfo {
+pub(crate) struct ScimTokenInfo {
     pub id: String,
     pub description: Option<String>,
     pub created_at: Timestamp,
@@ -69,13 +69,13 @@ pub struct ScimTokenInfo {
 
 /// Response for listing SCIM tokens.
 #[derive(Debug, serde::Serialize)]
-pub struct ListScimTokensResponse {
+pub(crate) struct ListScimTokensResponse {
     pub tokens: Vec<ScimTokenInfo>,
 }
 
 /// Create a new SCIM token.
 /// POST /api/v1/org/scim-tokens
-pub async fn create_scim_token(
+pub(crate) async fn create_scim_token(
     method: Method,
     uri: OriginalUri,
     State(state): State<Arc<AppState>>,
@@ -160,7 +160,7 @@ pub async fn create_scim_token(
 
 /// List SCIM tokens for the organization.
 /// GET /api/v1/org/scim-tokens
-pub async fn list_scim_tokens(
+pub(crate) async fn list_scim_tokens(
     method: Method,
     uri: OriginalUri,
     State(state): State<Arc<AppState>>,
@@ -188,7 +188,7 @@ pub async fn list_scim_tokens(
 
 /// Delete a SCIM token.
 /// DELETE /api/v1/org/scim-tokens/:id
-pub async fn delete_scim_token(
+pub(crate) async fn delete_scim_token(
     method: Method,
     uri: OriginalUri,
     State(state): State<Arc<AppState>>,
@@ -237,7 +237,7 @@ pub async fn delete_scim_token(
 // ============================================================================
 
 /// Display row for SCIM tokens in the template.
-pub struct ScimTokenRow {
+pub(crate) struct ScimTokenRow {
     pub id: String,
     pub description: Option<String>,
     pub created_at: String,
@@ -248,7 +248,7 @@ pub struct ScimTokenRow {
 /// SCIM tokens page template.
 #[derive(Template)]
 #[template(path = "admin/scim_tokens.html")]
-pub struct AdminScimTokensTemplate {
+pub(crate) struct AdminScimTokensTemplate {
     pub auth: AuthContext,
     pub tokens: Vec<ScimTokenRow>,
     pub flash_message: Option<String>,
@@ -259,7 +259,7 @@ impl_template_response!(AdminScimTokensTemplate);
 
 /// Form data for creating a SCIM token.
 #[derive(Debug, Deserialize)]
-pub struct CreateScimTokenForm {
+pub(crate) struct CreateScimTokenForm {
     pub description: Option<String>,
     pub expires_in_days: i64,
 }
@@ -271,7 +271,7 @@ fn redirect_error(jar: CookieJar, msg: impl Into<String>) -> Response {
 }
 
 /// GET /admin/scim-tokens — SCIM token management page.
-pub async fn admin_scim_tokens_page(
+pub(crate) async fn admin_scim_tokens_page(
     State(state): State<Arc<AppState>>,
     jar: CookieJar,
 ) -> Response {
@@ -331,7 +331,7 @@ pub async fn admin_scim_tokens_page(
 }
 
 /// POST /admin/scim-tokens — Create a new SCIM token (UI form).
-pub async fn admin_create_scim_token(
+pub(crate) async fn admin_create_scim_token(
     method: Method,
     uri: OriginalUri,
     State(state): State<Arc<AppState>>,
@@ -443,7 +443,7 @@ pub async fn admin_create_scim_token(
 }
 
 /// POST /admin/scim-tokens/{id}/revoke — Revoke a SCIM token (UI form).
-pub async fn admin_revoke_scim_token(
+pub(crate) async fn admin_revoke_scim_token(
     method: Method,
     uri: OriginalUri,
     State(state): State<Arc<AppState>>,

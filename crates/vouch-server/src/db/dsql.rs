@@ -29,7 +29,7 @@ use sqlx::postgres::PgSslMode;
 ///
 /// * `region` - Optional AWS region override. If not provided, the SDK will
 ///   attempt to determine the region from environment variables or config files.
-pub async fn load_sdk_config(region: Option<&str>) -> SdkConfig {
+pub(crate) async fn load_sdk_config(region: Option<&str>) -> SdkConfig {
     let mut loader = aws_config::defaults(BehaviorVersion::latest());
     if let Some(r) = region {
         loader = loader.region(Region::new(r.to_string()));
@@ -54,7 +54,7 @@ pub async fn load_sdk_config(region: Option<&str>) -> SdkConfig {
 ///
 /// Returns an error if token generation fails, typically due to missing or
 /// invalid AWS credentials.
-pub async fn generate_dsql_token(
+pub(crate) async fn generate_dsql_token(
     sdk_config: &SdkConfig,
     cluster_endpoint: &str,
     region: &str,
@@ -97,13 +97,12 @@ pub async fn generate_dsql_token(
 ///
 /// # Example
 ///
-/// ```
-/// use vouch_server::db::dsql::extract_region_from_endpoint;
-///
+/// ```ignore
+/// // Crate-internal helper; not part of the public API.
 /// let region = extract_region_from_endpoint("abc123.dsql.us-east-1.on.aws");
 /// assert_eq!(region, Some("us-east-1"));
 /// ```
-pub fn extract_region_from_endpoint(endpoint: &str) -> Option<&str> {
+pub(crate) fn extract_region_from_endpoint(endpoint: &str) -> Option<&str> {
     let parts: Vec<&str> = endpoint.split('.').collect();
     // Expected format: cluster-id.dsql.REGION.on.aws (5 parts)
     if parts.len() >= 5 && parts.get(1) == Some(&"dsql") && parts.get(4) == Some(&"aws") {
@@ -124,7 +123,7 @@ pub fn extract_region_from_endpoint(endpoint: &str) -> Option<&str> {
 /// # Returns
 ///
 /// `true` if the hostname appears to be a DSQL endpoint.
-pub fn is_dsql_endpoint(host: &str) -> bool {
+pub(crate) fn is_dsql_endpoint(host: &str) -> bool {
     host.contains(".dsql.") && host.ends_with(".on.aws")
 }
 
@@ -142,7 +141,7 @@ pub fn is_dsql_endpoint(host: &str) -> bool {
 /// Use [`DsqlEndpoint::from_url`] to parse a database URL and determine
 /// the connection type.
 #[derive(Debug, Clone)]
-pub enum DsqlEndpoint {
+pub(crate) enum DsqlEndpoint {
     /// Direct DSQL connection: `cluster-id.dsql.region.on.aws`
     Direct {
         /// The cluster endpoint hostname (used for both connection and token generation)
@@ -191,7 +190,7 @@ impl DsqlEndpoint {
     /// let ep = DsqlEndpoint::from_url("postgres://localhost/db")?;
     /// assert!(ep.is_none());
     /// ```
-    pub fn from_url(url: &str) -> Result<Option<Self>> {
+    pub(crate) fn from_url(url: &str) -> Result<Option<Self>> {
         let parsed = url::Url::parse(url).context("failed to parse database URL")?;
         let host = parsed.host_str().unwrap_or("");
 
@@ -242,7 +241,7 @@ impl DsqlEndpoint {
 
     /// The hostname to connect to.
     #[must_use]
-    pub fn connect_hostname(&self) -> &str {
+    pub(crate) fn connect_hostname(&self) -> &str {
         match self {
             Self::Direct { hostname, .. } | Self::VpcEndpoint { hostname, .. } => hostname,
         }
@@ -254,7 +253,7 @@ impl DsqlEndpoint {
     /// For VPC endpoints this is the cluster's public hostname
     /// (e.g., `cluster_id.dsql.region.on.aws`).
     #[must_use]
-    pub fn token_hostname(&self) -> &str {
+    pub(crate) fn token_hostname(&self) -> &str {
         match self {
             Self::Direct { hostname, .. } => hostname,
             Self::VpcEndpoint { auth_hostname, .. } => auth_hostname,
@@ -263,7 +262,7 @@ impl DsqlEndpoint {
 
     /// The AWS region for this DSQL endpoint.
     #[must_use]
-    pub fn region(&self) -> &str {
+    pub(crate) fn region(&self) -> &str {
         match self {
             Self::Direct { region, .. } | Self::VpcEndpoint { region, .. } => region,
         }
@@ -275,7 +274,7 @@ impl DsqlEndpoint {
     /// VPC endpoints use `Require` because the VPC endpoint FQDN does not
     /// match the DSQL cluster's TLS certificate.
     #[must_use]
-    pub fn ssl_mode(&self) -> PgSslMode {
+    pub(crate) fn ssl_mode(&self) -> PgSslMode {
         match self {
             Self::Direct { .. } => PgSslMode::VerifyFull,
             Self::VpcEndpoint { .. } => PgSslMode::Require,
@@ -284,7 +283,7 @@ impl DsqlEndpoint {
 
     /// The DSQL cluster ID, if this is a VPC endpoint connection.
     #[must_use]
-    pub fn cluster_id(&self) -> Option<&str> {
+    pub(crate) fn cluster_id(&self) -> Option<&str> {
         match self {
             Self::Direct { .. } => None,
             Self::VpcEndpoint { cluster_id, .. } => Some(cluster_id),
@@ -297,7 +296,7 @@ impl DsqlEndpoint {
     /// for passing to `PgConnectOptions::options()`. For direct connections,
     /// returns `None`.
     #[must_use]
-    pub fn pg_options(&self) -> Option<(&str, &str)> {
+    pub(crate) fn pg_options(&self) -> Option<(&str, &str)> {
         match self {
             Self::Direct { .. } => None,
             Self::VpcEndpoint { cluster_id, .. } => Some(("amzn-cluster-id", cluster_id)),

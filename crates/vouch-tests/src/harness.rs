@@ -62,7 +62,7 @@ impl TestHarness {
     /// # Errors
     ///
     /// Returns an error if user creation fails.
-    pub async fn create_user(&self, email: &str) -> Result<vouch_server::User> {
+    pub async fn create_user(&self, email: &str) -> Result<vouch_server::db::User> {
         let user = test_utils::create_test_user(&self.state.store, email).await;
         Ok(user)
     }
@@ -125,7 +125,7 @@ impl TestHarness {
     pub async fn create_authenticated_user(
         &self,
         email: &str,
-    ) -> Result<(vouch_server::User, String, String)> {
+    ) -> Result<(vouch_server::db::User, String, String)> {
         let user = self.create_user(email).await?;
         let auth_id = self.create_authenticator(&user.id).await?;
         let token = self.create_session(&user.id, email, &auth_id).await?;
@@ -152,7 +152,7 @@ impl TestHarness {
         email: &str,
         org_id: &str,
         is_admin: bool,
-    ) -> Result<vouch_server::User> {
+    ) -> Result<vouch_server::db::User> {
         let user =
             test_utils::create_test_user_in_org(&self.state.store, email, org_id, is_admin).await;
         Ok(user)
@@ -169,7 +169,7 @@ impl TestHarness {
         &self,
         email: &str,
         domain: &str,
-    ) -> Result<(vouch_server::User, db::Organization, String, String)> {
+    ) -> Result<(vouch_server::db::User, db::Organization, String, String)> {
         let org = self.create_org(domain).await?;
         let user = self.create_user_in_org(email, &org.id, true).await?;
         let auth_id = self.create_authenticator(&user.id).await?;
@@ -188,7 +188,7 @@ impl TestHarness {
         &self,
         email: &str,
         org_id: &str,
-    ) -> Result<(vouch_server::User, String, String)> {
+    ) -> Result<(vouch_server::db::User, String, String)> {
         let user = self.create_user_in_org(email, org_id, false).await?;
         let auth_id = self.create_authenticator(&user.id).await?;
         let token = self.create_session(&user.id, email, &auth_id).await?;

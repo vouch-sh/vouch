@@ -34,7 +34,7 @@ use crate::services::oidc::ResourceUri;
 
 /// List user's applications (API).
 /// GET /api/v1/applications
-pub async fn list_applications_api(
+pub(crate) async fn list_applications_api(
     method: Method,
     uri: OriginalUri,
     headers: HeaderMap,
@@ -71,7 +71,7 @@ pub async fn list_applications_api(
 
 /// Create a new application (API).
 /// POST /api/v1/applications
-pub async fn create_application_api(
+pub(crate) async fn create_application_api(
     method: Method,
     uri: OriginalUri,
     headers: HeaderMap,
@@ -370,7 +370,7 @@ pub async fn create_application_api(
 
 /// Get application details (API).
 /// GET /api/v1/applications/:id
-pub async fn get_application_api(
+pub(crate) async fn get_application_api(
     method: Method,
     uri: OriginalUri,
     headers: HeaderMap,
@@ -421,7 +421,7 @@ pub async fn get_application_api(
     clippy::too_many_arguments,
     reason = "axum handler signature: extractors are positional parameters"
 )]
-pub async fn update_application_api(
+pub(crate) async fn update_application_api(
     method: Method,
     uri: OriginalUri,
     headers: HeaderMap,
@@ -726,7 +726,7 @@ pub async fn update_application_api(
 
 /// Delete an application (API).
 /// DELETE /api/v1/applications/:id
-pub async fn delete_application_api(
+pub(crate) async fn delete_application_api(
     method: Method,
     uri: OriginalUri,
     headers: HeaderMap,
@@ -790,7 +790,7 @@ pub async fn delete_application_api(
     clippy::too_many_arguments,
     reason = "axum handler signature: extractors are positional parameters"
 )]
-pub async fn add_secret_api(
+pub(crate) async fn add_secret_api(
     method: Method,
     uri: OriginalUri,
     headers: HeaderMap,
@@ -920,7 +920,7 @@ pub async fn add_secret_api(
 
 /// List secrets for an application (API).
 /// GET /api/v1/applications/:id/secrets
-pub async fn list_secrets_api(
+pub(crate) async fn list_secrets_api(
     method: Method,
     uri: OriginalUri,
     headers: HeaderMap,
@@ -991,7 +991,7 @@ pub async fn list_secrets_api(
 
 /// Delete (revoke) a secret (API).
 /// DELETE /api/v1/applications/:id/secrets/:secret_id
-pub async fn delete_secret_api(
+pub(crate) async fn delete_secret_api(
     method: Method,
     uri: OriginalUri,
     headers: HeaderMap,
@@ -1121,7 +1121,7 @@ pub async fn delete_secret_api(
 
 /// Revoke all tokens for an application (API).
 /// `POST /api/v1/applications/:id/revoke`
-pub async fn revoke_tokens_api(
+pub(crate) async fn revoke_tokens_api(
     method: Method,
     uri: OriginalUri,
     headers: HeaderMap,

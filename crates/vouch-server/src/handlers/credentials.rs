@@ -31,7 +31,7 @@ use crate::redact_email;
 ///
 /// Requires Bearer token authentication. Signs the provided SSH public key
 /// as a user certificate with principals extracted from the user's email.
-pub async fn issue_ssh_certificate(
+pub(crate) async fn issue_ssh_certificate(
     method: Method,
     uri: OriginalUri,
     headers: HeaderMap,
@@ -186,7 +186,7 @@ pub async fn issue_ssh_certificate(
 ///
 /// Returns the CA public key in OpenSSH format. This key should be added
 /// to SSH server configurations to trust certificates signed by this CA.
-pub async fn get_ssh_ca_public_key(
+pub(crate) async fn get_ssh_ca_public_key(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<SshCaPublicKeyResponse>, ServiceError> {
     let ssh_ca = state.ssh_ca.as_ref().ok_or_else(|| {
@@ -218,7 +218,7 @@ pub async fn get_ssh_ca_public_key(
 
 /// Response for SSH KRL (Key Revocation List) endpoint.
 #[derive(Debug, Serialize)]
-pub struct SshKrlResponse {
+pub(crate) struct SshKrlResponse {
     /// List of revoked certificate serials.
     pub revoked_serials: Vec<String>,
     /// Total number of revoked certificates.
@@ -236,7 +236,7 @@ pub struct SshKrlResponse {
 ///
 /// This endpoint does not require authentication to allow SSH servers
 /// to check revocation status without needing credentials.
-pub async fn get_ssh_krl(
+pub(crate) async fn get_ssh_krl(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<SshKrlResponse>, ServiceError> {
     // Get all revoked certificates
@@ -266,7 +266,7 @@ pub async fn get_ssh_krl(
 /// GET /v1/credentials/ssh/krl/:serial
 ///
 /// Returns whether the certificate with the given serial is revoked.
-pub async fn check_ssh_revocation(
+pub(crate) async fn check_ssh_revocation(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(serial): axum::extract::Path<String>,
 ) -> Result<Json<SshRevocationCheckResponse>, ServiceError> {
@@ -300,7 +300,7 @@ pub async fn check_ssh_revocation(
 
 /// Response for SSH revocation check.
 #[derive(Debug, Serialize)]
-pub struct SshRevocationCheckResponse {
+pub(crate) struct SshRevocationCheckResponse {
     /// The certificate serial that was checked.
     pub serial: String,
     /// Whether the certificate is revoked.
@@ -323,7 +323,7 @@ pub struct SshRevocationCheckResponse {
 /// When the DPoP proof includes a `source` custom claim (e.g., "claude-code"),
 /// the issued token includes AI-specific session tags (`vouch:AccessType=AI`,
 /// `vouch:Agent=<agent>`) for CloudTrail differentiation and IAM condition keys.
-pub async fn get_aws_token(
+pub(crate) async fn get_aws_token(
     method: Method,
     uri: OriginalUri,
     headers: HeaderMap,
@@ -440,7 +440,7 @@ pub async fn get_aws_token(
 
 /// Query parameters for the Kubernetes token endpoint.
 #[derive(Debug, Deserialize)]
-pub struct K8sTokenQuery {
+pub(crate) struct K8sTokenQuery {
     /// OIDC audience (must match `--oidc-client-id` on the API server).
     /// Defaults to "kubernetes" if not specified.
     #[serde(default)]
@@ -453,7 +453,7 @@ pub struct K8sTokenQuery {
 ///
 /// Returns an OIDC ID token that can be used with Kubernetes clusters
 /// configured with the Vouch OIDC provider.
-pub async fn get_kubernetes_token(
+pub(crate) async fn get_kubernetes_token(
     method: Method,
     uri: OriginalUri,
     headers: HeaderMap,
@@ -582,7 +582,7 @@ pub async fn get_kubernetes_token(
 /// GET /v1/credentials/github/status
 ///
 /// Returns whether GitHub is configured and connected for the user's organization.
-pub async fn get_github_status(
+pub(crate) async fn get_github_status(
     method: Method,
     uri: OriginalUri,
     headers: HeaderMap,
@@ -668,7 +668,7 @@ pub async fn get_github_status(
     clippy::too_many_arguments,
     reason = "axum handler signature: extractors are positional parameters"
 )]
-pub async fn get_github_token(
+pub(crate) async fn get_github_token(
     method: Method,
     uri: OriginalUri,
     client_info: ClientInfo,

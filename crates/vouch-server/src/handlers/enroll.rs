@@ -46,7 +46,7 @@ use crate::services::oidc::ScopeSet;
 /// Device code entry page template.
 #[derive(Template)]
 #[template(path = "device_verify.html")]
-pub struct DeviceVerifyTemplate {
+pub(crate) struct DeviceVerifyTemplate {
     pub error: Option<String>,
 }
 
@@ -54,7 +54,7 @@ pub struct DeviceVerifyTemplate {
 /// Authentication is via cookie, not state token in template.
 #[derive(Template)]
 #[template(path = "enroll_keys.html")]
-pub struct EnrollKeysTemplate {
+pub(crate) struct EnrollKeysTemplate {
     pub rp_id: String,
     /// Authentication context for header display.
     pub auth: AuthContext,
@@ -63,12 +63,12 @@ pub struct EnrollKeysTemplate {
 /// Success page template.
 #[derive(Template)]
 #[template(path = "success.html")]
-pub struct SuccessTemplate;
+pub(crate) struct SuccessTemplate;
 
 /// Error page template.
 #[derive(Template)]
 #[template(path = "error.html")]
-pub struct ErrorTemplate {
+pub(crate) struct ErrorTemplate {
     pub title: String,
     pub message: String,
     pub back_url: Option<String>,
@@ -81,7 +81,7 @@ pub struct ErrorTemplate {
 /// handles browsers without JavaScript.
 #[derive(Template)]
 #[template(path = "saml_post_form.html")]
-pub struct SamlPostFormTemplate {
+pub(crate) struct SamlPostFormTemplate {
     pub action_url: String,
     pub saml_request: String,
     pub relay_state: String,
@@ -96,7 +96,7 @@ pub struct SamlPostFormTemplate {
 /// link to `{action}?provider=<slug>` (used by `GET /enroll/start`).
 #[derive(Template)]
 #[template(path = "select_idp.html")]
-pub struct SelectIdpTemplate {
+pub(crate) struct SelectIdpTemplate {
     /// Form action URL or link base URL (e.g., `/device`, `/enroll/start`).
     pub action: String,
     /// Render as POST form (true) or anchor links with `?provider=` (false).
@@ -127,7 +127,7 @@ impl_template_response!(
 /// handler either auto-selects the single IdP, falls through to WebAuthn
 /// (no IdPs), or renders the chooser.
 #[derive(Debug, Deserialize)]
-pub struct UserCodeForm {
+pub(crate) struct UserCodeForm {
     user_code: String,
     #[serde(default)]
     provider: Option<String>,
@@ -135,7 +135,7 @@ pub struct UserCodeForm {
 
 /// Query params for OIDC callback.
 #[derive(Debug, Deserialize)]
-pub struct OidcCallbackParams {
+pub(crate) struct OidcCallbackParams {
     code: Option<String>,
     state: Option<String>,
     error: Option<String>,
@@ -200,13 +200,13 @@ impl BrowserRegistrationState {
 
 /// Show device code entry page.
 /// GET /device
-pub async fn device_verify_page() -> impl IntoResponse {
+pub(crate) async fn device_verify_page() -> impl IntoResponse {
     DeviceVerifyTemplate { error: None }
 }
 
 /// Handle device code submission.
 /// POST /device
-pub async fn device_verify_submit(
+pub(crate) async fn device_verify_submit(
     State(state): State<Arc<AppState>>,
     Form(form): Form<UserCodeForm>,
 ) -> Response {
@@ -379,7 +379,7 @@ pub async fn device_verify_submit(
     clippy::too_many_lines,
     reason = "axum handler; OIDC callback orchestrates IdP exchange and enrollment"
 )]
-pub async fn oidc_callback(
+pub(crate) async fn oidc_callback(
     State(state): State<Arc<AppState>>,
     Query(params): Query<OidcCallbackParams>,
 ) -> Response {
@@ -754,7 +754,10 @@ pub(crate) async fn complete_enrollment_after_identity(
 /// Serve the key management page.
 /// GET /enroll/keys
 /// Authentication is via session cookie (set by oidc_callback).
-pub async fn enroll_keys_page(State(state): State<Arc<AppState>>, jar: CookieJar) -> Response {
+pub(crate) async fn enroll_keys_page(
+    State(state): State<Arc<AppState>>,
+    jar: CookieJar,
+) -> Response {
     tracing::debug!("enroll_keys_page: checking for session cookie");
 
     // Get session from cookie
@@ -797,7 +800,7 @@ pub async fn enroll_keys_page(State(state): State<Arc<AppState>>, jar: CookieJar
 /// Start browser-based `WebAuthn` registration.
 /// POST /enroll/webauthn/start
 /// Authentication is via session cookie (set by oidc_callback).
-pub async fn browser_register_start(
+pub(crate) async fn browser_register_start(
     State(state): State<Arc<AppState>>,
     jar: CookieJar,
 ) -> Result<Json<BrowserRegisterStartResponse>, ServiceError> {
@@ -999,7 +1002,7 @@ const MAX_CREDENTIAL_ID_BYTES: usize = 1023;
     clippy::too_many_lines,
     reason = "axum handler; FIDO2 registration completion: attestation, db, session"
 )]
-pub async fn browser_register_complete(
+pub(crate) async fn browser_register_complete(
     State(state): State<Arc<AppState>>,
     client_info: ClientInfo,
     Json(req): Json<BrowserRegisterCompleteRequest>,
@@ -1412,7 +1415,7 @@ const DIRECT_ENROLL_PREFIX: &str = "DIRECT-";
 
 /// Query parameters for direct enrollment start.
 #[derive(Deserialize)]
-pub struct DirectEnrollQuery {
+pub(crate) struct DirectEnrollQuery {
     /// Optional OIDC provider slug (e.g. "google"). If absent, uses first provider.
     pub provider: Option<String>,
 }
@@ -1423,7 +1426,7 @@ pub struct DirectEnrollQuery {
 /// This initiates OIDC authentication directly from the browser,
 /// without requiring the CLI to create a device authorization request.
 /// After successful enrollment, the user can download the CLI and login.
-pub async fn direct_enroll_start(
+pub(crate) async fn direct_enroll_start(
     State(state): State<Arc<AppState>>,
     Query(query): Query<DirectEnrollQuery>,
 ) -> Response {
@@ -1580,11 +1583,6 @@ pub async fn direct_enroll_start(
         }
         .into_response(),
     }
-}
-
-/// Check if a device auth request is for direct enrollment.
-pub fn is_direct_enrollment(device_auth: &db::DeviceAuthRequest) -> bool {
-    device_auth.user_code.starts_with(DIRECT_ENROLL_PREFIX)
 }
 
 /// Characters used for user code generation (consonants only, no ambiguous chars).

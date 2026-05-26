@@ -47,7 +47,7 @@
 pub(crate) mod auth;
 pub(crate) mod error;
 pub(crate) mod idp;
-pub mod integrations;
+pub(crate) mod integrations;
 pub(crate) mod keys;
 pub mod oidc;
 pub(crate) mod posture;

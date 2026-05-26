@@ -21,7 +21,7 @@ const OIDC_CACHE_CONTROL: (axum::http::header::HeaderName, &str) =
 ///
 /// OIDC Discovery 1.0 Section 4: The OpenID Provider Metadata is published at a
 /// well-known URL derived from the Issuer Identifier.
-pub async fn discovery(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub(crate) async fn discovery(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     (
         [OIDC_CACHE_CONTROL],
         Json(svc::build_discovery_document(&state)),
@@ -32,7 +32,9 @@ pub async fn discovery(State(state): State<Arc<AppState>>) -> impl IntoResponse 
 ///
 /// RFC 7517 Section 5: Returns the JWK Set containing the public keys used to
 /// verify token signatures.
-pub async fn jwks(State(state): State<Arc<AppState>>) -> Result<impl IntoResponse, StatusCode> {
+pub(crate) async fn jwks(
+    State(state): State<Arc<AppState>>,
+) -> Result<impl IntoResponse, StatusCode> {
     svc::build_jwks(&state)
         .map(|jwks| ([OIDC_CACHE_CONTROL], Json(jwks)))
         .map_err(|e| {

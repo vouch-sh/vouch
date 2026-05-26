@@ -15,7 +15,7 @@ use axum_extra::extract::cookie::CookieJar;
 use std::sync::Arc;
 
 /// A single identity provider entry for the sign-in button list.
-pub struct IdpEntry {
+pub(crate) struct IdpEntry {
     /// Operator-chosen slug.
     pub id: String,
     /// Display name for the button (e.g., "Google", "Microsoft").
@@ -30,7 +30,7 @@ pub struct IdpEntry {
 /// "select identity provider" chooser shown when more than one IdP is
 /// configured.
 #[must_use]
-pub fn build_idp_entries(idps: &[crate::services::idp::ConfiguredIdp]) -> Vec<IdpEntry> {
+pub(crate) fn build_idp_entries(idps: &[crate::services::idp::ConfiguredIdp]) -> Vec<IdpEntry> {
     idps.iter()
         .map(|idp| {
             let brand = idp.brand();
@@ -46,7 +46,7 @@ pub fn build_idp_entries(idps: &[crate::services::idp::ConfiguredIdp]) -> Vec<Id
 /// Home page template.
 #[derive(Template)]
 #[template(path = "landing.html")]
-pub struct HomeTemplate {
+pub(crate) struct HomeTemplate {
     pub server_url: String,
     pub org_name: String,
     pub has_downloads: bool,
@@ -63,7 +63,10 @@ impl_template_response!(HomeTemplate);
 
 /// Home page showing enrollment instructions.
 /// GET /
-pub async fn home_page(State(state): State<Arc<AppState>>, jar: CookieJar) -> impl IntoResponse {
+pub(crate) async fn home_page(
+    State(state): State<Arc<AppState>>,
+    jar: CookieJar,
+) -> impl IntoResponse {
     let auth = get_auth_context(&state, &jar).await;
 
     let has_downloads = state.config().cli_download_macos.is_some()

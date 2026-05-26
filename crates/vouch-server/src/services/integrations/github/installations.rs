@@ -20,7 +20,7 @@ use crate::db::{self, GitHubCredentialAuditData, User};
 // ============================================================================
 
 /// Parameters for connecting a new GitHub installation.
-pub struct ConnectInstallationParams<'a> {
+pub(crate) struct ConnectInstallationParams<'a> {
     /// The GitHub installation ID.
     pub installation_id: u64,
     /// The organization ID to connect to.
@@ -30,7 +30,7 @@ pub struct ConnectInstallationParams<'a> {
 }
 
 /// Parameters for reconnecting an existing GitHub installation.
-pub struct ReconnectInstallationParams<'a> {
+pub(crate) struct ReconnectInstallationParams<'a> {
     /// The GitHub installation ID to reconnect.
     pub installation_id: u64,
     /// The organization ID to connect to.
@@ -40,13 +40,13 @@ pub struct ReconnectInstallationParams<'a> {
 }
 
 /// Result of a successful installation connection.
-pub struct InstallationConnectResult {
+pub(crate) struct InstallationConnectResult {
     /// The GitHub account login (org/user name).
     pub account_login: String,
 }
 
 /// An unlinked installation that can be reconnected.
-pub struct UnlinkedInstallation {
+pub(crate) struct UnlinkedInstallation {
     /// Installation ID.
     pub id: u64,
     /// GitHub account login.
@@ -64,7 +64,7 @@ impl GitHubService<'_> {
     ///
     /// This is called after the user installs the GitHub App and is redirected
     /// back with an installation ID.
-    pub async fn connect_installation(
+    pub(crate) async fn connect_installation(
         &self,
         params: ConnectInstallationParams<'_>,
     ) -> GitHubResult<InstallationConnectResult> {
@@ -115,7 +115,7 @@ impl GitHubService<'_> {
     ///
     /// This allows an org admin to link an existing GitHub installation (that they
     /// have access to via their OAuth token) to their Vouch organization.
-    pub async fn reconnect_installation(
+    pub(crate) async fn reconnect_installation(
         &self,
         params: ReconnectInstallationParams<'_>,
     ) -> GitHubResult<InstallationConnectResult> {
@@ -205,7 +205,7 @@ impl GitHubService<'_> {
     ///
     /// Returns an empty list if the user hasn't linked their GitHub account or
     /// if OAuth is not configured.
-    pub async fn get_unlinked_installations(
+    pub(crate) async fn get_unlinked_installations(
         &self,
         user: &User,
     ) -> GitHubResult<Vec<UnlinkedInstallation>> {
@@ -261,7 +261,7 @@ impl GitHubService<'_> {
     }
 
     /// Get connected installations for an organization.
-    pub async fn get_org_installations(&self, org_id: &str) -> GitHubResult<Vec<String>> {
+    pub(crate) async fn get_org_installations(&self, org_id: &str) -> GitHubResult<Vec<String>> {
         let installations = db::get_github_installations_by_org(self.store, org_id)
             .await
             .map_err(GitHubError::Database)?;
@@ -276,7 +276,7 @@ impl GitHubService<'_> {
     ///
     /// # Arguments
     /// * `state` - The encoded state token for CSRF protection
-    pub fn build_installation_url(&self, state: &str) -> GitHubResult<String> {
+    pub(crate) fn build_installation_url(&self, state: &str) -> GitHubResult<String> {
         let app_name = self.app_name()?;
 
         Ok(format!(
@@ -319,7 +319,7 @@ impl GitHubService<'_> {
 /// Validate that a user can manage GitHub installations for an organization.
 ///
 /// Returns the organization ID if valid, or an error if not.
-pub fn validate_org_admin(user: &User) -> GitHubResult<&str> {
+pub(crate) fn validate_org_admin(user: &User) -> GitHubResult<&str> {
     match &user.org_id {
         Some(org_id) if user.is_org_admin => Ok(org_id),
         Some(_) => Err(GitHubError::NotOrgAdmin),

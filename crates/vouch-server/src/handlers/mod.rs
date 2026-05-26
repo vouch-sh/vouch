@@ -1,28 +1,28 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 //! HTTP request handlers.
 
-pub mod admin;
-pub mod applications;
-pub mod auth;
-pub mod browser_login;
-pub mod certification;
-pub mod credentials;
-pub mod device;
-pub mod enroll;
-pub mod enroll_keys;
+pub(crate) mod admin;
+pub(crate) mod applications;
+pub(crate) mod auth;
+pub(crate) mod browser_login;
+pub(crate) mod certification;
+pub(crate) mod credentials;
+pub(crate) mod device;
+pub(crate) mod enroll;
+pub(crate) mod enroll_keys;
 pub(crate) mod extractors;
 pub(crate) use extractors::{ValidPath, ValidUuid};
-pub mod github;
-pub mod home;
-pub mod install;
-pub mod integrations;
-pub mod keys;
-pub mod legal;
-pub mod oidc;
-pub mod registration;
-pub mod saml;
-pub mod scim;
-pub mod session;
+pub(crate) mod github;
+pub(crate) mod home;
+pub(crate) mod install;
+pub(crate) mod integrations;
+pub(crate) mod keys;
+pub(crate) mod legal;
+pub(crate) mod oidc;
+pub(crate) mod registration;
+pub(crate) mod saml;
+pub(crate) mod scim;
+pub(crate) mod session;
 
 // Re-export commonly used utilities from focused modules
 pub(crate) use crate::crypto::{generate_challenge, generate_random_bytes, hash_token};
@@ -35,7 +35,7 @@ pub(crate) use session::{
 ///
 /// Implemented automatically by [`impl_template_response!`] so that
 /// Askama templates can render `{{ self.version() }}`.
-pub trait HasVersion {
+pub(crate) trait HasVersion {
     fn version(&self) -> &'static str {
         env!("CARGO_PKG_VERSION")
     }

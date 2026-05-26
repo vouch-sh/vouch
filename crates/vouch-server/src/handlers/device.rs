@@ -77,7 +77,7 @@ fn hash_device_code(code: &str) -> String {
 ///
 /// RFC 8628 Section 3.1: The client makes a request using
 /// "application/x-www-form-urlencoded" format.
-pub async fn device_code(
+pub(crate) async fn device_code(
     State(state): State<Arc<AppState>>,
     axum::Form(req): axum::Form<DeviceCodeRequest>,
 ) -> Result<Json<DeviceCodeResponse>, ServiceError> {
@@ -170,7 +170,7 @@ pub async fn device_code(
 /// - `expired_token` — the device code has expired
 /// - `access_denied` — the user denied the authorization request
 /// - A successful token response when the user has authorized
-pub async fn device_token(
+pub(crate) async fn device_token(
     State(state): State<Arc<AppState>>,
     Json(req): Json<DeviceTokenRequest>,
 ) -> Result<Json<DeviceTokenResponse>, (StatusCode, Json<OAuthError>)> {

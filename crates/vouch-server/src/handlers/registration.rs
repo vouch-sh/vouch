@@ -6,7 +6,7 @@ use crate::services::error::ServiceError;
 use axum::http::StatusCode;
 
 /// Result of validating a registration attestation.
-pub struct ValidatedAttestation {
+pub(crate) struct ValidatedAttestation {
     /// The AAGUID extracted from the attestation (if available).
     pub aaguid: Option<String>,
     /// The device name determined from the AAGUID.
@@ -30,7 +30,7 @@ pub struct ValidatedAttestation {
 ///
 /// Returns an error if the attestation is from a software passkey or platform
 /// authenticator, or if the AAGUID is not permitted by the policy.
-pub fn validate_registration_attestation(
+pub(crate) fn validate_registration_attestation(
     attestation_object: &[u8],
     policy: &vouch_common::AaguidPolicy,
     require_attestation_cert: bool,
