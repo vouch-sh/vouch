@@ -56,7 +56,7 @@ RUST_LOG=debug \
 cargo run --bin vouch-server
 ```
 
-OIDC enrollment requires `VOUCH_OIDC_ISSUER`, `VOUCH_OIDC_CLIENT_ID`, `VOUCH_OIDC_CLIENT_SECRET`.
+At least one upstream IdP is required (`VOUCH_IDPS`); the server refuses to start without one. Configure per-IdP variables with `VOUCH_IDP_<SLUG>_TYPE` plus type-specific vars (see `docs/src/reference/environment-variables.md`).
 
 ## Gotchas
 

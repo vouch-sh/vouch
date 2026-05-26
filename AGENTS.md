@@ -33,7 +33,7 @@ RUST_LOG=debug \
 cargo run --bin vouch-server
 ```
 
-The server will listen on port 3000 and create a SQLite database file at `vouch-dev.db`. The OIDC enrollment flow (`Sign in with Google`) requires `VOUCH_OIDC_ISSUER`, `VOUCH_OIDC_CLIENT_ID`, and `VOUCH_OIDC_CLIENT_SECRET` to be configured; without these, clicking "Sign in" will show "Not Configured."
+The server will listen on port 3000 and create a SQLite database file at `vouch-dev.db`. At least one upstream IdP must be configured via `VOUCH_IDPS` (the server refuses to start without one). See the [Environment Variables reference](docs/src/reference/environment-variables.md) for the `VOUCH_IDPS` / `VOUCH_IDP_<SLUG>_*` variables.
 
 ### Key commands
 

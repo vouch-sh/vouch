@@ -101,17 +101,13 @@ env:
 # Secret environment variables
 # Reference an existing secret containing these keys:
 # - VOUCH_JWT_SECRET
-# - VOUCH_OIDC_ISSUER
-# - VOUCH_OIDC_CLIENT_ID
-# - VOUCH_OIDC_CLIENT_SECRET
+# - VOUCH_IDP_<SLUG>_CLIENT_SECRET  (one per IdP; VOUCH_IDPS is required)
 existingSecret: ""
 
 # Or create a new secret (not recommended for production)
 secrets: {}
   # VOUCH_JWT_SECRET: ""
-  # VOUCH_OIDC_ISSUER: ""
-  # VOUCH_OIDC_CLIENT_ID: ""
-  # VOUCH_OIDC_CLIENT_SECRET: ""
+  # VOUCH_IDP_<SLUG>_CLIENT_SECRET: ""
 
 # PodDisruptionBudget (only created when enabled AND replicaCount > 1)
 podDisruptionBudget:
