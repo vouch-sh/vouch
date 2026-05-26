@@ -7,7 +7,7 @@
 //! - RFC 8705 Section 3 - mTLS certificate-bound access tokens at resource endpoints
 
 use crate::AppState;
-use crate::db::{self, JwsAlgorithm, SessionPurpose};
+use crate::db::{self, JwsAlgorithm};
 use crate::handlers::extractors::OptionalClientCert;
 use crate::services::OAuthErrorCode;
 use crate::services::auth::decode_token;
@@ -272,11 +272,12 @@ pub async fn userinfo(
     };
 
     // Determine whether email claims should be returned based on granted scope.
-    // Backward compat: legacy OAuth tokens without a scope field are treated as
-    // having full scope if they are OAuthAccessToken purpose.
+    // `scope: None` means no scope was granted — token exchange produces this
+    // when the requested scope set has an empty intersection with available
+    // scopes. Returning email in that case would be a scope escalation.
     let has_email_scope = match &result.scope {
         Some(scope_set) => scope_set.contains(OAuthScope::Email),
-        None => result.session.session_type == SessionPurpose::OAuthAccessToken,
+        None => false,
     };
 
     let response_body = UserInfoResponse {

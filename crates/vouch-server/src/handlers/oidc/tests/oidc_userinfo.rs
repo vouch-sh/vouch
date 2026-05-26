@@ -75,6 +75,70 @@ async fn test_userinfo_returns_sub_claim() {
 }
 
 #[tokio::test]
+async fn test_userinfo_no_email_when_scope_is_none() {
+    // Regression for #390: an access token with `scope: None` (produced by
+    // token exchange when the requested scope set has an empty intersection
+    // with the available scopes) was previously interpreted by userinfo as
+    // "full access" via a backward-compat fallback, returning the user's
+    // email without the email scope. Must now return only `sub`.
+    use crate::services::auth::{
+        ClientAuthProof, CreateOAuthTokenParams, GrantProof, HardwareVerification,
+        NoClientAuth, TokenIssuanceProof, create_oauth_access_token,
+    };
+    use secrecy::ExposeSecret;
+
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "no-scope@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+
+    let result = create_oauth_access_token(
+        &state,
+        CreateOAuthTokenParams {
+            user_id: &user.id,
+            email: &user.email,
+            authenticator_id: Some(&auth_id),
+            client_id: &state.config().base_url,
+            scope: None,
+            dpop_jkt: None,
+            mtls_cert_thumbprint: None,
+            act: None,
+            audience: None,
+            auth_time: Some(jiff::Timestamp::now().as_second()),
+            hardware_verification: HardwareVerification::Verified,
+            session_purpose: db::SessionPurpose::OAuthAccessToken,
+            authorization_details: None,
+        },
+        TokenIssuanceProof {
+            grant: GrantProof::TestingOnly,
+            client_auth: ClientAuthProof::NoAuth(NoClientAuth::internal_endpoint()),
+        },
+    )
+    .await
+    .expect("issue token");
+    let token = result.token.expose_secret().to_string();
+
+    let (status, body) = http_get(
+        &app,
+        "/oauth/userinfo",
+        &[("Authorization", &format!("Bearer {token}"))],
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    let userinfo: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert!(userinfo.get("sub").is_some(), "sub must be present");
+    assert!(
+        userinfo.get("email").is_none(),
+        "email must NOT be present when token has no granted scope; got: {body}"
+    );
+    assert!(
+        userinfo.get("email_verified").is_none(),
+        "email_verified must NOT be present when token has no granted scope"
+    );
+}
+
+#[tokio::test]
 async fn test_userinfo_invalid_token() {
     // Invalid token should return 401
     let (app, _state) = test_app().await;
