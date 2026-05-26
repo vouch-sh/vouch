@@ -50,15 +50,6 @@ pub struct DeviceVerifyTemplate {
     pub error: Option<String>,
 }
 
-/// WebAuthn registration page template.
-#[derive(Template)]
-#[template(path = "enroll_webauthn.html")]
-pub struct EnrollWebauthnTemplate {
-    pub email: String,
-    pub state: String,
-    pub rp_id: String,
-}
-
 /// Key management page template (shown after OAuth callback).
 /// Authentication is via cookie, not state token in template.
 #[derive(Template)]
@@ -96,13 +87,33 @@ pub struct SamlPostFormTemplate {
     pub relay_state: String,
 }
 
+/// Identity provider chooser shown when multiple IdPs are configured and
+/// the user has not yet selected one.
+///
+/// `is_post = true` renders each IdP as a submit button inside a form
+/// (used by `POST /device`, which must carry the validated `user_code`
+/// forward as a hidden field). `is_post = false` renders each IdP as a
+/// link to `{action}?provider=<slug>` (used by `GET /enroll/start`).
+#[derive(Template)]
+#[template(path = "select_idp.html")]
+pub struct SelectIdpTemplate {
+    /// Form action URL or link base URL (e.g., `/device`, `/enroll/start`).
+    pub action: String,
+    /// Render as POST form (true) or anchor links with `?provider=` (false).
+    pub is_post: bool,
+    /// Hidden `user_code` carried forward when `is_post` is true.
+    pub user_code: Option<String>,
+    /// IdPs to show, in `VOUCH_IDPS` order.
+    pub idp_entries: Vec<super::home::IdpEntry>,
+}
+
 impl_template_response!(
     DeviceVerifyTemplate,
-    EnrollWebauthnTemplate,
     EnrollKeysTemplate,
     SuccessTemplate,
     ErrorTemplate,
     SamlPostFormTemplate,
+    SelectIdpTemplate,
 );
 
 // ============================================================================
@@ -110,9 +121,16 @@ impl_template_response!(
 // ============================================================================
 
 /// Form data for user code submission.
+///
+/// `provider` is set on the second POST when the chooser is rendered
+/// (multiple IdPs configured). On the initial POST it is `None` and the
+/// handler either auto-selects the single IdP, falls through to WebAuthn
+/// (no IdPs), or renders the chooser.
 #[derive(Debug, Deserialize)]
 pub struct UserCodeForm {
     user_code: String,
+    #[serde(default)]
+    provider: Option<String>,
 }
 
 /// Query params for OIDC callback.
@@ -248,62 +266,60 @@ pub async fn device_verify_submit(
         .into_response();
     }
 
-    // No upstream IdP → go directly to WebAuthn; otherwise → initiate auth
-    // with the first configured IdP (any kind). Order in VOUCH_IDPS / idps[]
-    // controls which provider is used here.
+    // Select which upstream IdP to use:
+    //   * `form.provider` set → user picked from the chooser; validate slug.
+    //   * Zero IdPs configured → refuse: without IdP auth we cannot verify
+    //     an email, enforce allowed_domains, or bind a key to a real user.
+    //   * One IdP configured → auto-select (no UI choice to make).
+    //   * Two+ IdPs configured, no choice yet → render the chooser. The
+    //     validated `user_code` is carried as a hidden field, which doubles
+    //     as an implicit CSRF token (the attacker must already hold it).
     let base_url = state.config().base_url.clone();
-    let auth_request_result: Option<(
-        Result<crate::services::idp::AuthRequest, anyhow::Error>,
-        String,
-    )> = state.idps.first().map(|idp| {
-        let provider_id = idp.id().to_string();
-        (idp.initiate_auth(&base_url), provider_id)
-    });
-
-    let Some((auth_request_result, auth_provider_id)) = auth_request_result else {
-        // No IdP configured - go directly to WebAuthn registration
-        let random_bytes = match generate_random_bytes(32) {
-            Ok(bytes) => bytes,
-            Err(_) => {
+    let chosen_idp: &crate::services::idp::ConfiguredIdp = match form
+        .provider
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        Some(slug) => match state.idp(slug) {
+            Some(idp) => idp,
+            None => {
                 return ErrorTemplate {
-                    title: "Error".to_string(),
-                    message: "Failed to generate secure random state".to_string(),
-                    back_url: None,
+                    title: "Unknown Provider".to_string(),
+                    message: format!("Identity provider '{slug}' is not configured."),
+                    back_url: Some("/device".to_string()),
                 }
                 .into_response();
             }
-        };
-        let oidc_state = URL_SAFE_NO_PAD.encode(random_bytes);
-
-        let state_expires = now.checked_add(Span::new().minutes(10)).unwrap_or(now);
-
-        if let Err(e) = db::create_oidc_state(
-            &state.store,
-            &oidc_state,
-            &request.id,
-            "", // No nonce for non-IdP flow
-            "", // No PKCE for non-IdP flow
-            state_expires,
-            "", // No provider_id for non-IdP flow
-        )
-        .await
-        {
-            tracing::error!("Failed to create state: {}", e);
-            return ErrorTemplate {
-                title: "Error".to_string(),
-                message: "Failed to create session state".to_string(),
-                back_url: None,
+        },
+        None => {
+            if state.idps.len() > 1 {
+                return SelectIdpTemplate {
+                    action: "/device".to_string(),
+                    is_post: true,
+                    user_code: Some(user_code.clone()),
+                    idp_entries: super::home::build_idp_entries(&state.idps),
+                }
+                .into_response();
             }
-            .into_response();
+            match state.idps.first() {
+                Some(idp) => idp,
+                None => {
+                    return ErrorTemplate {
+                        title: "Not Configured".to_string(),
+                        message: "Identity provider is not configured. \
+                                  Please contact your administrator."
+                            .to_string(),
+                        back_url: Some("/".to_string()),
+                    }
+                    .into_response();
+                }
+            }
         }
-
-        return EnrollWebauthnTemplate {
-            email: "new user".to_string(),
-            state: oidc_state,
-            rp_id: state.config().rp_id.clone(),
-        }
-        .into_response();
     };
+
+    let auth_provider_id = chosen_idp.id().to_string();
+    let auth_request_result = chosen_idp.initiate_auth(&base_url);
 
     let auth_request = match auth_request_result {
         Ok(r) => r,
@@ -1411,6 +1427,25 @@ pub async fn direct_enroll_start(
     State(state): State<Arc<AppState>>,
     Query(query): Query<DirectEnrollQuery>,
 ) -> Response {
+    // Render the IdP chooser before creating any state rows when multiple
+    // IdPs are configured and the caller has not yet picked one. Doing this
+    // first avoids orphaning `device_auth_requests` rows for clicks that
+    // never proceed past the chooser.
+    let provider_choice = query
+        .provider
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    if provider_choice.is_none() && state.idps.len() > 1 {
+        return SelectIdpTemplate {
+            action: "/enroll/start".to_string(),
+            is_post: false,
+            user_code: None,
+            idp_entries: super::home::build_idp_entries(&state.idps),
+        }
+        .into_response();
+    }
+
     let now = Timestamp::now();
 
     // Create a "virtual" device auth request for direct enrollment
@@ -1461,24 +1496,25 @@ pub async fn direct_enroll_start(
     };
 
     // Initiate upstream IdP authentication.
-    // If a provider slug was specified, require it to exist — do not fall through.
+    // If a provider slug was specified, require it to exist — do not fall
+    // through. When unspecified, the chooser above has already returned for
+    // the multi-IdP case, so `state.idps.first()` here is either the single
+    // configured IdP or `None` (no IdPs at all).
     let base_url = state.config().base_url.clone();
-    let chosen_idp: Option<&crate::services::idp::ConfiguredIdp> =
-        if let Some(ref slug) = query.provider {
-            match state.idp(slug.as_str()) {
-                Some(i) => Some(i),
-                None => {
-                    return ErrorTemplate {
-                        title: "Unknown Provider".to_string(),
-                        message: format!("Identity provider '{slug}' is not configured."),
-                        back_url: Some("/".to_string()),
-                    }
-                    .into_response();
+    let chosen_idp: Option<&crate::services::idp::ConfiguredIdp> = match provider_choice {
+        Some(slug) => match state.idp(slug) {
+            Some(i) => Some(i),
+            None => {
+                return ErrorTemplate {
+                    title: "Unknown Provider".to_string(),
+                    message: format!("Identity provider '{slug}' is not configured."),
+                    back_url: Some("/".to_string()),
                 }
+                .into_response();
             }
-        } else {
-            state.idps.first()
-        };
+        },
+        None => state.idps.first(),
+    };
 
     let Some(idp) = chosen_idp else {
         return ErrorTemplate {
@@ -1875,6 +1911,276 @@ mod tests {
         assert!(
             body.contains("Invalid or expired state"),
             "expected 'Invalid or expired state' in body, got: {body}"
+        );
+    }
+
+    // ── IdP chooser tests ────────────────────────────────────────────────
+
+    /// Build a [`ConfiguredIdp::Oidc`] for tests against the given issuer
+    /// (the issuer drives the chooser button's brand/display name).
+    fn make_test_oidc_idp(id: &str, issuer: &str) -> crate::services::idp::ConfiguredIdp {
+        use secrecy::SecretString;
+        crate::services::idp::ConfiguredIdp::Oidc(crate::services::idp::ConfiguredOidcProvider {
+            id: id.to_string(),
+            client_id: format!("{id}-client-id"),
+            client_secret: SecretString::from(format!("{id}-secret")),
+            provider: crate::services::idp::oidc::OidcProvider {
+                issuer: issuer.to_string(),
+                authorization_endpoint: url::Url::parse(&format!("{issuer}/authorize"))
+                    .expect("auth endpoint url"),
+                token_endpoint: url::Url::parse(&format!("{issuer}/token"))
+                    .expect("token endpoint url"),
+                jwks_uri: url::Url::parse(&format!("{issuer}/jwks")).expect("jwks url"),
+            },
+        })
+    }
+
+    /// Seed a pending device-auth row with a valid user code, return the code.
+    async fn seed_pending_device_auth(state: &AppState, user_code: &str) {
+        let expires_at: jiff::Timestamp = "2099-12-31T23:59:59Z".parse().expect("valid timestamp");
+        crate::db::create_device_auth_request(
+            &state.store,
+            &format!("hash-{user_code}"),
+            user_code,
+            None,
+            expires_at,
+            5,
+        )
+        .await
+        .expect("seed device_auth_request");
+    }
+
+    fn two_idps() -> Vec<crate::services::idp::ConfiguredIdp> {
+        vec![
+            make_test_oidc_idp("google", "https://accounts.google.com"),
+            make_test_oidc_idp("entra", "https://login.microsoftonline.com/common/v2.0"),
+        ]
+    }
+
+    #[tokio::test]
+    async fn device_chooser_rendered_when_multiple_idps_and_no_provider() {
+        let (app, state) = crate::test_utils::test_app_with_idps(two_idps()).await;
+        seed_pending_device_auth(&state, "BCDF-GHJK").await;
+
+        let (status, body) =
+            crate::test_utils::http_post_form(&app, "/device", "user_code=BCDF-GHJK", &[]).await;
+
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "chooser renders 200 OK; body: {body}"
+        );
+        assert!(
+            body.contains("Choose your identity provider"),
+            "expected chooser heading, got: {body}"
+        );
+        assert!(
+            body.contains("Sign in with Google"),
+            "expected Google button, got: {body}"
+        );
+        assert!(
+            body.contains("Sign in with Microsoft"),
+            "expected Microsoft button, got: {body}"
+        );
+        assert!(
+            body.contains("name=\"user_code\""),
+            "chooser must carry user_code forward as hidden field; got: {body}"
+        );
+        assert!(
+            body.contains("value=\"BCDF-GHJK\""),
+            "hidden user_code value must match; got: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn device_redirects_when_provider_selected() {
+        let (app, state) = crate::test_utils::test_app_with_idps(two_idps()).await;
+        seed_pending_device_auth(&state, "BCDF-GHJK").await;
+
+        let resp = crate::test_utils::http_post_form_full(
+            &app,
+            "/device",
+            "user_code=BCDF-GHJK&provider=entra",
+            &[],
+        )
+        .await;
+
+        assert_eq!(
+            resp.status,
+            StatusCode::SEE_OTHER,
+            "want 303 redirect; body: {}",
+            resp.body
+        );
+        let location = resp
+            .headers
+            .get(axum::http::header::LOCATION)
+            .expect("Location header")
+            .to_str()
+            .expect("ascii Location");
+        assert!(
+            location.starts_with("https://login.microsoftonline.com"),
+            "expected Microsoft auth URL, got: {location}"
+        );
+    }
+
+    #[tokio::test]
+    async fn device_rejects_unknown_provider_slug() {
+        let (app, state) = crate::test_utils::test_app_with_idps(two_idps()).await;
+        seed_pending_device_auth(&state, "BCDF-GHJK").await;
+
+        let (status, body) = crate::test_utils::http_post_form(
+            &app,
+            "/device",
+            "user_code=BCDF-GHJK&provider=evil",
+            &[],
+        )
+        .await;
+
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "error template renders 200 OK; body: {body}"
+        );
+        assert!(
+            body.contains("Unknown Provider"),
+            "expected 'Unknown Provider' title, got: {body}"
+        );
+        assert!(
+            // Askama HTML-escapes single quotes, so the rendered message
+            // contains `&#39;evil&#39;` rather than `'evil'`. The slug name
+            // alone is enough to confirm it round-tripped into the error.
+            body.contains("evil"),
+            "expected slug 'evil' echoed in message, got: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn device_single_idp_auto_selects_without_chooser() {
+        let idps = vec![make_test_oidc_idp("google", "https://accounts.google.com")];
+        let (app, state) = crate::test_utils::test_app_with_idps(idps).await;
+        seed_pending_device_auth(&state, "BCDF-GHJK").await;
+
+        let resp =
+            crate::test_utils::http_post_form_full(&app, "/device", "user_code=BCDF-GHJK", &[])
+                .await;
+
+        assert_eq!(
+            resp.status,
+            StatusCode::SEE_OTHER,
+            "single IdP must auto-select; body: {}",
+            resp.body
+        );
+        let location = resp
+            .headers
+            .get(axum::http::header::LOCATION)
+            .expect("Location header")
+            .to_str()
+            .expect("ascii Location");
+        assert!(
+            location.starts_with("https://accounts.google.com"),
+            "expected Google auth URL, got: {location}"
+        );
+    }
+
+    #[tokio::test]
+    async fn device_zero_idps_renders_not_configured_error() {
+        // Without an IdP we have no way to verify identity or email, so the
+        // device flow must refuse rather than fall through to a WebAuthn
+        // registration that would create a user keyed on the literal string
+        // "new user".
+        let (app, state) = test_app().await;
+        seed_pending_device_auth(&state, "BCDF-GHJK").await;
+
+        let (status, body) =
+            crate::test_utils::http_post_form(&app, "/device", "user_code=BCDF-GHJK", &[]).await;
+
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "error template renders 200 OK; body: {body}"
+        );
+        assert!(
+            body.contains("Not Configured"),
+            "expected 'Not Configured' title, got: {body}"
+        );
+        assert!(
+            !body.contains("Choose your identity provider"),
+            "chooser must NOT render with zero IdPs; got: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn enroll_start_chooser_rendered_when_multiple_idps_and_no_provider() {
+        let (app, _state) = crate::test_utils::test_app_with_idps(two_idps()).await;
+
+        let (status, body) = crate::test_utils::http_get(&app, "/enroll/start", &[]).await;
+
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "chooser renders 200 OK; body: {body}"
+        );
+        assert!(
+            body.contains("Choose your identity provider"),
+            "expected chooser heading, got: {body}"
+        );
+        assert!(
+            body.contains("/enroll/start?provider=google"),
+            "expected Google chooser link, got: {body}"
+        );
+        assert!(
+            body.contains("/enroll/start?provider=entra"),
+            "expected Microsoft chooser link, got: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn enroll_start_redirects_when_provider_selected() {
+        let (app, _state) = crate::test_utils::test_app_with_idps(two_idps()).await;
+
+        let resp =
+            crate::test_utils::http_get_full(&app, "/enroll/start?provider=entra", &[]).await;
+
+        assert_eq!(
+            resp.status,
+            StatusCode::SEE_OTHER,
+            "want 303 redirect; body: {}",
+            resp.body
+        );
+        let location = resp
+            .headers
+            .get(axum::http::header::LOCATION)
+            .expect("Location header")
+            .to_str()
+            .expect("ascii Location");
+        assert!(
+            location.starts_with("https://login.microsoftonline.com"),
+            "expected Microsoft auth URL, got: {location}"
+        );
+    }
+
+    #[tokio::test]
+    async fn enroll_start_single_idp_auto_selects_without_chooser() {
+        let idps = vec![make_test_oidc_idp("google", "https://accounts.google.com")];
+        let (app, _state) = crate::test_utils::test_app_with_idps(idps).await;
+
+        let resp = crate::test_utils::http_get_full(&app, "/enroll/start", &[]).await;
+
+        assert_eq!(
+            resp.status,
+            StatusCode::SEE_OTHER,
+            "single IdP must auto-select; body: {}",
+            resp.body
+        );
+        let location = resp
+            .headers
+            .get(axum::http::header::LOCATION)
+            .expect("Location header")
+            .to_str()
+            .expect("ascii Location");
+        assert!(
+            location.starts_with("https://accounts.google.com"),
+            "expected Google auth URL, got: {location}"
         );
     }
 }

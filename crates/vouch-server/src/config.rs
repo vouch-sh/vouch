@@ -861,6 +861,17 @@ impl ServerConfig {
     /// Validate that all required configuration is present.
     /// Call this after all config sources (env, S3) have been merged.
     pub fn validate(&self) -> Result<()> {
+        // Refuse to start with no IdP. Enrollment and login both depend on
+        // upstream identity verification to bind a security key to a real
+        // email; without it the server can only create users keyed on
+        // placeholder strings, which silently degrades the security model.
+        if self.idps.is_empty() {
+            anyhow::bail!(
+                "No upstream IdP configured. Set VOUCH_IDPS=<slug>[,<slug>...] \
+                 with per-provider VOUCH_IDP_<SLUG>_TYPE plus type-specific vars."
+            );
+        }
+
         // Reject duplicate IdP slugs — order matters for UI but ids must be unique.
         // Also enforce slug format here so all merged sources (env, S3) are
         // checked consistently — env parsing already runs validate_provider_slug,
@@ -1168,6 +1179,19 @@ mod tests {
         assert!(!config.has_idps());
         assert!(!config.has_oidc_idp());
         assert!(!config.has_saml_idp());
+    }
+
+    #[test]
+    fn test_validate_rejects_zero_idps() {
+        // Without an IdP we cannot verify user identity, so the server must
+        // refuse to boot rather than silently degrade to placeholder users.
+        let mut config = test_config();
+        config.idps = Vec::new();
+        let err = config.validate().unwrap_err();
+        assert!(
+            err.to_string().contains("No upstream IdP configured"),
+            "expected zero-IdP rejection, got: {err}"
+        );
     }
 
     #[test]

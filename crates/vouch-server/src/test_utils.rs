@@ -122,6 +122,16 @@ pub fn test_config() -> ServerConfig {
 
 /// Create a test AppState with in-memory database.
 pub async fn test_app_state() -> Arc<AppState> {
+    test_app_state_with_idps(Vec::new()).await
+}
+
+/// Create a test AppState seeded with the given upstream IdPs.
+///
+/// Used by tests that exercise multi-IdP code paths (chooser rendering,
+/// provider slug validation, etc.) without standing up real IdP metadata.
+pub async fn test_app_state_with_idps(
+    idps: Vec<crate::services::idp::ConfiguredIdp>,
+) -> Arc<AppState> {
     let pool = test_db().await;
     let config = test_config();
 
@@ -155,13 +165,23 @@ pub async fn test_app_state() -> Arc<AppState> {
         github_app: None,
         http_client: reqwest::Client::new(),
         session_cache: crate::db::SessionCache::new(10_000, 30),
-        idps: Vec::new(),
+        idps,
     })
 }
 
 /// Create test app (router + state) for handler testing.
 pub async fn test_app() -> (Router, Arc<AppState>) {
     let state = test_app_state().await;
+    let config = state.config();
+    let router = build_app(state.clone(), &config).expect("Failed to build test app router");
+    (router, state)
+}
+
+/// Create test app (router + state) with the given upstream IdPs seeded.
+pub async fn test_app_with_idps(
+    idps: Vec<crate::services::idp::ConfiguredIdp>,
+) -> (Router, Arc<AppState>) {
+    let state = test_app_state_with_idps(idps).await;
     let config = state.config();
     let router = build_app(state.clone(), &config).expect("Failed to build test app router");
     (router, state)

@@ -26,7 +26,7 @@ Configure one or more upstream IdPs (OIDC, SAML, or any mix) as a single unified
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `VOUCH_IDPS` | No | _(none)_ | Comma-separated list of IdP slugs in display order (e.g., `google,entra,corp-saml`). |
+| `VOUCH_IDPS` | Yes | _(none)_ | Comma-separated list of IdP slugs in display order (e.g., `google,entra,corp-saml`). At least one slug is required; the server refuses to start otherwise. |
 | `VOUCH_IDP_<SLUG>_TYPE` | Yes (per IdP) | _(none)_ | `oidc` or `saml`. |
 
 Hyphens in slugs become underscores in variable names: a slug of `corp-saml` becomes `VOUCH_IDP_CORP_SAML_*`.
