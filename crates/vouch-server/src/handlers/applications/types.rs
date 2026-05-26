@@ -25,14 +25,15 @@ use crate::filters;
 /// Applications list page template.
 #[derive(Template)]
 #[template(path = "applications/list.html")]
-pub struct ApplicationsListTemplate {
+pub(crate) struct ApplicationsListTemplate {
     pub applications: Vec<ApplicationInfo>,
     /// Authentication context for header display.
     pub auth: AuthContext,
 }
 
 /// Application info for display.
-pub struct ApplicationInfo {
+#[allow(dead_code, reason = "fields rendered via Askama template macros")]
+pub(crate) struct ApplicationInfo {
     pub id: String,
     pub client_id: String,
     pub name: String,
@@ -86,7 +87,7 @@ impl From<OAuthClient> for ApplicationInfo {
 /// Application create page template.
 #[derive(Template)]
 #[template(path = "applications/create.html")]
-pub struct ApplicationCreateTemplate {
+pub(crate) struct ApplicationCreateTemplate {
     /// Authentication context for header display.
     pub auth: AuthContext,
     /// Whether the user has an organization (affects available access scopes).
@@ -96,7 +97,7 @@ pub struct ApplicationCreateTemplate {
 /// Application created success page (shows credentials once).
 #[derive(Template)]
 #[template(path = "applications/created.html")]
-pub struct ApplicationCreatedTemplate {
+pub(crate) struct ApplicationCreatedTemplate {
     pub name: String,
     pub client_id: String,
     pub client_secret: Option<String>,
@@ -109,7 +110,7 @@ pub struct ApplicationCreatedTemplate {
 /// Application detail page template.
 #[derive(Template)]
 #[template(path = "applications/detail.html")]
-pub struct ApplicationDetailTemplate {
+pub(crate) struct ApplicationDetailTemplate {
     pub app: ApplicationInfo,
     pub secrets_count: usize,
     pub secrets: Vec<SecretInfo>,
@@ -119,7 +120,7 @@ pub struct ApplicationDetailTemplate {
 }
 
 /// Usage stat for display.
-pub struct UsageStat {
+pub(crate) struct UsageStat {
     pub event_type: String,
     pub count: i64,
 }
@@ -127,7 +128,8 @@ pub struct UsageStat {
 /// Secret added success page (shows new secret once).
 #[derive(Template)]
 #[template(path = "applications/secret_added.html")]
-pub struct SecretAddedTemplate {
+#[allow(dead_code, reason = "fields rendered via Askama template macros")]
+pub(crate) struct SecretAddedTemplate {
     pub app_id: String,
     pub name: String,
     pub client_id: String,
@@ -140,7 +142,7 @@ pub struct SecretAddedTemplate {
 /// Error page template.
 #[derive(Template)]
 #[template(path = "applications/error.html")]
-pub struct ApplicationErrorTemplate {
+pub(crate) struct ApplicationErrorTemplate {
     pub title: String,
     pub message: String,
     pub back_url: String,
@@ -149,7 +151,7 @@ pub struct ApplicationErrorTemplate {
 /// Unauthorized template.
 #[derive(Template)]
 #[template(path = "applications/unauthorized.html")]
-pub struct ApplicationUnauthorizedTemplate;
+pub(crate) struct ApplicationUnauthorizedTemplate;
 
 impl_template_response!(
     ApplicationsListTemplate,
@@ -182,7 +184,7 @@ impl IntoResponse for ApplicationUnauthorizedTemplate {
 
 /// Form data for creating an application.
 #[derive(Debug, Deserialize)]
-pub struct CreateApplicationForm {
+pub(crate) struct CreateApplicationForm {
     pub name: String,
     pub description: Option<String>,
     pub application_type: String,
@@ -204,7 +206,7 @@ pub struct CreateApplicationForm {
 
 /// Form data for updating an application.
 #[derive(Debug, Deserialize)]
-pub struct UpdateApplicationForm {
+pub(crate) struct UpdateApplicationForm {
     pub name: String,
     pub description: Option<String>,
     pub redirect_uris: String,
@@ -225,7 +227,7 @@ pub struct UpdateApplicationForm {
 
 /// API request for creating an application.
 #[derive(Debug, Deserialize)]
-pub struct CreateApplicationRequest {
+pub(crate) struct CreateApplicationRequest {
     pub name: String,
     pub description: Option<String>,
     pub application_type: String,
@@ -247,7 +249,7 @@ pub struct CreateApplicationRequest {
 
 /// API request for updating an application.
 #[derive(Debug, Deserialize)]
-pub struct UpdateApplicationRequest {
+pub(crate) struct UpdateApplicationRequest {
     pub name: Option<String>,
     pub description: Option<String>,
     pub redirect_uris: Option<Vec<String>>,
@@ -268,7 +270,7 @@ pub struct UpdateApplicationRequest {
 
 /// API response for a created application.
 #[derive(Debug, Serialize)]
-pub struct CreateApplicationResponse {
+pub(crate) struct CreateApplicationResponse {
     pub id: String,
     pub client_id: String,
     pub client_secret: Option<String>,
@@ -289,7 +291,7 @@ pub struct CreateApplicationResponse {
 
 /// API response for application details.
 #[derive(Debug, Serialize)]
-pub struct ApplicationResponse {
+pub(crate) struct ApplicationResponse {
     pub id: String,
     pub client_id: String,
     pub name: String,
@@ -342,19 +344,19 @@ impl From<OAuthClient> for ApplicationResponse {
 
 /// API response for listing applications.
 #[derive(Debug, Serialize)]
-pub struct ListApplicationsResponse {
+pub(crate) struct ListApplicationsResponse {
     pub applications: Vec<ApplicationResponse>,
 }
 
 /// API request for adding a secret.
 #[derive(Debug, Deserialize)]
-pub struct AddSecretRequest {
+pub(crate) struct AddSecretRequest {
     pub description: Option<String>,
 }
 
 /// API response for adding a secret (plaintext shown once).
 #[derive(Debug, Serialize)]
-pub struct AddSecretResponse {
+pub(crate) struct AddSecretResponse {
     pub secret_id: String,
     pub client_secret: String,
     pub created_at: Timestamp,
@@ -363,7 +365,7 @@ pub struct AddSecretResponse {
 
 /// Secret metadata for listing (never exposes hash).
 #[derive(Debug, Serialize)]
-pub struct SecretInfo {
+pub(crate) struct SecretInfo {
     pub id: String,
     pub description: Option<String>,
     pub created_at: Timestamp,
@@ -373,6 +375,6 @@ pub struct SecretInfo {
 
 /// API response for listing secrets.
 #[derive(Debug, Serialize)]
-pub struct ListSecretsResponse {
+pub(crate) struct ListSecretsResponse {
     pub secrets: Vec<SecretInfo>,
 }

@@ -18,7 +18,7 @@ use time::Duration;
 ///
 /// Provides a consistent way to pass auth state to templates and handlers.
 /// This struct is used by the `header_auth` template macro.
-pub struct AuthContext {
+pub(crate) struct AuthContext {
     /// Whether the user is authenticated.
     pub authenticated: bool,
     /// The user's ID if authenticated (for authorization checks).
@@ -36,7 +36,7 @@ pub struct AuthContext {
 impl AuthContext {
     /// Create an unauthenticated auth context.
     #[must_use]
-    pub fn unauthenticated() -> Self {
+    pub(crate) fn unauthenticated() -> Self {
         Self {
             authenticated: false,
             user_id: None,
@@ -53,7 +53,8 @@ impl AuthContext {
 
 /// Validated OAuth resource token information.
 #[derive(Debug)]
-pub struct ValidatedResourceToken {
+#[allow(dead_code, reason = "fields populated for diagnostic / future use")]
+pub(crate) struct ValidatedResourceToken {
     /// User ID (`sub` claim from the access token).
     pub sub: String,
     /// User email (from `email` claim if present, or DB lookup).
@@ -85,7 +86,7 @@ pub struct ValidatedResourceToken {
 /// `method` and `uri` are the actual HTTP method and path of the request,
 /// used for DPoP proof validation. Pass empty strings for cookie-only paths
 /// where DPoP validation is skipped.
-pub async fn extract_resource_token(
+pub(crate) async fn extract_resource_token(
     state: &AppState,
     headers: &axum::http::HeaderMap,
     jar: &CookieJar,
@@ -255,7 +256,7 @@ pub async fn extract_resource_token(
 /// Extract resource token and also fetch the user email from DB.
 ///
 /// Convenience function for handlers that need the user email.
-pub async fn extract_resource_token_with_email(
+pub(crate) async fn extract_resource_token_with_email(
     state: &AppState,
     headers: &axum::http::HeaderMap,
     jar: &CookieJar,
@@ -289,7 +290,7 @@ pub async fn extract_resource_token_with_email(
 /// # Errors
 ///
 /// Returns an error response if no valid session cookie is present.
-pub async fn extract_session_from_cookie(
+pub(crate) async fn extract_session_from_cookie(
     state: &AppState,
     jar: &CookieJar,
 ) -> Result<ValidatedResourceToken, ServiceError> {
@@ -350,7 +351,7 @@ fn extract_token_from_request(
 /// Extract authenticated user and their org_id.
 ///
 /// Returns `(user, org_id)` or an error if not authenticated or no org.
-pub async fn extract_user_with_org(
+pub(crate) async fn extract_user_with_org(
     state: &AppState,
     headers: &axum::http::HeaderMap,
     jar: &CookieJar,
@@ -390,7 +391,7 @@ pub async fn extract_user_with_org(
 /// Returns the user and their org_id if they are an org admin.
 /// Reuses `extract_user_with_org` for token validation and user lookup,
 /// then adds active-status and admin-role checks.
-pub async fn extract_org_admin(
+pub(crate) async fn extract_org_admin(
     state: &AppState,
     headers: &axum::http::HeaderMap,
     jar: &CookieJar,
@@ -428,7 +429,7 @@ pub async fn extract_org_admin(
 /// → `/enroll/keys`. With `Strict`, the browser treats the entire redirect
 /// chain as cross-site and refuses to send the cookie on the final hop.
 #[must_use]
-pub fn create_session_cookie(token: &str, max_age_seconds: i64) -> Cookie<'static> {
+pub(crate) fn create_session_cookie(token: &str, max_age_seconds: i64) -> Cookie<'static> {
     Cookie::build((vouch_common::SESSION_COOKIE_NAME, token.to_owned()))
         .path("/")
         .http_only(true)
@@ -442,7 +443,7 @@ pub fn create_session_cookie(token: &str, max_age_seconds: i64) -> Cookie<'stati
 ///
 /// Returns a Cookie that expires the session cookie.
 #[must_use]
-pub fn clear_session_cookie() -> Cookie<'static> {
+pub(crate) fn clear_session_cookie() -> Cookie<'static> {
     Cookie::build((vouch_common::SESSION_COOKIE_NAME, ""))
         .path("/")
         .http_only(true)
@@ -453,7 +454,7 @@ pub fn clear_session_cookie() -> Cookie<'static> {
 }
 
 /// Helper to extract auth context from cookie jar using OAuth tokens.
-pub async fn get_resource_auth_context(state: &AppState, jar: &CookieJar) -> AuthContext {
+pub(crate) async fn get_resource_auth_context(state: &AppState, jar: &CookieJar) -> AuthContext {
     // Try to extract token from cookie
     let token = match jar.get(vouch_common::SESSION_COOKIE_NAME) {
         Some(c) => c.value(),
@@ -504,7 +505,7 @@ pub async fn get_resource_auth_context(state: &AppState, jar: &CookieJar) -> Aut
 /// by templates and browser UI handlers.
 ///
 /// Both names refer to the same OAuth-token-based auth context extraction.
-pub async fn get_auth_context(state: &AppState, jar: &CookieJar) -> AuthContext {
+pub(crate) async fn get_auth_context(state: &AppState, jar: &CookieJar) -> AuthContext {
     get_resource_auth_context(state, jar).await
 }
 

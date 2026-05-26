@@ -23,7 +23,7 @@ use crate::handlers::{ValidPath, ValidUuid};
 const MEMBERS_PAGE_SIZE: u64 = 50;
 
 /// A member row for the template.
-pub struct MemberRow {
+pub(crate) struct MemberRow {
     pub id: String,
     pub email: String,
     pub is_org_admin: bool,
@@ -35,7 +35,7 @@ pub struct MemberRow {
 /// Members list page template.
 #[derive(Template)]
 #[template(path = "admin/members.html")]
-pub struct AdminMembersTemplate {
+pub(crate) struct AdminMembersTemplate {
     pub auth: AuthContext,
     pub members: Vec<MemberRow>,
     pub has_more: bool,
@@ -45,7 +45,7 @@ pub struct AdminMembersTemplate {
 impl_template_response!(AdminMembersTemplate);
 
 /// GET /admin — Members list page.
-pub async fn admin_members_page(
+pub(crate) async fn admin_members_page(
     State(state): State<Arc<AppState>>,
     jar: CookieJar,
     Query(params): Query<PaginationParams>,
@@ -119,7 +119,7 @@ pub async fn admin_members_page(
 }
 
 /// POST /admin/members/{id}/promote — Promote a member to admin.
-pub async fn promote_member(
+pub(crate) async fn promote_member(
     method: Method,
     uri: OriginalUri,
     State(state): State<Arc<AppState>>,
@@ -179,7 +179,7 @@ pub async fn promote_member(
 }
 
 /// POST /admin/members/{id}/demote — Demote an admin to regular member.
-pub async fn demote_member(
+pub(crate) async fn demote_member(
     method: Method,
     uri: OriginalUri,
     State(state): State<Arc<AppState>>,
@@ -239,7 +239,7 @@ pub async fn demote_member(
 }
 
 /// POST /admin/members/{id}/deactivate — Deactivate a user.
-pub async fn deactivate_member(
+pub(crate) async fn deactivate_member(
     method: Method,
     uri: OriginalUri,
     State(state): State<Arc<AppState>>,
@@ -315,7 +315,7 @@ pub async fn deactivate_member(
 }
 
 /// POST /admin/members/{id}/activate — Reactivate a user.
-pub async fn activate_member(
+pub(crate) async fn activate_member(
     method: Method,
     uri: OriginalUri,
     State(state): State<Arc<AppState>>,
@@ -362,7 +362,7 @@ pub async fn activate_member(
 }
 
 /// POST /admin/members/{id}/revoke-credentials — Revoke all credentials for a user.
-pub async fn revoke_member_credentials(
+pub(crate) async fn revoke_member_credentials(
     method: Method,
     uri: OriginalUri,
     State(state): State<Arc<AppState>>,
@@ -450,7 +450,7 @@ pub async fn revoke_member_credentials(
 }
 
 /// POST /admin/members/{id}/remove — Remove a user from the organization.
-pub async fn remove_member(
+pub(crate) async fn remove_member(
     method: Method,
     uri: OriginalUri,
     State(state): State<Arc<AppState>>,

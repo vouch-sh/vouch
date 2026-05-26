@@ -83,7 +83,7 @@ impl RegistrationState {
 /// Requires an OAuth access token (FAPI 2.0). Users must first enroll via OIDC
 /// (`vouch enroll`) to register their first key. After that, they can add
 /// additional keys via this endpoint after logging in with an existing key.
-pub async fn register_start(
+pub(crate) async fn register_start(
     method: Method,
     uri: OriginalUri,
     headers: HeaderMap,
@@ -185,7 +185,7 @@ pub async fn register_start(
 
 /// Complete registration - verify attestation and store credential
 /// (WebAuthn Level 2 Section 7.1, Step 4-22).
-pub async fn register_complete(
+pub(crate) async fn register_complete(
     State(state): State<Arc<AppState>>,
     Json(req): Json<RegisterCompleteRequest>,
 ) -> Result<Json<RegisterCompleteResponse>, ServiceError> {
@@ -338,7 +338,7 @@ pub async fn register_complete(
 // ============================================================================
 
 /// List all registered keys for the authenticated user.
-pub async fn list_keys(
+pub(crate) async fn list_keys(
     method: Method,
     uri: OriginalUri,
     headers: HeaderMap,
@@ -368,7 +368,7 @@ pub async fn list_keys(
     clippy::too_many_arguments,
     reason = "axum handler signature: extractors are positional parameters"
 )]
-pub async fn rename_key(
+pub(crate) async fn rename_key(
     method: Method,
     uri: OriginalUri,
     headers: HeaderMap,
@@ -411,7 +411,7 @@ pub async fn rename_key(
 }
 
 /// Delete a registered key.
-pub async fn delete_key(
+pub(crate) async fn delete_key(
     method: Method,
     uri: OriginalUri,
     headers: HeaderMap,

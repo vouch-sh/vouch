@@ -36,7 +36,7 @@ use std::sync::Arc;
 // ============================================================================
 
 /// Unlinked GitHub installation (exists on GitHub but not in our database).
-pub struct UnlinkedInstallation {
+pub(crate) struct UnlinkedInstallation {
     pub id: u64,
     pub account_login: String,
     pub account_type: String,
@@ -45,7 +45,8 @@ pub struct UnlinkedInstallation {
 /// GitHub connect page template.
 #[derive(Template)]
 #[template(path = "github/connect.html")]
-pub struct GitHubConnectTemplate {
+#[allow(dead_code, reason = "fields rendered via Askama template macros")]
+pub(crate) struct GitHubConnectTemplate {
     pub org_name: String,
     pub github_app_url: String,
     pub error: Option<String>,
@@ -68,7 +69,8 @@ impl_template_response!(GitHubConnectTemplate);
 /// GitHub success page template.
 #[derive(Template)]
 #[template(path = "github/success.html")]
-pub struct GitHubSuccessTemplate {
+#[allow(dead_code, reason = "fields rendered via Askama template macros")]
+pub(crate) struct GitHubSuccessTemplate {
     pub org_name: String,
     pub github_account: String,
     /// Authentication context for header display.
@@ -80,7 +82,7 @@ impl_template_response!(GitHubSuccessTemplate);
 /// Error page template.
 #[derive(Template)]
 #[template(path = "github/error.html")]
-pub struct GitHubErrorTemplate {
+pub(crate) struct GitHubErrorTemplate {
     pub title: String,
     pub message: String,
 }
@@ -202,7 +204,7 @@ impl GitHubStateToken {
 
 /// Query parameters for GitHub callback.
 #[derive(Debug, Deserialize)]
-pub struct GitHubCallbackParams {
+pub(crate) struct GitHubCallbackParams {
     /// Installation ID from GitHub (present for installation callbacks).
     installation_id: Option<u64>,
     /// State token for CSRF protection.
@@ -216,7 +218,7 @@ pub struct GitHubCallbackParams {
 
 /// Query parameters for connect page (may include callback params).
 #[derive(Debug, Deserialize, Default)]
-pub struct GitHubConnectParams {
+pub(crate) struct GitHubConnectParams {
     /// Installation ID from GitHub (present when redirected after install).
     installation_id: Option<u64>,
     /// State token for CSRF protection.
@@ -228,13 +230,13 @@ pub struct GitHubConnectParams {
 
 /// Query parameters for success page.
 #[derive(Debug, Deserialize)]
-pub struct GitHubSuccessParams {
+pub(crate) struct GitHubSuccessParams {
     account: Option<String>,
 }
 
 /// Form data for reconnecting a GitHub installation.
 #[derive(Debug, Deserialize)]
-pub struct GitHubReconnectForm {
+pub(crate) struct GitHubReconnectForm {
     /// Installation ID to reconnect.
     installation_id: u64,
 }
@@ -270,7 +272,7 @@ fn github_service<'a>(
 // ============================================================================
 
 /// POST /api/webhooks/github - Handle GitHub webhook events.
-pub async fn github_webhook(
+pub(crate) async fn github_webhook(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     body: Bytes,
@@ -321,7 +323,7 @@ pub async fn github_webhook(
 ///
 /// Also handles redirects from GitHub after app installation if the GitHub App's
 /// "Setup URL" points here instead of `/github/callback`.
-pub async fn github_connect_page(
+pub(crate) async fn github_connect_page(
     State(state): State<Arc<AppState>>,
     jar: CookieJar,
     Query(params): Query<GitHubConnectParams>,
@@ -439,7 +441,7 @@ pub async fn github_connect_page(
 ///
 /// Both flows require an authenticated session cookie that matches the session
 /// which originally minted the state token (RFC 6819 §5.3.5 CSRF defense).
-pub async fn github_callback(
+pub(crate) async fn github_callback(
     State(state): State<Arc<AppState>>,
     jar: CookieJar,
     Query(params): Query<GitHubCallbackParams>,
@@ -647,7 +649,10 @@ async fn handle_installation_callback(
 }
 
 /// GET /github/link - Redirect user to GitHub OAuth to link their GitHub account.
-pub async fn github_link_start(State(state): State<Arc<AppState>>, jar: CookieJar) -> Response {
+pub(crate) async fn github_link_start(
+    State(state): State<Arc<AppState>>,
+    jar: CookieJar,
+) -> Response {
     let config = state.config();
     let service = github_service(&state, &config);
 
@@ -706,7 +711,7 @@ pub async fn github_link_start(State(state): State<Arc<AppState>>, jar: CookieJa
 ///
 /// This allows an org admin to link an existing GitHub installation (that they
 /// have access to via `/user/installations`) to their Vouch organization.
-pub async fn github_reconnect(
+pub(crate) async fn github_reconnect(
     State(state): State<Arc<AppState>>,
     jar: CookieJar,
     Form(form): Form<GitHubReconnectForm>,
@@ -765,7 +770,7 @@ pub async fn github_reconnect(
 }
 
 /// GET /github/success - Show success page after GitHub connection.
-pub async fn github_success_page(
+pub(crate) async fn github_success_page(
     State(state): State<Arc<AppState>>,
     jar: CookieJar,
     Query(params): Query<GitHubSuccessParams>,

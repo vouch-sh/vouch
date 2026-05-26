@@ -20,7 +20,7 @@ use super::session::extract_session_from_cookie;
 /// List all registered keys for the user (during enrollment).
 /// GET /enroll/keys/api
 /// Authentication is via session cookie.
-pub async fn list_keys(
+pub(crate) async fn list_keys(
     State(state): State<Arc<AppState>>,
     jar: CookieJar,
 ) -> Result<Json<ListKeysResponse>, ServiceError> {
@@ -36,7 +36,7 @@ pub async fn list_keys(
 /// Rename a security key (during enrollment).
 /// PATCH /enroll/keys/{id}
 /// Authentication is via session cookie.
-pub async fn rename_key(
+pub(crate) async fn rename_key(
     State(state): State<Arc<AppState>>,
     jar: CookieJar,
     Path(key_id): Path<String>,
@@ -52,7 +52,7 @@ pub async fn rename_key(
 /// Delete a security key (during enrollment).
 /// DELETE /enroll/keys/{id}
 /// Authentication is via session cookie.
-pub async fn delete_key(
+pub(crate) async fn delete_key(
     State(state): State<Arc<AppState>>,
     jar: CookieJar,
     Path(key_id): Path<String>,

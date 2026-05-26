@@ -59,7 +59,7 @@ impl_template_response!(FormPostResponseTemplate);
 
 /// Authorization request query parameters (RFC 6749 Section 4.1.1).
 #[derive(Debug, Deserialize)]
-pub struct AuthorizeQuery {
+pub(crate) struct AuthorizeQuery {
     /// RFC 6749 Section 4.1.1: Response type (must be "code").
     response_type: Option<String>,
     /// RFC 6749 Section 4.1.1: Client identifier.
@@ -371,7 +371,7 @@ async fn check_session_and_authorize(
 /// - RFC 7636: PKCE support
 /// - RFC 9207: Includes `iss` parameter in response
 /// - RFC 9700: Follows OAuth 2.0 Security BCP
-pub async fn authorize(
+pub(crate) async fn authorize(
     State(state): State<Arc<AppState>>,
     Query(params): Query<AuthorizeQuery>,
     jar: CookieJar,
@@ -465,7 +465,7 @@ async fn authorize_inner(state: Arc<AppState>, params: AuthorizeQuery, jar: Cook
 /// RFC 6749 Section 3.1: The authorization endpoint MAY support POST.
 /// Accepts `application/x-www-form-urlencoded` parameters and delegates
 /// to the same logic as the GET handler.
-pub async fn authorize_post(
+pub(crate) async fn authorize_post(
     State(state): State<Arc<AppState>>,
     jar: CookieJar,
     Form(params): Form<AuthorizeQuery>,

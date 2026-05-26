@@ -26,7 +26,7 @@ use std::sync::Arc;
 /// Integrations page template.
 #[derive(Template)]
 #[template(path = "integrations.html")]
-pub struct IntegrationsTemplate {
+pub(crate) struct IntegrationsTemplate {
     /// Authentication context for header display.
     pub auth: AuthContext,
     /// Whether the server has GitHub App configured.
@@ -44,7 +44,10 @@ impl_template_response!(IntegrationsTemplate);
 // ============================================================================
 
 /// GET /integrations - Show integrations page.
-pub async fn integrations_page(State(state): State<Arc<AppState>>, jar: CookieJar) -> Response {
+pub(crate) async fn integrations_page(
+    State(state): State<Arc<AppState>>,
+    jar: CookieJar,
+) -> Response {
     let auth = get_resource_auth_context(&state, &jar).await;
 
     // Redirect unauthenticated users to enrollment

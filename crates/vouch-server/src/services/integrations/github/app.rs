@@ -33,7 +33,7 @@ pub struct GitHubInstallationId(pub u64);
 /// expects PKCS#1 DER format (RFC 8017), which is what GitHub provides for
 /// App private keys (`BEGIN RSA PRIVATE KEY`).
 #[derive(Clone)]
-pub struct RsaPrivateKeyDer(Zeroizing<Vec<u8>>);
+pub(crate) struct RsaPrivateKeyDer(Zeroizing<Vec<u8>>);
 
 impl RsaPrivateKeyDer {
     /// Parse RSA private key from PKCS#1 PEM or base64-encoded PKCS#1 PEM.
@@ -46,7 +46,7 @@ impl RsaPrivateKeyDer {
     /// ```bash
     /// cat your-key.pem | base64 | tr -d '\n'
     /// ```
-    pub fn from_pem(pem_or_base64: &str) -> Result<Self> {
+    pub(crate) fn from_pem(pem_or_base64: &str) -> Result<Self> {
         let pem =
             crate::crypto::pem::decode_base64_pem(pem_or_base64).context("Invalid key format")?;
         Self::parse_pem(&pem)
@@ -68,7 +68,7 @@ impl RsaPrivateKeyDer {
 
     /// Get the PKCS#1 DER bytes.
     #[must_use]
-    pub fn as_bytes(&self) -> &[u8] {
+    pub(crate) fn as_bytes(&self) -> &[u8] {
         &self.0
     }
 
@@ -396,7 +396,7 @@ impl GitHubApp {
 
 /// Minimal permissions for Git operations.
 #[must_use]
-pub fn minimal_git_permissions() -> HashMap<String, String> {
+pub(crate) fn minimal_git_permissions() -> HashMap<String, String> {
     [("contents", "write"), ("metadata", "read")]
         .into_iter()
         .map(|(k, v)| (k.to_string(), v.to_string()))
@@ -409,8 +409,9 @@ pub fn minimal_git_permissions() -> HashMap<String, String> {
 
 /// Response from GET /user/installations (paginated).
 #[derive(Debug, Deserialize)]
-pub struct UserInstallationsResponse {
+pub(crate) struct UserInstallationsResponse {
     /// Total count of installations the user has access to.
+    #[allow(dead_code, reason = "GitHub API field; deserialized but not consumed")]
     pub total_count: u32,
     /// List of installations.
     pub installations: Vec<InstallationDetails>,
@@ -424,7 +425,7 @@ pub struct UserInstallationsResponse {
 /// # Arguments
 /// * `http_client` - HTTP client to use
 /// * `user_token` - GitHub user OAuth access token
-pub async fn list_user_accessible_installations(
+pub(crate) async fn list_user_accessible_installations(
     http_client: &reqwest::Client,
     user_token: &str,
 ) -> Result<Vec<InstallationDetails>> {
@@ -472,7 +473,8 @@ pub async fn list_user_accessible_installations(
 
 /// GitHub user info from /user endpoint.
 #[derive(Debug, Deserialize)]
-pub struct GitHubUser {
+#[allow(dead_code, reason = "GitHub API fields; deserialized for completeness")]
+pub(crate) struct GitHubUser {
     /// GitHub user ID.
     pub id: u64,
     /// GitHub username (login).
@@ -488,7 +490,7 @@ pub struct GitHubUser {
 /// # Arguments
 /// * `http_client` - HTTP client to use
 /// * `user_token` - GitHub user OAuth access token
-pub async fn get_github_user(
+pub(crate) async fn get_github_user(
     http_client: &reqwest::Client,
     user_token: &str,
 ) -> Result<GitHubUser> {
@@ -519,7 +521,7 @@ pub async fn get_github_user(
 
 /// Response from GitHub OAuth token endpoint.
 #[derive(Deserialize)]
-pub struct GitHubOAuthTokenResponse {
+pub(crate) struct GitHubOAuthTokenResponse {
     /// Access token for API calls.
     pub access_token: String,
     /// Token type (usually "bearer").
@@ -559,7 +561,7 @@ impl std::fmt::Debug for GitHubOAuthTokenResponse {
 /// * `client_secret` - GitHub App Client Secret
 /// * `code` - Authorization code from OAuth callback
 /// * `redirect_uri` - The same redirect URI used in the authorization request
-pub async fn exchange_oauth_code(
+pub(crate) async fn exchange_oauth_code(
     http_client: &reqwest::Client,
     client_id: &str,
     client_secret: &str,
@@ -613,7 +615,7 @@ pub async fn exchange_oauth_code(
 /// * `client_id` - GitHub App Client ID
 /// * `client_secret` - GitHub App Client Secret
 /// * `refresh_token` - Refresh token from previous OAuth flow
-pub async fn refresh_oauth_token(
+pub(crate) async fn refresh_oauth_token(
     http_client: &reqwest::Client,
     client_id: &str,
     client_secret: &str,

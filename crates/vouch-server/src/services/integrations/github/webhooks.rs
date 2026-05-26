@@ -20,7 +20,11 @@ use crate::db;
 /// Installation webhook events with typed actions.
 #[derive(Debug, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
-pub enum InstallationEvent {
+#[allow(
+    dead_code,
+    reason = "GitHub webhook payload fields deserialized for completeness"
+)]
+pub(crate) enum InstallationEvent {
     Created {
         installation: WebhookInstallation,
         #[serde(default)]
@@ -47,7 +51,7 @@ pub enum InstallationEvent {
 /// Note: Both arrays are always present in GitHub payloads (one may be empty).
 #[derive(Debug, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
-pub enum InstallationRepositoriesEvent {
+pub(crate) enum InstallationRepositoriesEvent {
     Added {
         installation: WebhookInstallation,
         #[serde(default)]
@@ -68,27 +72,39 @@ pub enum InstallationRepositoriesEvent {
 }
 
 #[derive(Debug, Deserialize)]
-pub struct WebhookInstallation {
+pub(crate) struct WebhookInstallation {
     pub id: u64,
     pub account: WebhookAccount,
 }
 
 #[derive(Debug, Deserialize)]
-pub struct WebhookAccount {
+#[allow(
+    dead_code,
+    reason = "GitHub webhook payload fields deserialized for completeness"
+)]
+pub(crate) struct WebhookAccount {
     pub login: String,
     #[serde(rename = "type")]
     pub account_type: String,
 }
 
 #[derive(Debug, Deserialize)]
-pub struct WebhookRepository {
+#[allow(
+    dead_code,
+    reason = "GitHub webhook payload fields deserialized for completeness"
+)]
+pub(crate) struct WebhookRepository {
     pub name: String,
     pub full_name: String,
     pub private: bool,
 }
 
 #[derive(Debug, Deserialize)]
-pub struct WebhookSender {
+#[allow(
+    dead_code,
+    reason = "GitHub webhook payload fields deserialized for completeness"
+)]
+pub(crate) struct WebhookSender {
     pub login: String,
 }
 
@@ -98,7 +114,7 @@ pub struct WebhookSender {
 
 /// Supported webhook event types.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WebhookEvent {
+pub(crate) enum WebhookEvent {
     Installation,
     InstallationRepositories,
     Unknown,
@@ -116,7 +132,7 @@ impl From<&str> for WebhookEvent {
 
 /// Result of processing a webhook.
 #[derive(Debug)]
-pub enum WebhookResult {
+pub(crate) enum WebhookResult {
     /// Event was processed successfully.
     Processed,
     /// Event type is not handled (ignored).
@@ -133,7 +149,11 @@ impl GitHubService<'_> {
     /// # Arguments
     /// * `signature` - The signature from X-Hub-Signature-256 header (without "sha256=" prefix)
     /// * `body` - The raw request body
-    pub fn verify_webhook_signature(&self, signature: &str, body: &[u8]) -> GitHubResult<()> {
+    pub(crate) fn verify_webhook_signature(
+        &self,
+        signature: &str,
+        body: &[u8],
+    ) -> GitHubResult<()> {
         let secret = self.webhook_secret()?;
 
         let key = hmac::Key::new(hmac::HMAC_SHA256, secret.as_bytes());
@@ -152,7 +172,7 @@ impl GitHubService<'_> {
     /// # Arguments
     /// * `event_type` - The event type from X-GitHub-Event header
     /// * `body` - The raw request body (already signature-verified)
-    pub async fn handle_webhook_event(
+    pub(crate) async fn handle_webhook_event(
         &self,
         event_type: WebhookEvent,
         body: &[u8],

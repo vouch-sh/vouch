@@ -143,7 +143,7 @@ impl std::fmt::Debug for TokenResponse {
 
 /// Token request for all grant types (RFC 6749 Section 4.1.3, RFC 8628 Section 3.4, RFC 8693 Section 2.1).
 #[derive(Deserialize)]
-pub struct TokenRequest {
+pub(crate) struct TokenRequest {
     /// RFC 6749 Section 4.1.3: The grant type.
     pub grant_type: String,
     /// RFC 6749 Section 4.1.3: The authorization code received from the authorization server.
@@ -293,7 +293,7 @@ const MAX_ASSERTION_LEN: usize = 8192;
 /// - `authorization_code` grant (RFC 6749 Section 4.1.3)
 /// - `urn:ietf:params:oauth:grant-type:device_code` grant (RFC 8628 Section 3.4)
 /// - `urn:ietf:params:oauth:grant-type:token-exchange` grant (RFC 8693 Section 2.1)
-pub async fn token(
+pub(crate) async fn token(
     State(state): State<Arc<AppState>>,
     client_info: crate::handlers::extractors::ClientInfo,
     client_cert: crate::handlers::extractors::OptionalClientCert,

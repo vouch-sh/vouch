@@ -22,7 +22,7 @@ use super::kms_signer::KmsSignerEd25519;
 /// Supports two modes:
 /// - `Local`: Uses a local Ed25519 private key (file or PEM content)
 /// - `Kms`: Uses an AWS KMS Ed25519 key via `kms:Sign`
-pub enum SshCa {
+pub(crate) enum SshCa {
     /// Local Ed25519 private key for signing certificates.
     Local {
         /// CA private key for signing certificates.
@@ -44,7 +44,7 @@ impl SshCa {
     ///
     /// This is used when the key content is provided via environment variable
     /// rather than a file path. Supports both raw PEM and base64-encoded PEM.
-    pub fn from_pem(pem_content: &str, rp_id: &str) -> Result<Self> {
+    pub(crate) fn from_pem(pem_content: &str, rp_id: &str) -> Result<Self> {
         let pem =
             super::pem::decode_base64_pem(pem_content).context("Failed to decode SSH CA key")?;
         let private_key = PrivateKey::from_openssh(pem.trim())
@@ -67,7 +67,7 @@ impl SshCa {
     /// Create a KMS-backed SSH CA.
     ///
     /// Calls `kms:GetPublicKey` to fetch and cache the Ed25519 public key.
-    pub async fn from_kms(
+    pub(crate) async fn from_kms(
         kms_client: aws_sdk_kms::Client,
         key_id: String,
         rp_id: &str,
@@ -83,7 +83,7 @@ impl SshCa {
     ///
     /// If the key file exists, it loads the private key.
     /// Otherwise, it generates a new Ed25519 keypair and saves it.
-    pub fn load_or_create(key_path: &Path, rp_id: &str) -> Result<Self> {
+    pub(crate) fn load_or_create(key_path: &Path, rp_id: &str) -> Result<Self> {
         let private_key = if key_path.exists() {
             Self::load_private_key(key_path)?
         } else {
@@ -99,7 +99,7 @@ impl SshCa {
     /// Load from PEM content if provided, otherwise load from file path.
     ///
     /// Priority: PEM content > file path > generate new key
-    pub fn load(
+    pub(crate) fn load(
         pem_content: Option<&str>,
         key_path: Option<&str>,
         rp_id: &str,
@@ -190,7 +190,7 @@ impl SshCa {
     }
 
     /// Get the CA public key in OpenSSH format.
-    pub fn public_key(&self) -> Result<String> {
+    pub(crate) fn public_key(&self) -> Result<String> {
         match self {
             Self::Local { private_key, .. } => private_key
                 .public_key()
@@ -205,7 +205,7 @@ impl SshCa {
 
     /// Get the CA public key comment.
     #[must_use]
-    pub fn public_key_comment(&self) -> String {
+    pub(crate) fn public_key_comment(&self) -> String {
         let rp_id = match self {
             Self::Local { rp_id, .. } | Self::Kms { rp_id, .. } => rp_id,
         };
@@ -221,7 +221,7 @@ impl SshCa {
     ///
     /// # Returns
     /// The signed SSH certificate in OpenSSH format
-    pub fn sign_certificate(
+    pub(crate) fn sign_certificate(
         &self,
         user_public_key: &str,
         user_email: &str,
@@ -347,7 +347,7 @@ impl SshCa {
 }
 
 /// A signed SSH certificate with metadata.
-pub struct SignedCertificate {
+pub(crate) struct SignedCertificate {
     /// The certificate in OpenSSH format.
     pub certificate: String,
     /// Certificate serial number.

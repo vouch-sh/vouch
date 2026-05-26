@@ -18,7 +18,7 @@ use crate::db;
 // ============================================================================
 
 /// Parameters for linking a GitHub account.
-pub struct LinkAccountParams<'a> {
+pub(crate) struct LinkAccountParams<'a> {
     /// The OAuth authorization code from GitHub.
     pub code: &'a str,
     /// The user ID to link the GitHub account to.
@@ -26,7 +26,11 @@ pub struct LinkAccountParams<'a> {
 }
 
 /// Result of successfully linking a GitHub account.
-pub struct LinkAccountResult {
+#[allow(
+    dead_code,
+    reason = "kept for diagnostics; payload not currently consumed"
+)]
+pub(crate) struct LinkAccountResult {
     /// The linked GitHub user info.
     pub github_user: GitHubUser,
 }
@@ -40,7 +44,7 @@ impl GitHubService<'_> {
     ///
     /// This exchanges the OAuth authorization code for tokens, fetches the
     /// GitHub user info, and stores the identity and refresh token.
-    pub async fn link_user_account(
+    pub(crate) async fn link_user_account(
         &self,
         params: LinkAccountParams<'_>,
     ) -> GitHubResult<LinkAccountResult> {
@@ -89,7 +93,10 @@ impl GitHubService<'_> {
     ///
     /// Returns `Ok(None)` if the user doesn't have a stored refresh token.
     /// Returns an error if the refresh fails.
-    pub async fn get_user_access_token(&self, user_id: &str) -> GitHubResult<Option<String>> {
+    pub(crate) async fn get_user_access_token(
+        &self,
+        user_id: &str,
+    ) -> GitHubResult<Option<String>> {
         // Get the user's refresh token
         let refresh_token = match db::get_user_github_refresh_token(self.store, user_id)
             .await
@@ -133,7 +140,7 @@ impl GitHubService<'_> {
     ///
     /// # Arguments
     /// * `state` - The encoded state token for CSRF protection
-    pub fn build_oauth_url(&self, state: &str) -> GitHubResult<String> {
+    pub(crate) fn build_oauth_url(&self, state: &str) -> GitHubResult<String> {
         let client_id = self.oauth_client_id()?;
         let redirect_uri = format!("{}/github/callback", self.config.base_url);
 

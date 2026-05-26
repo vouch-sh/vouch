@@ -22,9 +22,9 @@ use sqlx::PgPool;
 ///
 /// This approach works around DSQL's restriction on mixing DDL and DML.
 /// Result of running migrations: (newly_applied, total).
-pub type MigrationResult = (usize, usize);
+pub(crate) type MigrationResult = (usize, usize);
 
-pub async fn run_dsql_migrations(pool: &PgPool) -> Result<MigrationResult> {
+pub(crate) async fn run_dsql_migrations(pool: &PgPool) -> Result<MigrationResult> {
     // Get the embedded migrations
     let migrator = sqlx::migrate!("./migrations/postgres");
     let total = migrator.iter().count();

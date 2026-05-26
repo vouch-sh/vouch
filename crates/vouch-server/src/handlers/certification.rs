@@ -36,7 +36,7 @@ const CERT_USER_EMAIL: &str = "cert-test@vouch.sh";
 
 /// Query parameters for `GET /certification/complete-login`.
 #[derive(Debug, Deserialize)]
-pub struct CompleteLoginQuery {
+pub(crate) struct CompleteLoginQuery {
     /// Pending OAuth authorization ID (UUID).
     pub pending_auth: String,
     /// HMAC-SHA256 of `pending_auth`, base64url-encoded (no padding).
@@ -55,7 +55,7 @@ pub struct CompleteLoginQuery {
 /// - `403` — HMAC validation failed
 /// - `404` — no pending authorization found for the given ID
 /// - `500` — internal error
-pub async fn complete_login(
+pub(crate) async fn complete_login(
     State(state): State<Arc<AppState>>,
     Query(query): Query<CompleteLoginQuery>,
 ) -> Response {
@@ -198,7 +198,7 @@ pub async fn complete_login(
 /// Simulates user rejection for conformance testing. Consumes the pending
 /// authorization and redirects to the client's callback URI with
 /// `error=access_denied`.
-pub async fn deny_login(
+pub(crate) async fn deny_login(
     State(state): State<Arc<AppState>>,
     Query(query): Query<CompleteLoginQuery>,
 ) -> Response {

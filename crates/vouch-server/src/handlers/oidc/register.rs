@@ -34,7 +34,7 @@ use std::sync::Arc;
 /// registration), the client is created without user association.
 ///
 /// Returns 201 Created with the client information response.
-pub async fn register(
+pub(crate) async fn register(
     method: Method,
     uri: OriginalUri,
     State(state): State<Arc<AppState>>,
@@ -97,7 +97,7 @@ pub async fn register(
 /// Authenticates via Bearer token (the `registration_access_token` issued
 /// during dynamic registration). Returns 200 with current client metadata
 /// on success, 401 if the token is invalid, 404 if the client does not exist.
-pub async fn read_client(
+pub(crate) async fn read_client(
     State(state): State<Arc<AppState>>,
     Path(client_id): Path<String>,
     headers: HeaderMap,
@@ -138,7 +138,7 @@ pub async fn read_client(
 /// during dynamic registration or the previous PUT). Replaces the client's
 /// mutable registration metadata.  Returns 200 with updated metadata
 /// (including a new `registration_access_token`) on success.
-pub async fn update_client(
+pub(crate) async fn update_client(
     State(state): State<Arc<AppState>>,
     Path(client_id): Path<String>,
     headers: HeaderMap,
@@ -179,7 +179,7 @@ pub async fn update_client(
 /// Authenticates via Bearer token (the `registration_access_token` issued
 /// during dynamic registration). Returns 204 No Content on success,
 /// 401 if the token is invalid, 404 if the client does not exist.
-pub async fn delete_client(
+pub(crate) async fn delete_client(
     State(state): State<Arc<AppState>>,
     Path(client_id): Path<String>,
     headers: HeaderMap,

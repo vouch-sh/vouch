@@ -1637,7 +1637,7 @@ mod es256_flow {
     use base64::Engine;
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     use ciborium::Value;
-    use vouch_server::{CoseVerifier, RealCoseVerifier};
+    use vouch_server::crypto::webauthn_verify::{CoseVerifier, RealCoseVerifier};
 
     /// Build a COSE EC2 key for ES256 (P-256) in the format used by cose_key_to_cbor.
     fn build_cose_ec2_key(x: &[u8], y: &[u8]) -> Vec<u8> {

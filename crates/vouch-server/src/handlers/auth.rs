@@ -23,7 +23,7 @@ use super::{clear_session_cookie, hash_token};
 ///
 /// Accepts an OAuth access token (Bearer or DPoP scheme) and returns
 /// authenticated status, email, expiration, and device name.
-pub async fn status(
+pub(crate) async fn status(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> Result<Json<SessionStatus>, ServiceError> {
@@ -115,7 +115,7 @@ pub async fn status(
 
 /// Handle sign-out (clears session cookie).
 /// POST /logout
-pub async fn logout(
+pub(crate) async fn logout(
     State(state): State<Arc<AppState>>,
     client_info: ClientInfo,
     jar: CookieJar,

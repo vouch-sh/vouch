@@ -30,7 +30,7 @@ use super::client_auth::{ClientAuthFields, complete_client_auth, extract_client_
 /// Supports `client_secret_basic`, `client_secret_post`, and `private_key_jwt`
 /// (RFC 7523) client authentication methods.
 #[derive(Debug, Deserialize)]
-pub struct RevokeRequest {
+pub(crate) struct RevokeRequest {
     /// RFC 7009 Section 2.1: The token that the client wants to get revoked.
     token: String,
     /// RFC 7009 Section 2.1: A hint about the type of the token.
@@ -75,7 +75,7 @@ impl ClientAuthFields for RevokeRequest {
 /// Supports `client_secret_basic`, `client_secret_post`, and `private_key_jwt`
 /// (RFC 7523) client authentication methods.
 #[derive(Debug, Deserialize)]
-pub struct IntrospectRequest {
+pub(crate) struct IntrospectRequest {
     /// RFC 7662 Section 2.1: The string value of the token.
     token: String,
     /// RFC 7662 Section 2.1: A hint about the type of the token.
@@ -120,7 +120,7 @@ impl ClientAuthFields for IntrospectRequest {
 /// Revoke an access token (RFC 7009 Section 2.1).
 /// Returns 200 OK regardless of whether the token was valid (security best practice).
 /// Supports `client_secret_basic`, `client_secret_post`, and `private_key_jwt` auth.
-pub async fn revoke(
+pub(crate) async fn revoke(
     State(state): State<Arc<AppState>>,
     client_info: ClientInfo,
     headers: HeaderMap,
@@ -177,7 +177,7 @@ pub async fn revoke(
 /// Requires client authentication via `Authorization: Basic` header, body
 /// credentials, or `private_key_jwt` (RFC 7523).
 /// Returns token metadata if valid, or `{"active": false}` if invalid or auth fails.
-pub async fn introspect(
+pub(crate) async fn introspect(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     axum::Form(params): axum::Form<IntrospectRequest>,
