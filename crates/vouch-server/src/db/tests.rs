@@ -3693,3 +3693,92 @@ async fn test_record_recheck_result_concurrent() {
         "both record_recheck_result calls must succeed (CAS loser returns Ok(StillVerified))"
     );
 }
+
+// Regression for #389: two enrollments for the same domain must converge
+// on a single organization. Pre-fix, `enroll_user_with_org` used
+// `find_one(domain) + insert` with random UUIDs, so the second enrollee
+// either found the first's row (sequential) or — under contention —
+// both inserts succeeded with different IDs (the bug; the issue reports
+// 14/15 distinct orgs in a Postgres reproduction).
+//
+// The fix derives a deterministic org ID from the domain. This test
+// exercises the "second enrollee converges on first's org" property
+// sequentially because multi-step transactions on SQLite WAL deadlock
+// under real `tokio::join!` contention; the under-contention property
+// is guaranteed by `store.insert_with_id`'s atomic primary-key behavior
+// (covered by `test_dpop_jti_concurrent_insert_rejects_duplicates`)
+// combined with our deterministic ID.
+#[tokio::test]
+async fn test_enroll_user_with_org_same_domain_converges_on_one_org() {
+    use crate::db::documents::organization::OrganizationDoc;
+    use crate::db::enroll_user_with_org;
+
+    let (store, _audit) = test_db().await;
+    let domain = "shared-domain.example";
+
+    let alice = enroll_user_with_org(&store, "alice@shared-domain.example", None, Some(domain))
+        .await
+        .expect("alice enrollment");
+    let bob = enroll_user_with_org(&store, "bob@shared-domain.example", None, Some(domain))
+        .await
+        .expect("bob enrollment");
+
+    assert_eq!(
+        alice.org_id, bob.org_id,
+        "both enrollees must share the same org_id"
+    );
+    assert!(alice.org_id.is_some());
+
+    let org_count = store
+        .count::<OrganizationDoc>("domain", domain)
+        .await
+        .expect("count orgs by domain");
+    assert_eq!(
+        org_count, 1,
+        "exactly one organization must exist for the domain; got {org_count}"
+    );
+
+    assert!(alice.is_org_admin, "first enrollee should be admin");
+    assert!(!bob.is_org_admin, "second enrollee must not be admin");
+}
+
+// Verifies the second enrollee adopts an un-admined org and gets
+// promoted to admin. Pre-fix code with random UUIDs would skip the
+// org INSERT (because `find_one(domain)` finds the seeded row) but
+// fail to detect that a previously-orphaned org should adopt a new
+// admin — this exercises the Step 4 `compare_and_update` repair path.
+#[tokio::test]
+async fn test_enroll_promotes_admin_for_org_without_one() {
+    use crate::db::documents::organization::OrganizationDoc;
+    use crate::db::enroll_user_with_org;
+
+    let (store, _audit) = test_db().await;
+    let domain = "orphaned-org.example";
+
+    // Seed an org row with no admin (e.g. previous enrollee crashed
+    // mid-flow before Step 4 ran).
+    let seed_doc = OrganizationDoc {
+        domain: domain.to_string(),
+        name: None,
+        created_by_user_id: None,
+        additional_domains: Vec::new(),
+    };
+    store.insert(&seed_doc).await.expect("seed org row");
+
+    let user = enroll_user_with_org(&store, "rescuer@orphaned-org.example", None, Some(domain))
+        .await
+        .expect("enrollment");
+
+    assert!(
+        user.is_org_admin,
+        "an org with no admin must promote the next enrollee"
+    );
+    let org_count = store
+        .count::<OrganizationDoc>("domain", domain)
+        .await
+        .expect("count orgs by domain");
+    assert_eq!(
+        org_count, 1,
+        "no duplicate org may be created when one already exists"
+    );
+}
