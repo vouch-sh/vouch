@@ -252,15 +252,14 @@ async fn load_s3_config(
         config.s3_config_key
     );
 
-    let sdk_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
-        .region(
-            config
-                .s3_config_region
-                .as_ref()
-                .map(|r| aws_config::Region::new(r.clone())),
-        )
-        .load()
-        .await;
+    // Only override the region when VOUCH_S3_CONFIG_REGION is set; passing
+    // Option::<Region>::None to `.region(...)` disables the default region
+    // provider chain (env / shared config / IMDS) and breaks S3 requests.
+    let mut builder = aws_config::defaults(aws_config::BehaviorVersion::latest());
+    if let Some(region) = &config.s3_config_region {
+        builder = builder.region(aws_config::Region::new(region.clone()));
+    }
+    let sdk_config = builder.load().await;
 
     let s3_client = aws_sdk_s3::Client::new(&sdk_config);
 
