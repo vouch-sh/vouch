@@ -57,16 +57,35 @@ pub async fn run_dsql_migrations(pool: &PgPool) -> Result<MigrationResult> {
         let start = std::time::Instant::now();
 
         // Execute the migration SQL directly (no transaction wrapper)
-        // DSQL will auto-commit each statement
-        sqlx::raw_sql(&migration.sql)
-            .execute(pool)
-            .await
-            .with_context(|| {
-                format!(
+        // DSQL will auto-commit each statement.
+        //
+        // Crash recovery: if a previous attempt's DDL succeeded but the
+        // subsequent `record_migration` write was lost (server crashed,
+        // DSQL transient failure, …), the schema object already exists
+        // and a re-run would normally fail with "relation already
+        // exists" — leaving the server permanently unable to start.
+        //
+        // Treat a duplicate-object error here as evidence that the DDL
+        // landed on the prior attempt, then re-record the migration so
+        // future startups skip it cleanly. New deployments will hit the
+        // happy path; only recovery paths exercise this branch.
+        match sqlx::raw_sql(&migration.sql).execute(pool).await {
+            Ok(_) => {}
+            Err(e) if is_duplicate_object_error(&e) => {
+                tracing::warn!(
+                    version,
+                    description = %migration.description,
+                    "migration DDL already applied on a prior attempt — \
+                     recovering by recording completion now",
+                );
+            }
+            Err(e) => {
+                return Err(anyhow::Error::from(e).context(format!(
                     "failed to execute migration {}: {}",
                     version, migration.description
-                )
-            })?;
+                )));
+            }
+        }
 
         let elapsed = start.elapsed();
 
@@ -86,6 +105,28 @@ pub async fn run_dsql_migrations(pool: &PgPool) -> Result<MigrationResult> {
     }
 
     Ok((newly_applied, total))
+}
+
+/// Returns true if `err` is a PostgreSQL duplicate-object error.
+/// See [`is_duplicate_object_sqlstate`] for the matched codes.
+fn is_duplicate_object_error(err: &sqlx::Error) -> bool {
+    err.as_database_error()
+        .and_then(|e| e.code())
+        .is_some_and(|c| is_duplicate_object_sqlstate(c.as_ref()))
+}
+
+/// True if `code` is one of the PostgreSQL `SQLSTATE` values that
+/// indicate "this object already exists" — the family signalling a
+/// re-run of a DDL the database already executed.
+///
+/// - `42P07` — `duplicate_table`
+/// - `42710` — `duplicate_object` (catches indexes, triggers, …)
+/// - `42P06` — `duplicate_schema`
+/// - `42701` — `duplicate_column`
+/// - `42P16` — `invalid_table_definition` (raised by some PG flavours
+///   when re-adding an identical constraint)
+fn is_duplicate_object_sqlstate(code: &str) -> bool {
+    matches!(code, "42P07" | "42710" | "42P06" | "42701" | "42P16")
 }
 
 /// Create the _sqlx_migrations table if it doesn't exist.
@@ -138,4 +179,35 @@ async fn record_migration(
     .context("failed to insert migration record")?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_duplicate_object_sqlstate;
+
+    #[test]
+    fn classifies_duplicate_table() {
+        assert!(is_duplicate_object_sqlstate("42P07"));
+    }
+
+    #[test]
+    fn classifies_duplicate_object() {
+        // 42710 is raised for duplicate indexes (the case #397 cares
+        // about most: a partial-recovery re-run of CREATE INDEX ASYNC).
+        assert!(is_duplicate_object_sqlstate("42710"));
+    }
+
+    #[test]
+    fn does_not_classify_unrelated_errors() {
+        // 23505 = unique_violation (a DML conflict, not a DDL re-run)
+        assert!(!is_duplicate_object_sqlstate("23505"));
+        // 42703 = undefined_column — symptom of a wrong migration,
+        // must propagate as failure, not be silently swallowed.
+        assert!(!is_duplicate_object_sqlstate("42703"));
+        // Connection failures must propagate.
+        assert!(!is_duplicate_object_sqlstate("08006"));
+        // Empty / nonsense codes must not match.
+        assert!(!is_duplicate_object_sqlstate(""));
+        assert!(!is_duplicate_object_sqlstate("nope"));
+    }
 }
