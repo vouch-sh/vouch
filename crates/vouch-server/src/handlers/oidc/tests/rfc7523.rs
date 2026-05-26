@@ -1452,3 +1452,332 @@ async fn test_jwt_assertion_dpop_use_nonce_retry_succeeds() {
         second.body
     );
 }
+
+// ========================================================================
+// RFC 7523 — private_key_jwt + DPoP at the token endpoint
+//
+// Covers vouch-conformance TOKEN_TEST_HANDOFF.md scenarios 18–21, 23
+// (private_key_jwt + DPoP-bound code, FAPI 2.0 sender-constraint check).
+// ========================================================================
+
+/// Issue an authorization code with optional dpop_jkt binding.
+async fn pkjwt_issue_code(
+    state: &std::sync::Arc<crate::AppState>,
+    client_id: &str,
+    user: &crate::db::User,
+    auth_id: &str,
+    dpop_jkt: Option<&str>,
+) -> String {
+    let scope = ScopeSet::parse("openid email");
+    issue_authorization_code(
+        state,
+        AuthorizationCodeParams {
+            client_id,
+            redirect_uri: "https://example.com/callback",
+            user_id: &user.id,
+            email: &user.email,
+            authenticator_id: auth_id,
+            aaguid: None,
+            scope: &scope,
+            nonce: None,
+            code_challenge: None,
+            code_challenge_method: None,
+            resource: None,
+            acr_values: None,
+            dpop_jkt,
+            auth_code_lifetime_seconds:
+                crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
+            authorization_details: None,
+            auth_time: None,
+        },
+    )
+    .await
+    .expect("issue code")
+}
+
+/// Compute the RFC 7638 JWK thumbprint (jkt) for a DPoP JWK with EC P-256 members.
+fn pkjwt_dpop_jkt(jwk: &serde_json::Value) -> String {
+    let canonical = serde_json::json!({
+        "crv": jwk["crv"],
+        "kty": jwk["kty"],
+        "x": jwk["x"],
+        "y": jwk["y"]
+    });
+    let bytes = serde_json::to_vec(&canonical).expect("serialize JWK");
+    let digest = aws_lc_rs::digest::digest(&aws_lc_rs::digest::SHA256, &bytes);
+    URL_SAFE_NO_PAD.encode(digest.as_ref())
+}
+
+/// RFC 9449 §5 + RFC 7523 §3: `private_key_jwt`-authenticated client presents
+/// a DPoP proof at `/oauth/token` and exchanges a code that was bound to the
+/// same DPoP key. Result: DPoP-bound access token with `cnf.jkt`.
+#[tokio::test]
+async fn test_rfc7523_token_private_key_jwt_plus_dpop_succeeds() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "pkjwt-dpop-ok@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let (client, pkcs8_bytes) = create_test_jwt_client(&state.store, &user.id).await;
+
+    let (dpop_key, dpop_jwk) = generate_dpop_key_pair();
+    let jkt = pkjwt_dpop_jkt(&dpop_jwk);
+    let token_endpoint = format!("{}/oauth/token", state.config().base_url);
+
+    // Authorization code carries the dpop_jkt binding.
+    let code = pkjwt_issue_code(&state, &client.client_id, &user, &auth_id, Some(&jkt)).await;
+
+    // Acquire DPoP nonce via the throwaway proof.
+    let throwaway = create_dpop_proof(&dpop_key, &dpop_jwk, "POST", &token_endpoint, None);
+    let probe = http_post_form_full(
+        &app,
+        "/oauth/token",
+        "grant_type=authorization_code&code=dummy",
+        &[("DPoP", &throwaway)],
+    )
+    .await;
+    let nonce = probe
+        .headers
+        .get("DPoP-Nonce")
+        .expect("server must return DPoP-Nonce")
+        .to_str()
+        .expect("nonce UTF-8")
+        .to_string();
+
+    let proof = create_dpop_proof(&dpop_key, &dpop_jwk, "POST", &token_endpoint, Some(&nonce));
+    let assertion = build_client_assertion(&client.client_id, &token_endpoint, &pkcs8_bytes, None);
+
+    let body = format!(
+        "grant_type=authorization_code&code={code}&redirect_uri={}\
+         &client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer\
+         &client_assertion={assertion}",
+        urlencoding::encode("https://example.com/callback"),
+    );
+
+    let (status, response_body) =
+        http_post_form(&app, "/oauth/token", &body, &[("DPoP", &proof)]).await;
+
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "private_key_jwt + DPoP exchange must succeed: {response_body}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&response_body).expect("Valid JSON");
+    assert_eq!(json["token_type"].as_str(), Some("DPoP"));
+
+    let access_token = json["access_token"].as_str().expect("access_token");
+    let claims = decode_jwt_payload(access_token);
+    assert_eq!(
+        claims["cnf"]["jkt"].as_str(),
+        Some(jkt.as_str()),
+        "cnf.jkt must match DPoP proof key thumbprint"
+    );
+}
+
+/// RFC 9449 §10.1: When the authorization code carries a `dpop_jkt` and the
+/// token request presents a DPoP proof from a different key, the token
+/// endpoint must reject with `invalid_grant`. Verified for `private_key_jwt`.
+#[tokio::test]
+async fn test_rfc7523_token_private_key_jwt_plus_dpop_invalid_grant_jkt_mismatch() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "pkjwt-dpop-mismatch@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let (client, pkcs8_bytes) = create_test_jwt_client(&state.store, &user.id).await;
+
+    // Authorization is bound to key A's jkt.
+    let (_key_a, jwk_a) = generate_dpop_key_pair();
+    let jkt_a = pkjwt_dpop_jkt(&jwk_a);
+    let code = pkjwt_issue_code(&state, &client.client_id, &user, &auth_id, Some(&jkt_a)).await;
+
+    // Token request signs with key B.
+    let (key_b, jwk_b) = generate_dpop_key_pair();
+    let token_endpoint = format!("{}/oauth/token", state.config().base_url);
+
+    // Get a DPoP nonce using key B.
+    let probe_proof = create_dpop_proof(&key_b, &jwk_b, "POST", &token_endpoint, None);
+    let probe = http_post_form_full(
+        &app,
+        "/oauth/token",
+        "grant_type=authorization_code&code=dummy",
+        &[("DPoP", &probe_proof)],
+    )
+    .await;
+    let nonce = probe
+        .headers
+        .get("DPoP-Nonce")
+        .expect("nonce header")
+        .to_str()
+        .expect("utf8")
+        .to_string();
+
+    let proof_b = create_dpop_proof(&key_b, &jwk_b, "POST", &token_endpoint, Some(&nonce));
+    let assertion = build_client_assertion(&client.client_id, &token_endpoint, &pkcs8_bytes, None);
+
+    let body = format!(
+        "grant_type=authorization_code&code={code}&redirect_uri={}\
+         &client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer\
+         &client_assertion={assertion}",
+        urlencoding::encode("https://example.com/callback"),
+    );
+
+    let (status, response_body) =
+        http_post_form(&app, "/oauth/token", &body, &[("DPoP", &proof_b)]).await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "jkt mismatch must return 400: {response_body}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&response_body).expect("Valid JSON");
+    assert_eq!(json["error"], "invalid_grant");
+}
+
+/// RFC 9449 §4.3 / §8: A `private_key_jwt`-authenticated DPoP token request
+/// without a server-issued nonce must be rejected with `use_dpop_nonce`. The
+/// response carries the `DPoP-Nonce` header so the client can retry.
+#[tokio::test]
+async fn test_rfc7523_token_private_key_jwt_plus_dpop_use_dpop_nonce() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "pkjwt-dpop-nonce@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let (client, pkcs8_bytes) = create_test_jwt_client(&state.store, &user.id).await;
+
+    let (dpop_key, dpop_jwk) = generate_dpop_key_pair();
+    let jkt = pkjwt_dpop_jkt(&dpop_jwk);
+    let code = pkjwt_issue_code(&state, &client.client_id, &user, &auth_id, Some(&jkt)).await;
+
+    let token_endpoint = format!("{}/oauth/token", state.config().base_url);
+    // Proof carries no nonce — server must reject with use_dpop_nonce.
+    let proof = create_dpop_proof(&dpop_key, &dpop_jwk, "POST", &token_endpoint, None);
+    let assertion = build_client_assertion(&client.client_id, &token_endpoint, &pkcs8_bytes, None);
+
+    let body = format!(
+        "grant_type=authorization_code&code={code}&redirect_uri={}\
+         &client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer\
+         &client_assertion={assertion}",
+        urlencoding::encode("https://example.com/callback"),
+    );
+
+    let response = http_post_form_full(&app, "/oauth/token", &body, &[("DPoP", &proof)]).await;
+    assert_eq!(
+        response.status,
+        StatusCode::BAD_REQUEST,
+        "DPoP request without nonce must return 400: {}",
+        response.body
+    );
+    let json: serde_json::Value = serde_json::from_str(&response.body).expect("Valid JSON");
+    assert_eq!(json["error"], "use_dpop_nonce");
+    assert!(
+        response.headers.get("DPoP-Nonce").is_some(),
+        "Response must include DPoP-Nonce header so the client can retry"
+    );
+}
+
+/// RFC 7523 §3 + RFC 9449 §5: A bad `client_assertion` JWT must fail client
+/// authentication with `invalid_client` even when a valid DPoP proof is
+/// present.
+#[tokio::test]
+async fn test_rfc7523_token_private_key_jwt_plus_dpop_invalid_client_bad_jwt() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "pkjwt-dpop-badjwt@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let (client, _pkcs8_bytes) = create_test_jwt_client(&state.store, &user.id).await;
+
+    let (dpop_key, dpop_jwk) = generate_dpop_key_pair();
+    let jkt = pkjwt_dpop_jkt(&dpop_jwk);
+    let code = pkjwt_issue_code(&state, &client.client_id, &user, &auth_id, Some(&jkt)).await;
+
+    let token_endpoint = format!("{}/oauth/token", state.config().base_url);
+    let throwaway = create_dpop_proof(&dpop_key, &dpop_jwk, "POST", &token_endpoint, None);
+    let probe = http_post_form_full(
+        &app,
+        "/oauth/token",
+        "grant_type=authorization_code&code=dummy",
+        &[("DPoP", &throwaway)],
+    )
+    .await;
+    let nonce = probe
+        .headers
+        .get("DPoP-Nonce")
+        .expect("nonce")
+        .to_str()
+        .expect("utf8")
+        .to_string();
+    let proof = create_dpop_proof(&dpop_key, &dpop_jwk, "POST", &token_endpoint, Some(&nonce));
+
+    // Sign the assertion with a wrong key.
+    let (wrong_pkcs8, _wrong_jwk) = generate_es256_signing_key();
+    let bad_assertion =
+        build_client_assertion(&client.client_id, &token_endpoint, &wrong_pkcs8, None);
+
+    let body = format!(
+        "grant_type=authorization_code&code={code}&redirect_uri={}\
+         &client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer\
+         &client_assertion={bad_assertion}",
+        urlencoding::encode("https://example.com/callback"),
+    );
+
+    let (status, response_body) =
+        http_post_form(&app, "/oauth/token", &body, &[("DPoP", &proof)]).await;
+
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "Bad client_assertion must return 401: {response_body}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&response_body).expect("Valid JSON");
+    assert_eq!(json["error"], "invalid_client");
+}
+
+/// FAPI 2.0 §5.2.2: FAPI clients require sender-constrained access tokens.
+/// `private_key_jwt` alone is client authentication — not sender-constraint.
+/// Without DPoP and without mTLS, the token endpoint must reject with
+/// `invalid_request` "FAPI 2.0 requires sender-constrained access tokens
+/// (DPoP or mTLS required)".
+#[tokio::test]
+async fn test_rfc7523_token_fapi_client_invalid_request_no_dpop_or_mtls() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "fapi-pkjwt-nosc@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let (client, pkcs8_bytes) = create_test_jwt_client(&state.store, &user.id).await;
+    let oauth = db::get_oauth_client_by_client_id(&state.store, &client.client_id)
+        .await
+        .expect("DB error")
+        .expect("client");
+    // FAPI profile WITHOUT dpop_bound_access_tokens=true so the
+    // FAPI sender-constraint check fires (instead of the DPoP-required check).
+    db::update_oauth_client_fapi_settings(
+        &state.store,
+        &oauth.id,
+        db::FapiProfile::Fapi2Security,
+        false,
+    )
+    .await
+    .expect("set FAPI profile");
+
+    let code = pkjwt_issue_code(&state, &client.client_id, &user, &auth_id, None).await;
+    let issuer = &state.config().base_url;
+    let assertion = build_client_assertion(&client.client_id, issuer, &pkcs8_bytes, None);
+
+    let body = format!(
+        "grant_type=authorization_code&code={code}&redirect_uri={}\
+         &client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer\
+         &client_assertion={assertion}",
+        urlencoding::encode("https://example.com/callback"),
+    );
+
+    let (status, response_body) = http_post_form(&app, "/oauth/token", &body, &[]).await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "FAPI client without DPoP/mTLS must return 400: {response_body}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&response_body).expect("Valid JSON");
+    assert_eq!(json["error"], "invalid_request");
+    assert!(
+        json["error_description"]
+            .as_str()
+            .unwrap_or("")
+            .contains("sender-constrained"),
+        "error_description must mention sender-constrained: {response_body}"
+    );
+}

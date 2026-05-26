@@ -4,121 +4,6 @@
 use super::helpers::*;
 
 // ========================================================================
-// DPoP Helper Functions
-// ========================================================================
-
-/// Helper: Generate an EC P-256 key pair and return (signing_key, DPoP JWK header fields).
-fn generate_dpop_key_pair() -> (aws_lc_rs::signature::EcdsaKeyPair, serde_json::Value) {
-    use aws_lc_rs::signature::{ECDSA_P256_SHA256_FIXED_SIGNING, EcdsaKeyPair, KeyPair};
-
-    let rng = aws_lc_rs::rand::SystemRandom::new();
-    let pkcs8 = EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, &rng)
-        .expect("Failed to generate key");
-    let key_pair = EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, pkcs8.as_ref())
-        .expect("Failed to parse key");
-
-    // Extract x/y coordinates from uncompressed public key (65 bytes: 0x04 || x || y)
-    let pub_bytes = key_pair.public_key().as_ref();
-    let x = URL_SAFE_NO_PAD.encode(&pub_bytes[1..33]);
-    let y = URL_SAFE_NO_PAD.encode(&pub_bytes[33..65]);
-
-    let jwk = serde_json::json!({
-        "kty": "EC",
-        "crv": "P-256",
-        "x": x,
-        "y": y
-    });
-
-    (key_pair, jwk)
-}
-
-/// Helper: Create and sign a DPoP proof JWT for the given method and URI.
-fn create_dpop_proof(
-    key_pair: &aws_lc_rs::signature::EcdsaKeyPair,
-    jwk: &serde_json::Value,
-    method: &str,
-    uri: &str,
-    nonce: Option<&str>,
-    access_token: Option<&str>,
-) -> String {
-    use aws_lc_rs::digest;
-
-    // Build header
-    let header = serde_json::json!({
-        "typ": "dpop+jwt",
-        "alg": "ES256",
-        "jwk": jwk
-    });
-
-    let header_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&header).unwrap());
-
-    // Build claims
-    let jti = uuid::Uuid::now_v7().to_string();
-    let now = jiff::Timestamp::now().as_second();
-    let mut claims = serde_json::json!({
-        "jti": jti,
-        "htm": method,
-        "htu": uri,
-        "iat": now
-    });
-
-    if let Some(n) = nonce {
-        claims["nonce"] = serde_json::json!(n);
-    }
-
-    if let Some(token) = access_token {
-        // Compute ath (access token hash)
-        let hash = digest::digest(&digest::SHA256, token.as_bytes());
-        let ath = URL_SAFE_NO_PAD.encode(hash.as_ref());
-        claims["ath"] = serde_json::json!(ath);
-    }
-
-    let claims_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).unwrap());
-
-    // Sign with ES256
-    let signing_input = format!("{}.{}", header_b64, claims_b64);
-    let rng = aws_lc_rs::rand::SystemRandom::new();
-    let sig = key_pair
-        .sign(&rng, signing_input.as_bytes())
-        .expect("Failed to sign DPoP proof");
-    let sig_b64 = URL_SAFE_NO_PAD.encode(sig.as_ref());
-
-    format!("{}.{}.{}", header_b64, claims_b64, sig_b64)
-}
-
-/// Helper: Acquire a DPoP nonce by submitting a proof without one to the token endpoint.
-///
-/// Nonces are always required (RFC 9449 Section 8). This helper performs the
-/// `use_dpop_nonce` round-trip and returns the server-provided nonce.
-async fn acquire_dpop_nonce(
-    app: &axum::Router,
-    dpop_key: &aws_lc_rs::signature::EcdsaKeyPair,
-    dpop_jwk: &serde_json::Value,
-    method: &str,
-    uri: &str,
-) -> String {
-    let proof = create_dpop_proof(dpop_key, dpop_jwk, method, uri, None, None);
-
-    // Submit a token exchange request that will fail with use_dpop_nonce.
-    // The specific grant_type body doesn't matter — DPoP validation happens first.
-    let response = http_post_form_full(
-        app,
-        "/oauth/token",
-        "grant_type=authorization_code&code=dummy",
-        &[("DPoP", &proof)],
-    )
-    .await;
-
-    response
-        .headers
-        .get("DPoP-Nonce")
-        .expect("Server must return DPoP-Nonce header")
-        .to_str()
-        .expect("DPoP-Nonce must be valid UTF-8")
-        .to_string()
-}
-
-// ========================================================================
 // DPoP Integration Tests (RFC 9449)
 // ========================================================================
 
@@ -1355,5 +1240,397 @@ async fn test_dpop_resource_endpoint_post_json_without_nonce() {
         status,
         StatusCode::SERVICE_UNAVAILABLE,
         "Should fail with SSH CA not configured, not auth error: {body}"
+    );
+}
+
+// ========================================================================
+// RFC 9449 + RFC 6749 — public-client and confidential-client token requests
+// with DPoP. Covers conformance scenarios 3, 4, 5 (auth=client_id_only).
+// ========================================================================
+
+/// RFC 9449 §8 + RFC 7636: A public PKCE client that posts a DPoP proof
+/// without a server-issued nonce must be rejected with `use_dpop_nonce`.
+/// The response carries the `DPoP-Nonce` header so the client can retry.
+#[tokio::test]
+async fn test_rfc9449_token_public_client_dpop_use_dpop_nonce() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "public-dpop-nonce@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_public_oauth_client(&state.store, &user.id).await;
+
+    let (dpop_key, dpop_jwk) = generate_dpop_key_pair();
+    let jkt = dpop_jkt(&dpop_jwk);
+
+    // PKCE: S256 challenge / verifier.
+    let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+    let challenge = sha256_base64url(verifier);
+    let scope = ScopeSet::parse("openid");
+    let code = issue_authorization_code(
+        &state,
+        AuthorizationCodeParams {
+            client_id: &client.client_id,
+            redirect_uri: "https://example.com/callback",
+            user_id: &user.id,
+            email: &user.email,
+            authenticator_id: &auth_id,
+            aaguid: None,
+            scope: &scope,
+            nonce: None,
+            code_challenge: Some(&challenge),
+            code_challenge_method: Some(CodeChallengeMethod::S256),
+            resource: None,
+            acr_values: None,
+            dpop_jkt: Some(&jkt),
+            auth_code_lifetime_seconds:
+                crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
+            authorization_details: None,
+            auth_time: None,
+        },
+    )
+    .await
+    .expect("issue code");
+
+    let token_uri = format!("{}/oauth/token", state.config().base_url);
+    let proof_no_nonce = create_dpop_proof(&dpop_key, &dpop_jwk, "POST", &token_uri, None, None);
+
+    let body = format!(
+        "grant_type=authorization_code&code={code}\
+         &redirect_uri={}&client_id={}&code_verifier={verifier}",
+        urlencoding::encode("https://example.com/callback"),
+        client.client_id,
+    );
+
+    let response =
+        http_post_form_full(&app, "/oauth/token", &body, &[("DPoP", &proof_no_nonce)]).await;
+
+    assert_eq!(
+        response.status,
+        StatusCode::BAD_REQUEST,
+        "Public client + DPoP without nonce must return 400: {}",
+        response.body
+    );
+    let json: serde_json::Value = serde_json::from_str(&response.body).expect("Valid JSON");
+    assert_eq!(json["error"], "use_dpop_nonce");
+    assert!(
+        response.headers.get("DPoP-Nonce").is_some(),
+        "Response must include DPoP-Nonce header"
+    );
+}
+
+/// RFC 6749 §2.3: A confidential client cannot authenticate using
+/// `client_id` alone. When the client is registered as confidential
+/// (e.g., `private_key_jwt`) but the request omits client credentials
+/// — even with a DPoP proof present — the token endpoint must respond
+/// with `invalid_client` "client authentication required".
+#[tokio::test]
+async fn test_rfc9449_token_confidential_client_requires_client_auth_with_dpop() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "conf-dpop-noauth@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    // private_key_jwt = confidential, but we won't send the assertion.
+    let (client, _pkcs8_bytes) = create_test_jwt_client(&state.store, &user.id).await;
+
+    let (dpop_key, dpop_jwk) = generate_dpop_key_pair();
+    let token_uri = format!("{}/oauth/token", state.config().base_url);
+    let nonce = acquire_dpop_nonce(&app, &dpop_key, &dpop_jwk, "POST", &token_uri).await;
+    let proof = create_dpop_proof(&dpop_key, &dpop_jwk, "POST", &token_uri, Some(&nonce), None);
+
+    let scope = ScopeSet::parse("openid");
+    let code = issue_authorization_code(
+        &state,
+        AuthorizationCodeParams {
+            client_id: &client.client_id,
+            redirect_uri: "https://example.com/callback",
+            user_id: &user.id,
+            email: &user.email,
+            authenticator_id: &auth_id,
+            aaguid: None,
+            scope: &scope,
+            nonce: None,
+            code_challenge: None,
+            code_challenge_method: None,
+            resource: None,
+            acr_values: None,
+            dpop_jkt: None,
+            auth_code_lifetime_seconds:
+                crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
+            authorization_details: None,
+            auth_time: None,
+        },
+    )
+    .await
+    .expect("issue code");
+
+    // Body provides client_id but NO client_assertion and NO Basic header.
+    let body = format!(
+        "grant_type=authorization_code&code={code}&redirect_uri={}&client_id={}",
+        urlencoding::encode("https://example.com/callback"),
+        client.client_id,
+    );
+
+    let (status, response_body) =
+        http_post_form(&app, "/oauth/token", &body, &[("DPoP", &proof)]).await;
+
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "Confidential client missing client auth must return 401: {response_body}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&response_body).expect("Valid JSON");
+    assert_eq!(json["error"], "invalid_client");
+    assert!(
+        json["error_description"]
+            .as_str()
+            .unwrap_or("")
+            .contains("client authentication"),
+        "error_description must mention client authentication: {response_body}"
+    );
+}
+
+/// RFC 8705 §2.1: A client registered with `tls_client_auth` must present
+/// an mTLS client certificate at the token endpoint. Without a cert the
+/// server must respond with `invalid_client` "mTLS client certificate
+/// required" — even if a DPoP proof is also present.
+#[tokio::test]
+async fn test_rfc9449_token_mtls_registered_client_without_cert_rejected() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "mtls-noclientcert@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+
+    // Build any cert just to derive a subject DN to register against.
+    let registered_cert = make_test_cert_der("mtls-registered-client");
+    let parsed =
+        crate::services::oidc::mtls::parse_client_certificate(&registered_cert).expect("parse");
+    let subject_dn = parsed.subject_dn.expect("subject DN");
+
+    // Manually create an mtls-auth client (no cert-binding required).
+    let (_doc, client_id) = db::create_oauth_client(
+        &state.store,
+        &db::CreateOAuthClientParams {
+            user_id: Some(&user.id),
+            name: "Test mTLS Token Endpoint Client",
+            description: None,
+            application_type: db::OAuthClientType::Web,
+            redirect_uris: &["https://example.com/callback".to_string()],
+            access_scope: db::AccessScope::Public,
+            org_id: None,
+            resource_uris: &[],
+            token_endpoint_auth_method: Some(db::TokenEndpointAuthMethod::TlsClientAuth),
+            jwks: None,
+            jwks_uri: None,
+            fapi_profile: None,
+            dpop_bound_access_tokens: None,
+            grant_types: None,
+            response_types: None,
+            software_id: None,
+            software_version: None,
+            registration_source: db::RegistrationSource::Manual,
+            registration_access_token_hash: None,
+            registration_metadata: None,
+            id_token_signed_response_alg: db::JwsAlgorithm::Rs256,
+            tls_client_auth_subject_dn: Some(&subject_dn),
+            tls_client_auth_san_dns: None,
+            tls_client_auth_san_uri: None,
+            tls_client_auth_san_ip: None,
+            tls_client_auth_san_email: None,
+            tls_client_certificate_bound_access_tokens: None,
+            authorization_signed_response_alg: None,
+            introspection_signed_response_alg: None,
+            request_object_signing_alg: None,
+            require_signed_request_object: None,
+            userinfo_signed_response_alg: None,
+            request_uris: None,
+        },
+    )
+    .await
+    .expect("create mTLS-auth client");
+
+    let scope = ScopeSet::parse("openid");
+    let code = issue_authorization_code(
+        &state,
+        AuthorizationCodeParams {
+            client_id: &client_id,
+            redirect_uri: "https://example.com/callback",
+            user_id: &user.id,
+            email: &user.email,
+            authenticator_id: &auth_id,
+            aaguid: None,
+            scope: &scope,
+            nonce: None,
+            code_challenge: None,
+            code_challenge_method: None,
+            resource: None,
+            acr_values: None,
+            dpop_jkt: None,
+            auth_code_lifetime_seconds:
+                crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
+            authorization_details: None,
+            auth_time: None,
+        },
+    )
+    .await
+    .expect("issue code");
+
+    let body = format!(
+        "grant_type=authorization_code&code={code}&redirect_uri={}&client_id={client_id}",
+        urlencoding::encode("https://example.com/callback"),
+    );
+
+    // No mTLS cert presented.
+    let (status, response_body) =
+        http_post_form_with_cert(&app, "/oauth/token", &body, &[], None).await;
+
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "mTLS-registered client without cert must return 401: {response_body}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&response_body).expect("Valid JSON");
+    assert_eq!(json["error"], "invalid_client");
+    assert!(
+        json["error_description"]
+            .as_str()
+            .unwrap_or("")
+            .contains("mTLS client certificate required"),
+        "error_description must reference mTLS cert requirement: {response_body}"
+    );
+}
+
+// ========================================================================
+// RFC 9449 §7.1 — DPoP at the userinfo endpoint: edge cases.
+// Covers conformance scenarios for multiple DPoP headers, combined
+// mTLS + DPoP, and DPoP-bound token via wrong transport.
+// ========================================================================
+
+/// RFC 9449 §7.1: A request MUST NOT contain more than one DPoP header.
+/// When two values are supplied, the userinfo endpoint must reject with
+/// `400 invalid_dpop_proof` "Request must contain exactly one DPoP header".
+#[tokio::test]
+async fn test_rfc9449_userinfo_multiple_dpop_headers_rejected() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "userinfo-multi-dpop@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+
+    let (dpop_key, dpop_jwk) = generate_dpop_key_pair();
+    let jkt = dpop_jkt(&dpop_jwk);
+    let token = create_test_session_with_dpop(&state, &user.id, &user.email, &auth_id, &jkt).await;
+
+    let userinfo_uri = format!("{}/oauth/userinfo", state.config().base_url);
+    let proof_a = create_dpop_proof(
+        &dpop_key,
+        &dpop_jwk,
+        "GET",
+        &userinfo_uri,
+        None,
+        Some(&token),
+    );
+    let proof_b = create_dpop_proof(
+        &dpop_key,
+        &dpop_jwk,
+        "GET",
+        &userinfo_uri,
+        None,
+        Some(&token),
+    );
+
+    // Two DPoP header values.
+    let (status, body) = http_get(
+        &app,
+        "/oauth/userinfo",
+        &[
+            ("Authorization", &format!("DPoP {token}")),
+            ("DPoP", &proof_a),
+            ("DPoP", &proof_b),
+        ],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "Multiple DPoP headers must return 400: {body}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(json["error"], "invalid_dpop_proof");
+    assert!(
+        json["error_description"]
+            .as_str()
+            .unwrap_or("")
+            .contains("exactly one DPoP header"),
+        "error_description must mention exactly-one-DPoP: {body}"
+    );
+}
+
+/// RFC 9449 §7.1 + RFC 8705 §3: A DPoP-bound token must validate at the
+/// userinfo endpoint when accompanied by a matching DPoP proof, even if the
+/// caller also presents an mTLS client certificate. The certificate is
+/// irrelevant when `cnf.jkt` rather than `cnf.x5t#S256` is the binding.
+#[tokio::test]
+async fn test_rfc9449_userinfo_mtls_and_dpop_combined_succeeds() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "userinfo-mtls-dpop@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+
+    let (dpop_key, dpop_jwk) = generate_dpop_key_pair();
+    let jkt = dpop_jkt(&dpop_jwk);
+    let token = create_test_session_with_dpop(&state, &user.id, &user.email, &auth_id, &jkt).await;
+
+    // mTLS cert is presented but the token is DPoP-bound (no x5t#S256 in cnf).
+    let cert_der = make_test_cert_der("mtls-also-present");
+
+    let userinfo_uri = format!("{}/oauth/userinfo", state.config().base_url);
+    let proof = create_dpop_proof(
+        &dpop_key,
+        &dpop_jwk,
+        "GET",
+        &userinfo_uri,
+        None,
+        Some(&token),
+    );
+
+    let (status, body) = http_get_with_cert(
+        &app,
+        "/oauth/userinfo",
+        &[
+            ("Authorization", &format!("DPoP {token}")),
+            ("DPoP", &proof),
+        ],
+        Some(cert_der),
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "DPoP-bound token with valid proof + mTLS cert must succeed: {body}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(
+        json["email"].as_str(),
+        Some("userinfo-mtls-dpop@example.com")
+    );
+}
+
+/// RFC 6750 §2.2 + RFC 9449 §7.1: The POST body `access_token` parameter is a
+/// Bearer-only transport mechanism. A DPoP-bound token sent via the POST body
+/// must be rejected with 401 because the body transport implies the Bearer
+/// scheme but the token requires a DPoP proof.
+#[tokio::test]
+async fn test_rfc9449_userinfo_dpop_bound_token_in_post_body_rejected() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "userinfo-dpop-body@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+
+    let (_dpop_key, dpop_jwk) = generate_dpop_key_pair();
+    let jkt = dpop_jkt(&dpop_jwk);
+    let token = create_test_session_with_dpop(&state, &user.id, &user.email, &auth_id, &jkt).await;
+
+    let body_str = format!("access_token={}", urlencoding::encode(&token));
+    let (status, body) = http_post_form(&app, "/oauth/userinfo", &body_str, &[]).await;
+
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "DPoP-bound token via POST body must return 401: {body}"
     );
 }
