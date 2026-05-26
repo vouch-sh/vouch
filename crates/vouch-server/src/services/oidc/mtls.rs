@@ -19,7 +19,7 @@ const SAN_OID: ObjectIdentifier = ObjectIdentifier::new_unwrap("2.5.29.17");
 
 /// Parsed client certificate with extracted identity fields.
 #[derive(Debug, Clone)]
-pub struct ClientCertificate {
+pub(crate) struct ClientCertificate {
     /// `x5t#S256`: base64url-encoded SHA-256 of the DER certificate.
     /// RFC 8705 Section 3.1 / RFC 7515 Section 4.1.8.
     pub thumbprint: String,

@@ -29,7 +29,7 @@ static ASN_DB: LazyLock<Option<Reader<&'static [u8]>>> = LazyLock::new(|| {
 });
 
 /// Geolocation result for an IP address.
-pub struct GeoLocation {
+pub(crate) struct GeoLocation {
     pub country_code: String,
     pub asn: Option<u32>,
     pub org_name: Option<String>,
@@ -39,7 +39,7 @@ pub struct GeoLocation {
 ///
 /// Returns `None` for private, loopback, or unresolvable addresses,
 /// or if the GeoIP database failed to load.
-pub fn lookup(ip: IpAddr) -> Option<GeoLocation> {
+pub(crate) fn lookup(ip: IpAddr) -> Option<GeoLocation> {
     let ip = ip.to_canonical();
     if is_non_global(&ip) {
         return None;
@@ -104,7 +104,7 @@ fn is_non_global(ip: &IpAddr) -> bool {
 
 /// Force-initialize the GeoIP databases.
 /// Call during startup to avoid cold-start latency on first request.
-pub fn warmup() {
+pub(crate) fn warmup() {
     let _ = COUNTRY_DB.as_ref();
     let _ = ASN_DB.as_ref();
 }
@@ -112,7 +112,7 @@ pub fn warmup() {
 /// Convert a two-letter country code to a flag emoji.
 ///
 /// Uses Unicode Regional Indicator Symbols to form flag sequences.
-pub fn country_flag(code: &str) -> Option<String> {
+pub(crate) fn country_flag(code: &str) -> Option<String> {
     let bytes = code.as_bytes();
     if bytes.len() != 2 {
         return None;

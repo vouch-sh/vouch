@@ -12,11 +12,11 @@ mod members;
 mod policies;
 mod scim_tokens;
 
-pub use audit::*;
-pub use domains::*;
-pub use members::*;
-pub use policies::*;
-pub use scim_tokens::*;
+pub(crate) use audit::*;
+pub(crate) use domains::*;
+pub(crate) use members::*;
+pub(crate) use policies::*;
+pub(crate) use scim_tokens::*;
 
 use crate::AppState;
 use crate::db;
@@ -37,8 +37,8 @@ pub(crate) const MAX_SCIM_TOKENS: usize = 2;
 
 /// Query parameters for paginated pages.
 #[derive(Debug, Deserialize)]
-pub struct PaginationParams {
-    pub after: Option<String>,
+pub(crate) struct PaginationParams {
+    pub(crate) after: Option<String>,
 }
 
 /// Result of generating a SCIM token (plaintext + hash for storage).

@@ -21,7 +21,7 @@ use crate::db::{ScimFilterError, ScimScope};
 /// GET /scim/v2/Groups (RFC 7644 Section 3.4.2).
 ///
 /// Returns a paginated list of Group resources, with optional filtering.
-pub async fn list_groups(
+pub(crate) async fn list_groups(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Query(query): Query<ScimListQuery>,
@@ -120,7 +120,7 @@ pub async fn list_groups(
 ///
 /// Creates a new Group resource. Returns 201 Created on success,
 /// 409 Conflict if the group already exists.
-pub async fn create_group(
+pub(crate) async fn create_group(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Json(group): Json<ScimGroup>,
@@ -207,7 +207,7 @@ pub async fn create_group(
 /// GET /scim/v2/Groups/:id (RFC 7644 Section 3.4.1).
 ///
 /// Retrieves a single Group resource by ID, including its members.
-pub async fn get_group(
+pub(crate) async fn get_group(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Path(id): Path<String>,
@@ -258,7 +258,7 @@ pub async fn get_group(
     clippy::too_many_lines,
     reason = "SCIM PATCH operation handles add/remove/replace across all group fields"
 )]
-pub async fn patch_group(
+pub(crate) async fn patch_group(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Path(id): Path<String>,
@@ -459,7 +459,7 @@ pub async fn patch_group(
 ///
 /// Permanently deletes a Group resource. Returns 204 No Content on success.
 /// Group membership records are cascade-deleted.
-pub async fn delete_group(
+pub(crate) async fn delete_group(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Path(id): Path<String>,
@@ -528,7 +528,7 @@ pub async fn delete_group(
 /// Helper to get group members in SCIM format, scoped to the
 /// caller's org. Cross-org user_ids in the membership table are
 /// silently filtered out at read time by `db::get_scim_group_members`.
-pub async fn get_group_members_scim(
+pub(crate) async fn get_group_members_scim(
     db: &crate::db::store::DocumentStore,
     base_url: &str,
     group_id: &str,
@@ -548,7 +548,7 @@ pub async fn get_group_members_scim(
 }
 
 /// Convert database group to SCIM group.
-pub fn db_group_to_scim(
+pub(crate) fn db_group_to_scim(
     base_url: &str,
     group: db::ScimGroupRecord,
     members: Vec<ScimGroupMember>,

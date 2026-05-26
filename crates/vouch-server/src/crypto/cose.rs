@@ -8,7 +8,7 @@ use webauthn_rs::prelude::{COSEKey, COSEKeyType, ECDSACurve, EDDSACurve};
 
 /// Errors that can occur during COSE key serialization.
 #[derive(Debug, thiserror::Error)]
-pub enum CoseError {
+pub(crate) enum CoseError {
     /// CBOR serialization failed.
     #[error("CBOR serialization failed: {0}")]
     Cbor(String),
@@ -22,7 +22,7 @@ pub enum CoseError {
 /// # Errors
 ///
 /// Returns [`CoseError::Cbor`] if CBOR serialization fails.
-pub fn cose_key_to_cbor(key: &COSEKey) -> Result<Vec<u8>, CoseError> {
+pub(crate) fn cose_key_to_cbor(key: &COSEKey) -> Result<Vec<u8>, CoseError> {
     use ciborium::Value;
 
     let map: Vec<(Value, Value)> = match &key.key {

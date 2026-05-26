@@ -32,7 +32,7 @@ use crate::services::oidc::ResourceUri;
 
 /// List user's applications.
 /// GET /applications
-pub async fn list_applications_page(
+pub(crate) async fn list_applications_page(
     State(state): State<Arc<AppState>>,
     jar: CookieJar,
 ) -> Response {
@@ -59,7 +59,7 @@ pub async fn list_applications_page(
 
 /// Show create application form.
 /// GET /applications/new
-pub async fn create_application_page(
+pub(crate) async fn create_application_page(
     State(state): State<Arc<AppState>>,
     jar: CookieJar,
 ) -> Response {
@@ -73,7 +73,7 @@ pub async fn create_application_page(
 
 /// Create a new application.
 /// POST /applications/new
-pub async fn create_application_form(
+pub(crate) async fn create_application_form(
     State(state): State<Arc<AppState>>,
     jar: CookieJar,
     Form(form): Form<CreateApplicationForm>,
@@ -372,7 +372,7 @@ pub async fn create_application_form(
 
 /// Show application details.
 /// GET /applications/:id
-pub async fn detail_application_page(
+pub(crate) async fn detail_application_page(
     State(state): State<Arc<AppState>>,
     jar: CookieJar,
     Path(app_id): Path<String>,
@@ -454,7 +454,7 @@ pub async fn detail_application_page(
 
 /// Update an application.
 /// POST /applications/:id
-pub async fn update_application_form(
+pub(crate) async fn update_application_form(
     State(state): State<Arc<AppState>>,
     jar: CookieJar,
     Path(app_id): Path<String>,
@@ -725,7 +725,7 @@ pub async fn update_application_form(
 
 /// Delete an application.
 /// POST /applications/:id/delete
-pub async fn delete_application_form(
+pub(crate) async fn delete_application_form(
     State(state): State<Arc<AppState>>,
     jar: CookieJar,
     Path(app_id): Path<String>,
@@ -767,7 +767,7 @@ pub async fn delete_application_form(
 
 /// Add a new client secret.
 /// POST /applications/:id/secrets
-pub async fn add_secret_form(
+pub(crate) async fn add_secret_form(
     State(state): State<Arc<AppState>>,
     jar: CookieJar,
     Path(app_id): Path<String>,
@@ -867,7 +867,7 @@ pub async fn add_secret_form(
 
 /// Delete (revoke) a secret.
 /// POST /applications/:id/secrets/:secret_id/delete
-pub async fn delete_secret_form(
+pub(crate) async fn delete_secret_form(
     State(state): State<Arc<AppState>>,
     jar: CookieJar,
     Path((app_id, secret_id)): Path<(String, String)>,

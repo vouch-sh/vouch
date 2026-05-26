@@ -70,7 +70,8 @@ pub(crate) fn hmac_sha256_base64url(secret: &str, message: &str) -> String {
 /// Login page template.
 #[derive(Template)]
 #[template(path = "login.html")]
-pub struct LoginTemplate {
+#[allow(dead_code, reason = "fields rendered via Askama template macros")]
+pub(crate) struct LoginTemplate {
     /// Pending OAuth authorization ID (if coming from /oauth/authorize).
     pub pending_auth: Option<String>,
     /// OAuth client name (for display).
@@ -181,12 +182,12 @@ impl BrowserAuthenticationState {
 /// Login page for browser-based WebAuthn authentication.
 /// Accepts optional `pending_auth` query parameter to resume OAuth flow after login.
 #[derive(Debug, Deserialize)]
-pub struct LoginQuery {
+pub(crate) struct LoginQuery {
     /// Pending OAuth authorization ID.
     pending_auth: Option<String>,
 }
 
-pub async fn login_page(
+pub(crate) async fn login_page(
     State(state): State<Arc<AppState>>,
     axum::extract::Query(query): axum::extract::Query<LoginQuery>,
     jar: CookieJar,
@@ -304,7 +305,7 @@ pub async fn login_page(
 ///
 /// Generate a WebAuthn authentication challenge.
 /// Uses discoverable credentials (passkeys) so the authenticator identifies the user.
-pub async fn browser_login_start(
+pub(crate) async fn browser_login_start(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Json(req): Json<BrowserLoginStartRequest>,
@@ -376,7 +377,7 @@ pub async fn browser_login_start(
     clippy::too_many_lines,
     reason = "FAPI 2.0 browser login orchestrates assertion verification and session issuance"
 )]
-pub async fn browser_login_complete(
+pub(crate) async fn browser_login_complete(
     State(state): State<Arc<AppState>>,
     client_info: ClientInfo,
     headers: HeaderMap,

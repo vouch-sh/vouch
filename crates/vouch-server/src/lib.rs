@@ -13,28 +13,18 @@
 #[cfg(all(feature = "test-utils", not(debug_assertions)))]
 compile_error!("test-utils feature must not be enabled in release builds");
 
-pub mod attestation;
+pub(crate) mod attestation;
 pub mod config;
 pub mod crypto;
 pub mod db;
 pub mod filters;
-pub mod geo;
-pub mod handlers;
+pub(crate) mod geo;
+pub(crate) mod handlers;
 pub mod infra;
 pub mod services;
 
 #[cfg(any(test, feature = "test-utils"))]
 pub mod test_utils;
-
-// Re-export main types
-pub use config::ServerConfig;
-pub use crypto::webauthn_verify::{
-    CoseVerifier, RealCoseVerifier, VerificationResult, VerifyError,
-};
-pub use db::User;
-
-#[cfg(any(test, feature = "test-utils"))]
-pub use crypto::webauthn_verify::TestCoseVerifier;
 
 use arc_swap::ArcSwap;
 use axum::{
@@ -80,17 +70,17 @@ pub struct AppState {
     /// Audit event store.
     pub audit: db::audit::AuditStore,
     /// Server configuration (wrapped in ArcSwap for lock-free dynamic updates).
-    pub config: Arc<ArcSwap<ServerConfig>>,
+    pub config: Arc<ArcSwap<config::ServerConfig>>,
     /// WebAuthn instance.
     pub webauthn: webauthn_rs::Webauthn,
     /// SSH Certificate Authority (optional, None if disabled).
-    pub ssh_ca: Option<crypto::ssh_ca::SshCa>,
+    pub(crate) ssh_ca: Option<crypto::ssh_ca::SshCa>,
     /// ES256 OIDC signing key (always present, used for access tokens).
-    pub oidc_key: services::oidc::OidcSigningKey,
+    pub(crate) oidc_key: services::oidc::OidcSigningKey,
     /// OIDC RSA signing key for RS256 ID token signing (optional).
-    pub oidc_rsa_key: Option<services::oidc::OidcRsaSigningKey>,
+    pub(crate) oidc_rsa_key: Option<services::oidc::OidcRsaSigningKey>,
     /// State token signer (Local HS256 or KMS HMAC-SHA256).
-    pub state_signer: crypto::jwt::StateTokenSigner,
+    pub(crate) state_signer: crypto::jwt::StateTokenSigner,
     /// GitHub App for credential issuance (optional, None if not configured).
     pub github_app: Option<std::sync::Arc<services::integrations::github::GitHubApp>>,
     /// Shared HTTP client for outbound server-side API calls (no redirects).
@@ -110,7 +100,7 @@ impl AppState {
     /// the configuration at the time of the call. The returned config
     /// remains valid even if the underlying config is updated.
     #[must_use]
-    pub fn config(&self) -> arc_swap::Guard<Arc<ServerConfig>> {
+    pub fn config(&self) -> arc_swap::Guard<Arc<config::ServerConfig>> {
         self.config.load()
     }
 
@@ -198,7 +188,7 @@ mod redirect_tests {
     use tower::ServiceExt;
 
     fn test_app_state_with_rp_id(rp_id: &str) -> AppState {
-        let config = ServerConfig {
+        let config = config::ServerConfig {
             listen_addr: "127.0.0.1:0".to_string(),
             database_url: "sqlite::memory:".to_string(),
             rp_id: rp_id.to_string(),

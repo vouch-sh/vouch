@@ -32,10 +32,10 @@
 //!     └─► db::users (user updates)
 //! ```
 
-pub mod app;
-pub mod installations;
-pub mod oauth;
-pub mod webhooks;
+pub(crate) mod app;
+pub(crate) mod installations;
+pub(crate) mod oauth;
+pub(crate) mod webhooks;
 
 use std::sync::Arc;
 
@@ -44,19 +44,16 @@ use crate::db::audit::AuditStore;
 use crate::db::store::DocumentStore;
 
 // Re-export commonly used types
-pub use app::{
-    GitHubApp, GitHubAppId, GitHubInstallationId, GitHubInstallationToken,
-    GitHubOAuthTokenResponse, GitHubRepository, GitHubUser, InstallationAccount,
-    InstallationDetails, RsaPrivateKeyDer, exchange_oauth_code, get_github_user,
+pub(crate) use app::{
+    GitHubApp, GitHubInstallationId, GitHubUser, exchange_oauth_code, get_github_user,
     list_user_accessible_installations, minimal_git_permissions, refresh_oauth_token,
 };
-pub use installations::{ConnectInstallationParams, ReconnectInstallationParams};
-pub use oauth::{LinkAccountParams, LinkAccountResult};
-pub use webhooks::{WebhookEvent, WebhookResult};
+pub(crate) use installations::{ConnectInstallationParams, ReconnectInstallationParams};
+pub(crate) use oauth::LinkAccountParams;
 
 /// Error types for GitHub service operations.
 #[derive(Debug, thiserror::Error)]
-pub enum GitHubError {
+pub(crate) enum GitHubError {
     /// GitHub App not configured on this server.
     #[error("GitHub integration is not configured on this server")]
     NotConfigured,
@@ -129,7 +126,7 @@ pub enum GitHubError {
 impl GitHubError {
     /// Get a user-friendly error title for display.
     #[must_use]
-    pub fn title(&self) -> &'static str {
+    pub(crate) fn title(&self) -> &'static str {
         match self {
             Self::NotConfigured => "Not Available",
             Self::OAuthNotConfigured => "Not Available",
@@ -153,13 +150,13 @@ impl GitHubError {
 }
 
 /// Result type for GitHub service operations.
-pub type GitHubResult<T> = Result<T, GitHubError>;
+pub(crate) type GitHubResult<T> = Result<T, GitHubError>;
 
 /// GitHub integration service.
 ///
 /// Provides business logic for all GitHub operations. This is the main entry
 /// point for handlers to interact with GitHub functionality.
-pub struct GitHubService<'a> {
+pub(crate) struct GitHubService<'a> {
     /// Document store for CRUD operations.
     pub store: &'a DocumentStore,
     /// Audit store for audit event operations.
@@ -173,7 +170,7 @@ pub struct GitHubService<'a> {
 impl<'a> GitHubService<'a> {
     /// Create a new GitHub service instance.
     #[must_use]
-    pub fn new(
+    pub(crate) fn new(
         store: &'a DocumentStore,
         audit: &'a AuditStore,
         config: &'a ServerConfig,
@@ -189,23 +186,23 @@ impl<'a> GitHubService<'a> {
 
     /// Check if GitHub App is configured.
     #[must_use]
-    pub fn is_configured(&self) -> bool {
+    pub(crate) fn is_configured(&self) -> bool {
         self.github_app.is_some()
     }
 
     /// Check if GitHub OAuth is configured.
     #[must_use]
-    pub fn is_oauth_configured(&self) -> bool {
+    pub(crate) fn is_oauth_configured(&self) -> bool {
         self.config.github_oauth_configured()
     }
 
     /// Get the GitHub App, returning an error if not configured.
-    pub fn require_app(&self) -> GitHubResult<&Arc<GitHubApp>> {
+    pub(crate) fn require_app(&self) -> GitHubResult<&Arc<GitHubApp>> {
         self.github_app.ok_or(GitHubError::NotConfigured)
     }
 
     /// Get the GitHub App name for building installation URLs.
-    pub fn app_name(&self) -> GitHubResult<&str> {
+    pub(crate) fn app_name(&self) -> GitHubResult<&str> {
         self.config
             .github_app_name
             .as_deref()
@@ -213,7 +210,7 @@ impl<'a> GitHubService<'a> {
     }
 
     /// Get OAuth client ID.
-    pub fn oauth_client_id(&self) -> GitHubResult<&str> {
+    pub(crate) fn oauth_client_id(&self) -> GitHubResult<&str> {
         self.config
             .github_app_client_id
             .as_deref()
@@ -221,14 +218,14 @@ impl<'a> GitHubService<'a> {
     }
 
     /// Get OAuth client secret.
-    pub fn oauth_client_secret(&self) -> GitHubResult<&str> {
+    pub(crate) fn oauth_client_secret(&self) -> GitHubResult<&str> {
         self.config
             .github_app_client_secret_exposed()
             .ok_or(GitHubError::OAuthNotConfigured)
     }
 
     /// Get webhook secret.
-    pub fn webhook_secret(&self) -> GitHubResult<&str> {
+    pub(crate) fn webhook_secret(&self) -> GitHubResult<&str> {
         self.config
             .github_webhook_secret_exposed()
             .ok_or(GitHubError::WebhookSecretNotConfigured)

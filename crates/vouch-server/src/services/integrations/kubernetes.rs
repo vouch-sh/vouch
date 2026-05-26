@@ -26,14 +26,14 @@ use crate::services::oidc::OidcIdTokenClaimsBuilder;
 use crate::services::oidc::OidcSigningKey;
 
 /// Default audience for Kubernetes tokens.
-pub const DEFAULT_K8S_AUDIENCE: &str = "kubernetes";
+pub(crate) const DEFAULT_K8S_AUDIENCE: &str = "kubernetes";
 
 /// Token validity for Kubernetes tokens (1 hour).
 const K8S_TOKEN_EXPIRES_SECONDS: u64 = 3600;
 
 /// Error types for Kubernetes integration operations.
 #[derive(Debug, thiserror::Error)]
-pub enum K8sError {
+pub(crate) enum K8sError {
     /// Failed to build OIDC claims.
     #[error("Failed to build claims: {0}")]
     ClaimsBuild(String),
@@ -44,11 +44,11 @@ pub enum K8sError {
 }
 
 /// Result type for Kubernetes integration operations.
-pub type K8sResult<T> = Result<T, K8sError>;
+pub(crate) type K8sResult<T> = Result<T, K8sError>;
 
 /// Result of issuing a Kubernetes OIDC token.
 #[derive(Debug)]
-pub struct K8sTokenResult {
+pub(crate) struct K8sTokenResult {
     /// The signed OIDC ID token.
     pub id_token: String,
     /// Token validity in seconds.
@@ -73,7 +73,7 @@ pub struct K8sTokenResult {
 /// * `audience` - Token audience (matches `--oidc-client-id` on the API server)
 /// * `hardware_aaguid` - AAGUID of the authenticator used
 /// * `hd` - User's organization domain
-pub async fn issue_kubernetes_token(
+pub(crate) async fn issue_kubernetes_token(
     base_url: &str,
     oidc_key: &OidcSigningKey,
     user_email: &str,

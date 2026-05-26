@@ -16,7 +16,7 @@ use ciborium::Value;
 /// - Software/synced passkeys (1Password, browser sync) use `none`
 /// - Platform authenticators (Touch ID, Windows Hello) use their respective formats
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum AttestationFormat {
+pub(crate) enum AttestationFormat {
     /// Packed attestation - used by most hardware security keys (YubiKey, Titan, etc.)
     Packed,
     /// TPM attestation - used by Windows Hello and TPM-based authenticators
@@ -38,7 +38,7 @@ pub enum AttestationFormat {
 impl AttestationFormat {
     /// Parse attestation format from string.
     #[must_use]
-    pub fn parse(s: &str) -> Self {
+    pub(crate) fn parse(s: &str) -> Self {
         match s {
             "packed" => Self::Packed,
             "tpm" => Self::Tpm,
@@ -53,7 +53,7 @@ impl AttestationFormat {
 
     /// Returns the format string as it appears in the attestation object.
     #[must_use]
-    pub fn as_str(&self) -> &str {
+    pub(crate) fn as_str(&self) -> &str {
         match self {
             Self::Packed => "packed",
             Self::Tpm => "tpm",
@@ -71,7 +71,7 @@ impl AttestationFormat {
     /// Hardware authenticators use `packed` or `fido-u2f` formats and provide
     /// strong security guarantees because the private key is bound to the device.
     #[must_use]
-    pub fn is_hardware(&self) -> bool {
+    pub(crate) fn is_hardware(&self) -> bool {
         matches!(self, Self::Packed | Self::FidoU2f)
     }
 
@@ -80,7 +80,7 @@ impl AttestationFormat {
     /// Software passkeys use `none` attestation because synced credentials
     /// cannot provide attestation (they're extractable by design).
     #[must_use]
-    pub fn is_software(&self) -> bool {
+    pub(crate) fn is_software(&self) -> bool {
         matches!(self, Self::None)
     }
 
@@ -89,7 +89,7 @@ impl AttestationFormat {
     /// Platform authenticators (Touch ID, Windows Hello, Android) use their
     /// respective attestation formats but are not hardware security keys.
     #[must_use]
-    pub fn is_platform(&self) -> bool {
+    pub(crate) fn is_platform(&self) -> bool {
         matches!(
             self,
             Self::Tpm | Self::AndroidKey | Self::AndroidSafetynet | Self::Apple
@@ -113,7 +113,7 @@ impl std::fmt::Display for AttestationFormat {
 /// Returns the attestation format if successfully parsed, or `None` if the
 /// attestation object is malformed.
 #[must_use]
-pub fn extract_attestation_format(attestation: &[u8]) -> Option<AttestationFormat> {
+pub(crate) fn extract_attestation_format(attestation: &[u8]) -> Option<AttestationFormat> {
     let value: Value = ciborium::from_reader(attestation).ok()?;
 
     let fmt_str = value
@@ -144,7 +144,7 @@ pub fn extract_attestation_format(attestation: &[u8]) -> Option<AttestationForma
 ///
 /// Returns the AAGUID as a UUID string if present and valid.
 #[must_use]
-pub fn extract_aaguid_from_attestation(attestation: &[u8]) -> Option<String> {
+pub(crate) fn extract_aaguid_from_attestation(attestation: &[u8]) -> Option<String> {
     if attestation.len() < 37 {
         return None;
     }
@@ -165,7 +165,11 @@ pub fn extract_aaguid_from_attestation(attestation: &[u8]) -> Option<String> {
 
 /// Result of validating an attestation format for hardware-only authentication.
 #[derive(Debug, Clone)]
-pub enum AttestationValidation {
+#[allow(
+    dead_code,
+    reason = "payloads kept for diagnostics; matched but not read"
+)]
+pub(crate) enum AttestationValidation {
     /// The attestation format indicates a hardware security key.
     Valid(AttestationFormat),
     /// Software passkey (1Password, browser sync) - not allowed.
@@ -179,7 +183,7 @@ pub enum AttestationValidation {
 impl AttestationValidation {
     /// Returns the error code for rejected attestation formats.
     #[must_use]
-    pub fn error_code(&self) -> Option<&'static str> {
+    pub(crate) fn error_code(&self) -> Option<&'static str> {
         match self {
             Self::Valid(_) => None,
             Self::SoftwarePasskey => Some("software_passkey_not_allowed"),
@@ -190,7 +194,7 @@ impl AttestationValidation {
 
     /// Returns the user-facing error message for rejected attestation formats.
     #[must_use]
-    pub fn error_message(&self) -> Option<String> {
+    pub(crate) fn error_message(&self) -> Option<String> {
         match self {
             Self::Valid(_) => None,
             Self::SoftwarePasskey => Some(
@@ -209,12 +213,6 @@ impl AttestationValidation {
             ),
         }
     }
-
-    /// Returns true if the attestation is valid (hardware security key).
-    #[must_use]
-    pub fn is_valid(&self) -> bool {
-        matches!(self, Self::Valid(_))
-    }
 }
 
 /// Validate that an attestation object indicates a hardware security key.
@@ -226,7 +224,7 @@ impl AttestationValidation {
 ///
 /// Only hardware security keys using `packed` or `fido-u2f` attestation are allowed.
 #[must_use]
-pub fn validate_hardware_attestation(attestation: &[u8]) -> AttestationValidation {
+pub(crate) fn validate_hardware_attestation(attestation: &[u8]) -> AttestationValidation {
     let fmt = extract_attestation_format(attestation)
         .unwrap_or_else(|| AttestationFormat::Unknown("missing".to_string()));
 
@@ -246,7 +244,7 @@ pub fn validate_hardware_attestation(attestation: &[u8]) -> AttestationValidatio
 /// Parses the attestation object to find `attStmt.x5c` and returns the
 /// DER-encoded certificates as byte vectors.
 #[must_use]
-pub fn extract_x5c_from_attestation(attestation: &[u8]) -> Option<Vec<Vec<u8>>> {
+pub(crate) fn extract_x5c_from_attestation(attestation: &[u8]) -> Option<Vec<Vec<u8>>> {
     let value: Value = ciborium::from_reader(attestation).ok()?;
     let map = value.as_map()?;
 

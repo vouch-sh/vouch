@@ -27,7 +27,7 @@ use crate::services::idp::IdentityResult;
 
 /// Form parameters posted by the IdP to the Assertion Consumer Service.
 #[derive(Deserialize)]
-pub struct SamlAcsForm {
+pub(crate) struct SamlAcsForm {
     /// Base64-encoded SAML Response XML.
     #[serde(rename = "SAMLResponse")]
     pub saml_response: String,
@@ -47,7 +47,7 @@ pub struct SamlAcsForm {
 /// SAML IdPs are configured with different SP entity IDs, this returns the
 /// first one's; operators can fetch per-IdP metadata via `?idp=<slug>` if
 /// that becomes a real need.
-pub async fn metadata(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub(crate) async fn metadata(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let config = state.config();
     let sp_entity_id = state
         .idps
@@ -70,7 +70,10 @@ pub async fn metadata(State(state): State<Arc<AppState>>) -> impl IntoResponse {
 ///
 /// Receives the IdP's SAML Response, validates it, and completes the
 /// enrollment flow identically to `oidc_callback()`.
-pub async fn acs(State(state): State<Arc<AppState>>, Form(form): Form<SamlAcsForm>) -> Response {
+pub(crate) async fn acs(
+    State(state): State<Arc<AppState>>,
+    Form(form): Form<SamlAcsForm>,
+) -> Response {
     // Step 1: RelayState is required — it's our CSRF/state token.
     let relay_state = match form.relay_state {
         Some(rs) if !rs.is_empty() => rs,

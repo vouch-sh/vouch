@@ -38,7 +38,7 @@ const RFC9728_CACHE_CONTROL: (axum::http::header::HeaderName, &str) =
 /// Returns the top-level Protected Resource Metadata document
 /// (RFC 9728 §§2, 3.1). The `resource` field is the server's
 /// `base_url`.
-pub async fn protected_resource_metadata_root(
+pub(crate) async fn protected_resource_metadata_root(
     State(state): State<Arc<AppState>>,
 ) -> Result<impl IntoResponse, StatusCode> {
     build_response(&state, None).await
@@ -53,7 +53,7 @@ pub async fn protected_resource_metadata_root(
 /// [`svc::PROTECTED_RESOURCE_PREFIXES`]); unknown sub-paths return
 /// 404 to preserve the §4 identity rule — we never echo a
 /// `resource` value we do not recognize.
-pub async fn protected_resource_metadata_subpath(
+pub(crate) async fn protected_resource_metadata_subpath(
     State(state): State<Arc<AppState>>,
     Path(sub_path): Path<String>,
 ) -> Result<impl IntoResponse, StatusCode> {

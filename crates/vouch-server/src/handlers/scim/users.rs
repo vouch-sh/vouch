@@ -22,7 +22,7 @@ use crate::redact_email;
 /// GET /scim/v2/Users (RFC 7644 Section 3.4.2).
 ///
 /// Returns a paginated list of User resources, with optional filtering.
-pub async fn list_users(
+pub(crate) async fn list_users(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Query(query): Query<ScimListQuery>,
@@ -120,7 +120,7 @@ pub async fn list_users(
 ///
 /// Creates a new User resource. Returns 201 Created on success,
 /// 409 Conflict if the user already exists (RFC 7644 Section 3.3.1).
-pub async fn create_user(
+pub(crate) async fn create_user(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Json(user): Json<ScimUser>,
@@ -211,7 +211,7 @@ pub async fn create_user(
 /// GET /scim/v2/Users/:id (RFC 7644 Section 3.4.1).
 ///
 /// Retrieves a single User resource by ID.
-pub async fn get_user(
+pub(crate) async fn get_user(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Path(id): Path<String>,
@@ -261,7 +261,7 @@ pub async fn get_user(
     clippy::too_many_lines,
     reason = "SCIM PATCH operation handles add/remove/replace across all user fields"
 )]
-pub async fn patch_user(
+pub(crate) async fn patch_user(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Path(id): Path<String>,
@@ -498,7 +498,7 @@ pub async fn patch_user(
 ///
 /// Permanently deletes a User resource. Returns 204 No Content on success.
 /// All sessions are invalidated and SSH certificates are revoked.
-pub async fn delete_user(
+pub(crate) async fn delete_user(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Path(id): Path<String>,
@@ -596,7 +596,7 @@ pub async fn delete_user(
 }
 
 /// Convert database user to SCIM user.
-pub fn db_user_to_scim(base_url: &str, user: db::ScimUserRecord) -> ScimUser {
+pub(crate) fn db_user_to_scim(base_url: &str, user: db::ScimUserRecord) -> ScimUser {
     ScimUser {
         schemas: vec!["urn:ietf:params:scim:schemas:core:2.0:User".to_string()],
         id: Some(user.id.clone()),

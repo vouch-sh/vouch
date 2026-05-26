@@ -10,10 +10,10 @@
 //! - [`users`] - User CRUD operations
 //! - [`groups`] - Group CRUD operations
 
-pub mod discovery;
-pub mod groups;
-pub mod types;
-pub mod users;
+pub(crate) mod discovery;
+pub(crate) mod groups;
+pub(crate) mod types;
+pub(crate) mod users;
 
 use aws_lc_rs::digest::{self, SHA256};
 use axum::{
@@ -26,12 +26,12 @@ use crate::db;
 use crate::db::{ScimScope, ScimScopeSet};
 
 // Re-export types for convenience (used by tests via `use super::*`)
-pub use types::*;
+pub(crate) use types::*;
 
 // Re-export handlers
-pub use discovery::{resource_types, schemas, service_provider_config};
-pub use groups::{create_group, delete_group, get_group, list_groups, patch_group};
-pub use users::{create_user, delete_user, get_user, list_users, patch_user};
+pub(crate) use discovery::{resource_types, schemas, service_provider_config};
+pub(crate) use groups::{create_group, delete_group, get_group, list_groups, patch_group};
+pub(crate) use users::{create_user, delete_user, get_user, list_users, patch_user};
 
 // ============================================================================
 // Input Validation
@@ -87,7 +87,7 @@ fn validate_list_params(
 // ============================================================================
 
 /// Authenticated SCIM token information.
-pub struct ScimAuth {
+pub(crate) struct ScimAuth {
     /// Token ID.
     pub token_id: String,
     /// Organization the token is scoped to. Required; SCIM tokens
@@ -99,7 +99,10 @@ pub struct ScimAuth {
 
 impl ScimAuth {
     /// Check if the token has the required scope.
-    pub fn require_scope(&self, required: ScimScope) -> Result<(), (StatusCode, Json<ScimError>)> {
+    pub(crate) fn require_scope(
+        &self,
+        required: ScimScope,
+    ) -> Result<(), (StatusCode, Json<ScimError>)> {
         if self.scope.contains(required) {
             Ok(())
         } else {
@@ -119,7 +122,7 @@ impl ScimAuth {
 /// SCIM endpoints require authentication via OAuth 2.0 Bearer Token
 /// (RFC 6750). The token is validated against the SCIM token store.
 /// Returns the token ID and scope for authorization checks.
-pub async fn authenticate_scim(
+pub(crate) async fn authenticate_scim(
     state: &AppState,
     headers: &HeaderMap,
 ) -> Result<ScimAuth, (StatusCode, Json<ScimError>)> {

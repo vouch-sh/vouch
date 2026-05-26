@@ -36,7 +36,7 @@ use crate::services::oidc::{AwsSessionTags, OidcIdTokenClaimsBuilder, OidcSignin
 
 /// Error types for AWS integration operations.
 #[derive(Debug, thiserror::Error)]
-pub enum AwsError {
+pub(crate) enum AwsError {
     /// User session does not have an associated authenticator.
     #[error("Session does not have a security key - please register one first")]
     NoAuthenticator,
@@ -55,11 +55,11 @@ pub enum AwsError {
 }
 
 /// Result type for AWS integration operations.
-pub type AwsResult<T> = Result<T, AwsError>;
+pub(crate) type AwsResult<T> = Result<T, AwsError>;
 
 /// Result of issuing an AWS OIDC token.
 #[derive(Debug)]
-pub struct AwsTokenResult {
+pub(crate) struct AwsTokenResult {
     /// The signed OIDC ID token.
     pub id_token: String,
     /// Token validity in seconds.
@@ -89,7 +89,7 @@ pub struct AwsTokenResult {
     clippy::too_many_arguments,
     reason = "AWS STS AssumeRoleWithWebIdentity issuance requires full session context"
 )]
-pub async fn issue_aws_token(
+pub(crate) async fn issue_aws_token(
     store: &DocumentStore,
     base_url: &str,
     session_hours: u64,

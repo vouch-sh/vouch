@@ -3,8 +3,7 @@
 
 use super::client_auth::{ClientAuthFields, complete_client_auth, extract_client_auth};
 use crate::AppState;
-use crate::db::par::PAR_EXPIRES_IN;
-use crate::db::{self, CreateParParams};
+use crate::db::{self, CreateParParams, PAR_EXPIRES_IN};
 use crate::services::ServiceError;
 use crate::services::auth::{ClientAuthProof, ParCreationProof};
 use crate::services::error::OAuthErrorResponse;
@@ -39,7 +38,7 @@ struct ParResponse {
 /// Contains the same parameters as an authorization request, plus client
 /// authentication fields.
 #[derive(Debug, Deserialize)]
-pub struct ParRequest {
+pub(crate) struct ParRequest {
     /// RFC 6749 Section 4.1.1: Response type (must be "code").
     #[serde(default)]
     response_type: Option<String>,
@@ -140,7 +139,7 @@ impl ClientAuthFields for ParRequest {
 /// ## Response
 ///
 /// Returns 201 Created with a JSON body containing `request_uri` and `expires_in`.
-pub async fn par(
+pub(crate) async fn par(
     State(state): State<Arc<AppState>>,
     client_cert: crate::handlers::extractors::OptionalClientCert,
     headers: HeaderMap,

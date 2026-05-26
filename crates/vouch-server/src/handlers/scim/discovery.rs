@@ -14,7 +14,9 @@ use crate::AppState;
 ///
 /// Returns the Service Provider's configuration (RFC 7643 Section 5),
 /// describing supported SCIM capabilities: patch, bulk, filter, etc.
-pub async fn service_provider_config(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub(crate) async fn service_provider_config(
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
     let base_url = &state.config().base_url;
 
     Json(ScimServiceProviderConfig {
@@ -45,7 +47,7 @@ pub async fn service_provider_config(State(state): State<Arc<AppState>>) -> impl
 /// GET /scim/v2/Schemas (RFC 7644 Section 4).
 ///
 /// Returns the schema definitions for supported resource types (RFC 7643 Section 7).
-pub async fn schemas() -> impl IntoResponse {
+pub(crate) async fn schemas() -> impl IntoResponse {
     let user_schema = ScimSchema {
         id: "urn:ietf:params:scim:schemas:core:2.0:User".to_string(),
         name: "User".to_string(),
@@ -134,7 +136,7 @@ pub async fn schemas() -> impl IntoResponse {
 /// GET /scim/v2/ResourceTypes (RFC 7644 Section 4).
 ///
 /// Returns the Resource Type definitions (RFC 7643 Section 6).
-pub async fn resource_types(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub(crate) async fn resource_types(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let base_url = &state.config().base_url;
 
     Json(ScimListResponse {

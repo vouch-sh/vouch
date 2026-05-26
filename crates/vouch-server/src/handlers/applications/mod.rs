@@ -21,21 +21,13 @@ use super::session::AuthContext;
 /// Maximum number of active secrets per application.
 pub(crate) const MAX_ACTIVE_SECRETS: usize = 2;
 
-// Re-export all public handler functions so callers don't need to change.
-pub use api::{
+// Re-export handler functions used by the router.
+pub(crate) use api::{
     add_secret_api, create_application_api, delete_application_api, delete_secret_api,
     get_application_api, list_applications_api, list_secrets_api, revoke_tokens_api,
     update_application_api,
 };
-pub use types::{
-    AddSecretRequest, AddSecretResponse, ApplicationCreateTemplate, ApplicationCreatedTemplate,
-    ApplicationDetailTemplate, ApplicationErrorTemplate, ApplicationInfo, ApplicationResponse,
-    ApplicationUnauthorizedTemplate, ApplicationsListTemplate, CreateApplicationForm,
-    CreateApplicationRequest, CreateApplicationResponse, ListApplicationsResponse,
-    ListSecretsResponse, SecretAddedTemplate, SecretInfo, UpdateApplicationForm,
-    UpdateApplicationRequest, UsageStat,
-};
-pub use web::{
+pub(crate) use web::{
     add_secret_form, create_application_form, create_application_page, delete_application_form,
     delete_secret_form, detail_application_page, list_applications_page, update_application_form,
 };

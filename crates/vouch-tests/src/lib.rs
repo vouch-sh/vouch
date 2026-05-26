@@ -16,4 +16,4 @@ pub use mock_fido::IntegrationMockDevice;
 pub use clock::{Clock, SystemClock, TestClock};
 pub use vouch_agent::{AgentTransport, TestTransport, TestTransportPair};
 pub use vouch_cli::{FidoDevice, HttpClient, MockFidoDevice, TestHttpClient};
-pub use vouch_server::{CoseVerifier, RealCoseVerifier, TestCoseVerifier};
+pub use vouch_server::crypto::webauthn_verify::{CoseVerifier, RealCoseVerifier, TestCoseVerifier};

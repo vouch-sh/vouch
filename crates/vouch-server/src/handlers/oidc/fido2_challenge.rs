@@ -52,7 +52,7 @@ pub(super) struct Fido2ChallengeResponse {
 ///
 /// Unauthenticated. No `client_id` is needed at this stage; client
 /// identification happens at the token endpoint via `client_assertion`.
-pub async fn fido2_challenge(State(state): State<Arc<AppState>>) -> Response {
+pub(crate) async fn fido2_challenge(State(state): State<Arc<AppState>>) -> Response {
     let challenge = match generate_challenge() {
         Ok(c) => c,
         Err(_) => {

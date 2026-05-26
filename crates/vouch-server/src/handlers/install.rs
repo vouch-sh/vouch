@@ -12,7 +12,7 @@ use std::sync::Arc;
 /// Install page template.
 #[derive(Template)]
 #[template(path = "install.html")]
-pub struct InstallTemplate {
+pub(crate) struct InstallTemplate {
     pub has_downloads: bool,
     pub download_macos: Option<String>,
     pub download_linux: Option<String>,
@@ -27,7 +27,10 @@ impl_template_response!(InstallTemplate);
 
 /// Install page - CLI installation and enrollment instructions.
 /// GET /install
-pub async fn install_page(State(state): State<Arc<AppState>>, jar: CookieJar) -> impl IntoResponse {
+pub(crate) async fn install_page(
+    State(state): State<Arc<AppState>>,
+    jar: CookieJar,
+) -> impl IntoResponse {
     let auth = get_auth_context(&state, &jar).await;
 
     let has_downloads = state.config().cli_download_macos.is_some()

@@ -18,7 +18,7 @@ use crate::services::error::ServiceError;
 /// Derefs to `&str` so it can be passed directly to db functions.
 /// Normalizes to lowercase (UUIDs are case-insensitive per RFC 9562).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ValidUuid(String);
+pub(crate) struct ValidUuid(String);
 
 impl std::ops::Deref for ValidUuid {
     type Target = str;
@@ -53,7 +53,7 @@ impl<'de> Deserialize<'de> for ValidUuid {
 
 /// Path extractor that converts `PathRejection` into `ServiceError`.
 /// Use instead of `axum::extract::Path` when the handler returns `ServiceError`.
-pub struct ValidPath<T>(pub T);
+pub(crate) struct ValidPath<T>(pub T);
 
 impl<T, S> FromRequestParts<S> for ValidPath<T>
 where
@@ -238,7 +238,7 @@ fn extract_validated_header(headers: &HeaderMap, name: &str, max_len: usize) -> 
 ///
 /// On the main (non-mTLS) port this always yields `None`.
 #[derive(Debug, Clone)]
-pub struct OptionalClientCert(pub Option<crate::services::oidc::mtls::ClientCertificate>);
+pub(crate) struct OptionalClientCert(pub Option<crate::services::oidc::mtls::ClientCertificate>);
 
 impl FromRequestParts<Arc<AppState>> for OptionalClientCert {
     type Rejection = std::convert::Infallible;

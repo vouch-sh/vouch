@@ -20,9 +20,6 @@
 //! - OIDC provider, SCIM server, JWKS endpoint
 //! - Vouch is the server, responding to external clients
 
-pub mod aws;
-pub mod github;
-pub mod kubernetes;
-
-pub use aws::{AwsError, AwsResult, AwsTokenResult, issue_aws_token};
-pub use github::GitHubService;
+pub(crate) mod aws;
+pub(crate) mod github;
+pub(crate) mod kubernetes;

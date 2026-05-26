@@ -23,7 +23,7 @@ const AUDIT_PAGE_SIZE: u64 = 50;
 
 /// Query parameters for audit page (pagination + optional semantic filter).
 #[derive(Debug, Deserialize)]
-pub struct AuditParams {
+pub(crate) struct AuditParams {
     pub after: Option<String>,
     pub filter: Option<String>,
 }
@@ -43,7 +43,7 @@ fn audit_filter_event_types(filter: &str) -> Option<Vec<String>> {
 }
 
 /// Audit event row for the template.
-pub struct AuditRow {
+pub(crate) struct AuditRow {
     pub id: String,
     pub event_type: String,
     pub email_domain: Option<String>,
@@ -58,7 +58,7 @@ pub struct AuditRow {
 /// Audit log page template.
 #[derive(Template)]
 #[template(path = "admin/audit.html")]
-pub struct AdminAuditTemplate {
+pub(crate) struct AdminAuditTemplate {
     pub auth: AuthContext,
     pub events: Vec<AuditRow>,
     pub has_more: bool,
@@ -69,7 +69,7 @@ pub struct AdminAuditTemplate {
 impl_template_response!(AdminAuditTemplate);
 
 /// GET /admin/audit — Audit log page.
-pub async fn admin_audit_page(
+pub(crate) async fn admin_audit_page(
     State(state): State<Arc<AppState>>,
     jar: CookieJar,
     Query(params): Query<AuditParams>,

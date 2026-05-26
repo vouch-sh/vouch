@@ -32,7 +32,7 @@ fn redirect_error(jar: CookieJar, msg: impl Into<String>) -> Response {
 const MAX_CUSTOM_POLICIES: usize = 20;
 
 /// A preconfigured policy row for the template.
-pub struct PreconfiguredPolicyRow {
+pub(crate) struct PreconfiguredPolicyRow {
     pub slug: String,
     pub name: String,
     pub description: String,
@@ -41,7 +41,7 @@ pub struct PreconfiguredPolicyRow {
 }
 
 /// A custom policy row for the template.
-pub struct CustomPolicyRow {
+pub(crate) struct CustomPolicyRow {
     pub id: String,
     pub name: String,
     pub description: Option<String>,
@@ -52,7 +52,7 @@ pub struct CustomPolicyRow {
 /// Policies page template.
 #[derive(Template)]
 #[template(path = "admin/policies.html")]
-pub struct AdminPoliciesTemplate {
+pub(crate) struct AdminPoliciesTemplate {
     pub auth: AuthContext,
     pub preconfigured_policies: Vec<PreconfiguredPolicyRow>,
     pub custom_policies: Vec<CustomPolicyRow>,
@@ -62,7 +62,10 @@ pub struct AdminPoliciesTemplate {
 impl_template_response!(AdminPoliciesTemplate);
 
 /// GET /admin/policies — Device posture policies page.
-pub async fn admin_policies_page(State(state): State<Arc<AppState>>, jar: CookieJar) -> Response {
+pub(crate) async fn admin_policies_page(
+    State(state): State<Arc<AppState>>,
+    jar: CookieJar,
+) -> Response {
     let auth = get_resource_auth_context(&state, &jar).await;
 
     if !auth.authenticated {
@@ -137,7 +140,7 @@ pub async fn admin_policies_page(State(state): State<Arc<AppState>>, jar: Cookie
 }
 
 /// POST /admin/policies/preconfigured/{slug}/toggle
-pub async fn toggle_preconfigured_policy(
+pub(crate) async fn toggle_preconfigured_policy(
     method: Method,
     uri: OriginalUri,
     State(state): State<Arc<AppState>>,
@@ -226,7 +229,7 @@ pub async fn toggle_preconfigured_policy(
 
 /// Form data for creating/updating a custom policy.
 #[derive(Debug, Deserialize)]
-pub struct CustomPolicyForm {
+pub(crate) struct CustomPolicyForm {
     #[serde(alias = "policy_name")]
     pub name: String,
     #[serde(default, alias = "policy_description")]
@@ -235,7 +238,7 @@ pub struct CustomPolicyForm {
 }
 
 /// POST /admin/policies/custom — Create a new custom policy.
-pub async fn create_custom_policy(
+pub(crate) async fn create_custom_policy(
     method: Method,
     uri: OriginalUri,
     State(state): State<Arc<AppState>>,
@@ -336,7 +339,7 @@ pub async fn create_custom_policy(
 }
 
 /// POST /admin/policies/custom/{id} — Update a custom policy.
-pub async fn update_custom_policy(
+pub(crate) async fn update_custom_policy(
     method: Method,
     uri: OriginalUri,
     State(state): State<Arc<AppState>>,
@@ -420,7 +423,7 @@ pub async fn update_custom_policy(
 }
 
 /// POST /admin/policies/custom/{id}/delete — Delete a custom policy.
-pub async fn delete_custom_policy(
+pub(crate) async fn delete_custom_policy(
     method: Method,
     uri: OriginalUri,
     State(state): State<Arc<AppState>>,
@@ -469,7 +472,7 @@ pub async fn delete_custom_policy(
 }
 
 /// POST /admin/policies/custom/{id}/toggle — Toggle active state.
-pub async fn toggle_custom_policy(
+pub(crate) async fn toggle_custom_policy(
     method: Method,
     uri: OriginalUri,
     State(state): State<Arc<AppState>>,
@@ -591,7 +594,7 @@ fn cel_expression_hash(expression: &str) -> String {
 
 /// Response for validating a CEL expression (JSON API for CEL playground).
 #[derive(Debug, serde::Serialize)]
-pub struct ValidateResponse {
+pub(crate) struct ValidateResponse {
     pub valid: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
@@ -601,20 +604,20 @@ pub struct ValidateResponse {
 
 /// Test result from dry-running a CEL expression against sample posture.
 #[derive(Debug, serde::Serialize)]
-pub struct TestResult {
+pub(crate) struct TestResult {
     pub pass: bool,
 }
 
 /// Request to validate a CEL expression (JSON API for CEL playground).
 #[derive(Debug, Deserialize)]
-pub struct ValidateRequest {
+pub(crate) struct ValidateRequest {
     pub cel_expression: String,
     #[serde(default)]
     pub test_posture: Option<vouch_common::posture::DevicePosture>,
 }
 
 /// POST /api/v1/org/policies/validate — Validate CEL expression (JSON).
-pub async fn validate_cel_api(
+pub(crate) async fn validate_cel_api(
     method: Method,
     uri: OriginalUri,
     State(state): State<Arc<AppState>>,

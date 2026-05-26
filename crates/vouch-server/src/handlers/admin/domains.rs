@@ -27,7 +27,7 @@ use std::sync::Arc;
 /// Typed so template comparisons can't drift from the handler's spelling
 /// of the status string.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DomainRowStatus {
+pub(crate) enum DomainRowStatus {
     /// The organization's primary domain (configured at org creation).
     Primary,
     /// Added but never verified — TXT record has not yet been observed.
@@ -40,7 +40,7 @@ pub enum DomainRowStatus {
 }
 
 /// Display row for an organization's email domains in the template.
-pub struct DomainRow {
+pub(crate) struct DomainRow {
     pub domain: String,
     /// Unicode rendering of a punycode domain, if applicable. `None` for
     /// pure-ASCII domains. Surfacing both forms makes IDN spoofing visible.
@@ -56,7 +56,7 @@ pub struct DomainRow {
 /// Email domains page template.
 #[derive(Template)]
 #[template(path = "admin/domains.html")]
-pub struct AdminDomainsTemplate {
+pub(crate) struct AdminDomainsTemplate {
     pub auth: AuthContext,
     pub domains: Vec<DomainRow>,
     pub max_additional: usize,
@@ -68,7 +68,7 @@ pub struct AdminDomainsTemplate {
 impl_template_response!(AdminDomainsTemplate);
 
 #[derive(Debug, Deserialize)]
-pub struct AddDomainForm {
+pub(crate) struct AddDomainForm {
     pub domain: String,
 }
 
@@ -126,7 +126,10 @@ fn build_rows(org: &db::Organization) -> Vec<DomainRow> {
 }
 
 /// GET /admin/domains — list primary and additional domains.
-pub async fn admin_domains_page(State(state): State<Arc<AppState>>, jar: CookieJar) -> Response {
+pub(crate) async fn admin_domains_page(
+    State(state): State<Arc<AppState>>,
+    jar: CookieJar,
+) -> Response {
     let auth = get_resource_auth_context(&state, &jar).await;
     if !auth.authenticated {
         return Redirect::to("/enroll/start").into_response();
@@ -176,7 +179,7 @@ pub async fn admin_domains_page(State(state): State<Arc<AppState>>, jar: CookieJ
 }
 
 /// POST /admin/domains — add a pending additional domain.
-pub async fn admin_add_domain(
+pub(crate) async fn admin_add_domain(
     method: Method,
     uri: OriginalUri,
     State(state): State<Arc<AppState>>,
@@ -233,7 +236,7 @@ pub async fn admin_add_domain(
 }
 
 /// POST /admin/domains/{domain}/verify — fetch DNS TXT and mark verified.
-pub async fn admin_verify_domain(
+pub(crate) async fn admin_verify_domain(
     method: Method,
     uri: OriginalUri,
     State(state): State<Arc<AppState>>,
@@ -315,7 +318,7 @@ pub async fn admin_verify_domain(
 }
 
 /// POST /admin/domains/{domain}/remove — remove an additional domain.
-pub async fn admin_remove_domain(
+pub(crate) async fn admin_remove_domain(
     method: Method,
     uri: OriginalUri,
     State(state): State<Arc<AppState>>,
