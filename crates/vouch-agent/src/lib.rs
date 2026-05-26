@@ -53,8 +53,8 @@ pub mod wire;
 pub use client::AgentClient;
 pub use error::{AgentError, Result};
 #[cfg(unix)]
-pub use ssh_agent::{SshAgentServer, SshAgentState, SshCredentials, ssh_agent_socket_path};
-pub use state::{CachedCredential, SessionInfo};
+pub use ssh_agent::ssh_agent_socket_path;
+pub use state::SessionInfo;
 pub use transport::AgentTransport;
 
 #[cfg(any(test, feature = "test-utils"))]
