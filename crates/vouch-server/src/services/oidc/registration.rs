@@ -2853,22 +2853,16 @@ mod tests {
         // Integration of reject_rs256_for_fapi into the userinfo validator.
         // Passing has_rsa_key=true isolates the FAPI rejection from the
         // "no RSA key configured" path.
-        let result = validate_userinfo_signed_response_alg(
-            Some("RS256"),
-            true,
-            FapiProfile::Fapi2Security,
-        );
+        let result =
+            validate_userinfo_signed_response_alg(Some("RS256"), true, FapiProfile::Fapi2Security);
         assert_rs256_fapi_error(result.map(|_| ()), "userinfo_signed_response_alg");
     }
 
     #[test]
     fn test_validate_userinfo_signed_response_alg_allows_es256_for_fapi() {
         // ES256 is allowed for FAPI clients regardless of RSA key availability.
-        let result = validate_userinfo_signed_response_alg(
-            Some("ES256"),
-            false,
-            FapiProfile::Fapi2Security,
-        );
+        let result =
+            validate_userinfo_signed_response_alg(Some("ES256"), false, FapiProfile::Fapi2Security);
         let alg = result.expect("ES256 must be accepted for FAPI userinfo");
         assert_eq!(alg, Some(JwsAlgorithm::Es256));
     }
