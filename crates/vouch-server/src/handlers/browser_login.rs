@@ -639,6 +639,9 @@ pub async fn browser_login_complete(
         signature,
         public_key: authenticator.public_key.clone(),
         rp_id: auth_state.rp_id.clone(),
+        // Browser sets clientDataJSON.origin to the calling page's origin
+        // (the server's base_url), which may be a subdomain of rp_id.
+        expected_origin: state.config().base_url.clone(),
         challenge: auth_state.challenge.clone(),
         stored_counter,
     })

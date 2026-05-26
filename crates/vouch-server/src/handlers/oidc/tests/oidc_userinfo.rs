@@ -82,8 +82,8 @@ async fn test_userinfo_no_email_when_scope_is_none() {
     // "full access" via a backward-compat fallback, returning the user's
     // email without the email scope. Must now return only `sub`.
     use crate::services::auth::{
-        ClientAuthProof, CreateOAuthTokenParams, GrantProof, HardwareVerification,
-        NoClientAuth, TokenIssuanceProof, create_oauth_access_token,
+        ClientAuthProof, CreateOAuthTokenParams, GrantProof, HardwareVerification, NoClientAuth,
+        TokenIssuanceProof, create_oauth_access_token,
     };
     use secrecy::ExposeSecret;
 
