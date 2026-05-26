@@ -365,3 +365,69 @@ async fn test_token_exchange_rejects_revoked_authenticator() {
         "Revoked authenticator must return invalid_grant, got: {body}"
     );
 }
+
+/// RFC 6749 §2.3.1: A confidential client may authenticate by sending
+/// `client_id` and `client_secret` in the request body as form parameters
+/// (`client_secret_post`) instead of HTTP Basic. The token endpoint must
+/// accept this and return a successful token response.
+///
+/// Covers vouch-conformance TOKEN_TEST_HANDOFF scenario
+/// `auth=client_secret_post grant=authorization_code → 200`.
+#[tokio::test]
+async fn test_rfc6749_token_client_secret_post_succeeds() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "csp-token@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+
+    let scope = ScopeSet::parse("openid");
+    let code = issue_authorization_code(
+        &state,
+        AuthorizationCodeParams {
+            client_id: &client.client_id,
+            redirect_uri: "https://example.com/callback",
+            user_id: &user.id,
+            email: &user.email,
+            authenticator_id: &auth_id,
+            aaguid: None,
+            scope: &scope,
+            nonce: None,
+            code_challenge: None,
+            code_challenge_method: None,
+            resource: None,
+            acr_values: None,
+            dpop_jkt: None,
+            auth_code_lifetime_seconds:
+                crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
+            authorization_details: None,
+            auth_time: None,
+        },
+    )
+    .await
+    .expect("issue code");
+
+    // Credentials in the form body (NO Authorization header).
+    let body = format!(
+        "grant_type=authorization_code&code={code}&redirect_uri={}\
+         &client_id={}&client_secret={}",
+        urlencoding::encode("https://example.com/callback"),
+        client.client_id,
+        client.client_secret,
+    );
+
+    let (status, response_body) = http_post_form(&app, "/oauth/token", &body, &[]).await;
+
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "client_secret_post auth must succeed: {response_body}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&response_body).expect("Valid JSON");
+    assert!(
+        json.get("access_token")
+            .and_then(serde_json::Value::as_str)
+            .is_some(),
+        "Response must contain access_token"
+    );
+    assert_eq!(json["token_type"].as_str(), Some("Bearer"));
+}

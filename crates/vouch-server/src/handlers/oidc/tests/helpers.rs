@@ -248,3 +248,179 @@ pub(super) fn sha256_base64url(input: &str) -> String {
     let digest = aws_lc_rs::digest::digest(&SHA256, input.as_bytes());
     URL_SAFE_NO_PAD.encode(digest.as_ref())
 }
+
+// ========================================================================
+// mTLS Certificate Helpers (shared across rfc8705, rfc7523, rfc9449)
+// ========================================================================
+
+/// Generate a self-signed P-256 certificate DER for testing.
+pub(super) fn make_test_cert_der(cn: &str) -> Vec<u8> {
+    use der::{Decode as _, Encode, asn1::Utf8StringRef};
+    use p256::ecdsa::SigningKey;
+    use spki::EncodePublicKey as _;
+    use x509_cert::builder::{Builder as _, CertificateBuilder, Profile};
+    use x509_cert::serial_number::SerialNumber;
+    use x509_cert::time::Validity;
+
+    let key = SigningKey::random(&mut p256::elliptic_curve::rand_core::OsRng);
+
+    let cn_oid = der::oid::ObjectIdentifier::new_unwrap("2.5.4.3");
+    let cn_value = Utf8StringRef::new(cn).expect("valid CN");
+    let atv = x509_cert::attr::AttributeTypeAndValue {
+        oid: cn_oid,
+        value: der::asn1::Any::from(cn_value),
+    };
+    let mut rdn_set = der::asn1::SetOfVec::new();
+    rdn_set.insert(atv).expect("insert RDN");
+    let subject =
+        x509_cert::name::RdnSequence(vec![x509_cert::name::RelativeDistinguishedName(rdn_set)]);
+
+    let validity = Validity::from_now(core::time::Duration::from_secs(86400)).expect("validity");
+    let serial = SerialNumber::new(&[1u8]).expect("serial");
+    let spki_der = key.verifying_key().to_public_key_der().expect("spki DER");
+    let spki = spki::SubjectPublicKeyInfoOwned::from_der(spki_der.as_ref()).expect("parse spki");
+
+    let builder = CertificateBuilder::new(
+        Profile::Leaf {
+            issuer: subject.clone(),
+            enable_key_agreement: false,
+            enable_key_encipherment: false,
+        },
+        serial,
+        validity,
+        subject,
+        spki,
+        &key,
+    )
+    .expect("cert builder");
+
+    let cert = builder
+        .build::<p256::ecdsa::DerSignature>()
+        .expect("build cert");
+    cert.to_der().expect("DER encode")
+}
+
+/// Compute the base64url SHA-256 thumbprint of DER bytes.
+pub(super) fn cert_thumbprint(der: &[u8]) -> String {
+    URL_SAFE_NO_PAD.encode(aws_lc_rs::digest::digest(&SHA256, der).as_ref())
+}
+
+// ========================================================================
+// DPoP Helpers (shared across rfc9449, rfc8705, rfc7523)
+// ========================================================================
+
+/// Generate an EC P-256 key pair and return (signing_key, DPoP JWK header fields).
+pub(super) fn generate_dpop_key_pair() -> (EcdsaKeyPair, serde_json::Value) {
+    use aws_lc_rs::signature::KeyPair;
+
+    let rng = aws_lc_rs::rand::SystemRandom::new();
+    let pkcs8 = EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, &rng)
+        .expect("Failed to generate key");
+    let key_pair = EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, pkcs8.as_ref())
+        .expect("Failed to parse key");
+
+    let pub_bytes = key_pair.public_key().as_ref();
+    let x = URL_SAFE_NO_PAD.encode(&pub_bytes[1..33]);
+    let y = URL_SAFE_NO_PAD.encode(&pub_bytes[33..65]);
+
+    let jwk = serde_json::json!({
+        "kty": "EC",
+        "crv": "P-256",
+        "x": x,
+        "y": y
+    });
+
+    (key_pair, jwk)
+}
+
+/// Compute the RFC 7638 JWK thumbprint for a DPoP JWK (lexicographic JSON
+/// of the required members: crv, kty, x, y).
+pub(super) fn dpop_jkt(jwk: &serde_json::Value) -> String {
+    let canonical = serde_json::json!({
+        "crv": jwk["crv"],
+        "kty": jwk["kty"],
+        "x": jwk["x"],
+        "y": jwk["y"]
+    });
+    let bytes = serde_json::to_vec(&canonical).expect("serialize JWK");
+    let digest = aws_lc_rs::digest::digest(&SHA256, &bytes);
+    URL_SAFE_NO_PAD.encode(digest.as_ref())
+}
+
+/// Create and sign a DPoP proof JWT for the given method and URI.
+pub(super) fn create_dpop_proof(
+    key_pair: &EcdsaKeyPair,
+    jwk: &serde_json::Value,
+    method: &str,
+    uri: &str,
+    nonce: Option<&str>,
+    access_token: Option<&str>,
+) -> String {
+    let header = serde_json::json!({
+        "typ": "dpop+jwt",
+        "alg": "ES256",
+        "jwk": jwk
+    });
+
+    let header_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&header).unwrap());
+
+    let jti = uuid::Uuid::now_v7().to_string();
+    let now = jiff::Timestamp::now().as_second();
+    let mut claims = serde_json::json!({
+        "jti": jti,
+        "htm": method,
+        "htu": uri,
+        "iat": now
+    });
+
+    if let Some(n) = nonce {
+        claims["nonce"] = serde_json::json!(n);
+    }
+
+    if let Some(token) = access_token {
+        let hash = aws_lc_rs::digest::digest(&SHA256, token.as_bytes());
+        let ath = URL_SAFE_NO_PAD.encode(hash.as_ref());
+        claims["ath"] = serde_json::json!(ath);
+    }
+
+    let claims_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).unwrap());
+
+    let signing_input = format!("{header_b64}.{claims_b64}");
+    let rng = aws_lc_rs::rand::SystemRandom::new();
+    let sig = key_pair
+        .sign(&rng, signing_input.as_bytes())
+        .expect("Failed to sign DPoP proof");
+    let sig_b64 = URL_SAFE_NO_PAD.encode(sig.as_ref());
+
+    format!("{header_b64}.{claims_b64}.{sig_b64}")
+}
+
+/// Acquire a DPoP nonce by submitting a proof without one to the token endpoint.
+///
+/// Nonces are always required (RFC 9449 Section 8). This helper performs the
+/// `use_dpop_nonce` round-trip and returns the server-provided nonce.
+pub(super) async fn acquire_dpop_nonce(
+    app: &axum::Router,
+    dpop_key: &EcdsaKeyPair,
+    dpop_jwk: &serde_json::Value,
+    method: &str,
+    uri: &str,
+) -> String {
+    let proof = create_dpop_proof(dpop_key, dpop_jwk, method, uri, None, None);
+
+    let response = http_post_form_full(
+        app,
+        "/oauth/token",
+        "grant_type=authorization_code&code=dummy",
+        &[("DPoP", &proof)],
+    )
+    .await;
+
+    response
+        .headers
+        .get("DPoP-Nonce")
+        .expect("Server must return DPoP-Nonce header")
+        .to_str()
+        .expect("DPoP-Nonce must be valid UTF-8")
+        .to_string()
+}
