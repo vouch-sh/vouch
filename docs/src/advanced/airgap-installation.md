@@ -429,7 +429,7 @@ export VOUCH_CA_CERT=/etc/vouch/root-ca.crt
 Each user:
 
 1. Opens a browser to `https://auth.internal/enroll`
-2. Authenticates via the configured identity provider (or direct registration if no external IdP is configured)
+2. Authenticates via the configured identity provider
 3. Registers their YubiKey through the browser's WebAuthn prompt (touch + PIN)
 
 After enrollment, daily login uses the CLI (`vouch login`) with no browser required.

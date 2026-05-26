@@ -73,12 +73,10 @@ Vouch's built-in SSH CA and local-first architecture make it well-suited for the
 
 ## Identity Provider Considerations
 
-In an air-gapped environment, you cannot use external identity providers like Google Workspace for enrollment. There are several options for handling user identity:
+In an air-gapped environment, you cannot use external identity providers like Google Workspace for enrollment. Vouch Server requires at least one upstream IdP to verify user identity, so an air-gapped deployment must include a self-hosted IdP inside the enclave:
 
 - **Self-hosted OIDC provider** — Deploy an internal OIDC-compliant IdP inside the enclave (e.g., Keycloak, Dex, or Microsoft AD FS). Add it to Vouch Server's `VOUCH_IDPS` list with `VOUCH_IDP_<SLUG>_TYPE=oidc` plus the `_ISSUER`, `_CLIENT_ID`, and `_CLIENT_SECRET` variables pointing to the internal IdP.
-- **No external IdP** — `VOUCH_IDPS` is optional, so Vouch Server can start with no upstream IdPs configured. See the [Environment Variables](../reference/environment-variables.md) reference for details.
-
-> **Needs product decision:** The exact enrollment workflow without an external IdP (e.g., admin-initiated enrollment, local credential bootstrapping) is not yet defined. This section will be updated once the air-gapped enrollment flow is finalized.
+- **Self-hosted SAML provider** — Deploy an internal SAML IdP (e.g., Shibboleth, AD FS) and configure it with `VOUCH_IDP_<SLUG>_TYPE=saml` plus `VOUCH_IDP_<SLUG>_METADATA_URL` pointing to the internal metadata document.
 
 ## Prerequisites
 
