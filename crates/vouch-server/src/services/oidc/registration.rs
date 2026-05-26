@@ -337,12 +337,7 @@ pub async fn register_client(
             }
 
             // FAPI 2.0 Section 5.4: RS256 is not permitted for FAPI clients.
-            if parsed == JwsAlgorithm::Rs256 && fapi_profile != FapiProfile::None {
-                return Err(ServiceError::oauth(
-                    OAuthErrorCode::InvalidClientMetadata,
-                    "RS256 is not permitted for FAPI 2.0 clients. Use ES256",
-                ));
-            }
+            reject_rs256_for_fapi(parsed, fapi_profile, "id_token_signed_response_alg")?;
 
             // If RS256 is explicitly requested but no RSA key is configured, reject.
             // An unspecified algorithm falls back to ES256 automatically (see below).
@@ -396,6 +391,8 @@ pub async fn register_client(
                     ),
                 ));
             }
+            // FAPI 2.0 Section 5.4.1: RS256 is not permitted for FAPI clients.
+            reject_rs256_for_fapi(parsed, fapi_profile, "authorization_signed_response_alg")?;
             if parsed == JwsAlgorithm::Rs256 && state.oidc_rsa_key.is_none() {
                 return Err(ServiceError::oauth(
                     OAuthErrorCode::InvalidClientMetadata,
@@ -439,6 +436,7 @@ pub async fn register_client(
     let userinfo_alg = validate_userinfo_signed_response_alg(
         request.userinfo_signed_response_alg.as_deref(),
         state.oidc_rsa_key.is_some(),
+        fapi_profile,
     )?;
 
     // 12b-2. Validate request_uris (OIDC Core Section 6.2).
@@ -454,12 +452,7 @@ pub async fn register_client(
             )
         })?;
         // FAPI 2.0 Section 5.4: RS256 is not permitted for FAPI clients.
-        if parsed == JwsAlgorithm::Rs256 && fapi_profile != FapiProfile::None {
-            return Err(ServiceError::oauth(
-                OAuthErrorCode::InvalidClientMetadata,
-                "RS256 is not permitted for FAPI 2.0 request objects. Use ES256",
-            ));
-        }
+        reject_rs256_for_fapi(parsed, fapi_profile, "request_object_signing_alg")?;
         Some(parsed)
     } else {
         None
@@ -650,12 +643,32 @@ struct ValidatedGrantTypes {
     has_auth_code: bool,
 }
 
+/// Reject RS256 when the client is registering under any FAPI 2.0 profile.
+///
+/// FAPI 2.0 Security Profile §5.4 forbids RS256 for any JWT minted on behalf
+/// of a FAPI client (id_token, JARM authorization response, userinfo, request
+/// object). Returns `Ok(())` for non-FAPI clients or non-RS256 algorithms.
+fn reject_rs256_for_fapi(
+    alg: JwsAlgorithm,
+    fapi_profile: FapiProfile,
+    field: &'static str,
+) -> Result<(), ServiceError> {
+    if alg == JwsAlgorithm::Rs256 && fapi_profile != FapiProfile::None {
+        return Err(ServiceError::oauth(
+            OAuthErrorCode::InvalidClientMetadata,
+            format!("RS256 is not permitted for FAPI 2.0 clients on {field}. Use ES256"),
+        ));
+    }
+    Ok(())
+}
+
 /// Validate `userinfo_signed_response_alg` — only RS256 and ES256 are accepted.
 ///
 /// Returns the parsed algorithm, or `None` if the field is absent.
 fn validate_userinfo_signed_response_alg(
     raw: Option<&str>,
     has_rsa_key: bool,
+    fapi_profile: FapiProfile,
 ) -> Result<Option<JwsAlgorithm>, ServiceError> {
     let Some(s) = raw else { return Ok(None) };
     let parsed = s.parse::<JwsAlgorithm>().map_err(|_| {
@@ -664,6 +677,7 @@ fn validate_userinfo_signed_response_alg(
             format!("Unsupported userinfo_signed_response_alg: '{s}'. Supported: RS256, ES256"),
         )
     })?;
+    reject_rs256_for_fapi(parsed, fapi_profile, "userinfo_signed_response_alg")?;
     match parsed {
         JwsAlgorithm::Rs256 if !has_rsa_key => Err(ServiceError::oauth(
             OAuthErrorCode::InvalidClientMetadata,
@@ -1066,9 +1080,12 @@ pub async fn update_client_configuration(
     )?;
 
     // Validate userinfo_signed_response_alg (same rules as initial registration).
+    // The client's FAPI profile is immutable post-registration (RFC 7592), so we
+    // re-apply the original profile's algorithm restrictions to any updates.
     let userinfo_alg = validate_userinfo_signed_response_alg(
         mutable_request.userinfo_signed_response_alg.as_deref(),
         state.oidc_rsa_key.is_some(),
+        client.fapi_profile,
     )?;
 
     // Validate request_uris (same rules as initial registration).
@@ -2741,5 +2758,112 @@ mod tests {
             &redirect_uris,
         );
         assert_eq!(result, OAuthClientType::Web);
+    }
+
+    // =========================================================================
+    // FAPI 2.0 Section 5.4: RS256 rejection across all client-configurable
+    // signing algorithm fields (issue #393).
+    //
+    // Each test asserts the specific field name appears in the error message
+    // so future refactors that drop the field-specific message would break the
+    // test, not just the helper.
+    // =========================================================================
+
+    fn assert_rs256_fapi_error(result: Result<(), ServiceError>, field: &str) {
+        let err = result.expect_err("RS256 + FAPI must be rejected");
+        assert!(
+            matches!(&err, ServiceError::OAuth { code, .. } if *code == OAuthErrorCode::InvalidClientMetadata),
+            "Expected InvalidClientMetadata OAuth error, got {err:?}"
+        );
+        assert!(
+            matches!(&err, ServiceError::OAuth { description, .. } if description.contains(field)),
+            "Error description must name the field '{field}': {err:?}"
+        );
+        assert!(
+            matches!(&err, ServiceError::OAuth { description, .. } if description.contains("RS256")),
+            "Error description must mention RS256: {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_reject_rs256_for_fapi_rejects_jarm() {
+        let result = reject_rs256_for_fapi(
+            JwsAlgorithm::Rs256,
+            FapiProfile::Fapi2Security,
+            "authorization_signed_response_alg",
+        );
+        assert_rs256_fapi_error(result, "authorization_signed_response_alg");
+    }
+
+    #[test]
+    fn test_reject_rs256_for_fapi_rejects_userinfo() {
+        let result = reject_rs256_for_fapi(
+            JwsAlgorithm::Rs256,
+            FapiProfile::Fapi2Security,
+            "userinfo_signed_response_alg",
+        );
+        assert_rs256_fapi_error(result, "userinfo_signed_response_alg");
+    }
+
+    #[test]
+    fn test_reject_rs256_for_fapi_rejects_id_token() {
+        let result = reject_rs256_for_fapi(
+            JwsAlgorithm::Rs256,
+            FapiProfile::Fapi2Security,
+            "id_token_signed_response_alg",
+        );
+        assert_rs256_fapi_error(result, "id_token_signed_response_alg");
+    }
+
+    #[test]
+    fn test_reject_rs256_for_fapi_rejects_request_object() {
+        let result = reject_rs256_for_fapi(
+            JwsAlgorithm::Rs256,
+            FapiProfile::Fapi2Security,
+            "request_object_signing_alg",
+        );
+        assert_rs256_fapi_error(result, "request_object_signing_alg");
+    }
+
+    #[test]
+    fn test_reject_rs256_for_fapi_allows_rs256_for_non_fapi() {
+        // Non-FAPI clients are permitted to use RS256 (subject to other checks
+        // like RSA key availability handled by the calling block).
+        let result = reject_rs256_for_fapi(
+            JwsAlgorithm::Rs256,
+            FapiProfile::None,
+            "authorization_signed_response_alg",
+        );
+        assert!(result.is_ok(), "Non-FAPI + RS256 must be allowed");
+    }
+
+    #[test]
+    fn test_reject_rs256_for_fapi_allows_es256_for_fapi() {
+        // ES256 is the canonical FAPI-permitted algorithm.
+        let result = reject_rs256_for_fapi(
+            JwsAlgorithm::Es256,
+            FapiProfile::Fapi2Security,
+            "authorization_signed_response_alg",
+        );
+        assert!(result.is_ok(), "FAPI + ES256 must be allowed");
+    }
+
+    #[test]
+    fn test_validate_userinfo_signed_response_alg_rejects_rs256_for_fapi() {
+        // Integration of reject_rs256_for_fapi into the userinfo validator.
+        // Passing has_rsa_key=true isolates the FAPI rejection from the
+        // "no RSA key configured" path.
+        let result =
+            validate_userinfo_signed_response_alg(Some("RS256"), true, FapiProfile::Fapi2Security);
+        assert_rs256_fapi_error(result.map(|_| ()), "userinfo_signed_response_alg");
+    }
+
+    #[test]
+    fn test_validate_userinfo_signed_response_alg_allows_es256_for_fapi() {
+        // ES256 is allowed for FAPI clients regardless of RSA key availability.
+        let result =
+            validate_userinfo_signed_response_alg(Some("ES256"), false, FapiProfile::Fapi2Security);
+        let alg = result.expect("ES256 must be accepted for FAPI userinfo");
+        assert_eq!(alg, Some(JwsAlgorithm::Es256));
     }
 }
