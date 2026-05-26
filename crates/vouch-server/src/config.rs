@@ -876,6 +876,23 @@ impl ServerConfig {
             }
         }
 
+        // Retention windows are subtracted from `now` to form a deletion cutoff;
+        // a negative value yields a future cutoff, which matches every row and
+        // wipes the entire audit log. Reject at startup so an operator typo or
+        // malicious config change can't silently destroy forensic data.
+        if self.auth_events_retention_days < 0 {
+            anyhow::bail!(
+                "VOUCH_AUTH_EVENTS_RETENTION_DAYS must be non-negative (got {})",
+                self.auth_events_retention_days
+            );
+        }
+        if self.oauth_events_retention_days < 0 {
+            anyhow::bail!(
+                "VOUCH_OAUTH_EVENTS_RETENTION_DAYS must be non-negative (got {})",
+                self.oauth_events_retention_days
+            );
+        }
+
         // Skip jwt_secret validation when KMS HMAC signing is configured.
         if self.jwt_hmac_kms_key_id.is_none() {
             let secret = self.jwt_secret.expose_secret();
@@ -1063,6 +1080,47 @@ mod tests {
     #[test]
     fn test_validate_good_secret_accepted() {
         let config = test_config();
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_rejects_negative_auth_events_retention() {
+        let mut config = test_config();
+        config.auth_events_retention_days = -1;
+        let err = config.validate().unwrap_err();
+        assert!(
+            err.to_string().contains("AUTH_EVENTS_RETENTION_DAYS"),
+            "Error should name the offending field: {err}"
+        );
+    }
+
+    #[test]
+    fn test_validate_rejects_negative_oauth_events_retention() {
+        let mut config = test_config();
+        config.oauth_events_retention_days = -1;
+        let err = config.validate().unwrap_err();
+        assert!(
+            err.to_string().contains("OAUTH_EVENTS_RETENTION_DAYS"),
+            "Error should name the offending field: {err}"
+        );
+    }
+
+    #[test]
+    fn test_validate_rejects_i64_min_retention() {
+        // i64::MIN is the worst case: days_to_span(i64::MIN) would panic in
+        // jiff because i64::MIN * 24 overflows; validation must catch it first.
+        let mut config = test_config();
+        config.auth_events_retention_days = i64::MIN;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_accepts_zero_retention() {
+        // Zero days is a valid choice: deletes everything older than "now",
+        // i.e. effectively disables retention. Only negative values are rejected.
+        let mut config = test_config();
+        config.auth_events_retention_days = 0;
+        config.oauth_events_retention_days = 0;
         assert!(config.validate().is_ok());
     }
 
