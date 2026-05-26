@@ -208,6 +208,12 @@ pub(crate) struct LoginAssertionParams {
     pub public_key: Vec<u8>,
     /// Relying party ID.
     pub rp_id: String,
+    /// Expected `clientDataJSON.origin`. Browsers set this to the calling
+    /// page's origin (the server's `base_url`); CLI flows construct it as
+    /// `https://{rp_id}`. Deriving it from `rp_id` here would reject valid
+    /// browser logins when `base_url`'s host is a subdomain of `rp_id`
+    /// (a configuration `webauthn-rs` accepts at startup).
+    pub expected_origin: String,
     /// Expected challenge (raw bytes).
     pub challenge: Vec<u8>,
     /// Current counter value from the database.
@@ -238,7 +244,6 @@ pub(crate) async fn verify_login_assertion(
     params: LoginAssertionParams,
 ) -> ServiceResult<LoginAssertionResult> {
     tokio::task::spawn_blocking(move || {
-        let expected_origin = format!("https://{}", params.rp_id);
         let expected_challenge = URL_SAFE_NO_PAD.encode(&params.challenge);
 
         let result = webauthn_verify::verify_assertion(
@@ -248,7 +253,7 @@ pub(crate) async fn verify_login_assertion(
             &params.public_key,
             &params.rp_id,
             &expected_challenge,
-            &expected_origin,
+            &params.expected_origin,
             params.stored_counter,
             true, // require_user_verification
         )
@@ -1068,5 +1073,62 @@ mod tests {
         // Required fields should be present
         assert_eq!(parsed["iss"], "https://example.com");
         assert_eq!(parsed["sub"], "user-123");
+    }
+
+    // Regression for #392: `verify_login_assertion` must honor the
+    // caller-supplied `expected_origin` rather than deriving it from
+    // `rp_id`. This matters when `base_url` is a subdomain of `rp_id`
+    // (e.g. `https://idp.example.com` for `rp_id=example.com`), a
+    // configuration `webauthn-rs` accepts and browsers report as the
+    // page origin in `clientDataJSON.origin`.
+    #[tokio::test]
+    async fn test_verify_login_assertion_honors_expected_origin_subdomain() {
+        use aws_lc_rs::digest::{SHA256, digest};
+
+        let rp_id = "example.com";
+        let expected_origin = "https://idp.example.com";
+        let challenge: Vec<u8> = b"regression-test-challenge".to_vec();
+
+        // Minimal valid authData: rpIdHash || flags(UP|UV) || counter
+        let rp_id_hash = digest(&SHA256, rp_id.as_bytes());
+        let mut auth_data = Vec::with_capacity(37);
+        auth_data.extend_from_slice(rp_id_hash.as_ref());
+        auth_data.push(0x05); // UP + UV
+        auth_data.extend_from_slice(&[0, 0, 0, 1]); // counter = 1
+
+        let challenge_b64 = URL_SAFE_NO_PAD.encode(&challenge);
+        let client_data_json = serde_json::json!({
+            "type": "webauthn.get",
+            "challenge": challenge_b64,
+            "origin": expected_origin,
+        })
+        .to_string()
+        .into_bytes();
+
+        let params = LoginAssertionParams {
+            authenticator_data: auth_data,
+            client_data_json,
+            signature: vec![0u8; 64],
+            // Bogus 32-byte COSE key — signature verification will fail,
+            // but only AFTER the origin check, which is what we're testing.
+            public_key: vec![0u8; 32],
+            rp_id: rp_id.to_string(),
+            expected_origin: expected_origin.to_string(),
+            challenge,
+            stored_counter: 0,
+        };
+
+        let err = verify_login_assertion(params)
+            .await
+            .err()
+            .expect("expected error — signature is bogus");
+        let description = match &err {
+            ServiceError::OAuth { description, .. } => description.clone(),
+            other => format!("unexpected error variant: {other}"),
+        };
+        assert!(
+            !description.contains("Invalid origin"),
+            "origin must not be rejected for valid subdomain config; got: {description}"
+        );
     }
 }

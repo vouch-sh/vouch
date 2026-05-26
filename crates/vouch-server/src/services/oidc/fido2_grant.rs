@@ -239,6 +239,9 @@ pub(crate) async fn exchange_fido2_assertion(
         signature: signature_bytes,
         public_key: authenticator.public_key.clone(),
         rp_id: challenge_state.rp_id.clone(),
+        // CLI flow: clientDataJSON.origin is `https://{rp_id}` since the
+        // CLI is not a browser and does not have a page origin.
+        expected_origin: format!("https://{}", challenge_state.rp_id),
         challenge: challenge_state.challenge.as_bytes().to_vec(),
         stored_counter,
     })
