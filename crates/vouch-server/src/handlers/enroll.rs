@@ -124,8 +124,9 @@ impl_template_response!(
 ///
 /// `provider` is set on the second POST when the chooser is rendered
 /// (multiple IdPs configured). On the initial POST it is `None` and the
-/// handler either auto-selects the single IdP, falls through to WebAuthn
-/// (no IdPs), or renders the chooser.
+/// handler either auto-selects the single IdP, renders the chooser (multiple
+/// IdPs), or returns a "Not Configured" error (no IdPs — server should have
+/// refused to start).
 #[derive(Debug, Deserialize)]
 pub(crate) struct UserCodeForm {
     user_code: String,
@@ -1501,8 +1502,8 @@ pub(crate) async fn direct_enroll_start(
     // Initiate upstream IdP authentication.
     // If a provider slug was specified, require it to exist — do not fall
     // through. When unspecified, the chooser above has already returned for
-    // the multi-IdP case, so `state.idps.first()` here is either the single
-    // configured IdP or `None` (no IdPs at all).
+    // the multi-IdP case, so `state.idps.first()` here is the single
+    // configured IdP (config validation ensures at least one IdP is present).
     let base_url = state.config().base_url.clone();
     let chosen_idp: Option<&crate::services::idp::ConfiguredIdp> = match provider_choice {
         Some(slug) => match state.idp(slug) {

@@ -204,15 +204,15 @@ VOUCH_SSH_CA_KEY=<base64-encoded-ssh-ca-private-key>
 VOUCH_OIDC_SIGNING_KEY=<base64-encoded-oidc-signing-key>
 
 # -----------------------------------------------------------------------------
-# External Identity Provider (Optional)
-# For enrollment via external IdP (e.g., on-premises OIDC provider)
+# Upstream Identity Provider (Required)
+# At least one IdP must be configured; the server refuses to start without one.
 # -----------------------------------------------------------------------------
 
-# VOUCH_IDPS=internal-oidc
-# VOUCH_IDP_INTERNAL_OIDC_TYPE=oidc
-# VOUCH_IDP_INTERNAL_OIDC_ISSUER=https://idp.internal
-# VOUCH_IDP_INTERNAL_OIDC_CLIENT_ID=vouch-client
-# VOUCH_IDP_INTERNAL_OIDC_CLIENT_SECRET=<client-secret>
+VOUCH_IDPS=internal-oidc
+VOUCH_IDP_INTERNAL_OIDC_TYPE=oidc
+VOUCH_IDP_INTERNAL_OIDC_ISSUER=https://idp.internal
+VOUCH_IDP_INTERNAL_OIDC_CLIENT_ID=vouch-client
+VOUCH_IDP_INTERNAL_OIDC_CLIENT_SECRET=<client-secret>
 
 # -----------------------------------------------------------------------------
 # Session Configuration

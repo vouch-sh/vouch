@@ -29,9 +29,9 @@ IMPORTANT: Before using Vouch, ensure you have configured:
   3. VOUCH_BASE_URL - Public URL where Vouch is accessible
   4. VOUCH_JWT_SECRET - A secure random secret for JWT signing
 
-For OIDC authentication (Google Sign-In), also configure:
-  - VOUCH_OIDC_ISSUER
-  - VOUCH_OIDC_CLIENT_ID
-  - VOUCH_OIDC_CLIENT_SECRET
+An upstream IdP is required (the server refuses to start without one). Configure it with:
+  - VOUCH_IDPS=<slug>
+  - VOUCH_IDP_<SLUG>_TYPE=oidc (or saml)
+  - VOUCH_IDP_<SLUG>_ISSUER, VOUCH_IDP_<SLUG>_CLIENT_ID, VOUCH_IDP_<SLUG>_CLIENT_SECRET (for OIDC)
 
 See https://github.com/vouch-sh/vouch for full documentation.
