@@ -350,6 +350,93 @@ async fn test_rfc7644_patch_user_deactivate() {
     assert_eq!(updated["active"], false);
 }
 
+#[tokio::test]
+async fn test_patch_user_active_string_rejected() {
+    // Regression: PATCH with `"active": "false"` (string, not bool) previously
+    // coerced to `true` via `as_bool().unwrap_or(true)`, silently reactivating
+    // deactivated users. Must return 400 invalidValue per RFC 7643 §2.2.
+    let (app, state) = test_app().await;
+
+    let token = create_test_scim_token(&state.store, "test-patch-string", "test-org").await;
+    let auth_header = format!("Bearer {}", token);
+
+    let (status, body) = http_post_json(
+        &app,
+        "/scim/v2/Users",
+        r#"{"schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"], "userName": "stringactive@example.com", "active": false}"#,
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let created: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let user_id = created["id"].as_str().expect("user id");
+
+    // PATCH with stringified "false" — must be rejected, not silently coerced to true.
+    let (status, body) = http_request(
+        &app,
+        "PATCH",
+        &format!("/scim/v2/Users/{}", user_id),
+        Some(r#"{"schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"], "Operations": [{"op": "replace", "path": "active", "value": "false"}]}"#.to_string()),
+        &[
+            ("Authorization", &auth_header),
+            ("Content-Type", "application/json"),
+        ],
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+    let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(error["scimType"], "invalidValue");
+
+    // Verify the user is still inactive — the bug would have flipped it to active.
+    let (status, body) = http_get(
+        &app,
+        &format!("/scim/v2/Users/{}", user_id),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let after: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(after["active"], false, "user must remain inactive");
+}
+
+#[tokio::test]
+async fn test_patch_user_active_add_op_string_rejected() {
+    // Same regression but exercising the `Add` op path, which had its own
+    // copy of the `unwrap_or(true)` coercion.
+    let (app, state) = test_app().await;
+
+    let token = create_test_scim_token(&state.store, "test-patch-add-string", "test-org").await;
+    let auth_header = format!("Bearer {}", token);
+
+    let (status, body) = http_post_json(
+        &app,
+        "/scim/v2/Users",
+        r#"{"schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"], "userName": "addactive@example.com", "active": false}"#,
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let created: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let user_id = created["id"].as_str().expect("user id");
+
+    let (status, body) = http_request(
+        &app,
+        "PATCH",
+        &format!("/scim/v2/Users/{}", user_id),
+        Some(r#"{"schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"], "Operations": [{"op": "add", "path": "active", "value": "false"}]}"#.to_string()),
+        &[
+            ("Authorization", &auth_header),
+            ("Content-Type", "application/json"),
+        ],
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+    let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(error["scimType"], "invalidValue");
+}
+
 // ========================================================================
 // RFC 7644 Section 3.5.3 - PATCH Unsupported Paths
 // ========================================================================

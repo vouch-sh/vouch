@@ -314,7 +314,19 @@ pub async fn patch_user(
                     match path.as_str() {
                         "active" => {
                             if let Some(val) = &op.value {
-                                let new_active = val.as_bool().unwrap_or(true);
+                                // RFC 7643 §2.2 — `active` is a boolean. Coercing
+                                // non-boolean values (e.g. the string "false") to
+                                // `true` would silently reactivate disabled users.
+                                let Some(new_active) = val.as_bool() else {
+                                    return (
+                                        StatusCode::BAD_REQUEST,
+                                        Json(
+                                            ScimError::new(400, "active must be a boolean")
+                                                .with_type("invalidValue"),
+                                        ),
+                                    )
+                                        .into_response();
+                                };
                                 if active && !new_active {
                                     deactivated = true;
                                 }
@@ -368,7 +380,16 @@ pub async fn patch_user(
                     && path == "active"
                     && let Some(val) = &op.value
                 {
-                    let new_active = val.as_bool().unwrap_or(true);
+                    let Some(new_active) = val.as_bool() else {
+                        return (
+                            StatusCode::BAD_REQUEST,
+                            Json(
+                                ScimError::new(400, "active must be a boolean")
+                                    .with_type("invalidValue"),
+                            ),
+                        )
+                            .into_response();
+                    };
                     if active && !new_active {
                         deactivated = true;
                     }
