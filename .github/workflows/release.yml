@@ -1160,11 +1160,14 @@ jobs:
       - name: Normalize manifest line endings to CRLF
         # Workaround for komac v2.16.0 bug: --release-notes-url value is
         # written with LF instead of CRLF, which fails winget-pkgs validation.
+        # Slurp each file (-0) so we can normalize any line ending (CRLF, CR,
+        # or LF) and append a trailing CRLF if missing — the prior yq step
+        # can drop the trailing newline, which line-mode perl wouldn't add back.
         run: |
           find ./winget-manifests -name '*.yaml' -print0 \
-            | xargs -0 perl -i -pe 's/\r?\n/\r\n/g'
-          if grep -RPLz '\r\n$' ./winget-manifests; then
-            echo "::error::manifests still contain non-CRLF line endings"
+            | xargs -0 perl -i -0pe 's/\r\n|\r|\n/\r\n/g; s/([^\n])\z/$1\r\n/'
+          if grep -RPlz '(?<!\r)\n' ./winget-manifests; then
+            echo "::error::manifests contain bare LF line endings"
             exit 1
           fi
 
