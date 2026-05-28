@@ -6,8 +6,8 @@ use crate::db::{self, GitHubCredentialAuditData};
 use crate::services::error::ServiceError;
 use crate::services::integrations::aws::{AwsError, issue_aws_token};
 use crate::services::integrations::github::{GitHubInstallationId, minimal_git_permissions};
-use crate::services::integrations::kubernetes::{
-    DEFAULT_K8S_AUDIENCE, K8sError, issue_kubernetes_token,
+use crate::services::oidc::federation::{
+    FederationError, FederationTokenParams, issue_federation_token,
 };
 use axum::extract::{OriginalUri, Query};
 use axum::http::Method;
@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use vouch_common::{
     AwsTokenResponse, GitHubStatusResponse, GitHubTokenRequest, GitHubTokenResponse,
-    K8sTokenResponse, SshCaPublicKeyResponse, SshCertificateRequest, SshCertificateResponse,
+    OidcTokenResponse, SshCaPublicKeyResponse, SshCertificateRequest, SshCertificateResponse,
 };
 
 use super::extractors::{ClientInfo, OptionalClientCert};
@@ -435,33 +435,40 @@ pub(crate) async fn get_aws_token(
 }
 
 // ============================================================================
-// Kubernetes Token Endpoint
+// Generic OIDC Federation Token Endpoint
 // ============================================================================
 
-/// Query parameters for the Kubernetes token endpoint.
+/// Query parameters for the generic OIDC federation token endpoint.
 #[derive(Debug, Deserialize)]
-pub(crate) struct K8sTokenQuery {
-    /// OIDC audience (must match `--oidc-client-id` on the API server).
-    /// Defaults to "kubernetes" if not specified.
+pub(crate) struct OidcTokenQuery {
+    /// `aud` claim the relying party will validate against. When omitted,
+    /// the issuer URL is used (self-issued token). Callers exchanging the
+    /// token with an external relying party (Anthropic, OpenAI, a
+    /// Kubernetes API server) should always pass the value that relying
+    /// party expects.
     #[serde(default)]
     pub audience: Option<String>,
 }
 
-/// Get an OIDC ID token for Kubernetes authentication.
+/// Get a generic OIDC ID token for Workload Identity Federation.
 ///
-/// GET /v1/credentials/kubernetes/token?audience=kubernetes
+/// `GET /v1/credentials/oidc/token?audience=<aud>`
 ///
-/// Returns an OIDC ID token that can be used with Kubernetes clusters
-/// configured with the Vouch OIDC provider.
-pub(crate) async fn get_kubernetes_token(
+/// Returns an OIDC ID token (ES256) with the standard claim set
+/// (`iss`/`sub`/`aud`/`email`/`hardware_verified`/...) — no
+/// provider-specific tags. Used by `vouch credential k8s` (audience =
+/// `kubernetes`), `vouch credential anthropic`, and
+/// `vouch credential openai` as the assertion in a downstream
+/// jwt-bearer / token-exchange flow.
+pub(crate) async fn get_oidc_token(
     method: Method,
     uri: OriginalUri,
     headers: HeaderMap,
     jar: CookieJar,
     State(state): State<Arc<AppState>>,
     client_cert: OptionalClientCert,
-    Query(query): Query<K8sTokenQuery>,
-) -> Result<Json<K8sTokenResponse>, ServiceError> {
+    Query(query): Query<OidcTokenQuery>,
+) -> Result<Json<OidcTokenResponse>, ServiceError> {
     let token = extract_resource_token(
         &state,
         &headers,
@@ -495,11 +502,15 @@ pub(crate) async fn get_kubernetes_token(
     }
 
     let user_email = token.email.clone().unwrap_or_else(|| user.email.clone());
+
+    let config = state.config();
+    // Default audience: the issuer itself (self-issued). The handler — not the
+    // service — owns this default, so the choice is visible at the call site.
     let audience = query
         .audience
         .as_deref()
         .filter(|s| !s.is_empty())
-        .unwrap_or(DEFAULT_K8S_AUDIENCE);
+        .unwrap_or(&config.base_url);
 
     // Get authenticator info for AAGUID claim
     let authenticator = if let Some(ref auth_id) = token.authenticator_id {
@@ -530,27 +541,28 @@ pub(crate) async fn get_kubernetes_token(
         None
     };
 
-    let config = state.config();
-    let result = issue_kubernetes_token(
-        &config.base_url,
-        &state.oidc_key,
-        &user_email,
+    let expires_in_secs = config.session_hours.saturating_mul(3600);
+    let result = issue_federation_token(FederationTokenParams {
+        base_url: &config.base_url,
+        oidc_key: &state.oidc_key,
+        user_email: &user_email,
         audience,
-        authenticator.and_then(|a| a.aaguid),
+        hardware_aaguid: authenticator.and_then(|a| a.aaguid),
         hd,
-    )
+        expires_in_secs,
+    })
     .await
     .map_err(|e| match e {
-        K8sError::ClaimsBuild(ref err) => {
-            tracing::error!("Kubernetes token claims build error: {err}");
+        FederationError::ClaimsBuild(ref err) => {
+            tracing::error!("OIDC token claims build error: {err}");
             ServiceError::api(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "claims_error",
                 "Failed to build token claims",
             )
         }
-        K8sError::TokenSign(ref err) => {
-            tracing::error!("Kubernetes token signing error: {err}");
+        FederationError::TokenSign(ref err) => {
+            tracing::error!("OIDC token signing error: {err}");
             ServiceError::api(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "token_error",
@@ -559,17 +571,17 @@ pub(crate) async fn get_kubernetes_token(
         }
     })?;
 
-    crate::infra::metrics::record_credential_issuance("kubernetes");
+    crate::infra::metrics::record_credential_issuance("oidc");
 
     tracing::info!(
-        "Issued Kubernetes OIDC token for {} (audience: {})",
+        "Issued OIDC federation token for {} (audience: {})",
         crate::redact_email(&user_email),
         audience,
     );
 
-    Ok(Json(K8sTokenResponse {
+    Ok(Json(OidcTokenResponse {
         id_token: result.id_token,
-        expires_in: result.expires_in,
+        expires_in: result.expires_in_secs,
     }))
 }
 
@@ -1223,14 +1235,14 @@ mod tests {
     }
 
     // ========================================================================
-    // Kubernetes Token Tests
+    // Generic OIDC Federation Token Tests
     // ========================================================================
 
     #[tokio::test]
-    async fn test_k8s_token_requires_auth() {
+    async fn test_oidc_token_requires_auth() {
         let (app, _state) = test_app().await;
 
-        let (status, body) = http_get(&app, "/v1/credentials/kubernetes/token", &[]).await;
+        let (status, body) = http_get(&app, "/v1/credentials/oidc/token", &[]).await;
 
         assert_eq!(status, StatusCode::UNAUTHORIZED);
         let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
@@ -1238,16 +1250,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_k8s_token_returns_token_for_valid_session() {
+    async fn test_oidc_token_returns_token_for_valid_session() {
         let (app, state) = test_app().await;
 
-        let user = create_test_user(&state.store, "k8suser@example.com").await;
+        let user = create_test_user(&state.store, "oidcuser@example.com").await;
         let auth_id = create_test_authenticator(&state.store, &user.id).await;
         let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
 
         let (status, body) = http_get(
             &app,
-            "/v1/credentials/kubernetes/token",
+            "/v1/credentials/oidc/token",
             &[("Authorization", &format!("Bearer {token}"))],
         )
         .await;
@@ -1255,46 +1267,98 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         let resp: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
         assert!(resp["id_token"].is_string());
+        assert!(resp["expires_in"].is_number());
+    }
+
+    /// When no `audience` query param is supplied, the handler defaults the
+    /// `aud` claim to the issuer URL (self-issued token).
+    #[tokio::test]
+    async fn test_oidc_token_default_audience_is_issuer() {
+        use base64::Engine;
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+
+        let (app, state) = test_app().await;
+
+        let user = create_test_user(&state.store, "oidcdef@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let issuer = state.config().base_url.clone();
+
+        let (status, body) = http_get(
+            &app,
+            "/v1/credentials/oidc/token",
+            &[("Authorization", &format!("Bearer {token}"))],
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        let resp: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+        let id_token = resp["id_token"].as_str().expect("id_token string");
+        let parts: Vec<&str> = id_token.split('.').collect();
+        let claims_bytes = URL_SAFE_NO_PAD.decode(parts[1]).expect("base64 payload");
+        let claims: serde_json::Value = serde_json::from_slice(&claims_bytes).expect("JSON claims");
+        assert_eq!(claims["aud"], issuer);
     }
 
     #[tokio::test]
-    async fn test_k8s_token_default_audience() {
+    async fn test_oidc_token_custom_audience() {
+        use base64::Engine;
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+
         let (app, state) = test_app().await;
 
-        let user = create_test_user(&state.store, "k8saud@example.com").await;
+        let user = create_test_user(&state.store, "oidccustom@example.com").await;
         let auth_id = create_test_authenticator(&state.store, &user.id).await;
         let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
 
         let (status, body) = http_get(
             &app,
-            "/v1/credentials/kubernetes/token",
+            "/v1/credentials/oidc/token?audience=my-cluster",
             &[("Authorization", &format!("Bearer {token}"))],
         )
         .await;
 
         assert_eq!(status, StatusCode::OK);
         let resp: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
-        assert!(resp["id_token"].is_string());
+        let id_token = resp["id_token"].as_str().expect("id_token string");
+        let parts: Vec<&str> = id_token.split('.').collect();
+        let claims_bytes = URL_SAFE_NO_PAD.decode(parts[1]).expect("base64 payload");
+        let claims: serde_json::Value = serde_json::from_slice(&claims_bytes).expect("JSON claims");
+        assert_eq!(claims["aud"], "my-cluster");
     }
 
+    /// The generic OIDC token must NOT carry AWS-namespaced claims. This
+    /// invariant separates federation tokens from AWS tokens.
     #[tokio::test]
-    async fn test_k8s_token_custom_audience() {
+    async fn test_oidc_token_has_no_aws_claims() {
+        use base64::Engine;
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+
         let (app, state) = test_app().await;
 
-        let user = create_test_user(&state.store, "k8scustom@example.com").await;
+        let user = create_test_user(&state.store, "oidcclean@example.com").await;
         let auth_id = create_test_authenticator(&state.store, &user.id).await;
         let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
 
         let (status, body) = http_get(
             &app,
-            "/v1/credentials/kubernetes/token?audience=my-cluster",
+            "/v1/credentials/oidc/token?audience=https://api.anthropic.com",
             &[("Authorization", &format!("Bearer {token}"))],
         )
         .await;
 
         assert_eq!(status, StatusCode::OK);
         let resp: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
-        assert!(resp["id_token"].is_string());
+        let id_token = resp["id_token"].as_str().expect("id_token string");
+        let parts: Vec<&str> = id_token.split('.').collect();
+        let claims_bytes = URL_SAFE_NO_PAD.decode(parts[1]).expect("base64 payload");
+        let claims: serde_json::Value = serde_json::from_slice(&claims_bytes).expect("JSON claims");
+        assert!(claims.get("https://aws.amazon.com/tags").is_none());
+        assert!(
+            claims
+                .get("https://aws.amazon.com/source_identity")
+                .is_none()
+        );
     }
 
     // ========================================================================
@@ -1428,10 +1492,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_deactivated_user_cannot_get_k8s_token() {
+    async fn test_deactivated_user_cannot_get_oidc_token() {
         let (app, state) = test_app().await;
 
-        let user = create_test_user(&state.store, "deactivated-k8s@example.com").await;
+        let user = create_test_user(&state.store, "deactivated-oidc@example.com").await;
         let auth_id = create_test_authenticator(&state.store, &user.id).await;
         let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
 
@@ -1441,7 +1505,7 @@ mod tests {
 
         let (status, body) = http_get(
             &app,
-            "/v1/credentials/kubernetes/token",
+            "/v1/credentials/oidc/token",
             &[("Authorization", &format!("Bearer {token}"))],
         )
         .await;

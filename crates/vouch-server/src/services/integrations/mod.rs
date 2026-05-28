@@ -22,4 +22,3 @@
 
 pub(crate) mod aws;
 pub(crate) mod github;
-pub(crate) mod kubernetes;

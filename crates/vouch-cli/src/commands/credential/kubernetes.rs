@@ -6,14 +6,14 @@
 //!
 //! Protocol:
 //! 1. Check agent cache for a valid token
-//! 2. GET /v1/credentials/kubernetes/token?audience=<aud>
+//! 2. GET /v1/credentials/oidc/token?audience=<aud>
 //! 3. Output as Kubernetes `ExecCredential` JSON
 
 use anyhow::{Context, Result};
 
 use crate::client::VouchClient;
 use crate::commands::credential::cache;
-use vouch_common::K8sTokenResponse;
+use vouch_common::OidcTokenResponse;
 
 /// Run the Kubernetes credential command.
 ///
@@ -36,11 +36,14 @@ pub(crate) async fn run(server: &str, cluster: &str, audience: Option<&str>) -> 
     Ok(())
 }
 
-/// Fetch a Kubernetes OIDC token from the Vouch server.
-async fn fetch_k8s_token(server: &str, audience: &str) -> Result<K8sTokenResponse> {
+/// Fetch a generic OIDC token from the Vouch server scoped to a Kubernetes
+/// audience. Calls the shared `/v1/credentials/oidc/token` endpoint — there
+/// is nothing k8s-specific about the server-side token any more, only the
+/// caller-supplied `audience` value.
+async fn fetch_k8s_token(server: &str, audience: &str) -> Result<OidcTokenResponse> {
     let client = VouchClient::new(server).await?;
     let path = format!(
-        "/v1/credentials/kubernetes/token?audience={}",
+        "/v1/credentials/oidc/token?audience={}",
         urlencoding::encode(audience)
     );
     client
