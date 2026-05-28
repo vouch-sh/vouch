@@ -438,6 +438,16 @@ pub(crate) async fn get_aws_token(
 // Generic OIDC Federation Token Endpoint
 // ============================================================================
 
+/// Default OIDC federation token lifetime when the caller doesn't request
+/// one. Matches the lifetime the legacy `/kubernetes/token` endpoint
+/// produced so the kubectl exec-plugin flow continues to refresh on the
+/// same cadence.
+const DEFAULT_FEDERATION_TTL_SECS: u64 = 3600;
+
+/// Minimum honoured TTL — anything shorter is at risk of being dead on
+/// arrival due to clock skew between the issuer and the relying party.
+const MIN_FEDERATION_TTL_SECS: u64 = 60;
+
 /// Query parameters for the generic OIDC federation token endpoint.
 #[derive(Debug, Deserialize)]
 pub(crate) struct OidcTokenQuery {
@@ -448,6 +458,14 @@ pub(crate) struct OidcTokenQuery {
     /// party expects.
     #[serde(default)]
     pub audience: Option<String>,
+    /// Token lifetime in seconds. Defaults to
+    /// [`DEFAULT_FEDERATION_TTL_SECS`] (1 h). RFC 7523 §3 says JWT-bearer
+    /// assertions MUST limit their lifetime, so single-use callers
+    /// (Anthropic / OpenAI WIF assertions) should request a short value
+    /// (e.g. 300). The server caps the granted TTL at the session
+    /// duration so a token can never outlive the user's session.
+    #[serde(default)]
+    pub ttl_seconds: Option<u64>,
 }
 
 /// Get a generic OIDC ID token for Workload Identity Federation.
@@ -541,7 +559,14 @@ pub(crate) async fn get_oidc_token(
         None
     };
 
-    let expires_in_secs = config.session_hours.saturating_mul(3600);
+    // Clamp the requested lifetime: never exceed the session duration
+    // (the token can't outlive its issuing session), never fall below the
+    // skew-safe minimum, default to `DEFAULT_FEDERATION_TTL_SECS`.
+    let session_cap_secs = config.session_hours.saturating_mul(3600);
+    let expires_in_secs = query
+        .ttl_seconds
+        .unwrap_or(DEFAULT_FEDERATION_TTL_SECS)
+        .clamp(MIN_FEDERATION_TTL_SECS, session_cap_secs);
     let result = issue_federation_token(FederationTokenParams {
         base_url: &config.base_url,
         oidc_key: &state.oidc_key,
@@ -1325,6 +1350,88 @@ mod tests {
         let claims_bytes = URL_SAFE_NO_PAD.decode(parts[1]).expect("base64 payload");
         let claims: serde_json::Value = serde_json::from_slice(&claims_bytes).expect("JSON claims");
         assert_eq!(claims["aud"], "my-cluster");
+    }
+
+    /// The handler honours a caller-supplied `ttl_seconds` query param so
+    /// single-use WIF assertions can request short lifetimes per RFC 7523 §3
+    /// instead of getting the kubeconfig-friendly default.
+    #[tokio::test]
+    async fn test_oidc_token_honours_ttl_seconds() {
+        use base64::Engine;
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+
+        let (app, state) = test_app().await;
+
+        let user = create_test_user(&state.store, "oidcttl@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+
+        let (status, body) = http_get(
+            &app,
+            "/v1/credentials/oidc/token?ttl_seconds=300",
+            &[("Authorization", &format!("Bearer {token}"))],
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        let resp: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+        assert_eq!(resp["expires_in"], 300);
+
+        let id_token = resp["id_token"].as_str().expect("id_token string");
+        let parts: Vec<&str> = id_token.split('.').collect();
+        let claims_bytes = URL_SAFE_NO_PAD.decode(parts[1]).expect("base64 payload");
+        let claims: serde_json::Value = serde_json::from_slice(&claims_bytes).expect("JSON claims");
+        let exp = claims["exp"].as_i64().expect("exp number");
+        let iat = claims["iat"].as_i64().expect("iat number");
+        assert_eq!(exp - iat, 300);
+    }
+
+    /// A federation token can never outlive the user's session. Requesting
+    /// a multi-day TTL is silently clamped to `session_hours * 3600`.
+    #[tokio::test]
+    async fn test_oidc_token_clamps_ttl_to_session_duration() {
+        let (app, state) = test_app().await;
+
+        let user = create_test_user(&state.store, "oidccap@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+
+        let session_cap = state.config().session_hours.saturating_mul(3600);
+
+        let (status, body) = http_get(
+            &app,
+            "/v1/credentials/oidc/token?ttl_seconds=999999",
+            &[("Authorization", &format!("Bearer {token}"))],
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        let resp: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+        assert_eq!(resp["expires_in"].as_u64(), Some(session_cap));
+    }
+
+    /// When the caller omits `ttl_seconds` the default matches the old
+    /// `/v1/credentials/kubernetes/token` lifetime so `vouch credential k8s`
+    /// (which still calls this endpoint without `ttl_seconds`) keeps its
+    /// previous behaviour after the consolidation.
+    #[tokio::test]
+    async fn test_oidc_token_default_ttl_matches_legacy_k8s() {
+        let (app, state) = test_app().await;
+
+        let user = create_test_user(&state.store, "oidcdefttl@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+
+        let (status, body) = http_get(
+            &app,
+            "/v1/credentials/oidc/token",
+            &[("Authorization", &format!("Bearer {token}"))],
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        let resp: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+        assert_eq!(resp["expires_in"], 3600);
     }
 
     /// The generic OIDC token must NOT carry AWS-namespaced claims. This

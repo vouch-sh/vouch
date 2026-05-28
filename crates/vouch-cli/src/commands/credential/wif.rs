@@ -33,6 +33,13 @@ use crate::client::VouchClient;
 /// the token actually expires.
 const REFRESH_MARGIN_SECS: i64 = 60;
 
+/// Lifetime requested for the assertion JWT we fetch from Vouch. RFC 7523
+/// §3 says JWT-bearer assertions MUST limit their lifetime; the assertion
+/// is used immediately (one HTTP round-trip later) and then discarded, so
+/// 5 minutes is generous against clock skew without leaving a long-lived
+/// signed credential in flight.
+const ASSERTION_TTL_SECS: u64 = 300;
+
 /// Response from the Vouch generic OIDC token endpoint.
 ///
 /// Mirrors `vouch_common::OidcTokenResponse`. Held locally so the secret
@@ -55,14 +62,14 @@ impl std::fmt::Debug for VouchOidcTokenResponse {
 /// when `None`, the server defaults to its own issuer URL.
 pub(crate) async fn fetch_assertion(server: &str, audience: Option<&str>) -> Result<SecretString> {
     let client = VouchClient::new(server).await?;
-    let path = match audience.filter(|s| !s.is_empty()) {
-        Some(aud) => {
-            let q = serde_urlencoded::to_string([("audience", aud)])
-                .context("failed to encode audience query parameter")?;
-            format!("/v1/credentials/oidc/token?{q}")
-        }
-        None => "/v1/credentials/oidc/token".to_string(),
+    let ttl = ASSERTION_TTL_SECS.to_string();
+    let query: Vec<(&str, &str)> = match audience.filter(|s| !s.is_empty()) {
+        Some(aud) => vec![("audience", aud), ("ttl_seconds", &ttl)],
+        None => vec![("ttl_seconds", &ttl)],
     };
+    let encoded = serde_urlencoded::to_string(&query)
+        .context("failed to encode oidc-token query parameters")?;
+    let path = format!("/v1/credentials/oidc/token?{encoded}");
     let resp: VouchOidcTokenResponse = client
         .get_authenticated(&path)
         .await
@@ -123,8 +130,15 @@ pub(crate) async fn exchange(
         anyhow::bail!("{label} token exchange failed ({status}): {text}");
     }
 
-    let parsed: ProviderTokenResponse = serde_json::from_str(&text)
-        .with_context(|| format!("invalid {label} token response: {text}"))?;
+    // Deliberately do not include the response body in the error context:
+    // a successful (2xx) response that fails to deserialize almost always
+    // contains the access token itself, and the resulting error message
+    // surfaces on stderr / in the calling helper's logs (Claude Code's
+    // apiKeyHelper, Codex's auth command). The status code + label is
+    // enough to triage.
+    let parsed: ProviderTokenResponse = serde_json::from_str(&text).with_context(|| {
+        format!("invalid {label} token response: expected JSON with access_token and expires_in")
+    })?;
 
     let expiry = cache_expiry(parsed.expires_in);
     Ok((parsed.access_token, expiry))
@@ -161,6 +175,7 @@ pub(crate) fn build_cache_key(provider: &str, id: &str, agent: Option<&str>) -> 
 #[cfg(test)]
 #[expect(
     clippy::unwrap_used,
+    clippy::expect_used,
     reason = "test code: panic on assertion failure is acceptable"
 )]
 mod tests {
@@ -230,5 +245,27 @@ mod tests {
         let a = build_cache_key("openai", "wip_1", Some("claude-code"));
         let b = build_cache_key("openai", "wip_1", Some("cursor"));
         assert_ne!(a, b);
+    }
+
+    /// A 2xx provider response that fails to deserialize almost always
+    /// contains the access token itself (different schema, type mismatch).
+    /// The error context surfaces on stderr / in the calling helper's
+    /// logs, so it must NOT include the response body. Lock that in.
+    #[test]
+    fn test_parse_error_does_not_leak_response_body() {
+        let leaked_token = "sk-ant-oat01-LEAKED-SECRET";
+        let bad_body =
+            format!("{{\"access_token\": \"{leaked_token}\", \"expires_in\": \"oops\"}}");
+        let parsed: Result<ProviderTokenResponse, _> = serde_json::from_str(&bad_body);
+        let err = parsed.expect_err("expires_in is a string, not a u64");
+        let context = format!(
+            "invalid {} token response: expected JSON with access_token and expires_in",
+            "Anthropic"
+        );
+        // The error message we'd actually surface (context + serde error)
+        // must not contain the access token. The serde error itself
+        // mentions which field failed, not the token value.
+        let full = format!("{context}: {err}");
+        assert!(!full.contains(leaked_token), "error leaked token: {full}");
     }
 }
