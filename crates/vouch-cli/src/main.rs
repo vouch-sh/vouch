@@ -646,6 +646,8 @@ async fn run() -> Result<()> {
                 )
                 .await
             }
+            CredentialCommands::Anthropic {} => commands::credential::anthropic::run(server).await,
+            CredentialCommands::Openai {} => commands::credential::openai::run(server).await,
             CredentialCommands::Token {} => commands::credential::token::run().await,
             CredentialCommands::Codeartifact {
                 domain,
@@ -740,6 +742,42 @@ async fn run() -> Result<()> {
             } => {
                 commands::setup::codecommit::run(region.as_deref(), profile.as_deref(), configure)
                     .await
+            }
+            SetupCommands::Anthropic {
+                federation_rule_id,
+                organization_id,
+                service_account_id,
+                workspace_id,
+                audience,
+                token_endpoint,
+                force,
+            } => {
+                commands::setup::anthropic::run(commands::setup::anthropic::SetupArgs {
+                    federation_rule_id: &federation_rule_id,
+                    organization_id: &organization_id,
+                    service_account_id: &service_account_id,
+                    workspace_id: &workspace_id,
+                    audience: audience.as_deref(),
+                    token_endpoint: token_endpoint.as_deref(),
+                    force,
+                })
+                .await
+            }
+            SetupCommands::Openai {
+                identity_provider_id,
+                service_account_id,
+                audience,
+                token_endpoint,
+                force,
+            } => {
+                commands::setup::openai::run(commands::setup::openai::SetupArgs {
+                    identity_provider_id: &identity_provider_id,
+                    service_account_id: &service_account_id,
+                    audience: audience.as_deref(),
+                    token_endpoint: token_endpoint.as_deref(),
+                    force,
+                })
+                .await
             }
             SetupCommands::Codeartifact {
                 tool,
