@@ -170,7 +170,27 @@ pub(crate) async fn run(server: &str, quiet: bool, json: bool) -> Result<()> {
     }
     checks.push(ssm_result);
 
-    // Check 8: Server URL security
+    // Check 8: Claude federation
+    if !suppress {
+        print!("Claude federation ... ");
+    }
+    let anthropic_result = check_anthropic_config();
+    if !suppress {
+        print_result(&anthropic_result);
+    }
+    checks.push(anthropic_result);
+
+    // Check 9: OpenAI federation
+    if !suppress {
+        print!("OpenAI federation ... ");
+    }
+    let openai_result = check_openai_config();
+    if !suppress {
+        print_result(&openai_result);
+    }
+    checks.push(openai_result);
+
+    // Check 10: Server URL security
     if !suppress {
         print!("Server URL security ... ");
     }
@@ -566,6 +586,100 @@ fn check_ssm_config() -> CheckResult {
         (false, false) => CheckResult::pass(
             "ssm",
             "SSM not configured (session-manager-plugin not found)",
+        ),
+    }
+}
+
+/// Check Anthropic (Claude) federation configuration.
+///
+/// Federation that's persisted in `~/.vouch/config.json` but not wired
+/// into Claude Code's `apiKeyHelper` is a real misconfiguration —
+/// `vouch credential anthropic` works in isolation but Claude Code
+/// would never invoke it. That asymmetry warrants a fail, not just a
+/// hint. The "neither configured" case is a normal pass: not every
+/// install uses Claude federation.
+fn check_anthropic_config() -> CheckResult {
+    use crate::integrations::anthropic::{ClaudeCodeHelperState, claude_code_helper_state};
+
+    let config = match Config::load() {
+        Ok(c) => c,
+        Err(_) => {
+            return CheckResult::pass("anthropic", "Claude federation not configured");
+        }
+    };
+    let vouch_configured = config.ai().and_then(|ai| ai.anthropic.as_ref()).is_some();
+    let helper = claude_code_helper_state();
+
+    match (vouch_configured, helper) {
+        (false, ClaudeCodeHelperState::Missing | ClaudeCodeHelperState::Other(_)) => {
+            CheckResult::pass(
+                "anthropic",
+                "Claude federation not configured. Run: vouch setup anthropic",
+            )
+        }
+        (true, ClaudeCodeHelperState::Vouch) => {
+            CheckResult::pass("anthropic", "Claude federation configured")
+        }
+        (true, ClaudeCodeHelperState::Missing) => CheckResult::fail(
+            "anthropic",
+            "Vouch federation configured but Claude Code apiKeyHelper is missing. \
+             Run: vouch setup anthropic",
+        ),
+        (true, ClaudeCodeHelperState::Other(cmd)) => CheckResult::fail(
+            "anthropic",
+            format!(
+                "Vouch federation configured but Claude Code apiKeyHelper points elsewhere: \
+                 {cmd}. Run: vouch setup anthropic --force"
+            ),
+        ),
+        (false, ClaudeCodeHelperState::Vouch) => CheckResult::fail(
+            "anthropic",
+            "Claude Code apiKeyHelper points at vouch but no Anthropic federation is \
+             configured. Run: vouch setup anthropic",
+        ),
+    }
+}
+
+/// Check OpenAI federation configuration.
+///
+/// Same fail-on-asymmetry rationale as Claude. Cross-check Vouch
+/// federation params against Codex's top-level `model_provider`.
+fn check_openai_config() -> CheckResult {
+    use crate::integrations::openai::{CodexProviderState, codex_provider_state};
+
+    let config = match Config::load() {
+        Ok(c) => c,
+        Err(_) => {
+            return CheckResult::pass("openai", "OpenAI federation not configured");
+        }
+    };
+    let vouch_configured = config.ai().and_then(|ai| ai.openai.as_ref()).is_some();
+    let provider = codex_provider_state();
+
+    match (vouch_configured, provider) {
+        (false, CodexProviderState::Missing | CodexProviderState::Other(_)) => CheckResult::pass(
+            "openai",
+            "OpenAI federation not configured. Run: vouch setup openai",
+        ),
+        (true, CodexProviderState::Vouch) => {
+            CheckResult::pass("openai", "OpenAI federation configured")
+        }
+        (true, CodexProviderState::Missing) => CheckResult::fail(
+            "openai",
+            "Vouch federation configured but Codex model_provider is not set. \
+             Run: vouch setup openai",
+        ),
+        (true, CodexProviderState::Other(name)) => CheckResult::fail(
+            "openai",
+            format!(
+                "Vouch federation configured but Codex model_provider = {name:?}. \
+                 Run: vouch setup openai --force"
+            ),
+        ),
+        (false, CodexProviderState::Vouch) => CheckResult::fail(
+            "openai",
+            "Codex model_provider = \"vouch\" but no OpenAI federation is configured. \
+             Run: vouch setup openai",
         ),
     }
 }
