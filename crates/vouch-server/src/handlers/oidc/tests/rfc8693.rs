@@ -1138,3 +1138,102 @@ async fn test_rfc8693_id_token_deactivated_user_rejected() {
     let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
     assert_eq!(error["error"], "invalid_grant");
 }
+
+#[tokio::test]
+async fn test_rfc8693_id_token_rejects_non_hardware_verified_subject() {
+    // A non-hardware-verified subject token (e.g., an enrollment bootstrap
+    // session created after upstream SSO but before FIDO2 registration) must
+    // not be exchangeable for an ID token. The ID-token claim set hardcodes
+    // `hardware_verified: true`, so allowing this exchange would launder a
+    // pre-FIDO2 session into a federation assertion that downstream relying
+    // parties trust as hardware-attested.
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "wif-bootstrap@example.com").await;
+    let token =
+        crate::test_utils::create_test_bootstrap_session(&state, &user.id, &user.email).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+    let auth_header = client.basic_auth_header();
+
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        &format!(
+            "grant_type=urn:ietf:params:oauth:grant-type:token-exchange\
+             &subject_token={token}\
+             &subject_token_type=urn:ietf:params:oauth:token-type:access_token\
+             &requested_token_type={ID_TOKEN_TYPE}"
+        ),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(error["error"], "access_denied");
+
+    // Regression guard: the same subject token must still work for an
+    // access-token exchange. The hardware gate is specific to ID-token
+    // requests; access-token exchange preserves the original
+    // `hardware_verified: false` claim (no laundering possible).
+    let (status_at, body_at) = http_post_form(
+        &app,
+        "/oauth/token",
+        &format!(
+            "grant_type=urn:ietf:params:oauth:grant-type:token-exchange\
+             &subject_token={token}\
+             &subject_token_type=urn:ietf:params:oauth:token-type:access_token\
+             &requested_token_type=urn:ietf:params:oauth:token-type:access_token"
+        ),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    assert_eq!(
+        status_at,
+        StatusCode::OK,
+        "access-token exchange must remain available for non-hardware subjects: {body_at}"
+    );
+}
+
+#[tokio::test]
+async fn test_rfc8693_id_token_rejects_actor_token() {
+    // The ID-token claim set has no `act` field, so honoring `actor_token`
+    // for an ID-token request would silently drop the delegation chain.
+    // Refuse the combination explicitly. The access-token path (without
+    // `requested_token_type`) continues to honor `actor_token` as tested by
+    // `test_rfc8693_actor_token_delegation_chain`.
+    let (app, state) = test_app().await;
+
+    let grantor = create_test_user(&state.store, "id-grantor@example.com").await;
+    let grantor_auth = create_test_authenticator(&state.store, &grantor.id).await;
+    let client = create_test_oauth_client(&state.store, &grantor.id).await;
+
+    let grantee = create_test_user(&state.store, "id-grantee@example.com").await;
+    let grantee_auth = create_test_authenticator(&state.store, &grantee.id).await;
+
+    let (grantor_token, _) =
+        issue_oauth_access_token(&app, &state, &grantor, &grantor_auth, &client).await;
+    let (grantee_token, _) =
+        issue_oauth_access_token(&app, &state, &grantee, &grantee_auth, &client).await;
+
+    let auth_header = client.basic_auth_header();
+
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        &format!(
+            "grant_type=urn:ietf:params:oauth:grant-type:token-exchange\
+             &subject_token={grantor_token}\
+             &subject_token_type=urn:ietf:params:oauth:token-type:access_token\
+             &actor_token={grantee_token}\
+             &actor_token_type=urn:ietf:params:oauth:token-type:access_token\
+             &requested_token_type={ID_TOKEN_TYPE}"
+        ),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(error["error"], "invalid_request");
+}

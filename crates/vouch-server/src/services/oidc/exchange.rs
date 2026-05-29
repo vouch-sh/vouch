@@ -128,6 +128,17 @@ pub(crate) async fn exchange_token(
         ));
     }
 
+    // Reject `actor_token` with `requested_token_type=id_token`. The ID-token
+    // path issues a clean OIDC claim set and does not carry the `act` claim,
+    // so honoring `actor_token` here would silently drop the delegation chain.
+    // Refuse the combination explicitly rather than ignore the input.
+    if params.requested_token_type == Some(token_types::ID_TOKEN) && params.actor_token.is_some() {
+        return Err(ServiceError::oauth(
+            OAuthErrorCode::InvalidRequest,
+            "actor_token is not supported with requested_token_type=id_token",
+        ));
+    }
+
     // Decode and validate the subject token (supports both HS256 and ES256)
     let config = state.config();
     let subject_decoded = decode_token(params.subject_token, &state.oidc_key, &config.base_url)
@@ -331,7 +342,20 @@ pub(crate) async fn exchange_token(
     // standard OIDC claim set, is never persisted as a session, and is
     // short-lived. `expires_in` is already capped by the subject token's
     // remaining TTL and any delegation policy at this point.
+    //
+    // The issued ID token claims `hardware_verified: true` unconditionally
+    // (see `OidcIdTokenClaimsBuilder::build`). To prevent a non-hardware
+    // subject token (e.g., an enrollment bootstrap session created after
+    // upstream SSO but before FIDO2 registration) from minting a WIF
+    // assertion that downstream relying parties trust as hardware-attested,
+    // gate the fork on the subject token's hardware verification level.
     if params.requested_token_type == Some(token_types::ID_TOKEN) {
+        if !subject_decoded.hardware_verification().hardware_verified() {
+            return Err(ServiceError::oauth(
+                OAuthErrorCode::AccessDenied,
+                "ID token exchange requires a hardware-verified subject token",
+            ));
+        }
         return issue_id_token(
             state,
             IdTokenContext {
