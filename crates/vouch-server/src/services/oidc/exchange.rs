@@ -341,7 +341,10 @@ pub(crate) async fn exchange_token(
     // instead of an RFC 9068 access token. The ID token carries only the
     // standard OIDC claim set, is never persisted as a session, and is
     // short-lived. `expires_in` is already capped by the subject token's
-    // remaining TTL and any delegation policy at this point.
+    // remaining TTL and any delegation policy at this point; `issue_id_token`
+    // additionally caps it at `DEFAULT_ID_TOKEN_EXPIRES_SECS` (600s), so the
+    // value passed in is an upper bound that the federation ceiling will
+    // tighten further if needed — never bypassable.
     //
     // The issued ID token claims `hardware_verified: true` unconditionally
     // (see `OidcIdTokenClaimsBuilder::build`). To prevent a non-hardware
@@ -514,16 +517,15 @@ async fn issue_id_token(
     let audience = ctx.audience.unwrap_or(&config.base_url);
     let expires_in = ctx.expires_in.min(DEFAULT_ID_TOKEN_EXPIRES_SECS);
 
-    // hardware_aaguid from the session's authenticator (best-effort: a missing
-    // authenticator record simply omits the claim).
+    // hardware_aaguid from the session's authenticator. Fail closed on DB
+    // error: a transient lookup failure must not silently downgrade the
+    // issued claim set. A stale `Ok(None)` (authenticator deleted after
+    // session creation) is still tolerated — the claim is simply omitted.
     let hardware_aaguid = if let Some(auth_id) = ctx.authenticator_id {
-        match db::get_authenticator_by_id(&state.store, auth_id).await {
-            Ok(auth) => auth.and_then(|a| a.aaguid),
-            Err(e) => {
-                tracing::warn!("Failed to get authenticator {auth_id}: {e}");
-                None
-            }
-        }
+        db::get_authenticator_by_id(&state.store, auth_id)
+            .await
+            .map_err(|e| ServiceError::Internal(format!("Database error: {e}")))?
+            .and_then(|a| a.aaguid)
     } else {
         None
     };
