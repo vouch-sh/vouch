@@ -38,7 +38,6 @@
 //! - [`token`] - Token endpoint logic (auth code, device code grants)
 //! - [`client_credentials`] - Client credentials grant (RFC 6749 Section 4.4)
 //! - [`exchange`] - Token exchange (RFC 8693)
-//! - [`federation`] - Generic OIDC ID token issuance for external relying parties
 //! - [`jwt_bearer`] - JWT client authentication and bearer grants (RFC 7523)
 //! - [`jar`] - JWT-Secured Authorization Request validation (RFC 9101)
 //! - [`amr`] - Authentication method references (RFC 8176)
@@ -59,7 +58,6 @@ pub mod discovery;
 pub mod dpop;
 pub mod exchange;
 pub mod fapi;
-pub(crate) mod federation;
 pub mod fido2_grant;
 pub mod introspection;
 pub mod jar;

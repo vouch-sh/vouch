@@ -40,7 +40,7 @@ async fn get_token(server: &str) -> Result<SecretString> {
     let server = server.to_string();
 
     let data = super::cache::get_or_fetch(&cache_key, "OpenAI token", || async move {
-        let assertion = super::wif::fetch_assertion(&server, audience.as_deref()).await?;
+        let (assertion, _) = super::wif::fetch_assertion(&server, audience.as_deref()).await?;
         let body = serde_json::json!({
             "grant_type": "urn:ietf:params:oauth:grant-type:token-exchange",
             "subject_token_type": "urn:ietf:params:oauth:token-type:jwt",

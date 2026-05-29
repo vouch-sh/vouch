@@ -4,10 +4,13 @@
 //! Both `vouch credential anthropic` and `vouch credential openai` follow
 //! the same two-step exchange:
 //!
-//! 1. Fetch a clean OIDC ID token from `GET /v1/credentials/oidc/token` on
-//!    the Vouch server (the *assertion*). This call uses DPoP-authenticated
-//!    `VouchClient` and is non-interactive — `resolve_token()` only reads
-//!    the existing session, never triggers FIDO2.
+//! 1. Fetch a clean OIDC ID token from the Vouch server (the *assertion*)
+//!    via the standard RFC 8693 token exchange at `POST /oauth/token`
+//!    (`requested_token_type=id_token`). The subject token is the existing
+//!    session token, so this is non-interactive — `resolve_token()` only
+//!    reads the current session and never triggers FIDO2. Client
+//!    authentication uses the FAPI `private_key_jwt` assertion and the
+//!    request carries a DPoP proof (the CLI client is DPoP-bound).
 //! 2. POST the assertion to the provider's token endpoint (Anthropic's
 //!    RFC 7523 jwt-bearer or OpenAI's RFC 8693 token-exchange grant) and
 //!    receive a short-lived provider token.
@@ -23,58 +26,201 @@
 //! [`super::cache::get_or_fetch`]: super::cache::get_or_fetch
 
 use anyhow::{Context, Result};
-use secrecy::SecretString;
+use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
 
-use crate::client::VouchClient;
+use crate::config::Config;
+use crate::session::resolve_token;
+use vouch_cli::fapi::key_store::load_client_key;
+use vouch_cli::fapi::{ClientAssertionBuilder, ClientKey, DpopProofBuilder};
 
 /// Number of seconds shaved off the provider's stated `expires_in` when
 /// computing the cache expiry — gives callers a window to refresh before
 /// the token actually expires.
 const REFRESH_MARGIN_SECS: i64 = 60;
 
-/// Lifetime requested for the assertion JWT we fetch from Vouch. RFC 7523
-/// §3 says JWT-bearer assertions MUST limit their lifetime; the assertion
-/// is used immediately (one HTTP round-trip later) and then discarded, so
-/// 5 minutes is generous against clock skew without leaving a long-lived
-/// signed credential in flight.
-const ASSERTION_TTL_SECS: u64 = 300;
+/// RFC 8693 grant type for OAuth 2.0 token exchange.
+const GRANT_TYPE_TOKEN_EXCHANGE: &str = "urn:ietf:params:oauth:grant-type:token-exchange";
+/// RFC 8693 token type URN for an access token (the subject token).
+const TOKEN_TYPE_ACCESS_TOKEN: &str = "urn:ietf:params:oauth:token-type:access_token";
+/// RFC 8693 token type URN for an ID token (the requested token).
+const TOKEN_TYPE_ID_TOKEN: &str = "urn:ietf:params:oauth:token-type:id_token";
 
-/// Response from the Vouch generic OIDC token endpoint.
-///
-/// Mirrors `vouch_common::OidcTokenResponse`. Held locally so the secret
-/// can be wrapped in `SecretString` rather than `String`.
+/// Subset of the RFC 8693 token-exchange response we consume. Per RFC 8693
+/// §2.2.1 the issued security token — an OIDC ID token here — is always
+/// returned in `access_token`, regardless of `issued_token_type`.
 #[derive(Deserialize)]
-struct VouchOidcTokenResponse {
-    id_token: SecretString,
+struct VouchTokenExchangeResponse {
+    access_token: SecretString,
+    #[serde(default)]
+    expires_in: Option<u64>,
 }
 
-impl std::fmt::Debug for VouchOidcTokenResponse {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("VouchOidcTokenResponse")
-            .field("id_token", &"[REDACTED]")
-            .finish()
-    }
+/// Inputs for a single token-exchange request attempt.
+struct ExchangeRequest<'a> {
+    /// Vouch server base URL (also the `private_key_jwt` audience).
+    server: &'a str,
+    /// OAuth client_id of the CLI's registered client.
+    client_id: &'a str,
+    /// FAPI signing key, for both the client assertion and the DPoP proof.
+    key: &'a ClientKey,
+    /// The existing session token, used as the RFC 8693 subject token.
+    subject_token: &'a SecretString,
+    /// Requested `aud` claim; omitted when `None`/empty (server self-issues).
+    audience: Option<&'a str>,
+    /// DPoP nonce supplied by the server on a `use_dpop_nonce` retry.
+    nonce: Option<&'a str>,
+}
+
+/// Outcome of a single token-exchange attempt.
+enum ExchangeOutcome {
+    /// Issued ID token plus its `expires_in` (seconds), when reported.
+    Success(SecretString, Option<u64>),
+    /// The server demanded a DPoP nonce (RFC 9449); retry with this value.
+    NeedNonce(String),
 }
 
 /// Fetch a generic OIDC ID token from the Vouch server to use as the WIF
-/// assertion. `audience`, when set, is requested as the token's `aud` claim;
-/// when `None`, the server defaults to its own issuer URL.
-pub(crate) async fn fetch_assertion(server: &str, audience: Option<&str>) -> Result<SecretString> {
-    let client = VouchClient::new(server).await?;
-    let ttl = ASSERTION_TTL_SECS.to_string();
-    let query: Vec<(&str, &str)> = match audience.filter(|s| !s.is_empty()) {
-        Some(aud) => vec![("audience", aud), ("ttl_seconds", &ttl)],
-        None => vec![("ttl_seconds", &ttl)],
+/// assertion, via the RFC 8693 token exchange at `POST /oauth/token`.
+///
+/// `audience`, when set, is requested as the token's `aud` claim; when
+/// `None`, the server defaults to its own issuer URL. Returns the issued ID
+/// token paired with its `expires_in` (seconds), when the server reports one.
+pub(crate) async fn fetch_assertion(
+    server: &str,
+    audience: Option<&str>,
+) -> Result<(SecretString, Option<u64>)> {
+    let config = Config::load().context("failed to load Vouch config")?;
+    let client_id = config
+        .client_id()
+        .context("no OAuth client registered — run 'vouch login' first")?;
+    let key = load_client_key().context("no FAPI client key found — run 'vouch login' first")?;
+    let subject_token = resolve_token().await?;
+
+    let endpoint = format!("{server}/oauth/token");
+    let http =
+        vouch_common::http::credential_client(&format!("vouch-cli/{}", env!("CARGO_PKG_VERSION")))
+            .context("failed to create HTTP client")?;
+
+    // First attempt without a nonce. A DPoP-bound client at the token
+    // endpoint always gets `use_dpop_nonce` on the first try (RFC 9449),
+    // so retry once with the server-provided nonce.
+    let first = send_exchange(
+        &http,
+        &endpoint,
+        ExchangeRequest {
+            server,
+            client_id,
+            key: &key,
+            subject_token: &subject_token,
+            audience,
+            nonce: None,
+        },
+    )
+    .await?;
+    let nonce = match first {
+        ExchangeOutcome::Success(token, expires_in) => return Ok((token, expires_in)),
+        ExchangeOutcome::NeedNonce(nonce) => nonce,
     };
-    let encoded = serde_urlencoded::to_string(&query)
-        .context("failed to encode oidc-token query parameters")?;
-    let path = format!("/v1/credentials/oidc/token?{encoded}");
-    let resp: VouchOidcTokenResponse = client
-        .get_authenticated(&path)
+
+    match send_exchange(
+        &http,
+        &endpoint,
+        ExchangeRequest {
+            server,
+            client_id,
+            key: &key,
+            subject_token: &subject_token,
+            audience,
+            nonce: Some(&nonce),
+        },
+    )
+    .await?
+    {
+        ExchangeOutcome::Success(token, expires_in) => Ok((token, expires_in)),
+        ExchangeOutcome::NeedNonce(_) => {
+            anyhow::bail!("Vouch token endpoint repeatedly demanded a DPoP nonce")
+        }
+    }
+}
+
+/// Encode the form body for one token-exchange request, including a fresh
+/// `private_key_jwt` client assertion.
+fn build_exchange_form(req: &ExchangeRequest<'_>) -> Result<String> {
+    let assertion = ClientAssertionBuilder::new(req.client_id, req.server)
+        .build(req.key)
+        .context("failed to build client assertion")?;
+    let subject_token = req.subject_token.expose_secret();
+    let mut form: Vec<(&str, &str)> = vec![
+        ("grant_type", GRANT_TYPE_TOKEN_EXCHANGE),
+        ("subject_token", subject_token),
+        ("subject_token_type", TOKEN_TYPE_ACCESS_TOKEN),
+        ("requested_token_type", TOKEN_TYPE_ID_TOKEN),
+        ("client_id", req.client_id),
+        ("client_assertion_type", assertion.assertion_type),
+        ("client_assertion", &assertion.assertion),
+    ];
+    if let Some(aud) = req.audience.filter(|s| !s.is_empty()) {
+        form.push(("audience", aud));
+    }
+    serde_urlencoded::to_string(&form).context("failed to encode token-exchange request")
+}
+
+/// Send one token-exchange request and classify the response.
+async fn send_exchange(
+    http: &reqwest::Client,
+    endpoint: &str,
+    req: ExchangeRequest<'_>,
+) -> Result<ExchangeOutcome> {
+    let body = build_exchange_form(&req)?;
+    let mut dpop_builder = DpopProofBuilder::new("POST", endpoint);
+    if let Some(nonce) = req.nonce {
+        dpop_builder = dpop_builder.nonce(nonce);
+    }
+    let dpop_proof = dpop_builder
+        .build(req.key)
+        .context("failed to build DPoP proof for token request")?;
+
+    let response = http
+        .post(endpoint)
+        .header("content-type", "application/x-www-form-urlencoded")
+        .header("DPoP", dpop_proof)
+        .body(body)
+        .send()
         .await
-        .context("failed to fetch federation assertion from Vouch server")?;
-    Ok(resp.id_token)
+        .with_context(|| format!("failed to reach Vouch token endpoint at {endpoint}"))?;
+
+    let status = response.status();
+    let nonce = response
+        .headers()
+        .get("dpop-nonce")
+        .and_then(|v| v.to_str().ok())
+        .map(String::from);
+    let text = response
+        .text()
+        .await
+        .context("failed to read Vouch token-exchange response body")?;
+
+    if status.is_success() {
+        // A 2xx response that fails to deserialize almost certainly contains
+        // the ID token itself; never echo the body into the error message.
+        let parsed: VouchTokenExchangeResponse = serde_json::from_str(&text)
+            .context("invalid token-exchange response from Vouch server: expected access_token")?;
+        return Ok(ExchangeOutcome::Success(
+            parsed.access_token,
+            parsed.expires_in,
+        ));
+    }
+
+    // RFC 9449: a `use_dpop_nonce` error carries a fresh nonce to retry with.
+    if let Ok(err) = serde_json::from_str::<vouch_common::OAuthError>(&text)
+        && err.error == "use_dpop_nonce"
+        && let Some(nonce) = nonce
+    {
+        return Ok(ExchangeOutcome::NeedNonce(nonce));
+    }
+
+    anyhow::bail!("Vouch token exchange failed ({status}): {text}");
 }
 
 /// Standard OAuth 2.0 token response from a provider's token endpoint

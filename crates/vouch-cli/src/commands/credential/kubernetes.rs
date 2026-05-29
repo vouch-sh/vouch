@@ -6,14 +6,17 @@
 //!
 //! Protocol:
 //! 1. Check agent cache for a valid token
-//! 2. GET /v1/credentials/oidc/token?audience=<aud>
+//! 2. RFC 8693 token exchange at POST /oauth/token (audience = <aud>)
 //! 3. Output as Kubernetes `ExecCredential` JSON
 
 use anyhow::{Context, Result};
+use secrecy::ExposeSecret;
 
-use crate::client::VouchClient;
 use crate::commands::credential::cache;
-use vouch_common::OidcTokenResponse;
+
+/// Default lifetime (seconds) for the ExecCredential when the server does
+/// not report an `expires_in` for the issued ID token.
+const DEFAULT_EXEC_TTL_SECS: u64 = 600;
 
 /// Run the Kubernetes credential command.
 ///
@@ -24,9 +27,9 @@ pub(crate) async fn run(server: &str, cluster: &str, audience: Option<&str>) -> 
     let cache_key = format!("k8s:{cluster}:{aud}");
 
     let data = cache::get_or_fetch(&cache_key, "Kubernetes token", || async {
-        let token = fetch_k8s_token(server, aud).await?;
-        let expires_at = expiration_rfc3339(token.expires_in)?;
-        let exec_cred = build_exec_credential(&token.id_token, &expires_at)?;
+        let (id_token, expires_in) = super::wif::fetch_assertion(server, Some(aud)).await?;
+        let expires_at = expiration_rfc3339(expires_in.unwrap_or(DEFAULT_EXEC_TTL_SECS))?;
+        let exec_cred = build_exec_credential(id_token.expose_secret(), &expires_at)?;
         Ok((exec_cred, expires_at))
     })
     .await?;
@@ -34,22 +37,6 @@ pub(crate) async fn run(server: &str, cluster: &str, audience: Option<&str>) -> 
     let json = serde_json::to_string(&data).context("failed to serialize ExecCredential")?;
     println!("{json}");
     Ok(())
-}
-
-/// Fetch a generic OIDC token from the Vouch server scoped to a Kubernetes
-/// audience. Calls the shared `/v1/credentials/oidc/token` endpoint — there
-/// is nothing k8s-specific about the server-side token any more, only the
-/// caller-supplied `audience` value.
-async fn fetch_k8s_token(server: &str, audience: &str) -> Result<OidcTokenResponse> {
-    let client = VouchClient::new(server).await?;
-    let path = format!(
-        "/v1/credentials/oidc/token?audience={}",
-        urlencoding::encode(audience)
-    );
-    client
-        .get_authenticated(&path)
-        .await
-        .context("failed to fetch Kubernetes token from Vouch server")
 }
 
 /// Build the Kubernetes `ExecCredential` JSON value.
