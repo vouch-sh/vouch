@@ -537,28 +537,6 @@ impl DocumentType for TokenExchangeDoc {
     }
 }
 
-/// A delegation policy for token exchange.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DelegationPolicyDoc {
-    pub name: String,
-    pub grantor_pattern: String,
-    pub grantee_pattern: String,
-    pub allowed_scopes: Option<String>,
-    pub max_ttl_seconds: Option<i32>,
-    pub enabled: bool,
-}
-
-impl DocumentType for DelegationPolicyDoc {
-    const DOC_TYPE: &'static str = "delegation_policy";
-
-    fn index_entries(&self) -> Vec<IndexEntry> {
-        vec![IndexEntry {
-            field: "enabled",
-            value: self.enabled.to_string(),
-        }]
-    }
-}
-
 #[cfg(test)]
 #[expect(
     clippy::unwrap_used,
