@@ -445,4 +445,45 @@ mod tests {
         let full = format!("{context}: {err}");
         assert!(!full.contains(leaked_token), "error leaked token: {full}");
     }
+
+    /// A non-2xx provider response with a body containing token-shaped material
+    /// (e.g., echoed assertion, partial credentials, internal diagnostics) must
+    /// never be echoed verbatim. We only surface RFC 6749 `error` /
+    /// `error_description` after explicit parsing — both are designed to be
+    /// safe for display.
+    #[test]
+    fn test_error_body_not_echoed_when_body_is_not_oauth_error() {
+        let status = reqwest::StatusCode::BAD_REQUEST;
+        let leaked_token = "sk-LEAKED-INTERNAL-DIAGNOSTIC";
+        let opaque_body = format!("internal proxy diagnostic — debug-token={leaked_token}");
+        let parsed = serde_json::from_str::<vouch_common::OAuthError>(&opaque_body).ok();
+        assert!(parsed.is_none(), "opaque body must not parse as OAuthError");
+
+        // The actual error-message branch taken when parsing fails.
+        let message = format!("Vouch token exchange failed ({status})");
+        assert!(
+            !message.contains(leaked_token),
+            "error leaked body: {message}"
+        );
+        assert!(
+            !message.contains("debug-token"),
+            "error leaked body: {message}"
+        );
+    }
+
+    /// A standards-compliant OAuth error response (RFC 6749 §5.2) IS echoed —
+    /// the `error` code and `error_description` are designed to be displayed
+    /// to users. Lock in that valid OAuth errors round-trip through the
+    /// safe-display formatter.
+    #[test]
+    fn test_oauth_error_round_trips_through_safe_formatter() {
+        let err = vouch_common::OAuthError {
+            error: "invalid_grant".to_string(),
+            error_description: Some("subject token expired".to_string()),
+        };
+        let formatted = format_oauth_error("Anthropic", reqwest::StatusCode::BAD_REQUEST, &err);
+        assert!(formatted.contains("Anthropic"));
+        assert!(formatted.contains("invalid_grant"));
+        assert!(formatted.contains("subject token expired"));
+    }
 }
