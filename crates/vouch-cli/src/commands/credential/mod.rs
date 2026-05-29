@@ -3,6 +3,7 @@
 
 use clap::Subcommand;
 
+pub(crate) mod anthropic;
 pub(crate) mod aws;
 pub(crate) mod cache;
 pub(crate) mod cargo;
@@ -13,12 +14,14 @@ pub(crate) mod eks;
 pub(crate) mod git_protocol;
 pub(crate) mod github;
 pub(crate) mod kubernetes;
+pub(crate) mod openai;
 pub(crate) mod pip;
 pub(crate) mod rds;
 pub(crate) mod redshift;
 
 pub(crate) mod ssh;
 pub(crate) mod token;
+pub(crate) mod wif;
 
 /// Credential subcommands.
 #[derive(Subcommand)]
@@ -176,6 +179,23 @@ pub(crate) enum CredentialCommands {
         #[arg(long, value_parser = clap::value_parser!(u32).range(900..=3600), conflicts_with = "workgroup")]
         duration: Option<u32>,
     },
+    /// Obtain a short-lived Anthropic (Claude) API token via Workload
+    /// Identity Federation.
+    ///
+    /// Requires `vouch setup anthropic` and an active session
+    /// (`vouch login`). Prints a bare `sk-ant-oat01-...` token to stdout
+    /// with no trailing newline — designed to be invoked by Claude Code's
+    /// `apiKeyHelper`.
+    Anthropic {},
+    /// Obtain a short-lived OpenAI API token via Workload Identity Federation.
+    ///
+    /// Requires `vouch setup openai`, an active session (`vouch login`),
+    /// and that OpenAI has onboarded the Vouch issuer as a workload
+    /// identity provider (custom OIDC is not self-service on OpenAI's side).
+    /// Prints a bare token to stdout — designed to be invoked by the
+    /// OpenAI Codex CLI as a `[model_providers.<id>.auth]` command with
+    /// `refresh_interval_ms`.
+    Openai {},
     /// Print the current session token for use with curl or other tools.
     Token {},
     /// Obtain a CodeArtifact authorization token.

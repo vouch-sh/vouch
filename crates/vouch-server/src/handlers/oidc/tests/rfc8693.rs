@@ -706,3 +706,534 @@ async fn test_rfc8693_deactivated_subject_user_rejected() {
     let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
     assert_eq!(error["error"], "invalid_grant");
 }
+
+// ========================================================================
+// requested_token_type = id_token (Workload Identity Federation)
+//
+// When the client asks for an ID token, the server mints a clean OIDC ID
+// token (ES256) instead of an RFC 9068 access token. This is the assertion
+// used by `vouch credential anthropic|openai|k8s`. The ID token is never
+// persisted as a session and carries only the standard OIDC claim set.
+// ========================================================================
+
+const ID_TOKEN_TYPE: &str = "urn:ietf:params:oauth:token-type:id_token";
+
+#[tokio::test]
+async fn test_rfc8693_id_token_request_returns_clean_id_token() {
+    // requested_token_type=id_token mints an OIDC ID token whose claims match
+    // the subject user, and reports the ID-token issued type with a Bearer
+    // token_type (ID tokens are not sender-constrained).
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "wif-basic@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+    let auth_header = client.basic_auth_header();
+
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        &format!(
+            "grant_type=urn:ietf:params:oauth:grant-type:token-exchange\
+             &subject_token={token}\
+             &subject_token_type=urn:ietf:params:oauth:token-type:access_token\
+             &requested_token_type={ID_TOKEN_TYPE}"
+        ),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "ID token exchange should succeed: {body}"
+    );
+    let response: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+
+    assert_eq!(
+        response["issued_token_type"], ID_TOKEN_TYPE,
+        "issued_token_type must report id_token"
+    );
+    assert_eq!(
+        response["token_type"], "Bearer",
+        "ID tokens are not sender-constrained"
+    );
+
+    let id_token = response["access_token"]
+        .as_str()
+        .expect("access_token present");
+    let claims = decode_jwt_payload(id_token);
+
+    assert_eq!(
+        claims["iss"], "https://test.example.com",
+        "issuer is the Vouch base URL"
+    );
+    assert_eq!(claims["sub"], "wif-basic@example.com");
+    assert_eq!(claims["email"], "wif-basic@example.com");
+    assert_eq!(claims["email_verified"], true);
+    assert_eq!(claims["hardware_verified"], true);
+    assert!(
+        claims["jti"].as_str().is_some_and(|j| !j.is_empty()),
+        "ID token must carry a jti for replay prevention"
+    );
+}
+
+#[tokio::test]
+async fn test_rfc8693_id_token_audience_routing() {
+    // RFC 8707: the requested audience becomes the ID token's `aud` claim.
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "wif-aud@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+    let auth_header = client.basic_auth_header();
+
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        &format!(
+            "grant_type=urn:ietf:params:oauth:grant-type:token-exchange\
+             &subject_token={token}\
+             &subject_token_type=urn:ietf:params:oauth:token-type:access_token\
+             &requested_token_type={ID_TOKEN_TYPE}\
+             &audience=https://my-cluster.example.org"
+        ),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "ID token exchange should succeed: {body}"
+    );
+    let response: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let id_token = response["access_token"]
+        .as_str()
+        .expect("access_token present");
+    let claims = decode_jwt_payload(id_token);
+    assert_eq!(
+        claims["aud"], "https://my-cluster.example.org",
+        "requested audience must become the aud claim"
+    );
+}
+
+#[tokio::test]
+async fn test_rfc8693_id_token_default_audience_is_issuer() {
+    // With no audience requested, the ID token's `aud` falls back to the issuer.
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "wif-default-aud@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+    let auth_header = client.basic_auth_header();
+
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        &format!(
+            "grant_type=urn:ietf:params:oauth:grant-type:token-exchange\
+             &subject_token={token}\
+             &subject_token_type=urn:ietf:params:oauth:token-type:access_token\
+             &requested_token_type={ID_TOKEN_TYPE}"
+        ),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "ID token exchange should succeed: {body}"
+    );
+    let response: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let id_token = response["access_token"]
+        .as_str()
+        .expect("access_token present");
+    let claims = decode_jwt_payload(id_token);
+    assert_eq!(
+        claims["aud"], "https://test.example.com",
+        "aud defaults to the issuer when no audience is requested"
+    );
+}
+
+#[tokio::test]
+async fn test_rfc8693_id_token_lifetime_capped_at_default() {
+    // The ID token lifetime is capped at the 600s federation ceiling even
+    // though the subject token (an 8h session) has far more time remaining.
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "wif-ttl@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+    let auth_header = client.basic_auth_header();
+
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        &format!(
+            "grant_type=urn:ietf:params:oauth:grant-type:token-exchange\
+             &subject_token={token}\
+             &subject_token_type=urn:ietf:params:oauth:token-type:access_token\
+             &requested_token_type={ID_TOKEN_TYPE}"
+        ),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "ID token exchange should succeed: {body}"
+    );
+    let response: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(
+        response["expires_in"].as_u64().expect("expires_in present"),
+        600,
+        "ID token lifetime is capped at the federation ceiling"
+    );
+
+    // The exp claim should agree with the reported expires_in (within slop).
+    let id_token = response["access_token"]
+        .as_str()
+        .expect("access_token present");
+    let claims = decode_jwt_payload(id_token);
+    let exp = claims["exp"].as_i64().expect("exp present");
+    let now = jiff::Timestamp::now().as_second();
+    let remaining = exp.saturating_sub(now);
+    assert!(
+        (595..=605).contains(&remaining),
+        "exp should be ~600s out, was {remaining}s"
+    );
+}
+
+#[tokio::test]
+async fn test_rfc8693_id_token_not_persisted_as_session() {
+    // The minted ID token must not be stored as a session — it is a one-shot
+    // federation assertion, never a replayable Vouch credential.
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "wif-nosession@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+    let auth_header = client.basic_auth_header();
+
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        &format!(
+            "grant_type=urn:ietf:params:oauth:grant-type:token-exchange\
+             &subject_token={token}\
+             &subject_token_type=urn:ietf:params:oauth:token-type:access_token\
+             &requested_token_type={ID_TOKEN_TYPE}"
+        ),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "ID token exchange should succeed: {body}"
+    );
+    let response: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let id_token = response["access_token"]
+        .as_str()
+        .expect("access_token present");
+
+    let hash = crate::crypto::hash_token(id_token);
+    let session = state
+        .session_cache
+        .get_session_by_token_hash(&state.store, &hash)
+        .await
+        .expect("session lookup");
+    assert!(
+        session.is_none(),
+        "ID token must not be persisted as a session"
+    );
+}
+
+#[tokio::test]
+async fn test_rfc8693_id_token_carries_hardware_aaguid() {
+    // The ID token surfaces the backing authenticator's AAGUID so relying
+    // parties can pin a hardware model in their trust policy.
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "wif-aaguid@example.com").await;
+    let aaguid = "ee882879-721c-4913-9775-3dfcce97072a";
+    let auth_id = crate::db::create_authenticator(
+        &state.store,
+        &user.id,
+        &user.email,
+        "YubiKey 5",
+        format!("cred-{}", uuid::Uuid::now_v7()).as_bytes(),
+        &[0u8; 32],
+        Some(aaguid),
+        Some(user.id.as_bytes()),
+        true,
+    )
+    .await
+    .expect("create authenticator with aaguid");
+    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+    let auth_header = client.basic_auth_header();
+
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        &format!(
+            "grant_type=urn:ietf:params:oauth:grant-type:token-exchange\
+             &subject_token={token}\
+             &subject_token_type=urn:ietf:params:oauth:token-type:access_token\
+             &requested_token_type={ID_TOKEN_TYPE}"
+        ),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "ID token exchange should succeed: {body}"
+    );
+    let response: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let id_token = response["access_token"]
+        .as_str()
+        .expect("access_token present");
+    let claims = decode_jwt_payload(id_token);
+    assert_eq!(
+        claims["hardware_aaguid"], aaguid,
+        "ID token should carry the authenticator AAGUID"
+    );
+}
+
+#[tokio::test]
+async fn test_rfc8693_id_token_carries_hd_for_org_user() {
+    // A user in an organization gets the org's domain as the `hd` claim, so
+    // relying parties can restrict federation to a corporate domain.
+    let (app, state) = test_app().await;
+
+    let org = create_test_org(&state.store, "example.com").await;
+    let user = create_test_user_in_org(&state.store, "hduser@example.com", &org.id, false).await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+    let auth_header = client.basic_auth_header();
+
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        &format!(
+            "grant_type=urn:ietf:params:oauth:grant-type:token-exchange\
+             &subject_token={token}\
+             &subject_token_type=urn:ietf:params:oauth:token-type:access_token\
+             &requested_token_type={ID_TOKEN_TYPE}"
+        ),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "ID token exchange should succeed: {body}"
+    );
+    let response: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let id_token = response["access_token"]
+        .as_str()
+        .expect("access_token present");
+    let claims = decode_jwt_payload(id_token);
+    assert_eq!(
+        claims["hd"], "example.com",
+        "ID token should carry the organization domain as hd"
+    );
+}
+
+#[tokio::test]
+async fn test_rfc8693_access_token_request_unaffected_by_id_token_branch() {
+    // Regression guard: explicitly requesting an access token still mints an
+    // RFC 9068 access token (issued type access_token), not an ID token.
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "wif-regression@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+    let auth_header = client.basic_auth_header();
+
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        &format!(
+            "grant_type=urn:ietf:params:oauth:grant-type:token-exchange\
+             &subject_token={token}\
+             &subject_token_type=urn:ietf:params:oauth:token-type:access_token\
+             &requested_token_type=urn:ietf:params:oauth:token-type:access_token"
+        ),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "Access token exchange should succeed: {body}"
+    );
+    let response: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(
+        response["issued_token_type"], "urn:ietf:params:oauth:token-type:access_token",
+        "default exchange must still issue an access token"
+    );
+    // An RFC 9068 access token is persisted as a session; the ID token is not.
+    let access_token = response["access_token"]
+        .as_str()
+        .expect("access_token present");
+    let hash = crate::crypto::hash_token(access_token);
+    let session = state
+        .session_cache
+        .get_session_by_token_hash(&state.store, &hash)
+        .await
+        .expect("session lookup");
+    assert!(
+        session.is_some(),
+        "exchanged access token must be persisted as a session"
+    );
+}
+
+#[tokio::test]
+async fn test_rfc8693_id_token_deactivated_user_rejected() {
+    // The deactivation check runs before the ID-token fork, so a deactivated
+    // user cannot mint a federation assertion either.
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "wif-deactivated@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+    let auth_header = client.basic_auth_header();
+
+    crate::db::update_user_active_status(&state.store, &user.id, false)
+        .await
+        .expect("deactivate user");
+
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        &format!(
+            "grant_type=urn:ietf:params:oauth:grant-type:token-exchange\
+             &subject_token={token}\
+             &subject_token_type=urn:ietf:params:oauth:token-type:access_token\
+             &requested_token_type={ID_TOKEN_TYPE}"
+        ),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(error["error"], "invalid_grant");
+}
+
+#[tokio::test]
+async fn test_rfc8693_id_token_rejects_non_hardware_verified_subject() {
+    // A non-hardware-verified subject token (e.g., an enrollment bootstrap
+    // session created after upstream SSO but before FIDO2 registration) must
+    // not be exchangeable for an ID token. The ID-token claim set hardcodes
+    // `hardware_verified: true`, so allowing this exchange would launder a
+    // pre-FIDO2 session into a federation assertion that downstream relying
+    // parties trust as hardware-attested.
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "wif-bootstrap@example.com").await;
+    let token =
+        crate::test_utils::create_test_bootstrap_session(&state, &user.id, &user.email).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+    let auth_header = client.basic_auth_header();
+
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        &format!(
+            "grant_type=urn:ietf:params:oauth:grant-type:token-exchange\
+             &subject_token={token}\
+             &subject_token_type=urn:ietf:params:oauth:token-type:access_token\
+             &requested_token_type={ID_TOKEN_TYPE}"
+        ),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(error["error"], "access_denied");
+
+    // Regression guard: the same subject token must still work for an
+    // access-token exchange. The hardware gate is specific to ID-token
+    // requests; access-token exchange preserves the original
+    // `hardware_verified: false` claim (no laundering possible).
+    let (status_at, body_at) = http_post_form(
+        &app,
+        "/oauth/token",
+        &format!(
+            "grant_type=urn:ietf:params:oauth:grant-type:token-exchange\
+             &subject_token={token}\
+             &subject_token_type=urn:ietf:params:oauth:token-type:access_token\
+             &requested_token_type=urn:ietf:params:oauth:token-type:access_token"
+        ),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    assert_eq!(
+        status_at,
+        StatusCode::OK,
+        "access-token exchange must remain available for non-hardware subjects: {body_at}"
+    );
+}
+
+#[tokio::test]
+async fn test_rfc8693_id_token_rejects_actor_token() {
+    // The ID-token claim set has no `act` field, so honoring `actor_token`
+    // for an ID-token request would silently drop the delegation chain.
+    // Refuse the combination explicitly. The access-token path (without
+    // `requested_token_type`) continues to honor `actor_token` as tested by
+    // `test_rfc8693_actor_token_delegation_chain`.
+    let (app, state) = test_app().await;
+
+    let grantor = create_test_user(&state.store, "id-grantor@example.com").await;
+    let grantor_auth = create_test_authenticator(&state.store, &grantor.id).await;
+    let client = create_test_oauth_client(&state.store, &grantor.id).await;
+
+    let grantee = create_test_user(&state.store, "id-grantee@example.com").await;
+    let grantee_auth = create_test_authenticator(&state.store, &grantee.id).await;
+
+    let (grantor_token, _) =
+        issue_oauth_access_token(&app, &state, &grantor, &grantor_auth, &client).await;
+    let (grantee_token, _) =
+        issue_oauth_access_token(&app, &state, &grantee, &grantee_auth, &client).await;
+
+    let auth_header = client.basic_auth_header();
+
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        &format!(
+            "grant_type=urn:ietf:params:oauth:grant-type:token-exchange\
+             &subject_token={grantor_token}\
+             &subject_token_type=urn:ietf:params:oauth:token-type:access_token\
+             &actor_token={grantee_token}\
+             &actor_token_type=urn:ietf:params:oauth:token-type:access_token\
+             &requested_token_type={ID_TOKEN_TYPE}"
+        ),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(error["error"], "invalid_request");
+}

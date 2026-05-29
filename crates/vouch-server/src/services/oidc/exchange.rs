@@ -14,6 +14,7 @@ use crate::services::auth::{
 };
 use crate::services::oidc::ScopeSet;
 use crate::services::oidc::authorization_details::AuthorizationDetails;
+use crate::services::oidc::claims::OidcIdTokenClaimsBuilder;
 use crate::services::{OAuthErrorCode, ServiceError, ServiceResult};
 use jiff::Timestamp;
 use secrecy::ExposeSecret;
@@ -28,6 +29,13 @@ pub mod token_types {
     /// JWT type.
     pub const JWT: &str = "urn:ietf:params:oauth:token-type:jwt";
 }
+
+/// Default lifetime for an exchanged OIDC ID token
+/// (`requested_token_type=id_token`). Short because the token is presented
+/// immediately as a federation assertion (Kubernetes, Claude/OpenAI WIF) and
+/// then discarded. The effective lifetime is further capped by the subject
+/// token's remaining TTL and any delegation policy, so this is only a ceiling.
+const DEFAULT_ID_TOKEN_EXPIRES_SECS: u64 = 600;
 
 /// Parameters for token exchange (RFC 8693 Section 2.1).
 #[derive(Debug)]
@@ -117,6 +125,17 @@ pub(crate) async fn exchange_token(
         return Err(ServiceError::oauth(
             OAuthErrorCode::InvalidRequest,
             "Unsupported requested_token_type",
+        ));
+    }
+
+    // Reject `actor_token` with `requested_token_type=id_token`. The ID-token
+    // path issues a clean OIDC claim set and does not carry the `act` claim,
+    // so honoring `actor_token` here would silently drop the delegation chain.
+    // Refuse the combination explicitly rather than ignore the input.
+    if params.requested_token_type == Some(token_types::ID_TOKEN) && params.actor_token.is_some() {
+        return Err(ServiceError::oauth(
+            OAuthErrorCode::InvalidRequest,
+            "actor_token is not supported with requested_token_type=id_token",
         ));
     }
 
@@ -315,6 +334,46 @@ pub(crate) async fn exchange_token(
     // Get authenticator_id from the session record (server-side, not from JWT)
     let authenticator_id = subject_session.authenticator_id.as_deref();
 
+    // RFC 8693 Section 2.1: When the client requests an ID token
+    // (`requested_token_type=urn:ietf:params:oauth:token-type:id_token`), mint
+    // a clean OIDC ID token for federation with an external relying party
+    // (Kubernetes API server, Claude/OpenAI Workload Identity Federation)
+    // instead of an RFC 9068 access token. The ID token carries only the
+    // standard OIDC claim set, is never persisted as a session, and is
+    // short-lived. `expires_in` is already capped by the subject token's
+    // remaining TTL and any delegation policy at this point; `issue_id_token`
+    // additionally caps it at `DEFAULT_ID_TOKEN_EXPIRES_SECS` (600s), so the
+    // value passed in is an upper bound that the federation ceiling will
+    // tighten further if needed — never bypassable.
+    //
+    // The issued ID token claims `hardware_verified: true` unconditionally
+    // (see `OidcIdTokenClaimsBuilder::build`). To prevent a non-hardware
+    // subject token (e.g., an enrollment bootstrap session created after
+    // upstream SSO but before FIDO2 registration) from minting a WIF
+    // assertion that downstream relying parties trust as hardware-attested,
+    // gate the fork on the subject token's hardware verification level.
+    if params.requested_token_type == Some(token_types::ID_TOKEN) {
+        if !subject_decoded.hardware_verification().hardware_verified() {
+            return Err(ServiceError::oauth(
+                OAuthErrorCode::AccessDenied,
+                "ID token exchange requires a hardware-verified subject token",
+            ));
+        }
+        return issue_id_token(
+            state,
+            IdTokenContext {
+                user_id: &subject_session.user_id,
+                org_id: subject_user.org_id.as_deref(),
+                email: subject_email,
+                subject_token_hash: &subject_token_hash,
+                authenticator_id,
+                audience,
+                expires_in,
+            },
+        )
+        .await;
+    }
+
     // RFC 9396: Inherit authorization_details from subject token session.
     let inherited_ad_value = subject_session.authorization_details.as_ref();
     let inherited_ad_parsed =
@@ -386,6 +445,11 @@ pub(crate) async fn exchange_token(
     {
         ts
     } else {
+        tracing::warn!(
+            "token exchange audit: expires_at overflow ({expires_in}s from {}), \
+             recording `now` instead",
+            now.as_second()
+        );
         now
     };
     if let Err(e) = db::insert_token_exchange(
@@ -423,6 +487,120 @@ pub(crate) async fn exchange_token(
         expires_in,
         scope: granted_scope,
         authorization_details: effective_ad,
+    })
+}
+
+/// Inputs for issuing an exchanged OIDC ID token ([`issue_id_token`]).
+struct IdTokenContext<'a> {
+    /// Subject user's ID, for the token-exchange audit record.
+    user_id: &'a str,
+    /// Subject user's organization ID, for the `hd` claim lookup.
+    org_id: Option<&'a str>,
+    /// Subject user's canonical email (`sub`/`email` claims).
+    email: &'a str,
+    /// Hash of the subject token, for the audit record.
+    subject_token_hash: &'a str,
+    /// Authenticator backing the subject session (`hardware_aaguid` claim).
+    authenticator_id: Option<&'a str>,
+    /// Requested audience (`aud` claim); falls back to the issuer URL.
+    audience: Option<&'a str>,
+    /// Lifetime ceiling in seconds, already capped by subject TTL and policy.
+    expires_in: u64,
+}
+
+/// Mint a clean OIDC ID token (ES256) for an RFC 8693 exchange where the
+/// client requested `requested_token_type=id_token`.
+///
+/// The token carries only the standard OIDC claim set (no AWS tags, no
+/// `authorization_details`) and is never persisted as a session — it is
+/// meant to be presented immediately to an external relying party.
+async fn issue_id_token(
+    state: &Arc<AppState>,
+    ctx: IdTokenContext<'_>,
+) -> ServiceResult<TokenExchangeResult> {
+    let config = state.config();
+    let audience = ctx.audience.unwrap_or(&config.base_url);
+    let expires_in = ctx.expires_in.min(DEFAULT_ID_TOKEN_EXPIRES_SECS);
+
+    // hardware_aaguid from the session's authenticator. Fail closed on DB
+    // error: a transient lookup failure must not silently downgrade the
+    // issued claim set. A stale `Ok(None)` (authenticator deleted after
+    // session creation) is still tolerated — the claim is simply omitted.
+    let hardware_aaguid = if let Some(auth_id) = ctx.authenticator_id {
+        db::get_authenticator_by_id(&state.store, auth_id)
+            .await
+            .map_err(|e| ServiceError::Internal(format!("Database error: {e}")))?
+            .and_then(|a| a.aaguid)
+    } else {
+        None
+    };
+
+    // hd claim from the user's organization domain, when they belong to one.
+    let hd = if let Some(org_id) = ctx.org_id {
+        db::get_organization_domain(&state.store, org_id)
+            .await
+            .map_err(|e| ServiceError::Internal(format!("Database error: {e}")))?
+    } else {
+        None
+    };
+
+    let claims = OidcIdTokenClaimsBuilder::for_audience(&config.base_url, ctx.email, audience)
+        .hardware_aaguid(hardware_aaguid)
+        .hd(hd)
+        .valid_for_seconds(expires_in)
+        .build()
+        .map_err(|e| ServiceError::Internal(format!("Failed to build ID token claims: {e}")))?;
+
+    let id_token = state
+        .oidc_key
+        .sign_jwt(&claims)
+        .await
+        .map_err(|e| ServiceError::Internal(format!("Failed to sign ID token: {e}")))?;
+
+    // Log the exchange for audit (best-effort — failures are non-fatal).
+    let now = Timestamp::now();
+    let issued_token_hash = hash_token(&id_token);
+    let expires_at = i64::try_from(expires_in)
+        .ok()
+        .and_then(|s| now.as_second().checked_add(s))
+        .and_then(|s| Timestamp::from_second(s).ok())
+        .unwrap_or_else(|| {
+            tracing::warn!(
+                "ID token audit: expires_at overflow ({expires_in}s from {}), \
+                 recording `now` instead",
+                now.as_second()
+            );
+            now
+        });
+    if let Err(e) = db::insert_token_exchange(
+        &state.store,
+        ctx.user_id,
+        ctx.subject_token_hash,
+        None, // actor_user_id
+        &issued_token_hash,
+        ctx.audience,
+        None, // granted_scope — ID tokens do not carry OAuth scope
+        expires_at,
+    )
+    .await
+    {
+        tracing::warn!("Failed to log ID token exchange: {e}");
+    }
+
+    crate::infra::metrics::record_credential_issuance("oidc");
+
+    tracing::info!(
+        "Issued OIDC ID token via exchange for {} (audience: {audience})",
+        redact_email(ctx.email),
+    );
+
+    Ok(TokenExchangeResult {
+        access_token: id_token,
+        issued_token_type: token_types::ID_TOKEN.to_string(),
+        token_type: "Bearer".to_string(),
+        expires_in,
+        scope: None,
+        authorization_details: None,
     })
 }
 

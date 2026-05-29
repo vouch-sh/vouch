@@ -100,7 +100,6 @@ pub const PROTECTED_RESOURCE_PREFIXES: &[&str] = &[
     "oauth/register",
     "v1/credentials/ssh",
     "v1/credentials/aws/token",
-    "v1/credentials/kubernetes/token",
     "v1/credentials/github/token",
     "v1/keys",
     "api/v1/org",

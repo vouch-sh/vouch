@@ -153,12 +153,16 @@ impl OidcIdTokenClaimsBuilder {
             .source_identity(email)
     }
 
-    /// Create a builder pre-configured for Kubernetes.
+    /// Create a builder pre-configured for an external relying party that
+    /// validates a specific `aud` claim.
     ///
-    /// The audience must match the `--oidc-client-id` configured on the Kubernetes
-    /// API server. The subject and email are both set to the user's email.
+    /// Generic shape: `iss = issuer`, `sub = email`, `aud = audience`,
+    /// `email = email`. Used by every non-AWS issuance path — Kubernetes
+    /// (audience = `--oidc-client-id` on the API server) and Workload
+    /// Identity Federation with Claude/OpenAI (audience = the value the
+    /// relying party expects).
     #[must_use]
-    pub fn for_k8s(issuer: &str, email: &str, audience: &str) -> Self {
+    pub fn for_audience(issuer: &str, email: &str, audience: &str) -> Self {
         Self::new()
             .issuer(issuer)
             .subject(email)
@@ -406,8 +410,8 @@ mod tests {
     }
 
     #[test]
-    fn test_for_k8s_uses_provided_audience() {
-        let result = OidcIdTokenClaimsBuilder::for_k8s(
+    fn test_for_audience_uses_provided_audience() {
+        let result = OidcIdTokenClaimsBuilder::for_audience(
             "https://vouch.example.com",
             "user@example.com",
             "kubernetes",
@@ -427,8 +431,8 @@ mod tests {
     }
 
     #[test]
-    fn test_for_k8s_custom_audience() {
-        let result = OidcIdTokenClaimsBuilder::for_k8s(
+    fn test_for_audience_custom_value() {
+        let result = OidcIdTokenClaimsBuilder::for_audience(
             "https://vouch.example.com",
             "user@example.com",
             "my-cluster",

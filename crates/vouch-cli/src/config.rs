@@ -131,6 +131,8 @@ pub(crate) struct Config {
     aws: Option<AwsMultiAccountConfig>,
     /// Global network configuration (DoH, …).
     network: Option<NetworkConfig>,
+    /// AI provider Workload Identity Federation configuration.
+    ai: Option<AiProvidersConfig>,
 }
 
 /// Per-server configuration state.
@@ -175,6 +177,67 @@ pub(crate) struct CodeArtifactProfile {
 }
 
 // =========================================================================
+// AI provider Workload Identity Federation configuration
+// =========================================================================
+
+/// Federation configuration for AI provider APIs (Claude, OpenAI).
+///
+/// Stored at the top level of `~/.vouch/config.json`. Holds the (non-secret)
+/// identifiers a workload presents to a provider's token endpoint to
+/// exchange a Vouch-issued OIDC ID token for a short-lived provider token.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub(crate) struct AiProvidersConfig {
+    /// Anthropic (Claude) federation parameters.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anthropic: Option<AnthropicFederation>,
+    /// OpenAI federation parameters.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub openai: Option<OpenAiFederation>,
+}
+
+/// Anthropic (Claude) Workload Identity Federation parameters.
+///
+/// See <https://platform.claude.com/docs/en/manage-claude/workload-identity-federation>.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct AnthropicFederation {
+    /// Federation rule ID (`fdrl_...`).
+    pub federation_rule_id: String,
+    /// Anthropic organization ID (UUID).
+    pub organization_id: String,
+    /// Service account ID (`svac_...`) the minted token acts as.
+    pub service_account_id: String,
+    /// Workspace ID (`wrkspc_...`).
+    pub workspace_id: String,
+    /// `aud` claim to request on the assertion. Optional: most federation
+    /// rules match on `sub` alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audience: Option<String>,
+    /// Token endpoint override (defaults to Anthropic's public endpoint).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_endpoint: Option<String>,
+}
+
+/// OpenAI Workload Identity Federation parameters.
+///
+/// See <https://developers.openai.com/api/docs/guides/workload-identity-federation>.
+/// Note: OpenAI must onboard the Vouch issuer as a workload identity
+/// provider first — custom OIDC issuers are not self-service.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct OpenAiFederation {
+    /// OpenAI Workload Identity Provider ID for the Vouch issuer.
+    pub identity_provider_id: String,
+    /// OpenAI service account ID to resolve the mapping against.
+    pub service_account_id: String,
+    /// `aud` claim to request on the assertion. Set this to whatever
+    /// audience OpenAI configured for the Vouch issuer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audience: Option<String>,
+    /// Token endpoint override (defaults to OpenAI's public endpoint).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_endpoint: Option<String>,
+}
+
+// =========================================================================
 // On-disk format (ConfigFile)
 // =========================================================================
 
@@ -199,6 +262,9 @@ struct ConfigFile {
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     network: Option<NetworkConfig>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ai: Option<AiProvidersConfig>,
 
     // Legacy flat fields — read for migration, never written back.
     #[serde(default, skip_serializing)]
@@ -246,6 +312,7 @@ impl std::fmt::Debug for ConfigFile {
             .field("codeartifact", &self.codeartifact)
             .field("aws", &self.aws)
             .field("network", &self.network)
+            .field("ai", &self.ai)
             .finish()
     }
 }
@@ -258,6 +325,7 @@ impl std::fmt::Debug for Config {
             .field("codeartifact", &self.codeartifact)
             .field("aws", &self.aws)
             .field("network", &self.network)
+            .field("ai", &self.ai)
             .finish()
     }
 }
@@ -507,6 +575,30 @@ impl Config {
         self.aws = Some(config);
     }
 
+    // =====================================================================
+    // AI provider federation (global, not per-server)
+    // =====================================================================
+
+    /// Get the AI provider federation configuration.
+    #[must_use]
+    pub(crate) fn ai(&self) -> Option<&AiProvidersConfig> {
+        self.ai.as_ref()
+    }
+
+    /// Set the Anthropic federation parameters (in memory; call `save()`).
+    pub(crate) fn set_ai_anthropic(&mut self, fed: AnthropicFederation) {
+        self.ai
+            .get_or_insert_with(AiProvidersConfig::default)
+            .anthropic = Some(fed);
+    }
+
+    /// Set the OpenAI federation parameters (in memory; call `save()`).
+    pub(crate) fn set_ai_openai(&mut self, fed: OpenAiFederation) {
+        self.ai
+            .get_or_insert_with(AiProvidersConfig::default)
+            .openai = Some(fed);
+    }
+
     /// Get the path to the config file.
     fn config_path() -> Result<PathBuf> {
         let home = dirs::home_dir().context("could not determine home directory")?;
@@ -637,6 +729,7 @@ impl From<ConfigFile> for Config {
             codeartifact: file.codeartifact.take(),
             aws: file.aws.take(),
             network: file.network.take(),
+            ai: file.ai.take(),
         }
     }
 }
@@ -672,6 +765,7 @@ impl From<&Config> for ConfigFile {
             codeartifact: config.codeartifact.clone(),
             aws: config.aws.clone(),
             network: config.network.clone(),
+            ai: config.ai.clone(),
             // Legacy fields are never written.
             server_url: None,
             token: None,
@@ -1382,6 +1476,90 @@ mod tests {
 
         // Empty sso_sessions map is skipped due to skip_serializing_if
         assert!(!json.contains("sso_sessions"));
+    }
+
+    // -----------------------------------------------------------------
+    // AiProvidersConfig round-trip + accessors
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn test_ai_providers_config_round_trip() {
+        let json = r#"{
+            "current_server": "us.vouch.sh",
+            "servers": {
+                "us.vouch.sh": {
+                    "server_url": "https://us.vouch.sh",
+                    "token": "t"
+                }
+            },
+            "ai": {
+                "anthropic": {
+                    "federation_rule_id": "fdrl_abc",
+                    "organization_id": "00000000-0000-0000-0000-000000000000",
+                    "service_account_id": "svac_xyz",
+                    "workspace_id": "wrkspc_q",
+                    "audience": "https://api.anthropic.com"
+                },
+                "openai": {
+                    "identity_provider_id": "wip_123",
+                    "service_account_id": "sa_456"
+                }
+            }
+        }"#;
+
+        let file: ConfigFile = serde_json::from_str(json).unwrap();
+        let config = Config::from(file);
+
+        let ai = config.ai().expect("ai section should exist");
+        let anthropic = ai.anthropic.as_ref().expect("anthropic");
+        assert_eq!(anthropic.federation_rule_id, "fdrl_abc");
+        assert_eq!(anthropic.workspace_id, "wrkspc_q");
+        assert_eq!(
+            anthropic.audience.as_deref(),
+            Some("https://api.anthropic.com")
+        );
+        assert!(anthropic.token_endpoint.is_none());
+
+        let openai = ai.openai.as_ref().expect("openai");
+        assert_eq!(openai.identity_provider_id, "wip_123");
+        assert_eq!(openai.service_account_id, "sa_456");
+
+        // Round-trip through JSON preserves everything.
+        let file2 = ConfigFile::from(&config);
+        let json2 = serde_json::to_string(&file2).unwrap();
+        let file3: ConfigFile = serde_json::from_str(&json2).unwrap();
+        let config3 = Config::from(file3);
+        let ai3 = config3.ai().expect("ai survives round-trip");
+        assert_eq!(
+            ai3.anthropic.as_ref().unwrap().federation_rule_id,
+            "fdrl_abc"
+        );
+    }
+
+    #[test]
+    fn test_set_ai_anthropic_and_openai_independent() {
+        let mut config = Config::default();
+
+        config.set_ai_anthropic(AnthropicFederation {
+            federation_rule_id: "fdrl_a".to_string(),
+            organization_id: "org".to_string(),
+            service_account_id: "svac".to_string(),
+            workspace_id: "wrkspc".to_string(),
+            audience: None,
+            token_endpoint: None,
+        });
+        assert!(config.ai().unwrap().anthropic.is_some());
+        assert!(config.ai().unwrap().openai.is_none());
+
+        config.set_ai_openai(OpenAiFederation {
+            identity_provider_id: "wip".to_string(),
+            service_account_id: "sa".to_string(),
+            audience: None,
+            token_endpoint: None,
+        });
+        // Setting OpenAI must NOT clear the existing Anthropic config.
+        assert!(config.ai().unwrap().anthropic.is_some());
+        assert!(config.ai().unwrap().openai.is_some());
     }
 
     #[test]

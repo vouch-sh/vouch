@@ -6,19 +6,16 @@ use crate::db::{self, GitHubCredentialAuditData};
 use crate::services::error::ServiceError;
 use crate::services::integrations::aws::{AwsError, issue_aws_token};
 use crate::services::integrations::github::{GitHubInstallationId, minimal_git_permissions};
-use crate::services::integrations::kubernetes::{
-    DEFAULT_K8S_AUDIENCE, K8sError, issue_kubernetes_token,
-};
-use axum::extract::{OriginalUri, Query};
+use axum::extract::OriginalUri;
 use axum::http::Method;
 use axum::{Json, extract::State, http::HeaderMap, http::StatusCode};
 use axum_extra::extract::cookie::CookieJar;
 use jiff::Timestamp;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::sync::Arc;
 use vouch_common::{
     AwsTokenResponse, GitHubStatusResponse, GitHubTokenRequest, GitHubTokenResponse,
-    K8sTokenResponse, SshCaPublicKeyResponse, SshCertificateRequest, SshCertificateResponse,
+    SshCaPublicKeyResponse, SshCertificateRequest, SshCertificateResponse,
 };
 
 use super::extractors::{ClientInfo, OptionalClientCert};
@@ -429,145 +426,6 @@ pub(crate) async fn get_aws_token(
     crate::infra::metrics::record_credential_issuance("aws");
 
     Ok(Json(AwsTokenResponse {
-        id_token: result.id_token,
-        expires_in: result.expires_in,
-    }))
-}
-
-// ============================================================================
-// Kubernetes Token Endpoint
-// ============================================================================
-
-/// Query parameters for the Kubernetes token endpoint.
-#[derive(Debug, Deserialize)]
-pub(crate) struct K8sTokenQuery {
-    /// OIDC audience (must match `--oidc-client-id` on the API server).
-    /// Defaults to "kubernetes" if not specified.
-    #[serde(default)]
-    pub audience: Option<String>,
-}
-
-/// Get an OIDC ID token for Kubernetes authentication.
-///
-/// GET /v1/credentials/kubernetes/token?audience=kubernetes
-///
-/// Returns an OIDC ID token that can be used with Kubernetes clusters
-/// configured with the Vouch OIDC provider.
-pub(crate) async fn get_kubernetes_token(
-    method: Method,
-    uri: OriginalUri,
-    headers: HeaderMap,
-    jar: CookieJar,
-    State(state): State<Arc<AppState>>,
-    client_cert: OptionalClientCert,
-    Query(query): Query<K8sTokenQuery>,
-) -> Result<Json<K8sTokenResponse>, ServiceError> {
-    let token = extract_resource_token(
-        &state,
-        &headers,
-        &jar,
-        method.as_str(),
-        uri.path(),
-        client_cert.0.as_ref(),
-    )
-    .await?;
-
-    let user = db::get_user_by_id(&state.store, &token.sub)
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to get user by ID: {e}");
-            ServiceError::api(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "db_error",
-                "Internal database error",
-            )
-        })?
-        .ok_or_else(|| {
-            ServiceError::api(StatusCode::NOT_FOUND, "user_not_found", "User not found")
-        })?;
-
-    if !user.active {
-        return Err(ServiceError::api(
-            StatusCode::UNAUTHORIZED,
-            "unauthorized",
-            "User account is deactivated",
-        ));
-    }
-
-    let user_email = token.email.clone().unwrap_or_else(|| user.email.clone());
-    let audience = query
-        .audience
-        .as_deref()
-        .filter(|s| !s.is_empty())
-        .unwrap_or(DEFAULT_K8S_AUDIENCE);
-
-    // Get authenticator info for AAGUID claim
-    let authenticator = if let Some(ref auth_id) = token.authenticator_id {
-        match db::get_authenticator_by_id(&state.store, auth_id).await {
-            Ok(auth) => auth,
-            Err(e) => {
-                tracing::warn!("Failed to get authenticator {auth_id}: {e}");
-                None
-            }
-        }
-    } else {
-        None
-    };
-
-    // Get user's organization domain (hd claim) if they belong to an org
-    let hd = if let Some(ref org_id) = user.org_id {
-        db::get_organization_domain(&state.store, org_id)
-            .await
-            .map_err(|e| {
-                tracing::error!("Failed to get organization domain: {e}");
-                ServiceError::api(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "db_error",
-                    "Internal database error",
-                )
-            })?
-    } else {
-        None
-    };
-
-    let config = state.config();
-    let result = issue_kubernetes_token(
-        &config.base_url,
-        &state.oidc_key,
-        &user_email,
-        audience,
-        authenticator.and_then(|a| a.aaguid),
-        hd,
-    )
-    .await
-    .map_err(|e| match e {
-        K8sError::ClaimsBuild(ref err) => {
-            tracing::error!("Kubernetes token claims build error: {err}");
-            ServiceError::api(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "claims_error",
-                "Failed to build token claims",
-            )
-        }
-        K8sError::TokenSign(ref err) => {
-            tracing::error!("Kubernetes token signing error: {err}");
-            ServiceError::api(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "token_error",
-                "Failed to sign token",
-            )
-        }
-    })?;
-
-    crate::infra::metrics::record_credential_issuance("kubernetes");
-
-    tracing::info!(
-        "Issued Kubernetes OIDC token for {} (audience: {})",
-        crate::redact_email(&user_email),
-        audience,
-    );
-
-    Ok(Json(K8sTokenResponse {
         id_token: result.id_token,
         expires_in: result.expires_in,
     }))
@@ -1223,81 +1081,6 @@ mod tests {
     }
 
     // ========================================================================
-    // Kubernetes Token Tests
-    // ========================================================================
-
-    #[tokio::test]
-    async fn test_k8s_token_requires_auth() {
-        let (app, _state) = test_app().await;
-
-        let (status, body) = http_get(&app, "/v1/credentials/kubernetes/token", &[]).await;
-
-        assert_eq!(status, StatusCode::UNAUTHORIZED);
-        let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
-        assert_eq!(error["code"], "unauthorized");
-    }
-
-    #[tokio::test]
-    async fn test_k8s_token_returns_token_for_valid_session() {
-        let (app, state) = test_app().await;
-
-        let user = create_test_user(&state.store, "k8suser@example.com").await;
-        let auth_id = create_test_authenticator(&state.store, &user.id).await;
-        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
-
-        let (status, body) = http_get(
-            &app,
-            "/v1/credentials/kubernetes/token",
-            &[("Authorization", &format!("Bearer {token}"))],
-        )
-        .await;
-
-        assert_eq!(status, StatusCode::OK);
-        let resp: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
-        assert!(resp["id_token"].is_string());
-    }
-
-    #[tokio::test]
-    async fn test_k8s_token_default_audience() {
-        let (app, state) = test_app().await;
-
-        let user = create_test_user(&state.store, "k8saud@example.com").await;
-        let auth_id = create_test_authenticator(&state.store, &user.id).await;
-        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
-
-        let (status, body) = http_get(
-            &app,
-            "/v1/credentials/kubernetes/token",
-            &[("Authorization", &format!("Bearer {token}"))],
-        )
-        .await;
-
-        assert_eq!(status, StatusCode::OK);
-        let resp: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
-        assert!(resp["id_token"].is_string());
-    }
-
-    #[tokio::test]
-    async fn test_k8s_token_custom_audience() {
-        let (app, state) = test_app().await;
-
-        let user = create_test_user(&state.store, "k8scustom@example.com").await;
-        let auth_id = create_test_authenticator(&state.store, &user.id).await;
-        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
-
-        let (status, body) = http_get(
-            &app,
-            "/v1/credentials/kubernetes/token?audience=my-cluster",
-            &[("Authorization", &format!("Bearer {token}"))],
-        )
-        .await;
-
-        assert_eq!(status, StatusCode::OK);
-        let resp: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
-        assert!(resp["id_token"].is_string());
-    }
-
-    // ========================================================================
     // GitHub Status Tests
     // ========================================================================
 
@@ -1417,31 +1200,6 @@ mod tests {
         let (status, body) = http_get(
             &app,
             "/v1/credentials/aws/token",
-            &[("Authorization", &format!("Bearer {token}"))],
-        )
-        .await;
-
-        assert_eq!(status, StatusCode::UNAUTHORIZED);
-        let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
-        assert_eq!(error["code"], "unauthorized");
-        assert_eq!(error["message"], "User account is deactivated");
-    }
-
-    #[tokio::test]
-    async fn test_deactivated_user_cannot_get_k8s_token() {
-        let (app, state) = test_app().await;
-
-        let user = create_test_user(&state.store, "deactivated-k8s@example.com").await;
-        let auth_id = create_test_authenticator(&state.store, &user.id).await;
-        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
-
-        crate::db::update_user_active_status(&state.store, &user.id, false)
-            .await
-            .expect("deactivate user");
-
-        let (status, body) = http_get(
-            &app,
-            "/v1/credentials/kubernetes/token",
             &[("Authorization", &format!("Bearer {token}"))],
         )
         .await;
