@@ -42,7 +42,11 @@ async fn get_token(server: &str) -> Result<SecretString> {
     let server = server.to_string();
 
     let data = super::cache::get_or_fetch(&cache_key, "Anthropic token", || async move {
-        let (assertion, _) = super::wif::fetch_assertion(&server, audience.as_deref()).await?;
+        // The Vouch assertion's expires_in is discarded: we cache the provider
+        // token (returned below as `expiry`), not the assertion itself, since
+        // the assertion is consumed immediately by the next request.
+        let (assertion, _expires_in) =
+            super::wif::fetch_assertion(&server, audience.as_deref()).await?;
         let body = serde_json::json!({
             "grant_type": "urn:ietf:params:oauth:grant-type:jwt-bearer",
             "assertion": assertion.expose_secret(),

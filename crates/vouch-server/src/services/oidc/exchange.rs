@@ -445,6 +445,11 @@ pub(crate) async fn exchange_token(
     {
         ts
     } else {
+        tracing::warn!(
+            "token exchange audit: expires_at overflow ({expires_in}s from {}), \
+             recording `now` instead",
+            now.as_second()
+        );
         now
     };
     if let Err(e) = db::insert_token_exchange(
@@ -559,7 +564,14 @@ async fn issue_id_token(
         .ok()
         .and_then(|s| now.as_second().checked_add(s))
         .and_then(|s| Timestamp::from_second(s).ok())
-        .unwrap_or(now);
+        .unwrap_or_else(|| {
+            tracing::warn!(
+                "ID token audit: expires_at overflow ({expires_in}s from {}), \
+                 recording `now` instead",
+                now.as_second()
+            );
+            now
+        });
     if let Err(e) = db::insert_token_exchange(
         &state.store,
         ctx.user_id,

@@ -68,7 +68,7 @@ pub fn record_auth_event(event_type: &str) {
     .increment(1);
 }
 
-/// Record a credential issuance event (ssh, aws, k8s, github).
+/// Record a credential issuance event (ssh, aws, oidc, github).
 pub fn record_credential_issuance(credential_type: &str) {
     metrics::counter!(
         "vouch_credential_issuance_total",

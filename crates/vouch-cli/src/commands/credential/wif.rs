@@ -213,14 +213,38 @@ async fn send_exchange(
     }
 
     // RFC 9449: a `use_dpop_nonce` error carries a fresh nonce to retry with.
-    if let Ok(err) = serde_json::from_str::<vouch_common::OAuthError>(&text)
+    let parsed_err = serde_json::from_str::<vouch_common::OAuthError>(&text).ok();
+    if let Some(err) = &parsed_err
         && err.error == "use_dpop_nonce"
         && let Some(nonce) = nonce
     {
         return Ok(ExchangeOutcome::NeedNonce(nonce));
     }
 
-    anyhow::bail!("Vouch token exchange failed ({status}): {text}");
+    // Surface the RFC 6749 standard `error` / `error_description` fields when
+    // present, but never echo the raw body — a misconfigured proxy or future
+    // server bug could include token material in error responses.
+    match parsed_err {
+        Some(err) => anyhow::bail!("{}", format_oauth_error("Vouch", status, &err)),
+        None => anyhow::bail!("Vouch token exchange failed ({status})"),
+    }
+}
+
+/// Format an OAuth error response (RFC 6749 §5.2) for user-facing display.
+/// Only `error` and `error_description` are echoed — both are designed to be
+/// safe to display.
+fn format_oauth_error(
+    label: &str,
+    status: reqwest::StatusCode,
+    err: &vouch_common::OAuthError,
+) -> String {
+    match err.error_description.as_deref() {
+        Some(desc) => format!(
+            "{label} token exchange failed ({status}): {} — {desc}",
+            err.error
+        ),
+        None => format!("{label} token exchange failed ({status}): {}", err.error),
+    }
 }
 
 /// Standard OAuth 2.0 token response from a provider's token endpoint
@@ -273,7 +297,14 @@ pub(crate) async fn exchange(
         .with_context(|| format!("failed to read {label} token response body"))?;
 
     if !status.is_success() {
-        anyhow::bail!("{label} token exchange failed ({status}): {text}");
+        // Surface the RFC 6749 standard `error` / `error_description` fields
+        // when present, but never echo the raw body — providers may include
+        // sensitive material in error responses (assertion echoes, internal
+        // diagnostics, partial credentials).
+        match serde_json::from_str::<vouch_common::OAuthError>(&text).ok() {
+            Some(err) => anyhow::bail!("{}", format_oauth_error(label, status, &err)),
+            None => anyhow::bail!("{label} token exchange failed ({status})"),
+        }
     }
 
     // Deliberately do not include the response body in the error context:
