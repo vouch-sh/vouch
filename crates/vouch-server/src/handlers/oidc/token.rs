@@ -610,6 +610,11 @@ async fn handle_authorization_code_grant(
             Err(crate::services::oidc::dpop::DpopError::UseNonce(nonce)) => {
                 return dpop_use_nonce_response(&nonce);
             }
+            Err(e @ crate::services::oidc::dpop::DpopError::Database(_)) => {
+                return ServiceError::oauth(OAuthErrorCode::ServerError, e.to_string())
+                    .into_oauth_response()
+                    .into_response();
+            }
             Err(e) => {
                 return ServiceError::oauth(OAuthErrorCode::InvalidDpopProof, e.to_string())
                     .into_oauth_response()
@@ -946,6 +951,11 @@ async fn handle_token_exchange_grant(
             Err(crate::services::oidc::dpop::DpopError::UseNonce(nonce)) => {
                 return dpop_use_nonce_response(&nonce);
             }
+            Err(e @ crate::services::oidc::dpop::DpopError::Database(_)) => {
+                return ServiceError::oauth(OAuthErrorCode::ServerError, e.to_string())
+                    .into_oauth_response()
+                    .into_response();
+            }
             Err(e) => {
                 return ServiceError::oauth(OAuthErrorCode::InvalidDpopProof, e.to_string())
                     .into_oauth_response()
@@ -1127,6 +1137,11 @@ async fn handle_fido2_assertion_grant(
             Ok(proof) => proof,
             Err(crate::services::oidc::dpop::DpopError::UseNonce(nonce)) => {
                 return dpop_use_nonce_response(&nonce);
+            }
+            Err(e @ crate::services::oidc::dpop::DpopError::Database(_)) => {
+                return ServiceError::oauth(OAuthErrorCode::ServerError, e.to_string())
+                    .into_oauth_response()
+                    .into_response();
             }
             Err(e) => {
                 return ServiceError::oauth(OAuthErrorCode::InvalidDpopProof, e.to_string())

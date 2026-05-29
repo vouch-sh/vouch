@@ -67,11 +67,28 @@ pub(crate) async fn fetch_rds_token(
     let effective_region = region.or(hostname_region);
     let (role_arn, region_name) = aws::resolve_role_and_region(role, effective_region)?;
 
-    let cache_key = format!("rds:{hostname}:{port}:{username}:{role_arn}");
+    // Detect agent context BEFORE the cache lookup. Folding the source into
+    // the cache key ensures agent and non-agent invocations never share a
+    // cached entry, which would otherwise hand the agent credentials minted
+    // without ReadOnlyAccess / `vouch:AccessType=ai` tags (issue #426).
+    let agent_source = crate::commands::credential::aws::detect_agent_source();
+    let agent_suffix = agent_source
+        .as_deref()
+        .map_or(String::new(), |src| format!(":agent:{src}"));
+    let cache_key = format!("rds:{hostname}:{port}:{username}:{role_arn}{agent_suffix}");
 
+    let agent = agent_source;
     let data = cache::get_or_fetch(&cache_key, "RDS token", || async {
-        let token =
-            generate_rds_token(server, hostname, port, username, &region_name, &role_arn).await?;
+        let token = generate_rds_token(
+            server,
+            hostname,
+            port,
+            username,
+            &region_name,
+            &role_arn,
+            agent.as_deref(),
+        )
+        .await?;
         let expires_at = rds_cache_expiry()?;
         let value = serde_json::Value::String(token);
         Ok((value, expires_at))
@@ -91,14 +108,14 @@ async fn generate_rds_token(
     username: &str,
     region: &str,
     role_arn: &str,
+    agent_source: Option<&str>,
 ) -> Result<String> {
-    let agent_source = crate::commands::credential::aws::detect_agent_source();
     let result = exchange_for_sts_credentials(StsRequest {
         server,
         role_arn,
         region,
         management_role: None,
-        agent_source: agent_source.as_deref(),
+        agent_source,
     })
     .await?;
 
@@ -168,17 +185,73 @@ mod tests {
         assert_eq!(endpoint, "https://mydb.us-east-1.rds.amazonaws.com:5432");
     }
 
+    /// Mirror the cache-key construction in `fetch_rds_token()` so we can lock
+    /// in the invariant that agent and non-agent invocations land on different
+    /// keys.
+    fn build_rds_cache_key(
+        hostname: &str,
+        port: u16,
+        username: &str,
+        role_arn: &str,
+        agent: Option<&str>,
+    ) -> String {
+        let agent_suffix = agent.map_or(String::new(), |src| format!(":agent:{src}"));
+        format!("rds:{hostname}:{port}:{username}:{role_arn}{agent_suffix}")
+    }
+
     #[test]
     fn test_rds_cache_key_format() {
-        let hostname = "mydb.us-east-1.rds.amazonaws.com";
-        let port: u16 = 5432;
-        let username = "admin";
-        let role_arn = "arn:aws:iam::123456789012:role/MyRole";
-        let key = format!("rds:{hostname}:{port}:{username}:{role_arn}");
+        let key = build_rds_cache_key(
+            "mydb.us-east-1.rds.amazonaws.com",
+            5432,
+            "admin",
+            "arn:aws:iam::123456789012:role/MyRole",
+            None,
+        );
         assert_eq!(
             key,
             "rds:mydb.us-east-1.rds.amazonaws.com:5432:admin:arn:aws:iam::123456789012:role/MyRole"
         );
+    }
+
+    /// Agent and non-agent invocations must never share a cached entry —
+    /// issue #426.
+    #[test]
+    fn test_rds_cache_key_differs_when_agent_detected() {
+        let without = build_rds_cache_key(
+            "mydb.us-east-1.rds.amazonaws.com",
+            5432,
+            "admin",
+            "arn:aws:iam::123456789012:role/MyRole",
+            None,
+        );
+        let with = build_rds_cache_key(
+            "mydb.us-east-1.rds.amazonaws.com",
+            5432,
+            "admin",
+            "arn:aws:iam::123456789012:role/MyRole",
+            Some("claude-code"),
+        );
+        assert_ne!(without, with);
+    }
+
+    #[test]
+    fn test_rds_cache_key_differs_between_agents() {
+        let claude = build_rds_cache_key(
+            "mydb.us-east-1.rds.amazonaws.com",
+            5432,
+            "admin",
+            "arn:aws:iam::123456789012:role/MyRole",
+            Some("claude-code"),
+        );
+        let cursor = build_rds_cache_key(
+            "mydb.us-east-1.rds.amazonaws.com",
+            5432,
+            "admin",
+            "arn:aws:iam::123456789012:role/MyRole",
+            Some("cursor"),
+        );
+        assert_ne!(claude, cursor);
     }
 
     #[test]

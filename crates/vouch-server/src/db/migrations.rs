@@ -163,10 +163,19 @@ async fn record_migration(
 
     let elapsed_nanos = i64::try_from(elapsed.as_nanos())
         .context("migration elapsed time exceeds i64 nanoseconds")?;
+    // `ON CONFLICT DO NOTHING` handles concurrent multi-replica startup: two
+    // instances can both decide the same migration is pending, run the DDL
+    // (the duplicate-object handler above absorbs the redundant DDL), then
+    // race here to record completion. Without the conflict clause the loser
+    // hits `_sqlx_migrations.version` PRIMARY KEY (SQLSTATE 23505) and the
+    // process exits, causing a restart loop (issue #428). DSQL supports
+    // `ON CONFLICT DO NOTHING` — the AWS DSQL Loader uses the same pattern
+    // for resumable loads.
     sqlx::query(
         r#"
         INSERT INTO _sqlx_migrations (version, description, success, checksum, execution_time)
         VALUES ($1, $2, $3, $4, $5)
+        ON CONFLICT (version) DO NOTHING
         "#,
     )
     .bind(migration.version)

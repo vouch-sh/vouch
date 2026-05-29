@@ -46,10 +46,26 @@ pub(crate) async fn run(
 
     let (role_arn, region_name) = aws::resolve_role_and_region(role, region)?;
 
-    let cache_key = format!("eks:{cluster_name}:{role_arn}");
+    // Detect agent context BEFORE the cache lookup. Folding the source into
+    // the cache key ensures agent and non-agent invocations never share a
+    // cached entry, which would otherwise hand the agent credentials minted
+    // without ReadOnlyAccess / `vouch:AccessType=ai` tags (issue #426).
+    let agent_source = crate::commands::credential::aws::detect_agent_source();
+    let agent_suffix = agent_source
+        .as_deref()
+        .map_or(String::new(), |src| format!(":agent:{src}"));
+    let cache_key = format!("eks:{cluster_name}:{role_arn}{agent_suffix}");
 
+    let agent = agent_source;
     let data = cache::get_or_fetch(&cache_key, "EKS token", || async {
-        let token = generate_eks_token(server, cluster_name, &region_name, &role_arn).await?;
+        let token = generate_eks_token(
+            server,
+            cluster_name,
+            &region_name,
+            &role_arn,
+            agent.as_deref(),
+        )
+        .await?;
         let exec_cred = build_exec_credential(&token)?;
         let expires_at = expiration_rfc3339()?;
         Ok((exec_cred, expires_at))
@@ -67,14 +83,14 @@ async fn generate_eks_token(
     cluster_name: &str,
     region: &str,
     role_arn: &str,
+    agent_source: Option<&str>,
 ) -> Result<String> {
-    let agent_source = crate::commands::credential::aws::detect_agent_source();
     let result = exchange_for_sts_credentials(StsRequest {
         server,
         role_arn,
         region,
         management_role: None,
-        agent_source: agent_source.as_deref(),
+        agent_source,
     })
     .await?;
 
@@ -175,5 +191,36 @@ mod tests {
     fn test_expiration_rfc3339_valid() {
         let ts = expiration_rfc3339().expect("should compute");
         assert!(ts.parse::<jiff::Timestamp>().is_ok());
+    }
+
+    /// Mirror the cache-key construction in `run()` so we can lock in the
+    /// invariant that agent and non-agent invocations land on different keys.
+    fn build_eks_cache_key(cluster_name: &str, role_arn: &str, agent: Option<&str>) -> String {
+        let agent_suffix = agent.map_or(String::new(), |src| format!(":agent:{src}"));
+        format!("eks:{cluster_name}:{role_arn}{agent_suffix}")
+    }
+
+    #[test]
+    fn test_eks_cache_key_format() {
+        let key = build_eks_cache_key("my-cluster", "arn:aws:iam::123456789012:role/MyRole", None);
+        assert_eq!(key, "eks:my-cluster:arn:aws:iam::123456789012:role/MyRole");
+    }
+
+    /// Agent and non-agent invocations must never share a cached entry —
+    /// issue #426.
+    #[test]
+    fn test_eks_cache_key_differs_when_agent_detected() {
+        let role_arn = "arn:aws:iam::123456789012:role/MyRole";
+        let without = build_eks_cache_key("my-cluster", role_arn, None);
+        let with = build_eks_cache_key("my-cluster", role_arn, Some("claude-code"));
+        assert_ne!(without, with);
+    }
+
+    #[test]
+    fn test_eks_cache_key_differs_between_agents() {
+        let role_arn = "arn:aws:iam::123456789012:role/MyRole";
+        let claude = build_eks_cache_key("my-cluster", role_arn, Some("claude-code"));
+        let cursor = build_eks_cache_key("my-cluster", role_arn, Some("cursor"));
+        assert_ne!(claude, cursor);
     }
 }

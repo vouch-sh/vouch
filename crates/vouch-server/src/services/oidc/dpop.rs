@@ -172,6 +172,14 @@ pub enum DpopError {
     TokenHashMismatch,
     /// Server requires nonce.
     UseNonce(String),
+    /// Backend database failure during JTI persistence or nonce
+    /// generation/validation. Distinct from `InvalidFormat`: this is a
+    /// server-side fault (maps to `server_error` / HTTP 500), not a
+    /// client-side proof defect (issue #427). Without this variant the
+    /// catch-all in `validate_dpop_common` swallowed `ClaimError::Database`
+    /// as `InvalidFormat`, which surfaced as HTTP 400 `invalid_dpop_proof`
+    /// and prevented clients from retrying transient DB failures.
+    Database(String),
 }
 
 impl std::fmt::Display for DpopError {
@@ -188,6 +196,7 @@ impl std::fmt::Display for DpopError {
             Self::InvalidNonce => write!(f, "invalid or missing DPoP nonce"),
             Self::TokenHashMismatch => write!(f, "DPoP ath claim mismatch"),
             Self::UseNonce(nonce) => write!(f, "use_dpop_nonce: {nonce}"),
+            Self::Database(msg) => write!(f, "DPoP backend failure: {msg}"),
         }
     }
 }
@@ -500,7 +509,9 @@ async fn validate_dpop_common(
         Ok(claim) => claim,
         Err(db::claim::ClaimError::AlreadyConsumed) => return Err(DpopError::ReplayDetected),
         Err(db::claim::ClaimError::InvalidInput(msg)) => return Err(DpopError::InvalidFormat(msg)),
-        Err(e) => return Err(DpopError::InvalidFormat(format!("JTI check failed: {e}"))),
+        Err(db::claim::ClaimError::Database(msg)) => {
+            return Err(DpopError::Database(format!("JTI check failed: {msg}")));
+        }
     };
 
     // Nonce requirement: enforced at token endpoint (RFC 9449 Section 8)
@@ -509,7 +520,7 @@ async fn validate_dpop_common(
     if require_nonce && claims.nonce.is_none() {
         let new_nonce = db::generate_dpop_nonce(store, NONCE_VALIDITY_SECONDS)
             .await
-            .map_err(|e| DpopError::InvalidFormat(format!("nonce generation failed: {e}")))?;
+            .map_err(|e| DpopError::Database(format!("nonce generation failed: {e}")))?;
         return Err(DpopError::UseNonce(new_nonce));
     }
 
@@ -536,14 +547,15 @@ async fn validate_dpop_common(
             Err(db::claim::ClaimError::AlreadyConsumed) => {
                 let new_nonce = db::generate_dpop_nonce(store, NONCE_VALIDITY_SECONDS)
                     .await
-                    .map_err(|e| {
-                        DpopError::InvalidFormat(format!("nonce generation failed: {e}"))
-                    })?;
+                    .map_err(|e| DpopError::Database(format!("nonce generation failed: {e}")))?;
                 return Err(DpopError::UseNonce(new_nonce));
             }
-            Err(e) => {
-                return Err(DpopError::InvalidFormat(format!(
-                    "nonce validation failed: {e}"
+            Err(db::claim::ClaimError::InvalidInput(msg)) => {
+                return Err(DpopError::InvalidFormat(msg));
+            }
+            Err(db::claim::ClaimError::Database(msg)) => {
+                return Err(DpopError::Database(format!(
+                    "nonce validation failed: {msg}"
                 )));
             }
         }
@@ -665,6 +677,27 @@ mod tests {
         assert!(!hash.is_empty());
         // SHA-256 base64url encoded should be 43 chars
         assert_eq!(hash.len(), 43);
+    }
+
+    /// `DpopError::Database` is distinct from `DpopError::InvalidFormat` so
+    /// the handler layer can route it to HTTP 500 `server_error` instead of
+    /// HTTP 400 `invalid_dpop_proof` (issue #427). Lock in the Display form
+    /// because handlers surface it verbatim in `error_description`.
+    #[test]
+    fn dpop_error_database_display() {
+        let err = DpopError::Database("connection refused".to_string());
+        assert_eq!(err.to_string(), "DPoP backend failure: connection refused");
+    }
+
+    /// Guard against accidental collapsing of `Database` back into
+    /// `InvalidFormat`: the two map to different HTTP statuses.
+    #[test]
+    fn dpop_error_database_distinct_from_invalid_format() {
+        let db_err = DpopError::Database("x".to_string());
+        let fmt_err = DpopError::InvalidFormat("x".to_string());
+        assert!(matches!(db_err, DpopError::Database(_)));
+        assert!(!matches!(db_err, DpopError::InvalidFormat(_)));
+        assert!(matches!(fmt_err, DpopError::InvalidFormat(_)));
     }
 
     fn make_claims(htm: &str, htu: &str, iat: i64) -> DpopClaims {
