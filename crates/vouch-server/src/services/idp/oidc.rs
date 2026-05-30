@@ -163,6 +163,37 @@ fn is_entra_common_issuer(issuer: &str) -> bool {
         && (url.path().starts_with("/common/") || url.path() == "/common")
 }
 
+/// Check whether an issuer URL points at any Microsoft Entra endpoint.
+///
+/// Parses the URL and matches on `host_str()` so lookalike domains
+/// (`login.microsoftonline.com.evil.com`) are rejected. Used by
+/// `verify_id_token` to gate Entra-specific behavior — `xms_edov`
+/// honoring, tenant validation against `tid`, and the Entra-specific
+/// error message that walks operators through the `xms_edov` claim
+/// configuration (issue #425).
+fn is_entra_host(issuer: &str) -> bool {
+    Url::parse(issuer)
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_ascii_lowercase))
+        .as_deref()
+        == Some("login.microsoftonline.com")
+}
+
+/// Check whether an issuer URL points at Google's OIDC endpoint.
+///
+/// Same rationale as [`is_entra_host`] — substring matching accepts
+/// lookalike hosts (issue #425). Discovery validation gates `provider.issuer`,
+/// but the verification path uses this for feature detection (using `hd` vs.
+/// extracting domain from `email`); the consistency-with-discovery-helpers
+/// invariant in this file matters for future-developer copy-paste safety.
+fn is_google_host(issuer: &str) -> bool {
+    Url::parse(issuer)
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_ascii_lowercase))
+        .as_deref()
+        == Some("accounts.google.com")
+}
+
 /// Check whether an issuer URL is the Entra per-tenant template returned by
 /// `/organizations/` discovery (literal `{tenantid}` placeholder).
 ///
@@ -399,7 +430,7 @@ pub(crate) async fn verify_id_token(
     // emit `email_verified`; Entra never does and instead uses the optional
     // `xms_edov` (Email Domain Owner Verified) claim. `xms_edov` is honored
     // only for Entra issuers — it's an Entra-specific signal.
-    let is_entra_issuer = provider.issuer.contains("login.microsoftonline.com");
+    let is_entra_issuer = is_entra_host(&provider.issuer);
     let email_is_verified =
         claims.email_verified || (is_entra_issuer && claims.xms_edov == Some(true));
     if !email_is_verified {
@@ -447,7 +478,7 @@ pub(crate) async fn verify_id_token(
     //
     // Normalize to ASCII lowercase so that org lookups match regardless of
     // the case the IdP returned. Org domains are stored lowercase.
-    let is_google = provider.issuer.contains("accounts.google.com");
+    let is_google = is_google_host(&provider.issuer);
     let domain = if is_google {
         claims.hd.as_deref().map(str::to_ascii_lowercase)
     } else {
@@ -561,6 +592,58 @@ mod tests {
     )]
 
     use super::*;
+
+    // ── Issuer host matching (#425) ────────────────────────────────────────
+
+    #[test]
+    fn is_entra_host_matches_legitimate_endpoints() {
+        assert!(is_entra_host(
+            "https://login.microsoftonline.com/tenant-uuid/v2.0"
+        ));
+        assert!(is_entra_host(
+            "https://login.microsoftonline.com/organizations/v2.0"
+        ));
+        assert!(is_entra_host(
+            "https://login.microsoftonline.com/%7Btenantid%7D/v2.0"
+        ));
+    }
+
+    /// Lookalike host with the target domain as a substring must be
+    /// rejected — the entire point of swapping `.contains()` for host-based
+    /// matching (#425).
+    #[test]
+    fn is_entra_host_rejects_lookalike_domain() {
+        assert!(!is_entra_host(
+            "https://login.microsoftonline.com.evil.com/tenant/v2.0"
+        ));
+        assert!(!is_entra_host(
+            "https://evil.com/login.microsoftonline.com/v2.0"
+        ));
+    }
+
+    #[test]
+    fn is_entra_host_rejects_malformed_url() {
+        assert!(!is_entra_host("not a url"));
+        assert!(!is_entra_host(""));
+    }
+
+    #[test]
+    fn is_google_host_matches_legitimate_endpoint() {
+        assert!(is_google_host("https://accounts.google.com"));
+        assert!(is_google_host("https://accounts.google.com/"));
+    }
+
+    #[test]
+    fn is_google_host_rejects_lookalike_domain() {
+        assert!(!is_google_host("https://accounts.google.com.evil.com"));
+        assert!(!is_google_host("https://evil.com/accounts.google.com"));
+    }
+
+    #[test]
+    fn is_google_host_rejects_malformed_url() {
+        assert!(!is_google_host("not a url"));
+        assert!(!is_google_host(""));
+    }
 
     // ── Test helpers for verify_id_token ────────────────────────────────────
 

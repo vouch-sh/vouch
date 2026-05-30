@@ -285,6 +285,13 @@ pub(crate) async fn par(
             )
                 .into_response();
         }
+        Err(e @ DpopError::Database(_)) => {
+            return par_error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "server_error",
+                &e.to_string(),
+            );
+        }
         Err(e) => {
             return par_error_response(
                 StatusCode::BAD_REQUEST,

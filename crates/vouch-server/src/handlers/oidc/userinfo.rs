@@ -217,6 +217,13 @@ pub(crate) async fn userinfo(
                 )
                     .into_response();
             }
+            Err(e @ DpopError::Database(_)) => {
+                return oauth_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    OAuthErrorCode::ServerError.as_str(),
+                    &e.to_string(),
+                );
+            }
             Err(e) => {
                 return oauth_error(
                     StatusCode::UNAUTHORIZED,

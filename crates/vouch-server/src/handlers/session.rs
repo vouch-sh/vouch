@@ -166,6 +166,14 @@ pub(crate) async fn extract_resource_token(
                             }
                             dpop_source = validated.source;
                         }
+                        Err(e @ crate::services::oidc::dpop::DpopError::Database(_)) => {
+                            tracing::error!("DPoP backend failure: {e}");
+                            return Err(ServiceError::api(
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                "server_error",
+                                "DPoP validation backend error",
+                            ));
+                        }
                         Err(e) => {
                             tracing::debug!("DPoP validation failed: {e}");
                             return Err(ServiceError::api(
