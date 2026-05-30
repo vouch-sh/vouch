@@ -8,7 +8,7 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use sea_query::{Expr, Iden, Order, Query};
+use sea_query::{Expr, ExprTrait, Iden, Order, Query};
 
 use super::pool::Pool;
 use crate::crypto::document_crypto::DocumentCrypto;

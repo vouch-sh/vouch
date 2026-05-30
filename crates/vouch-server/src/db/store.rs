@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use jiff::Timestamp;
-use sea_query::{Cond, Expr, Iden, OnConflict, Order, Query};
+use sea_query::{Cond, Expr, ExprTrait, Iden, OnConflict, Order, Query};
 
 use super::document_type::{Document, DocumentType};
 use super::pool::Pool;
