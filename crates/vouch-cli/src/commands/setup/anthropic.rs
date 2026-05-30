@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 
 use crate::config::{AnthropicFederation, Config};
+use crate::install_path::resolve_install_path;
 
 /// Refresh interval injected into Claude Code's environment so the
 /// `apiKeyHelper` is actually re-invoked before the short-lived provider
@@ -48,9 +49,7 @@ pub(crate) async fn run(args: SetupArgs<'_>) -> Result<()> {
         .server_url()
         .context("not configured — run 'vouch enroll' first")?;
 
-    let vouch_path = std::env::current_exe()
-        .ok()
-        .map_or_else(|| "vouch".to_string(), |p| p.display().to_string());
+    let vouch_path = resolve_install_path().display().to_string();
     // `apiKeyHelper` is a shell command string executed via `/bin/sh`, so any
     // path containing a space (or other shell-special character) must be
     // POSIX-quoted to survive word-splitting.

@@ -3,8 +3,9 @@
 //!
 //! Configures Cargo to use Vouch for private registry authentication.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 
+use crate::install_path::resolve_install_path;
 use crate::integrations::cargo::CargoConfig;
 
 /// Run the Cargo setup command.
@@ -20,7 +21,7 @@ pub(crate) async fn run(registry: Option<&str>, configure: bool) -> Result<()> {
     println!("================================\n");
 
     // Get vouch binary path
-    let vouch_path = std::env::current_exe().context("could not determine vouch binary path")?;
+    let vouch_path = resolve_install_path();
     let vouch_path_str = vouch_path.display().to_string();
 
     // Build the provider command as array parts

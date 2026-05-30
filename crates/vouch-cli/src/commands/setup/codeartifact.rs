@@ -11,6 +11,7 @@ use secrecy::ExposeSecret;
 
 use crate::commands::credential::codeartifact::resolve_codeartifact_params;
 use crate::config::{CodeArtifactProfile, Config};
+use crate::install_path::resolve_install_path;
 use crate::integrations::aws::codeartifact::{CodeArtifactRegistry, parse_codeartifact_url};
 use crate::integrations::aws::get_local_aws_role;
 use crate::integrations::aws::sts::parse_role_arn;
@@ -116,7 +117,7 @@ fn setup_cargo(ca_host: &str, repository: &str) -> Result<()> {
     let index_url = format!("sparse+https://{ca_host}/cargo/{repository}/");
 
     // Get vouch binary path
-    let vouch_path = std::env::current_exe().context("could not determine vouch binary path")?;
+    let vouch_path = resolve_install_path();
     let vouch_path_str = vouch_path.display().to_string();
 
     let registry_name = format!("codeartifact-{repository}");
@@ -187,7 +188,7 @@ fn setup_pip(ca_host: &str, repository: &str) -> Result<()> {
 /// is configured. The symlink makes vouch detect argv[0] == "keyring" and
 /// handle those calls.
 fn install_keyring_wrapper() -> Result<()> {
-    let vouch_path = std::env::current_exe().context("could not determine vouch binary path")?;
+    let vouch_path = resolve_install_path();
     let keyring_path = crate::utils::vouch_helper_path("keyring")?;
 
     // Don't overwrite if it exists and isn't a vouch symlink
@@ -509,7 +510,7 @@ fn setup_pnpm(ca_host: &str, repository: &str) -> Result<()> {
 /// The symlink makes vouch detect argv[0] == "vouch-pnpm-tokenhelper"
 /// and dispatch to the codeartifact credential command.
 fn install_pnpm_token_helper() -> Result<std::path::PathBuf> {
-    let vouch_path = std::env::current_exe().context("could not determine vouch binary path")?;
+    let vouch_path = resolve_install_path();
     let helper_path = crate::utils::vouch_helper_path("vouch-pnpm-tokenhelper")?;
 
     // Don't overwrite if it exists and isn't a vouch symlink

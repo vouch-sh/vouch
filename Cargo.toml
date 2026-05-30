@@ -210,6 +210,7 @@ vouch-common = { path = "crates/vouch-common" }
 vouch-httpsig = { path = "crates/vouch-httpsig" }
 webauthn-rs = { version = "=0.5.5", default-features = false }
 webauthn-rs-proto = { version = "=0.5.5", default-features = false }
+which = { version = "=8.0.2", default-features = false }
 windows = { version = "=0.62.2", default-features = false }
 windows-native-keyring-store = { version = "=1.1.0", default-features = false }
 wiremock = { version = "=0.6.5", default-features = false }
