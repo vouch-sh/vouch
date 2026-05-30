@@ -235,6 +235,11 @@ fn version_pin_hint(exe: &Path) -> Option<String> {
 mod tests {
     use super::*;
 
+    // Homebrew tests are gated to Unix because `is_absolute()` returns false
+    // on Windows for paths without a drive prefix (e.g. `/opt/homebrew/...`).
+    // Homebrew itself only runs on macOS and Linux, so this matches reality.
+
+    #[cfg(unix)]
     #[test]
     fn homebrew_candidate_apple_silicon() {
         let exe = Path::new("/opt/homebrew/Cellar/vouch/2026.5.4/bin/vouch");
@@ -244,6 +249,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn homebrew_candidate_intel_mac() {
         let exe = Path::new("/usr/local/Cellar/vouch/2026.5.4/bin/vouch");
@@ -253,6 +259,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn homebrew_candidate_linuxbrew() {
         let exe = Path::new("/home/linuxbrew/.linuxbrew/Cellar/vouch/2026.5.4/bin/vouch");
@@ -421,6 +428,7 @@ mod tests {
         assert_eq!(result, PathBuf::from(fallback_binary_name()));
     }
 
+    #[cfg(unix)]
     #[test]
     fn version_pin_hint_detects_cellar() {
         let exe = Path::new("/opt/homebrew/Cellar/vouch/2026.5.4/bin/vouch");
