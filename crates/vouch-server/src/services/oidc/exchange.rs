@@ -314,12 +314,12 @@ pub(crate) async fn exchange_token(
             state,
             IdTokenContext {
                 user_id: &subject_session.user_id,
-                org_id: subject_user.org_id.as_deref(),
                 email: subject_email,
                 subject_token_hash: &subject_token_hash,
-                authenticator_id,
                 audience,
                 expires_in,
+                hardware_aaguid: subject_session.hardware_aaguid.as_deref(),
+                org_domain: subject_session.org_domain.as_deref(),
             },
         )
         .await;
@@ -381,6 +381,11 @@ pub(crate) async fn exchange_token(
             hardware_verification: subject_decoded.hardware_verification(),
             session_purpose: crate::db::SessionPurpose::OAuthAccessToken,
             authorization_details: effective_ad_value.as_ref(),
+            // Propagate the subject session's federation snapshot so the
+            // exchanged session reports the original authenticator/org even
+            // after the user rotates keys or changes orgs.
+            hardware_aaguid: subject_session.hardware_aaguid.as_deref(),
+            org_domain: subject_session.org_domain.as_deref(),
         },
         proof,
     )
@@ -445,18 +450,18 @@ pub(crate) async fn exchange_token(
 struct IdTokenContext<'a> {
     /// Subject user's ID, for the token-exchange audit record.
     user_id: &'a str,
-    /// Subject user's organization ID, for the `hd` claim lookup.
-    org_id: Option<&'a str>,
     /// Subject user's canonical email (`sub`/`email` claims).
     email: &'a str,
     /// Hash of the subject token, for the audit record.
     subject_token_hash: &'a str,
-    /// Authenticator backing the subject session (`hardware_aaguid` claim).
-    authenticator_id: Option<&'a str>,
     /// Requested audience (`aud` claim); falls back to the issuer URL.
     audience: Option<&'a str>,
     /// Lifetime ceiling in seconds, already capped by subject TTL and policy.
     expires_in: u64,
+    /// AAGUID snapshot from the subject session (`hardware_aaguid` claim).
+    hardware_aaguid: Option<&'a str>,
+    /// Organization domain snapshot from the subject session (`hd` claim).
+    org_domain: Option<&'a str>,
 }
 
 /// Mint a clean OIDC ID token (ES256) for an RFC 8693 exchange where the
@@ -473,31 +478,12 @@ async fn issue_id_token(
     let audience = ctx.audience.unwrap_or(&config.base_url);
     let expires_in = ctx.expires_in.min(DEFAULT_ID_TOKEN_EXPIRES_SECS);
 
-    // hardware_aaguid from the session's authenticator. Fail closed on DB
-    // error: a transient lookup failure must not silently downgrade the
-    // issued claim set. A stale `Ok(None)` (authenticator deleted after
-    // session creation) is still tolerated — the claim is simply omitted.
-    let hardware_aaguid = if let Some(auth_id) = ctx.authenticator_id {
-        db::get_authenticator_by_id(&state.store, auth_id)
-            .await
-            .map_err(|e| ServiceError::Internal(format!("Database error: {e}")))?
-            .and_then(|a| a.aaguid)
-    } else {
-        None
-    };
-
-    // hd claim from the user's organization domain, when they belong to one.
-    let hd = if let Some(org_id) = ctx.org_id {
-        db::get_organization_domain(&state.store, org_id)
-            .await
-            .map_err(|e| ServiceError::Internal(format!("Database error: {e}")))?
-    } else {
-        None
-    };
-
+    // `hardware_aaguid` and `hd` are session-time snapshots — they reflect the
+    // authenticator/org state at session creation and survive later rotations
+    // of the user's keys or organization membership.
     let claims = OidcIdTokenClaimsBuilder::for_audience(&config.base_url, ctx.email, audience)
-        .hardware_aaguid(hardware_aaguid)
-        .hd(hd)
+        .hardware_aaguid(ctx.hardware_aaguid.map(String::from))
+        .hd(ctx.org_domain.map(String::from))
         .valid_for_seconds(expires_in)
         .build()
         .map_err(|e| ServiceError::Internal(format!("Failed to build ID token claims: {e}")))?;

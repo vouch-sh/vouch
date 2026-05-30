@@ -19,8 +19,9 @@ pub enum SessionPurpose {
 
 /// An authenticated session (DPoP-bound access token).
 ///
-/// Denormalized: includes `user_email` to avoid a JOIN back to
-/// the user document.
+/// Denormalized: includes `user_email`, `hardware_aaguid`, and `org_domain` to
+/// avoid lookups (and to capture the session-time snapshot of the federation
+/// claims) when issuing tokens.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionDoc {
     pub user_id: String,
@@ -32,6 +33,15 @@ pub struct SessionDoc {
     /// RFC 9396: Rich authorization details (JSON array).
     #[serde(default)]
     pub authorization_details: Option<Value>,
+    /// AAGUID of the authenticator that established this session.
+    ///
+    /// Captured at session creation so claims reflect "what was true when this
+    /// session was created" rather than the user's current authenticator state.
+    #[serde(default)]
+    pub hardware_aaguid: Option<String>,
+    /// Organization domain (`hd` claim) at session creation time.
+    #[serde(default)]
+    pub org_domain: Option<String>,
 }
 
 impl DocumentType for SessionDoc {
@@ -59,5 +69,56 @@ impl DocumentType for SessionDoc {
 
     fn expires_at(&self) -> Option<Timestamp> {
         Some(self.expires_at)
+    }
+}
+
+#[cfg(test)]
+#[expect(
+    clippy::expect_used,
+    reason = "test code: panic on assertion failure is acceptable"
+)]
+mod tests {
+    use super::*;
+
+    /// Pre-deployment session records do not have `hardware_aaguid` or
+    /// `org_domain`. They must deserialize as `None` so old sessions continue
+    /// to work without a backfill migration.
+    #[test]
+    fn deserializes_legacy_session_without_new_fields() {
+        let legacy = r#"{
+            "user_id": "u-1",
+            "user_email": "a@example.com",
+            "token_hash": "h",
+            "authenticator_id": "auth-1",
+            "session_type": "oauth_access_token",
+            "expires_at": "2099-01-01T00:00:00Z"
+        }"#;
+        let doc: SessionDoc = serde_json::from_str(legacy).expect("parse legacy session");
+        assert!(doc.hardware_aaguid.is_none());
+        assert!(doc.org_domain.is_none());
+        assert!(doc.authorization_details.is_none());
+    }
+
+    /// The denormalized fields survive a serde roundtrip on new sessions.
+    #[test]
+    fn roundtrips_denormalized_fields() {
+        let doc = SessionDoc {
+            user_id: "u-1".to_string(),
+            user_email: "a@example.com".to_string(),
+            token_hash: "h".to_string(),
+            authenticator_id: Some("auth-1".to_string()),
+            session_type: SessionPurpose::OAuthAccessToken,
+            expires_at: "2099-01-01T00:00:00Z".parse().expect("parse timestamp"),
+            authorization_details: None,
+            hardware_aaguid: Some("ee882879-721c-4913-9775-3dfcce97072a".to_string()),
+            org_domain: Some("example.com".to_string()),
+        };
+        let json = serde_json::to_string(&doc).expect("serialize");
+        let back: SessionDoc = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(
+            back.hardware_aaguid.as_deref(),
+            Some("ee882879-721c-4913-9775-3dfcce97072a")
+        );
+        assert_eq!(back.org_domain.as_deref(), Some("example.com"));
     }
 }

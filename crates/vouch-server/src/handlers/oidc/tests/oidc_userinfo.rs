@@ -108,6 +108,8 @@ async fn test_userinfo_no_email_when_scope_is_none() {
             hardware_verification: HardwareVerification::Verified,
             session_purpose: db::SessionPurpose::OAuthAccessToken,
             authorization_details: None,
+            hardware_aaguid: None,
+            org_domain: None,
         },
         TokenIssuanceProof {
             grant: GrantProof::TestingOnly,

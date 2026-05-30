@@ -339,7 +339,18 @@ pub(crate) async fn get_aws_token(
     )
     .await?;
 
-    // Get user record once — extract both email and org_id
+    // Verify the session was hardware-verified. M2M and pre-FIDO2 bootstrap
+    // sessions have no `authenticator_id`; AWS federation requires hardware.
+    if token.authenticator_id.is_none() {
+        return Err(ServiceError::api(
+            StatusCode::FORBIDDEN,
+            "no_authenticator",
+            "Session does not have a security key - please register one first",
+        ));
+    }
+
+    // Confirm the user is still active. Email and federation claims come from
+    // the session snapshot, not from current state.
     let user = db::get_user_by_id(&state.store, &token.sub)
         .await
         .map_err(|e| {
@@ -364,47 +375,19 @@ pub(crate) async fn get_aws_token(
 
     let user_email = token.email.clone().unwrap_or_else(|| user.email.clone());
 
-    // Get user's organization domain (hd claim) if they belong to an org
-    let hd = if let Some(ref org_id) = user.org_id {
-        db::get_organization_domain(&state.store, org_id)
-            .await
-            .map_err(|e| {
-                tracing::error!("Failed to get organization domain: {e}");
-                ServiceError::api(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "db_error",
-                    "Internal database error",
-                )
-            })?
-    } else {
-        None
-    };
-
-    // Issue AWS token
+    // Issue AWS token using the session-time snapshot of aaguid and org domain.
     let config = state.config();
     let result = issue_aws_token(
-        &state.store,
         &config.base_url,
         config.session_hours,
         &state.oidc_key,
         &user_email,
-        token.authenticator_id.as_deref(),
-        hd,
+        token.hardware_aaguid.clone(),
+        token.org_domain.clone(),
         token.dpop_source.as_deref(),
     )
     .await
     .map_err(|e| match e {
-        AwsError::NoAuthenticator => {
-            ServiceError::api(StatusCode::FORBIDDEN, "no_authenticator", e.to_string())
-        }
-        AwsError::Database(ref err) => {
-            tracing::error!("AWS token database error: {err}");
-            ServiceError::api(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "db_error",
-                "Internal database error",
-            )
-        }
         AwsError::ClaimsBuild(ref err) => {
             tracing::error!("AWS token claims build error: {err}");
             ServiceError::api(

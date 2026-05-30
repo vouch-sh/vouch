@@ -71,6 +71,10 @@ pub(crate) struct ValidatedResourceToken {
     pub token_hash: String,
     /// AI coding agent identifier from DPoP proof custom claim (e.g., "claude-code").
     pub dpop_source: Option<String>,
+    /// AAGUID snapshot from the session record (federation claim).
+    pub hardware_aaguid: Option<String>,
+    /// Organization domain snapshot from the session record (`hd` claim).
+    pub org_domain: Option<String>,
 }
 
 /// Extract and validate an OAuth access token from the request.
@@ -246,18 +250,19 @@ pub(crate) async fn extract_resource_token(
         }
     }
 
-    // 5. Look up authenticator_id from DB session record
-    let authenticator_id = session.authenticator_id;
-
+    // 5. Surface the session-time federation snapshot (avoids per-request DB
+    //    lookups in handlers that need `hardware_aaguid` or `hd`).
     Ok(ValidatedResourceToken {
         sub: access_claims.sub,
         email: access_claims.email,
         client_id: access_claims.client_id,
         scope: access_claims.scope,
-        authenticator_id,
+        authenticator_id: session.authenticator_id,
         auth_time: access_claims.auth_time,
         token_hash,
         dpop_source,
+        hardware_aaguid: session.hardware_aaguid,
+        org_domain: session.org_domain,
     })
 }
 

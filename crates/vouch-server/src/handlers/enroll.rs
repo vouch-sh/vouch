@@ -647,7 +647,29 @@ pub(crate) async fn complete_enrollment_after_identity(
     let existing_auths = db::get_authenticators_for_user(&state.store, &user.id)
         .await
         .unwrap_or_default();
-    let authenticator_id = existing_auths.first().map(|a| a.id.clone());
+    let existing_authenticator = existing_auths.first();
+    let authenticator_id = existing_authenticator.map(|a| a.id.clone());
+    let hardware_aaguid = existing_authenticator.and_then(|a| a.aaguid.clone());
+
+    // Snapshot org domain so the enrollment session carries the federation
+    // claims that match the user's state at this moment. Fail closed: the
+    // snapshot is captured exactly once, so silently dropping a transient
+    // DB error would permanently degrade this session's `hd` claim.
+    let org_domain = match user.org_id.as_deref() {
+        Some(org_id) => match db::get_organization_domain(&state.store, org_id).await {
+            Ok(domain) => domain,
+            Err(e) => {
+                tracing::error!("Failed to snapshot org domain: {}", e);
+                return ErrorTemplate {
+                    title: "Error".to_string(),
+                    message: "Failed to create session".to_string(),
+                    back_url: None,
+                }
+                .into_response();
+            }
+        },
+        None => None,
+    };
 
     // Issue an OAuth access token for the enrollment session.
     // This session is created after upstream IdP auth (OIDC/SAML) but BEFORE
@@ -670,6 +692,8 @@ pub(crate) async fn complete_enrollment_after_identity(
             hardware_verification: crate::services::auth::HardwareVerification::NotVerified,
             session_purpose: db::SessionPurpose::OAuthAccessToken,
             authorization_details: None,
+            hardware_aaguid: hardware_aaguid.as_deref(),
+            org_domain: org_domain.as_deref(),
         },
         TokenIssuanceProof {
             grant: GrantProof::EnrollmentBootstrap(oidc_state_claim),
@@ -1353,6 +1377,31 @@ pub(crate) async fn browser_register_complete(
     // Issue an OAuth access token (RFC 9068) — the server acts as both issuer and audience
     let enroll_client_id = state.config().base_url.clone();
     let user_id_str = reg_state.user_id.to_string();
+
+    // Snapshot org domain for federation claims tied to this session. Fail
+    // closed: the snapshot is captured exactly once, so silently dropping a
+    // transient DB error would permanently degrade this session's `hd` claim.
+    let snapshot_error = |err: anyhow::Error| {
+        tracing::error!("Failed to snapshot org domain: {}", err);
+        ServiceError::api(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "db_error",
+            "Failed to create session",
+        )
+    };
+    let org_domain = match db::get_user_by_id(&state.store, &user_id_str)
+        .await
+        .map_err(snapshot_error)?
+    {
+        Some(u) => match u.org_id {
+            Some(org_id) => db::get_organization_domain(&state.store, &org_id)
+                .await
+                .map_err(snapshot_error)?,
+            None => None,
+        },
+        None => None,
+    };
+
     let session_result = create_oauth_access_token(
         &state,
         CreateOAuthTokenParams {
@@ -1369,6 +1418,8 @@ pub(crate) async fn browser_register_complete(
             hardware_verification: crate::services::auth::HardwareVerification::Verified,
             session_purpose: db::SessionPurpose::OAuthAccessToken,
             authorization_details: None,
+            hardware_aaguid: validated.aaguid.as_deref(),
+            org_domain: org_domain.as_deref(),
         },
         TokenIssuanceProof {
             grant: GrantProof::EnrollmentComplete(registration_claim),

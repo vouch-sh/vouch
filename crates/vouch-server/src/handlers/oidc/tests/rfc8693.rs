@@ -1013,6 +1013,72 @@ async fn test_rfc8693_id_token_carries_hardware_aaguid() {
 }
 
 #[tokio::test]
+async fn test_rfc8693_id_token_uses_session_aaguid_after_rotation() {
+    // Regression for GH#431: the id_token must reflect the AAGUID captured at
+    // session creation, not the user's *current* authenticator. Otherwise, a
+    // user who rotates security keys retroactively invalidates the federation
+    // claims of every still-live session.
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "wif-rotation@example.com").await;
+    let original_aaguid = "ee882879-721c-4913-9775-3dfcce97072a";
+    let auth_id = crate::db::create_authenticator(
+        &state.store,
+        &user.id,
+        &user.email,
+        "YubiKey 5 (original)",
+        format!("cred-{}", uuid::Uuid::now_v7()).as_bytes(),
+        &[0u8; 32],
+        Some(original_aaguid),
+        Some(user.id.as_bytes()),
+        true,
+    )
+    .await
+    .expect("create original authenticator");
+
+    // Session captures the original AAGUID.
+    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+    let auth_header = client.basic_auth_header();
+
+    // Simulate the post-refactor invariant: the session-time snapshot survives
+    // even when the original authenticator is no longer present. (We bypass
+    // `delete_authenticator` because it cascades and removes the session
+    // along with the key — the snapshot is what makes the issued claim
+    // independent of *current* authenticator state at issuance time.)
+    state
+        .store
+        .delete(&auth_id)
+        .await
+        .expect("delete authenticator without cascade");
+
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        &format!(
+            "grant_type=urn:ietf:params:oauth:grant-type:token-exchange\
+             &subject_token={token}\
+             &subject_token_type=urn:ietf:params:oauth:token-type:access_token\
+             &requested_token_type={ID_TOKEN_TYPE}"
+        ),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "exchange should succeed: {body}");
+    let response: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let id_token = response["access_token"]
+        .as_str()
+        .expect("access_token present");
+    let claims = decode_jwt_payload(id_token);
+    assert_eq!(
+        claims["hardware_aaguid"], original_aaguid,
+        "ID token must reflect the AAGUID captured at session creation, \
+         not the user's current authenticator after rotation"
+    );
+}
+
+#[tokio::test]
 async fn test_rfc8693_id_token_carries_hd_for_org_user() {
     // A user in an organization gets the org's domain as the `hd` claim, so
     // relying parties can restrict federation to a corporate domain.
