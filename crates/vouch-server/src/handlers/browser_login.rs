@@ -673,11 +673,20 @@ pub(crate) async fn browser_login_complete(
     let auth_now = Timestamp::now();
 
     // Snapshot org domain at session creation so the federation claims are a
-    // session-time snapshot rather than current-state lookups.
+    // session-time snapshot rather than current-state lookups. Fail closed:
+    // the snapshot is captured exactly once, so silently dropping a transient
+    // DB error here would permanently degrade the session's `hd` claim.
     let org_domain = if let Some(ref org_id) = user.org_id {
         db::get_organization_domain(&state.store, org_id)
             .await
-            .unwrap_or(None)
+            .map_err(|e| {
+                tracing::error!("Failed to snapshot org domain: {e}");
+                ServiceError::api(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "db_error",
+                    "Failed to create session",
+                )
+            })?
     } else {
         None
     };

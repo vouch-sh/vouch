@@ -652,13 +652,23 @@ pub(crate) async fn complete_enrollment_after_identity(
     let hardware_aaguid = existing_authenticator.and_then(|a| a.aaguid.clone());
 
     // Snapshot org domain so the enrollment session carries the federation
-    // claims that match the user's state at this moment.
-    let org_domain = if let Some(ref org_id) = user.org_id {
-        db::get_organization_domain(&state.store, org_id)
-            .await
-            .unwrap_or(None)
-    } else {
-        None
+    // claims that match the user's state at this moment. Fail closed: the
+    // snapshot is captured exactly once, so silently dropping a transient
+    // DB error would permanently degrade this session's `hd` claim.
+    let org_domain = match user.org_id.as_deref() {
+        Some(org_id) => match db::get_organization_domain(&state.store, org_id).await {
+            Ok(domain) => domain,
+            Err(e) => {
+                tracing::error!("Failed to snapshot org domain: {}", e);
+                return ErrorTemplate {
+                    title: "Error".to_string(),
+                    message: "Failed to create session".to_string(),
+                    back_url: None,
+                }
+                .into_response();
+            }
+        },
+        None => None,
     };
 
     // Issue an OAuth access token for the enrollment session.
@@ -1368,15 +1378,28 @@ pub(crate) async fn browser_register_complete(
     let enroll_client_id = state.config().base_url.clone();
     let user_id_str = reg_state.user_id.to_string();
 
-    // Snapshot org domain for federation claims tied to this session.
-    let org_domain = match db::get_user_by_id(&state.store, &user_id_str).await {
-        Ok(Some(u)) => match u.org_id {
+    // Snapshot org domain for federation claims tied to this session. Fail
+    // closed: the snapshot is captured exactly once, so silently dropping a
+    // transient DB error would permanently degrade this session's `hd` claim.
+    let snapshot_error = |err: anyhow::Error| {
+        tracing::error!("Failed to snapshot org domain: {}", err);
+        ServiceError::api(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "db_error",
+            "Failed to create session",
+        )
+    };
+    let org_domain = match db::get_user_by_id(&state.store, &user_id_str)
+        .await
+        .map_err(snapshot_error)?
+    {
+        Some(u) => match u.org_id {
             Some(org_id) => db::get_organization_domain(&state.store, &org_id)
                 .await
-                .unwrap_or(None),
+                .map_err(snapshot_error)?,
             None => None,
         },
-        _ => None,
+        None => None,
     };
 
     let session_result = create_oauth_access_token(

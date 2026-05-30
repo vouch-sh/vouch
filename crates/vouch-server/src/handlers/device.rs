@@ -316,19 +316,31 @@ pub(crate) async fn device_token(
             // The device auth request doesn't carry aaguid/org_domain, so look
             // them up once here. These reads happen at session creation and
             // eliminate per-issuance lookups for every downstream token.
+            //
+            // Fail closed on DB errors: the snapshot is captured exactly once,
+            // so silently dropping a transient failure would permanently
+            // degrade the federation claims for this session's whole lifetime.
+            let db_error = || {
+                oauth_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    OAuthError::invalid_grant(),
+                )
+            };
             let hardware_aaguid = db::get_authenticator_by_id(&state.store, &authenticator_id)
                 .await
-                .ok()
-                .flatten()
+                .map_err(|_| db_error())?
                 .and_then(|a| a.aaguid);
-            let org_domain = match db::get_user_by_id(&state.store, &user_id).await {
-                Ok(Some(u)) => match u.org_id {
+            let org_domain = match db::get_user_by_id(&state.store, &user_id)
+                .await
+                .map_err(|_| db_error())?
+            {
+                Some(u) => match u.org_id {
                     Some(org_id) => db::get_organization_domain(&state.store, &org_id)
                         .await
-                        .unwrap_or(None),
+                        .map_err(|_| db_error())?,
                     None => None,
                 },
-                _ => None,
+                None => None,
             };
 
             let session_result = create_oauth_access_token(
