@@ -326,12 +326,14 @@ pub(super) async fn fetch_redshift_with_opts(
     let (role_arn, region_name) =
         crate::integrations::aws::resolve_role_and_region(role, opts.region)?;
 
+    let agent_source = super::credential::aws::detect_agent_source();
     super::credential::redshift::fetch_redshift_credentials(
         server,
         &target,
         opts.db_name,
         &region_name,
         &role_arn,
+        agent_source.as_deref(),
     )
     .await
 }
