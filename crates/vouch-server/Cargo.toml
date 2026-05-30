@@ -65,7 +65,7 @@ rust-embed = { workspace = true, features = ["axum-ex", "deterministic-timestamp
 rustls = { workspace = true, features = ["aws-lc-rs", "std", "prefer-post-quantum", "tls12"] }
 rustls-pemfile = { workspace = true, features = ["std"] }
 sea-query = { workspace = true, features = ["backend-sqlite", "backend-postgres", "derive"] }
-sea-query-binder = { workspace = true, features = ["sqlx-sqlite", "sqlx-postgres", "runtime-tokio"] }
+sea-query-sqlx = { workspace = true, features = ["sqlx-sqlite", "sqlx-postgres", "runtime-tokio"] }
 secrecy = { workspace = true, features = ["serde"] }
 serde = { workspace = true, features = ["std", "derive"] }
 serde_json = { workspace = true, features = ["std"] }

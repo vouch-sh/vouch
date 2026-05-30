@@ -26,6 +26,7 @@ use anyhow::{Context, Result};
 use toml_edit::{Array, DocumentMut, Item, Table, Value};
 
 use crate::config::{Config, OpenAiFederation};
+use crate::install_path::resolve_install_path;
 
 /// Codex provider id Vouch registers itself under.
 const PROVIDER_ID: &str = "vouch";
@@ -57,9 +58,7 @@ pub(crate) async fn run(args: SetupArgs<'_>) -> Result<()> {
         .server_url()
         .context("not configured — run 'vouch enroll' first")?;
 
-    let vouch_path = std::env::current_exe()
-        .ok()
-        .map_or_else(|| "vouch".to_string(), |p| p.display().to_string());
+    let vouch_path = resolve_install_path().display().to_string();
 
     // Configure Codex FIRST so a conflict error doesn't leave the user
     // with persisted Vouch state pointing at an unwired provider.

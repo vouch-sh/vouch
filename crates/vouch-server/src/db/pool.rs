@@ -468,23 +468,23 @@ macro_rules! with_dsql_retry {
 /// Execute a sea-query statement that returns no rows against the pool.
 ///
 /// Builds parameterized SQL for the correct backend (SQLite/PostgreSQL)
-/// using `sea-query-binder`, then executes via `sqlx::query_with`.
+/// using `sea-query-sqlx`, then executes via `sqlx::query_with`.
 #[macro_export]
 macro_rules! db_execute {
     ($pool:expr, $stmt:expr) => {
         match $pool {
             $crate::db::Pool::Sqlite(p) => {
-                use sea_query_binder::SqlxBinder;
+                use sea_query_sqlx::SqlxBinder;
                 let (sql, values) = $stmt.build_sqlx(sea_query::SqliteQueryBuilder);
-                sqlx::query_with(&sql, values)
+                sqlx::query_with(sqlx::AssertSqlSafe(sql), values)
                     .execute(p)
                     .await
                     .map($crate::db::pool::QueryResult::from)
             }
             $crate::db::Pool::Postgres(p) => {
-                use sea_query_binder::SqlxBinder;
+                use sea_query_sqlx::SqlxBinder;
                 let (sql, values) = $stmt.build_sqlx(sea_query::PostgresQueryBuilder);
-                sqlx::query_with(&sql, values)
+                sqlx::query_with(sqlx::AssertSqlSafe(sql), values)
                     .execute(p)
                     .await
                     .map($crate::db::pool::QueryResult::from)
@@ -499,16 +499,16 @@ macro_rules! db_fetch_all {
     ($pool:expr, $stmt:expr, $row_type:ty) => {
         match $pool {
             $crate::db::Pool::Sqlite(p) => {
-                use sea_query_binder::SqlxBinder;
+                use sea_query_sqlx::SqlxBinder;
                 let (sql, values) = $stmt.build_sqlx(sea_query::SqliteQueryBuilder);
-                sqlx::query_as_with::<_, $row_type, _>(&sql, values)
+                sqlx::query_as_with::<_, $row_type, _>(sqlx::AssertSqlSafe(sql), values)
                     .fetch_all(p)
                     .await
             }
             $crate::db::Pool::Postgres(p) => {
-                use sea_query_binder::SqlxBinder;
+                use sea_query_sqlx::SqlxBinder;
                 let (sql, values) = $stmt.build_sqlx(sea_query::PostgresQueryBuilder);
-                sqlx::query_as_with::<_, $row_type, _>(&sql, values)
+                sqlx::query_as_with::<_, $row_type, _>(sqlx::AssertSqlSafe(sql), values)
                     .fetch_all(p)
                     .await
             }
@@ -522,16 +522,16 @@ macro_rules! db_fetch_one {
     ($pool:expr, $stmt:expr, $row_type:ty) => {
         match $pool {
             $crate::db::Pool::Sqlite(p) => {
-                use sea_query_binder::SqlxBinder;
+                use sea_query_sqlx::SqlxBinder;
                 let (sql, values) = $stmt.build_sqlx(sea_query::SqliteQueryBuilder);
-                sqlx::query_as_with::<_, $row_type, _>(&sql, values)
+                sqlx::query_as_with::<_, $row_type, _>(sqlx::AssertSqlSafe(sql), values)
                     .fetch_one(p)
                     .await
             }
             $crate::db::Pool::Postgres(p) => {
-                use sea_query_binder::SqlxBinder;
+                use sea_query_sqlx::SqlxBinder;
                 let (sql, values) = $stmt.build_sqlx(sea_query::PostgresQueryBuilder);
-                sqlx::query_as_with::<_, $row_type, _>(&sql, values)
+                sqlx::query_as_with::<_, $row_type, _>(sqlx::AssertSqlSafe(sql), values)
                     .fetch_one(p)
                     .await
             }
@@ -545,16 +545,16 @@ macro_rules! db_fetch_optional {
     ($pool:expr, $stmt:expr, $row_type:ty) => {
         match $pool {
             $crate::db::Pool::Sqlite(p) => {
-                use sea_query_binder::SqlxBinder;
+                use sea_query_sqlx::SqlxBinder;
                 let (sql, values) = $stmt.build_sqlx(sea_query::SqliteQueryBuilder);
-                sqlx::query_as_with::<_, $row_type, _>(&sql, values)
+                sqlx::query_as_with::<_, $row_type, _>(sqlx::AssertSqlSafe(sql), values)
                     .fetch_optional(p)
                     .await
             }
             $crate::db::Pool::Postgres(p) => {
-                use sea_query_binder::SqlxBinder;
+                use sea_query_sqlx::SqlxBinder;
                 let (sql, values) = $stmt.build_sqlx(sea_query::PostgresQueryBuilder);
-                sqlx::query_as_with::<_, $row_type, _>(&sql, values)
+                sqlx::query_as_with::<_, $row_type, _>(sqlx::AssertSqlSafe(sql), values)
                     .fetch_optional(p)
                     .await
             }
@@ -568,17 +568,17 @@ macro_rules! tx_execute {
     ($tx:expr, $stmt:expr) => {
         match $tx {
             $crate::db::Transaction::Sqlite(ref mut t) => {
-                use sea_query_binder::SqlxBinder;
+                use sea_query_sqlx::SqlxBinder;
                 let (sql, values) = $stmt.build_sqlx(sea_query::SqliteQueryBuilder);
-                sqlx::query_with(&sql, values)
+                sqlx::query_with(sqlx::AssertSqlSafe(sql), values)
                     .execute(&mut **t)
                     .await
                     .map($crate::db::pool::QueryResult::from)
             }
             $crate::db::Transaction::Postgres(ref mut t) => {
-                use sea_query_binder::SqlxBinder;
+                use sea_query_sqlx::SqlxBinder;
                 let (sql, values) = $stmt.build_sqlx(sea_query::PostgresQueryBuilder);
-                sqlx::query_with(&sql, values)
+                sqlx::query_with(sqlx::AssertSqlSafe(sql), values)
                     .execute(&mut **t)
                     .await
                     .map($crate::db::pool::QueryResult::from)
@@ -593,16 +593,16 @@ macro_rules! tx_fetch_all {
     ($tx:expr, $stmt:expr, $row_type:ty) => {
         match $tx {
             $crate::db::Transaction::Sqlite(ref mut t) => {
-                use sea_query_binder::SqlxBinder;
+                use sea_query_sqlx::SqlxBinder;
                 let (sql, values) = $stmt.build_sqlx(sea_query::SqliteQueryBuilder);
-                sqlx::query_as_with::<_, $row_type, _>(&sql, values)
+                sqlx::query_as_with::<_, $row_type, _>(sqlx::AssertSqlSafe(sql), values)
                     .fetch_all(&mut **t)
                     .await
             }
             $crate::db::Transaction::Postgres(ref mut t) => {
-                use sea_query_binder::SqlxBinder;
+                use sea_query_sqlx::SqlxBinder;
                 let (sql, values) = $stmt.build_sqlx(sea_query::PostgresQueryBuilder);
-                sqlx::query_as_with::<_, $row_type, _>(&sql, values)
+                sqlx::query_as_with::<_, $row_type, _>(sqlx::AssertSqlSafe(sql), values)
                     .fetch_all(&mut **t)
                     .await
             }
@@ -616,16 +616,16 @@ macro_rules! tx_fetch_one {
     ($tx:expr, $stmt:expr, $row_type:ty) => {
         match $tx {
             $crate::db::Transaction::Sqlite(ref mut t) => {
-                use sea_query_binder::SqlxBinder;
+                use sea_query_sqlx::SqlxBinder;
                 let (sql, values) = $stmt.build_sqlx(sea_query::SqliteQueryBuilder);
-                sqlx::query_as_with::<_, $row_type, _>(&sql, values)
+                sqlx::query_as_with::<_, $row_type, _>(sqlx::AssertSqlSafe(sql), values)
                     .fetch_one(&mut **t)
                     .await
             }
             $crate::db::Transaction::Postgres(ref mut t) => {
-                use sea_query_binder::SqlxBinder;
+                use sea_query_sqlx::SqlxBinder;
                 let (sql, values) = $stmt.build_sqlx(sea_query::PostgresQueryBuilder);
-                sqlx::query_as_with::<_, $row_type, _>(&sql, values)
+                sqlx::query_as_with::<_, $row_type, _>(sqlx::AssertSqlSafe(sql), values)
                     .fetch_one(&mut **t)
                     .await
             }
@@ -639,16 +639,16 @@ macro_rules! tx_fetch_optional {
     ($tx:expr, $stmt:expr, $row_type:ty) => {
         match $tx {
             $crate::db::Transaction::Sqlite(ref mut t) => {
-                use sea_query_binder::SqlxBinder;
+                use sea_query_sqlx::SqlxBinder;
                 let (sql, values) = $stmt.build_sqlx(sea_query::SqliteQueryBuilder);
-                sqlx::query_as_with::<_, $row_type, _>(&sql, values)
+                sqlx::query_as_with::<_, $row_type, _>(sqlx::AssertSqlSafe(sql), values)
                     .fetch_optional(&mut **t)
                     .await
             }
             $crate::db::Transaction::Postgres(ref mut t) => {
-                use sea_query_binder::SqlxBinder;
+                use sea_query_sqlx::SqlxBinder;
                 let (sql, values) = $stmt.build_sqlx(sea_query::PostgresQueryBuilder);
-                sqlx::query_as_with::<_, $row_type, _>(&sql, values)
+                sqlx::query_as_with::<_, $row_type, _>(sqlx::AssertSqlSafe(sql), values)
                     .fetch_optional(&mut **t)
                     .await
             }

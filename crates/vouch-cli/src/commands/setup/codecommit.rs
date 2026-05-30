@@ -16,6 +16,7 @@ use anyhow::{Context, Result};
 use std::process::Command;
 
 use crate::config::Config;
+use crate::install_path::resolve_install_path;
 use crate::integrations::aws::{AwsConfig, extract_role_from_credential_process};
 
 /// Git config patterns for CodeCommit credential helper by partition.
@@ -63,7 +64,7 @@ pub(crate) async fn run(
     println!();
 
     // Get vouch binary path for the credential helper command and symlink
-    let vouch_path = std::env::current_exe().context("could not determine vouch binary path")?;
+    let vouch_path = resolve_install_path();
 
     // Build the native credential helper command
     let helper_command = format!("{} credential codecommit", vouch_path.display());

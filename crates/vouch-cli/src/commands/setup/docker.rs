@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use crate::config::Config;
+use crate::install_path::resolve_install_path;
 
 /// Docker config.json structure (partial).
 #[derive(Debug, Serialize, Deserialize, Default)]
@@ -40,7 +41,7 @@ pub(crate) async fn run(registries: &[String], configure: bool) -> Result<()> {
     println!("==============================\n");
 
     // Get vouch binary path
-    let vouch_path = std::env::current_exe().context("could not determine vouch binary path")?;
+    let vouch_path = resolve_install_path();
 
     // Determine where to create the symlink
     let symlink_path = crate::utils::vouch_helper_path("docker-credential-vouch")?;

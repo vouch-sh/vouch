@@ -69,7 +69,7 @@ pub(crate) async fn run_dsql_migrations(pool: &PgPool) -> Result<MigrationResult
         // landed on the prior attempt, then re-record the migration so
         // future startups skip it cleanly. New deployments will hit the
         // happy path; only recovery paths exercise this branch.
-        match sqlx::raw_sql(&migration.sql).execute(pool).await {
+        match sqlx::raw_sql(migration.sql.clone()).execute(pool).await {
             Ok(_) => {}
             Err(e) if is_duplicate_object_error(&e) => {
                 tracing::warn!(
@@ -157,7 +157,7 @@ async fn record_migration(
     elapsed: std::time::Duration,
 ) -> Result<()> {
     // Compute checksum (SHA-384 of the SQL, matching sqlx's approach)
-    let checksum = digest::digest(&SHA384, migration.sql.as_bytes())
+    let checksum = digest::digest(&SHA384, migration.sql.as_str().as_bytes())
         .as_ref()
         .to_vec();
 

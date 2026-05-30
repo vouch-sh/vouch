@@ -4,8 +4,8 @@
 //! Configures AWS CLI/SDK to use Vouch for credential federation.
 
 use anyhow::{Context, Result};
-use std::path::PathBuf;
 
+use crate::install_path::resolve_install_path;
 use crate::integrations::aws::{AwsConfig, AwsProfile};
 use crate::utils::ensure_secure_dir;
 
@@ -65,7 +65,7 @@ pub(crate) async fn run(
         )
     })?;
 
-    let vouch_path = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("vouch"));
+    let vouch_path = resolve_install_path();
 
     let config_path = AwsConfig::default_path()?;
     let aws_dir = dirs::home_dir()
@@ -179,7 +179,7 @@ async fn run_discover(profile_prefix: Option<&str>, region: Option<&str>) -> Res
         .await
         .context("failed to list SSO accounts")?;
 
-    let vouch_path = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("vouch"));
+    let vouch_path = resolve_install_path();
 
     let config_path = AwsConfig::default_path()?;
     let aws_dir = dirs::home_dir()

@@ -865,7 +865,11 @@ impl ServerConfig {
         // upstream identity verification to bind a security key to a real
         // email; without it the server can only create users keyed on
         // placeholder strings, which silently degrades the security model.
-        if self.idps.is_empty() {
+        //
+        // Certification-test mode is the one exception: the cert-login
+        // handler mints a synthetic session without touching IdP discovery
+        // or callback, and the token is gated to non-production use.
+        if self.idps.is_empty() && self.certification_test_token.is_none() {
             anyhow::bail!(
                 "No upstream IdP configured. Set VOUCH_IDPS=<slug>[,<slug>...] \
                  with per-provider VOUCH_IDP_<SLUG>_TYPE plus type-specific vars."
@@ -1192,6 +1196,17 @@ mod tests {
             err.to_string().contains("No upstream IdP configured"),
             "expected zero-IdP rejection, got: {err}"
         );
+    }
+
+    #[test]
+    fn test_validate_cert_token_bypasses_idp_requirement() {
+        // Certification-test mode mints sessions via the cert-login handler
+        // without contacting an upstream IdP, so requiring one would block
+        // the OpenID conformance suite from running.
+        let mut config = test_config();
+        config.idps = Vec::new();
+        config.certification_test_token = Some(SecretString::from("cert-token"));
+        assert!(config.validate().is_ok());
     }
 
     #[test]

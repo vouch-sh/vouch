@@ -78,7 +78,11 @@ pub(crate) fn print_integration_status<I: IntegrationCheck>(integration: &I) {
                 details.summary
             );
             for (key, value) in details.details {
-                println!("{VALUE_INDENT}{key}: {value}");
+                if key.is_empty() {
+                    println!("{VALUE_INDENT}{value}");
+                } else {
+                    println!("{VALUE_INDENT}{key}: {value}");
+                }
             }
         }
         IntegrationState::NotConfigured { setup_hint } => {

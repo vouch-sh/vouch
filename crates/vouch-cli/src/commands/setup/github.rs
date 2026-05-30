@@ -9,6 +9,7 @@ use vouch_common::GitHubStatusResponse;
 
 use crate::commands::credential::github::check_status;
 use crate::config::Config;
+use crate::install_path::resolve_install_path;
 
 /// Run the GitHub setup command.
 ///
@@ -71,7 +72,7 @@ pub(crate) async fn run(host: &str, configure: bool) -> Result<()> {
     }
 
     // Get vouch binary path
-    let vouch_path = std::env::current_exe().context("could not determine vouch binary path")?;
+    let vouch_path = resolve_install_path();
     let vouch_path_str = vouch_path.display().to_string();
 
     // Build the helper command
