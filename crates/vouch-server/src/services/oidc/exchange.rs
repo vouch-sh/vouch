@@ -34,7 +34,7 @@ pub mod token_types {
 /// (`requested_token_type=id_token`). Short because the token is presented
 /// immediately as a federation assertion (Kubernetes, Claude/OpenAI WIF) and
 /// then discarded. The effective lifetime is further capped by the subject
-/// token's remaining TTL and any delegation policy, so this is only a ceiling.
+/// token's remaining TTL, so this is only a ceiling.
 const DEFAULT_ID_TOKEN_EXPIRES_SECS: u64 = 600;
 
 /// Parameters for token exchange (RFC 8693 Section 2.1).
@@ -163,10 +163,9 @@ pub(crate) async fn exchange_token(
             )
         })?;
 
-    // Look up the user to get the email for delegation policy checks and
-    // the exchanged token. For access tokens, the email may not be in the
-    // JWT (e.g., when only "openid" scope was granted), so we always use
-    // the canonical email from the user record.
+    // Look up the user to get the email for the exchanged token. For access
+    // tokens, the email may not be in the JWT (e.g., when only "openid" scope
+    // was granted), so we always use the canonical email from the user record.
     let subject_user = db::get_user_by_id(&state.store, &subject_session.user_id)
         .await
         .map_err(|e| ServiceError::Internal(format!("Database error: {e}")))?
@@ -260,63 +259,15 @@ pub(crate) async fn exchange_token(
         None
     };
 
-    // Check delegation policy if audience is specified
-    let max_ttl_override = if params.audience.is_some() {
-        let policy = db::check_delegation_policy(&state.store, subject_email, params.audience)
-            .await
-            .map_err(|e| ServiceError::Internal(format!("Database error: {e}")))?;
-
-        match policy {
-            Some(p) => {
-                tracing::debug!(
-                    "Token exchange allowed by policy '{}' for {} -> {:?}",
-                    p.name,
-                    redact_email(subject_email),
-                    params.audience
-                );
-                p.max_ttl_seconds
-            }
-            None => {
-                // No matching policy - check if any policies exist
-                let all_policies = db::get_delegation_policies(&state.store)
-                    .await
-                    .unwrap_or_default();
-
-                if all_policies.iter().any(|p| p.enabled) {
-                    // Policies exist but none match - deny
-                    return Err(ServiceError::oauth(
-                        OAuthErrorCode::AccessDenied,
-                        "No delegation policy allows this token exchange",
-                    ));
-                }
-                // No policies configured - allow by default (open mode)
-                None
-            }
-        }
-    } else {
-        None
-    };
-
     // Calculate granted scope (intersection of requested and available).
     // For FIDO2 sessions (scope: None), require explicit scope in the request
     // rather than defaulting to ScopeSet::all() to prevent scope escalation.
     let granted_scope = calculate_granted_scope(params.scope, subject_decoded.scope());
 
-    // Calculate expiration with policy TTL limit and subject token remaining TTL.
-    // RFC 8693 Section 2.2: The exchanged token's lifetime should not exceed
-    // the remaining lifetime of the subject token.
-    let default_expires_in = state.config().session_hours.saturating_mul(3600);
-    let mut expires_in = match max_ttl_override {
-        Some(max_ttl) => {
-            let max_ttl_u64 = u64::try_from(max_ttl).map_err(|_| {
-                ServiceError::Internal("Delegation policy max_ttl is negative".to_string())
-            })?;
-            default_expires_in.min(max_ttl_u64)
-        }
-        None => default_expires_in,
-    };
+    // Cap exchanged-token lifetime by subject token's remaining TTL
+    // (RFC 8693 Section 2.2).
+    let mut expires_in = state.config().session_hours.saturating_mul(3600);
 
-    // Cap by subject token's remaining TTL
     if let Some(subject_exp) = subject_decoded.exp() {
         let now = Timestamp::now().as_second();
         let remaining = subject_exp.saturating_sub(now);
@@ -341,7 +292,7 @@ pub(crate) async fn exchange_token(
     // instead of an RFC 9068 access token. The ID token carries only the
     // standard OIDC claim set, is never persisted as a session, and is
     // short-lived. `expires_in` is already capped by the subject token's
-    // remaining TTL and any delegation policy at this point; `issue_id_token`
+    // remaining TTL at this point; `issue_id_token`
     // additionally caps it at `DEFAULT_ID_TOKEN_EXPIRES_SECS` (600s), so the
     // value passed in is an upper bound that the federation ceiling will
     // tighten further if needed — never bypassable.

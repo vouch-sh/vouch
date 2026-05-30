@@ -4,7 +4,7 @@
 
 use super::document_type::{Document, DocumentType};
 use super::documents::credential::{EnrollmentSessionDoc, SshIssuedCertDoc, SshRevokedCertDoc};
-use super::documents::oauth::{DelegationPolicyDoc, TokenExchangeDoc};
+use super::documents::oauth::TokenExchangeDoc;
 use super::store::DocumentStore;
 use anyhow::Result;
 use jiff::Timestamp;
@@ -86,112 +86,6 @@ pub async fn get_token_exchanges_for_user(
         .find_all::<TokenExchangeDoc>("subject_user_id", user_id)
         .await?;
     Ok(docs.into_iter().map(TokenExchangeRecord::from).collect())
-}
-
-// ============================================================
-// Delegation Policies
-// ============================================================
-
-/// Delegation policy record.
-#[derive(Debug)]
-pub struct DelegationPolicy {
-    pub id: String,
-    pub name: String,
-    pub grantor_pattern: String,
-    pub grantee_pattern: String,
-    pub allowed_scopes: Option<String>,
-    pub max_ttl_seconds: Option<i32>,
-    pub enabled: bool,
-    pub created_at: Timestamp,
-    pub updated_at: Timestamp,
-}
-
-impl From<Document<DelegationPolicyDoc>> for DelegationPolicy {
-    fn from(doc: Document<DelegationPolicyDoc>) -> Self {
-        Self {
-            id: doc.id,
-            name: doc.data.name,
-            grantor_pattern: doc.data.grantor_pattern,
-            grantee_pattern: doc.data.grantee_pattern,
-            allowed_scopes: doc.data.allowed_scopes,
-            max_ttl_seconds: doc.data.max_ttl_seconds,
-            enabled: doc.data.enabled,
-            created_at: doc.created_at,
-            updated_at: doc.updated_at,
-        }
-    }
-}
-
-/// Check if a delegation is allowed by any policy.
-pub async fn check_delegation_policy(
-    store: &DocumentStore,
-    grantor_email: &str,
-    grantee_audience: Option<&str>,
-) -> Result<Option<DelegationPolicy>> {
-    let docs = store
-        .find_all::<DelegationPolicyDoc>("enabled", "true")
-        .await?;
-
-    for doc in docs {
-        let policy = DelegationPolicy::from(doc);
-
-        if !pattern_matches(&policy.grantor_pattern, grantor_email) {
-            continue;
-        }
-
-        if let Some(audience) = grantee_audience
-            && !pattern_matches(&policy.grantee_pattern, audience)
-        {
-            continue;
-        }
-
-        return Ok(Some(policy));
-    }
-
-    Ok(None)
-}
-
-/// Check if a pattern matches a value.
-fn pattern_matches(pattern: &str, value: &str) -> bool {
-    if pattern == "*" {
-        return true;
-    }
-
-    if let Some(domain) = pattern.strip_prefix("*@") {
-        if let Some(email_domain) = value.rsplit('@').next() {
-            return email_domain.eq_ignore_ascii_case(domain);
-        }
-        return false;
-    }
-
-    pattern.eq_ignore_ascii_case(value)
-}
-
-/// Get all delegation policies.
-pub async fn get_delegation_policies(store: &DocumentStore) -> Result<Vec<DelegationPolicy>> {
-    let docs = store.list_all::<DelegationPolicyDoc>().await?;
-    Ok(docs.into_iter().map(DelegationPolicy::from).collect())
-}
-
-/// Update a delegation policy's enabled status.
-pub async fn set_delegation_policy_enabled(
-    store: &DocumentStore,
-    id: &str,
-    enabled: bool,
-) -> Result<bool> {
-    if let Some(doc) = store.get::<DelegationPolicyDoc>(id).await? {
-        let mut data = doc.data;
-        data.enabled = enabled;
-        store.update(id, &data).await?;
-        return Ok(true);
-    }
-    Ok(false)
-}
-
-/// Delete a delegation policy.
-pub async fn delete_delegation_policy(store: &DocumentStore, id: &str) -> Result<bool> {
-    store.delete(id).await?;
-    Ok(true)
 }
 
 // ============================================================
