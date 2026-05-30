@@ -27,6 +27,10 @@ pub struct Session {
     pub session_type: SessionPurpose,
     /// RFC 9396: Rich authorization details (JSON array).
     pub authorization_details: Option<serde_json::Value>,
+    /// AAGUID of the authenticator that established this session (snapshot).
+    pub hardware_aaguid: Option<String>,
+    /// Organization domain (`hd` claim) at session creation time (snapshot).
+    pub org_domain: Option<String>,
 }
 
 impl From<Document<SessionDoc>> for Session {
@@ -41,6 +45,8 @@ impl From<Document<SessionDoc>> for Session {
             created_at: doc.created_at,
             session_type: doc.data.session_type,
             authorization_details: doc.data.authorization_details,
+            hardware_aaguid: doc.data.hardware_aaguid,
+            org_domain: doc.data.org_domain,
         }
     }
 }
@@ -63,6 +69,8 @@ pub async fn create_session(
     expires_at: Timestamp,
     session_type: SessionPurpose,
     authorization_details: Option<&serde_json::Value>,
+    hardware_aaguid: Option<&str>,
+    org_domain: Option<&str>,
 ) -> Result<String> {
     let doc = SessionDoc {
         user_id: user_id.to_string(),
@@ -72,6 +80,8 @@ pub async fn create_session(
         session_type,
         expires_at,
         authorization_details: authorization_details.cloned(),
+        hardware_aaguid: hardware_aaguid.map(String::from),
+        org_domain: org_domain.map(String::from),
     };
     let result = store.insert(&doc).await?;
     Ok(result.id)
@@ -291,6 +301,8 @@ mod tests {
             created_at: Timestamp::now(),
             session_type: SessionPurpose::OAuthAccessToken,
             authorization_details: None,
+            hardware_aaguid: None,
+            org_domain: None,
         }
     }
 

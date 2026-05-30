@@ -313,6 +313,16 @@ pub(crate) async fn exchange_fido2_assertion(
     let dpop_jkt = params.dpop_proof.as_ref().map(|p| p.jkt.as_str());
     let now = jiff::Timestamp::now().as_second();
 
+    // Snapshot org domain at session creation so federation claims reflect
+    // the user's state at this moment, not whenever the token is issued.
+    let org_domain = if let Some(ref org_id) = user.org_id {
+        db::get_organization_domain(&state.store, org_id)
+            .await
+            .map_err(|e| ServiceError::Internal(format!("Failed to fetch org domain: {e}")))?
+    } else {
+        None
+    };
+
     // Build the chokepoint proof here: `GrantProof::Fido2Assertion` can
     // only be constructed by code that holds a `ChallengeStateClaim`,
     // produced above by `try_consume_challenge_state`.
@@ -336,6 +346,8 @@ pub(crate) async fn exchange_fido2_assertion(
             hardware_verification: crate::services::auth::HardwareVerification::Verified,
             session_purpose: db::SessionPurpose::OAuthAccessToken,
             authorization_details: ad_value.as_ref(),
+            hardware_aaguid: authenticator.aaguid.as_deref(),
+            org_domain: org_domain.as_deref(),
         },
         proof,
     )

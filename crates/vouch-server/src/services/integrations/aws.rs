@@ -30,21 +30,12 @@
 //! }
 //! ```
 
-use crate::db::{self, Authenticator, store::DocumentStore};
 use crate::redact_email;
 use crate::services::oidc::{AwsSessionTags, OidcIdTokenClaimsBuilder, OidcSigningKey};
 
 /// Error types for AWS integration operations.
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum AwsError {
-    /// User session does not have an associated authenticator.
-    #[error("Session does not have a security key - please register one first")]
-    NoAuthenticator,
-
-    /// Database error.
-    #[error("Database error: {0}")]
-    Database(#[from] anyhow::Error),
-
     /// Failed to build OIDC claims.
     #[error("Failed to build claims: {0}")]
     ClaimsBuild(String),
@@ -77,31 +68,22 @@ pub(crate) struct AwsTokenResult {
 /// - `hd`: Google Workspace hosted domain (for domain-based access control)
 ///
 /// # Arguments
-/// * `db` - Database pool
 /// * `base_url` - Server base URL (issuer)
 /// * `session_hours` - Session duration in hours
 /// * `oidc_key` - OIDC signing key
 /// * `user_email` - The authenticated user's email
-/// * `authenticator_id` - The authenticator ID from the session (for AAGUID lookup)
-/// * `hd` - The user's organization domain (Google Workspace hosted domain)
+/// * `hardware_aaguid` - AAGUID snapshot from the session record
+/// * `hd` - Organization domain snapshot from the session record
 /// * `source` - AI coding agent identifier (e.g., "claude-code", "cursor")
-#[expect(
-    clippy::too_many_arguments,
-    reason = "AWS STS AssumeRoleWithWebIdentity issuance requires full session context"
-)]
 pub(crate) async fn issue_aws_token(
-    store: &DocumentStore,
     base_url: &str,
     session_hours: u64,
     oidc_key: &OidcSigningKey,
     user_email: &str,
-    authenticator_id: Option<&str>,
+    hardware_aaguid: Option<String>,
     hd: Option<String>,
     source: Option<&str>,
 ) -> AwsResult<AwsTokenResult> {
-    // Get authenticator info for AAGUID
-    let authenticator = get_authenticator(store, authenticator_id).await?;
-
     // Token validity matches session duration
     let expires_in = session_hours.saturating_mul(3600);
 
@@ -139,7 +121,7 @@ pub(crate) async fn issue_aws_token(
     // Build OIDC claims
     // For AWS, the audience is the issuer URL (AWS matches against the OIDC provider)
     let id_claims = OidcIdTokenClaimsBuilder::for_aws(base_url, user_email)
-        .hardware_aaguid(authenticator.and_then(|a| a.aaguid))
+        .hardware_aaguid(hardware_aaguid)
         .hd(hd)
         .aws_tags(aws_tags)
         .valid_for_seconds(expires_in)
@@ -160,20 +142,6 @@ pub(crate) async fn issue_aws_token(
     })
 }
 
-/// Get authenticator info for AAGUID lookup.
-async fn get_authenticator(
-    store: &DocumentStore,
-    authenticator_id: Option<&str>,
-) -> AwsResult<Option<Authenticator>> {
-    let Some(id) = authenticator_id else {
-        return Err(AwsError::NoAuthenticator);
-    };
-
-    db::get_authenticator_by_id(store, id)
-        .await
-        .map_err(AwsError::Database)
-}
-
 #[cfg(test)]
 #[expect(
     clippy::expect_used,
@@ -182,55 +150,9 @@ async fn get_authenticator(
 )]
 mod tests {
     use super::*;
-    use crate::crypto::document_crypto::PlaintextDocumentCrypto;
-    use crate::db::{Pool, pool::PoolConfig, store::DocumentStore};
     use crate::services::oidc::OidcSigningKey;
     use base64::Engine;
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-    use std::sync::Arc;
-
-    /// Create an in-memory SQLite store with migrations for testing.
-    async fn test_store() -> DocumentStore {
-        let pool = Pool::connect("sqlite::memory:", &PoolConfig::default())
-            .await
-            .expect("Failed to create test database");
-
-        match &pool {
-            Pool::Sqlite(p) => sqlx::migrate!("./migrations/sqlite")
-                .run(p)
-                .await
-                .expect("Failed to run migrations"),
-            Pool::Postgres(p) => sqlx::migrate!("./migrations/postgres")
-                .run(p)
-                .await
-                .expect("Failed to run migrations"),
-        }
-
-        let crypto: Arc<dyn crate::crypto::document_crypto::DocumentCrypto> =
-            Arc::new(PlaintextDocumentCrypto);
-        DocumentStore::new(pool, crypto)
-    }
-
-    /// Create a user and authenticator in the store, returning the authenticator ID.
-    async fn create_test_user_and_authenticator(store: &DocumentStore, email: &str) -> String {
-        let (user_id, _) = db::upsert_user(store, email, None)
-            .await
-            .expect("Failed to create test user");
-
-        db::create_authenticator(
-            store,
-            &user_id,
-            email,
-            "Test Key",
-            b"test-credential-id",
-            &[0u8; 32],
-            None,
-            Some(user_id.as_bytes()),
-            false,
-        )
-        .await
-        .expect("Failed to create test authenticator")
-    }
 
     /// Decode a JWT payload (middle part) into a `serde_json::Value` without
     /// signature verification. Used only in tests to inspect claims.
@@ -243,29 +165,23 @@ mod tests {
         serde_json::from_slice(&payload_bytes).expect("Failed to parse JWT payload as JSON")
     }
 
-    // ── test helpers ──────────────────────────────────────────────────────────
-
     const BASE_URL: &str = "https://vouch.example.com";
     const SESSION_HOURS: u64 = 8;
     const USER_EMAIL: &str = "user@example.com";
-
-    // ── tests ─────────────────────────────────────────────────────────────────
+    const TEST_AAGUID: &str = "ee882879-721c-4913-9775-3dfcce97072a";
 
     /// Default tags present: `vouch:Email` is always included; `vouch:AccessType`
     /// and `vouch:Agent` must NOT be present when `source` is `None`.
     #[tokio::test]
     async fn test_default_tags_present_without_source() {
-        let store = test_store().await;
-        let auth_id = create_test_user_and_authenticator(&store, USER_EMAIL).await;
         let key = OidcSigningKey::generate().expect("Failed to generate OIDC key");
 
         let result = issue_aws_token(
-            &store,
             BASE_URL,
             SESSION_HOURS,
             &key,
             USER_EMAIL,
-            Some(&auth_id),
+            Some(TEST_AAGUID.to_string()),
             None,
             None, // no source
         )
@@ -295,17 +211,14 @@ mod tests {
     /// Domain tag: when `hd` is `Some`, `vouch:Domain` must be included.
     #[tokio::test]
     async fn test_domain_tag_included_when_hd_present() {
-        let store = test_store().await;
-        let auth_id = create_test_user_and_authenticator(&store, USER_EMAIL).await;
         let key = OidcSigningKey::generate().expect("Failed to generate OIDC key");
 
         let result = issue_aws_token(
-            &store,
             BASE_URL,
             SESSION_HOURS,
             &key,
             USER_EMAIL,
-            Some(&auth_id),
+            Some(TEST_AAGUID.to_string()),
             Some("example.com".to_string()),
             None,
         )
@@ -332,17 +245,14 @@ mod tests {
     /// and `vouch:Agent=<source>` must appear in `principal_tags`.
     #[tokio::test]
     async fn test_agent_tags_added_when_source_present() {
-        let store = test_store().await;
-        let auth_id = create_test_user_and_authenticator(&store, USER_EMAIL).await;
         let key = OidcSigningKey::generate().expect("Failed to generate OIDC key");
 
         let result = issue_aws_token(
-            &store,
             BASE_URL,
             SESSION_HOURS,
             &key,
             USER_EMAIL,
-            Some(&auth_id),
+            Some(TEST_AAGUID.to_string()),
             None,
             Some("claude-code"),
         )
@@ -374,17 +284,14 @@ mod tests {
     /// `vouch:AccessType` nor `vouch:Agent` may appear.
     #[tokio::test]
     async fn test_agent_tags_absent_without_source() {
-        let store = test_store().await;
-        let auth_id = create_test_user_and_authenticator(&store, USER_EMAIL).await;
         let key = OidcSigningKey::generate().expect("Failed to generate OIDC key");
 
         let result = issue_aws_token(
-            &store,
             BASE_URL,
             SESSION_HOURS,
             &key,
             USER_EMAIL,
-            Some(&auth_id),
+            Some(TEST_AAGUID.to_string()),
             Some("example.com".to_string()), // hd present, but no source
             None,
         )
@@ -409,17 +316,14 @@ mod tests {
     /// present in `principal_tags`.
     #[tokio::test]
     async fn test_all_tags_are_transitive() {
-        let store = test_store().await;
-        let auth_id = create_test_user_and_authenticator(&store, USER_EMAIL).await;
         let key = OidcSigningKey::generate().expect("Failed to generate OIDC key");
 
         let result = issue_aws_token(
-            &store,
             BASE_URL,
             SESSION_HOURS,
             &key,
             USER_EMAIL,
-            Some(&auth_id),
+            Some(TEST_AAGUID.to_string()),
             Some("example.com".to_string()),
             Some("cursor"),
         )
@@ -464,45 +368,17 @@ mod tests {
         }
     }
 
-    /// No-authenticator error: passing `authenticator_id = None` returns
-    /// `AwsError::NoAuthenticator` without touching the database.
-    #[tokio::test]
-    async fn test_no_authenticator_returns_error() {
-        let store = test_store().await;
-        let key = OidcSigningKey::generate().expect("Failed to generate OIDC key");
-
-        let result = issue_aws_token(
-            &store,
-            BASE_URL,
-            SESSION_HOURS,
-            &key,
-            USER_EMAIL,
-            None, // no authenticator
-            None,
-            None,
-        )
-        .await;
-
-        assert!(
-            matches!(result, Err(AwsError::NoAuthenticator)),
-            "expected NoAuthenticator error when authenticator_id is None, got: {result:?}"
-        );
-    }
-
     /// `expires_in` matches `session_hours * 3600`.
     #[tokio::test]
     async fn test_expires_in_matches_session_hours() {
-        let store = test_store().await;
-        let auth_id = create_test_user_and_authenticator(&store, USER_EMAIL).await;
         let key = OidcSigningKey::generate().expect("Failed to generate OIDC key");
 
         let result = issue_aws_token(
-            &store,
             BASE_URL,
             4, // 4 hours
             &key,
             USER_EMAIL,
-            Some(&auth_id),
+            Some(TEST_AAGUID.to_string()),
             None,
             None,
         )
@@ -513,6 +389,30 @@ mod tests {
             result.expires_in,
             4 * 3600,
             "expires_in must be session_hours * 3600"
+        );
+    }
+
+    /// AAGUID claim is present in the issued token when supplied.
+    #[tokio::test]
+    async fn test_hardware_aaguid_claim_is_emitted() {
+        let key = OidcSigningKey::generate().expect("Failed to generate OIDC key");
+
+        let result = issue_aws_token(
+            BASE_URL,
+            SESSION_HOURS,
+            &key,
+            USER_EMAIL,
+            Some(TEST_AAGUID.to_string()),
+            None,
+            None,
+        )
+        .await
+        .expect("issue_aws_token should succeed");
+
+        let claims = decode_jwt_payload(&result.id_token);
+        assert_eq!(
+            claims["hardware_aaguid"], TEST_AAGUID,
+            "hardware_aaguid claim must reflect the supplied snapshot"
         );
     }
 }

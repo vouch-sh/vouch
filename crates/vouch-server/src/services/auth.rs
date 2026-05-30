@@ -622,6 +622,11 @@ pub(crate) struct CreateOAuthTokenParams<'a> {
     pub session_purpose: SessionPurpose,
     /// RFC 9396: Rich authorization details (JSON array, stored in session).
     pub authorization_details: Option<&'a serde_json::Value>,
+    /// AAGUID of the authenticator establishing this session (snapshot for
+    /// federation claims). `None` for M2M and pre-FIDO2 enrollment sessions.
+    pub hardware_aaguid: Option<&'a str>,
+    /// Organization domain (`hd` claim) at session creation time.
+    pub org_domain: Option<&'a str>,
 }
 
 /// Result of creating a session token.
@@ -736,6 +741,8 @@ pub(crate) async fn create_oauth_access_token(
         expires,
         params.session_purpose,
         params.authorization_details,
+        params.hardware_aaguid,
+        params.org_domain,
     )
     .await
     .map_err(|e| ServiceError::Internal(format!("Failed to store session: {e}")))?;

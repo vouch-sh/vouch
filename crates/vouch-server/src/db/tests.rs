@@ -140,6 +140,8 @@ async fn test_session_lifecycle() {
         "2099-12-31T23:59:59Z".parse().unwrap(),
         SessionPurpose::OAuthAccessToken,
         None,
+        None,
+        None,
     )
     .await
     .expect("Failed to create session");
@@ -1339,6 +1341,8 @@ async fn test_scim_session_invalidation_on_deactivation() {
         "2099-12-31T23:59:59Z".parse().unwrap(),
         SessionPurpose::OAuthAccessToken,
         None,
+        None,
+        None,
     )
     .await
     .expect("Failed to create session");
@@ -1682,6 +1686,8 @@ async fn test_user_cascade_delete() {
         Some(&auth_id),
         "2099-12-31T23:59:59Z".parse().unwrap(),
         SessionPurpose::OAuthAccessToken,
+        None,
+        None,
         None,
     )
     .await

@@ -86,6 +86,8 @@ pub(crate) async fn exchange_client_credentials(
             hardware_verification: crate::services::auth::HardwareVerification::NotVerified,
             session_purpose: SessionPurpose::M2MAccessToken,
             authorization_details: None,
+            hardware_aaguid: None,
+            org_domain: None,
         },
         proof,
     )

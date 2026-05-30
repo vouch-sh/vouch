@@ -1758,6 +1758,8 @@ mod tests {
             session_type: SessionPurpose::OAuthAccessToken,
             expires_at: in_one_hour,
             authorization_details: None,
+            hardware_aaguid: None,
+            org_domain: None,
         };
         store
             .insert(&mk_session(

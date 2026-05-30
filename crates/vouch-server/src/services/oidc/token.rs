@@ -346,6 +346,16 @@ pub(crate) async fn exchange_authorization_code(
     )
     .await?;
 
+    // Snapshot org domain at session creation so federation claims survive
+    // later changes to the user's organization membership.
+    let org_domain = if let Some(ref org_id) = user.org_id {
+        db::get_organization_domain(&state.store, org_id)
+            .await
+            .map_err(|e| ServiceError::Internal(e.to_string()))?
+    } else {
+        None
+    };
+
     // Generate access token as an RFC 9068 JWT (ES256, verifiable via JWKS).
     // Build the chokepoint proof here: `GrantProof::AuthorizationCode` can
     // only be constructed by code that holds an AuthCodeClaim, which is
@@ -371,6 +381,8 @@ pub(crate) async fn exchange_authorization_code(
             hardware_verification: crate::services::auth::HardwareVerification::Verified,
             session_purpose: db::SessionPurpose::OAuthAccessToken,
             authorization_details: grants.authorization_details_value.as_ref(),
+            hardware_aaguid: auth_code.aaguid.as_deref(),
+            org_domain: org_domain.as_deref(),
         },
         proof,
     )

@@ -671,6 +671,17 @@ pub(crate) async fn browser_login_complete(
     // Issue an OAuth access token (RFC 9068) — the server acts as both issuer and audience
     let client_id = state.config().base_url.clone();
     let auth_now = Timestamp::now();
+
+    // Snapshot org domain at session creation so the federation claims are a
+    // session-time snapshot rather than current-state lookups.
+    let org_domain = if let Some(ref org_id) = user.org_id {
+        db::get_organization_domain(&state.store, org_id)
+            .await
+            .unwrap_or(None)
+    } else {
+        None
+    };
+
     let session_result = create_oauth_access_token(
         &state,
         CreateOAuthTokenParams {
@@ -687,6 +698,8 @@ pub(crate) async fn browser_login_complete(
             hardware_verification: crate::services::auth::HardwareVerification::Verified,
             session_purpose: db::SessionPurpose::OAuthAccessToken,
             authorization_details: None,
+            hardware_aaguid: authenticator.aaguid.as_deref(),
+            org_domain: org_domain.as_deref(),
         },
         TokenIssuanceProof {
             grant: GrantProof::BrowserLogin(challenge_claim),

@@ -148,6 +148,10 @@ pub(crate) async fn complete_login(
             hardware_verification: crate::services::auth::HardwareVerification::Verified,
             session_purpose: db::SessionPurpose::OAuthAccessToken,
             authorization_details: None,
+            // Cert user has no org and the cert authenticator AAGUID isn't
+            // exercised by conformance suites; omit both.
+            hardware_aaguid: None,
+            org_domain: None,
         },
         TokenIssuanceProof {
             grant: GrantProof::CertificationBypass,

@@ -513,6 +513,35 @@ pub async fn create_test_authenticator(store: &DocumentStore, user_id: &str) -> 
     .expect("Failed to create authenticator")
 }
 
+/// Resolve the session-time `hardware_aaguid` / `org_domain` snapshot the way
+/// production call sites do — by fetching the authenticator and the user's
+/// organization domain. Used by every test session helper so tests exercise
+/// the same denormalization path the server uses.
+async fn resolve_session_snapshot(
+    state: &AppState,
+    user_id: &str,
+    auth_id: Option<&str>,
+) -> (Option<String>, Option<String>) {
+    let hardware_aaguid = match auth_id {
+        Some(id) => crate::db::get_authenticator_by_id(&state.store, id)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|a| a.aaguid),
+        None => None,
+    };
+    let org_domain = match crate::db::get_user_by_id(&state.store, user_id).await {
+        Ok(Some(u)) => match u.org_id {
+            Some(org_id) => crate::db::get_organization_domain(&state.store, &org_id)
+                .await
+                .unwrap_or(None),
+            None => None,
+        },
+        _ => None,
+    };
+    (hardware_aaguid, org_domain)
+}
+
 /// Create a test session with an OAuth access token stored in the database.
 ///
 /// Returns the raw access token string. Uses the real `create_oauth_access_token`
@@ -531,6 +560,9 @@ pub async fn create_test_session(
     use crate::services::oidc::ScopeSet;
     use secrecy::ExposeSecret;
 
+    let (hardware_aaguid, org_domain) =
+        resolve_session_snapshot(state, user_id, Some(auth_id)).await;
+
     let result = create_oauth_access_token(
         state,
         CreateOAuthTokenParams {
@@ -547,6 +579,8 @@ pub async fn create_test_session(
             hardware_verification: crate::services::auth::HardwareVerification::Verified,
             session_purpose: crate::db::SessionPurpose::OAuthAccessToken,
             authorization_details: None,
+            hardware_aaguid: hardware_aaguid.as_deref(),
+            org_domain: org_domain.as_deref(),
         },
         TokenIssuanceProof {
             grant: GrantProof::TestingOnly,
@@ -575,6 +609,8 @@ pub async fn create_test_bootstrap_session(state: &AppState, user_id: &str, emai
     use crate::services::oidc::ScopeSet;
     use secrecy::ExposeSecret;
 
+    let (_, org_domain) = resolve_session_snapshot(state, user_id, None).await;
+
     let result = create_oauth_access_token(
         state,
         CreateOAuthTokenParams {
@@ -591,6 +627,8 @@ pub async fn create_test_bootstrap_session(state: &AppState, user_id: &str, emai
             hardware_verification: crate::services::auth::HardwareVerification::NotVerified,
             session_purpose: crate::db::SessionPurpose::OAuthAccessToken,
             authorization_details: None,
+            hardware_aaguid: None,
+            org_domain: org_domain.as_deref(),
         },
         TokenIssuanceProof {
             grant: GrantProof::TestingOnly,
@@ -623,6 +661,9 @@ pub async fn create_test_session_with_iat(
     use crate::services::oidc::ScopeSet;
     use secrecy::ExposeSecret;
 
+    let (hardware_aaguid, org_domain) =
+        resolve_session_snapshot(state, user_id, Some(auth_id)).await;
+
     let result = create_oauth_access_token(
         state,
         CreateOAuthTokenParams {
@@ -639,6 +680,8 @@ pub async fn create_test_session_with_iat(
             hardware_verification: crate::services::auth::HardwareVerification::Verified,
             session_purpose: crate::db::SessionPurpose::OAuthAccessToken,
             authorization_details: None,
+            hardware_aaguid: hardware_aaguid.as_deref(),
+            org_domain: org_domain.as_deref(),
         },
         TokenIssuanceProof {
             grant: GrantProof::TestingOnly,
@@ -671,6 +714,9 @@ pub async fn create_test_session_for_client(
     use crate::services::oidc::ScopeSet;
     use secrecy::ExposeSecret;
 
+    let (hardware_aaguid, org_domain) =
+        resolve_session_snapshot(state, user_id, Some(auth_id)).await;
+
     let result = create_oauth_access_token(
         state,
         CreateOAuthTokenParams {
@@ -687,6 +733,8 @@ pub async fn create_test_session_for_client(
             hardware_verification: crate::services::auth::HardwareVerification::Verified,
             session_purpose: crate::db::SessionPurpose::OAuthAccessToken,
             authorization_details: None,
+            hardware_aaguid: hardware_aaguid.as_deref(),
+            org_domain: org_domain.as_deref(),
         },
         TokenIssuanceProof {
             grant: GrantProof::TestingOnly,
@@ -719,6 +767,9 @@ pub async fn create_test_session_with_dpop(
     use crate::services::oidc::ScopeSet;
     use secrecy::ExposeSecret;
 
+    let (hardware_aaguid, org_domain) =
+        resolve_session_snapshot(state, user_id, Some(auth_id)).await;
+
     let result = create_oauth_access_token(
         state,
         CreateOAuthTokenParams {
@@ -735,6 +786,8 @@ pub async fn create_test_session_with_dpop(
             hardware_verification: crate::services::auth::HardwareVerification::Verified,
             session_purpose: crate::db::SessionPurpose::OAuthAccessToken,
             authorization_details: None,
+            hardware_aaguid: hardware_aaguid.as_deref(),
+            org_domain: org_domain.as_deref(),
         },
         TokenIssuanceProof {
             grant: GrantProof::TestingOnly,
@@ -767,6 +820,9 @@ pub async fn create_test_session_with_mtls(
     use crate::services::oidc::ScopeSet;
     use secrecy::ExposeSecret;
 
+    let (hardware_aaguid, org_domain) =
+        resolve_session_snapshot(state, user_id, Some(auth_id)).await;
+
     let result = create_oauth_access_token(
         state,
         CreateOAuthTokenParams {
@@ -783,6 +839,8 @@ pub async fn create_test_session_with_mtls(
             hardware_verification: crate::services::auth::HardwareVerification::Verified,
             session_purpose: crate::db::SessionPurpose::OAuthAccessToken,
             authorization_details: None,
+            hardware_aaguid: hardware_aaguid.as_deref(),
+            org_domain: org_domain.as_deref(),
         },
         TokenIssuanceProof {
             grant: GrantProof::TestingOnly,

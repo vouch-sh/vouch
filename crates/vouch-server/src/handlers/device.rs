@@ -313,6 +313,24 @@ pub(crate) async fn device_token(
                 .unwrap_or_else(|| state.config().base_url.clone());
             let now_secs = now.as_second();
 
+            // The device auth request doesn't carry aaguid/org_domain, so look
+            // them up once here. These reads happen at session creation and
+            // eliminate per-issuance lookups for every downstream token.
+            let hardware_aaguid = db::get_authenticator_by_id(&state.store, &authenticator_id)
+                .await
+                .ok()
+                .flatten()
+                .and_then(|a| a.aaguid);
+            let org_domain = match db::get_user_by_id(&state.store, &user_id).await {
+                Ok(Some(u)) => match u.org_id {
+                    Some(org_id) => db::get_organization_domain(&state.store, &org_id)
+                        .await
+                        .unwrap_or(None),
+                    None => None,
+                },
+                _ => None,
+            };
+
             let session_result = create_oauth_access_token(
                 &state,
                 CreateOAuthTokenParams {
@@ -329,6 +347,8 @@ pub(crate) async fn device_token(
                     hardware_verification: crate::services::auth::HardwareVerification::Verified,
                     session_purpose: crate::db::SessionPurpose::OAuthAccessToken,
                     authorization_details: None,
+                    hardware_aaguid: hardware_aaguid.as_deref(),
+                    org_domain: org_domain.as_deref(),
                 },
                 TokenIssuanceProof {
                     grant: GrantProof::DeviceCode(device_claim),
