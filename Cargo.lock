@@ -4411,9 +4411,9 @@ dependencies = [
 
 [[package]]
 name = "rpassword"
-version = "7.5.3"
+version = "7.5.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "835a57a69104632d64deb0df2e09a69945cd7a6eab4070fc9b1d7e50cf6c3edc"
+checksum = "2da316a15f47e3d053de9cb2c439650bd8fa4aaeb9365f2e5f27f492ff73c196"
 dependencies = [
  "libc",
  "rtoolbox",
@@ -4665,9 +4665,9 @@ checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 
 [[package]]
 name = "sea-query"
-version = "1.0.0"
+version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "aa60532b2ee9d8eee57580d6eb3a8106632426751b309bc9f2857aeda04b07b0"
+checksum = "8d190cfb3bcceb8a8d7d04dee5a0c77f60c7627979cdcb47fdcb8934f009badf"
 dependencies = [
  "sea-query-derive",
 ]
@@ -4688,9 +4688,9 @@ dependencies = [
 
 [[package]]
 name = "sea-query-sqlx"
-version = "0.9.0"
+version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c487ce270735db1579b7ae3af3c4818e9195d0ab3727606f1787c01895821e68"
+checksum = "4eaa419cdb9157da1361186b1959983eb2ea0dcb9a3c69dc45c449ecb2af8fef"
 dependencies = [
  "sea-query",
  "sqlx",
@@ -5968,7 +5968,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "vouch-agent"
-version = "2026.5.4"
+version = "2026.6.1"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -5994,7 +5994,7 @@ dependencies = [
 
 [[package]]
 name = "vouch-cli"
-version = "2026.5.4"
+version = "2026.6.1"
 dependencies = [
  "anyhow",
  "apple-native-keyring-store",
@@ -6050,7 +6050,7 @@ dependencies = [
 
 [[package]]
 name = "vouch-common"
-version = "2026.5.4"
+version = "2026.6.1"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -6072,7 +6072,7 @@ dependencies = [
 
 [[package]]
 name = "vouch-httpsig"
-version = "2026.5.4"
+version = "2026.6.1"
 dependencies = [
  "aws-lc-rs",
  "axum",
@@ -6088,7 +6088,7 @@ dependencies = [
 
 [[package]]
 name = "vouch-server"
-version = "2026.5.4"
+version = "2026.6.1"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -6172,7 +6172,7 @@ dependencies = [
 
 [[package]]
 name = "vouch-tests"
-version = "2026.5.4"
+version = "2026.6.1"
 dependencies = [
  "anyhow",
  "aws-lc-rs",
