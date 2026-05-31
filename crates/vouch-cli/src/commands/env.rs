@@ -37,7 +37,20 @@ pub(crate) async fn run(
         CredentialType::Codeartifact => print_codeartifact_env(server, &ca_opts, shell).await,
         CredentialType::Rds => print_rds_env(server, role, &rds_opts, shell).await,
         CredentialType::Redshift => print_redshift_env(server, role, &rs_opts, shell).await,
+        CredentialType::Anthropic => print_anthropic_env(server, shell).await,
     }
+}
+
+/// Fetch an Anthropic federation token (cache-first) and print the
+/// `ANTHROPIC_AUTH_TOKEN` export statement.
+///
+/// The minted `sk-ant-oat01-...` is an OAuth access token, so it is exported
+/// as a Bearer token (`ANTHROPIC_AUTH_TOKEN`), not an API key. It acts as a
+/// service account — the workload path, intended for CI/headless automation.
+async fn print_anthropic_env(server: &str, shell: &Shell) -> Result<()> {
+    let token = super::credential::anthropic::get_token(server).await?;
+    print_export(shell, "ANTHROPIC_AUTH_TOKEN", token.expose_secret());
+    Ok(())
 }
 
 /// Fetch AWS credentials (cache-first) and print export statements.

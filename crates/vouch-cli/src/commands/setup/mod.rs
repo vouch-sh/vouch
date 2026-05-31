@@ -133,13 +133,10 @@ pub(crate) enum SetupCommands {
     },
     /// Configure Anthropic (Claude) Workload Identity Federation.
     ///
-    /// Persists federation parameters to `~/.vouch/config.json` AND
-    /// auto-configures Claude Code's `apiKeyHelper` in
-    /// `~/.claude/settings.json` to call `vouch credential anthropic`,
-    /// with the matching `CLAUDE_CODE_API_KEY_HELPER_TTL_MS` env var.
-    ///
-    /// If Claude Code already has a different `apiKeyHelper`, the
-    /// command errors — pass `--force` to overwrite.
+    /// Persists federation parameters to `~/.vouch/config.json` for use by
+    /// `vouch credential anthropic`. This is the **workload** path: the
+    /// minted token acts as a non-human service account, intended for
+    /// CI/headless automation. It does not configure Claude Code.
     Anthropic {
         /// Anthropic federation rule ID (`fdrl_...`).
         #[arg(long)]
@@ -159,9 +156,6 @@ pub(crate) enum SetupCommands {
         /// Token endpoint override (defaults to Anthropic's public endpoint).
         #[arg(long)]
         token_endpoint: Option<String>,
-        /// Overwrite an existing Claude Code `apiKeyHelper` configuration.
-        #[arg(long)]
-        force: bool,
     },
     /// Configure OpenAI Workload Identity Federation.
     ///

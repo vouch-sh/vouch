@@ -184,8 +184,9 @@ pub(crate) enum CredentialCommands {
     ///
     /// Requires `vouch setup anthropic` and an active session
     /// (`vouch login`). Prints a bare `sk-ant-oat01-...` token to stdout
-    /// with no trailing newline — designed to be invoked by Claude Code's
-    /// `apiKeyHelper`.
+    /// with no trailing newline. The token acts as a non-human service
+    /// account — intended as a credential source for CI/headless
+    /// automation, not for interactive Claude Code sessions.
     Anthropic {},
     /// Obtain a short-lived OpenAI API token via Workload Identity Federation.
     ///

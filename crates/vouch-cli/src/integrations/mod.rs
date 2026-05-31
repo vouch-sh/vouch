@@ -8,23 +8,19 @@
 //! Each integration is organized as a submodule containing both utilities
 //! and status checking (AWS, Cargo, GitHub, EKS, SSH, Docker).
 
-pub(crate) mod anthropic;
 pub(crate) mod aws;
 pub(crate) mod cargo;
 pub(crate) mod docker;
 pub(crate) mod eks;
 pub(crate) mod github;
-pub(crate) mod openai;
 pub(crate) mod ssh;
 pub(crate) mod ssm;
 
-pub(crate) use anthropic::AnthropicIntegration;
 pub(crate) use aws::AwsIntegration;
 pub(crate) use cargo::CargoIntegration;
 pub(crate) use docker::DockerIntegration;
 pub(crate) use eks::EksIntegration;
 pub(crate) use github::GitHubIntegration;
-pub(crate) use openai::OpenAiIntegration;
 pub(crate) use ssh::SshIntegration;
 pub(crate) use ssm::SsmIntegration;
 
