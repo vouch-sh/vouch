@@ -6056,7 +6056,6 @@ dependencies = [
  "base64 0.22.1",
  "ciborium",
  "dirs",
- "gethostname",
  "hex",
  "hickory-resolver",
  "jiff",

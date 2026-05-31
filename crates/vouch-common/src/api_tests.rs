@@ -262,46 +262,6 @@ mod tests {
     }
 
     // =========================================================================
-    // Client Context Tests
-    // =========================================================================
-
-    #[test]
-    fn test_client_context_all_fields_none() {
-        let ctx = ClientContext {
-            cli_version: None,
-            os: None,
-            os_version: None,
-            arch: None,
-            hostname: None,
-        };
-        let json = serde_json::to_string(&ctx).unwrap();
-        let decoded: ClientContext = serde_json::from_str(&json).unwrap();
-        assert!(decoded.cli_version.is_none());
-        assert!(decoded.os.is_none());
-        assert!(decoded.os_version.is_none());
-        assert!(decoded.arch.is_none());
-        assert!(decoded.hostname.is_none());
-    }
-
-    #[test]
-    fn test_client_context_partial_fields() {
-        let ctx = ClientContext {
-            cli_version: Some("1.0.0".to_string()),
-            os: Some("linux".to_string()),
-            os_version: None,
-            arch: None,
-            hostname: Some("workstation".to_string()),
-        };
-        let json = serde_json::to_string(&ctx).unwrap();
-        let decoded: ClientContext = serde_json::from_str(&json).unwrap();
-        assert_eq!(decoded.cli_version.as_deref(), Some("1.0.0"));
-        assert_eq!(decoded.os.as_deref(), Some("linux"));
-        assert!(decoded.os_version.is_none());
-        assert!(decoded.arch.is_none());
-        assert_eq!(decoded.hostname.as_deref(), Some("workstation"));
-    }
-
-    // =========================================================================
     // Invalid JSON Format Tests
     // =========================================================================
 
@@ -342,19 +302,5 @@ mod tests {
         let decoded: RegisterStartResponse = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded.rp_name, "テスト会社 🔐");
         assert_eq!(decoded.user_name, "用户@example.com");
-    }
-
-    #[test]
-    fn test_client_context_unicode_hostname() {
-        let ctx = ClientContext {
-            cli_version: Some("1.0.0".to_string()),
-            os: Some("macos".to_string()),
-            os_version: None,
-            arch: None,
-            hostname: Some("开发机-αβγ".to_string()), // Chinese + Greek
-        };
-        let json = serde_json::to_string(&ctx).unwrap();
-        let decoded: ClientContext = serde_json::from_str(&json).unwrap();
-        assert_eq!(decoded.hostname.as_deref(), Some("开发机-αβγ"));
     }
 }
