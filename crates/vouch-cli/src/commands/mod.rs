@@ -32,4 +32,9 @@ pub(crate) enum CredentialType {
     Rds,
     /// Redshift database credentials (PGPASSWORD, PGUSER, PGSSLMODE).
     Redshift,
+    /// Anthropic (Claude) federation token (ANTHROPIC_AUTH_TOKEN).
+    ///
+    /// Workload path: the minted token acts as a service account, intended
+    /// for CI/headless automation, not interactive Claude Code sessions.
+    Anthropic,
 }

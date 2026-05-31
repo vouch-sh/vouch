@@ -177,6 +177,9 @@ pub(crate) async fn run(
         CredentialType::Redshift => {
             inject_redshift_credentials(&mut cmd, server, role, &rs_opts).await?;
         }
+        CredentialType::Anthropic => {
+            inject_anthropic_credentials(&mut cmd, server).await?;
+        }
     }
 
     // On Unix, replace our process so signals propagate correctly.
@@ -237,6 +240,19 @@ async fn inject_github_credentials(cmd: &mut Command, server: &str) -> Result<()
     cmd.env("GITHUB_TOKEN", gh.token.expose_secret());
     cmd.env("GH_TOKEN", gh.token.expose_secret());
 
+    Ok(())
+}
+
+/// Fetch an Anthropic federation token (cache-first) and inject it into the
+/// environment as `ANTHROPIC_AUTH_TOKEN`.
+///
+/// The minted `sk-ant-oat01-...` is an OAuth access token, so it is supplied
+/// as a Bearer token (`ANTHROPIC_AUTH_TOKEN`), not an API key
+/// (`ANTHROPIC_API_KEY`). It acts as a service account — the workload path,
+/// intended for CI/headless automation.
+async fn inject_anthropic_credentials(cmd: &mut Command, server: &str) -> Result<()> {
+    let token = super::credential::anthropic::get_token(server).await?;
+    cmd.env("ANTHROPIC_AUTH_TOKEN", token.expose_secret());
     Ok(())
 }
 
