@@ -3,8 +3,9 @@
 //! Anthropic (Claude) API token via Workload Identity Federation
 //! ([RFC 7523](https://www.rfc-editor.org/rfc/rfc7523) `jwt-bearer` grant).
 //!
-//! Prints the bare `sk-ant-oat01-...` token to stdout so it can be consumed
-//! directly as a credential helper (for example, Claude Code's `apiKeyHelper`).
+//! Prints the bare `sk-ant-oat01-...` token to stdout. The minted token acts
+//! as a non-human service account, so this is a credential source for
+//! CI/headless automation — not for interactive Claude Code sessions.
 
 use anyhow::{Context, Result};
 use secrecy::{ExposeSecret, SecretString};
@@ -18,7 +19,7 @@ const DEFAULT_ENDPOINT: &str = "https://api.anthropic.com/v1/oauth/token";
 pub(crate) async fn run(server: &str) -> Result<()> {
     let token = get_token(server).await?;
     // Bare token, no trailing newline — matches `vouch credential token`
-    // and is what apiKeyHelper expects.
+    // and is what credential-helper consumers expect.
     print!("{}", token.expose_secret());
     Ok(())
 }

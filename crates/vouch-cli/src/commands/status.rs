@@ -10,9 +10,8 @@ use vouch_common::SessionStatus;
 use crate::client::VouchClient;
 use crate::config::Config;
 use crate::integrations::{
-    AnthropicIntegration, AwsIntegration, CargoIntegration, DockerIntegration, EksIntegration,
-    GitHubIntegration, LABEL_WIDTH, OpenAiIntegration, SshIntegration, SsmIntegration,
-    print_integration_status,
+    AwsIntegration, CargoIntegration, DockerIntegration, EksIntegration, GitHubIntegration,
+    LABEL_WIDTH, SshIntegration, SsmIntegration, print_integration_status,
 };
 use crate::style;
 
@@ -352,8 +351,6 @@ async fn print_all_integrations(server: &str) {
     print_integration_status(&SsmIntegration::new());
     print_integration_status(&DockerIntegration::new());
     print_integration_status(&CargoIntegration::new());
-    print_integration_status(&AnthropicIntegration::new());
-    print_integration_status(&OpenAiIntegration::new());
 
     // Now await the GitHub result
     github_future.await;

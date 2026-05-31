@@ -751,7 +751,6 @@ async fn run() -> Result<()> {
                 workspace_id,
                 audience,
                 token_endpoint,
-                force,
             } => {
                 commands::setup::anthropic::run(commands::setup::anthropic::SetupArgs {
                     federation_rule_id: &federation_rule_id,
@@ -760,7 +759,6 @@ async fn run() -> Result<()> {
                     workspace_id: &workspace_id,
                     audience: audience.as_deref(),
                     token_endpoint: token_endpoint.as_deref(),
-                    force,
                 })
                 .await
             }
