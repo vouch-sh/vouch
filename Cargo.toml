@@ -126,9 +126,9 @@ askama = { version = "=0.16.0", default-features = false }
 aws-config = { version = "=1.8.17", default-features = false }
 aws-lc-rs = { version = "=1.17.0", default-features = false }
 aws-sdk-dsql = { version = "=1.58.0", default-features = false }
-aws-sdk-kms = { version = "=1.108.0", default-features = false }
+aws-sdk-kms = { version = "=1.109.0", default-features = false }
 aws-sdk-s3 = { version = "=1.134.0", default-features = false }
-aws-smithy-types = { version = "=1.4.8", default-features = false }
+aws-smithy-types = { version = "=1.4.9", default-features = false }
 axum = { version = "=0.8.9", default-features = false }
 axum-extra = { version = "=0.12.6", default-features = false }
 axum-server = { version = "=0.8.0", default-features = false }
