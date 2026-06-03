@@ -11,6 +11,7 @@ cargo-fuzz = true
 libfuzzer-sys = "0.4.9"
 vouch-server = { path = "../crates/vouch-server", features = ["test-utils"] }
 vouch-common = { path = "../crates/vouch-common" }
+vouch-httpsig = { path = "../crates/vouch-httpsig" }
 ciborium = "0.2.2"
 
 # Prevent this from joining the workspace
@@ -29,4 +30,9 @@ doc = false
 [[bin]]
 name = "fuzz_cose_key"
 path = "fuzz_targets/fuzz_cose_key.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_httpsig"
+path = "fuzz_targets/fuzz_httpsig.rs"
 doc = false

@@ -60,6 +60,7 @@ test-fuzz: ## Run fuzz targets (60s each, requires nightly)
 	cargo +nightly fuzz run fuzz_ber_parse -- -max_total_time=60
 	cargo +nightly fuzz run fuzz_attestation_object -- -max_total_time=60
 	cargo +nightly fuzz run fuzz_cose_key -- -max_total_time=60
+	cargo +nightly fuzz run fuzz_httpsig -- -max_total_time=60
 
 test-coverage: ## Generate test coverage report (requires cargo-llvm-cov)
 	$(CARGO) llvm-cov --workspace --html
