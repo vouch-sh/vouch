@@ -5,6 +5,15 @@
 
 [graph]
 all-features = true
+# Resolve dependencies for all supported targets so platform-specific
+# duplicates (windows-sys, r-efi, etc.) are caught on any host OS.
+targets = [
+    "x86_64-unknown-linux-musl",
+    "aarch64-unknown-linux-musl",
+    "aarch64-apple-darwin",
+    "x86_64-pc-windows-msvc",
+    "aarch64-pc-windows-msvc",
+]
 
 [advisories]
 ignore = [
@@ -34,8 +43,80 @@ allow = [
 exceptions = []
 
 [bans]
-multiple-versions = "warn"
+multiple-versions = "deny"
 wildcards = "deny"
+allow-wildcard-paths = true
+
+# These duplicates are caused by transitive dependencies pulling different major
+# versions (webauthn-rs, ctap-hid-fido2, ssh-key, aws-sdk-*). They cannot be
+# resolved without upstream updates. Review periodically and remove entries as
+# upstream crates converge.
+skip = [
+    # ssh-key → ssh-cipher → aes-gcm 0.10 (aes 0.8) vs ctap-hid-fido2 (aes 0.9)
+    { crate = "aes:>=0.8,<0.9", reason = "ssh-key depends on aes-gcm 0.10 which requires aes 0.8" },
+    # webauthn-rs → x509-parser 0.16 (asn1-rs 0.6) vs ctap-hid-fido2 → x509-parser 0.18 (asn1-rs 0.7)
+    { crate = "asn1-rs:>=0.6,<0.7", reason = "webauthn-rs uses x509-parser 0.16 which requires asn1-rs 0.6" },
+    { crate = "asn1-rs-derive:>=0.5,<0.6", reason = "transitive via asn1-rs 0.6" },
+    { crate = "der-parser:>=9,<10", reason = "webauthn-rs uses x509-parser 0.16 which requires der-parser 9" },
+    { crate = "oid-registry:>=0.7,<0.8", reason = "transitive via x509-parser 0.16" },
+    { crate = "x509-parser:>=0.16,<0.17", reason = "webauthn-rs depends on x509-parser 0.16" },
+    # base64 0.21 vs 0.22 (transitive)
+    { crate = "base64:>=0.21,<0.22", reason = "transitive dependencies still on base64 0.21" },
+    # digest ecosystem version split (0.10 vs 0.11)
+    { crate = "block-buffer:>=0.10,<0.11", reason = "digest 0.10 ecosystem" },
+    { crate = "crypto-common:>=0.1,<0.2", reason = "digest 0.10 ecosystem" },
+    { crate = "digest:>=0.10,<0.11", reason = "ssh-key and others still on digest 0.10" },
+    { crate = "hmac:>=0.12,<0.13", reason = "digest 0.10 ecosystem" },
+    { crate = "sha1:>=0.10,<0.11", reason = "digest 0.10 ecosystem" },
+    { crate = "sha2:>=0.10,<0.11", reason = "digest 0.10 ecosystem" },
+    # cipher ecosystem (0.4 vs 0.5)
+    { crate = "block-padding:>=0.3,<0.4", reason = "cipher 0.4 ecosystem" },
+    { crate = "cbc:>=0.1,<0.2", reason = "cipher 0.4 ecosystem" },
+    { crate = "chacha20:>=0.9,<0.10", reason = "cipher 0.4 ecosystem" },
+    { crate = "cipher:>=0.4,<0.5", reason = "ssh-cipher uses cipher 0.4" },
+    { crate = "inout:>=0.1,<0.2", reason = "cipher 0.4 ecosystem" },
+    # const-oid 0.9 vs 0.10 (der/spki ecosystem)
+    { crate = "const-oid:>=0.9,<0.10", reason = "der 0.7/spki 0.7 depend on const-oid 0.9" },
+    # core-foundation version split (macOS only)
+    { crate = "core-foundation:>=0.9,<0.10", reason = "some macOS crates still on 0.9" },
+    # cpufeatures version split
+    { crate = "cpufeatures:>=0.2,<0.3", reason = "digest 0.10 ecosystem uses cpufeatures 0.2" },
+    # getrandom 0.2/0.3 (rand ecosystem transition)
+    { crate = "getrandom:>=0.2,<0.3", reason = "rand 0.8/0.9 ecosystem uses getrandom 0.2" },
+    { crate = "getrandom:>=0.3,<0.4", reason = "rand 0.9/0.10 transition pulls both" },
+    # hashbrown version splits (indexmap/dashmap/sqlx transitive)
+    { crate = "hashbrown@0.14.5", reason = "indexmap/dashmap still on hashbrown 0.14" },
+    { crate = "hashbrown@0.16.1", reason = "governor/sqlx use hashbrown 0.16" },
+    # heck version split (clap_derive vs other derive macros)
+    { crate = "heck:>=0.4,<0.5", reason = "some derive macros still on heck 0.4" },
+    # http/http-body 0.2 vs 1.x (hyper ecosystem transition)
+    { crate = "http:>=0.2,<0.3", reason = "aws-sdk still uses http 0.2 internally" },
+    { crate = "http-body:>=0.4,<0.5", reason = "aws-sdk still uses http-body 0.4 internally" },
+    # itertools version split
+    { crate = "itertools@0.13.0", reason = "some dependencies still on itertools 0.13" },
+    # pastey version split
+    { crate = "pastey@0.1.1", reason = "transitive dependency version split" },
+    # rand 0.9 vs 0.10
+    { crate = "rand@0.9.4", reason = "some crates still on rand 0.9" },
+    { crate = "rand_core:>=0.6,<0.7", reason = "rand 0.8 ecosystem" },
+    { crate = "rand_core:>=0.9,<0.10", reason = "rand 0.9 ecosystem" },
+    # shlex version split (build-script dependency)
+    { crate = "shlex@1.3.0", reason = "cc/cmake build dependencies use shlex 1.x" },
+    # spin version split
+    { crate = "spin:>=0.9,<0.10", reason = "lazy_static/ring transitive" },
+    # thiserror 1.x vs 2.x (ecosystem transition)
+    { crate = "thiserror:>=1,<2", reason = "many transitive deps still on thiserror 1.x" },
+    { crate = "thiserror-impl:>=1,<2", reason = "transitive via thiserror 1.x" },
+    # unicode-width version split
+    { crate = "unicode-width:>=0.1,<0.2", reason = "some crates still on unicode-width 0.1" },
+    # untrusted version split (ring/aws-lc-rs transitive)
+    { crate = "untrusted:>=0.7,<0.8", reason = "webpki/ring transitive" },
+]
+skip-tree = [
+    # windows-sys bumps frequently; many crates lag behind. Rather than tracking
+    # each transitive dep individually, skip the entire tree for older versions.
+    { crate = "windows-sys:>=0.59,<0.60", reason = "foundational Windows crate that bumps frequently; many deps lag behind" },
+]
 
 [sources]
 unknown-registry = "deny"

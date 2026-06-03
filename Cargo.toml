@@ -8,6 +8,7 @@ edition = "2024"
 license = "Apache-2.0 OR MIT"
 rust-version = "1.96.0"
 repository = "https://github.com/vouch-sh/vouch"
+publish = false
 
 [workspace.lints.rust]
 unsafe_code = "deny"
