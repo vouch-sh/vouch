@@ -484,4 +484,30 @@ mod tests {
         let diff_secs = now.duration_since(cutoff).as_secs().abs();
         assert!(diff_secs <= 1, "0-day cutoff should be ~now");
     }
+
+    // -----------------------------------------------------------------
+    // random_jitter
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn random_jitter_zero_returns_zero() {
+        let jitter = random_jitter(0);
+        assert_eq!(jitter, std::time::Duration::ZERO);
+    }
+
+    #[test]
+    fn random_jitter_is_bounded_above_by_input() {
+        // The function returns `value % max_jitter_secs` seconds, so the result
+        // must be strictly less than the cap. Sample several draws so a single
+        // unlucky zero doesn't pass the bound check by accident.
+        let cap_secs = 30u64;
+        for _ in 0..32 {
+            let jitter = random_jitter(cap_secs);
+            assert!(
+                jitter < std::time::Duration::from_secs(cap_secs),
+                "jitter {:?} exceeds cap {cap_secs}s",
+                jitter
+            );
+        }
+    }
 }
