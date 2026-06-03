@@ -424,7 +424,7 @@ export VOUCH_CA_CERT=/etc/vouch/root-ca.crt
 
 ## Step 10: Enroll Users
 
-> **Important:** Enrollment requires browser access to the Vouch server's web UI on the internal network. CLI-only enrollment (`vouch enroll --airgap`) is not yet implemented.
+> **Important:** Enrollment requires browser access to the Vouch server's web UI on the internal network. Users run `vouch enroll` on a workstation that can open the device verification URL against the internal Vouch host; there is no separate headless-only enroll mode.
 
 Each user:
 
