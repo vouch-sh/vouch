@@ -24,12 +24,7 @@ async fn list_keys(harness: &TestHarness, token: &str) -> HttpResponse {
     http_get_full(&harness.router, "/enroll/keys/api", &[("Cookie", &cookie)]).await
 }
 
-async fn rename_key(
-    harness: &TestHarness,
-    token: &str,
-    key_id: &str,
-    body: &str,
-) -> HttpResponse {
+async fn rename_key(harness: &TestHarness, token: &str, key_id: &str, body: &str) -> HttpResponse {
     let cookie = cookie_header(token);
     http_request_full(
         &harness.router,

@@ -75,7 +75,10 @@ async fn create_and_get_by_org_returns_installation() {
     );
     assert!(installation.suspended_at.is_none());
     assert!(installation.repositories.is_none());
-    assert_eq!(installation.permissions.get("contents").map(String::as_str), Some("read"));
+    assert_eq!(
+        installation.permissions.get("contents").map(String::as_str),
+        Some("read")
+    );
 }
 
 #[tokio::test]
@@ -101,7 +104,10 @@ async fn get_by_org_sorts_by_account_login() {
     let listed = db::get_github_installations_by_org(&harness.state.store, &org_id)
         .await
         .expect("get by org");
-    let names: Vec<_> = listed.iter().map(|i| i.github_account_login.as_str()).collect();
+    let names: Vec<_> = listed
+        .iter()
+        .map(|i| i.github_account_login.as_str())
+        .collect();
     assert_eq!(names, vec!["alpha", "bravo", "charlie"]);
 }
 
@@ -112,30 +118,21 @@ async fn get_by_org_and_account_is_case_insensitive() {
 
     let _ = install(&harness, &org_id, 42, "MixedCase", "Organization").await;
 
-    let lower = db::get_github_installation_by_org_and_account(
-        &harness.state.store,
-        &org_id,
-        "mixedcase",
-    )
-    .await
-    .expect("get by login");
+    let lower =
+        db::get_github_installation_by_org_and_account(&harness.state.store, &org_id, "mixedcase")
+            .await
+            .expect("get by login");
     assert!(lower.is_some());
-    let upper = db::get_github_installation_by_org_and_account(
-        &harness.state.store,
-        &org_id,
-        "MIXEDCASE",
-    )
-    .await
-    .expect("get by login");
+    let upper =
+        db::get_github_installation_by_org_and_account(&harness.state.store, &org_id, "MIXEDCASE")
+            .await
+            .expect("get by login");
     assert!(upper.is_some());
 
-    let other = db::get_github_installation_by_org_and_account(
-        &harness.state.store,
-        &org_id,
-        "different",
-    )
-    .await
-    .expect("get by login");
+    let other =
+        db::get_github_installation_by_org_and_account(&harness.state.store, &org_id, "different")
+            .await
+            .expect("get by login");
     assert!(other.is_none());
 }
 
@@ -151,10 +148,9 @@ async fn get_by_installation_id_finds_record() {
     let found = found.expect("installation exists");
     assert_eq!(found.installation_id, 999);
 
-    let missing =
-        db::get_github_installation_by_installation_id(&harness.state.store, 12_345)
-            .await
-            .expect("lookup");
+    let missing = db::get_github_installation_by_installation_id(&harness.state.store, 12_345)
+        .await
+        .expect("lookup");
     assert!(missing.is_none());
 }
 
@@ -184,11 +180,10 @@ async fn suspend_and_unsuspend_toggle_suspended_at() {
         .expect("unsuspend");
     assert!(toggled);
 
-    let after_unsuspend =
-        db::get_github_installation_by_installation_id(&harness.state.store, 7)
-            .await
-            .expect("lookup")
-            .expect("present");
+    let after_unsuspend = db::get_github_installation_by_installation_id(&harness.state.store, 7)
+        .await
+        .expect("lookup")
+        .expect("present");
     assert!(after_unsuspend.suspended_at.is_none());
 }
 
@@ -235,13 +230,10 @@ async fn update_repos_replaces_list() {
     );
 
     // A subsequent call replaces, not merges.
-    let updated = db::update_github_installation_repos(
-        &harness.state.store,
-        11,
-        &["repo-c".to_string()],
-    )
-    .await
-    .expect("update");
+    let updated =
+        db::update_github_installation_repos(&harness.state.store, 11, &["repo-c".to_string()])
+            .await
+            .expect("update");
     assert!(updated);
     let fetched = db::get_github_installation_by_installation_id(&harness.state.store, 11)
         .await
@@ -282,7 +274,13 @@ async fn update_repos_delta_adds_and_removes_with_sort() {
         .expect("present");
     assert_eq!(
         fetched.repositories.as_deref(),
-        Some(&["alpha".to_string(), "delta".to_string(), "gamma".to_string()][..]),
+        Some(
+            &[
+                "alpha".to_string(),
+                "delta".to_string(),
+                "gamma".to_string()
+            ][..]
+        ),
         "delta should add+remove and sort the result"
     );
 }
@@ -320,13 +318,10 @@ async fn update_repos_delta_ignores_duplicate_adds() {
 #[tokio::test]
 async fn update_repos_unknown_installation_returns_false() {
     let harness = TestHarness::new().await;
-    let touched = db::update_github_installation_repos(
-        &harness.state.store,
-        424_242,
-        &["nope".to_string()],
-    )
-    .await
-    .expect("update");
+    let touched =
+        db::update_github_installation_repos(&harness.state.store, 424_242, &["nope".to_string()])
+            .await
+            .expect("update");
     assert!(!touched);
 
     let touched = db::update_github_installation_repos_delta(
@@ -361,10 +356,9 @@ async fn delete_removes_installation() {
     assert!(after.is_none());
 
     // Second delete is a no-op.
-    let deleted_again =
-        db::delete_github_installation_by_installation_id(&harness.state.store, 55)
-            .await
-            .expect("delete again");
+    let deleted_again = db::delete_github_installation_by_installation_id(&harness.state.store, 55)
+        .await
+        .expect("delete again");
     assert!(!deleted_again);
 }
 

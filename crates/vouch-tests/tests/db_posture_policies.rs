@@ -12,9 +12,7 @@
     reason = "test code: panic on assertion failure is acceptable"
 )]
 
-use vouch_server::db::{
-    self, CreateCustomPolicyParams, UpdateCustomPolicyParams,
-};
+use vouch_server::db::{self, CreateCustomPolicyParams, UpdateCustomPolicyParams};
 use vouch_tests::TestHarness;
 
 async fn fresh_org_id(harness: &TestHarness, domain: &str) -> String {
@@ -101,7 +99,10 @@ async fn custom_policy_create_defaults_to_inactive() {
     .expect("create policy");
 
     assert_eq!(policy.name, "Require macOS");
-    assert_eq!(policy.description.as_deref(), Some("Block non-mac platforms"));
+    assert_eq!(
+        policy.description.as_deref(),
+        Some("Block non-mac platforms")
+    );
     assert_eq!(policy.cel_expression, "device.platform == 'mac'");
     assert!(!policy.active, "new policies must default to inactive");
     assert_eq!(policy.org_id, org_id);
@@ -214,7 +215,10 @@ async fn custom_policy_update_can_activate_and_rename() {
     .expect("policy returned");
 
     assert_eq!(updated.name, "new name");
-    assert!(updated.description.is_none(), "description should be cleared");
+    assert!(
+        updated.description.is_none(),
+        "description should be cleared"
+    );
     assert_eq!(updated.cel_expression, "device.os_version >= '14'");
     assert!(updated.active);
 }
@@ -313,7 +317,10 @@ async fn custom_policy_delete_refuses_cross_org() {
     let still_there = db::get_custom_policy(&harness.state.store, &created.id)
         .await
         .expect("get");
-    assert!(still_there.is_some(), "policy must survive cross-org delete");
+    assert!(
+        still_there.is_some(),
+        "policy must survive cross-org delete"
+    );
 }
 
 #[tokio::test]

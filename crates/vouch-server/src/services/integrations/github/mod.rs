@@ -246,18 +246,29 @@ mod tests {
     async fn is_configured_reflects_app_presence() {
         let state = test_utils::test_app_state().await;
         let config = (**state.config()).clone();
-        let service =
-            GitHubService::new(&state.store, &state.audit, &config, state.github_app.as_ref());
+        let service = GitHubService::new(
+            &state.store,
+            &state.audit,
+            &config,
+            state.github_app.as_ref(),
+        );
         assert!(!service.is_configured());
-        assert!(matches!(service.require_app(), Err(GitHubError::NotConfigured)));
+        assert!(matches!(
+            service.require_app(),
+            Err(GitHubError::NotConfigured)
+        ));
     }
 
     #[tokio::test]
     async fn is_oauth_configured_requires_both_id_and_secret() {
         let state = test_utils::test_app_state().await;
         let config = (**state.config()).clone();
-        let service =
-            GitHubService::new(&state.store, &state.audit, &config, state.github_app.as_ref());
+        let service = GitHubService::new(
+            &state.store,
+            &state.audit,
+            &config,
+            state.github_app.as_ref(),
+        );
         assert!(!service.is_oauth_configured());
         assert!(matches!(
             service.oauth_client_id(),
@@ -276,8 +287,12 @@ mod tests {
         config.github_app_client_id = Some("client-xyz".to_string());
         config.github_app_client_secret = Some(SecretString::from("secret-xyz".to_string()));
 
-        let service =
-            GitHubService::new(&state.store, &state.audit, &config, state.github_app.as_ref());
+        let service = GitHubService::new(
+            &state.store,
+            &state.audit,
+            &config,
+            state.github_app.as_ref(),
+        );
         assert!(service.is_oauth_configured());
         assert_eq!(service.oauth_client_id().expect("client_id"), "client-xyz");
         assert_eq!(
@@ -290,15 +305,20 @@ mod tests {
     async fn webhook_secret_helper_paths() {
         let state = test_utils::test_app_state().await;
         let config = (**state.config()).clone();
-        let service =
-            GitHubService::new(&state.store, &state.audit, &config, state.github_app.as_ref());
+        let service = GitHubService::new(
+            &state.store,
+            &state.audit,
+            &config,
+            state.github_app.as_ref(),
+        );
         assert!(matches!(
             service.webhook_secret(),
             Err(GitHubError::WebhookSecretNotConfigured)
         ));
 
         let mut config_with_secret = (**state.config()).clone();
-        config_with_secret.github_webhook_secret = Some(SecretString::from("wh-secret".to_string()));
+        config_with_secret.github_webhook_secret =
+            Some(SecretString::from("wh-secret".to_string()));
         let service = GitHubService::new(
             &state.store,
             &state.audit,
@@ -312,8 +332,12 @@ mod tests {
     async fn app_name_helper_paths() {
         let state = test_utils::test_app_state().await;
         let config = (**state.config()).clone();
-        let service =
-            GitHubService::new(&state.store, &state.audit, &config, state.github_app.as_ref());
+        let service = GitHubService::new(
+            &state.store,
+            &state.audit,
+            &config,
+            state.github_app.as_ref(),
+        );
         assert!(matches!(service.app_name(), Err(GitHubError::Internal(_))));
 
         let mut config_with_name = (**state.config()).clone();

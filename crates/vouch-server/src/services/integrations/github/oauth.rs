@@ -171,8 +171,12 @@ mod tests {
         config.github_app_client_id = Some("github-client-id".to_string());
         config.github_app_client_secret = Some(SecretString::from("shh".to_string()));
 
-        let service =
-            GitHubService::new(&state.store, &state.audit, &config, state.github_app.as_ref());
+        let service = GitHubService::new(
+            &state.store,
+            &state.audit,
+            &config,
+            state.github_app.as_ref(),
+        );
         let url = service
             .build_oauth_url("opaque-csrf-state")
             .expect("build url");
@@ -200,8 +204,12 @@ mod tests {
         config.github_app_client_id = Some("github-client-id".to_string());
         config.github_app_client_secret = Some(SecretString::from("shh".to_string()));
 
-        let service =
-            GitHubService::new(&state.store, &state.audit, &config, state.github_app.as_ref());
+        let service = GitHubService::new(
+            &state.store,
+            &state.audit,
+            &config,
+            state.github_app.as_ref(),
+        );
         let url = service
             .build_oauth_url("state with =& special / chars")
             .expect("build url");
@@ -219,8 +227,12 @@ mod tests {
     async fn build_oauth_url_errors_when_client_id_missing() {
         let state = test_utils::test_app_state().await;
         let config = (**state.config()).clone(); // client_id is None
-        let service =
-            GitHubService::new(&state.store, &state.audit, &config, state.github_app.as_ref());
+        let service = GitHubService::new(
+            &state.store,
+            &state.audit,
+            &config,
+            state.github_app.as_ref(),
+        );
 
         match service.build_oauth_url("state") {
             Err(GitHubError::OAuthNotConfigured) => {}

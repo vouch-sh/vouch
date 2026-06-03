@@ -1544,7 +1544,10 @@ mod tests {
             IdpConfig::Saml(saml) => {
                 assert_eq!(saml.id, "corp");
                 assert_eq!(saml.metadata_url, "https://idp.example.com/saml/metadata");
-                assert_eq!(saml.sp_entity_id.as_deref(), Some("https://vouch.example.com"));
+                assert_eq!(
+                    saml.sp_entity_id.as_deref(),
+                    Some("https://vouch.example.com")
+                );
                 assert_eq!(saml.email_attribute.as_deref(), Some("emailAddress"));
                 assert_eq!(saml.domain_attribute.as_deref(), Some("dom"));
             }

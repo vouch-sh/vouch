@@ -806,7 +806,10 @@ eyYRskrWOAtu0DuWJARLn74r5B4ze8s4DvUdPe781neRB1hMbXte6g==
         let config = test_config_with_app(Some(12345), Some("   \n   "));
         let loaded =
             GitHubApp::load(&config, reqwest::Client::new()).expect("load should not error");
-        assert!(loaded.is_none(), "whitespace-only key should be treated as unconfigured");
+        assert!(
+            loaded.is_none(),
+            "whitespace-only key should be treated as unconfigured"
+        );
     }
 
     #[tokio::test]
@@ -837,9 +840,7 @@ eyYRskrWOAtu0DuWJARLn74r5B4ze8s4DvUdPe781neRB1hMbXte6g==
         let parts: Vec<&str> = jwt.split('.').collect();
         assert_eq!(parts.len(), 3, "JWT must have three parts");
 
-        let header_bytes = URL_SAFE_NO_PAD
-            .decode(parts[0])
-            .expect("decode jwt header");
+        let header_bytes = URL_SAFE_NO_PAD.decode(parts[0]).expect("decode jwt header");
         let header: serde_json::Value =
             serde_json::from_slice(&header_bytes).expect("parse header");
         assert_eq!(header.get("alg").and_then(|v| v.as_str()), Some("RS256"));

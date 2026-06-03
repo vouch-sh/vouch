@@ -391,8 +391,12 @@ mod tests {
         let mut config = (**state.config()).clone();
         config.github_app_name = Some("acme-vouch".to_string());
 
-        let service =
-            GitHubService::new(&state.store, &state.audit, &config, state.github_app.as_ref());
+        let service = GitHubService::new(
+            &state.store,
+            &state.audit,
+            &config,
+            state.github_app.as_ref(),
+        );
         let url = service
             .build_installation_url("opaque-state-token")
             .expect("build url");
@@ -410,12 +414,19 @@ mod tests {
         // turns it into `%20`).
         config.github_app_name = Some("acme vouch".to_string());
 
-        let service =
-            GitHubService::new(&state.store, &state.audit, &config, state.github_app.as_ref());
+        let service = GitHubService::new(
+            &state.store,
+            &state.audit,
+            &config,
+            state.github_app.as_ref(),
+        );
         let url = service
             .build_installation_url("state with spaces & symbols")
             .expect("build url");
-        assert!(url.contains("acme%20vouch"), "app name must be url-encoded: {url}");
+        assert!(
+            url.contains("acme%20vouch"),
+            "app name must be url-encoded: {url}"
+        );
         assert!(
             url.contains("state%20with%20spaces%20%26%20symbols"),
             "state must be url-encoded: {url}"
@@ -426,8 +437,12 @@ mod tests {
     async fn build_installation_url_errors_when_app_name_missing() {
         let state = test_utils::test_app_state().await;
         let config = (**state.config()).clone(); // github_app_name is None by default
-        let service =
-            GitHubService::new(&state.store, &state.audit, &config, state.github_app.as_ref());
+        let service = GitHubService::new(
+            &state.store,
+            &state.audit,
+            &config,
+            state.github_app.as_ref(),
+        );
 
         match service.build_installation_url("state") {
             Err(GitHubError::Internal(msg)) => {
@@ -444,13 +459,18 @@ mod tests {
     #[tokio::test]
     async fn get_org_installations_returns_empty_when_none_linked() {
         let state = test_utils::test_app_state().await;
-        let org = crate::db::create_organization(&state.store, "empty.example", Some("Empty"), None)
-            .await
-            .expect("create org");
+        let org =
+            crate::db::create_organization(&state.store, "empty.example", Some("Empty"), None)
+                .await
+                .expect("create org");
         let config = (**state.config()).clone();
 
-        let service =
-            GitHubService::new(&state.store, &state.audit, &config, state.github_app.as_ref());
+        let service = GitHubService::new(
+            &state.store,
+            &state.audit,
+            &config,
+            state.github_app.as_ref(),
+        );
         let logins = service
             .get_org_installations(&org.id)
             .await
@@ -461,9 +481,10 @@ mod tests {
     #[tokio::test]
     async fn get_org_installations_returns_linked_logins() {
         let state = test_utils::test_app_state().await;
-        let org = crate::db::create_organization(&state.store, "linked.example", Some("Linked"), None)
-            .await
-            .expect("create org");
+        let org =
+            crate::db::create_organization(&state.store, "linked.example", Some("Linked"), None)
+                .await
+                .expect("create org");
         let perms = HashMap::from([("contents".to_string(), "read".to_string())]);
         crate::db::create_github_installation(
             &state.store,
@@ -479,8 +500,12 @@ mod tests {
         .expect("create installation");
         let config = (**state.config()).clone();
 
-        let service =
-            GitHubService::new(&state.store, &state.audit, &config, state.github_app.as_ref());
+        let service = GitHubService::new(
+            &state.store,
+            &state.audit,
+            &config,
+            state.github_app.as_ref(),
+        );
         let logins = service
             .get_org_installations(&org.id)
             .await
