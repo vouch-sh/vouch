@@ -1,0 +1,10 @@
+.env
+*.pem
+*.key
+.claude/worktrees/
+.claude/settings.local.json
+.kamal/secrets
+docs/book/
+target/
+ssh_ca_key
+vouch.db
