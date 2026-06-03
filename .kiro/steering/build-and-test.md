@@ -2,7 +2,7 @@
 
 ## Prerequisites
 
-- Rust 1.95+ (pinned in `rust-toolchain.toml`)
+- Rust 1.96+ (pinned in `rust-toolchain.toml`)
 - TailwindCSS v4 standalone CLI (not npm) for CSS compilation
 - Docker for container builds
 - System packages (Linux): `libssl-dev`, `libudev-dev`, `cmake`, `golang-go`, `clang`, `pkg-config`
