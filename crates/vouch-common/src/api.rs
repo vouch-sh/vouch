@@ -72,45 +72,6 @@ pub struct RegisterCompleteResponse {
     pub message: String,
 }
 
-// ============================================================================
-// Client Context (device/environment info sent with requests)
-// ============================================================================
-
-/// Context about the client environment, sent with authentication requests.
-/// This enables future anomaly detection (e.g., impossible travel, new device).
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct ClientContext {
-    /// CLI version (from `CARGO_PKG_VERSION`).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub cli_version: Option<String>,
-    /// Operating system (e.g., "macos", "linux", "windows").
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub os: Option<String>,
-    /// OS version (e.g., "14.2.1").
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub os_version: Option<String>,
-    /// CPU architecture (e.g., "aarch64", "x86_64").
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub arch: Option<String>,
-    /// Client hostname.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub hostname: Option<String>,
-}
-
-impl ClientContext {
-    /// Create a new client context with current system information.
-    #[must_use]
-    pub fn current() -> Self {
-        Self {
-            cli_version: Some(env!("CARGO_PKG_VERSION").to_string()),
-            os: Some(std::env::consts::OS.to_string()),
-            os_version: None, // Filled in by CLI if available
-            arch: Some(std::env::consts::ARCH.to_string()),
-            hostname: gethostname::gethostname().to_str().map(String::from),
-        }
-    }
-}
-
 /// Response from `POST /oauth/fido2/challenge`.
 ///
 /// Used by the CLI login flow (FAPI 2.0 FIDO2 assertion grant).
