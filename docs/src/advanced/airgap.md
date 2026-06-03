@@ -2,7 +2,30 @@
 
 This chapter covers deploying Vouch in environments with no internet connectivity, such as defense contractors, government agencies, financial services, and critical infrastructure.
 
-> **Status: Planned** -- This document describes the air-gapped deployment architecture for Vouch. Server and CLI packages are available from [packages.vouch.sh](https://packages.vouch.sh), and the core components (SSH CA, FIDO2 authentication) exist today. However, air-gap-specific CLI commands (e.g., `vouch enroll --airgap`) and automation scripts are not yet implemented.
+> **Supported with operational constraints** — You can run `vouch-server` and the `vouch` CLI on an isolated network today using the same binaries and deployment paths as on-premise (systemd, Docker, or Kubernetes). This chapter documents that workflow. A few operator conveniences (listed under [Roadmap](#roadmap) below) are not built into the product yet.
+
+## Supported today
+
+| Capability | Where to read |
+|------------|----------------|
+| Server install (RPM/DEB, containers, Helm) | [Installation](airgap-installation.md), [Deployment Methods](../deployment/methods.md) |
+| Configuration, TLS, database, SSH CA | [Configuration Reference](../deployment/configuration.md) |
+| Internal OIDC or SAML IdP | [Identity Provider Overview](../idp/overview.md), [SAML 2.0](../idp/saml.md) |
+| Enrollment (YubiKey + browser on internal network) | [Installation](airgap-installation.md), [YubiKey Provisioning](airgap-yubikey.md) |
+| Key ceremony on a trusted workstation | [Key Ceremony](airgap-key-ceremony.md) |
+| Day-two ops (time sync, updates, audit export scripts) | [Operations](airgap-operations.md) |
+| Packages via sneakernet | [packages.vouch.sh](https://packages.vouch.sh) (download on a connected machine, transfer in) |
+
+Enrollment uses the standard `vouch enroll` device flow (browser opens the verification URL on your internal Vouch host) or browser-only `/enroll/start` on the server UI. There is no separate air-gap-only CLI mode.
+
+For general on-prem deployment (reachable IdP, standard updates), start with [Deployment Overview](../deployment/overview.md).
+
+## Roadmap
+
+These items are **not** available in the product today; the chapters above describe manual procedures instead:
+
+- **Server syslog / SIEM streaming** — use periodic database export in [Operations](airgap-operations.md#audit-log-export) until built-in export exists
+- **Headless enrollment** — enrollment without any browser on the internal network
 
 ## Overview
 
