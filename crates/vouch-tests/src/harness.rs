@@ -24,6 +24,9 @@ pub struct TestHarness {
     pub state: Arc<AppState>,
     /// Test HTTP client that calls the router directly.
     pub http_client: TestHttpClient,
+    /// Raw axum router for tests that need full response headers
+    /// (e.g. Location, Set-Cookie) which `TestHttpClient` strips.
+    pub router: axum::Router,
     /// Controllable test clock.
     pub clock: Arc<TestClock>,
 }
@@ -35,12 +38,13 @@ impl TestHarness {
         let config = state.config();
         let router = vouch_server::infra::router::build_app(state.clone(), &config)
             .expect("Failed to build test app router");
-        let http_client = TestHttpClient::new(router);
+        let http_client = TestHttpClient::new(router.clone());
         let clock = Arc::new(TestClock::default());
 
         Self {
             state,
             http_client,
+            router,
             clock,
         }
     }

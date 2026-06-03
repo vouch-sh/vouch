@@ -69,6 +69,9 @@ test-coverage: ## Generate test coverage report (requires cargo-llvm-cov)
 test-mutants: ## Run mutation testing (requires cargo-mutants)
 	$(CARGO) mutants --workspace --timeout 60 --output mutants.out
 
+audit: ## Check dependencies for security advisories and license issues
+	$(CARGO) deny check advisories licenses sources
+
 ##@ Docker
 
 docker-build: ## Build Docker image
