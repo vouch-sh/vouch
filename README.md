@@ -210,7 +210,7 @@ vouch init fish | source
 ## Requirements
 
 - **YubiKey 5 series** (firmware 5.2+) with FIDO2/WebAuthn support
-- **macOS** 12+ or **Linux** (glibc 2.31+) — Windows support is planned
+- **macOS** 12+, **Linux** (glibc 2.31+), or **Windows** 10+ for the CLI (FIDO2 via WebAuthn; `vouch-agent` daemon is macOS/Linux only)
 - For SSH: CA public key distributed to target hosts
 - For AWS: IAM role with OIDC federation configured
 - For EKS: Cluster with Access Entries configured for IAM role

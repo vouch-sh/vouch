@@ -117,7 +117,7 @@ Air-gapped environments still need audit trails for compliance.
 +-----------------+     +-------------+     +-----------------+
 ```
 
-Syslog export is planned but not yet implemented. Currently, use the periodic export method below.
+> **Roadmap:** Built-in syslog/SIEM forwarding from `vouch-server` is not implemented yet. Use the periodic export method below (or your database backup process — see [Backup and Recovery](../operations/backup-recovery.md)).
 
 ### Periodic Export
 
