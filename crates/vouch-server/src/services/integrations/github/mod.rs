@@ -231,3 +231,114 @@ impl<'a> GitHubService<'a> {
             .ok_or(GitHubError::WebhookSecretNotConfigured)
     }
 }
+
+#[cfg(test)]
+#[expect(
+    clippy::expect_used,
+    reason = "test code: panic on assertion failure is acceptable"
+)]
+mod tests {
+    use super::*;
+    use crate::test_utils;
+    use secrecy::SecretString;
+
+    #[tokio::test]
+    async fn is_configured_reflects_app_presence() {
+        let state = test_utils::test_app_state().await;
+        let config = (**state.config()).clone();
+        let service =
+            GitHubService::new(&state.store, &state.audit, &config, state.github_app.as_ref());
+        assert!(!service.is_configured());
+        assert!(matches!(service.require_app(), Err(GitHubError::NotConfigured)));
+    }
+
+    #[tokio::test]
+    async fn is_oauth_configured_requires_both_id_and_secret() {
+        let state = test_utils::test_app_state().await;
+        let config = (**state.config()).clone();
+        let service =
+            GitHubService::new(&state.store, &state.audit, &config, state.github_app.as_ref());
+        assert!(!service.is_oauth_configured());
+        assert!(matches!(
+            service.oauth_client_id(),
+            Err(GitHubError::OAuthNotConfigured)
+        ));
+        assert!(matches!(
+            service.oauth_client_secret(),
+            Err(GitHubError::OAuthNotConfigured)
+        ));
+    }
+
+    #[tokio::test]
+    async fn oauth_helpers_return_configured_values() {
+        let state = test_utils::test_app_state().await;
+        let mut config = (**state.config()).clone();
+        config.github_app_client_id = Some("client-xyz".to_string());
+        config.github_app_client_secret = Some(SecretString::from("secret-xyz".to_string()));
+
+        let service =
+            GitHubService::new(&state.store, &state.audit, &config, state.github_app.as_ref());
+        assert!(service.is_oauth_configured());
+        assert_eq!(service.oauth_client_id().expect("client_id"), "client-xyz");
+        assert_eq!(
+            service.oauth_client_secret().expect("client_secret"),
+            "secret-xyz"
+        );
+    }
+
+    #[tokio::test]
+    async fn webhook_secret_helper_paths() {
+        let state = test_utils::test_app_state().await;
+        let config = (**state.config()).clone();
+        let service =
+            GitHubService::new(&state.store, &state.audit, &config, state.github_app.as_ref());
+        assert!(matches!(
+            service.webhook_secret(),
+            Err(GitHubError::WebhookSecretNotConfigured)
+        ));
+
+        let mut config_with_secret = (**state.config()).clone();
+        config_with_secret.github_webhook_secret = Some(SecretString::from("wh-secret".to_string()));
+        let service = GitHubService::new(
+            &state.store,
+            &state.audit,
+            &config_with_secret,
+            state.github_app.as_ref(),
+        );
+        assert_eq!(service.webhook_secret().expect("secret"), "wh-secret");
+    }
+
+    #[tokio::test]
+    async fn app_name_helper_paths() {
+        let state = test_utils::test_app_state().await;
+        let config = (**state.config()).clone();
+        let service =
+            GitHubService::new(&state.store, &state.audit, &config, state.github_app.as_ref());
+        assert!(matches!(service.app_name(), Err(GitHubError::Internal(_))));
+
+        let mut config_with_name = (**state.config()).clone();
+        config_with_name.github_app_name = Some("acme".to_string());
+        let service = GitHubService::new(
+            &state.store,
+            &state.audit,
+            &config_with_name,
+            state.github_app.as_ref(),
+        );
+        assert_eq!(service.app_name().expect("app name"), "acme");
+    }
+
+    #[test]
+    fn github_error_titles_are_stable() {
+        // Smoke-test a couple of branches so the title() match arms get exercised.
+        assert_eq!(GitHubError::NotConfigured.title(), "Not Available");
+        assert_eq!(GitHubError::NotOrgAdmin.title(), "Admin Required");
+        assert_eq!(
+            GitHubError::InstallationAccessDenied.title(),
+            "Access Denied"
+        );
+        assert_eq!(
+            GitHubError::InstallationAlreadyConnected.title(),
+            "Already Connected"
+        );
+    }
+}

@@ -664,6 +664,7 @@ pub(crate) async fn refresh_oauth_token(
 #[cfg(test)]
 #[expect(
     clippy::expect_used,
+    clippy::indexing_slicing,
     reason = "test code: panic on assertion failure is acceptable"
 )]
 mod tests {
@@ -775,5 +776,92 @@ eyYRskrWOAtu0DuWJARLn74r5B4ze8s4DvUdPe781neRB1hMbXte6g==
         assert_eq!(perms.get("contents"), Some(&"write".to_string()));
         assert_eq!(perms.get("metadata"), Some(&"read".to_string()));
         assert_eq!(perms.len(), 2);
+    }
+
+    fn test_config_with_app(app_id: Option<u64>, key: Option<&str>) -> ServerConfig {
+        let mut config = crate::test_utils::test_config();
+        config.github_app_id = app_id;
+        config.github_app_key = key.map(|k| SecretString::from(k.to_string()));
+        config
+    }
+
+    #[tokio::test]
+    async fn load_returns_none_without_app_id() {
+        let config = test_config_with_app(None, Some(TEST_RSA_KEY_PKCS1_PEM));
+        let loaded =
+            GitHubApp::load(&config, reqwest::Client::new()).expect("load should not error");
+        assert!(loaded.is_none());
+    }
+
+    #[tokio::test]
+    async fn load_returns_none_without_private_key() {
+        let config = test_config_with_app(Some(12345), None);
+        let loaded =
+            GitHubApp::load(&config, reqwest::Client::new()).expect("load should not error");
+        assert!(loaded.is_none());
+    }
+
+    #[tokio::test]
+    async fn load_returns_none_for_blank_private_key() {
+        let config = test_config_with_app(Some(12345), Some("   \n   "));
+        let loaded =
+            GitHubApp::load(&config, reqwest::Client::new()).expect("load should not error");
+        assert!(loaded.is_none(), "whitespace-only key should be treated as unconfigured");
+    }
+
+    #[tokio::test]
+    async fn load_returns_app_with_valid_config() {
+        let config = test_config_with_app(Some(12345), Some(TEST_RSA_KEY_PKCS1_PEM));
+        let app = GitHubApp::load(&config, reqwest::Client::new())
+            .expect("load should succeed")
+            .expect("app should be returned");
+        assert_eq!(app.app_id().0, 12345);
+    }
+
+    #[tokio::test]
+    async fn load_rejects_invalid_private_key() {
+        let config = test_config_with_app(Some(12345), Some("not a pem block"));
+        let result = GitHubApp::load(&config, reqwest::Client::new());
+        assert!(result.is_err(), "invalid PEM must produce an error");
+    }
+
+    #[tokio::test]
+    async fn generate_app_jwt_signs_a_well_formed_token() {
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        let config = test_config_with_app(Some(98765), Some(TEST_RSA_KEY_PKCS1_PEM));
+        let app = GitHubApp::load(&config, reqwest::Client::new())
+            .expect("load")
+            .expect("app");
+
+        let jwt = app.generate_app_jwt().await.expect("generate jwt");
+        let parts: Vec<&str> = jwt.split('.').collect();
+        assert_eq!(parts.len(), 3, "JWT must have three parts");
+
+        let header_bytes = URL_SAFE_NO_PAD
+            .decode(parts[0])
+            .expect("decode jwt header");
+        let header: serde_json::Value =
+            serde_json::from_slice(&header_bytes).expect("parse header");
+        assert_eq!(header.get("alg").and_then(|v| v.as_str()), Some("RS256"));
+        assert_eq!(header.get("typ").and_then(|v| v.as_str()), Some("JWT"));
+
+        let payload_bytes = URL_SAFE_NO_PAD
+            .decode(parts[1])
+            .expect("decode jwt payload");
+        let payload: serde_json::Value =
+            serde_json::from_slice(&payload_bytes).expect("parse payload");
+        assert_eq!(payload.get("iss").and_then(|v| v.as_str()), Some("98765"));
+
+        let now = jiff::Timestamp::now().as_second();
+        let iat = payload.get("iat").and_then(|v| v.as_i64()).expect("iat");
+        let exp = payload.get("exp").and_then(|v| v.as_i64()).expect("exp");
+        // Per the implementation, iat is set 60s in the past and exp is 10min ahead.
+        assert!(iat <= now, "iat must be in the past or now");
+        assert!(exp > now, "exp must be in the future");
+        assert!(
+            exp - iat <= 660,
+            "iat→exp span must respect GitHub's 10-minute cap (got {})",
+            exp - iat
+        );
     }
 }

@@ -1507,4 +1507,121 @@ mod tests {
             other => panic!("expected SAML entry, got {other:?}"),
         }
     }
+
+    // -----------------------------------------------------------------
+    // S3IdpEntry::into_idp_config
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn into_idp_config_oidc_carries_all_fields() {
+        let entry = S3IdpEntry::Oidc {
+            id: "google".to_string(),
+            issuer: "https://accounts.google.com".to_string(),
+            client_id: "client-abc".to_string(),
+            client_secret: "secret-xyz".to_string(),
+        };
+        match entry.into_idp_config() {
+            IdpConfig::Oidc(oidc) => {
+                assert_eq!(oidc.id, "google");
+                assert_eq!(oidc.issuer_url, "https://accounts.google.com");
+                assert_eq!(oidc.client_id, "client-abc");
+                assert_eq!(oidc.client_secret.expose_secret(), "secret-xyz");
+            }
+            other => panic!("expected OIDC, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn into_idp_config_saml_carries_attributes() {
+        let entry = S3IdpEntry::Saml {
+            id: "corp".to_string(),
+            metadata_url: "https://idp.example.com/saml/metadata".to_string(),
+            sp_entity_id: Some("https://vouch.example.com".to_string()),
+            email_attribute: Some("emailAddress".to_string()),
+            domain_attribute: Some("dom".to_string()),
+        };
+        match entry.into_idp_config() {
+            IdpConfig::Saml(saml) => {
+                assert_eq!(saml.id, "corp");
+                assert_eq!(saml.metadata_url, "https://idp.example.com/saml/metadata");
+                assert_eq!(saml.sp_entity_id.as_deref(), Some("https://vouch.example.com"));
+                assert_eq!(saml.email_attribute.as_deref(), Some("emailAddress"));
+                assert_eq!(saml.domain_attribute.as_deref(), Some("dom"));
+            }
+            other => panic!("expected SAML, got {other:?}"),
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // S3IdpEntry::Debug redacts the OIDC client secret
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn s3_idp_entry_oidc_debug_redacts_client_secret() {
+        let entry = S3IdpEntry::Oidc {
+            id: "google".to_string(),
+            issuer: "https://accounts.google.com".to_string(),
+            client_id: "client-abc".to_string(),
+            client_secret: "should-not-leak".to_string(),
+        };
+        let debug = format!("{entry:?}");
+        assert!(debug.contains("[REDACTED]"), "must redact secret: {debug}");
+        assert!(
+            !debug.contains("should-not-leak"),
+            "secret must not appear: {debug}"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // apply_config_update — drives the private fn end-to-end without TLS
+    // -----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn apply_config_update_runtime_swaps_only_tls_fields() {
+        let mut starting = crate::test_utils::test_config();
+        starting.tls_cert = None;
+        starting.tls_key = None;
+        let arcswap = Arc::new(ArcSwap::from_pointee(starting));
+
+        let s3 = S3Config {
+            // Runtime updates only honor TLS, so this rp_id MUST be ignored.
+            rp_id: Some("hijacked.example.com".to_string()),
+            tls: Some(S3TlsConfig {
+                cert: Some("new-cert-base64".to_string()),
+                key: Some("new-key-base64".to_string()),
+            }),
+            ..Default::default()
+        };
+
+        apply_config_update(&arcswap, &None, s3)
+            .await
+            .expect("apply update");
+
+        let after = arcswap.load();
+        assert_eq!(after.tls_cert.as_deref(), Some("new-cert-base64"));
+        assert!(after.tls_key.is_some());
+        assert_ne!(
+            after.rp_id, "hijacked.example.com",
+            "rp_id must not be updated at runtime"
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_config_update_with_no_tls_change_is_a_noop_on_tls() {
+        let mut starting = crate::test_utils::test_config();
+        starting.tls_cert = Some("existing-cert".to_string());
+        starting.tls_key = Some(SecretString::from("existing-key".to_string()));
+        let arcswap = Arc::new(ArcSwap::from_pointee(starting));
+
+        // S3 config with no TLS section — apply must succeed and leave
+        // the existing TLS material untouched.
+        let s3 = S3Config::default();
+        apply_config_update(&arcswap, &None, s3)
+            .await
+            .expect("apply update");
+
+        let after = arcswap.load();
+        assert_eq!(after.tls_cert.as_deref(), Some("existing-cert"));
+        assert!(after.tls_key.is_some());
+    }
 }
