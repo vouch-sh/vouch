@@ -59,7 +59,7 @@ jobs:
           shared-key: "clippy-${{ runner.os }}"
           save-if: ${{ github.ref == 'refs/heads/main' }}
           cache-on-failure: true
-      - run: cargo clippy --all-targets --all-features -- -D warnings
+      - run: cargo clippy --locked --all-targets --all-features -- -D warnings
 
   test:
     name: Unit Tests (${{ matrix.name }})
@@ -106,7 +106,7 @@ jobs:
           echo "AWS_LC_FIPS_SYS_CC=${{ matrix.fips-cc }}" >> "$GITHUB_ENV"
           echo "AWS_LC_FIPS_SYS_CXX=${{ matrix.fips-cxx }}" >> "$GITHUB_ENV"
       - name: Run tests
-        run: cargo test ${{ matrix.cargo-args }} # zizmor: ignore[template-injection] — static matrix value
+        run: cargo test --locked ${{ matrix.cargo-args }} # zizmor: ignore[template-injection] — static matrix value
 
   build:
     name: Build (${{ matrix.name }})
@@ -176,7 +176,7 @@ jobs:
           TARGET: ${{ matrix.target }}
       - name: Build # zizmor: ignore[template-injection] — static matrix values
         if: runner.os != 'Linux'
-        run: cargo build --release --target ${{ matrix.target }} ${{ matrix.packages }}
+        run: cargo build --release --locked --target ${{ matrix.target }} ${{ matrix.packages }}
       - name: Upload Windows binary
         if: runner.os == 'Windows'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

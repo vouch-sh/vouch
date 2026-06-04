@@ -12,11 +12,11 @@
 | SSH agent protocol | `crates/vouch-agent/src/ssh_agent/` |
 | API types | `crates/vouch-common/src/api.rs` |
 | FIDO2 types | `crates/vouch-common/src/fido2_types.rs` |
-| Shared contracts | `crates/vouch-common/src/contracts.rs` |
+| Encoding helpers | `crates/vouch-common/src/encoding.rs` |
 | Server handlers | `crates/vouch-server/src/handlers/` |
 | Server services | `crates/vouch-server/src/services/` (oidc/, integrations/) |
 | Crypto primitives | `crates/vouch-server/src/crypto/` (jwt.rs, ssh_ca.rs, webauthn_verify.rs, tpm_decrypt.rs, ber.rs, pem.rs) |
-| Server infra | `crates/vouch-server/src/infra/` (tls.rs, cleanup.rs, s3_config.rs, encrypt_config.rs) |
+| Server infra | `crates/vouch-server/src/infra/` (tls.rs, cleanup.rs, s3_config.rs, generate_document_key.rs) |
 | Database modules | `crates/vouch-server/src/db/` (pool.rs, users.rs, sessions.rs, etc.) |
 | DB migrations | `crates/vouch-server/migrations/{sqlite,postgres}/` |
 | HTML templates | `crates/vouch-server/templates/` |

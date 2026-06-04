@@ -152,3 +152,91 @@ impl GitHubService<'_> {
         ))
     }
 }
+
+#[cfg(test)]
+#[expect(
+    clippy::expect_used,
+    clippy::panic,
+    reason = "test code: panic on assertion failure is acceptable"
+)]
+mod tests {
+    use super::*;
+    use crate::test_utils;
+    use secrecy::SecretString;
+
+    #[tokio::test]
+    async fn build_oauth_url_includes_client_id_redirect_and_state() {
+        let state = test_utils::test_app_state().await;
+        let mut config = (**state.config()).clone();
+        config.github_app_client_id = Some("github-client-id".to_string());
+        config.github_app_client_secret = Some(SecretString::from("shh".to_string()));
+
+        let service = GitHubService::new(
+            &state.store,
+            &state.audit,
+            &config,
+            state.github_app.as_ref(),
+        );
+        let url = service
+            .build_oauth_url("opaque-csrf-state")
+            .expect("build url");
+
+        // The URL starts with the authorize endpoint and contains the encoded
+        // client_id, redirect_uri (with port-less https origin), and state.
+        assert!(
+            url.starts_with("https://github.com/login/oauth/authorize?"),
+            "unexpected prefix: {url}"
+        );
+        assert!(url.contains("client_id=github-client-id"), "url: {url}");
+        // The configured base_url is https://test.example.com (no special chars in
+        // path), so the only encoded characters come from `://`.
+        assert!(
+            url.contains("redirect_uri=https%3A%2F%2Ftest.example.com%2Fgithub%2Fcallback"),
+            "redirect uri encoding wrong: {url}"
+        );
+        assert!(url.contains("state=opaque-csrf-state"), "url: {url}");
+    }
+
+    #[tokio::test]
+    async fn build_oauth_url_urlencodes_state_special_characters() {
+        let state = test_utils::test_app_state().await;
+        let mut config = (**state.config()).clone();
+        config.github_app_client_id = Some("github-client-id".to_string());
+        config.github_app_client_secret = Some(SecretString::from("shh".to_string()));
+
+        let service = GitHubService::new(
+            &state.store,
+            &state.audit,
+            &config,
+            state.github_app.as_ref(),
+        );
+        let url = service
+            .build_oauth_url("state with =& special / chars")
+            .expect("build url");
+        assert!(
+            !url.contains("state with =& special / chars"),
+            "raw state must not appear unencoded: {url}"
+        );
+        assert!(
+            url.contains("state%20with%20%3D%26%20special%20%2F%20chars"),
+            "state must be url-encoded: {url}"
+        );
+    }
+
+    #[tokio::test]
+    async fn build_oauth_url_errors_when_client_id_missing() {
+        let state = test_utils::test_app_state().await;
+        let config = (**state.config()).clone(); // client_id is None
+        let service = GitHubService::new(
+            &state.store,
+            &state.audit,
+            &config,
+            state.github_app.as_ref(),
+        );
+
+        match service.build_oauth_url("state") {
+            Err(GitHubError::OAuthNotConfigured) => {}
+            other => panic!("expected OAuthNotConfigured, got {other:?}"),
+        }
+    }
+}

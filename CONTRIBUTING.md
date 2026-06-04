@@ -318,6 +318,51 @@ Documentation lives in `/docs`. When updating:
 3. Update table of contents if adding sections
 4. Test any code examples
 
+## Reproducible Builds
+
+Release builds support deterministic output via `SOURCE_DATE_EPOCH`. This sets all embedded timestamps to a fixed value (the commit timestamp), making binary output reproducible across builds.
+
+### How It Works
+
+- The `Dockerfile` and `Dockerfile.build` accept a `SOURCE_DATE_EPOCH` build arg
+- The release workflow sets it to `git log -1 --format=%ct` (last commit Unix timestamp)
+- `touch -d "@${SOURCE_DATE_EPOCH}"` is applied to source files before compilation
+- Release profile uses `strip = true` (removes non-deterministic debug paths)
+
+### Verifying a Release
+
+To verify that a release binary is reproducible:
+
+```bash
+# Get the commit timestamp for the release tag
+SOURCE_DATE_EPOCH=$(git log -1 --format=%ct v2026.6.1)
+
+# Rebuild using Docker Bake with the same epoch
+docker buildx bake ci \
+  --set "*.args.SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH}"
+
+# Compare SHA-256 of resulting binaries against published checksums
+sha256sum out/target/*/release/vouch-server
+```
+
+For container images, the release workflow also sets `provenance: true` and `sbom: true` on the Docker build, generating SLSA provenance attestations that can be verified with `cosign` or `gh attestation verify`.
+
+### Local Reproducibility
+
+For local builds to match CI output, ensure:
+
+1. Same Rust toolchain version (check `rust-toolchain.toml`)
+2. Same target triple (e.g., `x86_64-unknown-linux-musl`)
+3. Same `SOURCE_DATE_EPOCH` value
+4. Use `--locked` to ensure identical dependency resolution
+5. Build via Docker Bake (same Alpine base, same system libraries)
+
+```bash
+# Reproduce the exact CI build locally
+export SOURCE_DATE_EPOCH=$(git log -1 --format=%ct HEAD)
+docker buildx bake ci
+```
+
 ## Getting Help
 
 - **Questions**: Open a [GitHub Discussion](https://github.com/vouch-sh/vouch/discussions)
