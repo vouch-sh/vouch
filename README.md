@@ -163,7 +163,7 @@ vouch exec --type aws --role arn:aws:iam::ID:role/name -- terraform plan
 # Export credentials for the current shell
 eval "$(vouch env --type aws --role arn:aws:iam::ID:role/name)"
 
-# Available types: aws, github, codeartifact, rds, redshift
+# Available types: aws, github, codeartifact, rds, redshift, anthropic, openai
 ```
 
 ### Shell Completions
