@@ -13,5 +13,7 @@ charts/
 *.md
 .local/
 .env
+.env.example
 *.db
 ssh_ca_key*
+.kiro/

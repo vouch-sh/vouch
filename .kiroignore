@@ -6,5 +6,5 @@
 .kamal/secrets
 docs/book/
 target/
-ssh_ca_key
-vouch.db
+ssh_ca_key*
+*.db
