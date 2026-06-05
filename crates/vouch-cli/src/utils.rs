@@ -174,6 +174,23 @@ pub(crate) fn create_symlink_with_fallback(
 
     #[cfg(unix)]
     {
+        // A relative symlink target is stored verbatim and resolved by the
+        // kernel relative to the symlink's *parent directory*, not via
+        // $PATH lookup. `resolve_install_path()` has a Tier 3 fallback that
+        // returns a bare `"vouch"` when `canonicalize()` fails — that works
+        // for config files that exec via PATH, but produces a dangling
+        // symlink here. Fail fast (#453).
+        if !vouch_path.is_absolute() {
+            anyhow::bail!(
+                "refusing to create symlink at {} with relative target {:?}: \
+                 a symlink stores its target verbatim and is resolved by the \
+                 kernel relative to the symlink's directory, not via $PATH. \
+                 Pass an absolute path to the vouch binary.",
+                symlink_path.display(),
+                vouch_path.display(),
+            );
+        }
+
         // Remove existing symlink if present
         if symlink_path.exists() || symlink_path.is_symlink() {
             fs::remove_file(symlink_path)
@@ -358,6 +375,52 @@ mod tests {
         let link = dir.path().join("keyring");
         std::os::unix::fs::symlink("/opt/vouch-server", &link)?;
         assert!(!is_vouch_symlink(&link));
+        Ok(())
+    }
+
+    // -- create_symlink_with_fallback --
+
+    /// Regression for #453: a relative target (e.g. bare `"vouch"`) would
+    /// create a dangling symlink because the kernel resolves it relative
+    /// to the symlink's directory, not via $PATH. Fail fast instead.
+    #[cfg(unix)]
+    #[test]
+    fn test_create_symlink_rejects_relative_target() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let link = dir.path().join("keyring");
+        let err = create_symlink_with_fallback(Path::new("vouch"), &link, "")
+            .err()
+            .ok_or_else(|| anyhow::anyhow!("expected error"))?;
+        let msg = format!("{err}");
+        assert!(msg.contains("relative"), "got: {msg}");
+        // No dangling artifact must be left behind.
+        assert!(!link.exists() && !link.is_symlink());
+        Ok(())
+    }
+
+    /// Same guard for multi-segment relative paths (e.g. `bin/vouch`).
+    #[cfg(unix)]
+    #[test]
+    fn test_create_symlink_rejects_relative_nested_target() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let link = dir.path().join("keyring");
+        let result = create_symlink_with_fallback(Path::new("bin/vouch"), &link, "");
+        assert!(result.is_err());
+        assert!(!link.exists() && !link.is_symlink());
+        Ok(())
+    }
+
+    /// Happy path: an absolute target still works.
+    #[cfg(unix)]
+    #[test]
+    fn test_create_symlink_accepts_absolute_target() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let target = dir.path().join("vouch");
+        fs::write(&target, b"")?;
+        let link = dir.path().join("keyring");
+        create_symlink_with_fallback(&target, &link, "")?;
+        assert!(link.is_symlink());
+        assert_eq!(fs::read_link(&link)?, target);
         Ok(())
     }
 }
