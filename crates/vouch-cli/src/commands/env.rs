@@ -38,6 +38,7 @@ pub(crate) async fn run(
         CredentialType::Rds => print_rds_env(server, role, &rds_opts, shell).await,
         CredentialType::Redshift => print_redshift_env(server, role, &rs_opts, shell).await,
         CredentialType::Anthropic => print_anthropic_env(server, shell).await,
+        CredentialType::Openai => print_openai_env(server, shell).await,
     }
 }
 
@@ -50,6 +51,20 @@ pub(crate) async fn run(
 async fn print_anthropic_env(server: &str, shell: &Shell) -> Result<()> {
     let token = super::credential::anthropic::get_token(server).await?;
     print_export(shell, "ANTHROPIC_AUTH_TOKEN", token.expose_secret());
+    Ok(())
+}
+
+/// Fetch an OpenAI federation token (cache-first) and print the
+/// `OPENAI_API_KEY` export statement.
+///
+/// The OpenAI SDK reads `OPENAI_API_KEY` only — there is no
+/// `OPENAI_AUTH_TOKEN`, so unlike `ANTHROPIC_AUTH_TOKEN` this uses the
+/// API-key variable name even though the minted token is an OAuth access
+/// token. Workload path: the token acts as a service account, intended
+/// for CI/headless automation.
+async fn print_openai_env(server: &str, shell: &Shell) -> Result<()> {
+    let token = super::credential::openai::get_token(server).await?;
+    print_export(shell, "OPENAI_API_KEY", token.expose_secret());
     Ok(())
 }
 
@@ -241,6 +256,16 @@ mod tests {
     fn test_codeartifact_env_variable_name_bash() {
         let ca = format_export(&Shell::Bash, "CODEARTIFACT_AUTH_TOKEN", "ca-token");
         assert_eq!(ca, "export CODEARTIFACT_AUTH_TOKEN='ca-token';");
+    }
+
+    /// Lock the OpenAI env-var name. The OpenAI SDK reads `OPENAI_API_KEY`
+    /// only — there is no `OPENAI_AUTH_TOKEN`. This test exists to prevent
+    /// well-meaning "alignment" with Anthropic's `_AUTH_TOKEN` naming, which
+    /// would silently break the integration (#452).
+    #[test]
+    fn test_openai_env_variable_name_bash() {
+        let openai = format_export(&Shell::Bash, "OPENAI_API_KEY", "sk-x");
+        assert_eq!(openai, "export OPENAI_API_KEY='sk-x';");
     }
 
     /// Verify Fish shell format with AWS variable names.

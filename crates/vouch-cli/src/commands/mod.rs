@@ -37,4 +37,50 @@ pub(crate) enum CredentialType {
     /// Workload path: the minted token acts as a service account, intended
     /// for CI/headless automation, not interactive Claude Code sessions.
     Anthropic,
+    /// OpenAI federation token (OPENAI_API_KEY).
+    ///
+    /// Workload path: the minted token acts as a service account, intended
+    /// for CI/headless automation. Note: the OpenAI SDK reads
+    /// `OPENAI_API_KEY` only — there is no `OPENAI_AUTH_TOKEN` variant, so
+    /// this deliberately diverges from the Anthropic naming convention.
+    Openai,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::ValueEnum;
+
+    /// Regression for #452: `vouch exec --type openai` returned
+    /// `error: invalid value 'openai' for '--type <CREDENTIAL_TYPE>'`
+    /// because `Openai` was missing from the enum. Lock the parse.
+    #[test]
+    fn test_credential_type_parses_openai() {
+        let v = CredentialType::from_str("openai", true);
+        assert!(matches!(v, Ok(CredentialType::Openai)));
+    }
+
+    /// Lock the full set of accepted `--type` values so any future addition
+    /// or rename surfaces in review.
+    #[test]
+    fn test_credential_type_value_enum_set() {
+        let mut names: Vec<String> = CredentialType::value_variants()
+            .iter()
+            .filter_map(|v| v.to_possible_value())
+            .map(|pv| pv.get_name().to_string())
+            .collect();
+        names.sort_unstable();
+        assert_eq!(
+            names,
+            vec![
+                "anthropic",
+                "aws",
+                "codeartifact",
+                "github",
+                "openai",
+                "rds",
+                "redshift",
+            ]
+        );
+    }
 }
