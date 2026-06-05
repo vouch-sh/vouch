@@ -64,7 +64,16 @@ pub(crate) struct ValidatedResourceToken {
     /// Granted OAuth scope.
     pub scope: Option<crate::services::oidc::ScopeSet>,
     /// Authenticator ID from the server-side session record (not in JWT).
+    ///
+    /// Presence merely means a key is registered to the user — it does
+    /// **not** prove the current session was hardware-verified. For that,
+    /// gate on [`Self::hardware_verified`] instead.
     pub authenticator_id: Option<String>,
+    /// FIDO2 hardware-verification claim from the access token. `true`
+    /// only when the session was minted via the FIDO2 grant; `false` for
+    /// bootstrap/enrollment sessions. Used to gate credential issuance
+    /// that asserts hardware verification downstream (e.g. AWS WIF).
+    pub hardware_verified: bool,
     /// Authentication time (`auth_time` claim).
     pub auth_time: Option<i64>,
     /// SHA-256 hash of the access token (for DB lookups/revocation).
@@ -258,6 +267,7 @@ pub(crate) async fn extract_resource_token(
         client_id: access_claims.client_id,
         scope: access_claims.scope,
         authenticator_id: session.authenticator_id,
+        hardware_verified: access_claims.hardware_verified,
         auth_time: access_claims.auth_time,
         token_hash,
         dpop_source,

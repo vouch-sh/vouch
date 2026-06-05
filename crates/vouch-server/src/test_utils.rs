@@ -643,6 +643,62 @@ pub async fn create_test_bootstrap_session(state: &AppState, user_id: &str, emai
     result.token.expose_secret().to_string()
 }
 
+/// Like [`create_test_bootstrap_session`], but with an `authenticator_id`
+/// attached so the access token's `hardware_verified` claim is `false`
+/// while the session record still references a key.
+///
+/// This reproduces the #451 token-laundering scenario: a re-enrollment
+/// bootstrap session for a user who already has a registered security
+/// key has `authenticator_id = Some(_)` and `hardware_verified = false`.
+/// Hardware-gated handlers must reject it.
+pub async fn create_test_bootstrap_session_with_authenticator(
+    state: &AppState,
+    user_id: &str,
+    email: &str,
+    auth_id: &str,
+) -> String {
+    use crate::services::auth::{
+        ClientAuthProof, CreateOAuthTokenParams, GrantProof, TokenIssuanceProof,
+        create_oauth_access_token,
+    };
+    use crate::services::oidc::ScopeSet;
+    use secrecy::ExposeSecret;
+
+    let (hardware_aaguid, org_domain) =
+        resolve_session_snapshot(state, user_id, Some(auth_id)).await;
+
+    let result = create_oauth_access_token(
+        state,
+        CreateOAuthTokenParams {
+            user_id,
+            email,
+            authenticator_id: Some(auth_id),
+            client_id: &state.config().base_url,
+            scope: Some(ScopeSet::all()),
+            dpop_jkt: None,
+            mtls_cert_thumbprint: None,
+            act: None,
+            audience: None,
+            auth_time: Some(jiff::Timestamp::now().as_second()),
+            hardware_verification: crate::services::auth::HardwareVerification::NotVerified,
+            session_purpose: crate::db::SessionPurpose::OAuthAccessToken,
+            authorization_details: None,
+            hardware_aaguid: hardware_aaguid.as_deref(),
+            org_domain: org_domain.as_deref(),
+        },
+        TokenIssuanceProof {
+            grant: GrantProof::TestingOnly,
+            client_auth: ClientAuthProof::NoAuth(
+                crate::services::auth::NoClientAuth::internal_endpoint(),
+            ),
+        },
+    )
+    .await
+    .expect("Failed to create bootstrap test session with authenticator");
+
+    result.token.expose_secret().to_string()
+}
+
 /// Create a test session with a custom `iat`-equivalent auth_time.
 ///
 /// Used for step-up authentication tests (RFC 9470) where the auth_time

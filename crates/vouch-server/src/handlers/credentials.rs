@@ -339,13 +339,18 @@ pub(crate) async fn get_aws_token(
     )
     .await?;
 
-    // Verify the session was hardware-verified. M2M and pre-FIDO2 bootstrap
-    // sessions have no `authenticator_id`; AWS federation requires hardware.
-    if token.authenticator_id.is_none() {
+    // AWS federation mints an OIDC ID token whose claims hardcode
+    // `hardware_verified: true`, so the *current session* must itself
+    // be hardware-verified — otherwise we'd be laundering a non-verified
+    // bootstrap session into a verified assertion (#451). Gate on the
+    // access-token `hardware_verified` claim, not on `authenticator_id`:
+    // a re-enrollment bootstrap session can legitimately have an
+    // `authenticator_id` set while `hardware_verified` is false.
+    if !token.hardware_verified {
         return Err(ServiceError::api(
             StatusCode::FORBIDDEN,
-            "no_authenticator",
-            "Session does not have a security key - please register one first",
+            "hardware_required",
+            "AWS federation requires a hardware-verified session - run 'vouch login' to authenticate with your security key",
         ));
     }
 
@@ -1038,6 +1043,60 @@ mod tests {
         let resp: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
         assert!(resp["id_token"].is_string());
         assert!(resp["expires_in"].is_number());
+    }
+
+    /// Regression for #451: a non-hardware-verified bootstrap session
+    /// for a user who **already has a registered key** (so
+    /// `authenticator_id = Some(_)` from the session record) must NOT
+    /// be exchangeable for an AWS WIF token. The previous gate checked
+    /// `authenticator_id.is_none()` and let this case through, allowing
+    /// the handler to mint an ID token asserting `hardware_verified: true`.
+    #[tokio::test]
+    async fn test_aws_token_rejects_bootstrap_session_with_existing_key() {
+        let (app, state) = test_app().await;
+
+        let user = create_test_user(&state.store, "bootstrap@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_bootstrap_session_with_authenticator(
+            &state,
+            &user.id,
+            &user.email,
+            &auth_id,
+        )
+        .await;
+
+        let (status, body) = http_get(
+            &app,
+            "/v1/credentials/aws/token",
+            &[("Authorization", &format!("Bearer {token}"))],
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+        assert_eq!(error["code"], "hardware_required");
+    }
+
+    /// A plain bootstrap session (no authenticator yet, `hardware_verified=false`)
+    /// must also be rejected. Confirms the `#[serde(default)]` fail-closed
+    /// behavior of the access-token claim end-to-end.
+    #[tokio::test]
+    async fn test_aws_token_rejects_bootstrap_session_without_key() {
+        let (app, state) = test_app().await;
+
+        let user = create_test_user(&state.store, "newuser@example.com").await;
+        let token = create_test_bootstrap_session(&state, &user.id, &user.email).await;
+
+        let (status, body) = http_get(
+            &app,
+            "/v1/credentials/aws/token",
+            &[("Authorization", &format!("Bearer {token}"))],
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+        assert_eq!(error["code"], "hardware_required");
     }
 
     #[tokio::test]
