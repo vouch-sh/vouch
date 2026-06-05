@@ -772,41 +772,37 @@ pub(crate) const MAX_DSQL_RETRIES: u32 = 3;
 
 /// SQLSTATE codes that indicate a transient, retryable error.
 ///
+/// Postgres/DSQL (5-char SQLSTATEs):
 /// - `40001`: Serialization failure (standard SQL)
 /// - `OC000`: Aurora DSQL optimistic concurrency conflict
 /// - `OC001`: Aurora DSQL transaction conflict
-/// - `5`: SQLite `SQLITE_BUSY` — writer contention (primary code)
-/// - `6`: SQLite `SQLITE_LOCKED` — deadlock between concurrent transactions
-///   (primary code)
 ///
-/// Postgres/DSQL emit 5-char SQLSTATEs that match exactly. SQLite, in
-/// contrast, returns its **extended** result code as a numeric string via
-/// `sqlx::Error::code()` (e.g. `"517"` for `SQLITE_BUSY_SNAPSHOT`, primary
-/// `5`); a plain string compare against `"5"`/`"6"` therefore never fires.
-/// [`is_retryable_code`] handles that by masking numeric codes to their
-/// low byte (the primary code) before comparison (issue #429).
-const RETRYABLE_SQL_STATES: &[&str] = &["40001", "OC000", "OC001", "5", "6"];
+/// SQLite primaries:
+/// - `5`: `SQLITE_BUSY` — writer contention
+/// - `6`: `SQLITE_LOCKED` — deadlock between concurrent transactions
+///
+/// SQLite extended codes for those primaries — sqlx returns these as the
+/// integer literal (e.g. `"517"` for `SQLITE_BUSY_SNAPSHOT`), so we
+/// enumerate the ones we want rather than masking. The full set is small
+/// and stable.
+/// - `261`: `SQLITE_BUSY_RECOVERY`
+/// - `517`: `SQLITE_BUSY_SNAPSHOT`
+/// - `773`: `SQLITE_BUSY_TIMEOUT`
+/// - `262`: `SQLITE_LOCKED_SHAREDCACHE`
+/// - `518`: `SQLITE_LOCKED_VTAB`
+const RETRYABLE_SQL_STATES: &[&str] = &[
+    "40001", "OC000", "OC001", "5", "6", "261", "517", "773", "262", "518",
+];
 
-/// Match `code` against [`RETRYABLE_SQL_STATES`], normalizing SQLite extended
-/// codes to their primary code first.
+/// Match `code` against [`RETRYABLE_SQL_STATES`] verbatim.
 ///
-/// SQLite extended result codes encode the primary code in the low byte
-/// (e.g. `SQLITE_BUSY_SNAPSHOT = 517 = (1 << 8) | 5`). We try an exact match
-/// first (covers Postgres/DSQL 5-char SQLSTATEs and the unlikely bare `"5"`/
-/// `"6"`); if that fails and the code parses as an integer, mask with
-/// `0xFF` and retry. Postgres SQLSTATEs like `"40001"` parse as integers
-/// too, but `40001 & 0xFF = 65` doesn't collide with any entry in
-/// `RETRYABLE_SQL_STATES`, so the second check is a no-op for them.
+/// Earlier revisions masked numeric codes with `& 0xFF` to normalize
+/// SQLite extended codes down to their primary, but that masked
+/// Postgres SQLSTATEs too — `"22021"`, `"22022"`, and `"42501"` all
+/// collide with SQLite `5`/`6` after masking (#454). Since SQLite's
+/// retryable extended-code set is small and stable, we just list them.
 fn is_retryable_code(code: &str) -> bool {
-    if RETRYABLE_SQL_STATES.contains(&code) {
-        return true;
-    }
-    let Ok(numeric) = code.parse::<u32>() else {
-        return false;
-    };
-    let primary = numeric & 0xFF;
-    let primary_str = primary.to_string();
-    RETRYABLE_SQL_STATES.contains(&primary_str.as_str())
+    RETRYABLE_SQL_STATES.contains(&code)
 }
 
 /// Check whether an error is a transient database error worth retrying.
@@ -957,20 +953,22 @@ mod tests {
         assert!(is_retryable_code("OC001"));
     }
 
-    /// SQLite extended `SQLITE_BUSY_SNAPSHOT` = 517 = `(2 << 8) | 5` —
-    /// primary code `5` (SQLITE_BUSY). Before #429 the string `"517"` never
-    /// matched any entry in `RETRYABLE_SQL_STATES`, so SQLite contention
-    /// silently bypassed retry. The mask-and-recompare path restores it.
+    /// SQLite extended codes for `SQLITE_BUSY` (primary `5`). sqlx
+    /// returns the integer literal, so each is listed verbatim in
+    /// `RETRYABLE_SQL_STATES`. Listed individually so a future deletion
+    /// fails the most relevant test.
     #[test]
-    fn test_is_retryable_code_sqlite_busy_snapshot_extended() {
-        assert!(is_retryable_code("517"));
+    fn test_is_retryable_code_sqlite_busy_extended() {
+        assert!(is_retryable_code("261")); // SQLITE_BUSY_RECOVERY
+        assert!(is_retryable_code("517")); // SQLITE_BUSY_SNAPSHOT
+        assert!(is_retryable_code("773")); // SQLITE_BUSY_TIMEOUT
     }
 
-    /// SQLite extended `SQLITE_LOCKED_SHAREDCACHE` = 262 = `(1 << 8) | 6` —
-    /// primary code `6` (SQLITE_LOCKED).
+    /// SQLite extended codes for `SQLITE_LOCKED` (primary `6`).
     #[test]
-    fn test_is_retryable_code_sqlite_locked_sharedcache_extended() {
-        assert!(is_retryable_code("262"));
+    fn test_is_retryable_code_sqlite_locked_extended() {
+        assert!(is_retryable_code("262")); // SQLITE_LOCKED_SHAREDCACHE
+        assert!(is_retryable_code("518")); // SQLITE_LOCKED_VTAB
     }
 
     /// Primary `SQLITE_BUSY`/`SQLITE_LOCKED` as a bare digit also retries —
@@ -1002,18 +1000,26 @@ mod tests {
         assert!(!is_retryable_code("not-a-code"));
     }
 
-    /// Postgres SQLSTATEs that happen to parse as integers (e.g. `"40001"`)
-    /// must NOT pass via the masking path. `40001 & 0xFF = 65`, which is
-    /// not in `RETRYABLE_SQL_STATES`. The exact-match path already returned
-    /// true for `"40001"`; this guards against a regression where the
-    /// masking path inadvertently flags an unrelated SQLSTATE as retryable.
+    /// Regression for #454: Postgres SQLSTATEs that happen to share a low
+    /// byte with `5`/`6` after `& 0xFF` masking were misclassified as
+    /// retryable. Dropping the mask in favor of explicit enumeration
+    /// eliminates the collision class.
+    ///
+    /// - `22021 & 0xFF = 5` (would have collided with `SQLITE_BUSY`)
+    /// - `22022 & 0xFF = 6` (would have collided with `SQLITE_LOCKED`)
+    /// - `42501 & 0xFF = 5` (would have collided with `SQLITE_BUSY`)
+    #[test]
+    fn test_is_retryable_code_no_postgres_false_positives() {
+        assert!(!is_retryable_code("22021"));
+        assert!(!is_retryable_code("22022"));
+        assert!(!is_retryable_code("42501"));
+    }
+
+    /// Non-retryable Postgres SQLSTATEs continue to be rejected.
     #[test]
     fn test_is_retryable_code_numeric_postgres_does_not_alias() {
-        // 23505 (unique_violation) -- 23505 & 0xFF = 209, not a retry code.
-        assert!(!is_retryable_code("23505"));
-        // 42P07 contains a letter so doesn't parse as integer — exact match
-        // path only, and not retryable.
-        assert!(!is_retryable_code("42P07"));
+        assert!(!is_retryable_code("23505")); // unique_violation
+        assert!(!is_retryable_code("42P07")); // duplicate_table
     }
 
     #[test]

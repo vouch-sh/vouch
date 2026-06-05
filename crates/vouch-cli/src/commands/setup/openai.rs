@@ -96,7 +96,7 @@ fn configure_codex(vouch_path: &str, force: bool) -> Result<PathBuf> {
 
     check_conflicts(&doc, &config_path, force)?;
 
-    write_provider_block(&mut doc, vouch_path);
+    write_provider_block(&mut doc, vouch_path)?;
     doc.insert("model_provider", toml_edit::value(PROVIDER_ID));
 
     if !codex_dir.exists() {
@@ -137,7 +137,11 @@ fn check_conflicts(doc: &DocumentMut, config_path: &Path, force: bool) -> Result
 
 /// Insert (or replace) the `[model_providers.vouch]` block, preserving
 /// any other provider entries that already live under `model_providers`.
-fn write_provider_block(doc: &mut DocumentMut, vouch_path: &str) {
+///
+/// Errors if `model_providers` exists but is not a table — writing only the
+/// dependent top-level `model_provider = "vouch"` would leave the config
+/// pointing at a provider block that was never created.
+fn write_provider_block(doc: &mut DocumentMut, vouch_path: &str) -> Result<()> {
     let mut provider = Table::new();
     provider.insert("name", toml_edit::value(PROVIDER_ID));
     provider.insert("base_url", toml_edit::value("https://api.openai.com/v1"));
@@ -159,13 +163,19 @@ fn write_provider_block(doc: &mut DocumentMut, vouch_path: &str) {
     let providers = doc
         .entry("model_providers")
         .or_insert(Item::Table(Table::new()));
+    let providers_tbl = providers.as_table_mut().ok_or_else(|| {
+        anyhow::anyhow!(
+            "cannot configure OpenAI: `model_providers` exists in \
+             ~/.codex/config.toml but is not a table. Remove or rename \
+             the `model_providers` entry and try again."
+        )
+    })?;
     // Without this the parent renders as plain `[model_providers]` instead
     // of letting the child `[model_providers.vouch]` header own the
     // section, which clutters the file.
-    if let Some(providers_tbl) = providers.as_table_mut() {
-        providers_tbl.set_implicit(true);
-        providers_tbl.insert(PROVIDER_ID, Item::Table(provider));
-    }
+    providers_tbl.set_implicit(true);
+    providers_tbl.insert(PROVIDER_ID, Item::Table(provider));
+    Ok(())
 }
 
 fn print_success(config_path: &Path) {
@@ -208,7 +218,7 @@ mod tests {
     #[test]
     fn test_write_provider_block_into_empty_doc() {
         let mut doc = DocumentMut::new();
-        write_provider_block(&mut doc, "/usr/local/bin/vouch");
+        write_provider_block(&mut doc, "/usr/local/bin/vouch").unwrap();
         let rendered = doc.to_string();
         assert!(rendered.contains("[model_providers.vouch]"));
         assert!(rendered.contains("[model_providers.vouch.auth]"));
@@ -228,10 +238,31 @@ name = "openai"
 base_url = "https://api.openai.com/v1"
 "#,
         );
-        write_provider_block(&mut doc, "/bin/vouch");
+        write_provider_block(&mut doc, "/bin/vouch").unwrap();
         let rendered = doc.to_string();
         assert!(rendered.contains("[model_providers.openai]"));
         assert!(rendered.contains("[model_providers.vouch]"));
+    }
+
+    /// Regression for #450: when `model_providers` exists but is a scalar
+    /// (not a table), `write_provider_block` must error before the caller
+    /// writes the dependent top-level `model_provider` key. Otherwise the
+    /// config ends up with `model_provider = "vouch"` referencing a
+    /// provider block that was never created.
+    #[test]
+    fn test_write_provider_block_errors_on_non_table_model_providers() {
+        let mut doc = doc_from(r#"model_providers = "garbage""#);
+        let err = write_provider_block(&mut doc, "/bin/vouch").unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("model_providers"));
+        assert!(msg.contains("not a table"));
+        // No partial state: the doc must still NOT have `model_provider`
+        // (the dependent write) and `model_providers` must remain untouched.
+        assert!(doc.get("model_provider").is_none());
+        assert_eq!(
+            doc.get("model_providers").and_then(Item::as_str),
+            Some("garbage")
+        );
     }
 
     #[test]

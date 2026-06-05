@@ -22,7 +22,7 @@ pub(crate) async fn run(server: &str) -> Result<()> {
     Ok(())
 }
 
-async fn get_token(server: &str) -> Result<SecretString> {
+pub(crate) async fn get_token(server: &str) -> Result<SecretString> {
     let config = Config::load().context("failed to load Vouch config")?;
     let fed = config
         .ai()

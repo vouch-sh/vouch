@@ -180,6 +180,9 @@ pub(crate) async fn run(
         CredentialType::Anthropic => {
             inject_anthropic_credentials(&mut cmd, server).await?;
         }
+        CredentialType::Openai => {
+            inject_openai_credentials(&mut cmd, server).await?;
+        }
     }
 
     // On Unix, replace our process so signals propagate correctly.
@@ -253,6 +256,20 @@ async fn inject_github_credentials(cmd: &mut Command, server: &str) -> Result<()
 async fn inject_anthropic_credentials(cmd: &mut Command, server: &str) -> Result<()> {
     let token = super::credential::anthropic::get_token(server).await?;
     cmd.env("ANTHROPIC_AUTH_TOKEN", token.expose_secret());
+    Ok(())
+}
+
+/// Fetch an OpenAI federation token (cache-first) and inject it into the
+/// environment as `OPENAI_API_KEY`.
+///
+/// The OpenAI SDK reads `OPENAI_API_KEY` only — there is no
+/// `OPENAI_AUTH_TOKEN`, so unlike `ANTHROPIC_AUTH_TOKEN` this uses the
+/// API-key variable name even though the minted token is an OAuth access
+/// token. Workload path: the token acts as a service account, intended
+/// for CI/headless automation.
+async fn inject_openai_credentials(cmd: &mut Command, server: &str) -> Result<()> {
+    let token = super::credential::openai::get_token(server).await?;
+    cmd.env("OPENAI_API_KEY", token.expose_secret());
     Ok(())
 }
 
