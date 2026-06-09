@@ -95,26 +95,86 @@
             document.getElementById('empty-state').classList.add('hidden');
             document.getElementById('keys-list').classList.remove('hidden');
 
+            // Build the list with DOM APIs (createElement/textContent) rather
+            // than innerHTML string concatenation, so user-controlled values
+            // (key name, device model) can never be interpreted as markup —
+            // escaping is structural, not dependent on a per-field escapeHtml().
             var container = document.getElementById('keys-items');
-            container.innerHTML = keysData.map(function(key) {
-                return '<div class="border border-vouch-border rounded-lg p-4 bg-vouch-surface" data-key-id="' + key.id + '">' +
-                    '<div class="flex items-start justify-between">' +
-                        '<div class="flex-1 min-w-0 mr-4">' +
-                            '<div class="flex items-center gap-2 mb-1">' +
-                                '<input type="text" class="key-name font-medium text-gray-200 bg-transparent border-b border-transparent hover:border-vouch-border focus:border-vouch-accent focus:outline-none transition-colors w-full" value="' + escapeHtml(key.name) + '" data-key-id="' + key.id + '" data-original="' + escapeHtml(key.name) + '" />' +
-                            '</div>' +
-                            '<div class="text-sm text-gray-500">' +
-                                (key.device_model ? '<span class="mr-3">' + escapeHtml(key.device_model) + '</span>' : '') +
-                                '<span>Added ' + formatDate(key.created_at) + '</span>' +
-                            '</div>' +
-                        '</div>' +
-                        '<button data-action="delete" data-key-id="' + key.id + '" data-key-name="' + escapeHtml(key.name) + '" class="text-gray-500 hover:text-vouch-error p-1' + (keysData.length <= 1 ? ' hidden' : '') + '" title="Delete key">' +
-                            '<svg class="w-5 h-5 pointer-events-none" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>' +
-                        '</button>' +
-                    '</div>' +
-                '</div>';
-            }).join('');
+            container.replaceChildren();
+            keysData.forEach(function(key) {
+                container.appendChild(buildKeyItem(key));
+            });
         }
+    }
+
+    function buildKeyItem(key) {
+        var item = document.createElement('div');
+        item.className = 'border border-vouch-border rounded-lg p-4 bg-vouch-surface';
+        item.dataset.keyId = key.id;
+
+        var row = document.createElement('div');
+        row.className = 'flex items-start justify-between';
+
+        var info = document.createElement('div');
+        info.className = 'flex-1 min-w-0 mr-4';
+
+        var nameWrap = document.createElement('div');
+        nameWrap.className = 'flex items-center gap-2 mb-1';
+
+        var nameInput = document.createElement('input');
+        nameInput.type = 'text';
+        nameInput.className = 'key-name font-medium text-gray-200 bg-transparent border-b border-transparent hover:border-vouch-border focus:border-vouch-accent focus:outline-none transition-colors w-full';
+        // Assigning to .value sets the property, not parsed HTML — safe.
+        nameInput.value = key.name;
+        nameInput.dataset.keyId = key.id;
+        nameInput.dataset.original = key.name;
+        nameWrap.appendChild(nameInput);
+
+        var meta = document.createElement('div');
+        meta.className = 'text-sm text-gray-500';
+        if (key.device_model) {
+            var model = document.createElement('span');
+            model.className = 'mr-3';
+            model.textContent = key.device_model;
+            meta.appendChild(model);
+        }
+        var added = document.createElement('span');
+        added.textContent = 'Added ' + formatDate(key.created_at);
+        meta.appendChild(added);
+
+        info.appendChild(nameWrap);
+        info.appendChild(meta);
+
+        var delBtn = document.createElement('button');
+        delBtn.dataset.action = 'delete';
+        delBtn.dataset.keyId = key.id;
+        delBtn.dataset.keyName = key.name;
+        delBtn.className = 'text-gray-500 hover:text-vouch-error p-1' + (keysData.length <= 1 ? ' hidden' : '');
+        delBtn.title = 'Delete key';
+        delBtn.appendChild(makeDeleteIcon());
+
+        row.appendChild(info);
+        row.appendChild(delBtn);
+        item.appendChild(row);
+        return item;
+    }
+
+    // Build the trash/delete SVG icon. Static markup (no user data); created
+    // via the SVG namespace so it renders correctly as a DOM node.
+    function makeDeleteIcon() {
+        var ns = 'http://www.w3.org/2000/svg';
+        var svg = document.createElementNS(ns, 'svg');
+        svg.setAttribute('class', 'w-5 h-5 pointer-events-none');
+        svg.setAttribute('fill', 'none');
+        svg.setAttribute('stroke', 'currentColor');
+        svg.setAttribute('viewBox', '0 0 24 24');
+        var path = document.createElementNS(ns, 'path');
+        path.setAttribute('stroke-linecap', 'round');
+        path.setAttribute('stroke-linejoin', 'round');
+        path.setAttribute('stroke-width', '2');
+        path.setAttribute('d', 'M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16');
+        svg.appendChild(path);
+        return svg;
     }
 
     async function handleNameBlur(input) {

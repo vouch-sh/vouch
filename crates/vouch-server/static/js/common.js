@@ -10,9 +10,12 @@
 
             var text = btn.dataset.copyText;
             navigator.clipboard.writeText(text).then(function() {
-                // Capture innerHTML, not textContent — icon-only buttons (SVG
-                // children, no text) would otherwise be replaced by an empty
-                // string when restored.
+                // innerHTML is intentional and safe here: there is no
+                // user-controlled data in play. We capture innerHTML (not
+                // textContent) because icon-only buttons (SVG children, no
+                // text) would otherwise be wiped when restored, and we only
+                // ever write the hardcoded literal "Copied!". This is exempt
+                // from the structural-DOM migration applied elsewhere.
                 var original = btn.innerHTML;
                 btn.innerHTML = 'Copied!';
                 btn.classList.add('text-vouch-success');

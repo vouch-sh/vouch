@@ -11,33 +11,42 @@
         results.appendChild(el);
     }
 
-    function assert(description, condition) {
+    // Append a result row using DOM APIs (textContent), not innerHTML string
+    // building. `detailLines` is an optional array of extra lines.
+    function appendResult(pass, description, detailLines) {
         var el = document.createElement('div');
         el.className = 'test';
-        if (condition) {
-            el.innerHTML = '<span class="pass">PASS</span> ' + description;
-            passed++;
-        } else {
-            el.innerHTML = '<span class="fail">FAIL</span> ' + description;
-            failed++;
+        var status = document.createElement('span');
+        status.className = pass ? 'pass' : 'fail';
+        status.textContent = pass ? 'PASS' : 'FAIL';
+        el.appendChild(status);
+        el.appendChild(document.createTextNode(' ' + description));
+        if (detailLines) {
+            detailLines.forEach(function(line) {
+                el.appendChild(document.createElement('br'));
+                el.appendChild(document.createTextNode(line));
+            });
         }
         results.appendChild(el);
     }
 
+    function assert(description, condition) {
+        appendResult(condition, description);
+        if (condition) { passed++; } else { failed++; }
+    }
+
     function assertEqual(description, actual, expected) {
         var ok = actual === expected;
-        var el = document.createElement('div');
-        el.className = 'test';
         if (ok) {
-            el.innerHTML = '<span class="pass">PASS</span> ' + description;
+            appendResult(true, description);
             passed++;
         } else {
-            el.innerHTML = '<span class="fail">FAIL</span> ' + description +
-                '<br>       expected: ' + JSON.stringify(expected) +
-                '<br>       actual:   ' + JSON.stringify(actual);
+            appendResult(false, description, [
+                '       expected: ' + JSON.stringify(expected),
+                '       actual:   ' + JSON.stringify(actual)
+            ]);
             failed++;
         }
-        results.appendChild(el);
     }
 
     function assertArrayEqual(description, actual, expected) {
@@ -47,18 +56,16 @@
                 if (actual[i] !== expected[i]) { ok = false; break; }
             }
         }
-        var el = document.createElement('div');
-        el.className = 'test';
         if (ok) {
-            el.innerHTML = '<span class="pass">PASS</span> ' + description;
+            appendResult(true, description);
             passed++;
         } else {
-            el.innerHTML = '<span class="fail">FAIL</span> ' + description +
-                '<br>       expected: [' + Array.from(expected).join(', ') + ']' +
-                '<br>       actual:   [' + Array.from(actual).join(', ') + ']';
+            appendResult(false, description, [
+                '       expected: [' + Array.from(expected).join(', ') + ']',
+                '       actual:   [' + Array.from(actual).join(', ') + ']'
+            ]);
             failed++;
         }
-        results.appendChild(el);
     }
 
     // ================================================================
@@ -216,11 +223,15 @@
     // ================================================================
     var summary = document.createElement('div');
     summary.className = 'summary';
+    var summarySpan = document.createElement('span');
     if (failed === 0) {
-        summary.innerHTML = '<span class="pass">All ' + passed + ' tests passed.</span>';
+        summarySpan.className = 'pass';
+        summarySpan.textContent = 'All ' + passed + ' tests passed.';
     } else {
-        summary.innerHTML = '<span class="fail">' + failed + ' of ' + (passed + failed) + ' tests failed.</span>';
+        summarySpan.className = 'fail';
+        summarySpan.textContent = failed + ' of ' + (passed + failed) + ' tests failed.';
     }
+    summary.appendChild(summarySpan);
     results.appendChild(summary);
 
     document.title = (failed === 0 ? 'PASS' : 'FAIL') + ' — Vouch JS Unit Tests';

@@ -92,8 +92,20 @@ impl AgentServer {
                                     }
                                 }
                                 Err(e) => {
-                                    // Best-effort: allow connection if peer creds unavailable
-                                    debug!("Could not verify peer credentials: {e}");
+                                    // Fail closed: the 0600 socket mode is the
+                                    // primary gate, but the UID check is the
+                                    // defense-in-depth layer against permission
+                                    // misconfiguration. On Linux (SO_PEERCRED)
+                                    // and macOS (LOCAL_PEERCRED) retrieval
+                                    // failure is anomalous, not expected, so we
+                                    // reject rather than allow an unverified peer.
+                                    warn!("Rejecting IPC connection: could not verify peer credentials: {e}");
+                                    audit::log_event(AuditEvent::ConnectionRejected {
+                                        peer_uid: 0,
+                                        peer_pid: 0,
+                                        reason: "peer credential retrieval failed".to_string(),
+                                    });
+                                    continue;
                                 }
                             }
 
