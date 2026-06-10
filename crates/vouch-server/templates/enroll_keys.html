@@ -15,36 +15,9 @@
             <h1 class="text-2xl font-bold text-gray-200 mb-2">Security Keys</h1>
         </div>
 
-        <!-- Loading state -->
-        <div id="loading" class="text-center py-8">
-            <div class="animate-spin inline-block w-8 h-8 border-4 border-vouch-accent border-t-transparent rounded-full"></div>
-            <p class="text-gray-500 mt-2">Loading your keys...</p>
-        </div>
-
-        <!-- Keys list (hidden until loaded) -->
-        <div id="keys-container" class="hidden">
-            <!-- Empty state -->
-            <div id="empty-state" class="hidden text-center py-8">
-                <p class="text-gray-500 mb-4">No security keys registered yet.</p>
-                <button id="add-first-key-btn" class="btn-primary">
-                    Register Your First Security Key
-                </button>
-            </div>
-
-            <!-- Keys list -->
-            <div id="keys-list" class="hidden">
-                <div class="space-y-3 mb-6" id="keys-items"></div>
-
-                <button id="add-another-key-btn" class="btn-secondary w-full">
-                    + Add Another Security Key
-                </button>
-            </div>
-        </div>
-
-        <!-- Error state -->
-        <div id="error-state" class="hidden text-center py-8">
-            <p class="text-vouch-error mb-4" id="error-message"></p>
-            <button id="retry-btn" class="btn-secondary">Try Again</button>
+        <!-- Keys list (server-rendered; refreshed via /enroll/keys/fragment) -->
+        <div id="keys-container">
+            {% include "enroll_keys_container.html" %}
         </div>
 
         <!-- CLI guidance section -->
@@ -63,7 +36,6 @@
         </div>
     </div>
 </div>
-<div id="keys-config" data-rp-id="{{ rp_id }}" hidden></div>
 {% endblock %}
 
 {% block scripts %}

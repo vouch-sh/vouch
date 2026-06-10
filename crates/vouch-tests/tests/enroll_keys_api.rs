@@ -28,10 +28,13 @@ async fn rename_key(harness: &TestHarness, token: &str, key_id: &str, body: &str
     let cookie = cookie_header(token);
     http_request_full(
         &harness.router,
-        "PATCH",
-        &format!("/enroll/keys/{key_id}"),
+        "POST",
+        &format!("/enroll/keys/{key_id}/rename"),
         Some(body.to_string()),
-        &[("Cookie", &cookie), ("Content-Type", "application/json")],
+        &[
+            ("Cookie", &cookie),
+            ("Content-Type", "application/x-www-form-urlencoded"),
+        ],
     )
     .await
 }
@@ -83,8 +86,14 @@ async fn rename_updates_name() {
         .await
         .expect("create authed user");
 
-    let resp = rename_key(&harness, &token, &auth_id, r#"{"name":"renamed-yubikey"}"#).await;
-    assert_eq!(resp.status, StatusCode::OK, "rename failed: {}", resp.body);
+    // Form POST redirects back to /enroll/keys on success (303 See Other).
+    let resp = rename_key(&harness, &token, &auth_id, "name=renamed-yubikey").await;
+    assert_eq!(
+        resp.status,
+        StatusCode::SEE_OTHER,
+        "rename failed: {}",
+        resp.body
+    );
 
     let list = list_keys(&harness, &token).await;
     let body: Value = serde_json::from_str(&list.body).expect("json body");

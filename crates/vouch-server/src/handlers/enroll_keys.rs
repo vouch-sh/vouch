@@ -8,12 +8,14 @@ use crate::AppState;
 use crate::services::error::ServiceError;
 use crate::services::keys as key_svc;
 use axum::{
-    Json,
+    Form, Json,
     extract::{Path, State},
+    response::{IntoResponse, Redirect, Response},
 };
 use axum_extra::extract::cookie::CookieJar;
+use serde::Deserialize;
 use std::sync::Arc;
-use vouch_common::{DeleteKeyResponse, ListKeysResponse, RenameKeyRequest, RenameKeyResponse};
+use vouch_common::{DeleteKeyResponse, ListKeysResponse};
 
 use super::session::extract_session_from_cookie;
 
@@ -33,20 +35,37 @@ pub(crate) async fn list_keys(
     Ok(Json(ListKeysResponse { keys }))
 }
 
-/// Rename a security key (during enrollment).
-/// PATCH /enroll/keys/{id}
+/// Form body for renaming a key from the browser UI.
+#[derive(Debug, Deserialize)]
+pub(crate) struct RenameKeyForm {
+    /// New display name for the key.
+    pub name: String,
+}
+
+/// Rename a security key (during enrollment) via a browser form POST.
+/// POST /enroll/keys/{id}/rename
+///
+/// Server-rendered, redirect-back CRUD (matches the admin pages): on success
+/// the browser is redirected to `/enroll/keys`, which re-renders the list.
 /// Authentication is via session cookie.
-pub(crate) async fn rename_key(
+pub(crate) async fn rename_key_form(
     State(state): State<Arc<AppState>>,
     jar: CookieJar,
     Path(key_id): Path<String>,
-    Json(req): Json<RenameKeyRequest>,
-) -> Result<Json<RenameKeyResponse>, ServiceError> {
-    let token = extract_session_from_cookie(&state, &jar).await?;
+    Form(form): Form<RenameKeyForm>,
+) -> Response {
+    let token = match extract_session_from_cookie(&state, &jar).await {
+        Ok(token) => token,
+        Err(_) => return Redirect::to("/enroll/start").into_response(),
+    };
 
-    let message = key_svc::rename_key(&state.store, &token.sub, &key_id, &req.name).await?;
-
-    Ok(Json(RenameKeyResponse { message }))
+    match key_svc::rename_key(&state.store, &token.sub, &key_id, &form.name).await {
+        Ok(_) => Redirect::to("/enroll/keys").into_response(),
+        Err(err) => {
+            tracing::warn!(error = ?err, "rename_key_form: rename failed");
+            err.into_response()
+        }
+    }
 }
 
 /// Delete a security key (during enrollment).

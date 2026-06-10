@@ -727,9 +727,15 @@ fn build_ui_routes(config: &config::ServerConfig) -> anyhow::Result<Router<Arc<A
         .route("/enroll/keys", get(handlers::enroll::enroll_keys_page))
         .route("/logout", post(handlers::auth::logout))
         .route("/enroll/keys/api", get(handlers::enroll_keys::list_keys))
+        // Rename is a browser form POST (server-rendered, redirects back),
+        // matching the admin pages' form-POST CRUD pattern.
+        .route(
+            "/enroll/keys/{id}/rename",
+            post(handlers::enroll_keys::rename_key_form),
+        )
         .route(
             "/enroll/keys/{id}",
-            patch(handlers::enroll_keys::rename_key).delete(handlers::enroll_keys::delete_key),
+            delete(handlers::enroll_keys::delete_key),
         )
         // GitHub App installation
         .route(
