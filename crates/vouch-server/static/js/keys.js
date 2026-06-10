@@ -1,11 +1,11 @@
-// Key management page: register and delete security keys.
+// Key management page: register, rename, and delete security keys.
 //
-// The key list is rendered server-side (Askama), and rename is a plain form
-// POST (see enroll_keys_container.html) — matching the server-rendered,
-// redirect-back CRUD pattern used by the admin pages. This script only drives
-// the flows that must run in the browser — WebAuthn registration and RFC 9470
-// step-up re-authentication — and reloads the page on success so the
-// server-rendered list reflects the change.
+// The key list is rendered server-side (Askama). Rename submits via a plain
+// form POST (see enroll_keys_container.html) — matching the server-rendered,
+// redirect-back CRUD pattern used by the admin pages. This script drives the
+// flows that must run in the browser — WebAuthn registration, RFC 9470 step-up
+// re-authentication, and the click-to-edit toggle for the rename UI — and
+// reloads the page on success so the server-rendered list reflects the change.
 
 (function() {
     document.addEventListener('DOMContentLoaded', function() {
@@ -20,9 +20,79 @@
             var deleteBtn = event.target.closest('[data-action="delete"]');
             if (deleteBtn) {
                 deleteKey(deleteBtn.dataset.keyId, deleteBtn.dataset.keyName);
+                return;
+            }
+            var renameBtn = event.target.closest('[data-action="rename"]');
+            if (renameBtn) {
+                enterEditMode(renameBtn.closest('[data-key-id]'));
+                return;
+            }
+            var cancelBtn = event.target.closest('[data-action="cancel-rename"]');
+            if (cancelBtn) {
+                exitEditMode(cancelBtn.closest('.key-rename-form'), true);
             }
         });
+
+        // Esc reverts and exits edit mode; Enter falls through to native submit.
+        document.addEventListener('keydown', function(event) {
+            if (event.key !== 'Escape') return;
+            var input = event.target.closest('.key-name-input');
+            if (!input) return;
+            event.preventDefault();
+            exitEditMode(input.closest('.key-rename-form'), true);
+        });
+
+        // Clicking outside the input cancels the edit (no silent autosave).
+        // The mousedown handler on Save/Cancel keeps focus on the input so this
+        // blur fires only for genuine outside clicks.
+        document.addEventListener('focusout', function(event) {
+            var input = event.target.closest('.key-name-input');
+            if (!input) return;
+            var form = input.closest('.key-rename-form');
+            if (!form || form.classList.contains('hidden')) return;
+            exitEditMode(form, true);
+        });
+
+        // Keep focus on the input when the user clicks Save or Cancel — without
+        // this, focusout would fire on mousedown and cancel before the click
+        // submit runs.
+        document.addEventListener('mousedown', function(event) {
+            var btn = event.target.closest('.key-rename-save, .key-rename-cancel');
+            if (btn) event.preventDefault();
+        });
     });
+
+    function enterEditMode(card) {
+        if (!card) return;
+        var displayRow = card.querySelector('.key-name-display-row');
+        var form = card.querySelector('.key-rename-form');
+        if (!displayRow || !form) return;
+        displayRow.classList.remove('flex');
+        displayRow.classList.add('hidden');
+        form.classList.remove('hidden');
+        form.classList.add('flex');
+        var input = form.querySelector('.key-name-input');
+        if (input) {
+            input.focus();
+            input.select();
+        }
+    }
+
+    function exitEditMode(form, revert) {
+        if (!form) return;
+        var card = form.closest('[data-key-id]');
+        var displayRow = card ? card.querySelector('.key-name-display-row') : null;
+        if (revert) {
+            var input = form.querySelector('.key-name-input');
+            if (input) input.value = form.dataset.originalName || '';
+        }
+        form.classList.remove('flex');
+        form.classList.add('hidden');
+        if (displayRow) {
+            displayRow.classList.remove('hidden');
+            displayRow.classList.add('flex');
+        }
+    }
 
     async function deleteKey(keyId, keyName) {
         if (!confirm('Delete key "' + keyName + '"? This action cannot be undone.')) {
