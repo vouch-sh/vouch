@@ -14,7 +14,7 @@
         <div class="flex items-start justify-between">
             <div class="flex-1 min-w-0 mr-4">
                 <form method="POST" action="/enroll/keys/{{ key.id }}/rename" class="flex items-center gap-2 mb-1">
-                    <input type="text" name="name" required maxlength="128"
+                    <input type="text" name="name" required maxlength="100"
                            class="key-name font-medium text-gray-200 bg-transparent border-b border-transparent hover:border-vouch-border focus:border-vouch-accent focus:outline-none transition-colors w-full"
                            value="{{ key.name }}" />
                     <button type="submit" class="shrink-0 text-xs text-gray-500 hover:text-vouch-accent transition-colors">Save</button>

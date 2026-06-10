@@ -15,7 +15,13 @@
             <h1 class="text-2xl font-bold text-gray-200 mb-2">Security Keys</h1>
         </div>
 
-        <!-- Keys list (server-rendered; refreshed via /enroll/keys/fragment) -->
+        {% if let Some(msg) = flash_message %}
+        <div class="mb-4 px-4 py-3 rounded bg-red-900/30 border border-red-800 text-red-300 text-sm" role="alert">
+            {{ msg }}
+        </div>
+        {% endif %}
+
+        <!-- Keys list (server-rendered; register/delete reload the page) -->
         <div id="keys-container">
             {% include "enroll_keys_container.html" %}
         </div>

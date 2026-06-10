@@ -109,6 +109,40 @@ async fn rename_updates_name() {
 }
 
 #[tokio::test]
+async fn rename_rejects_invalid_name_with_redirect() {
+    // A failed rename (here, a name longer than the 100-char limit) must
+    // redirect back to /enroll/keys (PRG + flash), not return a raw JSON error
+    // body, and must leave the key name unchanged.
+    let harness = TestHarness::new().await;
+    let (_user, auth_id, token) = harness
+        .create_authenticated_user("keys-rename-bad@example.com")
+        .await
+        .expect("create authed user");
+
+    let too_long = "a".repeat(101);
+    let resp = rename_key(&harness, &token, &auth_id, &format!("name={too_long}")).await;
+    assert_eq!(
+        resp.status,
+        StatusCode::SEE_OTHER,
+        "invalid rename should redirect, got body: {}",
+        resp.body
+    );
+
+    let list = list_keys(&harness, &token).await;
+    let body: Value = serde_json::from_str(&list.body).expect("json body");
+    let keys = body.get("keys").and_then(Value::as_array).expect("keys[]");
+    let key = keys
+        .iter()
+        .find(|k| k.get("id").and_then(Value::as_str) == Some(&auth_id))
+        .expect("key present");
+    assert_ne!(
+        key.get("name").and_then(Value::as_str),
+        Some(too_long.as_str()),
+        "invalid name must not be applied"
+    );
+}
+
+#[tokio::test]
 async fn delete_rejects_stale_session() {
     let harness = TestHarness::new().await;
     let user = harness

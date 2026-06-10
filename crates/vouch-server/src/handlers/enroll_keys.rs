@@ -46,8 +46,9 @@ pub(crate) struct RenameKeyForm {
 /// POST /enroll/keys/{id}/rename
 ///
 /// Server-rendered, redirect-back CRUD (matches the admin pages): on success
-/// the browser is redirected to `/enroll/keys`, which re-renders the list.
-/// Authentication is via session cookie.
+/// or failure the browser is redirected to `/enroll/keys`, which re-renders
+/// the list — surfacing any error via a flash message rather than returning a
+/// raw JSON error body. Authentication is via session cookie.
 pub(crate) async fn rename_key_form(
     State(state): State<Arc<AppState>>,
     jar: CookieJar,
@@ -63,7 +64,14 @@ pub(crate) async fn rename_key_form(
         Ok(_) => Redirect::to("/enroll/keys").into_response(),
         Err(err) => {
             tracing::warn!(error = ?err, "rename_key_form: rename failed");
-            err.into_response()
+            // A generic, user-safe message: the common failures (empty / too
+            // long) are also constrained by the form, and we must not surface
+            // internal error detail.
+            let jar = crate::handlers::admin::flash::set_err(
+                jar,
+                "Could not rename key. Please choose a name between 1 and 100 characters.",
+            );
+            (jar, Redirect::to("/enroll/keys")).into_response()
         }
     }
 }

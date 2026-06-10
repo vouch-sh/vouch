@@ -52,9 +52,9 @@ pub(crate) struct DeviceVerifyTemplate {
 
 /// A single security key, pre-formatted for server-side rendering.
 ///
-/// The created-at timestamp is formatted here so the template (and the
-/// fragment endpoint) render display-ready text — escaping is handled
-/// structurally by Askama, so no client-side DOM construction is needed.
+/// The created-at timestamp is formatted here so the template renders
+/// display-ready text — escaping is handled structurally by Askama, so no
+/// client-side DOM construction is needed.
 pub(crate) struct KeyDisplay {
     pub id: String,
     pub name: String,
@@ -79,6 +79,8 @@ pub(crate) struct EnrollKeysTemplate {
     pub keys: Vec<KeyDisplay>,
     /// Whether delete controls are shown (a user must keep at least one key).
     pub can_delete: bool,
+    /// One-shot error message from a prior failed form POST (e.g. rename).
+    pub flash_message: Option<String>,
 }
 
 /// Success page template.
@@ -862,12 +864,23 @@ pub(crate) async fn enroll_keys_page(
                 has_org,
                 is_org_admin,
             };
-            EnrollKeysTemplate {
-                auth,
-                keys,
-                can_delete,
-            }
-            .into_response()
+
+            // Consume any flash error set by a prior failed form POST (rename),
+            // expiring the cookie in the response — the PRG pattern used by the
+            // admin pages.
+            let flash_message = super::admin::flash::read(&jar).err;
+            let jar = super::admin::flash::clear(jar);
+
+            (
+                jar,
+                EnrollKeysTemplate {
+                    auth,
+                    keys,
+                    can_delete,
+                    flash_message,
+                },
+            )
+                .into_response()
         }
         Err(err) => {
             tracing::warn!(

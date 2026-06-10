@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
-//! Cookie-based flash messages for admin pages.
+//! Cookie-based flash messages for server-rendered form-POST pages.
 //!
 //! Carries one-shot success/error messages across a POST → redirect → GET
-//! cycle without putting the text in a query string. Each admin page that
-//! wants flash messages reads them at the top of its GET handler (clearing
-//! them in the response) and sets them in its POST handlers' redirects.
+//! cycle without putting the text in a query string. Each page that wants
+//! flash messages reads them at the top of its GET handler (clearing them in
+//! the response) and sets them in its POST handlers' redirects.
 
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 use time::Duration;
@@ -12,9 +12,12 @@ use time::Duration;
 const FLASH_OK: &str = "vouch_flash_ok";
 const FLASH_ERR: &str = "vouch_flash_err";
 
-/// Cookie path scope. All admin pages share the same scope so the same
-/// utility is reusable across `members`, `policies`, `scim_tokens`, etc.
-const PATH: &str = "/admin";
+/// Cookie path scope. Root-scoped so the same utility is reusable across the
+/// admin pages (`members`, `policies`, `scim_tokens`, …) and the enrollment
+/// key-management page. A flash is set by a POST handler and immediately
+/// consumed by the GET it redirects to, so the broad scope does not cause
+/// messages to leak between unrelated pages in practice.
+const PATH: &str = "/";
 
 /// Short TTL so a flash that the user navigates away from (instead of
 /// loading the page that would clear it) doesn't linger and reappear later.
