@@ -70,18 +70,20 @@
 
     // Decide where to go after a successful delete. Deleting the key that the
     // current session is bound to cascade-revokes that session, so a plain
-    // reload would bounce through the page GET to /enroll/start. When the
-    // response reports a revoked session, go to /login to re-authenticate with
-    // a remaining key (the prior behavior); otherwise refresh the list.
+    // reload would bounce through the page GET to /enroll/start. The server
+    // reports `current_session_revoked` (true only when the deleted key is this
+    // session's own authenticator, not merely any session of that key); when
+    // set, go to /login to re-authenticate with a remaining key. Otherwise the
+    // session is intact, so just refresh the list.
     async function finishAfterDelete(response) {
-        var revoked = 0;
+        var revoked = false;
         try {
             var result = await response.json();
-            revoked = (result && result.sessions_revoked) || 0;
+            revoked = !!(result && result.current_session_revoked);
         } catch (e) {
-            revoked = 0;
+            revoked = false;
         }
-        if (revoked > 0) {
+        if (revoked) {
             window.location.href = '/login';
         } else {
             window.location.reload();

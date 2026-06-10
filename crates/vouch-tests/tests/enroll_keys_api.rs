@@ -217,4 +217,44 @@ async fn delete_with_fresh_session_succeeds() {
             .and_then(Value::as_str)
             .is_some_and(|m| m.contains("deleted"))
     );
+    // The session is bound to `kept`, not the deleted `doomed` key, so the
+    // current session must NOT be reported as revoked.
+    assert_eq!(
+        body.get("current_session_revoked").and_then(Value::as_bool),
+        Some(false),
+        "deleting a non-session key must not flag the current session revoked"
+    );
+}
+
+#[tokio::test]
+async fn delete_of_current_session_key_reports_revoked() {
+    let harness = TestHarness::new().await;
+    let user = harness
+        .create_user("self-delete@example.com")
+        .await
+        .expect("create user");
+    // Keep one key so we're allowed to delete the session's own key.
+    let _kept = harness
+        .create_authenticator(&user.id)
+        .await
+        .expect("create kept authenticator");
+    let session_key = harness
+        .create_authenticator(&user.id)
+        .await
+        .expect("create session authenticator");
+    let token = harness
+        .create_session(&user.id, &user.email, &session_key)
+        .await
+        .expect("create fresh session");
+
+    let resp = delete_key(&harness, &token, &session_key).await;
+    assert_eq!(resp.status, StatusCode::OK, "delete failed: {}", resp.body);
+
+    let body: Value = serde_json::from_str(&resp.body).expect("json body");
+    // Deleting the authenticator the session is bound to revokes that session.
+    assert_eq!(
+        body.get("current_session_revoked").and_then(Value::as_bool),
+        Some(true),
+        "deleting the session's own key must flag the current session revoked"
+    );
 }

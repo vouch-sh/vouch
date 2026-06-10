@@ -92,6 +92,10 @@ pub(crate) async fn delete_key(
     let auth_timestamp = token.auth_time.unwrap_or(0);
     key_svc::require_fresh_timestamp(auth_timestamp, key_svc::KEY_DELETE_MAX_AGE_SECS)?;
 
+    // Whether we just deleted the key this very session is bound to (so the
+    // browser knows to re-authenticate rather than reload into a dead session).
+    let current_session_revoked = token.authenticator_id.as_deref() == Some(key_id.as_str());
+
     let (key_name, sessions_revoked) =
         key_svc::delete_key(&state.store, &token.sub, &key_id).await?;
 
@@ -101,5 +105,6 @@ pub(crate) async fn delete_key(
     Ok(Json(DeleteKeyResponse {
         message: format!("Key '{}' has been deleted", key_name),
         sessions_revoked,
+        current_session_revoked,
     }))
 }

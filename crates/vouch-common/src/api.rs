@@ -378,6 +378,12 @@ pub struct DeleteKeyResponse {
     pub message: String,
     /// Number of sessions that were revoked.
     pub sessions_revoked: u64,
+    /// Whether the caller's *current* session was among those revoked, i.e.
+    /// the deleted key is the authenticator the current session is bound to.
+    /// The browser uses this to decide whether to re-authenticate; a plain
+    /// `sessions_revoked > 0` would also fire for unrelated stale sessions.
+    #[serde(default)]
+    pub current_session_revoked: bool,
 }
 
 /// Request to rename a security key.
