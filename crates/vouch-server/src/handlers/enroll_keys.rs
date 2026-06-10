@@ -67,9 +67,10 @@ pub(crate) async fn rename_key_form(
             // A generic, user-safe message: the common failures (empty / too
             // long) are also constrained by the form, and we must not surface
             // internal error detail.
-            let jar = crate::handlers::admin::flash::set_err(
+            let jar = crate::handlers::admin::flash::set_err_at(
                 jar,
                 "Could not rename key. Please choose a name between 1 and 100 characters.",
+                crate::handlers::admin::flash::KEYS_PATH,
             );
             (jar, Redirect::to("/enroll/keys")).into_response()
         }

@@ -867,9 +867,10 @@ pub(crate) async fn enroll_keys_page(
 
             // Consume any flash error set by a prior failed form POST (rename),
             // expiring the cookie in the response — the PRG pattern used by the
-            // admin pages.
+            // admin pages. Scoped to the keys path so admin flashes never
+            // surface (or get cleared) here.
             let flash_message = super::admin::flash::read(&jar).err;
-            let jar = super::admin::flash::clear(jar);
+            let jar = super::admin::flash::clear_at(jar, super::admin::flash::KEYS_PATH);
 
             (
                 jar,

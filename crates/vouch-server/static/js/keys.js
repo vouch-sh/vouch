@@ -49,7 +49,7 @@
                         var retryErr = await retryResp.json();
                         throw new Error(retryErr.message || 'Failed to delete key after re-authentication');
                     }
-                    window.location.reload();
+                    await finishAfterDelete(retryResp);
                     return;
                 }
                 // Regular expired session
@@ -62,9 +62,29 @@
                 throw new Error(err.message || 'Failed to delete key');
             }
 
-            window.location.reload();
+            await finishAfterDelete(response);
         } catch (err) {
             alert('Failed to delete key: ' + err.message);
+        }
+    }
+
+    // Decide where to go after a successful delete. Deleting the key that the
+    // current session is bound to cascade-revokes that session, so a plain
+    // reload would bounce through the page GET to /enroll/start. When the
+    // response reports a revoked session, go to /login to re-authenticate with
+    // a remaining key (the prior behavior); otherwise refresh the list.
+    async function finishAfterDelete(response) {
+        var revoked = 0;
+        try {
+            var result = await response.json();
+            revoked = (result && result.sessions_revoked) || 0;
+        } catch (e) {
+            revoked = 0;
+        }
+        if (revoked > 0) {
+            window.location.href = '/login';
+        } else {
+            window.location.reload();
         }
     }
 
