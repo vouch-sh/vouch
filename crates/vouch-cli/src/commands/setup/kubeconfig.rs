@@ -5,7 +5,8 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-use crate::utils::{ensure_secure_dir, write_secure_file};
+use crate::utils::ensure_secure_dir;
+use vouch_common::fs::write_secure_file;
 
 // ============================================================================
 // Kubeconfig Types

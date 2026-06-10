@@ -59,7 +59,12 @@ engineering throughout:
 > it exists for; instead the test-mode switch now emits loud `warn`-level
 > security logs at startup and at router build, and its full blast radius
 > (login bypass, rate-limiting disabled, IdP requirement relaxed) is documented
-> at every touch point. P3.1–P3.4 remain open.
+> at every touch point. P3.1, P3.2, and P3.3 are now resolved. P3.4 is resolved
+> as well: the BER parser is already covered by a fuzz target
+> (`fuzz/fuzz_targets/fuzz_ber_parse.rs`), and migrating to the `der` crate was
+> rejected because `der` 0.8's BER support would pull a second major version of
+> `der` into the tree (the P-256/x509 stack pins `der` 0.7), tripping
+> `cargo-deny`'s `multiple-versions = "deny"`. All P3 items are now closed.
 
 ### P1 — High
 
@@ -177,37 +182,58 @@ invariant for all future routes.
 
 ### P3 — Low / Hardening
 
-#### P3.1 SSH certificate written non-atomically with default umask
+#### P3.1 SSH certificate written non-atomically with default umask — RESOLVED
 
-`crates/vouch-agent/src/ssh_agent/provisioning.rs:236-245` — the
-lazy-provisioned certificate is written with `std::fs::write` (default
+`crates/vouch-agent/src/ssh_agent/provisioning.rs` — the
+lazy-provisioned certificate was written with `std::fs::write` (default
 umask, typically 0644) and then chmod'd to 0600, leaving a brief
 world-readable window. Impact is low (SSH certificates are public
-material), but the CLI already has an `atomic_write_secure()` helper
-(`crates/vouch-cli/src/utils.rs`) that sets permissions on the temp file
-before the atomic rename — reuse that pattern for consistency.
+material), but the CLI already had an `atomic_write_secure()` helper that
+sets permissions on the temp file before the atomic rename.
 
-#### P3.2 `VOUCH_ALLOW_INSECURE` accepted silently
+**Resolution:** the atomic-write helpers moved from `vouch-cli` to
+`vouch-common` (`crates/vouch-common/src/fs.rs`, reachable by both the CLI
+and the agent), and the provisioning path now calls
+`vouch_common::fs::write_secure_file`, so the file is never visible with
+default permissions.
 
-`crates/vouch-agent/src/server.rs:295-305` — the insecure-URL override is
-honored without any prominent signal. Add a one-time `warn`-level startup
-log when the variable is set (mirroring the existing clock-skew warning
-pattern).
+#### P3.2 `VOUCH_ALLOW_INSECURE` accepted silently — RESOLVED
 
-#### P3.3 Ignored advisory RUSTSEC-2025-0134
+`crates/vouch-agent/src/server.rs` — the insecure-URL override was honored
+without any prominent boot-time signal (a per-request `warn` fired only when
+an insecure URL was actually stored).
 
-`deny.toml:19-21` — the `rustls-pemfile` advisory is ignored with a
-documented reason and tracked migration. Complete the migration to
-`rustls-pki-types` so the ignore entry can be removed.
+**Resolution:** `AgentServer::run()` now emits a one-time `warn`-level log at
+startup whenever `VOUCH_ALLOW_INSECURE` is set, so a set-but-unused flag is
+still visible. The existing per-request warning is retained.
 
-#### P3.4 Custom BER parser lacks fuzz coverage
+#### P3.3 Ignored advisory RUSTSEC-2025-0134 — RESOLVED
+
+`deny.toml` — the `rustls-pemfile` advisory was ignored with a documented
+reason and tracked migration.
+
+**Resolution:** the four PEM-parsing call sites in
+`crates/vouch-server/src/infra/tls.rs` were migrated to `rustls-pki-types`
+(`PemObject::pem_slice_iter` / `from_pem_slice`), the `rustls-pemfile`
+dependency was dropped, and the `RUSTSEC-2025-0134` ignore entry was removed
+from `deny.toml`.
+
+#### P3.4 Custom BER parser lacks fuzz coverage — RESOLVED
 
 `crates/vouch-server/src/crypto/ber.rs` — the hand-written ASN.1 BER
 parser for AWS KMS CMS envelopes is bounded (max depth 32, correct
 indefinite-length/EOC handling) and looks correct, but homegrown parsing
-of attacker-influenceable encodings warrants a `cargo-fuzz` target — or
-migration to the `der` crate, which now supports indefinite-length
-encoding.
+of attacker-influenceable encodings warrants a `cargo-fuzz` target.
+
+**Resolution:** a fuzz target already exists at
+`fuzz/fuzz_targets/fuzz_ber_parse.rs` and exercises every public
+`DerParser` entry point (`read_tlv`, `read_tlv_ber`, `expect_*`, `skip_*`,
+`read_implicit_octet_string_ber`) plus sequential indefinite-length reads.
+Migration to the `der` crate was evaluated and rejected: although `der` 0.8
+(Feb 2026) genuinely added indefinite-length BER support, adopting it would
+introduce a second major version of `der` (the P-256/x509 stack pins 0.7),
+violating `deny.toml`'s `multiple-versions = "deny"` — net new supply-chain
+debt in exchange for replacing a working, already-fuzzed parser.
 
 #### P3.5 Counter-regression events should reach the audit trail — RESOLVED
 

@@ -14,7 +14,8 @@ use std::fs;
 use crate::commands::setup::ssh::ssh_config_path;
 use crate::integrations::aws;
 use crate::integrations::ssm as ssm_integration;
-use crate::utils::{atomic_write_secure, ensure_secure_dir};
+use crate::utils::ensure_secure_dir;
+use vouch_common::fs::atomic_write_secure;
 
 /// Marker comment used for idempotency detection.
 pub(crate) const SSM_MARKER: &str = "# Vouch SSM Configuration";

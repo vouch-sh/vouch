@@ -10,6 +10,7 @@ pub mod encoding;
 pub(crate) mod error;
 pub mod fido2_types;
 pub mod fixtures;
+pub mod fs;
 pub mod http;
 pub mod posture;
 pub(crate) mod url;

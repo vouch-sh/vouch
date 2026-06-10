@@ -16,9 +16,7 @@ targets = [
 ]
 
 [advisories]
-ignore = [
-    { id = "RUSTSEC-2025-0134", reason = "rustls-pemfile is a thin wrapper around rustls-pki-types; migration tracked separately" },
-]
+ignore = []
 
 [licenses]
 confidence-threshold = 0.8

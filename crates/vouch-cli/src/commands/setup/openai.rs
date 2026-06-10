@@ -103,7 +103,7 @@ fn configure_codex(vouch_path: &str, force: bool) -> Result<PathBuf> {
         std::fs::create_dir_all(&codex_dir)
             .with_context(|| format!("failed to create {}", codex_dir.display()))?;
     }
-    crate::utils::atomic_write(&config_path, doc.to_string().as_bytes())
+    vouch_common::fs::atomic_write(&config_path, doc.to_string().as_bytes())
         .with_context(|| format!("failed to write {}", config_path.display()))?;
 
     Ok(config_path)

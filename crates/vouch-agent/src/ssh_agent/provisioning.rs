@@ -229,19 +229,17 @@ fn spawn_lazy_provision(
             }
         };
 
-        // Write certificate to disk
+        // Write certificate to disk atomically with 0600 permissions, so it is
+        // never briefly visible world-readable between create and chmod.
         let cert_path = home
             .join(".ssh")
             .join(format!("{DEFAULT_KEY_NAME}-cert.pub"));
-        if let Err(e) = std::fs::write(&cert_path, format!("{}\n", cert_response.certificate)) {
+        if let Err(e) = vouch_common::fs::write_secure_file(
+            &cert_path,
+            &format!("{}\n", cert_response.certificate),
+        ) {
             debug!("Failed to write lazy-provisioned certificate: {e}");
             return;
-        }
-        // Set certificate file permissions to 0600 (owner read/write only)
-        use std::os::unix::fs::PermissionsExt;
-        if let Err(e) = std::fs::set_permissions(&cert_path, std::fs::Permissions::from_mode(0o600))
-        {
-            debug!("Failed to set certificate permissions: {e}");
         }
 
         // Load credentials into agent state

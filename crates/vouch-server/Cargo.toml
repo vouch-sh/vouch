@@ -64,7 +64,7 @@ reqwest = { workspace = true, features = ["json", "rustls", "form"] }
 roxmltree = { workspace = true }
 rust-embed = { workspace = true, features = ["axum-ex", "deterministic-timestamps", "mime-guess"] }
 rustls = { workspace = true, features = ["aws-lc-rs", "std", "prefer-post-quantum", "tls12"] }
-rustls-pemfile = { workspace = true, features = ["std"] }
+rustls-pki-types = { workspace = true, features = ["alloc"] }
 sea-query = { workspace = true, features = ["backend-sqlite", "backend-postgres", "derive"] }
 sea-query-sqlx = { workspace = true, features = ["sqlx-sqlite", "sqlx-postgres", "runtime-tokio"] }
 secrecy = { workspace = true, features = ["serde"] }

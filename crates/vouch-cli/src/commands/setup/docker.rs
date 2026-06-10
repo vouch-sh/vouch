@@ -141,7 +141,7 @@ fn configure_docker_config(registries: &[String]) -> Result<()> {
     // Write config atomically to avoid corruption if interrupted
     let json =
         serde_json::to_string_pretty(&config).context("failed to serialize Docker config")?;
-    crate::utils::atomic_write(&docker_config_path, json.as_bytes())
+    vouch_common::fs::atomic_write(&docker_config_path, json.as_bytes())
         .with_context(|| format!("failed to write {}", docker_config_path.display()))?;
 
     println!("Updated: {}", docker_config_path.display());
