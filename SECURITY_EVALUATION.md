@@ -51,9 +51,19 @@ engineering throughout:
 
 ## Prioritized Remediation List
 
+> **Remediation status (update):** P1.1, P2.1, P2.2, P2.4, and P2.5 are
+> resolved, and P3.5 (audit trail for clone detection) is addressed as part of
+> P1.1. P2.3 was handled as **hardening only** (no activation guard): the
+> certification/conformance test mode runs over TLS with self-signed certs, so
+> gating it on `tls_configured()` — or a build flag — would break the very flow
+> it exists for; instead the test-mode switch now emits loud `warn`-level
+> security logs at startup and at router build, and its full blast radius
+> (login bypass, rate-limiting disabled, IdP requirement relaxed) is documented
+> at every touch point. P3.1–P3.4 remain open.
+
 ### P1 — High
 
-#### P1.1 WebAuthn signCount clone-detection bypass
+#### P1.1 WebAuthn signCount clone-detection bypass — RESOLVED
 
 `crates/vouch-server/src/crypto/webauthn_verify.rs:298`
 

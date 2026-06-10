@@ -144,13 +144,29 @@ pub async fn initialize(args: config::Args) -> Result<ServerComponents> {
         None => tracing::info!("CORS: same-origin only"),
     }
 
-    // Warn if rp_id is localhost but TLS is configured (likely production)
+    // Warn if rp_id is localhost but TLS is configured (likely a
+    // misconfiguration: a loopback rp_id in what looks like production).
+    // WebAuthn origin relaxation is now disabled whenever TLS is configured,
+    // so origin binding is NOT weakened here — but the loopback rp_id itself
+    // is almost certainly wrong for a TLS deployment.
     if vouch_common::is_loopback_host(&config.rp_id) && config.tls_configured() {
         tracing::warn!(
             target: "security",
-            "rp_id is '{}' but TLS is configured -- \
-             this allows WebAuthn origin relaxation in what appears to be a production deployment",
+            "rp_id is '{}' but TLS is configured -- this looks like a production \
+             deployment with a loopback relying-party ID, which is almost \
+             certainly a misconfiguration",
             config.rp_id,
+        );
+    }
+
+    // Loudly flag certification test mode at startup. This is a login-bypass
+    // switch (see router.rs) intended only for OpenID conformance testing.
+    if config.certification_test_token.is_some() {
+        tracing::warn!(
+            target: "security",
+            "CERTIFICATION TEST MODE is ENABLED (VOUCH_CERTIFICATION_TEST_TOKEN is \
+             set): login-bypass endpoint active, global rate limiting disabled, \
+             and the upstream-IdP requirement relaxed. MUST NOT be set in production."
         );
     }
 

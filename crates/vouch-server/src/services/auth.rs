@@ -218,6 +218,10 @@ pub(crate) struct LoginAssertionParams {
     pub challenge: Vec<u8>,
     /// Current counter value from the database.
     pub stored_counter: u32,
+    /// Whether to tolerate loopback origin variations (development only).
+    /// Set to `false` whenever TLS is configured so a production deployment
+    /// never weakens origin binding, even with a loopback `rp_id`.
+    pub allow_localhost_origin: bool,
 }
 
 /// Result of WebAuthn assertion verification.
@@ -256,6 +260,7 @@ pub(crate) async fn verify_login_assertion(
             &params.expected_origin,
             params.stored_counter,
             true, // require_user_verification
+            params.allow_localhost_origin,
         )
         .map_err(|e| {
             ServiceError::oauth(
@@ -1123,6 +1128,8 @@ mod tests {
             expected_origin: expected_origin.to_string(),
             challenge,
             stored_counter: 0,
+            // Exact-match origins here; relaxation is irrelevant to this test.
+            allow_localhost_origin: false,
         };
 
         let err = verify_login_assertion(params)

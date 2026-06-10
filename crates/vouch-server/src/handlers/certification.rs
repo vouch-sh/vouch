@@ -5,6 +5,14 @@
 //! the OpenID Foundation conformance suite at `certification.openid.net` drive
 //! the login flow without a physical FIDO2 key. Only registered when
 //! `VOUCH_CERTIFICATION_TEST_TOKEN` is set; **never enable in production**.
+//!
+//! Setting that token is a broad test-mode switch (see `config.rs` and
+//! `infra/router.rs`): besides this login bypass it also disables global rate
+//! limiting and relaxes the upstream-IdP requirement. A leaked or mistakenly
+//! set token in production therefore exposes a login-bypass-shaped endpoint.
+//! Activation is deliberately not gated on TLS because conformance runs over
+//! HTTPS with self-signed certs; the safeguards are operational discipline and
+//! the loud startup warnings.
 
 use std::sync::Arc;
 

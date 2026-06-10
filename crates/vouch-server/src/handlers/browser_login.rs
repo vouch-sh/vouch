@@ -645,6 +645,8 @@ pub(crate) async fn browser_login_complete(
         expected_origin: state.config().base_url.clone(),
         challenge: auth_state.challenge.clone(),
         stored_counter,
+        // Tolerate loopback origin variations only in development (no TLS).
+        allow_localhost_origin: !state.config().tls_configured(),
     })
     .await
     .map_err(|e| {

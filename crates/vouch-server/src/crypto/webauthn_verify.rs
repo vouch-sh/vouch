@@ -195,6 +195,9 @@ struct ClientData {
 /// * `expected_origin` - The expected origin URL
 /// * `stored_counter` - The previously stored counter value
 /// * `require_user_verification` - Whether to require UV flag
+/// * `allow_localhost_origin` - Whether to tolerate loopback origin variations
+///   (development only; pass `false` in production so an origin mismatch is
+///   always rejected)
 #[expect(
     clippy::too_many_arguments,
     reason = "WebAuthn assertion verification requires all per-RFC parameters"
@@ -209,8 +212,9 @@ pub fn verify_assertion(
     expected_origin: &str,
     stored_counter: u32,
     require_user_verification: bool,
+    allow_localhost_origin: bool,
 ) -> Result<VerificationResult, VerifyError> {
-    verify_assertion_with_verifier(
+    verify_assertion_inner(
         authenticator_data,
         client_data_json,
         signature,
@@ -220,6 +224,7 @@ pub fn verify_assertion(
         expected_origin,
         stored_counter,
         require_user_verification,
+        allow_localhost_origin,
         &RealCoseVerifier,
     )
 }
@@ -240,6 +245,11 @@ pub fn verify_assertion(
 /// * `stored_counter` - The previously stored counter value
 /// * `require_user_verification` - Whether to require UV flag
 /// * `verifier` - The COSE verifier to use for signature verification
+///
+/// Localhost origin relaxation is always enabled in this helper, matching its
+/// historical dev/test behavior. Production callers go through
+/// [`verify_assertion`], which threads an explicit `allow_localhost_origin`
+/// flag derived from server config.
 #[expect(
     clippy::too_many_arguments,
     reason = "WebAuthn assertion verification requires all per-RFC parameters"
@@ -254,6 +264,45 @@ pub fn verify_assertion_with_verifier<V: CoseVerifier>(
     expected_origin: &str,
     stored_counter: u32,
     require_user_verification: bool,
+    verifier: &V,
+) -> Result<VerificationResult, VerifyError> {
+    verify_assertion_inner(
+        authenticator_data,
+        client_data_json,
+        signature,
+        public_key_cose,
+        expected_rp_id,
+        expected_challenge,
+        expected_origin,
+        stored_counter,
+        require_user_verification,
+        // Dev/test default: tolerate loopback origin variations.
+        true,
+        verifier,
+    )
+}
+
+/// Core WebAuthn assertion verification.
+///
+/// `allow_localhost_origin` gates the loopback origin-variation relaxation: it
+/// must be `true` only in development (no TLS). Production threads `false` so
+/// an origin mismatch is always rejected even on a misconfigured loopback
+/// `rp_id`.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "WebAuthn assertion verification requires all per-RFC parameters"
+)]
+fn verify_assertion_inner<V: CoseVerifier>(
+    authenticator_data: &[u8],
+    client_data_json: &[u8],
+    signature: &[u8],
+    public_key_cose: &[u8],
+    expected_rp_id: &str,
+    expected_challenge: &str,
+    expected_origin: &str,
+    stored_counter: u32,
+    require_user_verification: bool,
+    allow_localhost_origin: bool,
     verifier: &V,
 ) -> Result<VerificationResult, VerifyError> {
     // 1. Verify authenticator data structure
@@ -294,8 +343,20 @@ pub fn verify_assertion_with_verifier<V: CoseVerifier>(
         .map_err(|_| VerifyError::InvalidAuthDataLength)?;
     let counter = u32::from_be_bytes(counter_bytes);
 
-    // 5. Verify counter is increasing (if not zero - some authenticators don't use counters)
-    if counter != 0 && stored_counter != 0 && counter <= stored_counter {
+    // 5. Verify counter is increasing.
+    //
+    // Per WebAuthn Level 2 §6.1.1, a value of `authData.signCount <=
+    // storedSignCount` is a cloning signal whenever *either* value is nonzero.
+    // We therefore reject as soon as the *stored* counter is nonzero and the
+    // presented counter does not strictly increase — including a regression to
+    // zero. A credential that has ever reported a nonzero counter may never go
+    // backwards (YubiKeys always increment), so a zero arriving after a nonzero
+    // stored value is unambiguous evidence of cloning or forgery.
+    //
+    // Credentials that have only ever reported zero (counter-less
+    // authenticators, e.g. some CTAP1 devices) keep `stored_counter == 0` and
+    // remain accepted, preserving compatibility.
+    if stored_counter != 0 && counter <= stored_counter {
         return Err(VerifyError::CounterNotIncreasing);
     }
 
@@ -329,13 +390,15 @@ pub fn verify_assertion_with_verifier<V: CoseVerifier>(
             .ok()
             .and_then(|u| u.host_str().map(String::from))
             .is_some_and(|h| vouch_common::is_loopback_host(&h));
-        let is_localhost_match = expected_is_local && origin_is_local;
+        let is_localhost_match = allow_localhost_origin && expected_is_local && origin_is_local;
 
         if is_localhost_match {
-            tracing::debug!(
+            tracing::warn!(
+                target: "security",
                 expected = %expected_origin,
                 actual = %client_data.origin,
-                "Allowing localhost origin variation (development mode)"
+                "Allowing localhost origin variation (development mode) -- \
+                 this relaxation is disabled when TLS is configured"
             );
         } else {
             return Err(VerifyError::InvalidOrigin);
@@ -387,6 +450,7 @@ pub fn verify_assertion_typed(
     expected_origin: &str,
     stored_counter: u32,
     require_user_verification: bool,
+    allow_localhost_origin: bool,
 ) -> Result<VerificationResult, VerifyError> {
     verify_assertion(
         authenticator_data.as_bytes(),
@@ -398,6 +462,7 @@ pub fn verify_assertion_typed(
         expected_origin,
         stored_counter,
         require_user_verification,
+        allow_localhost_origin,
     )
 }
 
@@ -1779,6 +1844,93 @@ mod tests {
         );
         assert!(result.is_ok());
         assert_eq!(result.unwrap().counter, u32::MAX);
+    }
+
+    #[test]
+    fn test_counter_regression_to_zero_rejected() {
+        // A credential that previously reported a nonzero counter must never
+        // regress to zero: that is unambiguous evidence of a cloned or forged
+        // authenticator (WebAuthn L2 §6.1.1). Regression test for the
+        // clone-detection bypass where `counter == 0` skipped the check.
+        let verifier = TestCoseVerifier::always_succeed();
+        let rp_id = "example.com";
+        let auth_data = make_auth_data(rp_id, 0x05, 0); // counter regressed to 0
+        let client_data =
+            make_client_data_json("webauthn.get", "test-challenge", "https://example.com");
+        let cose_key = make_eddsa_cose_key(&[0u8; 32]);
+
+        let result = verify_assertion_with_verifier(
+            &auth_data,
+            &client_data,
+            &[0u8; 64],
+            &cose_key,
+            rp_id,
+            "test-challenge",
+            "https://example.com",
+            5, // stored counter was nonzero
+            false,
+            &verifier,
+        );
+        assert!(matches!(result, Err(VerifyError::CounterNotIncreasing)));
+    }
+
+    // =========================================================================
+    // Origin Relaxation Gating Tests (P2.2)
+    // =========================================================================
+
+    #[test]
+    fn test_localhost_origin_relaxation_allowed_when_enabled() {
+        // With relaxation enabled (development, no TLS), a loopback origin
+        // variation (localhost vs 127.0.0.1, differing ports) is tolerated.
+        let verifier = TestCoseVerifier::always_succeed();
+        let rp_id = "localhost";
+        let auth_data = make_auth_data(rp_id, 0x05, 1);
+        let client_data =
+            make_client_data_json("webauthn.get", "test-challenge", "http://127.0.0.1:9000");
+        let cose_key = make_eddsa_cose_key(&[0u8; 32]);
+
+        let result = verify_assertion_inner(
+            &auth_data,
+            &client_data,
+            &[0u8; 64],
+            &cose_key,
+            rp_id,
+            "test-challenge",
+            "http://localhost:8080",
+            0,
+            false,
+            true, // allow_localhost_origin
+            &verifier,
+        );
+        assert!(result.is_ok(), "expected ok, got {result:?}");
+    }
+
+    #[test]
+    fn test_localhost_origin_relaxation_rejected_when_disabled() {
+        // With relaxation disabled (production), the same loopback origin
+        // variation is rejected: production must never weaken origin binding,
+        // even on a misconfigured loopback rp_id.
+        let verifier = TestCoseVerifier::always_succeed();
+        let rp_id = "localhost";
+        let auth_data = make_auth_data(rp_id, 0x05, 1);
+        let client_data =
+            make_client_data_json("webauthn.get", "test-challenge", "http://127.0.0.1:9000");
+        let cose_key = make_eddsa_cose_key(&[0u8; 32]);
+
+        let result = verify_assertion_inner(
+            &auth_data,
+            &client_data,
+            &[0u8; 64],
+            &cose_key,
+            rp_id,
+            "test-challenge",
+            "http://localhost:8080",
+            0,
+            false,
+            false, // allow_localhost_origin disabled
+            &verifier,
+        );
+        assert!(matches!(result, Err(VerifyError::InvalidOrigin)));
     }
 
     // =========================================================================

@@ -465,8 +465,14 @@ pub struct Args {
     pub metrics_bearer_token: Option<String>,
 
     /// Secret token for the certification test-mode login endpoint.
-    /// When set, enables GET /certification/complete-login for automated OpenID conformance
-    /// testing. MUST NOT be set in production deployments.
+    ///
+    /// When set, this is a broad **test-mode switch** for automated OpenID
+    /// conformance testing, not just one route. It enables
+    /// `GET /certification/complete-login` (a login bypass that mints a session
+    /// for a synthetic test user without a FIDO2 key), **disables global rate
+    /// limiting**, and **relaxes the upstream-IdP requirement** (the server may
+    /// boot with no IdP). MUST NOT be set in production deployments — a leaked
+    /// or mistakenly set value enables a login-bypass-shaped endpoint.
     #[arg(long, env = "VOUCH_CERTIFICATION_TEST_TOKEN")]
     pub certification_test_token: Option<String>,
 

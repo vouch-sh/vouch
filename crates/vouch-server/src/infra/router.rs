@@ -137,11 +137,19 @@ pub fn build_app(state: Arc<AppState>, config: &config::ServerConfig) -> anyhow:
 
     // Register the certification test-mode login endpoint when the secret token
     // is configured. This route MUST NOT be enabled in production deployments.
+    //
+    // Activation is intentionally NOT gated on TLS or any other config: the
+    // OpenID conformance suite drives this over HTTPS with self-signed certs,
+    // so a TLS-based guard would break the very flow it exists for. The guard
+    // is operational discipline plus the loud warning below.
     let certification_route = if let Some(ref _token) = config.certification_test_token {
         tracing::warn!(
-            "Certification test mode ENABLED — \
-             GET /certification/complete-login is active. \
-             Do NOT run this in production."
+            target: "security",
+            "CERTIFICATION TEST MODE ENABLED — this is a login bypass and MUST \
+             NOT run in production. It activates GET /certification/complete-login \
+             (mints a session for a synthetic test user without FIDO2), DISABLES \
+             global rate limiting, and relaxes the upstream-IdP requirement. \
+             Unset VOUCH_CERTIFICATION_TEST_TOKEN outside conformance testing."
         );
         Router::new()
             .route(

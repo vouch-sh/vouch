@@ -233,6 +233,9 @@ pub(crate) async fn exchange_fido2_assertion(
 
     // 6. Verify WebAuthn assertion
     let stored_counter = u32::try_from(authenticator.counter).unwrap_or(0);
+    // Cloned for the failure audit event below, since the success path moves
+    // `params.client_info` when it records the LoginSuccess event.
+    let failure_client_info = params.client_info.clone();
     let assertion_result = verify_login_assertion(LoginAssertionParams {
         authenticator_data: authenticator_data_bytes,
         client_data_json: client_data_json_bytes,
@@ -244,6 +247,8 @@ pub(crate) async fn exchange_fido2_assertion(
         expected_origin: format!("https://{}", challenge_state.rp_id),
         challenge: challenge_state.challenge.as_bytes().to_vec(),
         stored_counter,
+        // Tolerate loopback origin variations only in development (no TLS).
+        allow_localhost_origin: !state.config().tls_configured(),
     })
     .await
     .map_err(|e| {
@@ -251,6 +256,26 @@ pub(crate) async fn exchange_fido2_assertion(
             "FIDO2 assertion grant: assertion verification failed for user {}: {e}",
             user_id
         );
+        // P3.5: a failed assertion — including clone detection (counter
+        // regression) — is a high-signal security event. Record it in the
+        // audit trail with the credential and user IDs and the failure reason.
+        let failure_event = AuthEventParams {
+            user_id: user.id.clone(),
+            event_type: AuthEventType::LoginFailed,
+            authenticator_id: Some(authenticator.id.clone()),
+            success: false,
+            failure_reason: Some(e.to_string()),
+            ..AuthEventParams::default()
+        }
+        .with_client_info(failure_client_info);
+        let audit = state.audit.clone();
+        let user_email = user.email.clone();
+        tokio::spawn(async move {
+            if let Err(err) = db::insert_auth_event(&audit, &failure_event, Some(&user_email)).await
+            {
+                tracing::warn!("Failed to log auth event: {}", err);
+            }
+        });
         ServiceError::oauth(OAuthErrorCode::InvalidGrant, "Authentication failed")
     })?;
 
