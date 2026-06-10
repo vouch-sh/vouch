@@ -406,7 +406,7 @@ impl Config {
         let content =
             serde_json::to_string_pretty(&config_file).context("failed to serialize config")?;
 
-        crate::utils::atomic_write_secure(path.as_path(), content.as_bytes())
+        vouch_common::fs::atomic_write_secure(path.as_path(), content.as_bytes())
             .with_context(|| format!("failed to write config to {}", path.display()))?;
 
         Ok(())

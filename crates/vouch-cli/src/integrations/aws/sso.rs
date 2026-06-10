@@ -368,7 +368,7 @@ fn save_registration(
     crate::utils::ensure_secure_dir(cache_dir)?;
     let path = cache_dir.join(format!("{key}.json"));
     let content = serde_json::to_vec(reg).context("failed to serialize registration")?;
-    crate::utils::atomic_write_secure(&path, &content)
+    vouch_common::fs::atomic_write_secure(&path, &content)
         .context("failed to write SSO client registration cache")
 }
 
@@ -379,7 +379,7 @@ pub(crate) fn save_access_token(config: &SsoConfig, token: &SsoAccessToken) -> R
     let key = token_cache_key(config);
     let path = cache_dir.join(format!("{key}.json"));
     let content = serde_json::to_vec(token).context("failed to serialize access token")?;
-    crate::utils::atomic_write_secure(&path, &content)
+    vouch_common::fs::atomic_write_secure(&path, &content)
         .context("failed to write SSO access token cache")
 }
 

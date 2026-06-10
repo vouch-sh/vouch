@@ -9,7 +9,8 @@ use std::path::PathBuf;
 use vouch_common::SshCaPublicKeyResponse;
 
 use crate::client::VouchClient;
-use crate::utils::{atomic_write, atomic_write_secure, ensure_secure_dir};
+use crate::utils::ensure_secure_dir;
+use vouch_common::fs::{atomic_write, atomic_write_secure};
 
 /// Get the SSH config path (~/.ssh/config).
 pub(crate) fn ssh_config_path() -> Result<PathBuf> {

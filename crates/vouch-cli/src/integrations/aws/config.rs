@@ -177,7 +177,7 @@ impl AwsConfig {
         self.ini
             .write_to(&mut buf)
             .with_context(|| format!("failed to serialize {}", self.path.display()))?;
-        crate::utils::atomic_write(&self.path, &buf)
+        vouch_common::fs::atomic_write(&self.path, &buf)
             .with_context(|| format!("failed to write {}", self.path.display()))
     }
 

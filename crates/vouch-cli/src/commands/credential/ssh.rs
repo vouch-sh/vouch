@@ -69,7 +69,7 @@ pub(crate) fn ensure_keypair(key_path: &Path) -> Result<KeypairAction> {
     let private_key_str = private_key
         .to_openssh(LineEnding::LF)
         .map_err(|e| anyhow::anyhow!("failed to serialize private key: {e}"))?;
-    crate::utils::atomic_write_secure(key_path, private_key_str.as_bytes())
+    vouch_common::fs::atomic_write_secure(key_path, private_key_str.as_bytes())
         .with_context(|| format!("failed to write {}", key_path.display()))?;
 
     // Save public key (atomic)
@@ -77,7 +77,7 @@ pub(crate) fn ensure_keypair(key_path: &Path) -> Result<KeypairAction> {
     let pub_key_str = public_key
         .to_openssh()
         .map_err(|e| anyhow::anyhow!("failed to serialize public key: {e}"))?;
-    crate::utils::atomic_write(&pub_path, format!("{pub_key_str}\n").as_bytes())
+    vouch_common::fs::atomic_write(&pub_path, format!("{pub_key_str}\n").as_bytes())
         .with_context(|| format!("failed to write {}", pub_path.display()))?;
 
     Ok(KeypairAction::Generated(public_key.clone()))
@@ -223,7 +223,7 @@ pub(crate) async fn provision_ssh_certificate(
 
     // Save certificate (atomic)
     let cert_path = PathBuf::from(format!("{}-cert.pub", key_path.display()));
-    crate::utils::atomic_write(&cert_path, format!("{}\n", response.certificate).as_bytes())
+    vouch_common::fs::atomic_write(&cert_path, format!("{}\n", response.certificate).as_bytes())
         .with_context(|| format!("failed to write {}", cert_path.display()))?;
 
     Ok(SshProvisionResult {

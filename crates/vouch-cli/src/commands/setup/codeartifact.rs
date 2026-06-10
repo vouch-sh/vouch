@@ -256,7 +256,7 @@ fn write_pip_config(index_url: &str) -> Result<()> {
             config_path.display()
         )
     })?;
-    crate::utils::atomic_write_secure(&config_path, &buf)
+    vouch_common::fs::atomic_write_secure(&config_path, &buf)
         .with_context(|| format!("failed to write {}", config_path.display()))?;
 
     println!("Wrote pip config: {}", config_path.display());
@@ -362,7 +362,7 @@ fn write_uv_config(index_url: &str, repository: &str) -> Result<()> {
     }
 
     let serialized = doc.to_string();
-    crate::utils::atomic_write_secure(&config_path, serialized.as_bytes())
+    vouch_common::fs::atomic_write_secure(&config_path, serialized.as_bytes())
         .with_context(|| format!("failed to write {}", config_path.display()))?;
 
     println!("Wrote uv config: {}", config_path.display());
@@ -479,7 +479,7 @@ fn write_npmrc(ca_host: &str, repository: &str, token: &str) -> Result<()> {
     warn_npmrc_conflict(&existing, ca_host, repository, "npm");
     let content = build_npmrc_content(&existing, ca_host, repository, token);
 
-    crate::utils::atomic_write_secure(&npmrc_path, content.as_bytes())
+    vouch_common::fs::atomic_write_secure(&npmrc_path, content.as_bytes())
         .with_context(|| format!("failed to write {}", npmrc_path.display()))?;
 
     println!("Wrote npm config: {}", npmrc_path.display());
@@ -564,7 +564,7 @@ fn write_npmrc_pnpm(ca_host: &str, repository: &str, helper_path: &std::path::Pa
     warn_npmrc_conflict(&existing, ca_host, repository, "pnpm");
     let content = build_npmrc_pnpm_content(&existing, ca_host, repository, helper_path);
 
-    crate::utils::atomic_write_secure(&npmrc_path, content.as_bytes())
+    vouch_common::fs::atomic_write_secure(&npmrc_path, content.as_bytes())
         .with_context(|| format!("failed to write {}", npmrc_path.display()))?;
 
     println!("Wrote pnpm config: {}", npmrc_path.display());
@@ -682,7 +682,7 @@ async fn try_refresh_npmrc(server: &str) -> Result<()> {
     let (new_content, refreshed) = rewrite_npmrc_tokens(&content, &plain_map);
 
     if refreshed {
-        crate::utils::atomic_write_secure(&npmrc_path, new_content.as_bytes())
+        vouch_common::fs::atomic_write_secure(&npmrc_path, new_content.as_bytes())
             .with_context(|| format!("failed to write {}", npmrc_path.display()))?;
         println!("Refreshed CodeArtifact token in ~/.npmrc");
     }

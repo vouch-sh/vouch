@@ -64,6 +64,14 @@ impl AgentServer {
 
         info!("Agent listening on {}", path.display());
 
+        // Surface the insecure-URL override at boot, not just when an insecure
+        // URL is actually stored — a set-but-unused flag is still a misconfiguration.
+        if std::env::var_os("VOUCH_ALLOW_INSECURE").is_some() {
+            warn!(
+                "VOUCH_ALLOW_INSECURE is set: insecure (plain HTTP) server URLs will be accepted. Do not use in production."
+            );
+        }
+
         let mut shutdown = self.shutdown_rx.clone();
         let semaphore = Arc::new(Semaphore::new(MAX_CONNECTIONS));
 

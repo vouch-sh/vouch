@@ -171,7 +171,7 @@ impl CargoConfig {
     /// Uses atomic write (temp file + rename) to prevent corruption
     /// if the process is interrupted mid-write.
     pub(crate) fn save(&self) -> Result<()> {
-        crate::utils::atomic_write(&self.path, self.doc.to_string().as_bytes())
+        vouch_common::fs::atomic_write(&self.path, self.doc.to_string().as_bytes())
             .with_context(|| format!("failed to write {}", self.path.display()))
     }
 

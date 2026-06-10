@@ -10,6 +10,8 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 use axum_server::tls_rustls::RustlsConfig;
+use rustls::pki_types::pem::PemObject;
+use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use secrecy::{ExposeSecret, SecretString};
 
 use crate::config::ServerConfig;
@@ -127,13 +129,11 @@ fn build_server_config(cert_pem: &[u8], key_pem: &[u8]) -> Result<Arc<rustls::Se
     validate_pem(cert_pem, "CERTIFICATE").context("Invalid TLS certificate format")?;
     validate_pem(key_pem, "PRIVATE KEY").context("Invalid TLS private key format")?;
 
-    let certs: Vec<rustls::pki_types::CertificateDer<'_>> = rustls_pemfile::certs(&mut &*cert_pem)
+    let certs: Vec<CertificateDer<'static>> = CertificateDer::pem_slice_iter(cert_pem)
         .collect::<Result<Vec<_>, _>>()
         .context("Failed to parse PEM certificate chain")?;
 
-    let key = rustls_pemfile::private_key(&mut &*key_pem)
-        .context("Failed to parse PEM private key")?
-        .ok_or_else(|| anyhow::anyhow!("No private key found in PEM data"))?;
+    let key = PrivateKeyDer::from_pem_slice(key_pem).context("Failed to parse PEM private key")?;
 
     let mut config =
         rustls::ServerConfig::builder_with_provider(Arc::new(bcp195_crypto_provider()))
@@ -178,14 +178,12 @@ pub(crate) fn parse_server_cert_and_key(
         .context("Failed to decode TLS private key")?
         .into_bytes();
 
-    let certs: Vec<rustls::pki_types::CertificateDer<'static>> =
-        rustls_pemfile::certs(&mut &*cert_bytes)
-            .collect::<Result<Vec<_>, _>>()
-            .context("Failed to parse PEM certificate chain")?;
+    let certs: Vec<CertificateDer<'static>> = CertificateDer::pem_slice_iter(&cert_bytes)
+        .collect::<Result<Vec<_>, _>>()
+        .context("Failed to parse PEM certificate chain")?;
 
-    let key = rustls_pemfile::private_key(&mut &*key_bytes)
-        .context("Failed to parse PEM private key")?
-        .ok_or_else(|| anyhow::anyhow!("No private key found in PEM data"))?;
+    let key =
+        PrivateKeyDer::from_pem_slice(&key_bytes).context("Failed to parse PEM private key")?;
 
     Ok((certs, key))
 }
@@ -235,5 +233,49 @@ mod tests {
         // EC PRIVATE KEY also contains "PRIVATE KEY"
         let pem = b"-----BEGIN EC PRIVATE KEY-----\ndata\n-----END EC PRIVATE KEY-----";
         assert!(validate_pem(pem, "PRIVATE KEY").is_ok());
+    }
+
+    // Throwaway self-signed P-256 cert + PKCS#8 key, generated for tests only.
+    const TEST_CERT_PEM: &str = "-----BEGIN CERTIFICATE-----\n\
+MIIBiDCCAS2gAwIBAgIUAzsi4KkqvGaw6UTFs4DrQEe2KWwwCgYIKoZIzj0EAwIw\n\
+GTEXMBUGA1UEAwwOdm91Y2gtdGxzLXRlc3QwHhcNMjYwNjEwMTYxMjM3WhcNMzYw\n\
+NjA3MTYxMjM3WjAZMRcwFQYDVQQDDA52b3VjaC10bHMtdGVzdDBZMBMGByqGSM49\n\
+AgEGCCqGSM49AwEHA0IABAOqxc9YgMgXu2BGQ3KOgFNtVxG7pdencd5TOnjrr6zJ\n\
+nPi66MVoVlQ9bi3ydlRJ1ce7HHOEui/G0U0aoDJtgVmjUzBRMB0GA1UdDgQWBBQW\n\
+yEA6dBvaxTzloNCzXuJLG5z9/DAfBgNVHSMEGDAWgBQWyEA6dBvaxTzloNCzXuJL\n\
+G5z9/DAPBgNVHRMBAf8EBTADAQH/MAoGCCqGSM49BAMCA0kAMEYCIQC9cwWPeNND\n\
+WFbJkO8dqEVE69Xzdj+NMgenQFOJsOW2yAIhAISz7zP/KDBC6jVhH7qJTR9E7Rnr\n\
+3wT8S2AL3BFHW6+2\n\
+-----END CERTIFICATE-----\n";
+
+    const TEST_KEY_PEM: &str = "-----BEGIN PRIVATE KEY-----\n\
+MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQghUolejGt3e2SfwZJ\n\
+BRRya1VbXh8fYhiJfLvrVBbs/lqhRANCAAQDqsXPWIDIF7tgRkNyjoBTbVcRu6XX\n\
+p3HeUzp466+syZz4uujFaFZUPW4t8nZUSdXHuxxzhLovxtFNGqAybYFZ\n\
+-----END PRIVATE KEY-----\n";
+
+    #[test]
+    fn test_build_server_config_parses_real_pem() {
+        // Exercises the rustls-pki-types PemObject parsing path end-to-end:
+        // PEM cert chain + PKCS#8 key must yield a usable ServerConfig.
+        let config = build_server_config(TEST_CERT_PEM.as_bytes(), TEST_KEY_PEM.as_bytes());
+        assert!(
+            config.is_ok(),
+            "valid PEM cert/key must build a ServerConfig, got: {:?}",
+            config.err()
+        );
+    }
+
+    #[test]
+    fn test_build_server_config_rejects_malformed_cert_pem() {
+        // Passes the validate_pem check (contains "CERTIFICATE") but has
+        // undecodable base64, so PemObject parsing must surface an error.
+        let bad_cert =
+            b"-----BEGIN CERTIFICATE-----\nnot valid base64 @@@@\n-----END CERTIFICATE-----\n";
+        let config = build_server_config(bad_cert, TEST_KEY_PEM.as_bytes());
+        assert!(
+            config.is_err(),
+            "malformed certificate PEM must be rejected"
+        );
     }
 }
