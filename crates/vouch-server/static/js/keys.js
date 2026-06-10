@@ -43,13 +43,16 @@
         });
 
         // Clicking outside the input cancels the edit (no silent autosave).
-        // The mousedown handler on Save/Cancel keeps focus on the input so this
-        // blur fires only for genuine outside clicks.
+        // But focus moving to a control *inside* the same form — Save/Cancel via
+        // Tab, click, or touch tap — is not an outside click: reverting there
+        // would discard the pending rename before Save submits. `relatedTarget`
+        // is the element receiving focus; skip the cancel when it's in the form.
         document.addEventListener('focusout', function(event) {
             var input = event.target.closest('.key-name-input');
             if (!input) return;
             var form = input.closest('.key-rename-form');
             if (!form || form.classList.contains('hidden')) return;
+            if (event.relatedTarget && form.contains(event.relatedTarget)) return;
             exitEditMode(form, true);
         });
 
