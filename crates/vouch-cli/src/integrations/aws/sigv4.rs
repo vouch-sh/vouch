@@ -514,14 +514,7 @@ pub(crate) fn validate_sigv4_input(value: &str, label: &str) -> Result<()> {
 /// AWS error XML/JSON can contain account IDs, ARNs, and request IDs.
 /// Limiting the length avoids leaking excessive detail.
 fn truncate_error_body(body: &str, max_len: usize) -> &str {
-    if body.len() <= max_len {
-        return body;
-    }
-    // Find the last char boundary at or before max_len
-    let mut end = max_len;
-    while !body.is_char_boundary(end) && end > 0 {
-        end = end.saturating_sub(1);
-    }
+    let end = body.floor_char_boundary(max_len);
     body.get(..end).unwrap_or(body)
 }
 

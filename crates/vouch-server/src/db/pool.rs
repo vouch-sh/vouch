@@ -260,7 +260,7 @@ impl Pool {
         let pool = PgPoolOptions::new()
             .max_connections(max_connections)
             .min_connections(pool_cfg.min_connections)
-            .max_lifetime(Duration::from_secs(55 * 60))
+            .max_lifetime(Duration::from_mins(55))
             .idle_timeout(Duration::from_secs(pool_cfg.idle_timeout_secs))
             .acquire_timeout(Duration::from_secs(pool_cfg.acquire_timeout_secs))
             .test_before_acquire(false)
@@ -703,7 +703,7 @@ pub(crate) fn redact_database_url(url: &str) -> String {
 fn spawn_token_refresh(pool: sqlx::PgPool, dsql: DsqlEndpoint, user: String, is_admin: bool) {
     tokio::spawn(async move {
         // Refresh every 10 minutes (tokens expire after 15 min by default)
-        let refresh_interval = Duration::from_secs(10 * 60);
+        let refresh_interval = Duration::from_mins(10);
         let region = dsql.region().to_string();
 
         tracing::info!(

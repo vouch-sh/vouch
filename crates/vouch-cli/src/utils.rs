@@ -153,24 +153,6 @@ pub(crate) fn create_symlink_with_fallback(
     Ok(())
 }
 
-/// Acquire an exclusive advisory lock on a file using `flock(2)`.
-///
-/// This is the only `unsafe` call in the CLI crate. `flock` is a well-defined
-/// POSIX API and the file descriptor is guaranteed valid by the borrow of `File`.
-#[cfg(unix)]
-#[expect(
-    unsafe_code,
-    reason = "POSIX flock; safety documented inline above call site"
-)]
-pub(crate) fn flock_exclusive(file: &fs::File) -> Result<(), std::io::Error> {
-    use std::os::unix::io::{AsFd, AsRawFd};
-    let ret = unsafe { libc::flock(file.as_fd().as_raw_fd(), libc::LOCK_EX) };
-    if ret != 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 #[expect(
     clippy::panic_in_result_fn,

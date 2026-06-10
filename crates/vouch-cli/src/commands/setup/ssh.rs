@@ -210,7 +210,7 @@ Host *
 
 /// Add a @cert-authority entry to known_hosts for the given host patterns.
 ///
-/// Uses advisory file locking (`flock`) on Unix to prevent concurrent
+/// Uses advisory file locking (`File::lock`) to prevent concurrent
 /// modifications from corrupting the file. The lock is held for the
 /// entire read-modify-write cycle.
 fn add_trusted_ca_to_known_hosts(ca_path: &std::path::Path, host_patterns: &str) -> Result<()> {
@@ -241,7 +241,7 @@ fn add_trusted_ca_to_known_hosts(ca_path: &std::path::Path, host_patterns: &str)
     }
 
     // Acquire advisory lock for the read-modify-write cycle
-    let lock_path = known_hosts_path.with_extension("lock");
+    let lock_path = known_hosts_path.with_added_extension("lock");
     let lock_file = fs::OpenOptions::new()
         .create(true)
         .write(true)
@@ -256,8 +256,9 @@ fn add_trusted_ca_to_known_hosts(ca_path: &std::path::Path, host_patterns: &str)
         let _chmod = fs::set_permissions(&lock_path, fs::Permissions::from_mode(0o600));
     }
 
-    #[cfg(unix)]
-    crate::utils::flock_exclusive(&lock_file).context("failed to acquire known_hosts lock")?;
+    lock_file
+        .lock()
+        .context("failed to acquire known_hosts lock")?;
 
     // Read existing known_hosts under the lock
     let existing = if known_hosts_path.exists() {

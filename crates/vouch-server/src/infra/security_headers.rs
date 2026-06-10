@@ -38,7 +38,7 @@ pub fn build_api_cors_layer() -> CorsLayer {
             HeaderName::from_static("dpop"),
         ])
         .expose_headers([HeaderName::from_static("dpop-nonce")])
-        .max_age(std::time::Duration::from_secs(3600))
+        .max_age(std::time::Duration::from_hours(1))
 }
 
 /// Build restrictive CORS layer for UI routes (login, enroll, applications, etc.).
@@ -68,7 +68,7 @@ pub fn build_ui_cors_layer(config: &config::ServerConfig) -> CorsLayer {
                     header::ORIGIN,
                 ])
                 .allow_credentials(true)
-                .max_age(std::time::Duration::from_secs(3600))
+                .max_age(std::time::Duration::from_hours(1))
         }
         _ => {
             // No CORS configured -- restrictive same-origin defaults

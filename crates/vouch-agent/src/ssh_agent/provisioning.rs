@@ -139,7 +139,7 @@ fn spawn_lazy_provision(
         None => return,
     };
     let key_path = home.join(".ssh").join(DEFAULT_KEY_NAME);
-    let pub_path = key_path.with_extension("pub");
+    let pub_path = key_path.with_added_extension("pub");
 
     if !key_path.exists() || !pub_path.exists() {
         debug!("No SSH keypair on disk, cannot lazy-provision");
