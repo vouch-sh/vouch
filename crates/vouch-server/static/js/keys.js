@@ -1,222 +1,99 @@
-// Key management page: list, rename, delete, and register new security keys.
-// Template variables are passed via data-* attributes on #keys-config.
+// Key management page: register, rename, and delete security keys.
+//
+// The key list is rendered server-side (Askama). Rename submits via a plain
+// form POST (see enroll_keys_container.html) — matching the server-rendered,
+// redirect-back CRUD pattern used by the admin pages. This script drives the
+// flows that must run in the browser — WebAuthn registration, RFC 9470 step-up
+// re-authentication, and the click-to-edit toggle for the rename UI — and
+// reloads the page on success so the server-rendered list reflects the change.
 
 (function() {
-    var configEl = document.getElementById('keys-config');
-    var rpId = configEl ? configEl.dataset.rpId : '';
-    var keysData = [];
-
     document.addEventListener('DOMContentLoaded', function() {
-        loadKeys();
+        // Event delegation from document keeps a single handler regardless of
+        // how many keys are rendered.
+        document.addEventListener('click', function(event) {
+            var addBtn = event.target.closest('[data-action="add-key"]');
+            if (addBtn) {
+                addNewKey(addBtn);
+                return;
+            }
+            var deleteBtn = event.target.closest('[data-action="delete"]');
+            if (deleteBtn) {
+                deleteKey(deleteBtn.dataset.keyId, deleteBtn.dataset.keyName);
+                return;
+            }
+            var renameBtn = event.target.closest('[data-action="rename"]');
+            if (renameBtn) {
+                enterEditMode(renameBtn.closest('[data-key-id]'));
+                return;
+            }
+            var cancelBtn = event.target.closest('[data-action="cancel-rename"]');
+            if (cancelBtn) {
+                exitEditMode(cancelBtn.closest('.key-rename-form'), true);
+            }
+        });
 
-        // Static buttons
-        var addFirstBtn = document.getElementById('add-first-key-btn');
-        if (addFirstBtn) {
-            addFirstBtn.addEventListener('click', addNewKey);
-        }
+        // Esc reverts and exits edit mode; Enter falls through to native submit.
+        document.addEventListener('keydown', function(event) {
+            if (event.key !== 'Escape') return;
+            var input = event.target.closest('.key-name-input');
+            if (!input) return;
+            event.preventDefault();
+            exitEditMode(input.closest('.key-rename-form'), true);
+        });
 
-        var addAnotherBtn = document.getElementById('add-another-key-btn');
-        if (addAnotherBtn) {
-            addAnotherBtn.addEventListener('click', addNewKey);
-        }
+        // Clicking outside the input cancels the edit (no silent autosave).
+        // But focus moving to a control *inside* the same form — Save/Cancel via
+        // Tab, click, or touch tap — is not an outside click: reverting there
+        // would discard the pending rename before Save submits. `relatedTarget`
+        // is the element receiving focus; skip the cancel when it's in the form.
+        document.addEventListener('focusout', function(event) {
+            var input = event.target.closest('.key-name-input');
+            if (!input) return;
+            var form = input.closest('.key-rename-form');
+            if (!form || form.classList.contains('hidden')) return;
+            if (event.relatedTarget && form.contains(event.relatedTarget)) return;
+            exitEditMode(form, true);
+        });
 
-        var retryBtn = document.getElementById('retry-btn');
-        if (retryBtn) {
-            retryBtn.addEventListener('click', loadKeys);
-        }
-
-        // Event delegation for dynamically rendered key items
-        var keysItems = document.getElementById('keys-items');
-        if (keysItems) {
-            keysItems.addEventListener('click', function(event) {
-                var deleteBtn = event.target.closest('[data-action="delete"]');
-                if (deleteBtn) {
-                    deleteKey(deleteBtn.dataset.keyId, deleteBtn.dataset.keyName);
-                }
-            });
-
-            keysItems.addEventListener('blur', function(event) {
-                if (event.target.classList.contains('key-name')) {
-                    handleNameBlur(event.target);
-                }
-            }, true);
-
-            keysItems.addEventListener('keydown', function(event) {
-                if (event.target.classList.contains('key-name')) {
-                    handleNameKeydown(event, event.target);
-                }
-            });
-        }
+        // Keep focus on the input when the user clicks Save or Cancel — without
+        // this, focusout would fire on mousedown and cancel before the click
+        // submit runs.
+        document.addEventListener('mousedown', function(event) {
+            var btn = event.target.closest('.key-rename-save, .key-rename-cancel');
+            if (btn) event.preventDefault();
+        });
     });
 
-    async function loadKeys() {
-        showLoading();
-
-        try {
-            var response = await fetch('/enroll/keys/api', {
-                credentials: 'same-origin'
-            });
-
-            if (!response.ok) {
-                var err = await response.json();
-                throw new Error(err.message || 'Failed to load keys');
-            }
-
-            var data = await response.json();
-            keysData = data.keys;
-            renderKeys();
-        } catch (err) {
-            showError(err.message);
+    function enterEditMode(card) {
+        if (!card) return;
+        var displayRow = card.querySelector('.key-name-display-row');
+        var form = card.querySelector('.key-rename-form');
+        if (!displayRow || !form) return;
+        displayRow.classList.remove('flex');
+        displayRow.classList.add('hidden');
+        form.classList.remove('hidden');
+        form.classList.add('flex');
+        var input = form.querySelector('.key-name-input');
+        if (input) {
+            input.focus();
+            input.select();
         }
     }
 
-    function showLoading() {
-        document.getElementById('loading').classList.remove('hidden');
-        document.getElementById('keys-container').classList.add('hidden');
-        document.getElementById('error-state').classList.add('hidden');
-    }
-
-    function showError(message) {
-        document.getElementById('loading').classList.add('hidden');
-        document.getElementById('keys-container').classList.add('hidden');
-        document.getElementById('error-state').classList.remove('hidden');
-        document.getElementById('error-message').textContent = message;
-    }
-
-    function renderKeys() {
-        document.getElementById('loading').classList.add('hidden');
-        document.getElementById('error-state').classList.add('hidden');
-        document.getElementById('keys-container').classList.remove('hidden');
-
-        if (keysData.length === 0) {
-            document.getElementById('empty-state').classList.remove('hidden');
-            document.getElementById('keys-list').classList.add('hidden');
-        } else {
-            document.getElementById('empty-state').classList.add('hidden');
-            document.getElementById('keys-list').classList.remove('hidden');
-
-            // Build the list with DOM APIs (createElement/textContent) rather
-            // than innerHTML string concatenation, so user-controlled values
-            // (key name, device model) can never be interpreted as markup —
-            // escaping is structural, not dependent on a per-field escapeHtml().
-            var container = document.getElementById('keys-items');
-            container.replaceChildren();
-            keysData.forEach(function(key) {
-                container.appendChild(buildKeyItem(key));
-            });
+    function exitEditMode(form, revert) {
+        if (!form) return;
+        var card = form.closest('[data-key-id]');
+        var displayRow = card ? card.querySelector('.key-name-display-row') : null;
+        if (revert) {
+            var input = form.querySelector('.key-name-input');
+            if (input) input.value = form.dataset.originalName || '';
         }
-    }
-
-    function buildKeyItem(key) {
-        var item = document.createElement('div');
-        item.className = 'border border-vouch-border rounded-lg p-4 bg-vouch-surface';
-        item.dataset.keyId = key.id;
-
-        var row = document.createElement('div');
-        row.className = 'flex items-start justify-between';
-
-        var info = document.createElement('div');
-        info.className = 'flex-1 min-w-0 mr-4';
-
-        var nameWrap = document.createElement('div');
-        nameWrap.className = 'flex items-center gap-2 mb-1';
-
-        var nameInput = document.createElement('input');
-        nameInput.type = 'text';
-        nameInput.className = 'key-name font-medium text-gray-200 bg-transparent border-b border-transparent hover:border-vouch-border focus:border-vouch-accent focus:outline-none transition-colors w-full';
-        // Assigning to .value sets the property, not parsed HTML — safe.
-        nameInput.value = key.name;
-        nameInput.dataset.keyId = key.id;
-        nameInput.dataset.original = key.name;
-        nameWrap.appendChild(nameInput);
-
-        var meta = document.createElement('div');
-        meta.className = 'text-sm text-gray-500';
-        if (key.device_model) {
-            var model = document.createElement('span');
-            model.className = 'mr-3';
-            model.textContent = key.device_model;
-            meta.appendChild(model);
-        }
-        var added = document.createElement('span');
-        added.textContent = 'Added ' + formatDate(key.created_at);
-        meta.appendChild(added);
-
-        info.appendChild(nameWrap);
-        info.appendChild(meta);
-
-        var delBtn = document.createElement('button');
-        delBtn.dataset.action = 'delete';
-        delBtn.dataset.keyId = key.id;
-        delBtn.dataset.keyName = key.name;
-        delBtn.className = 'text-gray-500 hover:text-vouch-error p-1' + (keysData.length <= 1 ? ' hidden' : '');
-        delBtn.title = 'Delete key';
-        delBtn.appendChild(makeDeleteIcon());
-
-        row.appendChild(info);
-        row.appendChild(delBtn);
-        item.appendChild(row);
-        return item;
-    }
-
-    // Build the trash/delete SVG icon. Static markup (no user data); created
-    // via the SVG namespace so it renders correctly as a DOM node.
-    function makeDeleteIcon() {
-        var ns = 'http://www.w3.org/2000/svg';
-        var svg = document.createElementNS(ns, 'svg');
-        svg.setAttribute('class', 'w-5 h-5 pointer-events-none');
-        svg.setAttribute('fill', 'none');
-        svg.setAttribute('stroke', 'currentColor');
-        svg.setAttribute('viewBox', '0 0 24 24');
-        var path = document.createElementNS(ns, 'path');
-        path.setAttribute('stroke-linecap', 'round');
-        path.setAttribute('stroke-linejoin', 'round');
-        path.setAttribute('stroke-width', '2');
-        path.setAttribute('d', 'M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16');
-        svg.appendChild(path);
-        return svg;
-    }
-
-    async function handleNameBlur(input) {
-        var keyId = input.dataset.keyId;
-        var original = input.dataset.original;
-        var newName = input.value.trim();
-
-        if (newName === original || newName === '') {
-            input.value = original;
-            return;
-        }
-
-        try {
-            var response = await fetch('/enroll/keys/' + keyId, {
-                method: 'PATCH',
-                headers: { 'Content-Type': 'application/json' },
-                credentials: 'same-origin',
-                body: JSON.stringify({ name: newName })
-            });
-
-            if (!response.ok) {
-                var err = await response.json();
-                throw new Error(err.message || 'Failed to rename key');
-            }
-
-            input.dataset.original = newName;
-            var key = keysData.find(function(k) { return k.id === keyId; });
-            if (key) key.name = newName;
-        } catch (err) {
-            alert('Failed to rename key: ' + err.message);
-            input.value = original;
-        }
-    }
-
-    function handleNameKeydown(event, input) {
-        if (event.key === 'Enter') {
-            event.preventDefault();
-            input.blur();
-        }
-        if (event.key === 'Escape') {
-            input.value = input.dataset.original;
-            input.blur();
+        form.classList.remove('flex');
+        form.classList.add('hidden');
+        if (displayRow) {
+            displayRow.classList.remove('hidden');
+            displayRow.classList.add('flex');
         }
     }
 
@@ -245,7 +122,7 @@
                         var retryErr = await retryResp.json();
                         throw new Error(retryErr.message || 'Failed to delete key after re-authentication');
                     }
-                    await loadKeysAfterDelete();
+                    await finishAfterDelete(retryResp);
                     return;
                 }
                 // Regular expired session
@@ -258,34 +135,32 @@
                 throw new Error(err.message || 'Failed to delete key');
             }
 
-            await loadKeysAfterDelete();
+            await finishAfterDelete(response);
         } catch (err) {
             alert('Failed to delete key: ' + err.message);
         }
     }
 
-    // Reload key list after a successful delete. If the deleted key was used
-    // for the current session, the session was cascade-deleted too — redirect
-    // to login so the user can re-authenticate with a remaining key.
-    async function loadKeysAfterDelete() {
-        var response = await fetch('/enroll/keys/api', {
-            credentials: 'same-origin'
-        });
-
-        if (response.status === 401) {
-            // Session was invalidated (deleted key's session cascade)
+    // Decide where to go after a successful delete. Deleting the key that the
+    // current session is bound to cascade-revokes that session, so a plain
+    // reload would bounce through the page GET to /enroll/start. The server
+    // reports `current_session_revoked` (true only when the deleted key is this
+    // session's own authenticator, not merely any session of that key); when
+    // set, go to /login to re-authenticate with a remaining key. Otherwise the
+    // session is intact, so just refresh the list.
+    async function finishAfterDelete(response) {
+        var revoked = false;
+        try {
+            var result = await response.json();
+            revoked = !!(result && result.current_session_revoked);
+        } catch (e) {
+            revoked = false;
+        }
+        if (revoked) {
             window.location.href = '/login';
-            return;
+        } else {
+            window.location.reload();
         }
-
-        if (!response.ok) {
-            var err = await response.json();
-            throw new Error(err.message || 'Failed to load keys');
-        }
-
-        var data = await response.json();
-        keysData = data.keys;
-        renderKeys();
     }
 
     // RFC 9470: Perform inline FIDO2 re-authentication to get a fresh session.
@@ -341,8 +216,7 @@
         // Fresh session cookie is now set by the Set-Cookie header
     }
 
-    async function addNewKey(event) {
-        var btn = event.currentTarget;
+    async function addNewKey(btn) {
         var originalText = btn.textContent;
         btn.disabled = true;
         btn.textContent = 'Starting registration...';
@@ -417,11 +291,10 @@
                 throw new Error(errResp.message || 'Failed to complete registration');
             }
 
-            loadKeys();
+            window.location.reload();
 
         } catch (err) {
             alert(webauthnError(err));
-        } finally {
             btn.disabled = false;
             btn.textContent = originalText;
         }

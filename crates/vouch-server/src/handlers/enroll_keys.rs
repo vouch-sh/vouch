@@ -8,12 +8,14 @@ use crate::AppState;
 use crate::services::error::ServiceError;
 use crate::services::keys as key_svc;
 use axum::{
-    Json,
+    Form, Json,
     extract::{Path, State},
+    response::{IntoResponse, Redirect, Response},
 };
 use axum_extra::extract::cookie::CookieJar;
+use serde::Deserialize;
 use std::sync::Arc;
-use vouch_common::{DeleteKeyResponse, ListKeysResponse, RenameKeyRequest, RenameKeyResponse};
+use vouch_common::{DeleteKeyResponse, ListKeysResponse};
 
 use super::session::extract_session_from_cookie;
 
@@ -33,20 +35,46 @@ pub(crate) async fn list_keys(
     Ok(Json(ListKeysResponse { keys }))
 }
 
-/// Rename a security key (during enrollment).
-/// PATCH /enroll/keys/{id}
-/// Authentication is via session cookie.
-pub(crate) async fn rename_key(
+/// Form body for renaming a key from the browser UI.
+#[derive(Debug, Deserialize)]
+pub(crate) struct RenameKeyForm {
+    /// New display name for the key.
+    pub name: String,
+}
+
+/// Rename a security key (during enrollment) via a browser form POST.
+/// POST /enroll/keys/{id}/rename
+///
+/// Server-rendered, redirect-back CRUD (matches the admin pages): on success
+/// or failure the browser is redirected to `/enroll/keys`, which re-renders
+/// the list — surfacing any error via a flash message rather than returning a
+/// raw JSON error body. Authentication is via session cookie.
+pub(crate) async fn rename_key_form(
     State(state): State<Arc<AppState>>,
     jar: CookieJar,
     Path(key_id): Path<String>,
-    Json(req): Json<RenameKeyRequest>,
-) -> Result<Json<RenameKeyResponse>, ServiceError> {
-    let token = extract_session_from_cookie(&state, &jar).await?;
+    Form(form): Form<RenameKeyForm>,
+) -> Response {
+    let token = match extract_session_from_cookie(&state, &jar).await {
+        Ok(token) => token,
+        Err(_) => return Redirect::to("/enroll/start").into_response(),
+    };
 
-    let message = key_svc::rename_key(&state.store, &token.sub, &key_id, &req.name).await?;
-
-    Ok(Json(RenameKeyResponse { message }))
+    match key_svc::rename_key(&state.store, &token.sub, &key_id, &form.name).await {
+        Ok(_) => Redirect::to("/enroll/keys").into_response(),
+        Err(err) => {
+            tracing::warn!(error = ?err, "rename_key_form: rename failed");
+            // A generic, user-safe message: the common failures (empty / too
+            // long) are also constrained by the form, and we must not surface
+            // internal error detail.
+            let jar = crate::handlers::admin::flash::set_err_at(
+                jar,
+                "Could not rename key. Please choose a name between 1 and 100 characters.",
+                crate::handlers::admin::flash::KEYS_PATH,
+            );
+            (jar, Redirect::to("/enroll/keys")).into_response()
+        }
+    }
 }
 
 /// Delete a security key (during enrollment).
@@ -64,6 +92,10 @@ pub(crate) async fn delete_key(
     let auth_timestamp = token.auth_time.unwrap_or(0);
     key_svc::require_fresh_timestamp(auth_timestamp, key_svc::KEY_DELETE_MAX_AGE_SECS)?;
 
+    // Whether we just deleted the key this very session is bound to (so the
+    // browser knows to re-authenticate rather than reload into a dead session).
+    let current_session_revoked = token.authenticator_id.as_deref() == Some(key_id.as_str());
+
     let (key_name, sessions_revoked) =
         key_svc::delete_key(&state.store, &token.sub, &key_id).await?;
 
@@ -73,5 +105,6 @@ pub(crate) async fn delete_key(
     Ok(Json(DeleteKeyResponse {
         message: format!("Key '{}' has been deleted", key_name),
         sessions_revoked,
+        current_session_revoked,
     }))
 }

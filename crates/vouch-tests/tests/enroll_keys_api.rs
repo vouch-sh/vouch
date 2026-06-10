@@ -28,10 +28,13 @@ async fn rename_key(harness: &TestHarness, token: &str, key_id: &str, body: &str
     let cookie = cookie_header(token);
     http_request_full(
         &harness.router,
-        "PATCH",
-        &format!("/enroll/keys/{key_id}"),
+        "POST",
+        &format!("/enroll/keys/{key_id}/rename"),
         Some(body.to_string()),
-        &[("Cookie", &cookie), ("Content-Type", "application/json")],
+        &[
+            ("Cookie", &cookie),
+            ("Content-Type", "application/x-www-form-urlencoded"),
+        ],
     )
     .await
 }
@@ -83,8 +86,14 @@ async fn rename_updates_name() {
         .await
         .expect("create authed user");
 
-    let resp = rename_key(&harness, &token, &auth_id, r#"{"name":"renamed-yubikey"}"#).await;
-    assert_eq!(resp.status, StatusCode::OK, "rename failed: {}", resp.body);
+    // Form POST redirects back to /enroll/keys on success (303 See Other).
+    let resp = rename_key(&harness, &token, &auth_id, "name=renamed-yubikey").await;
+    assert_eq!(
+        resp.status,
+        StatusCode::SEE_OTHER,
+        "rename failed: {}",
+        resp.body
+    );
 
     let list = list_keys(&harness, &token).await;
     let body: Value = serde_json::from_str(&list.body).expect("json body");
@@ -96,6 +105,40 @@ async fn rename_updates_name() {
     assert_eq!(
         renamed.get("name").and_then(Value::as_str),
         Some("renamed-yubikey")
+    );
+}
+
+#[tokio::test]
+async fn rename_rejects_invalid_name_with_redirect() {
+    // A failed rename (here, a name longer than the 100-char limit) must
+    // redirect back to /enroll/keys (PRG + flash), not return a raw JSON error
+    // body, and must leave the key name unchanged.
+    let harness = TestHarness::new().await;
+    let (_user, auth_id, token) = harness
+        .create_authenticated_user("keys-rename-bad@example.com")
+        .await
+        .expect("create authed user");
+
+    let too_long = "a".repeat(101);
+    let resp = rename_key(&harness, &token, &auth_id, &format!("name={too_long}")).await;
+    assert_eq!(
+        resp.status,
+        StatusCode::SEE_OTHER,
+        "invalid rename should redirect, got body: {}",
+        resp.body
+    );
+
+    let list = list_keys(&harness, &token).await;
+    let body: Value = serde_json::from_str(&list.body).expect("json body");
+    let keys = body.get("keys").and_then(Value::as_array).expect("keys[]");
+    let key = keys
+        .iter()
+        .find(|k| k.get("id").and_then(Value::as_str) == Some(&auth_id))
+        .expect("key present");
+    assert_ne!(
+        key.get("name").and_then(Value::as_str),
+        Some(too_long.as_str()),
+        "invalid name must not be applied"
     );
 }
 
@@ -173,5 +216,45 @@ async fn delete_with_fresh_session_succeeds() {
         body.get("message")
             .and_then(Value::as_str)
             .is_some_and(|m| m.contains("deleted"))
+    );
+    // The session is bound to `kept`, not the deleted `doomed` key, so the
+    // current session must NOT be reported as revoked.
+    assert_eq!(
+        body.get("current_session_revoked").and_then(Value::as_bool),
+        Some(false),
+        "deleting a non-session key must not flag the current session revoked"
+    );
+}
+
+#[tokio::test]
+async fn delete_of_current_session_key_reports_revoked() {
+    let harness = TestHarness::new().await;
+    let user = harness
+        .create_user("self-delete@example.com")
+        .await
+        .expect("create user");
+    // Keep one key so we're allowed to delete the session's own key.
+    let _kept = harness
+        .create_authenticator(&user.id)
+        .await
+        .expect("create kept authenticator");
+    let session_key = harness
+        .create_authenticator(&user.id)
+        .await
+        .expect("create session authenticator");
+    let token = harness
+        .create_session(&user.id, &user.email, &session_key)
+        .await
+        .expect("create fresh session");
+
+    let resp = delete_key(&harness, &token, &session_key).await;
+    assert_eq!(resp.status, StatusCode::OK, "delete failed: {}", resp.body);
+
+    let body: Value = serde_json::from_str(&resp.body).expect("json body");
+    // Deleting the authenticator the session is bound to revokes that session.
+    assert_eq!(
+        body.get("current_session_revoked").and_then(Value::as_bool),
+        Some(true),
+        "deleting the session's own key must flag the current session revoked"
     );
 }

@@ -50,14 +50,37 @@ pub(crate) struct DeviceVerifyTemplate {
     pub error: Option<String>,
 }
 
+/// A single security key, pre-formatted for server-side rendering.
+///
+/// The created-at timestamp is formatted here so the template renders
+/// display-ready text — escaping is handled structurally by Askama, so no
+/// client-side DOM construction is needed.
+pub(crate) struct KeyDisplay {
+    pub id: String,
+    pub name: String,
+    pub device_model: Option<String>,
+    /// Human-readable registration date, e.g. "Jun 09, 2026".
+    pub created_at: String,
+}
+
 /// Key management page template (shown after OAuth callback).
 /// Authentication is via cookie, not state token in template.
+///
+/// The key list is rendered server-side via the `enroll_keys_container.html`
+/// partial (`{% include %}`); mutations (register/delete) reload the page and
+/// rename is a form POST, matching the server-rendered pattern used by the
+/// admin pages.
 #[derive(Template)]
 #[template(path = "enroll_keys.html")]
 pub(crate) struct EnrollKeysTemplate {
-    pub rp_id: String,
     /// Authentication context for header display.
     pub auth: AuthContext,
+    /// Registered keys, rendered server-side.
+    pub keys: Vec<KeyDisplay>,
+    /// Whether delete controls are shown (a user must keep at least one key).
+    pub can_delete: bool,
+    /// One-shot error message from a prior failed form POST (e.g. rename).
+    pub flash_message: Option<String>,
 }
 
 /// Success page template.
@@ -777,6 +800,29 @@ pub(crate) async fn complete_enrollment_after_identity(
 }
 
 /// Serve the key management page.
+/// Fetch the user's keys and pre-format them for server-side rendering.
+///
+/// Returns the display rows plus whether delete controls should be shown
+/// (a user must always retain at least one key).
+async fn load_keys_for_display(
+    state: &Arc<AppState>,
+    user_sub: &str,
+    authenticator_id: Option<&str>,
+) -> Result<(Vec<KeyDisplay>, bool), ServiceError> {
+    let keys = key_svc::list_keys_for_user(&state.store, user_sub, authenticator_id).await?;
+    let can_delete = keys.len() > 1;
+    let display = keys
+        .into_iter()
+        .map(|k| KeyDisplay {
+            id: k.id,
+            name: k.name,
+            device_model: k.device_model,
+            created_at: k.created_at.strftime("%b %d, %Y").to_string(),
+        })
+        .collect();
+    Ok((display, can_delete))
+}
+
 /// GET /enroll/keys
 /// Authentication is via session cookie (set by oidc_callback).
 pub(crate) async fn enroll_keys_page(
@@ -793,6 +839,19 @@ pub(crate) async fn enroll_keys_page(
                 "enroll_keys_page: found valid session for {}",
                 redact_email(&email)
             );
+
+            // Render the key list server-side.
+            let (keys, can_delete) =
+                match load_keys_for_display(&state, &token.sub, token.authenticator_id.as_deref())
+                    .await
+                {
+                    Ok(result) => result,
+                    Err(err) => {
+                        tracing::error!(error = ?err, "enroll_keys_page: failed to load keys");
+                        return err.into_response();
+                    }
+                };
+
             // Look up user to check org membership
             let (has_org, is_org_admin) = match db::get_user_by_id(&state.store, &token.sub).await {
                 Ok(Some(user)) => (user.org_id.is_some(), user.is_org_admin),
@@ -805,11 +864,24 @@ pub(crate) async fn enroll_keys_page(
                 has_org,
                 is_org_admin,
             };
-            EnrollKeysTemplate {
-                rp_id: state.config().rp_id.clone(),
-                auth,
-            }
-            .into_response()
+
+            // Consume any flash error set by a prior failed form POST (rename),
+            // expiring the cookie in the response — the PRG pattern used by the
+            // admin pages. Scoped to the keys path so admin flashes never
+            // surface (or get cleared) here.
+            let flash_message = super::admin::flash::read(&jar).err;
+            let jar = super::admin::flash::clear_at(jar, super::admin::flash::KEYS_PATH);
+
+            (
+                jar,
+                EnrollKeysTemplate {
+                    auth,
+                    keys,
+                    can_delete,
+                    flash_message,
+                },
+            )
+                .into_response()
         }
         Err(err) => {
             tracing::warn!(

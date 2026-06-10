@@ -444,6 +444,10 @@ pub(crate) async fn delete_key(
         key_svc::KEY_DELETE_MAX_AGE_SECS,
     )?;
 
+    // Whether the deleted key is the authenticator the current session is
+    // bound to (browser uses this to decide whether to re-authenticate).
+    let current_session_revoked = token.authenticator_id.as_deref() == Some(key_id.as_str());
+
     let (key_name, sessions_revoked) =
         key_svc::delete_key(&state.store, &token.sub, &key_id).await?;
 
@@ -453,6 +457,7 @@ pub(crate) async fn delete_key(
     Ok(Json(DeleteKeyResponse {
         message: format!("Key '{}' has been deleted", key_name),
         sessions_revoked,
+        current_session_revoked,
     }))
 }
 
