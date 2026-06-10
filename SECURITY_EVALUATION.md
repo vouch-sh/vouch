@@ -98,7 +98,7 @@ compatibility.
 
 ### P2 — Medium
 
-#### P2.1 Agent IPC peer-credential check fails open
+#### P2.1 Agent IPC peer-credential check fails open — RESOLVED
 
 `crates/vouch-agent/src/server.rs:94-97`
 
@@ -120,7 +120,7 @@ platforms where retrieval is reliable; log at `warn` and emit a
 `ConnectionRejected` audit event (the audit plumbing already exists at
 `server.rs:86-90`).
 
-#### P2.2 Localhost origin relaxation compiled into production WebAuthn verification
+#### P2.2 Localhost origin relaxation compiled into production WebAuthn verification — RESOLVED
 
 `crates/vouch-server/src/crypto/webauthn_verify.rs:320-343`
 
@@ -136,7 +136,7 @@ is logged only at `debug`.
 config flag (or `#[cfg(debug_assertions)]`), and raise the log to `warn`
 so any production use is visible.
 
-#### P2.3 Certification test endpoint enabled by a runtime environment variable
+#### P2.3 Certification test endpoint enabled by a runtime environment variable — HARDENED
 
 `crates/vouch-server/src/infra/router.rs:140-157`
 
@@ -150,7 +150,7 @@ the guard.
 excluded from release builds; at minimum, refuse to enable it when TLS or
 other production-indicating config is present.
 
-#### P2.4 Fragile `innerHTML` string-building in UI JavaScript
+#### P2.4 Fragile `innerHTML` string-building in UI JavaScript — RESOLVED
 
 `crates/vouch-server/static/js/keys.js:99-116`
 
@@ -163,7 +163,7 @@ from stored XSS via user-controlled key names. The same pattern appears in
 **Remediation:** migrate to `createElement`/`textContent` DOM
 construction so escaping is structural rather than per-call-site.
 
-#### P2.5 No mechanical negative-auth coverage of API routes
+#### P2.5 No mechanical negative-auth coverage of API routes — RESOLVED
 
 Individual SCIM, admin, and OIDC handlers verify authentication correctly,
 but the audit could not mechanically prove that **every** route under
@@ -209,7 +209,7 @@ of attacker-influenceable encodings warrants a `cargo-fuzz` target — or
 migration to the `der` crate, which now supports indefinite-length
 encoding.
 
-#### P3.5 Counter-regression events should reach the audit trail
+#### P3.5 Counter-regression events should reach the audit trail — RESOLVED
 
 When P1.1's check fires, the result is an error returned to the client.
 A failed clone-detection check is a high-signal security event and should
