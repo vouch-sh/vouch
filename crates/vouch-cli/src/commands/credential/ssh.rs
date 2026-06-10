@@ -47,7 +47,7 @@ pub(crate) fn default_key_path() -> Result<PathBuf> {
 /// Generate a new Ed25519 SSH keypair if it doesn't exist.
 /// Returns what action was taken (loaded existing vs generated new).
 pub(crate) fn ensure_keypair(key_path: &Path) -> Result<KeypairAction> {
-    let pub_path = key_path.with_extension("pub");
+    let pub_path = key_path.with_added_extension("pub");
 
     if key_path.exists() && pub_path.exists() {
         // Load existing public key
@@ -348,7 +348,7 @@ pub(crate) async fn run(server: &str, key_path: Option<&str>, force: bool) -> Re
         println!("Created: {}", result.key_path.display());
         println!(
             "Created: {}",
-            result.key_path.with_extension("pub").display()
+            result.key_path.with_added_extension("pub").display()
         );
     }
 

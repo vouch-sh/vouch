@@ -421,7 +421,7 @@ impl Config {
     #[cfg(unix)]
     pub(crate) fn modify(f: impl FnOnce(&mut Config)) -> Result<()> {
         let path = Self::config_path()?;
-        let lock_path = path.with_extension("lock");
+        let lock_path = path.with_added_extension("lock");
 
         if let Some(parent) = lock_path.parent() {
             fs::create_dir_all(parent)
@@ -443,7 +443,9 @@ impl Config {
                 std::fs::set_permissions(&lock_path, std::fs::Permissions::from_mode(0o600));
         }
 
-        crate::utils::flock_exclusive(&lock_file).context("failed to acquire config file lock")?;
+        lock_file
+            .lock()
+            .context("failed to acquire config file lock")?;
 
         let mut config = Self::load()?;
         f(&mut config);

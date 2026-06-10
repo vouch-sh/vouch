@@ -112,7 +112,7 @@ pub fn write_pid_file() -> Result<()> {
     let pid = process::id();
 
     // Write to a temp file in the same directory, then rename atomically
-    let tmp_path = pid_path.with_extension("tmp");
+    let tmp_path = pid_path.with_added_extension("tmp");
     let mut file = fs::File::create(&tmp_path)
         .map_err(|e| AgentError::Config(format!("Failed to create temp PID file: {e}")))?;
 

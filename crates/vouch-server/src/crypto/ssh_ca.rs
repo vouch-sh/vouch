@@ -174,7 +174,7 @@ impl SshCa {
         );
 
         // Also save public key alongside private key for convenience
-        let pub_path = path.with_extension("pub");
+        let pub_path = path.with_added_extension("pub");
         let pub_key_str = format!(
             "{} {}\n",
             private_key

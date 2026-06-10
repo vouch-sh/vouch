@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Vouch is a hardware-backed authentication system that issues short-lived credentials after FIDO2 verification with a YubiKey. The core principle: **no credential issuance without human presence proof**.
+Vouch is a hardware-backed authentication system that issues short-lived credentials after FIDO2 verification with a YubiKey. The core principle: **no credential issuance without human presence proof**. Vouch is OpenID Certified for the FAPI 2.0 OP Security Profile (including message signing).
 
 ## Architecture Quick Reference
 
@@ -15,7 +15,9 @@ vouch/
 │   ├── vouch-agent/      # Background daemon for session/cert management (Apache-2.0/MIT)
 │   ├── vouch-server/     # Auth server with OIDC provider, SSH CA (Apache-2.0/MIT)
 │   ├── vouch-common/     # Shared types, FIDO2 helpers, API client (Apache-2.0/MIT)
+│   ├── vouch-httpsig/    # RFC 9421 HTTP Message Signatures + RFC 9530 Content-Digest
 │   └── vouch-tests/      # Integration + property-based tests
+├── fuzz/                 # libfuzzer targets: BER, attestation objects, COSE keys, HTTP sigs
 ├── docs/                 # mdBook documentation (build with `make docs-build`)
 └── packaging/            # AMI and post-install scripts
 ```
@@ -33,6 +35,8 @@ vouch/
 6. `vouch setup eks` → configure kubeconfig for EKS (chains through `vouch credential aws` → `aws eks get-token`)
 7. Native tools (ssh, aws, kubectl) call vouch helpers transparently via `credential_process`
 
+Beyond ssh/aws/eks, credential helpers and setup commands cover many more integrations (kubernetes, github, docker, cargo, codeartifact, codecommit, pip, rds, redshift, ssm, and anthropic/openai via workload identity federation) — see `crates/vouch-cli/src/commands/credential/` and `setup/`.
+
 ## Server Architecture
 
 The server has two distinct route groups sharing `AppState`:
@@ -45,6 +49,8 @@ When TLS is configured, a separate HTTP→HTTPS redirect router runs on port 80 
 **AppState** holds: `Pool` (db), `ArcSwap<ServerConfig>` (lock-free config reload), `Webauthn`, optional `SshCa`, optional `GitHubApp`, `DpopState`, and `OidcSigningKey`.
 
 **Services layer** (`crates/vouch-server/src/services/`): Business logic called by handlers — `oidc/` (authorization, token issuance, DPoP, discovery, JWKS, token exchange), `integrations/` (AWS, GitHub App/OAuth/webhooks), `auth.rs` (WebAuthn verification).
+
+**HTTP message signing:** Requests to `/v1/*` may carry RFC 9421 signatures. The generic signing/verification middleware (with an async `KeyResolver` trait) lives in `vouch-httpsig`; the server-side resolver is `infra/httpsig.rs` (extracts `client_id` from the JWT, resolves P-256 public keys from OAuth client JWKS stored at RFC 7591 dynamic registration). Enforcement is optional: verify when `Signature-Input` is present, pass through otherwise. The CLI signing adapter is `crates/vouch-cli/src/fapi/httpsig.rs`.
 
 ## Build & Development Commands
 
@@ -66,15 +72,28 @@ make run-agent             # Agent daemon in foreground
 make test                  # Unit tests (cargo test)
 make test-integration      # Integration tests (cargo test --package vouch-tests)
 cargo test test_name -- --nocapture  # Single test with output
+make test-fuzz             # Fuzz targets, 60s each (requires nightly)
+make test-coverage         # Coverage report (requires cargo-llvm-cov)
+make test-mutants          # Mutation testing (requires cargo-mutants)
+
+# Supply chain
+make audit                 # cargo-deny: advisories, licenses, bans
 
 # CSS (requires tailwindcss CLI)
 make css-dev               # Watch mode
 make css-build             # Minified production build
 
+# Docs (mdBook)
+make docs-build
+make docs-serve
+
 # Docker
 make docker-build
 make docker-run
+make bake-all              # musl binaries via Docker Bake (also bake-cli, bake-server)
 ```
+
+**Running the server locally:** at least one upstream IdP must be configured via `VOUCH_IDPS` / `VOUCH_IDP_<SLUG>_*` (the server refuses to start without one), plus `VOUCH_RP_ID`, `VOUCH_JWT_SECRET`, and `VOUCH_DATABASE_URL`. See `AGENTS.md` for a minimum viable command and `docs/src/reference/environment-variables.md` for the full reference.
 
 **Toolchain:** Rust 1.96.0, edition 2024 (pinned in `rust-toolchain.toml`). Max line width 100 chars (`.rustfmt.toml`). Release profile uses `lto = true`, `codegen-units = 1`, `opt-level = "z"`, `panic = "abort"`, `strip = true`.
 
@@ -247,8 +266,10 @@ cargo test --features yubikey-tests -- --ignored
 | FIDO2 types | `crates/vouch-common/src/fido2_types.rs` |
 | Server handlers | `crates/vouch-server/src/handlers/` |
 | Server services | `crates/vouch-server/src/services/` (oidc/, integrations/) |
-| Crypto primitives | `crates/vouch-server/src/crypto/` (jwt.rs, ssh_ca.rs, webauthn_verify.rs, tpm_decrypt.rs, ber.rs, pem.rs) |
-| Server infra | `crates/vouch-server/src/infra/` (tls.rs, cleanup.rs, s3_config.rs, encrypt_config.rs) |
+| Crypto primitives | `crates/vouch-server/src/crypto/` (jwt.rs, ssh_ca.rs, webauthn_verify.rs, kms_signer.rs, cose.rs, attestation_chain.rs, document_crypto.rs, tpm_decrypt.rs, ber.rs, pem.rs) |
+| Server infra | `crates/vouch-server/src/infra/` (router.rs, tls.rs, rate_limit.rs, security_headers.rs, mtls_listener.rs, httpsig.rs, cleanup.rs, s3_config.rs) |
+| HTTP message signatures | `crates/vouch-httpsig/` (server resolver: `infra/httpsig.rs`, CLI adapter: `fapi/httpsig.rs`) |
+| Fuzz targets | `fuzz/fuzz_targets/` |
 | Database modules | `crates/vouch-server/src/db/` (pool.rs, users.rs, sessions.rs, etc.) |
 | HTML templates | `crates/vouch-server/templates/` |
 | CSS source | `crates/vouch-server/styles/input.css` |
