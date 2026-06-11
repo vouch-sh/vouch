@@ -593,6 +593,10 @@ pub(crate) async fn oidc_callback(
     complete_enrollment_after_identity(&state, &stored_state, identity, oidc_state_claim).await
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "linear enrollment completion sequence after IdP identity"
+)]
 pub(crate) async fn complete_enrollment_after_identity(
     state: &Arc<AppState>,
     stored_state: &db::OidcState,

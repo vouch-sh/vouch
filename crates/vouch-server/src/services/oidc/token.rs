@@ -254,6 +254,10 @@ pub struct IdTokenClaims {
 ///
 /// # Errors
 /// Returns `ServiceError` for invalid requests.
+#[expect(
+    clippy::too_many_lines,
+    reason = "linear authorization-code exchange sequence"
+)]
 pub(crate) async fn exchange_authorization_code(
     state: &Arc<AppState>,
     params: AuthCodeExchangeParams<'_>,

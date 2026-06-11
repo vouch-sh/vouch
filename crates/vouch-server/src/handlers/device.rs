@@ -170,6 +170,10 @@ pub(crate) async fn device_code(
 /// - `expired_token` — the device code has expired
 /// - `access_denied` — the user denied the authorization request
 /// - A successful token response when the user has authorized
+#[expect(
+    clippy::too_many_lines,
+    reason = "linear RFC 8628 device token grant validation sequence"
+)]
 pub(crate) async fn device_token(
     State(state): State<Arc<AppState>>,
     Json(req): Json<DeviceTokenRequest>,

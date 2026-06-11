@@ -74,6 +74,10 @@ pub(crate) async fn list_applications_api(
 
 /// Create a new application (API).
 /// POST /api/v1/applications
+#[expect(
+    clippy::too_many_lines,
+    reason = "dominated by the exhaustive CreateOAuthClientParams literal"
+)]
 pub(crate) async fn create_application_api(
     method: Method,
     uri: OriginalUri,
@@ -313,6 +317,10 @@ pub(crate) async fn get_application_api(
 #[expect(
     clippy::too_many_arguments,
     reason = "axum handler signature: extractors are positional parameters"
+)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "linear merge of PATCH fields with the existing client record"
 )]
 pub(crate) async fn update_application_api(
     method: Method,

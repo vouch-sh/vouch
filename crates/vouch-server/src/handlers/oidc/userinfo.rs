@@ -69,6 +69,7 @@ struct UserInfoForm {
 /// Supports `Bearer` and `DPoP` authorization schemes (RFC 9449 Section 7.1),
 /// and access token in POST body (RFC 6750 Section 2.2, Bearer only).
 /// Enforces mTLS certificate binding per RFC 8705 Section 3.
+#[expect(clippy::too_many_lines, reason = "linear OIDC userinfo claim assembly")]
 pub(crate) async fn userinfo(
     State(state): State<Arc<AppState>>,
     method: Method,

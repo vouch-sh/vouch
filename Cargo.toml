@@ -113,6 +113,11 @@ map_unwrap_or = "deny"
 # Silent drops of #[must_use] (mostly Result) hide real failures
 let_underscore_must_use = "deny"
 
+# Functions over 150 LoC (threshold in .clippy.toml) need an explicit
+# #[expect(..., reason)] — ratchet against monolithic functions. warn is
+# enforced as deny by `make lint` (-D warnings).
+too_many_lines = "warn"
+
 module_name_repetitions = "allow"
 similar_names = "allow"
 

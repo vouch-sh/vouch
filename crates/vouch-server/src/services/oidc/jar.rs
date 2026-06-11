@@ -319,6 +319,7 @@ fn parse_request_object_header(
 /// If `query_params` are provided, validates that any overlapping parameters
 /// (`client_id`, `response_type`, `scope`) match between query and JWT
 /// (FAPI 2.0 Section 5.3.2).
+#[expect(clippy::too_many_lines, reason = "single-pass RFC 9101 JAR validation")]
 pub async fn validate_request_object(
     state: &Arc<AppState>,
     request_jwt: &str,

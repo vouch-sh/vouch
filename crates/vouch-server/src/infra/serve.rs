@@ -27,6 +27,10 @@ use super::startup::ServerComponents;
 /// # Errors
 ///
 /// Returns an error if the server fails to bind or encounters a fatal error.
+#[expect(
+    clippy::too_many_lines,
+    reason = "sequential listener, TLS, and shutdown wiring"
+)]
 pub async fn serve(components: ServerComponents, app: Router) -> Result<()> {
     let ServerComponents {
         config,

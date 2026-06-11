@@ -719,6 +719,10 @@ impl ServerConfig {
     /// # Runtime Updates
     /// Only TLS certificates can be updated at runtime (for hot-reload).
     /// All other configuration changes require a server restart.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "field-by-field merge of every S3-overridable config option"
+    )]
     pub fn merge_s3_config(
         &mut self,
         s3: &S3Config,

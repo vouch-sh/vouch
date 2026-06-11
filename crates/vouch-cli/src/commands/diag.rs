@@ -58,6 +58,10 @@ struct DiagJson {
 }
 
 /// Run diagnostic test of YubiKey registration + authentication + verification.
+#[expect(
+    clippy::too_many_lines,
+    reason = "sequential FIDO2 diagnostic report; each phase prints independent results"
+)]
 pub(crate) fn run(args: DiagArgs) -> Result<()> {
     let json = args.json;
 

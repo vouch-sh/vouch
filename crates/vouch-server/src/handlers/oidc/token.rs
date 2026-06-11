@@ -552,6 +552,10 @@ async fn resolve_non_jwt_auth(
 }
 
 /// Handle authorization code grant.
+#[expect(
+    clippy::too_many_lines,
+    reason = "linear RFC 6749 section 4.1.3 authorization-code grant validation"
+)]
 async fn handle_authorization_code_grant(
     State(state): State<Arc<AppState>>,
     client_cert: crate::handlers::extractors::OptionalClientCert,
