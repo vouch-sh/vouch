@@ -288,63 +288,35 @@ vulnerability was found. The headline new item (SP1) is an unauthenticated
 **blind** SSRF surface that is reachable but constrained (no response
 reflection, and IMDSv2 on the shipped AMI blocks instance-credential theft).
 
-### SP1 — High/Medium: SSRF via server-side `jwks_uri` / `request_uri` fetch with no private-network blocklist
+### SP1 — High/Medium: SSRF via server-side `jwks_uri` / `request_uri` fetch with no private-network blocklist — RESOLVED
 
 The server makes outbound HTTPS requests to URLs that an **unauthenticated**
-caller can control, and the only egress guard is an HTTPS-scheme check plus a
-256 KiB response cap. There is no rejection of loopback, private, link-local,
-unique-local, or multicast destinations (a grep for `169.254` / `is_private` /
-`is_blocked` finds no server-side egress filtering).
+caller can control, and the only egress guard was an HTTPS-scheme check plus a
+256 KiB response cap. There was no rejection of loopback, private, link-local,
+unique-local, or multicast destinations.
 
 Attack-reachable fetch paths:
 
 - **Client `jwks_uri`.** `POST /oauth/register` is unauthenticated RFC 7591
-  dynamic client registration (`crates/vouch-server/src/infra/router.rs:218-239`).
-  A registrant can store an arbitrary HTTPS `jwks_uri`; the server later fetches
-  it while *verifying* a `private_key_jwt` client assertion — i.e. **before**
-  client authentication succeeds:
-  `services/oidc/jwt_bearer/client_auth.rs:204` → `resolve_client_jwks`
-  (`jwt_bearer/jwks.rs:64`) → `fetch_and_parse_jwks` (`jwks.rs:188`) →
-  `fetch_jwks` (`jwks.rs:131`, `http_client.get(uri).send()` at `jwks.rs:140`).
-  The HTTPS-only enforcement is exercised by tests (`jwks.rs:881-909`) but does
-  not constrain the host.
-- **JAR `request_uri`.** `services/oidc/jar.rs:173` fetches a request-object URI
-  via `http_client.get(uri)`. When a client's pre-registered allowlist is unset
-  (`OAuthClient.request_uris == None`), *any* HTTPS `request_uri` is accepted
-  (`db/oauth.rs:72-76`).
+  dynamic client registration. A registrant could store an arbitrary HTTPS
+  `jwks_uri`; the server later fetches it while *verifying* a `private_key_jwt`
+  client assertion — i.e. **before** client authentication succeeds.
+- **JAR `request_uri`.** When a client's pre-registered allowlist was unset
+  (`OAuthClient.request_uris == None`), *any* HTTPS `request_uri` was accepted.
 
-```rust
-// jwt_bearer/jwks.rs — only scheme + size are checked, never the host/IP
-async fn fetch_jwks(uri: &str, http_client: &reqwest::Client) -> ServiceResult<String> {
-    // ... HTTPS-scheme check ...
-    let response = http_client.get(uri).send().await /* ... */;
-    // ... 256 KiB content-length / body cap ...
-}
-```
-
-A related fetch, `fetch_discovery` (`services/idp/oidc.rs:295`), retrieves the
-operator-configured `issuer_url` / SAML `metadata_url`. It is **operator**
-controlled rather than attacker controlled (lower severity), but it shares the
-same missing egress guard and should be covered by the same fix.
-
-**Severity:** Medium. The SSRF is blind (no response body is returned to the
-caller; only coarse success/failure and timing leak). IMDSv2 enforced on the
-shipped AMI prevents the classic `169.254.169.254` credential-theft pivot, but
-internal-service reachability, port/host scanning of the VPC, and link-local
-ranges remain. Severity rises toward High in any deployment where IMDSv1 is
-reachable or where the server sits adjacent to sensitive internal services.
-
-**Remediation:** introduce a single egress-policy helper that resolves the
-target host and rejects loopback (`127.0.0.0/8`, `::1`), private
-(`10/8`, `172.16/12`, `192.168/16`, `fc00::/7`), link-local
-(`169.254/16`, `fe80::/10`), multicast, and unspecified addresses; apply it in
-`fetch_jwks`, the `jar.rs` `request_uri` fetch, and `fetch_discovery`. Prefer a
-resolve → validate → connect-to-pinned-IP flow (e.g. a custom
-`reqwest`/hyper resolver) so a hostname cannot re-resolve to a blocked address
-between validation and connection (DNS-rebinding TOCTOU). Additionally enforce
-the same check at write time in the registration `jwks_uri` / `request_uris`
-validators for fail-fast operator feedback. A loopback exception, gated the same
-way as the existing dev-mode relaxations, may be retained for local testing.
+**Resolution:** introduced `infra::ssrf::assert_public_destination`, which
+parses the URL host and — resolving hostnames through the same system resolver
+the `reqwest` client uses (`infra::dns::resolve_host_ips`) — rejects any
+destination that maps to a non-global address (loopback, RFC 1918, link-local,
+CGNAT, ULA, multicast, …). The non-global classifier (`is_non_global`) was
+moved from `geo.rs` into the new `ssrf` module for reuse. The guard is wired
+into `fetch_jwks` and the JAR `fetch_request_object`. An `allow_loopback` flag
+(`!ServerConfig::tls_configured()`, mirroring the WebAuthn `allow_localhost_origin`
+relaxation) permits loopback destinations in local development so a localhost
+server + localhost client still work; private and link-local ranges stay blocked
+even in dev. Operator-configured upstream IdP discovery (`fetch_discovery`) is
+intentionally not gated (trusted operator input, may legitimately target a
+private/internal IdP).
 
 ### SP2 — Low/Medium: AMI build downloads `coldsnap` binary unpinned and pipes it into tar
 
@@ -432,6 +404,6 @@ audits the effort:
 
 ### Suggested order of work (second pass)
 
-1. **SP1** — add the shared SSRF egress guard; highest-value new item.
+1. ~~**SP1** — add the shared SSRF egress guard; highest-value new item.~~ **RESOLVED**
 2. **SP2–SP4** — small, contained AMI/packaging hardening.
 3. **SP5** — documentation plus an optional tenant-allowlist config.

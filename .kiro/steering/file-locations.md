@@ -16,7 +16,7 @@
 | Server handlers | `crates/vouch-server/src/handlers/` |
 | Server services | `crates/vouch-server/src/services/` (oidc/, integrations/) |
 | Crypto primitives | `crates/vouch-server/src/crypto/` (jwt.rs, ssh_ca.rs, webauthn_verify.rs, tpm_decrypt.rs, ber.rs, pem.rs) |
-| Server infra | `crates/vouch-server/src/infra/` (tls.rs, cleanup.rs, s3_config.rs, generate_document_key.rs) |
+| Server infra | `crates/vouch-server/src/infra/` (tls.rs, cleanup.rs, s3_config.rs, generate_document_key.rs, ssrf.rs, dns.rs) |
 | Database modules | `crates/vouch-server/src/db/` (pool.rs, users.rs, sessions.rs, etc.) |
 | DB migrations | `crates/vouch-server/migrations/{sqlite,postgres}/` |
 | HTML templates | `crates/vouch-server/templates/` |
