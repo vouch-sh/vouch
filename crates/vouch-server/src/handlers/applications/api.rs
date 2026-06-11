@@ -6,8 +6,8 @@
 
 use crate::AppState;
 use crate::db::{
-    self, AccessScope, CreateOAuthClientParams, FapiProfile, JwsAlgorithm, OAuthClientType,
-    OAuthEventType, RegistrationSource, TokenEndpointAuthMethod, UpdateOAuthClientParams,
+    self, AccessScope, CreateOAuthClientParams, FapiProfile, JwsAlgorithm, OAuthEventType,
+    RegistrationSource, TokenEndpointAuthMethod, UpdateOAuthClientParams,
 };
 use axum::extract::OriginalUri;
 use axum::http::Method;
@@ -24,13 +24,16 @@ use super::types::{
     CreateApplicationResponse, ListApplicationsResponse, ListSecretsResponse, SecretInfo,
     UpdateApplicationRequest,
 };
-use super::{MAX_ACTIVE_SECRETS, generate_client_secret, validate_redirect_uris};
+use super::validate::{
+    CreateAppInput, UpdateAppInput, validate_create_application, validate_update_fapi,
+    validate_update_format,
+};
+use super::{MAX_ACTIVE_SECRETS, generate_client_secret};
 use crate::handlers::extractors::OptionalClientCert;
 use crate::handlers::hash_token;
 use crate::handlers::session::extract_resource_token;
 use crate::handlers::{ValidPath, ValidUuid};
 use crate::services::error::ServiceError;
-use crate::services::oidc::ResourceUri;
 
 /// List user's applications (API).
 /// GET /api/v1/applications
@@ -81,133 +84,23 @@ pub(crate) async fn create_application_api(
     Json(req): Json<CreateApplicationRequest>,
 ) -> Result<Json<CreateApplicationResponse>, ServiceError> {
     // ── Pure format validation first — no DB cost for malformed requests ──
-    let name = req.name.trim();
-    if name.is_empty() {
-        return Err(ServiceError::api(
-            StatusCode::BAD_REQUEST,
-            "invalid_name",
-            "Application name is required",
-        ));
-    }
-
-    let app_type = req
-        .application_type
-        .parse::<OAuthClientType>()
-        .map_err(|_| {
-            ServiceError::api(
-                StatusCode::BAD_REQUEST,
-                "invalid_type",
-                "Invalid application type. Must be: web, native, spa, or service",
-            )
-        })?;
-
-    // For non-service apps, at least one redirect URI is required
-    if !matches!(app_type, OAuthClientType::Service) && req.redirect_uris.is_empty() {
-        return Err(ServiceError::api(
-            StatusCode::BAD_REQUEST,
-            "invalid_redirect_uris",
-            "At least one redirect URI is required",
-        ));
-    }
-
-    // Validate redirect URIs are valid URLs
-    if let Err(invalid) = validate_redirect_uris(&req.redirect_uris) {
-        return Err(ServiceError::api(
-            StatusCode::BAD_REQUEST,
-            "invalid_redirect_uris",
-            format!(
-                "Invalid redirect URI(s): {}. Each URI must be a valid http:// or https:// URL.",
-                invalid.join(", ")
-            ),
-        ));
-    }
-
     // RFC 8707: Resource URIs default to empty if not provided.
     let resource_uris = req.resource_uris.as_deref().unwrap_or(&[]);
 
-    // Validate resource URIs per RFC 8707 (absolute URI, no fragment).
-    for uri_str in resource_uris {
-        if let Err(e) = ResourceUri::parse(uri_str) {
-            return Err(ServiceError::api(
-                StatusCode::BAD_REQUEST,
-                "invalid_resource_uri",
-                format!("Invalid resource URI '{uri_str}': {e}"),
-            ));
-        }
-    }
-
-    // Determine FAPI profile
-    let is_fapi = req
-        .fapi_profile
-        .as_deref()
-        .is_some_and(|p| p == "fapi2_security");
-
-    // FAPI validation: must be a confidential client type
-    if is_fapi && !matches!(app_type, OAuthClientType::Web | OAuthClientType::Service) {
-        return Err(ServiceError::api(
-            StatusCode::BAD_REQUEST,
-            "invalid_fapi_profile",
-            "FAPI 2.0 Security Profile requires a confidential client type (web or service)",
-        ));
-    }
-
-    // FAPI validation: require JWKS or JWKS URI
-    let jwks_trimmed_str = req.jwks.as_deref().map(str::trim).filter(|s| !s.is_empty());
-    let jwks_uri_trimmed = req
-        .jwks_uri
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty());
-
-    if is_fapi && jwks_trimmed_str.is_none() && jwks_uri_trimmed.is_none() {
-        return Err(ServiceError::api(
-            StatusCode::BAD_REQUEST,
-            "missing_jwks",
-            "FAPI 2.0 requires jwks or jwks_uri for private_key_jwt authentication",
-        ));
-    }
-
-    // Validate and parse JWKS JSON if provided
-    let jwks_value = if let Some(jwks_json) = jwks_trimmed_str {
-        match serde_json::from_str::<serde_json::Value>(jwks_json) {
-            Ok(val) => {
-                if !val
-                    .get("keys")
-                    .is_some_and(|k| k.is_array() && !k.as_array().is_some_and(|a| a.is_empty()))
-                {
-                    return Err(ServiceError::api(
-                        StatusCode::BAD_REQUEST,
-                        "invalid_jwks",
-                        "JWKS must be a JSON object with a non-empty \"keys\" array",
-                    ));
-                }
-                Some(val)
-            }
-            Err(_) => {
-                return Err(ServiceError::api(
-                    StatusCode::BAD_REQUEST,
-                    "invalid_jwks",
-                    "JWKS must be valid JSON",
-                ));
-            }
-        }
-    } else {
-        None
-    };
-
-    // Validate JWKS URI if provided
-    if let Some(jwks_uri_val) = jwks_uri_trimmed {
-        match url::Url::parse(jwks_uri_val) {
-            Ok(parsed) if parsed.scheme() == "https" => {}
-            _ => {
-                return Err(ServiceError::api(
-                    StatusCode::BAD_REQUEST,
-                    "invalid_jwks_uri",
-                    "JWKS URI must be a valid https:// URL",
-                ));
-            }
-        }
-    }
+    let validated = validate_create_application(CreateAppInput {
+        name: &req.name,
+        application_type: &req.application_type,
+        redirect_uris: &req.redirect_uris,
+        resource_uris,
+        fapi_profile: req.fapi_profile.as_deref(),
+        jwks: req.jwks.as_deref(),
+        jwks_uri: req.jwks_uri.as_deref(),
+    })?;
+    let name = validated.name;
+    let app_type = validated.app_type;
+    let is_fapi = validated.is_fapi;
+    let jwks_value = validated.jwks;
+    let jwks_uri_trimmed = validated.jwks_uri;
 
     // ── Authentication — validated input is good, now check credentials ──
     let token = extract_resource_token(
@@ -432,81 +325,13 @@ pub(crate) async fn update_application_api(
     Json(req): Json<UpdateApplicationRequest>,
 ) -> Result<Json<ApplicationResponse>, ServiceError> {
     // ── Pure format validation first — no DB cost for malformed requests ──
-    // Validate request-provided redirect URIs (if any)
-    if let Some(ref uris) = req.redirect_uris
-        && let Err(invalid) = validate_redirect_uris(uris)
-    {
-        return Err(ServiceError::api(
-            StatusCode::BAD_REQUEST,
-            "invalid_redirect_uris",
-            format!(
-                "Invalid redirect URI(s): {}. Each URI must be a valid http:// or https:// URL.",
-                invalid.join(", ")
-            ),
-        ));
-    }
-
-    // Validate request-provided resource URIs (if any)
-    if let Some(ref uris) = req.resource_uris {
-        for uri_str in uris {
-            if let Err(e) = ResourceUri::parse(uri_str) {
-                return Err(ServiceError::api(
-                    StatusCode::BAD_REQUEST,
-                    "invalid_resource_uri",
-                    format!("Invalid resource URI '{uri_str}': {e}"),
-                ));
-            }
-        }
-    }
-
-    // Validate and parse JWKS JSON format if provided
-    let jwks_trimmed_str = req.jwks.as_deref().map(str::trim).filter(|s| !s.is_empty());
-    let jwks_uri_trimmed = req
-        .jwks_uri
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty());
-
-    let jwks_value = if let Some(jwks_json) = jwks_trimmed_str {
-        match serde_json::from_str::<serde_json::Value>(jwks_json) {
-            Ok(val) => {
-                if !val
-                    .get("keys")
-                    .is_some_and(|k| k.is_array() && !k.as_array().is_some_and(|a| a.is_empty()))
-                {
-                    return Err(ServiceError::api(
-                        StatusCode::BAD_REQUEST,
-                        "invalid_jwks",
-                        "JWKS must be a JSON object with a non-empty \"keys\" array",
-                    ));
-                }
-                Some(val)
-            }
-            Err(_) => {
-                return Err(ServiceError::api(
-                    StatusCode::BAD_REQUEST,
-                    "invalid_jwks",
-                    "JWKS must be valid JSON",
-                ));
-            }
-        }
-    } else {
-        None
-    };
-
-    // Validate JWKS URI format if provided
-    if let Some(jwks_uri_val) = jwks_uri_trimmed {
-        match url::Url::parse(jwks_uri_val) {
-            Ok(parsed) if parsed.scheme() == "https" => {}
-            _ => {
-                return Err(ServiceError::api(
-                    StatusCode::BAD_REQUEST,
-                    "invalid_jwks_uri",
-                    "JWKS URI must be a valid https:// URL",
-                ));
-            }
-        }
-    }
+    let validated = validate_update_format(UpdateAppInput {
+        redirect_uris: req.redirect_uris.as_deref(),
+        resource_uris: req.resource_uris.as_deref(),
+        fapi_profile: req.fapi_profile.as_deref(),
+        jwks: req.jwks.as_deref(),
+        jwks_uri: req.jwks_uri.as_deref(),
+    })?;
 
     // ── Authentication — validated input is good, now check credentials ──
     let token = extract_resource_token(
@@ -600,39 +425,11 @@ pub(crate) async fn update_application_api(
         .as_deref()
         .map_or_else(|| client.resource_uris.clone(), <[String]>::to_vec);
 
-    // Determine FAPI profile
-    let is_fapi = req
-        .fapi_profile
-        .as_deref()
-        .is_some_and(|p| p == "fapi2_security");
-
-    // FAPI validation: must be a confidential client type
-    if is_fapi
-        && !matches!(
-            client.application_type,
-            OAuthClientType::Web | OAuthClientType::Service
-        )
-    {
-        return Err(ServiceError::api(
-            StatusCode::BAD_REQUEST,
-            "invalid_fapi_profile",
-            "FAPI 2.0 Security Profile requires a confidential client type (web or service)",
-        ));
-    }
-
-    // FAPI validation: require JWKS or JWKS URI (request or existing)
-    if is_fapi
-        && jwks_value.is_none()
-        && jwks_uri_trimmed.is_none()
-        && client.jwks.is_none()
-        && client.jwks_uri.is_none()
-    {
-        return Err(ServiceError::api(
-            StatusCode::BAD_REQUEST,
-            "missing_jwks",
-            "FAPI 2.0 requires jwks or jwks_uri for private_key_jwt authentication",
-        ));
-    }
+    // FAPI rules that depend on the existing client record
+    validate_update_fapi(&validated, &client)?;
+    let is_fapi = validated.is_fapi;
+    let jwks_value = validated.jwks;
+    let jwks_uri_trimmed = validated.jwks_uri;
 
     // Compute FAPI-related values
     let fapi_profile = if is_fapi {
