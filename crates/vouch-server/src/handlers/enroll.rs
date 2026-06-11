@@ -1374,14 +1374,16 @@ pub(crate) async fn browser_register_complete(
     let user_handle = reg_state.user_id.as_bytes().to_vec();
     let authenticator_id = db::create_authenticator(
         &state.store,
-        &reg_state.user_id.to_string(),
-        &reg_state.user_email,
-        &validated.device_name,
-        &cred_id_to_store,
-        &public_key_cbor,
-        validated.aaguid.as_deref(),
-        Some(&user_handle),
-        validated.attestation_verified,
+        &db::CreateAuthenticatorParams {
+            user_id: &reg_state.user_id.to_string(),
+            user_email: &reg_state.user_email,
+            name: &validated.device_name,
+            credential_id: &cred_id_to_store,
+            public_key: &public_key_cbor,
+            aaguid: validated.aaguid.as_deref(),
+            user_handle: Some(&user_handle),
+            attestation_verified: validated.attestation_verified,
+        },
     )
     .await?;
 

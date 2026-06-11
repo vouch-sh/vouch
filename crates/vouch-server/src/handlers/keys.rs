@@ -308,14 +308,16 @@ pub(crate) async fn register_complete(
     let user_handle = reg_state.user_id.as_bytes().to_vec();
     let device_id = db::create_authenticator(
         &state.store,
-        &reg_state.user_id.to_string(),
-        &reg_state.user_name,
-        &reg_state.device_name,
-        &verified_cred_id,
-        &verified_public_key,
-        aaguid.as_deref(),
-        Some(&user_handle),
-        validated.attestation_verified,
+        &db::CreateAuthenticatorParams {
+            user_id: &reg_state.user_id.to_string(),
+            user_email: &reg_state.user_name,
+            name: &reg_state.device_name,
+            credential_id: &verified_cred_id,
+            public_key: &verified_public_key,
+            aaguid: aaguid.as_deref(),
+            user_handle: Some(&user_handle),
+            attestation_verified: validated.attestation_verified,
+        },
     )
     .await?;
 

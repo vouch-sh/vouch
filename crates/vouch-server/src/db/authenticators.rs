@@ -69,34 +69,35 @@ pub struct AuthenticatorWithUser {
     pub user: User,
 }
 
-/// Create a new authenticator.
+/// Parameters for creating a new authenticator.
 ///
 /// `user_email` is denormalized into the document to eliminate JOINs.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "authenticator record requires all denormalized fields"
-)]
+pub struct CreateAuthenticatorParams<'a> {
+    pub user_id: &'a str,
+    pub user_email: &'a str,
+    pub name: &'a str,
+    pub credential_id: &'a [u8],
+    pub public_key: &'a [u8],
+    pub aaguid: Option<&'a str>,
+    pub user_handle: Option<&'a [u8]>,
+    pub attestation_verified: bool,
+}
+
+/// Create a new authenticator.
 pub async fn create_authenticator(
     store: &DocumentStore,
-    user_id: &str,
-    user_email: &str,
-    name: &str,
-    credential_id: &[u8],
-    public_key: &[u8],
-    aaguid: Option<&str>,
-    user_handle: Option<&[u8]>,
-    attestation_verified: bool,
+    params: &CreateAuthenticatorParams<'_>,
 ) -> Result<String> {
     let doc = AuthenticatorDoc {
-        user_id: user_id.to_string(),
-        user_email: user_email.to_string(),
-        name: name.to_string(),
-        credential_id: URL_SAFE_NO_PAD.encode(credential_id),
-        public_key: URL_SAFE_NO_PAD.encode(public_key),
+        user_id: params.user_id.to_string(),
+        user_email: params.user_email.to_string(),
+        name: params.name.to_string(),
+        credential_id: URL_SAFE_NO_PAD.encode(params.credential_id),
+        public_key: URL_SAFE_NO_PAD.encode(params.public_key),
         counter: 0,
-        aaguid: aaguid.map(String::from),
-        user_handle: user_handle.map(|h| URL_SAFE_NO_PAD.encode(h)),
-        attestation_verified,
+        aaguid: params.aaguid.map(String::from),
+        user_handle: params.user_handle.map(|h| URL_SAFE_NO_PAD.encode(h)),
+        attestation_verified: params.attestation_verified,
     };
     let result = store.insert(&doc).await?;
     Ok(result.id)

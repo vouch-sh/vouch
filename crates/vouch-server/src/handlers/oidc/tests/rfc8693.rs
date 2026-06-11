@@ -968,14 +968,16 @@ async fn test_rfc8693_id_token_carries_hardware_aaguid() {
     let aaguid = "ee882879-721c-4913-9775-3dfcce97072a";
     let auth_id = crate::db::create_authenticator(
         &state.store,
-        &user.id,
-        &user.email,
-        "YubiKey 5",
-        format!("cred-{}", uuid::Uuid::now_v7()).as_bytes(),
-        &[0u8; 32],
-        Some(aaguid),
-        Some(user.id.as_bytes()),
-        true,
+        &crate::db::CreateAuthenticatorParams {
+            user_id: &user.id,
+            user_email: &user.email,
+            name: "YubiKey 5",
+            credential_id: format!("cred-{}", uuid::Uuid::now_v7()).as_bytes(),
+            public_key: &[0u8; 32],
+            aaguid: Some(aaguid),
+            user_handle: Some(user.id.as_bytes()),
+            attestation_verified: true,
+        },
     )
     .await
     .expect("create authenticator with aaguid");
@@ -1024,14 +1026,16 @@ async fn test_rfc8693_id_token_uses_session_aaguid_after_rotation() {
     let original_aaguid = "ee882879-721c-4913-9775-3dfcce97072a";
     let auth_id = crate::db::create_authenticator(
         &state.store,
-        &user.id,
-        &user.email,
-        "YubiKey 5 (original)",
-        format!("cred-{}", uuid::Uuid::now_v7()).as_bytes(),
-        &[0u8; 32],
-        Some(original_aaguid),
-        Some(user.id.as_bytes()),
-        true,
+        &crate::db::CreateAuthenticatorParams {
+            user_id: &user.id,
+            user_email: &user.email,
+            name: "YubiKey 5 (original)",
+            credential_id: format!("cred-{}", uuid::Uuid::now_v7()).as_bytes(),
+            public_key: &[0u8; 32],
+            aaguid: Some(original_aaguid),
+            user_handle: Some(user.id.as_bytes()),
+            attestation_verified: true,
+        },
     )
     .await
     .expect("create original authenticator");

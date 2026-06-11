@@ -500,14 +500,16 @@ pub async fn create_test_user_in_org(
 pub async fn create_test_authenticator(store: &DocumentStore, user_id: &str) -> String {
     crate::db::create_authenticator(
         store,
-        user_id,
-        "test@example.com",
-        "Test Key",
-        format!("test-cred-{}", uuid::Uuid::now_v7()).as_bytes(),
-        &[0u8; 32],
-        None,
-        Some(user_id.as_bytes()),
-        false,
+        &crate::db::CreateAuthenticatorParams {
+            user_id,
+            user_email: "test@example.com",
+            name: "Test Key",
+            credential_id: format!("test-cred-{}", uuid::Uuid::now_v7()).as_bytes(),
+            public_key: &[0u8; 32],
+            aaguid: None,
+            user_handle: Some(user_id.as_bytes()),
+            attestation_verified: false,
+        },
     )
     .await
     .expect("Failed to create authenticator")

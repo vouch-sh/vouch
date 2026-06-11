@@ -49,30 +49,31 @@ impl From<Document<GitHubInstallationDoc>> for GitHubInstallation {
     }
 }
 
+/// Parameters for creating a new GitHub App installation.
+pub struct CreateGitHubInstallationParams<'a> {
+    pub org_id: &'a str,
+    pub installation_id: i64,
+    pub github_account_login: &'a str,
+    pub github_account_type: &'a str,
+    pub permissions: &'a HashMap<String, String>,
+    pub repository_selection: &'a str,
+    pub installed_by_user_id: Option<&'a str>,
+}
+
 /// Create a new GitHub App installation for an organization.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "GitHub installation record requires all webhook fields"
-)]
 pub async fn create_github_installation(
     store: &DocumentStore,
-    org_id: &str,
-    installation_id: i64,
-    github_account_login: &str,
-    github_account_type: &str,
-    permissions: &HashMap<String, String>,
-    repository_selection: &str,
-    installed_by_user_id: Option<&str>,
+    params: &CreateGitHubInstallationParams<'_>,
 ) -> Result<String> {
     let doc = GitHubInstallationDoc {
-        org_id: org_id.to_string(),
-        installation_id,
-        github_account_login: github_account_login.to_string(),
-        github_account_type: github_account_type.to_string(),
-        permissions: permissions.clone(),
-        repository_selection: repository_selection.to_string(),
+        org_id: params.org_id.to_string(),
+        installation_id: params.installation_id,
+        github_account_login: params.github_account_login.to_string(),
+        github_account_type: params.github_account_type.to_string(),
+        permissions: params.permissions.clone(),
+        repository_selection: params.repository_selection.to_string(),
         installed_at: Timestamp::now(),
-        installed_by_user_id: installed_by_user_id.map(String::from),
+        installed_by_user_id: params.installed_by_user_id.map(String::from),
         suspended_at: None,
         repositories: None,
     };

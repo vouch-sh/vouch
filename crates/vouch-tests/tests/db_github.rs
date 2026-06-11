@@ -36,13 +36,15 @@ async fn install(
 ) -> String {
     db::create_github_installation(
         &harness.state.store,
-        org_id,
-        installation_id,
-        login,
-        account_type,
-        &perm(&[("contents", "read")]),
-        "all",
-        Some("admin-user"),
+        &db::CreateGitHubInstallationParams {
+            org_id,
+            installation_id,
+            github_account_login: login,
+            github_account_type: account_type,
+            permissions: &perm(&[("contents", "read")]),
+            repository_selection: "all",
+            installed_by_user_id: Some("admin-user"),
+        },
     )
     .await
     .expect("create installation")

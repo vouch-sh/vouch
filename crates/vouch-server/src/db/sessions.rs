@@ -51,37 +51,38 @@ impl From<Document<SessionDoc>> for Session {
     }
 }
 
-/// Create a new session.
+/// Parameters for creating a new session.
 ///
 /// `authenticator_id` is optional for OIDC-authenticated users who haven't
 /// registered a security key yet.
 /// `user_email` is denormalized into the session document.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "session record requires all denormalized client/user fields"
-)]
+pub struct CreateSessionParams<'a> {
+    pub user_id: &'a str,
+    pub user_email: &'a str,
+    pub token_hash: &'a str,
+    pub authenticator_id: Option<&'a str>,
+    pub expires_at: Timestamp,
+    pub session_type: SessionPurpose,
+    pub authorization_details: Option<&'a serde_json::Value>,
+    pub hardware_aaguid: Option<&'a str>,
+    pub org_domain: Option<&'a str>,
+}
+
+/// Create a new session.
 pub async fn create_session(
     store: &DocumentStore,
-    user_id: &str,
-    user_email: &str,
-    token_hash: &str,
-    authenticator_id: Option<&str>,
-    expires_at: Timestamp,
-    session_type: SessionPurpose,
-    authorization_details: Option<&serde_json::Value>,
-    hardware_aaguid: Option<&str>,
-    org_domain: Option<&str>,
+    params: &CreateSessionParams<'_>,
 ) -> Result<String> {
     let doc = SessionDoc {
-        user_id: user_id.to_string(),
-        user_email: user_email.to_string(),
-        token_hash: token_hash.to_string(),
-        authenticator_id: authenticator_id.map(String::from),
-        session_type,
-        expires_at,
-        authorization_details: authorization_details.cloned(),
-        hardware_aaguid: hardware_aaguid.map(String::from),
-        org_domain: org_domain.map(String::from),
+        user_id: params.user_id.to_string(),
+        user_email: params.user_email.to_string(),
+        token_hash: params.token_hash.to_string(),
+        authenticator_id: params.authenticator_id.map(String::from),
+        session_type: params.session_type,
+        expires_at: params.expires_at,
+        authorization_details: params.authorization_details.cloned(),
+        hardware_aaguid: params.hardware_aaguid.map(String::from),
+        org_domain: params.org_domain.map(String::from),
     };
     let result = store.insert(&doc).await?;
     Ok(result.id)

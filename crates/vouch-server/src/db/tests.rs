@@ -117,14 +117,16 @@ async fn test_session_lifecycle() {
     // Create authenticator (with user_email parameter)
     let auth_id = create_authenticator(
         &store,
-        &user_id,
-        "session@example.com",
-        "Test Key",
-        b"test-cred-id",
-        &[0u8; 32],
-        None,
-        Some(user_id.as_bytes()),
-        false,
+        &CreateAuthenticatorParams {
+            user_id: &user_id,
+            user_email: "session@example.com",
+            name: "Test Key",
+            credential_id: b"test-cred-id",
+            public_key: &[0u8; 32],
+            aaguid: None,
+            user_handle: Some(user_id.as_bytes()),
+            attestation_verified: false,
+        },
     )
     .await
     .expect("Failed to create authenticator");
@@ -133,15 +135,17 @@ async fn test_session_lifecycle() {
     let token_hash = "test_token_hash_123";
     let session_id = create_session(
         &store,
-        &user_id,
-        "session@example.com",
-        token_hash,
-        Some(&auth_id),
-        "2099-12-31T23:59:59Z".parse().unwrap(),
-        SessionPurpose::OAuthAccessToken,
-        None,
-        None,
-        None,
+        &CreateSessionParams {
+            user_id: &user_id,
+            user_email: "session@example.com",
+            token_hash,
+            authenticator_id: Some(&auth_id),
+            expires_at: "2099-12-31T23:59:59Z".parse().unwrap(),
+            session_type: SessionPurpose::OAuthAccessToken,
+            authorization_details: None,
+            hardware_aaguid: None,
+            org_domain: None,
+        },
     )
     .await
     .expect("Failed to create session");
@@ -241,14 +245,16 @@ async fn test_device_auth_authorization_flow() {
     // Create authenticator
     let auth_id = create_authenticator(
         &store,
-        &user_id,
-        "device@example.com",
-        "Test Key",
-        b"test-cred-id-device",
-        &[0u8; 32],
-        None,
-        Some(user_id.as_bytes()),
-        false,
+        &CreateAuthenticatorParams {
+            user_id: &user_id,
+            user_email: "device@example.com",
+            name: "Test Key",
+            credential_id: b"test-cred-id-device",
+            public_key: &[0u8; 32],
+            aaguid: None,
+            user_handle: Some(user_id.as_bytes()),
+            attestation_verified: false,
+        },
     )
     .await
     .expect("Failed to create authenticator");
@@ -360,14 +366,16 @@ async fn test_try_consume_device_auth_authorized_succeeds() {
         .expect("user");
     let auth_id = create_authenticator(
         &store,
-        &user_id,
-        "consume@example.com",
-        "Key",
-        b"cred-consume",
-        &[0u8; 32],
-        None,
-        None,
-        false,
+        &CreateAuthenticatorParams {
+            user_id: &user_id,
+            user_email: "consume@example.com",
+            name: "Key",
+            credential_id: b"cred-consume",
+            public_key: &[0u8; 32],
+            aaguid: None,
+            user_handle: None,
+            attestation_verified: false,
+        },
     )
     .await
     .expect("auth");
@@ -411,14 +419,16 @@ async fn test_try_consume_device_auth_already_consumed_returns_false() {
         .expect("user");
     let auth_id = create_authenticator(
         &store,
-        &user_id,
-        "double@example.com",
-        "Key",
-        b"cred-double",
-        &[0u8; 32],
-        None,
-        None,
-        false,
+        &CreateAuthenticatorParams {
+            user_id: &user_id,
+            user_email: "double@example.com",
+            name: "Key",
+            credential_id: b"cred-double",
+            public_key: &[0u8; 32],
+            aaguid: None,
+            user_handle: None,
+            attestation_verified: false,
+        },
     )
     .await
     .expect("auth");
@@ -478,14 +488,16 @@ async fn test_try_consume_device_auth_expired_returns_false() {
         .expect("user");
     let auth_id = create_authenticator(
         &store,
-        &user_id,
-        "expired@example.com",
-        "Key",
-        b"cred-expired",
-        &[0u8; 32],
-        None,
-        None,
-        false,
+        &CreateAuthenticatorParams {
+            user_id: &user_id,
+            user_email: "expired@example.com",
+            name: "Key",
+            credential_id: b"cred-expired",
+            public_key: &[0u8; 32],
+            aaguid: None,
+            user_handle: None,
+            attestation_verified: false,
+        },
     )
     .await
     .expect("auth");
@@ -1319,14 +1331,16 @@ async fn test_scim_session_invalidation_on_deactivation() {
     // Create authenticator (with user_email parameter)
     let auth_id = create_authenticator(
         &store,
-        &user.id,
-        "invalidate@example.com",
-        "SCIM Key",
-        b"scim-cred-id",
-        &[0u8; 32],
-        None,
-        Some(user.id.as_bytes()),
-        false,
+        &CreateAuthenticatorParams {
+            user_id: &user.id,
+            user_email: "invalidate@example.com",
+            name: "SCIM Key",
+            credential_id: b"scim-cred-id",
+            public_key: &[0u8; 32],
+            aaguid: None,
+            user_handle: Some(user.id.as_bytes()),
+            attestation_verified: false,
+        },
     )
     .await
     .expect("Failed to create authenticator");
@@ -1334,15 +1348,17 @@ async fn test_scim_session_invalidation_on_deactivation() {
     // Create session (with user_email parameter)
     create_session(
         &store,
-        &user.id,
-        "invalidate@example.com",
-        "scim_token_hash",
-        Some(&auth_id),
-        "2099-12-31T23:59:59Z".parse().unwrap(),
-        SessionPurpose::OAuthAccessToken,
-        None,
-        None,
-        None,
+        &CreateSessionParams {
+            user_id: &user.id,
+            user_email: "invalidate@example.com",
+            token_hash: "scim_token_hash",
+            authenticator_id: Some(&auth_id),
+            expires_at: "2099-12-31T23:59:59Z".parse().unwrap(),
+            session_type: SessionPurpose::OAuthAccessToken,
+            authorization_details: None,
+            hardware_aaguid: None,
+            org_domain: None,
+        },
     )
     .await
     .expect("Failed to create session");
@@ -1460,14 +1476,16 @@ async fn test_authenticator_crud() {
 
     let auth_id = create_authenticator(
         &store,
-        &user_id,
-        "auth@example.com",
-        "YubiKey 5C",
-        &credential_id,
-        &public_key,
-        Some("2fc0579f-8113-47ea-b116-bb5a8db9202a"),
-        Some(&user_handle),
-        false,
+        &CreateAuthenticatorParams {
+            user_id: &user_id,
+            user_email: "auth@example.com",
+            name: "YubiKey 5C",
+            credential_id: &credential_id,
+            public_key: &public_key,
+            aaguid: Some("2fc0579f-8113-47ea-b116-bb5a8db9202a"),
+            user_handle: Some(&user_handle),
+            attestation_verified: false,
+        },
     )
     .await
     .expect("Failed to create authenticator");
@@ -1544,14 +1562,16 @@ async fn test_authenticator_count() {
     for i in 0..3 {
         create_authenticator(
             &store,
-            &user_id,
-            "count@example.com",
-            &format!("Key {}", i),
-            &[i as u8; 10],
-            &[0u8; 32],
-            None,
-            None,
-            false,
+            &CreateAuthenticatorParams {
+                user_id: &user_id,
+                user_email: "count@example.com",
+                name: &format!("Key {}", i),
+                credential_id: &[i as u8; 10],
+                public_key: &[0u8; 32],
+                aaguid: None,
+                user_handle: None,
+                attestation_verified: false,
+            },
         )
         .await
         .expect("Failed to create authenticator");
@@ -1666,29 +1686,33 @@ async fn test_user_cascade_delete() {
 
     let auth_id = create_authenticator(
         &store,
-        &user_id,
-        "cascade@example.com",
-        "Cascade Key",
-        &[99u8; 10],
-        &[0u8; 32],
-        None,
-        None,
-        false,
+        &CreateAuthenticatorParams {
+            user_id: &user_id,
+            user_email: "cascade@example.com",
+            name: "Cascade Key",
+            credential_id: &[99u8; 10],
+            public_key: &[0u8; 32],
+            aaguid: None,
+            user_handle: None,
+            attestation_verified: false,
+        },
     )
     .await
     .expect("Failed to create authenticator");
 
     create_session(
         &store,
-        &user_id,
-        "cascade@example.com",
-        "cascade_token",
-        Some(&auth_id),
-        "2099-12-31T23:59:59Z".parse().unwrap(),
-        SessionPurpose::OAuthAccessToken,
-        None,
-        None,
-        None,
+        &CreateSessionParams {
+            user_id: &user_id,
+            user_email: "cascade@example.com",
+            token_hash: "cascade_token",
+            authenticator_id: Some(&auth_id),
+            expires_at: "2099-12-31T23:59:59Z".parse().unwrap(),
+            session_type: SessionPurpose::OAuthAccessToken,
+            authorization_details: None,
+            hardware_aaguid: None,
+            org_domain: None,
+        },
     )
     .await
     .expect("Failed to create session");
@@ -3335,14 +3359,16 @@ async fn test_device_auth_consume_concurrent() {
         .expect("upsert user");
     let auth_id = create_authenticator(
         &store,
-        &user_id,
-        "race-device@example.com",
-        "Key",
-        b"cred-race-device",
-        &[0u8; 32],
-        None,
-        None,
-        false,
+        &CreateAuthenticatorParams {
+            user_id: &user_id,
+            user_email: "race-device@example.com",
+            name: "Key",
+            credential_id: b"cred-race-device",
+            public_key: &[0u8; 32],
+            aaguid: None,
+            user_handle: None,
+            attestation_verified: false,
+        },
     )
     .await
     .expect("create authenticator");
@@ -3483,14 +3509,16 @@ async fn test_authorize_device_auth_concurrent() {
         .expect("upsert user");
     let auth_id = create_authenticator(
         &store,
-        &user_id,
-        "race-authorize@example.com",
-        "Key",
-        b"cred-race-authorize",
-        &[0u8; 32],
-        None,
-        None,
-        false,
+        &CreateAuthenticatorParams {
+            user_id: &user_id,
+            user_email: "race-authorize@example.com",
+            name: "Key",
+            credential_id: b"cred-race-authorize",
+            public_key: &[0u8; 32],
+            aaguid: None,
+            user_handle: None,
+            attestation_verified: false,
+        },
     )
     .await
     .expect("create authenticator");
