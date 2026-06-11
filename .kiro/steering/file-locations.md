@@ -42,7 +42,7 @@
 4. Add tests
 
 ### New Credential Type
-1. Add type to `vouch-common/src/types.rs`
+1. Add type to `vouch-common/src/api.rs`
 2. Add credential helper in `vouch-cli/src/commands/credential/`
 3. Add setup command in `vouch-cli/src/commands/setup/`
 4. Update documentation
