@@ -717,7 +717,7 @@ fn print_report(
 fn extract_aaguid(reg: &Registration) -> Option<String> {
     // AAGUID lives at bytes 37-52 when the AT flag (0x40) is set
     let auth_data = &reg.attestation.auth_data;
-    if auth_data[32] & 0x40 != 0 && auth_data.len() >= 53 {
+    if auth_data.len() >= 53 && auth_data[32] & 0x40 != 0 {
         Some(hex::encode(&auth_data[37..53]))
     } else {
         None

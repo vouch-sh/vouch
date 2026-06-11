@@ -15,7 +15,7 @@ pub const MAX_MESSAGE_SIZE: usize = 1024 * 1024;
 ///
 /// Generous enough for legitimate long-idle clients, but bounds how long an
 /// abandoned or stalled peer can pin a per-connection task and its FD.
-pub const IDLE_READ_TIMEOUT: Duration = Duration::from_secs(300);
+pub const IDLE_READ_TIMEOUT: Duration = Duration::from_mins(5);
 
 /// Read a length-prefixed message (4-byte BE length + payload).
 ///

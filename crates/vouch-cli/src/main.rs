@@ -453,13 +453,13 @@ async fn main() -> ExitCode {
 /// (docker credential helper, git-remote-codecommit, keyring, pnpm token
 /// helper). Returns `true` if a helper handled the invocation and the
 /// process should exit.
-async fn init_and_dispatch_helper_binaries() -> Result<bool> {
+async fn init_and_dispatch_helper_binaries(config: Option<&config::Config>) -> Result<bool> {
     let argv0 = std::env::args().next().unwrap_or_default();
 
     // Initialize the process-wide DNS-over-HTTPS resolver from config + env
     // before any HTTP client is constructed (including from helper-binary
     // dispatch below). Hard-fails if DoH is configured but unavailable.
-    dns::init()?;
+    dns::init(config)?;
 
     // Register the platform-native keyring store. Non-fatal: keychain access
     // already falls back to file storage in fapi::key_store when unavailable.
@@ -487,8 +487,7 @@ async fn init_and_dispatch_helper_binaries() -> Result<bool> {
 ///
 /// Offline commands (completions, init, logout, diag) skip validation but
 /// still normalize for consistency.
-fn resolve_server_url(cli: &Cli) -> Result<server_url::ServerUrl> {
-    let config = config::Config::load()?;
+fn resolve_server_url(cli: &Cli, config: &config::Config) -> Result<server_url::ServerUrl> {
     let server_raw = cli
         .server
         .clone()
@@ -507,7 +506,9 @@ fn resolve_server_url(cli: &Cli) -> Result<server_url::ServerUrl> {
     reason = "single dispatch match over all CLI subcommands"
 )]
 async fn run() -> Result<()> {
-    if init_and_dispatch_helper_binaries().await? {
+    let config = config::Config::load();
+
+    if init_and_dispatch_helper_binaries(config.as_ref().ok()).await? {
         return Ok(());
     }
 
@@ -526,7 +527,8 @@ async fn run() -> Result<()> {
     });
     tracing_subscriber::fmt().with_env_filter(filter).init();
 
-    let server = resolve_server_url(&cli)?;
+    let config = config?;
+    let server = resolve_server_url(&cli, &config)?;
     let server = server.as_str();
 
     match cli.command {
