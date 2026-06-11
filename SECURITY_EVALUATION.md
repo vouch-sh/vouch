@@ -274,3 +274,164 @@ future audits the effort:
    WebAuthn origin relaxation, and certification endpoint gating.
 4. **P2.4** — mechanical JS refactor.
 5. **P3.x** — fold into routine maintenance.
+
+## Addendum — Second-Pass Evaluation (June 2026)
+
+A second pass focused on areas the original review covered less deeply: OAuth
+grant extensions (RFC 8693/8628/9101/9396), server-side outbound HTTP fetches
+(SSRF), upstream-IdP federation, and the AMI/packaging scripts. Findings below
+are **new** relative to P1.1–P3.5 and were verified against the source at the
+current branch `HEAD` (`5c3253e`); line references are to that tree.
+
+The original posture summary still holds — no critical, directly exploitable
+vulnerability was found. The headline new item (SP1) is an unauthenticated
+**blind** SSRF surface that is reachable but constrained (no response
+reflection, and IMDSv2 on the shipped AMI blocks instance-credential theft).
+
+### SP1 — High/Medium: SSRF via server-side `jwks_uri` / `request_uri` fetch with no private-network blocklist
+
+The server makes outbound HTTPS requests to URLs that an **unauthenticated**
+caller can control, and the only egress guard is an HTTPS-scheme check plus a
+256 KiB response cap. There is no rejection of loopback, private, link-local,
+unique-local, or multicast destinations (a grep for `169.254` / `is_private` /
+`is_blocked` finds no server-side egress filtering).
+
+Attack-reachable fetch paths:
+
+- **Client `jwks_uri`.** `POST /oauth/register` is unauthenticated RFC 7591
+  dynamic client registration (`crates/vouch-server/src/infra/router.rs:218-239`).
+  A registrant can store an arbitrary HTTPS `jwks_uri`; the server later fetches
+  it while *verifying* a `private_key_jwt` client assertion — i.e. **before**
+  client authentication succeeds:
+  `services/oidc/jwt_bearer/client_auth.rs:204` → `resolve_client_jwks`
+  (`jwt_bearer/jwks.rs:64`) → `fetch_and_parse_jwks` (`jwks.rs:188`) →
+  `fetch_jwks` (`jwks.rs:131`, `http_client.get(uri).send()` at `jwks.rs:140`).
+  The HTTPS-only enforcement is exercised by tests (`jwks.rs:881-909`) but does
+  not constrain the host.
+- **JAR `request_uri`.** `services/oidc/jar.rs:173` fetches a request-object URI
+  via `http_client.get(uri)`. When a client's pre-registered allowlist is unset
+  (`OAuthClient.request_uris == None`), *any* HTTPS `request_uri` is accepted
+  (`db/oauth.rs:72-76`).
+
+```rust
+// jwt_bearer/jwks.rs — only scheme + size are checked, never the host/IP
+async fn fetch_jwks(uri: &str, http_client: &reqwest::Client) -> ServiceResult<String> {
+    // ... HTTPS-scheme check ...
+    let response = http_client.get(uri).send().await /* ... */;
+    // ... 256 KiB content-length / body cap ...
+}
+```
+
+A related fetch, `fetch_discovery` (`services/idp/oidc.rs:295`), retrieves the
+operator-configured `issuer_url` / SAML `metadata_url`. It is **operator**
+controlled rather than attacker controlled (lower severity), but it shares the
+same missing egress guard and should be covered by the same fix.
+
+**Severity:** Medium. The SSRF is blind (no response body is returned to the
+caller; only coarse success/failure and timing leak). IMDSv2 enforced on the
+shipped AMI prevents the classic `169.254.169.254` credential-theft pivot, but
+internal-service reachability, port/host scanning of the VPC, and link-local
+ranges remain. Severity rises toward High in any deployment where IMDSv1 is
+reachable or where the server sits adjacent to sensitive internal services.
+
+**Remediation:** introduce a single egress-policy helper that resolves the
+target host and rejects loopback (`127.0.0.0/8`, `::1`), private
+(`10/8`, `172.16/12`, `192.168/16`, `fc00::/7`), link-local
+(`169.254/16`, `fe80::/10`), multicast, and unspecified addresses; apply it in
+`fetch_jwks`, the `jar.rs` `request_uri` fetch, and `fetch_discovery`. Prefer a
+resolve → validate → connect-to-pinned-IP flow (e.g. a custom
+`reqwest`/hyper resolver) so a hostname cannot re-resolve to a blocked address
+between validation and connection (DNS-rebinding TOCTOU). Additionally enforce
+the same check at write time in the registration `jwks_uri` / `request_uris`
+validators for fail-fast operator feedback. A loopback exception, gated the same
+way as the existing dev-mode relaxations, may be retained for local testing.
+
+### SP2 — Low/Medium: AMI build downloads `coldsnap` binary unpinned and pipes it into tar
+
+`packaging/ami/user-data.sh.tpl:137` streams a GitHub release tarball straight
+into `tar` and then executes the extracted binary, with no checksum:
+
+```bash
+curl -sL "https://github.com/jplock/coldsnap/releases/download/${COLDSNAP_VERSION}/coldsnap-${COLDSNAP_VERSION}-${ARCH}-unknown-linux-musl.tar.gz" | tar -xzf - -C /usr/local/bin
+chmod +x /usr/local/bin/coldsnap
+```
+
+Impact is build-time and bounded by HTTPS transport trust, but a compromised or
+swapped release artifact would run with full AMI-build privileges.
+
+**Remediation:** pin and verify a SHA-256 before extraction (mirror the
+`tailwindcss` checksum-pin pattern already used in the Dockerfile and the
+release workflow), and add `-f` so the `curl` fails closed on an HTTP error.
+
+### SP3 — Low/Medium: `vouch-config.service` lacks the systemd hardening applied to the main service
+
+`packaging/ami/root/usr/lib/systemd/system/vouch-config.service` runs
+`vouch-fetch-config.sh` as **root** (no `User=`) to fetch configuration —
+including secrets — from Parameter Store, but sets **none** of the hardening
+directives present on `vouch-server.service`
+(`vouch-server.service:26-29` has `NoNewPrivileges=yes`, `ProtectSystem=strict`,
+`ProtectHome=yes`, `PrivateTmp=yes`).
+
+**Remediation:** add the same hardening (`NoNewPrivileges`, `ProtectSystem`,
+`ProtectHome`, `PrivateTmp`, `PrivateDevices`, `ProtectClock`,
+`ProtectHostname`) with `ReadWritePaths` scoped to `/run/vouch-server` and
+`/var/log/vouch-config`.
+
+### SP4 — Low/Medium: IMDSv2 token fetch has no empty-token guard (silent IMDSv1 fallback)
+
+`packaging/ami/root/usr/local/bin/vouch-fetch-config.sh:16-17` captures the
+IMDSv2 session token without checking the result; on failure `$TOKEN` is empty
+and the subsequent metadata calls (`:20`, `:22`, `:27`) degrade silently to
+unauthenticated IMDSv1.
+
+**Remediation:** fail closed when `$TOKEN` is empty
+(`[ -z "$TOKEN" ] && { echo "ERROR: no IMDSv2 token" >&2; exit 1; }`).
+
+### SP5 — Low: Entra `/organizations/v2.0` federation is implicitly multi-tenant
+
+When an operator configures the Entra `/organizations/v2.0` issuer, the
+template-issuer path in `services/idp/oidc.rs` accepts verified ID tokens from
+**any** Entra tenant; there is no per-tenant (`tid`) restriction or explicit
+warning. `/common/` is already rejected outright (`oidc.rs:281-291`), and an
+operator who wants a single tenant can configure the per-tenant issuer URL, so
+this is a documentation/ergonomics gap rather than a clear vulnerability.
+
+**Remediation:** document the multi-tenant behavior at the config site, emit a
+startup `warn` when `/organizations/` is configured, and optionally support an
+allowed-tenant list checked against the token `tid` claim.
+
+### Verified non-issues (second pass)
+
+Checked and intentionally **not** filed as findings, recorded to save future
+audits the effort:
+
+- **OAuth scope escalation** (authorization-code `authorization.rs:539`,
+  token-exchange `exchange.rs:265`, device-grant `device.rs`) — there is no
+  per-client registered-scope concept to escalate against (`db/oauth.rs:22-77`
+  carries an `access_scope` enum, not an OAuth-scope allowlist), and only
+  `openid` / `email` exist, both granted to every authenticated user. Scope is
+  already intersected against the subject/known set in `calculate_granted_scope`
+  (`exchange.rs:549-585`).
+- **Token-exchange actor scope** — the issued token's authority derives from the
+  *subject* token, not the actor; the actor is recorded only in the `act` claim.
+  Using a token as `subject_token` requires already possessing that valid,
+  non-revoked session (`exchange.rs:212-224`), so no privilege is gained.
+- **JAR `aud` optional for non-FAPI clients** (`jar.rs:467-489`) — matches RFC
+  9101 (RECOMMENDED, not REQUIRED); the request-object signature is verified, and
+  FAPI clients *are* required to carry `aud`.
+- **WebAuthn challenge compared with `==`** (`webauthn_verify.rs:376`) — the
+  challenge is not a secret (single-use is enforced via atomic challenge-state
+  consumption), so constant-time comparison is unnecessary.
+- **SSH certificate `valid_seconds` has no explicit bounds** (`ssh_ca.rs:228-254`)
+  — the value is derived from server config (`session_hours`,
+  `handlers/credentials.rs:84`), never from attacker input; a bounds check is
+  defense-in-depth at most.
+- **SCIM cross-org group membership** — cross-org `user_id`s are filtered at read
+  time (`db/scim.rs`), so no cross-tenant data leaks today; enforcing the org
+  boundary at write time as well is optional Low hardening.
+
+### Suggested order of work (second pass)
+
+1. **SP1** — add the shared SSRF egress guard; highest-value new item.
+2. **SP2–SP4** — small, contained AMI/packaging hardening.
+3. **SP5** — documentation plus an optional tenant-allowlist config.
