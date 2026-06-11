@@ -40,6 +40,31 @@ fn resolver() -> Result<&'static TokioResolver> {
     RESOLVER.as_ref().map_err(|e| anyhow::anyhow!("{e}"))
 }
 
+/// Resolve a hostname to the IP addresses it currently maps to, using the
+/// process-wide system resolver.
+///
+/// Used by the SSRF egress guard ([`crate::infra::ssrf`]) to vet
+/// client-controlled fetch destinations before they are requested. The same
+/// system resolver backs the server's `reqwest` client (no DoH override is
+/// installed server-side), so the addresses returned here are the ones the
+/// HTTP client will dial.
+///
+/// # Errors
+///
+/// Returns an error if the resolver is unavailable, the lookup fails, or the
+/// lookup times out.
+pub(crate) async fn resolve_host_ips(host: &str) -> Result<Vec<std::net::IpAddr>> {
+    let resolver = resolver().context("DNS resolver unavailable")?;
+    let lookup = match tokio::time::timeout(TXT_QUERY_TIMEOUT, resolver.lookup_ip(host)).await {
+        Ok(Ok(l)) => l,
+        Ok(Err(e)) => {
+            return Err(anyhow::Error::from(e).context(format!("DNS lookup for {host} failed")));
+        }
+        Err(_) => anyhow::bail!("DNS lookup for {host} timed out after {TXT_QUERY_TIMEOUT:?}"),
+    };
+    Ok(lookup.iter().collect())
+}
+
 /// Returns true if any TXT record at `_vouch-verification.<domain>` equals
 /// the expected token.
 ///

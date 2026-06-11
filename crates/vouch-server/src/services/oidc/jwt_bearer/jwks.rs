@@ -67,6 +67,7 @@ pub async fn resolve_client_jwks(
     jwks: Option<&serde_json::Value>,
     jwks_uri: Option<&str>,
     jwks_cache: Option<&JwksCacheDoc>,
+    allow_loopback: bool,
     http_client: &reqwest::Client,
 ) -> ServiceResult<JwkSet> {
     // Inline JWKS takes priority
@@ -76,7 +77,15 @@ pub async fn resolve_client_jwks(
 
     // JWKS URI with caching
     if let Some(uri) = jwks_uri {
-        return resolve_jwks_uri(store, client_id, uri, jwks_cache, http_client).await;
+        return resolve_jwks_uri(
+            store,
+            client_id,
+            uri,
+            jwks_cache,
+            allow_loopback,
+            http_client,
+        )
+        .await;
     }
 
     Err(ServiceError::oauth(
@@ -91,6 +100,7 @@ async fn resolve_jwks_uri(
     parent_id: &str,
     uri: &str,
     cached: Option<&JwksCacheDoc>,
+    allow_loopback: bool,
     http_client: &reqwest::Client,
 ) -> ServiceResult<JwkSet> {
     // Check cache freshness
@@ -101,7 +111,7 @@ async fn resolve_jwks_uri(
     }
 
     // Cache is stale or missing — attempt fetch
-    match fetch_and_parse_jwks(uri, http_client).await {
+    match fetch_and_parse_jwks(uri, allow_loopback, http_client).await {
         Ok((jwks_value, jwks_set)) => {
             if let Err(e) = db::upsert_jwks_cache(store, parent_id, &jwks_value).await {
                 tracing::warn!("Failed to update JWKS cache for {parent_id}: {e}");
@@ -128,7 +138,11 @@ async fn resolve_jwks_uri(
 /// Fetch JWKS from a remote URI.
 ///
 /// Enforces HTTPS-only and response size cap.
-async fn fetch_jwks(uri: &str, http_client: &reqwest::Client) -> ServiceResult<String> {
+async fn fetch_jwks(
+    uri: &str,
+    allow_loopback: bool,
+    http_client: &reqwest::Client,
+) -> ServiceResult<String> {
     // HTTPS-only
     if !uri.starts_with("https://") {
         return Err(ServiceError::oauth(
@@ -136,6 +150,17 @@ async fn fetch_jwks(uri: &str, http_client: &reqwest::Client) -> ServiceResult<S
             "JWKS URI must use HTTPS",
         ));
     }
+
+    // SSRF egress guard: a client-registered `jwks_uri` is fetched here while
+    // verifying a `private_key_jwt` assertion, and dynamic client registration
+    // is unauthenticated — refuse to dial private/link-local targets. Loopback
+    // is permitted only in local development (`allow_loopback`).
+    crate::infra::ssrf::assert_public_destination(
+        uri,
+        allow_loopback,
+        OAuthErrorCode::InvalidClient,
+    )
+    .await?;
 
     let response = http_client.get(uri).send().await.map_err(|e| {
         tracing::warn!("Failed to fetch JWKS from {uri}: {e}");
@@ -187,9 +212,10 @@ async fn fetch_jwks(uri: &str, http_client: &reqwest::Client) -> ServiceResult<S
 /// Fetch JWKS from a URI and parse into both a `Value` (for caching) and a `JwkSet`.
 async fn fetch_and_parse_jwks(
     uri: &str,
+    allow_loopback: bool,
     http_client: &reqwest::Client,
 ) -> ServiceResult<(serde_json::Value, JwkSet)> {
-    let jwks_json = fetch_jwks(uri, http_client).await?;
+    let jwks_json = fetch_jwks(uri, allow_loopback, http_client).await?;
     let jwks_value: serde_json::Value = serde_json::from_str(&jwks_json).map_err(|e| {
         tracing::debug!("Failed to parse JWKS as JSON value: {e}");
         ServiceError::oauth(OAuthErrorCode::InvalidClient, "Invalid JWKS format")
@@ -283,12 +309,17 @@ const JWKS_FORCE_REFRESH_MIN_INTERVAL_SECONDS: i64 = 10;
 /// On initial key miss, if the client has a `jwks_uri` and it hasn't been refreshed
 /// in the last 10 seconds, fetches a fresh JWKS and retries. This handles key rotation
 /// where a client starts signing with a new key before the server's cache has expired.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "store/client/uri/cache/loopback-flag/http-client/jwks/header are all distinct inputs"
+)]
 pub async fn find_matching_key_with_refresh_client(
     store: &DocumentStore,
     client_id: &str,
     jwks_uri: Option<&str>,
     // Load once before calling resolve_client_jwks; pre-refresh timestamp matches prior behavior.
     jwks_cache: Option<&JwksCacheDoc>,
+    allow_loopback: bool,
     http_client: &reqwest::Client,
     jwks: &JwkSet,
     header: &JwtAssertionHeader,
@@ -315,7 +346,7 @@ pub async fn find_matching_key_with_refresh_client(
     }
 
     tracing::debug!("Key not found in JWKS cache for client {client_id}; force-refreshing");
-    match fetch_and_parse_jwks(uri, http_client).await {
+    match fetch_and_parse_jwks(uri, allow_loopback, http_client).await {
         Ok((jwks_value, fresh_jwks)) => {
             if let Err(e) = db::upsert_jwks_cache(store, client_id, &jwks_value).await {
                 tracing::warn!("Failed to update JWKS cache for client {client_id}: {e}");
@@ -880,7 +911,7 @@ mod tests {
     #[tokio::test]
     async fn test_fetch_jwks_rejects_http_url() {
         let client = reqwest::Client::new();
-        let result = fetch_jwks("http://example.com/jwks", &client).await;
+        let result = fetch_jwks("http://example.com/jwks", false, &client).await;
         let err = result.unwrap_err();
         assert!(
             matches!(&err, ServiceError::OAuth { code, .. } if *code == OAuthErrorCode::InvalidClient)
@@ -893,7 +924,7 @@ mod tests {
     #[tokio::test]
     async fn test_fetch_jwks_rejects_ftp_url() {
         let client = reqwest::Client::new();
-        let result = fetch_jwks("ftp://example.com/jwks", &client).await;
+        let result = fetch_jwks("ftp://example.com/jwks", false, &client).await;
         let err = result.unwrap_err();
         assert!(
             matches!(&err, ServiceError::OAuth { code, .. } if *code == OAuthErrorCode::InvalidClient)
@@ -906,7 +937,7 @@ mod tests {
     #[tokio::test]
     async fn test_fetch_jwks_rejects_empty_uri() {
         let client = reqwest::Client::new();
-        let result = fetch_jwks("", &client).await;
+        let result = fetch_jwks("", false, &client).await;
         let err = result.unwrap_err();
         assert!(
             matches!(&err, ServiceError::OAuth { code, .. } if *code == OAuthErrorCode::InvalidClient)
@@ -1066,6 +1097,7 @@ mod tests {
             "client-abc",
             None, // no JWKS URI
             None,
+            false,
             &http_client,
             &jwks,
             &hdr,
@@ -1100,6 +1132,7 @@ mod tests {
             "client-rate-limited",
             Some("https://127.0.0.1:1/jwks"),
             Some(&recent),
+            false,
             &http_client,
             &jwks,
             &hdr,
@@ -1137,6 +1170,7 @@ mod tests {
             "client-fetch-test",
             Some("http://127.0.0.1:1/jwks"),
             Some(&old_cache),
+            false,
             &http_client,
             &stale_jwks,
             &hdr,

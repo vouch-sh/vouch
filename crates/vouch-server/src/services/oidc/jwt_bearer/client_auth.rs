@@ -201,12 +201,18 @@ pub async fn authenticate_client_jwt(
             ClientAuthError::InvalidCredentials
         })?;
 
+    // Loopback JWKS destinations are permitted only in local development
+    // (no TLS configured), matching the WebAuthn `allow_localhost_origin`
+    // relaxation; private/link-local targets stay blocked.
+    let allow_loopback = !state.config().tls_configured();
+
     let jwks = resolve_client_jwks(
         &state.store,
         &client.id,
         client.jwks.as_ref(),
         client.jwks_uri.as_deref(),
         jwks_cache.as_ref(),
+        allow_loopback,
         &state.http_client,
     )
     .await
@@ -224,6 +230,7 @@ pub async fn authenticate_client_jwt(
         &client.id,
         client.jwks_uri.as_deref(),
         jwks_cache.as_ref(),
+        allow_loopback,
         &state.http_client,
         &jwks,
         &header,

@@ -41,7 +41,7 @@ pub(crate) struct GeoLocation {
 /// or if the GeoIP database failed to load.
 pub(crate) fn lookup(ip: IpAddr) -> Option<GeoLocation> {
     let ip = ip.to_canonical();
-    if is_non_global(&ip) {
+    if crate::infra::ssrf::is_non_global(&ip) {
         return None;
     }
     let country_db = COUNTRY_DB.as_ref()?;
@@ -64,42 +64,6 @@ pub(crate) fn lookup(ip: IpAddr) -> Option<GeoLocation> {
         asn,
         org_name,
     })
-}
-
-fn is_non_global(ip: &IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(v4) => {
-            let octets = v4.octets();
-            v4.is_loopback()
-                || v4.is_private()
-                || v4.is_link_local()
-                || v4.is_broadcast()
-                || v4.is_unspecified()
-                || v4.is_documentation()
-                || v4.is_multicast()
-                || (octets[0] == 100 && (octets[1] & 0xC0 == 64)) // shared/CGNAT 100.64.0.0/10
-                || (octets[0] == 192 && octets[1] == 0 && octets[2] == 0) // IETF 192.0.0.0/24
-                || (octets[0] == 192 && octets[1] == 88 && octets[2] == 99) // 6to4 192.88.99.0/24
-                || (octets[0] == 198 && (octets[1] & 0xFE == 18)) // benchmarking 198.18.0.0/15
-                || (octets[0] & 0xF0 == 240) // reserved 240.0.0.0/4
-        }
-        IpAddr::V6(v6) => {
-            let octets = v6.octets();
-            v6.is_loopback()
-                || v6.is_unspecified()
-                || v6.is_multicast()
-                || (octets[0] & 0xfe == 0xfc) // ULA fc00::/7
-                || (octets[0] == 0xfe && octets[1] & 0xc0 == 0x80) // link-local fe80::/10
-                || (octets[0] == 0x20 && octets[1] == 0x01
-                    && octets[2] == 0x0d && octets[3] == 0xb8) // documentation 2001:db8::/32
-                || (octets[0] == 0x20 && octets[1] == 0x01
-                    && octets[2] == 0x00 && octets[3] == 0x02) // benchmarking 2001:2::/48
-                || (octets[0] == 0x01 && octets[1] == 0x00
-                    && octets[2] == 0x00 && octets[3] == 0x00
-                    && octets[4] == 0x00 && octets[5] == 0x00
-                    && octets[6] == 0x00 && octets[7] == 0x00) // discard 100::/64
-        }
-    }
 }
 
 /// Force-initialize the GeoIP databases.

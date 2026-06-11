@@ -135,10 +135,13 @@ const MAX_REQUEST_OBJECT_SIZE: usize = 64 * 1024;
 /// parameter). SSRF is mitigated by:
 /// 1. HTTPS-only enforcement (no plaintext HTTP)
 /// 2. URL structure validation (must parse as a valid URL with a hostname)
-/// 3. Caller-side allowlist (`OAuthClient.request_uris`) when configured
-/// 4. Caller verifies the client is registered and active before calling
-/// 5. 64 KB response size cap prevents data exfiltration
-/// 6. `reqwest` with `rustls` — no system cert store manipulation
+/// 3. Egress guard ([`crate::infra::ssrf::assert_public_destination`]): the
+///    host is resolved and rejected if it maps to any non-global
+///    (loopback/private/link-local/…) address
+/// 4. Caller-side allowlist (`OAuthClient.request_uris`) when configured
+/// 5. Caller verifies the client is registered and active before calling
+/// 6. 64 KB response size cap prevents data exfiltration
+/// 7. `reqwest` with `rustls` — no system cert store manipulation
 ///
 /// # Errors
 /// Returns `OAuthErrorCode::InvalidRequestUri` if the URI is not HTTPS,
@@ -146,6 +149,7 @@ const MAX_REQUEST_OBJECT_SIZE: usize = 64 * 1024;
 /// or the body exceeds `MAX_REQUEST_OBJECT_SIZE`.
 pub async fn fetch_request_object(
     uri: &str,
+    allow_loopback: bool,
     http_client: &reqwest::Client,
 ) -> ServiceResult<String> {
     if !uri.starts_with("https://") {
@@ -169,7 +173,17 @@ pub async fn fetch_request_object(
         ));
     }
 
-    // SSRF: URL has been validated (HTTPS, valid hostname, caller-side allowlist).
+    // SSRF egress guard: refuse to dial a request_uri that resolves to a
+    // private/link-local address. Loopback is permitted only in local
+    // development (`allow_loopback`). Complements the HTTPS check, structural
+    // validation, and any caller-side allowlist.
+    crate::infra::ssrf::assert_public_destination(
+        uri,
+        allow_loopback,
+        OAuthErrorCode::InvalidRequestUri,
+    )
+    .await?;
+
     let response = http_client.get(uri).send().await.map_err(|e| {
         tracing::debug!("Failed to fetch Request Object from {uri}: {e}");
         ServiceError::oauth(
@@ -353,12 +367,18 @@ pub async fn validate_request_object(
             )
         })?;
 
+    // Loopback JWKS destinations are permitted only in local development
+    // (no TLS configured), matching the WebAuthn `allow_localhost_origin`
+    // relaxation; private/link-local targets stay blocked.
+    let allow_loopback = !state.config().tls_configured();
+
     let jwks = resolve_client_jwks(
         &state.store,
         &client.id,
         client.jwks.as_ref(),
         client.jwks_uri.as_deref(),
         jwks_cache.as_ref(),
+        allow_loopback,
         &state.http_client,
     )
     .await
@@ -376,6 +396,7 @@ pub async fn validate_request_object(
         &client.id,
         client.jwks_uri.as_deref(),
         jwks_cache.as_ref(),
+        allow_loopback,
         &state.http_client,
         &jwks,
         &assertion_header,
