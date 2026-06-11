@@ -269,7 +269,7 @@ pub struct DohResolver {
     config: ResolverConfig,
     label: String,
     endpoint_url: String,
-    // FIXME: replace with `OnceLock::get_or_try_init` once stable
+    // FIXME(#467): replace with `OnceLock::get_or_try_init` once stable
     // (rust-lang/rust#109737). Until then we stringify the build error so
     // every subsequent caller sees the same message.
     inner: OnceLock<Result<hickory_resolver::TokioResolver, String>>,

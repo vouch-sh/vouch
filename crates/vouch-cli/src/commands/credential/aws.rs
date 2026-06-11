@@ -286,11 +286,7 @@ pub(crate) async fn exchange_for_sts_credentials(req: StsRequest<'_>) -> Result<
     // Detection must happen at the caller — and, for cached callers, before
     // the cache lookup — otherwise a cache hit would silently return
     // credentials minted in the wrong context (issue #398).
-    let agent_policies: &[&str] = if agent_source.is_some() {
-        &["ReadOnlyAccess"]
-    } else {
-        &[]
-    };
+    let policies = agent_session_policies(agent_source);
 
     let mut client = VouchClient::new(server).await?;
 
@@ -320,27 +316,6 @@ pub(crate) async fn exchange_for_sts_credentials(req: StsRequest<'_>) -> Result<
 
     let session = extract_sub_from_jwt(id_token).context("server returned invalid OIDC token")?;
 
-    let all_policies: &[&str] = agent_policies;
-
-    // Inline session policy for the management role hop when an agent is
-    // detected: restrict to only the STS actions needed for role chaining.
-    let mgmt_hop_policy = if agent_source.is_some() {
-        Some(serde_json::json!({
-            "Version": "2012-10-17",
-            "Statement": [{
-                "Effect": "Allow",
-                "Action": [
-                    "sts:AssumeRole",
-                    "sts:TagSession",
-                    "sts:SetSourceIdentity"
-                ],
-                "Resource": "*"
-            }]
-        }))
-    } else {
-        None
-    };
-
     if let Some(mgmt_role_arn) = mgmt.filter(|m| *m != role_arn) {
         // Chain: AssumeRoleWithWebIdentity into management role, then AssumeRole into target.
         // Management hop gets an inline STS-only policy; final hop gets ReadOnlyAccess.
@@ -355,7 +330,7 @@ pub(crate) async fn exchange_for_sts_credentials(req: StsRequest<'_>) -> Result<
             region,
             domain_suffix: mgmt_domain_suffix,
             session_policy_names: &[],
-            session_policy: mgmt_hop_policy.as_ref(),
+            session_policy: policies.mgmt_hop_policy.as_ref(),
         })
         .await
         .context("failed to assume management role")?;
@@ -366,7 +341,7 @@ pub(crate) async fn exchange_for_sts_credentials(req: StsRequest<'_>) -> Result<
             &session,
             region,
             &mgmt_credentials,
-            all_policies,
+            policies.session_policy_names,
             None,
         )
         .await
@@ -387,7 +362,7 @@ pub(crate) async fn exchange_for_sts_credentials(req: StsRequest<'_>) -> Result<
         web_identity_token: id_token,
         region,
         domain_suffix,
-        session_policy_names: all_policies,
+        session_policy_names: policies.session_policy_names,
         session_policy: None,
     })
     .await
@@ -398,6 +373,43 @@ pub(crate) async fn exchange_for_sts_credentials(req: StsRequest<'_>) -> Result<
         credentials,
         domain_suffix,
     })
+}
+
+/// Session policies applied to STS calls, restricted when an AI coding
+/// agent context is detected.
+struct AgentSessionPolicies {
+    /// Managed policy names attached to the issued credentials.
+    session_policy_names: &'static [&'static str],
+    /// Inline policy for the management-role hop, restricting it to only
+    /// the STS actions needed for role chaining.
+    mgmt_hop_policy: Option<serde_json::Value>,
+}
+
+/// Build the session policies for an exchange: unrestricted normally,
+/// ReadOnlyAccess plus an STS-only management-hop policy when an AI agent
+/// is detected.
+fn agent_session_policies(agent_source: Option<&str>) -> AgentSessionPolicies {
+    if agent_source.is_none() {
+        return AgentSessionPolicies {
+            session_policy_names: &[],
+            mgmt_hop_policy: None,
+        };
+    }
+    AgentSessionPolicies {
+        session_policy_names: &["ReadOnlyAccess"],
+        mgmt_hop_policy: Some(serde_json::json!({
+            "Version": "2012-10-17",
+            "Statement": [{
+                "Effect": "Allow",
+                "Action": [
+                    "sts:AssumeRole",
+                    "sts:TagSession",
+                    "sts:SetSourceIdentity"
+                ],
+                "Resource": "*"
+            }]
+        })),
+    }
 }
 
 /// Resolve the management role ARN from vouch config.

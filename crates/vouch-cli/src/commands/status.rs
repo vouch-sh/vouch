@@ -77,10 +77,52 @@ pub(crate) fn print_shell(
 }
 
 /// Run the status command.
-#[expect(clippy::too_many_lines, reason = "sequential status report output")]
 pub(crate) async fn run(server: &str, mode: OutputFormat) -> Result<()> {
-    // First, try to get session from agent (Unix only)
+    // First, try to get status from the agent (Unix only)
     #[cfg(unix)]
+    if agent_status(server, mode).await? {
+        return Ok(());
+    }
+
+    server_status(server, mode).await
+}
+
+/// Report an unauthenticated/expired session in the requested format.
+///
+/// `headline` is printed as-is in human mode, so callers style it.
+fn report_unauthenticated(
+    mode: OutputFormat,
+    agent_running: bool,
+    expires_in_seconds: Option<u64>,
+    headline: &str,
+    hint: &str,
+) {
+    match mode {
+        OutputFormat::Json => {
+            print_json(&StatusJson {
+                authenticated: false,
+                email: None,
+                expires_in_seconds,
+                agent_running,
+            });
+        }
+        OutputFormat::Shell => {
+            print_shell(false, None, None);
+        }
+        OutputFormat::Human => {
+            println!("{headline}");
+            println!("\n{}", style::dim(hint));
+        }
+    }
+}
+
+/// Report status from the agent session, if the agent answers.
+///
+/// Returns `true` when the agent gave a definitive answer (authenticated,
+/// not authenticated, or expired) and `false` when the caller should fall
+/// back to the config/server check.
+#[cfg(unix)]
+async fn agent_status(server: &str, mode: OutputFormat) -> Result<bool> {
     match get_session_from_agent().await {
         Ok(session) => {
             // Prefer the server URL from the agent (it knows the real server),
@@ -108,78 +150,52 @@ pub(crate) async fn run(server: &str, mode: OutputFormat) -> Result<()> {
                     print_all_integrations(effective_server).await;
                 }
             }
-            return Ok(());
+            Ok(true)
         }
         Err(AgentError::NotRunning) => {
             tracing::debug!("Agent not running, checking server");
+            Ok(false)
         }
         Err(AgentError::NotAuthenticated) => {
-            match mode {
-                OutputFormat::Json => {
-                    print_json(&StatusJson {
-                        authenticated: false,
-                        email: None,
-                        expires_in_seconds: None,
-                        agent_running: true,
-                    });
-                }
-                OutputFormat::Shell => {
-                    print_shell(false, None, None);
-                }
-                OutputFormat::Human => {
-                    println!("{}", style::bold_red("Not authenticated."));
-                    println!("\n{}", style::dim("Run 'vouch login' to authenticate."));
-                }
-            }
-            return Ok(());
+            report_unauthenticated(
+                mode,
+                true,
+                None,
+                &style::bold_red("Not authenticated."),
+                "Run 'vouch login' to authenticate.",
+            );
+            Ok(true)
         }
         Err(AgentError::SessionExpired) => {
-            match mode {
-                OutputFormat::Json => {
-                    print_json(&StatusJson {
-                        authenticated: false,
-                        email: None,
-                        expires_in_seconds: Some(0),
-                        agent_running: true,
-                    });
-                }
-                OutputFormat::Shell => {
-                    print_shell(false, None, None);
-                }
-                OutputFormat::Human => {
-                    println!("{}", style::bold_red("Session expired."));
-                    println!("\n{}", style::dim("Run 'vouch login' to re-authenticate."));
-                }
-            }
-            return Ok(());
+            report_unauthenticated(
+                mode,
+                true,
+                Some(0),
+                &style::bold_red("Session expired."),
+                "Run 'vouch login' to re-authenticate.",
+            );
+            Ok(true)
         }
         Err(e) => {
             tracing::debug!("Agent error: {e}, falling back to server check");
+            Ok(false)
         }
     }
+}
 
-    // Fall back to config/server check
+/// Report status from the stored token and the server's /v1/auth/status.
+async fn server_status(server: &str, mode: OutputFormat) -> Result<()> {
     let mut config = Config::load()?;
     config.set_server_url(server);
 
     if config.token().is_none() {
-        match mode {
-            OutputFormat::Json => {
-                print_json(&StatusJson {
-                    authenticated: false,
-                    email: None,
-                    expires_in_seconds: None,
-                    agent_running: false,
-                });
-            }
-            OutputFormat::Shell => {
-                print_shell(false, None, None);
-            }
-            OutputFormat::Human => {
-                println!("{}", style::bold_red("Not authenticated."));
-                println!("\n{}", style::dim("Run 'vouch login' to authenticate."));
-            }
-        }
+        report_unauthenticated(
+            mode,
+            false,
+            None,
+            &style::bold_red("Not authenticated."),
+            "Run 'vouch login' to authenticate.",
+        );
         return Ok(());
     }
 
@@ -207,54 +223,50 @@ pub(crate) async fn run(server: &str, mode: OutputFormat) -> Result<()> {
             }
             OutputFormat::Human => {
                 if status.authenticated {
-                    println!("{} ({server})", style::bold_green("Authenticated"));
-                    if let Some(email) = &status.email {
-                        println!("  {:LABEL_WIDTH$} {email}", "Email:");
-                    }
-                    if let Some(device) = &status.device_name {
-                        println!("  {:LABEL_WIDTH$} {device}", "Device:");
-                    }
-                    if let Some(expires_in) = status.expires_in_seconds {
-                        print_expiry(expires_in)?;
-                    }
-                    println!(
-                        "  {:LABEL_WIDTH$} {}",
-                        "Agent:",
-                        style::yellow("not running")
-                    );
-                    println!();
-                    print_all_integrations(server).await;
-                    println!(
-                        "\n{}",
-                        style::dim(
-                            "Hint: Start the agent for faster status checks: vouch-agent --foreground"
-                        )
-                    );
+                    print_server_session(server, &status).await?;
                 } else {
                     println!("{}", style::bold_red("Session expired."));
                     println!("\n{}", style::dim("Run 'vouch login' to re-authenticate."));
                 }
             }
         },
-        Err(e) => match mode {
-            OutputFormat::Json => {
-                print_json(&StatusJson {
-                    authenticated: false,
-                    email: None,
-                    expires_in_seconds: None,
-                    agent_running: false,
-                });
-            }
-            OutputFormat::Shell => {
-                print_shell(false, None, None);
-            }
-            OutputFormat::Human => {
-                println!("{}: {e}", style::bold_red("Session invalid"));
-                println!("\n{}", style::dim("Run 'vouch login' to re-authenticate."));
-            }
-        },
+        Err(e) => {
+            report_unauthenticated(
+                mode,
+                false,
+                None,
+                &format!("{}: {e}", style::bold_red("Session invalid")),
+                "Run 'vouch login' to re-authenticate.",
+            );
+        }
     }
 
+    Ok(())
+}
+
+/// Print a human-readable report for a server-verified session (no agent).
+async fn print_server_session(server: &str, status: &SessionStatus) -> Result<()> {
+    println!("{} ({server})", style::bold_green("Authenticated"));
+    if let Some(email) = &status.email {
+        println!("  {:LABEL_WIDTH$} {email}", "Email:");
+    }
+    if let Some(device) = &status.device_name {
+        println!("  {:LABEL_WIDTH$} {device}", "Device:");
+    }
+    if let Some(expires_in) = status.expires_in_seconds {
+        print_expiry(expires_in)?;
+    }
+    println!(
+        "  {:LABEL_WIDTH$} {}",
+        "Agent:",
+        style::yellow("not running")
+    );
+    println!();
+    print_all_integrations(server).await;
+    println!(
+        "\n{}",
+        style::dim("Hint: Start the agent for faster status checks: vouch-agent --foreground")
+    );
     Ok(())
 }
 

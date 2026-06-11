@@ -55,44 +55,8 @@ pub(crate) async fn run(server: &str) -> Result<()> {
     };
 
     // Step 3: Request device code (RFC 8628 Section 3.1).
-    // Include the client_id if we registered successfully.
-    let device_request = DeviceCodeRequest {
-        client_id: pre_registered_client_id.clone(),
-        scope: None,
-    };
-
-    let device_response: DeviceCodeResponse =
-        match client.post_form("/oauth/device", &device_request).await {
-            Ok(resp) => resp,
-            Err(e) if pre_registered_client_id.is_some() => {
-                // The cached client_id may be stale (e.g. server DB was reset). Clear FAPI state, re-register, and retry once.
-                tracing::info!(
-                    "Device code request failed with cached client_id, re-registering: {e:#}"
-                );
-                if let Err(clear_err) = Config::modify(|c| {
-                    c.set_server_url(server);
-                    c.clear_fapi();
-                }) {
-                    tracing::warn!("Failed to clear stale FAPI config: {clear_err}");
-                }
-
-                let new_client_id = if let Some(ref key) = fapi_key {
-                    register_fapi_client_open(client.raw_client(), server, key).await
-                } else {
-                    None
-                };
-
-                let retry_request = DeviceCodeRequest {
-                    client_id: new_client_id,
-                    scope: None,
-                };
-                client
-                    .post_form("/oauth/device", &retry_request)
-                    .await
-                    .context("Failed to start enrollment")?
-            }
-            Err(e) => return Err(e.context("Failed to start enrollment")),
-        };
+    let device_response =
+        request_device_code(&client, server, fapi_key.as_ref(), pre_registered_client_id).await?;
 
     // Step 4: Open browser and display instructions.
     let verification_url = &device_response.verification_uri;
@@ -169,6 +133,55 @@ pub(crate) async fn run(server: &str) -> Result<()> {
     println!("  vouch login && vouch register --name \"Backup Key\"");
 
     Ok(())
+}
+
+/// Request a device code (RFC 8628 Section 3.1), including the client_id
+/// if FAPI pre-registration succeeded.
+///
+/// If the request fails with a cached client_id, the id may be stale (e.g.
+/// the server DB was reset): FAPI state is cleared, the client re-registers,
+/// and the request is retried once.
+async fn request_device_code(
+    client: &VouchClient,
+    server: &str,
+    fapi_key: Option<&vouch_cli::fapi::ClientKey>,
+    pre_registered_client_id: Option<String>,
+) -> Result<DeviceCodeResponse> {
+    let device_request = DeviceCodeRequest {
+        client_id: pre_registered_client_id.clone(),
+        scope: None,
+    };
+
+    match client.post_form("/oauth/device", &device_request).await {
+        Ok(resp) => Ok(resp),
+        Err(e) if pre_registered_client_id.is_some() => {
+            tracing::info!(
+                "Device code request failed with cached client_id, re-registering: {e:#}"
+            );
+            if let Err(clear_err) = Config::modify(|c| {
+                c.set_server_url(server);
+                c.clear_fapi();
+            }) {
+                tracing::warn!("Failed to clear stale FAPI config: {clear_err}");
+            }
+
+            let new_client_id = if let Some(key) = fapi_key {
+                register_fapi_client_open(client.raw_client(), server, key).await
+            } else {
+                None
+            };
+
+            let retry_request = DeviceCodeRequest {
+                client_id: new_client_id,
+                scope: None,
+            };
+            client
+                .post_form("/oauth/device", &retry_request)
+                .await
+                .context("Failed to start enrollment")
+        }
+        Err(e) => Err(e.context("Failed to start enrollment")),
+    }
 }
 
 /// Attempt open (unauthenticated) FAPI client registration.
