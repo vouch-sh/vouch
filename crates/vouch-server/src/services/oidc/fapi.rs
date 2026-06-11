@@ -127,32 +127,37 @@ pub fn validate_fapi_authorization_request(
     Ok(())
 }
 
+/// Sender-constraint mechanisms present on a token request.
+///
+/// FAPI 2.0 Section 5.2.2 requires at least one of these for FAPI clients.
+#[derive(Debug, Clone, Copy)]
+pub struct SenderConstraints {
+    /// A valid DPoP proof was provided in the request.
+    pub dpop: bool,
+    /// A client mTLS certificate was presented on the connection.
+    pub mtls_cert: bool,
+}
+
 /// Validate FAPI 2.0 constraints on a token request.
 ///
-/// FAPI 2.0 Section 5.2.2 requires sender-constrained access tokens.
-/// Since we use DPoP (not mTLS), a DPoP proof is required for FAPI clients.
+/// FAPI 2.0 Section 5.2.2 requires sender-constrained access tokens,
+/// so FAPI clients must present at least one mechanism in `constraints`.
 ///
 /// Non-FAPI clients pass validation unconditionally.
-///
-/// # Arguments
-///
-/// * `client` - The OAuth client making the token request
-/// * `has_dpop` - Whether a valid DPoP proof was provided in the request
 ///
 /// # Errors
 ///
 /// Returns `ServiceError::OAuth` with `invalid_request` if constraints are violated.
 pub fn validate_fapi_token_request(
     client: &OAuthClient,
-    has_dpop: bool,
-    has_mtls_cert: bool,
+    constraints: SenderConstraints,
 ) -> ServiceResult<()> {
     if !client.is_fapi() {
         return Ok(());
     }
 
     // FAPI 2.0 Section 5.2.2: Sender-constrained tokens required (DPoP or mTLS)
-    if !has_dpop && !has_mtls_cert {
+    if !constraints.dpop && !constraints.mtls_cert {
         return Err(ServiceError::oauth(
             OAuthErrorCode::InvalidRequest,
             "FAPI 2.0 requires sender-constrained access tokens (DPoP or mTLS required)",
@@ -437,16 +442,29 @@ mod tests {
     // Token Request Tests
     // =========================================================================
 
+    const NO_CONSTRAINTS: SenderConstraints = SenderConstraints {
+        dpop: false,
+        mtls_cert: false,
+    };
+    const DPOP_ONLY: SenderConstraints = SenderConstraints {
+        dpop: true,
+        mtls_cert: false,
+    };
+    const MTLS_ONLY: SenderConstraints = SenderConstraints {
+        dpop: false,
+        mtls_cert: true,
+    };
+
     #[test]
     fn test_validate_fapi_token_request_requires_sender_constraint() {
         let client = fapi_client();
-        assert!(validate_fapi_token_request(&client, false, false).is_err());
+        assert!(validate_fapi_token_request(&client, NO_CONSTRAINTS).is_err());
     }
 
     #[test]
     fn test_validate_fapi_token_request_accepts_dpop() {
         let client = fapi_client();
-        assert!(validate_fapi_token_request(&client, true, false).is_ok());
+        assert!(validate_fapi_token_request(&client, DPOP_ONLY).is_ok());
     }
 
     #[test]
@@ -454,7 +472,7 @@ mod tests {
         // mTLS certificate is a valid sender-constraint mechanism for FAPI 2.0.
         let client = fapi_client();
         assert!(
-            validate_fapi_token_request(&client, false, true).is_ok(),
+            validate_fapi_token_request(&client, MTLS_ONLY).is_ok(),
             "mTLS cert must be accepted as sender-constraint for FAPI token request"
         );
     }
@@ -462,8 +480,8 @@ mod tests {
     #[test]
     fn test_validate_fapi_token_request_skips_non_fapi() {
         let client = standard_client();
-        assert!(validate_fapi_token_request(&client, false, false).is_ok());
-        assert!(validate_fapi_token_request(&client, true, false).is_ok());
+        assert!(validate_fapi_token_request(&client, NO_CONSTRAINTS).is_ok());
+        assert!(validate_fapi_token_request(&client, DPOP_ONLY).is_ok());
     }
 
     // =========================================================================

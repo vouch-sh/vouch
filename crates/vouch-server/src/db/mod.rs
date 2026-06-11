@@ -102,7 +102,7 @@ pub(crate) use device_auth::{DeviceCodeClaim, OidcStateClaim};
 pub(crate) use device_auth::get_device_auth_by_id;
 
 // Re-export config and auth event types and functions
-pub use config::{AuthEventParams, AuthEventType, delete_old_auth_events, insert_auth_event};
+pub use config::{AuthEventParams, AuthEventType, delete_old_auth_events, spawn_audit_event};
 
 // Re-export SCIM types and functions
 pub use scim::{
@@ -210,8 +210,8 @@ pub use enrollment::{EnrolledUser, EnrollmentResult, enroll_user_with_org};
 
 // Re-export posture policy types and functions
 pub use posture_policies::{
-    CreateCustomPolicyParams, CustomPosturePolicy, UpdateCustomPolicyParams, count_active_policies,
-    create_custom_policy, delete_custom_policy, get_active_custom_policies,
+    CreateCustomPolicyParams, CustomPosturePolicy, FieldUpdate, UpdateCustomPolicyParams,
+    count_active_policies, create_custom_policy, delete_custom_policy, get_active_custom_policies,
     get_active_preconfigured_slugs, get_custom_policy, list_custom_policies,
     set_preconfigured_active, update_custom_policy,
 };

@@ -446,18 +446,20 @@ async fn main() -> ExitCode {
     }
 }
 
-/// Inner entry point that returns `anyhow::Result`.
-#[expect(
-    clippy::too_many_lines,
-    reason = "single dispatch match over all CLI subcommands"
-)]
-async fn run() -> Result<()> {
+/// Process-wide initialization plus helper-binary dispatch.
+///
+/// Initializes DNS-over-HTTPS and the keyring store, then checks whether
+/// the process was invoked via symlink as one of the helper binaries
+/// (docker credential helper, git-remote-codecommit, keyring, pnpm token
+/// helper). Returns `true` if a helper handled the invocation and the
+/// process should exit.
+async fn init_and_dispatch_helper_binaries(config: Option<&config::Config>) -> Result<bool> {
     let argv0 = std::env::args().next().unwrap_or_default();
 
     // Initialize the process-wide DNS-over-HTTPS resolver from config + env
     // before any HTTP client is constructed (including from helper-binary
     // dispatch below). Hard-fails if DoH is configured but unavailable.
-    dns::init()?;
+    dns::init(config)?;
 
     // Register the platform-native keyring store. Non-fatal: keychain access
     // already falls back to file storage in fapi::key_store when unavailable.
@@ -465,17 +467,48 @@ async fn run() -> Result<()> {
         tracing::debug!("Could not initialize keyring store: {e}");
     }
 
-    // Check if invoked via symlink as a helper binary
     if check_docker_credential_invocation(&argv0).await? {
-        return Ok(());
+        return Ok(true);
     }
     if check_git_remote_codecommit_invocation(&argv0).await? {
-        return Ok(());
+        return Ok(true);
     }
     if check_keyring_invocation(&argv0).await? {
-        return Ok(());
+        return Ok(true);
     }
     if check_pnpm_tokenhelper_invocation(&argv0).await? {
+        return Ok(true);
+    }
+    Ok(false)
+}
+
+/// Resolve the server URL from `--server`, config, or the default, and
+/// validate/normalize it.
+///
+/// Offline commands (completions, init, logout, diag) skip validation but
+/// still normalize for consistency.
+fn resolve_server_url(cli: &Cli, config: &config::Config) -> Result<server_url::ServerUrl> {
+    let server_raw = cli
+        .server
+        .clone()
+        .or_else(|| config.server_url().map(String::from))
+        .unwrap_or_else(|| "https://us.vouch.sh".to_string());
+
+    Ok(server_url::ServerUrl::parse(
+        &server_raw,
+        cli.allow_insecure || !cli.command.uses_server(),
+    )?)
+}
+
+/// Inner entry point that returns `anyhow::Result`.
+#[expect(
+    clippy::too_many_lines,
+    reason = "single dispatch match over all CLI subcommands"
+)]
+async fn run() -> Result<()> {
+    let config = config::Config::load();
+
+    if init_and_dispatch_helper_binaries(config.as_ref().ok()).await? {
         return Ok(());
     }
 
@@ -494,20 +527,8 @@ async fn run() -> Result<()> {
     });
     tracing_subscriber::fmt().with_env_filter(filter).init();
 
-    // Load config and resolve server URL
-    let config = config::Config::load()?;
-    let server_raw = cli
-        .server
-        .or_else(|| config.server_url().map(String::from))
-        .unwrap_or_else(|| "https://us.vouch.sh".to_string());
-
-    // Validate and normalize URL for commands that contact the server.
-    // Offline commands (completions, init, logout, diag) skip validation
-    // but still normalize for consistency.
-    let server = server_url::ServerUrl::parse(
-        &server_raw,
-        cli.allow_insecure || !cli.command.uses_server(),
-    )?;
+    let config = config?;
+    let server = resolve_server_url(&cli, &config)?;
     let server = server.as_str();
 
     match cli.command {

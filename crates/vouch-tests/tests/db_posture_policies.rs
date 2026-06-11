@@ -12,7 +12,7 @@
     reason = "test code: panic on assertion failure is acceptable"
 )]
 
-use vouch_server::db::{self, CreateCustomPolicyParams, UpdateCustomPolicyParams};
+use vouch_server::db::{self, CreateCustomPolicyParams, FieldUpdate, UpdateCustomPolicyParams};
 use vouch_tests::TestHarness;
 
 async fn fresh_org_id(harness: &TestHarness, domain: &str) -> String {
@@ -205,7 +205,7 @@ async fn custom_policy_update_can_activate_and_rename() {
         &org_id,
         UpdateCustomPolicyParams {
             name: Some("new name"),
-            description: Some(None),
+            description: FieldUpdate::Clear,
             cel_expression: Some("device.os_version >= '14'"),
             active: Some(true),
         },
@@ -246,7 +246,7 @@ async fn custom_policy_update_refuses_cross_org_writes() {
         &org_b, // wrong org
         UpdateCustomPolicyParams {
             name: Some("hijacked"),
-            description: None,
+            description: FieldUpdate::Keep,
             cel_expression: None,
             active: None,
         },
@@ -365,7 +365,7 @@ async fn get_active_custom_policies_filters_by_flag() {
         &org_id,
         UpdateCustomPolicyParams {
             name: None,
-            description: None,
+            description: FieldUpdate::Keep,
             cel_expression: None,
             active: Some(true),
         },
@@ -431,7 +431,7 @@ async fn count_active_policies_sums_preconfigured_and_custom() {
         &org_id,
         UpdateCustomPolicyParams {
             name: None,
-            description: None,
+            description: FieldUpdate::Keep,
             cel_expression: None,
             active: Some(true),
         },

@@ -668,27 +668,32 @@ pub enum LogFormat {
     Json,
 }
 
+/// Compute the base URL: the explicit value if provided, otherwise derived
+/// from `rp_id` (http with port for loopback development, https for
+/// production).
+fn derive_base_url(base_url: Option<String>, rp_id: &str, listen_addr: &str) -> String {
+    if let Some(url) = base_url {
+        return url;
+    }
+    let derived = if vouch_common::is_loopback_host(rp_id) {
+        // For local development (localhost/127.0.0.1), use http with port
+        let port = listen_addr.rsplit(':').next().unwrap_or("3000");
+        format!("http://{rp_id}:{port}")
+    } else {
+        // Production: use https without port (assumes standard 443)
+        format!("https://{rp_id}")
+    };
+    tracing::debug!("VOUCH_BASE_URL not set, derived from rp_id: {}", derived);
+    derived
+}
+
 impl ServerConfig {
     /// Create configuration from parsed command-line arguments.
     pub fn from_args(args: Args) -> Result<Self> {
         // Note: Validation of rp_id and jwt_secret is deferred to validate()
         // to allow these values to come from S3 config.
 
-        // Compute base URL (handles both production https and local http)
-        let base_url = if let Some(url) = args.base_url {
-            url
-        } else {
-            let derived = if vouch_common::is_loopback_host(&args.rp_id) {
-                // For local development (localhost/127.0.0.1), use http with port
-                let port = args.listen_addr.rsplit(':').next().unwrap_or("3000");
-                format!("http://{}:{}", args.rp_id, port)
-            } else {
-                // Production: use https without port (assumes standard 443)
-                format!("https://{}", args.rp_id)
-            };
-            tracing::debug!("VOUCH_BASE_URL not set, derived from rp_id: {}", derived);
-            derived
-        };
+        let base_url = derive_base_url(args.base_url, &args.rp_id, &args.listen_addr);
 
         // Parse allowed domains
         let allowed_domains = args

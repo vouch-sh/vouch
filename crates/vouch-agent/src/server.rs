@@ -174,8 +174,9 @@ async fn handle_connection(
     ssh_state: Arc<SshAgentState>,
 ) -> Result<()> {
     loop {
-        // Read length-prefixed message
-        let buf = match wire::read_message(&mut stream).await? {
+        // Read length-prefixed message, bounding how long an idle or
+        // stalled client can hold this connection task open.
+        let buf = match wire::read_message_timeout(&mut stream, wire::IDLE_READ_TIMEOUT).await? {
             Some(buf) => buf,
             None => return Ok(()), // Client disconnected
         };

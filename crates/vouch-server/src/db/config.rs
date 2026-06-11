@@ -81,7 +81,11 @@ impl AuthEventParams {
 }
 
 /// Insert a new authentication event via the audit store.
-pub async fn insert_auth_event(
+///
+/// Production code records events through [`spawn_audit_event`]; this is
+/// exposed to in-crate tests that need to await the write and inspect the
+/// returned event ID.
+pub(super) async fn insert_auth_event(
     audit: &AuditStore,
     params: &AuthEventParams,
     email: Option<&str>,
@@ -112,6 +116,20 @@ pub async fn insert_auth_event(
             &data_json,
         )
         .await
+}
+
+/// Record an authentication event without blocking the caller.
+///
+/// Spawns a detached task so credential flows never wait on (or fail with)
+/// the audit write; failures are logged with the event type so dropped
+/// records are visible in one consistent format.
+pub fn spawn_audit_event(audit: &AuditStore, params: AuthEventParams, email: Option<String>) {
+    let audit = audit.clone();
+    tokio::spawn(async move {
+        if let Err(e) = insert_auth_event(&audit, &params, email.as_deref()).await {
+            tracing::warn!(error = %e, event_type = ?params.event_type, "failed to record audit event");
+        }
+    });
 }
 
 /// Delete authentication events older than the specified timestamp.

@@ -159,10 +159,22 @@ pub async fn get_custom_policy(
     Ok(doc.map(CustomPosturePolicy::from))
 }
 
+/// Intent for an optional field in a PATCH-style update.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum FieldUpdate<'a> {
+    /// Leave the stored value unchanged.
+    #[default]
+    Keep,
+    /// Clear the stored value.
+    Clear,
+    /// Replace the stored value.
+    Set(&'a str),
+}
+
 /// Parameters for updating a custom posture policy.
 pub struct UpdateCustomPolicyParams<'a> {
     pub name: Option<&'a str>,
-    pub description: Option<Option<&'a str>>,
+    pub description: FieldUpdate<'a>,
     pub cel_expression: Option<&'a str>,
     pub active: Option<bool>,
 }
@@ -187,8 +199,9 @@ pub async fn update_custom_policy(
     let updated = CustomPosturePolicyDoc {
         name: params.name.map(String::from).unwrap_or(doc.data.name),
         description: match params.description {
-            Some(d) => d.map(String::from),
-            None => doc.data.description,
+            FieldUpdate::Keep => doc.data.description,
+            FieldUpdate::Clear => None,
+            FieldUpdate::Set(d) => Some(d.to_string()),
         },
         cel_expression: params
             .cel_expression

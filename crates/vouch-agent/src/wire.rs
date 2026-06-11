@@ -5,10 +5,17 @@
 //! used by both the agent IPC protocol and the SSH agent protocol.
 
 use crate::error::{AgentError, Result};
+use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 /// Maximum message size (1MB).
 pub const MAX_MESSAGE_SIZE: usize = 1024 * 1024;
+
+/// Idle read deadline for server-side connections.
+///
+/// Generous enough for legitimate long-idle clients, but bounds how long an
+/// abandoned or stalled peer can pin a per-connection task and its FD.
+pub const IDLE_READ_TIMEOUT: Duration = Duration::from_mins(5);
 
 /// Read a length-prefixed message (4-byte BE length + payload).
 ///
@@ -41,6 +48,21 @@ pub async fn read_message<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Option
     reader.read_exact(&mut buf).await?;
 
     Ok(Some(buf))
+}
+
+/// Read a length-prefixed message, failing if the peer stays silent (or
+/// stalls mid-message) past `timeout`.
+///
+/// Used by server-side connection loops, where every read on a
+/// peer-controlled connection needs a deadline; clients awaiting a response
+/// to their own request use [`read_message`] directly.
+pub async fn read_message_timeout<R: AsyncRead + Unpin>(
+    reader: &mut R,
+    timeout: Duration,
+) -> Result<Option<Vec<u8>>> {
+    tokio::time::timeout(timeout, read_message(reader))
+        .await
+        .map_err(|_| AgentError::Protocol("idle connection timed out".to_string()))?
 }
 
 /// Write a length-prefixed message (4-byte BE length + payload).
@@ -151,6 +173,37 @@ mod tests {
         let mut buf = Cursor::new(Vec::<u8>::new());
         let result = read_message(&mut buf).await.unwrap();
         assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_read_message_timeout_on_silent_peer() {
+        // A duplex stream with nothing written never produces data.
+        let (mut silent, _writer) = tokio::io::duplex(64);
+        let result = read_message_timeout(&mut silent, Duration::from_millis(10)).await;
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("idle connection timed out"));
+    }
+
+    #[tokio::test]
+    async fn test_read_message_timeout_on_stalled_mid_message() {
+        // Peer sends the length prefix but never the body.
+        let (mut reader, mut writer) = tokio::io::duplex(64);
+        writer.write_all(&[0, 0, 0, 8]).await.unwrap();
+        let result = read_message_timeout(&mut reader, Duration::from_millis(10)).await;
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("idle connection timed out"));
+    }
+
+    #[tokio::test]
+    async fn test_read_message_timeout_passes_through_message() {
+        let mut buf = Vec::new();
+        write_message(&mut buf, b"prompt reply").await.unwrap();
+        let mut cursor = Cursor::new(buf);
+        let read_back = read_message_timeout(&mut cursor, Duration::from_secs(5))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(read_back, b"prompt reply");
     }
 
     #[test]

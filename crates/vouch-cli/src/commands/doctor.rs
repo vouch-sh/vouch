@@ -64,6 +64,46 @@ pub(crate) async fn run(server: &str, quiet: bool, json: bool) -> Result<()> {
         println!("Vouch Doctor - Environment Diagnostics\n");
     }
 
+    let checks = run_checks(server, suppress).await;
+
+    let all_passed = checks.iter().all(|c| c.passed);
+
+    // JSON output
+    if json {
+        let json_output = DoctorJson {
+            checks: checks
+                .into_iter()
+                .map(|c| DoctorCheckJson {
+                    name: c.name,
+                    passed: c.passed,
+                    message: c.message,
+                })
+                .collect(),
+            all_passed,
+        };
+        println!("{}", serde_json::to_string_pretty(&json_output)?);
+    }
+
+    // Summary
+    if !suppress {
+        println!();
+    }
+    if all_passed {
+        if !suppress {
+            println!("All checks passed!");
+        }
+        Ok(())
+    } else {
+        if !suppress {
+            println!("Some checks failed. Review the issues above.");
+        }
+        bail!("doctor: one or more checks failed")
+    }
+}
+
+/// Run every diagnostic check in order, printing progress as each one
+/// completes (unless `suppress` is set), and collect the results.
+async fn run_checks(server: &str, suppress: bool) -> Vec<CheckResult> {
     let mut checks: Vec<CheckResult> = Vec::new();
 
     // Check 1: YubiKey connectivity
@@ -180,39 +220,7 @@ pub(crate) async fn run(server: &str, quiet: bool, json: bool) -> Result<()> {
     }
     checks.push(security_result);
 
-    let all_passed = checks.iter().all(|c| c.passed);
-
-    // JSON output
-    if json {
-        let json_output = DoctorJson {
-            checks: checks
-                .into_iter()
-                .map(|c| DoctorCheckJson {
-                    name: c.name,
-                    passed: c.passed,
-                    message: c.message,
-                })
-                .collect(),
-            all_passed,
-        };
-        println!("{}", serde_json::to_string_pretty(&json_output)?);
-    }
-
-    // Summary
-    if !suppress {
-        println!();
-    }
-    if all_passed {
-        if !suppress {
-            println!("All checks passed!");
-        }
-        Ok(())
-    } else {
-        if !suppress {
-            println!("Some checks failed. Review the issues above.");
-        }
-        bail!("doctor: one or more checks failed")
-    }
+    checks
 }
 
 /// Print check result with color indicators.

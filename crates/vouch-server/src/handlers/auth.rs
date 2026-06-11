@@ -143,8 +143,6 @@ pub(crate) async fn logout(
 
                     // Fire-and-forget logout audit event
                     if let Some(session) = session_info {
-                        let audit = state.audit.clone();
-                        let user_email = session.user_email.clone();
                         let params = db::AuthEventParams {
                             user_id: session.user_id.clone(),
                             event_type: db::AuthEventType::Logout,
@@ -152,13 +150,7 @@ pub(crate) async fn logout(
                             ..Default::default()
                         }
                         .with_client_info(client_info);
-                        tokio::spawn(async move {
-                            if let Err(e) =
-                                db::insert_auth_event(&audit, &params, Some(&user_email)).await
-                            {
-                                tracing::warn!("Failed to log logout event: {}", e,);
-                            }
-                        });
+                        db::spawn_audit_event(&state.audit, params, Some(session.user_email));
                     }
                 }
             }

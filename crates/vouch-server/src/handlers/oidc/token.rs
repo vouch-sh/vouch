@@ -683,8 +683,10 @@ async fn handle_authorization_code_grant(
     // FAPI 2.0: Require DPoP for FAPI clients (sender-constrained tokens).
     if let Err(e) = crate::services::oidc::fapi::validate_fapi_token_request(
         &authenticated_client.client,
-        dpop_proof.is_some(),
-        has_mtls_cert,
+        crate::services::oidc::fapi::SenderConstraints {
+            dpop: dpop_proof.is_some(),
+            mtls_cert: has_mtls_cert,
+        },
     ) {
         return e.into_oauth_response().into_response();
     }
@@ -1159,8 +1161,10 @@ async fn handle_fido2_assertion_grant(
     // FAPI 2.0: Require sender-constrained tokens (DPoP or mTLS)
     if let Err(e) = crate::services::oidc::fapi::validate_fapi_token_request(
         &jwt_authenticated.client,
-        dpop_proof.is_some(),
-        has_mtls_cert,
+        crate::services::oidc::fapi::SenderConstraints {
+            dpop: dpop_proof.is_some(),
+            mtls_cert: has_mtls_cert,
+        },
     ) {
         return e.into_oauth_response().into_response();
     }

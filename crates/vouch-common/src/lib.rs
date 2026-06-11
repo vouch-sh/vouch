@@ -21,15 +21,31 @@ mod api_tests;
 mod encoding_tests;
 
 pub use encoding::{Base64Url, ConvertEncoding, Encoded, Encoding, Raw};
-pub use fido2_types::*;
+pub use fido2_types::{
+    AttestationObject, AttestationObjectData, AuthData, AuthenticatorDataMarker,
+    Base64UrlChallenge, Base64UrlCredentialId, Challenge, ChallengeData, ClientDataJson,
+    ClientDataJsonData, CoseKey, CoseKeyData, CredentialId, CredentialIdData, RawAttestationObject,
+    RawAuthData, RawChallenge, RawClientDataJson, RawCoseKey, RawCredentialId, RawSignature,
+    RawUserHandle, Signature, SignatureData, UserHandle, UserHandleData,
+};
 
 pub use aaguid::{
     AaguidPolicy, extract_aaguid_from_auth_data, extract_public_key_from_attestation,
     extract_public_key_from_auth_data, is_fips, is_yubikey_5, lookup_device_model,
 };
-pub use api::*;
+pub use api::{
+    AwsTokenResponse, BrowserLoginCompleteRequest, BrowserLoginCompleteResponse,
+    BrowserLoginStartRequest, BrowserLoginStartResponse, BrowserRegisterCompleteRequest,
+    BrowserRegisterStartRequest, BrowserRegisterStartResponse, CloudTokenResponse,
+    DeleteKeyResponse, DeviceCodeRequest, DeviceCodeResponse, DeviceTokenRequest,
+    DeviceTokenResponse, Fido2ChallengeResponse, GitHubAccountStatus, GitHubStatusResponse,
+    GitHubTokenRequest, GitHubTokenResponse, KeyInfo, ListKeysResponse, OAuthError,
+    RegisterCompleteRequest, RegisterCompleteResponse, RegisterStartRequest, RegisterStartResponse,
+    RenameKeyRequest, RenameKeyResponse, SessionStatus, SshCaPublicKeyResponse,
+    SshCertificateRequest, SshCertificateResponse, serialize_secret_string,
+};
 pub use cookie::{SessionCookie, clear_cookie, cookie_path, read_cookie, write_cookie};
-pub use error::*;
+pub use error::{ApiError, VouchError};
 pub use url::{UrlSecurity, check_url_security, is_loopback_host};
 
 /// Session cookie name with `__Host-` prefix (RFC 6265bis).

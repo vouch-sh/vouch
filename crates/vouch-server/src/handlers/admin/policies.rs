@@ -380,7 +380,9 @@ pub(crate) async fn update_custom_policy(
         &org_id,
         db::UpdateCustomPolicyParams {
             name: Some(&form.name),
-            description: Some(description.as_deref()),
+            description: description
+                .as_deref()
+                .map_or(db::FieldUpdate::Clear, db::FieldUpdate::Set),
             cel_expression: Some(&form.cel_expression),
             active: None,
         },
@@ -535,7 +537,7 @@ pub(crate) async fn toggle_custom_policy(
         &org_id,
         db::UpdateCustomPolicyParams {
             name: None,
-            description: None,
+            description: db::FieldUpdate::Keep,
             cel_expression: None,
             active: Some(new_active),
         },

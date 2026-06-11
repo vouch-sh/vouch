@@ -1424,15 +1424,11 @@ pub(crate) async fn browser_register_complete(
         ..AuthEventParams::default()
     }
     .with_client_info(client_info);
-    let audit = state.audit.clone();
-    let user_email_for_audit = reg_state.user_email.clone();
-    tokio::spawn(async move {
-        if let Err(e) =
-            db::insert_auth_event(&audit, &auth_event_params, Some(&user_email_for_audit)).await
-        {
-            tracing::warn!("Failed to log enrollment event: {}", e);
-        }
-    });
+    db::spawn_audit_event(
+        &state.audit,
+        auth_event_params,
+        Some(reg_state.user_email.clone()),
+    );
 
     crate::infra::metrics::record_auth_event("enrollment");
 

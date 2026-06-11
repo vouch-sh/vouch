@@ -88,87 +88,10 @@ pub async fn initialize(args: config::Args) -> Result<ServerComponents> {
         use_attestation,
     );
 
-    // AWS SDK and runtime configuration
-    let env_or = |key: &str| -> String { std::env::var(key).unwrap_or_else(|_| "(empty)".into()) };
-    tracing::info!(
-        "AWS SDK: region={}, fips={}, dualstack={}, sts_regional={}, defaults_mode={}",
-        env_or("AWS_REGION"),
-        env_or("AWS_USE_FIPS_ENDPOINT"),
-        env_or("AWS_USE_DUALSTACK_ENDPOINT"),
-        env_or("AWS_STS_REGIONAL_ENDPOINTS"),
-        env_or("AWS_DEFAULTS_MODE"),
-    );
-    tracing::info!("Logging: RUST_LOG={}", env_or("RUST_LOG"));
-
-    if !config.trusted_proxies.is_empty() {
-        let cidrs: Vec<String> = config
-            .trusted_proxies
-            .iter()
-            .map(ToString::to_string)
-            .collect();
-        tracing::warn!(
-            "Trusted proxies configured: {} -- X-Forwarded-For will be parsed for client IP",
-            cidrs.join(", "),
-        );
-    }
-
     crate::geo::warmup();
     tracing::info!("GeoIP database initialized");
 
-    // Feature status summary — one log per feature for searchable CloudWatch events
-    let pool_cfg = &config.pool_config;
-    tracing::info!(
-        "Database pool: max_connections={}, min_connections={}, idle_timeout={}s, acquire_timeout={}s",
-        pool_cfg.max_connections,
-        pool_cfg.min_connections,
-        pool_cfg.idle_timeout_secs,
-        pool_cfg.acquire_timeout_secs,
-    );
-    tracing::info!(
-        "Sessions: duration={}h, dpop_max_age={}s, cache_max_capacity={}, cache_ttl={}s",
-        config.session_hours,
-        config.dpop_max_age_seconds,
-        config.session_cache_max_capacity,
-        config.session_cache_ttl_secs,
-    );
-    tracing::info!(
-        "Device flow: code_expires={}s, poll_interval={}s",
-        config.device_code_expires_seconds,
-        config.device_poll_interval_seconds,
-    );
-
-    log_authenticator_policy(&config);
-
-    match &config.cors_origins {
-        Some(origins) => tracing::info!("CORS: origins={}", origins.join(", ")),
-        None => tracing::info!("CORS: same-origin only"),
-    }
-
-    // Warn if rp_id is localhost but TLS is configured (likely a
-    // misconfiguration: a loopback rp_id in what looks like production).
-    // WebAuthn origin relaxation is now disabled whenever TLS is configured,
-    // so origin binding is NOT weakened here — but the loopback rp_id itself
-    // is almost certainly wrong for a TLS deployment.
-    if vouch_common::is_loopback_host(&config.rp_id) && config.tls_configured() {
-        tracing::warn!(
-            target: "security",
-            "rp_id is '{}' but TLS is configured -- this looks like a production \
-             deployment with a loopback relying-party ID, which is almost \
-             certainly a misconfiguration",
-            config.rp_id,
-        );
-    }
-
-    // Loudly flag certification test mode at startup. This is a login-bypass
-    // switch (see router.rs) intended only for OpenID conformance testing.
-    if config.certification_test_token.is_some() {
-        tracing::warn!(
-            target: "security",
-            "CERTIFICATION TEST MODE is ENABLED (VOUCH_CERTIFICATION_TEST_TOKEN is \
-             set): login-bypass endpoint active, global rate limiting disabled, \
-             and the upstream-IdP requirement relaxed. MUST NOT be set in production."
-        );
-    }
+    log_startup_summary(&config);
 
     // Build AppState and start background tasks
     let state = build_app_state(&config, db.clone(), doc_keys, kms_client).await?;
@@ -747,6 +670,89 @@ async fn build_configured_idp(
                 },
             ))
         }
+    }
+}
+
+/// Log the runtime/feature configuration summary at startup — one log per
+/// feature for searchable CloudWatch events — plus security warnings for
+/// suspicious configurations.
+fn log_startup_summary(config: &config::ServerConfig) {
+    // AWS SDK and runtime configuration
+    let env_or = |key: &str| -> String { std::env::var(key).unwrap_or_else(|_| "(empty)".into()) };
+    tracing::info!(
+        "AWS SDK: region={}, fips={}, dualstack={}, sts_regional={}, defaults_mode={}",
+        env_or("AWS_REGION"),
+        env_or("AWS_USE_FIPS_ENDPOINT"),
+        env_or("AWS_USE_DUALSTACK_ENDPOINT"),
+        env_or("AWS_STS_REGIONAL_ENDPOINTS"),
+        env_or("AWS_DEFAULTS_MODE"),
+    );
+    tracing::info!("Logging: RUST_LOG={}", env_or("RUST_LOG"));
+
+    if !config.trusted_proxies.is_empty() {
+        let cidrs: Vec<String> = config
+            .trusted_proxies
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        tracing::warn!(
+            "Trusted proxies configured: {} -- X-Forwarded-For will be parsed for client IP",
+            cidrs.join(", "),
+        );
+    }
+
+    let pool_cfg = &config.pool_config;
+    tracing::info!(
+        "Database pool: max_connections={}, min_connections={}, idle_timeout={}s, acquire_timeout={}s",
+        pool_cfg.max_connections,
+        pool_cfg.min_connections,
+        pool_cfg.idle_timeout_secs,
+        pool_cfg.acquire_timeout_secs,
+    );
+    tracing::info!(
+        "Sessions: duration={}h, dpop_max_age={}s, cache_max_capacity={}, cache_ttl={}s",
+        config.session_hours,
+        config.dpop_max_age_seconds,
+        config.session_cache_max_capacity,
+        config.session_cache_ttl_secs,
+    );
+    tracing::info!(
+        "Device flow: code_expires={}s, poll_interval={}s",
+        config.device_code_expires_seconds,
+        config.device_poll_interval_seconds,
+    );
+
+    log_authenticator_policy(config);
+
+    match &config.cors_origins {
+        Some(origins) => tracing::info!("CORS: origins={}", origins.join(", ")),
+        None => tracing::info!("CORS: same-origin only"),
+    }
+
+    // Warn if rp_id is localhost but TLS is configured (likely a
+    // misconfiguration: a loopback rp_id in what looks like production).
+    // WebAuthn origin relaxation is now disabled whenever TLS is configured,
+    // so origin binding is NOT weakened here — but the loopback rp_id itself
+    // is almost certainly wrong for a TLS deployment.
+    if vouch_common::is_loopback_host(&config.rp_id) && config.tls_configured() {
+        tracing::warn!(
+            target: "security",
+            "rp_id is '{}' but TLS is configured -- this looks like a production \
+             deployment with a loopback relying-party ID, which is almost \
+             certainly a misconfiguration",
+            config.rp_id,
+        );
+    }
+
+    // Loudly flag certification test mode at startup. This is a login-bypass
+    // switch (see router.rs) intended only for OpenID conformance testing.
+    if config.certification_test_token.is_some() {
+        tracing::warn!(
+            target: "security",
+            "CERTIFICATION TEST MODE is ENABLED (VOUCH_CERTIFICATION_TEST_TOKEN is \
+             set): login-bypass endpoint active, global rate limiting disabled, \
+             and the upstream-IdP requirement relaxed. MUST NOT be set in production."
+        );
     }
 }
 
