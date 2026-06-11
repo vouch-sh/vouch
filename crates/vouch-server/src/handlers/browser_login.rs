@@ -452,7 +452,7 @@ pub(crate) async fn browser_login_complete(
 
     // ── Phase 3b: Atomic single-use challenge consume ─────────────────────
     // Mark the authentication state JWT consumed before any side effects.
-    // The returned `WebauthnChallengeClaim` witness is the structural proof
+    // The returned `ChallengeStateClaim` witness is the structural proof
     // threaded into the TokenIssuanceProof below — the only path to
     // `GrantProof::BrowserLogin`. Two concurrent requests with the same
     // state JWT collide on the deterministic PRIMARY KEY; only one wins.

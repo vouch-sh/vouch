@@ -195,7 +195,7 @@ pub(crate) async fn exchange_fido2_assertion(
 
     // 5. Mark challenge used + look up authenticator in parallel
     //    (independent DB operations on different tables). The returned
-    //    `WebauthnChallengeClaim` witness is the structural proof threaded
+    //    `ChallengeStateClaim` witness is the structural proof threaded
     //    into the TokenIssuanceProof below — the only path to
     //    `GrantProof::Fido2Assertion`.
     let (challenge_claim_result, lookup_result) = tokio::try_join!(
