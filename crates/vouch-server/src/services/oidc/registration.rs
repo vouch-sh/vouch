@@ -276,7 +276,7 @@ pub async fn register_client(
     let validated = validate_grant_and_response_types(&mut request)?;
 
     // 7. Validate redirect URIs
-    let redirect_uris = validate_redirect_uris(&mut request, validated.has_auth_code)?;
+    let redirect_uris = validate_redirect_uris(&mut request, validated.auth_code_grant)?;
 
     // 8-9. Validate JWKS and auth method
     let jwks_auth = validate_jwks_and_auth_method(&mut request, &validated.auth_method_str)?;
@@ -437,9 +437,14 @@ pub async fn register_client(
         };
 
     // 12c-2. Validate userinfo_signed_response_alg (OIDC Core Section 5.3.4).
+    let rsa_key = if state.oidc_rsa_key.is_some() {
+        RsaSigningKey::Available
+    } else {
+        RsaSigningKey::Unavailable
+    };
     let userinfo_alg = validate_userinfo_signed_response_alg(
         request.userinfo_signed_response_alg.as_deref(),
-        state.oidc_rsa_key.is_some(),
+        rsa_key,
         fapi_profile,
     )?;
 
@@ -638,13 +643,20 @@ pub async fn register_client(
 // Registration Validation Helpers
 // ============================================================================
 
+/// Whether the requested grant types include `authorization_code`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AuthorizationCodeGrant {
+    Present,
+    Absent,
+}
+
 /// Validated grant/response types and auth method from a registration request.
 #[derive(Debug)]
 struct ValidatedGrantTypes {
     grant_types: Vec<String>,
     response_types: Vec<String>,
     auth_method_str: String,
-    has_auth_code: bool,
+    auth_code_grant: AuthorizationCodeGrant,
 }
 
 /// Reject RS256 when the client is registering under any FAPI 2.0 profile.
@@ -666,12 +678,20 @@ fn reject_rs256_for_fapi(
     Ok(())
 }
 
+/// Whether the server has an RSA signing key configured (and can thus
+/// offer RS256 for signed responses).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RsaSigningKey {
+    Available,
+    Unavailable,
+}
+
 /// Validate `userinfo_signed_response_alg` — only RS256 and ES256 are accepted.
 ///
 /// Returns the parsed algorithm, or `None` if the field is absent.
 fn validate_userinfo_signed_response_alg(
     raw: Option<&str>,
-    has_rsa_key: bool,
+    rsa_key: RsaSigningKey,
     fapi_profile: FapiProfile,
 ) -> Result<Option<JwsAlgorithm>, ServiceError> {
     let Some(s) = raw else { return Ok(None) };
@@ -683,7 +703,7 @@ fn validate_userinfo_signed_response_alg(
     })?;
     reject_rs256_for_fapi(parsed, fapi_profile, "userinfo_signed_response_alg")?;
     match parsed {
-        JwsAlgorithm::Rs256 if !has_rsa_key => Err(ServiceError::oauth(
+        JwsAlgorithm::Rs256 if rsa_key == RsaSigningKey::Unavailable => Err(ServiceError::oauth(
             OAuthErrorCode::InvalidClientMetadata,
             "RS256 is not available for userinfo_signed_response_alg \
              (no RSA signing key configured)",
@@ -779,9 +799,13 @@ fn validate_grant_and_response_types(
         }
     }
 
-    let has_auth_code = grant_types.iter().any(|g| g == "authorization_code");
+    let auth_code_grant = if grant_types.iter().any(|g| g == "authorization_code") {
+        AuthorizationCodeGrant::Present
+    } else {
+        AuthorizationCodeGrant::Absent
+    };
     let has_code_response = response_types.iter().any(|r| r == "code");
-    if has_auth_code && !has_code_response {
+    if auth_code_grant == AuthorizationCodeGrant::Present && !has_code_response {
         return Err(ServiceError::oauth(
             OAuthErrorCode::InvalidClientMetadata,
             "grant_types includes 'authorization_code' but response_types is missing 'code'",
@@ -792,17 +816,17 @@ fn validate_grant_and_response_types(
         grant_types,
         response_types,
         auth_method_str,
-        has_auth_code,
+        auth_code_grant,
     })
 }
 
 /// Validate redirect URIs: required for auth_code grant, cardinality, format.
 fn validate_redirect_uris(
     request: &mut RegistrationRequest,
-    has_auth_code: bool,
+    auth_code_grant: AuthorizationCodeGrant,
 ) -> Result<Vec<String>, ServiceError> {
     let redirect_uris = request.redirect_uris.take().unwrap_or_default();
-    if has_auth_code && redirect_uris.is_empty() {
+    if auth_code_grant == AuthorizationCodeGrant::Present && redirect_uris.is_empty() {
         return Err(ServiceError::oauth(
             OAuthErrorCode::InvalidClientMetadata,
             "redirect_uris is required when grant_types includes 'authorization_code'",
@@ -1071,7 +1095,7 @@ pub async fn update_client_configuration(
     let validated = validate_grant_and_response_types(&mut mutable_request)?;
 
     // Validate redirect URIs (same cardinality + format rules as initial registration)
-    let redirect_uris = validate_redirect_uris(&mut mutable_request, validated.has_auth_code)?;
+    let redirect_uris = validate_redirect_uris(&mut mutable_request, validated.auth_code_grant)?;
 
     // Build updated registration metadata (cosmetic fields)
     let registration_metadata = mutable_request.registration_metadata();
@@ -1086,9 +1110,14 @@ pub async fn update_client_configuration(
     // Validate userinfo_signed_response_alg (same rules as initial registration).
     // The client's FAPI profile is immutable post-registration (RFC 7592), so we
     // re-apply the original profile's algorithm restrictions to any updates.
+    let rsa_key = if state.oidc_rsa_key.is_some() {
+        RsaSigningKey::Available
+    } else {
+        RsaSigningKey::Unavailable
+    };
     let userinfo_alg = validate_userinfo_signed_response_alg(
         mutable_request.userinfo_signed_response_alg.as_deref(),
-        state.oidc_rsa_key.is_some(),
+        rsa_key,
         client.fapi_profile,
     )?;
 
@@ -2183,7 +2212,7 @@ mod tests {
         );
         assert!(validated.response_types.contains(&"code".to_string()));
         assert_eq!(validated.auth_method_str, "client_secret_basic");
-        assert!(validated.has_auth_code);
+        assert_eq!(validated.auth_code_grant, AuthorizationCodeGrant::Present);
     }
 
     #[test]
@@ -2239,7 +2268,7 @@ mod tests {
         // Deliberately overwrite response_types to omit "code" after construction
         req.response_types = Some(vec!["token".to_string()]); // will fail earlier for "token"
         // Use a minimal non-implicit, non-code type — but those are all rejected.
-        // Instead, craft a request where has_auth_code=true but response_types != ["code"].
+        // Instead, craft a request where the authorization_code grant is present but response_types != ["code"].
         // The only allowed response type is "code", so we must test via a two-step approach:
         // Force grant_types to include authorization_code while response_types is empty.
         let mut req2 = RegistrationRequest {
@@ -2272,7 +2301,7 @@ mod tests {
             make_request_with_grant_response(Some(vec!["client_credentials"]), Some(vec!["code"]));
         let result = validate_grant_and_response_types(&mut req);
         let validated = result.expect("client_credentials + code must be valid");
-        assert!(!validated.has_auth_code);
+        assert_eq!(validated.auth_code_grant, AuthorizationCodeGrant::Absent);
         assert!(
             validated
                 .grant_types
@@ -2318,15 +2347,16 @@ mod tests {
     #[test]
     fn test_validate_redirect_uris_required_for_auth_code_empty() {
         let mut req = make_request_with_redirect_uris(None);
-        let result = validate_redirect_uris(&mut req, true);
+        let result = validate_redirect_uris(&mut req, AuthorizationCodeGrant::Present);
         assert_oauth_error(result, OAuthErrorCode::InvalidClientMetadata);
     }
 
     #[test]
     fn test_validate_redirect_uris_not_required_without_auth_code() {
         let mut req = make_request_with_redirect_uris(None);
-        let result = validate_redirect_uris(&mut req, false);
-        let uris = result.expect("Empty redirect_uris allowed when has_auth_code=false");
+        let result = validate_redirect_uris(&mut req, AuthorizationCodeGrant::Absent);
+        let uris =
+            result.expect("Empty redirect_uris allowed without the authorization_code grant");
         assert!(uris.is_empty());
     }
 
@@ -2336,7 +2366,7 @@ mod tests {
             .map(|_| "https://example.com/callback")
             .collect();
         let mut req = make_request_with_redirect_uris(Some(many));
-        let result = validate_redirect_uris(&mut req, false);
+        let result = validate_redirect_uris(&mut req, AuthorizationCodeGrant::Absent);
         assert_oauth_error(result, OAuthErrorCode::InvalidClientMetadata);
     }
 
@@ -2346,7 +2376,7 @@ mod tests {
             "https://example.com/callback",
             "http://localhost:8080/callback",
         ]));
-        let result = validate_redirect_uris(&mut req, true);
+        let result = validate_redirect_uris(&mut req, AuthorizationCodeGrant::Present);
         let uris = result.expect("Valid URIs must pass");
         assert_eq!(uris.len(), 2);
     }
@@ -2354,7 +2384,7 @@ mod tests {
     #[test]
     fn test_validate_redirect_uris_invalid_uri_rejected() {
         let mut req = make_request_with_redirect_uris(Some(vec!["not a uri !!"]));
-        let result = validate_redirect_uris(&mut req, false);
+        let result = validate_redirect_uris(&mut req, AuthorizationCodeGrant::Absent);
         assert_oauth_error(result, OAuthErrorCode::InvalidRedirectUri);
     }
 
@@ -2857,16 +2887,22 @@ mod tests {
         // Integration of reject_rs256_for_fapi into the userinfo validator.
         // Passing has_rsa_key=true isolates the FAPI rejection from the
         // "no RSA key configured" path.
-        let result =
-            validate_userinfo_signed_response_alg(Some("RS256"), true, FapiProfile::Fapi2Security);
+        let result = validate_userinfo_signed_response_alg(
+            Some("RS256"),
+            RsaSigningKey::Available,
+            FapiProfile::Fapi2Security,
+        );
         assert_rs256_fapi_error(result.map(|_| ()), "userinfo_signed_response_alg");
     }
 
     #[test]
     fn test_validate_userinfo_signed_response_alg_allows_es256_for_fapi() {
         // ES256 is allowed for FAPI clients regardless of RSA key availability.
-        let result =
-            validate_userinfo_signed_response_alg(Some("ES256"), false, FapiProfile::Fapi2Security);
+        let result = validate_userinfo_signed_response_alg(
+            Some("ES256"),
+            RsaSigningKey::Unavailable,
+            FapiProfile::Fapi2Security,
+        );
         let alg = result.expect("ES256 must be accepted for FAPI userinfo");
         assert_eq!(alg, Some(JwsAlgorithm::Es256));
     }

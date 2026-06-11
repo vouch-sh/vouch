@@ -162,6 +162,22 @@ struct CacheEntry {
     inserted_at: Instant,
 }
 
+/// Result of a cache probe, distinguishing a miss from a cached
+/// "no such session" answer (negative caching).
+#[expect(
+    clippy::large_enum_variant,
+    reason = "Hit is the common case on the auth hot path and is destructured \
+              immediately; boxing would add an allocation per lookup"
+)]
+enum CacheLookup {
+    /// No fresh entry for this key — consult the database.
+    Miss,
+    /// Cached knowledge that the database has no session for this key.
+    NegativeHit,
+    /// Cached session.
+    Hit(Session),
+}
+
 impl SessionCache {
     /// Create a new session cache.
     ///
@@ -188,8 +204,10 @@ impl SessionCache {
         store: &DocumentStore,
         token_hash: &str,
     ) -> Result<Option<Session>> {
-        if let Some(cached) = self.get(token_hash) {
-            return Ok(cached);
+        match self.get(token_hash) {
+            CacheLookup::Hit(session) => return Ok(Some(session)),
+            CacheLookup::NegativeHit => return Ok(None),
+            CacheLookup::Miss => {}
         }
         // Snapshot generation before the async DB fetch so we can
         // detect invalidations that occurred during the await.
@@ -231,16 +249,21 @@ impl SessionCache {
         map.clear();
     }
 
-    fn get(&self, key: &str) -> Option<Option<Session>> {
+    fn get(&self, key: &str) -> CacheLookup {
         let Ok(mut map) = self.entries.lock() else {
-            return None;
+            return CacheLookup::Miss;
         };
-        let entry = map.get(key)?;
+        let Some(entry) = map.get(key) else {
+            return CacheLookup::Miss;
+        };
         if entry.inserted_at.elapsed() >= self.ttl {
             map.remove(key);
-            return None;
+            return CacheLookup::Miss;
         }
-        Some(entry.value.clone())
+        match entry.value.clone() {
+            Some(session) => CacheLookup::Hit(session),
+            None => CacheLookup::NegativeHit,
+        }
     }
 
     /// Expose generation for testing the TOCTOU guard.
@@ -316,13 +339,13 @@ mod tests {
             Some(fake_session("hash-a")),
             generation,
         );
-        assert!(matches!(cache.get("hash-a"), Some(Some(_))));
+        assert!(matches!(cache.get("hash-a"), CacheLookup::Hit(_)));
     }
 
     #[test]
     fn cache_miss_returns_none() {
         let cache = SessionCache::new(100, 30);
-        assert!(cache.get("nonexistent").is_none());
+        assert!(matches!(cache.get("nonexistent"), CacheLookup::Miss));
     }
 
     #[test]
@@ -331,8 +354,8 @@ mod tests {
         let generation = cache.generation();
         cache.insert_if_valid("hash-b".to_string(), None, generation);
         assert!(
-            matches!(cache.get("hash-b"), Some(None)),
-            "cache entry should exist with None value"
+            matches!(cache.get("hash-b"), CacheLookup::NegativeHit),
+            "cache entry should exist as a negative hit"
         );
     }
 
@@ -346,7 +369,7 @@ mod tests {
             generation,
         );
         cache.invalidate("hash-c");
-        assert!(cache.get("hash-c").is_none());
+        assert!(matches!(cache.get("hash-c"), CacheLookup::Miss));
     }
 
     #[test]
@@ -364,8 +387,8 @@ mod tests {
             generation,
         );
         cache.invalidate_all();
-        assert!(cache.get("hash-d").is_none());
-        assert!(cache.get("hash-e").is_none());
+        assert!(matches!(cache.get("hash-d"), CacheLookup::Miss));
+        assert!(matches!(cache.get("hash-e"), CacheLookup::Miss));
     }
 
     /// Regression test: simulates the TOCTOU race where an invalidation
@@ -387,7 +410,7 @@ mod tests {
         );
 
         assert!(
-            cache.get("hash-f").is_none(),
+            matches!(cache.get("hash-f"), CacheLookup::Miss),
             "revoked session must not be cached"
         );
     }
@@ -417,7 +440,7 @@ mod tests {
         );
 
         assert!(
-            cache.get("hash-g").is_none(),
+            matches!(cache.get("hash-g"), CacheLookup::Miss),
             "revoked session must not be cached after invalidate_all"
         );
     }
@@ -436,7 +459,7 @@ mod tests {
             fresh_gen,
         );
 
-        assert!(matches!(cache.get("hash-h"), Some(Some(_))));
+        assert!(matches!(cache.get("hash-h"), CacheLookup::Hit(_)));
     }
 
     /// Same TOCTOU regression case for user-scoped invalidation.
@@ -454,7 +477,7 @@ mod tests {
         );
 
         assert!(
-            cache.get("hash-user").is_none(),
+            matches!(cache.get("hash-user"), CacheLookup::Miss),
             "revoked session must not be cached after invalidate_for_user"
         );
     }
@@ -469,7 +492,7 @@ mod tests {
             generation,
         );
         // With a 0s TTL the entry is immediately expired
-        assert!(cache.get("hash-i").is_none());
+        assert!(matches!(cache.get("hash-i"), CacheLookup::Miss));
     }
 
     #[test]
@@ -481,7 +504,7 @@ mod tests {
             Some(fake_session("hash-j")),
             generation,
         );
-        assert!(cache.get("hash-j").is_none());
+        assert!(matches!(cache.get("hash-j"), CacheLookup::Miss));
     }
 
     #[test]
@@ -496,7 +519,7 @@ mod tests {
             generation,
         );
         // "first" should have been evicted to make room for "second"
-        assert!(cache.get("first").is_none());
-        assert!(cache.get("second").is_some());
+        assert!(matches!(cache.get("first"), CacheLookup::Miss));
+        assert!(matches!(cache.get("second"), CacheLookup::Hit(_)));
     }
 }
