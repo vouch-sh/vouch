@@ -919,20 +919,24 @@ async fn fetch_and_resolve_request_uri(
     }
 
     // Step 4: fetch the Request Object JWT from the URL.
-    let fetched_jwt = match fetch_request_object(request_uri, &state.http_client).await {
-        Ok(jwt) => jwt,
-        Err(e) => {
-            let description = match &e {
-                crate::services::ServiceError::OAuth { description, .. } => description.clone(),
-                _ => e.to_string(),
-            };
-            return Err(AuthorizeDeniedTemplate {
-                client_name: oauth_client.name,
-                error_message: format!("Failed to fetch Request Object: {description}"),
+    // Loopback request_uri destinations are permitted only in local development
+    // (no TLS configured); private/link-local targets stay blocked.
+    let allow_loopback = !state.config().tls_configured();
+    let fetched_jwt =
+        match fetch_request_object(request_uri, allow_loopback, &state.http_client).await {
+            Ok(jwt) => jwt,
+            Err(e) => {
+                let description = match &e {
+                    crate::services::ServiceError::OAuth { description, .. } => description.clone(),
+                    _ => e.to_string(),
+                };
+                return Err(AuthorizeDeniedTemplate {
+                    client_name: oauth_client.name,
+                    error_message: format!("Failed to fetch Request Object: {description}"),
+                }
+                .into_response());
             }
-            .into_response());
-        }
-    };
+        };
 
     // Step 5: validate the JWT.
     let query_hints = QueryParamHints {

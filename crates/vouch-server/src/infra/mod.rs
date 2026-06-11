@@ -20,6 +20,7 @@ pub mod router;
 pub mod s3_config;
 pub mod security_headers;
 pub mod serve;
+pub(crate) mod ssrf;
 pub mod startup;
 pub mod static_assets;
 pub mod telemetry;
