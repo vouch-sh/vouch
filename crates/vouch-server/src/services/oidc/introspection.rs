@@ -295,7 +295,6 @@ pub async fn revoke_token(
     if revoked {
         // Fire-and-forget logout audit event
         if let Some(ref user_id) = sub {
-            let audit = state.audit.clone();
             let params = db::AuthEventParams {
                 user_id: user_id.clone(),
                 event_type: db::AuthEventType::Logout,
@@ -303,14 +302,7 @@ pub async fn revoke_token(
                 ..Default::default()
             }
             .with_client_info(client_info);
-            let email_for_audit = email.clone();
-            tokio::spawn(async move {
-                if let Err(e) =
-                    db::insert_auth_event(&audit, &params, email_for_audit.as_deref()).await
-                {
-                    tracing::warn!("Failed to log revocation logout event: {}", e);
-                }
-            });
+            db::spawn_audit_event(&state.audit, params, email.clone());
         }
 
         return RevocationResult {

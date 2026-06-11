@@ -268,14 +268,7 @@ pub(crate) async fn exchange_fido2_assertion(
             ..AuthEventParams::default()
         }
         .with_client_info(failure_client_info);
-        let audit = state.audit.clone();
-        let user_email = user.email.clone();
-        tokio::spawn(async move {
-            if let Err(err) = db::insert_auth_event(&audit, &failure_event, Some(&user_email)).await
-            {
-                tracing::warn!("Failed to log auth event: {}", err);
-            }
-        });
+        db::spawn_audit_event(&state.audit, failure_event, Some(user.email.clone()));
         ServiceError::oauth(OAuthErrorCode::InvalidGrant, "Authentication failed")
     })?;
 
@@ -306,13 +299,7 @@ pub(crate) async fn exchange_fido2_assertion(
         ..AuthEventParams::default()
     }
     .with_client_info(params.client_info);
-    let audit = state.audit.clone();
-    let user_email = user.email.clone();
-    tokio::spawn(async move {
-        if let Err(e) = db::insert_auth_event(&audit, &auth_event_params, Some(&user_email)).await {
-            tracing::warn!("Failed to log auth event: {}", e);
-        }
-    });
+    db::spawn_audit_event(&state.audit, auth_event_params, Some(user.email.clone()));
 
     // 9. Validate authorization_details if provided (RFC 9396)
     let validated_ad = params

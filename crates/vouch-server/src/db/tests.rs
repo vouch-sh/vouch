@@ -1422,7 +1422,7 @@ async fn test_auth_event_logging() {
         .expect("Failed to create user");
 
     // Log successful login (insert_auth_event now uses AuditStore)
-    let event_id = insert_auth_event(
+    let event_id = config::insert_auth_event(
         &audit,
         &AuthEventParams {
             user_id: user_id.clone(),
@@ -1441,7 +1441,7 @@ async fn test_auth_event_logging() {
     assert!(!event_id.is_empty());
 
     // Log failed login
-    insert_auth_event(
+    config::insert_auth_event(
         &audit,
         &AuthEventParams {
             user_id: user_id.clone(),

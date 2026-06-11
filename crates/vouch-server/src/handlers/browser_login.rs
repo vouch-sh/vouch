@@ -591,12 +591,7 @@ pub(crate) async fn browser_login_complete(
             ..AuthEventParams::default()
         }
         .with_client_info(client_info.clone());
-        let audit = state.audit.clone();
-        tokio::spawn(async move {
-            if let Err(e) = db::insert_auth_event(&audit, &params, None).await {
-                tracing::warn!("Failed to log auth event: {}", e);
-            }
-        });
+        db::spawn_audit_event(&state.audit, params, None);
     };
 
     // Look up authenticator and verify ownership (single JOIN query)
@@ -738,12 +733,7 @@ pub(crate) async fn browser_login_complete(
         ..AuthEventParams::default()
     }
     .with_client_info(client_info);
-    let audit = state.audit.clone();
-    tokio::spawn(async move {
-        if let Err(e) = db::insert_auth_event(&audit, &auth_event_params, None).await {
-            tracing::warn!("Failed to log auth event: {}", e);
-        }
-    });
+    db::spawn_audit_event(&state.audit, auth_event_params, None);
 
     crate::infra::metrics::record_auth_event("browser_login_success");
 
