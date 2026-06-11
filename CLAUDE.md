@@ -267,7 +267,7 @@ cargo test --features yubikey-tests -- --ignored
 | Server handlers | `crates/vouch-server/src/handlers/` |
 | Server services | `crates/vouch-server/src/services/` (oidc/, integrations/) |
 | Crypto primitives | `crates/vouch-server/src/crypto/` (jwt.rs, ssh_ca.rs, webauthn_verify.rs, kms_signer.rs, cose.rs, attestation_chain.rs, document_crypto.rs, tpm_decrypt.rs, ber.rs, pem.rs) |
-| Server infra | `crates/vouch-server/src/infra/` (router.rs, tls.rs, rate_limit.rs, security_headers.rs, mtls_listener.rs, httpsig.rs, cleanup.rs, s3_config.rs) |
+| Server infra | `crates/vouch-server/src/infra/` (router.rs, tls.rs, rate_limit.rs, security_headers.rs, mtls_listener.rs, httpsig.rs, cleanup.rs, s3_config.rs, ssrf.rs, dns.rs) |
 | HTTP message signatures | `crates/vouch-httpsig/` (server resolver: `infra/httpsig.rs`, CLI adapter: `fapi/httpsig.rs`) |
 | Fuzz targets | `fuzz/fuzz_targets/` |
 | Database modules | `crates/vouch-server/src/db/` (pool.rs, users.rs, sessions.rs, etc.) |
