@@ -56,7 +56,7 @@ vouch/
 │   │   └── src/
 │   │       ├── api.rs      # API types (Credential, Session, etc.)
 │   │       ├── fido2_types.rs # FIDO2 type definitions
-│   │       └── contracts.rs   # Shared contracts
+│   │       └── fs.rs       # Atomic file write utilities
 │   ├── vouch-server/       # Auth server (Apache-2.0 OR MIT)
 │   │   ├── src/handlers/   # HTTP route handlers
 │   │   ├── src/db/         # Database layer (sqlx)
