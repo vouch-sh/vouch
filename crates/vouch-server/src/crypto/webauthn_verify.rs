@@ -25,8 +25,6 @@ use aws_lc_rs::digest::{self, SHA256};
 use aws_lc_rs::signature::{self, UnparsedPublicKey};
 use der::Decode;
 use thiserror::Error;
-use vouch_common::encoding::Raw;
-use vouch_common::fido2_types::{AuthData, ClientDataJson, CoseKey, Signature};
 
 /// Trait for COSE signature verification.
 ///
@@ -180,41 +178,65 @@ struct ClientData {
     cross_origin: Option<bool>,
 }
 
+/// Parameters for WebAuthn assertion verification (WebAuthn Level 2 §7.2).
+///
+/// Named fields prevent the positional byte-slice/string swaps an 11-argument
+/// signature would invite.
+#[derive(Debug, Clone, Copy)]
+pub struct AssertionParams<'a> {
+    /// Raw authenticator data bytes.
+    pub authenticator_data: &'a [u8],
+    /// Raw client data JSON bytes.
+    pub client_data_json: &'a [u8],
+    /// The signature to verify.
+    pub signature: &'a [u8],
+    /// The public key in COSE format (from registration).
+    pub public_key_cose: &'a [u8],
+    /// The expected relying party ID.
+    pub expected_rp_id: &'a str,
+    /// The expected challenge (base64url encoded).
+    pub expected_challenge: &'a str,
+    /// The expected origin URL.
+    pub expected_origin: &'a str,
+    /// The previously stored counter value.
+    pub stored_counter: u32,
+    /// Whether to require the UV flag.
+    pub require_user_verification: bool,
+    /// Whether to tolerate loopback origin variations. Development only; pass
+    /// `false` in production so an origin mismatch is always rejected.
+    pub allow_localhost_origin: bool,
+}
+
 /// Verify a WebAuthn assertion using the default COSE verifier.
 ///
 /// This is a convenience function that uses [`RealCoseVerifier`] for production use.
 /// For testing, use [`verify_assertion_with_verifier`] with a custom verifier.
+pub fn verify_assertion(params: &AssertionParams<'_>) -> Result<VerificationResult, VerifyError> {
+    verify_assertion_inner(params, &RealCoseVerifier)
+}
+
+/// Verify a WebAuthn assertion with a custom COSE verifier.
 ///
-/// # Arguments
-/// * `authenticator_data` - Raw authenticator data bytes
-/// * `client_data_json` - Raw client data JSON bytes
-/// * `signature` - The signature to verify
-/// * `public_key_cose` - The public key in COSE format (from registration)
-/// * `expected_rp_id` - The expected relying party ID
-/// * `expected_challenge` - The expected challenge (base64url encoded)
-/// * `expected_origin` - The expected origin URL
-/// * `stored_counter` - The previously stored counter value
-/// * `require_user_verification` - Whether to require UV flag
-/// * `allow_localhost_origin` - Whether to tolerate loopback origin variations
-///   (development only; pass `false` in production so an origin mismatch is
-///   always rejected)
-#[expect(
-    clippy::too_many_arguments,
-    reason = "WebAuthn assertion verification requires all per-RFC parameters"
-)]
-pub fn verify_assertion(
-    authenticator_data: &[u8],
-    client_data_json: &[u8],
-    signature: &[u8],
-    public_key_cose: &[u8],
-    expected_rp_id: &str,
-    expected_challenge: &str,
-    expected_origin: &str,
-    stored_counter: u32,
-    require_user_verification: bool,
-    allow_localhost_origin: bool,
+/// This function allows injecting a custom verifier for testing purposes.
+/// For production use, prefer [`verify_assertion`] which uses the default verifier.
+pub fn verify_assertion_with_verifier<V: CoseVerifier>(
+    params: &AssertionParams<'_>,
+    verifier: &V,
 ) -> Result<VerificationResult, VerifyError> {
-    verify_assertion_inner(
+    verify_assertion_inner(params, verifier)
+}
+
+/// Core WebAuthn assertion verification.
+///
+/// `params.allow_localhost_origin` gates the loopback origin-variation
+/// relaxation: it must be `true` only in development (no TLS). Production
+/// threads `false` so an origin mismatch is always rejected even on a
+/// misconfigured loopback `rp_id`.
+fn verify_assertion_inner<V: CoseVerifier>(
+    params: &AssertionParams<'_>,
+    verifier: &V,
+) -> Result<VerificationResult, VerifyError> {
+    let &AssertionParams {
         authenticator_data,
         client_data_json,
         signature,
@@ -225,86 +247,8 @@ pub fn verify_assertion(
         stored_counter,
         require_user_verification,
         allow_localhost_origin,
-        &RealCoseVerifier,
-    )
-}
+    } = params;
 
-/// Verify a WebAuthn assertion with a custom COSE verifier.
-///
-/// This function allows injecting a custom verifier for testing purposes.
-/// For production use, prefer [`verify_assertion`] which uses the default verifier.
-///
-/// # Arguments
-/// * `authenticator_data` - Raw authenticator data bytes
-/// * `client_data_json` - Raw client data JSON bytes
-/// * `signature` - The signature to verify
-/// * `public_key_cose` - The public key in COSE format (from registration)
-/// * `expected_rp_id` - The expected relying party ID
-/// * `expected_challenge` - The expected challenge (base64url encoded)
-/// * `expected_origin` - The expected origin URL
-/// * `stored_counter` - The previously stored counter value
-/// * `require_user_verification` - Whether to require UV flag
-/// * `verifier` - The COSE verifier to use for signature verification
-///
-/// Localhost origin relaxation is always enabled in this helper, matching its
-/// historical dev/test behavior. Production callers go through
-/// [`verify_assertion`], which threads an explicit `allow_localhost_origin`
-/// flag derived from server config.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "WebAuthn assertion verification requires all per-RFC parameters"
-)]
-pub fn verify_assertion_with_verifier<V: CoseVerifier>(
-    authenticator_data: &[u8],
-    client_data_json: &[u8],
-    signature: &[u8],
-    public_key_cose: &[u8],
-    expected_rp_id: &str,
-    expected_challenge: &str,
-    expected_origin: &str,
-    stored_counter: u32,
-    require_user_verification: bool,
-    verifier: &V,
-) -> Result<VerificationResult, VerifyError> {
-    verify_assertion_inner(
-        authenticator_data,
-        client_data_json,
-        signature,
-        public_key_cose,
-        expected_rp_id,
-        expected_challenge,
-        expected_origin,
-        stored_counter,
-        require_user_verification,
-        // Dev/test default: tolerate loopback origin variations.
-        true,
-        verifier,
-    )
-}
-
-/// Core WebAuthn assertion verification.
-///
-/// `allow_localhost_origin` gates the loopback origin-variation relaxation: it
-/// must be `true` only in development (no TLS). Production threads `false` so
-/// an origin mismatch is always rejected even on a misconfigured loopback
-/// `rp_id`.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "WebAuthn assertion verification requires all per-RFC parameters"
-)]
-fn verify_assertion_inner<V: CoseVerifier>(
-    authenticator_data: &[u8],
-    client_data_json: &[u8],
-    signature: &[u8],
-    public_key_cose: &[u8],
-    expected_rp_id: &str,
-    expected_challenge: &str,
-    expected_origin: &str,
-    stored_counter: u32,
-    require_user_verification: bool,
-    allow_localhost_origin: bool,
-    verifier: &V,
-) -> Result<VerificationResult, VerifyError> {
     // 1. Verify authenticator data structure
     // Minimum length: 32 (rpIdHash) + 1 (flags) + 4 (counter) = 37 bytes
     if authenticator_data.len() < 37 {
@@ -418,85 +362,6 @@ fn verify_assertion_inner<V: CoseVerifier>(
         counter,
         user_verified,
     })
-}
-
-// ============================================================================
-// Type-Safe Wrappers (Phase 3)
-// ============================================================================
-
-/// Verify a WebAuthn assertion using typed parameters.
-///
-/// This is a type-safe wrapper around [`verify_assertion`] that uses the
-/// `Encoded<T, E>` types from `vouch_common` for compile-time safety.
-///
-/// # Type Safety
-///
-/// Using typed parameters prevents accidentally swapping arguments:
-/// - `AuthData<Raw>` for authenticator data
-/// - `ClientDataJson<Raw>` for client data JSON
-/// - `Signature<Raw>` for the signature
-/// - `CoseKey<Raw>` for the public key
-#[expect(
-    clippy::too_many_arguments,
-    reason = "WebAuthn assertion verification requires all per-RFC parameters"
-)]
-pub fn verify_assertion_typed(
-    authenticator_data: &AuthData<Raw>,
-    client_data_json: &ClientDataJson<Raw>,
-    signature: &Signature<Raw>,
-    public_key_cose: &CoseKey<Raw>,
-    expected_rp_id: &str,
-    expected_challenge: &str,
-    expected_origin: &str,
-    stored_counter: u32,
-    require_user_verification: bool,
-    allow_localhost_origin: bool,
-) -> Result<VerificationResult, VerifyError> {
-    verify_assertion(
-        authenticator_data.as_bytes(),
-        client_data_json.as_bytes(),
-        signature.as_bytes(),
-        public_key_cose.as_bytes(),
-        expected_rp_id,
-        expected_challenge,
-        expected_origin,
-        stored_counter,
-        require_user_verification,
-        allow_localhost_origin,
-    )
-}
-
-/// Verify a WebAuthn assertion with a custom COSE verifier using typed parameters.
-///
-/// This is a type-safe wrapper around [`verify_assertion_with_verifier`].
-#[expect(
-    clippy::too_many_arguments,
-    reason = "WebAuthn assertion verification requires all per-RFC parameters"
-)]
-pub fn verify_assertion_typed_with_verifier<V: CoseVerifier>(
-    authenticator_data: &AuthData<Raw>,
-    client_data_json: &ClientDataJson<Raw>,
-    signature: &Signature<Raw>,
-    public_key_cose: &CoseKey<Raw>,
-    expected_rp_id: &str,
-    expected_challenge: &str,
-    expected_origin: &str,
-    stored_counter: u32,
-    require_user_verification: bool,
-    verifier: &V,
-) -> Result<VerificationResult, VerifyError> {
-    verify_assertion_with_verifier(
-        authenticator_data.as_bytes(),
-        client_data_json.as_bytes(),
-        signature.as_bytes(),
-        public_key_cose.as_bytes(),
-        expected_rp_id,
-        expected_challenge,
-        expected_origin,
-        stored_counter,
-        require_user_verification,
-        verifier,
-    )
 }
 
 // ============================================================================
@@ -1556,15 +1421,18 @@ mod tests {
         let cose_key = make_eddsa_cose_key(&[0u8; 32]);
 
         let result = verify_assertion_with_verifier(
-            &short_auth_data,
-            &client_data,
-            &[0u8; 64],
-            &cose_key,
-            rp_id,
-            "test-challenge",
-            "https://example.com",
-            0,
-            false,
+            &AssertionParams {
+                authenticator_data: &short_auth_data,
+                client_data_json: &client_data,
+                signature: &[0u8; 64],
+                public_key_cose: &cose_key,
+                expected_rp_id: rp_id,
+                expected_challenge: "test-challenge",
+                expected_origin: "https://example.com",
+                stored_counter: 0,
+                require_user_verification: false,
+                allow_localhost_origin: true,
+            },
             &verifier,
         );
         assert!(matches!(result, Err(VerifyError::InvalidAuthDataLength)));
@@ -1580,15 +1448,18 @@ mod tests {
         let cose_key = make_eddsa_cose_key(&[0u8; 32]);
 
         let result = verify_assertion_with_verifier(
-            &auth_data,
-            &client_data,
-            &[0u8; 64],
-            &cose_key,
-            rp_id,
-            "test-challenge",
-            "https://example.com",
-            0,
-            false,
+            &AssertionParams {
+                authenticator_data: &auth_data,
+                client_data_json: &client_data,
+                signature: &[0u8; 64],
+                public_key_cose: &cose_key,
+                expected_rp_id: rp_id,
+                expected_challenge: "test-challenge",
+                expected_origin: "https://example.com",
+                stored_counter: 0,
+                require_user_verification: false,
+                allow_localhost_origin: true,
+            },
             &verifier,
         );
         assert!(result.is_ok());
@@ -1603,15 +1474,18 @@ mod tests {
         let cose_key = make_eddsa_cose_key(&[0u8; 32]);
 
         let result = verify_assertion_with_verifier(
-            &auth_data,
-            &client_data,
-            &[0u8; 64],
-            &cose_key,
-            "example.com", // Expected RP ID doesn't match auth_data
-            "test-challenge",
-            "https://example.com",
-            0,
-            false,
+            &AssertionParams {
+                authenticator_data: &auth_data,
+                client_data_json: &client_data,
+                signature: &[0u8; 64],
+                public_key_cose: &cose_key,
+                expected_rp_id: "example.com", // Expected RP ID doesn't match auth_data
+                expected_challenge: "test-challenge",
+                expected_origin: "https://example.com",
+                stored_counter: 0,
+                require_user_verification: false,
+                allow_localhost_origin: true,
+            },
             &verifier,
         );
         assert!(matches!(result, Err(VerifyError::RpIdMismatch)));
@@ -1627,15 +1501,18 @@ mod tests {
         let cose_key = make_eddsa_cose_key(&[0u8; 32]);
 
         let result = verify_assertion_with_verifier(
-            &auth_data,
-            &client_data,
-            &[0u8; 64],
-            &cose_key,
-            rp_id,
-            "test-challenge",
-            "https://example.com",
-            0,
-            false,
+            &AssertionParams {
+                authenticator_data: &auth_data,
+                client_data_json: &client_data,
+                signature: &[0u8; 64],
+                public_key_cose: &cose_key,
+                expected_rp_id: rp_id,
+                expected_challenge: "test-challenge",
+                expected_origin: "https://example.com",
+                stored_counter: 0,
+                require_user_verification: false,
+                allow_localhost_origin: true,
+            },
             &verifier,
         );
         assert!(matches!(result, Err(VerifyError::UserNotPresent)));
@@ -1651,15 +1528,18 @@ mod tests {
         let cose_key = make_eddsa_cose_key(&[0u8; 32]);
 
         let result = verify_assertion_with_verifier(
-            &auth_data,
-            &client_data,
-            &[0u8; 64],
-            &cose_key,
-            rp_id,
-            "test-challenge",
-            "https://example.com",
-            0,
-            true, // Require UV
+            &AssertionParams {
+                authenticator_data: &auth_data,
+                client_data_json: &client_data,
+                signature: &[0u8; 64],
+                public_key_cose: &cose_key,
+                expected_rp_id: rp_id,
+                expected_challenge: "test-challenge",
+                expected_origin: "https://example.com",
+                stored_counter: 0,
+                require_user_verification: true, // Require UV
+                allow_localhost_origin: true,
+            },
             &verifier,
         );
         assert!(matches!(result, Err(VerifyError::UserNotVerified)));
@@ -1675,15 +1555,18 @@ mod tests {
         let cose_key = make_eddsa_cose_key(&[0u8; 32]);
 
         let result = verify_assertion_with_verifier(
-            &auth_data,
-            &client_data,
-            &[0u8; 64],
-            &cose_key,
-            rp_id,
-            "test-challenge",
-            "https://example.com",
-            0,
-            false, // Don't require UV
+            &AssertionParams {
+                authenticator_data: &auth_data,
+                client_data_json: &client_data,
+                signature: &[0u8; 64],
+                public_key_cose: &cose_key,
+                expected_rp_id: rp_id,
+                expected_challenge: "test-challenge",
+                expected_origin: "https://example.com",
+                stored_counter: 0,
+                require_user_verification: false, // Don't require UV
+                allow_localhost_origin: true,
+            },
             &verifier,
         );
         assert!(result.is_ok());
@@ -1704,15 +1587,18 @@ mod tests {
 
         // With stored counter 4, new counter 5 should succeed
         let result = verify_assertion_with_verifier(
-            &auth_data,
-            &client_data,
-            &[0u8; 64],
-            &cose_key,
-            rp_id,
-            "test-challenge",
-            "https://example.com",
-            4, // stored counter
-            false,
+            &AssertionParams {
+                authenticator_data: &auth_data,
+                client_data_json: &client_data,
+                signature: &[0u8; 64],
+                public_key_cose: &cose_key,
+                expected_rp_id: rp_id,
+                expected_challenge: "test-challenge",
+                expected_origin: "https://example.com",
+                stored_counter: 4, // stored counter
+                require_user_verification: false,
+                allow_localhost_origin: true,
+            },
             &verifier,
         );
         assert!(result.is_ok());
@@ -1730,15 +1616,18 @@ mod tests {
 
         // Same counter = replay attack
         let result = verify_assertion_with_verifier(
-            &auth_data,
-            &client_data,
-            &[0u8; 64],
-            &cose_key,
-            rp_id,
-            "test-challenge",
-            "https://example.com",
-            5, // Same as auth_data counter
-            false,
+            &AssertionParams {
+                authenticator_data: &auth_data,
+                client_data_json: &client_data,
+                signature: &[0u8; 64],
+                public_key_cose: &cose_key,
+                expected_rp_id: rp_id,
+                expected_challenge: "test-challenge",
+                expected_origin: "https://example.com",
+                stored_counter: 5, // Same as auth_data counter
+                require_user_verification: false,
+                allow_localhost_origin: true,
+            },
             &verifier,
         );
         assert!(matches!(result, Err(VerifyError::CounterNotIncreasing)));
@@ -1755,15 +1644,18 @@ mod tests {
 
         // Lower counter = cloned authenticator
         let result = verify_assertion_with_verifier(
-            &auth_data,
-            &client_data,
-            &[0u8; 64],
-            &cose_key,
-            rp_id,
-            "test-challenge",
-            "https://example.com",
-            5, // stored counter is higher
-            false,
+            &AssertionParams {
+                authenticator_data: &auth_data,
+                client_data_json: &client_data,
+                signature: &[0u8; 64],
+                public_key_cose: &cose_key,
+                expected_rp_id: rp_id,
+                expected_challenge: "test-challenge",
+                expected_origin: "https://example.com",
+                stored_counter: 5, // stored counter is higher
+                require_user_verification: false,
+                allow_localhost_origin: true,
+            },
             &verifier,
         );
         assert!(matches!(result, Err(VerifyError::CounterNotIncreasing)));
@@ -1781,15 +1673,18 @@ mod tests {
 
         // Zero counter should be accepted (authenticator doesn't support counters)
         let result = verify_assertion_with_verifier(
-            &auth_data,
-            &client_data,
-            &[0u8; 64],
-            &cose_key,
-            rp_id,
-            "test-challenge",
-            "https://example.com",
-            0, // stored counter also 0
-            false,
+            &AssertionParams {
+                authenticator_data: &auth_data,
+                client_data_json: &client_data,
+                signature: &[0u8; 64],
+                public_key_cose: &cose_key,
+                expected_rp_id: rp_id,
+                expected_challenge: "test-challenge",
+                expected_origin: "https://example.com",
+                stored_counter: 0, // stored counter also 0
+                require_user_verification: false,
+                allow_localhost_origin: true,
+            },
             &verifier,
         );
         assert!(result.is_ok());
@@ -1806,15 +1701,18 @@ mod tests {
         let cose_key = make_eddsa_cose_key(&[0u8; 32]);
 
         let result = verify_assertion_with_verifier(
-            &auth_data,
-            &client_data,
-            &[0u8; 64],
-            &cose_key,
-            rp_id,
-            "test-challenge",
-            "https://example.com",
-            0, // Initial stored counter
-            false,
+            &AssertionParams {
+                authenticator_data: &auth_data,
+                client_data_json: &client_data,
+                signature: &[0u8; 64],
+                public_key_cose: &cose_key,
+                expected_rp_id: rp_id,
+                expected_challenge: "test-challenge",
+                expected_origin: "https://example.com",
+                stored_counter: 0, // Initial stored counter
+                require_user_verification: false,
+                allow_localhost_origin: true,
+            },
             &verifier,
         );
         assert!(result.is_ok());
@@ -1831,15 +1729,18 @@ mod tests {
         let cose_key = make_eddsa_cose_key(&[0u8; 32]);
 
         let result = verify_assertion_with_verifier(
-            &auth_data,
-            &client_data,
-            &[0u8; 64],
-            &cose_key,
-            rp_id,
-            "test-challenge",
-            "https://example.com",
-            u32::MAX - 1, // stored counter just below max
-            false,
+            &AssertionParams {
+                authenticator_data: &auth_data,
+                client_data_json: &client_data,
+                signature: &[0u8; 64],
+                public_key_cose: &cose_key,
+                expected_rp_id: rp_id,
+                expected_challenge: "test-challenge",
+                expected_origin: "https://example.com",
+                stored_counter: u32::MAX - 1, // stored counter just below max
+                require_user_verification: false,
+                allow_localhost_origin: true,
+            },
             &verifier,
         );
         assert!(result.is_ok());
@@ -1860,15 +1761,18 @@ mod tests {
         let cose_key = make_eddsa_cose_key(&[0u8; 32]);
 
         let result = verify_assertion_with_verifier(
-            &auth_data,
-            &client_data,
-            &[0u8; 64],
-            &cose_key,
-            rp_id,
-            "test-challenge",
-            "https://example.com",
-            5, // stored counter was nonzero
-            false,
+            &AssertionParams {
+                authenticator_data: &auth_data,
+                client_data_json: &client_data,
+                signature: &[0u8; 64],
+                public_key_cose: &cose_key,
+                expected_rp_id: rp_id,
+                expected_challenge: "test-challenge",
+                expected_origin: "https://example.com",
+                stored_counter: 5, // stored counter was nonzero
+                require_user_verification: false,
+                allow_localhost_origin: true,
+            },
             &verifier,
         );
         assert!(matches!(result, Err(VerifyError::CounterNotIncreasing)));
@@ -1890,16 +1794,18 @@ mod tests {
         let cose_key = make_eddsa_cose_key(&[0u8; 32]);
 
         let result = verify_assertion_inner(
-            &auth_data,
-            &client_data,
-            &[0u8; 64],
-            &cose_key,
-            rp_id,
-            "test-challenge",
-            "http://localhost:8080",
-            0,
-            false,
-            true, // allow_localhost_origin
+            &AssertionParams {
+                authenticator_data: &auth_data,
+                client_data_json: &client_data,
+                signature: &[0u8; 64],
+                public_key_cose: &cose_key,
+                expected_rp_id: rp_id,
+                expected_challenge: "test-challenge",
+                expected_origin: "http://localhost:8080",
+                stored_counter: 0,
+                require_user_verification: false,
+                allow_localhost_origin: true,
+            },
             &verifier,
         );
         assert!(result.is_ok(), "expected ok, got {result:?}");
@@ -1918,16 +1824,18 @@ mod tests {
         let cose_key = make_eddsa_cose_key(&[0u8; 32]);
 
         let result = verify_assertion_inner(
-            &auth_data,
-            &client_data,
-            &[0u8; 64],
-            &cose_key,
-            rp_id,
-            "test-challenge",
-            "http://localhost:8080",
-            0,
-            false,
-            false, // allow_localhost_origin disabled
+            &AssertionParams {
+                authenticator_data: &auth_data,
+                client_data_json: &client_data,
+                signature: &[0u8; 64],
+                public_key_cose: &cose_key,
+                expected_rp_id: rp_id,
+                expected_challenge: "test-challenge",
+                expected_origin: "http://localhost:8080",
+                stored_counter: 0,
+                require_user_verification: false,
+                allow_localhost_origin: false,
+            },
             &verifier,
         );
         assert!(matches!(result, Err(VerifyError::InvalidOrigin)));
@@ -1946,15 +1854,18 @@ mod tests {
         let cose_key = make_eddsa_cose_key(&[0u8; 32]);
 
         let result = verify_assertion_with_verifier(
-            &auth_data,
-            invalid_json,
-            &[0u8; 64],
-            &cose_key,
-            rp_id,
-            "test-challenge",
-            "https://example.com",
-            0,
-            false,
+            &AssertionParams {
+                authenticator_data: &auth_data,
+                client_data_json: invalid_json,
+                signature: &[0u8; 64],
+                public_key_cose: &cose_key,
+                expected_rp_id: rp_id,
+                expected_challenge: "test-challenge",
+                expected_origin: "https://example.com",
+                stored_counter: 0,
+                require_user_verification: false,
+                allow_localhost_origin: true,
+            },
             &verifier,
         );
         assert!(matches!(result, Err(VerifyError::InvalidClientData(_))));
@@ -1971,15 +1882,18 @@ mod tests {
 
         // Type should be "webauthn.get" for assertions
         let result = verify_assertion_with_verifier(
-            &auth_data,
-            &client_data,
-            &[0u8; 64],
-            &cose_key,
-            rp_id,
-            "test-challenge",
-            "https://example.com",
-            0,
-            false,
+            &AssertionParams {
+                authenticator_data: &auth_data,
+                client_data_json: &client_data,
+                signature: &[0u8; 64],
+                public_key_cose: &cose_key,
+                expected_rp_id: rp_id,
+                expected_challenge: "test-challenge",
+                expected_origin: "https://example.com",
+                stored_counter: 0,
+                require_user_verification: false,
+                allow_localhost_origin: true,
+            },
             &verifier,
         );
         assert!(
@@ -1997,15 +1911,18 @@ mod tests {
         let cose_key = make_eddsa_cose_key(&[0u8; 32]);
 
         let result = verify_assertion_with_verifier(
-            &auth_data,
-            &client_data,
-            &[0u8; 64],
-            &cose_key,
-            rp_id,
-            "expected-challenge",
-            "https://example.com",
-            0,
-            false,
+            &AssertionParams {
+                authenticator_data: &auth_data,
+                client_data_json: &client_data,
+                signature: &[0u8; 64],
+                public_key_cose: &cose_key,
+                expected_rp_id: rp_id,
+                expected_challenge: "expected-challenge",
+                expected_origin: "https://example.com",
+                stored_counter: 0,
+                require_user_verification: false,
+                allow_localhost_origin: true,
+            },
             &verifier,
         );
         assert!(matches!(result, Err(VerifyError::ChallengeMismatch)));
@@ -2021,15 +1938,18 @@ mod tests {
         let cose_key = make_eddsa_cose_key(&[0u8; 32]);
 
         let result = verify_assertion_with_verifier(
-            &auth_data,
-            &client_data,
-            &[0u8; 64],
-            &cose_key,
-            rp_id,
-            "test-challenge",
-            "https://example.com",
-            0,
-            false,
+            &AssertionParams {
+                authenticator_data: &auth_data,
+                client_data_json: &client_data,
+                signature: &[0u8; 64],
+                public_key_cose: &cose_key,
+                expected_rp_id: rp_id,
+                expected_challenge: "test-challenge",
+                expected_origin: "https://example.com",
+                stored_counter: 0,
+                require_user_verification: false,
+                allow_localhost_origin: true,
+            },
             &verifier,
         );
         assert!(matches!(result, Err(VerifyError::InvalidOrigin)));
@@ -2046,15 +1966,18 @@ mod tests {
 
         // localhost and 127.0.0.1 should be treated as equivalent
         let result = verify_assertion_with_verifier(
-            &auth_data,
-            &client_data,
-            &[0u8; 64],
-            &cose_key,
-            rp_id,
-            "test-challenge",
-            "https://localhost:8080",
-            0,
-            false,
+            &AssertionParams {
+                authenticator_data: &auth_data,
+                client_data_json: &client_data,
+                signature: &[0u8; 64],
+                public_key_cose: &cose_key,
+                expected_rp_id: rp_id,
+                expected_challenge: "test-challenge",
+                expected_origin: "https://localhost:8080",
+                stored_counter: 0,
+                require_user_verification: false,
+                allow_localhost_origin: true,
+            },
             &verifier,
         );
         assert!(result.is_ok());
@@ -2071,15 +1994,18 @@ mod tests {
 
         // host.docker.internal and localhost are both loopback
         let result = verify_assertion_with_verifier(
-            &auth_data,
-            &client_data,
-            &[0u8; 64],
-            &cose_key,
-            rp_id,
-            "test-challenge",
-            "http://host.docker.internal:3000",
-            0,
-            false,
+            &AssertionParams {
+                authenticator_data: &auth_data,
+                client_data_json: &client_data,
+                signature: &[0u8; 64],
+                public_key_cose: &cose_key,
+                expected_rp_id: rp_id,
+                expected_challenge: "test-challenge",
+                expected_origin: "http://host.docker.internal:3000",
+                stored_counter: 0,
+                require_user_verification: false,
+                allow_localhost_origin: true,
+            },
             &verifier,
         );
         assert!(result.is_ok());
@@ -2096,15 +2022,18 @@ mod tests {
 
         // [::1] and localhost are both loopback
         let result = verify_assertion_with_verifier(
-            &auth_data,
-            &client_data,
-            &[0u8; 64],
-            &cose_key,
-            rp_id,
-            "test-challenge",
-            "http://localhost:3000",
-            0,
-            false,
+            &AssertionParams {
+                authenticator_data: &auth_data,
+                client_data_json: &client_data,
+                signature: &[0u8; 64],
+                public_key_cose: &cose_key,
+                expected_rp_id: rp_id,
+                expected_challenge: "test-challenge",
+                expected_origin: "http://localhost:3000",
+                stored_counter: 0,
+                require_user_verification: false,
+                allow_localhost_origin: true,
+            },
             &verifier,
         );
         assert!(result.is_ok());
@@ -2121,15 +2050,18 @@ mod tests {
         let cose_key = make_eddsa_cose_key(&[0u8; 32]);
 
         let result = verify_assertion_with_verifier(
-            &auth_data,
-            &client_data,
-            &[0u8; 64],
-            &cose_key,
-            rp_id,
-            "test-challenge",
-            "https://example.com",
-            0,
-            false,
+            &AssertionParams {
+                authenticator_data: &auth_data,
+                client_data_json: &client_data,
+                signature: &[0u8; 64],
+                public_key_cose: &cose_key,
+                expected_rp_id: rp_id,
+                expected_challenge: "test-challenge",
+                expected_origin: "https://example.com",
+                stored_counter: 0,
+                require_user_verification: false,
+                allow_localhost_origin: true,
+            },
             &verifier,
         );
         assert!(matches!(result, Err(VerifyError::InvalidOrigin)));
@@ -2146,15 +2078,18 @@ mod tests {
         let cose_key = make_eddsa_cose_key(&[0u8; 32]);
 
         let result = verify_assertion_with_verifier(
-            &auth_data,
-            &client_data,
-            &[0u8; 64],
-            &cose_key,
-            rp_id,
-            "test-challenge",
-            "http://localhost:3000",
-            0,
-            false,
+            &AssertionParams {
+                authenticator_data: &auth_data,
+                client_data_json: &client_data,
+                signature: &[0u8; 64],
+                public_key_cose: &cose_key,
+                expected_rp_id: rp_id,
+                expected_challenge: "test-challenge",
+                expected_origin: "http://localhost:3000",
+                stored_counter: 0,
+                require_user_verification: false,
+                allow_localhost_origin: true,
+            },
             &verifier,
         );
         assert!(matches!(result, Err(VerifyError::InvalidOrigin)));
@@ -2175,15 +2110,18 @@ mod tests {
         let cose_key = make_eddsa_cose_key(&[0u8; 32]);
 
         let result = verify_assertion_with_verifier(
-            &auth_data,
-            &client_data,
-            &[0u8; 64],
-            &cose_key,
-            rp_id,
-            "test-challenge",
-            "http://localhost:3000",
-            0,
-            false,
+            &AssertionParams {
+                authenticator_data: &auth_data,
+                client_data_json: &client_data,
+                signature: &[0u8; 64],
+                public_key_cose: &cose_key,
+                expected_rp_id: rp_id,
+                expected_challenge: "test-challenge",
+                expected_origin: "http://localhost:3000",
+                stored_counter: 0,
+                require_user_verification: false,
+                allow_localhost_origin: true,
+            },
             &verifier,
         );
         assert!(matches!(result, Err(VerifyError::InvalidOrigin)));
@@ -2203,15 +2141,18 @@ mod tests {
         let cose_key = make_eddsa_cose_key(&[0u8; 32]);
 
         let result = verify_assertion_with_verifier(
-            &auth_data,
-            &client_data,
-            &[0u8; 64],
-            &cose_key,
-            rp_id,
-            "test-challenge",
-            "https://example.com",
-            0,
-            false,
+            &AssertionParams {
+                authenticator_data: &auth_data,
+                client_data_json: &client_data,
+                signature: &[0u8; 64],
+                public_key_cose: &cose_key,
+                expected_rp_id: rp_id,
+                expected_challenge: "test-challenge",
+                expected_origin: "https://example.com",
+                stored_counter: 0,
+                require_user_verification: false,
+                allow_localhost_origin: true,
+            },
             &verifier,
         );
 
@@ -2231,15 +2172,18 @@ mod tests {
         let cose_key = make_eddsa_cose_key(&[0u8; 32]);
 
         let result = verify_assertion_with_verifier(
-            &auth_data,
-            &client_data,
-            &[0u8; 64],
-            &cose_key,
-            rp_id,
-            "test-challenge",
-            "https://example.com",
-            0,
-            false,
+            &AssertionParams {
+                authenticator_data: &auth_data,
+                client_data_json: &client_data,
+                signature: &[0u8; 64],
+                public_key_cose: &cose_key,
+                expected_rp_id: rp_id,
+                expected_challenge: "test-challenge",
+                expected_origin: "https://example.com",
+                stored_counter: 0,
+                require_user_verification: false,
+                allow_localhost_origin: true,
+            },
             &verifier,
         );
         assert!(matches!(result, Err(VerifyError::SignatureInvalid)));

@@ -263,6 +263,10 @@ pub struct RegistrationResponse {
 ///
 /// # Errors
 /// Returns `ServiceError::OAuth` with the appropriate RFC 7591 error code.
+#[expect(
+    clippy::too_many_lines,
+    reason = "single-pass RFC 7591 registration metadata validation"
+)]
 pub async fn register_client(
     state: &Arc<AppState>,
     mut request: RegistrationRequest,

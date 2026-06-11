@@ -379,6 +379,10 @@ async fn connect_and_migrate(config: &config::ServerConfig) -> Result<Pool> {
 }
 
 /// Build shared application state with all service components.
+#[expect(
+    clippy::too_many_lines,
+    reason = "sequential construction of every AppState component"
+)]
 async fn build_app_state(
     config: &config::ServerConfig,
     db: Pool,

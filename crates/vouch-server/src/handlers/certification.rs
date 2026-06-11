@@ -339,14 +339,16 @@ async fn get_or_create_cert_authenticator(
 
     match db::create_authenticator(
         &state.store,
-        user_id,
-        user_email,
-        "Certification Test Authenticator",
-        &dummy_credential_id,
-        &dummy_public_key,
-        None,  // aaguid
-        None,  // user_handle
-        false, // attestation_verified
+        &db::CreateAuthenticatorParams {
+            user_id,
+            user_email,
+            name: "Certification Test Authenticator",
+            credential_id: &dummy_credential_id,
+            public_key: &dummy_public_key,
+            aaguid: None,
+            user_handle: None,
+            attestation_verified: false,
+        },
     )
     .await
     {

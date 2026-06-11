@@ -94,6 +94,10 @@ struct Fapi2TokenResponse {
 }
 
 /// Run FAPI 2.0 login using the FIDO2 assertion grant.
+#[expect(
+    clippy::too_many_lines,
+    reason = "linear FAPI 2.0 login flow: challenge, assertion, token, session"
+)]
 async fn run_fapi_login(
     client: &VouchClient,
     server: &str,

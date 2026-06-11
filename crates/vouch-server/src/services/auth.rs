@@ -250,18 +250,18 @@ pub(crate) async fn verify_login_assertion(
     tokio::task::spawn_blocking(move || {
         let expected_challenge = URL_SAFE_NO_PAD.encode(&params.challenge);
 
-        let result = webauthn_verify::verify_assertion(
-            &params.authenticator_data,
-            &params.client_data_json,
-            &params.signature,
-            &params.public_key,
-            &params.rp_id,
-            &expected_challenge,
-            &params.expected_origin,
-            params.stored_counter,
-            true, // require_user_verification
-            params.allow_localhost_origin,
-        )
+        let result = webauthn_verify::verify_assertion(&webauthn_verify::AssertionParams {
+            authenticator_data: &params.authenticator_data,
+            client_data_json: &params.client_data_json,
+            signature: &params.signature,
+            public_key_cose: &params.public_key,
+            expected_rp_id: &params.rp_id,
+            expected_challenge: &expected_challenge,
+            expected_origin: &params.expected_origin,
+            stored_counter: params.stored_counter,
+            require_user_verification: true,
+            allow_localhost_origin: params.allow_localhost_origin,
+        })
         .map_err(|e| {
             ServiceError::oauth(
                 OAuthErrorCode::InvalidGrant,
@@ -739,15 +739,17 @@ pub(crate) async fn create_oauth_access_token(
     let token_hash = hash_token(&token);
     db::create_session(
         &state.store,
-        params.user_id,
-        params.email,
-        &token_hash,
-        params.authenticator_id,
-        expires,
-        params.session_purpose,
-        params.authorization_details,
-        params.hardware_aaguid,
-        params.org_domain,
+        &db::CreateSessionParams {
+            user_id: params.user_id,
+            user_email: params.email,
+            token_hash: &token_hash,
+            authenticator_id: params.authenticator_id,
+            expires_at: expires,
+            session_type: params.session_purpose,
+            authorization_details: params.authorization_details,
+            hardware_aaguid: params.hardware_aaguid,
+            org_domain: params.org_domain,
+        },
     )
     .await
     .map_err(|e| ServiceError::Internal(format!("Failed to store session: {e}")))?;

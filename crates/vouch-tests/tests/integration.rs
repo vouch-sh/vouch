@@ -2555,12 +2555,12 @@ mod encoding_verification {
         assert!(!auth_result.client_data_json.is_empty());
     }
 
-    /// Test typed verification functions
+    /// Test verification through the AssertionParams API
     #[tokio::test]
     async fn test_typed_verification_functions() {
         use vouch_cli::{FidoDevice, MockFidoDevice};
         use vouch_server::crypto::webauthn_verify::{
-            TestCoseVerifier, verify_assertion_typed_with_verifier,
+            AssertionParams, TestCoseVerifier, verify_assertion_with_verifier,
         };
 
         let device = MockFidoDevice::new();
@@ -2596,16 +2596,19 @@ mod encoding_verification {
         let client_data_json: serde_json::Value = serde_json::from_str(client_data_str).unwrap();
         let expected_challenge = client_data_json["challenge"].as_str().unwrap();
 
-        let result = verify_assertion_typed_with_verifier(
-            auth_data,
-            client_data,
-            signature,
-            public_key,
-            "test.local",
-            expected_challenge,
-            "https://test.local",
-            0,
-            true,
+        let result = verify_assertion_with_verifier(
+            &AssertionParams {
+                authenticator_data: auth_data.as_bytes(),
+                client_data_json: client_data.as_bytes(),
+                signature: signature.as_bytes(),
+                public_key_cose: public_key.as_bytes(),
+                expected_rp_id: "test.local",
+                expected_challenge,
+                expected_origin: "https://test.local",
+                stored_counter: 0,
+                require_user_verification: true,
+                allow_localhost_origin: true,
+            },
             &verifier,
         );
 

@@ -447,6 +447,10 @@ async fn main() -> ExitCode {
 }
 
 /// Inner entry point that returns `anyhow::Result`.
+#[expect(
+    clippy::too_many_lines,
+    reason = "single dispatch match over all CLI subcommands"
+)]
 async fn run() -> Result<()> {
     let argv0 = std::env::args().next().unwrap_or_default();
 

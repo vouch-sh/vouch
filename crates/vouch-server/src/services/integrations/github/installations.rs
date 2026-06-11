@@ -79,13 +79,15 @@ impl GitHubService<'_> {
         // Store installation in database
         db::create_github_installation(
             self.store,
-            params.org_id,
-            params.installation_id.cast_signed(),
-            &details.account.login,
-            &details.account.account_type,
-            &details.permissions,
-            &details.repository_selection,
-            Some(&params.user.id),
+            &db::CreateGitHubInstallationParams {
+                org_id: params.org_id,
+                installation_id: params.installation_id.cast_signed(),
+                github_account_login: &details.account.login,
+                github_account_type: &details.account.account_type,
+                permissions: &details.permissions,
+                repository_selection: &details.repository_selection,
+                installed_by_user_id: Some(&params.user.id),
+            },
         )
         .await
         .map_err(GitHubError::Database)?;
@@ -168,13 +170,15 @@ impl GitHubService<'_> {
         // Store installation in database
         db::create_github_installation(
             self.store,
-            params.org_id,
-            params.installation_id.cast_signed(),
-            &user_installation.account.login,
-            &user_installation.account.account_type,
-            &details.permissions,
-            &details.repository_selection,
-            Some(&params.user.id),
+            &db::CreateGitHubInstallationParams {
+                org_id: params.org_id,
+                installation_id: params.installation_id.cast_signed(),
+                github_account_login: &user_installation.account.login,
+                github_account_type: &user_installation.account.account_type,
+                permissions: &details.permissions,
+                repository_selection: &details.repository_selection,
+                installed_by_user_id: Some(&params.user.id),
+            },
         )
         .await
         .map_err(GitHubError::Database)?;
@@ -488,13 +492,15 @@ mod tests {
         let perms = HashMap::from([("contents".to_string(), "read".to_string())]);
         crate::db::create_github_installation(
             &state.store,
-            &org.id,
-            42,
-            "the-org",
-            "Organization",
-            &perms,
-            "all",
-            None,
+            &crate::db::CreateGitHubInstallationParams {
+                org_id: &org.id,
+                installation_id: 42,
+                github_account_login: "the-org",
+                github_account_type: "Organization",
+                permissions: &perms,
+                repository_selection: "all",
+                installed_by_user_id: None,
+            },
         )
         .await
         .expect("create installation");

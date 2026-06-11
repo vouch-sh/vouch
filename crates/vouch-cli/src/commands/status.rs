@@ -77,6 +77,7 @@ pub(crate) fn print_shell(
 }
 
 /// Run the status command.
+#[expect(clippy::too_many_lines, reason = "sequential status report output")]
 pub(crate) async fn run(server: &str, mode: OutputFormat) -> Result<()> {
     // First, try to get session from agent (Unix only)
     #[cfg(unix)]

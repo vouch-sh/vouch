@@ -6,8 +6,8 @@
 
 use crate::AppState;
 use crate::db::{
-    self, AccessScope, CreateOAuthClientParams, FapiProfile, JwsAlgorithm, OAuthClientType,
-    RegistrationSource, TokenEndpointAuthMethod, UpdateOAuthClientParams,
+    self, AccessScope, CreateOAuthClientParams, FapiProfile, JwsAlgorithm, RegistrationSource,
+    TokenEndpointAuthMethod, UpdateOAuthClientParams,
 };
 use axum::{
     Form,
@@ -23,12 +23,25 @@ use super::types::{
     ApplicationsListTemplate, CreateApplicationForm, SecretAddedTemplate, SecretInfo,
     UpdateApplicationForm, UsageStat,
 };
+use super::validate::{
+    AppValidationError, CreateAppInput, UpdateAppInput, validate_create_application,
+    validate_update_fapi, validate_update_format,
+};
 use super::{
     MAX_ACTIVE_SECRETS, extract_auth_from_cookie, generate_client_secret, parse_redirect_uris,
-    parse_resource_uris, validate_redirect_uris,
+    parse_resource_uris,
 };
 use crate::handlers::hash_token;
-use crate::services::oidc::ResourceUri;
+
+/// Render a shared validation failure as the standard error page.
+fn validation_error_response(err: &AppValidationError, back_url: String) -> Response {
+    ApplicationErrorTemplate {
+        title: "Invalid Input".to_string(),
+        message: err.message(),
+        back_url,
+    }
+    .into_response()
+}
 
 /// List user's applications.
 /// GET /applications
@@ -84,25 +97,27 @@ pub(crate) async fn create_application_form(
 
     let user_id = auth.user_id.as_deref().unwrap_or_default();
 
-    // Validate inputs
-    let name = form.name.trim();
-    if name.is_empty() {
-        return ApplicationErrorTemplate {
-            title: "Invalid Input".to_string(),
-            message: "Application name is required.".to_string(),
-            back_url: "/applications/new".to_string(),
-        }
-        .into_response();
-    }
+    // Parse textarea inputs, then run the shared format validation
+    let redirect_uris = parse_redirect_uris(&form.redirect_uris);
+    let resource_uris = parse_resource_uris(form.resource_uris.as_deref());
 
-    let Some(app_type) = form.application_type.parse::<OAuthClientType>().ok() else {
-        return ApplicationErrorTemplate {
-            title: "Invalid Input".to_string(),
-            message: "Invalid application type.".to_string(),
-            back_url: "/applications/new".to_string(),
-        }
-        .into_response();
+    let validated = match validate_create_application(CreateAppInput {
+        name: &form.name,
+        application_type: &form.application_type,
+        redirect_uris: &redirect_uris,
+        resource_uris: &resource_uris,
+        fapi_profile: form.fapi_profile.as_deref(),
+        jwks: form.jwks.as_deref(),
+        jwks_uri: form.jwks_uri.as_deref(),
+    }) {
+        Ok(v) => v,
+        Err(e) => return validation_error_response(&e, "/applications/new".to_string()),
     };
+    let name = validated.name;
+    let app_type = validated.app_type;
+    let is_fapi = validated.is_fapi;
+    let jwks_value = validated.jwks;
+    let jwks_uri_trimmed = validated.jwks_uri;
 
     // Parse and validate access scope
     let access_scope = form.access_scope.parse::<AccessScope>().unwrap_or_default();
@@ -115,135 +130,6 @@ pub(crate) async fn create_application_form(
             back_url: "/applications/new".to_string(),
         }
         .into_response();
-    }
-
-    let redirect_uris = parse_redirect_uris(&form.redirect_uris);
-
-    // For non-service apps, at least one redirect URI is required
-    if !matches!(app_type, OAuthClientType::Service) && redirect_uris.is_empty() {
-        return ApplicationErrorTemplate {
-            title: "Invalid Input".to_string(),
-            message: "At least one redirect URI is required.".to_string(),
-            back_url: "/applications/new".to_string(),
-        }
-        .into_response();
-    }
-
-    // Validate redirect URIs are valid URLs
-    if let Err(invalid) = validate_redirect_uris(&redirect_uris) {
-        return ApplicationErrorTemplate {
-            title: "Invalid Input".to_string(),
-            message: format!(
-                "Invalid redirect URI(s): {}. Each URI must be a valid http:// or https:// URL.",
-                invalid.join(", ")
-            ),
-            back_url: "/applications/new".to_string(),
-        }
-        .into_response();
-    }
-
-    // RFC 8707: Parse and validate resource URIs from form (if provided).
-    let resource_uris = parse_resource_uris(form.resource_uris.as_deref());
-
-    for uri in &resource_uris {
-        if let Err(e) = ResourceUri::parse(uri) {
-            return ApplicationErrorTemplate {
-                title: "Invalid Input".to_string(),
-                message: format!(
-                    "Invalid resource URI '{uri}': {e}. \
-                     Resource URIs must be absolute URIs without fragment components."
-                ),
-                back_url: "/applications/new".to_string(),
-            }
-            .into_response();
-        }
-    }
-
-    // Determine FAPI profile
-    let is_fapi = form
-        .fapi_profile
-        .as_deref()
-        .is_some_and(|p| p == "fapi2_security");
-
-    // FAPI validation: must be a confidential client type
-    if is_fapi && !matches!(app_type, OAuthClientType::Web | OAuthClientType::Service) {
-        return ApplicationErrorTemplate {
-            title: "Invalid Input".to_string(),
-            message: "FAPI 2.0 Security Profile requires a confidential client type \
-                      (Web Application or Service)."
-                .to_string(),
-            back_url: "/applications/new".to_string(),
-        }
-        .into_response();
-    }
-
-    // FAPI validation: require JWKS or JWKS URI
-    let jwks_trimmed_str = form
-        .jwks
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty());
-    let jwks_uri_trimmed = form
-        .jwks_uri
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty());
-
-    if is_fapi && jwks_trimmed_str.is_none() && jwks_uri_trimmed.is_none() {
-        return ApplicationErrorTemplate {
-            title: "Invalid Input".to_string(),
-            message: "FAPI 2.0 requires a JWKS (inline JSON) or JWKS URI for \
-                      private_key_jwt authentication."
-                .to_string(),
-            back_url: "/applications/new".to_string(),
-        }
-        .into_response();
-    }
-
-    // Validate and parse JWKS JSON if provided
-    let jwks_value = if let Some(jwks_json) = jwks_trimmed_str {
-        match serde_json::from_str::<serde_json::Value>(jwks_json) {
-            Ok(val) => {
-                if !val
-                    .get("keys")
-                    .is_some_and(|k| k.is_array() && !k.as_array().is_some_and(|a| a.is_empty()))
-                {
-                    return ApplicationErrorTemplate {
-                        title: "Invalid Input".to_string(),
-                        message: "JWKS must be a JSON object with a non-empty \"keys\" array."
-                            .to_string(),
-                        back_url: "/applications/new".to_string(),
-                    }
-                    .into_response();
-                }
-                Some(val)
-            }
-            Err(_) => {
-                return ApplicationErrorTemplate {
-                    title: "Invalid Input".to_string(),
-                    message: "JWKS must be valid JSON.".to_string(),
-                    back_url: "/applications/new".to_string(),
-                }
-                .into_response();
-            }
-        }
-    } else {
-        None
-    };
-
-    // Validate JWKS URI if provided
-    if let Some(uri) = jwks_uri_trimmed {
-        match url::Url::parse(uri) {
-            Ok(parsed) if parsed.scheme() == "https" => {}
-            _ => {
-                return ApplicationErrorTemplate {
-                    title: "Invalid Input".to_string(),
-                    message: "JWKS URI must be a valid https:// URL.".to_string(),
-                    back_url: "/applications/new".to_string(),
-                }
-                .into_response();
-            }
-        }
     }
 
     // All input validated — now fetch org_id from DB (only needed for org-scoped apps)
@@ -482,12 +368,10 @@ pub(crate) async fn update_application_form(
     // Validate inputs
     let name = form.name.trim();
     if name.is_empty() {
-        return ApplicationErrorTemplate {
-            title: "Invalid Input".to_string(),
-            message: "Application name is required.".to_string(),
-            back_url: format!("/applications/{}", app_id),
-        }
-        .into_response();
+        return validation_error_response(
+            &AppValidationError::EmptyName,
+            format!("/applications/{}", app_id),
+        );
     }
 
     // Parse access scope if provided
@@ -523,132 +407,28 @@ pub(crate) async fn update_application_form(
         None
     };
 
+    // Parse textarea inputs, then run the shared format validation
     let redirect_uris = parse_redirect_uris(&form.redirect_uris);
-
-    // Validate redirect URIs are valid URLs
-    if let Err(invalid) = validate_redirect_uris(&redirect_uris) {
-        return ApplicationErrorTemplate {
-            title: "Invalid Input".to_string(),
-            message: format!(
-                "Invalid redirect URI(s): {}. Each URI must be a valid http:// or https:// URL.",
-                invalid.join(", ")
-            ),
-            back_url: format!("/applications/{}", app_id),
-        }
-        .into_response();
-    }
-
-    // RFC 8707: Parse and validate resource URIs from form (if provided).
     let resource_uris = parse_resource_uris(form.resource_uris.as_deref());
 
-    for uri in &resource_uris {
-        if let Err(e) = ResourceUri::parse(uri) {
-            return ApplicationErrorTemplate {
-                title: "Invalid Input".to_string(),
-                message: format!(
-                    "Invalid resource URI '{uri}': {e}. \
-                     Resource URIs must be absolute URIs without fragment components."
-                ),
-                back_url: format!("/applications/{}", app_id),
-            }
-            .into_response();
-        }
-    }
-
-    // Determine FAPI profile
-    let is_fapi = form
-        .fapi_profile
-        .as_deref()
-        .is_some_and(|p| p == "fapi2_security");
-
-    // FAPI validation: must be a confidential client type
-    if is_fapi
-        && !matches!(
-            client.application_type,
-            OAuthClientType::Web | OAuthClientType::Service
-        )
-    {
-        return ApplicationErrorTemplate {
-            title: "Invalid Input".to_string(),
-            message: "FAPI 2.0 Security Profile requires a confidential client type \
-                      (Web Application or Service)."
-                .to_string(),
-            back_url: format!("/applications/{}", app_id),
-        }
-        .into_response();
-    }
-
-    // FAPI validation: require JWKS or JWKS URI
-    let jwks_trimmed_str = form
-        .jwks
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty());
-    let jwks_uri_trimmed = form
-        .jwks_uri
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty());
-
-    if is_fapi && jwks_trimmed_str.is_none() && jwks_uri_trimmed.is_none() {
-        // If transitioning to FAPI, check if client already has JWKS configured
-        if client.jwks.is_none() && client.jwks_uri.is_none() {
-            return ApplicationErrorTemplate {
-                title: "Invalid Input".to_string(),
-                message: "FAPI 2.0 requires a JWKS (inline JSON) or JWKS URI for \
-                          private_key_jwt authentication."
-                    .to_string(),
-                back_url: format!("/applications/{}", app_id),
-            }
-            .into_response();
-        }
-    }
-
-    // Validate and parse JWKS JSON if provided
-    let jwks_value = if let Some(jwks_json) = jwks_trimmed_str {
-        match serde_json::from_str::<serde_json::Value>(jwks_json) {
-            Ok(val) => {
-                if !val
-                    .get("keys")
-                    .is_some_and(|k| k.is_array() && !k.as_array().is_some_and(|a| a.is_empty()))
-                {
-                    return ApplicationErrorTemplate {
-                        title: "Invalid Input".to_string(),
-                        message: "JWKS must be a JSON object with a non-empty \"keys\" array."
-                            .to_string(),
-                        back_url: format!("/applications/{}", app_id),
-                    }
-                    .into_response();
-                }
-                Some(val)
-            }
-            Err(_) => {
-                return ApplicationErrorTemplate {
-                    title: "Invalid Input".to_string(),
-                    message: "JWKS must be valid JSON.".to_string(),
-                    back_url: format!("/applications/{}", app_id),
-                }
-                .into_response();
-            }
-        }
-    } else {
-        None
+    let validated = match validate_update_format(UpdateAppInput {
+        redirect_uris: Some(&redirect_uris),
+        resource_uris: Some(&resource_uris),
+        fapi_profile: form.fapi_profile.as_deref(),
+        jwks: form.jwks.as_deref(),
+        jwks_uri: form.jwks_uri.as_deref(),
+    }) {
+        Ok(v) => v,
+        Err(e) => return validation_error_response(&e, format!("/applications/{}", app_id)),
     };
 
-    // Validate JWKS URI if provided
-    if let Some(uri) = jwks_uri_trimmed {
-        match url::Url::parse(uri) {
-            Ok(parsed) if parsed.scheme() == "https" => {}
-            _ => {
-                return ApplicationErrorTemplate {
-                    title: "Invalid Input".to_string(),
-                    message: "JWKS URI must be a valid https:// URL.".to_string(),
-                    back_url: format!("/applications/{}", app_id),
-                }
-                .into_response();
-            }
-        }
+    // FAPI rules that depend on the existing client record
+    if let Err(e) = validate_update_fapi(&validated, &client) {
+        return validation_error_response(&e, format!("/applications/{}", app_id));
     }
+    let is_fapi = validated.is_fapi;
+    let jwks_value = validated.jwks;
+    let jwks_uri_trimmed = validated.jwks_uri;
 
     // Compute FAPI-related values: merge form values with existing client values
     let fapi_profile = if is_fapi {

@@ -58,14 +58,14 @@ pub use users::{upsert_user, upsert_user_with_org};
 
 // Re-export session types and functions
 pub use sessions::{
-    Session, SessionCache, SessionPurpose, create_session, delete_expired_sessions,
-    delete_oauth_sessions_for_user, delete_session_by_token_hash, delete_sessions_for_user,
-    get_session_by_token_hash,
+    CreateSessionParams, Session, SessionCache, SessionPurpose, create_session,
+    delete_expired_sessions, delete_oauth_sessions_for_user, delete_session_by_token_hash,
+    delete_sessions_for_user, get_session_by_token_hash,
 };
 
 // Re-export authenticator types and functions
 pub use authenticators::{
-    Authenticator, AuthenticatorWithUser, count_authenticators_for_user,
+    Authenticator, AuthenticatorWithUser, CreateAuthenticatorParams, count_authenticators_for_user,
     count_sessions_for_authenticator, create_authenticator, delete_authenticator,
     delete_authenticator_in_tx, get_authenticator_by_credential_id, get_authenticator_by_id,
     get_authenticator_with_user_by_credential_id, get_authenticators_for_user,
@@ -156,9 +156,9 @@ pub use dpop::{
 
 // Re-export credentials types and functions
 pub use credentials::{
-    EnrollmentSession, IssuedSshCertificate, RevokedSshCertificate, TokenExchangeRecord,
-    create_enrollment_session, delete_expired_enrollment_sessions, delete_expired_ssh_issued_certs,
-    delete_expired_ssh_revocations, delete_old_token_exchanges,
+    EnrollmentSession, InsertTokenExchangeParams, IssuedSshCertificate, RevokedSshCertificate,
+    TokenExchangeRecord, create_enrollment_session, delete_expired_enrollment_sessions,
+    delete_expired_ssh_issued_certs, delete_expired_ssh_revocations, delete_old_token_exchanges,
     get_enrollment_session_by_token_hash, get_issued_ssh_certificates_for_user,
     get_revoked_ssh_certificates, get_token_exchanges_for_user, insert_token_exchange,
     is_ssh_certificate_revoked, record_ssh_certificate_issuance,
@@ -167,12 +167,12 @@ pub use credentials::{
 
 // Re-export GitHub types and functions
 pub use github::{
-    GitHubInstallation, create_github_installation, delete_github_installation_by_installation_id,
-    delete_old_github_credential_events, get_all_linked_installation_ids,
-    get_github_installation_by_installation_id, get_github_installation_by_org_and_account,
-    get_github_installations_by_org, log_github_credential_event, suspend_github_installation,
-    unsuspend_github_installation, update_github_installation_repos,
-    update_github_installation_repos_delta,
+    CreateGitHubInstallationParams, GitHubInstallation, create_github_installation,
+    delete_github_installation_by_installation_id, delete_old_github_credential_events,
+    get_all_linked_installation_ids, get_github_installation_by_installation_id,
+    get_github_installation_by_org_and_account, get_github_installations_by_org,
+    log_github_credential_event, suspend_github_installation, unsuspend_github_installation,
+    update_github_installation_repos, update_github_installation_repos_delta,
 };
 
 // Re-export PAR types and functions (RFC 9126)

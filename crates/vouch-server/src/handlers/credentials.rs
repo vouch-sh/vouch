@@ -514,6 +514,10 @@ pub(crate) async fn get_github_status(
     clippy::too_many_arguments,
     reason = "axum handler signature: extractors are positional parameters"
 )]
+#[expect(
+    clippy::too_many_lines,
+    reason = "sequential GitHub installation token validation and issuance"
+)]
 pub(crate) async fn get_github_token(
     method: Method,
     uri: OriginalUri,

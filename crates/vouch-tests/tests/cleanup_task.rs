@@ -60,29 +60,33 @@ async fn run_cleanup_removes_expired_sessions_and_keeps_fresh_ones() {
     // Two sessions: one already expired, one with a future expiry.
     db::create_session(
         &harness.state.store,
-        &user.id,
-        &user.email,
-        TOKEN_HASH_EXPIRED,
-        Some(&auth_id),
-        past,
-        SessionPurpose::OAuthAccessToken,
-        None,
-        None,
-        None,
+        &db::CreateSessionParams {
+            user_id: &user.id,
+            user_email: &user.email,
+            token_hash: TOKEN_HASH_EXPIRED,
+            authenticator_id: Some(&auth_id),
+            expires_at: past,
+            session_type: SessionPurpose::OAuthAccessToken,
+            authorization_details: None,
+            hardware_aaguid: None,
+            org_domain: None,
+        },
     )
     .await
     .expect("create expired session");
     db::create_session(
         &harness.state.store,
-        &user.id,
-        &user.email,
-        TOKEN_HASH_FRESH,
-        Some(&auth_id),
-        future,
-        SessionPurpose::OAuthAccessToken,
-        None,
-        None,
-        None,
+        &db::CreateSessionParams {
+            user_id: &user.id,
+            user_email: &user.email,
+            token_hash: TOKEN_HASH_FRESH,
+            authenticator_id: Some(&auth_id),
+            expires_at: future,
+            session_type: SessionPurpose::OAuthAccessToken,
+            authorization_details: None,
+            hardware_aaguid: None,
+            org_domain: None,
+        },
     )
     .await
     .expect("create fresh session");

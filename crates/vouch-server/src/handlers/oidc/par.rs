@@ -139,6 +139,10 @@ impl ClientAuthFields for ParRequest {
 /// ## Response
 ///
 /// Returns 201 Created with a JSON body containing `request_uri` and `expires_in`.
+#[expect(
+    clippy::too_many_lines,
+    reason = "single-pass FAPI 2.0 PAR validation per RFC 9126"
+)]
 pub(crate) async fn par(
     State(state): State<Arc<AppState>>,
     client_cert: crate::handlers::extractors::OptionalClientCert,

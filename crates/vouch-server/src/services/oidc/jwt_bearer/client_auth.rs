@@ -127,6 +127,10 @@ impl PendingJti {
 ///   passed. Thread it forward to construct
 ///   [`crate::services::auth::ClientAuthProof::PrivateKeyJwt`] regardless of
 ///   whether the assertion carried a `jti`.
+#[expect(
+    clippy::too_many_lines,
+    reason = "single-pass RFC 7523 client assertion validation"
+)]
 pub async fn authenticate_client_jwt(
     state: &Arc<AppState>,
     client_assertion: &str,

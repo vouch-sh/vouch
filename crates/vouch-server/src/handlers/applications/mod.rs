@@ -6,6 +6,7 @@
 
 mod api;
 mod types;
+mod validate;
 mod web;
 
 use crate::AppState;

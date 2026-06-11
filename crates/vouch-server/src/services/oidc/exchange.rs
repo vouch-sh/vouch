@@ -410,13 +410,15 @@ pub(crate) async fn exchange_token(
     };
     if let Err(e) = db::insert_token_exchange(
         &state.store,
-        &subject_session.user_id,
-        &subject_token_hash,
-        None, // actor_user_id
-        &issued_token_hash,
-        params.audience,
-        scope_string.as_deref(),
-        expires_at,
+        &db::InsertTokenExchangeParams {
+            subject_user_id: &subject_session.user_id,
+            subject_token_hash: &subject_token_hash,
+            actor_user_id: None,
+            issued_token_hash: &issued_token_hash,
+            requested_audience: params.audience,
+            granted_scope: scope_string.as_deref(),
+            expires_at,
+        },
     )
     .await
     {
@@ -511,13 +513,16 @@ async fn issue_id_token(
         });
     if let Err(e) = db::insert_token_exchange(
         &state.store,
-        ctx.user_id,
-        ctx.subject_token_hash,
-        None, // actor_user_id
-        &issued_token_hash,
-        ctx.audience,
-        None, // granted_scope — ID tokens do not carry OAuth scope
-        expires_at,
+        &db::InsertTokenExchangeParams {
+            subject_user_id: ctx.user_id,
+            subject_token_hash: ctx.subject_token_hash,
+            actor_user_id: None,
+            issued_token_hash: &issued_token_hash,
+            requested_audience: ctx.audience,
+            // ID tokens do not carry OAuth scope
+            granted_scope: None,
+            expires_at,
+        },
     )
     .await
     {

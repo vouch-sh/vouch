@@ -13,29 +13,30 @@ use jiff::Timestamp;
 // Token Exchange (RFC 8693)
 // ============================================================
 
+/// Parameters for a token exchange audit record (RFC 8693).
+pub struct InsertTokenExchangeParams<'a> {
+    pub subject_user_id: &'a str,
+    pub subject_token_hash: &'a str,
+    pub actor_user_id: Option<&'a str>,
+    pub issued_token_hash: &'a str,
+    pub requested_audience: Option<&'a str>,
+    pub granted_scope: Option<&'a str>,
+    pub expires_at: Timestamp,
+}
+
 /// Insert a token exchange audit record.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "token-exchange audit row requires all RFC 8693 fields"
-)]
 pub async fn insert_token_exchange(
     store: &DocumentStore,
-    subject_user_id: &str,
-    subject_token_hash: &str,
-    actor_user_id: Option<&str>,
-    issued_token_hash: &str,
-    requested_audience: Option<&str>,
-    granted_scope: Option<&str>,
-    expires_at: Timestamp,
+    params: &InsertTokenExchangeParams<'_>,
 ) -> Result<String> {
     let doc = TokenExchangeDoc {
-        subject_user_id: subject_user_id.to_string(),
-        subject_token_hash: subject_token_hash.to_string(),
-        actor_user_id: actor_user_id.map(String::from),
-        issued_token_hash: issued_token_hash.to_string(),
-        requested_audience: requested_audience.map(String::from),
-        granted_scope: granted_scope.map(String::from),
-        expires_at,
+        subject_user_id: params.subject_user_id.to_string(),
+        subject_token_hash: params.subject_token_hash.to_string(),
+        actor_user_id: params.actor_user_id.map(String::from),
+        issued_token_hash: params.issued_token_hash.to_string(),
+        requested_audience: params.requested_audience.map(String::from),
+        granted_scope: params.granted_scope.map(String::from),
+        expires_at: params.expires_at,
     };
     let result = store.insert(&doc).await?;
     Ok(result.id)
