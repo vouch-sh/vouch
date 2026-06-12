@@ -8,7 +8,7 @@ image: vouch-sh/vouch
 servers:
   web:
     hosts:
-      - 10.0.57.35
+      - 10.0.57.30
     options:
       expose: "3000"
 
