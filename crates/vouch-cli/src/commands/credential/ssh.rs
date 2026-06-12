@@ -49,6 +49,26 @@ pub(crate) fn default_key_path() -> Result<PathBuf> {
 pub(crate) fn ensure_keypair(key_path: &Path) -> Result<KeypairAction> {
     let pub_path = key_path.with_added_extension("pub");
 
+    // Releases <= v2026.6.1 wrote the public key with the final extension
+    // replaced (`prod_key.pem` -> `prod_key.pub`) rather than appended
+    // (`prod_key.pem.pub`). Migrate it so the lookup below finds the existing
+    // keypair instead of regenerating — and overwriting — the private key.
+    let old_pub_path = key_path.with_extension("pub");
+    if key_path.exists() && !pub_path.exists() && old_pub_path.exists() {
+        tracing::info!(
+            old_path = %old_pub_path.display(),
+            new_path = %pub_path.display(),
+            "Migrating SSH public key to new location"
+        );
+        std::fs::rename(&old_pub_path, &pub_path).with_context(|| {
+            format!(
+                "failed to migrate public key {} to {}",
+                old_pub_path.display(),
+                pub_path.display()
+            )
+        })?;
+    }
+
     if key_path.exists() && pub_path.exists() {
         // Load existing public key
         let pub_key_str = std::fs::read_to_string(&pub_path)
@@ -574,6 +594,64 @@ mod tests {
 
         let result = check_existing_certificate(&key_path);
         assert!(result.is_none(), "expected None when cert file is missing");
+    }
+
+    /// Write a keypair to disk, returning the generated key. The public key
+    /// is written to `pub_path`, letting tests choose the old (replaced
+    /// extension) or new (appended extension) location.
+    fn write_test_keypair(key_path: &Path, pub_path: &Path) -> PrivateKey {
+        let key = PrivateKey::random(&mut OsRng, Algorithm::Ed25519).unwrap();
+        let key_str = key.to_openssh(LineEnding::LF).unwrap();
+        std::fs::write(key_path, key_str.as_bytes()).unwrap();
+        let pub_str = key.public_key().to_openssh().unwrap();
+        std::fs::write(pub_path, format!("{pub_str}\n")).unwrap();
+        key
+    }
+
+    #[test]
+    fn test_ensure_keypair_migrates_old_style_pub_path() {
+        // Releases <= v2026.6.1 wrote `prod_key.pub` for `prod_key.pem`.
+        // ensure_keypair must find it, migrate it to `prod_key.pem.pub`,
+        // and load the existing keypair instead of regenerating.
+        let dir = tempfile::tempdir().unwrap();
+        let key_path = dir.path().join("prod_key.pem");
+        let old_pub_path = dir.path().join("prod_key.pub");
+        let new_pub_path = dir.path().join("prod_key.pem.pub");
+
+        let key = write_test_keypair(&key_path, &old_pub_path);
+        let private_before = std::fs::read(&key_path).unwrap();
+
+        let action = ensure_keypair(&key_path).unwrap();
+
+        assert!(
+            matches!(action, KeypairAction::Loaded(_)),
+            "expected existing keypair to be loaded, not regenerated"
+        );
+        assert_eq!(action.public_key(), key.public_key());
+        assert_eq!(
+            std::fs::read(&key_path).unwrap(),
+            private_before,
+            "private key must not be overwritten"
+        );
+        assert!(new_pub_path.exists(), "public key migrated to new location");
+        assert!(!old_pub_path.exists(), "old public key location removed");
+    }
+
+    #[test]
+    fn test_ensure_keypair_loads_new_style_pub_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let key_path = dir.path().join("prod_key.pem");
+        let pub_path = dir.path().join("prod_key.pem.pub");
+
+        let key = write_test_keypair(&key_path, &pub_path);
+        let private_before = std::fs::read(&key_path).unwrap();
+
+        let action = ensure_keypair(&key_path).unwrap();
+
+        assert!(matches!(action, KeypairAction::Loaded(_)));
+        assert_eq!(action.public_key(), key.public_key());
+        assert_eq!(std::fs::read(&key_path).unwrap(), private_before);
+        assert!(pub_path.exists());
     }
 
     #[test]
