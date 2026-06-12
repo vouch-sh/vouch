@@ -393,6 +393,11 @@ pub struct RegistrationVerificationResult {
 /// 5. For `fmt="none"`: accept (no attestation statement)
 ///
 /// Returns the server-verified credential ID, public key, and AAGUID.
+///
+/// `allow_localhost_origin` gates the loopback origin-variation relaxation:
+/// it must be `true` only in development (no TLS). Production threads `false`
+/// so an origin mismatch is always rejected even on a misconfigured loopback
+/// `rp_id`.
 pub fn verify_registration(
     attestation_object: &[u8],
     client_data_json: &[u8],
@@ -400,6 +405,7 @@ pub fn verify_registration(
     expected_challenge: &str,
     expected_origin: &str,
     require_user_verification: bool,
+    allow_localhost_origin: bool,
 ) -> Result<RegistrationVerificationResult, VerifyError> {
     verify_registration_with_verifier(
         attestation_object,
@@ -408,6 +414,7 @@ pub fn verify_registration(
         expected_challenge,
         expected_origin,
         require_user_verification,
+        allow_localhost_origin,
         &RealCoseVerifier,
     )
 }
@@ -415,6 +422,10 @@ pub fn verify_registration(
 /// Verify a WebAuthn registration with a custom COSE verifier.
 ///
 /// This is the testable version of [`verify_registration`].
+#[expect(
+    clippy::too_many_arguments,
+    reason = "mirrors verify_registration; a params struct would churn all callers"
+)]
 pub fn verify_registration_with_verifier<V: CoseVerifier>(
     attestation_object: &[u8],
     client_data_json: &[u8],
@@ -422,6 +433,7 @@ pub fn verify_registration_with_verifier<V: CoseVerifier>(
     expected_challenge: &str,
     expected_origin: &str,
     require_user_verification: bool,
+    allow_localhost_origin: bool,
     verifier: &V,
 ) -> Result<RegistrationVerificationResult, VerifyError> {
     // 1. Parse attestation_object CBOR
@@ -553,11 +565,15 @@ pub fn verify_registration_with_verifier<V: CoseVerifier>(
             .and_then(|u| u.host_str().map(String::from))
             .is_some_and(|h| vouch_common::is_loopback_host(&h));
 
-        if expected_is_local && origin_is_local {
-            tracing::debug!(
+        let is_localhost_match = allow_localhost_origin && expected_is_local && origin_is_local;
+
+        if is_localhost_match {
+            tracing::warn!(
+                target: "security",
                 expected = %expected_origin,
                 actual = %client_data.origin,
-                "Allowing localhost origin variation for registration (development mode)"
+                "Allowing localhost origin variation for registration (development mode) -- \
+                 this relaxation is disabled when TLS is configured"
             );
         } else {
             return Err(VerifyError::InvalidOrigin);
@@ -2234,6 +2250,7 @@ mod tests {
             challenge,
             origin,
             true,
+            true,
             &TestCoseVerifier::always_succeed(),
         )
         .unwrap_err();
@@ -2261,6 +2278,7 @@ mod tests {
             challenge,
             origin,
             true,
+            true,
             &TestCoseVerifier::always_succeed(),
         )
         .unwrap_err();
@@ -2269,5 +2287,56 @@ mod tests {
             matches!(err, VerifyError::InvalidAuthDataLength),
             "got {err:?}"
         );
+    }
+
+    #[test]
+    fn test_registration_localhost_origin_relaxation_allowed_when_enabled() {
+        // With relaxation enabled (development), a loopback origin variation
+        // (localhost vs 127.0.0.1, differing ports) is accepted.
+        let rp_id = "localhost";
+        let challenge = "test-challenge";
+        let cose_key = make_eddsa_cose_key(&[0u8; 32]);
+        let auth_data = make_registration_auth_data(rp_id, [1; 16], b"cred-id", &cose_key);
+        let attestation = make_attestation_object_none(&auth_data);
+        let client_data =
+            make_client_data_json("webauthn.create", challenge, "http://127.0.0.1:9000");
+
+        let result = verify_registration_with_verifier(
+            &attestation,
+            &client_data,
+            rp_id,
+            challenge,
+            "http://localhost:8080",
+            true,
+            true,
+            &TestCoseVerifier::always_succeed(),
+        );
+        assert!(result.is_ok(), "expected ok, got {result:?}");
+    }
+
+    #[test]
+    fn test_registration_localhost_origin_relaxation_rejected_when_disabled() {
+        // With relaxation disabled (production), the same loopback origin
+        // variation is rejected: production must never weaken origin binding,
+        // even on a misconfigured loopback rp_id.
+        let rp_id = "localhost";
+        let challenge = "test-challenge";
+        let cose_key = make_eddsa_cose_key(&[0u8; 32]);
+        let auth_data = make_registration_auth_data(rp_id, [1; 16], b"cred-id", &cose_key);
+        let attestation = make_attestation_object_none(&auth_data);
+        let client_data =
+            make_client_data_json("webauthn.create", challenge, "http://127.0.0.1:9000");
+
+        let result = verify_registration_with_verifier(
+            &attestation,
+            &client_data,
+            rp_id,
+            challenge,
+            "http://localhost:8080",
+            true,
+            false,
+            &TestCoseVerifier::always_succeed(),
+        );
+        assert!(matches!(result, Err(VerifyError::InvalidOrigin)));
     }
 }

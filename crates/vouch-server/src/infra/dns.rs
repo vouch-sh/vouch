@@ -44,10 +44,12 @@ fn resolver() -> Result<&'static TokioResolver> {
 /// process-wide system resolver.
 ///
 /// Used by the SSRF egress guard ([`crate::infra::ssrf`]) to vet
-/// client-controlled fetch destinations before they are requested. The same
-/// system resolver backs the server's `reqwest` client (no DoH override is
-/// installed server-side), so the addresses returned here are the ones the
-/// HTTP client will dial.
+/// client-controlled fetch destinations before they are requested. Note that
+/// `reqwest` builds its own resolver with an independent cache (the server
+/// does not install a shared process resolver), so the addresses returned
+/// here are not guaranteed to be the ones the HTTP client dials — a record
+/// change between check and fetch can diverge. The guard is a best-effort
+/// pre-flight check; TLS validation protects the subsequent fetch.
 ///
 /// # Errors
 ///

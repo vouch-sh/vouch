@@ -255,6 +255,9 @@ pub(crate) async fn register_complete(
         &challenge_b64,
         &config.base_url,
         true, // require user verification
+        // Loopback origin relaxation is development-only: disabled as soon
+        // as TLS is configured, matching assertion verification.
+        !config.tls_configured(),
     )
     .map_err(|e| {
         tracing::warn!("Registration attestation verification failed: {e}");
