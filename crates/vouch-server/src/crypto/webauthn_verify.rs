@@ -226,6 +226,50 @@ pub fn verify_assertion_with_verifier<V: CoseVerifier>(
     verify_assertion_inner(params, verifier)
 }
 
+/// Verify the client-data origin for both assertion and registration flows.
+///
+/// `allow_localhost_origin` gates the loopback origin-variation relaxation
+/// (e.g. `localhost` ↔ `127.0.0.1`): it must be `true` only in development
+/// (no TLS). Production threads `false` so an origin mismatch is always
+/// rejected even on a misconfigured loopback `rp_id`.
+///
+/// Note: the relaxation intentionally does not compare ports — the server
+/// may listen on one port while the browser constructs an origin with a
+/// different one.
+fn verify_origin(
+    presented_origin: &str,
+    expected_origin: &str,
+    allow_localhost_origin: bool,
+    flow: &str,
+) -> Result<(), VerifyError> {
+    if presented_origin == expected_origin {
+        return Ok(());
+    }
+
+    let expected_is_local = url::Url::parse(expected_origin)
+        .ok()
+        .and_then(|u| u.host_str().map(String::from))
+        .is_some_and(|h| vouch_common::is_loopback_host(&h));
+    let origin_is_local = url::Url::parse(presented_origin)
+        .ok()
+        .and_then(|u| u.host_str().map(String::from))
+        .is_some_and(|h| vouch_common::is_loopback_host(&h));
+
+    if allow_localhost_origin && expected_is_local && origin_is_local {
+        tracing::warn!(
+            target: "security",
+            flow,
+            expected = %expected_origin,
+            actual = %presented_origin,
+            "Allowing localhost origin variation (development mode) -- \
+             this relaxation is disabled when TLS is configured"
+        );
+        Ok(())
+    } else {
+        Err(VerifyError::InvalidOrigin)
+    }
+}
+
 /// Core WebAuthn assertion verification.
 ///
 /// `params.allow_localhost_origin` gates the loopback origin-variation
@@ -322,32 +366,12 @@ fn verify_assertion_inner<V: CoseVerifier>(
     }
 
     // Verify origin
-    if client_data.origin != expected_origin {
-        // Allow localhost variations for development (e.g. localhost ↔ 127.0.0.1).
-        // Note: this intentionally does not compare ports — the server may listen
-        // on one port while the browser constructs an origin with a different one.
-        let expected_is_local = url::Url::parse(expected_origin)
-            .ok()
-            .and_then(|u| u.host_str().map(String::from))
-            .is_some_and(|h| vouch_common::is_loopback_host(&h));
-        let origin_is_local = url::Url::parse(&client_data.origin)
-            .ok()
-            .and_then(|u| u.host_str().map(String::from))
-            .is_some_and(|h| vouch_common::is_loopback_host(&h));
-        let is_localhost_match = allow_localhost_origin && expected_is_local && origin_is_local;
-
-        if is_localhost_match {
-            tracing::warn!(
-                target: "security",
-                expected = %expected_origin,
-                actual = %client_data.origin,
-                "Allowing localhost origin variation (development mode) -- \
-                 this relaxation is disabled when TLS is configured"
-            );
-        } else {
-            return Err(VerifyError::InvalidOrigin);
-        }
-    }
+    verify_origin(
+        &client_data.origin,
+        expected_origin,
+        allow_localhost_origin,
+        "assertion",
+    )?;
 
     // 7. Build signed data: authenticator_data || SHA-256(client_data_json)
     let client_data_hash = digest::digest(&SHA256, client_data_json);
@@ -383,6 +407,30 @@ pub struct RegistrationVerificationResult {
     pub attestation_verified: bool,
 }
 
+/// Parameters for WebAuthn registration (attestation) verification
+/// (WebAuthn Level 2 §7.1).
+///
+/// Named fields prevent the positional byte-slice/string swaps an 8-argument
+/// signature would invite.
+#[derive(Debug, Clone, Copy)]
+pub struct RegistrationParams<'a> {
+    /// Raw attestation object bytes (CBOR).
+    pub attestation_object: &'a [u8],
+    /// Raw client data JSON bytes.
+    pub client_data_json: &'a [u8],
+    /// The expected relying party ID.
+    pub expected_rp_id: &'a str,
+    /// The expected challenge (base64url encoded).
+    pub expected_challenge: &'a str,
+    /// The expected origin URL.
+    pub expected_origin: &'a str,
+    /// Whether to require the UV flag.
+    pub require_user_verification: bool,
+    /// Whether to tolerate loopback origin variations. Development only; pass
+    /// `false` in production so an origin mismatch is always rejected.
+    pub allow_localhost_origin: bool,
+}
+
 /// Verify a WebAuthn registration (attestation) response.
 ///
 /// Implements WebAuthn Level 2 Section 7.1 verification steps:
@@ -393,21 +441,20 @@ pub struct RegistrationVerificationResult {
 /// 5. For `fmt="none"`: accept (no attestation statement)
 ///
 /// Returns the server-verified credential ID, public key, and AAGUID.
-///
-/// `allow_localhost_origin` gates the loopback origin-variation relaxation:
-/// it must be `true` only in development (no TLS). Production threads `false`
-/// so an origin mismatch is always rejected even on a misconfigured loopback
-/// `rp_id`.
 pub fn verify_registration(
-    attestation_object: &[u8],
-    client_data_json: &[u8],
-    expected_rp_id: &str,
-    expected_challenge: &str,
-    expected_origin: &str,
-    require_user_verification: bool,
-    allow_localhost_origin: bool,
+    params: &RegistrationParams<'_>,
 ) -> Result<RegistrationVerificationResult, VerifyError> {
-    verify_registration_with_verifier(
+    verify_registration_with_verifier(params, &RealCoseVerifier)
+}
+
+/// Verify a WebAuthn registration with a custom COSE verifier.
+///
+/// This is the testable version of [`verify_registration`].
+pub fn verify_registration_with_verifier<V: CoseVerifier>(
+    params: &RegistrationParams<'_>,
+    verifier: &V,
+) -> Result<RegistrationVerificationResult, VerifyError> {
+    let &RegistrationParams {
         attestation_object,
         client_data_json,
         expected_rp_id,
@@ -415,27 +462,8 @@ pub fn verify_registration(
         expected_origin,
         require_user_verification,
         allow_localhost_origin,
-        &RealCoseVerifier,
-    )
-}
+    } = params;
 
-/// Verify a WebAuthn registration with a custom COSE verifier.
-///
-/// This is the testable version of [`verify_registration`].
-#[expect(
-    clippy::too_many_arguments,
-    reason = "mirrors verify_registration; a params struct would churn all callers"
-)]
-pub fn verify_registration_with_verifier<V: CoseVerifier>(
-    attestation_object: &[u8],
-    client_data_json: &[u8],
-    expected_rp_id: &str,
-    expected_challenge: &str,
-    expected_origin: &str,
-    require_user_verification: bool,
-    allow_localhost_origin: bool,
-    verifier: &V,
-) -> Result<RegistrationVerificationResult, VerifyError> {
     // 1. Parse attestation_object CBOR
     let att_obj: ciborium::Value = ciborium::from_reader(attestation_object)
         .map_err(|e| VerifyError::InvalidClientData(format!("Invalid attestation CBOR: {e}")))?;
@@ -554,31 +582,13 @@ pub fn verify_registration_with_verifier<V: CoseVerifier>(
         return Err(VerifyError::ChallengeMismatch);
     }
 
-    // Verify origin (reuse the same localhost relaxation logic as assertion)
-    if client_data.origin != expected_origin {
-        let expected_is_local = url::Url::parse(expected_origin)
-            .ok()
-            .and_then(|u| u.host_str().map(String::from))
-            .is_some_and(|h| vouch_common::is_loopback_host(&h));
-        let origin_is_local = url::Url::parse(&client_data.origin)
-            .ok()
-            .and_then(|u| u.host_str().map(String::from))
-            .is_some_and(|h| vouch_common::is_loopback_host(&h));
-
-        let is_localhost_match = allow_localhost_origin && expected_is_local && origin_is_local;
-
-        if is_localhost_match {
-            tracing::warn!(
-                target: "security",
-                expected = %expected_origin,
-                actual = %client_data.origin,
-                "Allowing localhost origin variation for registration (development mode) -- \
-                 this relaxation is disabled when TLS is configured"
-            );
-        } else {
-            return Err(VerifyError::InvalidOrigin);
-        }
-    }
+    // Verify origin (same localhost relaxation gating as assertion)
+    verify_origin(
+        &client_data.origin,
+        expected_origin,
+        allow_localhost_origin,
+        "registration",
+    )?;
 
     // 4. Verify attestation statement based on format
     let mut attestation_verified = false;
@@ -2244,13 +2254,15 @@ mod tests {
         let client_data = make_client_data_json("webauthn.create", challenge, origin);
 
         let err = verify_registration_with_verifier(
-            &attestation,
-            &client_data,
-            rp_id,
-            challenge,
-            origin,
-            true,
-            true,
+            &RegistrationParams {
+                attestation_object: &attestation,
+                client_data_json: &client_data,
+                expected_rp_id: rp_id,
+                expected_challenge: challenge,
+                expected_origin: origin,
+                require_user_verification: true,
+                allow_localhost_origin: true,
+            },
             &TestCoseVerifier::always_succeed(),
         )
         .unwrap_err();
@@ -2272,13 +2284,15 @@ mod tests {
         let client_data = make_client_data_json("webauthn.create", challenge, origin);
 
         let err = verify_registration_with_verifier(
-            &attestation,
-            &client_data,
-            rp_id,
-            challenge,
-            origin,
-            true,
-            true,
+            &RegistrationParams {
+                attestation_object: &attestation,
+                client_data_json: &client_data,
+                expected_rp_id: rp_id,
+                expected_challenge: challenge,
+                expected_origin: origin,
+                require_user_verification: true,
+                allow_localhost_origin: true,
+            },
             &TestCoseVerifier::always_succeed(),
         )
         .unwrap_err();
@@ -2302,13 +2316,15 @@ mod tests {
             make_client_data_json("webauthn.create", challenge, "http://127.0.0.1:9000");
 
         let result = verify_registration_with_verifier(
-            &attestation,
-            &client_data,
-            rp_id,
-            challenge,
-            "http://localhost:8080",
-            true,
-            true,
+            &RegistrationParams {
+                attestation_object: &attestation,
+                client_data_json: &client_data,
+                expected_rp_id: rp_id,
+                expected_challenge: challenge,
+                expected_origin: "http://localhost:8080",
+                require_user_verification: true,
+                allow_localhost_origin: true,
+            },
             &TestCoseVerifier::always_succeed(),
         );
         assert!(result.is_ok(), "expected ok, got {result:?}");
@@ -2328,13 +2344,15 @@ mod tests {
             make_client_data_json("webauthn.create", challenge, "http://127.0.0.1:9000");
 
         let result = verify_registration_with_verifier(
-            &attestation,
-            &client_data,
-            rp_id,
-            challenge,
-            "http://localhost:8080",
-            true,
-            false,
+            &RegistrationParams {
+                attestation_object: &attestation,
+                client_data_json: &client_data,
+                expected_rp_id: rp_id,
+                expected_challenge: challenge,
+                expected_origin: "http://localhost:8080",
+                require_user_verification: true,
+                allow_localhost_origin: false,
+            },
             &TestCoseVerifier::always_succeed(),
         );
         assert!(matches!(result, Err(VerifyError::InvalidOrigin)));

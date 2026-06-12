@@ -248,17 +248,17 @@ pub(crate) async fn register_complete(
     let config = state.config();
     let challenge_b64 =
         base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(reg_state.challenge.as_bytes());
-    let verified = webauthn_verify::verify_registration(
-        req.attestation_object.as_bytes(),
-        req.client_data_json.as_bytes(),
-        &reg_state.rp_id,
-        &challenge_b64,
-        &config.base_url,
-        true, // require user verification
+    let verified = webauthn_verify::verify_registration(&webauthn_verify::RegistrationParams {
+        attestation_object: req.attestation_object.as_bytes(),
+        client_data_json: req.client_data_json.as_bytes(),
+        expected_rp_id: &reg_state.rp_id,
+        expected_challenge: &challenge_b64,
+        expected_origin: &config.base_url,
+        require_user_verification: true,
         // Loopback origin relaxation is development-only: disabled as soon
         // as TLS is configured, matching assertion verification.
-        !config.tls_configured(),
-    )
+        allow_localhost_origin: !config.tls_configured(),
+    })
     .map_err(|e| {
         tracing::warn!("Registration attestation verification failed: {e}");
         ServiceError::api(
