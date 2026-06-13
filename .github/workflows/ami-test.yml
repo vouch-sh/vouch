@@ -377,6 +377,9 @@ jobs:
           # Console output can lag behind boot; poll until it has content.
           # Don't suppress stderr: authorization errors must be visible
           # instead of looking like "console not ready yet".
+          # --latest only works for running instances; fall back to the
+          # buffered output EC2 posts shortly after boot or stop so we
+          # still capture the console of an instance that powered off.
           CONSOLE_FILE=/tmp/console.txt
           for attempt in {1..20}; do
             aws ec2 get-console-output \
@@ -384,6 +387,13 @@ jobs:
               --latest \
               --query 'Output' \
               --output text > "$CONSOLE_FILE" || true
+
+            if ! [ -s "$CONSOLE_FILE" ] || grep -qx 'None' "$CONSOLE_FILE"; then
+              aws ec2 get-console-output \
+                --instance-id "${INSTANCE_ID}" \
+                --query 'Output' \
+                --output text > "$CONSOLE_FILE" || true
+            fi
 
             if [ -s "$CONSOLE_FILE" ] && ! grep -qx 'None' "$CONSOLE_FILE"; then
               break
