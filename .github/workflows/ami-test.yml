@@ -89,6 +89,16 @@ jobs:
           role-session-name: test-ami-build-${{ inputs.arch }}
           mask-aws-account-id: true
 
+      - name: Clean up artifacts from previous run attempts
+        env:
+          S3_BUCKET: ${{ vars.AMI_BUILD_BUCKET }}
+          S3_PREFIX: ami-test-builds/${{ github.run_id }}
+        run: |
+          # Re-runs keep the same run_id; stale build-status.txt/snapshot-id.txt
+          # from a previous attempt would otherwise satisfy the polling below
+          echo "Removing stale artifacts at s3://${S3_BUCKET}/${S3_PREFIX}/"
+          aws s3 rm "s3://${S3_BUCKET}/${S3_PREFIX}/" --recursive 2>/dev/null || true
+
       - name: Upload AMI files to S3
         env:
           S3_BUCKET: ${{ vars.AMI_BUILD_BUCKET }}
