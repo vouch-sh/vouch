@@ -16,7 +16,7 @@
         <type
             image="oem"
             filesystem="xfs"
-            kernelcmdline="console=ttyS0 rd.shell=0 systemd.getty_auto=false rd.kiwi.verity_options=panic-on-corruption"
+            kernelcmdline="console=ttyS0 rd.shell=0 systemd.getty_auto=false rd.kiwi.verity_options=panic-on-corruption fips=1"
             firmware="uefi"
             overlayroot="true"
             overlayroot_write_partition="false"
@@ -61,6 +61,8 @@
         <package name="dracut-kiwi-verity"/>
         <package name="dracut-kiwi-overlay"/>
         <package name="aws-nitro-tpm-tools"/>
+        <!-- FIPS crypto-policy (kernel fips=1 is set via kernelcmdline above) -->
+        <package name="crypto-policies-scripts"/>
         <!-- Networking -->
         <package name="systemd-resolved"/>
         <package name="amazon-chrony-config"/>

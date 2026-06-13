@@ -71,4 +71,19 @@ passwd -l root
 # Remove any existing SSH host keys (shouldn't exist, but be safe)
 rm -f /etc/ssh/ssh_host_*
 
+#======================================
+# Enable FIPS crypto-policy
+#======================================
+# fips-mode-setup --enable cannot run here: there is no grubby and the kernel
+# cmdline is baked into the signed UKI. Its effects are reproduced as:
+#   1. fips=1 on the kernelcmdline (appliance.kiwi)
+#   2. dracut fips module (/etc/dracut.conf.d/40-fips.conf)
+#   3. the FIPS crypto-policy set below
+update-crypto-policies --no-reload --set FIPS
+CURRENT_POLICY=$(update-crypto-policies --show)
+if [ "$CURRENT_POLICY" != "FIPS" ]; then
+    echo "ERROR: crypto-policy is '${CURRENT_POLICY}', expected 'FIPS'"
+    exit 1
+fi
+
 echo "Vouch Server image configuration complete"
