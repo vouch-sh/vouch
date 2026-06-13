@@ -413,8 +413,9 @@ jobs:
         run: |
           # Terminate build instance (S3 artifacts cleaned by lifecycle policy)
           if [ -n "${INSTANCE_ID}" ]; then
-            aws ec2 terminate-instances \
-              --instance-ids "${INSTANCE_ID}" || true
+            if ! aws ec2 terminate-instances --instance-ids "${INSTANCE_ID}"; then
+              echo "::warning::Failed to terminate ${INSTANCE_ID} - manual cleanup required"
+            fi
           fi
 
   copy-ami:
