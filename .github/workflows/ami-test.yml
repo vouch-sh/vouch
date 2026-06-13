@@ -454,7 +454,9 @@ jobs:
     needs: [build, boot-verify]
     permissions:
       id-token: write
-    if: always() && needs.build.outputs.ami_id != ''
+    # Run whenever anything was created: a build that fails after the
+    # coldsnap upload leaves a snapshot but no AMI.
+    if: always() && (needs.build.outputs.ami_id != '' || needs.build.outputs.snapshot_id != '')
 
     steps:
       - name: Configure AWS credentials
@@ -471,8 +473,10 @@ jobs:
           AMI_ID: ${{ needs.build.outputs.ami_id }}
           SNAPSHOT_ID: ${{ needs.build.outputs.snapshot_id }}
         run: |
-          echo "Deregistering test AMI ${AMI_ID}"
-          aws ec2 deregister-image --image-id "${AMI_ID}" || true
+          if [ -n "${AMI_ID}" ]; then
+            echo "Deregistering test AMI ${AMI_ID}"
+            aws ec2 deregister-image --image-id "${AMI_ID}" || true
+          fi
 
           if [ -n "${SNAPSHOT_ID}" ]; then
             echo "Deleting snapshot ${SNAPSHOT_ID}"
