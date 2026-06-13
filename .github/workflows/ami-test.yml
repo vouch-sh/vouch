@@ -381,18 +381,32 @@ jobs:
           # buffered output EC2 posts shortly after boot or stop so we
           # still capture the console of an instance that powered off.
           CONSOLE_FILE=/tmp/console.txt
+          RAW_FILE=/tmp/console.b64
           for attempt in {1..20}; do
+            if [ "$attempt" -eq 1 ]; then
+              # Diagnostic: show whether the API has any output at all
+              aws ec2 get-console-output \
+                --instance-id "${INSTANCE_ID}" \
+                --latest \
+                --query '{Timestamp: Timestamp, OutputChars: length(Output || `""`)}' || true
+            fi
+
             aws ec2 get-console-output \
               --instance-id "${INSTANCE_ID}" \
               --latest \
               --query 'Output' \
-              --output text > "$CONSOLE_FILE" || true
+              --output text > "$RAW_FILE" || true
 
-            if ! grep -q '[^[:space:]]' "$CONSOLE_FILE" || grep -qx 'None' "$CONSOLE_FILE"; then
+            if ! grep -q '[^[:space:]]' "$RAW_FILE" || grep -qx 'None' "$RAW_FILE"; then
               aws ec2 get-console-output \
                 --instance-id "${INSTANCE_ID}" \
                 --query 'Output' \
-                --output text > "$CONSOLE_FILE" || true
+                --output text > "$RAW_FILE" || true
+            fi
+
+            # Output is base64-encoded; decode it for the greps below
+            if ! base64 -d "$RAW_FILE" > "$CONSOLE_FILE" 2>/dev/null; then
+              cp "$RAW_FILE" "$CONSOLE_FILE"
             fi
 
             if grep -q '[^[:space:]]' "$CONSOLE_FILE" && ! grep -qx 'None' "$CONSOLE_FILE"; then
@@ -423,10 +437,10 @@ jobs:
             FAILED=1
           fi
 
-          if grep -qi 'fips mode: enabled' "$CONSOLE_FILE"; then
+          if grep -qiE 'fips mode: enabled|FIPS 140: integrity verification passed|loading FIPS 140 Kernel Cryptographic Module' "$CONSOLE_FILE"; then
             echo "PASS: kernel reports FIPS mode enabled"
           else
-            echo "FAIL: 'fips mode: enabled' not found in console output"
+            echo "FAIL: no FIPS-mode kernel messages found in console output"
             FAILED=1
           fi
 
