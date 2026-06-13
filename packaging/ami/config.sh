@@ -90,4 +90,15 @@ if [ "$CURRENT_POLICY" != "FIPS" ]; then
     exit 1
 fi
 
+#======================================
+# Verify kernel hardening drop-in
+#======================================
+# STIG-aligned sysctl settings are provided via the root/ overlay. Values are
+# applied at boot by systemd-sysctl; here we only assert the file is present so
+# a missing overlay fails the build instead of silently shipping unhardened.
+if [ ! -f /etc/sysctl.d/90-vouch-hardening.conf ]; then
+    echo "ERROR: /etc/sysctl.d/90-vouch-hardening.conf not found"
+    exit 1
+fi
+
 echo "Vouch Server image configuration complete"
