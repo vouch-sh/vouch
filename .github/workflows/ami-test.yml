@@ -336,10 +336,42 @@ jobs:
         run: |
           # The image has no SSH/SSM by design; verification relies on the
           # serial console (console=ttyS0) and EC2 reachability checks.
-          BOOT_OK=true
-          if ! aws ec2 wait instance-status-ok --instance-ids "${INSTANCE_ID}"; then
-            echo "WARNING: instance did not reach status-ok within the waiter timeout"
-            BOOT_OK=false
+          # Poll instance state alongside status checks so an instance that
+          # powers itself off (firmware exit, OS shutdown) fails fast with a
+          # state reason instead of waiting out the full status-ok timeout.
+          BOOT_OK=false
+          for attempt in {1..40}; do
+            STATE=$(aws ec2 describe-instances \
+              --instance-ids "${INSTANCE_ID}" \
+              --query 'Reservations[0].Instances[0].State.Name' \
+              --output text)
+
+            case "${STATE}" in
+              stopping|stopped|shutting-down|terminated)
+                REASON=$(aws ec2 describe-instances \
+                  --instance-ids "${INSTANCE_ID}" \
+                  --query 'Reservations[0].Instances[0].StateReason.Message' \
+                  --output text)
+                echo "Instance left the running state: ${STATE} (${REASON})"
+                break
+                ;;
+            esac
+
+            STATUS=$(aws ec2 describe-instance-status \
+              --instance-ids "${INSTANCE_ID}" \
+              --query 'InstanceStatuses[0].[InstanceStatus.Status,SystemStatus.Status]' \
+              --output text | tr '\t' ' ')
+            if [ "${STATUS}" = "ok ok" ]; then
+              BOOT_OK=true
+              break
+            fi
+
+            echo "Instance state: ${STATE}, status checks: ${STATUS:-pending} (attempt ${attempt}/40)..."
+            sleep 15
+          done
+
+          if [ "${BOOT_OK}" != "true" ]; then
+            echo "WARNING: instance did not reach status-ok"
           fi
 
           # Console output can lag behind boot; poll until it has content.
