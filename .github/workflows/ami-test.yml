@@ -149,7 +149,7 @@ jobs:
             --subnet-id "${SUBNET_ID}" \
             --iam-instance-profile Name=VouchAMIBuilder \
             --block-device-mappings '[{"DeviceName":"/dev/xvda","Ebs":{"VolumeSize":30,"VolumeType":"gp3","DeleteOnTermination":true}}]' \
-            --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=vouch-ami-test-builder-${ARCH}}]" \
+            --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=vouch-ami-builder-test-${ARCH}}]" \
             --user-data file:///tmp/user-data.sh \
             --query 'Instances[0].InstanceId' \
             --output text)
@@ -323,7 +323,7 @@ jobs:
             --instance-type "${INSTANCE_TYPE}" \
             --subnet-id "${SUBNET_ID}" \
             --metadata-options 'HttpTokens=required,InstanceMetadataTags=enabled' \
-            --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=vouch-ami-test-verify-${ARCH}}]" \
+            --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=vouch-ami-builder-verify-${ARCH}}]" \
             --query 'Instances[0].InstanceId' \
             --output text)
 
