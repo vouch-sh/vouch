@@ -388,14 +388,14 @@ jobs:
               --query 'Output' \
               --output text > "$CONSOLE_FILE" || true
 
-            if ! [ -s "$CONSOLE_FILE" ] || grep -qx 'None' "$CONSOLE_FILE"; then
+            if ! grep -q '[^[:space:]]' "$CONSOLE_FILE" || grep -qx 'None' "$CONSOLE_FILE"; then
               aws ec2 get-console-output \
                 --instance-id "${INSTANCE_ID}" \
                 --query 'Output' \
                 --output text > "$CONSOLE_FILE" || true
             fi
 
-            if [ -s "$CONSOLE_FILE" ] && ! grep -qx 'None' "$CONSOLE_FILE"; then
+            if grep -q '[^[:space:]]' "$CONSOLE_FILE" && ! grep -qx 'None' "$CONSOLE_FILE"; then
               break
             fi
             echo "Console output not available yet (attempt $attempt/20)..."

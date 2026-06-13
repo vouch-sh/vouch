@@ -77,8 +77,12 @@ rm -f /etc/ssh/ssh_host_*
 # fips-mode-setup --enable cannot run here: there is no grubby and the kernel
 # cmdline is baked into the signed UKI. Its effects are reproduced as:
 #   1. fips=1 on the kernelcmdline (appliance.kiwi)
-#   2. dracut fips module (/etc/dracut.conf.d/40-fips.conf)
-#   3. the FIPS crypto-policy set below
+#   2. the FIPS crypto-policy set below
+# The dracut fips module is deliberately NOT included: its kernel HMAC check
+# expects /boot/vmlinuz-<ver> + .hmac, which do not exist in the UKI layout,
+# and the failed check powers the instance off (rd.shell=0). Kernel integrity
+# is enforced by Secure Boot UKI signing and dm-verity instead, and the
+# kernel still runs its FIPS self-tests with fips=1.
 update-crypto-policies --no-reload --set FIPS
 CURRENT_POLICY=$(update-crypto-policies --show)
 if [ "$CURRENT_POLICY" != "FIPS" ]; then
