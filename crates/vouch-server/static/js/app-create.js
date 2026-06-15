@@ -49,7 +49,7 @@
             }
 
             if (invalid.length > 0) {
-                return t('appcreate-js-redirect-invalid-prefix') + invalid.join(', ') + t('appcreate-js-redirect-invalid-suffix');
+                return t('appcreate-js-redirect-invalid', { uris: invalid.join(', ') });
             }
 
             return null;
@@ -90,7 +90,7 @@
             }
 
             if (errors.length > 0) {
-                return t('appcreate-js-resource-invalid-prefix') + errors.join('; ') + '.';
+                return t('appcreate-js-resource-invalid', { errors: errors.join('; ') });
             }
 
             return null;

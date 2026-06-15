@@ -80,7 +80,7 @@
 
         } catch (err) {
             status.className = 'status-error mb-6';
-            status.textContent = t('login-js-error-prefix') + webauthnError(err);
+            status.textContent = t('login-js-error', { message: webauthnError(err) });
             btn.disabled = false;
             btn.classList.remove('opacity-60', 'cursor-not-allowed');
         }

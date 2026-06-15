@@ -98,7 +98,7 @@
     }
 
     async function deleteKey(keyId, keyName) {
-        if (!confirm(t('keys-js-delete-prefix') + keyName + t('keys-js-delete-suffix'))) {
+        if (!confirm(t('keys-js-delete', { name: keyName }))) {
             return;
         }
 
@@ -137,7 +137,7 @@
 
             await finishAfterDelete(response);
         } catch (err) {
-            alert(t('keys-js-delete-failed-prefix') + err.message);
+            alert(t('keys-js-delete-failed-message', { message: err.message }));
         }
     }
 

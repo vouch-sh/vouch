@@ -12,7 +12,7 @@ use clap::Parser;
 
 use vouch_server::{
     config,
-    infra::{generate_document_key, router, serve, startup, telemetry},
+    infra::{generate_document_key, i18n, router, serve, startup, telemetry},
 };
 
 // ============================================================================
@@ -95,6 +95,10 @@ async fn run_server(args: config::Args) -> Result<()> {
     telemetry::init_tracing(log_format)?;
 
     router::print_startup_banner();
+
+    // Verify the embedded i18n catalogs loaded — refuses to start if the UI
+    // would render with raw Fluent message ids.
+    i18n::validate_startup()?;
 
     // Initialize all server components (config, database, state, background tasks)
     let components = startup::initialize(args).await?;
