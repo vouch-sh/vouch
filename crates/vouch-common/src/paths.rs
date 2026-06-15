@@ -147,19 +147,22 @@ fn ensure_private_dir(dir: &Path) -> std::io::Result<()> {
 
 /// Move `from` to `to`, preserving permission bits.
 ///
-/// Prefers an atomic `rename`; falls back to copy + remove when the source and
-/// destination live on different filesystems (`EXDEV`).
+/// Prefers an atomic `rename`. Falls back to copy + remove *only* when the
+/// source and destination live on different filesystems (`EXDEV`). Any other
+/// `rename` failure (permissions, transient I/O) is propagated so the source is
+/// never deleted after a failed or partial move.
 fn move_file(from: &Path, to: &Path) -> std::io::Result<()> {
     if let Some(parent) = to.parent() {
         ensure_private_dir(parent)?;
     }
     match std::fs::rename(from, to) {
         Ok(()) => Ok(()),
-        Err(_) => {
+        Err(e) if e.kind() == std::io::ErrorKind::CrossesDevices => {
             // Cross-device rename: copy (preserves mode bits) then remove.
             std::fs::copy(from, to)?;
             std::fs::remove_file(from)
         }
+        Err(e) => Err(e),
     }
 }
 

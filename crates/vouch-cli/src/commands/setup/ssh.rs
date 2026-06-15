@@ -123,6 +123,16 @@ pub(crate) async fn run(server: &str, hosts: Option<&str>) -> Result<()> {
     Ok(())
 }
 
+/// True if `line` is an `IdentityAgent` directive pointing at the legacy
+/// `~/.vouch/ssh-agent.sock` socket (ignoring leading indentation).
+///
+/// Deliberately narrow: a stray mention of the path in a comment or unrelated
+/// directive does not match, so it cannot trigger a spurious rewrite.
+fn is_stale_identity_agent_line(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    trimmed.starts_with("IdentityAgent") && trimmed.contains(".vouch/ssh-agent.sock")
+}
+
 /// Configure SSH config with Vouch identity and certificate.
 ///
 /// If `--hosts` is provided, creates a host-specific block with `IdentityAgent`
@@ -149,15 +159,19 @@ fn configure_ssh_config(hosts: Option<&str>) -> Result<()> {
         String::new()
     };
 
-    // Migrate a stale IdentityAgent left over from the legacy ~/.vouch layout.
+    // Normalize a stale IdentityAgent left over from the legacy ~/.vouch layout.
     // Older versions wrote the agent socket under ~/.vouch/ssh-agent.sock; the
-    // socket now lives in the XDG runtime directory. Rewrite the path in place
-    // so existing users don't have to delete their config by hand.
-    if existing.contains(".vouch/ssh-agent.sock") && !existing.contains(&agent_socket) {
-        let rewritten = existing
+    // socket now lives in the XDG runtime directory. Only an actual
+    // `IdentityAgent ...~/.vouch/ssh-agent.sock` line is rewritten (not a stray
+    // mention in a comment), and we fall through to the normal setup path
+    // afterwards rather than returning early — so a first run that also needs
+    // the IdentityFile/CertificateFile block still gets it.
+    let has_stale_identity_agent = existing.lines().any(is_stale_identity_agent_line);
+    let existing = if has_stale_identity_agent {
+        let mut rewritten = existing
             .lines()
             .map(|line| {
-                if line.contains("IdentityAgent") && line.contains(".vouch/ssh-agent.sock") {
+                if is_stale_identity_agent_line(line) {
                     let indent: String = line.chars().take_while(|c| c.is_whitespace()).collect();
                     format!("{indent}IdentityAgent {agent_socket}")
                 } else {
@@ -166,19 +180,19 @@ fn configure_ssh_config(hosts: Option<&str>) -> Result<()> {
             })
             .collect::<Vec<_>>()
             .join("\n");
-        let rewritten = if existing.ends_with('\n') {
-            format!("{rewritten}\n")
-        } else {
-            rewritten
-        };
+        if existing.ends_with('\n') {
+            rewritten.push('\n');
+        }
         atomic_write_secure(&config_path, rewritten.as_bytes())
             .with_context(|| format!("failed to write {}", config_path.display()))?;
         println!(
             "Updated stale Vouch IdentityAgent path in {} -> {agent_socket}",
             config_path.display()
         );
-        return Ok(());
-    }
+        rewritten
+    } else {
+        existing
+    };
 
     // Check if Vouch config already exists
     if existing.contains("# Vouch SSH Configuration") || existing.contains(&agent_socket) {
@@ -352,5 +366,29 @@ mod tests {
         let path = ca_key_path("https://us.vouch.sh/").unwrap();
         let filename = path.file_name().unwrap().to_str().unwrap();
         assert_eq!(filename, "vouch_ca_us_vouch_sh.pub");
+    }
+
+    #[test]
+    fn stale_identity_agent_line_matches_only_real_directive() {
+        // Actual directive (with and without indentation) -> stale.
+        assert!(is_stale_identity_agent_line(
+            "    IdentityAgent ~/.vouch/ssh-agent.sock"
+        ));
+        assert!(is_stale_identity_agent_line(
+            "IdentityAgent /home/u/.vouch/ssh-agent.sock"
+        ));
+
+        // A comment or unrelated line mentioning the path must NOT match,
+        // so it cannot trigger a spurious rewrite / early skip.
+        assert!(!is_stale_identity_agent_line(
+            "# old path was ~/.vouch/ssh-agent.sock"
+        ));
+        assert!(!is_stale_identity_agent_line(
+            "IdentityFile ~/.ssh/id_ed25519"
+        ));
+        // A directive pointing at the new XDG socket is not stale.
+        assert!(!is_stale_identity_agent_line(
+            "    IdentityAgent /run/user/1000/vouch/ssh-agent.sock"
+        ));
     }
 }
