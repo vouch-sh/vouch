@@ -30,7 +30,7 @@ Vouch is a Rust workspace with these crates:
 
 ## Agent IPC
 
-The CLI communicates with the agent daemon over a Unix socket (`~/.vouch/agent.sock`) using JSON-RPC 2.0 with 4-byte length-prefixed messages.
+The CLI communicates with the agent daemon over a Unix socket (`$XDG_RUNTIME_DIR/vouch/agent.sock`) using JSON-RPC 2.0 with 4-byte length-prefixed messages.
 
 ## Server Architecture
 
