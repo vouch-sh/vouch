@@ -21,6 +21,7 @@
 !crates/vouch-server/migrations/
 !crates/vouch-server/root_certs/
 !crates/vouch-server/templates/
+!crates/vouch-server/i18n/
 !crates/vouch-server/static/
 !crates/vouch-server/styles/
 !crates/vouch-server/tailwind.config.js
