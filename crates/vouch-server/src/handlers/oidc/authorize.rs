@@ -13,8 +13,8 @@ use super::{
 use crate::AppState;
 use crate::db::ResponseMode;
 use crate::db::{self, Authenticator, CreatePendingOAuthParams, OAuthClient, Session, User};
-use crate::handlers::HasVersion;
 use crate::impl_template_response;
+use crate::infra::i18n::PageContext;
 use crate::services::oidc::ScopeSet;
 use crate::services::oidc::authorization::{
     AuthorizationCodeParams, AuthorizationSessionState, AuthorizeRequestParams,
@@ -37,6 +37,8 @@ use std::sync::Arc;
 #[derive(Template)]
 #[template(path = "authorize_denied.html")]
 pub(super) struct AuthorizeDeniedTemplate {
+    /// Page-level template context: i18n + version.
+    pub page: PageContext,
     pub client_name: String,
     pub error_message: String,
 }
@@ -51,6 +53,8 @@ impl_template_response!(AuthorizeDeniedTemplate);
 #[derive(Template)]
 #[template(path = "form_post_response.html")]
 struct FormPostResponseTemplate {
+    /// Page-level template context: i18n + version.
+    page: PageContext,
     redirect_uri: String,
     params: Vec<(String, String)>,
 }
@@ -174,6 +178,7 @@ impl ResolvedClient {
                 "redirect_uri not registered for client"
             );
             let resp = AuthorizeDeniedTemplate {
+                page: PageContext::current(),
                 client_name: client.name,
                 error_message: "Invalid redirect_uri: not registered for this application"
                     .to_string(),
@@ -389,6 +394,7 @@ async fn authorize_inner(state: Arc<AppState>, params: AuthorizeQuery, jar: Cook
     // RFC 9101 + RFC 9126: Mutual exclusion — cannot provide both request and request_uri
     if params.request.is_some() && params.request_uri.is_some() {
         return AuthorizeDeniedTemplate {
+            page: PageContext::current(),
             client_name: "Unknown Application".to_string(),
             error_message:
                 "Invalid request: 'request' and 'request_uri' parameters are mutually exclusive"
@@ -402,6 +408,7 @@ async fn authorize_inner(state: Arc<AppState>, params: AuthorizeQuery, jar: Cook
         let client_id = params.client_id.clone().unwrap_or_default();
         if client_id.is_empty() {
             return AuthorizeDeniedTemplate {
+                page: PageContext::current(),
                 client_name: "Unknown Application".to_string(),
                 error_message: "Invalid request: client_id is required with request parameter"
                     .to_string(),
@@ -417,6 +424,7 @@ async fn authorize_inner(state: Arc<AppState>, params: AuthorizeQuery, jar: Cook
         let client_id = params.client_id.clone().unwrap_or_default();
         if client_id.is_empty() {
             return AuthorizeDeniedTemplate {
+                page: PageContext::current(),
                 client_name: "Unknown Application".to_string(),
                 error_message: "Invalid request: client_id is required with request_uri"
                     .to_string(),
@@ -428,6 +436,7 @@ async fn authorize_inner(state: Arc<AppState>, params: AuthorizeQuery, jar: Cook
             // RFC 9126: PAR URN — must be reasonably sized.
             if request_uri.len() > 256 {
                 return AuthorizeDeniedTemplate {
+                    page: PageContext::current(),
                     client_name: "Unknown Application".to_string(),
                     error_message: "Invalid request_uri format".to_string(),
                 }
@@ -450,6 +459,7 @@ async fn authorize_inner(state: Arc<AppState>, params: AuthorizeQuery, jar: Cook
 
         // Neither a PAR URN nor an HTTPS URL.
         return AuthorizeDeniedTemplate {
+            page: PageContext::current(),
             client_name: "Unknown Application".to_string(),
             error_message: "Invalid request_uri: must be a PAR URN or an HTTPS URL".to_string(),
         }
@@ -490,6 +500,7 @@ async fn handle_direct_request(
     let client_id = params.client_id.clone().unwrap_or_default();
     if client_id.is_empty() {
         return AuthorizeDeniedTemplate {
+            page: PageContext::current(),
             client_name: "Unknown Application".to_string(),
             error_message: "Invalid request: client_id is required".to_string(),
         }
@@ -619,6 +630,7 @@ async fn handle_jar_request(
                 _ => e.to_string(),
             };
             return AuthorizeDeniedTemplate {
+                page: PageContext::current(),
                 client_name: oauth_client.name,
                 error_message: format!("Invalid Request Object: {description}"),
             }
@@ -708,6 +720,7 @@ async fn lookup_par(
                 return Err(axum::response::Redirect::to(redirect.as_str()).into_response());
             }
             Err(AuthorizeDeniedTemplate {
+                page: PageContext::current(),
                 client_name: "Unknown Application".to_string(),
                 error_message:
                     "Invalid or expired request_uri. Please restart the authorization flow."
@@ -718,6 +731,7 @@ async fn lookup_par(
         Err(e) => {
             tracing::error!("Failed to look up PAR: {}", e);
             Err(AuthorizeDeniedTemplate {
+                page: PageContext::current(),
                 client_name: "Unknown Application".to_string(),
                 error_message: "An error occurred. Please try again.".to_string(),
             }
@@ -900,6 +914,7 @@ async fn fetch_and_resolve_request_uri(
             _ => e.to_string(),
         };
         return Err(AuthorizeDeniedTemplate {
+            page: PageContext::current(),
             client_name: oauth_client.name,
             error_message: format!("Invalid request: {description}"),
         }
@@ -911,6 +926,7 @@ async fn fetch_and_resolve_request_uri(
         && !allowed.iter().any(|u| u == request_uri)
     {
         return Err(AuthorizeDeniedTemplate {
+            page: PageContext::current(),
             client_name: oauth_client.name,
             error_message: "Invalid request: request_uri is not registered for this client"
                 .to_string(),
@@ -931,6 +947,7 @@ async fn fetch_and_resolve_request_uri(
                     _ => e.to_string(),
                 };
                 return Err(AuthorizeDeniedTemplate {
+                    page: PageContext::current(),
                     client_name: oauth_client.name,
                     error_message: format!("Failed to fetch Request Object: {description}"),
                 }
@@ -956,6 +973,7 @@ async fn fetch_and_resolve_request_uri(
                     _ => ("invalid_request_object", e.to_string()),
                 };
                 return Err(AuthorizeDeniedTemplate {
+                    page: PageContext::current(),
                     client_name: oauth_client.name,
                     error_message: format!("Invalid Request Object ({error_code}): {description}"),
                 }
@@ -993,6 +1011,7 @@ async fn handle_pending_auth(state: &Arc<AppState>, pending_id: &str, jar: &Cook
                     "Pending OAuth authorization not found or expired"
                 );
                 return AuthorizeDeniedTemplate {
+                    page: PageContext::current(),
                     client_name: "Unknown Application".to_string(),
                     error_message: "Authorization session expired. Please try again.".to_string(),
                 }
@@ -1001,6 +1020,7 @@ async fn handle_pending_auth(state: &Arc<AppState>, pending_id: &str, jar: &Cook
             Err(e) => {
                 tracing::error!("Failed to retrieve pending OAuth authorization: {}", e);
                 return AuthorizeDeniedTemplate {
+                    page: PageContext::current(),
                     client_name: "Unknown Application".to_string(),
                     error_message: "An error occurred. Please try again.".to_string(),
                 }
@@ -1058,6 +1078,7 @@ async fn handle_pending_auth(state: &Arc<AppState>, pending_id: &str, jar: &Cook
         Ok(AuthorizationSessionState::NeedsAuth) | Err(_) => {
             tracing::warn!("User not authenticated after returning from login");
             AuthorizeDeniedTemplate {
+                page: PageContext::current(),
                 client_name: resolved.client.name.clone(),
                 error_message: "Authentication failed. Please try again.".to_string(),
             }
@@ -1087,6 +1108,7 @@ async fn complete_pending_auth(
             _ => "You don't have access to this application".to_string(),
         };
         return AuthorizeDeniedTemplate {
+            page: PageContext::current(),
             client_name: resolved.client.name.clone(),
             error_message,
         }
@@ -1197,6 +1219,7 @@ async fn lookup_and_check_active(
         Ok(Some(c)) => c,
         Ok(None) => {
             return Err(AuthorizeDeniedTemplate {
+                page: PageContext::current(),
                 client_name: "Unknown Application".to_string(),
                 error_message:
                     "Unknown client application. Please contact the application administrator."
@@ -1206,6 +1229,7 @@ async fn lookup_and_check_active(
         }
         Err(_) => {
             return Err(AuthorizeDeniedTemplate {
+                page: PageContext::current(),
                 client_name: "Unknown Application".to_string(),
                 error_message: "An error occurred. Please try again.".to_string(),
             }
@@ -1215,6 +1239,7 @@ async fn lookup_and_check_active(
 
     if !client.active {
         return Err(AuthorizeDeniedTemplate {
+            page: PageContext::current(),
             client_name: client.name,
             error_message: "This application has been deactivated.".to_string(),
         }
@@ -1245,6 +1270,7 @@ fn resolve_redirect_uri(
                     "redirect_uri not registered for client"
                 );
                 return Err(AuthorizeDeniedTemplate {
+                    page: PageContext::current(),
                     client_name: client.name.clone(),
                     error_message: "Invalid redirect_uri: not registered for this application"
                         .to_string(),
@@ -1258,6 +1284,7 @@ fn resolve_redirect_uri(
             Ok(client.redirect_uris.first().cloned().unwrap_or_default())
         }
         _ => Err(AuthorizeDeniedTemplate {
+            page: PageContext::current(),
             client_name: client.name.clone(),
             error_message: "Invalid request: redirect_uri is required when multiple \
                             redirect URIs are registered"
@@ -1388,6 +1415,7 @@ async fn authorize_authenticated_user(
             _ => "You don't have access to this application".to_string(),
         };
         return AuthorizeDeniedTemplate {
+            page: PageContext::current(),
             client_name: oauth_client.name.clone(),
             error_message,
         }
@@ -1629,6 +1657,7 @@ async fn issue_code_and_redirect(
                     params.push(("state".to_string(), s.to_string()));
                 }
                 FormPostResponseTemplate {
+                    page: PageContext::current(),
                     redirect_uri: redirect_uri.to_string(),
                     params,
                 }
@@ -1708,6 +1737,7 @@ async fn oauth_error_response(
                 params.push(("state".to_string(), s.to_string()));
             }
             FormPostResponseTemplate {
+                page: PageContext::current(),
                 redirect_uri: redirect_uri.to_string(),
                 params,
             }

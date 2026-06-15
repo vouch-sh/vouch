@@ -3,9 +3,9 @@
 
 use crate::AppState;
 use crate::db;
-use crate::handlers::HasVersion;
 use crate::handlers::admin::flash;
 use crate::impl_template_response;
+use crate::infra::i18n::PageContext;
 use crate::services::error::ServiceError;
 use crate::services::posture;
 use askama::Template;
@@ -53,6 +53,8 @@ pub(crate) struct CustomPolicyRow {
 #[derive(Template)]
 #[template(path = "admin/policies.html")]
 pub(crate) struct AdminPoliciesTemplate {
+    /// Page-level template context: i18n + version.
+    pub page: PageContext,
     pub auth: AuthContext,
     pub preconfigured_policies: Vec<PreconfiguredPolicyRow>,
     pub custom_policies: Vec<CustomPolicyRow>,
@@ -131,6 +133,7 @@ pub(crate) async fn admin_policies_page(
     let jar = flash::clear(jar);
 
     let body = AdminPoliciesTemplate {
+        page: PageContext::current(),
         auth,
         preconfigured_policies,
         custom_policies,

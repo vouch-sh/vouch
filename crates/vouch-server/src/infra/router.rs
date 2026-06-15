@@ -795,6 +795,11 @@ fn build_ui_routes(config: &config::ServerConfig) -> anyhow::Result<Router<Arc<A
         .route("/static/{*path}", get(static_assets::static_handler))
         // Browsers request /favicon.ico at the root path
         .route("/favicon.ico", get(static_assets::favicon_handler))
+        // Install request-scoped i18n: every UI request negotiates a locale
+        // via the Accept-Language header and templates pick it up through
+        // `PageContext::current()`, so adding a new language is just dropping
+        // an `i18n/<tag>/vouch.ftl` catalog.
+        .layer(axum::middleware::from_fn(crate::infra::i18n::i18n_layer))
         .layer(security_headers::build_ui_cors_layer(config)))
 }
 

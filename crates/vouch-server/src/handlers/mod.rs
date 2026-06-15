@@ -31,58 +31,23 @@ pub(crate) use session::{
     clear_session_cookie, create_session_cookie, extract_session_from_cookie,
 };
 
-/// Common helpers available to every Askama template.
+/// Implement [`axum::response::IntoResponse`] and the page-level template
+/// shims for an Askama template.
 ///
-/// Implemented automatically by [`impl_template_response!`] so templates can
-/// render `{{ self.version() }}`, `{{ self.lang() }}`, and `{{ self.tr("id") }}`.
-///
-/// Translation methods delegate to the shared `en-US`
-/// [`default_context`](crate::infra::i18n::default_context); see that module for
-/// why rendering is single-context until a second language ships.
-pub(crate) trait HasVersion {
-    /// Server version, for footer/version links.
-    fn version(&self) -> &'static str {
-        env!("CARGO_PKG_VERSION")
-    }
-
-    /// BCP-47 tag for `<html lang="...">`.
-    fn lang(&self) -> &'static str {
-        crate::infra::i18n::default_context().lang()
-    }
-
-    /// Text direction for `<html dir="...">`.
-    fn dir(&self) -> &'static str {
-        crate::infra::i18n::default_context().dir()
-    }
-
-    /// Translate a message with no arguments.
-    fn tr(&self, id: &str) -> String {
-        crate::infra::i18n::default_context().t(id)
-    }
-
-    /// Translate a message with a single Fluent placeable.
-    fn tr1(&self, id: &str, name: &str, value: &str) -> String {
-        crate::infra::i18n::default_context().t1(id, name, value)
-    }
-}
-
-/// Macro to implement `IntoResponse` for Askama templates.
-///
-/// This reduces boilerplate when implementing `IntoResponse` for HTML templates.
-/// The macro generates an implementation that renders the template and returns
-/// either the HTML content or a 500 error if rendering fails.
-///
-/// It also implements [`HasVersion`] so templates can access the server version
-/// via `{{ self.version() }}`.
+/// The shims (`version`, `lang`, `dir`, `tr`, `tr1`) delegate to a required
+/// `page: PageContext` field on the template, so template `.html` files render
+/// `{{ self.tr("id") }}`, `{{ self.version() }}`, etc. against the
+/// request-scoped translation context the handler constructed.
 ///
 /// # Example
 ///
 /// ```ignore
-/// use crate::impl_template_response;
+/// use crate::{impl_template_response, infra::i18n::PageContext};
 ///
 /// #[derive(Template)]
 /// #[template(path = "example.html")]
 /// pub struct ExampleTemplate {
+///     pub page: PageContext,
 ///     pub name: String,
 /// }
 ///
@@ -105,7 +70,19 @@ macro_rules! impl_template_response {
                 }
             }
 
-            impl $crate::handlers::HasVersion for $template {}
+            #[allow(
+                dead_code,
+                reason = "page-context shims; not every template references every helper"
+            )]
+            impl $template {
+                fn version(&self) -> &'static str { self.page.version() }
+                fn lang(&self) -> &str { self.page.lang() }
+                fn dir(&self) -> &'static str { self.page.dir() }
+                fn tr(&self, id: &str) -> String { self.page.tr(id) }
+                fn tr1(&self, id: &str, name: &str, value: &str) -> String {
+                    self.page.tr1(id, name, value)
+                }
+            }
         )*
     };
 }

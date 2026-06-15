@@ -9,6 +9,7 @@ use crate::db::{
     self, AccessScope, CreateOAuthClientParams, FapiProfile, JwsAlgorithm, RegistrationSource,
     TokenEndpointAuthMethod, UpdateOAuthClientParams,
 };
+use crate::infra::i18n::PageContext;
 use axum::{
     Form,
     extract::{Path, State},
@@ -36,6 +37,7 @@ use crate::handlers::hash_token;
 /// Render a shared validation failure as the standard error page.
 fn validation_error_response(err: &AppValidationError, back_url: String) -> Response {
     ApplicationErrorTemplate {
+        page: PageContext::current(),
         title: "Invalid Input".to_string(),
         message: err.message(),
         back_url,
@@ -50,7 +52,10 @@ pub(crate) async fn list_applications_page(
     jar: CookieJar,
 ) -> Response {
     let Some(auth) = extract_auth_from_cookie(&state, &jar).await else {
-        return ApplicationUnauthorizedTemplate.into_response();
+        return ApplicationUnauthorizedTemplate {
+            page: PageContext::current(),
+        }
+        .into_response();
     };
 
     let user_id = auth.user_id.as_deref().unwrap_or_default();
@@ -59,6 +64,7 @@ pub(crate) async fn list_applications_page(
         Err(e) => {
             tracing::error!("Failed to list applications: {}", e);
             return ApplicationErrorTemplate {
+                page: PageContext::current(),
                 title: "Error".to_string(),
                 message: "Failed to load applications.".to_string(),
                 back_url: "/".to_string(),
@@ -67,7 +73,12 @@ pub(crate) async fn list_applications_page(
         }
     };
 
-    ApplicationsListTemplate { applications, auth }.into_response()
+    ApplicationsListTemplate {
+        page: PageContext::current(),
+        applications,
+        auth,
+    }
+    .into_response()
 }
 
 /// Show create application form.
@@ -77,11 +88,19 @@ pub(crate) async fn create_application_page(
     jar: CookieJar,
 ) -> Response {
     let Some(auth) = extract_auth_from_cookie(&state, &jar).await else {
-        return ApplicationUnauthorizedTemplate.into_response();
+        return ApplicationUnauthorizedTemplate {
+            page: PageContext::current(),
+        }
+        .into_response();
     };
 
     let user_has_org = auth.has_org;
-    ApplicationCreateTemplate { auth, user_has_org }.into_response()
+    ApplicationCreateTemplate {
+        page: PageContext::current(),
+        auth,
+        user_has_org,
+    }
+    .into_response()
 }
 
 /// Create a new application.
@@ -92,7 +111,10 @@ pub(crate) async fn create_application_form(
     Form(form): Form<CreateApplicationForm>,
 ) -> Response {
     let Some(auth) = extract_auth_from_cookie(&state, &jar).await else {
-        return ApplicationUnauthorizedTemplate.into_response();
+        return ApplicationUnauthorizedTemplate {
+            page: PageContext::current(),
+        }
+        .into_response();
     };
 
     let user_id = auth.user_id.as_deref().unwrap_or_default();
@@ -125,6 +147,7 @@ pub(crate) async fn create_application_form(
     // Validate: Organization scope requires user to have an org
     if access_scope == AccessScope::Organization && !auth.has_org {
         return ApplicationErrorTemplate {
+            page: PageContext::current(),
             title: "Invalid Input".to_string(),
             message: "Organization scope requires organization membership.".to_string(),
             back_url: "/applications/new".to_string(),
@@ -201,6 +224,7 @@ pub(crate) async fn create_application_form(
         Err(e) => {
             tracing::error!("Failed to create application: {}", e);
             return ApplicationErrorTemplate {
+                page: PageContext::current(),
                 title: "Error".to_string(),
                 message: "Failed to create application.".to_string(),
                 back_url: "/applications/new".to_string(),
@@ -231,6 +255,7 @@ pub(crate) async fn create_application_form(
                 );
             }
             return ApplicationErrorTemplate {
+                page: PageContext::current(),
                 title: "Error".to_string(),
                 message: "Failed to create application.".to_string(),
                 back_url: "/applications/new".to_string(),
@@ -246,6 +271,7 @@ pub(crate) async fn create_application_form(
     tracing::info!("Created OAuth application: {} ({})", name, client_id);
 
     ApplicationCreatedTemplate {
+        page: PageContext::current(),
         name: name.to_string(),
         client_id,
         client_secret,
@@ -264,7 +290,10 @@ pub(crate) async fn detail_application_page(
     Path(app_id): Path<String>,
 ) -> Response {
     let Some(auth) = extract_auth_from_cookie(&state, &jar).await else {
-        return ApplicationUnauthorizedTemplate.into_response();
+        return ApplicationUnauthorizedTemplate {
+            page: PageContext::current(),
+        }
+        .into_response();
     };
 
     let user_id = auth.user_id.as_deref().unwrap_or_default();
@@ -274,6 +303,7 @@ pub(crate) async fn detail_application_page(
         Ok(Some(c)) if c.user_id.as_deref() == Some(user_id) => c,
         Ok(Some(_)) => {
             return ApplicationErrorTemplate {
+                page: PageContext::current(),
                 title: "Not Found".to_string(),
                 message: "Application not found.".to_string(),
                 back_url: "/applications".to_string(),
@@ -282,6 +312,7 @@ pub(crate) async fn detail_application_page(
         }
         Ok(None) => {
             return ApplicationErrorTemplate {
+                page: PageContext::current(),
                 title: "Not Found".to_string(),
                 message: "Application not found.".to_string(),
                 back_url: "/applications".to_string(),
@@ -291,6 +322,7 @@ pub(crate) async fn detail_application_page(
         Err(e) => {
             tracing::error!("Failed to get application: {}", e);
             return ApplicationErrorTemplate {
+                page: PageContext::current(),
                 title: "Error".to_string(),
                 message: "Failed to load application.".to_string(),
                 back_url: "/applications".to_string(),
@@ -329,6 +361,7 @@ pub(crate) async fn detail_application_page(
     };
 
     ApplicationDetailTemplate {
+        page: PageContext::current(),
         app: ApplicationInfo::from(client),
         secrets_count,
         secrets,
@@ -347,7 +380,10 @@ pub(crate) async fn update_application_form(
     Form(form): Form<UpdateApplicationForm>,
 ) -> Response {
     let Some(auth) = extract_auth_from_cookie(&state, &jar).await else {
-        return ApplicationUnauthorizedTemplate.into_response();
+        return ApplicationUnauthorizedTemplate {
+            page: PageContext::current(),
+        }
+        .into_response();
     };
 
     let user_id = auth.user_id.as_deref().unwrap_or_default();
@@ -357,6 +393,7 @@ pub(crate) async fn update_application_form(
         Ok(Some(c)) if c.user_id.as_deref() == Some(user_id) => c,
         _ => {
             return ApplicationErrorTemplate {
+                page: PageContext::current(),
                 title: "Not Found".to_string(),
                 message: "Application not found.".to_string(),
                 back_url: "/applications".to_string(),
@@ -383,6 +420,7 @@ pub(crate) async fn update_application_form(
     // Validate: Organization scope requires user to have an org
     if access_scope == Some(AccessScope::Organization) && !auth.has_org {
         return ApplicationErrorTemplate {
+            page: PageContext::current(),
             title: "Invalid Input".to_string(),
             message: "Organization scope requires organization membership.".to_string(),
             back_url: format!("/applications/{}", app_id),
@@ -491,6 +529,7 @@ pub(crate) async fn update_application_form(
     {
         tracing::error!("Failed to update application: {}", e);
         return ApplicationErrorTemplate {
+            page: PageContext::current(),
             title: "Error".to_string(),
             message: "Failed to update application.".to_string(),
             back_url: format!("/applications/{}", app_id),
@@ -511,7 +550,10 @@ pub(crate) async fn delete_application_form(
     Path(app_id): Path<String>,
 ) -> Response {
     let Some(auth) = extract_auth_from_cookie(&state, &jar).await else {
-        return ApplicationUnauthorizedTemplate.into_response();
+        return ApplicationUnauthorizedTemplate {
+            page: PageContext::current(),
+        }
+        .into_response();
     };
 
     let user_id = auth.user_id.as_deref().unwrap_or_default();
@@ -521,6 +563,7 @@ pub(crate) async fn delete_application_form(
         Ok(Some(c)) if c.user_id.as_deref() == Some(user_id) => c,
         _ => {
             return ApplicationErrorTemplate {
+                page: PageContext::current(),
                 title: "Not Found".to_string(),
                 message: "Application not found.".to_string(),
                 back_url: "/applications".to_string(),
@@ -533,6 +576,7 @@ pub(crate) async fn delete_application_form(
     if let Err(e) = db::delete_oauth_client(&state.store, &app_id).await {
         tracing::error!("Failed to delete application: {}", e);
         return ApplicationErrorTemplate {
+            page: PageContext::current(),
             title: "Error".to_string(),
             message: "Failed to delete application.".to_string(),
             back_url: format!("/applications/{}", app_id),
@@ -553,7 +597,10 @@ pub(crate) async fn add_secret_form(
     Path(app_id): Path<String>,
 ) -> Response {
     let Some(auth) = extract_auth_from_cookie(&state, &jar).await else {
-        return ApplicationUnauthorizedTemplate.into_response();
+        return ApplicationUnauthorizedTemplate {
+            page: PageContext::current(),
+        }
+        .into_response();
     };
 
     let user_id = auth.user_id.as_deref().unwrap_or_default();
@@ -562,6 +609,7 @@ pub(crate) async fn add_secret_form(
         Ok(Some(c)) if c.user_id.as_deref() == Some(user_id) => c,
         _ => {
             return ApplicationErrorTemplate {
+                page: PageContext::current(),
                 title: "Not Found".to_string(),
                 message: "Application not found.".to_string(),
                 back_url: "/applications".to_string(),
@@ -572,6 +620,7 @@ pub(crate) async fn add_secret_form(
 
     if !client.application_type.requires_secret() {
         return ApplicationErrorTemplate {
+            page: PageContext::current(),
             title: "Error".to_string(),
             message: "This application type does not use client secrets.".to_string(),
             back_url: format!("/applications/{app_id}"),
@@ -583,6 +632,7 @@ pub(crate) async fn add_secret_form(
         && client.token_endpoint_auth_method == db::TokenEndpointAuthMethod::PrivateKeyJwt
     {
         return ApplicationErrorTemplate {
+            page: PageContext::current(),
             title: "Error".to_string(),
             message: "FAPI clients using private_key_jwt do not use client secrets.".to_string(),
             back_url: format!("/applications/{app_id}"),
@@ -596,6 +646,7 @@ pub(crate) async fn add_secret_form(
         Err(e) => {
             tracing::error!("Failed to get secrets: {e}");
             return ApplicationErrorTemplate {
+                page: PageContext::current(),
                 title: "Error".to_string(),
                 message: "Failed to add secret.".to_string(),
                 back_url: format!("/applications/{app_id}"),
@@ -607,6 +658,7 @@ pub(crate) async fn add_secret_form(
     let active_count = secrets.iter().filter(|s| s.is_valid(&now)).count();
     if active_count >= MAX_ACTIVE_SECRETS {
         return ApplicationErrorTemplate {
+            page: PageContext::current(),
             title: "Error".to_string(),
             message: "Maximum of 2 active secrets allowed.".to_string(),
             back_url: format!("/applications/{app_id}"),
@@ -624,6 +676,7 @@ pub(crate) async fn add_secret_form(
             Err(e) => {
                 tracing::error!("Failed to create secret: {e}");
                 return ApplicationErrorTemplate {
+                    page: PageContext::current(),
                     title: "Error".to_string(),
                     message: "Failed to add secret.".to_string(),
                     back_url: format!("/applications/{app_id}"),
@@ -635,6 +688,7 @@ pub(crate) async fn add_secret_form(
     tracing::info!("Added secret for OAuth application: {}", client.client_id);
 
     SecretAddedTemplate {
+        page: PageContext::current(),
         app_id: app_id.to_string(),
         name: client.name,
         client_id: client.client_id,
@@ -653,7 +707,10 @@ pub(crate) async fn delete_secret_form(
     Path((app_id, secret_id)): Path<(String, String)>,
 ) -> Response {
     let Some(auth) = extract_auth_from_cookie(&state, &jar).await else {
-        return ApplicationUnauthorizedTemplate.into_response();
+        return ApplicationUnauthorizedTemplate {
+            page: PageContext::current(),
+        }
+        .into_response();
     };
 
     let user_id = auth.user_id.as_deref().unwrap_or_default();
@@ -662,6 +719,7 @@ pub(crate) async fn delete_secret_form(
         Ok(Some(c)) if c.user_id.as_deref() == Some(user_id) => c,
         _ => {
             return ApplicationErrorTemplate {
+                page: PageContext::current(),
                 title: "Not Found".to_string(),
                 message: "Application not found.".to_string(),
                 back_url: "/applications".to_string(),
@@ -674,6 +732,7 @@ pub(crate) async fn delete_secret_form(
         Ok(Some(s)) if s.oauth_client_id == app_id => s,
         _ => {
             return ApplicationErrorTemplate {
+                page: PageContext::current(),
                 title: "Not Found".to_string(),
                 message: "Secret not found.".to_string(),
                 back_url: format!("/applications/{app_id}"),
@@ -684,6 +743,7 @@ pub(crate) async fn delete_secret_form(
 
     if secret.revoked_at.is_some() {
         return ApplicationErrorTemplate {
+            page: PageContext::current(),
             title: "Not Found".to_string(),
             message: "Secret not found.".to_string(),
             back_url: format!("/applications/{app_id}"),
@@ -702,6 +762,7 @@ pub(crate) async fn delete_secret_form(
 
     if other_active == 0 {
         return ApplicationErrorTemplate {
+            page: PageContext::current(),
             title: "Error".to_string(),
             message: "Cannot delete the last active secret.".to_string(),
             back_url: format!("/applications/{app_id}"),
@@ -712,6 +773,7 @@ pub(crate) async fn delete_secret_form(
     if let Err(e) = db::revoke_oauth_client_secret(&state.store, &secret_id).await {
         tracing::error!("Failed to revoke secret: {e}");
         return ApplicationErrorTemplate {
+            page: PageContext::current(),
             title: "Error".to_string(),
             message: "Failed to delete secret.".to_string(),
             back_url: format!("/applications/{app_id}"),

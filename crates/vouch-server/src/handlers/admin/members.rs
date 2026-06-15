@@ -3,8 +3,8 @@
 
 use crate::AppState;
 use crate::db;
-use crate::handlers::HasVersion;
 use crate::impl_template_response;
+use crate::infra::i18n::PageContext;
 use crate::services::error::ServiceError;
 use askama::Template;
 use axum::extract::OriginalUri;
@@ -36,6 +36,8 @@ pub(crate) struct MemberRow {
 #[derive(Template)]
 #[template(path = "admin/members.html")]
 pub(crate) struct AdminMembersTemplate {
+    /// Page-level template context: i18n + version.
+    pub page: PageContext,
     pub auth: AuthContext,
     pub members: Vec<MemberRow>,
     pub has_more: bool,
@@ -110,6 +112,7 @@ pub(crate) async fn admin_members_page(
     };
 
     AdminMembersTemplate {
+        page: PageContext::current(),
         auth,
         members,
         has_more,

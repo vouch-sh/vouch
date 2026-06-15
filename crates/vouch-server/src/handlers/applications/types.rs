@@ -5,8 +5,8 @@
 //! both the web UI and API handlers.
 
 use crate::db::{AccessScope, OAuthClient};
-use crate::handlers::HasVersion;
 use crate::impl_template_response;
+use crate::infra::i18n::PageContext;
 use askama::Template;
 use axum::{
     http::StatusCode,
@@ -26,6 +26,8 @@ use crate::filters;
 #[derive(Template)]
 #[template(path = "applications/list.html")]
 pub(crate) struct ApplicationsListTemplate {
+    /// Page-level template context: i18n + version.
+    pub page: PageContext,
     pub applications: Vec<ApplicationInfo>,
     /// Authentication context for header display.
     pub auth: AuthContext,
@@ -89,6 +91,8 @@ impl From<OAuthClient> for ApplicationInfo {
 #[template(path = "applications/create.html")]
 pub(crate) struct ApplicationCreateTemplate {
     /// Authentication context for header display.
+    /// Page-level template context: i18n + version.
+    pub page: PageContext,
     pub auth: AuthContext,
     /// Whether the user has an organization (affects available access scopes).
     pub user_has_org: bool,
@@ -98,6 +102,8 @@ pub(crate) struct ApplicationCreateTemplate {
 #[derive(Template)]
 #[template(path = "applications/created.html")]
 pub(crate) struct ApplicationCreatedTemplate {
+    /// Page-level template context: i18n + version.
+    pub page: PageContext,
     pub name: String,
     pub client_id: String,
     pub client_secret: Option<String>,
@@ -111,6 +117,8 @@ pub(crate) struct ApplicationCreatedTemplate {
 #[derive(Template)]
 #[template(path = "applications/detail.html")]
 pub(crate) struct ApplicationDetailTemplate {
+    /// Page-level template context: i18n + version.
+    pub page: PageContext,
     pub app: ApplicationInfo,
     pub secrets_count: usize,
     pub secrets: Vec<SecretInfo>,
@@ -130,6 +138,8 @@ pub(crate) struct UsageStat {
 #[template(path = "applications/secret_added.html")]
 #[allow(dead_code, reason = "fields rendered via Askama template macros")]
 pub(crate) struct SecretAddedTemplate {
+    /// Page-level template context: i18n + version.
+    pub page: PageContext,
     pub app_id: String,
     pub name: String,
     pub client_id: String,
@@ -143,6 +153,8 @@ pub(crate) struct SecretAddedTemplate {
 #[derive(Template)]
 #[template(path = "applications/error.html")]
 pub(crate) struct ApplicationErrorTemplate {
+    /// Page-level template context: i18n + version.
+    pub page: PageContext,
     pub title: String,
     pub message: String,
     pub back_url: String,
@@ -151,7 +163,10 @@ pub(crate) struct ApplicationErrorTemplate {
 /// Unauthorized template.
 #[derive(Template)]
 #[template(path = "applications/unauthorized.html")]
-pub(crate) struct ApplicationUnauthorizedTemplate;
+pub(crate) struct ApplicationUnauthorizedTemplate {
+    /// Page-level template context: i18n + version.
+    pub page: PageContext,
+}
 
 impl_template_response!(
     ApplicationsListTemplate,
@@ -162,10 +177,10 @@ impl_template_response!(
     ApplicationErrorTemplate,
 );
 
-impl HasVersion for ApplicationUnauthorizedTemplate {}
-
-// Note: ApplicationUnauthorizedTemplate needs a custom implementation
-// because it returns a different status code
+// `ApplicationUnauthorizedTemplate` needs a custom `IntoResponse` because it
+// returns 401 rather than 200, so it can't use the macro that wires the
+// `IntoResponse + page` shims together. The page-context delegators are
+// generated manually here to keep templates rendering `{{ self.tr(...) }}`.
 impl IntoResponse for ApplicationUnauthorizedTemplate {
     fn into_response(self) -> Response {
         match self.render() {
@@ -175,6 +190,28 @@ impl IntoResponse for ApplicationUnauthorizedTemplate {
                 StatusCode::INTERNAL_SERVER_ERROR.into_response()
             }
         }
+    }
+}
+
+#[allow(
+    dead_code,
+    reason = "page-context shims used by the Askama template renderer"
+)]
+impl ApplicationUnauthorizedTemplate {
+    fn version(&self) -> &'static str {
+        self.page.version()
+    }
+    fn lang(&self) -> &str {
+        self.page.lang()
+    }
+    fn dir(&self) -> &'static str {
+        self.page.dir()
+    }
+    fn tr(&self, id: &str) -> String {
+        self.page.tr(id)
+    }
+    fn tr1(&self, id: &str, name: &str, value: &str) -> String {
+        self.page.tr1(id, name, value)
     }
 }
 

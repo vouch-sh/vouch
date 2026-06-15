@@ -10,8 +10,8 @@
 //! - GET /github/success - Success page after connection
 
 use crate::db;
-use crate::handlers::HasVersion;
 use crate::handlers::session::AuthContext;
+use crate::infra::i18n::PageContext;
 use crate::services::error::ServiceError;
 use crate::services::integrations::github::{
     ConnectInstallationParams, GitHubError, GitHubService, LinkAccountParams,
@@ -47,6 +47,8 @@ pub(crate) struct UnlinkedInstallation {
 #[template(path = "github/connect.html")]
 #[allow(dead_code, reason = "fields rendered via Askama template macros")]
 pub(crate) struct GitHubConnectTemplate {
+    /// Page-level template context: i18n + version.
+    pub page: PageContext,
     pub org_name: String,
     pub github_app_url: String,
     pub error: Option<String>,
@@ -71,6 +73,8 @@ impl_template_response!(GitHubConnectTemplate);
 #[template(path = "github/success.html")]
 #[allow(dead_code, reason = "fields rendered via Askama template macros")]
 pub(crate) struct GitHubSuccessTemplate {
+    /// Page-level template context: i18n + version.
+    pub page: PageContext,
     pub org_name: String,
     pub github_account: String,
     /// Authentication context for header display.
@@ -83,6 +87,8 @@ impl_template_response!(GitHubSuccessTemplate);
 #[derive(Template)]
 #[template(path = "github/error.html")]
 pub(crate) struct GitHubErrorTemplate {
+    /// Page-level template context: i18n + version.
+    pub page: PageContext,
     pub title: String,
     pub message: String,
 }
@@ -246,8 +252,14 @@ pub(crate) struct GitHubReconnectForm {
 // ============================================================================
 
 /// Convert a GitHubError to an error template response.
+///
+/// Error pages use the fallback locale (`en-US`) because they can be reached
+/// from request paths where the [`I18nContext`] isn't readily threaded in.
+/// When a second language ships, replace with the per-request context where
+/// possible.
 fn error_response(error: GitHubError) -> Response {
     GitHubErrorTemplate {
+        page: PageContext::current(),
         title: error.title().to_string(),
         message: error.to_string(),
     }
@@ -420,6 +432,7 @@ pub(crate) async fn github_connect_page(
     };
 
     GitHubConnectTemplate {
+        page: PageContext::current(),
         org_name: state.config().get_org_display_name().to_string(),
         github_app_url,
         error: None,
@@ -778,6 +791,7 @@ pub(crate) async fn github_success_page(
     let auth = crate::handlers::session::get_auth_context(&state, &jar).await;
 
     GitHubSuccessTemplate {
+        page: PageContext::current(),
         org_name: state.config().get_org_display_name().to_string(),
         github_account: params.account.unwrap_or_else(|| "GitHub".to_string()),
         auth,

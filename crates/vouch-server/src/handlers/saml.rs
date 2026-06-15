@@ -19,6 +19,7 @@ use serde::Deserialize;
 use crate::AppState;
 use crate::db;
 use crate::handlers::enroll::{ErrorTemplate, complete_enrollment_after_identity};
+use crate::infra::i18n::PageContext;
 use crate::services::idp::IdentityResult;
 
 // ============================================================================
@@ -79,6 +80,7 @@ pub(crate) async fn acs(
         Some(rs) if !rs.is_empty() => rs,
         _ => {
             return ErrorTemplate {
+                page: PageContext::current(),
                 title: "Error".to_string(),
                 message: "Missing RelayState parameter".to_string(),
                 back_url: None,
@@ -90,6 +92,7 @@ pub(crate) async fn acs(
     // Step 2: Validate RelayState length before DB lookup.
     if relay_state.len() > 128 {
         return ErrorTemplate {
+            page: PageContext::current(),
             title: "Error".to_string(),
             message: "Invalid RelayState parameter".to_string(),
             back_url: None,
@@ -107,6 +110,7 @@ pub(crate) async fn acs(
             Ok(pair) => pair,
             Err(db::ClaimError::AlreadyConsumed) => {
                 return ErrorTemplate {
+                    page: PageContext::current(),
                     title: "Error".to_string(),
                     message: "Invalid or expired state".to_string(),
                     back_url: None,
@@ -116,6 +120,7 @@ pub(crate) async fn acs(
             Err(e) => {
                 tracing::error!("Failed to consume SAML state: {e:#}");
                 return ErrorTemplate {
+                    page: PageContext::current(),
                     title: "Error".to_string(),
                     message: "Failed to verify state".to_string(),
                     back_url: None,
@@ -140,6 +145,7 @@ pub(crate) async fn acs(
     };
     let Some(saml_provider) = saml_provider else {
         return ErrorTemplate {
+            page: PageContext::current(),
             title: "Error".to_string(),
             message: "SAML IdP not configured for this state. If using OIDC, \
                       responses go to /oauth/callback."
@@ -159,6 +165,7 @@ pub(crate) async fn acs(
         Err(e) => {
             tracing::warn!("SAML response validation failed: {e:#}");
             return ErrorTemplate {
+                page: PageContext::current(),
                 title: "Authentication Failed".to_string(),
                 message: "Failed to verify SAML response. Please try again.".to_string(),
                 back_url: None,

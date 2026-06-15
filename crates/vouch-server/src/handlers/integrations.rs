@@ -8,10 +8,10 @@
 //! - EKS (via AWS IAM and EKS Access Entries)
 
 use crate::db;
-use crate::handlers::HasVersion;
 use crate::handlers::session::{
     AuthContext, extract_session_from_cookie, get_resource_auth_context,
 };
+use crate::infra::i18n::PageContext;
 use crate::{AppState, impl_template_response};
 use askama::Template;
 use axum::extract::State;
@@ -27,6 +27,8 @@ use std::sync::Arc;
 #[derive(Template)]
 #[template(path = "integrations.html")]
 pub(crate) struct IntegrationsTemplate {
+    /// Page-level template context: i18n + version.
+    pub page: PageContext,
     /// Authentication context for header display.
     pub auth: AuthContext,
     /// Whether the server has GitHub App configured.
@@ -101,6 +103,7 @@ pub(crate) async fn integrations_page(
     };
 
     IntegrationsTemplate {
+        page: PageContext::current(),
         auth,
         github_configured,
         github_accounts,

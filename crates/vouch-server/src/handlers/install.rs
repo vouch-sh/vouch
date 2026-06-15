@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Install page handler.
 
-use crate::handlers::HasVersion;
 use crate::handlers::session::{AuthContext, get_auth_context};
+use crate::infra::i18n::PageContext;
 use crate::{AppState, impl_template_response};
 use askama::Template;
 use axum::{extract::State, response::IntoResponse};
@@ -13,6 +13,8 @@ use std::sync::Arc;
 #[derive(Template)]
 #[template(path = "install.html")]
 pub(crate) struct InstallTemplate {
+    /// Page-level template context: i18n + version.
+    pub page: PageContext,
     pub has_downloads: bool,
     pub download_macos: Option<String>,
     pub download_linux: Option<String>,
@@ -38,6 +40,7 @@ pub(crate) async fn install_page(
         || state.config().cli_download_windows.is_some();
 
     InstallTemplate {
+        page: PageContext::current(),
         has_downloads,
         download_macos: state.config().cli_download_macos.clone(),
         download_linux: state.config().cli_download_linux.clone(),

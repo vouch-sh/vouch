@@ -52,16 +52,16 @@ pub struct I18nContext {
     lang: String,
 }
 
-impl Default for I18nContext {
-    /// The fallback (`en-US`) context, for template constructors deep in error
-    /// paths where threading the request-scoped context would be invasive. With
-    /// a single shipped language this is identical to any negotiated context.
-    fn default() -> Self {
+impl I18nContext {
+    /// Build the fallback (`en-US`) context, for template constructors deep in
+    /// error paths where threading the request-scoped context would be
+    /// invasive. With a single shipped language this is identical to any
+    /// negotiated context; once a second language ships, callers should prefer
+    /// the [`FromRequestParts`] extractor so the user's locale is honored.
+    pub fn fallback() -> Self {
         negotiate(None)
     }
-}
 
-impl I18nContext {
     /// Translate a message with no arguments.
     pub fn t(&self, id: &str) -> String {
         self.loader.get(id)
@@ -91,18 +91,87 @@ impl I18nContext {
     }
 }
 
-/// Shared `en-US` context used for all server-rendered strings.
+/// Per-template page context — translation handle plus other "available to
+/// every page" data. Carried as a `page` field on every template struct, with
+/// the `impl_template_response!` macro generating short `self.tr(...)` /
+/// `self.version()` shims that delegate to this struct so template `.html`
+/// files stay unchanged. Cheap to construct (just clones the inner `Arc`).
+#[derive(Clone)]
+pub struct PageContext {
+    /// Request-scoped translation context.
+    pub i18n: I18nContext,
+}
+
+tokio::task_local! {
+    /// Request-scoped translation context, installed by [`i18n_layer`] for
+    /// every UI request. Templates read it via [`PageContext::current`] —
+    /// handlers don't need to thread the context themselves.
+    static REQUEST_I18N: I18nContext;
+}
+
+impl PageContext {
+    /// Wrap a negotiated [`I18nContext`] for use in a template.
+    pub fn new(i18n: I18nContext) -> Self {
+        Self { i18n }
+    }
+
+    /// Build a context from the task-local installed by [`i18n_layer`].
+    ///
+    /// This is what every template constructor should use. The middleware
+    /// pre-negotiates the locale per request, so dropping a new
+    /// `i18n/<tag>/vouch.ftl` is the only change required to add a language —
+    /// no handler-by-handler plumbing. Outside a request scope (e.g. background
+    /// jobs), falls back to `en-US`.
+    #[must_use]
+    pub fn current() -> Self {
+        let i18n = REQUEST_I18N
+            .try_with(I18nContext::clone)
+            .unwrap_or_else(|_| I18nContext::fallback());
+        Self { i18n }
+    }
+
+    /// Use the `en-US` fallback context. For callers outside any request
+    /// scope (rare). Prefer [`PageContext::current`] in handlers.
+    pub fn fallback() -> Self {
+        Self::new(I18nContext::fallback())
+    }
+
+    /// Server version for footer/version links.
+    pub fn version(&self) -> &'static str {
+        env!("CARGO_PKG_VERSION")
+    }
+
+    /// BCP-47 tag for `<html lang="...">`.
+    pub fn lang(&self) -> &str {
+        self.i18n.lang()
+    }
+
+    /// Text direction for `<html dir="...">`.
+    pub fn dir(&self) -> &'static str {
+        self.i18n.dir()
+    }
+
+    /// Translate a message with no arguments.
+    pub fn tr(&self, id: &str) -> String {
+        self.i18n.t(id)
+    }
+
+    /// Translate a message with a single Fluent placeable.
+    pub fn tr1(&self, id: &str, name: &str, value: &str) -> String {
+        self.i18n.t1(id, name, value)
+    }
+}
+
+/// Shared `en-US` context used to build the static `/i18n.js` bundle.
 ///
-/// Per-request language selection is intentionally deferred until a second
-/// language ships (together with the language switcher). With a single shipped
-/// language, request negotiation would always resolve to `en-US`, so templates
-/// render through this one context via the `tr`/`lang` template-trait methods.
-/// The [`negotiate`] engine and the [`FromRequestParts`] extractor below are the
-/// wired-and-tested extension point for that future work.
+/// Templates now carry a per-request [`PageContext`] (negotiated via the
+/// [`FromRequestParts`] extractor), so this static is no longer reachable from
+/// page rendering — only the JS bundle builder and `validate_startup` use it.
 static DEFAULT_CONTEXT: LazyLock<I18nContext> = LazyLock::new(|| negotiate(None));
 
-/// Borrow the process-wide default (`en-US`) translation context.
-pub(crate) fn default_context() -> &'static I18nContext {
+/// Borrow the process-wide static (`en-US`) translation context. Internal
+/// helper for the JS-bundle builder and the startup health check.
+fn default_context() -> &'static I18nContext {
     &DEFAULT_CONTEXT
 }
 
@@ -215,6 +284,19 @@ where
             .and_then(|value| value.to_str().ok());
         Ok(negotiate(header))
     }
+}
+
+/// Axum middleware that negotiates the request locale and installs it in the
+/// [`REQUEST_I18N`] task-local for the duration of the request. Templates
+/// constructed by handlers downstream pick it up via [`PageContext::current`].
+///
+/// Apply this once at the top of every router that renders UI templates.
+pub async fn i18n_layer(
+    i18n: I18nContext,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    REQUEST_I18N.scope(i18n, next.run(request)).await
 }
 
 /// Translation keys exposed to client-side JavaScript via [`i18n_js_handler`].
@@ -409,7 +491,10 @@ mod tests {
             .get("en-US")
             .map(|(body, _)| body.clone())
             .expect("en-US bundle should be present");
-        assert_eq!(cached, fresh, "cache should hold the same body as a fresh render");
+        assert_eq!(
+            cached, fresh,
+            "cache should hold the same body as a fresh render"
+        );
     }
 
     #[test]
@@ -512,7 +597,10 @@ mod tests {
             .to_owned();
         assert!(etag.starts_with('"') && etag.ends_with('"'));
         assert_eq!(
-            response.headers().get(header::VARY).and_then(|v| v.to_str().ok()),
+            response
+                .headers()
+                .get(header::VARY)
+                .and_then(|v| v.to_str().ok()),
             Some("Accept-Language")
         );
 
@@ -522,7 +610,10 @@ mod tests {
         let response = i18n_js_handler(negotiate(None), headers).await;
         assert_eq!(response.status(), StatusCode::NOT_MODIFIED);
         assert_eq!(
-            response.headers().get(header::ETAG).and_then(|v| v.to_str().ok()),
+            response
+                .headers()
+                .get(header::ETAG)
+                .and_then(|v| v.to_str().ok()),
             Some(etag.as_str())
         );
 

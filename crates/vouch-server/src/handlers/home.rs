@@ -6,8 +6,8 @@
 //! If the user is already authenticated, it shows a "Manage Security Keys"
 //! button instead.
 
-use crate::handlers::HasVersion;
 use crate::handlers::session::{AuthContext, get_auth_context};
+use crate::infra::i18n::PageContext;
 use crate::{AppState, impl_template_response};
 use askama::Template;
 use axum::{extract::State, response::IntoResponse};
@@ -47,6 +47,8 @@ pub(crate) fn build_idp_entries(idps: &[crate::services::idp::ConfiguredIdp]) ->
 #[derive(Template)]
 #[template(path = "landing.html")]
 pub(crate) struct HomeTemplate {
+    /// Page-level template context: i18n + version.
+    pub page: PageContext,
     pub server_url: String,
     pub org_name: String,
     pub has_downloads: bool,
@@ -76,6 +78,7 @@ pub(crate) async fn home_page(
     let idp_entries = build_idp_entries(&state.idps);
 
     HomeTemplate {
+        page: PageContext::current(),
         server_url: state.config().base_url.clone(),
         org_name: state.config().get_org_display_name().to_string(),
         has_downloads,
