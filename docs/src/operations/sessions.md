@@ -25,9 +25,16 @@ Sessions are stored in multiple locations for different access patterns:
 | Location | Purpose | Security |
 |----------|---------|----------|
 | `vouch-agent` memory | Primary access for CLI and credential helpers | In-process, zeroized on drop |
-| `~/.vouch/config.json` | Fallback when agent is not running | File permissions 0600 |
-| `~/.vouch/cookie.txt` | Netscape cookie file for `curl -b` usage | File permissions 0600 |
+| `~/.config/vouch/config.json` | Fallback when agent is not running | File permissions 0600 |
+| `~/.local/state/vouch/cookie.txt` | Netscape cookie file for `curl -b` usage | File permissions 0600 |
 | Server database | Server-side session record | Token hash stored, not plaintext |
+
+Vouch follows the [XDG Base Directory Specification](https://specifications.freedesktop.org/basedir-spec/latest/)
+and honors `XDG_CONFIG_HOME`, `XDG_STATE_HOME`, `XDG_DATA_HOME`, `XDG_CACHE_HOME`,
+and `XDG_RUNTIME_DIR` on all platforms (including macOS). The paths above show the
+defaults when those variables are unset. See
+[File Locations](../reference/file-locations.md) for the full map and the
+automatic migration from the legacy `~/.vouch/` directory.
 
 ## Server-Side Session Management
 

@@ -48,7 +48,7 @@ pub(crate) async fn run(args: SetupArgs<'_>) -> Result<()> {
 
 fn print_success() {
     println!("Anthropic (Claude) Workload Identity Federation configured.\n");
-    println!("  Federation params: ~/.vouch/config.json\n");
+    println!("  Federation params: ~/.config/vouch/config.json\n");
 
     println!("This mints a service-account token for CI/headless automation.");
     println!("Get a token:");

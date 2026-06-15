@@ -133,7 +133,7 @@ pub(crate) enum SetupCommands {
     },
     /// Configure Anthropic (Claude) Workload Identity Federation.
     ///
-    /// Persists federation parameters to `~/.vouch/config.json` for use by
+    /// Persists federation parameters to `~/.config/vouch/config.json` for use by
     /// `vouch credential anthropic`. This is the **workload** path: the
     /// minted token acts as a non-human service account, intended for
     /// CI/headless automation. It does not configure Claude Code.
@@ -159,7 +159,7 @@ pub(crate) enum SetupCommands {
     },
     /// Configure OpenAI Workload Identity Federation.
     ///
-    /// Persists federation parameters to `~/.vouch/config.json` AND
+    /// Persists federation parameters to `~/.config/vouch/config.json` AND
     /// auto-configures the OpenAI Codex CLI by writing a
     /// `[model_providers.vouch]` block (with refreshing auth
     /// command) into `~/.codex/config.toml` and setting it as the

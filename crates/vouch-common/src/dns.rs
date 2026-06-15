@@ -6,7 +6,7 @@
 //! (Google, Cloudflare, Quad9) or a custom HTTPS endpoint.
 //!
 //! Opt-in via the `VOUCH_DOH` env var or the `network.dns_over_https` field in
-//! `~/.vouch/config.json`. When unset, the system resolver is used.
+//! `~/.config/vouch/config.json`. When unset, the system resolver is used.
 //!
 //! Both `vouch-cli` and `vouch-agent` install the process-wide state via
 //! [`init_from`] before any HTTP client is constructed; [`process_resolver`]
@@ -175,7 +175,7 @@ impl DohConfig {
 // DohConfigSerde — config-file representation
 // =============================================================================
 
-/// Serializable form for `~/.vouch/config.json`. Accepts a string keyword,
+/// Serializable form for `~/.config/vouch/config.json`. Accepts a string keyword,
 /// a URL, or a bare boolean (`true` -> Google, `false` -> Off).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]

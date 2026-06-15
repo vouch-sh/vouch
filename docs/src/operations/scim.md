@@ -17,7 +17,7 @@ Log in with `vouch login`, then create a SCIM token using the cookie file or tok
 ```bash
 # Using cookie file (written automatically on login)
 curl -X POST https://auth.example.com/api/v1/org/scim-tokens \
-  -b ~/.vouch/cookie.txt \
+  -b ~/.local/state/vouch/cookie.txt \
   -H "Content-Type: application/json" \
   -d '{"description": "SCIM integration", "expires_in_days": 90}'
 
@@ -40,11 +40,11 @@ Enter the following in your IdP's SCIM configuration:
 
 ```bash
 # List active SCIM tokens
-curl -b ~/.vouch/cookie.txt \
+curl -b ~/.local/state/vouch/cookie.txt \
   https://auth.example.com/api/v1/org/scim-tokens
 
 # Revoke a SCIM token
-curl -X DELETE -b ~/.vouch/cookie.txt \
+curl -X DELETE -b ~/.local/state/vouch/cookie.txt \
   https://auth.example.com/api/v1/org/scim-tokens/<token-id>
 ```
 

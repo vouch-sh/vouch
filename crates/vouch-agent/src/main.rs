@@ -47,6 +47,11 @@ struct Args {
 fn main() -> ExitCode {
     let args = Args::parse();
 
+    // Relocate any legacy ~/.vouch/ files into the XDG base directories before
+    // reading config or binding sockets. Runs before daemonization so the
+    // one-time notice reaches the user's terminal rather than the daemon log.
+    vouch_common::paths::migrate_legacy_layout();
+
     // Handle status check (no logging needed)
     if args.status {
         match daemon::is_running() {

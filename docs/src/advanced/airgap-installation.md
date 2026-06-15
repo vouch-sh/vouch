@@ -409,7 +409,7 @@ echo "john" >> /etc/ssh/auth_principals/john
 ## Step 9: Configure CLI for Air-Gap
 
 ```bash
-# ~/.vouch/config.json
+# ~/.config/vouch/config.json
 {
   "server_url": "https://auth.internal",
   "ca_cert_path": "/etc/vouch/root-ca.crt"

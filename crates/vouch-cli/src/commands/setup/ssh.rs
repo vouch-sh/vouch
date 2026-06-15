@@ -149,6 +149,37 @@ fn configure_ssh_config(hosts: Option<&str>) -> Result<()> {
         String::new()
     };
 
+    // Migrate a stale IdentityAgent left over from the legacy ~/.vouch layout.
+    // Older versions wrote the agent socket under ~/.vouch/ssh-agent.sock; the
+    // socket now lives in the XDG runtime directory. Rewrite the path in place
+    // so existing users don't have to delete their config by hand.
+    if existing.contains(".vouch/ssh-agent.sock") && !existing.contains(&agent_socket) {
+        let rewritten = existing
+            .lines()
+            .map(|line| {
+                if line.contains("IdentityAgent") && line.contains(".vouch/ssh-agent.sock") {
+                    let indent: String = line.chars().take_while(|c| c.is_whitespace()).collect();
+                    format!("{indent}IdentityAgent {agent_socket}")
+                } else {
+                    line.to_string()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let rewritten = if existing.ends_with('\n') {
+            format!("{rewritten}\n")
+        } else {
+            rewritten
+        };
+        atomic_write_secure(&config_path, rewritten.as_bytes())
+            .with_context(|| format!("failed to write {}", config_path.display()))?;
+        println!(
+            "Updated stale Vouch IdentityAgent path in {} -> {agent_socket}",
+            config_path.display()
+        );
+        return Ok(());
+    }
+
     // Check if Vouch config already exists
     if existing.contains("# Vouch SSH Configuration") || existing.contains(&agent_socket) {
         println!("SSH config already configured for Vouch");

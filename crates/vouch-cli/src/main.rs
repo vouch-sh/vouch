@@ -506,6 +506,10 @@ fn resolve_server_url(cli: &Cli, config: &config::Config) -> Result<server_url::
     reason = "single dispatch match over all CLI subcommands"
 )]
 async fn run() -> Result<()> {
+    // Relocate any legacy ~/.vouch/ files into the XDG base directories before
+    // the config is read. Idempotent and a no-op once migrated / for new installs.
+    vouch_common::paths::migrate_legacy_layout();
+
     let config = config::Config::load();
 
     if init_and_dispatch_helper_binaries(config.as_ref().ok()).await? {

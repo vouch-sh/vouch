@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
-//! Read-only configuration reader for `~/.vouch/config.json`.
+//! Read-only configuration reader for `$XDG_CONFIG_HOME/vouch/config.json`.
 //!
 //! This module provides read-only access to the Vouch config file.
 //! The agent uses this to recover session state on startup.
@@ -78,10 +78,9 @@ impl VouchConfig {
     }
 }
 
-/// Get the path to the config file (`~/.vouch/config.json`).
+/// Get the path to the config file (`$XDG_CONFIG_HOME/vouch/config.json`).
 fn config_path() -> Result<PathBuf> {
-    let home = dirs::home_dir().context("could not determine home directory")?;
-    Ok(home.join(".vouch").join("config.json"))
+    vouch_common::paths::config_file().context("could not determine config directory")
 }
 
 /// Read the config file from disk.
@@ -135,7 +134,7 @@ mod tests {
         let path = config_path();
         assert!(path.is_ok());
         let path = path.expect("config_path should succeed");
-        assert!(path.ends_with(".vouch/config.json"));
+        assert!(path.ends_with("vouch/config.json"));
     }
 
     #[test]
