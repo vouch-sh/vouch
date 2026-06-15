@@ -105,6 +105,10 @@ pub(crate) async fn create_application_page(
 
 /// Create a new application.
 /// POST /applications/new
+#[expect(
+    clippy::too_many_lines,
+    reason = "axum handler; linear application-creation flow with inline error templates"
+)]
 pub(crate) async fn create_application_form(
     State(state): State<Arc<AppState>>,
     jar: CookieJar,
