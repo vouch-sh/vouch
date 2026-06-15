@@ -176,7 +176,11 @@ fn migrate_layout(legacy_dir: &Path, dests: &[(&str, PathBuf)]) -> bool {
         match move_file(&src, dest) {
             Ok(()) => moved_any = true,
             Err(e) => {
-                tracing::warn!("failed to migrate {} → {}: {e}", src.display(), dest.display());
+                tracing::warn!(
+                    "failed to migrate {} → {}: {e}",
+                    src.display(),
+                    dest.display()
+                );
             }
         }
     }
