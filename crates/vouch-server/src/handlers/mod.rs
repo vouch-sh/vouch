@@ -36,7 +36,7 @@ pub(crate) use session::{
 ///
 /// Doesn't touch the template's i18n shims; use it alone when you need a
 /// custom `IntoResponse` (e.g. a non-200 status) and pair with
-/// [`impl_template_shims!`].
+/// [`impl_template_helpers!`].
 #[macro_export]
 macro_rules! impl_template_into_response {
     ($($template:ty),* $(,)?) => {
@@ -57,17 +57,23 @@ macro_rules! impl_template_into_response {
     };
 }
 
-/// Generate page-level template shims (`version`, `lang`, `dir`, `tr`, `tr1`)
-/// as inherent methods that delegate to the request-scoped task-local set by
-/// [`crate::infra::i18n::i18n_layer`]. Lets template `.html` files render
-/// `{{ self.tr("id") }}` and friends with no per-struct field.
+/// Generate the page-level helper methods every Askama template can call as
+/// `self.<name>()`. Askama can only reach `self.field` and `self.method()` in
+/// `{{ … }}` expressions — it can't touch module constants or free functions —
+/// so these inherent shims exist to bridge that.
+///
+/// Currently includes:
+/// - **`version`** — `env!("CARGO_PKG_VERSION")` for the footer.
+/// - **`lang`**, **`dir`**, **`tr`**, **`tr1`** — i18n helpers that forward to
+///   the request-scoped task-local installed by
+///   [`crate::infra::i18n::i18n_layer`].
 #[macro_export]
-macro_rules! impl_template_shims {
+macro_rules! impl_template_helpers {
     ($($template:ty),* $(,)?) => {
         $(
             #[allow(
                 dead_code,
-                reason = "i18n shims; not every template references every helper"
+                reason = "page-level helpers; not every template references every method"
             )]
             impl $template {
                 fn version(&self) -> &'static str { env!("CARGO_PKG_VERSION") }
@@ -83,7 +89,7 @@ macro_rules! impl_template_shims {
 }
 
 /// Wire both [`impl_template_into_response!`] (default 200/HTML) and
-/// [`impl_template_shims!`] for one or more Askama templates.
+/// [`impl_template_helpers!`] for one or more Askama templates.
 ///
 /// # Example
 ///
@@ -100,6 +106,6 @@ macro_rules! impl_template_shims {
 macro_rules! impl_template_response {
     ($($template:ty),* $(,)?) => {
         $crate::impl_template_into_response!($($template),*);
-        $crate::impl_template_shims!($($template),*);
+        $crate::impl_template_helpers!($($template),*);
     };
 }
