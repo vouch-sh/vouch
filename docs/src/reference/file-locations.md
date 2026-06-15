@@ -40,6 +40,12 @@ automatically to their XDG locations, preserving permissions. The migration is
 idempotent and prints a one-time notice. Sockets are not migrated — they are
 recreated on demand.
 
+On macOS (and Windows), the agent's `agent.pid`/`agent.log` previously lived in
+the OS cache directory (`~/Library/Caches/vouch`) rather than `~/.cache/vouch`.
+These are migrated too, so an upgraded agent detects a still-running old agent
+via the PID file instead of starting a second one. On Linux the cache location
+is unchanged, so this step is a no-op.
+
 One thing the migration cannot fix automatically: if you previously ran
 `vouch setup ssh`, your `~/.ssh/config` may contain an `IdentityAgent` line
 pointing at the old `~/.vouch/ssh-agent.sock`. Re-running `vouch setup ssh`

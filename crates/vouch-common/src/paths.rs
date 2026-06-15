@@ -187,15 +187,27 @@ fn migrate_layout(legacy_dir: &Path, dests: &[(&str, PathBuf)]) -> bool {
     moved_any
 }
 
-/// Migrate a legacy flat `~/.vouch/` layout into the XDG directories.
+/// Migrate legacy file layouts into the XDG directories.
 ///
-/// Idempotent and best-effort. A no-op when `~/.vouch/` does not exist (the
-/// common case for new installs) or when files have already been migrated.
+/// Idempotent and best-effort. Covers two cases:
+/// 1. The flat `~/.vouch/` directory used by older versions (config, cookie,
+///    audit log, client key).
+/// 2. The cache directory: older versions resolved `agent.pid`/`agent.log`
+///    via `dirs::cache_dir()` (e.g. `~/Library/Caches` on macOS), which differs
+///    from the XDG cache dir now used. Migrating the PID file lets an upgraded
+///    agent detect a still-running old agent instead of starting a second one.
+///
 /// Sockets are intentionally *not* moved — they are runtime artifacts that are
 /// recreated, and a running agent may still hold them. Safe to call
 /// concurrently from the CLI and agent: each move is an atomic `rename` guarded
 /// by a destination-exists check.
 pub fn migrate_legacy_layout() {
+    migrate_legacy_vouch_dir();
+    migrate_legacy_cache_dir();
+}
+
+/// Migrate the legacy flat `~/.vouch/` directory (case 1 above).
+fn migrate_legacy_vouch_dir() {
     let Some(home) = dirs::home_dir() else {
         return;
     };
@@ -233,6 +245,38 @@ pub fn migrate_legacy_layout() {
     }
 }
 
+/// The cache directory used by older versions, via `dirs::cache_dir()`.
+///
+/// Equals [`cache_dir`] on Linux, but differs on macOS (`~/Library/Caches`) and
+/// Windows (`%LOCALAPPDATA%`).
+fn legacy_cache_dir() -> Option<PathBuf> {
+    dirs::cache_dir().map(|c| c.join(APP_DIR))
+}
+
+/// Migrate `agent.pid`/`agent.log` from the legacy cache dir (case 2 above).
+///
+/// A no-op when the legacy and current cache directories are the same (Linux)
+/// or when the legacy directory does not exist.
+fn migrate_legacy_cache_dir() {
+    let (Some(legacy), Some(new)) = (legacy_cache_dir(), cache_dir()) else {
+        return;
+    };
+    migrate_cache_files(&legacy, &new);
+}
+
+/// Core cache migration: move `agent.pid`/`agent.log` from `legacy_cache` to
+/// `new_cache` when the two differ. Returns `true` if anything was moved.
+fn migrate_cache_files(legacy_cache: &Path, new_cache: &Path) -> bool {
+    if legacy_cache == new_cache || !legacy_cache.exists() {
+        return false;
+    }
+    let dests = [
+        ("agent.pid", new_cache.join("agent.pid")),
+        ("agent.log", new_cache.join("agent.log")),
+    ];
+    migrate_layout(legacy_cache, &dests)
+}
+
 #[cfg(test)]
 #[expect(
     clippy::panic_in_result_fn,
@@ -245,12 +289,14 @@ mod tests {
     #[test]
     fn resolve_base_prefers_absolute_env() {
         let home = PathBuf::from("/home/alice");
-        let got = resolve_base(
-            Some(OsString::from("/custom/config")),
-            Some(&home),
-            &[".config"],
-        );
-        assert_eq!(got, Some(PathBuf::from("/custom/config")));
+        // `is_absolute()` is platform-specific: on Windows a path needs a drive
+        // (or UNC) prefix, so use a platform-appropriate absolute path.
+        #[cfg(unix)]
+        let abs = "/custom/config";
+        #[cfg(windows)]
+        let abs = r"C:\custom\config";
+        let got = resolve_base(Some(OsString::from(abs)), Some(&home), &[".config"]);
+        assert_eq!(got, Some(PathBuf::from(abs)));
     }
 
     #[test]
@@ -337,6 +383,35 @@ mod tests {
         // Existing destination is left untouched; source remains.
         assert_eq!(std::fs::read(&dest)?, b"existing");
         assert!(legacy.join("config.json").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn migrate_cache_files_moves_pid_and_log() -> std::io::Result<()> {
+        let tmp = tempfile::tempdir()?;
+        let legacy = tmp.path().join("Library/Caches/vouch");
+        let new = tmp.path().join(".cache/vouch");
+        std::fs::create_dir_all(&legacy)?;
+        std::fs::write(legacy.join("agent.pid"), b"4242")?;
+        std::fs::write(legacy.join("agent.log"), b"log")?;
+
+        assert!(migrate_cache_files(&legacy, &new));
+        assert_eq!(std::fs::read(new.join("agent.pid"))?, b"4242");
+        assert!(new.join("agent.log").exists());
+        assert!(!legacy.join("agent.pid").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn migrate_cache_files_noop_when_dirs_equal() -> std::io::Result<()> {
+        let tmp = tempfile::tempdir()?;
+        let cache = tmp.path().join(".cache/vouch");
+        std::fs::create_dir_all(&cache)?;
+        std::fs::write(cache.join("agent.pid"), b"1")?;
+
+        // Linux case: legacy and current cache dirs are identical -> no move.
+        assert!(!migrate_cache_files(&cache, &cache));
+        assert!(cache.join("agent.pid").exists());
         Ok(())
     }
 }
