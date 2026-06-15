@@ -12,7 +12,6 @@ use crate::handlers::browser_login::validate_origin;
 use crate::handlers::session::{AuthContext, extract_org_admin, get_resource_auth_context};
 use crate::impl_template_response;
 use crate::infra::dns;
-use crate::infra::i18n::PageContext;
 use crate::services::error::ServiceError;
 use askama::Template;
 use axum::extract::{OriginalUri, Path, State};
@@ -57,8 +56,6 @@ pub(crate) struct DomainRow {
 #[derive(Template)]
 #[template(path = "admin/domains.html")]
 pub(crate) struct AdminDomainsTemplate {
-    /// Page-level template context: i18n + version.
-    pub page: PageContext,
     pub auth: AuthContext,
     pub domains: Vec<DomainRow>,
     pub max_additional: usize,
@@ -170,7 +167,6 @@ pub(crate) async fn admin_domains_page(
     let jar = flash::clear(jar);
 
     let body = AdminDomainsTemplate {
-        page: PageContext::current(),
         auth,
         domains,
         max_additional: db::MAX_ADDITIONAL_DOMAINS,

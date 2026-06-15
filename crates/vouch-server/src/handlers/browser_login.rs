@@ -25,7 +25,6 @@ use crate::crypto::generate_challenge;
 use crate::db::{self, AuthEventParams, AuthEventType};
 use crate::handlers::session::{create_session_cookie, get_auth_context};
 use crate::impl_template_response;
-use crate::infra::i18n::PageContext;
 use crate::redact_email;
 use crate::services::auth::{
     ClientAuthProof, CreateOAuthTokenParams, GrantProof, TokenIssuanceProof,
@@ -73,8 +72,6 @@ pub(crate) fn hmac_sha256_base64url(secret: &str, message: &str) -> String {
 #[allow(dead_code, reason = "fields rendered via Askama template macros")]
 pub(crate) struct LoginTemplate {
     /// Pending OAuth authorization ID (if coming from /oauth/authorize).
-    /// Page-level template context: i18n + version.
-    pub page: PageContext,
     pub pending_auth: Option<String>,
     /// OAuth client name (for display).
     pub client_name: Option<String>,
@@ -290,7 +287,6 @@ pub(crate) async fn login_page(
     };
 
     LoginTemplate {
-        page: PageContext::current(),
         pending_auth: query.pending_auth,
         client_name,
         rp_id: state.config().rp_id.clone(),

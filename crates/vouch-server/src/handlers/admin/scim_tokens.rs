@@ -5,7 +5,6 @@ use crate::AppState;
 use crate::db;
 use crate::handlers::admin::flash;
 use crate::impl_template_response;
-use crate::infra::i18n::PageContext;
 use crate::services::error::ServiceError;
 use askama::Template;
 use axum::Json;
@@ -249,8 +248,6 @@ pub(crate) struct ScimTokenRow {
 #[derive(Template)]
 #[template(path = "admin/scim_tokens.html")]
 pub(crate) struct AdminScimTokensTemplate {
-    /// Page-level template context: i18n + version.
-    pub page: PageContext,
     pub auth: AuthContext,
     pub tokens: Vec<ScimTokenRow>,
     pub flash_message: Option<String>,
@@ -324,7 +321,6 @@ pub(crate) async fn admin_scim_tokens_page(
     let jar = flash::clear(jar);
 
     let body = AdminScimTokensTemplate {
-        page: PageContext::current(),
         auth,
         tokens,
         flash_message: messages.err,
@@ -437,7 +433,6 @@ pub(crate) async fn admin_create_scim_token(
     let auth = get_resource_auth_context(&state, &jar).await;
 
     Ok(AdminScimTokensTemplate {
-        page: PageContext::current(),
         auth,
         tokens,
         flash_message: None,

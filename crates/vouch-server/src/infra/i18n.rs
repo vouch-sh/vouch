@@ -91,75 +91,50 @@ impl I18nContext {
     }
 }
 
-/// Per-template page context — translation handle plus other "available to
-/// every page" data. Carried as a `page` field on every template struct, with
-/// the `impl_template_response!` macro generating short `self.tr(...)` /
-/// `self.version()` shims that delegate to this struct so template `.html`
-/// files stay unchanged. Cheap to construct (just clones the inner `Arc`).
-///
-/// `pub(crate)` because this type is only ever consumed inside the crate (no
-/// external library surface), and tightening the visibility preempts the
-/// pedantic `unreachable_pub` lint.
-#[derive(Clone)]
-pub(crate) struct PageContext {
-    /// Request-scoped translation context.
-    pub i18n: I18nContext,
-}
-
 tokio::task_local! {
     /// Request-scoped translation context, installed by [`i18n_layer`] for
-    /// every UI request. Templates read it via [`PageContext::current`] —
-    /// handlers don't need to thread the context themselves.
+    /// every request. Template shims read it via the [`t`], [`t1`], [`lang`],
+    /// and [`dir`] free functions below — handlers don't need to thread the
+    /// context themselves and templates don't need to carry any extra field.
     static REQUEST_I18N: I18nContext;
 }
 
-impl PageContext {
-    /// Build a context from the task-local installed by [`i18n_layer`].
-    ///
-    /// This is what every template constructor should use. The middleware
-    /// pre-negotiates the locale per request, so dropping a new
-    /// `i18n/<tag>/vouch.ftl` is the only change required to add a language —
-    /// no handler-by-handler plumbing. Outside a request scope (e.g. background
-    /// jobs), falls back to `en-US`.
-    #[must_use]
-    pub(crate) fn current() -> Self {
-        let i18n = REQUEST_I18N
-            .try_with(I18nContext::clone)
-            .unwrap_or_else(|_| I18nContext::fallback());
-        Self { i18n }
-    }
+/// Translate a message using the request-scoped locale, falling back to
+/// `en-US` when called outside any request scope (e.g. background work or a
+/// template constructed in a unit test).
+pub(crate) fn t(id: &str) -> String {
+    REQUEST_I18N
+        .try_with(|i| i.t(id))
+        .unwrap_or_else(|_| I18nContext::fallback().t(id))
+}
 
-    /// Server version for footer/version links.
-    pub(crate) fn version(&self) -> &'static str {
-        env!("CARGO_PKG_VERSION")
-    }
+/// Translate a message with a single Fluent placeable. Same scope semantics
+/// as [`t`].
+pub(crate) fn t1(id: &str, name: &str, value: &str) -> String {
+    REQUEST_I18N
+        .try_with(|i| i.t1(id, name, value))
+        .unwrap_or_else(|_| I18nContext::fallback().t1(id, name, value))
+}
 
-    /// BCP-47 tag for `<html lang="...">`.
-    pub(crate) fn lang(&self) -> &str {
-        self.i18n.lang()
-    }
+/// BCP-47 tag of the negotiated language for `<html lang="...">`. Returns
+/// `"en-US"` outside any request scope.
+pub(crate) fn lang() -> String {
+    REQUEST_I18N
+        .try_with(|i| i.lang().to_owned())
+        .unwrap_or_else(|_| "en-US".to_owned())
+}
 
-    /// Text direction for `<html dir="...">`.
-    pub(crate) fn dir(&self) -> &'static str {
-        self.i18n.dir()
-    }
-
-    /// Translate a message with no arguments.
-    pub(crate) fn tr(&self, id: &str) -> String {
-        self.i18n.t(id)
-    }
-
-    /// Translate a message with a single Fluent placeable.
-    pub(crate) fn tr1(&self, id: &str, name: &str, value: &str) -> String {
-        self.i18n.t1(id, name, value)
-    }
+/// Text direction for `<html dir="...">` — `"ltr"` until an RTL language
+/// ships.
+pub(crate) fn dir() -> &'static str {
+    REQUEST_I18N.try_with(I18nContext::dir).unwrap_or("ltr")
 }
 
 /// Shared `en-US` context used to build the static `/i18n.js` bundle.
 ///
-/// Templates now carry a per-request [`PageContext`] (negotiated via the
-/// [`FromRequestParts`] extractor), so this static is no longer reachable from
-/// page rendering — only the JS bundle builder and `validate_startup` use it.
+/// Template rendering goes through the task-local installed by [`i18n_layer`]
+/// (via [`t`], [`t1`], [`lang`]), so this static is reached only by the JS
+/// bundle builder and [`validate_startup`].
 static DEFAULT_CONTEXT: LazyLock<I18nContext> = LazyLock::new(|| negotiate(None));
 
 /// Borrow the process-wide static (`en-US`) translation context. Internal

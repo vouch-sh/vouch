@@ -31,30 +31,14 @@ pub(crate) use session::{
     clear_session_cookie, create_session_cookie, extract_session_from_cookie,
 };
 
-/// Implement [`axum::response::IntoResponse`] and the page-level template
-/// shims for an Askama template.
+/// Implement [`axum::response::IntoResponse`] for an Askama template — render
+/// to HTML on success, log + 500 on error.
 ///
-/// The shims (`version`, `lang`, `dir`, `tr`, `tr1`) delegate to a required
-/// `page: PageContext` field on the template, so template `.html` files render
-/// `{{ self.tr("id") }}`, `{{ self.version() }}`, etc. against the
-/// request-scoped translation context the handler constructed.
-///
-/// # Example
-///
-/// ```ignore
-/// use crate::{impl_template_response, infra::i18n::PageContext};
-///
-/// #[derive(Template)]
-/// #[template(path = "example.html")]
-/// pub struct ExampleTemplate {
-///     pub page: PageContext,
-///     pub name: String,
-/// }
-///
-/// impl_template_response!(ExampleTemplate);
-/// ```
+/// Doesn't touch the template's i18n shims; use it alone when you need a
+/// custom `IntoResponse` (e.g. a non-200 status) and pair with
+/// [`impl_template_shims!`].
 #[macro_export]
-macro_rules! impl_template_response {
+macro_rules! impl_template_into_response {
     ($($template:ty),* $(,)?) => {
         $(
             impl axum::response::IntoResponse for $template {
@@ -69,20 +53,53 @@ macro_rules! impl_template_response {
                     }
                 }
             }
+        )*
+    };
+}
 
+/// Generate page-level template shims (`version`, `lang`, `dir`, `tr`, `tr1`)
+/// as inherent methods that delegate to the request-scoped task-local set by
+/// [`crate::infra::i18n::i18n_layer`]. Lets template `.html` files render
+/// `{{ self.tr("id") }}` and friends with no per-struct field.
+#[macro_export]
+macro_rules! impl_template_shims {
+    ($($template:ty),* $(,)?) => {
+        $(
             #[allow(
                 dead_code,
-                reason = "page-context shims; not every template references every helper"
+                reason = "i18n shims; not every template references every helper"
             )]
             impl $template {
-                fn version(&self) -> &'static str { self.page.version() }
-                fn lang(&self) -> &str { self.page.lang() }
-                fn dir(&self) -> &'static str { self.page.dir() }
-                fn tr(&self, id: &str) -> String { self.page.tr(id) }
+                fn version(&self) -> &'static str { env!("CARGO_PKG_VERSION") }
+                fn lang(&self) -> String { $crate::infra::i18n::lang() }
+                fn dir(&self) -> &'static str { $crate::infra::i18n::dir() }
+                fn tr(&self, id: &str) -> String { $crate::infra::i18n::t(id) }
                 fn tr1(&self, id: &str, name: &str, value: &str) -> String {
-                    self.page.tr1(id, name, value)
+                    $crate::infra::i18n::t1(id, name, value)
                 }
             }
         )*
+    };
+}
+
+/// Wire both [`impl_template_into_response!`] (default 200/HTML) and
+/// [`impl_template_shims!`] for one or more Askama templates.
+///
+/// # Example
+///
+/// ```ignore
+/// #[derive(Template)]
+/// #[template(path = "example.html")]
+/// pub struct ExampleTemplate {
+///     pub name: String,
+/// }
+///
+/// impl_template_response!(ExampleTemplate);
+/// ```
+#[macro_export]
+macro_rules! impl_template_response {
+    ($($template:ty),* $(,)?) => {
+        $crate::impl_template_into_response!($($template),*);
+        $crate::impl_template_shims!($($template),*);
     };
 }

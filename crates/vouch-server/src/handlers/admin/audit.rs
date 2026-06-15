@@ -5,7 +5,6 @@ use crate::AppState;
 use crate::db;
 use crate::db::audit::AuditEventFilter;
 use crate::impl_template_response;
-use crate::infra::i18n::PageContext;
 use askama::Template;
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
@@ -59,8 +58,6 @@ pub(crate) struct AuditRow {
 #[derive(Template)]
 #[template(path = "admin/audit.html")]
 pub(crate) struct AdminAuditTemplate {
-    /// Page-level template context: i18n + version.
-    pub page: PageContext,
     pub auth: AuthContext,
     pub events: Vec<AuditRow>,
     pub has_more: bool,
@@ -155,7 +152,6 @@ pub(crate) async fn admin_audit_page(
     };
 
     AdminAuditTemplate {
-        page: PageContext::current(),
         auth,
         events,
         has_more,

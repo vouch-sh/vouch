@@ -5,7 +5,6 @@ use super::extractors::ClientInfo;
 use crate::AppState;
 use crate::db::{self, AuthEventParams, AuthEventType};
 use crate::impl_template_response;
-use crate::infra::i18n::PageContext;
 // This file's flows are heavily branched into error/redirect paths constructed
 // from helpers without easy access to the request-scoped `I18nContext`, so
 // every template here uses `PageContext::current()` (en-US). Upgrading any
@@ -52,8 +51,6 @@ use crate::services::oidc::ScopeSet;
 #[derive(Template)]
 #[template(path = "device_verify.html")]
 pub(crate) struct DeviceVerifyTemplate {
-    /// Page-level template context: i18n + version.
-    pub page: PageContext,
     pub error: Option<String>,
 }
 
@@ -80,8 +77,6 @@ pub(crate) struct KeyDisplay {
 #[derive(Template)]
 #[template(path = "enroll_keys.html")]
 pub(crate) struct EnrollKeysTemplate {
-    /// Page-level template context: i18n + version.
-    pub page: PageContext,
     /// Authentication context for header display.
     pub auth: AuthContext,
     /// Registered keys, rendered server-side.
@@ -95,17 +90,12 @@ pub(crate) struct EnrollKeysTemplate {
 /// Success page template.
 #[derive(Template)]
 #[template(path = "success.html")]
-pub(crate) struct SuccessTemplate {
-    /// Page-level template context: i18n + version.
-    pub page: PageContext,
-}
+pub(crate) struct SuccessTemplate;
 
 /// Error page template.
 #[derive(Template)]
 #[template(path = "error.html")]
 pub(crate) struct ErrorTemplate {
-    /// Page-level template context: i18n + version.
-    pub page: PageContext,
     pub title: String,
     pub message: String,
     pub back_url: Option<String>,
@@ -119,8 +109,6 @@ pub(crate) struct ErrorTemplate {
 #[derive(Template)]
 #[template(path = "saml_post_form.html")]
 pub(crate) struct SamlPostFormTemplate {
-    /// Page-level template context: i18n + version.
-    pub page: PageContext,
     pub action_url: String,
     pub saml_request: String,
     pub relay_state: String,
@@ -136,8 +124,6 @@ pub(crate) struct SamlPostFormTemplate {
 #[derive(Template)]
 #[template(path = "select_idp.html")]
 pub(crate) struct SelectIdpTemplate {
-    /// Page-level template context: i18n + version.
-    pub page: PageContext,
     /// Form action URL or link base URL (e.g., `/device`, `/enroll/start`).
     pub action: String,
     /// Render as POST form (true) or anchor links with `?provider=` (false).
@@ -243,10 +229,7 @@ impl BrowserRegistrationState {
 /// Show device code entry page.
 /// GET /device
 pub(crate) async fn device_verify_page() -> impl IntoResponse {
-    DeviceVerifyTemplate {
-        page: PageContext::current(),
-        error: None,
-    }
+    DeviceVerifyTemplate { error: None }
 }
 
 /// Handle device code submission.
@@ -272,7 +255,6 @@ pub(crate) async fn device_verify_submit(
     // (consonants: BCDFGHJKLMNPQRSTVWXZ). Reject anything else immediately.
     if !is_valid_user_code_format(&user_code) {
         return DeviceVerifyTemplate {
-            page: PageContext::current(),
             error: Some("Invalid code. Please check and try again.".to_string()),
         }
         .into_response();
@@ -283,14 +265,12 @@ pub(crate) async fn device_verify_submit(
         Ok(Some(req)) => req,
         Ok(None) => {
             return DeviceVerifyTemplate {
-                page: PageContext::current(),
                 error: Some("Invalid code. Please check and try again.".to_string()),
             }
             .into_response();
         }
         Err(_) => {
             return DeviceVerifyTemplate {
-                page: PageContext::current(),
                 error: Some("An error occurred. Please try again.".to_string()),
             }
             .into_response();
@@ -301,7 +281,6 @@ pub(crate) async fn device_verify_submit(
     let now = Timestamp::now();
     if now > request.expires_at {
         return DeviceVerifyTemplate {
-            page: PageContext::current(),
             error: Some("This code has expired. Please request a new one.".to_string()),
         }
         .into_response();
@@ -310,7 +289,6 @@ pub(crate) async fn device_verify_submit(
     // Check if already used
     if request.status != db::DeviceAuthStatus::Pending {
         return DeviceVerifyTemplate {
-            page: PageContext::current(),
             error: Some("This code has already been used.".to_string()),
         }
         .into_response();
@@ -335,7 +313,6 @@ pub(crate) async fn device_verify_submit(
             Some(idp) => idp,
             None => {
                 return ErrorTemplate {
-                    page: PageContext::current(),
                     title: "Unknown Provider".to_string(),
                     message: format!("Identity provider '{slug}' is not configured."),
                     back_url: Some("/device".to_string()),
@@ -346,7 +323,6 @@ pub(crate) async fn device_verify_submit(
         None => {
             if state.idps.len() > 1 {
                 return SelectIdpTemplate {
-                    page: PageContext::current(),
                     action: "/device".to_string(),
                     is_post: true,
                     user_code: Some(user_code.clone()),
@@ -358,7 +334,6 @@ pub(crate) async fn device_verify_submit(
                 Some(idp) => idp,
                 None => {
                     return ErrorTemplate {
-                        page: PageContext::current(),
                         title: "Not Configured".to_string(),
                         message: "Identity provider is not configured. \
                                   Please contact your administrator."
@@ -379,7 +354,6 @@ pub(crate) async fn device_verify_submit(
         Err(e) => {
             tracing::error!("Failed to initiate auth: {e:#}");
             return ErrorTemplate {
-                page: PageContext::current(),
                 title: "Error".to_string(),
                 message: "Failed to start authentication".to_string(),
                 back_url: None,
@@ -403,7 +377,6 @@ pub(crate) async fn device_verify_submit(
     {
         tracing::error!("Failed to create auth state: {}", e);
         return ErrorTemplate {
-            page: PageContext::current(),
             title: "Error".to_string(),
             message: "Failed to create session state".to_string(),
             back_url: None,
@@ -420,7 +393,6 @@ pub(crate) async fn device_verify_submit(
             saml_request,
             relay_state,
         } => SamlPostFormTemplate {
-            page: PageContext::current(),
             action_url,
             saml_request,
             relay_state,
@@ -445,7 +417,6 @@ pub(crate) async fn oidc_callback(
             .error_description
             .unwrap_or_else(|| "Unknown error".to_string());
         return ErrorTemplate {
-            page: PageContext::current(),
             title: error,
             message: desc,
             back_url: None,
@@ -456,7 +427,6 @@ pub(crate) async fn oidc_callback(
     // Get authorization code and state
     let Some(code) = params.code else {
         return ErrorTemplate {
-            page: PageContext::current(),
             title: "Error".to_string(),
             message: "Missing authorization code".to_string(),
             back_url: None,
@@ -466,7 +436,6 @@ pub(crate) async fn oidc_callback(
 
     let Some(oidc_state) = params.state else {
         return ErrorTemplate {
-            page: PageContext::current(),
             title: "Error".to_string(),
             message: "Missing state parameter".to_string(),
             back_url: None,
@@ -478,7 +447,6 @@ pub(crate) async fn oidc_callback(
     // OIDC state is base64url-encoded 32 random bytes (43 chars).
     if oidc_state.len() > 128 {
         return ErrorTemplate {
-            page: PageContext::current(),
             title: "Error".to_string(),
             message: "Invalid state parameter".to_string(),
             back_url: None,
@@ -496,7 +464,6 @@ pub(crate) async fn oidc_callback(
             Ok(pair) => pair,
             Err(db::ClaimError::AlreadyConsumed) => {
                 return ErrorTemplate {
-                    page: PageContext::current(),
                     title: "Error".to_string(),
                     message: "Invalid or expired state".to_string(),
                     back_url: None,
@@ -506,7 +473,6 @@ pub(crate) async fn oidc_callback(
             Err(e) => {
                 tracing::error!("Failed to consume OIDC state: {e:#}");
                 return ErrorTemplate {
-                    page: PageContext::current(),
                     title: "Error".to_string(),
                     message: "Failed to verify state".to_string(),
                     back_url: None,
@@ -534,7 +500,6 @@ pub(crate) async fn oidc_callback(
     };
     let Some(oidc_provider) = oidc_provider else {
         return ErrorTemplate {
-            page: PageContext::current(),
             title: "Error".to_string(),
             message: "OIDC not configured. If using SAML, responses should be \
                       sent to /saml/acs, not /oauth/callback."
@@ -574,7 +539,6 @@ pub(crate) async fn oidc_callback(
         Err(e) => {
             tracing::error!("Failed to exchange code: {}", e);
             return ErrorTemplate {
-                page: PageContext::current(),
                 title: "Error".to_string(),
                 message: "Failed to complete authentication".to_string(),
                 back_url: None,
@@ -587,7 +551,6 @@ pub(crate) async fn oidc_callback(
         let error_text = token_response.text().await.unwrap_or_default();
         tracing::error!("Token exchange failed: {}", error_text);
         return ErrorTemplate {
-            page: PageContext::current(),
             title: "Error".to_string(),
             message: "Failed to complete authentication".to_string(),
             back_url: None,
@@ -600,7 +563,6 @@ pub(crate) async fn oidc_callback(
         Err(e) => {
             tracing::error!("Failed to parse token response: {}", e);
             return ErrorTemplate {
-                page: PageContext::current(),
                 title: "Error".to_string(),
                 message: "Failed to complete authentication".to_string(),
                 back_url: None,
@@ -624,7 +586,6 @@ pub(crate) async fn oidc_callback(
         Err(e) => {
             tracing::error!("ID token verification failed: {e:#}");
             return ErrorTemplate {
-                page: PageContext::current(),
                 title: "Error".to_string(),
                 message: "Failed to verify identity token".to_string(),
                 back_url: None,
@@ -659,7 +620,6 @@ pub(crate) async fn complete_enrollment_after_identity(
         if !domains.iter().any(|d| d.eq_ignore_ascii_case(email_domain)) {
             let allowed_list = domains.join(", ");
             return ErrorTemplate {
-                page: PageContext::current(),
                 title: "Domain Not Allowed".to_string(),
                 message: format!(
                     "Only users from the following domains can enroll: {}. Your email ({}) is not from an allowed domain.",
@@ -687,7 +647,6 @@ pub(crate) async fn complete_enrollment_after_identity(
         Err(e) => {
             tracing::error!("Failed to enroll user: {}", e);
             return ErrorTemplate {
-                page: PageContext::current(),
                 title: "Error".to_string(),
                 message: "Failed to create user".to_string(),
                 back_url: None,
@@ -707,7 +666,6 @@ pub(crate) async fn complete_enrollment_after_identity(
         Err(e) => {
             tracing::error!("Failed to calculate session expiration: {}", e);
             return ErrorTemplate {
-                page: PageContext::current(),
                 title: "Error".to_string(),
                 message: "Failed to create session".to_string(),
                 back_url: None,
@@ -734,7 +692,6 @@ pub(crate) async fn complete_enrollment_after_identity(
             Err(e) => {
                 tracing::error!("Failed to snapshot org domain: {}", e);
                 return ErrorTemplate {
-                    page: PageContext::current(),
                     title: "Error".to_string(),
                     message: "Failed to create session".to_string(),
                     back_url: None,
@@ -782,7 +739,6 @@ pub(crate) async fn complete_enrollment_after_identity(
         Err(e) => {
             tracing::error!("Failed to create session: {}", e);
             return ErrorTemplate {
-                page: PageContext::current(),
                 title: "Error".to_string(),
                 message: "Failed to create session".to_string(),
                 back_url: None,
@@ -927,7 +883,6 @@ pub(crate) async fn enroll_keys_page(
             (
                 jar,
                 EnrollKeysTemplate {
-                    page: PageContext::current(),
                     auth,
                     keys,
                     can_delete,
@@ -1563,11 +1518,7 @@ pub(crate) async fn browser_register_complete(
 
     // Return success template with session cookie
     let cookie = create_session_cookie(token.expose_secret(), session_hours.saturating_mul(3600));
-    let html = SuccessTemplate {
-        page: PageContext::current(),
-    }
-    .render()
-    .map_err(|e| {
+    let html = SuccessTemplate.render().map_err(|e| {
         tracing::error!("Template render error: {}", e);
         ServiceError::api(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -1620,7 +1571,6 @@ pub(crate) async fn direct_enroll_start(
         .filter(|s| !s.is_empty());
     if provider_choice.is_none() && state.idps.len() > 1 {
         return SelectIdpTemplate {
-            page: PageContext::current(),
             action: "/enroll/start".to_string(),
             is_post: false,
             user_code: None,
@@ -1641,7 +1591,6 @@ pub(crate) async fn direct_enroll_start(
         (Ok(s), Ok(h)) => (s, h),
         _ => {
             return ErrorTemplate {
-                page: PageContext::current(),
                 title: "Error".to_string(),
                 message: "Failed to generate secure random codes".to_string(),
                 back_url: None,
@@ -1671,7 +1620,6 @@ pub(crate) async fn direct_enroll_start(
         Err(e) => {
             tracing::error!("Failed to create direct enrollment request: {}", e);
             return ErrorTemplate {
-                page: PageContext::current(),
                 title: "Error".to_string(),
                 message: "Failed to start enrollment. Please try again.".to_string(),
                 back_url: Some("/".to_string()),
@@ -1691,7 +1639,6 @@ pub(crate) async fn direct_enroll_start(
             Some(i) => Some(i),
             None => {
                 return ErrorTemplate {
-                    page: PageContext::current(),
                     title: "Unknown Provider".to_string(),
                     message: format!("Identity provider '{slug}' is not configured."),
                     back_url: Some("/".to_string()),
@@ -1704,7 +1651,6 @@ pub(crate) async fn direct_enroll_start(
 
     let Some(idp) = chosen_idp else {
         return ErrorTemplate {
-            page: PageContext::current(),
             title: "Not Configured".to_string(),
             message: "Identity provider is not configured. Please contact your administrator."
                 .to_string(),
@@ -1723,7 +1669,6 @@ pub(crate) async fn direct_enroll_start(
                 provider_id
             );
             return ErrorTemplate {
-                page: PageContext::current(),
                 title: "Error".to_string(),
                 message: "Failed to start enrollment. Please try again.".to_string(),
                 back_url: Some("/".to_string()),
@@ -1748,7 +1693,6 @@ pub(crate) async fn direct_enroll_start(
     {
         tracing::error!("Failed to create auth state: {}", e);
         return ErrorTemplate {
-            page: PageContext::current(),
             title: "Error".to_string(),
             message: "Failed to start enrollment. Please try again.".to_string(),
             back_url: Some("/".to_string()),
@@ -1763,7 +1707,6 @@ pub(crate) async fn direct_enroll_start(
             saml_request,
             relay_state,
         } => SamlPostFormTemplate {
-            page: PageContext::current(),
             action_url,
             saml_request,
             relay_state,
