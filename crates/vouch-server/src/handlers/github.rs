@@ -253,10 +253,12 @@ pub(crate) struct GitHubReconnectForm {
 
 /// Convert a GitHubError to an error template response.
 ///
-/// Error pages use the fallback locale (`en-US`) because they can be reached
-/// from request paths where the [`I18nContext`] isn't readily threaded in.
-/// When a second language ships, replace with the per-request context where
-/// possible.
+/// **Implicit dependency:** resolves the page context via
+/// [`PageContext::current`], which reads the `REQUEST_I18N` task-local set by
+/// `crate::infra::i18n::i18n_layer`. Only call this from handlers wired into a
+/// router that applies that middleware — i.e. `build_ui_routes`. From an
+/// API-route handler (or anywhere outside the UI layer) this would silently
+/// fall back to `en-US` rather than honoring the user's negotiated locale.
 fn error_response(error: GitHubError) -> Response {
     GitHubErrorTemplate {
         page: PageContext::current(),

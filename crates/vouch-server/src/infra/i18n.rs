@@ -96,8 +96,12 @@ impl I18nContext {
 /// the `impl_template_response!` macro generating short `self.tr(...)` /
 /// `self.version()` shims that delegate to this struct so template `.html`
 /// files stay unchanged. Cheap to construct (just clones the inner `Arc`).
+///
+/// `pub(crate)` because this type is only ever consumed inside the crate (no
+/// external library surface), and tightening the visibility preempts the
+/// pedantic `unreachable_pub` lint.
 #[derive(Clone)]
-pub struct PageContext {
+pub(crate) struct PageContext {
     /// Request-scoped translation context.
     pub i18n: I18nContext,
 }
@@ -110,11 +114,6 @@ tokio::task_local! {
 }
 
 impl PageContext {
-    /// Wrap a negotiated [`I18nContext`] for use in a template.
-    pub fn new(i18n: I18nContext) -> Self {
-        Self { i18n }
-    }
-
     /// Build a context from the task-local installed by [`i18n_layer`].
     ///
     /// This is what every template constructor should use. The middleware
@@ -123,41 +122,35 @@ impl PageContext {
     /// no handler-by-handler plumbing. Outside a request scope (e.g. background
     /// jobs), falls back to `en-US`.
     #[must_use]
-    pub fn current() -> Self {
+    pub(crate) fn current() -> Self {
         let i18n = REQUEST_I18N
             .try_with(I18nContext::clone)
             .unwrap_or_else(|_| I18nContext::fallback());
         Self { i18n }
     }
 
-    /// Use the `en-US` fallback context. For callers outside any request
-    /// scope (rare). Prefer [`PageContext::current`] in handlers.
-    pub fn fallback() -> Self {
-        Self::new(I18nContext::fallback())
-    }
-
     /// Server version for footer/version links.
-    pub fn version(&self) -> &'static str {
+    pub(crate) fn version(&self) -> &'static str {
         env!("CARGO_PKG_VERSION")
     }
 
     /// BCP-47 tag for `<html lang="...">`.
-    pub fn lang(&self) -> &str {
+    pub(crate) fn lang(&self) -> &str {
         self.i18n.lang()
     }
 
     /// Text direction for `<html dir="...">`.
-    pub fn dir(&self) -> &'static str {
+    pub(crate) fn dir(&self) -> &'static str {
         self.i18n.dir()
     }
 
     /// Translate a message with no arguments.
-    pub fn tr(&self, id: &str) -> String {
+    pub(crate) fn tr(&self, id: &str) -> String {
         self.i18n.t(id)
     }
 
     /// Translate a message with a single Fluent placeable.
-    pub fn tr1(&self, id: &str, name: &str, value: &str) -> String {
+    pub(crate) fn tr1(&self, id: &str, name: &str, value: &str) -> String {
         self.i18n.t1(id, name, value)
     }
 }
@@ -180,7 +173,20 @@ fn default_context() -> &'static I18nContext {
 /// Without this guard, a packaging mistake that ships a corrupt or missing
 /// `i18n/en-US/vouch.ftl` would let the server boot and render the UI with raw
 /// Fluent message ids — a silent break an operator could miss until a user
-/// complained. Called once during server initialization.
+/// complained.
+///
+/// **Ordering requirement:** call this exactly once during server
+/// initialization, **before** the listener starts accepting requests. It is
+/// what eagerly drives the `JS_BUNDLES` and `DEFAULT_CONTEXT` `LazyLock`
+/// initializers — if a request reaches the handlers before this runs and
+/// `build_js_bundles` panics, that `LazyLock` poisons and every later request
+/// panics on access. The current call site in `main::run_server` upholds this;
+/// a future refactor that reorders startup must preserve it.
+///
+/// # Errors
+///
+/// Returns an error if the embedded `en-US` catalog cannot be enumerated, is
+/// missing, fails to resolve a well-known key, or yields no JS bundle entry.
 pub fn validate_startup() -> anyhow::Result<()> {
     use anyhow::Context;
     let available = LOADER
@@ -197,9 +203,10 @@ pub fn validate_startup() -> anyhow::Result<()> {
         probe != "common-app-name",
         "i18n catalog loaded but key resolution returns raw ids; refusing to start"
     );
-    // Force the JS bundle map to build now (so any render failure surfaces
-    // here, not on the first /i18n.js request) and confirm en-US is present
-    // — the handler's fallback path depends on it.
+    // Eagerly force the JS bundle map to build now so any render failure
+    // surfaces here (not on the first `/i18n.js` request), and confirm en-US
+    // is present — the handler's fallback path depends on it.
+    LazyLock::force(&JS_BUNDLES);
     anyhow::ensure!(
         JS_BUNDLES.contains_key("en-US"),
         "i18n JS bundle for en-US was not built; refusing to start"
