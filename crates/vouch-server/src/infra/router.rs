@@ -172,6 +172,13 @@ pub fn build_app(state: Arc<AppState>, config: &config::ServerConfig) -> anyhow:
         config,
         &state.idps,
     )?
+    // Install request-scoped i18n for every route. The UI router renders
+    // templates via `PageContext::current()`, but several API routes also
+    // return HTML (e.g. `/oauth/authorize` consent/error pages,
+    // `/oauth/callback` enrollment errors), so the layer is applied at the
+    // merged-router level rather than only inside `build_ui_routes`. Adding
+    // a new language is then just dropping an `i18n/<tag>/vouch.ftl` catalog.
+    .layer(axum::middleware::from_fn(crate::infra::i18n::i18n_layer))
     .layer(axum::middleware::from_fn(metrics_middleware))
     // Global request timeout: 30 seconds.
     .layer(TimeoutLayer::with_status_code(
@@ -795,11 +802,6 @@ fn build_ui_routes(config: &config::ServerConfig) -> anyhow::Result<Router<Arc<A
         .route("/static/{*path}", get(static_assets::static_handler))
         // Browsers request /favicon.ico at the root path
         .route("/favicon.ico", get(static_assets::favicon_handler))
-        // Install request-scoped i18n: every UI request negotiates a locale
-        // via the Accept-Language header and templates pick it up through
-        // `PageContext::current()`, so adding a new language is just dropping
-        // an `i18n/<tag>/vouch.ftl` catalog.
-        .layer(axum::middleware::from_fn(crate::infra::i18n::i18n_layer))
         .layer(security_headers::build_ui_cors_layer(config)))
 }
 

@@ -255,10 +255,10 @@ pub(crate) struct GitHubReconnectForm {
 ///
 /// **Implicit dependency:** resolves the page context via
 /// [`PageContext::current`], which reads the `REQUEST_I18N` task-local set by
-/// `crate::infra::i18n::i18n_layer`. Only call this from handlers wired into a
-/// router that applies that middleware — i.e. `build_ui_routes`. From an
-/// API-route handler (or anywhere outside the UI layer) this would silently
-/// fall back to `en-US` rather than honoring the user's negotiated locale.
+/// `crate::infra::i18n::i18n_layer`. That layer is applied at the merged
+/// router in `build_app`, so any handler routed there is covered. A future
+/// caller from a non-HTTP context (e.g. a background job) would silently fall
+/// back to `en-US`.
 fn error_response(error: GitHubError) -> Response {
     GitHubErrorTemplate {
         page: PageContext::current(),
