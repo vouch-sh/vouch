@@ -22,6 +22,8 @@
 | Crypto | `aws-lc-rs` | `ring` |
 | HTTP client | `reqwest` + `rustls` | OpenSSL |
 | HTML templates | `askama` (compile-time checked) | Tera, Handlebars |
+| i18n | `i18n-embed` + `unic-langid` (Fluent backend, RFC 9110 negotiation) | `gettext-rs`, raw `fluent-rs` |
+| Embedded assets | `rust-embed` | bundling via build.rs |
 | CLI parsing | `clap` | structopt |
 | Web framework | `axum` | actix-web, rocket |
 | FIDO2 | `ctap-hid-fido2` (pure Rust) | |

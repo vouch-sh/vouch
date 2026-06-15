@@ -38,6 +38,8 @@ Two route groups sharing `AppState`:
 - **API routes** (`/v1/`, `/oauth/`, `/scim/`, `/api/v1/`) - JSON responses, JWT Bearer auth
 - **UI routes** (`/`, `/login`, `/enroll/*`, `/docs/*`, `/applications/*`) - HTML via Askama templates, cookie-based sessions
 
+UI strings are localized via Fluent (`i18n-embed`); per-request locale is negotiated from `Accept-Language` and installed in a `tokio::task_local!` by the `i18n_layer` middleware, so templates and helpers pick it up without any per-handler plumbing.
+
 **Database:** SQLite for local development, in-memory SQLite for tests, Aurora DSQL in production. The `Pool` enum dispatches at runtime based on `DATABASE_URL` scheme. Query building uses `sea-query`. Migrations in `crates/vouch-server/migrations/{sqlite,postgres}/`.
 
 The data model is document-oriented by design:
