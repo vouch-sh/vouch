@@ -23,8 +23,8 @@ document.addEventListener("DOMContentLoaded", function () {
       var tokenEl = document.getElementById("new-token-value");
       if (tokenEl && navigator.clipboard) {
         navigator.clipboard.writeText(tokenEl.textContent).then(function () {
-          copyBtn.textContent = "Copied!";
-          setTimeout(function () { copyBtn.textContent = "Copy"; }, 2000);
+          copyBtn.textContent = t("common-js-copied");
+          setTimeout(function () { copyBtn.textContent = t("common-copy"); }, 2000);
         });
       }
     });
@@ -106,7 +106,7 @@ document.addEventListener("DOMContentLoaded", function () {
 
   btnNew.addEventListener("click", function () {
     hidePlayground();
-    showPlayground("New Custom Policy");
+    showPlayground(t("admin-policies-playground-title"));
   });
 
   btnCancel.addEventListener("click", function () {
@@ -122,7 +122,7 @@ document.addEventListener("DOMContentLoaded", function () {
       descInput.value = btn.dataset.description;
       exprInput.value = btn.dataset.expression;
       policyForm.action = "/admin/policies/custom/" + btn.dataset.id;
-      showPlayground("Edit Custom Policy");
+      showPlayground(t("admin-js-edit-policy-title"));
       validateExpression(btn.dataset.expression);
     });
   });
@@ -164,8 +164,8 @@ document.addEventListener("DOMContentLoaded", function () {
           if (data.test_result) {
             var pass = data.test_result.pass;
             testResult.textContent = pass
-              ? "\u2014 passes against test device"
-              : "\u2014 fails against test device";
+              ? t("admin-js-cel-passes")
+              : t("admin-js-cel-fails");
             testResult.className = "ml-1 " + (pass
               ? "text-green-400"
               : "text-yellow-400");
@@ -175,7 +175,7 @@ document.addEventListener("DOMContentLoaded", function () {
         } else {
           validEl.classList.add("hidden");
           invalidEl.classList.remove("hidden");
-          errorMsg.textContent = data.error || "Invalid expression";
+          errorMsg.textContent = data.error || t("admin-js-cel-invalid");
           isValid = false;
           btnSave.disabled = true;
           testResult.textContent = "";

@@ -25,17 +25,17 @@ function bufferToBase64url(buffer) {
 function webauthnError(err) {
     var message = err.message;
     if (err.name === 'NotAllowedError') {
-        message = 'Operation was cancelled or timed out. Please try again.';
+        message = t('webauthn-err-notallowed');
     } else if (err.name === 'SecurityError') {
-        message = 'Security error. Please ensure you are on a secure (HTTPS) connection.';
+        message = t('webauthn-err-security');
     } else if (err.name === 'AbortError') {
-        message = 'Operation was cancelled.';
+        message = t('webauthn-err-abort');
     } else if (err.name === 'InvalidStateError') {
-        message = 'This security key is already registered or no credentials found.';
+        message = t('webauthn-err-invalidstate');
     } else if (err.name === 'NotSupportedError') {
-        message = 'This security key is not supported. Please use a FIDO2-compatible key.';
+        message = t('webauthn-err-notsupported');
     } else if (message && message.toLowerCase().indexOf('pin') !== -1) {
-        message = 'PIN error. Please check your security key PIN and try again.';
+        message = t('webauthn-err-pin');
     }
     return message;
 }

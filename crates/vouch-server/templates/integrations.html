@@ -1,18 +1,18 @@
 {% extends "base.html" %}
 {% import "macros/auth.html" as auth_macros %}
 
-{% block title %}Vouch - Integrations{% endblock %}
+{% block title %}{{ self.tr("integrations-page-title") }}{% endblock %}
 
 {% block header_right %}
-{{ auth_macros::header_auth(auth) }}
+{{ auth_macros::header_auth(auth, self) }}
 {% endblock %}
 
 {% block content %}
 <div class="flex-1 p-5">
     <div class="max-w-5xl mx-auto">
         <div class="mb-8">
-            <h1 class="text-2xl font-bold text-gray-200 mb-2">Integrations</h1>
-            <p class="text-gray-400">Manage server-configured integrations.</p>
+            <h1 class="text-2xl font-bold text-gray-200 mb-2">{{ self.tr("integrations-heading") }}</h1>
+            <p class="text-gray-400">{{ self.tr("integrations-subtitle") }}</p>
         </div>
 
         <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
@@ -24,28 +24,28 @@
                         <path fill-rule="evenodd" d="M12 2C6.477 2 2 6.484 2 12.017c0 4.425 2.865 8.18 6.839 9.504.5.092.682-.217.682-.483 0-.237-.008-.868-.013-1.703-2.782.605-3.369-1.343-3.369-1.343-.454-1.158-1.11-1.466-1.11-1.466-.908-.62.069-.608.069-.608 1.003.07 1.531 1.032 1.531 1.032.892 1.53 2.341 1.088 2.91.832.092-.647.35-1.088.636-1.338-2.22-.253-4.555-1.113-4.555-4.951 0-1.093.39-1.988 1.029-2.688-.103-.253-.446-1.272.098-2.65 0 0 .84-.27 2.75 1.026A9.564 9.564 0 0112 6.844c.85.004 1.705.115 2.504.337 1.909-1.296 2.747-1.027 2.747-1.027.546 1.379.202 2.398.1 2.651.64.7 1.028 1.595 1.028 2.688 0 3.848-2.339 4.695-4.566 4.943.359.309.678.92.678 1.855 0 1.338-.012 2.419-.012 2.747 0 .268.18.58.688.482A10.019 10.019 0 0022 12.017C22 6.484 17.522 2 12 2z" clip-rule="evenodd"/>
                     </svg>
                     <h2 class="text-lg font-semibold text-gray-200">GitHub</h2>
-                    <span class="text-xs bg-vouch-surface text-gray-400 px-2 py-0.5 rounded">Organization-wide</span>
+                    <span class="text-xs bg-vouch-surface text-gray-400 px-2 py-0.5 rounded">{{ self.tr("integrations-badge-org-wide") }}</span>
                 </div>
-                <p class="text-gray-400 text-sm mb-4">Get short-lived GitHub access tokens for Git operations.</p>
+                <p class="text-gray-400 text-sm mb-4">{{ self.tr("integrations-github-desc") }}</p>
 
                 {% if !github_configured %}
                 <div class="bg-yellow-900/20 border border-yellow-700/30 rounded-lg p-3">
-                    <p class="text-sm text-yellow-300">GitHub App not configured on this server.</p>
+                    <p class="text-sm text-yellow-300">{{ self.tr("integrations-github-not-configured") }}</p>
                     {% if auth.is_org_admin %}
-                    <p class="text-xs text-yellow-300/60 mt-1">Requires <code class="bg-yellow-900/30 px-1 rounded">VOUCH_GITHUB_APP_*</code> environment variables.</p>
+                    <p class="text-xs text-yellow-300/60 mt-1">{{ self.tr("integrations-github-requires-prefix") }} <code class="bg-yellow-900/30 px-1 rounded">VOUCH_GITHUB_APP_*</code> {{ self.tr("integrations-github-requires-suffix") }}</p>
                     {% endif %}
                 </div>
                 {% elif !auth.has_org %}
                 <div class="bg-blue-900/20 border border-blue-700/30 rounded-lg p-3">
-                    <p class="text-sm text-blue-300">Requires organization membership.</p>
+                    <p class="text-sm text-blue-300">{{ self.tr("integrations-requires-org") }}</p>
                 </div>
                 {% elif github_accounts.is_empty() %}
                 <div class="flex items-center justify-between">
-                    <span class="text-sm text-gray-500">No accounts connected</span>
+                    <span class="text-sm text-gray-500">{{ self.tr("integrations-no-accounts") }}</span>
                     {% if auth.is_org_admin %}
-                    <a href="/github/connect" class="btn-primary text-sm">Connect</a>
+                    <a href="/github/connect" class="btn-primary text-sm">{{ self.tr("integrations-connect") }}</a>
                     {% else %}
-                    <span class="text-xs text-gray-500">Ask an org admin</span>
+                    <span class="text-xs text-gray-500">{{ self.tr("integrations-ask-admin") }}</span>
                     {% endif %}
                 </div>
                 {% else %}
@@ -54,11 +54,11 @@
                         <svg class="w-4 h-4 text-green-400" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
                             <path stroke-linecap="round" stroke-linejoin="round" d="m4.5 12.75 6 6 9-13.5" />
                         </svg>
-                        <span class="text-sm text-green-400">Connected:</span>
+                        <span class="text-sm text-green-400">{{ self.tr("integrations-connected") }}</span>
                         <span class="text-sm text-gray-300">{% for account in github_accounts %}{{ account }}{% if !loop.last %}, {% endif %}{% endfor %}</span>
                     </div>
                     {% if auth.is_org_admin %}
-                    <a href="/github/connect" class="btn-secondary text-sm inline-block">Manage</a>
+                    <a href="/github/connect" class="btn-secondary text-sm inline-block">{{ self.tr("integrations-manage") }}</a>
                     {% endif %}
                 </div>
                 {% endif %}
@@ -71,19 +71,19 @@
                     <svg class="w-6 h-6 {% if ssh_ca_public_key.is_some() %}text-green-400{% else %}text-gray-600{% endif %} flex-shrink-0" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24">
                         <path stroke-linecap="round" stroke-linejoin="round" d="M6.75 7.5l3 2.25-3 2.25m4.5 0h3m-9 8.25h13.5A2.25 2.25 0 0021 18V6a2.25 2.25 0 00-2.25-2.25H5.25A2.25 2.25 0 003 6v12a2.25 2.25 0 002.25 2.25z" />
                     </svg>
-                    <h2 class="text-lg font-semibold text-gray-200">SSH Certificates</h2>
-                    <span class="text-xs bg-vouch-surface text-gray-400 px-2 py-0.5 rounded">Per-user</span>
+                    <h2 class="text-lg font-semibold text-gray-200">{{ self.tr("integrations-ssh-title") }}</h2>
+                    <span class="text-xs bg-vouch-surface text-gray-400 px-2 py-0.5 rounded">{{ self.tr("integrations-badge-per-user") }}</span>
                 </div>
-                <p class="text-gray-400 text-sm mb-4">Get short-lived SSH certificates signed by Vouch's CA.</p>
+                <p class="text-gray-400 text-sm mb-4">{{ self.tr("integrations-ssh-desc") }}</p>
 
                 {% if let Some(pub_key) = ssh_ca_public_key %}
                 <div class="bg-vouch-surface rounded-lg p-3 space-y-2">
                     <div>
-                        <p class="text-xs text-gray-500 mb-1">Get a certificate:</p>
+                        <p class="text-xs text-gray-500 mb-1">{{ self.tr("integrations-ssh-get-cert") }}</p>
                         <code class="block bg-vouch-bg px-2 py-1 rounded text-gray-300 text-xs">vouch credential ssh</code>
                     </div>
                     <div>
-                        <p class="text-xs text-gray-500 mb-1">CA public key (add to <code class="bg-vouch-bg px-1 rounded">/etc/ssh/ca.pub</code> on your servers):</p>
+                        <p class="text-xs text-gray-500 mb-1">{{ self.tr("integrations-ssh-capub-prefix") }} <code class="bg-vouch-bg px-1 rounded">/etc/ssh/ca.pub</code> {{ self.tr("integrations-ssh-capub-suffix") }}</p>
                         <div class="relative group">
                             <code class="block bg-vouch-bg px-2 py-1 rounded text-gray-300 text-xs break-all select-all">{{ pub_key }}</code>
                         </div>
@@ -91,9 +91,9 @@
                 </div>
                 {% else %}
                 <div class="bg-yellow-900/20 border border-yellow-700/30 rounded-lg p-3">
-                    <p class="text-sm text-yellow-300">SSH CA not configured on this server.</p>
+                    <p class="text-sm text-yellow-300">{{ self.tr("integrations-ssh-not-configured") }}</p>
                     {% if auth.is_org_admin %}
-                    <p class="text-xs text-yellow-300/60 mt-1">Set <code class="bg-yellow-900/30 px-1 rounded">VOUCH_SSH_CA_KEY</code> to enable. See the <a href="https://github.com/vouch-sh/vouch/blob/main/docs/src/operations/key-management.md" target="_blank" rel="noopener noreferrer" class="underline hover:text-yellow-300">key management guide</a>.</p>
+                    <p class="text-xs text-yellow-300/60 mt-1">{{ self.tr("integrations-ssh-set-prefix") }} <code class="bg-yellow-900/30 px-1 rounded">VOUCH_SSH_CA_KEY</code> {{ self.tr("integrations-ssh-set-mid") }} <a href="https://github.com/vouch-sh/vouch/blob/main/docs/src/operations/key-management.md" target="_blank" rel="noopener noreferrer" class="underline hover:text-yellow-300">{{ self.tr("integrations-ssh-guide-link") }}</a>.</p>
                     {% endif %}
                 </div>
                 {% endif %}
@@ -101,8 +101,8 @@
         </div>
 
         <p class="mt-6 text-sm text-gray-500">
-            Looking for AWS, EKS, Docker, or other integrations? See the
-            <a href="https://vouch.sh/docs/" target="_blank" rel="noopener noreferrer" class="text-vouch-accent hover:text-vouch-accent-hover">setup guide</a>.
+            {{ self.tr("integrations-more-prefix") }}
+            <a href="https://vouch.sh/docs/" target="_blank" rel="noopener noreferrer" class="text-vouch-accent hover:text-vouch-accent-hover">{{ self.tr("integrations-setup-guide-link") }}</a>.
         </p>
     </div>
 </div>

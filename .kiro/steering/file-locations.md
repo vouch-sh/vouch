@@ -20,6 +20,7 @@
 | Database modules | `crates/vouch-server/src/db/` (pool.rs, users.rs, sessions.rs, etc.) |
 | DB migrations | `crates/vouch-server/migrations/{sqlite,postgres}/` |
 | HTML templates | `crates/vouch-server/templates/` |
+| i18n catalogs (Fluent) | `crates/vouch-server/i18n/<bcp47-tag>/vouch.ftl` |
 | CSS source | `crates/vouch-server/styles/input.css` |
 | Static assets | `crates/vouch-server/static/` |
 | HTTP signatures | `crates/vouch-httpsig/src/` |
@@ -52,3 +53,8 @@
 2. Add service logic in `crates/vouch-server/src/services/`
 3. Register route in the router
 4. Add integration tests in `crates/vouch-tests/`
+
+### New UI Language
+1. Copy `crates/vouch-server/i18n/en-US/` to `crates/vouch-server/i18n/<bcp47-tag>/` and translate `vouch.ftl` (keep all message IDs)
+2. Insert the language into `JS_BUNDLES` in `crates/vouch-server/src/infra/i18n.rs::build_js_bundles`
+3. The `i18n_layer` middleware negotiates the locale from `Accept-Language` automatically — no handler changes

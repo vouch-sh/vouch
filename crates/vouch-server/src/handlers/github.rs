@@ -10,7 +10,6 @@
 //! - GET /github/success - Success page after connection
 
 use crate::db;
-use crate::handlers::HasVersion;
 use crate::handlers::session::AuthContext;
 use crate::services::error::ServiceError;
 use crate::services::integrations::github::{
@@ -246,6 +245,13 @@ pub(crate) struct GitHubReconnectForm {
 // ============================================================================
 
 /// Convert a GitHubError to an error template response.
+///
+/// **Implicit dependency:** resolves the page context via
+/// [`PageContext::current`], which reads the `REQUEST_I18N` task-local set by
+/// `crate::infra::i18n::i18n_layer`. That layer is applied at the merged
+/// router in `build_app`, so any handler routed there is covered. A future
+/// caller from a non-HTTP context (e.g. a background job) would silently fall
+/// back to `en-US`.
 fn error_response(error: GitHubError) -> Response {
     GitHubErrorTemplate {
         title: error.title().to_string(),

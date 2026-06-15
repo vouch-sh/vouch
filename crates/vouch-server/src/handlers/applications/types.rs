@@ -5,8 +5,7 @@
 //! both the web UI and API handlers.
 
 use crate::db::{AccessScope, OAuthClient};
-use crate::handlers::HasVersion;
-use crate::impl_template_response;
+use crate::{impl_template_helpers, impl_template_response};
 use askama::Template;
 use axum::{
     http::StatusCode,
@@ -162,10 +161,11 @@ impl_template_response!(
     ApplicationErrorTemplate,
 );
 
-impl HasVersion for ApplicationUnauthorizedTemplate {}
+// `ApplicationUnauthorizedTemplate` keeps a custom `IntoResponse` that returns
+// 401 instead of 200. Wire up the shared i18n shims (`tr`, `lang`, …) via
+// `impl_template_helpers!` while keeping the bespoke `IntoResponse` below.
+impl_template_helpers!(ApplicationUnauthorizedTemplate);
 
-// Note: ApplicationUnauthorizedTemplate needs a custom implementation
-// because it returns a different status code
 impl IntoResponse for ApplicationUnauthorizedTemplate {
     fn into_response(self) -> Response {
         match self.render() {

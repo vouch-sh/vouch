@@ -12,7 +12,7 @@
         btn.disabled = true;
         btn.classList.add('opacity-60', 'cursor-not-allowed');
         status.className = 'status-waiting mb-6';
-        status.textContent = 'Touch your security key when it blinks...';
+        status.textContent = t('login-js-touch');
 
         try {
             var startResp = await fetch('/login/webauthn/start', {
@@ -23,7 +23,7 @@
 
             if (!startResp.ok) {
                 var err = await startResp.json();
-                throw new Error(err.message || 'Failed to start authentication');
+                throw new Error(err.message || t('login-js-start-failed'));
             }
 
             var options = await startResp.json();
@@ -40,7 +40,7 @@
                 }
             };
 
-            status.textContent = 'Waiting for security key...';
+            status.textContent = t('login-js-waiting');
             var credential = await navigator.credentials.get(credentialRequestOptions);
 
             var assertionResponse = credential.response;
@@ -61,26 +61,26 @@
 
             if (!completeResp.ok) {
                 var errResp = await completeResp.json();
-                throw new Error(errResp.message || 'Failed to complete authentication');
+                throw new Error(errResp.message || t('login-js-complete-failed'));
             }
 
             var result = await completeResp.json();
 
             if (result.success && result.redirect_url) {
                 status.className = 'status-success mb-6';
-                status.textContent = 'Success! Redirecting...';
+                status.textContent = t('login-js-success-redirect');
                 window.location.href = result.redirect_url;
             } else if (result.error) {
                 throw new Error(result.error);
             } else {
                 status.className = 'status-success mb-6';
-                status.textContent = 'Signed in successfully!';
+                status.textContent = t('login-js-signed-in');
                 window.location.href = '/';
             }
 
         } catch (err) {
             status.className = 'status-error mb-6';
-            status.textContent = 'Error: ' + webauthnError(err);
+            status.textContent = t('login-js-error', { message: webauthnError(err) });
             btn.disabled = false;
             btn.classList.remove('opacity-60', 'cursor-not-allowed');
         }

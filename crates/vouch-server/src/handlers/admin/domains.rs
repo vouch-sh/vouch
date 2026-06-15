@@ -7,7 +7,6 @@
 
 use crate::AppState;
 use crate::db;
-use crate::handlers::HasVersion;
 use crate::handlers::admin::flash;
 use crate::handlers::browser_login::validate_origin;
 use crate::handlers::session::{AuthContext, extract_org_admin, get_resource_auth_context};

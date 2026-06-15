@@ -4,8 +4,12 @@
 use super::extractors::ClientInfo;
 use crate::AppState;
 use crate::db::{self, AuthEventParams, AuthEventType};
-use crate::handlers::HasVersion;
 use crate::impl_template_response;
+// This file's flows are heavily branched into error/redirect paths constructed
+// from helpers without easy access to the request-scoped `I18nContext`, so
+// every template here uses `PageContext::current()` (en-US). Upgrading any
+// individual handler to thread per-request locale is a localized change once
+// a second language ships.
 use askama::Template;
 use axum::{
     Form, Json,

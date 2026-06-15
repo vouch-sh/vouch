@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Install page handler.
 
-use crate::handlers::HasVersion;
 use crate::handlers::session::{AuthContext, get_auth_context};
 use crate::{AppState, impl_template_response};
 use askama::Template;

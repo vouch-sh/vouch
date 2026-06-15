@@ -23,7 +23,6 @@ use super::extractors::ClientInfo;
 use crate::AppState;
 use crate::crypto::generate_challenge;
 use crate::db::{self, AuthEventParams, AuthEventType};
-use crate::handlers::HasVersion;
 use crate::handlers::session::{create_session_cookie, get_auth_context};
 use crate::impl_template_response;
 use crate::redact_email;

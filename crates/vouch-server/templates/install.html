@@ -1,24 +1,24 @@
 {% extends "base.html" %}
 {% import "macros/auth.html" as auth_macros %}
 
-{% block title %}Developer Setup - Vouch{% endblock %}
+{% block title %}{{ self.tr("install-page-title") }}{% endblock %}
 
 {% block header_right %}
-{{ auth_macros::header_auth(auth) }}
+{{ auth_macros::header_auth(auth, self) }}
 {% endblock %}
 
 {% block content %}
 <div class="flex items-center justify-center flex-1 p-5">
     <div class="card max-w-xl w-full">
-        <h1 class="text-3xl font-bold text-gray-200 mb-2">Get Started with Vouch</h1>
-        <p class="text-gray-400 mb-8">Install the CLI and enroll your YubiKey</p>
+        <h1 class="text-3xl font-bold text-gray-200 mb-2">{{ self.tr("install-heading") }}</h1>
+        <p class="text-gray-400 mb-8">{{ self.tr("install-subtitle") }}</p>
 
         <!-- Prerequisites -->
         <div class="mb-8 p-4 bg-vouch-bg rounded-lg border border-vouch-border">
-            <div class="text-sm font-semibold text-gray-400 uppercase tracking-wide mb-2">Prerequisites</div>
+            <div class="text-sm font-semibold text-gray-400 uppercase tracking-wide mb-2">{{ self.tr("install-prereqs-label") }}</div>
             <ul class="text-sm text-gray-400 space-y-1">
-                <li>FIDO2 security key (YubiKey 5 series recommended)</li>
-                <li>Server URL from your admin (or use <code class="text-gray-300">{{ server_url }}</code>)</li>
+                <li>{{ self.tr("install-prereq-key") }}</li>
+                <li>{{ self.tr("install-prereq-server-prefix") }} <code class="text-gray-300">{{ server_url }}</code>)</li>
             </ul>
         </div>
 
@@ -26,7 +26,7 @@
         <div class="mb-8">
             <div class="flex items-center gap-3 mb-4">
                 <span class="step-number">1</span>
-                <span class="text-lg font-semibold text-gray-200">Install the CLI</span>
+                <span class="text-lg font-semibold text-gray-200">{{ self.tr("install-step1-title") }}</span>
             </div>
             <div class="ml-11">
                 <div class="flex gap-2 mb-2">
@@ -39,7 +39,7 @@
                 <div id="macos-tab" class="tab-content">
                     <div class="code-block relative">
                         <span class="text-gray-500 mr-2">$</span>brew install vouch-sh/tap/vouch
-                        <button data-copy-text="brew install vouch-sh/tap/vouch" class="absolute right-3 top-1/2 -translate-y-1/2 px-2.5 py-1.5 bg-vouch-raised text-gray-400 rounded text-xs hover:bg-vouch-border hover:text-white transition-colors">Copy</button>
+                        <button data-copy-text="brew install vouch-sh/tap/vouch" class="absolute right-3 top-1/2 -translate-y-1/2 px-2.5 py-1.5 bg-vouch-raised text-gray-400 rounded text-xs hover:bg-vouch-border hover:text-white transition-colors">{{ self.tr("common-copy") }}</button>
                     </div>
                 </div>
 
@@ -80,23 +80,21 @@
                                 <path fill-rule="evenodd" d="M8.485 2.495c.673-1.167 2.357-1.167 3.03 0l6.28 10.875c.673 1.167-.17 2.625-1.516 2.625H3.72c-1.347 0-2.189-1.458-1.515-2.625L8.485 2.495zM10 5a.75.75 0 01.75.75v3.5a.75.75 0 01-1.5 0v-3.5A.75.75 0 0110 5zm0 9a1 1 0 100-2 1 1 0 000 2z" clip-rule="evenodd"/>
                             </svg>
                             <div>
-                                <p class="text-amber-500 font-semibold text-sm">Limited Windows Support</p>
+                                <p class="text-amber-500 font-semibold text-sm">{{ self.tr("install-win-limited-title") }}</p>
                                 <p class="text-gray-300 text-sm mt-1">
-                                    The Vouch agent and SSH integration are not available on Windows.
-                                    Only basic authentication and credential exchange are supported.
+                                    {{ self.tr("install-win-limited-body") }}
                                 </p>
                             </div>
                         </div>
                     </div>
 
                     <p class="text-sm text-gray-300 mb-3">
-                        Download the Windows binary from the
-                        <a href="https://github.com/vouch-sh/vouch/releases/latest" class="text-vouch-accent hover:text-vouch-accent-hover">releases page</a>,
-                        extract the zip file, and add <code class="text-gray-200">vouch.exe</code> to a directory in your PATH.
+                        {{ self.tr("install-win-download-prefix") }}
+                        <a href="https://github.com/vouch-sh/vouch/releases/latest" class="text-vouch-accent hover:text-vouch-accent-hover">{{ self.tr("install-win-releases-link") }}</a>{{ self.tr("install-win-download-mid") }} <code class="text-gray-200">vouch.exe</code> {{ self.tr("install-win-download-suffix") }}
                     </p>
 
                     <p class="text-sm text-gray-400">
-                        <strong class="text-gray-300">Supported:</strong>
+                        <strong class="text-gray-300">{{ self.tr("install-win-supported-label") }}</strong>
                         <code class="text-gray-300">enroll</code>,
                         <code class="text-gray-300">login</code>,
                         <code class="text-gray-300">credential aws</code>,
@@ -105,7 +103,7 @@
                 </div>
 
                 {% if has_downloads %}
-                <p class="mt-4 text-sm text-gray-400">Or download directly:</p>
+                <p class="mt-4 text-sm text-gray-400">{{ self.tr("install-download-directly") }}</p>
                 <div class="flex flex-wrap gap-3 mt-4">
                     {% if let Some(url) = download_macos %}
                     <a href="{{ url }}" class="download-btn">
@@ -131,14 +129,14 @@
         <div class="mb-8">
             <div class="flex items-center gap-3 mb-4">
                 <span class="step-number">2</span>
-                <span class="text-lg font-semibold text-gray-200">Enroll your YubiKey</span>
+                <span class="text-lg font-semibold text-gray-200">{{ self.tr("install-step2-title") }}</span>
             </div>
             <div class="ml-11">
                 <div class="code-block relative" data-server-url="{{ server_url }}">
                     <span class="text-gray-500 mr-2">$</span><span id="step2-command">vouch enroll --server {{ server_url }}</span>
-                    <button id="step2-copy-btn" data-copy-text="vouch enroll --server {{ server_url }}" class="absolute right-3 top-1/2 -translate-y-1/2 px-2.5 py-1.5 bg-vouch-raised text-gray-400 rounded text-xs hover:bg-vouch-border hover:text-white transition-colors">Copy</button>
+                    <button id="step2-copy-btn" data-copy-text="vouch enroll --server {{ server_url }}" class="absolute right-3 top-1/2 -translate-y-1/2 px-2.5 py-1.5 bg-vouch-raised text-gray-400 rounded text-xs hover:bg-vouch-border hover:text-white transition-colors">{{ self.tr("common-copy") }}</button>
                 </div>
-                <p class="mt-2 text-sm text-gray-400">This opens a browser to verify your identity and register your YubiKey.</p>
+                <p class="mt-2 text-sm text-gray-400">{{ self.tr("install-step2-body") }}</p>
             </div>
         </div>
 
@@ -146,7 +144,7 @@
         <div>
             <div class="flex items-center gap-3 mb-4">
                 <span class="step-number">3</span>
-                <span class="text-lg font-semibold text-gray-200">Daily login</span>
+                <span class="text-lg font-semibold text-gray-200">{{ self.tr("install-step3-title") }}</span>
             </div>
             <div class="ml-11">
                 <div class="code-block">
@@ -156,7 +154,7 @@
                     <div>Touch your YubiKey...</div>
                     <div class="text-vouch-accent">&#x2713; Authenticated for 8 hours</div>
                 </div>
-                <p class="mt-2 text-sm text-gray-400">After login, your identity is available to SSH, AWS, Git, and other tools automatically.</p>
+                <p class="mt-2 text-sm text-gray-400">{{ self.tr("install-step3-body") }}</p>
             </div>
         </div>
     </div>

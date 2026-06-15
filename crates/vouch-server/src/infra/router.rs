@@ -172,6 +172,13 @@ pub fn build_app(state: Arc<AppState>, config: &config::ServerConfig) -> anyhow:
         config,
         &state.idps,
     )?
+    // Install request-scoped i18n for every route. The UI router renders
+    // templates via `PageContext::current()`, but several API routes also
+    // return HTML (e.g. `/oauth/authorize` consent/error pages,
+    // `/oauth/callback` enrollment errors), so the layer is applied at the
+    // merged-router level rather than only inside `build_ui_routes`. Adding
+    // a new language is then just dropping an `i18n/<tag>/vouch.ftl` catalog.
+    .layer(axum::middleware::from_fn(crate::infra::i18n::i18n_layer))
     .layer(axum::middleware::from_fn(metrics_middleware))
     // Global request timeout: 30 seconds.
     .layer(TimeoutLayer::with_status_code(
@@ -706,6 +713,8 @@ fn build_ui_routes(config: &config::ServerConfig) -> anyhow::Result<Router<Arc<A
         // Landing page with smart routing
         .route("/", get(handlers::home::home_page))
         .route("/install", get(handlers::install::install_page))
+        // Client-side translation bundle (CSP script-src 'self'); cached via ETag.
+        .route("/i18n.js", get(crate::infra::i18n::i18n_js_handler))
         .route("/health", get(|| async { "ok" }))
         .route("/health/ready", get(readiness_handler))
         // Legal pages (redirect to vouch.sh)

@@ -13,7 +13,6 @@ use super::{
 use crate::AppState;
 use crate::db::ResponseMode;
 use crate::db::{self, Authenticator, CreatePendingOAuthParams, OAuthClient, Session, User};
-use crate::handlers::HasVersion;
 use crate::impl_template_response;
 use crate::services::oidc::ScopeSet;
 use crate::services::oidc::authorization::{

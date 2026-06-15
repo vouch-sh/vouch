@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en" class="{% block html_class %}{% endblock %}">
+<html lang="{{ self.lang() }}" dir="{{ self.dir() }}" class="{% block html_class %}{% endblock %}">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -50,19 +50,20 @@
         {% block content %}{% endblock %}
     </main>
     <footer class="py-6 text-center text-xs text-gray-500">
-        <a href="/install" class="text-vouch-accent hover:text-vouch-accent-hover">Install</a>
+        <a href="/install" class="text-vouch-accent hover:text-vouch-accent-hover">{{ self.tr("footer-install") }}</a>
         <span class="mx-2">&middot;</span>
-        <a href="https://vouch.sh/docs/" class="text-vouch-accent hover:text-vouch-accent-hover">Docs</a>
+        <a href="https://vouch.sh/docs/" class="text-vouch-accent hover:text-vouch-accent-hover">{{ self.tr("footer-docs") }}</a>
         <span class="mx-2">&middot;</span>
-        <a href="https://vouch.sh/privacy/" class="text-vouch-accent hover:text-vouch-accent-hover">Privacy</a>
+        <a href="https://vouch.sh/privacy/" class="text-vouch-accent hover:text-vouch-accent-hover">{{ self.tr("footer-privacy") }}</a>
         <span class="mx-2">&middot;</span>
-        <a href="https://vouch.sh/terms/" class="text-vouch-accent hover:text-vouch-accent-hover">Terms</a>
+        <a href="https://vouch.sh/terms/" class="text-vouch-accent hover:text-vouch-accent-hover">{{ self.tr("footer-terms") }}</a>
         <span class="mx-2">&middot;</span>
-        <a href="https://vouch-sh.statuspage.io/" target="_blank" rel="noopener noreferrer" class="text-vouch-accent hover:text-vouch-accent-hover">Status</a>
+        <a href="https://vouch-sh.statuspage.io/" target="_blank" rel="noopener noreferrer" class="text-vouch-accent hover:text-vouch-accent-hover">{{ self.tr("footer-status") }}</a>
         <span class="mx-2">&middot;</span>
-        <a href="https://github.com/vouch-sh/vouch/releases/tag/v{{ self.version() }}" target="_blank" rel="noopener noreferrer" class="text-vouch-accent hover:text-vouch-accent-hover">v{{ self.version() }}</a>
-        <div class="mt-2">Copyright 2026 <a href="https://smoketurner.com" target="_blank" rel="noopener noreferrer" class="hover:underline">Smoke Turner, LLC</a></div>
+        <a href="https://github.com/vouch-sh/vouch/releases/tag/v{{ self.version() }}" target="_blank" rel="noopener noreferrer" class="text-vouch-accent hover:text-vouch-accent-hover">{{ self.tr1("footer-version", "version", self.version()) }}</a>
+        <div class="mt-2">{{ self.tr1("footer-copyright", "year", "2026") }} <a href="https://smoketurner.com" target="_blank" rel="noopener noreferrer" class="hover:underline">Smoke Turner, LLC</a></div>
     </footer>
+    <script src="/i18n.js"></script>
     {% block scripts %}{% endblock %}
 </body>
 </html>
