@@ -22,7 +22,9 @@ vouch/
 └── packaging/            # AMI and post-install scripts
 ```
 
-**Agent IPC:** The CLI communicates with the agent daemon over a Unix socket (`~/.vouch/agent.sock`) using JSON-RPC 2.0 with 4-byte length-prefixed messages.
+**Agent IPC:** The CLI communicates with the agent daemon over a Unix socket (`$XDG_RUNTIME_DIR/vouch/agent.sock`) using JSON-RPC 2.0 with 4-byte length-prefixed messages.
+
+**File locations:** Vouch follows the XDG Base Directory Specification on all platforms (including macOS, using `~/.config` rather than `~/Library/Application Support`). Path resolution is centralized in `crates/vouch-common/src/paths.rs`: config → `$XDG_CONFIG_HOME/vouch/` (`config.json`), state → `$XDG_STATE_HOME/vouch/` (`cookie.txt`, `audit.log`), data → `$XDG_DATA_HOME/vouch/` (`client_key.json` keyring fallback), cache → `$XDG_CACHE_HOME/vouch/` (`agent.pid`, `agent.log`), runtime → `$XDG_RUNTIME_DIR/vouch/` (sockets, with a cache-dir fallback when unset). `paths::migrate_legacy_layout()` relocates a legacy flat `~/.vouch/` on first run; it is called early in both the CLI and agent entrypoints. Do not reintroduce ad-hoc `dirs::home_dir().join(".vouch")` path construction — use the `paths` helpers.
 
 **Database:** vouch-server uses SQLite (dev), PostgreSQL (prod), and Aurora DSQL via sqlx with a `Pool` enum abstraction (`db/pool.rs`) that dispatches at runtime based on the `DATABASE_URL` scheme. Query building uses `sea-query` for dynamic SQL. DSQL endpoints (hostname contains `.dsql.` and ends `.on.aws`) auto-generate IAM auth tokens. Migrations live in `crates/vouch-server/migrations/{sqlite,postgres}/`. Domain modules are in `crates/vouch-server/src/db/` (users, sessions, authenticators, oauth, scim, etc.).
 

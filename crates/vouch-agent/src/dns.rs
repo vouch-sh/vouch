@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
-//! Initialize the process-wide DoH resolver from `~/.vouch/config.json` + env.
+//! Initialize the process-wide DoH resolver from
+//! `$XDG_CONFIG_HOME/vouch/config.json` + env.
 //!
 //! Called once from `main.rs` before any HTTP traffic. Mirrors the CLI's
 //! `vouch_cli::dns::init` so that the agent honors the same configuration.

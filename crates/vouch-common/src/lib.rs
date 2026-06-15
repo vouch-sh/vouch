@@ -12,6 +12,7 @@ pub mod fido2_types;
 pub mod fixtures;
 pub mod fs;
 pub mod http;
+pub mod paths;
 pub mod posture;
 pub(crate) mod url;
 

@@ -2,7 +2,7 @@
 //! Session recovery from persisted credentials on disk.
 //!
 //! On startup, the agent attempts to restore a valid session by reading
-//! `~/.vouch/config.json`, validating the token against the server, and
+//! `$XDG_CONFIG_HOME/vouch/config.json`, validating the token against the server, and
 //! populating in-memory state.
 //!
 //! This is best-effort: all errors are logged and never block startup.
@@ -116,7 +116,7 @@ async fn try_recover_inner(
     Ok(true)
 }
 
-/// Read token and server URL from `~/.vouch/config.json`.
+/// Read token and server URL from `$XDG_CONFIG_HOME/vouch/config.json`.
 ///
 /// Returns `Some((token, server_url))` if both are present, `None` otherwise.
 fn read_credentials_from_config() -> Result<Option<(String, String)>, Box<dyn std::error::Error>> {

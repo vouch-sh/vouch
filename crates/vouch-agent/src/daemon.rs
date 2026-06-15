@@ -24,19 +24,17 @@ pub enum DaemonizeResult {
     Skipped,
 }
 
-/// Get the path to the PID file.
+/// Get the path to the PID file (`$XDG_CACHE_HOME/vouch/agent.pid`).
 pub fn pid_file_path() -> Result<PathBuf> {
-    let cache_dir = dirs::cache_dir()
+    let vouch_dir = vouch_common::paths::cache_dir()
         .ok_or_else(|| AgentError::Config("Could not determine cache directory".to_string()))?;
-    let vouch_dir = cache_dir.join("vouch");
     Ok(vouch_dir.join("agent.pid"))
 }
 
-/// Get the path to the log file.
+/// Get the path to the log file (`$XDG_CACHE_HOME/vouch/agent.log`).
 pub(crate) fn log_file_path() -> Result<PathBuf> {
-    let cache_dir = dirs::cache_dir()
+    let vouch_dir = vouch_common::paths::cache_dir()
         .ok_or_else(|| AgentError::Config("Could not determine cache directory".to_string()))?;
-    let vouch_dir = cache_dir.join("vouch");
     Ok(vouch_dir.join("agent.log"))
 }
 

@@ -5,7 +5,7 @@
 //! ([draft-miller-ssh-agent](https://datatracker.ietf.org/doc/html/draft-miller-ssh-agent))
 //! to provide seamless SSH authentication using Vouch-issued certificates.
 //!
-//! The agent listens on `~/.vouch/ssh-agent.sock` and handles:
+//! The agent listens on `$XDG_RUNTIME_DIR/vouch/ssh-agent.sock` and handles:
 //! - `SSH_AGENTC_REQUEST_IDENTITIES` - Returns available SSH certificates
 //! - `SSH_AGENTC_SIGN_REQUEST` - Signs data with the user's private key
 
@@ -41,7 +41,7 @@ pub(crate) const MIN_REFRESH_INTERVAL_SECONDS: i64 = 5 * 60;
 /// Default SSH key path for lazy disk loading.
 pub(crate) const DEFAULT_KEY_NAME: &str = "id_ed25519_vouch";
 
-/// Get the SSH agent socket path (~/.vouch/ssh-agent.sock).
+/// Get the SSH agent socket path (`$XDG_RUNTIME_DIR/vouch/ssh-agent.sock`).
 pub fn ssh_agent_socket_path() -> Result<PathBuf> {
     Ok(vouch_dir()?.join("ssh-agent.sock"))
 }

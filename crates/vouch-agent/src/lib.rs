@@ -6,7 +6,8 @@
 //!
 //! # Architecture
 //!
-//! The agent runs as a background daemon listening on `~/.vouch/agent.sock`.
+//! The agent runs as a background daemon listening on
+//! `$XDG_RUNTIME_DIR/vouch/agent.sock`.
 //! It uses a JSON-RPC 2.0 protocol with 4-byte length-prefixed messages.
 //!
 //! # Example (CLI usage)
