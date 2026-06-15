@@ -172,12 +172,29 @@ fn parse_accept_language(header: &str) -> Vec<LanguageIdentifier> {
             continue;
         };
         let mut quality = 1.0_f32;
+        let mut valid = true;
         for segment in segments {
-            if let Some(value) = segment.trim().strip_prefix("q=")
-                && let Ok(parsed) = value.trim().parse::<f32>()
-            {
-                quality = parsed;
+            let Some(value) = segment.trim().strip_prefix("q=") else {
+                continue;
+            };
+            let Ok(parsed) = value.trim().parse::<f32>() else {
+                continue;
+            };
+            // RFC 9110 §12.4.2: q-values are bounded to `[0, 1]`. Reject
+            // anything else — `q=5` or `q=-1` would otherwise mis-rank.
+            if !(0.0..=1.0).contains(&parsed) {
+                valid = false;
+                break;
             }
+            quality = parsed;
+        }
+        // RFC 9110 §12.4.2: `q=0` means "not acceptable" — drop the entry.
+        // NaN can't reach this point: the range check above uses
+        // `Range::contains`, which returns `false` for NaN and sets `valid`
+        // to `false`. So `quality` here is either the default `1.0` or a
+        // value that already passed `[0, 1]`.
+        if !valid || quality <= 0.0 {
+            continue;
         }
         weighted.push((quality, lang));
     }
@@ -267,6 +284,13 @@ const T_RUNTIME_JS: &str = r"window.t=function(k,a){var s=Object.prototype.hasOw
 /// defined above. Catalog values keep Fluent placeables unresolved (e.g. the
 /// literal `{$name}`) so the browser can substitute runtime values via `t(key,
 /// args)`.
+///
+/// Note on Unicode line separators: `serde_json` does not escape U+2028 or
+/// U+2029. That is safe here because `/i18n.js` is served as an external script
+/// (CSP `script-src 'self'`), where those code points are valid in string
+/// literals. If a future change ever inlines this output into HTML, switch to
+/// an escaping serializer — inline `<script>` parsing treats U+2028/2029 as
+/// line terminators.
 fn render_i18n_js(ctx: &I18nContext) -> String {
     let mut map = serde_json::Map::with_capacity(JS_I18N_KEYS.len());
     for key in JS_I18N_KEYS {
@@ -452,6 +476,61 @@ mod tests {
     fn malformed_header_does_not_panic() {
         let _ = parse_accept_language(";;;,,q=,=,*;q=x");
         let _ = negotiate(Some(""));
+    }
+
+    #[test]
+    fn empty_accept_language_resolves_to_en_us() {
+        assert_eq!(negotiate(Some("")).lang(), "en-US");
+    }
+
+    #[test]
+    fn out_of_range_quality_is_dropped() {
+        // q=5 and q=-1 are outside RFC 9110's [0,1] band and must not mis-rank.
+        let parsed = parse_accept_language("fr;q=5, de;q=-1, en;q=0.7");
+        let tags: Vec<String> = parsed.iter().map(ToString::to_string).collect();
+        assert_eq!(tags, vec!["en"]);
+    }
+
+    #[test]
+    fn zero_quality_is_dropped() {
+        // RFC 9110 §12.4.2: q=0 means "not acceptable".
+        let parsed = parse_accept_language("fr;q=0, en;q=0.5");
+        let tags: Vec<String> = parsed.iter().map(ToString::to_string).collect();
+        assert_eq!(tags, vec!["en"]);
+    }
+
+    #[tokio::test]
+    async fn js_handler_returns_etag_and_serves_304_on_match() {
+        // No If-None-Match → 200 with body and ETag.
+        let response = i18n_js_handler(negotiate(None), HeaderMap::new()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let etag = response
+            .headers()
+            .get(header::ETAG)
+            .and_then(|value| value.to_str().ok())
+            .expect("response should carry an ETag")
+            .to_owned();
+        assert!(etag.starts_with('"') && etag.ends_with('"'));
+        assert_eq!(
+            response.headers().get(header::VARY).and_then(|v| v.to_str().ok()),
+            Some("Accept-Language")
+        );
+
+        // Matching If-None-Match → 304 with no body.
+        let mut headers = HeaderMap::new();
+        headers.insert(header::IF_NONE_MATCH, etag.parse().unwrap());
+        let response = i18n_js_handler(negotiate(None), headers).await;
+        assert_eq!(response.status(), StatusCode::NOT_MODIFIED);
+        assert_eq!(
+            response.headers().get(header::ETAG).and_then(|v| v.to_str().ok()),
+            Some(etag.as_str())
+        );
+
+        // Mismatched If-None-Match → 200 again.
+        let mut headers = HeaderMap::new();
+        headers.insert(header::IF_NONE_MATCH, "\"deadbeef\"".parse().unwrap());
+        let response = i18n_js_handler(negotiate(None), headers).await;
+        assert_eq!(response.status(), StatusCode::OK);
     }
 
     /// Every `self.tr*("id")` / `page.tr*("id")` key referenced by a template
