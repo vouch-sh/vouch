@@ -139,7 +139,7 @@ pub(crate) async fn store_session_in_agent(
     }
 }
 
-/// Write a Netscape cookie file for `curl -b ~/.vouch/cookie.txt`.
+/// Write a Netscape cookie file for `curl -b ~/.local/state/vouch/cookie.txt`.
 ///
 /// Best-effort: logs and swallows errors (cookie file is a convenience,
 /// never blocks the login flow).

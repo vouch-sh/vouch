@@ -8,18 +8,21 @@ use tokio::net::{UnixListener, UnixStream};
 /// Default socket filename.
 const SOCKET_FILENAME: &str = "agent.sock";
 
-/// Get the vouch directory (~/.vouch).
+/// Get the vouch runtime directory (`$XDG_RUNTIME_DIR/vouch`, or a `0700`
+/// cache fallback when `XDG_RUNTIME_DIR` is unset, e.g. on macOS).
+///
+/// Used for Unix sockets, which belong in the runtime directory: a private,
+/// user-owned location cleared on logout.
 ///
 /// # Errors
 ///
-/// Returns `AgentError::SocketPath` if the home directory cannot be determined.
+/// Returns `AgentError::SocketPath` if the directory cannot be determined.
 pub(crate) fn vouch_dir() -> Result<PathBuf> {
-    let home = dirs::home_dir()
-        .ok_or_else(|| AgentError::SocketPath("could not determine home directory".to_string()))?;
-    Ok(home.join(".vouch"))
+    vouch_common::paths::runtime_dir()
+        .ok_or_else(|| AgentError::SocketPath("could not determine runtime directory".to_string()))
 }
 
-/// Get the socket path (~/.vouch/agent.sock).
+/// Get the socket path (`$XDG_RUNTIME_DIR/vouch/agent.sock`).
 ///
 /// # Errors
 ///
@@ -142,11 +145,11 @@ pub(crate) fn get_peer_credentials(stream: &UnixStream) -> Result<PeerCredential
     })
 }
 
-/// Validate that the vouch directory is safe to use.
+/// Validate that the vouch runtime directory is safe to use.
 ///
-/// Checks that `~/.vouch/` is not a symlink and is owned by the current user.
-/// Prevents symlink attacks where an attacker pre-creates the directory pointing
-/// to an attacker-controlled location.
+/// Checks that the socket directory is not a symlink and is owned by the
+/// current user. Prevents symlink attacks where an attacker pre-creates the
+/// directory pointing to an attacker-controlled location.
 ///
 /// # Errors
 ///

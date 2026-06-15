@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Structured audit log for security-relevant agent events.
 //!
-//! Writes newline-delimited JSON to `~/.vouch/audit.log`. Each line is a
+//! Writes newline-delimited JSON to `$XDG_STATE_HOME/vouch/audit.log`
+//! (`~/.local/state/vouch/audit.log` by default). Each line is a
 //! self-contained JSON object describing a security-relevant event.
 //!
 //! This composes with external log aggregation tools (jq, Datadog, Splunk)
@@ -9,9 +10,8 @@
 
 use serde::Serialize;
 use std::io::Write;
+use std::path::PathBuf;
 use tracing::debug;
-
-use crate::socket::vouch_dir;
 
 /// Maximum audit log file size (10 MB). When exceeded, the log is rotated.
 const MAX_LOG_SIZE: u64 = 10 * 1024 * 1024;
@@ -77,7 +77,8 @@ struct AuditRecord {
     event: AuditEvent,
 }
 
-/// Log a security-relevant audit event to `~/.vouch/audit.log`.
+/// Log a security-relevant audit event to the audit log
+/// (`$XDG_STATE_HOME/vouch/audit.log`).
 ///
 /// Best-effort: failures are logged at debug level and never block the agent.
 pub(crate) fn log_event(event: AuditEvent) {
@@ -91,12 +92,26 @@ pub(crate) fn log_event(event: AuditEvent) {
     }
 }
 
+/// Resolve the audit log path (`$XDG_STATE_HOME/vouch/audit.log`).
+fn audit_log_path() -> std::io::Result<PathBuf> {
+    vouch_common::paths::audit_log_file()
+        .ok_or_else(|| std::io::Error::other("cannot determine state directory"))
+}
+
 /// Write a single audit event to the log file.
 fn write_event(record: &AuditRecord) -> std::io::Result<()> {
-    let dir = vouch_dir()
-        .map_err(|e| std::io::Error::other(format!("cannot determine vouch dir: {e}")))?;
+    let log_path = audit_log_path()?;
+    let dir = log_path
+        .parent()
+        .ok_or_else(|| std::io::Error::other("audit log path has no parent"))?;
 
-    let log_path = dir.join("audit.log");
+    // Ensure the state directory exists with owner-only permissions.
+    std::fs::create_dir_all(dir)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _chmod = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
+    }
 
     // Rotate if file exceeds max size
     if let Ok(metadata) = std::fs::metadata(&log_path)

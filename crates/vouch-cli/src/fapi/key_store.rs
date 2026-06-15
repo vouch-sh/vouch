@@ -106,7 +106,7 @@ pub fn delete_from_keychain() -> Result<(), FapiError> {
 ///
 /// Checks sources in order:
 /// 1. OS keychain (preferred — encrypted at rest)
-/// 2. `~/.vouch/client_key.json` (legacy/fallback)
+/// 2. `$XDG_DATA_HOME/vouch/client_key.json` (fallback)
 ///
 /// Returns `None` if no key is found. Never generates a new key — that
 /// happens only in the enroll/login flows via [`load_or_create_client_key`].
@@ -133,8 +133,7 @@ pub fn load_client_key() -> Option<ClientKey> {
     }
 
     // 2. Fall back to disk.
-    let home = dirs::home_dir()?;
-    let key_path = home.join(".vouch").join("client_key.json");
+    let key_path = vouch_common::paths::client_key_file()?;
 
     if !key_path.exists() {
         tracing::debug!("No FAPI key on disk at {}", key_path.display());
@@ -161,7 +160,7 @@ pub fn load_client_key() -> Option<ClientKey> {
 ///
 /// Checks sources in order:
 /// 1. OS keychain (preferred — encrypted at rest)
-/// 2. `~/.vouch/client_key.json` (legacy/fallback — migrated to keychain if possible)
+/// 2. `$XDG_DATA_HOME/vouch/client_key.json` (fallback — migrated to keychain if possible)
 /// 3. Generate new key → save to keychain (or file if keychain unavailable)
 ///
 /// If the key is found on disk but not in the keychain, it is migrated to the
@@ -179,25 +178,22 @@ pub fn load_or_create_client_key() -> anyhow::Result<ClientKey> {
         // If the key was loaded from disk (file still exists), migrate to keychain.
         // Verify the write by reading back — some platforms claim success but
         // don't actually persist the entry.
-        let home = dirs::home_dir();
-        if let Some(ref home) = home {
-            let key_path = home.join(".vouch").join("client_key.json");
-            if key_path.exists()
-                && let Ok(key_file) = key.to_key_file()
-                && save_to_keychain(&key_file).is_ok()
-                && load_from_keychain().is_ok_and(|v| v.is_some())
-            {
-                tracing::debug!("Migrated client key to keychain");
-                if let Err(e) = std::fs::remove_file(&key_path) {
-                    tracing::debug!("Could not remove old key file: {e}");
-                }
+        if let Some(key_path) = vouch_common::paths::client_key_file()
+            && key_path.exists()
+            && let Ok(key_file) = key.to_key_file()
+            && save_to_keychain(&key_file).is_ok()
+            && load_from_keychain().is_ok_and(|v| v.is_some())
+        {
+            tracing::debug!("Migrated client key to keychain");
+            if let Err(e) = std::fs::remove_file(&key_path) {
+                tracing::debug!("Could not remove old key file: {e}");
             }
         }
         return Ok(key);
     }
 
-    let home = dirs::home_dir().context("cannot determine home directory")?;
-    let key_path = home.join(".vouch").join("client_key.json");
+    let key_path =
+        vouch_common::paths::client_key_file().context("cannot determine data directory")?;
 
     // 2. Generate a new key.
     let key = ClientKey::generate().context("failed to generate FAPI client key")?;

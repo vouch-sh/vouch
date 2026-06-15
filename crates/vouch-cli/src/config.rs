@@ -13,7 +13,7 @@ use std::fs;
 use std::path::PathBuf;
 use vouch_common::dns::{DohConfigSerde, NetworkConfig};
 
-/// AWS multi-account configuration in ~/.vouch/config.json.
+/// AWS multi-account configuration in `$XDG_CONFIG_HOME/vouch/config.json`.
 ///
 /// Keyed by SSO session name (matching `[sso-session <name>]` in `~/.aws/config`).
 /// SSO connection details (start URL, region, scopes) are read from `~/.aws/config`
@@ -112,7 +112,8 @@ pub(crate) fn normalize_member_role_path(raw: &str) -> Result<String> {
     Ok(canonical)
 }
 
-/// CLI configuration stored in ~/.vouch/config.json
+/// CLI configuration stored in `$XDG_CONFIG_HOME/vouch/config.json`
+/// (`~/.config/vouch/config.json` by default)
 ///
 /// Per-server state (token, client_id, registration, DPoP key) is
 /// stored under `servers`, keyed by hostname. Global state (CodeArtifact
@@ -148,7 +149,8 @@ pub(crate) struct ServerConfig {
     registration_access_token: Option<SecretString>,
     /// URI to manage the dynamic registration (RFC 7592).
     registration_client_uri: Option<String>,
-    /// Key ID of the DPoP keypair stored in ~/.vouch/dpop_key.json.
+    /// Key ID of the DPoP/FAPI client keypair (stored in the OS keychain, or
+    /// `$XDG_DATA_HOME/vouch/client_key.json` as a fallback).
     dpop_key_id: Option<String>,
     /// ISO 8601 timestamp of last successful registration verification.
     registration_verified_at: Option<String>,
@@ -182,7 +184,7 @@ pub(crate) struct CodeArtifactProfile {
 
 /// Federation configuration for AI provider APIs (Claude, OpenAI).
 ///
-/// Stored at the top level of `~/.vouch/config.json`. Holds the (non-secret)
+/// Stored at the top level of `$XDG_CONFIG_HOME/vouch/config.json`. Holds the (non-secret)
 /// identifiers a workload presents to a provider's token endpoint to
 /// exchange a Vouch-issued OIDC ID token for a short-lived provider token.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -601,10 +603,10 @@ impl Config {
             .openai = Some(fed);
     }
 
-    /// Get the path to the config file.
+    /// Get the path to the config file
+    /// (`$XDG_CONFIG_HOME/vouch/config.json`).
     fn config_path() -> Result<PathBuf> {
-        let home = dirs::home_dir().context("could not determine home directory")?;
-        Ok(home.join(".vouch").join("config.json"))
+        vouch_common::paths::config_file().context("could not determine config directory")
     }
 }
 

@@ -4,7 +4,8 @@
 //! This module provides functions to read and write cookies in the Netscape cookie
 //! format, which is used by many tools including curl and wget.
 //!
-//! The cookie file is stored at `~/.vouch/cookie.txt` with 0600 permissions on Unix.
+//! The cookie file is stored at `$XDG_STATE_HOME/vouch/cookie.txt`
+//! (`~/.local/state/vouch/cookie.txt` by default) with 0600 permissions on Unix.
 
 use anyhow::{Context, Result};
 use std::fs;
@@ -97,10 +98,10 @@ impl SessionCookie {
 
 /// Get the path to the cookie file.
 ///
-/// Returns `~/.vouch/cookie.txt`.
+/// Returns `$XDG_STATE_HOME/vouch/cookie.txt` (`~/.local/state/vouch/cookie.txt`
+/// by default).
 pub fn cookie_path() -> Result<PathBuf> {
-    let home = dirs::home_dir().context("could not determine home directory")?;
-    Ok(home.join(".vouch").join("cookie.txt"))
+    crate::paths::cookie_file().context("could not determine home directory")
 }
 
 /// Write a session cookie to the cookie file.

@@ -44,6 +44,7 @@
 # Reference
 
 - [Environment Variables](reference/environment-variables.md)
+- [File Locations (CLI & Agent)](reference/file-locations.md)
 - [S3 Configuration Schema](reference/s3-config-schema.md)
 - [Compliance Mapping](reference/compliance.md)
 - [AMI STIG Alignment](reference/ami-stig.md)

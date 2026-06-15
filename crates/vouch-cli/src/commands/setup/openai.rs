@@ -180,7 +180,7 @@ fn write_provider_block(doc: &mut DocumentMut, vouch_path: &str) -> Result<()> {
 
 fn print_success(config_path: &Path) {
     println!("OpenAI Workload Identity Federation configured.\n");
-    println!("  Federation params: ~/.vouch/config.json");
+    println!("  Federation params: ~/.config/vouch/config.json");
     println!(
         "  Codex provider block: {} ([model_providers.{PROVIDER_ID}])\n",
         config_path.display()
