@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 
-{% block title %}Vouch - Error{% endblock %}
+{% block title %}{{ self.tr("error-page-title") }}{% endblock %}
 
 {% block content %}
 <div class="flex items-center justify-center flex-1 p-5">
@@ -10,7 +10,7 @@
         <p class="text-gray-400">{{ message }}</p>
 
         {% if let Some(url) = back_url %}
-        <a href="{{ url }}" class="btn-primary mt-6 inline-block">Back</a>
+        <a href="{{ url }}" class="btn-primary mt-6 inline-block">{{ self.tr("error-back") }}</a>
         {% endif %}
     </div>
 </div>

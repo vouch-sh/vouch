@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 
-{% block title %}Vouch - Sign In{% endblock %}
+{% block title %}{{ self.tr("login-page-title") }}{% endblock %}
 
 {% block content %}
 <div class="flex items-center justify-center flex-1 p-5">
@@ -11,35 +11,35 @@
         {% if let Some(logo) = logo_uri %}
         <img src="{{ logo }}" alt="Application logo" class="w-12 h-12 mx-auto mb-4 rounded" referrerpolicy="no-referrer">
         {% endif %}
-        <h1 class="text-2xl font-bold text-gray-200 mb-2">Sign In</h1>
+        <h1 class="text-2xl font-bold text-gray-200 mb-2">{{ self.tr("login-title") }}</h1>
         {% if client_name.is_some() %}
-        <p class="text-gray-400 text-sm mb-6">Sign in to continue to <span class="font-semibold text-gray-300">{{ client_name.as_ref().unwrap() }}</span></p>
+        <p class="text-gray-400 text-sm mb-6">{{ self.tr("login-continue-prefix") }} <span class="font-semibold text-gray-300">{{ client_name.as_ref().unwrap() }}</span></p>
         {% else %}
-        <p class="text-gray-400 text-sm mb-6">Touch your security key to sign in</p>
+        <p class="text-gray-400 text-sm mb-6">{{ self.tr("login-touch-prompt") }}</p>
         {% endif %}
 
-        <div id="status" class="status-waiting mb-6">Insert your security key and touch it when it blinks.</div>
+        <div id="status" class="status-waiting mb-6">{{ self.tr("login-status-insert") }}</div>
 
-        <button id="login-btn" class="btn-primary">Sign In with Security Key</button>
+        <button id="login-btn" class="btn-primary">{{ self.tr("login-button") }}</button>
 
         {% if policy_uri.is_some() || tos_uri.is_some() %}
         <div class="flex gap-3 justify-center text-xs text-gray-500 mt-4">
             {% if let Some(policy) = policy_uri %}
-            <a href="{{ policy }}" target="_blank" rel="noopener noreferrer" class="hover:underline">Privacy Policy</a>
+            <a href="{{ policy }}" target="_blank" rel="noopener noreferrer" class="hover:underline">{{ self.tr("login-privacy-policy") }}</a>
             {% endif %}
             {% if let Some(tos) = tos_uri %}
-            <a href="{{ tos }}" target="_blank" rel="noopener noreferrer" class="hover:underline">Terms of Service</a>
+            <a href="{{ tos }}" target="_blank" rel="noopener noreferrer" class="hover:underline">{{ self.tr("login-terms") }}</a>
             {% endif %}
         </div>
         {% endif %}
         <p class="text-gray-500 text-xs mt-6">
-            Don't have an account? <a href="/enroll/start" class="text-vouch-accent hover:text-vouch-accent-hover">Enroll now</a>
+            {{ self.tr("login-no-account-prefix") }} <a href="/enroll/start" class="text-vouch-accent hover:text-vouch-accent-hover">{{ self.tr("login-enroll-now") }}</a>
         </p>
     </div>
 </div>
 <div id="login-config" data-rp-id="{{ rp_id }}" {% if pending_auth.is_some() %}data-pending-auth="{{ pending_auth.as_ref().unwrap() }}"{% endif %} hidden></div>
-{% if cert_login_url.is_some() %}<a id="cert-login" href="{{ cert_login_url.as_ref().unwrap() }}">Certification Test Login</a>{% endif %}
-{% if cert_deny_url.is_some() %}<a id="cert-deny" href="{{ cert_deny_url.as_ref().unwrap() }}">Certification Test Deny</a>{% endif %}
+{% if cert_login_url.is_some() %}<a id="cert-login" href="{{ cert_login_url.as_ref().unwrap() }}">{{ self.tr("login-cert-test-login") }}</a>{% endif %}
+{% if cert_deny_url.is_some() %}<a id="cert-deny" href="{{ cert_deny_url.as_ref().unwrap() }}">{{ self.tr("login-cert-test-deny") }}</a>{% endif %}
 {% endblock %}
 
 {% block scripts %}

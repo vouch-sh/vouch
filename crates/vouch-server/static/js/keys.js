@@ -98,7 +98,7 @@
     }
 
     async function deleteKey(keyId, keyName) {
-        if (!confirm('Delete key "' + keyName + '"? This action cannot be undone.')) {
+        if (!confirm(t('keys-js-delete-prefix') + keyName + t('keys-js-delete-suffix'))) {
             return;
         }
 
@@ -120,7 +120,7 @@
                     });
                     if (!retryResp.ok) {
                         var retryErr = await retryResp.json();
-                        throw new Error(retryErr.message || 'Failed to delete key after re-authentication');
+                        throw new Error(retryErr.message || t('keys-js-delete-failed-reauth'));
                     }
                     await finishAfterDelete(retryResp);
                     return;
@@ -132,12 +132,12 @@
 
             if (!response.ok) {
                 var err = await response.json();
-                throw new Error(err.message || 'Failed to delete key');
+                throw new Error(err.message || t('keys-js-delete-failed'));
             }
 
             await finishAfterDelete(response);
         } catch (err) {
-            alert('Failed to delete key: ' + err.message);
+            alert(t('keys-js-delete-failed-prefix') + err.message);
         }
     }
 
@@ -166,7 +166,7 @@
     // RFC 9470: Perform inline FIDO2 re-authentication to get a fresh session.
     // Calls the same WebAuthn assertion endpoints as the login page.
     async function stepUpReauth() {
-        alert('Deleting a key requires recent authentication.\nPlease touch your security key when prompted.');
+        alert(t('keys-js-stepup-1') + '\n' + t('keys-js-stepup-2'));
 
         var startResp = await fetch('/login/webauthn/start', {
             method: 'POST',
@@ -177,7 +177,7 @@
 
         if (!startResp.ok) {
             var err = await startResp.json();
-            throw new Error(err.message || 'Failed to start re-authentication');
+            throw new Error(err.message || t('keys-js-reauth-start-failed'));
         }
 
         var options = await startResp.json();
@@ -211,7 +211,7 @@
 
         if (!completeResp.ok) {
             var errResp = await completeResp.json();
-            throw new Error(errResp.message || 'Failed to complete re-authentication');
+            throw new Error(errResp.message || t('keys-js-reauth-complete-failed'));
         }
         // Fresh session cookie is now set by the Set-Cookie header
     }
@@ -219,7 +219,7 @@
     async function addNewKey(btn) {
         var originalText = btn.textContent;
         btn.disabled = true;
-        btn.textContent = 'Starting registration...';
+        btn.textContent = t('keys-js-reg-starting');
 
         try {
             var startResp = await fetch('/enroll/webauthn/start', {
@@ -230,11 +230,11 @@
 
             if (!startResp.ok) {
                 var err = await startResp.json();
-                throw new Error(err.message || 'Failed to start registration');
+                throw new Error(err.message || t('keys-js-reg-start-failed'));
             }
 
             var options = await startResp.json();
-            btn.textContent = 'Touch your security key...';
+            btn.textContent = t('keys-js-reg-touch');
 
             var challenge = base64urlToBuffer(options.challenge);
             var userId = base64urlToBuffer(options.user_id);
@@ -271,7 +271,7 @@
                 }
             });
 
-            btn.textContent = 'Completing registration...';
+            btn.textContent = t('keys-js-reg-completing');
 
             var attestationResponse = credential.response;
             var completeResp = await fetch('/enroll/webauthn/complete', {
@@ -288,7 +288,7 @@
 
             if (!completeResp.ok) {
                 var errResp = await completeResp.json();
-                throw new Error(errResp.message || 'Failed to complete registration');
+                throw new Error(errResp.message || t('keys-js-reg-complete-failed'));
             }
 
             window.location.reload();

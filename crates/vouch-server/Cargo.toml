@@ -47,6 +47,7 @@ headers = { workspace = true }
 hex = { workspace = true, features = ["std"] }
 hickory-resolver = { workspace = true, features = ["dnssec-aws-lc-rs", "https-aws-lc-rs", "system-config", "tokio", "webpki-roots"] }
 http = { workspace = true }
+i18n-embed = { workspace = true, features = ["fluent-system", "rust-embed"] }
 idna = { workspace = true, features = ["compiled_data"] }
 ipnet = { workspace = true, features = ["std"] }
 jiff = { workspace = true, features = ["std", "serde", "tz-system"] }
@@ -89,6 +90,7 @@ tower_governor = { workspace = true, features = ["axum", "tracing"] }
 tracing = { workspace = true, features = ["std"] }
 tracing-opentelemetry = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["std", "fmt", "env-filter", "json"] }
+unic-langid = { workspace = true, features = ["macros"] }
 url = { workspace = true }
 urlencoding = { workspace = true }
 uuid = { workspace = true, features = ["v7", "serde", "std"] }

@@ -61,7 +61,7 @@
             }
 
             if (invalid.length > 0) {
-                return 'Invalid redirect URI(s): ' + invalid.join(', ') + '. Each URI must be a valid http:// or https:// URL.';
+                return t('appcreate-js-redirect-invalid-prefix') + invalid.join(', ') + t('appcreate-js-redirect-invalid-suffix');
             }
             return null;
         }
@@ -80,24 +80,24 @@
                 var trimmed = uris[i].trim();
 
                 if (trimmed.length > 2048) {
-                    errors.push(trimmed.substring(0, 40) + '... (exceeds maximum length of 2048)');
+                    errors.push(trimmed.substring(0, 40) + t('appcreate-js-resource-toolong'));
                     continue;
                 }
 
                 if (trimmed.indexOf('#') !== -1) {
-                    errors.push(trimmed + ' (must not contain a fragment)');
+                    errors.push(trimmed + t('appcreate-js-resource-fragment'));
                     continue;
                 }
 
                 try {
                     new URL(trimmed);
                 } catch (e) {
-                    errors.push(trimmed + ' (must be an absolute URI with a scheme)');
+                    errors.push(trimmed + t('appcreate-js-resource-scheme'));
                 }
             }
 
             if (errors.length > 0) {
-                return 'Invalid resource URI(s): ' + errors.join('; ') + '.';
+                return t('appcreate-js-resource-invalid-prefix') + errors.join('; ') + '.';
             }
             return null;
         }
@@ -177,10 +177,10 @@
             try {
                 var parsed = JSON.parse(value);
                 if (!parsed.keys || !Array.isArray(parsed.keys) || parsed.keys.length === 0) {
-                    return 'JWKS must be a JSON object with a non-empty "keys" array.';
+                    return t('appcreate-js-jwks-keys');
                 }
             } catch (e) {
-                return 'JWKS must be valid JSON.';
+                return t('appcreate-js-jwks-json');
             }
 
             return null;
@@ -198,10 +198,10 @@
             try {
                 var url = new URL(value);
                 if (url.protocol !== 'https:') {
-                    return 'JWKS URI must use https://.';
+                    return t('appcreate-js-jwksuri-https');
                 }
             } catch (e) {
-                return 'JWKS URI must be a valid https:// URL.';
+                return t('appcreate-js-jwksuri-invalid');
             }
 
             return null;
@@ -287,7 +287,7 @@
                     if (editJwksTextarea && editJwksUriInput
                         && !editJwksTextarea.value.trim() && !editJwksUriInput.value.trim()) {
                         e.preventDefault();
-                        var msg = 'FAPI 2.0 requires either a JWKS or JWKS URI.';
+                        var msg = t('appcreate-js-fapi-required');
                         showFieldError(editJwksError, editJwksTextarea, msg);
                         if (!hasError) {
                             editJwksTextarea.scrollIntoView({ behavior: 'smooth', block: 'center' });

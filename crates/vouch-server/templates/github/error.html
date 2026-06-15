@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 
-{% block title %}Vouch - Error{% endblock %}
+{% block title %}{{ self.tr("error-page-title") }}{% endblock %}
 
 {% block content %}
 <div class="flex items-center justify-center flex-1 p-5">
@@ -10,7 +10,7 @@
         <p class="text-gray-400 mb-6">{{ message }}</p>
 
         <a href="/github/connect" class="btn-primary inline-block">
-            Try Again
+            {{ self.tr("github-error-try-again") }}
         </a>
     </div>
 </div>

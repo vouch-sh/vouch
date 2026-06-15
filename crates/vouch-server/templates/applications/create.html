@@ -1,112 +1,112 @@
 {% extends "base.html" %}
 {% import "macros/auth.html" as auth_macros %}
 
-{% block title %}New Application - Vouch{% endblock %}
+{% block title %}{{ self.tr("apps-create-page-title") }}{% endblock %}
 
 {% block header_right %}
-{{ auth_macros::header_auth(auth) }}
+{{ auth_macros::header_auth(auth, self) }}
 {% endblock %}
 
 {% block content %}
 <div class="max-w-2xl mx-auto p-6">
     <div class="mb-6">
-        <h1 class="text-2xl font-bold text-gray-200">Register New Application</h1>
-        <p class="text-gray-400">Create an OAuth application to integrate with Vouch.</p>
+        <h1 class="text-2xl font-bold text-gray-200">{{ self.tr("apps-create-heading") }}</h1>
+        <p class="text-gray-400">{{ self.tr("apps-create-subtitle") }}</p>
     </div>
 
     <div class="bg-vouch-surface border border-vouch-border rounded-lg p-6">
         <form action="/applications/new" method="POST" class="space-y-6">
             <div>
-                <label for="name" class="block text-sm font-medium text-gray-300">Application Name</label>
+                <label for="name" class="block text-sm font-medium text-gray-300">{{ self.tr("apps-create-name-label") }}</label>
                 <input type="text" name="name" id="name" required
                     class="input-field mt-1"
-                    placeholder="My Application">
-                <p class="mt-1 text-sm text-gray-500">A friendly name for your application.</p>
+                    placeholder="{{ self.tr("apps-create-name-placeholder") }}">
+                <p class="mt-1 text-sm text-gray-500">{{ self.tr("apps-create-name-help") }}</p>
             </div>
 
             <div>
-                <label for="description" class="block text-sm font-medium text-gray-300">Description (optional)</label>
+                <label for="description" class="block text-sm font-medium text-gray-300">{{ self.tr("apps-create-desc-label") }}</label>
                 <textarea name="description" id="description" rows="2"
                     class="input-field mt-1"
-                    placeholder="Brief description of your application"></textarea>
+                    placeholder="{{ self.tr("apps-create-desc-placeholder") }}"></textarea>
             </div>
 
             <div>
-                <label class="block text-sm font-medium text-gray-300 mb-2">Application Type</label>
+                <label class="block text-sm font-medium text-gray-300 mb-2">{{ self.tr("apps-create-type-label") }}</label>
                 <div class="space-y-3">
                     <label class="flex items-start p-3 border border-vouch-border rounded-lg cursor-pointer hover:bg-vouch-raised transition-colors">
                         <input type="radio" name="application_type" value="web" checked
                             class="mt-0.5 h-4 w-4 text-vouch-accent border-vouch-border">
                         <div class="ml-3">
-                            <span class="block text-sm font-medium text-gray-200">Web Application</span>
-                            <span class="block text-sm text-gray-500">Server-side app with secure backend. Uses client secret.</span>
+                            <span class="block text-sm font-medium text-gray-200">{{ self.tr("apps-create-type-web") }}</span>
+                            <span class="block text-sm text-gray-500">{{ self.tr("apps-create-type-web-desc") }}</span>
                         </div>
                     </label>
                     <label class="flex items-start p-3 border border-vouch-border rounded-lg cursor-pointer hover:bg-vouch-raised transition-colors">
                         <input type="radio" name="application_type" value="spa"
                             class="mt-0.5 h-4 w-4 text-vouch-accent border-vouch-border">
                         <div class="ml-3">
-                            <span class="block text-sm font-medium text-gray-200">Single Page Application</span>
-                            <span class="block text-sm text-gray-500">Browser-only app. Uses PKCE, no client secret.</span>
+                            <span class="block text-sm font-medium text-gray-200">{{ self.tr("apps-create-type-spa") }}</span>
+                            <span class="block text-sm text-gray-500">{{ self.tr("apps-create-type-spa-desc") }}</span>
                         </div>
                     </label>
                     <label class="flex items-start p-3 border border-vouch-border rounded-lg cursor-pointer hover:bg-vouch-raised transition-colors">
                         <input type="radio" name="application_type" value="native"
                             class="mt-0.5 h-4 w-4 text-vouch-accent border-vouch-border">
                         <div class="ml-3">
-                            <span class="block text-sm font-medium text-gray-200">Native Application</span>
-                            <span class="block text-sm text-gray-500">Desktop or mobile app. Uses PKCE, no client secret.</span>
+                            <span class="block text-sm font-medium text-gray-200">{{ self.tr("apps-create-type-native") }}</span>
+                            <span class="block text-sm text-gray-500">{{ self.tr("apps-create-type-native-desc") }}</span>
                         </div>
                     </label>
                     <label class="flex items-start p-3 border border-vouch-border rounded-lg cursor-pointer hover:bg-vouch-raised transition-colors">
                         <input type="radio" name="application_type" value="service"
                             class="mt-0.5 h-4 w-4 text-vouch-accent border-vouch-border">
                         <div class="ml-3">
-                            <span class="block text-sm font-medium text-gray-200">Service / Machine-to-Machine</span>
-                            <span class="block text-sm text-gray-500">Backend service with no user interaction. Uses client credentials.</span>
+                            <span class="block text-sm font-medium text-gray-200">{{ self.tr("apps-create-type-service") }}</span>
+                            <span class="block text-sm text-gray-500">{{ self.tr("apps-create-type-service-desc") }}</span>
                         </div>
                     </label>
                 </div>
             </div>
 
             <div id="redirect-uris-section">
-                <label for="redirect_uris" class="block text-sm font-medium text-gray-300">Redirect URIs <span class="text-vouch-error">*</span></label>
+                <label for="redirect_uris" class="block text-sm font-medium text-gray-300">{{ self.tr("apps-create-redirect-label") }} <span class="text-vouch-error">*</span></label>
                 <textarea name="redirect_uris" id="redirect_uris" rows="3" required
                     class="input-field mt-1 font-mono"
                     placeholder="https://example.com/callback
 http://localhost:3000/callback"></textarea>
-                <p class="mt-1 text-sm text-gray-500">One URI per line. Where users are redirected after authentication.</p>
+                <p class="mt-1 text-sm text-gray-500">{{ self.tr("apps-create-redirect-help") }}</p>
                 <div id="redirect-uri-error" class="hidden mt-2 p-3 bg-vouch-error-bg border border-vouch-error/30 rounded-lg text-sm text-vouch-error"></div>
             </div>
 
             <div>
-                <label for="resource_uris" class="block text-sm font-medium text-gray-300">Resource URIs (optional)</label>
+                <label for="resource_uris" class="block text-sm font-medium text-gray-300">{{ self.tr("apps-create-resource-label") }}</label>
                 <textarea name="resource_uris" id="resource_uris" rows="2"
                     class="input-field mt-1 font-mono"
                     placeholder="https://api.example.com
 https://data.example.com"></textarea>
-                <p class="mt-1 text-sm text-gray-500">One URI per line. Target resource servers that will receive access tokens (RFC 8707). Leave empty to allow any resource.</p>
+                <p class="mt-1 text-sm text-gray-500">{{ self.tr("apps-create-resource-help") }}</p>
                 <div id="resource-uri-error" class="hidden mt-2 p-3 bg-vouch-error-bg border border-vouch-error/30 rounded-lg text-sm text-vouch-error"></div>
             </div>
 
             <!-- Security Profile (shown only for confidential types: web, service) -->
             <div id="security-profile-section" class="hidden">
-                <label class="block text-sm font-medium text-gray-300 mb-2">Security Profile</label>
+                <label class="block text-sm font-medium text-gray-300 mb-2">{{ self.tr("apps-create-secprofile-label") }}</label>
                 <div class="space-y-3">
                     <label class="flex items-start p-3 border border-vouch-border rounded-lg cursor-pointer hover:bg-vouch-raised transition-colors">
                         <input type="radio" name="fapi_profile" value="" checked
                             class="mt-0.5 h-4 w-4 text-vouch-accent border-vouch-border">
                         <div class="ml-3">
-                            <span class="block text-sm font-medium text-gray-200">Standard OAuth 2.0</span>
-                            <span class="block text-sm text-gray-500">Standard OAuth 2.0 with client secret authentication.</span>
+                            <span class="block text-sm font-medium text-gray-200">{{ self.tr("apps-create-secprofile-standard") }}</span>
+                            <span class="block text-sm text-gray-500">{{ self.tr("apps-create-secprofile-standard-desc") }}</span>
                         </div>
                     </label>
                     <label class="flex items-start p-3 border border-vouch-border rounded-lg cursor-pointer hover:bg-vouch-raised transition-colors">
                         <input type="radio" name="fapi_profile" value="fapi2_security"
                             class="mt-0.5 h-4 w-4 text-vouch-accent border-vouch-border">
                         <div class="ml-3">
-                            <span class="block text-sm font-medium text-gray-200">FAPI 2.0 Security Profile</span>
-                            <span class="block text-sm text-gray-500">Enforces PAR, DPoP, and private_key_jwt. No client secret — authentication uses signed JWTs.</span>
+                            <span class="block text-sm font-medium text-gray-200">{{ self.tr("apps-create-secprofile-fapi") }}</span>
+                            <span class="block text-sm text-gray-500">{{ self.tr("apps-create-secprofile-fapi-desc") }}</span>
                         </div>
                     </label>
                 </div>
@@ -114,42 +114,42 @@ https://data.example.com"></textarea>
                 <!-- FAPI JWKS fields (shown when FAPI selected) -->
                 <div id="fapi-jwks-section" class="hidden mt-4 space-y-4 pl-4 border-l-2 border-vouch-accent/30">
                     <div class="p-3 bg-vouch-raised border border-vouch-border rounded-lg">
-                        <p class="text-sm text-gray-400">FAPI 2.0 clients authenticate using signed JWTs instead of a client secret. Provide your public keys as a JWKS (inline JSON) or a JWKS URI endpoint.</p>
+                        <p class="text-sm text-gray-400">{{ self.tr("apps-create-fapi-jwks-info") }}</p>
                     </div>
                     <div>
-                        <label for="jwks" class="block text-sm font-medium text-gray-300">JWKS (inline JSON)</label>
+                        <label for="jwks" class="block text-sm font-medium text-gray-300">{{ self.tr("apps-create-jwks-label") }}</label>
                         <textarea name="jwks" id="jwks" rows="4"
                             class="input-field mt-1 font-mono text-xs"
                             placeholder='{"keys": [{"kty": "EC", "crv": "P-256", ...}]}'></textarea>
-                        <p class="mt-1 text-sm text-gray-500">JSON Web Key Set containing your public signing keys.</p>
+                        <p class="mt-1 text-sm text-gray-500">{{ self.tr("apps-create-jwks-help") }}</p>
                         <div id="jwks-error" class="hidden mt-2 p-3 bg-vouch-error-bg border border-vouch-error/30 rounded-lg text-sm text-vouch-error"></div>
                     </div>
                     <div class="flex items-center gap-3">
                         <div class="flex-1 border-t border-vouch-border"></div>
-                        <span class="text-xs text-gray-500">or</span>
+                        <span class="text-xs text-gray-500">{{ self.tr("common-or") }}</span>
                         <div class="flex-1 border-t border-vouch-border"></div>
                     </div>
                     <div>
-                        <label for="jwks_uri" class="block text-sm font-medium text-gray-300">JWKS URI</label>
+                        <label for="jwks_uri" class="block text-sm font-medium text-gray-300">{{ self.tr("apps-create-jwks-uri-label") }}</label>
                         <input type="url" name="jwks_uri" id="jwks_uri"
                             class="input-field mt-1 font-mono"
                             placeholder="https://example.com/.well-known/jwks.json">
-                        <p class="mt-1 text-sm text-gray-500">HTTPS endpoint serving your JWKS.</p>
+                        <p class="mt-1 text-sm text-gray-500">{{ self.tr("apps-create-jwks-uri-help") }}</p>
                         <div id="jwks-uri-error" class="hidden mt-2 p-3 bg-vouch-error-bg border border-vouch-error/30 rounded-lg text-sm text-vouch-error"></div>
                     </div>
                 </div>
             </div>
 
             <div>
-                <label class="block text-sm font-medium text-gray-300 mb-2">Who can use this application?</label>
+                <label class="block text-sm font-medium text-gray-300 mb-2">{{ self.tr("apps-create-access-label") }}</label>
                 <div class="space-y-3">
                     {% if user_has_org %}
                     <label class="flex items-start p-3 border border-vouch-border rounded-lg cursor-pointer hover:bg-vouch-raised transition-colors">
                         <input type="radio" name="access_scope" value="organization" checked
                             class="mt-0.5 h-4 w-4 text-vouch-accent border-vouch-border">
                         <div class="ml-3">
-                            <span class="block text-sm font-medium text-gray-200">Organization members only</span>
-                            <span class="block text-sm text-gray-500">Only users in your organization can authenticate with this app.</span>
+                            <span class="block text-sm font-medium text-gray-200">{{ self.tr("apps-create-access-org") }}</span>
+                            <span class="block text-sm text-gray-500">{{ self.tr("apps-create-access-org-desc") }}</span>
                         </div>
                     </label>
                     {% endif %}
@@ -157,16 +157,16 @@ https://data.example.com"></textarea>
                         <input type="radio" name="access_scope" value="personal" {% if !user_has_org %}checked{% endif %}
                             class="mt-0.5 h-4 w-4 text-vouch-accent border-vouch-border">
                         <div class="ml-3">
-                            <span class="block text-sm font-medium text-gray-200">Only me</span>
-                            <span class="block text-sm text-gray-500">Only you can authenticate with this app. Good for personal tools.</span>
+                            <span class="block text-sm font-medium text-gray-200">{{ self.tr("apps-create-access-personal") }}</span>
+                            <span class="block text-sm text-gray-500">{{ self.tr("apps-create-access-personal-desc") }}</span>
                         </div>
                     </label>
                     <label class="flex items-start p-3 border border-vouch-border rounded-lg cursor-pointer hover:bg-vouch-raised transition-colors">
                         <input type="radio" name="access_scope" value="public"
                             class="mt-0.5 h-4 w-4 text-vouch-accent border-vouch-border">
                         <div class="ml-3">
-                            <span class="block text-sm font-medium text-gray-200">Any Vouch user</span>
-                            <span class="block text-sm text-gray-500">Any authenticated Vouch user can use this app.</span>
+                            <span class="block text-sm font-medium text-gray-200">{{ self.tr("apps-create-access-public") }}</span>
+                            <span class="block text-sm text-gray-500">{{ self.tr("apps-create-access-public-desc") }}</span>
                         </div>
                     </label>
                 </div>
@@ -174,10 +174,10 @@ https://data.example.com"></textarea>
 
             <div class="flex justify-end space-x-3">
                 <a href="/applications" class="px-4 py-2 border border-vouch-border rounded-md text-sm font-medium text-gray-300 hover:bg-vouch-raised transition-colors">
-                    Cancel
+                    {{ self.tr("common-cancel") }}
                 </a>
                 <button type="submit" class="px-4 py-2 bg-vouch-accent hover:bg-vouch-accent-hover text-[#0a0a0a] rounded-md text-sm font-medium transition-colors">
-                    Create Application
+                    {{ self.tr("apps-list-create") }}
                 </button>
             </div>
         </form>

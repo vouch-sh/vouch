@@ -1,13 +1,13 @@
 {% extends "base.html" %}
 
-{% block title %}Sign in - Vouch{% endblock %}
+{% block title %}{{ self.tr("authorize-page-title") }}{% endblock %}
 
 {% block content %}
 <div class="flex items-center justify-center flex-1 p-5">
     <div class="card max-w-md w-full text-center">
         <svg class="w-8 h-8 text-vouch-accent mx-auto mb-4" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M16.5 10.5V6.75a4.5 4.5 0 1 0-9 0v3.75m-.75 11.25h10.5a2.25 2.25 0 0 0 2.25-2.25v-6.75a2.25 2.25 0 0 0-2.25-2.25H6.75a2.25 2.25 0 0 0-2.25 2.25v6.75a2.25 2.25 0 0 0 2.25 2.25Z"/></svg>
-        <h1 class="text-2xl font-bold text-gray-200 mb-2">Sign in to continue</h1>
-        <p class="text-gray-400 text-sm mb-6">Hardware authentication required</p>
+        <h1 class="text-2xl font-bold text-gray-200 mb-2">{{ self.tr("authorize-heading") }}</h1>
+        <p class="text-gray-400 text-sm mb-6">{{ self.tr("authorize-subtitle") }}</p>
 
         <div class="bg-vouch-raised rounded-lg p-4 mb-6 text-left">
             {% match client_name %}
@@ -16,23 +16,23 @@
             {% when None %}
             <strong class="text-gray-300">{{ client_id }}</strong>
             {% endmatch %}
-            <p class="text-gray-400 text-sm mt-1">wants to access your Vouch identity</p>
+            <p class="text-gray-400 text-sm mt-1">{{ self.tr("authorize-wants-access") }}</p>
             {% if is_org_app %}
             <p class="text-xs text-gray-500 mt-2">
                 {% match org_name %}
                 {% when Some with (org) %}
-                This is an organizational application for <strong class="text-gray-400">{{ org }}</strong>
+                {{ self.tr("authorize-org-app-for") }} <strong class="text-gray-400">{{ org }}</strong>
                 {% when None %}
-                This is an organizational application
+                {{ self.tr("authorize-org-app") }}
                 {% endmatch %}
             </p>
             {% endif %}
         </div>
 
         <div class="bg-vouch-warning-bg border-l-4 border-vouch-warning p-4 rounded-r-lg text-left">
-            <p class="text-gray-300 text-sm">Use the Vouch CLI to authenticate:</p>
+            <p class="text-gray-300 text-sm">{{ self.tr("authorize-use-cli") }}</p>
             <div class="code-block mt-2 text-sm">vouch login</div>
-            <p class="text-gray-400 text-xs mt-3">Then refresh this page.</p>
+            <p class="text-gray-400 text-xs mt-3">{{ self.tr("authorize-refresh") }}</p>
         </div>
     </div>
 </div>

@@ -1,18 +1,18 @@
 {# Header authentication info macro #}
 {# Shows navigation links and user info when authenticated #}
 
-{% macro header_auth(auth) %}
+{% macro header_auth(auth, page) %}
 {% if auth.authenticated %}
 <div class="flex items-center gap-4 text-sm">
     {# Navigation links #}
     <nav class="flex items-center gap-3">
-        <a href="/enroll/keys" class="text-gray-400 hover:text-gray-200">Keys</a>
+        <a href="/enroll/keys" class="text-gray-400 hover:text-gray-200">{{ page.tr("nav-keys") }}</a>
         {% if auth.has_org %}
-        <a href="/applications" class="text-gray-400 hover:text-gray-200">Apps</a>
+        <a href="/applications" class="text-gray-400 hover:text-gray-200">{{ page.tr("nav-apps") }}</a>
         {% endif %}
-        <a href="/integrations" class="text-gray-400 hover:text-gray-200">Integrations</a>
+        <a href="/integrations" class="text-gray-400 hover:text-gray-200">{{ page.tr("nav-integrations") }}</a>
         {% if auth.is_org_admin %}
-        <a href="/admin" class="text-gray-400 hover:text-gray-200">Admin</a>
+        <a href="/admin" class="text-gray-400 hover:text-gray-200">{{ page.tr("nav-admin") }}</a>
         {% endif %}
     </nav>
     {# Separator #}
@@ -20,7 +20,7 @@
     {# User info #}
     <span class="text-gray-400">{{ auth.user_email.as_deref().unwrap_or("") }}</span>
     <form method="POST" action="/logout" class="inline">
-        <button type="submit" class="text-gray-500 hover:text-gray-300">Sign out</button>
+        <button type="submit" class="text-gray-500 hover:text-gray-300">{{ page.tr("nav-sign-out") }}</button>
     </form>
 </div>
 {% endif %}

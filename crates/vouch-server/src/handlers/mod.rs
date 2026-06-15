@@ -31,13 +31,38 @@ pub(crate) use session::{
     clear_session_cookie, create_session_cookie, extract_session_from_cookie,
 };
 
-/// Returns the server version at compile time.
+/// Common helpers available to every Askama template.
 ///
-/// Implemented automatically by [`impl_template_response!`] so that
-/// Askama templates can render `{{ self.version() }}`.
+/// Implemented automatically by [`impl_template_response!`] so templates can
+/// render `{{ self.version() }}`, `{{ self.lang() }}`, and `{{ self.tr("id") }}`.
+///
+/// Translation methods delegate to the shared `en-US`
+/// [`default_context`](crate::infra::i18n::default_context); see that module for
+/// why rendering is single-context until a second language ships.
 pub(crate) trait HasVersion {
+    /// Server version, for footer/version links.
     fn version(&self) -> &'static str {
         env!("CARGO_PKG_VERSION")
+    }
+
+    /// BCP-47 tag for `<html lang="...">`.
+    fn lang(&self) -> &'static str {
+        crate::infra::i18n::default_context().lang()
+    }
+
+    /// Text direction for `<html dir="...">`.
+    fn dir(&self) -> &'static str {
+        crate::infra::i18n::default_context().dir()
+    }
+
+    /// Translate a message with no arguments.
+    fn tr(&self, id: &str) -> String {
+        crate::infra::i18n::default_context().t(id)
+    }
+
+    /// Translate a message with a single Fluent placeable.
+    fn tr1(&self, id: &str, name: &str, value: &str) -> String {
+        crate::infra::i18n::default_context().t1(id, name, value)
     }
 }
 

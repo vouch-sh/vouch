@@ -706,6 +706,8 @@ fn build_ui_routes(config: &config::ServerConfig) -> anyhow::Result<Router<Arc<A
         // Landing page with smart routing
         .route("/", get(handlers::home::home_page))
         .route("/install", get(handlers::install::install_page))
+        // Client-side translation bundle (CSP script-src 'self'); cached via ETag.
+        .route("/i18n.js", get(crate::infra::i18n::i18n_js_handler))
         .route("/health", get(|| async { "ok" }))
         .route("/health/ready", get(readiness_handler))
         // Legal pages (redirect to vouch.sh)

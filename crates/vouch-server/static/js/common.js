@@ -17,7 +17,7 @@
                 // ever write the hardcoded literal "Copied!". This is exempt
                 // from the structural-DOM migration applied elsewhere.
                 var original = btn.innerHTML;
-                btn.innerHTML = 'Copied!';
+                btn.innerHTML = t('common-js-copied');
                 btn.classList.add('text-vouch-success');
                 setTimeout(function() {
                     btn.innerHTML = original;

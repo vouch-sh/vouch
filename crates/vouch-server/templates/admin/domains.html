@@ -1,10 +1,10 @@
 {% extends "base.html" %}
 {% import "macros/auth.html" as auth_macros %}
 
-{% block title %}Vouch - Email Domains{% endblock %}
+{% block title %}{{ self.tr("admin-domains-page-title") }}{% endblock %}
 
 {% block header_right %}
-{{ auth_macros::header_auth(auth) }}
+{{ auth_macros::header_auth(auth, self) }}
 {% endblock %}
 
 {% block content %}
@@ -12,15 +12,15 @@
     <div class="max-w-5xl mx-auto">
         <div class="mb-6 flex items-center justify-between">
             <div>
-                <h1 class="text-2xl font-bold text-gray-200 mb-1">Email Domains</h1>
-                <p class="text-gray-400 text-sm">Manage which email domains attach signing-in users to this organization.</p>
+                <h1 class="text-2xl font-bold text-gray-200 mb-1">{{ self.tr("admin-nav-domains") }}</h1>
+                <p class="text-gray-400 text-sm">{{ self.tr("admin-domains-subtitle") }}</p>
             </div>
             <nav class="flex gap-3 text-sm">
-                <a href="/admin" class="text-gray-400 hover:text-gray-200">Members</a>
-                <a href="/admin/audit" class="text-gray-400 hover:text-gray-200">Audit Log</a>
-                <a href="/admin/policies" class="text-gray-400 hover:text-gray-200">Policies</a>
-                <a href="/admin/scim-tokens" class="text-gray-400 hover:text-gray-200">SCIM Tokens</a>
-                <a href="/admin/domains" class="text-vouch-accent hover:text-vouch-accent-hover font-medium">Email Domains</a>
+                <a href="/admin" class="text-gray-400 hover:text-gray-200">{{ self.tr("admin-nav-members") }}</a>
+                <a href="/admin/audit" class="text-gray-400 hover:text-gray-200">{{ self.tr("admin-nav-audit") }}</a>
+                <a href="/admin/policies" class="text-gray-400 hover:text-gray-200">{{ self.tr("admin-nav-policies") }}</a>
+                <a href="/admin/scim-tokens" class="text-gray-400 hover:text-gray-200">{{ self.tr("admin-nav-scim") }}</a>
+                <a href="/admin/domains" class="text-vouch-accent hover:text-vouch-accent-hover font-medium">{{ self.tr("admin-nav-domains") }}</a>
             </nav>
         </div>
 
@@ -38,19 +38,19 @@
 
         {% if additional_count >= max_additional %}
         <div class="mb-4 px-4 py-3 rounded bg-yellow-900/30 border border-yellow-800 text-yellow-300 text-sm">
-            Maximum of {{ max_additional }} additional domains reached. Remove an existing entry before adding a new one.
+            {{ self.tr("admin-domains-max-prefix") }} {{ max_additional }} {{ self.tr("admin-domains-max-suffix") }}
         </div>
         {% else %}
         <div class="mb-6 bg-vouch-surface border border-vouch-border rounded-lg p-4">
-            <h2 class="text-sm font-semibold text-gray-300 mb-3">Add Domain</h2>
+            <h2 class="text-sm font-semibold text-gray-300 mb-3">{{ self.tr("admin-domains-add") }}</h2>
             <form method="POST" action="/admin/domains" class="flex items-end gap-3">
                 <div class="flex-1">
-                    <label for="domain" class="block text-xs text-gray-400 mb-1">Domain (e.g. acme.co.uk)</label>
+                    <label for="domain" class="block text-xs text-gray-400 mb-1">{{ self.tr("admin-domains-domain-label") }}</label>
                     <input type="text" id="domain" name="domain" maxlength="253" required placeholder="example.com" class="w-full px-3 py-2 rounded bg-gray-800 border border-gray-700 text-gray-200 text-sm placeholder-gray-600 focus:outline-none focus:border-vouch-accent">
                 </div>
-                <button type="submit" class="px-4 py-2 text-sm rounded bg-vouch-accent text-white hover:bg-vouch-accent-hover">Add Domain</button>
+                <button type="submit" class="px-4 py-2 text-sm rounded bg-vouch-accent text-white hover:bg-vouch-accent-hover">{{ self.tr("admin-domains-add") }}</button>
             </form>
-            <p class="mt-3 text-xs text-gray-500">After adding, publish a TXT record to verify ownership. Only verified domains attach new users to this organization.</p>
+            <p class="mt-3 text-xs text-gray-500">{{ self.tr("admin-domains-add-help") }}</p>
         </div>
         {% endif %}
 
@@ -58,11 +58,11 @@
             <table class="w-full text-sm">
                 <thead>
                     <tr class="border-b border-vouch-border text-left text-gray-400">
-                        <th class="px-4 py-3 font-medium">Domain</th>
-                        <th class="px-4 py-3 font-medium">Status</th>
-                        <th class="px-4 py-3 font-medium">Added</th>
-                        <th class="px-4 py-3 font-medium">Added by</th>
-                        <th class="px-4 py-3 font-medium text-right">Actions</th>
+                        <th class="px-4 py-3 font-medium">{{ self.tr("admin-domains-th-domain") }}</th>
+                        <th class="px-4 py-3 font-medium">{{ self.tr("apps-list-th-status") }}</th>
+                        <th class="px-4 py-3 font-medium">{{ self.tr("admin-domains-th-added") }}</th>
+                        <th class="px-4 py-3 font-medium">{{ self.tr("admin-domains-th-added-by") }}</th>
+                        <th class="px-4 py-3 font-medium text-right">{{ self.tr("apps-list-th-actions") }}</th>
                     </tr>
                 </thead>
                 <tbody>
@@ -71,19 +71,19 @@
                         <td class="px-4 py-3 text-gray-200 font-mono">
                             {{ row.domain }}
                             {% if let Some(unicode) = row.unicode %}
-                            <div class="text-xs text-gray-500 font-mono mt-0.5" title="Decoded Unicode form of the IDN domain">↳ {{ unicode }}</div>
+                            <div class="text-xs text-gray-500 font-mono mt-0.5" title="{{ self.tr("admin-domains-idn-title") }}">↳ {{ unicode }}</div>
                             {% endif %}
                         </td>
                         <td class="px-4 py-3 whitespace-nowrap">
                             {% match row.status %}
                             {% when crate::handlers::admin::domains::DomainRowStatus::Primary %}
-                            <span class="px-2 py-0.5 rounded bg-blue-900/40 text-blue-300 text-xs">Primary</span>
+                            <span class="px-2 py-0.5 rounded bg-blue-900/40 text-blue-300 text-xs">{{ self.tr("admin-domains-status-primary") }}</span>
                             {% when crate::handlers::admin::domains::DomainRowStatus::Verified %}
-                            <span class="px-2 py-0.5 rounded bg-green-900/40 text-green-300 text-xs">Verified</span>
+                            <span class="px-2 py-0.5 rounded bg-green-900/40 text-green-300 text-xs">{{ self.tr("admin-domains-status-verified") }}</span>
                             {% when crate::handlers::admin::domains::DomainRowStatus::Unverified %}
-                            <span class="px-2 py-0.5 rounded bg-orange-900/40 text-orange-300 text-xs">Unverified</span>
+                            <span class="px-2 py-0.5 rounded bg-orange-900/40 text-orange-300 text-xs">{{ self.tr("admin-domains-status-unverified") }}</span>
                             {% when crate::handlers::admin::domains::DomainRowStatus::Pending %}
-                            <span class="px-2 py-0.5 rounded bg-yellow-900/40 text-yellow-300 text-xs">Pending</span>
+                            <span class="px-2 py-0.5 rounded bg-yellow-900/40 text-yellow-300 text-xs">{{ self.tr("admin-domains-status-pending") }}</span>
                             {% endmatch %}
                         </td>
                         <td class="px-4 py-3 text-gray-400 whitespace-nowrap">{{ row.added_at.as_deref().unwrap_or("—") }}</td>
@@ -95,11 +95,11 @@
                             <div class="inline-flex gap-2">
                                 {% if let Some(token) = row.verification_token %}
                                 <form method="POST" action="/admin/domains/{{ row.domain }}/verify">
-                                    <button type="submit" class="px-2 py-1 text-xs rounded bg-blue-900/40 text-blue-300 hover:bg-blue-900/60">Verify</button>
+                                    <button type="submit" class="px-2 py-1 text-xs rounded bg-blue-900/40 text-blue-300 hover:bg-blue-900/60">{{ self.tr("admin-domains-verify") }}</button>
                                 </form>
                                 {% endif %}
-                                <form method="POST" action="/admin/domains/{{ row.domain }}/remove" data-confirm-message="Remove this domain? Existing users from it stay in the org, but new logins from this domain will no longer attach.">
-                                    <button type="submit" class="px-2 py-1 text-xs rounded bg-red-900/40 text-red-400 hover:bg-red-900/60">Remove</button>
+                                <form method="POST" action="/admin/domains/{{ row.domain }}/remove" data-confirm-message="{{ self.tr("admin-domains-remove-confirm") }}">
+                                    <button type="submit" class="px-2 py-1 text-xs rounded bg-red-900/40 text-red-400 hover:bg-red-900/60">{{ self.tr("admin-members-btn-remove") }}</button>
                                 </form>
                             </div>
                             {% endmatch %}
@@ -108,17 +108,17 @@
                     {% if let Some(token) = row.verification_token %}
                     <tr class="border-b border-vouch-border last:border-b-0 bg-gray-900/40">
                         <td colspan="5" class="px-4 py-3 text-xs text-gray-400">
-                            <p class="mb-2">Publish this TXT record on <code class="text-gray-300">{{ row.domain }}</code>, then click <em>Verify</em>:</p>
+                            <p class="mb-2">{{ self.tr("admin-domains-txt-prefix") }} <code class="text-gray-300">{{ row.domain }}</code>{{ self.tr("admin-domains-txt-mid") }} <em>{{ self.tr("admin-domains-verify") }}</em>:</p>
                             <div class="font-mono text-gray-200 bg-gray-950 px-3 py-2 rounded border border-gray-800 break-all">
-                                <div><span class="text-gray-500">Name:</span> _vouch-verification.{{ row.domain }}</div>
-                                <div><span class="text-gray-500">Type:</span> TXT</div>
+                                <div><span class="text-gray-500">{{ self.tr("admin-domains-dns-name") }}</span> _vouch-verification.{{ row.domain }}</div>
+                                <div><span class="text-gray-500">{{ self.tr("admin-domains-dns-type") }}</span> TXT</div>
                                 <div class="flex items-start gap-2">
-                                    <span><span class="text-gray-500">Value:</span> {{ token }}</span>
-                                    <button type="button" data-copy-text="{{ token }}" class="shrink-0 text-gray-500 hover:text-gray-200 transition-colors" title="Copy verification token">
+                                    <span><span class="text-gray-500">{{ self.tr("admin-domains-dns-value") }}</span> {{ token }}</span>
+                                    <button type="button" data-copy-text="{{ token }}" class="shrink-0 text-gray-500 hover:text-gray-200 transition-colors" title="{{ self.tr("admin-domains-copy-token-title") }}">
                                         <svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
                                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"/>
                                         </svg>
-                                        <span class="sr-only">Copy</span>
+                                        <span class="sr-only">{{ self.tr("common-copy") }}</span>
                                     </button>
                                 </div>
                             </div>
@@ -131,7 +131,7 @@
         </div>
 
         <div class="mt-4 px-4 py-3 rounded bg-yellow-900/20 border border-yellow-900/40 text-yellow-400/80 text-xs">
-            Adding a domain claims it for this organization. Anyone with a verified email in a claimed domain who signs in will be attached as a member. Only verified domains participate in login matching; pending entries do not.
+            {{ self.tr("admin-domains-warning") }}
         </div>
     </div>
 </div>

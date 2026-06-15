@@ -1,0 +1,484 @@
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+//! Internationalization (i18n) for the server UI.
+//!
+//! All `i18n-embed` / Fluent usage is confined to this module, behind
+//! [`I18nContext`]. Templates, handlers, and JS string injection only ever call
+//! the [`I18nContext`] methods — they never reference `i18n-embed` types. This
+//! keeps the translation backend swappable in one place.
+//!
+//! Locale is negotiated per request from the `Accept-Language` header against
+//! the embedded catalogs, falling back to `en-US`. The global [`struct@LOADER`]
+//! is built once; each request derives a cheap, resource-sharing loader via
+//! `select_languages_negotiate`, so there is no shared mutable locale state.
+
+use std::collections::HashMap;
+use std::sync::{Arc, LazyLock};
+
+use axum::extract::FromRequestParts;
+use axum::response::{IntoResponse, Response};
+use http::request::Parts;
+use http::{HeaderMap, StatusCode, header};
+use i18n_embed::LanguageLoader;
+use i18n_embed::fluent::{FluentLanguageLoader, NegotiationStrategy};
+use unic_langid::{LanguageIdentifier, langid};
+
+/// Embedded Fluent catalogs, one `i18n/<lang>/vouch.ftl` per language.
+#[derive(rust_embed::RustEmbed)]
+#[folder = "i18n/"]
+struct Localizations;
+
+/// Process-wide loader holding every embedded catalog. Built once; never mutated
+/// after load. Per-request locale selection happens on cheap derived loaders.
+static LOADER: LazyLock<FluentLanguageLoader> = LazyLock::new(|| {
+    let loader = FluentLanguageLoader::new("vouch", langid!("en-US"));
+    if let Err(error) = loader.load_available_languages(&Localizations) {
+        tracing::error!(%error, "failed to load i18n catalogs");
+    }
+    // Disable Fluent's BiDi isolation, which otherwise wraps every interpolated
+    // value in invisible U+2068/U+2069 marks. For an LTR-only catalog those marks
+    // add nothing but leak into version strings and copy-paste. Re-enable (and add
+    // BiDi-aware tests) when an RTL language ships. The bundles are shared via Arc,
+    // so this applies to every derived loader.
+    loader.set_use_isolating(false);
+    loader
+});
+
+/// Request-scoped translation handle passed into every UI template.
+///
+/// Cloneable and cheap (the inner loader shares catalog data via `Arc`).
+#[derive(Clone)]
+pub struct I18nContext {
+    loader: Arc<FluentLanguageLoader>,
+    lang: String,
+}
+
+impl Default for I18nContext {
+    /// The fallback (`en-US`) context, for template constructors deep in error
+    /// paths where threading the request-scoped context would be invasive. With
+    /// a single shipped language this is identical to any negotiated context.
+    fn default() -> Self {
+        negotiate(None)
+    }
+}
+
+impl I18nContext {
+    /// Translate a message with no arguments.
+    pub fn t(&self, id: &str) -> String {
+        self.loader.get(id)
+    }
+
+    /// Translate a message, substituting Fluent placeables from `args`.
+    pub fn ta(&self, id: &str, args: &[(&str, &str)]) -> String {
+        let map: HashMap<&str, &str> = args.iter().copied().collect();
+        self.loader.get_args(id, map)
+    }
+
+    /// Translate a message with a single placeable. Convenience for templates,
+    /// which cannot easily build slice literals.
+    pub fn t1(&self, id: &str, name: &str, value: &str) -> String {
+        self.ta(id, &[(name, value)])
+    }
+
+    /// BCP-47 tag of the negotiated language, for `<html lang="...">`.
+    pub fn lang(&self) -> &str {
+        &self.lang
+    }
+
+    /// Text direction for the negotiated language (`ltr` until an RTL language
+    /// is added).
+    pub fn dir(&self) -> &'static str {
+        "ltr"
+    }
+}
+
+/// Shared `en-US` context used for all server-rendered strings.
+///
+/// Per-request language selection is intentionally deferred until a second
+/// language ships (together with the language switcher). With a single shipped
+/// language, request negotiation would always resolve to `en-US`, so templates
+/// render through this one context via the `tr`/`lang` template-trait methods.
+/// The [`negotiate`] engine and the [`FromRequestParts`] extractor below are the
+/// wired-and-tested extension point for that future work.
+static DEFAULT_CONTEXT: LazyLock<I18nContext> = LazyLock::new(|| negotiate(None));
+
+/// Borrow the process-wide default (`en-US`) translation context.
+pub(crate) fn default_context() -> &'static I18nContext {
+    &DEFAULT_CONTEXT
+}
+
+/// Negotiate an [`I18nContext`] from an optional `Accept-Language` header value.
+pub(crate) fn negotiate(accept_language: Option<&str>) -> I18nContext {
+    let requested = accept_language
+        .map(parse_accept_language)
+        .unwrap_or_default();
+    let loader = if requested.is_empty() {
+        LOADER.select_languages(&[LOADER.fallback_language().clone()])
+    } else {
+        LOADER.select_languages_negotiate(&requested, NegotiationStrategy::Filtering)
+    };
+    let lang = loader.current_language().to_string();
+    I18nContext {
+        loader: Arc::new(loader),
+        lang,
+    }
+}
+
+/// Parse an `Accept-Language` header into language identifiers, highest quality
+/// first. Malformed entries and the `*` wildcard are skipped.
+fn parse_accept_language(header: &str) -> Vec<LanguageIdentifier> {
+    let mut weighted: Vec<(f32, LanguageIdentifier)> = Vec::new();
+    for entry in header.split(',') {
+        let mut segments = entry.trim().split(';');
+        let Some(tag) = segments.next() else {
+            continue;
+        };
+        let tag = tag.trim();
+        if tag.is_empty() || tag == "*" {
+            continue;
+        }
+        let Ok(lang) = tag.parse::<LanguageIdentifier>() else {
+            continue;
+        };
+        let mut quality = 1.0_f32;
+        for segment in segments {
+            if let Some(value) = segment.trim().strip_prefix("q=")
+                && let Ok(parsed) = value.trim().parse::<f32>()
+            {
+                quality = parsed;
+            }
+        }
+        weighted.push((quality, lang));
+    }
+    weighted.sort_by(|a, b| b.0.total_cmp(&a.0));
+    weighted.into_iter().map(|(_, lang)| lang).collect()
+}
+
+impl<S> FromRequestParts<S> for I18nContext
+where
+    S: Send + Sync,
+{
+    type Rejection = std::convert::Infallible;
+
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+        let header = parts
+            .headers
+            .get(http::header::ACCEPT_LANGUAGE)
+            .and_then(|value| value.to_str().ok());
+        Ok(negotiate(header))
+    }
+}
+
+/// Translation keys exposed to client-side JavaScript via [`i18n_js_handler`].
+///
+/// The single authoritative list of strings the browser needs. The completeness
+/// test asserts this is a superset of every `t("…")` referenced under
+/// `static/js/` and a subset of the catalog, so a missing entry fails the build
+/// instead of silently rendering the raw key at runtime.
+pub(crate) const JS_I18N_KEYS: &[&str] = &[
+    "admin-js-cel-fails",
+    "admin-js-cel-invalid",
+    "admin-js-cel-passes",
+    "admin-js-edit-policy-title",
+    "admin-policies-playground-title",
+    "appcreate-js-fapi-required",
+    "appcreate-js-jwks-json",
+    "appcreate-js-jwks-keys",
+    "appcreate-js-jwksuri-https",
+    "appcreate-js-jwksuri-invalid",
+    "appcreate-js-redirect-invalid-prefix",
+    "appcreate-js-redirect-invalid-suffix",
+    "appcreate-js-redirect-required",
+    "appcreate-js-resource-fragment",
+    "appcreate-js-resource-invalid-prefix",
+    "appcreate-js-resource-scheme",
+    "appcreate-js-resource-toolong",
+    "common-copy",
+    "common-js-copied",
+    "keys-js-delete-failed",
+    "keys-js-delete-failed-prefix",
+    "keys-js-delete-failed-reauth",
+    "keys-js-delete-prefix",
+    "keys-js-delete-suffix",
+    "keys-js-reauth-complete-failed",
+    "keys-js-reauth-start-failed",
+    "keys-js-reg-complete-failed",
+    "keys-js-reg-completing",
+    "keys-js-reg-start-failed",
+    "keys-js-reg-starting",
+    "keys-js-reg-touch",
+    "keys-js-stepup-1",
+    "keys-js-stepup-2",
+    "login-js-complete-failed",
+    "login-js-error-prefix",
+    "login-js-signed-in",
+    "login-js-start-failed",
+    "login-js-success-redirect",
+    "login-js-touch",
+    "login-js-waiting",
+    "webauthn-err-abort",
+    "webauthn-err-invalidstate",
+    "webauthn-err-notallowed",
+    "webauthn-err-notsupported",
+    "webauthn-err-pin",
+    "webauthn-err-security",
+];
+
+/// Build the locale's client-side translation bundle as JavaScript source.
+///
+/// Emits `window.VOUCH_I18N` (a `key → string` map) and a global `t(key)` that
+/// returns the translation or the key itself when absent.
+fn render_i18n_js(ctx: &I18nContext) -> String {
+    let mut map = serde_json::Map::with_capacity(JS_I18N_KEYS.len());
+    for key in JS_I18N_KEYS {
+        map.insert((*key).to_owned(), serde_json::Value::String(ctx.t(key)));
+    }
+    let json = serde_json::Value::Object(map).to_string();
+    format!(
+        "window.VOUCH_I18N={json};\n\
+         window.t=function(k){{return Object.prototype.hasOwnProperty.call(window.VOUCH_I18N,k)\
+         ?window.VOUCH_I18N[k]:k;}};\n"
+    )
+}
+
+/// Strong ETag (quoted SHA-256 hex) over the rendered bundle, so an unchanged
+/// locale validates with a 304 across page loads.
+fn etag_for(body: &str) -> String {
+    let digest = aws_lc_rs::digest::digest(&aws_lc_rs::digest::SHA256, body.as_bytes());
+    format!("\"{}\"", hex::encode(digest.as_ref()))
+}
+
+/// Serve the negotiated locale's client-side translation bundle.
+///
+/// A single external script (allowed by the `script-src 'self'` CSP) loaded
+/// before page scripts, replacing per-page inline injection. `no-cache` + ETag
+/// lets the body be reused across navigations via cheap 304s while staying fresh
+/// on deploy; `Vary: Accept-Language` keeps per-locale responses distinct.
+pub(crate) async fn i18n_js_handler(ctx: I18nContext, headers: HeaderMap) -> Response {
+    let body = render_i18n_js(&ctx);
+    let etag = etag_for(&body);
+
+    let if_none_match = headers
+        .get(header::IF_NONE_MATCH)
+        .and_then(|value| value.to_str().ok());
+    if if_none_match == Some(etag.as_str()) {
+        return (
+            StatusCode::NOT_MODIFIED,
+            [
+                (header::ETAG, etag),
+                (header::CACHE_CONTROL, "no-cache".to_owned()),
+                (header::VARY, "accept-language".to_owned()),
+            ],
+        )
+            .into_response();
+    }
+
+    (
+        [
+            (
+                header::CONTENT_TYPE,
+                "text/javascript; charset=utf-8".to_owned(),
+            ),
+            (header::CACHE_CONTROL, "no-cache".to_owned()),
+            (header::VARY, "accept-language".to_owned()),
+            (header::ETAG, etag),
+        ],
+        body,
+    )
+        .into_response()
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, reason = "test code")]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn en_us_catalog_loads() {
+        let available = LOADER.available_languages(&Localizations).unwrap();
+        assert!(available.contains(&langid!("en-US")));
+    }
+
+    #[test]
+    fn known_key_resolves() {
+        let ctx = negotiate(None);
+        let rendered = ctx.t("footer-install");
+        assert_eq!(rendered, "Install");
+    }
+
+    #[test]
+    fn placeable_substitution() {
+        let ctx = negotiate(None);
+        let rendered = ctx.t1("footer-copyright", "year", "2026");
+        assert!(rendered.contains("2026"));
+    }
+
+    #[test]
+    fn js_bundle_exposes_every_declared_key() {
+        let ctx = negotiate(None);
+        let bundle = render_i18n_js(&ctx);
+        assert!(bundle.contains("window.VOUCH_I18N="));
+        assert!(bundle.contains("window.t=function"));
+        for key in JS_I18N_KEYS {
+            assert!(bundle.contains(key), "bundle missing key {key}");
+        }
+        // A representative translation is present, not just the key name.
+        assert!(bundle.contains(&ctx.t("common-copy")));
+    }
+
+    #[test]
+    fn etag_is_stable_and_content_addressed() {
+        let ctx = negotiate(None);
+        let body = render_i18n_js(&ctx);
+        assert_eq!(etag_for(&body), etag_for(&body));
+        assert_ne!(etag_for(&body), etag_for("window.VOUCH_I18N={};"));
+        assert!(etag_for(&body).starts_with('"') && etag_for(&body).ends_with('"'));
+    }
+
+    #[test]
+    fn absent_header_falls_back_to_en_us() {
+        assert_eq!(negotiate(None).lang(), "en-US");
+    }
+
+    #[test]
+    fn unsupported_language_falls_back_to_en_us() {
+        assert_eq!(negotiate(Some("zz,xx;q=0.5")).lang(), "en-US");
+    }
+
+    #[test]
+    fn quality_values_are_ordered() {
+        let parsed = parse_accept_language("fr;q=0.5, de, en;q=0.9");
+        let tags: Vec<String> = parsed.iter().map(ToString::to_string).collect();
+        assert_eq!(tags, vec!["de", "en", "fr"]);
+    }
+
+    #[test]
+    fn malformed_header_does_not_panic() {
+        let _ = parse_accept_language(";;;,,q=,=,*;q=x");
+        let _ = negotiate(Some(""));
+    }
+
+    /// Every `self.tr*("id")` / `page.tr*("id")` key referenced by a template
+    /// must be defined in the `en-US` catalog. This is the compile-time-style
+    /// guard for template-embedded keys (which are runtime strings).
+    #[test]
+    fn every_template_key_is_defined() {
+        use std::collections::HashSet;
+        use std::fs;
+        use std::path::{Path, PathBuf};
+
+        fn collect_ftl_ids(content: &str) -> HashSet<String> {
+            let mut ids = HashSet::new();
+            for line in content.lines() {
+                if line.trim_start() != line {
+                    continue; // indented attribute / continuation line
+                }
+                let Some((left, _)) = line.split_once('=') else {
+                    continue;
+                };
+                let id = left.trim();
+                if !id.is_empty()
+                    && id
+                        .chars()
+                        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+                {
+                    ids.insert(id.to_owned());
+                }
+            }
+            ids
+        }
+
+        fn collect_keys(text: &str, keys: &mut HashSet<String>) {
+            for marker in [".tr(\"", ".tr1(\"", ".tr2(\""] {
+                for part in text.split(marker).skip(1) {
+                    if let Some(key) = part.split('"').next() {
+                        keys.insert(key.to_owned());
+                    }
+                }
+            }
+        }
+
+        // A translation key in our convention: kebab-case with at least one
+        // hyphen. Filters out incidental `t('...')` matches in JS such as
+        // `split('\n')` or `closest('.foo')`.
+        fn looks_like_key(s: &str) -> bool {
+            s.contains('-')
+                && s.starts_with(|c: char| c.is_ascii_lowercase())
+                && s.chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+        }
+
+        fn collect_js_keys(text: &str, keys: &mut HashSet<String>) {
+            for marker in ["t(\"", "t('"] {
+                let quote = if marker.ends_with('"') { '"' } else { '\'' };
+                for part in text.split(marker).skip(1) {
+                    if let Some(candidate) = part.split(quote).next()
+                        && looks_like_key(candidate)
+                    {
+                        keys.insert(candidate.to_owned());
+                    }
+                }
+            }
+        }
+
+        fn files_with_ext(dir: &Path, ext: &str, out: &mut Vec<PathBuf>) {
+            let Ok(entries) = fs::read_dir(dir) else {
+                return;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    files_with_ext(&path, ext, out);
+                } else if path.extension().is_some_and(|e| e == ext) {
+                    out.push(path);
+                }
+            }
+        }
+
+        let root = env!("CARGO_MANIFEST_DIR");
+        let ftl = fs::read_to_string(format!("{root}/i18n/en-US/vouch.ftl")).unwrap();
+        let defined = collect_ftl_ids(&ftl);
+
+        let mut used = HashSet::new();
+
+        let mut templates = Vec::new();
+        files_with_ext(
+            Path::new(&format!("{root}/templates")),
+            "html",
+            &mut templates,
+        );
+        assert!(!templates.is_empty(), "no templates found");
+        for path in templates {
+            let text = fs::read_to_string(&path).unwrap();
+            collect_keys(&text, &mut used);
+        }
+
+        let mut js_used = HashSet::new();
+        let mut scripts = Vec::new();
+        files_with_ext(Path::new(&format!("{root}/static/js")), "js", &mut scripts);
+        assert!(!scripts.is_empty(), "no JS files found");
+        for path in scripts {
+            let text = fs::read_to_string(&path).unwrap();
+            collect_js_keys(&text, &mut js_used);
+        }
+
+        // Every key the JS calls must be declared in the bundle the /i18n.js
+        // route ships; otherwise t() would silently return the raw key.
+        let declared: HashSet<String> = JS_I18N_KEYS.iter().map(|key| (*key).to_owned()).collect();
+        let mut undeclared: Vec<&String> = js_used.difference(&declared).collect();
+        undeclared.sort();
+        assert!(
+            undeclared.is_empty(),
+            "JS t() keys missing from JS_I18N_KEYS: {undeclared:?}"
+        );
+
+        // Everything referenced (template keys plus the shipped JS bundle) must
+        // exist in the catalog.
+        used.extend(declared);
+        let mut missing: Vec<&String> = used.difference(&defined).collect();
+        missing.sort();
+        assert!(
+            missing.is_empty(),
+            "i18n keys missing from catalog: {missing:?}"
+        );
+    }
+}

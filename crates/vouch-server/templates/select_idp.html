@@ -1,12 +1,12 @@
 {% extends "base.html" %}
 
-{% block title %}Vouch - Choose Identity Provider{% endblock %}
+{% block title %}{{ self.tr("select-idp-page-title") }}{% endblock %}
 
 {% block content %}
 <div class="flex items-center justify-center flex-1 p-5">
     <div class="card max-w-md w-full">
-        <h1 class="text-2xl font-bold text-gray-200 mb-2">Choose your identity provider</h1>
-        <p class="text-gray-400 text-sm mb-6">Sign in with the identity provider your organization uses.</p>
+        <h1 class="text-2xl font-bold text-gray-200 mb-2">{{ self.tr("select-idp-heading") }}</h1>
+        <p class="text-gray-400 text-sm mb-6">{{ self.tr("select-idp-body") }}</p>
 
         {% if is_post %}
         <form method="POST" action="{{ action }}">
@@ -16,7 +16,7 @@
                 <button type="submit" name="provider" value="{{ entry.id }}"
                         class="w-full flex items-center justify-center gap-3 bg-vouch-surface border border-vouch-border text-gray-300 font-medium py-3 px-6 rounded-lg hover:bg-vouch-raised transition-colors">
                     {{ entry.svg_icon|safe }}
-                    Sign in with {{ entry.display_name }}
+                    {{ self.tr1("home-sign-in-with", "provider", entry.display_name.as_str()) }}
                 </button>
                 {% endfor %}
             </div>
@@ -27,7 +27,7 @@
             <a href="{{ action }}?provider={{ entry.id }}"
                class="w-full flex items-center justify-center gap-3 bg-vouch-surface border border-vouch-border text-gray-300 font-medium py-3 px-6 rounded-lg hover:bg-vouch-raised transition-colors">
                 {{ entry.svg_icon|safe }}
-                Sign in with {{ entry.display_name }}
+                {{ self.tr1("home-sign-in-with", "provider", entry.display_name.as_str()) }}
             </a>
             {% endfor %}
         </div>
