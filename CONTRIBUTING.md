@@ -61,7 +61,8 @@ vouch/
 │   │   ├── src/handlers/   # HTTP route handlers
 │   │   ├── src/db/         # Database layer (sqlx)
 │   │   ├── migrations/     # sqlite/ and postgres/
-│   │   └── templates/      # Askama HTML templates
+│   │   ├── templates/      # Askama HTML templates
+│   │   └── i18n/           # Fluent translation catalogs (en-US/vouch.ftl)
 │   └── vouch-tests/        # Integration + property-based tests
 │       └── tests/
 │           ├── integration.rs
