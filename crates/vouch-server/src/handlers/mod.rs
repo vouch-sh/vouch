@@ -67,6 +67,8 @@ macro_rules! impl_template_into_response {
 /// - **`lang`**, **`dir`**, **`tr`**, **`tr1`** — i18n helpers that forward to
 ///   the request-scoped task-local installed by
 ///   [`crate::infra::i18n::i18n_layer`].
+/// - **`tr_attr`**, **`tr_attr1`** — read Fluent message attributes
+///   (`id .attr = value`), used for paired button label + `.title` tooltip.
 #[macro_export]
 macro_rules! impl_template_helpers {
     ($($template:ty),* $(,)?) => {
@@ -82,6 +84,26 @@ macro_rules! impl_template_helpers {
                 fn tr(&self, id: &str) -> String { $crate::infra::i18n::t(id) }
                 fn tr1(&self, id: &str, name: &str, value: &str) -> String {
                     $crate::infra::i18n::t1(id, name, value)
+                }
+                // Askama passes scalar field accesses by reference, so
+                // accept `&i64` and deref inside. `&i64` covers both
+                // `member.key_count` (an `i64` field) and explicit `&value`
+                // call sites.
+                fn tr1_num(&self, id: &str, name: &str, value: &i64) -> String {
+                    $crate::infra::i18n::t1_num(id, name, *value)
+                }
+                fn tr2(
+                    &self, id: &str,
+                    n1: &str, v1: &str,
+                    n2: &str, v2: &str,
+                ) -> String {
+                    $crate::infra::i18n::ta(id, &[(n1, v1), (n2, v2)])
+                }
+                fn tr_attr(&self, id: &str, attr: &str) -> String {
+                    $crate::infra::i18n::t_attr(id, attr)
+                }
+                fn tr_attr1(&self, id: &str, attr: &str, name: &str, value: &str) -> String {
+                    $crate::infra::i18n::t_attr1(id, attr, name, value)
                 }
             }
         )*

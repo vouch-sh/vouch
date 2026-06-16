@@ -6,9 +6,32 @@
 #
 # This is the source-of-truth catalog for BOTH server-rendered templates and
 # the strings injected into static JS (see templates' `js_i18n` blocks).
+#
+# ---------------------------------------------------------------------------
+# Terms (Fluent feature: https://projectfluent.org/fluent/guide/terms.html)
+#   - Reusable nouns referenced as `{ -term-name }` from any message.
+#   - Names match `crates/vouch-cli/i18n/en-US/vouch-cli.ftl` where they
+#     overlap (`-product`, `-yubikey`, `-cmd`) so translators learn one
+#     vocabulary across the CLI and server.
+#   - Changing a term changes the rendered noun everywhere it's referenced.
+# ---------------------------------------------------------------------------
+
+-product = Vouch
+-cmd = vouch
+-yubikey = YubiKey
+-security-key = security key
+-fapi = FAPI 2.0
+-github = GitHub
+-ssh = SSH
+-oauth = OAuth 2.0
+-webauthn = WebAuthn
+-jwks = JWKS
+
+# Reusable noun phrase — appears verbatim in three help texts.
+-one-uri-per-line = One URI per line.
 
 ## Common / layout
-common-app-name = vouch
+common-app-name = { -product }
 common-copy = Copy
 common-save = Save
 common-cancel = Cancel
@@ -19,7 +42,7 @@ common-client-id = Client ID
 common-client-secret = Client Secret
 
 ## Application created (applications/created.html)
-apps-created-page-title = Application Created - Vouch
+apps-created-page-title = Application Created - { -product }
 apps-created-heading = Application Created
 apps-created-save-creds = Save Your Credentials
 apps-created-secret-once = The client secret will only be shown once. Store it securely.
@@ -28,32 +51,37 @@ apps-created-view-all = View All Applications
 
 ## Application error / unauthorized / secret added
 apps-error-go-back = Go Back
-apps-unauth-page-title = Unauthorized - Vouch
+apps-unauth-page-title = Unauthorized - { -product }
 apps-unauth-heading = Sign In Required
 apps-unauth-body = You need to be signed in to manage applications.
 apps-unauth-signin = Sign In
-apps-secret-page-title = Secret Added - Vouch
+apps-secret-page-title = Secret Added - { -product }
 apps-secret-heading = Secret Added
 apps-secret-save = Save Your New Secret
 apps-secret-once = This secret will only be shown once. Copy it now and store it securely.
 apps-secret-new-label = New Client Secret
-apps-secret-back-to = Back to
+# Merged from prior `apps-secret-back-to = Back to` + plain `{{ name }}`.
+apps-secret-back-to = Back to { $name }
 
 ## Application detail (applications/detail.html)
 apps-detail-back = Back to Applications
 apps-detail-delete-confirm = Are you sure you want to delete this application? This action cannot be undone.
 apps-detail-access-scope = Access Scope
 apps-detail-auth-method = Auth Method
-apps-detail-fapi-badge = FAPI 2.0
+apps-detail-fapi-badge = { -fapi }
 apps-detail-fapi-desc = PAR + DPoP + private_key_jwt
 apps-detail-description = Description
 apps-detail-created = Created
 apps-detail-client-keys = Client Keys
-apps-detail-inline-jwks = Inline JWKS
+apps-detail-inline-jwks = Inline { -jwks }
 apps-detail-no-redirect = No redirect URIs configured
 apps-detail-resource-uris = Resource URIs
 apps-detail-client-secrets = Client Secrets
-apps-detail-secrets-suffix = of 2 active
+# Merged from prior `apps-detail-secrets-suffix = of 2 active`. The template
+# wraps this in parens. `$count` is the active-secret count, `$max` is the
+# limit (currently 2; kept as a placeable so a future limit change is a
+# one-line code edit, no catalog change).
+apps-detail-secrets-count = { $count } of { $max } active
 apps-detail-add-secret = Add Secret
 apps-detail-no-secrets = No secrets configured.
 apps-detail-secret-default = Secret
@@ -63,16 +91,16 @@ apps-detail-revoke = Revoke
 apps-detail-revoke-confirm = Revoke this secret? It will no longer be accepted for authentication.
 apps-detail-usage-stats = Usage Statistics
 apps-detail-name = Name
-apps-detail-one-uri = One URI per line
-apps-detail-resource-help = One URI per line. Target resource servers for audience-restricted tokens (RFC 8707).
+apps-detail-one-uri = { -one-uri-per-line }
+apps-detail-resource-help = { -one-uri-per-line } Target resource servers for audience-restricted tokens (RFC 8707).
 apps-detail-standard-desc = Client secret authentication.
 apps-detail-fapi-short-desc = PAR + DPoP + private_key_jwt.
 apps-detail-save-changes = Save Changes
 
 ## Application create form (applications/create.html)
-apps-create-page-title = New Application - Vouch
+apps-create-page-title = New Application - { -product }
 apps-create-heading = Register New Application
-apps-create-subtitle = Create an OAuth application to integrate with Vouch.
+apps-create-subtitle = Create an { -oauth } application to integrate with { -product }.
 apps-create-name-label = Application Name
 apps-create-name-placeholder = My Application
 apps-create-name-help = A friendly name for your application.
@@ -88,34 +116,34 @@ apps-create-type-native-desc = Desktop or mobile app. Uses PKCE, no client secre
 apps-create-type-service = Service / Machine-to-Machine
 apps-create-type-service-desc = Backend service with no user interaction. Uses client credentials.
 apps-create-redirect-label = Redirect URIs
-apps-create-redirect-help = One URI per line. Where users are redirected after authentication.
+apps-create-redirect-help = { -one-uri-per-line } Where users are redirected after authentication.
 apps-create-resource-label = Resource URIs (optional)
-apps-create-resource-help = One URI per line. Target resource servers that will receive access tokens (RFC 8707). Leave empty to allow any resource.
+apps-create-resource-help = { -one-uri-per-line } Target resource servers that will receive access tokens (RFC 8707). Leave empty to allow any resource.
 apps-create-secprofile-label = Security Profile
-apps-create-secprofile-standard = Standard OAuth 2.0
-apps-create-secprofile-standard-desc = Standard OAuth 2.0 with client secret authentication.
-apps-create-secprofile-fapi = FAPI 2.0 Security Profile
+apps-create-secprofile-standard = Standard { -oauth }
+apps-create-secprofile-standard-desc = Standard { -oauth } with client secret authentication.
+apps-create-secprofile-fapi = { -fapi } Security Profile
 apps-create-secprofile-fapi-desc = Enforces PAR, DPoP, and private_key_jwt. No client secret — authentication uses signed JWTs.
-apps-create-fapi-jwks-info = FAPI 2.0 clients authenticate using signed JWTs instead of a client secret. Provide your public keys as a JWKS (inline JSON) or a JWKS URI endpoint.
-apps-create-jwks-label = JWKS (inline JSON)
+apps-create-fapi-jwks-info = { -fapi } clients authenticate using signed JWTs instead of a client secret. Provide your public keys as a { -jwks } (inline JSON) or a { -jwks } URI endpoint.
+apps-create-jwks-label = { -jwks } (inline JSON)
 apps-create-jwks-help = JSON Web Key Set containing your public signing keys.
-apps-create-jwks-uri-label = JWKS URI
-apps-create-jwks-uri-help = HTTPS endpoint serving your JWKS.
+apps-create-jwks-uri-label = { -jwks } URI
+apps-create-jwks-uri-help = HTTPS endpoint serving your { -jwks }.
 apps-create-access-label = Who can use this application?
 apps-create-access-org = Organization members only
 apps-create-access-org-desc = Only users in your organization can authenticate with this app.
 apps-create-access-personal = Only me
 apps-create-access-personal-desc = Only you can authenticate with this app. Good for personal tools.
-apps-create-access-public = Any Vouch user
-apps-create-access-public-desc = Any authenticated Vouch user can use this app.
+apps-create-access-public = Any { -product } user
+apps-create-access-public-desc = Any authenticated { -product } user can use this app.
 
 ## Applications list (applications/list.html)
-apps-list-page-title = My Applications - Vouch
+apps-list-page-title = My Applications - { -product }
 apps-list-heading = My Applications
 apps-list-new = New Application
 apps-list-empty-heading = No applications yet
-apps-list-empty-body = Build internal tools that authenticate users via YubiKey.
-apps-list-empty-detail = Register an OAuth application to get a client ID and secret, then integrate using standard OAuth 2.0 / OIDC flows.
+apps-list-empty-body = Build internal tools that authenticate users via { -yubikey }.
+apps-list-empty-detail = Register an { -oauth } application to get a client ID and secret, then integrate using standard { -oauth } / OIDC flows.
 apps-list-create = Create Application
 apps-list-th-name = Name
 apps-list-th-type = Type
@@ -123,27 +151,37 @@ apps-list-th-scope = Scope
 apps-list-th-status = Status
 apps-list-th-last-used = Last Used
 apps-list-th-actions = Actions
+# Status pill labels are kept as separate ids per the Fluent good-practices
+# rule "Reserve Variants for Grammar/Style Only, Not UI Logic" — these are
+# distinct UI states, not grammatical variants of one message.
 apps-list-status-active = Active
 apps-list-status-inactive = Inactive
 apps-list-never = Never
 apps-list-delete-confirm = Are you sure you want to delete this application?
 
 ## Security keys management (enroll_keys.html, enroll_keys_container.html)
-enroll-keys-page-title = Vouch - Security Keys
+enroll-keys-page-title = { -product } - { -security-key }s
 enroll-keys-heading = Security Keys
 enroll-keys-cli-guidance = You can also manage keys from the command line:
 enroll-keys-empty = No security keys registered yet.
 enroll-keys-register-first = Register Your First Security Key
-enroll-keys-rename-aria = Rename key
-enroll-keys-added-prefix = Added
-enroll-keys-delete-title = Delete key
+# Fluent attribute pattern (https://projectfluent.org/fluent/guide/attributes.html):
+# the value is the action verb; the .aria-label is what a screen reader announces.
+enroll-keys-rename = Rename
+    .aria-label = Rename key
+# Merged from prior `enroll-keys-added-prefix = Added`. `$when` is a rendered
+# timestamp from the template.
+enroll-keys-added = Added { $when }
+# Value is the action; .title is the tooltip a sighted user sees on hover.
+enroll-keys-delete = Delete
+    .title = Delete key
 enroll-keys-add-another = + Add Another Security Key
 
 ## Landing / home (landing.html)
-home-page-title = Vouch - { $org }
-home-welcome = Welcome to Vouch
+home-page-title = { -product } - { $org }
+home-welcome = Welcome to { -product }
 home-tagline = { $org }'s hardware-backed authentication system
-home-subtagline = Login once with your YubiKey. SSH, AWS, and Git work for 8 hours.
+home-subtagline = Login once with your { -yubikey }. { -ssh }, AWS, and Git work for 8 hours.
 home-manage-keys = Manage Security Keys
 home-no-browser-signin = Browser sign-in is not configured. Use the CLI enrollment command below.
 home-sign-in-with = Sign in with { $provider }
@@ -157,25 +195,31 @@ home-feature-shortlived = Short-lived credentials
 home-feature-phishing = Phishing-resistant
 
 ## Login (login.html)
-login-page-title = Vouch - Sign In
+login-page-title = { -product } - Sign In
 login-title = Sign In
+# DOCUMENTED FRAGMENT: paired with a `<span class="font-semibold ...">` styled
+# client name in the template (login.html). Merging into a single message with
+# a `{ $client }` placeable would lose the visual emphasis on the client name,
+# which matters for an OAuth consent screen.
 login-continue-prefix = Sign in to continue to
-login-touch-prompt = Touch your security key to sign in
-login-status-insert = Insert your security key and touch it when it blinks.
-login-button = Sign In with Security Key
+login-touch-prompt = Touch your { -security-key } to sign in
+login-status-insert = Insert your { -security-key } and touch it when it blinks.
+login-button = Sign In with { -security-key }
 login-privacy-policy = Privacy Policy
 login-terms = Terms of Service
+# DOCUMENTED FRAGMENT: followed by an `<a>` link with the `login-enroll-now`
+# text inside (login.html). Cannot merge without losing the link element.
 login-no-account-prefix = Don't have an account?
 login-enroll-now = Enroll now
 login-cert-test-login = Certification Test Login
 login-cert-test-deny = Certification Test Deny
 
 ## Generic error page (error.html)
-error-page-title = Vouch - Error
+error-page-title = { -product } - Error
 error-back = Back
 
 ## Enrollment success (success.html)
-success-page-title = Vouch - Success
+success-page-title = { -product } - Success
 success-heading = Enrollment Complete
 success-body = You can close this window and return to your terminal.
 success-next-label = Next in your terminal
@@ -184,95 +228,112 @@ success-cmd-aws = # AWS credentials
 success-cmd-github = # GitHub tokens
 
 ## Device verification (device_verify.html)
-device-page-title = Vouch - Device Verification
+device-page-title = { -product } - Device Verification
 device-heading = Enter Your Code
 device-body = Enter the code shown in your terminal to continue.
 device-continue = Continue
 
 ## Identity provider chooser (select_idp.html)
-select-idp-page-title = Vouch - Choose Identity Provider
+select-idp-page-title = { -product } - Choose Identity Provider
 select-idp-heading = Choose your identity provider
 select-idp-body = Sign in with the identity provider your organization uses.
 
 ## OAuth authorize / consent (authorize.html)
-authorize-page-title = Sign in - Vouch
+authorize-page-title = Sign in - { -product }
 authorize-heading = Sign in to continue
 authorize-subtitle = Hardware authentication required
-authorize-wants-access = wants to access your Vouch identity
+authorize-wants-access = wants to access your { -product } identity
 authorize-org-app-for = This is an organizational application for
 authorize-org-app = This is an organizational application
-authorize-use-cli = Use the Vouch CLI to authenticate:
+authorize-use-cli = Use the { -product } CLI to authenticate:
 authorize-refresh = Then refresh this page.
 
 ## OAuth access denied (authorize_denied.html)
-authorize-denied-page-title = Access Denied - Vouch
+authorize-denied-page-title = Access Denied - { -product }
 authorize-denied-heading = Access Denied
 authorize-denied-subtitle = You cannot use this application
+# DOCUMENTED FRAGMENT: preceded by `<strong>{{ client_name }}</strong>` in
+# the template. Merging would lose the styled client name.
 authorize-denied-restricted-suffix = has restricted access.
 authorize-denied-contact = If you believe you should have access, contact the application owner.
 
 ## GitHub connect result pages (github/success.html, github/error.html)
-github-success-page-title = Vouch - GitHub Connected
-github-success-heading = GitHub Connected
+github-success-page-title = { -product } - { -github } Connected
+github-success-heading = { -github } Connected
+# DOCUMENTED FRAGMENT: followed by `<span class="text-gray-300 font-medium">`
+# styled account name. Keep split to preserve the visual emphasis.
 github-success-connected-prefix = Successfully connected to
 github-success-next-steps = Next steps for your team:
-github-success-step1 = 1. Configure Git to use Vouch:
+github-success-step1 = 1. Configure Git to use { -product }:
 github-success-step2 = 2. Test with any repository:
 github-success-close = You can close this window.
 github-error-try-again = Try Again
 
 ## GitHub connect page (github/connect.html)
-github-connect-page-title = Vouch - Connect GitHub
-github-connect-heading = Connect GitHub
-github-connect-subtitle = Connect your organization's GitHub account to enable Git credential issuance.
-github-connect-link-heading = Link Your GitHub Account
-github-connect-link-body = To reconnect existing GitHub installations, link your GitHub account to verify your access.
-github-connect-link-button = Link GitHub Account
+github-connect-page-title = { -product } - Connect { -github }
+github-connect-heading = Connect { -github }
+github-connect-subtitle = Connect your organization's { -github } account to enable Git credential issuance.
+github-connect-link-heading = Link Your { -github } Account
+github-connect-link-body = To reconnect existing { -github } installations, link your { -github } account to verify your access.
+github-connect-link-button = Link { -github } Account
 github-connect-reconnect-heading = Reconnect Existing Installations
-github-connect-reconnect-body = These GitHub accounts have the Vouch app installed and you have access to reconnect them:
+github-connect-reconnect-body = These { -github } accounts have the { -product } app installed and you have access to reconnect them:
 github-connect-linked-as = Linked as
-github-connect-connected-heading = Connected GitHub accounts:
-github-connect-connected-more = You can connect additional GitHub organizations below.
+github-connect-connected-heading = Connected { -github } accounts:
+github-connect-connected-more = You can connect additional { -github } organizations below.
 github-connect-next-heading = What happens next:
-github-connect-step1 = You'll be redirected to GitHub to install the Vouch App
-github-connect-step2 = Select which repositories Vouch can access
+github-connect-step1 = You'll be redirected to { -github } to install the { -product } App
+github-connect-step2 = Select which repositories { -product } can access
+# DOCUMENTED FRAGMENT: prefix + `<code>vouch setup github</code>` + suffix in
+# the template (github/connect.html). The `<code>` styling on the command is
+# load-bearing — keeping the command visually distinct from the surrounding
+# instructions is the point of the line.
 github-connect-step3-prefix = Team members can then use
 github-connect-step3-suffix = to configure their machines
 github-connect-perms-heading = Permissions requested:
 github-connect-perm-contents = Repository contents (read/write)
 github-connect-perm-metadata = Repository metadata (read)
-github-connect-button = Connect GitHub
-github-connect-button-another = Connect Another GitHub Account
+github-connect-button = Connect { -github }
+github-connect-button-another = Connect Another { -github } Account
 
 ## Install / developer setup (install.html)
-install-page-title = Developer Setup - Vouch
-install-heading = Get Started with Vouch
-install-subtitle = Install the CLI and enroll your YubiKey
+install-page-title = Developer Setup - { -product }
+install-heading = Get Started with { -product }
+install-subtitle = Install the CLI and enroll your { -yubikey }
 install-prereqs-label = Prerequisites
-install-prereq-key = FIDO2 security key (YubiKey 5 series recommended)
+install-prereq-key = FIDO2 { -security-key } ({ -yubikey } 5 series recommended)
+# DOCUMENTED FRAGMENT: followed by `<code>{{ server_url }}</code>)` in the
+# template — note the message ends with an open paren and the closing paren
+# lives outside `<code>` in the HTML. Splitting preserves the `<code>` style
+# on the server URL.
 install-prereq-server-prefix = Server URL from your admin (or use
 install-step1-title = Install the CLI
 install-win-limited-title = Limited Windows Support
-install-win-limited-body = The Vouch agent and SSH integration are not available on Windows. Only basic authentication and credential exchange are supported.
+install-win-limited-body = The { -product } agent and SSH integration are not available on Windows. Only basic authentication and credential exchange are supported.
+# DOCUMENTED FRAGMENT: prefix + `<a>` releases link + mid + `<code>vouch.exe</code>`
+# + suffix in install.html. The link and the `<code>` for the binary name are
+# load-bearing styling that can't move through a plain placeable.
 install-win-download-prefix = Download the Windows binary from the
 install-win-releases-link = releases page
 install-win-download-mid = , extract the zip file, and add
 install-win-download-suffix = to a directory in your PATH.
 install-win-supported-label = Supported:
 install-download-directly = Or download directly:
-install-step2-title = Enroll your YubiKey
-install-step2-body = This opens a browser to verify your identity and register your YubiKey.
+install-step2-title = Enroll your { -yubikey }
+install-step2-body = This opens a browser to verify your identity and register your { -yubikey }.
 install-step3-title = Daily login
 install-step3-body = After login, your identity is available to SSH, AWS, Git, and other tools automatically.
 
 ## Integrations (integrations.html)
-integrations-page-title = Vouch - Integrations
+integrations-page-title = { -product } - Integrations
 integrations-heading = Integrations
 integrations-subtitle = Manage server-configured integrations.
 integrations-badge-org-wide = Organization-wide
 integrations-badge-per-user = Per-user
-integrations-github-desc = Get short-lived GitHub access tokens for Git operations.
-integrations-github-not-configured = GitHub App not configured on this server.
+integrations-github-desc = Get short-lived { -github } access tokens for Git operations.
+integrations-github-not-configured = { -github } App not configured on this server.
+# DOCUMENTED FRAGMENT: prefix + `<code>VOUCH_GITHUB_APP_*</code>` + suffix in
+# integrations.html. The `<code>` style on the env-var pattern is load-bearing.
 integrations-github-requires-prefix = Requires
 integrations-github-requires-suffix = environment variables.
 integrations-requires-org = Requires organization membership.
@@ -282,18 +343,24 @@ integrations-ask-admin = Ask an org admin
 integrations-connected = Connected:
 integrations-manage = Manage
 integrations-ssh-title = SSH Certificates
-integrations-ssh-desc = Get short-lived SSH certificates signed by Vouch's CA.
+integrations-ssh-desc = Get short-lived SSH certificates signed by { -product }'s CA.
 integrations-ssh-get-cert = Get a certificate:
+# DOCUMENTED FRAGMENT: prefix + `<code>/etc/ssh/ca.pub</code>` + suffix in
+# integrations.html. `<code>` on the path is load-bearing.
 integrations-ssh-capub-prefix = CA public key (add to
 integrations-ssh-capub-suffix = on your servers):
 integrations-ssh-not-configured = SSH CA not configured on this server.
+# DOCUMENTED FRAGMENT: prefix + `<code>VOUCH_SSH_CA_KEY</code>` + mid + `<a>`
+# link + integrations-ssh-guide-link. Code + link styling is load-bearing.
 integrations-ssh-set-prefix = Set
 integrations-ssh-set-mid = to enable. See the
 integrations-ssh-guide-link = key management guide
+# DOCUMENTED FRAGMENT: prefix + `<a>` link with `integrations-setup-guide-link`
+# text. Link element prevents merge.
 integrations-more-prefix = Looking for AWS, EKS, Docker, or other integrations? See the
 integrations-setup-guide-link = setup guide
 
-## Client-side JS strings (injected via the #vouch-i18n JSON data block)
+## Client-side JS strings (injected via the /i18n.js script bundle)
 common-js-copied = Copied!
 webauthn-err-notallowed = Operation was cancelled or timed out. Please try again.
 webauthn-err-security = Security error. Please ensure you are on a secure (HTTPS) connection.
@@ -325,15 +392,18 @@ keys-js-reg-complete-failed = Failed to complete registration
 ## Application form validation — client-side JS (app-create.js, app-detail.js)
 appcreate-js-redirect-required = At least one redirect URI is required.
 appcreate-js-redirect-invalid = Invalid redirect URI(s): { $uris }. Each URI must be a valid http:// or https:// URL.
-appcreate-js-resource-toolong = ... (exceeds maximum length of 2048)
-appcreate-js-resource-fragment = {" "}(must not contain a fragment)
-appcreate-js-resource-scheme = {" "}(must be an absolute URI with a scheme)
+# Per-URI validation errors. Each takes the offending URI as a placeable so JS
+# never concatenates strings around translated text — that pattern previously
+# required a `{ " " }(reason)` leading-space hack in the catalog.
+appcreate-js-resource-fragment-uri = { $uri } must not contain a fragment.
+appcreate-js-resource-scheme-uri = { $uri } must be an absolute URI with a scheme.
+appcreate-js-resource-toolong-uri = { $uri } exceeds the maximum length of 2048 characters.
 appcreate-js-resource-invalid = Invalid resource URI(s): { $errors }.
-appcreate-js-jwks-keys = JWKS must be a JSON object with a non-empty "keys" array.
-appcreate-js-jwks-json = JWKS must be valid JSON.
-appcreate-js-jwksuri-https = JWKS URI must use https://.
-appcreate-js-jwksuri-invalid = JWKS URI must be a valid https:// URL.
-appcreate-js-fapi-required = FAPI 2.0 requires either a JWKS or JWKS URI.
+appcreate-js-jwks-keys = { -jwks } must be a JSON object with a non-empty "keys" array.
+appcreate-js-jwks-json = { -jwks } must be valid JSON.
+appcreate-js-jwksuri-https = { -jwks } URI must use https://.
+appcreate-js-jwksuri-invalid = { -jwks } URI must be a valid https:// URL.
+appcreate-js-fapi-required = { -fapi } requires either a { -jwks } or { -jwks } URI.
 
 ## Authenticated header navigation (macros/auth.html)
 nav-keys = Keys
@@ -351,7 +421,11 @@ admin-nav-domains = Email Domains
 admin-next-page = Next page
 
 ## Admin members (admin/members.html)
-admin-members-page-title = Vouch - Organization Members
+#
+# Each per-row action button uses the Fluent attribute pattern: the value is
+# the visible button label, `.title` is the hover tooltip. Translators see
+# the label and tooltip together (https://projectfluent.org/fluent/guide/attributes.html).
+admin-members-page-title = { -product } - Organization Members
 admin-members-heading = Organization Members
 admin-members-subtitle = Manage members, roles, and credentials.
 admin-members-th-email = Email
@@ -360,26 +434,31 @@ admin-members-th-keys = Keys
 admin-members-you = (you)
 admin-members-role-admin = Admin
 admin-members-role-member = Member
-admin-members-btn-demote = Demote
-admin-members-btn-promote = Promote
-admin-members-btn-deactivate = Deactivate
-admin-members-btn-activate = Activate
-admin-members-btn-revoke = Revoke Keys
-admin-members-btn-remove = Remove
-admin-members-title-demote = Demote to member
-admin-members-title-promote = Promote to admin
-admin-members-title-deactivate = Deactivate user
-admin-members-title-activate = Reactivate user
-admin-members-title-revoke = Revoke all credentials
-admin-members-title-remove = Remove from organization
+admin-members-demote = Demote
+    .title = Demote to member
+admin-members-promote = Promote
+    .title = Promote to admin
+admin-members-deactivate = Deactivate
+    .title = Deactivate user
+admin-members-activate = Activate
+    .title = Reactivate user
+admin-members-revoke = Revoke Keys
+    .title = Revoke all credentials
+admin-members-remove = Remove
+    .title = Remove from organization
 admin-members-confirm-demote = Demote this user from admin?
 admin-members-confirm-deactivate = Deactivate this user? Their sessions will be invalidated.
-admin-members-confirm-revoke = Revoke all credentials for this user? This will delete their key(s) and invalidate all sessions. The user will need to re-enroll.
+# CLDR plural selector (https://projectfluent.org/fluent/guide/selectors.html):
+# `$count` is the number of registered keys on the target user (member.key_count).
+admin-members-confirm-revoke = Revoke all credentials for this user? This will delete their { $count ->
+        [one] key
+       *[other] keys
+    } and invalidate all sessions. The user will need to re-enroll.
 admin-members-confirm-remove = Remove this user from the organization? This permanently deletes the user and all their data.
 admin-members-none = No members found.
 
 ## Admin audit log (admin/audit.html)
-admin-audit-page-title = Vouch - Audit Log
+admin-audit-page-title = { -product } - Audit Log
 admin-audit-subtitle = Security events for your organization.
 admin-audit-filter-label = Filter:
 admin-audit-filter-all = All
@@ -398,10 +477,11 @@ admin-audit-none = No audit events found.
 admin-audit-older = Older events
 
 ## Admin email domains (admin/domains.html)
-admin-domains-page-title = Vouch - Email Domains
+admin-domains-page-title = { -product } - Email Domains
 admin-domains-subtitle = Manage which email domains attach signing-in users to this organization.
-admin-domains-max-prefix = Maximum of
-admin-domains-max-suffix = additional domains reached. Remove an existing entry before adding a new one.
+# Merged from prior `admin-domains-max-prefix` + `admin-domains-max-suffix`.
+# `$count` is the remaining additional-domain capacity.
+admin-domains-max = Maximum of { $count } additional domains reached. Remove an existing entry before adding a new one.
 admin-domains-add = Add Domain
 admin-domains-domain-label = Domain (e.g. acme.co.uk)
 admin-domains-add-help = After adding, publish a TXT record to verify ownership. Only verified domains attach new users to this organization.
@@ -415,6 +495,9 @@ admin-domains-status-unverified = Unverified
 admin-domains-status-pending = Pending
 admin-domains-verify = Verify
 admin-domains-remove-confirm = Remove this domain? Existing users from it stay in the org, but new logins from this domain will no longer attach.
+# DOCUMENTED FRAGMENT: prefix + `<code>{{ row.domain }}</code>` + mid + `<em>`
+# action verb. The styled domain + emphasized action verb in the middle
+# prevent a single-message merge without losing styling.
 admin-domains-txt-prefix = Publish this TXT record on
 admin-domains-txt-mid = , then click
 admin-domains-dns-name = Name:
@@ -424,14 +507,16 @@ admin-domains-copy-token-title = Copy verification token
 admin-domains-warning = Adding a domain claims it for this organization. Anyone with a verified email in a claimed domain who signs in will be attached as a member. Only verified domains participate in login matching; pending entries do not.
 
 ## Admin device posture policies (admin/policies.html)
-admin-policies-page-title = Vouch - Device Posture Policies
+admin-policies-page-title = { -product } - Device Posture Policies
 admin-policies-heading = Device Posture Policies
 admin-policies-subtitle = Enforce device security requirements for authentication. All active policies must pass.
 admin-policies-builtin = Built-in Policies
+# Fluent attribute pattern: the value is the displayed pill label (current
+# state), the `.title` is the action invoked by clicking it (the inverse).
 admin-policies-on = On
+    .title = Click to disable
 admin-policies-off = Off
-admin-policies-title-disable = Click to disable
-admin-policies-title-enable = Click to enable
+    .title = Click to enable
 admin-policies-disk-macos = FileVault full-disk encryption
 admin-policies-disk-windows = BitLocker drive encryption
 admin-policies-disk-linux = LUKS/dm-crypt volume encryption
@@ -473,7 +558,7 @@ admin-js-cel-fails = — fails against test device
 admin-js-cel-invalid = Invalid expression
 
 ## Admin SCIM tokens (admin/scim_tokens.html)
-admin-scim-page-title = Vouch - SCIM Tokens
+admin-scim-page-title = { -product } - SCIM Tokens
 admin-scim-subtitle = Manage SCIM provisioning tokens for your identity provider.
 admin-scim-new-created = New SCIM token created. Copy it now — it won't be shown again.
 admin-scim-max = Maximum of 2 SCIM tokens reached. Revoke an existing token before creating a new one.

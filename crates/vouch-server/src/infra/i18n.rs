@@ -68,6 +68,43 @@ impl I18nContext {
         self.ta(id, &[(name, value)])
     }
 
+    /// Translate a message with a single **numeric** placeable.
+    ///
+    /// Distinct from [`t1`] because Fluent's CLDR plural selector
+    /// (`{ $count -> [one] … *[other] … }`, see
+    /// <https://projectfluent.org/fluent/guide/selectors.html>) only fires
+    /// when the placeable is a `FluentValue::Number`. Passing a stringified
+    /// integer through `t1` would silently take the `*[other]` branch even
+    /// when the value is `1`.
+    pub fn t1_num(&self, id: &str, name: &str, value: i64) -> String {
+        let map: HashMap<&str, i64> = std::iter::once((name, value)).collect();
+        self.loader.get_args(id, map)
+    }
+
+    /// Translate a message **attribute** (Fluent's `id .attr = value` form,
+    /// per <https://projectfluent.org/fluent/guide/attributes.html>) with no
+    /// arguments.
+    ///
+    /// Attributes pair UI-adjacent strings under a single message id — most
+    /// commonly a visible button label (the value) plus its `.title` tooltip
+    /// or `.aria-label`. Translators see them together, which preserves the
+    /// relationship the templates implied with parallel `*-btn-*` /
+    /// `*-title-*` ids.
+    pub fn t_attr(&self, id: &str, attr: &str) -> String {
+        self.loader.get_attr(id, attr)
+    }
+
+    /// Translate a message attribute with multiple placeables.
+    pub fn t_attr_args(&self, id: &str, attr: &str, args: &[(&str, &str)]) -> String {
+        let map: HashMap<&str, &str> = args.iter().copied().collect();
+        self.loader.get_attr_args(id, attr, map)
+    }
+
+    /// Translate a message attribute with a single placeable.
+    pub fn t_attr1(&self, id: &str, attr: &str, name: &str, value: &str) -> String {
+        self.t_attr_args(id, attr, &[(name, value)])
+    }
+
     /// BCP-47 tag of the negotiated language, for `<html lang="...">`.
     pub fn lang(&self) -> &str {
         &self.lang
@@ -103,6 +140,40 @@ pub(crate) fn t1(id: &str, name: &str, value: &str) -> String {
     REQUEST_I18N
         .try_with(|i| i.t1(id, name, value))
         .unwrap_or_else(|_| I18nContext::fallback().t1(id, name, value))
+}
+
+/// Translate a message with a single numeric Fluent placeable. Same scope
+/// semantics as [`t`]. Use when the catalog message branches on the value
+/// via a CLDR plural selector — passing the count as a number lets Fluent
+/// pick the correct `[one]` / `[few]` / `[other]` arm for the target locale.
+pub(crate) fn t1_num(id: &str, name: &str, value: i64) -> String {
+    REQUEST_I18N
+        .try_with(|i| i.t1_num(id, name, value))
+        .unwrap_or_else(|_| I18nContext::fallback().t1_num(id, name, value))
+}
+
+/// Translate a message with multiple Fluent placeables. Same scope semantics
+/// as [`t`].
+pub(crate) fn ta(id: &str, args: &[(&str, &str)]) -> String {
+    REQUEST_I18N
+        .try_with(|i| i.ta(id, args))
+        .unwrap_or_else(|_| I18nContext::fallback().ta(id, args))
+}
+
+/// Translate a message attribute (Fluent `id .attr = value`). Same scope
+/// semantics as [`t`].
+pub(crate) fn t_attr(id: &str, attr: &str) -> String {
+    REQUEST_I18N
+        .try_with(|i| i.t_attr(id, attr))
+        .unwrap_or_else(|_| I18nContext::fallback().t_attr(id, attr))
+}
+
+/// Translate a message attribute with a single Fluent placeable. Same scope
+/// semantics as [`t`].
+pub(crate) fn t_attr1(id: &str, attr: &str, name: &str, value: &str) -> String {
+    REQUEST_I18N
+        .try_with(|i| i.t_attr1(id, attr, name, value))
+        .unwrap_or_else(|_| I18nContext::fallback().t_attr1(id, attr, name, value))
 }
 
 /// BCP-47 tag of the negotiated language for `<html lang="...">`. Returns
@@ -271,10 +342,10 @@ pub(crate) const JS_I18N_KEYS: &[&str] = &[
     "appcreate-js-jwksuri-invalid",
     "appcreate-js-redirect-invalid",
     "appcreate-js-redirect-required",
-    "appcreate-js-resource-fragment",
+    "appcreate-js-resource-fragment-uri",
     "appcreate-js-resource-invalid",
-    "appcreate-js-resource-scheme",
-    "appcreate-js-resource-toolong",
+    "appcreate-js-resource-scheme-uri",
+    "appcreate-js-resource-toolong-uri",
     "common-copy",
     "common-js-copied",
     "keys-js-delete",
@@ -433,6 +504,49 @@ mod tests {
     }
 
     #[test]
+    fn attribute_resolves() {
+        // Fluent attribute pattern, per the docs at
+        // <https://projectfluent.org/fluent/guide/attributes.html>.
+        // `admin-members-demote` carries a `.title` for the button tooltip.
+        let ctx = negotiate(None);
+        assert_eq!(ctx.t("admin-members-demote"), "Demote");
+        assert_eq!(
+            ctx.t_attr("admin-members-demote", "title"),
+            "Demote to member"
+        );
+    }
+
+    #[test]
+    fn term_substitution_renders_product_name() {
+        // Terms (`-product`, `-yubikey`, …) defined at the top of vouch.ftl
+        // expand inside referencing messages. A change to the term name
+        // propagates everywhere; this test pins one representative call site.
+        let ctx = negotiate(None);
+        let rendered = ctx.t("home-welcome");
+        assert!(
+            rendered.contains("Vouch"),
+            "{{ -product }} should expand to Vouch, got: {rendered}"
+        );
+    }
+
+    #[test]
+    fn plural_selector_one_vs_other() {
+        // CLDR plural selector on `admin-members-confirm-revoke`. The
+        // selector picks `[one]` vs `*[other]` from a `FluentValue::Number`,
+        // so the value must go through `t1_num` (not `t1`, which would
+        // serialize as `FluentValue::String` and always fall through to
+        // `*[other]`).
+        let ctx = negotiate(None);
+        let one = ctx.t1_num("admin-members-confirm-revoke", "count", 1);
+        let many = ctx.t1_num("admin-members-confirm-revoke", "count", 3);
+        assert!(one.contains("key "), "one-arm should say 'key', got: {one}");
+        assert!(
+            many.contains("keys "),
+            "other-arm should say 'keys', got: {many}"
+        );
+    }
+
+    #[test]
     fn validate_startup_passes_with_embedded_catalog() {
         validate_startup().expect("embedded en-US catalog should validate");
     }
@@ -587,31 +701,91 @@ mod tests {
         use std::path::{Path, PathBuf};
 
         fn collect_ftl_ids(content: &str) -> HashSet<String> {
+            // Collect both top-level message ids (`my-msg = …`) and attribute
+            // refs (`my-msg.title`, indented under their owning message as
+            // `    .title = …`). Attribute references in templates use the
+            // `id.attr` form (e.g. `self.tr_attr("admin-members-demote",
+            // "title")`), so we register them as `my-msg.title` here.
             let mut ids = HashSet::new();
+            let mut current_owner: Option<String> = None;
             for line in content.lines() {
-                if line.trim_start() != line {
-                    continue; // indented attribute / continuation line
+                let trimmed = line.trim_start();
+                if trimmed.is_empty() || trimmed.starts_with('#') {
+                    continue;
                 }
+                let indented = trimmed.len() < line.len();
+                if indented {
+                    // Attribute line: `    .attr-name = …`. Anything else
+                    // indented (raw continuation, selector arm, etc.) is
+                    // skipped — those don't introduce new ids.
+                    if !trimmed.starts_with('.') {
+                        continue;
+                    }
+                    let Some((left, _)) = trimmed.split_once('=') else {
+                        continue;
+                    };
+                    let attr = left.trim().trim_start_matches('.');
+                    if attr.is_empty()
+                        || !attr
+                            .chars()
+                            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+                    {
+                        continue;
+                    }
+                    if let Some(owner) = current_owner.as_deref() {
+                        ids.insert(format!("{owner}.{attr}"));
+                    }
+                    continue;
+                }
+                // Top-level line: `my-msg = …`. Reset attribute ownership.
                 let Some((left, _)) = line.split_once('=') else {
+                    current_owner = None;
                     continue;
                 };
                 let id = left.trim();
+                // Skip Fluent terms (`-foo = …`) — they're not callable from
+                // templates, only referenced from other messages via
+                // `{ -foo }`. Their syntax doesn't fit our kebab-case check
+                // either (leading `-`).
+                if id.starts_with('-') {
+                    current_owner = None;
+                    continue;
+                }
                 if !id.is_empty()
                     && id
                         .chars()
                         .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
                 {
                     ids.insert(id.to_owned());
+                    current_owner = Some(id.to_owned());
+                } else {
+                    current_owner = None;
                 }
             }
             ids
         }
 
         fn collect_keys(text: &str, keys: &mut HashSet<String>) {
+            // `self.tr("id")` / `self.tr1("id", …)` — store the bare id.
             for marker in [".tr(\"", ".tr1(\""] {
                 for part in text.split(marker).skip(1) {
                     if let Some(key) = part.split('"').next() {
                         keys.insert(key.to_owned());
+                    }
+                }
+            }
+            // `self.tr_attr("id", "attr")` / `self.tr_attr1("id", "attr", …)`
+            // — store as `id.attr` so it matches the attribute ids that
+            // `collect_ftl_ids` records.
+            for marker in [".tr_attr(\"", ".tr_attr1(\""] {
+                for part in text.split(marker).skip(1) {
+                    let mut it = part.split('"');
+                    let Some(id) = it.next() else { continue };
+                    // Skip the literal `, "` between the two string args.
+                    let _ = it.next();
+                    let Some(attr) = it.next() else { continue };
+                    if !id.is_empty() && !attr.is_empty() {
+                        keys.insert(format!("{id}.{attr}"));
                     }
                 }
             }
