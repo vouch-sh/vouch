@@ -67,6 +67,8 @@ macro_rules! impl_template_into_response {
 /// - **`lang`**, **`dir`**, **`tr`**, **`tr1`** — i18n helpers that forward to
 ///   the request-scoped task-local installed by
 ///   [`crate::infra::i18n::i18n_layer`].
+/// - **`tr_attr`**, **`tr_attr1`** — read Fluent message attributes
+///   (`id .attr = value`), used for paired button label + `.title` tooltip.
 #[macro_export]
 macro_rules! impl_template_helpers {
     ($($template:ty),* $(,)?) => {
@@ -79,9 +81,17 @@ macro_rules! impl_template_helpers {
                 fn version(&self) -> &'static str { env!("CARGO_PKG_VERSION") }
                 fn lang(&self) -> String { $crate::infra::i18n::lang() }
                 fn dir(&self) -> &'static str { $crate::infra::i18n::dir() }
-                fn tr(&self, id: &str) -> String { $crate::infra::i18n::t(id) }
-                fn tr1(&self, id: &str, name: &str, value: &str) -> String {
-                    $crate::infra::i18n::t1(id, name, value)
+                // Single translation entry point. Returns a [`Tr`] builder
+                // that Askama Display-renders in `{{ … }}`, so call sites
+                // chain `.arg(name, value)` and `.attr(attr)` as needed:
+                //
+                //   {{ self.tr("home-tagline").arg("org", org_name.as_str()) }}
+                //   {{ self.tr("admin-members-demote").attr("title") }}
+                //   {{ self.tr("count").arg("n", member.key_count) }}
+                //
+                // Numeric values engage CLDR plural rules automatically.
+                fn tr<'a>(&self, id: &'a str) -> $crate::infra::i18n::Tr<'a> {
+                    $crate::infra::i18n::Tr::new(id)
                 }
             }
         )*

@@ -4,6 +4,7 @@
 //! Configures Cargo to use Vouch for private registry authentication.
 
 use anyhow::Result;
+use vouch_cli::tr_println;
 
 use crate::install_path::resolve_install_path;
 use crate::integrations::cargo::CargoConfig;
@@ -17,8 +18,8 @@ use crate::integrations::cargo::CargoConfig;
 /// * `registry` - Optional registry name to configure (default: all registries)
 /// * `configure` - If true, automatically configure Cargo; if false, just show instructions
 pub(crate) async fn run(registry: Option<&str>, configure: bool) -> Result<()> {
-    println!("Cargo Credential Provider Setup");
-    println!("================================\n");
+    tr_println!("setup-cargo-header");
+    println!();
 
     // Get vouch binary path
     let vouch_path = resolve_install_path();
@@ -34,15 +35,15 @@ pub(crate) async fn run(registry: Option<&str>, configure: bool) -> Result<()> {
     }
 
     println!();
-    println!("For more information, see:");
-    println!("  https://doc.rust-lang.org/cargo/reference/registry-authentication.html");
+    tr_println!("setup-cargo-more-info");
 
     Ok(())
 }
 
 /// Show manual configuration instructions.
 fn show_instructions(registry: Option<&str>, command: &[&str]) {
-    println!("Add to ~/.cargo/config.toml:\n");
+    tr_println!("setup-cargo-add-to-config");
+    println!();
 
     let formatted = format_toml_array(command);
 
@@ -61,7 +62,7 @@ fn show_instructions(registry: Option<&str>, command: &[&str]) {
     }
 
     println!();
-    println!("Or run: vouch setup cargo --configure");
+    tr_println!("setup-cargo-or-run");
 }
 
 /// Format a command as a TOML array.
@@ -79,13 +80,21 @@ fn configure_cargo(registry: Option<&str>, command: &[&str]) -> Result<()> {
     // Check if already configured
     if let Some(reg) = registry {
         if config.has_registry_vouch(reg) {
-            println!("Vouch is already configured for registry '{}'\n", reg);
-            println!("Configuration file: {}", config.path().display());
+            tr_println!("setup-cargo-already-registry", name = reg);
+            println!();
+            tr_println!(
+                "setup-cargo-config-file",
+                path = config.path().display().to_string()
+            );
             return Ok(());
         }
     } else if config.has_global_vouch() {
-        println!("Vouch is already configured as global credential provider\n");
-        println!("Configuration file: {}", config.path().display());
+        tr_println!("setup-cargo-already-global");
+        println!();
+        tr_println!(
+            "setup-cargo-config-file",
+            path = config.path().display().to_string()
+        );
         return Ok(());
     }
 
@@ -93,15 +102,18 @@ fn configure_cargo(registry: Option<&str>, command: &[&str]) -> Result<()> {
     if let Some(reg) = registry {
         config.set_registry_provider(reg, command);
         config.save()?;
-        println!("Cargo configured for registry '{}'", reg);
+        tr_println!("setup-cargo-configured-registry", name = reg);
     } else {
         config.set_global_provider(command);
         config.save()?;
-        println!("Cargo configured with global credential provider");
+        tr_println!("setup-cargo-configured-global");
     }
 
     println!();
-    println!("Configuration added to: {}", config.path().display());
+    tr_println!(
+        "setup-cargo-config-added",
+        path = config.path().display().to_string()
+    );
 
     Ok(())
 }

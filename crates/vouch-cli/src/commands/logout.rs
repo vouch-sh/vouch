@@ -7,6 +7,7 @@ use secrecy::ExposeSecret;
 use vouch_agent::{AgentClient, AgentError};
 
 use crate::config::Config;
+use vouch_cli::tr_println;
 use vouch_common::clear_cookie;
 
 /// Run the logout command.
@@ -44,9 +45,9 @@ pub(crate) async fn run(server: &str) -> Result<()> {
     };
 
     if had_token || agent_cleared || cookie_cleared {
-        println!("Logged out successfully.");
+        tr_println!("logout-success");
     } else {
-        println!("Not currently logged in.");
+        tr_println!("logout-not-logged-in");
     }
 
     Ok(())

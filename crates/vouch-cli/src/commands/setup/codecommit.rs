@@ -46,20 +46,25 @@ pub(crate) async fn run(
     profile: Option<&str>,
     configure: bool,
 ) -> Result<()> {
+    use vouch_cli::{tr, tr_args, tr_println};
+
     // Load config to verify enrollment
-    let config = Config::load().context("failed to load config - run 'vouch enroll' first")?;
+    let config = Config::load().with_context(|| tr!("setup-err-load-config"))?;
     let _server = config
         .server_url()
-        .context("not configured - run 'vouch enroll' first")?;
+        .with_context(|| tr!("setup-err-not-configured"))?;
 
-    println!("CodeCommit Credential Setup");
-    println!("===========================\n");
+    tr_println!("setup-codecommit-header");
+    println!();
 
     // Check AWS configuration
     let (profile_name, role_arn) = check_aws_config(profile)?;
-    println!("AWS profile: {profile_name}");
+    tr_println!(
+        "setup-codecommit-aws-profile",
+        profile = profile_name.as_str()
+    );
     if let Some(ref role) = role_arn {
-        println!("AWS role:    {role}");
+        tr_println!("setup-codecommit-aws-role", role = role.as_str());
     }
     println!();
 
@@ -101,11 +106,12 @@ pub(crate) async fn run(
             let status = Command::new("git")
                 .args(["config", "--global", &config_key, &helper_command])
                 .status()
-                .context("failed to run git config")?;
+                .with_context(|| tr!("setup-codecommit-err-run-config"))?;
 
             if !status.success() {
-                return Err(crate::exit_code::CliError::ConfigError(format!(
-                    "failed to configure git credential helper for {pattern}"
+                return Err(crate::exit_code::CliError::ConfigError(tr_args!(
+                    "setup-codecommit-err-helper-pattern",
+                    pattern = pattern,
                 ))
                 .into());
             }
@@ -114,59 +120,69 @@ pub(crate) async fn run(
             let status = Command::new("git")
                 .args(["config", "--global", &use_http_path_key, "true"])
                 .status()
-                .context("failed to run git config")?;
+                .with_context(|| tr!("setup-codecommit-err-run-config"))?;
 
             if !status.success() {
-                return Err(crate::exit_code::CliError::ConfigError(format!(
-                    "failed to set useHttpPath for {pattern}"
+                return Err(crate::exit_code::CliError::ConfigError(tr_args!(
+                    "setup-codecommit-err-http-path",
+                    pattern = pattern,
                 ))
                 .into());
             }
         }
 
-        println!("\nGit configured for CodeCommit.\n");
-        println!("Credential helper (HTTPS URLs):");
+        println!();
+        tr_println!("setup-codecommit-success-block");
         for pattern in &patterns {
-            println!("  credential.{pattern}.helper = {helper_command}");
-            println!("  credential.{pattern}.useHttpPath = true");
+            tr_println!(
+                "setup-codecommit-helper-line",
+                indent = "  ",
+                pattern = pattern.as_str(),
+                helper = helper_command.as_str(),
+            );
+            tr_println!(
+                "setup-codecommit-http-path-line",
+                indent = "  ",
+                pattern = pattern,
+            );
         }
         println!();
-        println!("Remote helper (codecommit:// URLs):");
-        println!("  {} -> {}", symlink_path.display(), vouch_path.display());
+        tr_println!(
+            "setup-codecommit-remote-helper-block",
+            symlink = symlink_path.display().to_string(),
+            vouch = vouch_path.display().to_string(),
+        );
     } else {
-        println!("Step 1: Create symlink for codecommit:// URL support\n");
-        println!(
-            "  ln -sf \"{}\" \"{}\"",
-            vouch_path.display(),
-            symlink_path.display()
+        tr_println!(
+            "setup-codecommit-step1-block",
+            vouch = vouch_path.display().to_string(),
+            symlink = symlink_path.display().to_string(),
         );
 
-        println!("\nStep 2: Configure git credential helper for HTTPS URLs\n");
-        println!("  Add to ~/.gitconfig:\n");
+        println!();
+        tr_println!("setup-codecommit-step2");
+        println!();
         for pattern in &patterns {
             println!("[credential \"{pattern}\"]");
             println!("    helper = {helper_command}");
             println!("    useHttpPath = true");
             println!();
         }
-        println!("Or run: vouch setup codecommit --configure");
+        tr_println!("setup-codecommit-or-run");
     }
 
     let example_region = region.unwrap_or("us-east-1");
     println!();
-    println!("To verify, run:");
-    println!(
-        "  git ls-remote https://git-codecommit.{example_region}.amazonaws.com/v1/repos/YOUR-REPO"
+    tr_println!(
+        "setup-codecommit-tail-block",
+        region = example_region,
+        path = symlink_path.display().to_string(),
     );
-    println!("  git ls-remote codecommit::{example_region}://YOUR-REPO");
-
-    println!();
-    println!("To undo:");
-    println!("  rm \"{}\"", symlink_path.display());
     for pattern in &patterns {
-        println!(
-            "  git config --global --remove-section credential.\"{}\"",
-            pattern
+        tr_println!(
+            "setup-codecommit-undo-config",
+            indent = "  ",
+            pattern = pattern,
         );
     }
 
@@ -175,17 +191,18 @@ pub(crate) async fn run(
 
 /// Check AWS configuration and return (profile_name, optional_role_arn).
 fn check_aws_config(profile: Option<&str>) -> Result<(String, Option<String>)> {
-    let aws_config = AwsConfig::load().map_err(|_| {
-        anyhow::anyhow!("AWS not configured. Run 'vouch setup aws --role <role-arn>' first.")
-    })?;
+    use vouch_cli::{tr, tr_args};
+
+    let aws_config = AwsConfig::load()
+        .map_err(|_| anyhow::anyhow!(tr!("setup-codecommit-err-aws-not-configured")))?;
 
     if let Some(profile_name) = profile {
         // User specified a profile — look it up
         let profile_data = aws_config.get_profile(profile_name).ok_or_else(|| {
-            anyhow::anyhow!(
-                "AWS profile '{profile_name}' not found in ~/.aws/config.\n\
-                 Run 'vouch setup aws --role <role-arn>' first."
-            )
+            anyhow::anyhow!(tr_args!(
+                "setup-codecommit-err-profile-not-found",
+                profile = profile_name,
+            ))
         })?;
         let role_arn = profile_data
             .credential_process
@@ -194,12 +211,9 @@ fn check_aws_config(profile: Option<&str>) -> Result<(String, Option<String>)> {
         Ok((profile_name.to_string(), role_arn))
     } else {
         // Auto-detect the vouch profile
-        let profile = aws_config.find_vouch_profile().ok_or_else(|| {
-            anyhow::anyhow!(
-                "No Vouch AWS profile found in ~/.aws/config.\n\
-                 Run 'vouch setup aws --role <role-arn>' first."
-            )
-        })?;
+        let profile = aws_config
+            .find_vouch_profile()
+            .ok_or_else(|| anyhow::anyhow!(tr!("setup-codecommit-err-no-vouch-profile")))?;
         let role_arn = profile
             .credential_process
             .as_deref()
@@ -224,6 +238,8 @@ fn create_remote_helper_symlink(
 
 /// Detect credential helpers that may conflict with Vouch.
 fn detect_conflicting_helpers() -> Result<()> {
+    use vouch_cli::{tr, tr_println};
+
     let output = Command::new("git")
         .args([
             "config",
@@ -232,7 +248,7 @@ fn detect_conflicting_helpers() -> Result<()> {
             r"credential.*codecommit.*helper",
         ])
         .output()
-        .context("failed to run git config")?;
+        .with_context(|| tr!("setup-codecommit-err-run-config"))?;
 
     if output.status.success() {
         let existing = String::from_utf8_lossy(&output.stdout);
@@ -244,8 +260,7 @@ fn detect_conflicting_helpers() -> Result<()> {
             if line.contains("aws codecommit credential-helper")
                 || line.contains("git-remote-codecommit")
             {
-                println!("Warning: Existing CodeCommit credential helper detected:\n  {line}");
-                println!("This may conflict. Consider removing it.\n");
+                tr_println!("setup-codecommit-warn-existing-block", line = line);
             }
         }
     }

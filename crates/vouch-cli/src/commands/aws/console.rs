@@ -7,6 +7,7 @@
 use anyhow::{Context, Result};
 use secrecy::ExposeSecret;
 use serde::Deserialize;
+use vouch_cli::{tr, tr_args, tr_eprintln, tr_println};
 
 use crate::integrations::aws;
 
@@ -15,7 +16,7 @@ use crate::integrations::aws;
 pub(crate) struct ConsoleArgs {
     /// AWS IAM role ARN to assume (auto-detected from ~/.aws/config
     /// if not specified).
-    #[arg(long)]
+    #[arg(long, help = tr!("arg-aws-console-role-help"))]
     pub role: Option<String>,
 }
 
@@ -31,17 +32,13 @@ pub(crate) async fn run(server: &str, args: ConsoleArgs) -> Result<()> {
     // 1. Resolve role ARN
     let role_arn = match args.role {
         Some(r) => r,
-        None => aws::get_local_aws_role().ok_or_else(|| {
-            anyhow::anyhow!(
-                "AWS not configured. Run 'vouch setup aws --role \
-                 <role-arn>' first, or specify --role."
-            )
-        })?,
+        None => aws::get_local_aws_role()
+            .ok_or_else(|| anyhow::anyhow!(tr!("aws-err-not-configured")))?,
     };
 
     // 2. Determine partition and federation endpoints from role ARN
-    let partition =
-        vouch_common::aws::Partition::from_arn(&role_arn).context("invalid role ARN")?;
+    let partition = vouch_common::aws::Partition::from_arn(&role_arn)
+        .with_context(|| tr!("aws-console-err-invalid-role-arn"))?;
     let federation_url = partition.federation_endpoint()?;
     let console_url = partition.console_url()?;
 
@@ -71,7 +68,7 @@ pub(crate) async fn run(server: &str, args: ConsoleArgs) -> Result<()> {
         },
     )
     .await
-    .context("failed to get AWS credentials")?;
+    .with_context(|| tr!("aws-console-err-aws-credentials"))?;
 
     let creds = &result.credentials;
 
@@ -81,7 +78,7 @@ pub(crate) async fn run(server: &str, args: ConsoleArgs) -> Result<()> {
         "sessionKey": creds.secret_access_key.expose_secret(),
         "sessionToken": creds.session_token.expose_secret(),
     }))
-    .context("failed to serialize session JSON")?;
+    .with_context(|| tr!("aws-console-err-serialize-session"))?;
 
     // 6. POST to federation endpoint for a signin token
     let resp = result
@@ -90,22 +87,26 @@ pub(crate) async fn run(server: &str, args: ConsoleArgs) -> Result<()> {
         .form(&[("Action", "getSigninToken"), ("Session", &session_encoded)])
         .send()
         .await
-        .context("failed to request signin token")?;
+        .with_context(|| tr!("aws-console-err-signin-request"))?;
 
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
-        anyhow::bail!("federation getSigninToken failed ({status}): {body}");
+        anyhow::bail!(tr_args!(
+            "aws-console-err-signin-failed",
+            status = status.to_string(),
+            body = body,
+        ));
     }
 
     let token_resp: SigninTokenResponse = resp
         .json()
         .await
-        .context("failed to parse signin token response")?;
+        .with_context(|| tr!("aws-console-err-signin-parse"))?;
 
     // 7. Construct login URL using url::Url for safe encoding
-    let mut login_url =
-        url::Url::parse(federation_url).context("invalid federation endpoint URL")?;
+    let mut login_url = url::Url::parse(federation_url)
+        .with_context(|| tr!("aws-console-err-invalid-federation-url"))?;
     login_url
         .query_pairs_mut()
         .append_pair("Action", "login")
@@ -117,15 +118,12 @@ pub(crate) async fn run(server: &str, args: ConsoleArgs) -> Result<()> {
     let login_str = login_url.as_str();
     match open::that(login_str) {
         Ok(()) => {
-            println!("Opening AWS Console...");
+            tr_println!("aws-console-opening");
         }
         Err(e) => {
             tracing::debug!("failed to open browser: {e}");
             println!("{login_str}");
-            eprintln!(
-                "Could not open browser automatically. \
-                 Open the URL above in your browser."
-            );
+            tr_eprintln!("aws-console-browser-failed");
         }
     }
 

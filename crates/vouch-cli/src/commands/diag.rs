@@ -31,6 +31,7 @@ use ctap_hid_fido2::public_key_credential_user_entity::PublicKeyCredentialUserEn
 use ctap_hid_fido2::verifier;
 use ctap_hid_fido2::verifier::AttestationVerifyResult;
 use std::path::PathBuf;
+use vouch_cli::{tr, tr_args};
 use vouch_common::fixtures::{
     AuthenticationFixture, Fido2Fixture, FixtureMetadata, RegistrationFixture,
 };
@@ -119,11 +120,8 @@ struct Verification {
 pub(crate) fn run(args: DiagArgs) -> Result<()> {
     let json = args.json;
 
-    out!(json, "=== YubiKey Diagnostic Test ===\n");
-    out!(json, "This test will:");
-    out!(json, "1. Register a new credential on your YubiKey");
-    out!(json, "2. Authenticate with that credential");
-    out!(json, "3. Verify the signature using aws-lc-rs\n");
+    out!(json, "{}", tr!("diag-intro-block"));
+    out!(json, "");
 
     let (device, pin) = wait_for_device_and_pin(json)?;
 
@@ -149,7 +147,7 @@ pub(crate) fn run(args: DiagArgs) -> Result<()> {
 
 /// Wait for a YubiKey to be inserted and prompt for its PIN.
 fn wait_for_device_and_pin(json: bool) -> Result<(FidoKeyHid, String)> {
-    out_print!(json, "Please insert your YubiKey... ");
+    out_print!(json, "{} ", tr!("diag-insert-prompt"));
     if json {
         std::io::Write::flush(&mut std::io::stderr()).ok();
     } else {
@@ -159,14 +157,14 @@ fn wait_for_device_and_pin(json: bool) -> Result<(FidoKeyHid, String)> {
     let cfg = LibCfg::init();
     let device = loop {
         if let Ok(dev) = FidoKeyHidFactory::create(&cfg) {
-            out!(json, "detected!");
+            out!(json, "{}", tr!("diag-detected"));
             break dev;
         }
         std::thread::sleep(std::time::Duration::from_millis(500));
     };
 
     out!(json, "");
-    eprint!("YubiKey PIN: ");
+    eprint!("{} ", tr!("diag-pin-prompt"));
     let pin = rpassword::read_password().context("failed to read PIN")?;
     // Note: In diag mode, we keep this as a plain String for simplicity since
     // this is a debugging tool that immediately uses and discards the PIN.
@@ -194,7 +192,8 @@ fn run_registration(json: bool, device: &FidoKeyHid, pin: &str) -> Result<Regist
     let client_data_json = serde_json::to_vec(&client_data)?;
     let client_data_hash = digest(&SHA256, &client_data_json);
 
-    out!(json, "\n=== REGISTRATION ===");
+    out!(json, "");
+    out!(json, "{}", tr!("diag-registration-header"));
     out!(json, "RP ID: {}", RP_ID);
     out!(json, "Challenge: {}", hex::encode(&challenge));
     out!(
@@ -215,18 +214,19 @@ fn run_registration(json: bool, device: &FidoKeyHid, pin: &str) -> Result<Regist
         // NOT using .resident_key() - credential ID stored server-side
         .build();
 
-    out!(json, "\nTouch your YubiKey to register...");
+    out!(json, "");
+    out!(json, "{}", tr!("diag-touch-register"));
     let attestation = device
         .make_credential_with_args(&make_cred_args)
-        .context("Registration failed - check PIN and touch YubiKey")?;
+        .with_context(|| tr!("diag-err-registration"))?;
 
     // Verify attestation locally - pass raw challenge, library hashes internally
     let verify_result = verifier::verify_attestation(RP_ID, &challenge, &attestation);
     if !verify_result.is_success {
-        bail!("Attestation verification failed!");
+        bail!(tr!("diag-err-attestation"));
     }
 
-    out!(json, "Registration successful!");
+    out!(json, "{}", tr!("diag-registration-success"));
     out!(
         json,
         "Credential ID: {} ({} bytes)",
@@ -258,7 +258,7 @@ fn run_registration(json: bool, device: &FidoKeyHid, pin: &str) -> Result<Regist
     out!(json, "Flags: {:#04x}", flags);
 
     if flags & 0x40 == 0 {
-        bail!("No attested credential data in auth_data!");
+        bail!(tr!("diag-err-no-attested-data"));
     }
 
     let cred_id_len = u16::from_be_bytes([auth_data[53], auth_data[54]]) as usize;
@@ -274,9 +274,11 @@ fn run_registration(json: bool, device: &FidoKeyHid, pin: &str) -> Result<Regist
 
     // Parse COSE key to extract x and y
     let cose_val: ciborium::Value =
-        ciborium::from_reader(cose_key.as_slice()).context("Failed to parse COSE key")?;
+        ciborium::from_reader(cose_key.as_slice()).with_context(|| tr!("diag-err-cose-parse"))?;
 
-    let cose_map = cose_val.as_map().context("COSE key is not a map")?;
+    let cose_map = cose_val
+        .as_map()
+        .with_context(|| tr!("diag-err-cose-not-map"))?;
 
     let mut x: Option<Vec<u8>> = None;
     let mut y: Option<Vec<u8>> = None;
@@ -300,14 +302,18 @@ fn run_registration(json: bool, device: &FidoKeyHid, pin: &str) -> Result<Regist
     out!(json, "  kty: {:?} (should be 2 for EC2)", kty);
     out!(json, "  alg: {:?} (should be -7 for ES256)", alg);
 
-    let x = x.context("Missing x coordinate")?;
-    let y = y.context("Missing y coordinate")?;
+    let x = x.with_context(|| tr!("diag-err-missing-x"))?;
+    let y = y.with_context(|| tr!("diag-err-missing-y"))?;
 
     out!(json, "  x ({} bytes): {}", x.len(), hex::encode(&x));
     out!(json, "  y ({} bytes): {}", y.len(), hex::encode(&y));
 
     if x.len() != 32 || y.len() != 32 {
-        bail!("Invalid coordinate lengths: x={}, y={}", x.len(), y.len());
+        bail!(tr_args!(
+            "diag-err-coord-length",
+            x_len = x.len(),
+            y_len = y.len(),
+        ));
     }
 
     Ok(Registration {
@@ -329,7 +335,8 @@ fn run_authentication(
     pin: &str,
     credential_id: &[u8],
 ) -> Result<Authentication> {
-    out!(json, "\n=== AUTHENTICATION ===");
+    out!(json, "");
+    out!(json, "{}", tr!("diag-authentication-header"));
 
     let challenge: [u8; 32] = rand::random();
 
@@ -357,17 +364,18 @@ fn run_authentication(
         .add_credential_id(credential_id) // Explicitly specify which credential
         .build();
 
-    out!(json, "\nTouch your YubiKey to authenticate...");
+    out!(json, "");
+    out!(json, "{}", tr!("diag-touch-authenticate"));
     let assertions = device
         .get_assertion_with_args(&get_assertion_args)
-        .context("Authentication failed")?;
+        .with_context(|| tr!("diag-err-authentication"))?;
 
     let assertion = assertions
         .into_iter()
         .next()
-        .context("No assertion returned")?;
+        .with_context(|| tr!("diag-err-no-assertion"))?;
 
-    out!(json, "Authentication successful!");
+    out!(json, "{}", tr!("diag-authentication-success"));
     out!(
         json,
         "Credential ID: {} ({} bytes)",
@@ -388,7 +396,8 @@ fn run_authentication(
     );
 
     // Debug: Check the rpid_hash from the assertion
-    out!(json, "\n=== RPID VERIFICATION ===");
+    out!(json, "");
+    out!(json, "{}", tr!("diag-rpid-header"));
     let expected_rpid_hash = digest(&SHA256, RP_ID.as_bytes());
     out!(
         json,
@@ -401,9 +410,9 @@ fn run_authentication(
         hex::encode(&assertion.rpid_hash)
     );
     if expected_rpid_hash.as_ref() == assertion.rpid_hash.as_slice() {
-        out!(json, "OK RPID hash matches");
+        out!(json, "{}", tr!("diag-rpid-match"));
     } else {
-        out!(json, "FAIL RPID hash MISMATCH!");
+        out!(json, "{}", tr!("diag-rpid-mismatch"));
     }
 
     Ok(Authentication {
@@ -415,11 +424,16 @@ fn run_authentication(
 
 /// Verify the assertion signature two ways — via the ctap-hid-fido2 library
 /// and directly with aws-lc-rs — and dump the DER signature's r/s values.
+#[expect(
+    clippy::too_many_lines,
+    reason = "diagnostic dump of every signature-verification path"
+)]
 fn verify_signatures(json: bool, reg: &Registration, auth: &Authentication) -> Verification {
     let assertion = &auth.assertion;
 
     // First, use the library's verify_assertion function
-    out!(json, "\n=== LIBRARY VERIFICATION ===");
+    out!(json, "");
+    out!(json, "{}", tr!("diag-lib-verification-header"));
 
     // The library's verify_assertion expects raw challenge bytes (not clientDataJSON or hash)
     // It constructs clientDataJSON internally and hashes it
@@ -431,9 +445,9 @@ fn verify_signatures(json: bool, reg: &Registration, auth: &Authentication) -> V
     );
 
     if lib_result {
-        out!(json, "OK ctap-hid-fido2 library verification: PASSED");
+        out!(json, "{}", tr!("diag-lib-verification-passed"));
     } else {
-        out!(json, "FAIL ctap-hid-fido2 library verification: FAILED");
+        out!(json, "{}", tr!("diag-lib-verification-failed"));
 
         // Debug: Show what the library would compute
         // The library hashes the RAW challenge directly, not a clientDataJSON
@@ -461,7 +475,8 @@ fn verify_signatures(json: bool, reg: &Registration, auth: &Authentication) -> V
     }
 
     // Now verify the signature ourselves
-    out!(json, "\n=== AWS-LC-RS VERIFICATION ===");
+    out!(json, "");
+    out!(json, "{}", tr!("diag-aws-lc-header"));
 
     // Build the message: authenticator_data || SHA256(raw_challenge)
     // The library uses SHA256(challenge) directly, not SHA256(clientDataJSON)
@@ -501,9 +516,9 @@ fn verify_signatures(json: bool, reg: &Registration, auth: &Authentication) -> V
 
     // Explicit byte-by-byte comparison
     if point == *library_key {
-        out!(json, "OK Public keys are IDENTICAL (byte-by-byte)");
+        out!(json, "{}", tr!("diag-keys-identical"));
     } else {
-        out!(json, "FAIL Public keys DIFFER!");
+        out!(json, "{}", tr!("diag-keys-differ"));
         out!(json, "  Our point len: {}", point.len());
         out!(json, "  Library len: {}", library_key.len());
         for (i, (a, b)) in point.iter().zip(library_key.iter()).enumerate() {
@@ -527,10 +542,19 @@ fn verify_signatures(json: bool, reg: &Registration, auth: &Authentication) -> V
     let public_key = UnparsedPublicKey::new(&ECDSA_P256_SHA256_ASN1, &point);
 
     let aws_lc_result = public_key.verify(&message, &assertion.signature).is_ok();
+    out!(json, "");
     if aws_lc_result {
-        out!(json, "\nOK aws-lc-rs verification (our point): PASSED");
+        out!(
+            json,
+            "{}",
+            tr_args!("diag-aws-lc-passed", kind = "our point")
+        );
     } else {
-        out!(json, "\nFAIL aws-lc-rs verification (our point): FAILED");
+        out!(
+            json,
+            "{}",
+            tr_args!("diag-aws-lc-failed", kind = "our point")
+        );
     }
 
     // Also verify using the library's extracted public key directly
@@ -538,19 +562,28 @@ fn verify_signatures(json: bool, reg: &Registration, auth: &Authentication) -> V
 
     match public_key_lib.verify(&message, &assertion.signature) {
         Ok(()) => {
-            out!(json, "OK aws-lc-rs verification (library key): PASSED");
+            out!(
+                json,
+                "{}",
+                tr_args!("diag-aws-lc-passed", kind = "library key")
+            );
         }
         Err(e) => {
             out!(
                 json,
-                "FAIL aws-lc-rs verification (library key): FAILED - {:?}",
-                e
+                "{}",
+                tr_args!(
+                    "diag-aws-lc-failed-reason",
+                    kind = "library key",
+                    reason = format!("{e:?}"),
+                ),
             );
         }
     }
 
     // Additional debug: Parse the DER signature to see r and s values
-    out!(json, "\n=== SIGNATURE ANALYSIS ===");
+    out!(json, "");
+    out!(json, "{}", tr!("diag-sig-header"));
     let sig = &assertion.signature;
     if sig.len() >= 2 && sig[0] == 0x30 {
         let seq_len = sig[1] as usize;
@@ -600,7 +633,8 @@ fn print_report(
     verification: &Verification,
 ) {
     // Check if credential IDs match between registration and authentication
-    out!(json, "\n=== CREDENTIAL ID CHECK ===");
+    out!(json, "");
+    out!(json, "{}", tr!("diag-cred-id-header"));
     out!(
         json,
         "Registration cred_id: {}",
@@ -612,42 +646,22 @@ fn print_report(
         hex::encode(&auth.assertion.credential_id)
     );
     if reg.verify_result.credential_id == auth.assertion.credential_id {
-        out!(json, "OK Credential IDs match");
+        out!(json, "{}", tr!("diag-cred-id-match"));
     } else {
-        out!(
-            json,
-            "FAIL Credential ID MISMATCH - authenticator used different credential!"
-        );
+        out!(json, "{}", tr!("diag-cred-id-mismatch"));
     }
 
-    out!(json, "\n=== SUMMARY ===");
+    out!(json, "");
+    out!(json, "{}", tr!("diag-summary-header"));
     if verification.lib_result {
-        out!(json, "The ctap-hid-fido2 library CAN verify the signature.");
-        out!(
-            json,
-            "This suggests the issue is with how we're calling aws-lc-rs."
-        );
+        out!(json, "{}", tr!("diag-summary-lib-ok"));
     } else {
-        out!(
-            json,
-            "Even the ctap-hid-fido2 library CANNOT verify the signature."
-        );
-        out!(
-            json,
-            "This suggests a fundamental issue with the YubiKey or authentication flow."
-        );
-        out!(json, "\nPossible causes:");
-        out!(json, "1. YubiKey firmware bug (especially FIPS models)");
-        out!(json, "2. Credential corruption on the YubiKey");
-        out!(
-            json,
-            "3. Different key pair being used for signing vs registration"
-        );
+        out!(json, "{}", tr!("diag-summary-lib-fail"));
     }
 
     // Output data for manual OpenSSL verification
-    out!(json, "\n=== OPENSSL VERIFICATION DATA ===");
-    out!(json, "To verify with OpenSSL, run these commands:");
+    out!(json, "");
+    out!(json, "{}", tr!("diag-openssl-header"));
     out!(json, "");
     out!(json, "# Create public key PEM file");
     out!(json, "echo '-----BEGIN PUBLIC KEY-----' > /tmp/pubkey.pem");
@@ -706,10 +720,8 @@ fn print_report(
     );
 
     // Note: This test now uses non-resident credentials (no cleanup needed)
-    out!(
-        json,
-        "\nNote: Non-resident credential used - no cleanup needed on YubiKey."
-    );
+    out!(json, "");
+    out!(json, "{}", tr!("diag-no-cleanup"));
 }
 
 /// Extract the AAGUID (hex) from registration auth_data, if attested
@@ -750,7 +762,8 @@ fn export_fixture(
     reg: &Registration,
     auth: &Authentication,
 ) -> Result<()> {
-    out!(json, "\n=== EXPORTING FIXTURE ===");
+    out!(json, "");
+    out!(json, "{}", tr!("diag-export-header"));
 
     let aaguid = extract_aaguid(reg);
     let device_model = aaguid
@@ -786,8 +799,12 @@ fn export_fixture(
 
     fixture
         .save_to_file(path)
-        .map_err(|e| anyhow::anyhow!("Failed to save fixture: {}", e))?;
-    out!(json, "Fixture saved to: {}", path.display());
+        .map_err(|e| anyhow::anyhow!(tr_args!("diag-err-fixture-save", reason = e.to_string())))?;
+    out!(
+        json,
+        "{}",
+        tr_args!("diag-fixture-saved", path = path.display().to_string())
+    );
 
     Ok(())
 }

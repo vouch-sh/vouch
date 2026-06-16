@@ -64,9 +64,9 @@
                             </div>
                             <form method="POST" action="/admin/policies/preconfigured/{{ policy.slug }}/toggle" class="shrink-0 policy-toggle-form">
                                 {% if policy.active %}
-                                <button type="submit" class="px-2.5 py-1 text-xs rounded bg-green-900/30 text-green-400 hover:bg-green-900/50 border border-green-800/50" title="{{ self.tr("admin-policies-title-disable") }}">{{ self.tr("admin-policies-on") }}</button>
+                                <button type="submit" class="px-2.5 py-1 text-xs rounded bg-green-900/30 text-green-400 hover:bg-green-900/50 border border-green-800/50" title="{{ self.tr("admin-policies-on").attr("title") }}">{{ self.tr("admin-policies-on") }}</button>
                                 {% else %}
-                                <button type="submit" class="px-2.5 py-1 text-xs rounded bg-gray-700 text-gray-500 hover:bg-gray-600 border border-gray-600" title="{{ self.tr("admin-policies-title-enable") }}">{{ self.tr("admin-policies-off") }}</button>
+                                <button type="submit" class="px-2.5 py-1 text-xs rounded bg-gray-700 text-gray-500 hover:bg-gray-600 border border-gray-600" title="{{ self.tr("admin-policies-off").attr("title") }}">{{ self.tr("admin-policies-off") }}</button>
                                 {% endif %}
                             </form>
                         </summary>
@@ -192,9 +192,9 @@
                             <div class="flex items-center gap-2 shrink-0">
                                 <form method="POST" action="/admin/policies/custom/{{ policy.id }}/toggle" class="inline">
                                     {% if policy.active %}
-                                    <button type="submit" class="px-2.5 py-1 text-xs rounded bg-green-900/30 text-green-400 hover:bg-green-900/50 border border-green-800/50" title="{{ self.tr("admin-policies-title-disable") }}">{{ self.tr("admin-policies-on") }}</button>
+                                    <button type="submit" class="px-2.5 py-1 text-xs rounded bg-green-900/30 text-green-400 hover:bg-green-900/50 border border-green-800/50" title="{{ self.tr("admin-policies-on").attr("title") }}">{{ self.tr("admin-policies-on") }}</button>
                                     {% else %}
-                                    <button type="submit" class="px-2.5 py-1 text-xs rounded bg-gray-700 text-gray-500 hover:bg-gray-600 border border-gray-600" title="{{ self.tr("admin-policies-title-enable") }}">{{ self.tr("admin-policies-off") }}</button>
+                                    <button type="submit" class="px-2.5 py-1 text-xs rounded bg-gray-700 text-gray-500 hover:bg-gray-600 border border-gray-600" title="{{ self.tr("admin-policies-off").attr("title") }}">{{ self.tr("admin-policies-off") }}</button>
                                     {% endif %}
                                 </form>
                                 <button type="button" class="btn-edit-policy p-1 text-gray-500 hover:text-vouch-accent transition-colors"

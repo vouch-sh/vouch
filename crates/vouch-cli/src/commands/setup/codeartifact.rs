@@ -57,8 +57,8 @@ pub(crate) async fn run(
     let (domain, domain_owner, region) =
         resolve_codeartifact_params(domain, domain_owner, region, profile)?;
 
-    println!("CodeArtifact Setup");
-    println!("==================\n");
+    vouch_cli::tr_println!("setup-ca-header");
+    println!();
 
     // Save profile to config (using file lock for concurrent safety)
     let profile_name = profile.unwrap_or("default");
@@ -72,9 +72,10 @@ pub(crate) async fn run(
         Config::modify(|config| {
             config.set_codeartifact_profile(&name, ca_profile);
         })
-        .context("failed to save CodeArtifact profile")?;
+        .with_context(|| vouch_cli::tr!("setup-ca-err-save-profile"))?;
     }
-    println!("Saved CodeArtifact profile '{profile_name}' to config.\n");
+    vouch_cli::tr_println!("setup-ca-saved-profile", name = profile_name);
+    println!();
 
     // Derive domain suffix from the AWS config's role ARN partition
     // to support China, GovCloud, and other partitions.
@@ -125,12 +126,7 @@ fn setup_cargo(ca_host: &str, repository: &str) -> Result<()> {
     configure_cargo_registry(&registry_name, &index_url, &vouch_path_str)?;
 
     println!();
-    println!("Usage:");
-    println!("  cargo build --registry {}", registry_name);
-    println!("  cargo publish --registry {}", registry_name);
-    println!();
-    println!("Cargo will automatically call Vouch to obtain a fresh CodeArtifact");
-    println!("token each time it needs to authenticate.");
+    vouch_cli::tr_println!("setup-ca-cargo-usage", name = registry_name.as_str());
 
     Ok(())
 }
@@ -142,11 +138,11 @@ fn configure_cargo_registry(registry_name: &str, index_url: &str, vouch_path: &s
         .unwrap_or_else(|_| CargoConfig::empty(config_path));
 
     if config.has_registry_vouch(registry_name) {
-        println!(
-            "Vouch is already configured for registry '{}'\n",
-            registry_name
+        vouch_cli::tr_println!(
+            "setup-ca-cargo-already-block",
+            name = registry_name,
+            path = config.path().display().to_string(),
         );
-        println!("Configuration file: {}", config.path().display());
         return Ok(());
     }
 
@@ -155,11 +151,11 @@ fn configure_cargo_registry(registry_name: &str, index_url: &str, vouch_path: &s
     config.set_registry_index(registry_name, index_url);
 
     config.save()?;
-    println!(
-        "Cargo configured for CodeArtifact registry '{}'",
-        registry_name
+    vouch_cli::tr_println!(
+        "setup-ca-cargo-configured-block",
+        name = registry_name,
+        path = config.path().display().to_string(),
     );
-    println!("Configuration written to: {}", config.path().display());
 
     Ok(())
 }
@@ -176,8 +172,7 @@ fn setup_pip(ca_host: &str, repository: &str) -> Result<()> {
     install_keyring_wrapper()?;
 
     println!();
-    println!("pip will automatically call Vouch to obtain a fresh CodeArtifact");
-    println!("token each time it needs to authenticate. No more 12-hour token expiry!");
+    vouch_cli::tr_println!("setup-ca-pip-auto-block");
 
     Ok(())
 }
@@ -195,22 +190,10 @@ fn install_keyring_wrapper() -> Result<()> {
     if (keyring_path.exists() || keyring_path.is_symlink())
         && !crate::utils::is_vouch_symlink(&keyring_path)
     {
-        println!(
-            "Note: {} already exists (not managed by vouch).",
-            keyring_path.display()
-        );
-        println!("To use vouch for CodeArtifact authentication, you can:");
-        println!("  1. Rename the existing keyring and re-run this command:");
-        println!(
-            "     mv {} {}.bak",
-            keyring_path.display(),
-            keyring_path.display()
-        );
-        println!("  2. Or manually create a symlink to vouch:");
-        println!(
-            "     ln -sf \"{}\" \"{}\"",
-            vouch_path.display(),
-            keyring_path.display()
+        vouch_cli::tr_println!(
+            "setup-ca-keyring-conflict-block",
+            path = keyring_path.display().to_string(),
+            vouch_path = vouch_path.display().to_string(),
         );
         return Ok(());
     }
@@ -230,15 +213,23 @@ fn install_keyring_wrapper() -> Result<()> {
 /// with `index-url` and `keyring-provider`, preserving any other settings.
 fn write_pip_config(index_url: &str) -> Result<()> {
     let config_dir = get_pip_config_dir()?;
-    std::fs::create_dir_all(&config_dir)
-        .with_context(|| format!("failed to create {}", config_dir.display()))?;
+    std::fs::create_dir_all(&config_dir).with_context(|| {
+        vouch_cli::tr_args!(
+            "setup-ca-err-create-dir",
+            path = config_dir.display().to_string()
+        )
+    })?;
 
     let config_path = config_dir.join("pip.conf");
 
     // Load existing config or create new
     let mut ini = if config_path.exists() {
-        ini::Ini::load_from_file(&config_path)
-            .with_context(|| format!("failed to parse {}", config_path.display()))?
+        ini::Ini::load_from_file(&config_path).with_context(|| {
+            vouch_cli::tr_args!(
+                "setup-ca-err-parse",
+                path = config_path.display().to_string()
+            )
+        })?
     } else {
         ini::Ini::new()
     };
@@ -251,15 +242,22 @@ fn write_pip_config(index_url: &str) -> Result<()> {
     // Serialize INI to a buffer, then atomically write
     let mut buf = Vec::new();
     ini.write_to(&mut buf).with_context(|| {
-        format!(
-            "failed to serialize pip config for {}",
-            config_path.display()
+        vouch_cli::tr_args!(
+            "setup-ca-err-serialize-pip",
+            path = config_path.display().to_string()
         )
     })?;
-    vouch_common::fs::atomic_write_secure(&config_path, &buf)
-        .with_context(|| format!("failed to write {}", config_path.display()))?;
+    vouch_common::fs::atomic_write_secure(&config_path, &buf).with_context(|| {
+        vouch_cli::tr_args!(
+            "setup-ca-err-write",
+            path = config_path.display().to_string()
+        )
+    })?;
 
-    println!("Wrote pip config: {}", config_path.display());
+    vouch_cli::tr_println!(
+        "setup-ca-pip-wrote",
+        path = config_path.display().to_string()
+    );
 
     Ok(())
 }
@@ -274,7 +272,7 @@ fn get_pip_config_dir() -> Result<std::path::PathBuf> {
         }
     }
 
-    let home = dirs::home_dir().context("could not determine home directory")?;
+    let home = dirs::home_dir().with_context(|| vouch_cli::tr!("setup-err-no-home"))?;
     Ok(home.join(".config").join("pip"))
 }
 
@@ -292,11 +290,7 @@ fn setup_uv(ca_host: &str, repository: &str) -> Result<()> {
     install_keyring_wrapper()?;
 
     println!();
-    println!("uv will automatically call Vouch to obtain a fresh CodeArtifact");
-    println!("token each time it needs to authenticate. No more 12-hour token expiry!");
-    println!();
-    println!("Note: If you also use pip, run `vouch setup codeartifact --tool pip` to");
-    println!("configure pip separately (uv does not read pip.conf).");
+    vouch_cli::tr_println!("setup-ca-uv-auto-block");
 
     Ok(())
 }
@@ -308,22 +302,33 @@ fn setup_uv(ca_host: &str, repository: &str) -> Result<()> {
 /// updates) a CodeArtifact index entry.
 fn write_uv_config(index_url: &str, repository: &str) -> Result<()> {
     let config_dir = get_uv_config_dir()?;
-    std::fs::create_dir_all(&config_dir)
-        .with_context(|| format!("failed to create {}", config_dir.display()))?;
+    std::fs::create_dir_all(&config_dir).with_context(|| {
+        vouch_cli::tr_args!(
+            "setup-ca-err-create-dir",
+            path = config_dir.display().to_string()
+        )
+    })?;
 
     let config_path = config_dir.join("uv.toml");
 
     // Load existing config or create new
     let content = if config_path.exists() {
-        std::fs::read_to_string(&config_path)
-            .with_context(|| format!("failed to read {}", config_path.display()))?
+        std::fs::read_to_string(&config_path).with_context(|| {
+            vouch_cli::tr_args!(
+                "setup-ca-err-read",
+                path = config_path.display().to_string()
+            )
+        })?
     } else {
         String::new()
     };
 
-    let mut doc = content
-        .parse::<toml_edit::DocumentMut>()
-        .with_context(|| format!("failed to parse {}", config_path.display()))?;
+    let mut doc = content.parse::<toml_edit::DocumentMut>().with_context(|| {
+        vouch_cli::tr_args!(
+            "setup-ca-err-parse",
+            path = config_path.display().to_string()
+        )
+    })?;
 
     // Set keyring-provider = "subprocess"
     doc.insert("keyring-provider", toml_edit::value("subprocess"));
@@ -362,10 +367,19 @@ fn write_uv_config(index_url: &str, repository: &str) -> Result<()> {
     }
 
     let serialized = doc.to_string();
-    vouch_common::fs::atomic_write_secure(&config_path, serialized.as_bytes())
-        .with_context(|| format!("failed to write {}", config_path.display()))?;
+    vouch_common::fs::atomic_write_secure(&config_path, serialized.as_bytes()).with_context(
+        || {
+            vouch_cli::tr_args!(
+                "setup-ca-err-write",
+                path = config_path.display().to_string()
+            )
+        },
+    )?;
 
-    println!("Wrote uv config: {}", config_path.display());
+    vouch_cli::tr_println!(
+        "setup-ca-uv-wrote",
+        path = config_path.display().to_string()
+    );
 
     Ok(())
 }
@@ -380,7 +394,7 @@ fn get_uv_config_dir() -> Result<std::path::PathBuf> {
         }
     }
 
-    let home = dirs::home_dir().context("could not determine home directory")?;
+    let home = dirs::home_dir().with_context(|| vouch_cli::tr!("setup-err-no-home"))?;
     Ok(home.join(".config").join("uv"))
 }
 
@@ -399,7 +413,7 @@ async fn setup_npm(
     let result =
         crate::commands::credential::codeartifact::get_token(server, domain, domain_owner, region)
             .await
-            .context("failed to get CodeArtifact token")?;
+            .with_context(|| vouch_cli::tr!("setup-ca-err-fetch-token"))?;
 
     let registry_url = format!("https://{ca_host}/npm/{repository}/");
 
@@ -410,14 +424,11 @@ async fn setup_npm(
     )?;
 
     println!();
-    println!("Registry URL: {}", registry_url);
-    println!();
-    println!("Note: Unlike Cargo and pip, npm does not support dynamic credential");
-    println!("helpers. The token written to ~/.npmrc expires in ~12 hours.");
-    println!("To refresh: vouch setup codeartifact --tool npm --repository {repository}");
-    println!();
-    println!("Tip: pnpm supports dynamic credential helpers. Use --tool pnpm for");
-    println!("automatic token refresh without manual re-login.");
+    vouch_cli::tr_println!(
+        "setup-ca-npm-block",
+        url = registry_url.as_str(),
+        repository = repository,
+    );
 
     Ok(())
 }
@@ -454,9 +465,7 @@ fn detect_npmrc_conflict<'a>(
 /// Warn if `.npmrc` has a conflicting auth mechanism for the same registry.
 fn warn_npmrc_conflict(existing: &str, ca_host: &str, repository: &str, setting_up: &str) {
     if let Some(other_tool) = detect_npmrc_conflict(existing, ca_host, repository, setting_up) {
-        println!("Note: ~/.npmrc has an existing {other_tool} configuration for this registry.");
-        println!("It will be replaced. npm and pnpm use different auth mechanisms");
-        println!("(_authToken vs tokenHelper) and cannot coexist for the same registry.");
+        vouch_cli::tr_println!("setup-ca-npmrc-conflict-block", other_tool = other_tool);
         println!();
     }
 }
@@ -466,12 +475,13 @@ fn warn_npmrc_conflict(existing: &str, ca_host: &str, repository: &str, setting_
 /// Preserves existing entries while updating/adding CodeArtifact-specific lines.
 /// Only lines matching this specific host/repo are replaced.
 fn write_npmrc(ca_host: &str, repository: &str, token: &str) -> Result<()> {
-    let home = dirs::home_dir().context("could not determine home directory")?;
+    let home = dirs::home_dir().with_context(|| vouch_cli::tr!("setup-err-no-home"))?;
     let npmrc_path = home.join(".npmrc");
 
     let existing = if npmrc_path.exists() {
-        std::fs::read_to_string(&npmrc_path)
-            .with_context(|| format!("failed to read {}", npmrc_path.display()))?
+        std::fs::read_to_string(&npmrc_path).with_context(|| {
+            vouch_cli::tr_args!("setup-ca-err-read", path = npmrc_path.display().to_string())
+        })?
     } else {
         String::new()
     };
@@ -479,10 +489,17 @@ fn write_npmrc(ca_host: &str, repository: &str, token: &str) -> Result<()> {
     warn_npmrc_conflict(&existing, ca_host, repository, "npm");
     let content = build_npmrc_content(&existing, ca_host, repository, token);
 
-    vouch_common::fs::atomic_write_secure(&npmrc_path, content.as_bytes())
-        .with_context(|| format!("failed to write {}", npmrc_path.display()))?;
+    vouch_common::fs::atomic_write_secure(&npmrc_path, content.as_bytes()).with_context(|| {
+        vouch_cli::tr_args!(
+            "setup-ca-err-write",
+            path = npmrc_path.display().to_string()
+        )
+    })?;
 
-    println!("Wrote npm config: {}", npmrc_path.display());
+    vouch_cli::tr_println!(
+        "setup-ca-npm-wrote",
+        path = npmrc_path.display().to_string()
+    );
 
     Ok(())
 }
@@ -498,8 +515,7 @@ fn setup_pnpm(ca_host: &str, repository: &str) -> Result<()> {
     write_npmrc_pnpm(ca_host, repository, &helper_path)?;
 
     println!();
-    println!("pnpm will automatically call Vouch to obtain a fresh CodeArtifact");
-    println!("token each time it needs to authenticate. No more 12-hour token expiry!");
+    vouch_cli::tr_println!("setup-ca-pnpm-auto-block");
 
     Ok(())
 }
@@ -517,22 +533,10 @@ fn install_pnpm_token_helper() -> Result<std::path::PathBuf> {
     if (helper_path.exists() || helper_path.is_symlink())
         && !crate::utils::is_vouch_symlink(&helper_path)
     {
-        println!(
-            "Note: {} already exists (not managed by vouch).",
-            helper_path.display()
-        );
-        println!("To use vouch for pnpm CodeArtifact authentication, either:");
-        println!("  1. Rename the existing file and re-run this command:");
-        println!(
-            "     mv {} {}.bak",
-            helper_path.display(),
-            helper_path.display()
-        );
-        println!("  2. Or manually create a symlink to vouch:");
-        println!(
-            "     ln -sf \"{}\" \"{}\"",
-            vouch_path.display(),
-            helper_path.display()
+        vouch_cli::tr_println!(
+            "setup-ca-pnpm-conflict-block",
+            path = helper_path.display().to_string(),
+            vouch_path = vouch_path.display().to_string(),
         );
         return Ok(helper_path);
     }
@@ -551,12 +555,13 @@ fn install_pnpm_token_helper() -> Result<std::path::PathBuf> {
 /// Preserves existing entries while updating/adding the `tokenHelper`
 /// directive for the given CodeArtifact registry.
 fn write_npmrc_pnpm(ca_host: &str, repository: &str, helper_path: &std::path::Path) -> Result<()> {
-    let home = dirs::home_dir().context("could not determine home directory")?;
+    let home = dirs::home_dir().with_context(|| vouch_cli::tr!("setup-err-no-home"))?;
     let npmrc_path = home.join(".npmrc");
 
     let existing = if npmrc_path.exists() {
-        std::fs::read_to_string(&npmrc_path)
-            .with_context(|| format!("failed to read {}", npmrc_path.display()))?
+        std::fs::read_to_string(&npmrc_path).with_context(|| {
+            vouch_cli::tr_args!("setup-ca-err-read", path = npmrc_path.display().to_string())
+        })?
     } else {
         String::new()
     };
@@ -564,10 +569,17 @@ fn write_npmrc_pnpm(ca_host: &str, repository: &str, helper_path: &std::path::Pa
     warn_npmrc_conflict(&existing, ca_host, repository, "pnpm");
     let content = build_npmrc_pnpm_content(&existing, ca_host, repository, helper_path);
 
-    vouch_common::fs::atomic_write_secure(&npmrc_path, content.as_bytes())
-        .with_context(|| format!("failed to write {}", npmrc_path.display()))?;
+    vouch_common::fs::atomic_write_secure(&npmrc_path, content.as_bytes()).with_context(|| {
+        vouch_cli::tr_args!(
+            "setup-ca-err-write",
+            path = npmrc_path.display().to_string()
+        )
+    })?;
 
-    println!("Wrote pnpm config: {}", npmrc_path.display());
+    vouch_cli::tr_println!(
+        "setup-ca-pnpm-wrote",
+        path = npmrc_path.display().to_string()
+    );
 
     Ok(())
 }
@@ -618,7 +630,7 @@ pub(crate) async fn auto_refresh_npmrc(server: &str) {
 /// Inner implementation for `auto_refresh_npmrc` that returns `Result`
 /// for ergonomic error handling.
 async fn try_refresh_npmrc(server: &str) -> Result<()> {
-    let home = dirs::home_dir().context("could not determine home directory")?;
+    let home = dirs::home_dir().with_context(|| vouch_cli::tr!("setup-err-no-home"))?;
     let npmrc_path = home.join(".npmrc");
 
     let content = match std::fs::read_to_string(&npmrc_path) {
@@ -682,9 +694,15 @@ async fn try_refresh_npmrc(server: &str) -> Result<()> {
     let (new_content, refreshed) = rewrite_npmrc_tokens(&content, &plain_map);
 
     if refreshed {
-        vouch_common::fs::atomic_write_secure(&npmrc_path, new_content.as_bytes())
-            .with_context(|| format!("failed to write {}", npmrc_path.display()))?;
-        println!("Refreshed CodeArtifact token in ~/.npmrc");
+        vouch_common::fs::atomic_write_secure(&npmrc_path, new_content.as_bytes()).with_context(
+            || {
+                vouch_cli::tr_args!(
+                    "setup-ca-err-write",
+                    path = npmrc_path.display().to_string()
+                )
+            },
+        )?;
+        vouch_cli::tr_println!("setup-ca-refreshed-npmrc");
     }
 
     Ok(())

@@ -96,6 +96,7 @@ urlencoding = { workspace = true }
 uuid = { workspace = true, features = ["v7", "serde", "std"] }
 vouch-common = { workspace = true }
 vouch-httpsig = { workspace = true, features = ["axum"] }
+vouch-i18n = { workspace = true }
 webauthn-rs = { workspace = true, features = ["danger-allow-state-serialisation"] }
 webauthn-rs-proto = { workspace = true }
 x509-cert = { workspace = true, features = ["std", "pem", "builder"] }

@@ -8,6 +8,7 @@ use anyhow::{Context, Result};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use std::path::PathBuf;
+use vouch_cli::{tr_args, tr_println};
 
 use super::kubeconfig::{
     ExecConfig, KubeconfigCluster, KubeconfigClusterData, KubeconfigContext, KubeconfigContextData,
@@ -17,7 +18,7 @@ use super::kubeconfig::{
 /// Read and base64-encode a certificate authority file.
 fn read_ca_data(ca_path: &str) -> Result<String> {
     let bytes = std::fs::read(ca_path)
-        .with_context(|| format!("failed to read certificate authority file: {ca_path}"))?;
+        .with_context(|| tr_args!("setup-k8s-err-read-ca", path = ca_path))?;
     Ok(STANDARD.encode(&bytes))
 }
 
@@ -43,13 +44,15 @@ pub(crate) async fn run(
     // Read CA data if provided
     let ca_data = ca_path.map(read_ca_data).transpose()?;
 
-    println!("Kubernetes OIDC Setup");
-    println!("=====================");
+    tr_println!("setup-k8s-header");
     println!();
-    println!("Cluster:   {cluster}");
-    println!("Server:    {k8s_server}");
-    println!("Audience:  {aud}");
-    println!("Vouch:     {server}");
+    tr_println!(
+        "setup-k8s-summary",
+        cluster = cluster,
+        server = k8s_server,
+        audience = aud,
+        vouch = server,
+    );
     println!();
 
     // Naming convention
@@ -110,20 +113,20 @@ pub(crate) async fn run(
     save_kubeconfig(&kubeconfig_path, &config)?;
 
     // Print summary
-    println!("Updated kubeconfig: {}", kubeconfig_path.display());
-    println!("  Cluster: {cluster} ({k8s_server})");
-    println!("  User:    {user_name} (via vouch credential k8s)");
-    println!("  Context: {context_name}");
+    tr_println!(
+        "setup-k8s-updated-block",
+        kubeconfig = kubeconfig_path.display().to_string(),
+        cluster = cluster,
+        server = k8s_server,
+        user_name = user_name.as_str(),
+        context = context_name.as_str(),
+    );
     println!();
-    println!("To use:");
-    println!("  kubectl config use-context {context_name}");
-    println!("  kubectl get pods");
-    println!();
-    println!("Prerequisites:");
-    println!("  1. Run 'vouch login' to authenticate");
-    println!(
-        "  2. Kubernetes API server must be configured with \
-         --oidc-issuer-url={server} --oidc-client-id={aud}"
+    tr_println!(
+        "setup-k8s-tail-block",
+        context = context_name.as_str(),
+        vouch = server,
+        audience = aud,
     );
 
     Ok(())

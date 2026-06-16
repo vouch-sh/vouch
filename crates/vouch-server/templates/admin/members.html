@@ -65,35 +65,35 @@
                                 {# Promote/Demote #}
                                 {% if member.is_org_admin %}
                                 <form method="POST" action="/admin/members/{{ member.id }}/demote" data-confirm-message="{{ self.tr("admin-members-confirm-demote") }}">
-                                    <button type="submit" class="px-2 py-1 text-xs rounded bg-gray-700 text-gray-300 hover:bg-gray-600" title="{{ self.tr("admin-members-title-demote") }}">{{ self.tr("admin-members-btn-demote") }}</button>
+                                    <button type="submit" class="px-2 py-1 text-xs rounded bg-gray-700 text-gray-300 hover:bg-gray-600" title="{{ self.tr("admin-members-demote").attr("title") }}">{{ self.tr("admin-members-demote") }}</button>
                                 </form>
                                 {% else %}
                                 <form method="POST" action="/admin/members/{{ member.id }}/promote">
-                                    <button type="submit" class="px-2 py-1 text-xs rounded bg-gray-700 text-gray-300 hover:bg-gray-600" title="{{ self.tr("admin-members-title-promote") }}">{{ self.tr("admin-members-btn-promote") }}</button>
+                                    <button type="submit" class="px-2 py-1 text-xs rounded bg-gray-700 text-gray-300 hover:bg-gray-600" title="{{ self.tr("admin-members-promote").attr("title") }}">{{ self.tr("admin-members-promote") }}</button>
                                 </form>
                                 {% endif %}
 
                                 {# Activate/Deactivate #}
                                 {% if member.active %}
                                 <form method="POST" action="/admin/members/{{ member.id }}/deactivate" data-confirm-message="{{ self.tr("admin-members-confirm-deactivate") }}">
-                                    <button type="submit" class="px-2 py-1 text-xs rounded bg-yellow-900/40 text-yellow-400 hover:bg-yellow-900/60" title="{{ self.tr("admin-members-title-deactivate") }}">{{ self.tr("admin-members-btn-deactivate") }}</button>
+                                    <button type="submit" class="px-2 py-1 text-xs rounded bg-yellow-900/40 text-yellow-400 hover:bg-yellow-900/60" title="{{ self.tr("admin-members-deactivate").attr("title") }}">{{ self.tr("admin-members-deactivate") }}</button>
                                 </form>
                                 {% else %}
                                 <form method="POST" action="/admin/members/{{ member.id }}/activate">
-                                    <button type="submit" class="px-2 py-1 text-xs rounded bg-green-900/40 text-green-400 hover:bg-green-900/60" title="{{ self.tr("admin-members-title-activate") }}">{{ self.tr("admin-members-btn-activate") }}</button>
+                                    <button type="submit" class="px-2 py-1 text-xs rounded bg-green-900/40 text-green-400 hover:bg-green-900/60" title="{{ self.tr("admin-members-activate").attr("title") }}">{{ self.tr("admin-members-activate") }}</button>
                                 </form>
                                 {% endif %}
 
                                 {# Revoke Credentials #}
                                 {% if member.key_count > 0 %}
-                                <form method="POST" action="/admin/members/{{ member.id }}/revoke-credentials" data-confirm-message="{{ self.tr("admin-members-confirm-revoke") }}">
-                                    <button type="submit" class="px-2 py-1 text-xs rounded bg-red-900/40 text-red-400 hover:bg-red-900/60" title="{{ self.tr("admin-members-title-revoke") }}">{{ self.tr("admin-members-btn-revoke") }}</button>
+                                <form method="POST" action="/admin/members/{{ member.id }}/revoke-credentials" data-confirm-message="{{ self.tr("admin-members-confirm-revoke").arg("count", member.key_count) }}">
+                                    <button type="submit" class="px-2 py-1 text-xs rounded bg-red-900/40 text-red-400 hover:bg-red-900/60" title="{{ self.tr("admin-members-revoke").attr("title") }}">{{ self.tr("admin-members-revoke") }}</button>
                                 </form>
                                 {% endif %}
 
                                 {# Remove #}
                                 <form method="POST" action="/admin/members/{{ member.id }}/remove" data-confirm-message="{{ self.tr("admin-members-confirm-remove") }}">
-                                    <button type="submit" class="px-2 py-1 text-xs rounded bg-red-900/40 text-red-400 hover:bg-red-900/60" title="{{ self.tr("admin-members-title-remove") }}">{{ self.tr("admin-members-btn-remove") }}</button>
+                                    <button type="submit" class="px-2 py-1 text-xs rounded bg-red-900/40 text-red-400 hover:bg-red-900/60" title="{{ self.tr("admin-members-remove").attr("title") }}">{{ self.tr("admin-members-remove") }}</button>
                                 </form>
                             </div>
                             {% endif %}

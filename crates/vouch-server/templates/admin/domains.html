@@ -37,8 +37,9 @@
         {% endif %}
 
         {% if additional_count >= max_additional %}
+        {% let max_additional_str = max_additional.to_string() %}
         <div class="mb-4 px-4 py-3 rounded bg-yellow-900/30 border border-yellow-800 text-yellow-300 text-sm">
-            {{ self.tr("admin-domains-max-prefix") }} {{ max_additional }} {{ self.tr("admin-domains-max-suffix") }}
+            {{ self.tr("admin-domains-max").arg("count", max_additional_str.as_str()) }}
         </div>
         {% else %}
         <div class="mb-6 bg-vouch-surface border border-vouch-border rounded-lg p-4">
@@ -99,7 +100,7 @@
                                 </form>
                                 {% endif %}
                                 <form method="POST" action="/admin/domains/{{ row.domain }}/remove" data-confirm-message="{{ self.tr("admin-domains-remove-confirm") }}">
-                                    <button type="submit" class="px-2 py-1 text-xs rounded bg-red-900/40 text-red-400 hover:bg-red-900/60">{{ self.tr("admin-members-btn-remove") }}</button>
+                                    <button type="submit" class="px-2 py-1 text-xs rounded bg-red-900/40 text-red-400 hover:bg-red-900/60">{{ self.tr("admin-members-remove") }}</button>
                                 </form>
                             </div>
                             {% endmatch %}

@@ -120,20 +120,19 @@ pub(crate) async fn run(
     // Auto-discover profile, region, and role
     let profile_name = aws::resolve_profile(profile)?;
     let region_name = aws::resolve_region(region, &profile_name)?;
-    let role_arn = aws::get_local_aws_role().ok_or_else(|| {
-        anyhow::anyhow!("AWS not configured. Run 'vouch setup aws --role <role-arn>' first.")
-    })?;
+    let role_arn = aws::get_local_aws_role()
+        .ok_or_else(|| anyhow::anyhow!(vouch_cli::tr!("setup-eks-err-aws-not-configured")))?;
 
-    println!("Amazon EKS Setup");
-    println!("================");
-    println!();
-    println!("Cluster:  {cluster_name}");
-    println!("Region:   {region_name}");
-    println!("Profile:  {profile_name}");
+    vouch_cli::tr_println!(
+        "setup-eks-header-block",
+        cluster = cluster_name,
+        region = region_name.as_str(),
+        profile = profile_name.as_str(),
+    );
     println!();
 
     // Fetch cluster info from AWS using native SigV4 API call
-    println!("Fetching cluster details...");
+    vouch_cli::tr_println!("setup-eks-fetching");
     let (endpoint, ca_data) =
         describe_cluster(server, cluster_name, &region_name, &role_arn).await?;
 
@@ -202,18 +201,14 @@ pub(crate) async fn run(
 
     // Print summary
     println!();
-    println!("Updated kubeconfig: {}", kubeconfig_path.display());
-    println!("  Cluster: {cluster_name} ({endpoint})");
-    println!("  User:    {user_name} (via vouch credential eks)");
-    println!("  Context: {context_name}");
-    println!();
-    println!("To use:");
-    println!("  kubectl config use-context {context_name}");
-    println!("  kubectl get pods");
-    println!();
-    println!("Prerequisites:");
-    println!("  1. Run 'vouch login' to authenticate");
-    println!("  2. EKS Access Entry must exist for the IAM role in your AWS profile");
+    vouch_cli::tr_println!(
+        "setup-eks-result-block",
+        kubeconfig = kubeconfig_path.display().to_string(),
+        cluster = cluster_name,
+        endpoint = endpoint.as_str(),
+        user_name = user_name.as_str(),
+        context = context_name.as_str(),
+    );
 
     Ok(())
 }

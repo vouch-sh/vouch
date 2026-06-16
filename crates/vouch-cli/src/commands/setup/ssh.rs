@@ -6,6 +6,7 @@
 use anyhow::{Context, Result};
 use std::fs;
 use std::path::PathBuf;
+use vouch_cli::{tr, tr_args, tr_println};
 use vouch_common::SshCaPublicKeyResponse;
 
 use crate::client::VouchClient;
@@ -14,19 +15,19 @@ use vouch_common::fs::{atomic_write, atomic_write_secure};
 
 /// Get the SSH config path (~/.ssh/config).
 pub(crate) fn ssh_config_path() -> Result<PathBuf> {
-    let home = dirs::home_dir().context("could not determine home directory")?;
+    let home = dirs::home_dir().with_context(|| tr!("setup-err-no-home"))?;
     Ok(home.join(".ssh").join("config"))
 }
 
 /// Get the known hosts path (~/.ssh/known_hosts).
 fn known_hosts_path() -> Result<PathBuf> {
-    let home = dirs::home_dir().context("could not determine home directory")?;
+    let home = dirs::home_dir().with_context(|| tr!("setup-err-no-home"))?;
     Ok(home.join(".ssh").join("known_hosts"))
 }
 
 /// Get the CA public key path.
 fn ca_key_path(server: &str) -> Result<PathBuf> {
-    let home = dirs::home_dir().context("could not determine home directory")?;
+    let home = dirs::home_dir().with_context(|| tr!("setup-err-no-home"))?;
     // Sanitize server URL for filename: strip scheme, replace non-alphanumeric with underscores,
     // and collapse multiple underscores. e.g. "https://us.vouch.sh" → "vouch_ca_us_vouch_sh.pub"
     let safe_host = server
@@ -53,7 +54,7 @@ fn ca_key_path(server: &str) -> Result<PathBuf> {
 
 /// Get the default SSH key path (~/.ssh/id_ed25519_vouch).
 fn default_key_path() -> Result<PathBuf> {
-    let home = dirs::home_dir().context("could not determine home directory")?;
+    let home = dirs::home_dir().with_context(|| tr!("setup-err-no-home"))?;
     Ok(home.join(".ssh").join("id_ed25519_vouch"))
 }
 
@@ -69,11 +70,11 @@ pub(crate) async fn run(server: &str, hosts: Option<&str>) -> Result<()> {
     let client = VouchClient::new(server).await?;
 
     // Download CA public key
-    println!("Downloading SSH CA public key from server...");
+    tr_println!("setup-ssh-downloading-ca");
     let ca_response: SshCaPublicKeyResponse = client
         .get_authenticated("/v1/credentials/ssh/ca")
         .await
-        .context("failed to get SSH CA public key")?;
+        .with_context(|| tr!("setup-ssh-err-get-ca"))?;
 
     // Save CA public key
     let ca_path = ca_key_path(server)?;
@@ -84,9 +85,13 @@ pub(crate) async fn run(server: &str, hosts: Option<&str>) -> Result<()> {
         ensure_secure_dir(parent)?;
     }
 
-    atomic_write(&ca_path, ca_content.as_bytes())
-        .with_context(|| format!("failed to write {}", ca_path.display()))?;
-    println!("Saved CA public key: {}", ca_path.display());
+    atomic_write(&ca_path, ca_content.as_bytes()).with_context(|| {
+        tr_args!(
+            "setup-ssh-err-write-ca",
+            path = ca_path.display().to_string()
+        )
+    })?;
+    tr_println!("setup-ssh-saved-ca", path = ca_path.display().to_string());
 
     // If hosts are specified, add TrustedUserCAKeys entry to known_hosts
     if let Some(host_patterns) = hosts {
@@ -97,28 +102,10 @@ pub(crate) async fn run(server: &str, hosts: Option<&str>) -> Result<()> {
     configure_ssh_config(hosts)?;
 
     println!();
-    println!("SSH CA setup complete!");
-    println!();
-    println!("To trust user certificates signed by this CA, configure your SSH servers:");
-    println!();
-    println!("  1. Copy the CA public key to each server:");
-    println!(
-        "     scp {} root@server:/etc/ssh/vouch_ca.pub",
-        ca_path.display()
+    tr_println!(
+        "setup-ssh-complete-block",
+        ca_path = ca_path.display().to_string()
     );
-    println!();
-    println!("  2. Create /etc/ssh/sshd_config.d/99-vouch-ca.conf with:");
-    println!();
-    println!("     TrustedUserCAKeys /etc/ssh/vouch_ca.pub");
-    println!();
-    println!("  3. Validate the configuration and reload sshd:");
-    println!();
-    println!("     sudo sshd -t && sudo systemctl reload sshd");
-    println!();
-    println!("Users can then authenticate with:");
-    println!("  vouch login");
-    println!("  vouch credential ssh");
-    println!("  ssh user@server");
 
     Ok(())
 }
@@ -153,8 +140,12 @@ fn configure_ssh_config(hosts: Option<&str>) -> Result<()> {
 
     // Read existing config
     let existing = if config_path.exists() {
-        fs::read_to_string(&config_path)
-            .with_context(|| format!("failed to read {}", config_path.display()))?
+        fs::read_to_string(&config_path).with_context(|| {
+            tr_args!(
+                "setup-ssh-err-read-config",
+                path = config_path.display().to_string()
+            )
+        })?
     } else {
         String::new()
     };
@@ -183,11 +174,16 @@ fn configure_ssh_config(hosts: Option<&str>) -> Result<()> {
         if existing.ends_with('\n') {
             rewritten.push('\n');
         }
-        atomic_write_secure(&config_path, rewritten.as_bytes())
-            .with_context(|| format!("failed to write {}", config_path.display()))?;
-        println!(
-            "Updated stale Vouch IdentityAgent path in {} -> {agent_socket}",
-            config_path.display()
+        atomic_write_secure(&config_path, rewritten.as_bytes()).with_context(|| {
+            tr_args!(
+                "setup-ssh-err-write-config",
+                path = config_path.display().to_string()
+            )
+        })?;
+        tr_println!(
+            "setup-ssh-stale-agent-rewrite",
+            config_path = config_path.display().to_string(),
+            agent_socket = agent_socket.as_str(),
         );
         rewritten
     } else {
@@ -196,7 +192,7 @@ fn configure_ssh_config(hosts: Option<&str>) -> Result<()> {
 
     // Check if Vouch config already exists
     if existing.contains("# Vouch SSH Configuration") || existing.contains(&agent_socket) {
-        println!("SSH config already configured for Vouch");
+        tr_println!("setup-ssh-already-configured");
         return Ok(());
     }
 
@@ -234,20 +230,21 @@ Host *
     };
 
     let new_config = format!("{existing}{vouch_config}");
-    atomic_write_secure(&config_path, new_config.as_bytes())
-        .with_context(|| format!("failed to write {}", config_path.display()))?;
+    atomic_write_secure(&config_path, new_config.as_bytes()).with_context(|| {
+        tr_args!(
+            "setup-ssh-err-write-config",
+            path = config_path.display().to_string()
+        )
+    })?;
 
-    println!("Updated SSH config: {}", config_path.display());
+    tr_println!(
+        "setup-ssh-updated-config",
+        path = config_path.display().to_string()
+    );
     if hosts.is_some() {
-        println!("  Added Vouch IdentityAgent for specified hosts");
+        tr_println!("setup-ssh-added-host-agent", indent = "  ");
     } else {
-        println!("  Added Vouch IdentityFile and CertificateFile");
-        println!(
-            "  Note: IdentityAgent not set globally to avoid conflicts with other SSH agents."
-        );
-        println!(
-            "  To use the Vouch agent for specific hosts, re-run with: vouch setup ssh --hosts \"pattern\""
-        );
+        tr_println!("setup-ssh-added-identity-block", indent = "  ");
     }
 
     Ok(())
@@ -265,16 +262,15 @@ fn add_trusted_ca_to_known_hosts(ca_path: &std::path::Path, host_patterns: &str)
     let ca_pub_key = ca_pub_key
         .lines()
         .next()
-        .context("CA public key file is empty")?
+        .with_context(|| tr!("setup-ssh-err-ca-empty"))?
         .split_whitespace()
         .take(2)
         .collect::<Vec<_>>()
         .join(" ");
     if ca_pub_key.is_empty() {
-        return Err(crate::exit_code::CliError::ConfigError(
-            "CA public key file does not contain a valid key".to_string(),
-        )
-        .into());
+        return Err(
+            crate::exit_code::CliError::ConfigError(tr!("setup-ssh-err-ca-invalid")).into(),
+        );
     }
 
     // Create entry
@@ -292,7 +288,12 @@ fn add_trusted_ca_to_known_hosts(ca_path: &std::path::Path, host_patterns: &str)
         .write(true)
         .truncate(true)
         .open(&lock_path)
-        .with_context(|| format!("failed to open lock file {}", lock_path.display()))?;
+        .with_context(|| {
+            tr_args!(
+                "setup-ssh-err-lock-file",
+                path = lock_path.display().to_string()
+            )
+        })?;
 
     #[cfg(unix)]
     {
@@ -303,7 +304,7 @@ fn add_trusted_ca_to_known_hosts(ca_path: &std::path::Path, host_patterns: &str)
 
     lock_file
         .lock()
-        .context("failed to acquire known_hosts lock")?;
+        .with_context(|| tr!("setup-ssh-err-lock-acquire"))?;
 
     // Read existing known_hosts under the lock
     let existing = if known_hosts_path.exists() {
@@ -314,7 +315,7 @@ fn add_trusted_ca_to_known_hosts(ca_path: &std::path::Path, host_patterns: &str)
 
     // Check if entry already exists
     if existing.contains(&ca_pub_key) {
-        println!("CA already trusted in known_hosts");
+        tr_println!("setup-ssh-ca-already-trusted");
         // Lock released on drop
         drop(lock_file);
         return Ok(());
@@ -327,7 +328,7 @@ fn add_trusted_ca_to_known_hosts(ca_path: &std::path::Path, host_patterns: &str)
     // Lock released on drop
     drop(lock_file);
 
-    println!("Added CA to known_hosts for hosts: {}", host_patterns);
+    tr_println!("setup-ssh-added-ca-trust", hosts = host_patterns);
 
     Ok(())
 }

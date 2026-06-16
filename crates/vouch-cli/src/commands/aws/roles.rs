@@ -2,6 +2,7 @@
 //! `vouch aws roles` — list available roles across AWS accounts.
 
 use anyhow::{Context, Result};
+use vouch_cli::{tr, tr_args, tr_println};
 
 use crate::integrations::aws::config::AwsConfig;
 use crate::integrations::aws::sso::{SsoConfig, load_cached_token};
@@ -11,13 +12,13 @@ use crate::integrations::aws::sso_portal::{SsoAccount, list_account_roles, list_
 #[derive(clap::Args)]
 pub(crate) struct RolesArgs {
     /// SSO session name from ~/.aws/config (default: first found).
-    #[arg(long)]
+    #[arg(long, help = tr!("arg-aws-sso-session-help"))]
     pub sso_session: Option<String>,
     /// Filter by account ID (show roles for a single account only).
-    #[arg(long)]
+    #[arg(long, help = tr!("arg-aws-roles-account-help"))]
     pub account: Option<String>,
     /// Output as JSON.
-    #[arg(long)]
+    #[arg(long, help = tr!("arg-aws-roles-json-help"))]
     pub json: bool,
 }
 
@@ -36,7 +37,7 @@ pub(crate) async fn run(args: RolesArgs) -> Result<()> {
 
     let token = load_cached_token(&sso_config).ok_or_else(|| {
         crate::exit_code::CliError::NotAuthenticated {
-            reason: "SSO session expired or missing. Run 'vouch aws login' first.".to_string(),
+            reason: tr!("aws-err-sso-expired"),
         }
     })?;
     let bearer = token.token();
@@ -44,7 +45,7 @@ pub(crate) async fn run(args: RolesArgs) -> Result<()> {
 
     let http_client =
         vouch_common::http::credential_client(&format!("vouch-cli/{}", env!("CARGO_PKG_VERSION")))
-            .context("failed to create HTTP client")?;
+            .with_context(|| tr!("aws-login-err-http-client"))?;
 
     // Determine which accounts to query
     let accounts: Vec<SsoAccount> = if let Some(ref account_id) = args.account {
@@ -57,7 +58,7 @@ pub(crate) async fn run(args: RolesArgs) -> Result<()> {
     } else {
         list_accounts(&http_client, &region, &bearer)
             .await
-            .context("failed to list SSO accounts")?
+            .with_context(|| tr!("aws-accounts-err-list"))?
     };
 
     // Collect roles for each account (O(N) sequential — acceptable for v1)
@@ -65,7 +66,12 @@ pub(crate) async fn run(args: RolesArgs) -> Result<()> {
     for account in &accounts {
         let roles = list_account_roles(&http_client, &region, &bearer, &account.account_id)
             .await
-            .with_context(|| format!("failed to list roles for account {}", account.account_id))?;
+            .with_context(|| {
+                tr_args!(
+                    "aws-roles-err-list-roles",
+                    account_id = account.account_id.as_str()
+                )
+            })?;
 
         for role in roles {
             entries.push(RoleEntry {
@@ -89,10 +95,15 @@ pub(crate) async fn run(args: RolesArgs) -> Result<()> {
                 })
                 .collect::<Vec<_>>(),
         )
-        .context("failed to serialize roles")?;
+        .with_context(|| tr!("aws-roles-err-serialize"))?;
         println!("{json}");
     } else {
-        println!("{:<14} {:<35} ROLE NAME", "ACCOUNT ID", "ACCOUNT NAME");
+        println!(
+            "{:<14} {:<35} {}",
+            tr!("aws-roles-table-account-id"),
+            tr!("aws-roles-table-account-name"),
+            tr!("aws-roles-table-role-name"),
+        );
         println!("{}", "-".repeat(80));
         for entry in &entries {
             println!(
@@ -101,7 +112,7 @@ pub(crate) async fn run(args: RolesArgs) -> Result<()> {
             );
         }
         println!();
-        println!("{} role(s)", entries.len());
+        tr_println!("aws-roles-summary", count = entries.len());
     }
 
     Ok(())

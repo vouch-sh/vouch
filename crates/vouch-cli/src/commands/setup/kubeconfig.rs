@@ -107,7 +107,7 @@ pub(crate) fn default_kubeconfig_path() -> Result<PathBuf> {
         return Ok(PathBuf::from(first_path));
     }
 
-    let home = dirs::home_dir().context("could not determine home directory")?;
+    let home = dirs::home_dir().with_context(|| vouch_cli::tr!("setup-err-no-home"))?;
     Ok(home.join(".kube").join("config"))
 }
 
@@ -121,10 +121,12 @@ pub(crate) fn load_kubeconfig(path: &std::path::Path) -> Result<Kubeconfig> {
         });
     }
 
-    let content = std::fs::read_to_string(path)
-        .with_context(|| format!("failed to read kubeconfig: {}", path.display()))?;
-    let config: Kubeconfig = serde_yaml::from_str(&content)
-        .with_context(|| format!("failed to parse kubeconfig: {}", path.display()))?;
+    let content = std::fs::read_to_string(path).with_context(|| {
+        vouch_cli::tr_args!("setup-kc-err-read", path = path.display().to_string())
+    })?;
+    let config: Kubeconfig = serde_yaml::from_str(&content).with_context(|| {
+        vouch_cli::tr_args!("setup-kc-err-parse", path = path.display().to_string())
+    })?;
     Ok(config)
 }
 
@@ -134,7 +136,8 @@ pub(crate) fn save_kubeconfig(path: &std::path::Path, config: &Kubeconfig) -> Re
         ensure_secure_dir(parent)?;
     }
 
-    let content = serde_yaml::to_string(config).context("failed to serialize kubeconfig")?;
+    let content =
+        serde_yaml::to_string(config).with_context(|| vouch_cli::tr!("setup-kc-err-serialize"))?;
     write_secure_file(path, &content)?;
     Ok(())
 }

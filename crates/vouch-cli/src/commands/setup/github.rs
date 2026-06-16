@@ -5,6 +5,7 @@
 
 use anyhow::{Context, Result};
 use std::process::Command;
+use vouch_cli::{tr, tr_println};
 use vouch_common::GitHubStatusResponse;
 
 use crate::commands::credential::github::check_status;
@@ -22,13 +23,13 @@ use crate::install_path::resolve_install_path;
 /// * `configure` - If true, automatically configure git; if false, just show instructions
 pub(crate) async fn run(host: &str, configure: bool) -> Result<()> {
     // Load config to get server URL
-    let config = Config::load().context("failed to load config - run 'vouch enroll' first")?;
+    let config = Config::load().with_context(|| tr!("setup-err-load-config"))?;
     let server = config
         .server_url()
-        .context("not configured - run 'vouch enroll' first")?;
+        .with_context(|| tr!("setup-err-not-configured"))?;
 
-    println!("GitHub Credential Setup");
-    println!("=======================\n");
+    tr_println!("setup-github-header");
+    println!();
 
     // Check login status and GitHub connectivity
     match check_status(server).await {
@@ -36,17 +37,14 @@ pub(crate) async fn run(host: &str, configure: bool) -> Result<()> {
             print_status(&status);
 
             if !status.configured {
-                println!("\nGitHub App is not configured on the server.");
-                println!("Contact your administrator to enable GitHub integration.");
+                println!();
+                tr_println!("setup-github-not-configured-block");
                 return Ok(());
             }
 
             if !status.connected {
-                println!("\nYour organization has not connected GitHub.");
-                println!(
-                    "An organization admin needs to visit: {}/github/connect",
-                    server
-                );
+                println!();
+                tr_println!("setup-github-org-not-connected-block", server = server);
                 return Ok(());
             }
 
@@ -54,19 +52,18 @@ pub(crate) async fn run(host: &str, configure: bool) -> Result<()> {
             let all_suspended = !status.github_accounts.is_empty()
                 && status.github_accounts.iter().all(|a| a.suspended);
             if all_suspended {
-                println!("\nAll GitHub installations are currently suspended.");
-                println!("Contact your administrator to resolve this.");
+                println!();
+                tr_println!("setup-github-all-suspended-block");
                 return Ok(());
             }
         }
         Err(e) => {
             if e.to_string().contains("not authenticated") {
-                println!("Login status: Not logged in");
-                println!("\nRun 'vouch login' first to authenticate.");
+                tr_println!("setup-github-not-logged-in-block");
                 return Ok(());
             }
             // Server might not have the endpoint yet, continue with setup
-            println!("Note: Could not check GitHub status: {e}");
+            tr_println!("setup-github-could-not-check", reason = format!("{e:#}"));
             println!();
         }
     }
@@ -84,64 +81,66 @@ pub(crate) async fn run(host: &str, configure: bool) -> Result<()> {
     if configure {
         // Check for existing helpers that might conflict
         if let Some(existing) = detect_existing_helper(host)? {
-            println!("Warning: Existing credential helper detected: {}", existing);
-            println!("This may conflict with Vouch.\n");
+            tr_println!(
+                "setup-github-existing-warning-block",
+                existing = existing.as_str()
+            );
+            println!();
         }
 
         // Configure git
         let status = Command::new("git")
             .args(["config", "--global", &config_key, &helper_command])
             .status()
-            .context("failed to run git config")?;
+            .with_context(|| tr!("setup-github-err-run-config"))?;
 
         if !status.success() {
-            return Err(crate::exit_code::CliError::ConfigError(
-                "failed to configure git credential helper".to_string(),
-            )
-            .into());
+            return Err(
+                crate::exit_code::CliError::ConfigError(tr!("setup-github-err-helper")).into(),
+            );
         }
 
-        println!("Git configured for {}", host);
-        println!();
-        println!("Configuration added:");
-        println!("  {} = {}", config_key, helper_command);
+        tr_println!(
+            "setup-github-configured-block",
+            host = host,
+            key = config_key.as_str(),
+            value = helper_command.as_str(),
+        );
     } else {
-        println!("Add to ~/.gitconfig:\n");
+        tr_println!("setup-github-add-to-gitconfig");
+        println!();
         println!("[credential \"https://{}\"]", host);
         println!("    helper = {}", helper_command);
         println!();
-        println!("Or run: vouch setup github --configure");
+        tr_println!("setup-github-or-run");
     }
 
     println!();
-    println!("To verify, run:");
-    println!("  git ls-remote https://{}/YOUR-ORG/YOUR-REPO.git", host);
+    tr_println!("setup-github-to-verify", host = host);
 
     Ok(())
 }
 
 /// Print GitHub status information.
 fn print_status(status: &GitHubStatusResponse) {
-    println!(
-        "GitHub App configured: {}",
-        if status.configured { "Yes" } else { "No" }
+    tr_println!(
+        "setup-github-app-configured",
+        configured = status.configured.to_string(),
     );
-    println!(
-        "Organization connected: {}",
-        if status.connected { "Yes" } else { "No" }
+    tr_println!(
+        "setup-github-org-connected",
+        connected = status.connected.to_string(),
     );
 
     if !status.github_accounts.is_empty() {
-        println!("Connected GitHub accounts:");
+        tr_println!("setup-github-accounts-header");
         for account in &status.github_accounts {
-            let suspended_indicator = if account.suspended {
-                " (SUSPENDED)"
-            } else {
-                ""
-            };
-            println!(
-                "  - {} ({}){}",
-                account.login, account.account_type, suspended_indicator
+            tr_println!(
+                "setup-github-account-line",
+                indent = "  ",
+                login = account.login.as_str(),
+                kind = account.account_type.as_str(),
+                suspended = account.suspended.to_string(),
             );
         }
     }

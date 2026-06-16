@@ -80,19 +80,19 @@
                 var trimmed = uris[i].trim();
 
                 if (trimmed.length > 2048) {
-                    errors.push(trimmed.substring(0, 40) + t('appcreate-js-resource-toolong'));
+                    errors.push(t('appcreate-js-resource-toolong-uri', { uri: trimmed.substring(0, 40) }));
                     continue;
                 }
 
                 if (trimmed.indexOf('#') !== -1) {
-                    errors.push(trimmed + t('appcreate-js-resource-fragment'));
+                    errors.push(t('appcreate-js-resource-fragment-uri', { uri: trimmed }));
                     continue;
                 }
 
                 try {
                     new URL(trimmed);
                 } catch (e) {
-                    errors.push(trimmed + t('appcreate-js-resource-scheme'));
+                    errors.push(t('appcreate-js-resource-scheme-uri', { uri: trimmed }));
                 }
             }
 

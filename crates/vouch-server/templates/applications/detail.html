@@ -162,9 +162,10 @@
             {% if (app.application_type == "web" || app.application_type == "service") && app.fapi_profile != "fapi2_security" %}
             <div class="border-t border-vouch-border pt-4">
                 <div class="flex items-center justify-between mb-3">
+                    {% let secrets_count_str = secrets_count.to_string() %}
                     <div>
                         <label class="text-sm text-gray-400">{{ self.tr("apps-detail-client-secrets") }}</label>
-                        <span class="text-xs text-gray-500 ml-2">({{ secrets_count }} {{ self.tr("apps-detail-secrets-suffix") }})</span>
+                        <span class="text-xs text-gray-500 ml-2">({{ self.tr("apps-detail-secrets-count").arg("count", secrets_count_str.as_str()).arg("max", "2") }})</span>
                     </div>
                     {% if secrets_count < 2 %}
                     <form action="/applications/{{ app.id }}/secrets" method="POST">

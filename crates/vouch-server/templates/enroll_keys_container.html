@@ -15,7 +15,7 @@
             <div class="flex-1 min-w-0 mr-4">
                 <div class="key-name-display-row flex items-center gap-1 mb-1">
                     <span class="key-name-display font-medium text-gray-200 truncate">{{ key.name }}</span>
-                    <button type="button" data-action="rename" aria-label="{{ self.tr("enroll-keys-rename-aria") }}"
+                    <button type="button" data-action="rename" aria-label="{{ self.tr("enroll-keys-rename").attr("aria-label") }}"
                             class="shrink-0 text-gray-500 hover:text-vouch-accent transition-colors p-1">
                         <svg class="w-4 h-4 pointer-events-none" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="m16.862 4.487 1.687-1.688a1.875 1.875 0 1 1 2.652 2.652L6.832 19.82a4.5 4.5 0 0 1-1.897 1.13l-2.685.8.8-2.685a4.5 4.5 0 0 1 1.13-1.897L16.863 4.487Zm0 0L19.5 7.125"/></svg>
                     </button>
@@ -31,12 +31,12 @@
                 </form>
                 <div class="text-sm text-gray-500">
                     {% match key.device_model %}{% when Some with (model) %}<span class="mr-3">{{ model }}</span>{% when None %}{% endmatch %}
-                    <span>{{ self.tr("enroll-keys-added-prefix") }} {{ key.created_at }}</span>
+                    <span>{{ self.tr("enroll-keys-added").arg("when", key.created_at.as_str()) }}</span>
                 </div>
             </div>
             {% if can_delete %}
             <button type="button" data-action="delete" data-key-id="{{ key.id }}" data-key-name="{{ key.name }}"
-                    class="text-gray-500 hover:text-vouch-error p-1" title="{{ self.tr("enroll-keys-delete-title") }}">
+                    class="text-gray-500 hover:text-vouch-error p-1" title="{{ self.tr("enroll-keys-delete").attr("title") }}">
                 <svg class="w-5 h-5 pointer-events-none" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
             </button>
             {% endif %}

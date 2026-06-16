@@ -4,6 +4,7 @@
 use anyhow::{Context, Result, bail};
 use secrecy::{ExposeSecret, SecretString};
 use std::process::Command;
+use vouch_cli::{tr, tr_args};
 
 use super::CredentialType;
 use super::credential::cache;
@@ -70,18 +71,18 @@ pub(crate) async fn fetch_aws_credentials(
     let access_key_id = data
         .get("AccessKeyId")
         .and_then(|v| v.as_str())
-        .context("AWS credentials missing AccessKeyId")?
+        .with_context(|| tr!("exec-err-aws-missing-key-id"))?
         .to_string();
     let secret_access_key = SecretString::from(
         data.get("SecretAccessKey")
             .and_then(|v| v.as_str())
-            .context("AWS credentials missing SecretAccessKey")?
+            .with_context(|| tr!("exec-err-aws-missing-secret"))?
             .to_string(),
     );
     let session_token = SecretString::from(
         data.get("SessionToken")
             .and_then(|v| v.as_str())
-            .context("AWS credentials missing SessionToken")?
+            .with_context(|| tr!("exec-err-aws-missing-token"))?
             .to_string(),
     );
     let expiration = data
@@ -131,7 +132,7 @@ pub(crate) async fn fetch_github_token_cached(server: &str) -> Result<GitHubEnvT
     let token = SecretString::from(
         data.get("token")
             .and_then(serde_json::Value::as_str)
-            .context("GitHub credential missing 'token' field")?
+            .with_context(|| tr!("exec-err-github-missing-token"))?
             .to_string(),
     );
 
@@ -149,10 +150,12 @@ pub(crate) async fn run(
     rs_opts: RedshiftOptions<'_>,
 ) -> Result<()> {
     if command.is_empty() {
-        bail!("No command specified. Usage: vouch exec -- <command> [args...]");
+        bail!(tr!("exec-err-no-command"));
     }
 
-    let program = command.first().context("no command specified")?;
+    let program = command
+        .first()
+        .with_context(|| tr!("exec-err-no-command-short"))?;
     let args = command.get(1..).unwrap_or_default();
 
     let mut cmd = Command::new(program);
@@ -160,9 +163,7 @@ pub(crate) async fn run(
 
     match credential_type {
         CredentialType::Aws => {
-            let role_arn = role.context(
-                "AWS credentials require --role. Usage: vouch exec --type aws --role <ARN> -- <command>",
-            )?;
+            let role_arn = role.with_context(|| tr!("exec-err-aws-needs-role"))?;
             inject_aws_credentials(&mut cmd, server, role_arn).await?;
         }
         CredentialType::Github => {
@@ -190,18 +191,22 @@ pub(crate) async fn run(
     {
         use std::os::unix::process::CommandExt;
         let err = cmd.exec();
-        bail!("failed to execute {program}: {err}");
+        bail!(tr_args!(
+            "exec-err-execute-failed",
+            program = program,
+            reason = err.to_string()
+        ));
     }
 
     #[cfg(not(unix))]
     {
         let status = cmd
             .status()
-            .with_context(|| format!("failed to execute: {program}"))?;
+            .with_context(|| tr_args!("exec-err-execute-simple", program = program))?;
 
         if !status.success() {
             let code = status.code().unwrap_or(1);
-            bail!("command exited with status {code}");
+            bail!(tr_args!("exec-err-exit-status", code = code));
         }
 
         Ok(())
@@ -282,7 +287,7 @@ pub(crate) async fn fetch_github_token(server: &str) -> Result<serde_json::Value
             &vouch_common::GitHubTokenRequest::default(),
         )
         .await
-        .context("failed to get GitHub token from Vouch server")
+        .with_context(|| tr!("exec-err-github-fetch"))
 }
 
 /// Resolve CodeArtifact parameters and fetch a token.
@@ -300,7 +305,7 @@ pub(super) async fn fetch_codeartifact_token(
 
     super::credential::codeartifact::get_token(server, &domain, &domain_owner, &region)
         .await
-        .context("failed to get CodeArtifact token")
+        .with_context(|| tr!("exec-err-codeartifact-fetch"))
 }
 
 /// Validated RDS credentials ready for environment injection.
@@ -317,14 +322,12 @@ pub(super) async fn fetch_rds_with_opts(
     role: Option<&str>,
     opts: &RdsOptions<'_>,
 ) -> Result<RdsEnvCredentials> {
-    let hostname = opts.hostname.context(
-        "RDS credentials require --rds-hostname. \
-         Usage: vouch {exec|env} --type rds --rds-hostname <host> --rds-username <user>",
-    )?;
-    let username = opts.username.context(
-        "RDS credentials require --rds-username. \
-         Usage: vouch {exec|env} --type rds --rds-hostname <host> --rds-username <user>",
-    )?;
+    let hostname = opts
+        .hostname
+        .with_context(|| tr!("exec-err-rds-needs-hostname"))?;
+    let username = opts
+        .username
+        .with_context(|| tr!("exec-err-rds-needs-username"))?;
 
     let token = super::credential::rds::fetch_rds_token(
         server,

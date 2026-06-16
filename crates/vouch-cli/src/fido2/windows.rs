@@ -494,33 +494,28 @@ const ERROR_TIMEOUT_HRESULT: u32 = 0x8007_05B4;
 
 /// Translate a WebAuthn HRESULT into a user-friendly error.
 fn translate_webauthn_error(hr: windows::core::HRESULT, op: &str) -> anyhow::Error {
+    use crate::{tr, tr_args};
+
     // Bit-pattern-preserving conversion i32 → u32 (HRESULT is wrapped i32).
     let code = u32::from_ne_bytes(hr.0.to_ne_bytes());
     let detail = webauthn_error_message(hr);
 
     match code {
-        NTE_USER_CANCELLED => anyhow::anyhow!("Authentication cancelled."),
-        NTE_DEVICE_NOT_FOUND => anyhow::anyhow!(
-            "No security key found.\n\
-             Insert your YubiKey and try again."
-        ),
-        NTE_TOKEN_KEYSET_STORAGE_FULL => anyhow::anyhow!(
-            "Your YubiKey has no free passkey slots.\n\
-             Delete an existing credential with `ykman fido credentials delete` and try again."
-        ),
-        ERROR_TIMEOUT_HRESULT => anyhow::anyhow!(
-            "Timed out waiting for YubiKey.\n\
-             Insert your key and try again."
-        ),
-        NTE_NOT_SUPPORTED => anyhow::anyhow!(
-            "Your authenticator does not support resident keys or user verification.\n\
-             vouch requires a YubiKey 5 or later with PIN configured."
-        ),
-        NTE_INVALID_PARAMETER => anyhow::anyhow!(
-            "Internal error: invalid WebAuthn parameter (HRESULT 0x{code:08x}). \
-             Please file a bug at https://github.com/vouch-sh/vouch/issues."
-        ),
-        _ => anyhow::anyhow!("{op} failed: 0x{code:08x} {detail}"),
+        NTE_USER_CANCELLED => anyhow::anyhow!(tr!("webauthn-err-cancelled")),
+        NTE_DEVICE_NOT_FOUND => anyhow::anyhow!(tr!("webauthn-err-device-not-found")),
+        NTE_TOKEN_KEYSET_STORAGE_FULL => anyhow::anyhow!(tr!("webauthn-err-keyset-full")),
+        ERROR_TIMEOUT_HRESULT => anyhow::anyhow!(tr!("webauthn-err-timeout")),
+        NTE_NOT_SUPPORTED => anyhow::anyhow!(tr!("webauthn-err-not-supported")),
+        NTE_INVALID_PARAMETER => anyhow::anyhow!(tr_args!(
+            "webauthn-err-invalid-parameter",
+            code = format!("{code:08x}"),
+        )),
+        _ => anyhow::anyhow!(tr_args!(
+            "webauthn-err-generic",
+            operation = op,
+            code = format!("{code:08x}"),
+            detail = detail,
+        )),
     }
 }
 

@@ -12,6 +12,7 @@
 //! `select_languages_negotiate`, so there is no shared mutable locale state.
 
 use std::collections::HashMap;
+use std::fmt;
 use std::sync::{Arc, LazyLock};
 
 use axum::extract::FromRequestParts;
@@ -19,8 +20,9 @@ use axum::response::{IntoResponse, Response};
 use http::request::Parts;
 use http::{HeaderMap, StatusCode, header};
 use i18n_embed::LanguageLoader;
-use i18n_embed::fluent::{FluentLanguageLoader, NegotiationStrategy};
+use i18n_embed::fluent::FluentLanguageLoader;
 use unic_langid::{LanguageIdentifier, langid};
+use vouch_i18n::FluentValue;
 
 /// Embedded Fluent catalogs, one `i18n/<lang>/vouch.ftl` per language.
 #[derive(rust_embed::RustEmbed)]
@@ -29,19 +31,8 @@ struct Localizations;
 
 /// Process-wide loader holding every embedded catalog. Built once; never mutated
 /// after load. Per-request locale selection happens on cheap derived loaders.
-static LOADER: LazyLock<FluentLanguageLoader> = LazyLock::new(|| {
-    let loader = FluentLanguageLoader::new("vouch", langid!("en-US"));
-    if let Err(error) = loader.load_available_languages(&Localizations) {
-        tracing::error!(%error, "failed to load i18n catalogs");
-    }
-    // Disable Fluent's BiDi isolation, which otherwise wraps every interpolated
-    // value in invisible U+2068/U+2069 marks. For an LTR-only catalog those marks
-    // add nothing but leak into version strings and copy-paste. Re-enable (and add
-    // BiDi-aware tests) when an RTL language ships. The bundles are shared via Arc,
-    // so this applies to every derived loader.
-    loader.set_use_isolating(false);
-    loader
-});
+static LOADER: LazyLock<FluentLanguageLoader> =
+    LazyLock::new(|| vouch_i18n::build_loader("vouch", langid!("en-US"), &Localizations));
 
 /// Request-scoped translation handle passed into every UI template.
 ///
@@ -62,21 +53,31 @@ impl I18nContext {
         negotiate(None)
     }
 
-    /// Translate a message with no arguments.
+    /// Translate a no-argument message id. Bypasses the [`Tr`] builder for
+    /// the common case where a string lookup is all the caller needs — used
+    /// by the `/i18n.js` bundle builder and unit tests. Template call sites
+    /// go through the unified [`Tr`] entry point via `self.tr("id")`.
     pub fn t(&self, id: &str) -> String {
         self.loader.get(id)
     }
 
-    /// Translate a message, substituting Fluent placeables from `args`.
-    pub fn ta(&self, id: &str, args: &[(&str, &str)]) -> String {
-        let map: HashMap<&str, &str> = args.iter().copied().collect();
-        self.loader.get_args(id, map)
-    }
-
-    /// Translate a message with a single placeable. Convenience for templates,
-    /// which cannot easily build slice literals.
-    pub fn t1(&self, id: &str, name: &str, value: &str) -> String {
-        self.ta(id, &[(name, value)])
+    /// Render a [`Tr`] against this context. Handles all four shapes
+    /// (`id`, `id` + args, `id.attr`, `id.attr` + args) in one place so the
+    /// builder can stay small.
+    pub fn render(&self, tr: &Tr<'_>) -> String {
+        let no_args = tr.args.is_empty();
+        match (tr.attr, no_args) {
+            (None, true) => self.loader.get(tr.id),
+            (None, false) => {
+                let map = build_arg_map(&tr.args);
+                self.loader.get_args_concrete(tr.id, map)
+            }
+            (Some(attr), true) => self.loader.get_attr(tr.id, attr),
+            (Some(attr), false) => {
+                let map = build_arg_map(&tr.args);
+                self.loader.get_attr_args_concrete(tr.id, attr, map)
+            }
+        }
     }
 
     /// BCP-47 tag of the negotiated language, for `<html lang="...">`.
@@ -93,27 +94,80 @@ impl I18nContext {
 
 tokio::task_local! {
     /// Request-scoped translation context, installed by [`i18n_layer`] for
-    /// every request. Template shims read it via the [`t`], [`t1`], [`lang`],
-    /// and [`dir`] free functions below — handlers don't need to thread the
-    /// context themselves and templates don't need to carry any extra field.
+    /// every request. The [`Tr`] builder reads it inside its [`fmt::Display`]
+    /// impl — handlers don't thread the context and templates don't carry
+    /// any extra field.
     static REQUEST_I18N: I18nContext;
 }
 
-/// Translate a message using the request-scoped locale, falling back to
-/// `en-US` when called outside any request scope (e.g. background work or a
-/// template constructed in a unit test).
-pub(crate) fn t(id: &str) -> String {
-    REQUEST_I18N
-        .try_with(|i| i.t(id))
-        .unwrap_or_else(|_| I18nContext::fallback().t(id))
+/// Lazy translation builder.
+///
+/// Constructed by `self.tr("id")` in templates (and `Tr::new("id")` in Rust
+/// code), then chained with `.arg(name, value)` and/or `.attr(attr_name)`.
+/// Rendering happens through [`fmt::Display`] (so `{{ self.tr("id") }}` in
+/// Askama just works) and resolves against the request-scoped task-local —
+/// falling back to en-US outside any request scope.
+///
+/// Why a single builder instead of six methods (`tr` / `tr1` / `tr1_num` /
+/// `tr2` / `tr_attr` / `tr_attr1`): Askama can only call methods on `self`
+/// in `{{ … }}` expressions, so the historical method-per-arity API had to
+/// fan out. A method that returns a builder collapses every shape (no-arg,
+/// one arg, many args, with or without attribute, string or numeric value)
+/// into one call site shape, and `arg<V: Into<FluentValue<'_>>>` engages
+/// CLDR plural rules automatically when the value is numeric.
+pub struct Tr<'a> {
+    id: &'a str,
+    attr: Option<&'a str>,
+    args: Vec<(&'a str, FluentValue<'a>)>,
 }
 
-/// Translate a message with a single Fluent placeable. Same scope semantics
-/// as [`t`].
-pub(crate) fn t1(id: &str, name: &str, value: &str) -> String {
-    REQUEST_I18N
-        .try_with(|i| i.t1(id, name, value))
-        .unwrap_or_else(|_| I18nContext::fallback().t1(id, name, value))
+impl<'a> Tr<'a> {
+    /// Build a no-arg, no-attribute lookup. Chain `.arg` / `.attr` to refine.
+    pub fn new(id: &'a str) -> Self {
+        Self {
+            id,
+            attr: None,
+            args: Vec::new(),
+        }
+    }
+
+    /// Select a message attribute (Fluent's `id .attr = value` form). Pairs
+    /// with `.arg` for attributes that take placeables.
+    #[must_use]
+    pub fn attr(mut self, attr: &'a str) -> Self {
+        self.attr = Some(attr);
+        self
+    }
+
+    /// Add a Fluent placeable. Numeric `V` (`i64`, `usize`, …) flows through
+    /// `FluentValue::Number` so CLDR plural arms (`[one]` / `*[other]`) match
+    /// correctly; string `V` (`&str`, `String`, `&String`, `Cow<str>`) flows
+    /// through `FluentValue::String`. Anything else is not supported — the
+    /// compiler will tell the caller to stringify explicitly.
+    #[must_use]
+    pub fn arg<V>(mut self, name: &'a str, value: V) -> Self
+    where
+        V: Into<FluentValue<'a>>,
+    {
+        self.args.push((name, value.into()));
+        self
+    }
+}
+
+impl fmt::Display for Tr<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let rendered = REQUEST_I18N
+            .try_with(|ctx| ctx.render(self))
+            .unwrap_or_else(|_| I18nContext::fallback().render(self));
+        f.write_str(&rendered)
+    }
+}
+
+/// Materialize the builder's arg list as the loader's expected map. Cheap
+/// for the typical 0-3 args; the FluentValues are cloned because the
+/// loader's `_concrete` entry points take ownership of the map.
+fn build_arg_map<'a>(args: &'a [(&'a str, FluentValue<'a>)]) -> HashMap<&'a str, FluentValue<'a>> {
+    args.iter().map(|(k, v)| (*k, v.clone())).collect()
 }
 
 /// BCP-47 tag of the negotiated language for `<html lang="...">`. Returns
@@ -163,21 +217,7 @@ fn default_context() -> &'static I18nContext {
 /// Returns an error if the embedded `en-US` catalog cannot be enumerated, is
 /// missing, fails to resolve a well-known key, or yields no JS bundle entry.
 pub fn validate_startup() -> anyhow::Result<()> {
-    use anyhow::Context;
-    let available = LOADER
-        .available_languages(&Localizations)
-        .context("failed to enumerate embedded i18n catalogs")?;
-    anyhow::ensure!(
-        available.contains(&langid!("en-US")),
-        "embedded i18n catalog en-US is missing; refusing to start"
-    );
-    // Catch a parse failure that leaves the loader empty: a well-known key
-    // must resolve to a translated string, not echo its own id back.
-    let probe = DEFAULT_CONTEXT.t("common-app-name");
-    anyhow::ensure!(
-        probe != "common-app-name",
-        "i18n catalog loaded but key resolution returns raw ids; refusing to start"
-    );
+    vouch_i18n::validate_startup(&LOADER, &Localizations, &["common-app-name"])?;
     // Eagerly force the JS bundle map to build now so any render failure
     // surfaces here (not on the first `/i18n.js` request), and confirm en-US
     // is present — the handler's fallback path depends on it.
@@ -194,11 +234,7 @@ pub(crate) fn negotiate(accept_language: Option<&str>) -> I18nContext {
     let requested = accept_language
         .map(parse_accept_language)
         .unwrap_or_default();
-    let loader = if requested.is_empty() {
-        LOADER.select_languages(&[LOADER.fallback_language().clone()])
-    } else {
-        LOADER.select_languages_negotiate(&requested, NegotiationStrategy::Filtering)
-    };
+    let loader = vouch_i18n::select_loader(&LOADER, &requested);
     let lang = loader.current_language().to_string();
     I18nContext {
         loader: Arc::new(loader),
@@ -300,10 +336,10 @@ pub(crate) const JS_I18N_KEYS: &[&str] = &[
     "appcreate-js-jwksuri-invalid",
     "appcreate-js-redirect-invalid",
     "appcreate-js-redirect-required",
-    "appcreate-js-resource-fragment",
+    "appcreate-js-resource-fragment-uri",
     "appcreate-js-resource-invalid",
-    "appcreate-js-resource-scheme",
-    "appcreate-js-resource-toolong",
+    "appcreate-js-resource-scheme-uri",
+    "appcreate-js-resource-toolong-uri",
     "common-copy",
     "common-js-copied",
     "keys-js-delete",
@@ -457,8 +493,71 @@ mod tests {
     #[test]
     fn placeable_substitution() {
         let ctx = negotiate(None);
-        let rendered = ctx.t1("footer-copyright", "year", "2026");
+        let rendered = ctx.render(&Tr::new("footer-copyright").arg("year", "2026"));
         assert!(rendered.contains("2026"));
+    }
+
+    #[test]
+    fn attribute_resolves() {
+        // Fluent attribute pattern, per the docs at
+        // <https://projectfluent.org/fluent/guide/attributes.html>.
+        // `admin-members-demote` carries a `.title` for the button tooltip.
+        let ctx = negotiate(None);
+        assert_eq!(ctx.t("admin-members-demote"), "Demote");
+        assert_eq!(
+            ctx.render(&Tr::new("admin-members-demote").attr("title")),
+            "Demote to member"
+        );
+    }
+
+    #[test]
+    fn term_substitution_renders_product_name() {
+        // Terms (`-product`, `-yubikey`, …) defined at the top of vouch.ftl
+        // expand inside referencing messages. A change to the term name
+        // propagates everywhere; this test pins one representative call site.
+        let ctx = negotiate(None);
+        let rendered = ctx.t("home-welcome");
+        assert!(
+            rendered.contains("Vouch"),
+            "{{ -product }} should expand to Vouch, got: {rendered}"
+        );
+    }
+
+    /// Display impl resolves via the request-scoped task-local — and falls
+    /// back to en-US when called outside any scope. This is the path Askama
+    /// takes when rendering `{{ self.tr(...) }}`; the templates never call
+    /// `I18nContext::render` directly.
+    #[test]
+    fn tr_display_falls_back_to_en_us_outside_scope() {
+        let rendered = Tr::new("footer-install").to_string();
+        assert_eq!(rendered, "Install");
+        let with_attr = Tr::new("admin-members-demote").attr("title").to_string();
+        assert_eq!(with_attr, "Demote to member");
+        // Numeric arg → CLDR plural dispatch through the Display path.
+        let one_arm = Tr::new("admin-members-confirm-revoke")
+            .arg("count", 1_i64)
+            .to_string();
+        assert!(
+            one_arm.contains("key ") && !one_arm.contains("keys "),
+            "Display path should engage [one] arm for count=1, got: {one_arm}"
+        );
+    }
+
+    #[test]
+    fn plural_selector_one_vs_other() {
+        // CLDR plural selector on `admin-members-confirm-revoke`. The
+        // selector picks `[one]` vs `*[other]` from a `FluentValue::Number`,
+        // so the value must be passed as a numeric type — the `Tr` builder's
+        // `arg<V: Into<FluentValue>>` dispatches `i64` (and friends) through
+        // the Number arm automatically.
+        let ctx = negotiate(None);
+        let one = ctx.render(&Tr::new("admin-members-confirm-revoke").arg("count", 1_i64));
+        let many = ctx.render(&Tr::new("admin-members-confirm-revoke").arg("count", 3_i64));
+        assert!(one.contains("key "), "one-arm should say 'key', got: {one}");
+        assert!(
+            many.contains("keys "),
+            "other-arm should say 'keys', got: {many}"
+        );
     }
 
     #[test]
@@ -616,32 +715,98 @@ mod tests {
         use std::path::{Path, PathBuf};
 
         fn collect_ftl_ids(content: &str) -> HashSet<String> {
+            // Collect both top-level message ids (`my-msg = …`) and attribute
+            // refs (`my-msg.title`, indented under their owning message as
+            // `    .title = …`). Attribute references in templates use the
+            // `id.attr` form (e.g. `self.tr_attr("admin-members-demote",
+            // "title")`), so we register them as `my-msg.title` here.
             let mut ids = HashSet::new();
+            let mut current_owner: Option<String> = None;
             for line in content.lines() {
-                if line.trim_start() != line {
-                    continue; // indented attribute / continuation line
+                let trimmed = line.trim_start();
+                if trimmed.is_empty() || trimmed.starts_with('#') {
+                    continue;
                 }
+                let indented = trimmed.len() < line.len();
+                if indented {
+                    // Attribute line: `    .attr-name = …`. Anything else
+                    // indented (raw continuation, selector arm, etc.) is
+                    // skipped — those don't introduce new ids.
+                    if !trimmed.starts_with('.') {
+                        continue;
+                    }
+                    let Some((left, _)) = trimmed.split_once('=') else {
+                        continue;
+                    };
+                    let attr = left.trim().trim_start_matches('.');
+                    if attr.is_empty()
+                        || !attr
+                            .chars()
+                            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+                    {
+                        continue;
+                    }
+                    if let Some(owner) = current_owner.as_deref() {
+                        ids.insert(format!("{owner}.{attr}"));
+                    }
+                    continue;
+                }
+                // Top-level line: `my-msg = …`. Reset attribute ownership.
                 let Some((left, _)) = line.split_once('=') else {
+                    current_owner = None;
                     continue;
                 };
                 let id = left.trim();
+                // Skip Fluent terms (`-foo = …`) — they're not callable from
+                // templates, only referenced from other messages via
+                // `{ -foo }`. Their syntax doesn't fit our kebab-case check
+                // either (leading `-`).
+                if id.starts_with('-') {
+                    current_owner = None;
+                    continue;
+                }
                 if !id.is_empty()
                     && id
                         .chars()
                         .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
                 {
                     ids.insert(id.to_owned());
+                    current_owner = Some(id.to_owned());
+                } else {
+                    current_owner = None;
                 }
             }
             ids
         }
 
         fn collect_keys(text: &str, keys: &mut HashSet<String>) {
-            for marker in [".tr(\"", ".tr1(\""] {
-                for part in text.split(marker).skip(1) {
-                    if let Some(key) = part.split('"').next() {
-                        keys.insert(key.to_owned());
-                    }
+            // Template call sites have the shape `self.tr("id")` or
+            // `self.tr("id").attr("attr-name")` (plus optional `.arg(...)`
+            // chains that don't affect catalog identity). Scan for `.tr("`,
+            // capture the id, then peek at the immediately-following bytes
+            // for a `.attr("attr-name")` segment so attribute references are
+            // recorded as `id.attr` — matching what `collect_ftl_ids`
+            // produces.
+            for part in text.split(".tr(\"").skip(1) {
+                let Some(id) = part.split('"').next() else {
+                    continue;
+                };
+                if id.is_empty() {
+                    continue;
+                }
+                // The rest of the slice starts at the byte after the
+                // closing quote of the id. Look for an immediate
+                // `).attr("…")` to attach.
+                let rest_start = id.len() + 1; // +1 for the closing `"`
+                let rest = part.get(rest_start..).unwrap_or("");
+                let attr_marker = ").attr(\"";
+                if let Some(after) = rest.strip_prefix(attr_marker)
+                    && let Some(attr) = after.split('"').next()
+                    && !attr.is_empty()
+                {
+                    keys.insert(format!("{id}.{attr}"));
+                } else {
+                    keys.insert(id.to_owned());
                 }
             }
         }

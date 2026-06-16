@@ -30,6 +30,8 @@ dirs = { workspace = true }
 gethostname = { workspace = true }
 ed25519-dalek = { workspace = true, features = ["std"] }
 hex = { workspace = true, features = ["std"] }
+i18n-embed = { workspace = true, features = ["fluent-system", "rust-embed"] }
+i18n-embed-fl = { workspace = true }
 inquire = { workspace = true, features = ["crossterm"] }
 jiff = { workspace = true, features = ["std", "serde", "tz-system"] }
 jsonwebtoken = { workspace = true, features = ["aws_lc_rs"] }
@@ -39,8 +41,10 @@ open = { workspace = true }
 reqwest = { workspace = true, features = ["json", "rustls", "form", "query"] }
 roxmltree = { workspace = true, features = ["std"] }
 rpassword = { workspace = true }
+rust-embed = { workspace = true }
 rust-ini = { workspace = true }
 secrecy = { workspace = true, features = ["serde"] }
+sys-locale = { workspace = true }
 serde = { workspace = true, features = ["std", "derive"] }
 serde_json = { workspace = true, features = ["std"] }
 serde_urlencoded = { workspace = true }
@@ -54,9 +58,11 @@ tracing = { workspace = true, features = ["std"] }
 tracing-subscriber = { workspace = true, features = ["std", "fmt", "env-filter"] }
 url = { workspace = true }
 urlencoding = { workspace = true }
+unic-langid = { workspace = true, features = ["macros"] }
 uuid = { workspace = true, features = ["v7"] }
 vouch-common = { workspace = true }
 vouch-httpsig = { workspace = true }
+vouch-i18n = { workspace = true }
 which = { workspace = true, features = ["real-sys"] }
 zeroize = { workspace = true }
 

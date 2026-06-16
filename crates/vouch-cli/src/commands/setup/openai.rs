@@ -53,10 +53,10 @@ pub(crate) async fn run(args: SetupArgs<'_>) -> Result<()> {
     // Config::load() succeeds on an empty file, so we have to check that a
     // server context exists. Otherwise we'd happily write a Codex provider
     // block for a machine that can't get a Vouch session.
-    let config = Config::load().context("failed to load Vouch config")?;
+    let config = Config::load().with_context(|| vouch_cli::tr!("setup-err-load-vouch-config"))?;
     let _server = config
         .server_url()
-        .context("not configured — run 'vouch enroll' first")?;
+        .with_context(|| vouch_cli::tr!("setup-err-anthropic-not-enrolled"))?;
 
     let vouch_path = resolve_install_path().display().to_string();
 
@@ -80,16 +80,25 @@ pub(crate) async fn run(args: SetupArgs<'_>) -> Result<()> {
 /// has a different `model_provider` or a conflicting `vouch` provider
 /// block, unless `force` is set.
 fn configure_codex(vouch_path: &str, force: bool) -> Result<PathBuf> {
-    let home = dirs::home_dir().context("could not determine home directory")?;
+    use vouch_cli::{tr, tr_args};
+
+    let home = dirs::home_dir().with_context(|| tr!("setup-err-no-home"))?;
     let codex_dir = home.join(".codex");
     let config_path = codex_dir.join("config.toml");
 
     let mut doc: DocumentMut = if config_path.exists() {
-        let content = std::fs::read_to_string(&config_path)
-            .with_context(|| format!("failed to read {}", config_path.display()))?;
-        content
-            .parse()
-            .with_context(|| format!("failed to parse {}", config_path.display()))?
+        let content = std::fs::read_to_string(&config_path).with_context(|| {
+            tr_args!(
+                "setup-openai-err-read",
+                path = config_path.display().to_string()
+            )
+        })?;
+        content.parse().with_context(|| {
+            tr_args!(
+                "setup-openai-err-parse",
+                path = config_path.display().to_string()
+            )
+        })?
     } else {
         DocumentMut::new()
     };
@@ -100,11 +109,21 @@ fn configure_codex(vouch_path: &str, force: bool) -> Result<PathBuf> {
     doc.insert("model_provider", toml_edit::value(PROVIDER_ID));
 
     if !codex_dir.exists() {
-        std::fs::create_dir_all(&codex_dir)
-            .with_context(|| format!("failed to create {}", codex_dir.display()))?;
+        std::fs::create_dir_all(&codex_dir).with_context(|| {
+            tr_args!(
+                "setup-openai-err-create-dir",
+                path = codex_dir.display().to_string()
+            )
+        })?;
     }
-    vouch_common::fs::atomic_write(&config_path, doc.to_string().as_bytes())
-        .with_context(|| format!("failed to write {}", config_path.display()))?;
+    vouch_common::fs::atomic_write(&config_path, doc.to_string().as_bytes()).with_context(
+        || {
+            tr_args!(
+                "setup-openai-err-write",
+                path = config_path.display().to_string()
+            )
+        },
+    )?;
 
     Ok(config_path)
 }
@@ -123,13 +142,12 @@ fn check_conflicts(doc: &DocumentMut, config_path: &Path, force: bool) -> Result
     if let Some(existing_mp) = doc.get("model_provider").and_then(Item::as_str)
         && existing_mp != PROVIDER_ID
     {
-        anyhow::bail!(
-            "Codex already has model_provider = {existing_mp:?} in {}.\n\n\
-             Remove the `model_provider` entry from config.toml, or re-run \
-             `vouch setup openai --force` to switch the default to \
-             `{PROVIDER_ID}`.",
-            config_path.display(),
-        );
+        anyhow::bail!(vouch_cli::tr_args!(
+            "setup-openai-err-conflict",
+            existing = format!("{existing_mp:?}"),
+            path = config_path.display().to_string(),
+            provider_id = PROVIDER_ID,
+        ));
     }
 
     Ok(())
@@ -163,13 +181,9 @@ fn write_provider_block(doc: &mut DocumentMut, vouch_path: &str) -> Result<()> {
     let providers = doc
         .entry("model_providers")
         .or_insert(Item::Table(Table::new()));
-    let providers_tbl = providers.as_table_mut().ok_or_else(|| {
-        anyhow::anyhow!(
-            "cannot configure OpenAI: `model_providers` exists in \
-             ~/.codex/config.toml but is not a table. Remove or rename \
-             the `model_providers` entry and try again."
-        )
-    })?;
+    let providers_tbl = providers
+        .as_table_mut()
+        .ok_or_else(|| anyhow::anyhow!(vouch_cli::tr!("setup-openai-err-providers-not-table")))?;
     // Without this the parent renders as plain `[model_providers]` instead
     // of letting the child `[model_providers.vouch]` header own the
     // section, which clutters the file.
@@ -179,27 +193,12 @@ fn write_provider_block(doc: &mut DocumentMut, vouch_path: &str) -> Result<()> {
 }
 
 fn print_success(config_path: &Path) {
-    println!("OpenAI Workload Identity Federation configured.\n");
-    println!("  Federation params: ~/.config/vouch/config.json");
-    println!(
-        "  Codex provider block: {} ([model_providers.{PROVIDER_ID}])\n",
-        config_path.display()
+    use vouch_cli::tr_println;
+    tr_println!(
+        "setup-openai-success-block",
+        config_path = config_path.display().to_string(),
+        provider_id = PROVIDER_ID,
     );
-
-    println!("NOTE: OpenAI must onboard the Vouch issuer as a workload identity provider");
-    println!("      before this works — custom OIDC issuers are not self-service. Contact");
-    println!("      OpenAI to register your Vouch base URL.\n");
-
-    println!("Get a token:");
-    println!("  vouch login              # YubiKey tap, once per session");
-    println!("  vouch credential openai  # prints a short-lived OpenAI access token\n");
-
-    println!("Ensure OPENAI_API_KEY is UNSET in every environment Codex runs in —");
-    println!("it shadows the configured auth command.\n");
-
-    println!("Note: the [model_providers.vouch] block is owned by `vouch setup openai` —");
-    println!("re-running this command overwrites it. Edit the top-level `model_provider`");
-    println!("if you want to switch Codex back to a different provider.");
 }
 
 #[cfg(test)]

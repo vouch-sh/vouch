@@ -8,6 +8,7 @@
 //! Claude Code — vouch does not manage `~/.claude/settings.json`.
 
 use anyhow::{Context, Result};
+use vouch_cli::{tr, tr_println};
 
 use crate::config::{AnthropicFederation, Config};
 
@@ -27,10 +28,10 @@ pub(crate) async fn run(args: SetupArgs<'_>) -> Result<()> {
     // Config::load() succeeds on an empty file, so we have to check that a
     // server context exists. Otherwise we'd save federation params for a
     // machine that can't get a Vouch session.
-    let config = Config::load().context("failed to load Vouch config")?;
+    let config = Config::load().with_context(|| tr!("setup-err-load-vouch-config"))?;
     let _server = config
         .server_url()
-        .context("not configured — run 'vouch enroll' first")?;
+        .with_context(|| tr!("setup-err-anthropic-not-enrolled"))?;
 
     let fed = AnthropicFederation {
         federation_rule_id: args.federation_rule_id.to_string(),
@@ -47,20 +48,5 @@ pub(crate) async fn run(args: SetupArgs<'_>) -> Result<()> {
 }
 
 fn print_success() {
-    println!("Anthropic (Claude) Workload Identity Federation configured.\n");
-    println!("  Federation params: ~/.config/vouch/config.json\n");
-
-    println!("This mints a service-account token for CI/headless automation.");
-    println!("Get a token:");
-    println!("  vouch login                 # YubiKey tap, once per session");
-    println!("  vouch credential anthropic  # prints sk-ant-oat01-...\n");
-
-    println!("Smoke test:");
-    println!("  curl -sS https://api.anthropic.com/v1/messages \\");
-    println!("    -H \"authorization: Bearer $(vouch credential anthropic)\" \\");
-    println!("    -H \"anthropic-version: 2023-06-01\" \\");
-    println!("    -H \"content-type: application/json\" \\");
-    println!(
-        "    -d '{{\"model\":\"claude-sonnet-4-6\",\"max_tokens\":64,\"messages\":[{{\"role\":\"user\",\"content\":\"hi\"}}]}}'"
-    );
+    tr_println!("setup-anthropic-success-block");
 }

@@ -16,7 +16,14 @@ targets = [
 ]
 
 [advisories]
-ignore = []
+ignore = [
+    # proc-macro-error2 is unmaintained, but pulled in transitively by
+    # `i18n-embed-fl` v0.10.0. No safe upgrade is available upstream; the
+    # advisory is informational only (no known vulnerability). Re-evaluate
+    # when `i18n-embed-fl` drops the dependency or a maintained fork lands.
+    # https://rustsec.org/advisories/RUSTSEC-2026-0173
+    "RUSTSEC-2026-0173",
+]
 
 [licenses]
 confidence-threshold = 0.8
