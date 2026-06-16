@@ -53,6 +53,7 @@ FROM chef AS planner
 COPY Cargo.toml Cargo.lock ./
 COPY crates/vouch-common/Cargo.toml crates/vouch-common/
 COPY crates/vouch-httpsig/Cargo.toml crates/vouch-httpsig/
+COPY crates/vouch-i18n/Cargo.toml crates/vouch-i18n/
 COPY crates/vouch-server/Cargo.toml crates/vouch-server/
 COPY crates/vouch-cli/Cargo.toml crates/vouch-cli/
 COPY crates/vouch-agent/Cargo.toml crates/vouch-agent/
@@ -61,6 +62,7 @@ COPY crates/vouch-tests/Cargo.toml crates/vouch-tests/
 # Create dummy source files so cargo metadata can resolve the workspace
 RUN mkdir -p crates/vouch-common/src && touch crates/vouch-common/src/lib.rs \
     && mkdir -p crates/vouch-httpsig/src && touch crates/vouch-httpsig/src/lib.rs \
+    && mkdir -p crates/vouch-i18n/src && touch crates/vouch-i18n/src/lib.rs \
     && mkdir -p crates/vouch-server/src && touch crates/vouch-server/src/lib.rs crates/vouch-server/src/main.rs \
     && mkdir -p crates/vouch-cli/src && touch crates/vouch-cli/src/lib.rs crates/vouch-cli/src/main.rs \
     && mkdir -p crates/vouch-agent/src && touch crates/vouch-agent/src/lib.rs crates/vouch-agent/src/main.rs \
@@ -90,6 +92,7 @@ RUN cargo chef cook --release --package vouch-server --recipe-path recipe.json
 COPY Cargo.toml Cargo.lock ./
 COPY crates/vouch-common/Cargo.toml crates/vouch-common/
 COPY crates/vouch-httpsig/Cargo.toml crates/vouch-httpsig/
+COPY crates/vouch-i18n/Cargo.toml crates/vouch-i18n/
 COPY crates/vouch-server/Cargo.toml crates/vouch-server/
 COPY crates/vouch-cli/Cargo.toml crates/vouch-cli/
 COPY crates/vouch-agent/Cargo.toml crates/vouch-agent/
@@ -98,6 +101,7 @@ COPY crates/vouch-tests/Cargo.toml crates/vouch-tests/
 # Copy actual source code
 COPY crates/vouch-common/src crates/vouch-common/src
 COPY crates/vouch-httpsig/src crates/vouch-httpsig/src
+COPY crates/vouch-i18n/src crates/vouch-i18n/src
 COPY crates/vouch-server/src crates/vouch-server/src
 COPY crates/vouch-server/data crates/vouch-server/data
 COPY crates/vouch-server/migrations crates/vouch-server/migrations
