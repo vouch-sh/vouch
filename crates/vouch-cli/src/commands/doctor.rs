@@ -11,7 +11,7 @@ use vouch_agent::AgentClient;
 use crate::client::VouchClient;
 use crate::config::Config;
 use crate::style;
-use vouch_cli::{tr, tr_args};
+use vouch_cli::{tr, tr_args, tr_println};
 
 /// Check result with status and optional message.
 struct CheckResult {
@@ -62,7 +62,7 @@ pub(crate) async fn run(server: &str, quiet: bool, json: bool) -> Result<()> {
     let suppress = quiet || json;
 
     if !suppress {
-        println!("{}", tr!("doctor-title"));
+        tr_println!("doctor-title");
         println!();
     }
 
@@ -92,12 +92,12 @@ pub(crate) async fn run(server: &str, quiet: bool, json: bool) -> Result<()> {
     }
     if all_passed {
         if !suppress {
-            println!("{}", tr!("doctor-all-passed"));
+            tr_println!("doctor-all-passed");
         }
         Ok(())
     } else {
         if !suppress {
-            println!("{}", tr!("doctor-some-failed"));
+            tr_println!("doctor-some-failed");
         }
         bail!("doctor: one or more checks failed")
     }

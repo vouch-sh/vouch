@@ -15,10 +15,6 @@ use tracing_subscriber::EnvFilter;
 // `vouch` binary (e.g. `fido2/unix.rs`, which is compiled into both the lib
 // and the bin) can reference them as `crate::tr!` regardless of compilation
 // context.
-#[expect(
-    unused_imports,
-    reason = "re-exported so dual-compiled submodules can use `crate::tr*!`"
-)]
 use vouch_cli::{tr, tr_args, tr_eprintln, tr_println};
 
 mod client;

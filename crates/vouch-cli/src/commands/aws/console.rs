@@ -7,7 +7,7 @@
 use anyhow::{Context, Result};
 use secrecy::ExposeSecret;
 use serde::Deserialize;
-use vouch_cli::{tr, tr_args};
+use vouch_cli::{tr, tr_args, tr_eprintln, tr_println};
 
 use crate::integrations::aws;
 
@@ -118,12 +118,12 @@ pub(crate) async fn run(server: &str, args: ConsoleArgs) -> Result<()> {
     let login_str = login_url.as_str();
     match open::that(login_str) {
         Ok(()) => {
-            println!("{}", tr!("aws-console-opening"));
+            tr_println!("aws-console-opening");
         }
         Err(e) => {
             tracing::debug!("failed to open browser: {e}");
             println!("{login_str}");
-            eprintln!("{}", tr!("aws-console-browser-failed"));
+            tr_eprintln!("aws-console-browser-failed");
         }
     }
 

@@ -185,7 +185,7 @@ impl YubiKey {
     /// Prompts the user to insert their device and polls every 500ms.
     /// A `timeout_secs` of 0 means wait indefinitely.
     pub fn wait_for_device(timeout_secs: u64) -> Result<Self> {
-        use crate::{tr, tr_args};
+        use crate::{tr, tr_args, tr_println};
         use std::io::{Write, stdout};
         use std::thread;
         use std::time::{Duration, Instant};
@@ -212,7 +212,7 @@ impl YubiKey {
             thread::sleep(Duration::from_millis(500));
 
             if let Ok(device) = FidoKeyHidFactory::create(&cfg) {
-                println!("{}", tr!("fido2-detected"));
+                tr_println!("fido2-detected");
                 let key = Self { device };
                 key.wait_until_ready()?;
                 return Ok(key);
@@ -537,7 +537,7 @@ fn translate_fido2_error(err: anyhow::Error, operation: &str) -> anyhow::Error {
     reason = "used by binary target; lint fires inconsistently across compilation targets"
 )]
 fn prompt_new_pin() -> Result<SecretString> {
-    use crate::tr;
+    use crate::{tr, tr_eprintln};
     use std::io::{Write, stderr};
 
     loop {
@@ -547,11 +547,11 @@ fn prompt_new_pin() -> Result<SecretString> {
 
         // Validate PIN length
         if pin.len() < 8 {
-            eprintln!("{}", tr!("fido2-pin-err-too-short"));
+            tr_eprintln!("fido2-pin-err-too-short");
             continue;
         }
         if pin.len() > 63 {
-            eprintln!("{}", tr!("fido2-pin-err-too-long"));
+            tr_eprintln!("fido2-pin-err-too-long");
             continue;
         }
 
