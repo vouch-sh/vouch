@@ -63,7 +63,7 @@ pub(crate) async fn run(host: &str, configure: bool) -> Result<()> {
                 return Ok(());
             }
             // Server might not have the endpoint yet, continue with setup
-            tr_println!("setup-github-could-not-check", reason = e);
+            tr_println!("setup-github-could-not-check", reason = format!("{e:#}"));
             println!();
         }
     }
@@ -81,7 +81,10 @@ pub(crate) async fn run(host: &str, configure: bool) -> Result<()> {
     if configure {
         // Check for existing helpers that might conflict
         if let Some(existing) = detect_existing_helper(host)? {
-            tr_println!("setup-github-existing-warning-block", existing = &existing);
+            tr_println!(
+                "setup-github-existing-warning-block",
+                existing = existing.as_str()
+            );
             println!();
         }
 
@@ -100,8 +103,8 @@ pub(crate) async fn run(host: &str, configure: bool) -> Result<()> {
         tr_println!(
             "setup-github-configured-block",
             host = host,
-            key = &config_key,
-            value = &helper_command,
+            key = config_key.as_str(),
+            value = helper_command.as_str(),
         );
     } else {
         tr_println!("setup-github-add-to-gitconfig");
@@ -122,9 +125,12 @@ pub(crate) async fn run(host: &str, configure: bool) -> Result<()> {
 fn print_status(status: &GitHubStatusResponse) {
     tr_println!(
         "setup-github-app-configured",
-        configured = status.configured,
+        configured = status.configured.to_string(),
     );
-    tr_println!("setup-github-org-connected", connected = status.connected,);
+    tr_println!(
+        "setup-github-org-connected",
+        connected = status.connected.to_string(),
+    );
 
     if !status.github_accounts.is_empty() {
         tr_println!("setup-github-accounts-header");
@@ -132,9 +138,9 @@ fn print_status(status: &GitHubStatusResponse) {
             tr_println!(
                 "setup-github-account-line",
                 indent = "  ",
-                login = &account.login,
-                kind = &account.account_type,
-                suspended = account.suspended,
+                login = account.login.as_str(),
+                kind = account.account_type.as_str(),
+                suspended = account.suspended.to_string(),
             );
         }
     }

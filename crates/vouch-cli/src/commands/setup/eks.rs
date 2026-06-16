@@ -126,8 +126,8 @@ pub(crate) async fn run(
     vouch_cli::tr_println!(
         "setup-eks-header-block",
         cluster = cluster_name,
-        region = &region_name,
-        profile = &profile_name,
+        region = region_name.as_str(),
+        profile = profile_name.as_str(),
     );
     println!();
 
@@ -203,11 +203,11 @@ pub(crate) async fn run(
     println!();
     vouch_cli::tr_println!(
         "setup-eks-result-block",
-        kubeconfig = kubeconfig_path.display(),
+        kubeconfig = kubeconfig_path.display().to_string(),
         cluster = cluster_name,
-        endpoint = &endpoint,
-        user_name = &user_name,
-        context = &context_name,
+        endpoint = endpoint.as_str(),
+        user_name = user_name.as_str(),
+        context = context_name.as_str(),
     );
 
     Ok(())

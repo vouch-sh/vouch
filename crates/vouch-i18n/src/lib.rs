@@ -25,6 +25,11 @@ use unic_langid::{LanguageIdentifier, langid};
 pub use i18n_embed;
 pub use unic_langid;
 
+/// Re-exported so downstream crates can build [`FluentValue`]s (for plural
+/// rules / arg dispatch) without taking on `fluent`/`fluent-bundle` as a
+/// direct dep.
+pub use fluent_bundle::FluentValue;
+
 /// Build a process-wide [`FluentLanguageLoader`] for the given Fluent
 /// `domain`, loading every available catalog from `assets`.
 ///

@@ -6344,6 +6344,7 @@ name = "vouch-i18n"
 version = "2026.6.3"
 dependencies = [
  "anyhow",
+ "fluent-bundle",
  "i18n-embed",
  "rust-embed",
  "tracing",

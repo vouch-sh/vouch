@@ -82,13 +82,19 @@ fn configure_cargo(registry: Option<&str>, command: &[&str]) -> Result<()> {
         if config.has_registry_vouch(reg) {
             tr_println!("setup-cargo-already-registry", name = reg);
             println!();
-            tr_println!("setup-cargo-config-file", path = config.path().display());
+            tr_println!(
+                "setup-cargo-config-file",
+                path = config.path().display().to_string()
+            );
             return Ok(());
         }
     } else if config.has_global_vouch() {
         tr_println!("setup-cargo-already-global");
         println!();
-        tr_println!("setup-cargo-config-file", path = config.path().display());
+        tr_println!(
+            "setup-cargo-config-file",
+            path = config.path().display().to_string()
+        );
         return Ok(());
     }
 
@@ -104,7 +110,10 @@ fn configure_cargo(registry: Option<&str>, command: &[&str]) -> Result<()> {
     }
 
     println!();
-    tr_println!("setup-cargo-config-added", path = config.path().display());
+    tr_println!(
+        "setup-cargo-config-added",
+        path = config.path().display().to_string()
+    );
 
     Ok(())
 }

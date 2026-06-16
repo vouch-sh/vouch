@@ -73,17 +73,6 @@ impl I18nContext {
         }
     }
 
-    /// Translate a message with no arguments.
-    pub fn t(&self, id: &str) -> String {
-        self.loader.get(id)
-    }
-
-    /// Translate a message with the supplied Fluent placeable arguments.
-    pub fn ta(&self, id: &str, args: &[(&str, &str)]) -> String {
-        let map: std::collections::HashMap<&str, &str> = args.iter().copied().collect();
-        self.loader.get_args(id, map)
-    }
-
     /// BCP-47 tag of the negotiated language.
     pub fn lang(&self) -> &str {
         &self.lang
@@ -232,15 +221,27 @@ macro_rules! tr {
 }
 
 /// Translate a message id with Fluent placeable arguments. `name = value`
-/// pairs; values may be any `Display` type (`&str`, `String`, `Uuid`,
-/// integers, …) — the macro stringifies via `ToString` before handing them
-/// to Fluent so call sites stay uncluttered. Same compile-time-check
-/// guarantee as [`tr!`] for both message id and argument names.
+/// pairs; each value is forwarded to Fluent via `Into<FluentValue>`, so the
+/// dispatch matches `i18n-embed-fl`'s native contract:
+///
+/// - integer and float primitives become `FluentValue::Number`, engaging CLDR
+///   plural categories so `{ $count -> [one] 1 account *[other] N accounts }`
+///   selects the singular arm when `count = 1`.
+/// - `&str`, `String`, `&String`, and `Cow<'_, str>` become
+///   `FluentValue::String`, matched by exact variant-key equality (e.g. the
+///   `[true]` / `[false]` arms used for boolean selectors).
+/// - anything else (`bool`, `Path::Display`, `anyhow::Error`,
+///   `reqwest::StatusCode`, jiff timestamps, identifiers like a PID that
+///   should not be locale-grouped) must be stringified at the call site with
+///   `.to_string()` or `format!()` — the compiler will tell you.
+///
+/// Same compile-time-check guarantee as [`tr!`] for both message id and
+/// argument names.
 #[macro_export]
 macro_rules! tr_args {
     ($id:literal, $($name:ident = $value:expr),+ $(,)?) => {{
         let __ctx = $crate::i18n::ctx();
-        ::i18n_embed_fl::fl!(__ctx.loader(), $id, $($name = ($value).to_string()),+)
+        ::i18n_embed_fl::fl!(__ctx.loader(), $id, $($name = $value),+)
     }};
 }
 
@@ -470,5 +471,37 @@ mod tests {
                 "catalog id `{id}` does not resolve",
             );
         }
+    }
+
+    /// Locks in the contract that numeric arg values flow through
+    /// `FluentValue::Number`, so CLDR plural rules pick `[one]` for count = 1
+    /// and `*[other]` for count = 2. The bug this guards against: a previous
+    /// `tr_args!` macro stringified every value, so `[one]` never matched and
+    /// summary lines always read "1 accounts".
+    #[test]
+    fn aws_accounts_summary_singular_plural() {
+        let singular = crate::tr_args!("aws-accounts-summary", count = 1_usize);
+        assert!(
+            singular.contains("1 account") && !singular.contains("accounts"),
+            "count = 1 should pick the [one] arm, got {singular:?}"
+        );
+        let plural = crate::tr_args!("aws-accounts-summary", count = 2_usize);
+        assert!(
+            plural.contains("2 accounts"),
+            "count = 2 should pick the [other] arm, got {plural:?}"
+        );
+    }
+
+    /// Locks in the contract that `bool.to_string()` produces strings that
+    /// match the FTL's explicit `[true]` / `[false]` variant arms.
+    #[test]
+    fn github_app_configured_boolean_arms() {
+        let yes = crate::tr_args!("setup-github-app-configured", configured = true.to_string());
+        assert!(yes.contains("Yes"), "true should pick [true], got {yes:?}");
+        let no = crate::tr_args!(
+            "setup-github-app-configured",
+            configured = false.to_string()
+        );
+        assert!(no.contains("No"), "false should pick [false], got {no:?}");
     }
 }

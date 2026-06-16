@@ -53,7 +53,7 @@ fn validate_shell_safe(value: &str, label: &str) -> Result<()> {
             bail!(tr_args!(
                 "setup-ssm-err-invalid-char",
                 label = label,
-                char = ch
+                char = ch.to_string()
             ));
         }
     }
@@ -156,8 +156,8 @@ pub(crate) async fn run(
     println!();
     tr_println!(
         "setup-ssm-summary",
-        profile = &profile_name,
-        region = &region_name,
+        profile = profile_name.as_str(),
+        region = region_name.as_str(),
         hosts = host_pattern,
     );
     println!();
@@ -171,8 +171,12 @@ pub(crate) async fn run(
     }
 
     let existing = if config_path.exists() {
-        fs::read_to_string(&config_path)
-            .with_context(|| tr_args!("setup-ssm-err-read", path = config_path.display()))?
+        fs::read_to_string(&config_path).with_context(|| {
+            tr_args!(
+                "setup-ssm-err-read",
+                path = config_path.display().to_string()
+            )
+        })?
     } else {
         String::new()
     };
@@ -210,7 +214,7 @@ pub(crate) async fn run(
             tr_println!(
                 "setup-ssm-reconfigure-hint",
                 marker = SSM_MARKER,
-                path = config_path.display(),
+                path = config_path.display().to_string(),
             );
             return Ok(());
         }
@@ -230,15 +234,22 @@ pub(crate) async fn run(
     };
 
     let new_config = format!("{base}{ssm_config}");
-    atomic_write_secure(&config_path, new_config.as_bytes())
-        .with_context(|| tr_args!("setup-ssm-err-write", path = config_path.display()))?;
+    atomic_write_secure(&config_path, new_config.as_bytes()).with_context(|| {
+        tr_args!(
+            "setup-ssm-err-write",
+            path = config_path.display().to_string()
+        )
+    })?;
 
-    tr_println!("setup-ssm-result-block", path = config_path.display());
+    tr_println!(
+        "setup-ssm-result-block",
+        path = config_path.display().to_string()
+    );
     println!();
     tr_println!(
         "setup-ssm-undo",
         marker = SSM_MARKER,
-        path = config_path.display()
+        path = config_path.display().to_string()
     );
 
     Ok(())

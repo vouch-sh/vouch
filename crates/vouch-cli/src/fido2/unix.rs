@@ -290,7 +290,10 @@ impl YubiKey {
             } else if err_str.contains("already set") || err_str.contains("clientPin is true") {
                 anyhow::anyhow!(tr!("fido2-err-pin-already-set"))
             } else {
-                anyhow::anyhow!(tr_args!("fido2-err-pin-set-failed", reason = e))
+                anyhow::anyhow!(tr_args!(
+                    "fido2-err-pin-set-failed",
+                    reason = format!("{e:#}")
+                ))
             }
         })
     }
@@ -518,7 +521,7 @@ fn translate_fido2_error(err: anyhow::Error, operation: &str) -> anyhow::Error {
     anyhow::anyhow!(tr_args!(
         "fido2-err-generic",
         operation = operation,
-        reason = err
+        reason = format!("{err:#}")
     ))
 }
 

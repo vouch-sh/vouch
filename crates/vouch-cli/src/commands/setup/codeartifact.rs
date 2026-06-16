@@ -126,7 +126,7 @@ fn setup_cargo(ca_host: &str, repository: &str) -> Result<()> {
     configure_cargo_registry(&registry_name, &index_url, &vouch_path_str)?;
 
     println!();
-    vouch_cli::tr_println!("setup-ca-cargo-usage", name = &registry_name);
+    vouch_cli::tr_println!("setup-ca-cargo-usage", name = registry_name.as_str());
 
     Ok(())
 }
@@ -141,7 +141,7 @@ fn configure_cargo_registry(registry_name: &str, index_url: &str, vouch_path: &s
         vouch_cli::tr_println!(
             "setup-ca-cargo-already-block",
             name = registry_name,
-            path = config.path().display(),
+            path = config.path().display().to_string(),
         );
         return Ok(());
     }
@@ -154,7 +154,7 @@ fn configure_cargo_registry(registry_name: &str, index_url: &str, vouch_path: &s
     vouch_cli::tr_println!(
         "setup-ca-cargo-configured-block",
         name = registry_name,
-        path = config.path().display(),
+        path = config.path().display().to_string(),
     );
 
     Ok(())
@@ -192,8 +192,8 @@ fn install_keyring_wrapper() -> Result<()> {
     {
         vouch_cli::tr_println!(
             "setup-ca-keyring-conflict-block",
-            path = keyring_path.display(),
-            vouch_path = vouch_path.display(),
+            path = keyring_path.display().to_string(),
+            vouch_path = vouch_path.display().to_string(),
         );
         return Ok(());
     }
@@ -214,7 +214,10 @@ fn install_keyring_wrapper() -> Result<()> {
 fn write_pip_config(index_url: &str) -> Result<()> {
     let config_dir = get_pip_config_dir()?;
     std::fs::create_dir_all(&config_dir).with_context(|| {
-        vouch_cli::tr_args!("setup-ca-err-create-dir", path = config_dir.display())
+        vouch_cli::tr_args!(
+            "setup-ca-err-create-dir",
+            path = config_dir.display().to_string()
+        )
     })?;
 
     let config_path = config_dir.join("pip.conf");
@@ -222,7 +225,10 @@ fn write_pip_config(index_url: &str) -> Result<()> {
     // Load existing config or create new
     let mut ini = if config_path.exists() {
         ini::Ini::load_from_file(&config_path).with_context(|| {
-            vouch_cli::tr_args!("setup-ca-err-parse", path = config_path.display())
+            vouch_cli::tr_args!(
+                "setup-ca-err-parse",
+                path = config_path.display().to_string()
+            )
         })?
     } else {
         ini::Ini::new()
@@ -236,12 +242,22 @@ fn write_pip_config(index_url: &str) -> Result<()> {
     // Serialize INI to a buffer, then atomically write
     let mut buf = Vec::new();
     ini.write_to(&mut buf).with_context(|| {
-        vouch_cli::tr_args!("setup-ca-err-serialize-pip", path = config_path.display())
+        vouch_cli::tr_args!(
+            "setup-ca-err-serialize-pip",
+            path = config_path.display().to_string()
+        )
     })?;
-    vouch_common::fs::atomic_write_secure(&config_path, &buf)
-        .with_context(|| vouch_cli::tr_args!("setup-ca-err-write", path = config_path.display()))?;
+    vouch_common::fs::atomic_write_secure(&config_path, &buf).with_context(|| {
+        vouch_cli::tr_args!(
+            "setup-ca-err-write",
+            path = config_path.display().to_string()
+        )
+    })?;
 
-    vouch_cli::tr_println!("setup-ca-pip-wrote", path = config_path.display());
+    vouch_cli::tr_println!(
+        "setup-ca-pip-wrote",
+        path = config_path.display().to_string()
+    );
 
     Ok(())
 }
@@ -287,7 +303,10 @@ fn setup_uv(ca_host: &str, repository: &str) -> Result<()> {
 fn write_uv_config(index_url: &str, repository: &str) -> Result<()> {
     let config_dir = get_uv_config_dir()?;
     std::fs::create_dir_all(&config_dir).with_context(|| {
-        vouch_cli::tr_args!("setup-ca-err-create-dir", path = config_dir.display())
+        vouch_cli::tr_args!(
+            "setup-ca-err-create-dir",
+            path = config_dir.display().to_string()
+        )
     })?;
 
     let config_path = config_dir.join("uv.toml");
@@ -295,15 +314,21 @@ fn write_uv_config(index_url: &str, repository: &str) -> Result<()> {
     // Load existing config or create new
     let content = if config_path.exists() {
         std::fs::read_to_string(&config_path).with_context(|| {
-            vouch_cli::tr_args!("setup-ca-err-read", path = config_path.display())
+            vouch_cli::tr_args!(
+                "setup-ca-err-read",
+                path = config_path.display().to_string()
+            )
         })?
     } else {
         String::new()
     };
 
-    let mut doc = content
-        .parse::<toml_edit::DocumentMut>()
-        .with_context(|| vouch_cli::tr_args!("setup-ca-err-parse", path = config_path.display()))?;
+    let mut doc = content.parse::<toml_edit::DocumentMut>().with_context(|| {
+        vouch_cli::tr_args!(
+            "setup-ca-err-parse",
+            path = config_path.display().to_string()
+        )
+    })?;
 
     // Set keyring-provider = "subprocess"
     doc.insert("keyring-provider", toml_edit::value("subprocess"));
@@ -342,10 +367,19 @@ fn write_uv_config(index_url: &str, repository: &str) -> Result<()> {
     }
 
     let serialized = doc.to_string();
-    vouch_common::fs::atomic_write_secure(&config_path, serialized.as_bytes())
-        .with_context(|| vouch_cli::tr_args!("setup-ca-err-write", path = config_path.display()))?;
+    vouch_common::fs::atomic_write_secure(&config_path, serialized.as_bytes()).with_context(
+        || {
+            vouch_cli::tr_args!(
+                "setup-ca-err-write",
+                path = config_path.display().to_string()
+            )
+        },
+    )?;
 
-    vouch_cli::tr_println!("setup-ca-uv-wrote", path = config_path.display());
+    vouch_cli::tr_println!(
+        "setup-ca-uv-wrote",
+        path = config_path.display().to_string()
+    );
 
     Ok(())
 }
@@ -392,7 +426,7 @@ async fn setup_npm(
     println!();
     vouch_cli::tr_println!(
         "setup-ca-npm-block",
-        url = &registry_url,
+        url = registry_url.as_str(),
         repository = repository,
     );
 
@@ -446,7 +480,7 @@ fn write_npmrc(ca_host: &str, repository: &str, token: &str) -> Result<()> {
 
     let existing = if npmrc_path.exists() {
         std::fs::read_to_string(&npmrc_path).with_context(|| {
-            vouch_cli::tr_args!("setup-ca-err-read", path = npmrc_path.display())
+            vouch_cli::tr_args!("setup-ca-err-read", path = npmrc_path.display().to_string())
         })?
     } else {
         String::new()
@@ -455,10 +489,17 @@ fn write_npmrc(ca_host: &str, repository: &str, token: &str) -> Result<()> {
     warn_npmrc_conflict(&existing, ca_host, repository, "npm");
     let content = build_npmrc_content(&existing, ca_host, repository, token);
 
-    vouch_common::fs::atomic_write_secure(&npmrc_path, content.as_bytes())
-        .with_context(|| vouch_cli::tr_args!("setup-ca-err-write", path = npmrc_path.display()))?;
+    vouch_common::fs::atomic_write_secure(&npmrc_path, content.as_bytes()).with_context(|| {
+        vouch_cli::tr_args!(
+            "setup-ca-err-write",
+            path = npmrc_path.display().to_string()
+        )
+    })?;
 
-    vouch_cli::tr_println!("setup-ca-npm-wrote", path = npmrc_path.display());
+    vouch_cli::tr_println!(
+        "setup-ca-npm-wrote",
+        path = npmrc_path.display().to_string()
+    );
 
     Ok(())
 }
@@ -494,8 +535,8 @@ fn install_pnpm_token_helper() -> Result<std::path::PathBuf> {
     {
         vouch_cli::tr_println!(
             "setup-ca-pnpm-conflict-block",
-            path = helper_path.display(),
-            vouch_path = vouch_path.display(),
+            path = helper_path.display().to_string(),
+            vouch_path = vouch_path.display().to_string(),
         );
         return Ok(helper_path);
     }
@@ -519,7 +560,7 @@ fn write_npmrc_pnpm(ca_host: &str, repository: &str, helper_path: &std::path::Pa
 
     let existing = if npmrc_path.exists() {
         std::fs::read_to_string(&npmrc_path).with_context(|| {
-            vouch_cli::tr_args!("setup-ca-err-read", path = npmrc_path.display())
+            vouch_cli::tr_args!("setup-ca-err-read", path = npmrc_path.display().to_string())
         })?
     } else {
         String::new()
@@ -528,10 +569,17 @@ fn write_npmrc_pnpm(ca_host: &str, repository: &str, helper_path: &std::path::Pa
     warn_npmrc_conflict(&existing, ca_host, repository, "pnpm");
     let content = build_npmrc_pnpm_content(&existing, ca_host, repository, helper_path);
 
-    vouch_common::fs::atomic_write_secure(&npmrc_path, content.as_bytes())
-        .with_context(|| vouch_cli::tr_args!("setup-ca-err-write", path = npmrc_path.display()))?;
+    vouch_common::fs::atomic_write_secure(&npmrc_path, content.as_bytes()).with_context(|| {
+        vouch_cli::tr_args!(
+            "setup-ca-err-write",
+            path = npmrc_path.display().to_string()
+        )
+    })?;
 
-    vouch_cli::tr_println!("setup-ca-pnpm-wrote", path = npmrc_path.display());
+    vouch_cli::tr_println!(
+        "setup-ca-pnpm-wrote",
+        path = npmrc_path.display().to_string()
+    );
 
     Ok(())
 }
@@ -647,7 +695,12 @@ async fn try_refresh_npmrc(server: &str) -> Result<()> {
 
     if refreshed {
         vouch_common::fs::atomic_write_secure(&npmrc_path, new_content.as_bytes()).with_context(
-            || vouch_cli::tr_args!("setup-ca-err-write", path = npmrc_path.display()),
+            || {
+                vouch_cli::tr_args!(
+                    "setup-ca-err-write",
+                    path = npmrc_path.display().to_string()
+                )
+            },
         )?;
         vouch_cli::tr_println!("setup-ca-refreshed-npmrc");
     }

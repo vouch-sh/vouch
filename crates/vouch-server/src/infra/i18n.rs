@@ -12,6 +12,7 @@
 //! `select_languages_negotiate`, so there is no shared mutable locale state.
 
 use std::collections::HashMap;
+use std::fmt;
 use std::sync::{Arc, LazyLock};
 
 use axum::extract::FromRequestParts;
@@ -21,6 +22,7 @@ use http::{HeaderMap, StatusCode, header};
 use i18n_embed::LanguageLoader;
 use i18n_embed::fluent::FluentLanguageLoader;
 use unic_langid::{LanguageIdentifier, langid};
+use vouch_i18n::FluentValue;
 
 /// Embedded Fluent catalogs, one `i18n/<lang>/vouch.ftl` per language.
 #[derive(rust_embed::RustEmbed)]
@@ -51,58 +53,31 @@ impl I18nContext {
         negotiate(None)
     }
 
-    /// Translate a message with no arguments.
+    /// Translate a no-argument message id. Bypasses the [`Tr`] builder for
+    /// the common case where a string lookup is all the caller needs — used
+    /// by the `/i18n.js` bundle builder and unit tests. Template call sites
+    /// go through the unified [`Tr`] entry point via `self.tr("id")`.
     pub fn t(&self, id: &str) -> String {
         self.loader.get(id)
     }
 
-    /// Translate a message, substituting Fluent placeables from `args`.
-    pub fn ta(&self, id: &str, args: &[(&str, &str)]) -> String {
-        let map: HashMap<&str, &str> = args.iter().copied().collect();
-        self.loader.get_args(id, map)
-    }
-
-    /// Translate a message with a single placeable. Convenience for templates,
-    /// which cannot easily build slice literals.
-    pub fn t1(&self, id: &str, name: &str, value: &str) -> String {
-        self.ta(id, &[(name, value)])
-    }
-
-    /// Translate a message with a single **numeric** placeable.
-    ///
-    /// Distinct from [`t1`] because Fluent's CLDR plural selector
-    /// (`{ $count -> [one] … *[other] … }`, see
-    /// <https://projectfluent.org/fluent/guide/selectors.html>) only fires
-    /// when the placeable is a `FluentValue::Number`. Passing a stringified
-    /// integer through `t1` would silently take the `*[other]` branch even
-    /// when the value is `1`.
-    pub fn t1_num(&self, id: &str, name: &str, value: i64) -> String {
-        let map: HashMap<&str, i64> = std::iter::once((name, value)).collect();
-        self.loader.get_args(id, map)
-    }
-
-    /// Translate a message **attribute** (Fluent's `id .attr = value` form,
-    /// per <https://projectfluent.org/fluent/guide/attributes.html>) with no
-    /// arguments.
-    ///
-    /// Attributes pair UI-adjacent strings under a single message id — most
-    /// commonly a visible button label (the value) plus its `.title` tooltip
-    /// or `.aria-label`. Translators see them together, which preserves the
-    /// relationship the templates implied with parallel `*-btn-*` /
-    /// `*-title-*` ids.
-    pub fn t_attr(&self, id: &str, attr: &str) -> String {
-        self.loader.get_attr(id, attr)
-    }
-
-    /// Translate a message attribute with multiple placeables.
-    pub fn t_attr_args(&self, id: &str, attr: &str, args: &[(&str, &str)]) -> String {
-        let map: HashMap<&str, &str> = args.iter().copied().collect();
-        self.loader.get_attr_args(id, attr, map)
-    }
-
-    /// Translate a message attribute with a single placeable.
-    pub fn t_attr1(&self, id: &str, attr: &str, name: &str, value: &str) -> String {
-        self.t_attr_args(id, attr, &[(name, value)])
+    /// Render a [`Tr`] against this context. Handles all four shapes
+    /// (`id`, `id` + args, `id.attr`, `id.attr` + args) in one place so the
+    /// builder can stay small.
+    pub fn render(&self, tr: &Tr<'_>) -> String {
+        let no_args = tr.args.is_empty();
+        match (tr.attr, no_args) {
+            (None, true) => self.loader.get(tr.id),
+            (None, false) => {
+                let map = build_arg_map(&tr.args);
+                self.loader.get_args_concrete(tr.id, map)
+            }
+            (Some(attr), true) => self.loader.get_attr(tr.id, attr),
+            (Some(attr), false) => {
+                let map = build_arg_map(&tr.args);
+                self.loader.get_attr_args_concrete(tr.id, attr, map)
+            }
+        }
     }
 
     /// BCP-47 tag of the negotiated language, for `<html lang="...">`.
@@ -119,61 +94,80 @@ impl I18nContext {
 
 tokio::task_local! {
     /// Request-scoped translation context, installed by [`i18n_layer`] for
-    /// every request. Template shims read it via the [`t`], [`t1`], [`lang`],
-    /// and [`dir`] free functions below — handlers don't need to thread the
-    /// context themselves and templates don't need to carry any extra field.
+    /// every request. The [`Tr`] builder reads it inside its [`fmt::Display`]
+    /// impl — handlers don't thread the context and templates don't carry
+    /// any extra field.
     static REQUEST_I18N: I18nContext;
 }
 
-/// Translate a message using the request-scoped locale, falling back to
-/// `en-US` when called outside any request scope (e.g. background work or a
-/// template constructed in a unit test).
-pub(crate) fn t(id: &str) -> String {
-    REQUEST_I18N
-        .try_with(|i| i.t(id))
-        .unwrap_or_else(|_| I18nContext::fallback().t(id))
+/// Lazy translation builder.
+///
+/// Constructed by `self.tr("id")` in templates (and `Tr::new("id")` in Rust
+/// code), then chained with `.arg(name, value)` and/or `.attr(attr_name)`.
+/// Rendering happens through [`fmt::Display`] (so `{{ self.tr("id") }}` in
+/// Askama just works) and resolves against the request-scoped task-local —
+/// falling back to en-US outside any request scope.
+///
+/// Why a single builder instead of six methods (`tr` / `tr1` / `tr1_num` /
+/// `tr2` / `tr_attr` / `tr_attr1`): Askama can only call methods on `self`
+/// in `{{ … }}` expressions, so the historical method-per-arity API had to
+/// fan out. A method that returns a builder collapses every shape (no-arg,
+/// one arg, many args, with or without attribute, string or numeric value)
+/// into one call site shape, and `arg<V: Into<FluentValue<'_>>>` engages
+/// CLDR plural rules automatically when the value is numeric.
+pub struct Tr<'a> {
+    id: &'a str,
+    attr: Option<&'a str>,
+    args: Vec<(&'a str, FluentValue<'a>)>,
 }
 
-/// Translate a message with a single Fluent placeable. Same scope semantics
-/// as [`t`].
-pub(crate) fn t1(id: &str, name: &str, value: &str) -> String {
-    REQUEST_I18N
-        .try_with(|i| i.t1(id, name, value))
-        .unwrap_or_else(|_| I18nContext::fallback().t1(id, name, value))
+impl<'a> Tr<'a> {
+    /// Build a no-arg, no-attribute lookup. Chain `.arg` / `.attr` to refine.
+    pub fn new(id: &'a str) -> Self {
+        Self {
+            id,
+            attr: None,
+            args: Vec::new(),
+        }
+    }
+
+    /// Select a message attribute (Fluent's `id .attr = value` form). Pairs
+    /// with `.arg` for attributes that take placeables.
+    #[must_use]
+    pub fn attr(mut self, attr: &'a str) -> Self {
+        self.attr = Some(attr);
+        self
+    }
+
+    /// Add a Fluent placeable. Numeric `V` (`i64`, `usize`, …) flows through
+    /// `FluentValue::Number` so CLDR plural arms (`[one]` / `*[other]`) match
+    /// correctly; string `V` (`&str`, `String`, `&String`, `Cow<str>`) flows
+    /// through `FluentValue::String`. Anything else is not supported — the
+    /// compiler will tell the caller to stringify explicitly.
+    #[must_use]
+    pub fn arg<V>(mut self, name: &'a str, value: V) -> Self
+    where
+        V: Into<FluentValue<'a>>,
+    {
+        self.args.push((name, value.into()));
+        self
+    }
 }
 
-/// Translate a message with a single numeric Fluent placeable. Same scope
-/// semantics as [`t`]. Use when the catalog message branches on the value
-/// via a CLDR plural selector — passing the count as a number lets Fluent
-/// pick the correct `[one]` / `[few]` / `[other]` arm for the target locale.
-pub(crate) fn t1_num(id: &str, name: &str, value: i64) -> String {
-    REQUEST_I18N
-        .try_with(|i| i.t1_num(id, name, value))
-        .unwrap_or_else(|_| I18nContext::fallback().t1_num(id, name, value))
+impl fmt::Display for Tr<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let rendered = REQUEST_I18N
+            .try_with(|ctx| ctx.render(self))
+            .unwrap_or_else(|_| I18nContext::fallback().render(self));
+        f.write_str(&rendered)
+    }
 }
 
-/// Translate a message with multiple Fluent placeables. Same scope semantics
-/// as [`t`].
-pub(crate) fn ta(id: &str, args: &[(&str, &str)]) -> String {
-    REQUEST_I18N
-        .try_with(|i| i.ta(id, args))
-        .unwrap_or_else(|_| I18nContext::fallback().ta(id, args))
-}
-
-/// Translate a message attribute (Fluent `id .attr = value`). Same scope
-/// semantics as [`t`].
-pub(crate) fn t_attr(id: &str, attr: &str) -> String {
-    REQUEST_I18N
-        .try_with(|i| i.t_attr(id, attr))
-        .unwrap_or_else(|_| I18nContext::fallback().t_attr(id, attr))
-}
-
-/// Translate a message attribute with a single Fluent placeable. Same scope
-/// semantics as [`t`].
-pub(crate) fn t_attr1(id: &str, attr: &str, name: &str, value: &str) -> String {
-    REQUEST_I18N
-        .try_with(|i| i.t_attr1(id, attr, name, value))
-        .unwrap_or_else(|_| I18nContext::fallback().t_attr1(id, attr, name, value))
+/// Materialize the builder's arg list as the loader's expected map. Cheap
+/// for the typical 0-3 args; the FluentValues are cloned because the
+/// loader's `_concrete` entry points take ownership of the map.
+fn build_arg_map<'a>(args: &'a [(&'a str, FluentValue<'a>)]) -> HashMap<&'a str, FluentValue<'a>> {
+    args.iter().map(|(k, v)| (*k, v.clone())).collect()
 }
 
 /// BCP-47 tag of the negotiated language for `<html lang="...">`. Returns
@@ -499,7 +493,7 @@ mod tests {
     #[test]
     fn placeable_substitution() {
         let ctx = negotiate(None);
-        let rendered = ctx.t1("footer-copyright", "year", "2026");
+        let rendered = ctx.render(&Tr::new("footer-copyright").arg("year", "2026"));
         assert!(rendered.contains("2026"));
     }
 
@@ -511,7 +505,7 @@ mod tests {
         let ctx = negotiate(None);
         assert_eq!(ctx.t("admin-members-demote"), "Demote");
         assert_eq!(
-            ctx.t_attr("admin-members-demote", "title"),
+            ctx.render(&Tr::new("admin-members-demote").attr("title")),
             "Demote to member"
         );
     }
@@ -529,16 +523,36 @@ mod tests {
         );
     }
 
+    /// Display impl resolves via the request-scoped task-local — and falls
+    /// back to en-US when called outside any scope. This is the path Askama
+    /// takes when rendering `{{ self.tr(...) }}`; the templates never call
+    /// `I18nContext::render` directly.
+    #[test]
+    fn tr_display_falls_back_to_en_us_outside_scope() {
+        let rendered = Tr::new("footer-install").to_string();
+        assert_eq!(rendered, "Install");
+        let with_attr = Tr::new("admin-members-demote").attr("title").to_string();
+        assert_eq!(with_attr, "Demote to member");
+        // Numeric arg → CLDR plural dispatch through the Display path.
+        let one_arm = Tr::new("admin-members-confirm-revoke")
+            .arg("count", 1_i64)
+            .to_string();
+        assert!(
+            one_arm.contains("key ") && !one_arm.contains("keys "),
+            "Display path should engage [one] arm for count=1, got: {one_arm}"
+        );
+    }
+
     #[test]
     fn plural_selector_one_vs_other() {
         // CLDR plural selector on `admin-members-confirm-revoke`. The
         // selector picks `[one]` vs `*[other]` from a `FluentValue::Number`,
-        // so the value must go through `t1_num` (not `t1`, which would
-        // serialize as `FluentValue::String` and always fall through to
-        // `*[other]`).
+        // so the value must be passed as a numeric type — the `Tr` builder's
+        // `arg<V: Into<FluentValue>>` dispatches `i64` (and friends) through
+        // the Number arm automatically.
         let ctx = negotiate(None);
-        let one = ctx.t1_num("admin-members-confirm-revoke", "count", 1);
-        let many = ctx.t1_num("admin-members-confirm-revoke", "count", 3);
+        let one = ctx.render(&Tr::new("admin-members-confirm-revoke").arg("count", 1_i64));
+        let many = ctx.render(&Tr::new("admin-members-confirm-revoke").arg("count", 3_i64));
         assert!(one.contains("key "), "one-arm should say 'key', got: {one}");
         assert!(
             many.contains("keys "),
@@ -766,27 +780,33 @@ mod tests {
         }
 
         fn collect_keys(text: &str, keys: &mut HashSet<String>) {
-            // `self.tr("id")` / `self.tr1("id", …)` — store the bare id.
-            for marker in [".tr(\"", ".tr1(\""] {
-                for part in text.split(marker).skip(1) {
-                    if let Some(key) = part.split('"').next() {
-                        keys.insert(key.to_owned());
-                    }
+            // Template call sites have the shape `self.tr("id")` or
+            // `self.tr("id").attr("attr-name")` (plus optional `.arg(...)`
+            // chains that don't affect catalog identity). Scan for `.tr("`,
+            // capture the id, then peek at the immediately-following bytes
+            // for a `.attr("attr-name")` segment so attribute references are
+            // recorded as `id.attr` — matching what `collect_ftl_ids`
+            // produces.
+            for part in text.split(".tr(\"").skip(1) {
+                let Some(id) = part.split('"').next() else {
+                    continue;
+                };
+                if id.is_empty() {
+                    continue;
                 }
-            }
-            // `self.tr_attr("id", "attr")` / `self.tr_attr1("id", "attr", …)`
-            // — store as `id.attr` so it matches the attribute ids that
-            // `collect_ftl_ids` records.
-            for marker in [".tr_attr(\"", ".tr_attr1(\""] {
-                for part in text.split(marker).skip(1) {
-                    let mut it = part.split('"');
-                    let Some(id) = it.next() else { continue };
-                    // Skip the literal `, "` between the two string args.
-                    let _ = it.next();
-                    let Some(attr) = it.next() else { continue };
-                    if !id.is_empty() && !attr.is_empty() {
-                        keys.insert(format!("{id}.{attr}"));
-                    }
+                // The rest of the slice starts at the byte after the
+                // closing quote of the id. Look for an immediate
+                // `).attr("…")` to attach.
+                let rest_start = id.len() + 1; // +1 for the closing `"`
+                let rest = part.get(rest_start..).unwrap_or("");
+                let attr_marker = ").attr(\"";
+                if let Some(after) = rest.strip_prefix(attr_marker)
+                    && let Some(attr) = after.split('"').next()
+                    && !attr.is_empty()
+                {
+                    keys.insert(format!("{id}.{attr}"));
+                } else {
+                    keys.insert(id.to_owned());
                 }
             }
         }

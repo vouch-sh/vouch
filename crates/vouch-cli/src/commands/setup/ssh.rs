@@ -85,9 +85,13 @@ pub(crate) async fn run(server: &str, hosts: Option<&str>) -> Result<()> {
         ensure_secure_dir(parent)?;
     }
 
-    atomic_write(&ca_path, ca_content.as_bytes())
-        .with_context(|| tr_args!("setup-ssh-err-write-ca", path = ca_path.display()))?;
-    tr_println!("setup-ssh-saved-ca", path = ca_path.display());
+    atomic_write(&ca_path, ca_content.as_bytes()).with_context(|| {
+        tr_args!(
+            "setup-ssh-err-write-ca",
+            path = ca_path.display().to_string()
+        )
+    })?;
+    tr_println!("setup-ssh-saved-ca", path = ca_path.display().to_string());
 
     // If hosts are specified, add TrustedUserCAKeys entry to known_hosts
     if let Some(host_patterns) = hosts {
@@ -98,7 +102,10 @@ pub(crate) async fn run(server: &str, hosts: Option<&str>) -> Result<()> {
     configure_ssh_config(hosts)?;
 
     println!();
-    tr_println!("setup-ssh-complete-block", ca_path = ca_path.display());
+    tr_println!(
+        "setup-ssh-complete-block",
+        ca_path = ca_path.display().to_string()
+    );
 
     Ok(())
 }
@@ -133,8 +140,12 @@ fn configure_ssh_config(hosts: Option<&str>) -> Result<()> {
 
     // Read existing config
     let existing = if config_path.exists() {
-        fs::read_to_string(&config_path)
-            .with_context(|| tr_args!("setup-ssh-err-read-config", path = config_path.display()))?
+        fs::read_to_string(&config_path).with_context(|| {
+            tr_args!(
+                "setup-ssh-err-read-config",
+                path = config_path.display().to_string()
+            )
+        })?
     } else {
         String::new()
     };
@@ -164,12 +175,15 @@ fn configure_ssh_config(hosts: Option<&str>) -> Result<()> {
             rewritten.push('\n');
         }
         atomic_write_secure(&config_path, rewritten.as_bytes()).with_context(|| {
-            tr_args!("setup-ssh-err-write-config", path = config_path.display())
+            tr_args!(
+                "setup-ssh-err-write-config",
+                path = config_path.display().to_string()
+            )
         })?;
         tr_println!(
             "setup-ssh-stale-agent-rewrite",
-            config_path = config_path.display(),
-            agent_socket = &agent_socket,
+            config_path = config_path.display().to_string(),
+            agent_socket = agent_socket.as_str(),
         );
         rewritten
     } else {
@@ -216,10 +230,17 @@ Host *
     };
 
     let new_config = format!("{existing}{vouch_config}");
-    atomic_write_secure(&config_path, new_config.as_bytes())
-        .with_context(|| tr_args!("setup-ssh-err-write-config", path = config_path.display()))?;
+    atomic_write_secure(&config_path, new_config.as_bytes()).with_context(|| {
+        tr_args!(
+            "setup-ssh-err-write-config",
+            path = config_path.display().to_string()
+        )
+    })?;
 
-    tr_println!("setup-ssh-updated-config", path = config_path.display());
+    tr_println!(
+        "setup-ssh-updated-config",
+        path = config_path.display().to_string()
+    );
     if hosts.is_some() {
         tr_println!("setup-ssh-added-host-agent", indent = "  ");
     } else {
@@ -267,7 +288,12 @@ fn add_trusted_ca_to_known_hosts(ca_path: &std::path::Path, host_patterns: &str)
         .write(true)
         .truncate(true)
         .open(&lock_path)
-        .with_context(|| tr_args!("setup-ssh-err-lock-file", path = lock_path.display()))?;
+        .with_context(|| {
+            tr_args!(
+                "setup-ssh-err-lock-file",
+                path = lock_path.display().to_string()
+            )
+        })?;
 
     #[cfg(unix)]
     {

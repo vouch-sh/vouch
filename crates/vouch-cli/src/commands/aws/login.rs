@@ -47,8 +47,8 @@ pub(crate) async fn run(args: LoginArgs) -> Result<()> {
 
     tr_println!(
         "aws-login-browser-prompt",
-        url = &device_auth.verification_uri_complete,
-        code = &device_auth.user_code,
+        url = device_auth.verification_uri_complete.as_str(),
+        code = device_auth.user_code.as_str(),
     );
 
     // Best-effort browser open

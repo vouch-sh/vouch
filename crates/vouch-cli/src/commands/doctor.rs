@@ -235,7 +235,10 @@ fn check_yubikey() -> CheckResult {
     let cfg = Cfg::init();
     match FidoKeyHidFactory::create(&cfg) {
         Ok(_device) => CheckResult::pass("yubikey", tr!("doctor-yubikey-found")),
-        Err(e) => CheckResult::fail("yubikey", tr_args!("doctor-yubikey-not-found", reason = e)),
+        Err(e) => CheckResult::fail(
+            "yubikey",
+            tr_args!("doctor-yubikey-not-found", reason = format!("{e:#}")),
+        ),
     }
 }
 
@@ -283,14 +286,14 @@ async fn check_agent() -> CheckResult {
                     match pid_info {
                         Some(pid) => CheckResult::pass(
                             "agent",
-                            tr_args!("doctor-agent-running-pid", pid = pid),
+                            tr_args!("doctor-agent-running-pid", pid = pid.to_string()),
                         ),
                         None => CheckResult::pass("agent", tr!("doctor-agent-running")),
                     }
                 }
                 Err(e) => CheckResult::fail(
                     "agent",
-                    tr_args!("doctor-agent-connection-failed", reason = e),
+                    tr_args!("doctor-agent-connection-failed", reason = format!("{e:#}")),
                 ),
             }
         }
@@ -301,7 +304,7 @@ async fn check_agent() -> CheckResult {
             {
                 return CheckResult::fail(
                     "agent",
-                    tr_args!("doctor-agent-socket-exists", reason = e),
+                    tr_args!("doctor-agent-socket-exists", reason = format!("{e:#}")),
                 );
             }
             CheckResult::fail("agent", tr!("doctor-agent-not-running"))
@@ -320,7 +323,10 @@ async fn check_server(server: &str) -> (CheckResult, Option<CheckResult>) {
         Ok(c) => c,
         Err(e) => {
             return (
-                CheckResult::fail("server", tr_args!("doctor-server-invalid-url", reason = e)),
+                CheckResult::fail(
+                    "server",
+                    tr_args!("doctor-server-invalid-url", reason = format!("{e:#}")),
+                ),
                 None,
             );
         }
@@ -331,7 +337,10 @@ async fn check_server(server: &str) -> (CheckResult, Option<CheckResult>) {
         Ok(resp) => resp,
         Err(e) => {
             return (
-                CheckResult::fail("server", tr_args!("doctor-server-unreachable", reason = e)),
+                CheckResult::fail(
+                    "server",
+                    tr_args!("doctor-server-unreachable", reason = format!("{e:#}")),
+                ),
                 None,
             );
         }
@@ -347,7 +356,10 @@ async fn check_server(server: &str) -> (CheckResult, Option<CheckResult>) {
     } else {
         CheckResult::fail(
             "server",
-            tr_args!("doctor-server-status", status = response.status()),
+            tr_args!(
+                "doctor-server-status",
+                status = response.status().to_string()
+            ),
         )
     };
 
@@ -444,7 +456,7 @@ async fn check_session() -> CheckResult {
                             "doctor-session-valid",
                             hours = hours,
                             mins = mins,
-                            email = &session.user_email,
+                            email = session.user_email.as_str(),
                         ),
                     )
                 } else {

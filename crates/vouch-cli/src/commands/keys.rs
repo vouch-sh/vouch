@@ -106,7 +106,7 @@ pub(crate) async fn interactive(server: &str) -> Result<()> {
                 return Ok(());
             }
             Err(e) => {
-                bail!(tr_args!("keys-err-selection", reason = e));
+                bail!(tr_args!("keys-err-selection", reason = e.to_string()));
             }
         }
     }
@@ -132,8 +132,8 @@ async fn handle_key_action(server: &str, client: &VouchClient, key: &KeyInfo) ->
 
     let prompt = tr_args!(
         "keys-action-prompt",
-        name = &key.name,
-        marker = &current_marker,
+        name = key.name.as_str(),
+        marker = current_marker.as_str(),
     );
     let help = tr!("keys-help-action");
     let selection = Select::new(&prompt, actions)
@@ -152,7 +152,7 @@ async fn handle_key_action(server: &str, client: &VouchClient, key: &KeyInfo) ->
         ) => {
             Ok(true) // Back to list on Esc
         }
-        Err(e) => bail!(tr_args!("keys-err-selection", reason = e)),
+        Err(e) => bail!(tr_args!("keys-err-selection", reason = e.to_string())),
     }
 }
 
@@ -164,7 +164,11 @@ async fn delete_key_interactive(server: &str, client: &VouchClient, key: &KeyInf
         String::new()
     };
 
-    let prompt = tr_args!("keys-confirm-delete", name = &key.name, warning = &warning);
+    let prompt = tr_args!(
+        "keys-confirm-delete",
+        name = key.name.as_str(),
+        warning = warning.as_str()
+    );
 
     let undo_help = tr!("keys-help-undo");
     let confirmed = Confirm::new(&prompt)
@@ -195,7 +199,7 @@ async fn delete_key_interactive(server: &str, client: &VouchClient, key: &KeyInf
             tr_println!("keys-cancelled");
             println!();
         }
-        Err(e) => bail!(tr_args!("keys-err-confirmation", reason = e)),
+        Err(e) => bail!(tr_args!("keys-err-confirmation", reason = e.to_string())),
     }
 
     Ok(())
@@ -314,7 +318,11 @@ pub(crate) async fn remove(server: &str, key_id: &str, force: bool) -> Result<()
 
     // Prompt for confirmation unless --force is used
     if !force {
-        tr_println!("keys-confirm-remove-line", name = &key_name, id = key_id);
+        tr_println!(
+            "keys-confirm-remove-line",
+            name = key_name.as_str(),
+            id = key_id
+        );
         if key.is_some_and(|k| k.is_current_session) {
             tr_println!("keys-warn-remove-current-session");
         }

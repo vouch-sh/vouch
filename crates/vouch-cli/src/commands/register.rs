@@ -41,10 +41,10 @@ fn browser_register_fallback(server: &str) -> Result<()> {
     tr_println!("register-chrome-blocking");
     println!();
     match open::that(&url) {
-        Ok(()) => tr_println!("register-browser-block", url = &url),
+        Ok(()) => tr_println!("register-browser-block", url = url.as_str()),
         Err(e) => {
             tracing::debug!("Failed to open browser: {e}");
-            tr_println!("register-manual-block", url = &url);
+            tr_println!("register-manual-block", url = url.as_str());
         }
     }
     Ok(())
@@ -139,7 +139,7 @@ pub(crate) async fn run(server: &str, name: Option<&str>, timeout_secs: u64) -> 
     println!();
     tr_println!(
         "register-success-block",
-        device_id = &complete_resp.device_id,
+        device_id = complete_resp.device_id.to_string(),
     );
 
     Ok(())

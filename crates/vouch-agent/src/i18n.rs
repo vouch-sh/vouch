@@ -117,12 +117,18 @@ macro_rules! tr {
     }};
 }
 
-/// Translate a message id with Fluent placeable arguments.
+/// Translate a message id with Fluent placeable arguments. Values are
+/// forwarded to Fluent via `Into<FluentValue>`: integer/float primitives
+/// become `FluentValue::Number` (engaging CLDR plural arms), string types
+/// (`&str`, `String`, `&String`, `Cow<str>`) become `FluentValue::String`.
+/// Anything else (`bool`, `Path::Display`, `anyhow::Error`, raw identifiers
+/// like a PID that should not be locale-grouped, …) must be stringified at
+/// the call site with `.to_string()` or `format!()`.
 #[macro_export]
 macro_rules! tr_args {
     ($id:literal, $($name:ident = $value:expr),+ $(,)?) => {{
         let __ctx = $crate::i18n::ctx();
-        ::i18n_embed_fl::fl!(__ctx.loader(), $id, $($name = ($value).to_string()),+)
+        ::i18n_embed_fl::fl!(__ctx.loader(), $id, $($name = $value),+)
     }};
 }
 

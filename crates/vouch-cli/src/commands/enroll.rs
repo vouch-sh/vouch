@@ -67,15 +67,15 @@ pub(crate) async fn run(server: &str) -> Result<()> {
     match open::that(verification_url) {
         Ok(()) => tr_println!(
             "enroll-browser-block",
-            url = verification_url,
-            code = &device_response.user_code,
+            url = verification_url.as_str(),
+            code = device_response.user_code.as_str(),
         ),
         Err(e) => {
             tracing::debug!("Failed to open browser: {e}");
             tr_println!(
                 "enroll-manual-block",
-                url = verification_url,
-                code = &device_response.user_code,
+                url = verification_url.as_str(),
+                code = device_response.user_code.as_str(),
             );
         }
     }
@@ -102,7 +102,10 @@ pub(crate) async fn run(server: &str) -> Result<()> {
     .await?;
 
     println!();
-    tr_println!("enroll-success-block", email = &token_response.email);
+    tr_println!(
+        "enroll-success-block",
+        email = token_response.email.as_str()
+    );
 
     // Step 8: Auto-register the inserted YubiKey if not already known.
     // The enrollment token is a full OAuth access token that can call
@@ -502,7 +505,7 @@ async fn register_current_key(server: &str, token: SecretString) -> Result<()> {
 
     tr_println!(
         "enroll-key-registered",
-        device_id = &complete_resp.device_id,
+        device_id = complete_resp.device_id.to_string(),
     );
 
     Ok(())

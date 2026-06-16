@@ -67,7 +67,10 @@ pub(crate) async fn run(args: RolesArgs) -> Result<()> {
         let roles = list_account_roles(&http_client, &region, &bearer, &account.account_id)
             .await
             .with_context(|| {
-                tr_args!("aws-roles-err-list-roles", account_id = &account.account_id)
+                tr_args!(
+                    "aws-roles-err-list-roles",
+                    account_id = account.account_id.as_str()
+                )
             })?;
 
         for role in roles {

@@ -16,7 +16,7 @@
                 <button type="submit" name="provider" value="{{ entry.id }}"
                         class="w-full flex items-center justify-center gap-3 bg-vouch-surface border border-vouch-border text-gray-300 font-medium py-3 px-6 rounded-lg hover:bg-vouch-raised transition-colors">
                     {{ entry.svg_icon|safe }}
-                    {{ self.tr1("home-sign-in-with", "provider", entry.display_name.as_str()) }}
+                    {{ self.tr("home-sign-in-with").arg("provider", entry.display_name.as_str()) }}
                 </button>
                 {% endfor %}
             </div>
@@ -27,7 +27,7 @@
             <a href="{{ action }}?provider={{ entry.id }}"
                class="w-full flex items-center justify-center gap-3 bg-vouch-surface border border-vouch-border text-gray-300 font-medium py-3 px-6 rounded-lg hover:bg-vouch-raised transition-colors">
                 {{ entry.svg_icon|safe }}
-                {{ self.tr1("home-sign-in-with", "provider", entry.display_name.as_str()) }}
+                {{ self.tr("home-sign-in-with").arg("provider", entry.display_name.as_str()) }}
             </a>
             {% endfor %}
         </div>

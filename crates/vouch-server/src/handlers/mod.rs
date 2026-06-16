@@ -81,29 +81,17 @@ macro_rules! impl_template_helpers {
                 fn version(&self) -> &'static str { env!("CARGO_PKG_VERSION") }
                 fn lang(&self) -> String { $crate::infra::i18n::lang() }
                 fn dir(&self) -> &'static str { $crate::infra::i18n::dir() }
-                fn tr(&self, id: &str) -> String { $crate::infra::i18n::t(id) }
-                fn tr1(&self, id: &str, name: &str, value: &str) -> String {
-                    $crate::infra::i18n::t1(id, name, value)
-                }
-                // Askama passes scalar field accesses by reference, so
-                // accept `&i64` and deref inside. `&i64` covers both
-                // `member.key_count` (an `i64` field) and explicit `&value`
-                // call sites.
-                fn tr1_num(&self, id: &str, name: &str, value: &i64) -> String {
-                    $crate::infra::i18n::t1_num(id, name, *value)
-                }
-                fn tr2(
-                    &self, id: &str,
-                    n1: &str, v1: &str,
-                    n2: &str, v2: &str,
-                ) -> String {
-                    $crate::infra::i18n::ta(id, &[(n1, v1), (n2, v2)])
-                }
-                fn tr_attr(&self, id: &str, attr: &str) -> String {
-                    $crate::infra::i18n::t_attr(id, attr)
-                }
-                fn tr_attr1(&self, id: &str, attr: &str, name: &str, value: &str) -> String {
-                    $crate::infra::i18n::t_attr1(id, attr, name, value)
+                // Single translation entry point. Returns a [`Tr`] builder
+                // that Askama Display-renders in `{{ … }}`, so call sites
+                // chain `.arg(name, value)` and `.attr(attr)` as needed:
+                //
+                //   {{ self.tr("home-tagline").arg("org", org_name.as_str()) }}
+                //   {{ self.tr("admin-members-demote").attr("title") }}
+                //   {{ self.tr("count").arg("n", member.key_count) }}
+                //
+                // Numeric values engage CLDR plural rules automatically.
+                fn tr<'a>(&self, id: &'a str) -> $crate::infra::i18n::Tr<'a> {
+                    $crate::infra::i18n::Tr::new(id)
                 }
             }
         )*

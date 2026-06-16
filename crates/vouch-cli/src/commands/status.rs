@@ -236,7 +236,10 @@ async fn server_status(server: &str, mode: OutputFormat) -> Result<()> {
                 mode,
                 false,
                 None,
-                &style::bold_red(&tr_args!("status-session-invalid", reason = e)),
+                &style::bold_red(&tr_args!(
+                    "status-session-invalid",
+                    reason = format!("{e:#}")
+                )),
                 &tr!("status-hint-relogin"),
             );
         }

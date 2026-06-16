@@ -121,10 +121,12 @@ pub(crate) fn load_kubeconfig(path: &std::path::Path) -> Result<Kubeconfig> {
         });
     }
 
-    let content = std::fs::read_to_string(path)
-        .with_context(|| vouch_cli::tr_args!("setup-kc-err-read", path = path.display()))?;
-    let config: Kubeconfig = serde_yaml::from_str(&content)
-        .with_context(|| vouch_cli::tr_args!("setup-kc-err-parse", path = path.display()))?;
+    let content = std::fs::read_to_string(path).with_context(|| {
+        vouch_cli::tr_args!("setup-kc-err-read", path = path.display().to_string())
+    })?;
+    let config: Kubeconfig = serde_yaml::from_str(&content).with_context(|| {
+        vouch_cli::tr_args!("setup-kc-err-parse", path = path.display().to_string())
+    })?;
     Ok(config)
 }
 

@@ -76,8 +76,8 @@ pub(crate) async fn run(registries: &[String], configure: bool) -> Result<()> {
         // Show manual instructions
         tr_println!(
             "setup-docker-step1-block",
-            vouch_path = vouch_path.display(),
-            symlink_path = symlink_path.display(),
+            vouch_path = vouch_path.display().to_string(),
+            symlink_path = symlink_path.display().to_string(),
         );
         println!();
 
@@ -114,12 +114,15 @@ fn configure_docker_config(registries: &[String]) -> Result<()> {
     // Load existing config or create new
     let mut config: DockerConfig = if docker_config_path.exists() {
         let content = std::fs::read_to_string(&docker_config_path).with_context(|| {
-            tr_args!("setup-docker-err-read", path = docker_config_path.display())
+            tr_args!(
+                "setup-docker-err-read",
+                path = docker_config_path.display().to_string()
+            )
         })?;
         serde_json::from_str(&content).with_context(|| {
             tr_args!(
                 "setup-docker-err-parse",
-                path = docker_config_path.display()
+                path = docker_config_path.display().to_string()
             )
         })?
     } else {
@@ -137,8 +140,12 @@ fn configure_docker_config(registries: &[String]) -> Result<()> {
     if let Some(parent) = docker_config_path.parent()
         && !parent.exists()
     {
-        std::fs::create_dir_all(parent)
-            .with_context(|| tr_args!("setup-docker-err-create-dir", path = parent.display()))?;
+        std::fs::create_dir_all(parent).with_context(|| {
+            tr_args!(
+                "setup-docker-err-create-dir",
+                path = parent.display().to_string()
+            )
+        })?;
     }
 
     // Write config atomically to avoid corruption if interrupted
@@ -147,13 +154,13 @@ fn configure_docker_config(registries: &[String]) -> Result<()> {
     vouch_common::fs::atomic_write(&docker_config_path, json.as_bytes()).with_context(|| {
         tr_args!(
             "setup-docker-err-write",
-            path = docker_config_path.display()
+            path = docker_config_path.display().to_string()
         )
     })?;
 
     tr_println!(
         "setup-docker-updated-file",
-        path = docker_config_path.display()
+        path = docker_config_path.display().to_string()
     );
 
     Ok(())

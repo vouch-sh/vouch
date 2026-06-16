@@ -799,11 +799,11 @@ fn export_fixture(
 
     fixture
         .save_to_file(path)
-        .map_err(|e| anyhow::anyhow!(tr_args!("diag-err-fixture-save", reason = e)))?;
+        .map_err(|e| anyhow::anyhow!(tr_args!("diag-err-fixture-save", reason = e.to_string())))?;
     out!(
         json,
         "{}",
-        tr_args!("diag-fixture-saved", path = path.display())
+        tr_args!("diag-fixture-saved", path = path.display().to_string())
     );
 
     Ok(())

@@ -87,11 +87,18 @@ fn configure_codex(vouch_path: &str, force: bool) -> Result<PathBuf> {
     let config_path = codex_dir.join("config.toml");
 
     let mut doc: DocumentMut = if config_path.exists() {
-        let content = std::fs::read_to_string(&config_path)
-            .with_context(|| tr_args!("setup-openai-err-read", path = config_path.display()))?;
-        content
-            .parse()
-            .with_context(|| tr_args!("setup-openai-err-parse", path = config_path.display()))?
+        let content = std::fs::read_to_string(&config_path).with_context(|| {
+            tr_args!(
+                "setup-openai-err-read",
+                path = config_path.display().to_string()
+            )
+        })?;
+        content.parse().with_context(|| {
+            tr_args!(
+                "setup-openai-err-parse",
+                path = config_path.display().to_string()
+            )
+        })?
     } else {
         DocumentMut::new()
     };
@@ -102,11 +109,21 @@ fn configure_codex(vouch_path: &str, force: bool) -> Result<PathBuf> {
     doc.insert("model_provider", toml_edit::value(PROVIDER_ID));
 
     if !codex_dir.exists() {
-        std::fs::create_dir_all(&codex_dir)
-            .with_context(|| tr_args!("setup-openai-err-create-dir", path = codex_dir.display()))?;
+        std::fs::create_dir_all(&codex_dir).with_context(|| {
+            tr_args!(
+                "setup-openai-err-create-dir",
+                path = codex_dir.display().to_string()
+            )
+        })?;
     }
-    vouch_common::fs::atomic_write(&config_path, doc.to_string().as_bytes())
-        .with_context(|| tr_args!("setup-openai-err-write", path = config_path.display()))?;
+    vouch_common::fs::atomic_write(&config_path, doc.to_string().as_bytes()).with_context(
+        || {
+            tr_args!(
+                "setup-openai-err-write",
+                path = config_path.display().to_string()
+            )
+        },
+    )?;
 
     Ok(config_path)
 }
@@ -128,7 +145,7 @@ fn check_conflicts(doc: &DocumentMut, config_path: &Path, force: bool) -> Result
         anyhow::bail!(vouch_cli::tr_args!(
             "setup-openai-err-conflict",
             existing = format!("{existing_mp:?}"),
-            path = config_path.display(),
+            path = config_path.display().to_string(),
             provider_id = PROVIDER_ID,
         ));
     }
@@ -179,7 +196,7 @@ fn print_success(config_path: &Path) {
     use vouch_cli::tr_println;
     tr_println!(
         "setup-openai-success-block",
-        config_path = config_path.display(),
+        config_path = config_path.display().to_string(),
         provider_id = PROVIDER_ID,
     );
 }

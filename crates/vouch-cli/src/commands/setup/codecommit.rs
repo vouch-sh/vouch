@@ -59,9 +59,12 @@ pub(crate) async fn run(
 
     // Check AWS configuration
     let (profile_name, role_arn) = check_aws_config(profile)?;
-    tr_println!("setup-codecommit-aws-profile", profile = &profile_name);
+    tr_println!(
+        "setup-codecommit-aws-profile",
+        profile = profile_name.as_str()
+    );
     if let Some(ref role) = role_arn {
-        tr_println!("setup-codecommit-aws-role", role = role);
+        tr_println!("setup-codecommit-aws-role", role = role.as_str());
     }
     println!();
 
@@ -134,8 +137,8 @@ pub(crate) async fn run(
             tr_println!(
                 "setup-codecommit-helper-line",
                 indent = "  ",
-                pattern = pattern,
-                helper = &helper_command,
+                pattern = pattern.as_str(),
+                helper = helper_command.as_str(),
             );
             tr_println!(
                 "setup-codecommit-http-path-line",
@@ -148,8 +151,8 @@ pub(crate) async fn run(
         tr_println!(
             "setup-codecommit-remote-line",
             indent = "  ",
-            symlink = symlink_path.display(),
-            vouch = vouch_path.display(),
+            symlink = symlink_path.display().to_string(),
+            vouch = vouch_path.display().to_string(),
         );
     } else {
         tr_println!("setup-codecommit-step1");
@@ -178,7 +181,7 @@ pub(crate) async fn run(
     tr_println!(
         "setup-codecommit-undo-rm",
         indent = "  ",
-        path = symlink_path.display(),
+        path = symlink_path.display().to_string(),
     );
     for pattern in &patterns {
         tr_println!(

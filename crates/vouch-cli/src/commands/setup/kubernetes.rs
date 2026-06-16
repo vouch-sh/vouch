@@ -115,16 +115,16 @@ pub(crate) async fn run(
     // Print summary
     tr_println!(
         "setup-k8s-updated-block",
-        kubeconfig = kubeconfig_path.display(),
+        kubeconfig = kubeconfig_path.display().to_string(),
         cluster = cluster,
         server = k8s_server,
-        user_name = &user_name,
-        context = &context_name,
+        user_name = user_name.as_str(),
+        context = context_name.as_str(),
     );
     println!();
     tr_println!(
         "setup-k8s-tail-block",
-        context = &context_name,
+        context = context_name.as_str(),
         vouch = server,
         audience = aud,
     );

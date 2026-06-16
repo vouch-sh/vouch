@@ -74,7 +74,7 @@ fn main() -> ExitCode {
                 return ExitCode::FAILURE;
             }
             Err(e) => {
-                tr_eprintln!("agent-status-err", reason = e);
+                tr_eprintln!("agent-status-err", reason = format!("{e:#}"));
                 return ExitCode::FAILURE;
             }
         }
@@ -93,7 +93,7 @@ fn main() -> ExitCode {
         }
         Ok(false) => {}
         Err(e) => {
-            tr_eprintln!("agent-check-running-err", reason = e);
+            tr_eprintln!("agent-check-running-err", reason = format!("{e:#}"));
             return ExitCode::FAILURE;
         }
     }
@@ -129,7 +129,7 @@ fn main() -> ExitCode {
                 info!("Running in foreground mode (daemonization not available)");
             }
             Err(e) => {
-                tr_eprintln!("agent-daemonize-err", reason = e);
+                tr_eprintln!("agent-daemonize-err", reason = format!("{e:#}"));
                 return ExitCode::FAILURE;
             }
         }
@@ -268,7 +268,7 @@ fn stop_agent() -> ExitCode {
     let pid_path = match daemon::pid_file_path() {
         Ok(p) => p,
         Err(e) => {
-            tr_eprintln!("agent-pid-file-err", reason = e);
+            tr_eprintln!("agent-pid-file-err", reason = format!("{e:#}"));
             return ExitCode::FAILURE;
         }
     };
@@ -281,7 +281,7 @@ fn stop_agent() -> ExitCode {
     let pid_str = match std::fs::read_to_string(&pid_path) {
         Ok(s) => s,
         Err(e) => {
-            tr_eprintln!("agent-pid-read-err", reason = e);
+            tr_eprintln!("agent-pid-read-err", reason = e.to_string());
             return ExitCode::FAILURE;
         }
     };
@@ -301,7 +301,7 @@ fn stop_agent() -> ExitCode {
     {
         // SAFETY: kill() is a standard Unix API for sending signals to processes
         if unsafe { libc::kill(pid, libc::SIGTERM) } == 0 {
-            tr_println!("agent-stop-signal-sent", pid = pid);
+            tr_println!("agent-stop-signal-sent", pid = pid.to_string());
 
             // Wait a bit and check if it stopped
             std::thread::sleep(std::time::Duration::from_millis(500));
@@ -316,7 +316,7 @@ fn stop_agent() -> ExitCode {
             }
             ExitCode::SUCCESS
         } else {
-            tr_eprintln!("agent-stop-signal-failed", pid = pid);
+            tr_eprintln!("agent-stop-signal-failed", pid = pid.to_string());
             // Remove stale PID file if process doesn't exist
             // SAFETY: kill(pid, 0) checks if process exists
             if unsafe { libc::kill(pid, 0) } != 0 {

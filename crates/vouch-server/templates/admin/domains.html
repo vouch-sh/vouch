@@ -39,7 +39,7 @@
         {% if additional_count >= max_additional %}
         {% let max_additional_str = max_additional.to_string() %}
         <div class="mb-4 px-4 py-3 rounded bg-yellow-900/30 border border-yellow-800 text-yellow-300 text-sm">
-            {{ self.tr1("admin-domains-max", "count", max_additional_str.as_str()) }}
+            {{ self.tr("admin-domains-max").arg("count", max_additional_str.as_str()) }}
         </div>
         {% else %}
         <div class="mb-6 bg-vouch-surface border border-vouch-border rounded-lg p-4">

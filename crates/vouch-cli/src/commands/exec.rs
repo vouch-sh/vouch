@@ -194,7 +194,7 @@ pub(crate) async fn run(
         bail!(tr_args!(
             "exec-err-execute-failed",
             program = program,
-            reason = err
+            reason = err.to_string()
         ));
     }
 

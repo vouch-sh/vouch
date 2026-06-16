@@ -94,7 +94,7 @@ pub(crate) async fn run(server: &str, args: ConsoleArgs) -> Result<()> {
         let body = resp.text().await.unwrap_or_default();
         anyhow::bail!(tr_args!(
             "aws-console-err-signin-failed",
-            status = status,
+            status = status.to_string(),
             body = body,
         ));
     }
