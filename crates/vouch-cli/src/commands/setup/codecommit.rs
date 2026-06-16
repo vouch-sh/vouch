@@ -147,20 +147,16 @@ pub(crate) async fn run(
             );
         }
         println!();
-        tr_println!("setup-codecommit-remote-helper-header");
         tr_println!(
-            "setup-codecommit-remote-line",
-            indent = "  ",
+            "setup-codecommit-remote-helper-block",
             symlink = symlink_path.display().to_string(),
             vouch = vouch_path.display().to_string(),
         );
     } else {
-        tr_println!("setup-codecommit-step1");
-        println!();
-        println!(
-            "  ln -sf \"{}\" \"{}\"",
-            vouch_path.display(),
-            symlink_path.display()
+        tr_println!(
+            "setup-codecommit-step1-block",
+            vouch = vouch_path.display().to_string(),
+            symlink = symlink_path.display().to_string(),
         );
 
         println!();
@@ -177,10 +173,9 @@ pub(crate) async fn run(
 
     let example_region = region.unwrap_or("us-east-1");
     println!();
-    tr_println!("setup-codecommit-tail-block", region = example_region);
     tr_println!(
-        "setup-codecommit-undo-rm",
-        indent = "  ",
+        "setup-codecommit-tail-block",
+        region = example_region,
         path = symlink_path.display().to_string(),
     );
     for pattern in &patterns {

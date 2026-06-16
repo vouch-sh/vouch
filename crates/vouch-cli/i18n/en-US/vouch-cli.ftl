@@ -1065,9 +1065,13 @@ setup-codecommit-success-block =
     Credential helper (HTTPS URLs):
 setup-codecommit-helper-line = { $indent }credential.{ $pattern }.helper = { $helper }
 setup-codecommit-http-path-line = { $indent }credential.{ $pattern }.useHttpPath = true
-setup-codecommit-remote-helper-header = Remote helper (codecommit:// URLs):
-setup-codecommit-remote-line = { $indent }{ $symlink } -> { $vouch }
-setup-codecommit-step1 = Step 1: Create symlink for codecommit:// URL support
+setup-codecommit-remote-helper-block =
+    Remote helper (codecommit:// URLs):
+      { $symlink } -> { $vouch }
+setup-codecommit-step1-block =
+    Step 1: Create symlink for codecommit:// URL support
+
+      ln -sf "{ $vouch }" "{ $symlink }"
 setup-codecommit-step2 =
     Step 2: Configure git credential helper for HTTPS URLs
 
@@ -1079,7 +1083,8 @@ setup-codecommit-tail-block =
       git ls-remote codecommit::{ $region }://YOUR-REPO
 
     To undo:
-setup-codecommit-undo-rm = { $indent }rm "{ $path }"
+      rm "{ $path }"
+# Loop body: emitted once per credential pattern after the tail block above.
 setup-codecommit-undo-config = { $indent }git config --global --remove-section credential."{ $pattern }"
 setup-codecommit-err-aws-not-configured = AWS not configured. Run '{ -cmd } setup aws --role <role-arn>' first.
 setup-codecommit-err-profile-not-found =
