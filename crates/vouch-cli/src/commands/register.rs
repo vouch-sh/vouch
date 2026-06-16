@@ -14,6 +14,7 @@ use vouch_common::{
 };
 
 use crate::client::VouchClient;
+use crate::exit_code::CliError;
 use crate::fido2::{self, FidoDevice, YubiKey};
 use vouch_cli::{tr, tr_println};
 
@@ -72,9 +73,20 @@ pub(crate) async fn run(server: &str, name: Option<&str>, timeout_secs: u64) -> 
     // This fails fast if the server is unreachable or the user is not
     // authenticated, before they insert their key.
     print!("{} ", tr!("register-contacting-server"));
-    let client = VouchClient::new(server)
-        .await
-        .with_context(|| tr!("register-not-authenticated"))?;
+    // Only swap in the enroll/login guidance for a genuine missing-session
+    // error — bad URLs, HTTP client setup failures, or config corruption
+    // bubble up with their real cause instead of being mis-attributed to
+    // authentication.
+    let client = VouchClient::new(server).await.map_err(|err| {
+        if err
+            .downcast_ref::<CliError>()
+            .is_some_and(|e| matches!(e, CliError::NotAuthenticated { .. }))
+        {
+            anyhow::anyhow!(tr!("register-not-authenticated"))
+        } else {
+            err
+        }
+    })?;
     let start_resp: RegisterStartResponse = client
         .post_authenticated(
             "/v1/keys/register/start",

@@ -57,12 +57,12 @@ fn main() -> ExitCode {
     // one-time notice reaches the user's terminal rather than the daemon log.
     vouch_common::paths::migrate_legacy_layout();
 
-    if let Err(e) = vouch_agent::i18n::init() {
-        eprintln!("Error initializing i18n: {e}");
-        return ExitCode::FAILURE;
-    }
-
-    // Handle status check (no logging needed)
+    // `--status` and `--stop` are operator controls for an already-running
+    // daemon, so they intentionally run before i18n init: a packaging bug
+    // that corrupts the catalog must not strand the operator with no way to
+    // inspect or stop the agent. The `tr_*!` macros fall back to a fresh
+    // en-US loader when `init()` hasn't been called, so the messages still
+    // render — they just skip locale negotiation.
     if args.status {
         match daemon::is_running() {
             Ok(true) => {
@@ -80,9 +80,13 @@ fn main() -> ExitCode {
         }
     }
 
-    // Handle stop command
     if args.stop {
         return stop_agent();
+    }
+
+    if let Err(e) = vouch_agent::i18n::init() {
+        eprintln!("Error initializing i18n: {e}");
+        return ExitCode::FAILURE;
     }
 
     // Check if already running
