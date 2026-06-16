@@ -38,28 +38,6 @@ pub(crate) fn run(format: OutputFormat) -> Result<()> {
     reason = "linear print of every posture signal — splitting would obscure the column layout"
 )]
 fn print_text(p: &vouch_common::posture::DevicePosture) {
-    let enabled_or_missing = |b: bool| {
-        if b {
-            tr!("posture-val-enabled")
-        } else {
-            tr!("posture-val-not-detected")
-        }
-    };
-    let enabled_or_disabled = |b: bool| {
-        if b {
-            tr!("posture-val-enabled")
-        } else {
-            tr!("posture-val-disabled")
-        }
-    };
-    let yes_no = |b: bool| {
-        if b {
-            tr!("posture-val-yes")
-        } else {
-            tr!("posture-val-no")
-        }
-    };
-
     println!("{}", tr_args!("posture-title", version = p.posture_version));
     println!("{}", "-".repeat(50));
 
@@ -86,7 +64,7 @@ fn print_text(p: &vouch_common::posture::DevicePosture) {
 
     // Disk encryption
     if let Some(enabled) = p.disk_encryption_enabled {
-        let status = enabled_or_missing(enabled);
+        let status = tr_args!("posture-val-enabled-or-missing", on = enabled.to_string());
         let tech = p.disk_encryption_technology.as_deref().unwrap_or("");
         if tech.is_empty() {
             println!("  {:<16} {status}", tr!("posture-label-disk-encryption"));
@@ -106,7 +84,7 @@ fn print_text(p: &vouch_common::posture::DevicePosture) {
 
     // Screen lock
     if let Some(enabled) = p.screen_lock_enabled {
-        let status = enabled_or_missing(enabled);
+        let status = tr_args!("posture-val-enabled-or-missing", on = enabled.to_string());
         if let Some(timeout) = p.screen_lock_idle_timeout_secs {
             println!(
                 "  {:<16} {status} (idle timeout: {timeout}s)",
@@ -125,7 +103,7 @@ fn print_text(p: &vouch_common::posture::DevicePosture) {
 
     // Firewall
     if let Some(enabled) = p.firewall_enabled {
-        let status = enabled_or_missing(enabled);
+        let status = tr_args!("posture-val-enabled-or-missing", on = enabled.to_string());
         let tech = p.firewall_technology.as_deref().unwrap_or("");
         if tech.is_empty() {
             println!("  {:<16} {status}", tr!("posture-label-firewall"));
@@ -141,19 +119,15 @@ fn print_text(p: &vouch_common::posture::DevicePosture) {
     }
 
     if let Some(enabled) = p.secure_boot_enabled {
-        let status = enabled_or_disabled(enabled);
+        let status = tr_args!("posture-val-enabled-or-disabled", on = enabled.to_string());
         println!("  {:<16} {status}", tr!("posture-label-secure-boot"));
     }
     if let Some(sip) = p.sip_enabled {
-        let status = enabled_or_disabled(sip);
+        let status = tr_args!("posture-val-enabled-or-disabled", on = sip.to_string());
         println!("  {:<16} {status}", tr!("posture-label-sip"));
     }
     if let Some(tpm) = p.tpm_present {
-        let status = if tpm {
-            tr!("posture-val-present")
-        } else {
-            tr!("posture-val-not-detected")
-        };
+        let status = tr_args!("posture-val-present-or-missing", on = tpm.to_string());
         if let Some(ref ver) = p.tpm_version {
             println!("  {:<16} {status} (v{ver})", tr!("posture-label-tpm"));
         } else {
@@ -162,7 +136,7 @@ fn print_text(p: &vouch_common::posture::DevicePosture) {
     }
 
     if let Some(enabled) = p.auto_update_enabled {
-        let status = enabled_or_missing(enabled);
+        let status = tr_args!("posture-val-enabled-or-missing", on = enabled.to_string());
         let tech = p.auto_update_technology.as_deref().unwrap_or("");
         if tech.is_empty() {
             println!("  {:<16} {status}", tr!("posture-label-auto-update"));
@@ -187,11 +161,10 @@ fn print_text(p: &vouch_common::posture::DevicePosture) {
 
     if let Some(enforcing) = p.access_control_enforcing {
         let tech = p.access_control_technology.as_deref().unwrap_or("unknown");
-        let status = if enforcing {
-            tr!("posture-val-enforcing")
-        } else {
-            tr!("posture-val-permissive")
-        };
+        let status = tr_args!(
+            "posture-val-enforcing-or-permissive",
+            on = enforcing.to_string()
+        );
         println!(
             "  {:<16} {tech} ({status})",
             tr!("posture-label-access-control")
@@ -223,11 +196,11 @@ fn print_text(p: &vouch_common::posture::DevicePosture) {
     println!();
 
     if let Some(elevated) = p.elevated {
-        let status = yes_no(elevated);
+        let status = tr_args!("posture-val-yes-no", b = elevated.to_string());
         println!("  {:<16} {status}", tr!("posture-label-elevated"));
     }
     if let Some(tty) = p.tty {
-        let status = yes_no(tty);
+        let status = tr_args!("posture-val-yes-no", b = tty.to_string());
         println!("  {:<16} {status}", tr!("posture-label-tty"));
     }
     if let Some(ref parent) = p.parent_process {

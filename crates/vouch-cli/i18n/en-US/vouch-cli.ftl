@@ -334,15 +334,37 @@ posture-label-elevated = Elevated:
 posture-label-tty = TTY:
 posture-label-parent-process = Parent process:
 posture-label-cli-version = CLI version:
-posture-val-enabled = enabled
-posture-val-disabled = disabled
+# Boolean-state value pairs. Each renders one of two arms based on a `$on`
+# (or `$b`) placeable carrying the stringified bool ("true"/"false"). State
+# pairs are kept together here so translators see both arms side-by-side and
+# can keep them consistent (capitalization, punctuation, locale-specific
+# wording). The `not-checked` plain id stays separate — it's the "we didn't
+# attempt the check" state, not a boolean arm.
+posture-val-enabled-or-missing = { $on ->
+    [true] enabled
+   *[false] not detected
+}
+posture-val-enabled-or-disabled = { $on ->
+    [true] enabled
+   *[false] disabled
+}
+posture-val-present-or-missing = { $on ->
+    [true] present
+   *[false] not detected
+}
+posture-val-enforcing-or-permissive = { $on ->
+    [true] enforcing
+   *[false] permissive/disabled
+}
+posture-val-yes-no = { $b ->
+    [true] yes
+   *[false] no
+}
+# Standalone "we checked and found nothing" / "we didn't attempt the check"
+# states — used by EDR/MDM list rendering and the disk-encryption /
+# screen-lock / firewall blocks when the underlying signal couldn't be read.
 posture-val-not-detected = not detected
 posture-val-not-checked = not checked
-posture-val-present = present
-posture-val-enforcing = enforcing
-posture-val-permissive = permissive/disabled
-posture-val-yes = yes
-posture-val-no = no
 
 # doctor command ------------------------------------------------------------
 
