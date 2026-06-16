@@ -5,7 +5,7 @@
 //! Useful for debugging and verifying posture detection on a given machine.
 
 use anyhow::Result;
-use vouch_cli::{tr, tr_args};
+use vouch_cli::{tr, tr_args, tr_println};
 
 /// Output format for the posture command.
 #[derive(Debug, Default, Clone, Copy, clap::ValueEnum)]
@@ -38,7 +38,7 @@ pub(crate) fn run(format: OutputFormat) -> Result<()> {
     reason = "linear print of every posture signal — splitting would obscure the column layout"
 )]
 fn print_text(p: &vouch_common::posture::DevicePosture) {
-    println!("{}", tr_args!("posture-title", version = p.posture_version));
+    tr_println!("posture-title", version = p.posture_version);
     println!("{}", "-".repeat(50));
 
     // OS info

@@ -2,7 +2,7 @@
 //! `vouch aws roles` — list available roles across AWS accounts.
 
 use anyhow::{Context, Result};
-use vouch_cli::{tr, tr_args};
+use vouch_cli::{tr, tr_args, tr_println};
 
 use crate::integrations::aws::config::AwsConfig;
 use crate::integrations::aws::sso::{SsoConfig, load_cached_token};
@@ -112,7 +112,7 @@ pub(crate) async fn run(args: RolesArgs) -> Result<()> {
             );
         }
         println!();
-        println!("{}", tr_args!("aws-roles-summary", count = entries.len()));
+        tr_println!("aws-roles-summary", count = entries.len());
     }
 
     Ok(())
