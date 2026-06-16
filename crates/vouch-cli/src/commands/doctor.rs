@@ -11,6 +11,7 @@ use vouch_agent::AgentClient;
 use crate::client::VouchClient;
 use crate::config::Config;
 use crate::style;
+use vouch_cli::{tr, tr_args};
 
 /// Check result with status and optional message.
 struct CheckResult {
@@ -61,7 +62,8 @@ pub(crate) async fn run(server: &str, quiet: bool, json: bool) -> Result<()> {
     let suppress = quiet || json;
 
     if !suppress {
-        println!("Vouch Doctor - Environment Diagnostics\n");
+        println!("{}", tr!("doctor-title"));
+        println!();
     }
 
     let checks = run_checks(server, suppress).await;
@@ -90,12 +92,12 @@ pub(crate) async fn run(server: &str, quiet: bool, json: bool) -> Result<()> {
     }
     if all_passed {
         if !suppress {
-            println!("All checks passed!");
+            println!("{}", tr!("doctor-all-passed"));
         }
         Ok(())
     } else {
         if !suppress {
-            println!("Some checks failed. Review the issues above.");
+            println!("{}", tr!("doctor-some-failed"));
         }
         bail!("doctor: one or more checks failed")
     }
@@ -108,7 +110,7 @@ async fn run_checks(server: &str, suppress: bool) -> Vec<CheckResult> {
 
     // Check 1: YubiKey connectivity
     if !suppress {
-        print!("YubiKey connectivity ... ");
+        print!("{} ", tr!("doctor-check-yubikey-label"));
     }
     let yubikey_result = check_yubikey();
     if !suppress {
@@ -120,7 +122,7 @@ async fn run_checks(server: &str, suppress: bool) -> Vec<CheckResult> {
     #[cfg(unix)]
     {
         if !suppress {
-            print!("Agent running ... ");
+            print!("{} ", tr!("doctor-check-agent-label"));
         }
         let agent_result = check_agent().await;
         if !suppress {
@@ -131,7 +133,7 @@ async fn run_checks(server: &str, suppress: bool) -> Vec<CheckResult> {
 
     // Check 3: Server reachable (and clock skew, derived from same response)
     if !suppress {
-        print!("Server reachable ... ");
+        print!("{} ", tr!("doctor-check-server-label"));
     }
     let (server_result, clock_result) = check_server(server).await;
     if !suppress {
@@ -140,22 +142,16 @@ async fn run_checks(server: &str, suppress: bool) -> Vec<CheckResult> {
     checks.push(server_result);
     if let Some(clock) = clock_result {
         if !suppress {
-            print!("Clock in sync with server ... ");
+            print!("{} ", tr!("doctor-check-clock-label"));
             print_result(&clock);
         }
         checks.push(clock);
     }
 
     // Check 3a: DNS-over-HTTPS resolution status.
-    //
-    // Always emit something so users discover the option. When DoH is enabled
-    // we run a real lookup through the configured provider. When disabled we
-    // print a one-line nudge — not added to `checks` so it doesn't count
-    // toward pass/fail or appear in --json output (DoH being off is a user
-    // choice, not a misconfiguration).
     if let Some(resolver) = vouch_common::dns::process_resolver() {
         if !suppress {
-            print!("DNS-over-HTTPS resolution ... ");
+            print!("{} ", tr!("doctor-check-doh-label"));
         }
         let doh_result = check_doh(&resolver, server).await;
         if !suppress {
@@ -164,15 +160,16 @@ async fn run_checks(server: &str, suppress: bool) -> Vec<CheckResult> {
         checks.push(doh_result);
     } else if !suppress {
         println!(
-            "DNS-over-HTTPS resolution ... {} disabled — DNS queries are visible to your \
-             local network. Set VOUCH_DOH=cloudflare (or google/quad9) to encrypt them.",
+            "{} {} {}",
+            tr!("doctor-check-doh-label"),
             style::yellow("[INFO]"),
+            tr!("doctor-doh-disabled"),
         );
     }
 
     // Check 4: Session valid
     if !suppress {
-        print!("Session valid ... ");
+        print!("{} ", tr!("doctor-check-session-label"));
     }
     let session_result = check_session().await;
     if !suppress {
@@ -182,7 +179,7 @@ async fn run_checks(server: &str, suppress: bool) -> Vec<CheckResult> {
 
     // Check 5: SSH config
     if !suppress {
-        print!("SSH configuration ... ");
+        print!("{} ", tr!("doctor-check-ssh-label"));
     }
     let ssh_result = check_ssh_config();
     if !suppress {
@@ -192,7 +189,7 @@ async fn run_checks(server: &str, suppress: bool) -> Vec<CheckResult> {
 
     // Check 6: EKS config
     if !suppress {
-        print!("EKS configuration ... ");
+        print!("{} ", tr!("doctor-check-eks-label"));
     }
     let eks_result = check_eks_config();
     if !suppress {
@@ -202,7 +199,7 @@ async fn run_checks(server: &str, suppress: bool) -> Vec<CheckResult> {
 
     // Check 7: SSM config
     if !suppress {
-        print!("SSM configuration ... ");
+        print!("{} ", tr!("doctor-check-ssm-label"));
     }
     let ssm_result = check_ssm_config();
     if !suppress {
@@ -212,7 +209,7 @@ async fn run_checks(server: &str, suppress: bool) -> Vec<CheckResult> {
 
     // Check 8: Server URL security
     if !suppress {
-        print!("Server URL security ... ");
+        print!("{} ", tr!("doctor-check-server-url-label"));
     }
     let security_result = check_server_url_security(server);
     if !suppress {
@@ -237,8 +234,8 @@ fn print_result(result: &CheckResult) {
 fn check_yubikey() -> CheckResult {
     let cfg = Cfg::init();
     match FidoKeyHidFactory::create(&cfg) {
-        Ok(_device) => CheckResult::pass("yubikey", "FIDO2 device found"),
-        Err(e) => CheckResult::fail("yubikey", format!("No FIDO2 device found: {e}")),
+        Ok(_device) => CheckResult::pass("yubikey", tr!("doctor-yubikey-found")),
+        Err(e) => CheckResult::fail("yubikey", tr_args!("doctor-yubikey-not-found", reason = e)),
     }
 }
 
@@ -261,18 +258,11 @@ fn check_yubikey() -> CheckResult {
     )]
     let version = unsafe { WebAuthNGetApiVersionNumber() };
     if version == 0 {
-        CheckResult::fail(
-            "yubikey",
-            "Windows WebAuthn API not available. Update to Windows 10 1903 or later.",
-        )
+        CheckResult::fail("yubikey", tr!("doctor-yubikey-win-api-missing"))
     } else {
         CheckResult::pass(
             "yubikey",
-            format!(
-                "Windows WebAuthn API available (version {version}); \
-                 vouch login uses the system Security dialog to authenticate \
-                 your YubiKey — no admin privileges required."
-            ),
+            tr_args!("doctor-yubikey-win-api-available", version = version),
         )
     }
 }
@@ -291,13 +281,17 @@ async fn check_agent() -> CheckResult {
                         .and_then(|p| std::fs::read_to_string(p).ok())
                         .and_then(|s| s.trim().parse::<u32>().ok());
                     match pid_info {
-                        Some(pid) => {
-                            CheckResult::pass("agent", format!("Agent is running (PID {pid})"))
-                        }
-                        None => CheckResult::pass("agent", "Agent is running"),
+                        Some(pid) => CheckResult::pass(
+                            "agent",
+                            tr_args!("doctor-agent-running-pid", pid = pid),
+                        ),
+                        None => CheckResult::pass("agent", tr!("doctor-agent-running")),
                     }
                 }
-                Err(e) => CheckResult::fail("agent", format!("Agent connection failed: {e}")),
+                Err(e) => CheckResult::fail(
+                    "agent",
+                    tr_args!("doctor-agent-connection-failed", reason = e),
+                ),
             }
         }
         Err(e) => {
@@ -307,13 +301,10 @@ async fn check_agent() -> CheckResult {
             {
                 return CheckResult::fail(
                     "agent",
-                    format!("Socket exists but connection failed: {e}"),
+                    tr_args!("doctor-agent-socket-exists", reason = e),
                 );
             }
-            CheckResult::fail(
-                "agent",
-                "Agent not running. Start with: vouch-agent --foreground",
-            )
+            CheckResult::fail("agent", tr!("doctor-agent-not-running"))
         }
     }
 }
@@ -329,7 +320,7 @@ async fn check_server(server: &str) -> (CheckResult, Option<CheckResult>) {
         Ok(c) => c,
         Err(e) => {
             return (
-                CheckResult::fail("server", format!("Invalid server URL: {e}")),
+                CheckResult::fail("server", tr_args!("doctor-server-invalid-url", reason = e)),
                 None,
             );
         }
@@ -340,7 +331,7 @@ async fn check_server(server: &str) -> (CheckResult, Option<CheckResult>) {
         Ok(resp) => resp,
         Err(e) => {
             return (
-                CheckResult::fail("server", format!("Server unreachable: {e}")),
+                CheckResult::fail("server", tr_args!("doctor-server-unreachable", reason = e)),
                 None,
             );
         }
@@ -349,11 +340,14 @@ async fn check_server(server: &str) -> (CheckResult, Option<CheckResult>) {
     let clock_result = build_clock_skew_result(response.headers());
 
     let server_result = if response.status().is_success() {
-        CheckResult::pass("server", format!("Server at {server} is reachable"))
+        CheckResult::pass(
+            "server",
+            tr_args!("doctor-server-reachable", server = server),
+        )
     } else {
         CheckResult::fail(
             "server",
-            format!("Server returned status: {}", response.status()),
+            tr_args!("doctor-server-status", status = response.status()),
         )
     };
 
@@ -369,18 +363,17 @@ fn build_clock_skew_result(headers: &reqwest::header::HeaderMap) -> Option<Check
     if skew_secs < vouch_cli::http::CLOCK_SKEW_THRESHOLD_SECS {
         return Some(CheckResult::pass(
             "clock_skew",
-            format!("System clock within {skew_secs}s of server"),
+            tr_args!("doctor-clock-ok", secs = skew_secs),
         ));
     }
-    let direction = if local_behind { "behind" } else { "ahead of" };
+    let direction = if local_behind {
+        tr!("doctor-clock-direction-behind")
+    } else {
+        tr!("doctor-clock-direction-ahead")
+    };
     Some(CheckResult::fail(
         "clock_skew",
-        format!(
-            "System clock is {skew_secs}s {direction} the server. \
-             Signed requests will fail once skew exceeds 300s. \
-             Sync your clock (Windows: Settings → Time & Language → Date & Time → \
-             \"Sync now\"; macOS: `sudo sntp -sS time.apple.com`)."
-        ),
+        tr_args!("doctor-clock-skew", secs = skew_secs, direction = direction),
     ))
 }
 
@@ -412,14 +405,23 @@ async fn check_doh(resolver: &vouch_common::dns::DohResolver, server: &str) -> C
         }
     };
     match resolver.lookup_ip(&host).await {
-        Ok(addrs) if addrs.is_empty() => {
-            CheckResult::fail("doh", format!("{label}: {host} resolved to zero addresses"))
-        }
+        Ok(addrs) if addrs.is_empty() => CheckResult::fail(
+            "doh",
+            tr_args!("doctor-doh-zero-addresses", label = label, host = host),
+        ),
         Ok(addrs) => CheckResult::pass(
             "doh",
-            format!("{label}: {host} resolved to {} address(es)", addrs.len()),
+            tr_args!(
+                "doctor-doh-resolved",
+                label = label,
+                host = host,
+                count = addrs.len(),
+            ),
         ),
-        Err(e) => CheckResult::fail("doh", format!("{label}: {e:#}")),
+        Err(e) => CheckResult::fail(
+            "doh",
+            tr_args!("doctor-doh-error", label = label, reason = format!("{e:#}")),
+        ),
     }
 }
 
@@ -438,32 +440,31 @@ async fn check_session() -> CheckResult {
                         .unwrap_or(0);
                     CheckResult::pass(
                         "session",
-                        format!(
-                            "Session valid for {}h {}m ({})",
-                            hours, mins, session.user_email
+                        tr_args!(
+                            "doctor-session-valid",
+                            hours = hours,
+                            mins = mins,
+                            email = &session.user_email,
                         ),
                     )
                 } else {
-                    CheckResult::fail("session", "Session expired. Run: vouch login")
+                    CheckResult::fail("session", tr!("doctor-session-expired"))
                 }
             }
-            Err(_) => CheckResult::fail("session", "No active session. Run: vouch login"),
+            Err(_) => CheckResult::fail("session", tr!("doctor-session-none")),
         };
     }
 
     // Fall back to config
     let config = match Config::load() {
         Ok(c) => c,
-        Err(_) => return CheckResult::fail("session", "No config found. Run: vouch login"),
+        Err(_) => return CheckResult::fail("session", tr!("doctor-session-no-config")),
     };
 
     if config.token().is_some() {
-        CheckResult::pass(
-            "session",
-            "Session token found (agent not running for full validation)",
-        )
+        CheckResult::pass("session", tr!("doctor-session-token-only"))
     } else {
-        CheckResult::fail("session", "No session token. Run: vouch login")
+        CheckResult::fail("session", tr!("doctor-session-no-token"))
     }
 }
 
@@ -471,37 +472,35 @@ async fn check_session() -> CheckResult {
 fn check_ssh_config() -> CheckResult {
     let home = match dirs::home_dir() {
         Some(h) => h,
-        None => return CheckResult::fail("ssh", "Could not determine home directory"),
+        None => return CheckResult::fail("ssh", tr!("doctor-ssh-no-home")),
     };
 
     let ssh_config_path = home.join(".ssh").join("config");
     let vouch_key_path = home.join(".ssh").join("id_ed25519_vouch");
 
-    let mut issues = Vec::new();
+    let mut issues: Vec<String> = Vec::new();
 
-    // Check for Vouch SSH key
     if !vouch_key_path.exists() {
-        issues.push("Vouch SSH key not found. Run: vouch setup ssh");
+        issues.push(tr!("doctor-ssh-key-missing"));
     }
 
-    // Check for SSH config entry
     if ssh_config_path.exists() {
         match std::fs::read_to_string(&ssh_config_path) {
             Ok(content) => {
                 if !content.contains("id_ed25519_vouch") && !content.contains("vouch") {
-                    issues.push("No Vouch entry in SSH config. Run: vouch setup ssh");
+                    issues.push(tr!("doctor-ssh-config-missing-entry"));
                 }
             }
             Err(_) => {
-                issues.push("Could not read SSH config");
+                issues.push(tr!("doctor-ssh-config-unreadable"));
             }
         }
     } else {
-        issues.push("SSH config not found");
+        issues.push(tr!("doctor-ssh-config-not-found"));
     }
 
     if issues.is_empty() {
-        CheckResult::pass("ssh", "SSH configured for Vouch")
+        CheckResult::pass("ssh", tr!("doctor-ssh-configured"))
     } else {
         CheckResult::fail("ssh", issues.join("; "))
     }
@@ -511,32 +510,27 @@ fn check_ssh_config() -> CheckResult {
 fn check_eks_config() -> CheckResult {
     let home = match dirs::home_dir() {
         Some(h) => h,
-        None => return CheckResult::fail("eks", "Could not determine home directory"),
+        None => return CheckResult::fail("eks", tr!("doctor-eks-no-home")),
     };
 
-    // Check KUBECONFIG env var first, then default path
     let kubeconfig_path = std::env::var("KUBECONFIG")
         .ok()
         .and_then(|k| k.split(':').next().map(std::path::PathBuf::from))
         .unwrap_or_else(|| home.join(".kube").join("config"));
 
     if !kubeconfig_path.exists() {
-        return CheckResult::pass("eks", "No kubeconfig found (EKS not configured)");
+        return CheckResult::pass("eks", tr!("doctor-eks-no-kubeconfig"));
     }
 
     match std::fs::read_to_string(&kubeconfig_path) {
         Ok(content) => {
-            // Check if there's a Vouch EKS user configured
             if content.contains("vouch-eks-") {
-                CheckResult::pass("eks", "EKS configured for Vouch")
+                CheckResult::pass("eks", tr!("doctor-eks-configured"))
             } else {
-                CheckResult::pass(
-                    "eks",
-                    "Kubeconfig exists (no Vouch EKS integration). Run: vouch setup eks --cluster <name>",
-                )
+                CheckResult::pass("eks", tr!("doctor-eks-no-vouch-entry"))
             }
         }
-        Err(_) => CheckResult::fail("eks", "Could not read kubeconfig"),
+        Err(_) => CheckResult::fail("eks", tr!("doctor-eks-unreadable")),
     }
 }
 
@@ -551,7 +545,7 @@ fn check_ssm_config() -> CheckResult {
 
     let home = match dirs::home_dir() {
         Some(h) => h,
-        None => return CheckResult::fail("ssm", "Could not determine home directory"),
+        None => return CheckResult::fail("ssm", tr!("doctor-ssm-no-home")),
     };
 
     let ssh_config_path = home.join(".ssh").join("config");
@@ -562,19 +556,10 @@ fn check_ssm_config() -> CheckResult {
         .is_some_and(|content| content.contains(SSM_MARKER));
 
     match (plugin_found, marker_found) {
-        (true, true) => CheckResult::pass("ssm", "SSM configured for Vouch"),
-        (true, false) => CheckResult::pass(
-            "ssm",
-            "session-manager-plugin found (not configured). Run: vouch setup ssm",
-        ),
-        (false, true) => CheckResult::fail(
-            "ssm",
-            "SSH config references SSM but session-manager-plugin not found on PATH",
-        ),
-        (false, false) => CheckResult::pass(
-            "ssm",
-            "SSM not configured (session-manager-plugin not found)",
-        ),
+        (true, true) => CheckResult::pass("ssm", tr!("doctor-ssm-configured")),
+        (true, false) => CheckResult::pass("ssm", tr!("doctor-ssm-plugin-found")),
+        (false, true) => CheckResult::fail("ssm", tr!("doctor-ssm-plugin-missing-but-configured")),
+        (false, false) => CheckResult::pass("ssm", tr!("doctor-ssm-not-configured")),
     }
 }
 
@@ -583,12 +568,9 @@ fn check_server_url_security(server: &str) -> CheckResult {
     if vouch_common::check_url_security(server).is_insecure() {
         CheckResult::fail(
             "server_url_security",
-            format!("Server uses plain HTTP ({server}). Use HTTPS or set VOUCH_ALLOW_INSECURE=1."),
+            tr_args!("doctor-server-url-insecure", server = server),
         )
     } else {
-        CheckResult::pass(
-            "server_url_security",
-            "Server URL is secure (HTTPS or localhost)",
-        )
+        CheckResult::pass("server_url_security", tr!("doctor-server-url-secure"))
     }
 }

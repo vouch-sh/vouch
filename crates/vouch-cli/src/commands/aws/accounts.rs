@@ -2,6 +2,7 @@
 //! `vouch aws accounts` — list AWS accounts via Identity Center.
 
 use anyhow::{Context, Result};
+use vouch_cli::{tr, tr_args};
 
 use crate::integrations::aws::config::AwsConfig;
 use crate::integrations::aws::sso::{SsoConfig, load_cached_token};
@@ -11,10 +12,10 @@ use crate::integrations::aws::sso_portal::list_accounts;
 #[derive(clap::Args)]
 pub(crate) struct AccountsArgs {
     /// SSO session name from ~/.aws/config (default: first found).
-    #[arg(long)]
+    #[arg(long, help = tr!("arg-aws-sso-session-help"))]
     pub sso_session: Option<String>,
     /// Output as JSON.
-    #[arg(long)]
+    #[arg(long, help = tr!("arg-aws-accounts-json-help"))]
     pub json: bool,
 }
 
@@ -26,17 +27,17 @@ pub(crate) async fn run(args: AccountsArgs) -> Result<()> {
 
     let token = load_cached_token(&sso_config).ok_or_else(|| {
         crate::exit_code::CliError::NotAuthenticated {
-            reason: "SSO session expired or missing. Run 'vouch aws login' first.".to_string(),
+            reason: tr!("aws-err-sso-expired"),
         }
     })?;
 
     let http_client =
         vouch_common::http::credential_client(&format!("vouch-cli/{}", env!("CARGO_PKG_VERSION")))
-            .context("failed to create HTTP client")?;
+            .with_context(|| tr!("aws-login-err-http-client"))?;
 
     let accounts = list_accounts(&http_client, &session.region, &token.token())
         .await
-        .context("failed to list SSO accounts")?;
+        .with_context(|| tr!("aws-accounts-err-list"))?;
 
     if args.json {
         let json = serde_json::to_string_pretty(
@@ -51,10 +52,15 @@ pub(crate) async fn run(args: AccountsArgs) -> Result<()> {
                 })
                 .collect::<Vec<_>>(),
         )
-        .context("failed to serialize accounts")?;
+        .with_context(|| tr!("aws-accounts-err-serialize"))?;
         println!("{json}");
     } else {
-        println!("{:<14} {:<40} EMAIL", "ACCOUNT ID", "NAME");
+        println!(
+            "{:<14} {:<40} {}",
+            tr!("aws-accounts-table-account-id"),
+            tr!("aws-accounts-table-name"),
+            tr!("aws-accounts-table-email"),
+        );
         println!("{}", "-".repeat(80));
         for account in &accounts {
             println!(
@@ -63,7 +69,10 @@ pub(crate) async fn run(args: AccountsArgs) -> Result<()> {
             );
         }
         println!();
-        println!("{} account(s)", accounts.len());
+        println!(
+            "{}",
+            tr_args!("aws-accounts-summary", count = accounts.len())
+        );
     }
 
     Ok(())

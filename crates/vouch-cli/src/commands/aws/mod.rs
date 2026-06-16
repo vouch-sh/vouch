@@ -3,6 +3,7 @@
 
 use anyhow::Result;
 use clap::Subcommand;
+use vouch_cli::{tr, tr_args};
 
 use crate::integrations::aws::config::{AwsConfig, SsoSession};
 
@@ -15,12 +16,16 @@ pub(crate) mod roles;
 #[derive(Subcommand)]
 pub(crate) enum AwsCommands {
     /// Authenticate to AWS IAM Identity Center for account discovery.
+    #[command(about = tr!("cmd-aws-login-about"))]
     Login(login::LoginArgs),
     /// List AWS accounts you have access to via Identity Center.
+    #[command(about = tr!("cmd-aws-accounts-about"))]
     Accounts(accounts::AccountsArgs),
     /// List available roles across your AWS accounts.
+    #[command(about = tr!("cmd-aws-roles-about"))]
     Roles(roles::RolesArgs),
     /// Open the AWS Management Console in your browser.
+    #[command(about = tr!("cmd-aws-console-about"))]
     Console(console::ConsoleArgs),
 }
 
@@ -40,9 +45,9 @@ pub(crate) fn resolve_sso_session(
 
     if let Some(name) = explicit {
         return aws_config.find_sso_session(Some(name)).ok_or_else(|| {
-            crate::exit_code::CliError::ConfigError(format!(
-                "SSO session '{name}' not found in ~/.aws/config. \
-                 Run 'aws configure sso' or check --sso-session."
+            crate::exit_code::CliError::ConfigError(tr_args!(
+                "aws-err-sso-session-not-found",
+                name = name,
             ))
             .into()
         });
@@ -51,18 +56,15 @@ pub(crate) fn resolve_sso_session(
     // No explicit selection — use first found, with a hint if multiple exist
     let mut all = aws_config.find_all_sso_sessions();
     if all.is_empty() {
-        return Err(crate::exit_code::CliError::ConfigError(
-            "No SSO session found in ~/.aws/config. \
-             Run 'aws configure sso' first."
-                .to_string(),
-        )
-        .into());
+        return Err(crate::exit_code::CliError::ConfigError(tr!("aws-err-no-sso-session")).into());
     }
     if all.len() > 1 {
         eprintln!(
-            "Using SSO session '{}'. \
-             Specify --sso-session to use a different one.",
-            all.first().map_or("", |s| &s.name)
+            "{}",
+            tr_args!(
+                "aws-using-sso-session",
+                name = all.first().map_or("", |s| &s.name),
+            ),
         );
     }
     Ok(all.swap_remove(0))

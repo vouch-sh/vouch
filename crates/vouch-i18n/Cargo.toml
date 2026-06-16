@@ -1,0 +1,19 @@
+[package]
+name = "vouch-i18n"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Locale-agnostic Fluent i18n core shared by the Vouch server, CLI, and agent"
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow = { workspace = true, features = ["std"] }
+i18n-embed = { workspace = true, features = ["fluent-system", "rust-embed"] }
+tracing = { workspace = true, features = ["std"] }
+unic-langid = { workspace = true, features = ["macros"] }
+
+[dev-dependencies]
+rust-embed = { workspace = true, features = ["debug-embed"] }

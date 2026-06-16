@@ -172,9 +172,10 @@ impl YubiKey {
     /// Returns immediately if a device is found, or an error if not.
     #[expect(dead_code, reason = "used by binary target, not the library")]
     pub(crate) fn discover() -> Result<Self> {
+        use crate::tr;
+
         let cfg = LibCfg::init();
-        let device = FidoKeyHidFactory::create(&cfg)
-            .context("no YubiKey found - please insert your YubiKey")?;
+        let device = FidoKeyHidFactory::create(&cfg).with_context(|| tr!("fido2-err-no-device"))?;
 
         Ok(Self { device })
     }
@@ -184,6 +185,7 @@ impl YubiKey {
     /// Prompts the user to insert their device and polls every 500ms.
     /// A `timeout_secs` of 0 means wait indefinitely.
     pub fn wait_for_device(timeout_secs: u64) -> Result<Self> {
+        use crate::{tr, tr_args};
         use std::io::{Write, stdout};
         use std::thread;
         use std::time::{Duration, Instant};
@@ -196,7 +198,7 @@ impl YubiKey {
         }
 
         // Prompt user and wait
-        print!("Please insert your YubiKey... ");
+        print!("{} ", tr!("fido2-insert-prompt"));
         stdout().flush().ok();
 
         let start = Instant::now();
@@ -210,7 +212,7 @@ impl YubiKey {
             thread::sleep(Duration::from_millis(500));
 
             if let Ok(device) = FidoKeyHidFactory::create(&cfg) {
-                println!("detected!");
+                println!("{}", tr!("fido2-detected"));
                 let key = Self { device };
                 key.wait_until_ready()?;
                 return Ok(key);
@@ -220,10 +222,7 @@ impl YubiKey {
                 && start.elapsed() >= t
             {
                 println!();
-                bail!(
-                    "Timed out waiting for YubiKey after {timeout_secs}s. \
-                     Insert your key and try again."
-                );
+                bail!(tr_args!("fido2-err-insert-prompt", timeout = timeout_secs));
             }
         }
     }
@@ -234,6 +233,7 @@ impl YubiKey {
     /// channel. This method retries a lightweight query until the device is ready
     /// rather than using a fixed delay.
     fn wait_until_ready(&self) -> Result<()> {
+        use crate::tr;
         use std::thread;
         use std::time::Duration;
 
@@ -244,7 +244,7 @@ impl YubiKey {
                 Err(_) => thread::sleep(Duration::from_millis(200)),
             }
         }
-        bail!("YubiKey not ready after insertion - try removing and reinserting it")
+        bail!(tr!("fido2-err-not-ready"))
     }
 
     /// Check if a PIN is configured on this `YubiKey`.
@@ -254,12 +254,14 @@ impl YubiKey {
     /// - `Ok(false)` if no PIN is set (user needs to create one)
     /// - `Err` if PIN is not supported or device communication failed
     pub(crate) fn is_pin_set(&self) -> Result<bool> {
+        use crate::tr;
+
         match with_suppressed_stdout(|| self.device.enable_info_option(&InfoOption::ClientPin))
-            .context("failed to query PIN status")?
+            .with_context(|| tr!("fido2-err-pin-query"))?
         {
             Some(true) => Ok(true),
             Some(false) => Ok(false),
-            None => bail!("This device does not support PIN authentication"),
+            None => bail!(tr!("fido2-err-pin-unsupported")),
         }
     }
 
@@ -268,9 +270,10 @@ impl YubiKey {
     /// Returns the count of attempts before the PIN is blocked.
     #[expect(dead_code, reason = "used by binary target, not the library")]
     pub(crate) fn pin_retries(&self) -> Result<i32> {
+        use crate::tr;
         self.device
             .get_pin_retries()
-            .context("failed to get PIN retry count")
+            .with_context(|| tr!("fido2-err-pin-retries"))
     }
 
     /// Set a new PIN on a `YubiKey` that doesn't have one configured.
@@ -278,17 +281,16 @@ impl YubiKey {
     /// # Errors
     /// Returns an error if a PIN is already set (use `change_pin` instead).
     pub(crate) fn set_new_pin(&self, pin: &str) -> Result<()> {
+        use crate::{tr, tr_args};
+
         self.device.set_new_pin(pin).map_err(|e| {
             let err_str = e.to_string();
             if err_str.contains("0x37") || err_str.contains("PIN_POLICY") {
-                anyhow::anyhow!(
-                    "PIN does not meet requirements.\n\
-                     PIN must be at least 8 characters."
-                )
+                anyhow::anyhow!(tr!("fido2-pin-policy-block"))
             } else if err_str.contains("already set") || err_str.contains("clientPin is true") {
-                anyhow::anyhow!("A PIN is already set on this YubiKey.")
+                anyhow::anyhow!(tr!("fido2-err-pin-already-set"))
             } else {
-                anyhow::anyhow!("Failed to set PIN: {e}")
+                anyhow::anyhow!(tr_args!("fido2-err-pin-set-failed", reason = e))
             }
         })
     }
@@ -296,9 +298,10 @@ impl YubiKey {
     /// Change the PIN on a `YubiKey`.
     #[expect(dead_code, reason = "used by binary target, not the library")]
     pub(crate) fn change_pin(&self, current_pin: &str, new_pin: &str) -> Result<()> {
+        use crate::tr;
         self.device
             .change_pin(current_pin, new_pin)
-            .context("failed to change PIN")
+            .with_context(|| tr!("fido2-err-pin-change"))
     }
 
     /// Perform FIDO2 registration (`make_credential`) with an explicit PIN.
@@ -354,7 +357,7 @@ impl YubiKey {
         // Verify the attestation locally
         let verify_result = verifier::verify_attestation(rp_id, &client_data_json, &attestation);
         if !verify_result.is_success {
-            bail!("attestation verification failed");
+            bail!(crate::tr!("fido2-err-attestation"));
         }
 
         Ok(RegistrationResult {
@@ -394,10 +397,7 @@ impl YubiKey {
                 // Check if it's a "no credentials" error vs a PIN error
                 let err_str = e.to_string();
                 if err_str.contains("0x2E") || err_str.contains("NO_CREDENTIALS") {
-                    anyhow::anyhow!(
-                        "No credentials found for this service.\n\
-                         Have you enrolled with `vouch enroll`?"
-                    )
+                    anyhow::anyhow!(crate::tr!("fido2-err-no-credentials"))
                 } else {
                     translate_fido2_error(e, "FIDO2 authentication")
                 }
@@ -406,16 +406,11 @@ impl YubiKey {
         let assertion = assertions
             .into_iter()
             .next()
-            .context("no assertion returned")?;
+            .with_context(|| crate::tr!("fido2-err-no-assertion"))?;
 
         // Discoverable credentials must return a user handle
         if assertion.user.id.is_empty() {
-            bail!(
-                "Your YubiKey has a credential for this service, \
-                 but it was not stored as a passkey.\n\
-                 Re-enroll with `vouch enroll` to create a \
-                 compatible credential."
-            );
+            bail!(crate::tr!("fido2-err-not-passkey"));
         }
 
         Ok(AuthenticationResult {
@@ -466,8 +461,9 @@ impl FidoDevice for YubiKey {
     reason = "used by binary target; lint fires inconsistently across compilation targets"
 )]
 fn prompt_pin() -> Result<SecretString> {
-    eprint!("YubiKey PIN: ");
-    let pin = rpassword::read_password().context("failed to read PIN")?;
+    use crate::tr;
+    eprint!("{} ", tr!("fido2-pin-prompt"));
+    let pin = rpassword::read_password().with_context(|| tr!("fido2-err-read-pin"))?;
     Ok(SecretString::from(pin))
 }
 
@@ -476,76 +472,54 @@ fn prompt_pin() -> Result<SecretString> {
 /// The ctap-hid-fido2 library returns error messages containing CTAP2 error codes.
 /// This function provides more helpful guidance for common PIN-related errors.
 fn translate_fido2_error(err: anyhow::Error, operation: &str) -> anyhow::Error {
+    use crate::{tr, tr_args};
+
     let err_str = err.to_string();
 
     // CTAP2_ERR_CREDENTIAL_EXCLUDED: authenticator already holds a
     // credential from the exclude list for this RP.
     if err_str.contains("0x19") || err_str.contains("CREDENTIAL_EXCLUDED") {
-        return anyhow::anyhow!("This YubiKey is already registered for this service.");
+        return anyhow::anyhow!(tr!("fido2-err-credential-excluded"));
     }
 
-    // Check for specific CTAP2 PIN errors in the error string
     if err_str.contains("0x31") || err_str.contains("PIN_INVALID") {
-        return anyhow::anyhow!(
-            "Incorrect PIN. Please try again.\n\
-             Hint: Too many wrong attempts will lock your YubiKey."
-        );
+        return anyhow::anyhow!(tr!("fido2-err-pin-invalid"));
     }
 
     if err_str.contains("0x32") || err_str.contains("PIN_BLOCKED") {
-        return anyhow::anyhow!(
-            "Your YubiKey PIN is blocked due to too many \
-             incorrect attempts.\n\
-             You must reset the FIDO2 application to continue:\n\
-             \n\
-             WARNING: This will delete all FIDO2 credentials \
-             on this YubiKey!\n\
-             \n\
-             Option 1: ykman fido reset  \
-             (install: brew install ykman)\n\
-             Option 2: Use the YubiKey Manager GUI app to \
-             reset FIDO2\n\
-             \n\
-             After reset, run `vouch enroll` to re-register \
-             your YubiKey."
-        );
+        return anyhow::anyhow!(tr!("fido2-err-pin-blocked"));
     }
 
     if err_str.contains("0x33") || err_str.contains("PIN_AUTH_INVALID") {
-        return anyhow::anyhow!("PIN authentication failed. Please try again.");
+        return anyhow::anyhow!(tr!("fido2-err-pin-auth-invalid"));
     }
 
     if err_str.contains("0x34") || err_str.contains("PIN_AUTH_BLOCKED") {
-        return anyhow::anyhow!(
-            "PIN authentication is temporarily blocked.\n\
-             Please unplug your YubiKey and plug it back in, then try again."
-        );
+        return anyhow::anyhow!(tr!("fido2-err-pin-auth-blocked"));
     }
 
     if err_str.contains("0x35") || err_str.contains("PIN_NOT_SET") {
-        return anyhow::anyhow!(
-            "Your YubiKey PIN is not set. \
-             This is unexpected — try running this command again."
-        );
+        return anyhow::anyhow!(tr!("fido2-err-pin-not-set"));
     }
 
     if err_str.contains("0x36") || err_str.contains("PIN_REQUIRED") {
-        return anyhow::anyhow!("A PIN is required for this operation.");
+        return anyhow::anyhow!(tr!("fido2-err-pin-required"));
     }
 
     if err_str.contains("0x37") || err_str.contains("PIN_POLICY") {
-        return anyhow::anyhow!(
-            "PIN does not meet policy requirements.\n\
-             PIN must be at least 8 characters."
-        );
+        return anyhow::anyhow!(tr!("fido2-err-pin-policy"));
     }
 
     if err_str.contains("0x38") || err_str.contains("PIN_TOKEN_EXPIRED") {
-        return anyhow::anyhow!("PIN authentication expired. Please try again.");
+        return anyhow::anyhow!(tr!("fido2-err-pin-token-expired"));
     }
 
     // Generic fallback with the operation context
-    anyhow::anyhow!("{operation} failed: {err}")
+    anyhow::anyhow!(tr_args!(
+        "fido2-err-generic",
+        operation = operation,
+        reason = err
+    ))
 }
 
 /// Prompt for a new PIN with confirmation.
@@ -560,30 +534,32 @@ fn translate_fido2_error(err: anyhow::Error, operation: &str) -> anyhow::Error {
     reason = "used by binary target; lint fires inconsistently across compilation targets"
 )]
 fn prompt_new_pin() -> Result<SecretString> {
+    use crate::tr;
     use std::io::{Write, stderr};
 
     loop {
-        eprint!("New PIN (minimum 8 characters): ");
+        eprint!("{} ", tr!("fido2-pin-prompt-new"));
         stderr().flush().ok();
-        let pin = rpassword::read_password().context("failed to read PIN")?;
+        let pin = rpassword::read_password().with_context(|| tr!("fido2-err-read-pin"))?;
 
         // Validate PIN length
         if pin.len() < 8 {
-            eprintln!("PIN must be at least 8 characters.");
+            eprintln!("{}", tr!("fido2-pin-err-too-short"));
             continue;
         }
         if pin.len() > 63 {
-            eprintln!("PIN must be at most 63 characters.");
+            eprintln!("{}", tr!("fido2-pin-err-too-long"));
             continue;
         }
 
         // Confirm PIN
-        eprint!("Confirm PIN: ");
+        eprint!("{} ", tr!("fido2-pin-prompt-confirm"));
         stderr().flush().ok();
-        let confirm = rpassword::read_password().context("failed to read PIN confirmation")?;
+        let confirm =
+            rpassword::read_password().with_context(|| tr!("fido2-err-read-pin-confirmation"))?;
 
         if pin != confirm {
-            eprintln!("PINs do not match. Please try again.\n");
+            eprintln!("{}\n", tr!("fido2-pin-err-mismatch"));
             continue;
         }
 
@@ -599,6 +575,8 @@ fn prompt_new_pin() -> Result<SecretString> {
     reason = "used by binary target; lint fires inconsistently across compilation targets"
 )]
 pub(crate) fn ensure_pin_configured(key: &YubiKey) -> Result<SecretString> {
+    use crate::{tr, tr_println};
+
     if key.is_pin_set()? {
         // PIN is already set, just prompt for it
         return prompt_pin();
@@ -606,17 +584,14 @@ pub(crate) fn ensure_pin_configured(key: &YubiKey) -> Result<SecretString> {
 
     // No PIN set - guide user through setup
     println!();
-    println!("Your YubiKey does not have a PIN configured.");
-    println!("A PIN is required for FIDO2 authentication to prove you are present.");
-    println!();
-    println!("Let's set one up now.");
+    tr_println!("fido2-setup-pin-intro");
     println!();
 
     let pin = prompt_new_pin()?;
 
-    print!("Setting PIN... ");
+    print!("{} ", tr!("fido2-setting-pin"));
     key.set_new_pin(pin.expose_secret())?;
-    println!("done!");
+    tr_println!("fido2-setting-pin-done");
     println!();
 
     Ok(pin)

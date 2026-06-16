@@ -15,6 +15,7 @@ use vouch_common::{
 
 use crate::client::VouchClient;
 use crate::fido2::{self, FidoDevice, YubiKey};
+use vouch_cli::{tr, tr_println};
 
 /// On macOS, Google Chrome claims YubiKeys at the USB device level the moment
 /// they enumerate (so its WebAuthn can respond instantly), which blocks every
@@ -37,33 +38,13 @@ fn is_chrome_running() -> bool {
 
 fn browser_register_fallback(server: &str) -> Result<()> {
     let url = format!("{}/enroll/keys", server.trim_end_matches('/'));
-    println!(
-        "Google Chrome is using your YubiKey, so we can't register it from\n\
-         the command line. Opening your browser to finish registration there\n\
-         instead. (Tip: quit Chrome and re-run if you'd prefer the CLI.)\n"
-    );
+    tr_println!("register-chrome-blocking");
+    println!();
     match open::that(&url) {
-        Ok(()) => {
-            println!("Opening browser to complete registration...");
-            println!();
-            println!("  URL: {url}");
-            println!();
-            println!(
-                "If the browser didn't open, visit the URL above. You may be\n\
-                 prompted to sign in again. After registration, run `vouch keys`\n\
-                 to verify."
-            );
-        }
+        Ok(()) => tr_println!("register-browser-block", url = &url),
         Err(e) => {
             tracing::debug!("Failed to open browser: {e}");
-            println!("To complete registration:");
-            println!();
-            println!("  1. Open this URL in your browser:");
-            println!("     {url}");
-            println!();
-            println!("  2. Sign in (if prompted) and complete the WebAuthn ceremony.");
-            println!();
-            println!("After registration, run `vouch keys` to verify.");
+            tr_println!("register-manual-block", url = &url);
         }
     }
     Ok(())
@@ -78,7 +59,8 @@ fn browser_register_fallback(server: &str) -> Result<()> {
 /// 3. Complete registration with the server (async)
 pub(crate) async fn run(server: &str, name: Option<&str>, timeout_secs: u64) -> Result<()> {
     let name = name.unwrap_or("YubiKey");
-    println!("Registering additional YubiKey '{name}'...\n");
+    tr_println!("register-starting", name = name);
+    println!();
 
     // Pre-flight: if Chrome is running on macOS, the CTAP-HID flow will fail
     // due to Chrome's USB device claim. Route through the browser instead.
@@ -89,12 +71,10 @@ pub(crate) async fn run(server: &str, name: Option<&str>, timeout_secs: u64) -> 
     // Step 1: Start registration with server (async, authenticated).
     // This fails fast if the server is unreachable or the user is not
     // authenticated, before they insert their key.
-    print!("Contacting server... ");
-    let client = VouchClient::new(server).await.context(
-        "Not authenticated.\n\n\
-         To register your first key: vouch enroll\n\
-         To add additional keys: vouch login, then vouch register",
-    )?;
+    print!("{} ", tr!("register-contacting-server"));
+    let client = VouchClient::new(server)
+        .await
+        .with_context(|| tr!("register-not-authenticated"))?;
     let start_resp: RegisterStartResponse = client
         .post_authenticated(
             "/v1/keys/register/start",
@@ -104,13 +84,14 @@ pub(crate) async fn run(server: &str, name: Option<&str>, timeout_secs: u64) -> 
         )
         .await
         .context("failed to start registration")?;
-    println!("ok");
+    tr_println!("register-contact-ok");
 
     // Show info about existing keys
     if !start_resp.exclude_credential_ids.is_empty() {
-        println!(
-            "\nNote: You have {} existing key(s) registered.",
-            start_resp.exclude_credential_ids.len()
+        println!();
+        tr_println!(
+            "register-existing-keys",
+            count = start_resp.exclude_credential_ids.len(),
         );
     }
 
@@ -139,7 +120,7 @@ pub(crate) async fn run(server: &str, name: Option<&str>, timeout_secs: u64) -> 
     .await?;
 
     // Step 3: Complete registration with server (async, authenticated)
-    print!("Completing registration... ");
+    print!("{} ", tr!("register-completing"));
     let complete_resp: RegisterCompleteResponse = client
         .post_authenticated(
             "/v1/keys/register/complete",
@@ -153,11 +134,13 @@ pub(crate) async fn run(server: &str, name: Option<&str>, timeout_secs: u64) -> 
         )
         .await
         .context("failed to complete registration")?;
-    println!("ok\n");
+    tr_println!("register-completed-ok");
 
-    println!("Registration successful!");
-    println!("Device ID: {}", complete_resp.device_id);
-    println!("\nYou can manage your keys with: vouch keys");
+    println!();
+    tr_println!(
+        "register-success-block",
+        device_id = &complete_resp.device_id,
+    );
 
     Ok(())
 }

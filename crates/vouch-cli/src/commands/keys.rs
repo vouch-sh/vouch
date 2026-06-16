@@ -13,6 +13,7 @@ use vouch_common::{
 
 use crate::client::VouchClient;
 use crate::exit_code::CliError;
+use vouch_cli::{tr, tr_args, tr_println};
 
 /// Keys subcommands.
 #[derive(Subcommand)]
@@ -49,35 +50,39 @@ pub(crate) async fn interactive(server: &str) -> Result<()> {
         let response: ListKeysResponse = client.get_authenticated("/v1/keys").await?;
 
         if response.keys.is_empty() {
-            println!("No keys registered.");
+            tr_println!("keys-none");
             return Ok(());
         }
 
         // Build display options
         let options: Vec<String> = response.keys.iter().map(format_key_for_display).collect();
+        let exit_label = tr!("keys-action-exit");
 
         // Add quit option
         let mut menu_options = options.clone();
-        menu_options.push("Exit".to_string());
+        menu_options.push(exit_label.clone());
 
         // Print prompt on its own line
-        println!("\nSelect a key to manage:\n");
+        println!();
+        tr_println!("keys-prompt-select");
+        println!();
 
         // Configure render to remove all prefixes for clean alignment
         let render_config = RenderConfig::default()
             .with_prompt_prefix(Styled::new(""))
             .with_highlighted_option_prefix(Styled::new(">"));
 
+        let nav_help = tr!("keys-help-navigation");
         // Show interactive menu (disable filtering to prevent accidental key presses)
         let selection = Select::new("\n", menu_options)
             .with_render_config(render_config)
-            .with_help_message("↑↓ to move, Enter to select, Esc to exit")
+            .with_help_message(&nav_help)
             .without_filtering()
             .prompt();
 
         match selection {
             Ok(selected) => {
-                if selected == "Exit" {
+                if selected == exit_label {
                     return Ok(());
                 }
 
@@ -101,7 +106,7 @@ pub(crate) async fn interactive(server: &str) -> Result<()> {
                 return Ok(());
             }
             Err(e) => {
-                bail!("Selection error: {e}");
+                bail!(tr_args!("keys-err-selection", reason = e));
             }
         }
     }
@@ -111,47 +116,60 @@ pub(crate) async fn interactive(server: &str) -> Result<()> {
 /// Returns false if we should exit the interactive loop.
 async fn handle_key_action(server: &str, client: &VouchClient, key: &KeyInfo) -> Result<bool> {
     let current_marker = if key.is_current_session {
-        " (current session)"
+        tr!("keys-marker-current")
     } else {
-        ""
+        String::new()
     };
 
-    let actions = vec!["Delete this key", "Back to list", "Quit"];
+    let delete_label = tr!("keys-action-delete");
+    let back_label = tr!("keys-action-back");
+    let quit_label = tr!("keys-action-quit");
+    let actions = vec![
+        delete_label.as_str(),
+        back_label.as_str(),
+        quit_label.as_str(),
+    ];
 
-    let prompt = format!("Key: {}{}", key.name, current_marker);
+    let prompt = tr_args!(
+        "keys-action-prompt",
+        name = &key.name,
+        marker = &current_marker,
+    );
+    let help = tr!("keys-help-action");
     let selection = Select::new(&prompt, actions)
-        .with_help_message("Select an action")
+        .with_help_message(&help)
         .prompt();
 
     match selection {
-        Ok("Delete this key") => {
+        Ok(choice) if choice == delete_label => {
             delete_key_interactive(server, client, key).await?;
             Ok(true) // Continue loop to refresh list
         }
-        Ok("Quit") => Ok(false),
+        Ok(choice) if choice == quit_label => Ok(false),
         Ok(_) => Ok(true), // Back to list
         Err(
             inquire::InquireError::OperationCanceled | inquire::InquireError::OperationInterrupted,
         ) => {
             Ok(true) // Back to list on Esc
         }
-        Err(e) => bail!("Selection error: {e}"),
+        Err(e) => bail!(tr_args!("keys-err-selection", reason = e)),
     }
 }
 
 /// Delete a key with confirmation.
 async fn delete_key_interactive(server: &str, client: &VouchClient, key: &KeyInfo) -> Result<()> {
     let warning = if key.is_current_session {
-        "\nWARNING: This is the key used for your current session. Your session will be invalidated."
+        format!("\n{}", tr!("keys-warn-current-session"))
     } else {
-        ""
+        String::new()
     };
 
-    let prompt = format!("Delete key '{}'?{}", key.name, warning);
+    let prompt = tr_args!("keys-confirm-delete", name = &key.name, warning = &warning);
 
+    let undo_help = tr!("keys-help-undo");
     let confirmed = Confirm::new(&prompt)
         .with_default(false)
-        .with_help_message("This action cannot be undone")
+        .with_help_message(&undo_help)
         .prompt();
 
     match confirmed {
@@ -160,19 +178,24 @@ async fn delete_key_interactive(server: &str, client: &VouchClient, key: &KeyInf
 
             println!("\n{}", response.message);
             if response.sessions_revoked > 0 {
-                println!("  {} session(s) revoked.", response.sessions_revoked);
+                println!(
+                    "  {}",
+                    tr_args!("keys-sessions-revoked", count = response.sessions_revoked),
+                );
             }
             println!();
         }
         Ok(false) => {
-            println!("Cancelled.\n");
+            tr_println!("keys-cancelled");
+            println!();
         }
         Err(
             inquire::InquireError::OperationCanceled | inquire::InquireError::OperationInterrupted,
         ) => {
-            println!("Cancelled.\n");
+            tr_println!("keys-cancelled");
+            println!();
         }
-        Err(e) => bail!("Confirmation error: {e}"),
+        Err(e) => bail!(tr_args!("keys-err-confirmation", reason = e)),
     }
 
     Ok(())
@@ -196,7 +219,8 @@ async fn delete_with_step_up(
             if let Some(cli_err) = e.downcast_ref::<CliError>()
                 && matches!(cli_err, CliError::StepUpRequired { .. })
             {
-                println!("\nFresh authentication required to delete a key.");
+                println!();
+                tr_println!("keys-step-up-needed");
                 crate::commands::login::run(server, 30)
                     .await
                     .context("step-up re-authentication failed")?;
@@ -215,9 +239,9 @@ async fn delete_with_step_up(
 /// Format a key for display in the interactive menu.
 fn format_key_for_display(key: &KeyInfo) -> String {
     let current = if key.is_current_session {
-        "(current)"
+        tr!("keys-marker-current-short")
     } else {
-        ""
+        String::new()
     };
     let created = format_timestamp(&key.created_at);
     // Show device model if available, otherwise fall back to name
@@ -239,14 +263,19 @@ pub(crate) async fn list(server: &str, json: bool) -> Result<()> {
     }
 
     if response.keys.is_empty() {
-        println!("No keys registered.");
+        tr_println!("keys-none");
         return Ok(());
     }
 
-    println!("Registered keys:\n");
+    tr_println!("keys-header");
+    println!();
     let header = format!(
         "{:<36}  {:<20}  {:<20}  {:<20}  {}",
-        "ID", "NAME", "MODEL", "CREATED", "CURRENT"
+        tr!("keys-table-id"),
+        tr!("keys-table-name"),
+        tr!("keys-table-model"),
+        tr!("keys-table-created"),
+        tr!("keys-table-current"),
     );
     println!("{header}");
     println!("{}", "-".repeat(115));
@@ -262,7 +291,8 @@ pub(crate) async fn list(server: &str, json: bool) -> Result<()> {
         );
     }
 
-    println!("\n* = key used for current session");
+    println!();
+    tr_println!("keys-legend");
 
     Ok(())
 }
@@ -278,19 +308,18 @@ pub(crate) async fn remove(server: &str, key_id: &str, force: bool) -> Result<()
     let key_name = match key {
         Some(k) => k.name.clone(),
         None => {
-            bail!("Key not found: {key_id}");
+            bail!(tr_args!("keys-err-not-found", id = key_id));
         }
     };
 
     // Prompt for confirmation unless --force is used
     if !force {
-        println!("You are about to remove the key '{key_name}' (ID: {key_id}).");
+        tr_println!("keys-confirm-remove-line", name = &key_name, id = key_id);
         if key.is_some_and(|k| k.is_current_session) {
-            println!("WARNING: This is the key used for your current session.");
-            println!("         Your session will be invalidated.");
+            tr_println!("keys-warn-remove-current-session");
         }
         println!();
-        print!("Are you sure? [y/N] ");
+        print!("{} ", tr!("keys-confirm-y-n"));
         std::io::Write::flush(&mut std::io::stdout())?;
 
         let mut input = String::new();
@@ -298,7 +327,7 @@ pub(crate) async fn remove(server: &str, key_id: &str, force: bool) -> Result<()
         let input = input.trim().to_lowercase();
 
         if input != "y" && input != "yes" {
-            println!("Cancelled.");
+            tr_println!("keys-cancelled");
             return Ok(());
         }
     }
@@ -308,7 +337,10 @@ pub(crate) async fn remove(server: &str, key_id: &str, force: bool) -> Result<()
 
     println!("{}", response.message);
     if response.sessions_revoked > 0 {
-        println!("  {} session(s) revoked.", response.sessions_revoked);
+        println!(
+            "  {}",
+            tr_args!("keys-sessions-revoked", count = response.sessions_revoked),
+        );
     }
 
     Ok(())
@@ -321,10 +353,10 @@ pub(crate) async fn rename(server: &str, key_id: &str, new_name: &str) -> Result
     // Validate name
     let new_name = new_name.trim();
     if new_name.is_empty() {
-        bail!("Name cannot be empty");
+        bail!(tr!("keys-err-name-empty"));
     }
     if new_name.len() > 100 {
-        bail!("Name must be 100 characters or less");
+        bail!(tr!("keys-err-name-long"));
     }
 
     // First, verify the key exists
@@ -332,7 +364,7 @@ pub(crate) async fn rename(server: &str, key_id: &str, new_name: &str) -> Result
     let key = keys_response.keys.iter().find(|k| k.id == key_id);
 
     if key.is_none() {
-        bail!("Key not found: {key_id}");
+        bail!(tr_args!("keys-err-not-found", id = key_id));
     }
 
     // Rename the key

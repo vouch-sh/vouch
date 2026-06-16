@@ -29,6 +29,7 @@ use crate::client::VouchClient;
 use crate::config::Config;
 use crate::fido2::{self, FidoDevice, YubiKey};
 use crate::session;
+use vouch_cli::{tr, tr_args, tr_println};
 
 /// Run the login command.
 ///
@@ -40,7 +41,8 @@ use crate::session;
 /// 2. All FIDO2 device work on a plain OS thread (wait, PIN, authenticate).
 /// 3. Complete authentication with the server (async).
 pub(crate) async fn run(server: &str, timeout_secs: u64) -> Result<()> {
-    println!("Logging in...\n");
+    tr_println!("login-starting");
+    println!();
 
     let client = VouchClient::unauthenticated(server)?;
 
@@ -104,7 +106,7 @@ async fn run_fapi_login(
     timeout_secs: u64,
     fapi_key: &ClientKey,
 ) -> Result<()> {
-    print!("Contacting server ({server})... ");
+    print!("{} ", tr_args!("login-contacting-server", server = server));
 
     // Step 1: Ensure the client is registered.
     let client_id = ensure_client_registered(client, fapi_key).await?;
@@ -153,7 +155,7 @@ async fn run_fapi_login(
         .await
         .context("failed to parse challenge response")?;
 
-    println!("ok");
+    tr_println!("login-contact-ok");
 
     // Step 3: Start posture collection early — it runs during the FIDO2 wait
     // (human touch takes 5-30s, posture takes 100ms-2s).
@@ -575,18 +577,19 @@ fn resolve_expiry(expires_at: Option<&str>, expires_in: u64) -> (String, jiff::T
 
 /// Print the post-login success message.
 fn finalize_login_output(email: &str, expires_at: &str, agent_stored: bool) {
-    if !email.is_empty() {
-        println!("Login successful as {email}!");
+    if email.is_empty() {
+        tr_println!("login-success");
     } else {
-        println!("Login successful!");
+        tr_println!("login-success-as", email = email);
     }
-    println!("Session expires: {}", format_expiry(expires_at));
+    tr_println!("login-session-expires", expiry = format_expiry(expires_at));
 
+    println!();
     if agent_stored {
-        println!("\nYour identity is now available. Check with: vouch status");
+        tr_println!("session-agent-ready");
     } else {
-        println!("\nNote: Agent not running. Start it with: vouch-agent --foreground");
-        println!("Your identity is stored locally. Check with: vouch status");
+        tr_println!("session-agent-not-running");
+        tr_println!("session-stored-locally");
     }
 }
 
@@ -596,17 +599,9 @@ fn finalize_login_output(email: &str, expires_at: &str, agent_stored: bool) {
 fn token_error(body: &str, status: reqwest::StatusCode) -> anyhow::Error {
     if let Ok(oauth_err) = serde_json::from_str::<vouch_common::OAuthError>(body) {
         let hint = match oauth_err.error.as_str() {
-            "invalid_grant" => {
-                "\n\nThis YubiKey is not registered with the server.\n\
-                 Run 'vouch enroll' to register it."
-            }
-            "invalid_client" => {
-                "\n\nClient registration is invalid or expired.\n\
-                 The client will be re-registered on the next \
-                 attempt.\nPlease run this command again. If it \
-                 persists, run 'vouch enroll' to start fresh."
-            }
-            _ => "",
+            "invalid_grant" => format!("\n\n{}", tr!("login-err-not-registered")),
+            "invalid_client" => format!("\n\n{}", tr!("login-err-invalid-client")),
+            _ => String::new(),
         };
         let desc = oauth_err
             .error_description

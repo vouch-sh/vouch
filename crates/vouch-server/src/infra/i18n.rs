@@ -19,7 +19,7 @@ use axum::response::{IntoResponse, Response};
 use http::request::Parts;
 use http::{HeaderMap, StatusCode, header};
 use i18n_embed::LanguageLoader;
-use i18n_embed::fluent::{FluentLanguageLoader, NegotiationStrategy};
+use i18n_embed::fluent::FluentLanguageLoader;
 use unic_langid::{LanguageIdentifier, langid};
 
 /// Embedded Fluent catalogs, one `i18n/<lang>/vouch.ftl` per language.
@@ -29,19 +29,8 @@ struct Localizations;
 
 /// Process-wide loader holding every embedded catalog. Built once; never mutated
 /// after load. Per-request locale selection happens on cheap derived loaders.
-static LOADER: LazyLock<FluentLanguageLoader> = LazyLock::new(|| {
-    let loader = FluentLanguageLoader::new("vouch", langid!("en-US"));
-    if let Err(error) = loader.load_available_languages(&Localizations) {
-        tracing::error!(%error, "failed to load i18n catalogs");
-    }
-    // Disable Fluent's BiDi isolation, which otherwise wraps every interpolated
-    // value in invisible U+2068/U+2069 marks. For an LTR-only catalog those marks
-    // add nothing but leak into version strings and copy-paste. Re-enable (and add
-    // BiDi-aware tests) when an RTL language ships. The bundles are shared via Arc,
-    // so this applies to every derived loader.
-    loader.set_use_isolating(false);
-    loader
-});
+static LOADER: LazyLock<FluentLanguageLoader> =
+    LazyLock::new(|| vouch_i18n::build_loader("vouch", langid!("en-US"), &Localizations));
 
 /// Request-scoped translation handle passed into every UI template.
 ///
@@ -163,21 +152,7 @@ fn default_context() -> &'static I18nContext {
 /// Returns an error if the embedded `en-US` catalog cannot be enumerated, is
 /// missing, fails to resolve a well-known key, or yields no JS bundle entry.
 pub fn validate_startup() -> anyhow::Result<()> {
-    use anyhow::Context;
-    let available = LOADER
-        .available_languages(&Localizations)
-        .context("failed to enumerate embedded i18n catalogs")?;
-    anyhow::ensure!(
-        available.contains(&langid!("en-US")),
-        "embedded i18n catalog en-US is missing; refusing to start"
-    );
-    // Catch a parse failure that leaves the loader empty: a well-known key
-    // must resolve to a translated string, not echo its own id back.
-    let probe = DEFAULT_CONTEXT.t("common-app-name");
-    anyhow::ensure!(
-        probe != "common-app-name",
-        "i18n catalog loaded but key resolution returns raw ids; refusing to start"
-    );
+    vouch_i18n::validate_startup(&LOADER, &Localizations, &["common-app-name"])?;
     // Eagerly force the JS bundle map to build now so any render failure
     // surfaces here (not on the first `/i18n.js` request), and confirm en-US
     // is present — the handler's fallback path depends on it.
@@ -194,11 +169,7 @@ pub(crate) fn negotiate(accept_language: Option<&str>) -> I18nContext {
     let requested = accept_language
         .map(parse_accept_language)
         .unwrap_or_default();
-    let loader = if requested.is_empty() {
-        LOADER.select_languages(&[LOADER.fallback_language().clone()])
-    } else {
-        LOADER.select_languages_negotiate(&requested, NegotiationStrategy::Filtering)
-    };
+    let loader = vouch_i18n::select_loader(&LOADER, &requested);
     let lang = loader.current_language().to_string();
     I18nContext {
         loader: Arc::new(loader),

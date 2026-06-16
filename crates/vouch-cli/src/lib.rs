@@ -10,6 +10,7 @@ pub(crate) mod utils;
 pub mod fapi;
 pub mod fido2;
 pub mod http;
+pub mod i18n;
 pub mod posture;
 
 // Re-export commonly used types

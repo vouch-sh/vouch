@@ -29,13 +29,15 @@ pub(crate) const DEFAULT_HOST_PATTERN: &str = "i-* mi-*";
 /// and question marks. This covers AWS profile names, regions, and SSH host glob
 /// patterns while rejecting shell metacharacters and SSH config injection.
 fn validate_shell_safe(value: &str, label: &str) -> Result<()> {
+    use vouch_cli::tr_args;
+
     if value.is_empty() {
-        bail!("{label} must not be empty");
+        bail!(tr_args!("setup-ssm-err-empty", label = label));
     }
 
     // Reject newlines (SSH config directive injection)
     if value.contains('\n') || value.contains('\r') {
-        bail!("{label} must not contain newline characters");
+        bail!(tr_args!("setup-ssm-err-newline", label = label));
     }
 
     // Allow only safe characters
@@ -48,11 +50,11 @@ fn validate_shell_safe(value: &str, label: &str) -> Result<()> {
             && ch != '?'
             && ch != ' '
         {
-            bail!(
-                "{label} contains invalid character '{ch}'. \
-                 Only alphanumeric characters, spaces, underscores, hyphens, dots, \
-                 asterisks, and question marks are allowed."
-            );
+            bail!(tr_args!(
+                "setup-ssm-err-invalid-char",
+                label = label,
+                char = ch
+            ));
         }
     }
 
@@ -62,11 +64,7 @@ fn validate_shell_safe(value: &str, label: &str) -> Result<()> {
 /// Check that `session-manager-plugin` is installed and on PATH.
 fn check_session_manager_plugin() -> Result<()> {
     if !ssm_integration::is_plugin_available() {
-        bail!(
-            "session-manager-plugin not found on PATH.\n\n\
-             Install it from:\n  \
-             https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html"
-        );
+        bail!(vouch_cli::tr!("setup-ssm-err-plugin-missing"));
     }
     Ok(())
 }
@@ -152,12 +150,16 @@ pub(crate) async fn run(
     validate_shell_safe(&region_name, "--region")?;
     validate_shell_safe(host_pattern, "--hosts")?;
 
-    println!("AWS SSM Setup");
-    println!("=============");
+    use vouch_cli::{tr_args, tr_println};
+
+    tr_println!("setup-ssm-header");
     println!();
-    println!("Profile:  {profile_name}");
-    println!("Region:   {region_name}");
-    println!("Hosts:    {host_pattern}");
+    tr_println!(
+        "setup-ssm-summary",
+        profile = &profile_name,
+        region = &region_name,
+        hosts = host_pattern,
+    );
     println!();
 
     // Read existing SSH config
@@ -170,7 +172,7 @@ pub(crate) async fn run(
 
     let existing = if config_path.exists() {
         fs::read_to_string(&config_path)
-            .with_context(|| format!("failed to read {}", config_path.display()))?
+            .with_context(|| tr_args!("setup-ssm-err-read", path = config_path.display()))?
     } else {
         String::new()
     };
@@ -178,7 +180,7 @@ pub(crate) async fn run(
     // Check for existing Vouch SSM configuration (idempotency)
     if existing.contains(SSM_MARKER) {
         if !force {
-            println!("SSH config already contains Vouch SSM configuration.");
+            tr_println!("setup-ssm-already-configured");
 
             // Show existing configuration details
             if let Some(proxy_line) = existing
@@ -186,10 +188,10 @@ pub(crate) async fn run(
                 .find(|l| l.contains("aws ssm start-session"))
             {
                 if let Some(p) = ssm_integration::extract_flag_value(proxy_line, "--profile") {
-                    println!("  Profile: {p}");
+                    tr_println!("setup-ssm-existing-profile", indent = "  ", value = p);
                 }
                 if let Some(r) = ssm_integration::extract_flag_value(proxy_line, "--region") {
-                    println!("  Region:  {r}");
+                    tr_println!("setup-ssm-existing-region", indent = "  ", value = r);
                 }
             }
             // Show host pattern from the Host line
@@ -198,22 +200,23 @@ pub(crate) async fn run(
                     let trimmed = rest.trim();
                     // Only show the host line that follows our marker
                     if !trimmed.is_empty() && trimmed != "*" {
-                        println!("  Hosts:   {trimmed}");
+                        tr_println!("setup-ssm-existing-hosts", indent = "  ", value = trimmed);
                         break;
                     }
                 }
             }
 
             println!();
-            println!(
-                "To reconfigure, re-run with --force or remove the '{SSM_MARKER}' block from {}.",
-                config_path.display()
+            tr_println!(
+                "setup-ssm-reconfigure-hint",
+                marker = SSM_MARKER,
+                path = config_path.display(),
             );
             return Ok(());
         }
 
         // --force: strip the existing block before appending the new one
-        println!("Replacing existing Vouch SSM configuration (--force).");
+        tr_println!("setup-ssm-replacing");
         println!();
     }
 
@@ -228,23 +231,14 @@ pub(crate) async fn run(
 
     let new_config = format!("{base}{ssm_config}");
     atomic_write_secure(&config_path, new_config.as_bytes())
-        .with_context(|| format!("failed to write {}", config_path.display()))?;
+        .with_context(|| tr_args!("setup-ssm-err-write", path = config_path.display()))?;
 
-    println!("Updated SSH config: {}", config_path.display());
+    tr_println!("setup-ssm-result-block", path = config_path.display());
     println!();
-    println!("To use:");
-    println!("  vouch login");
-    println!("  ssh ec2-user@i-0abc123def456");
-    println!();
-    println!("Prerequisites:");
-    println!("  1. Run 'vouch login' to authenticate");
-    println!("  2. EC2 instances must have the SSM agent installed and an IAM instance");
-    println!("     profile with SSM permissions");
-    println!();
-    println!("To undo:");
-    println!(
-        "  Remove the '{SSM_MARKER}' block from {}",
-        config_path.display()
+    tr_println!(
+        "setup-ssm-undo",
+        marker = SSM_MARKER,
+        path = config_path.display()
     );
 
     Ok(())

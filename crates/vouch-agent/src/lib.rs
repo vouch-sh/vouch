@@ -37,6 +37,7 @@ pub mod dns;
 pub mod error;
 #[cfg(unix)]
 pub mod expiry_monitor;
+pub mod i18n;
 pub mod protocol;
 #[cfg(unix)]
 pub mod recovery;

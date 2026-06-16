@@ -18,6 +18,11 @@ use vouch_agent::server::AgentServer;
 use vouch_agent::socket::remove_socket;
 use vouch_agent::ssh_agent::{SshAgentServer, SshAgentState, ssh_agent_socket_path};
 use vouch_agent::state::AgentState;
+#[expect(
+    unused_imports,
+    reason = "re-exported so dual-compiled submodules can use `crate::tr*!`"
+)]
+use vouch_agent::{tr, tr_args, tr_eprintln, tr_println};
 
 /// Vouch credential agent daemon.
 #[derive(Parser)]
@@ -52,19 +57,24 @@ fn main() -> ExitCode {
     // one-time notice reaches the user's terminal rather than the daemon log.
     vouch_common::paths::migrate_legacy_layout();
 
+    if let Err(e) = vouch_agent::i18n::init() {
+        eprintln!("Error initializing i18n: {e}");
+        return ExitCode::FAILURE;
+    }
+
     // Handle status check (no logging needed)
     if args.status {
         match daemon::is_running() {
             Ok(true) => {
-                println!("Agent is running");
+                tr_println!("agent-running");
                 return ExitCode::SUCCESS;
             }
             Ok(false) => {
-                println!("Agent is not running");
+                tr_println!("agent-not-running");
                 return ExitCode::FAILURE;
             }
             Err(e) => {
-                eprintln!("Error checking status: {e}");
+                tr_eprintln!("agent-status-err", reason = e);
                 return ExitCode::FAILURE;
             }
         }
@@ -78,12 +88,12 @@ fn main() -> ExitCode {
     // Check if already running
     match daemon::is_running() {
         Ok(true) => {
-            eprintln!("Agent is already running. Use --stop to stop it.");
+            tr_eprintln!("agent-already-running");
             return ExitCode::FAILURE;
         }
         Ok(false) => {}
         Err(e) => {
-            eprintln!("Error checking if agent is running: {e}");
+            tr_eprintln!("agent-check-running-err", reason = e);
             return ExitCode::FAILURE;
         }
     }
@@ -119,7 +129,7 @@ fn main() -> ExitCode {
                 info!("Running in foreground mode (daemonization not available)");
             }
             Err(e) => {
-                eprintln!("Failed to daemonize: {e}");
+                tr_eprintln!("agent-daemonize-err", reason = e);
                 return ExitCode::FAILURE;
             }
         }
@@ -258,20 +268,20 @@ fn stop_agent() -> ExitCode {
     let pid_path = match daemon::pid_file_path() {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("Error getting PID file path: {e}");
+            tr_eprintln!("agent-pid-file-err", reason = e);
             return ExitCode::FAILURE;
         }
     };
 
     if !pid_path.exists() {
-        eprintln!("Agent is not running (no PID file)");
+        tr_eprintln!("agent-not-running-no-pid");
         return ExitCode::FAILURE;
     }
 
     let pid_str = match std::fs::read_to_string(&pid_path) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("Failed to read PID file: {e}");
+            tr_eprintln!("agent-pid-read-err", reason = e);
             return ExitCode::FAILURE;
         }
     };
@@ -279,7 +289,7 @@ fn stop_agent() -> ExitCode {
     let pid: i32 = match pid_str.trim().parse() {
         Ok(p) => p,
         Err(_) => {
-            eprintln!("Invalid PID in file");
+            tr_eprintln!("agent-pid-invalid");
             // Best-effort cleanup of the stale PID file.
             let _removed = std::fs::remove_file(&pid_path);
             return ExitCode::FAILURE;
@@ -291,22 +301,22 @@ fn stop_agent() -> ExitCode {
     {
         // SAFETY: kill() is a standard Unix API for sending signals to processes
         if unsafe { libc::kill(pid, libc::SIGTERM) } == 0 {
-            println!("Sent stop signal to agent (PID {pid})");
+            tr_println!("agent-stop-signal-sent", pid = pid);
 
             // Wait a bit and check if it stopped
             std::thread::sleep(std::time::Duration::from_millis(500));
 
             // SAFETY: kill(pid, 0) checks if process exists
             if unsafe { libc::kill(pid, 0) } != 0 {
-                println!("Agent stopped");
+                tr_println!("agent-stopped");
                 // Best-effort cleanup of the PID file.
                 let _removed = daemon::remove_pid_file();
             } else {
-                println!("Agent is shutting down...");
+                tr_println!("agent-shutting-down");
             }
             ExitCode::SUCCESS
         } else {
-            eprintln!("Failed to send signal to agent (PID {pid})");
+            tr_eprintln!("agent-stop-signal-failed", pid = pid);
             // Remove stale PID file if process doesn't exist
             // SAFETY: kill(pid, 0) checks if process exists
             if unsafe { libc::kill(pid, 0) } != 0 {
@@ -319,7 +329,7 @@ fn stop_agent() -> ExitCode {
 
     #[cfg(not(unix))]
     {
-        eprintln!("Stop command not supported on this platform");
+        tr_eprintln!("agent-stop-unsupported");
         ExitCode::FAILURE
     }
 }

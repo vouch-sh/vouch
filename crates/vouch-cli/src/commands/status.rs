@@ -14,6 +14,7 @@ use crate::integrations::{
     LABEL_WIDTH, SshIntegration, SsmIntegration, print_integration_status,
 };
 use crate::style;
+use vouch_cli::{tr, tr_args};
 
 /// Output format for the status command.
 #[derive(Debug, Clone, Copy, Default, clap::ValueEnum)]
@@ -161,8 +162,8 @@ async fn agent_status(server: &str, mode: OutputFormat) -> Result<bool> {
                 mode,
                 true,
                 None,
-                &style::bold_red("Not authenticated."),
-                "Run 'vouch login' to authenticate.",
+                &style::bold_red(&tr!("status-not-authenticated")),
+                &tr!("status-hint-login"),
             );
             Ok(true)
         }
@@ -171,8 +172,8 @@ async fn agent_status(server: &str, mode: OutputFormat) -> Result<bool> {
                 mode,
                 true,
                 Some(0),
-                &style::bold_red("Session expired."),
-                "Run 'vouch login' to re-authenticate.",
+                &style::bold_red(&tr!("status-session-expired")),
+                &tr!("status-hint-relogin"),
             );
             Ok(true)
         }
@@ -193,8 +194,8 @@ async fn server_status(server: &str, mode: OutputFormat) -> Result<()> {
             mode,
             false,
             None,
-            &style::bold_red("Not authenticated."),
-            "Run 'vouch login' to authenticate.",
+            &style::bold_red(&tr!("status-not-authenticated")),
+            &tr!("status-hint-login"),
         );
         return Ok(());
     }
@@ -225,8 +226,8 @@ async fn server_status(server: &str, mode: OutputFormat) -> Result<()> {
                 if status.authenticated {
                     print_server_session(server, &status).await?;
                 } else {
-                    println!("{}", style::bold_red("Session expired."));
-                    println!("\n{}", style::dim("Run 'vouch login' to re-authenticate."));
+                    println!("{}", style::bold_red(&tr!("status-session-expired")));
+                    println!("\n{}", style::dim(&tr!("status-hint-relogin")));
                 }
             }
         },
@@ -235,8 +236,8 @@ async fn server_status(server: &str, mode: OutputFormat) -> Result<()> {
                 mode,
                 false,
                 None,
-                &format!("{}: {e}", style::bold_red("Session invalid")),
-                "Run 'vouch login' to re-authenticate.",
+                &style::bold_red(&tr_args!("status-session-invalid", reason = e)),
+                &tr!("status-hint-relogin"),
             );
         }
     }
@@ -246,27 +247,27 @@ async fn server_status(server: &str, mode: OutputFormat) -> Result<()> {
 
 /// Print a human-readable report for a server-verified session (no agent).
 async fn print_server_session(server: &str, status: &SessionStatus) -> Result<()> {
-    println!("{} ({server})", style::bold_green("Authenticated"));
+    println!(
+        "{} ({server})",
+        style::bold_green(&tr!("status-authenticated"))
+    );
     if let Some(email) = &status.email {
-        println!("  {:LABEL_WIDTH$} {email}", "Email:");
+        println!("  {:LABEL_WIDTH$} {email}", tr!("status-label-email"));
     }
     if let Some(device) = &status.device_name {
-        println!("  {:LABEL_WIDTH$} {device}", "Device:");
+        println!("  {:LABEL_WIDTH$} {device}", tr!("status-label-device"));
     }
     if let Some(expires_in) = status.expires_in_seconds {
         print_expiry(expires_in)?;
     }
     println!(
         "  {:LABEL_WIDTH$} {}",
-        "Agent:",
-        style::yellow("not running")
+        tr!("status-label-agent"),
+        style::yellow(&tr!("status-agent-not-running"))
     );
     println!();
     print_all_integrations(server).await;
-    println!(
-        "\n{}",
-        style::dim("Hint: Start the agent for faster status checks: vouch-agent --foreground")
-    );
+    println!("\n{}", style::dim(&tr!("status-hint-start-agent")));
     Ok(())
 }
 
@@ -280,10 +281,21 @@ async fn get_session_from_agent() -> vouch_agent::Result<SessionInfo> {
 /// Print session info from agent.
 #[cfg(unix)]
 fn print_agent_session(server: &str, session: &SessionInfo) -> Result<()> {
-    println!("{} ({server})", style::bold_green("Authenticated"));
-    println!("  {:LABEL_WIDTH$} {}", "Email:", session.user_email);
+    println!(
+        "{} ({server})",
+        style::bold_green(&tr!("status-authenticated"))
+    );
+    println!(
+        "  {:LABEL_WIDTH$} {}",
+        tr!("status-label-email"),
+        session.user_email
+    );
     print_expiry(session.expires_in_seconds)?;
-    println!("  {:LABEL_WIDTH$} {}", "Agent:", style::green("running"));
+    println!(
+        "  {:LABEL_WIDTH$} {}",
+        tr!("status-label-agent"),
+        style::green(&tr!("status-agent-running"))
+    );
     Ok(())
 }
 
@@ -323,7 +335,7 @@ fn print_expiry(expires_in: u64) -> Result<()> {
         );
     }
 
-    let label = "Expires:";
+    let label = tr!("status-label-expires");
 
     let color_fn: fn(&str) -> String = if expires_in > 3600 {
         style::green

@@ -6,6 +6,7 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use vouch_cli::{tr, tr_args, tr_println};
 
 use crate::config::Config;
 use crate::install_path::resolve_install_path;
@@ -32,13 +33,13 @@ struct DockerConfig {
 /// * `configure` - If true, automatically configure Docker; if false, just show instructions
 pub(crate) async fn run(registries: &[String], configure: bool) -> Result<()> {
     // Load config to verify enrollment
-    let config = Config::load().context("failed to load config - run 'vouch enroll' first")?;
+    let config = Config::load().with_context(|| tr!("setup-err-load-config"))?;
     let _server = config
         .server_url()
-        .context("not configured - run 'vouch enroll' first")?;
+        .with_context(|| tr!("setup-err-not-configured"))?;
 
-    println!("Docker Credential Helper Setup");
-    println!("==============================\n");
+    tr_println!("setup-docker-header");
+    println!();
 
     // Get vouch binary path
     let vouch_path = resolve_install_path();
@@ -55,43 +56,40 @@ pub(crate) async fn run(registries: &[String], configure: bool) -> Result<()> {
             configure_docker_config(registries)?;
         }
 
-        println!("Docker credential helper configured successfully.\n");
+        tr_println!("setup-docker-configured");
+        println!();
 
         if registries.is_empty() {
-            println!("To configure registries, add them to ~/.docker/config.json:");
+            tr_println!("setup-docker-no-registries-add");
             print_example_config();
         } else {
-            println!("Configured registries:");
+            tr_println!("setup-docker-configured-registries-header");
             for registry in registries {
-                println!("  - {registry}");
+                tr_println!(
+                    "setup-docker-registry-line",
+                    indent = "  ",
+                    registry = registry
+                );
             }
         }
     } else {
         // Show manual instructions
-        println!("Step 1: Create symlink for docker-credential-vouch\n");
-        println!(
-            "  ln -sf \"{}\" \"{}\"",
-            vouch_path.display(),
-            symlink_path.display()
+        tr_println!(
+            "setup-docker-step1-block",
+            vouch_path = vouch_path.display(),
+            symlink_path = symlink_path.display(),
         );
         println!();
 
-        println!("Step 2: Configure Docker to use the credential helper\n");
-        println!("  Add to ~/.docker/config.json:\n");
+        tr_println!("setup-docker-step2-header");
         print_example_config();
 
-        println!("\nOr run: vouch setup docker --configure [REGISTRIES...]");
         println!();
-        println!("Examples:");
-        println!("  vouch setup docker --configure ghcr.io");
-        println!("  vouch setup docker --configure 123456789012.dkr.ecr.us-east-1.amazonaws.com");
-        println!("  vouch setup docker --configure 123456789012.dkr.ecr.us-west-2.amazonaws.com");
+        tr_println!("setup-docker-tail-block");
     }
 
     println!();
-    println!("Supported registries:");
-    println!("  - AWS ECR:     *.dkr.ecr.*.amazonaws.com");
-    println!("  - GitHub:      ghcr.io");
+    tr_println!("setup-docker-supported-block");
 
     Ok(())
 }
@@ -110,15 +108,20 @@ fn create_credential_helper_symlink(
 
 /// Configure ~/.docker/config.json with the credential helper.
 fn configure_docker_config(registries: &[String]) -> Result<()> {
-    let home = dirs::home_dir().context("could not determine home directory")?;
+    let home = dirs::home_dir().with_context(|| tr!("setup-err-no-home"))?;
     let docker_config_path = home.join(".docker/config.json");
 
     // Load existing config or create new
     let mut config: DockerConfig = if docker_config_path.exists() {
-        let content = std::fs::read_to_string(&docker_config_path)
-            .with_context(|| format!("failed to read {}", docker_config_path.display()))?;
-        serde_json::from_str(&content)
-            .with_context(|| format!("failed to parse {}", docker_config_path.display()))?
+        let content = std::fs::read_to_string(&docker_config_path).with_context(|| {
+            tr_args!("setup-docker-err-read", path = docker_config_path.display())
+        })?;
+        serde_json::from_str(&content).with_context(|| {
+            tr_args!(
+                "setup-docker-err-parse",
+                path = docker_config_path.display()
+            )
+        })?
     } else {
         DockerConfig::default()
     };
@@ -135,16 +138,23 @@ fn configure_docker_config(registries: &[String]) -> Result<()> {
         && !parent.exists()
     {
         std::fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create {}", parent.display()))?;
+            .with_context(|| tr_args!("setup-docker-err-create-dir", path = parent.display()))?;
     }
 
     // Write config atomically to avoid corruption if interrupted
     let json =
-        serde_json::to_string_pretty(&config).context("failed to serialize Docker config")?;
-    vouch_common::fs::atomic_write(&docker_config_path, json.as_bytes())
-        .with_context(|| format!("failed to write {}", docker_config_path.display()))?;
+        serde_json::to_string_pretty(&config).with_context(|| tr!("setup-docker-err-serialize"))?;
+    vouch_common::fs::atomic_write(&docker_config_path, json.as_bytes()).with_context(|| {
+        tr_args!(
+            "setup-docker-err-write",
+            path = docker_config_path.display()
+        )
+    })?;
 
-    println!("Updated: {}", docker_config_path.display());
+    tr_println!(
+        "setup-docker-updated-file",
+        path = docker_config_path.display()
+    );
 
     Ok(())
 }

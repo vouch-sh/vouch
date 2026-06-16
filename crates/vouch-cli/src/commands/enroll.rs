@@ -13,6 +13,7 @@ use crate::client::VouchClient;
 use crate::config::Config;
 use crate::fido2::{self, FidoDevice, YubiKey};
 use crate::session;
+use vouch_cli::{tr, tr_args, tr_println};
 
 /// Response from device token endpoint.
 #[derive(serde::Deserialize)]
@@ -36,7 +37,8 @@ impl std::fmt::Debug for DeviceTokenResponse {
 pub(crate) async fn run(server: &str) -> Result<()> {
     let client = VouchClient::unauthenticated(server)?;
 
-    println!("Starting enrollment...\n");
+    tr_println!("enroll-starting");
+    println!();
 
     // Step 1: Generate or load the FAPI client key (for DPoP proofs).
     let fapi_key = vouch_cli::fapi::key_store::load_or_create_client_key().ok();
@@ -63,30 +65,22 @@ pub(crate) async fn run(server: &str) -> Result<()> {
 
     // Try to open the browser automatically
     match open::that(verification_url) {
-        Ok(()) => {
-            println!("Opening browser to complete enrollment...");
-            println!();
-            println!("  URL:  {verification_url}");
-            println!("  Code: {}", device_response.user_code);
-            println!();
-            println!(
-                "If the browser didn't open, visit the URL above \
-                 and enter the code."
-            );
-        }
+        Ok(()) => tr_println!(
+            "enroll-browser-block",
+            url = verification_url,
+            code = &device_response.user_code,
+        ),
         Err(e) => {
             tracing::debug!("Failed to open browser: {e}");
-            println!("To complete enrollment:");
-            println!();
-            println!("  1. Open this URL in your browser:");
-            println!("     {verification_url}");
-            println!();
-            println!("  2. Enter this code:");
-            println!("     {}", device_response.user_code);
+            tr_println!(
+                "enroll-manual-block",
+                url = verification_url,
+                code = &device_response.user_code,
+            );
         }
     }
     println!();
-    println!("Waiting for browser authorization...");
+    tr_println!("enroll-waiting");
 
     // Step 5: Poll for token (with optional DPoP proofs).
     let token_response = poll_for_token(&client, &device_response, fapi_key.as_ref()).await?;
@@ -107,8 +101,8 @@ pub(crate) async fn run(server: &str) -> Result<()> {
     )
     .await?;
 
-    println!("\nEnrollment successful!");
-    println!("Enrolled as: {}", token_response.email);
+    println!();
+    tr_println!("enroll-success-block", email = &token_response.email);
 
     // Step 8: Auto-register the inserted YubiKey if not already known.
     // The enrollment token is a full OAuth access token that can call
@@ -117,20 +111,15 @@ pub(crate) async fn run(server: &str) -> Result<()> {
         tracing::debug!("Auto-registration skipped: {e}");
     }
 
+    println!();
     if agent_stored {
-        println!("\nYour identity is now available. Check with: vouch status");
+        tr_println!("session-agent-ready");
     } else {
-        println!("\nNote: Agent not running. Start it with: vouch-agent --foreground");
+        tr_println!("session-agent-not-running");
     }
 
     println!();
-    println!("Set up integrations:");
-    println!("  vouch setup ssh      # SSH certificates");
-    println!("  vouch setup aws      # AWS credentials");
-    println!("  vouch setup github   # GitHub tokens");
-    println!();
-    println!("Or add a backup key:");
-    println!("  vouch login && vouch register --name \"Backup Key\"");
+    tr_println!("enroll-next-steps");
 
     Ok(())
 }
@@ -178,9 +167,9 @@ async fn request_device_code(
             client
                 .post_form("/oauth/device", &retry_request)
                 .await
-                .context("Failed to start enrollment")
+                .with_context(|| tr!("enroll-err-start"))
         }
-        Err(e) => Err(e.context("Failed to start enrollment")),
+        Err(e) => Err(e.context(tr!("enroll-err-start"))),
     }
 }
 
@@ -263,11 +252,7 @@ async fn poll_for_token(
     loop {
         // Check timeout
         if start.elapsed() > timeout {
-            anyhow::bail!(
-                "Enrollment timed out. Please try again.\n\
-                 Make sure to complete the sign-in in your \
-                 browser window and enter the code shown above."
-            );
+            anyhow::bail!(tr!("enroll-err-timeout"));
         }
 
         // Wait before polling
@@ -276,7 +261,7 @@ async fn poll_for_token(
         // Show progress (only on interactive terminals)
         if stdout().is_terminal() {
             dots = dots.saturating_add(1) % 4;
-            print!("\rWaiting for browser authorization{}", ".".repeat(dots));
+            print!("\r{}{}", tr!("enroll-waiting-progress"), ".".repeat(dots),);
             print!("{}", " ".repeat(3_usize.saturating_sub(dots)));
             stdout().flush().ok();
         }
@@ -301,18 +286,17 @@ async fn poll_for_token(
             }
             Err(PollError::Denied) => {
                 println!();
-                return Err(crate::exit_code::CliError::PermissionDenied(
-                    "authorization was denied".to_string(),
-                )
-                .into());
+                return Err(
+                    crate::exit_code::CliError::PermissionDenied(tr!("enroll-err-denied")).into(),
+                );
             }
             Err(PollError::Expired) => {
                 println!();
-                anyhow::bail!("The code has expired. Please try again.");
+                anyhow::bail!(tr!("enroll-err-code-expired"));
             }
             Err(PollError::Other(msg)) => {
                 println!();
-                anyhow::bail!("Enrollment failed: {msg}");
+                anyhow::bail!(tr_args!("enroll-err-failed", reason = msg));
             }
         }
     }
@@ -476,7 +460,8 @@ async fn register_current_key(server: &str, token: SecretString) -> Result<()> {
         return Ok(());
     }
 
-    println!("\nRegistering your YubiKey with the server...");
+    println!();
+    tr_println!("enroll-registering-key");
 
     let rp_id = start_resp.rp_id.clone();
     let rp_name = start_resp.rp_name.clone();
@@ -515,9 +500,9 @@ async fn register_current_key(server: &str, token: SecretString) -> Result<()> {
         .await
         .context("failed to complete key registration")?;
 
-    println!(
-        "YubiKey registered! (device ID: {})",
-        complete_resp.device_id
+    tr_println!(
+        "enroll-key-registered",
+        device_id = &complete_resp.device_id,
     );
 
     Ok(())

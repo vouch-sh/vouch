@@ -11,6 +11,15 @@ use anyhow::Result;
 use clap::{CommandFactory, Parser, Subcommand};
 use std::process::ExitCode;
 use tracing_subscriber::EnvFilter;
+// Bring the i18n macros into the binary crate root so submodules under the
+// `vouch` binary (e.g. `fido2/unix.rs`, which is compiled into both the lib
+// and the bin) can reference them as `crate::tr!` regardless of compilation
+// context.
+#[expect(
+    unused_imports,
+    reason = "re-exported so dual-compiled submodules can use `crate::tr*!`"
+)]
+use vouch_cli::{tr, tr_args, tr_eprintln, tr_println};
 
 mod client;
 mod commands;
@@ -171,20 +180,14 @@ async fn check_pnpm_tokenhelper_invocation(argv0: &str) -> Result<bool> {
 #[derive(Parser)]
 #[command(
     name = "vouch",
-    about = "Hardware-backed identity for developers",
+    about = tr!("cli-about"),
+    long_about = tr!("cli-long-about"),
     version,
-    after_help = "Exit codes:\n  \
-        0  Success\n  \
-        1  General error\n  \
-        2  Not authenticated (session expired or missing)\n  \
-        3  Hardware key not detected\n  \
-        4  Network/server unreachable\n  \
-        5  Permission denied\n  \
-        6  Configuration error"
+    after_help = tr!("cli-after-help"),
 )]
 struct Cli {
     /// Vouch server URL.
-    #[arg(long, env = "VOUCH_SERVER", global = true)]
+    #[arg(long, env = "VOUCH_SERVER", global = true, help = tr!("cli-server-help"))]
     server: Option<String>,
 
     /// Allow insecure HTTP connections to non-localhost servers.
@@ -192,11 +195,15 @@ struct Cli {
     allow_insecure: bool,
 
     /// Enable verbose output.
-    #[arg(short, long, global = true)]
+    #[arg(short, long, global = true, help = tr!("cli-verbose-help"))]
     verbose: bool,
 
+    /// Override the user-facing language (BCP-47, e.g. en-US, fr-FR).
+    #[arg(long, env = "VOUCH_LANG", global = true, help = tr!("cli-lang-help"))]
+    lang: Option<String>,
+
     /// Control color output.
-    #[arg(long, global = true, default_value = "auto")]
+    #[arg(long, global = true, default_value = "auto", help = tr!("cli-color-help"))]
     color: style::ColorChoice,
 
     #[command(subcommand)]
@@ -294,43 +301,49 @@ impl RedshiftArgs {
 #[derive(Subcommand)]
 enum Commands {
     /// Enroll with browser-based OIDC + `WebAuthn` (recommended for new users).
+    #[command(about = tr!("cmd-enroll-about"))]
     Enroll,
     /// Register an additional `YubiKey` (requires login first).
+    #[command(about = tr!("cmd-register-about"))]
     Register {
         /// Human-readable name for this `YubiKey` (e.g., "My `YubiKey` 5").
         /// Defaults to "`YubiKey`" if not specified.
-        #[arg(long)]
+        #[arg(long, help = tr!("arg-register-name-help"))]
         name: Option<String>,
         /// Timeout in seconds for YubiKey detection (0 for no timeout).
-        #[arg(long, default_value = "60")]
+        #[arg(long, default_value = "60", help = tr!("arg-register-timeout-help"))]
         timeout: u64,
     },
     /// Authenticate with your `YubiKey`.
+    #[command(about = tr!("cmd-login-about"))]
     Login {
         /// Timeout in seconds for YubiKey detection (0 for no timeout).
-        #[arg(long, default_value = "60")]
+        #[arg(long, default_value = "60", help = tr!("arg-login-timeout-help"))]
         timeout: u64,
     },
     /// Show current session status.
+    #[command(about = tr!("cmd-status-about"))]
     Status {
         /// Output format.
-        #[arg(long, value_enum)]
+        #[arg(long, value_enum, help = tr!("arg-status-format-help"))]
         format: Option<commands::status::OutputFormat>,
     },
     /// End your current session.
+    #[command(about = tr!("cmd-logout-about"))]
     Logout,
     /// Output credential environment variables for `eval`.
     ///
     /// Usage: `eval "$(vouch env --type aws --shell bash --role <ARN>)"`
+    #[command(about = tr!("cmd-env-about"), long_about = tr!("cmd-env-long-about"))]
     Env {
         /// Credential type to export.
-        #[arg(long = "type")]
+        #[arg(long = "type", help = tr!("arg-env-type-help"))]
         credential_type: commands::CredentialType,
         /// Shell syntax to emit.
-        #[arg(long, default_value = "bash")]
+        #[arg(long, default_value = "bash", help = tr!("arg-env-shell-help"))]
         shell: commands::env::Shell,
         /// AWS IAM role ARN (required for --type aws).
-        #[arg(long)]
+        #[arg(long, help = tr!("arg-env-role-help"))]
         role: Option<String>,
         #[command(flatten)]
         codeartifact: CodeArtifactArgs,
@@ -342,24 +355,28 @@ enum Commands {
     /// Output a shell hook for ambient auth status.
     ///
     /// Add `eval "$(vouch init bash)"` to your shell profile.
+    #[command(about = tr!("cmd-init-about"), long_about = tr!("cmd-init-long-about"))]
     Init {
         /// Shell to generate hook for.
+        #[arg(help = tr!("arg-init-shell-help"))]
         shell: commands::init::Shell,
     },
     /// Manage registered security keys.
     ///
     /// Without a subcommand, opens an interactive menu.
+    #[command(about = tr!("cmd-keys-about"), long_about = tr!("cmd-keys-long-about"))]
     Keys {
         #[command(subcommand)]
         command: Option<KeysCommands>,
     },
     /// Run a command with Vouch-provided credentials in the environment.
+    #[command(about = tr!("cmd-exec-about"))]
     Exec {
         /// Credential type to inject.
-        #[arg(long = "type", value_enum)]
+        #[arg(long = "type", value_enum, help = tr!("arg-exec-type-help"))]
         credential_type: commands::CredentialType,
         /// AWS IAM role ARN (required for --type aws).
-        #[arg(long)]
+        #[arg(long, help = tr!("arg-exec-role-help"))]
         role: Option<String>,
         #[command(flatten)]
         codeartifact: CodeArtifactArgs,
@@ -368,39 +385,45 @@ enum Commands {
         #[command(flatten)]
         redshift: RedshiftArgs,
         /// Command and arguments to execute.
-        #[arg(trailing_var_arg = true, required = true)]
+        #[arg(trailing_var_arg = true, required = true, help = tr!("arg-exec-command-help"))]
         command: Vec<String>,
     },
     /// Obtain credentials for various services.
+    #[command(about = tr!("cmd-credential-about"))]
     Credential {
         #[command(subcommand)]
         command: CredentialCommands,
     },
     /// Configure integrations.
+    #[command(about = tr!("cmd-setup-about"))]
     Setup {
         #[command(subcommand)]
         command: SetupCommands,
     },
     /// AWS Identity Center commands for multi-account management.
+    #[command(about = tr!("cmd-aws-about"))]
     Aws {
         #[command(subcommand)]
         command: AwsCommands,
     },
     /// Generate shell completions.
+    #[command(about = tr!("cmd-completions-about"))]
     Completions(commands::completions::CompletionsArgs),
     /// Check your Vouch environment for common issues.
+    #[command(about = tr!("cmd-doctor-about"))]
     Doctor {
         /// Suppress output (exit code only).
-        #[arg(short, long)]
+        #[arg(short, long, help = tr!("arg-doctor-quiet-help"))]
         quiet: bool,
         /// Output as JSON.
-        #[arg(long)]
+        #[arg(long, help = tr!("arg-doctor-json-help"))]
         json: bool,
     },
     /// Show device posture signals (what the CLI detects about this machine).
+    #[command(about = tr!("cmd-posture-about"))]
     Posture {
         /// Output format.
-        #[arg(long, value_enum, default_value = "text")]
+        #[arg(long, value_enum, default_value = "text", help = tr!("arg-posture-format-help"))]
         format: commands::posture::OutputFormat,
     },
     /// Run diagnostic test of YubiKey registration + authentication (bypasses server).
@@ -408,7 +431,11 @@ enum Commands {
     /// Not available on Windows: depends on the CTAP2 protocol which Windows
     /// blocks for non-elevated processes.
     #[cfg(not(target_os = "windows"))]
-    #[command(hide = true)]
+    #[command(
+        about = tr!("cmd-diag-about"),
+        long_about = tr!("cmd-diag-long-about"),
+        hide = true,
+    )]
     Diag(commands::diag::DiagArgs),
 }
 
@@ -515,6 +542,12 @@ async fn run() -> Result<()> {
     if init_and_dispatch_helper_binaries(config.as_ref().ok()).await? {
         return Ok(());
     }
+
+    // Install the negotiated locale into the OnceLock before `Cli::parse()`
+    // expands the `tr!()` calls embedded in the clap derive attributes. The
+    // pre-scan honors `--lang` from argv since clap hasn't parsed it yet.
+    let preferred = vouch_cli::i18n::preresolve_lang_from_argv_and_env();
+    vouch_cli::i18n::init(preferred)?;
 
     let cli = Cli::parse();
 

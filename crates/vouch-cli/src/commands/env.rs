@@ -3,6 +3,7 @@
 
 use anyhow::{Context, Result};
 use secrecy::ExposeSecret;
+use vouch_cli::tr;
 
 use super::CredentialType;
 use super::exec::{CodeArtifactOptions, RdsOptions, RedshiftOptions};
@@ -28,9 +29,7 @@ pub(crate) async fn run(
 ) -> Result<()> {
     match credential_type {
         CredentialType::Aws => {
-            let role_arn = role.context(
-                "AWS credentials require --role. Usage: vouch env --type aws --role <ARN>",
-            )?;
+            let role_arn = role.with_context(|| tr!("env-err-aws-needs-role"))?;
             print_aws_env(server, role_arn, shell).await
         }
         CredentialType::Github => print_github_env(server, shell).await,

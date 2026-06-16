@@ -164,3 +164,21 @@ These optional variables configure download links displayed in the server UI.
 | `VOUCH_CLI_DOWNLOAD_MACOS` | No | _(none)_ | CLI download URL for macOS, displayed in the server UI. |
 | `VOUCH_CLI_DOWNLOAD_LINUX` | No | _(none)_ | CLI download URL for Linux, displayed in the server UI. |
 | `VOUCH_CLI_DOWNLOAD_WINDOWS` | No | _(none)_ | CLI download URL for Windows, displayed in the server UI. |
+
+## CLI Localization
+
+The Vouch CLI resolves its user-facing language once at startup. Resolution checks the following sources in order; the first that parses as a [BCP 47](https://www.rfc-editor.org/rfc/rfc5646) language tag wins.
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `--lang <BCP-47>` | No | _(none)_ | Global CLI flag (highest priority). Example: `vouch --lang en-US enroll`. |
+| `VOUCH_LANG` | No | _(none)_ | Explicit CLI locale override. Example: `VOUCH_LANG=en-US`. |
+| `LC_ALL` | No | _(POSIX)_ | Standard POSIX locale variable; overrides every other `LC_*`. |
+| `LC_MESSAGES` | No | _(POSIX)_ | Standard POSIX locale variable for message translations. |
+| `LANG` | No | _(POSIX)_ | Standard POSIX locale variable used when `LC_*` are unset. |
+
+If none of the above resolve, the CLI falls through to the operating system's default locale via [`sys-locale`](https://crates.io/crates/sys-locale). When that is also unavailable (e.g., a minimal container with no locale configured), the CLI falls back to `en-US`. POSIX-style locale strings (`en_US.UTF-8`, `ca_ES@valencia`) are normalized by stripping the `.<codeset>` and `@<modifier>` suffixes and replacing `_` with `-`.
+
+Machine-readable output (`vouch status --json`, `vouch status --shell`, `vouch env`, credential helpers) is **never** affected by the locale — those payloads are consumed by other tools and remain stable across locales. Only human-facing prompts, success/failure messages, and `--help` text honor the negotiated locale.
+
+This release ships `en-US` only; the catalog scaffolding lets translations land in isolated PRs without changing the CLI surface.
