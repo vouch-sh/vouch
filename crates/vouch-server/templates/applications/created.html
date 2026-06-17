@@ -73,7 +73,13 @@
 
             <div>
                 <label class="block text-sm font-medium text-gray-300 mb-1">{{ self.tr("apps-create-type-label") }}</label>
-                <p class="text-sm text-gray-200">{{ application_type }}</p>
+                <p class="text-sm text-gray-200">
+                    {% if application_type == "web" %}{{ self.tr("apps-type-web") }}
+                    {% elif application_type == "native" %}{{ self.tr("apps-type-native") }}
+                    {% elif application_type == "spa" %}{{ self.tr("apps-type-spa") }}
+                    {% elif application_type == "service" %}{{ self.tr("apps-type-service") }}
+                    {% else %}{{ application_type }}{% endif %}
+                </p>
             </div>
         </div>
 

@@ -58,7 +58,11 @@
                             {% elif app.application_type == "native" %}bg-vouch-success-bg text-vouch-success
                             {% elif app.application_type == "spa" %}bg-vouch-warning-bg text-vouch-warning
                             {% else %}bg-[#1f0d2d] text-[#a78bfa]{% endif %}">
-                            {{ app.application_type }}
+                            {% if app.application_type == "web" %}{{ self.tr("apps-type-web") }}
+                            {% elif app.application_type == "native" %}{{ self.tr("apps-type-native") }}
+                            {% elif app.application_type == "spa" %}{{ self.tr("apps-type-spa") }}
+                            {% elif app.application_type == "service" %}{{ self.tr("apps-type-service") }}
+                            {% else %}{{ app.application_type }}{% endif %}
                         </span>
                     </td>
                     <td class="px-3 py-4 whitespace-nowrap">
@@ -68,9 +72,17 @@
                             {% when crate::db::AccessScope::Personal %}bg-[#2d1f0d] text-[#fbbf24]
                             {% when crate::db::AccessScope::Public %}bg-[#0d2d1f] text-[#3ecf8e]
                             {% endmatch %}">
-                            {{ app.access_scope.display_name() }}
+                            {% match app.access_scope %}
+                            {% when crate::db::AccessScope::Organization %}{{ self.tr("apps-scope-organization") }}
+                            {% when crate::db::AccessScope::Personal %}{{ self.tr("apps-scope-personal") }}
+                            {% when crate::db::AccessScope::Public %}{{ self.tr("apps-scope-public") }}
+                            {% endmatch %}
                             <span class="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 px-2 py-1 text-xs text-gray-200 bg-gray-800 rounded whitespace-nowrap opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none z-10">
-                                {{ app.access_scope.description() }}
+                                {% match app.access_scope %}
+                                {% when crate::db::AccessScope::Organization %}{{ self.tr("apps-scope-organization").attr("desc") }}
+                                {% when crate::db::AccessScope::Personal %}{{ self.tr("apps-scope-personal").attr("desc") }}
+                                {% when crate::db::AccessScope::Public %}{{ self.tr("apps-scope-public").attr("desc") }}
+                                {% endmatch %}
                             </span>
                         </span>
                     </td>

@@ -7,6 +7,11 @@
 # This is the source-of-truth catalog for BOTH server-rendered templates and
 # the strings injected into static JS (see templates' `js_i18n` blocks).
 #
+# do-not-translate: some user-visible text is intentionally NOT in this catalog
+# because it is code, not prose — shell commands, CEL expression examples, JSON
+# and URI placeholders, and proper nouns (OS names like macOS / Debian / Ubuntu).
+# Those stay verbatim in the templates so they read identically in every locale.
+#
 # ---------------------------------------------------------------------------
 # Terms (Fluent feature: https://projectfluent.org/fluent/guide/terms.html)
 #   - Reusable nouns referenced as `{ -term-name }` from any message.
@@ -158,6 +163,22 @@ apps-list-status-active = Active
 apps-list-status-inactive = Inactive
 apps-list-never = Never
 apps-list-delete-confirm = Are you sure you want to delete this application?
+# Application type pill (applications/list.html) and the type shown on the
+# created confirmation (applications/created.html). Compact forms suit the
+# table pill and are reused on the created page.
+apps-type-web = Web
+apps-type-spa = SPA
+apps-type-native = Native
+apps-type-service = Service
+# Access scope pill plus its hover tooltip (applications/list.html). The display
+# name and its description are one conceptual pair, kept together via a Fluent
+# attribute (.desc) rather than as separate ids.
+apps-scope-organization = Organization
+    .desc = Only users in your organization can authenticate
+apps-scope-personal = Personal
+    .desc = Only you can authenticate
+apps-scope-public = Public
+    .desc = Any { -product } user can authenticate
 
 ## Security keys management (enroll_keys.html, enroll_keys_container.html)
 enroll-keys-page-title = { -product } - { -security-key }s
@@ -196,6 +217,7 @@ home-feature-phishing = Phishing-resistant
 
 ## Login (login.html)
 login-page-title = { -product } - Sign In
+login-logo-alt = Application logo
 login-title = Sign In
 # DOCUMENTED FRAGMENT: paired with a `<span class="font-semibold ...">` styled
 # client name in the template (login.html). Merging into a single message with
@@ -323,6 +345,20 @@ install-step2-title = Enroll your { -yubikey }
 install-step2-body = This opens a browser to verify your identity and register your { -yubikey }.
 install-step3-title = Daily login
 install-step3-body = After login, your identity is available to SSH, AWS, Git, and other tools automatically.
+# DOCUMENTED FRAGMENT: shell-comment annotations heading the apt/rpm code
+# blocks (install.html). The commands themselves stay English as code; only
+# these `#`-prefixed comment lines are prose. Shared across both package
+# managers where the wording is identical.
+install-comment-gpg = # Import GPG key
+install-comment-add-repo = # Add repository
+install-comment-install = # Install
+# DOCUMENTED FRAGMENT: the step-3 simulated terminal session (install.html) is
+# a stack of separately-styled <div>s interleaved with the untranslated
+# `$ vouch login` command, so each translatable line is its own id.
+install-step3-comment = # Start your day with a single touch
+install-step3-prompt-pin = Enter PIN: ****
+install-step3-prompt-touch = Touch your { -yubikey }...
+install-step3-authenticated = ✓ Authenticated for 8 hours
 
 ## Integrations (integrations.html)
 integrations-page-title = { -product } - Integrations
@@ -379,8 +415,11 @@ keys-js-delete = Delete key "{ $name }"? This action cannot be undone.
 keys-js-delete-failed = Failed to delete key
 keys-js-delete-failed-reauth = Failed to delete key after re-authentication
 keys-js-delete-failed-message = Failed to delete key: { $message }
-keys-js-stepup-1 = Deleting a key requires recent authentication.
-keys-js-stepup-2 = Please touch your security key when prompted.
+# Single multiline message (newline preserved between lines) so translators see
+# the full prompt as one block rather than two concatenated fragments.
+keys-js-stepup =
+    Deleting a key requires recent authentication.
+    Please touch your { -security-key } when prompted.
 keys-js-reauth-start-failed = Failed to start re-authentication
 keys-js-reauth-complete-failed = Failed to complete re-authentication
 keys-js-reg-starting = Starting registration...
