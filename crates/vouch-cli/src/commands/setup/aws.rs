@@ -91,14 +91,10 @@ pub(crate) async fn run(
             // Auto-naming: check if a vouch profile already targets this role
             if let Some(existing) = config.find_vouch_profile_for_role(role_arn) {
                 tr_println!(
-                    "setup-aws-already-configured-line",
+                    "setup-aws-already-configured-block",
                     profile = existing.name.as_str(),
                     role_arn = role_arn,
                 );
-                println!();
-                tr_println!("setup-aws-use-it-with");
-                // Shell command: machine-readable, stays English.
-                println!("  aws --profile {} sts get-caller-identity", existing.name);
                 return Ok(());
             }
             config.next_vouch_profile_name()
@@ -117,24 +113,9 @@ pub(crate) async fn run(
     });
     config.save()?;
 
-    tr_println!("setup-aws-added-profile", profile = profile_name.as_str());
-    println!();
-    tr_println!("setup-aws-use-cli-block");
-    println!();
-    // Shell commands: machine-readable, stay English.
-    println!("  aws --profile {profile_name} sts get-caller-identity");
-    println!();
-    tr_println!("setup-aws-or-set-env");
-    println!();
-    println!("  export AWS_PROFILE={profile_name}");
-    println!("  aws sts get-caller-identity");
-    println!();
-    tr_println!("setup-aws-prerequisites");
-    println!();
-    tr_println!("setup-aws-trust-policy-hint");
-    // Doc URL: machine-readable.
-    println!(
-        "  https://docs.aws.amazon.com/IAM/latest/UserGuide/id_roles_create_for-idp_oidc.html"
+    tr_println!(
+        "setup-aws-added-profile-block",
+        profile = profile_name.as_str(),
     );
 
     Ok(())

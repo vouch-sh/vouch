@@ -683,11 +683,27 @@ credential-ssh-issued-display =
       Serial: { $serial }
       Principals: { $principals }
       Valid for: { $valid_for }
+# Full block emitted when the agent picked up the new credentials. Includes
+# the displayed socket path and the matching export command in one message so
+# translators see the whole "credentials in agent, here's how to use them"
+# flow without coordinating across 3 keys. The `export` line is literal shell
+# text the user copy-pastes; translators leave it alone, same as `{ -cmd }`.
 credential-ssh-agent-loaded =
     SSH credentials loaded into agent.
       SSH agent socket: { $socket_path }
-credential-ssh-hint-set-sock = To use the agent, set SSH_AUTH_SOCK:
-credential-ssh-hint-add-config = To use this certificate, add to your ~/.ssh/config:
+
+    To use the agent, set SSH_AUTH_SOCK:
+      export SSH_AUTH_SOCK={ $socket_path }
+
+# Full block when the agent isn't available. The Host/IdentityFile/CertificateFile
+# stanza is literal SSH client config; translators leave it as-is, same as
+# any other config snippet in this catalog.
+credential-ssh-hint-add-config =
+    To use this certificate, add to your ~/.ssh/config:
+
+      Host *
+          IdentityFile { $key_path }
+          CertificateFile { $cert_path }
 
 ## credential helpers (shared)
 
@@ -709,7 +725,15 @@ credential-github-err-fetch-token = vouch: failed to get { -github } token: { $e
 
 # Emitted when cargo invokes the credential helper for an unsupported login
 # action ({ -cmd } manages auth, not `cargo login`).
-credential-cargo-login-needed = To authenticate with registry '{ $registry }', run:
+# Full block when cargo asks the helper to log in (which vouch doesn't
+# support — auth happens via `{ -cmd } login`). The shell snippet lives in
+# the message so translators see the "do this instead" instruction
+# together.
+credential-cargo-login-needed =
+    To authenticate with registry '{ $registry }', run:
+
+        { -cmd } login
+
 credential-cargo-login-hint = use '{ -cmd } login' to authenticate
 credential-cargo-logout =
     Note: 'cargo logout' does not affect your { -product } session for registry '{ $registry }'.
@@ -871,18 +895,40 @@ setup-aws-err-role-required = Either --role or --discover is required
 setup-aws-profile-already-exists =
     Profile [{ $profile }] already exists in ~/.aws/config.
     To update it, edit ~/.aws/config directly.
-setup-aws-already-configured-line = Already configured: profile [{ $profile }] uses role { $role_arn }
-setup-aws-use-it-with = Use it with:
-setup-aws-added-profile = Added profile [{ $profile }] to ~/.aws/config
-setup-aws-use-cli-block = Use AWS CLI with the profile:
-setup-aws-or-set-env = Or set the environment variable:
-# Multi-line prerequisites block. Numbered steps stay together so translators
-# can re-order or expand them without touching the Rust call site.
-setup-aws-prerequisites =
+
+# Full output block when an existing { -product } profile already targets the
+# requested role. Shell command sits inside the block as literal text so the
+# whole user-facing instruction stays one message — translators see the flow
+# (prose → command → end) without juggling multiple keys.
+setup-aws-already-configured-block =
+    Already configured: profile [{ $profile }] uses role { $role_arn }
+
+    Use it with:
+      aws --profile { $profile } sts get-caller-identity
+
+# Full post-setup instructions block. Embedded shell commands and the doc URL
+# stay as literal text in the message body — translators understand they're
+# code/data and don't translate them, exactly like the `{ $profile }`
+# placeable. Keeping the entire block as one message means a translator can
+# re-flow the prose and adjust spacing without coordinating across 5 keys.
+setup-aws-added-profile-block =
+    Added profile [{ $profile }] to ~/.aws/config
+
+    Use AWS CLI with the profile:
+
+      aws --profile { $profile } sts get-caller-identity
+
+    Or set the environment variable:
+
+      export AWS_PROFILE={ $profile }
+      aws sts get-caller-identity
+
     Prerequisites:
       1. You must be logged in to { -product }: { -cmd } login
       2. The AWS role must trust the { -product } OIDC provider
-setup-aws-trust-policy-hint = To configure AWS role trust policy, see:
+
+    To configure AWS role trust policy, see:
+      https://docs.aws.amazon.com/IAM/latest/UserGuide/id_roles_create_for-idp_oidc.html
 setup-aws-discover-skipped = Skipped [{ $profile }] — already exists
 setup-aws-discover-added = Added profile [{ $profile }] → { $role_arn }
 # Numeric arms ride as FluentValue::Number so locales can plural-form the
@@ -927,8 +973,34 @@ setup-cargo-config-file = Configuration file: { $path }
 setup-cargo-configured-registry = Cargo configured for registry '{ $name }'
 setup-cargo-configured-global = Cargo configured with global credential provider
 setup-cargo-config-added = Configuration added to: { $path }
-setup-cargo-add-to-config = Add to ~/.cargo/config.toml:
-setup-cargo-or-run = Or run: { -cmd } setup cargo --configure
+# Full "show me what to add" block for a specific registry. The TOML stanza
+# is part of the message so translators see (and can adjust spacing of) the
+# whole config-instructions flow in one place. Indented `[…]` lines start with
+# `{""}` because Fluent treats a leading `[` on a continuation line as a
+# variant key — the empty placeable forces TextElement parsing.
+setup-cargo-instructions-specific =
+    Add to ~/.cargo/config.toml:
+
+    {""}[registries.{ $registry }]
+    credential-provider = { $command }
+
+    Or run: { -cmd } setup cargo --configure
+
+# Full block for global credential-providers configuration. Same shape as
+# `setup-cargo-instructions-specific`; the per-registry commented example
+# lives inside the message so translators can rephrase the "Or for a
+# specific registry" hint without coordinating with a sibling key.
+setup-cargo-instructions-global =
+    Add to ~/.cargo/config.toml:
+
+    {""}[registry]
+    global-credential-providers = { $command }
+
+    {""}# Or for a specific registry:
+    {""}# [registries.my-private-registry]
+    {""}# credential-provider = { $command }
+
+    Or run: { -cmd } setup cargo --configure
 setup-cargo-more-info =
     For more information, see:
       https://doc.rust-lang.org/cargo/reference/registry-authentication.html
@@ -981,8 +1053,18 @@ setup-github-configured-block =
 
     Configuration added:
       { $key } = { $value }
-setup-github-add-to-gitconfig = Add to ~/.gitconfig:
-setup-github-or-run = Or run: { -cmd } setup github --configure
+# Full "show me what to add" block when --configure isn't passed. The two
+# git config lines live inside the message so translators see the heading
+# and the snippet together. The indented `[…]` line starts with `{""}` —
+# Fluent treats a leading `[` on a continuation line as a variant key
+# (deprecated syntax) unless an empty placeable forces TextElement parsing.
+setup-github-add-to-gitconfig =
+    Add to ~/.gitconfig:
+
+      {""}[credential "https://{ $host }"]
+          helper = { $helper_command }
+
+    Or run: { -cmd } setup github --configure
 setup-github-to-verify =
     To verify, run:
       git ls-remote https://{ $host }/YOUR-ORG/YOUR-REPO.git

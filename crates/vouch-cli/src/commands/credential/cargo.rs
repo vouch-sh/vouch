@@ -341,10 +341,6 @@ fn handle_login(registry: &RegistryInfo, _options: LoginOptions) -> Result<()> {
     let registry_name = registry.name.as_deref().unwrap_or(&registry.index_url);
     eprintln!();
     tr_eprintln!("credential-cargo-login-needed", registry = registry_name);
-    eprintln!();
-    // Shell command snippet: stays English so users can copy-paste it.
-    eprintln!("    vouch login");
-    eprintln!();
 
     // Return url-not-supported to indicate we don't support cargo login
     send_error(

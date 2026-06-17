@@ -406,33 +406,26 @@ pub(crate) async fn run(server: &str, key_path: Option<&str>, force: bool) -> Re
                 );
                 tr_println!(
                     "credential-ssh-agent-loaded",
-                    socket_path = socket_path.as_str()
+                    socket_path = socket_path.as_str(),
                 );
-                println!();
-                tr_println!("credential-ssh-hint-set-sock");
-                // Shell snippet: machine-readable, stays English.
-                println!("  export SSH_AUTH_SOCK={socket_path}");
             }
         } else {
             println!();
-            tr_println!("credential-ssh-hint-add-config");
-            println!();
-            // SSH client config block: machine-readable, stays English so it
-            // can be pasted verbatim into ~/.ssh/config.
-            println!("  Host *");
-            println!("      IdentityFile {}", result.key_path.display());
-            println!("      CertificateFile {}", result.cert_path.display());
+            tr_println!(
+                "credential-ssh-hint-add-config",
+                key_path = result.key_path.display().to_string(),
+                cert_path = result.cert_path.display().to_string(),
+            );
         }
     }
     #[cfg(not(unix))]
     {
         println!();
-        tr_println!("credential-ssh-hint-add-config");
-        println!();
-        // SSH client config block: machine-readable, stays English.
-        println!("  Host *");
-        println!("      IdentityFile {}", result.key_path.display());
-        println!("      CertificateFile {}", result.cert_path.display());
+        tr_println!(
+            "credential-ssh-hint-add-config",
+            key_path = result.key_path.display().to_string(),
+            cert_path = result.cert_path.display().to_string(),
+        );
     }
 
     Ok(())
