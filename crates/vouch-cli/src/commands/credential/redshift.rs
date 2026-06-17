@@ -101,6 +101,7 @@ pub(crate) async fn run(
     .await?;
 
     let json = serde_json::to_string(&data).context("failed to serialize Redshift credentials")?;
+    // Machine-readable JSON output: stays English (consumed by Redshift driver).
     println!("{json}");
     Ok(())
 }

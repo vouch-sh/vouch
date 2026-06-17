@@ -4,6 +4,7 @@
 //! Configures AWS CLI/SDK to use Vouch for credential federation.
 
 use anyhow::{Context, Result};
+use vouch_cli::{tr, tr_println};
 
 use crate::install_path::resolve_install_path;
 use crate::integrations::aws::{AwsConfig, AwsProfile};
@@ -60,9 +61,7 @@ pub(crate) async fn run(
     }
 
     let role_arn = role_arn.ok_or_else(|| {
-        crate::exit_code::CliError::ConfigError(
-            "Either --role or --discover is required".to_string(),
-        )
+        crate::exit_code::CliError::ConfigError(tr!("setup-aws-err-role-required"))
     })?;
 
     let vouch_path = resolve_install_path();
@@ -83,8 +82,7 @@ pub(crate) async fn run(
         Some(p) => {
             // Explicit profile name: exit early if it already exists
             if config.profile_exists(p) {
-                println!("Profile [{p}] already exists in ~/.aws/config.");
-                println!("To update it, edit ~/.aws/config directly.");
+                tr_println!("setup-aws-profile-already-exists", profile = p);
                 return Ok(());
             }
             p.to_string()
@@ -92,13 +90,11 @@ pub(crate) async fn run(
         None => {
             // Auto-naming: check if a vouch profile already targets this role
             if let Some(existing) = config.find_vouch_profile_for_role(role_arn) {
-                println!(
-                    "Already configured: profile [{}] uses role {role_arn}",
-                    existing.name
+                tr_println!(
+                    "setup-aws-already-configured-block",
+                    profile = existing.name.as_str(),
+                    role_arn = role_arn,
                 );
-                println!();
-                println!("Use it with:");
-                println!("  aws --profile {} sts get-caller-identity", existing.name);
                 return Ok(());
             }
             config.next_vouch_profile_name()
@@ -117,24 +113,9 @@ pub(crate) async fn run(
     });
     config.save()?;
 
-    println!("Added profile [{profile_name}] to ~/.aws/config");
-    println!();
-    println!("Use AWS CLI with the profile:");
-    println!();
-    println!("  aws --profile {profile_name} sts get-caller-identity");
-    println!();
-    println!("Or set the environment variable:");
-    println!();
-    println!("  export AWS_PROFILE={profile_name}");
-    println!("  aws sts get-caller-identity");
-    println!();
-    println!("Prerequisites:");
-    println!("  1. You must be logged in to Vouch: vouch login");
-    println!("  2. The AWS role must trust the Vouch OIDC provider");
-    println!();
-    println!("To configure AWS role trust policy, see:");
-    println!(
-        "  https://docs.aws.amazon.com/IAM/latest/UserGuide/id_roles_create_for-idp_oidc.html"
+    tr_println!(
+        "setup-aws-added-profile-block",
+        profile = profile_name.as_str(),
     );
 
     Ok(())
@@ -151,9 +132,7 @@ async fn run_discover(profile_prefix: Option<&str>, region: Option<&str>) -> Res
     let aws_cli_config = AwsCliConfig::load()?;
 
     let session = aws_cli_config.find_sso_session(None).ok_or_else(|| {
-        crate::exit_code::CliError::ConfigError(
-            "No SSO session found in ~/.aws/config. Run 'aws configure sso' first.".to_string(),
-        )
+        crate::exit_code::CliError::ConfigError(tr!("setup-aws-err-no-sso-session"))
     })?;
     let session_cfg = vouch_config
         .aws()
@@ -166,7 +145,7 @@ async fn run_discover(profile_prefix: Option<&str>, region: Option<&str>) -> Res
 
     let token = load_cached_token(&sso_config).ok_or_else(|| {
         crate::exit_code::CliError::NotAuthenticated {
-            reason: "SSO session expired or missing. Run 'vouch aws login' first.".to_string(),
+            reason: tr!("setup-aws-err-sso-expired"),
         }
     })?;
     let bearer = token.token();
@@ -220,7 +199,10 @@ async fn run_discover(profile_prefix: Option<&str>, region: Option<&str>) -> Res
         };
 
         if config.profile_exists(&profile_name) {
-            println!("Skipped [{profile_name}] — already exists");
+            tr_println!(
+                "setup-aws-discover-skipped",
+                profile = profile_name.as_str()
+            );
             skipped_count = skipped_count.saturating_add(1);
             continue;
         }
@@ -235,7 +217,11 @@ async fn run_discover(profile_prefix: Option<&str>, region: Option<&str>) -> Res
             output: Some("json".to_string()),
         });
 
-        println!("Added profile [{profile_name}] → {role_arn}");
+        tr_println!(
+            "setup-aws-discover-added",
+            profile = profile_name.as_str(),
+            role_arn = role_arn.as_str()
+        );
         created_count = created_count.saturating_add(1);
     }
 
@@ -244,7 +230,11 @@ async fn run_discover(profile_prefix: Option<&str>, region: Option<&str>) -> Res
     }
 
     println!();
-    println!("{created_count} profile(s) created, {skipped_count} skipped");
+    tr_println!(
+        "setup-aws-discover-summary",
+        created = created_count,
+        skipped = skipped_count
+    );
     Ok(())
 }
 

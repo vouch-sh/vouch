@@ -62,7 +62,8 @@ impl I18nContext {
 /// resolve.
 pub fn init() -> anyhow::Result<()> {
     vouch_i18n::validate_startup(&LOADER, &Localizations, REQUIRED_IDS)?;
-    let lang = negotiate();
+    let lang =
+        vouch_i18n::negotiate_env(None, |key| std::env::var(key).ok(), sys_locale::get_locale);
     let langs: Vec<LanguageIdentifier> = lang.into_iter().collect();
     let loader = vouch_i18n::select_loader(&LOADER, &langs);
     let ctx = I18nContext::from_loader(loader);
@@ -82,31 +83,11 @@ pub fn ctx() -> I18nContext {
     I18nContext::from_loader(loader)
 }
 
-/// Negotiate the preferred locale from environment + OS default.
-fn negotiate() -> Option<LanguageIdentifier> {
-    let env = |key: &str| std::env::var(key).ok();
-    let candidates = [
-        env("VOUCH_LANG"),
-        env("LC_ALL"),
-        env("LC_MESSAGES"),
-        env("LANG"),
-        sys_locale::get_locale(),
-    ];
-    for raw in candidates.into_iter().flatten() {
-        let trimmed = raw
-            .split(['.', '@'])
-            .next()
-            .unwrap_or(&raw)
-            .replace('_', "-");
-        if trimmed.is_empty() {
-            continue;
-        }
-        if let Ok(lang) = trimmed.parse::<LanguageIdentifier>() {
-            return Some(lang);
-        }
-    }
-    None
-}
+// The four `tr*` macros below are duplicated verbatim from
+// `crates/vouch-cli/src/i18n/mod.rs`. Sharing via `vouch-i18n` is blocked by
+// Rust macro hygiene + rust-lang/rust#52234 — see the comment in
+// `crates/vouch-i18n/src/lib.rs` above the `FluentValue` re-export. See the
+// CLI's i18n module for the full doc comment on `FluentValue` dispatch.
 
 /// Translate a message id with no arguments.
 #[macro_export]
@@ -148,4 +129,64 @@ macro_rules! tr_eprintln {
     ($id:literal, $($name:ident = $value:expr),+ $(,)?) => {
         eprintln!("{}", $crate::tr_args!($id, $($name = $value),+))
     };
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "test code may panic on setup failure"
+)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validate_startup_passes_with_embedded_catalog() {
+        vouch_i18n::validate_startup(&LOADER, &Localizations, REQUIRED_IDS).unwrap();
+    }
+
+    /// Walk the catalog: every multi-segment lowercase kebab-case key parsed
+    /// from `vouch-agent.ftl` must resolve at startup. Mirrors the CLI's
+    /// `every_catalog_key_resolves` (`crates/vouch-cli/src/i18n/mod.rs`) so
+    /// the agent catches typos that [`REQUIRED_IDS`] doesn't cover.
+    #[test]
+    fn every_catalog_key_resolves() {
+        let ftl = std::fs::read_to_string(format!(
+            "{}/i18n/en-US/vouch-agent.ftl",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .unwrap();
+        let loader = vouch_i18n::select_loader(&LOADER, &[]);
+        for line in ftl.lines() {
+            if line.trim_start() != line {
+                continue;
+            }
+            let Some((left, _)) = line.split_once('=') else {
+                continue;
+            };
+            let id = left.trim();
+            if id.is_empty() {
+                continue;
+            }
+            // Skip Fluent terms (e.g. `-product`) — reachable only via
+            // `{ -term }` references inside other messages, never `loader.get()`.
+            if id.starts_with('-') {
+                continue;
+            }
+            if !id
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+            {
+                continue;
+            }
+            if !id.contains('-') {
+                continue;
+            }
+            let resolved = loader.get(id);
+            assert!(
+                !resolved.starts_with("No localization for id"),
+                "catalog id `{id}` does not resolve",
+            );
+        }
+    }
 }

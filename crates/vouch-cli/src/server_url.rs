@@ -43,10 +43,9 @@ impl ServerUrl {
             vouch_common::UrlSecurity::Secure => {}
             vouch_common::UrlSecurity::InsecureHttp { url: insecure_url } => {
                 if allow_insecure {
-                    eprintln!(
-                        "WARNING: Using insecure HTTP connection to {insecure_url}.\n\
-                         Credentials will be transmitted in plaintext.\n"
-                    );
+                    crate::tr_eprintln!("server-url-warn-insecure", url = insecure_url.as_str());
+                    // Trailing blank line to set the warning apart visually.
+                    eprintln!();
                 } else {
                     return Err(ServerUrlError::InsecureHttp(insecure_url));
                 }

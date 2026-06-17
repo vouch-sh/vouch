@@ -70,13 +70,12 @@ async fn get_credential() -> Result<()> {
 
     // Resolve session (tries agent first, then config)
     let session = resolve_session().await.inspect_err(|_| {
-        eprintln!("vouch: not configured - run 'vouch enroll' first");
+        vouch_cli::tr_eprintln!("credential-helper-err-not-configured");
     })?;
 
     // Create authenticated client
-    let client = VouchClient::from_session(&session).map_err(|e| {
-        eprintln!("vouch: failed to create client: {e}");
-        e
+    let client = VouchClient::from_session(&session).inspect_err(|e| {
+        vouch_cli::tr_eprintln!("credential-github-err-create-client", error = e.to_string());
     })?;
 
     // Extract owner from path (e.g., "acme-corp/my-repo.git" -> "acme-corp")
@@ -91,9 +90,8 @@ async fn get_credential() -> Result<()> {
     let response: GitHubTokenResponse = client
         .post_authenticated("/v1/credentials/github/token", &request)
         .await
-        .map_err(|e| {
-            eprintln!("vouch: failed to get GitHub token: {e}");
-            e
+        .inspect_err(|e| {
+            vouch_cli::tr_eprintln!("credential-github-err-fetch-token", error = e.to_string());
         })?;
 
     // Output credentials to stdout in git credential protocol format

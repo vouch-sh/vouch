@@ -177,7 +177,7 @@ pub fn build_app(state: Arc<AppState>, config: &config::ServerConfig) -> anyhow:
     // return HTML (e.g. `/oauth/authorize` consent/error pages,
     // `/oauth/callback` enrollment errors), so the layer is applied at the
     // merged-router level rather than only inside `build_ui_routes`. Adding
-    // a new language is then just dropping an `i18n/<tag>/vouch.ftl` catalog.
+    // a new language is then just dropping an `i18n/<tag>/vouch-server.ftl` catalog.
     .layer(axum::middleware::from_fn(crate::infra::i18n::i18n_layer))
     .layer(axum::middleware::from_fn(metrics_middleware))
     // Global request timeout: 30 seconds.

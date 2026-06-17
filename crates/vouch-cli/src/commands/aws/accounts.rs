@@ -53,6 +53,7 @@ pub(crate) async fn run(args: AccountsArgs) -> Result<()> {
                 .collect::<Vec<_>>(),
         )
         .with_context(|| tr!("aws-accounts-err-serialize"))?;
+        // Machine-readable JSON output: stays English regardless of locale.
         println!("{json}");
     } else {
         println!(

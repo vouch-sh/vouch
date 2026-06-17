@@ -26,6 +26,7 @@ pub(crate) fn run(format: OutputFormat) -> Result<()> {
         OutputFormat::Json => {
             let json = serde_json::to_string_pretty(&posture)
                 .map_err(|e| anyhow::anyhow!("failed to serialize posture: {e}"))?;
+            // Machine-readable JSON output: stays English regardless of locale.
             println!("{json}");
         }
     }
@@ -86,8 +87,9 @@ fn print_text(p: &vouch_common::posture::DevicePosture) {
     if let Some(enabled) = p.screen_lock_enabled {
         let status = tr_args!("posture-val-enabled-or-missing", on = enabled.to_string());
         if let Some(timeout) = p.screen_lock_idle_timeout_secs {
+            let suffix = tr_args!("posture-screen-lock-with-idle", timeout = timeout);
             println!(
-                "  {:<16} {status} (idle timeout: {timeout}s)",
+                "  {:<16} {status} {suffix}",
                 tr!("posture-label-screen-lock")
             );
         } else {
@@ -153,10 +155,13 @@ fn print_text(p: &vouch_common::posture::DevicePosture) {
         let days = secs.checked_div(86400).unwrap_or(0);
         let hours = (secs % 86400).checked_div(3600).unwrap_or(0);
         let mins = (secs % 3600).checked_div(60).unwrap_or(0);
-        println!(
-            "  {:<16} {days}d {hours}h {mins}m",
-            tr!("posture-label-uptime")
+        let uptime = tr_args!(
+            "posture-uptime-d-h-m",
+            days = days,
+            hours = hours,
+            minutes = mins
         );
+        println!("  {:<16} {uptime}", tr!("posture-label-uptime"));
     }
 
     if let Some(enforcing) = p.access_control_enforcing {

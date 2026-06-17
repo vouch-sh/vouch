@@ -40,6 +40,10 @@ struct StatusJson {
 }
 
 /// Print a serializable value as JSON to stdout.
+///
+/// Machine-readable output (`--format json`) — stays English regardless of
+/// locale so downstream tooling that grep/parse this output isn't broken by
+/// translation.
 fn print_json<T: Serialize>(value: &T) {
     if let Ok(s) = serde_json::to_string_pretty(value) {
         println!("{s}");
@@ -59,6 +63,9 @@ fn print_json<T: Serialize>(value: &T) {
 /// ```text
 /// VOUCH_AUTHENTICATED=0
 /// ```
+///
+/// Machine-readable output (`--format shell`) for `eval "$(vouch status
+/// --format shell)"` hooks — stays English regardless of locale.
 pub(crate) fn print_shell(
     authenticated: bool,
     email: Option<&str>,
@@ -302,20 +309,18 @@ fn print_agent_session(server: &str, session: &SessionInfo) -> Result<()> {
     Ok(())
 }
 
-/// Format the remaining time as a human-readable string.
+/// Format the remaining time via the `status-time-remaining` Fluent selector.
 ///
-/// Returns `"in Xh Ym"` or `"in Ym"` depending on whether hours > 0.
+/// Hours and minutes are forwarded to Fluent as numeric `FluentValue`s so
+/// the FTL can dispatch on the `[0]` arm and a future locale can drop the
+/// hours segment or reorder the units without a Rust change.
 pub(crate) fn format_remaining_time(expires_in: u64) -> String {
     // 60 is non-zero; unwrap_or arms are unreachable.
     let remaining_mins = expires_in.checked_div(60).unwrap_or(0);
     let hours = remaining_mins.checked_div(60).unwrap_or(0);
     let mins = remaining_mins % 60;
 
-    if hours > 0 {
-        format!("in {hours}h {mins}m")
-    } else {
-        format!("in {mins}m")
-    }
+    tr_args!("status-time-remaining", hours = hours, minutes = mins)
 }
 
 /// Print expiry time with wall-clock time and remaining duration.

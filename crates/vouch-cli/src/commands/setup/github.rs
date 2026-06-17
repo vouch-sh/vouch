@@ -107,12 +107,11 @@ pub(crate) async fn run(host: &str, configure: bool) -> Result<()> {
             value = helper_command.as_str(),
         );
     } else {
-        tr_println!("setup-github-add-to-gitconfig");
-        println!();
-        println!("[credential \"https://{}\"]", host);
-        println!("    helper = {}", helper_command);
-        println!();
-        tr_println!("setup-github-or-run");
+        tr_println!(
+            "setup-github-add-to-gitconfig",
+            host = host,
+            helper_command = helper_command.as_str(),
+        );
     }
 
     println!();

@@ -42,27 +42,18 @@ pub(crate) async fn run(registry: Option<&str>, configure: bool) -> Result<()> {
 
 /// Show manual configuration instructions.
 fn show_instructions(registry: Option<&str>, command: &[&str]) {
-    tr_println!("setup-cargo-add-to-config");
-    println!();
-
     let formatted = format_toml_array(command);
-
-    if let Some(reg) = registry {
-        // Configure specific registry
-        println!("[registries.{}]", reg);
-        println!("credential-provider = {}", formatted);
-    } else {
-        // Configure as global provider
-        println!("[registry]");
-        println!("global-credential-providers = {}", formatted);
-        println!();
-        println!("# Or for a specific registry:");
-        println!("# [registries.my-private-registry]");
-        println!("# credential-provider = {}", formatted);
+    match registry {
+        Some(reg) => tr_println!(
+            "setup-cargo-instructions-specific",
+            registry = reg,
+            command = formatted.as_str(),
+        ),
+        None => tr_println!(
+            "setup-cargo-instructions-global",
+            command = formatted.as_str(),
+        ),
     }
-
-    println!();
-    tr_println!("setup-cargo-or-run");
 }
 
 /// Format a command as a TOML array.

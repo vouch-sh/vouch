@@ -135,15 +135,10 @@ pub(crate) async fn run(
         tr_println!("setup-codecommit-success-block");
         for pattern in &patterns {
             tr_println!(
-                "setup-codecommit-helper-line",
+                "setup-codecommit-helper-pair",
                 indent = "  ",
                 pattern = pattern.as_str(),
                 helper = helper_command.as_str(),
-            );
-            tr_println!(
-                "setup-codecommit-http-path-line",
-                indent = "  ",
-                pattern = pattern,
             );
         }
         println!();
@@ -162,6 +157,7 @@ pub(crate) async fn run(
         println!();
         tr_println!("setup-codecommit-step2");
         println!();
+        // Git config block: machine-readable, stays English.
         for pattern in &patterns {
             println!("[credential \"{pattern}\"]");
             println!("    helper = {helper_command}");

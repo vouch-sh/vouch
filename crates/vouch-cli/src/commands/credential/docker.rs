@@ -90,7 +90,8 @@ pub(crate) async fn run(operation: &str) -> Result<()> {
             Ok(())
         }
         "list" => {
-            // Return empty JSON object - we don't maintain a list
+            // Return empty JSON object - we don't maintain a list.
+            // Machine-readable JSON output: stays English (consumed by Docker).
             println!("{{}}");
             Ok(())
         }
@@ -167,7 +168,7 @@ async fn get_credential() -> Result<()> {
 
     // Resolve session (tries agent first, then config)
     let session = resolve_session().await.inspect_err(|_| {
-        eprintln!("vouch: not configured - run 'vouch enroll' first");
+        vouch_cli::tr_eprintln!("credential-helper-err-not-configured");
     })?;
     let server = session.server_url.as_str();
 
@@ -182,7 +183,10 @@ async fn get_credential() -> Result<()> {
         }
         RegistryType::Ghcr => get_ghcr_credential(server, &session.token).await?,
         RegistryType::Unknown => {
-            eprintln!("vouch: unknown registry type for URL: {}", server_url);
+            vouch_cli::tr_eprintln!(
+                "credential-docker-err-unknown-registry",
+                url = server_url.as_str()
+            );
             return Err(crate::exit_code::CliError::ConfigError(format!(
                 "unsupported registry: {server_url}"
             ))
