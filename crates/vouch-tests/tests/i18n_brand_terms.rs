@@ -78,6 +78,74 @@ fn brand_terms_agree_across_catalogs() {
     }
 }
 
+/// Collect term references (`{ -term-name }`) from a single FTL line. Comment
+/// lines (starting with `#`) are skipped by the caller so doc-comment examples
+/// like `{ -term-name }` don't trigger false positives.
+fn collect_term_refs(line: &str, out: &mut std::collections::HashSet<String>) {
+    let mut rest = line;
+    while let Some(open) = rest.find('{') {
+        let after_open = rest
+            .get(open.saturating_add(1)..)
+            .unwrap_or("")
+            .trim_start();
+        if let Some(stripped) = after_open.strip_prefix('-')
+            && let Some(close) = stripped.find('}')
+        {
+            let name = stripped.get(..close).unwrap_or("").trim();
+            if !name.is_empty()
+                && name
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+            {
+                out.insert(format!("-{name}"));
+            }
+        }
+        rest = rest.get(open.saturating_add(1)..).unwrap_or("");
+    }
+}
+
+/// Walk each catalog's message bodies and assert that every `{ -term }`
+/// reference resolves to a term **defined in the same catalog**. Fluent
+/// has no cross-file term import, so a message that references a term
+/// missing from its own catalog renders the placeable unresolved (e.g.
+/// "vouch: failed to get {-github} token: ..." instead of "GitHub").
+/// Caught in PR #492 review — the CLI added a message using `{ -github }`
+/// while `-github` was only defined in the server catalog.
+#[test]
+fn every_term_reference_has_a_definition() {
+    let catalogs = [
+        ("server", "vouch-server/i18n/en-US/vouch-server.ftl"),
+        ("cli", "vouch-cli/i18n/en-US/vouch-cli.ftl"),
+        ("agent", "vouch-agent/i18n/en-US/vouch-agent.ftl"),
+    ];
+
+    let mut failures = Vec::new();
+    for (name, rel_path) in catalogs {
+        let path = workspace_catalog(rel_path);
+        let defined: std::collections::HashSet<String> = parse_terms(&path).into_keys().collect();
+        let mut referenced = std::collections::HashSet::new();
+        let text = fs::read_to_string(&path).unwrap();
+        for line in text.lines() {
+            // Skip comment lines so doc-comment examples (e.g.
+            // `# Reference as { -term-name } in any message.`) don't count.
+            if line.trim_start().starts_with('#') {
+                continue;
+            }
+            collect_term_refs(line, &mut referenced);
+        }
+        for missing in referenced.difference(&defined) {
+            failures.push(format!("{name}: `{missing}` referenced but not defined"));
+        }
+    }
+    failures.sort();
+    assert!(
+        failures.is_empty(),
+        "Fluent term references without a matching definition in the same \
+         catalog (Fluent cannot import terms across files):\n  {}",
+        failures.join("\n  ")
+    );
+}
+
 #[test]
 fn brand_terms_present_in_server_catalog() {
     // Sanity check: the server catalog is the canonical source. If a term

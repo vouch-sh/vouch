@@ -21,6 +21,7 @@
 -yubikey = YubiKey
 -product = Vouch
 -cmd = vouch
+-github = GitHub
 
 cli-about = Hardware-backed identity for developers
 cli-long-about = { -product } issues short-lived credentials after FIDO2 verification with a { -yubikey }.
