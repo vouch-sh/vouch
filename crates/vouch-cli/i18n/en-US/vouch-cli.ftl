@@ -674,8 +674,13 @@ credential-ssh-cached-display =
       Remaining: { $remaining }
 
     Use --force to re-issue.
-credential-ssh-generating-new = Generating new SSH keypair...
-credential-ssh-created-file = Created: { $path }
+# Full block emitted when a new SSH keypair is generated alongside the
+# certificate. Translators see the heading and both "Created:" lines (with
+# their specific file paths) together in one message.
+credential-ssh-keypair-created =
+    Generating new SSH keypair...
+    Created: { $private_path }
+    Created: { $public_path }
 # Full display block for a freshly-issued certificate.
 credential-ssh-issued-display =
     SSH certificate issued successfully!

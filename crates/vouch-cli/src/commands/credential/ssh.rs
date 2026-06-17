@@ -364,18 +364,14 @@ pub(crate) async fn run(server: &str, key_path: Option<&str>, force: bool) -> Re
     }
 
     if matches!(result.outcome, ProvisionOutcome::IssuedWithNewKeypair) {
-        tr_println!("credential-ssh-generating-new");
         tr_println!(
-            "credential-ssh-created-file",
-            path = result.key_path.display().to_string()
-        );
-        tr_println!(
-            "credential-ssh-created-file",
-            path = result
+            "credential-ssh-keypair-created",
+            private_path = result.key_path.display().to_string(),
+            public_path = result
                 .key_path
                 .with_added_extension("pub")
                 .display()
-                .to_string()
+                .to_string(),
         );
     }
 
