@@ -45,21 +45,21 @@
 
                 <div id="apt-tab" class="tab-content hidden">
                     <div class="code-block text-sm space-y-1">
-                        <div class="text-gray-500"># Import GPG key</div>
+                        <div class="text-gray-500">{{ self.tr("install-comment-gpg") }}</div>
                         <div>curl -fsSL https://packages.vouch.sh/gpg/vouch.asc \</div>
                         <div class="pl-4">| gpg --dearmor \</div>
                         <div class="pl-4">| sudo tee /usr/share/keyrings/vouch-archive-keyring.gpg &gt; /dev/null</div>
-                        <div class="mt-2 text-gray-500"># Add repository</div>
+                        <div class="mt-2 text-gray-500">{{ self.tr("install-comment-add-repo") }}</div>
                         <div>echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/vouch-archive-keyring.gpg] https://packages.vouch.sh/apt stable main" \</div>
                         <div class="pl-4">| sudo tee /etc/apt/sources.list.d/vouch.list &gt; /dev/null</div>
-                        <div class="mt-2 text-gray-500"># Install</div>
+                        <div class="mt-2 text-gray-500">{{ self.tr("install-comment-install") }}</div>
                         <div>sudo apt-get update &amp;&amp; sudo apt-get install -y vouch</div>
                     </div>
                 </div>
 
                 <div id="rpm-tab" class="tab-content hidden">
                     <div class="code-block text-sm space-y-1">
-                        <div class="text-gray-500"># Add repository</div>
+                        <div class="text-gray-500">{{ self.tr("install-comment-add-repo") }}</div>
                         <div>sudo tee /etc/yum.repos.d/vouch.repo &lt;&lt; 'EOF'</div>
                         <div>[vouch]</div>
                         <div>name=Vouch</div>
@@ -68,7 +68,7 @@
                         <div>gpgkey=https://packages.vouch.sh/gpg/vouch.asc</div>
                         <div>enabled=1</div>
                         <div>EOF</div>
-                        <div class="mt-2 text-gray-500"># Install</div>
+                        <div class="mt-2 text-gray-500">{{ self.tr("install-comment-install") }}</div>
                         <div>sudo dnf install -y vouch</div>
                     </div>
                 </div>
@@ -148,11 +148,11 @@
             </div>
             <div class="ml-11">
                 <div class="code-block">
-                    <div class="text-gray-500"># Start your day with a single touch</div>
+                    <div class="text-gray-500">{{ self.tr("install-step3-comment") }}</div>
                     <div><span class="text-gray-500">$</span> <span id="step3-command">vouch login</span></div>
-                    <div>Enter PIN: ****</div>
-                    <div>Touch your YubiKey...</div>
-                    <div class="text-vouch-accent">&#x2713; Authenticated for 8 hours</div>
+                    <div>{{ self.tr("install-step3-prompt-pin") }}</div>
+                    <div>{{ self.tr("install-step3-prompt-touch") }}</div>
+                    <div class="text-vouch-accent">{{ self.tr("install-step3-authenticated") }}</div>
                 </div>
                 <p class="mt-2 text-sm text-gray-400">{{ self.tr("install-step3-body") }}</p>
             </div>

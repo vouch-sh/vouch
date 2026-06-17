@@ -18,7 +18,7 @@ use std::sync::{Arc, LazyLock};
 use axum::extract::FromRequestParts;
 use axum::response::{IntoResponse, Response};
 use http::request::Parts;
-use http::{HeaderMap, StatusCode, header};
+use http::{HeaderMap, HeaderValue, StatusCode, header};
 use i18n_embed::LanguageLoader;
 use i18n_embed::fluent::FluentLanguageLoader;
 use unic_langid::{LanguageIdentifier, langid};
@@ -245,7 +245,9 @@ pub(crate) fn negotiate(accept_language: Option<&str>) -> I18nContext {
 /// Parse an `Accept-Language` header into language identifiers, highest quality
 /// first. Malformed entries and the `*` wildcard are skipped.
 fn parse_accept_language(header: &str) -> Vec<LanguageIdentifier> {
-    let mut weighted: Vec<(f32, LanguageIdentifier)> = Vec::new();
+    // Browsers typically send a handful of languages; preallocate to skip the
+    // early reallocations.
+    let mut weighted: Vec<(f32, LanguageIdentifier)> = Vec::with_capacity(4);
     for entry in header.split(',') {
         let mut segments = entry.trim().split(';');
         let Some(tag) = segments.next() else {
@@ -353,8 +355,7 @@ pub(crate) const JS_I18N_KEYS: &[&str] = &[
     "keys-js-reg-start-failed",
     "keys-js-reg-starting",
     "keys-js-reg-touch",
-    "keys-js-stepup-1",
-    "keys-js-stepup-2",
+    "keys-js-stepup",
     "login-js-complete-failed",
     "login-js-error",
     "login-js-signed-in",
@@ -412,17 +413,31 @@ fn etag_for(body: &str) -> String {
 /// instead of a fresh JSON serialization plus SHA-256 per page navigation.
 /// `en-US` is the guaranteed fallback (verified by [`validate_startup`]); new
 /// languages are added inside [`build_js_bundles`] as their catalogs land.
-static JS_BUNDLES: LazyLock<HashMap<String, (String, String)>> = LazyLock::new(build_js_bundles);
+/// A pre-rendered client bundle: the JS body, its ETag string (for comparing
+/// against `If-None-Match`), and that ETag pre-parsed as a `HeaderValue` so the
+/// response path neither re-parses nor heap-allocates it per request.
+type Bundle = (String, String, HeaderValue);
 
-fn build_js_bundles() -> HashMap<String, (String, String)> {
+static JS_BUNDLES: LazyLock<HashMap<String, Bundle>> = LazyLock::new(build_js_bundles);
+
+fn build_js_bundles() -> HashMap<String, Bundle> {
     let mut bundles = HashMap::new();
     let body = render_i18n_js(default_context());
     let etag = etag_for(&body);
-    bundles.insert("en-US".to_owned(), (body, etag));
+    // `etag_for` emits `"<hex>"`, always a valid header value; the fallback only
+    // keeps this panic-free.
+    let etag_value =
+        HeaderValue::from_str(&etag).unwrap_or_else(|_| HeaderValue::from_static("\"i18n\""));
+    bundles.insert("en-US".to_owned(), (body, etag, etag_value));
     // Additional language bundles land here as their catalogs ship: build an
     // `I18nContext` for the tag via `negotiate(Some(tag))` and insert.
     bundles
 }
+
+const I18N_JS_CONTENT_TYPE: HeaderValue =
+    HeaderValue::from_static("text/javascript; charset=utf-8");
+const I18N_JS_CACHE_CONTROL: HeaderValue = HeaderValue::from_static("no-cache");
+const I18N_JS_VARY: HeaderValue = HeaderValue::from_static("Accept-Language");
 
 /// Serve the negotiated locale's client-side translation bundle.
 ///
@@ -437,7 +452,7 @@ pub(crate) async fn i18n_js_handler(ctx: I18nContext, headers: HeaderMap) -> Res
     let bundle = JS_BUNDLES
         .get(ctx.lang())
         .or_else(|| JS_BUNDLES.get("en-US"));
-    let Some((body, etag)) = bundle else {
+    let Some((body, etag, etag_value)) = bundle else {
         tracing::error!("i18n bundle map is empty; serving 500");
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     };
@@ -449,9 +464,9 @@ pub(crate) async fn i18n_js_handler(ctx: I18nContext, headers: HeaderMap) -> Res
         return (
             StatusCode::NOT_MODIFIED,
             [
-                (header::ETAG, etag.clone()),
-                (header::CACHE_CONTROL, "no-cache".to_owned()),
-                (header::VARY, "Accept-Language".to_owned()),
+                (header::ETAG, etag_value.clone()),
+                (header::CACHE_CONTROL, I18N_JS_CACHE_CONTROL),
+                (header::VARY, I18N_JS_VARY),
             ],
         )
             .into_response();
@@ -459,13 +474,10 @@ pub(crate) async fn i18n_js_handler(ctx: I18nContext, headers: HeaderMap) -> Res
 
     (
         [
-            (
-                header::CONTENT_TYPE,
-                "text/javascript; charset=utf-8".to_owned(),
-            ),
-            (header::CACHE_CONTROL, "no-cache".to_owned()),
-            (header::VARY, "Accept-Language".to_owned()),
-            (header::ETAG, etag.clone()),
+            (header::CONTENT_TYPE, I18N_JS_CONTENT_TYPE),
+            (header::CACHE_CONTROL, I18N_JS_CACHE_CONTROL),
+            (header::VARY, I18N_JS_VARY),
+            (header::ETAG, etag_value.clone()),
         ],
         body.clone(),
     )
@@ -570,7 +582,7 @@ mod tests {
         let fresh = render_i18n_js(default_context());
         let cached = JS_BUNDLES
             .get("en-US")
-            .map(|(body, _)| body.clone())
+            .map(|(body, ..)| body.clone())
             .expect("en-US bundle should be present");
         assert_eq!(
             cached, fresh,
@@ -930,6 +942,37 @@ mod tests {
         assert!(
             missing.is_empty(),
             "i18n keys missing from catalog: {missing:?}"
+        );
+
+        // Reverse direction: every catalog id should be referenced by some
+        // template/JS/Rust call site, otherwise it is dead weight. A message
+        // whose attribute is referenced (e.g. used only via `.attr("title")`)
+        // counts as live. Terms (`-foo`) are already excluded from `defined`.
+        //
+        // A few ids are intentionally present without a `tr()` render site:
+        // `common-app-name` is the canary `validate_startup` probes (passed as a
+        // required-id literal) to confirm the catalog resolves terms.
+        const NON_RENDERED_IDS: &[&str] = &["common-app-name"];
+        let used_roots: HashSet<&str> = used
+            .iter()
+            .map(|key| key.split('.').next().unwrap_or(key))
+            .collect();
+        let is_dead = |id: &String| {
+            if used.contains(id) || NON_RENDERED_IDS.contains(&id.as_str()) {
+                return false;
+            }
+            // Attribute entries (`id.attr`) must be referenced directly.
+            if id.contains('.') {
+                return true;
+            }
+            // A bare message id is live if any of its attributes is used.
+            !used_roots.contains(&id.as_str())
+        };
+        let mut dead: Vec<&String> = defined.iter().filter(|id| is_dead(id)).collect();
+        dead.sort();
+        assert!(
+            dead.is_empty(),
+            "i18n catalog ids defined but never referenced by any call site: {dead:?}"
         );
     }
 }

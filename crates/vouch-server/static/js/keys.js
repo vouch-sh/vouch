@@ -166,7 +166,7 @@
     // RFC 9470: Perform inline FIDO2 re-authentication to get a fresh session.
     // Calls the same WebAuthn assertion endpoints as the login page.
     async function stepUpReauth() {
-        alert(t('keys-js-stepup-1') + '\n' + t('keys-js-stepup-2'));
+        alert(t('keys-js-stepup'));
 
         var startResp = await fetch('/login/webauthn/start', {
             method: 'POST',
