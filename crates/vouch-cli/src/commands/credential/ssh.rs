@@ -9,6 +9,7 @@ use ssh_key::{
     Algorithm, LineEnding, PrivateKey, PublicKey, certificate::Certificate, rand_core::OsRng,
 };
 use std::path::{Path, PathBuf};
+use vouch_cli::{tr_args, tr_println};
 use vouch_common::{SshCertificateRequest, SshCertificateResponse};
 
 use crate::client::VouchClient;
@@ -125,12 +126,14 @@ pub(crate) struct SshProvisionResult {
     pub outcome: ProvisionOutcome,
 }
 
-/// Format seconds as a human-readable "Xh Ym" duration string.
+/// Format seconds as a duration string via the `credential-ssh-duration`
+/// Fluent key. Numeric arms ride through `FluentValue::Number` so a future
+/// locale can swap "Xh Ym" for "X時間Y分" etc. without a Rust change.
 fn format_duration(secs: u64) -> String {
     // 3600 and 60 are non-zero; unwrap_or arms are unreachable.
     let hours = secs.checked_div(3600).unwrap_or(0);
     let minutes = (secs % 3600).checked_div(60).unwrap_or(0);
-    format!("{hours}h {minutes}m")
+    tr_args!("credential-ssh-duration", hours = hours, minutes = minutes)
 }
 
 /// Check if an existing certificate on disk is still valid with
@@ -286,22 +289,25 @@ pub(crate) async fn auto_provision(
 
             match result.outcome {
                 ProvisionOutcome::Cached => {
-                    println!(
-                        "SSH certificate still valid ({} remaining).",
-                        format_duration(result.response.valid_for_seconds)
+                    tr_println!(
+                        "credential-ssh-cached-line",
+                        duration = format_duration(result.response.valid_for_seconds)
                     );
                 }
                 ProvisionOutcome::IssuedWithNewKeypair => {
-                    println!("Generated SSH keypair: {}", result.key_path.display());
-                    println!(
-                        "SSH certificate provisioned (valid for {}).",
-                        format_duration(result.response.valid_for_seconds)
+                    tr_println!(
+                        "credential-ssh-generated-keypair",
+                        path = result.key_path.display().to_string()
+                    );
+                    tr_println!(
+                        "credential-ssh-issued-line",
+                        duration = format_duration(result.response.valid_for_seconds)
                     );
                 }
                 ProvisionOutcome::Issued => {
-                    println!(
-                        "SSH certificate provisioned (valid for {}).",
-                        format_duration(result.response.valid_for_seconds)
+                    tr_println!(
+                        "credential-ssh-issued-line",
+                        duration = format_duration(result.response.valid_for_seconds)
                     );
                 }
             }
@@ -315,10 +321,7 @@ pub(crate) async fn auto_provision(
                 tracing::debug!("Server does not support SSH certificates: {e}");
             } else {
                 tracing::warn!("Auto SSH provisioning failed: {e}");
-                println!(
-                    "SSH certificate not provisioned ({e}). \
-                     Run: vouch credential ssh"
-                );
+                tr_println!("credential-ssh-not-provisioned", reason = e.to_string());
             }
             false
         }
@@ -350,36 +353,39 @@ pub(crate) async fn run(server: &str, key_path: Option<&str>, force: bool) -> Re
                 .await;
         }
 
-        println!("SSH certificate still valid.");
-        println!("  Certificate: {}", result.cert_path.display());
-        println!("  Serial: {}", result.response.serial);
-        println!("  Principals: {}", result.response.principals.join(", "));
-        println!(
-            "  Remaining: {}",
-            format_duration(result.response.valid_for_seconds)
+        tr_println!(
+            "credential-ssh-cached-display",
+            cert_path = result.cert_path.display().to_string(),
+            serial = result.response.serial,
+            principals = result.response.principals.join(", "),
+            remaining = format_duration(result.response.valid_for_seconds),
         );
-        println!();
-        println!("Use --force to re-issue.");
         return Ok(());
     }
 
     if matches!(result.outcome, ProvisionOutcome::IssuedWithNewKeypair) {
-        println!("Generating new SSH keypair...");
-        println!("Created: {}", result.key_path.display());
-        println!(
-            "Created: {}",
-            result.key_path.with_added_extension("pub").display()
+        tr_println!("credential-ssh-generating-new");
+        tr_println!(
+            "credential-ssh-created-file",
+            path = result.key_path.display().to_string()
+        );
+        tr_println!(
+            "credential-ssh-created-file",
+            path = result
+                .key_path
+                .with_added_extension("pub")
+                .display()
+                .to_string()
         );
     }
 
     println!();
-    println!("SSH certificate issued successfully!");
-    println!("  Certificate: {}", result.cert_path.display());
-    println!("  Serial: {}", result.response.serial);
-    println!("  Principals: {}", result.response.principals.join(", "));
-    println!(
-        "  Valid for: {}",
-        format_duration(result.response.valid_for_seconds)
+    tr_println!(
+        "credential-ssh-issued-display",
+        cert_path = result.cert_path.display().to_string(),
+        serial = result.response.serial,
+        principals = result.response.principals.join(", "),
+        valid_for = format_duration(result.response.valid_for_seconds),
     );
 
     // Try to store credentials in the agent (Unix only)
@@ -394,28 +400,25 @@ pub(crate) async fn run(server: &str, key_path: Option<&str>, force: bool) -> Re
                 .is_ok()
             {
                 println!();
-                println!("SSH credentials loaded into agent.");
-                println!(
-                    "  SSH agent socket: {}",
-                    vouch_agent::ssh_agent_socket_path().map_or_else(
-                        |_| "~/.vouch/ssh-agent.sock".to_string(),
-                        |p| p.display().to_string()
-                    )
+                let socket_path = vouch_agent::ssh_agent_socket_path().map_or_else(
+                    |_| "~/.vouch/ssh-agent.sock".to_string(),
+                    |p| p.display().to_string(),
+                );
+                tr_println!(
+                    "credential-ssh-agent-loaded",
+                    socket_path = socket_path.as_str()
                 );
                 println!();
-                println!("To use the agent, set SSH_AUTH_SOCK:");
-                println!(
-                    "  export SSH_AUTH_SOCK={}",
-                    vouch_agent::ssh_agent_socket_path().map_or_else(
-                        |_| "~/.vouch/ssh-agent.sock".to_string(),
-                        |p| p.display().to_string()
-                    )
-                );
+                tr_println!("credential-ssh-hint-set-sock");
+                // Shell snippet: machine-readable, stays English.
+                println!("  export SSH_AUTH_SOCK={socket_path}");
             }
         } else {
             println!();
-            println!("To use this certificate, add to your ~/.ssh/config:");
+            tr_println!("credential-ssh-hint-add-config");
             println!();
+            // SSH client config block: machine-readable, stays English so it
+            // can be pasted verbatim into ~/.ssh/config.
             println!("  Host *");
             println!("      IdentityFile {}", result.key_path.display());
             println!("      CertificateFile {}", result.cert_path.display());
@@ -424,8 +427,9 @@ pub(crate) async fn run(server: &str, key_path: Option<&str>, force: bool) -> Re
     #[cfg(not(unix))]
     {
         println!();
-        println!("To use this certificate, add to your ~/.ssh/config:");
+        tr_println!("credential-ssh-hint-add-config");
         println!();
+        // SSH client config block: machine-readable, stays English.
         println!("  Host *");
         println!("      IdentityFile {}", result.key_path.display());
         println!("      CertificateFile {}", result.cert_path.display());

@@ -24,7 +24,7 @@ use i18n_embed::fluent::FluentLanguageLoader;
 use unic_langid::{LanguageIdentifier, langid};
 use vouch_i18n::FluentValue;
 
-/// Embedded Fluent catalogs, one `i18n/<lang>/vouch.ftl` per language.
+/// Embedded Fluent catalogs, one `i18n/<lang>/vouch-server.ftl` per language.
 #[derive(rust_embed::RustEmbed)]
 #[folder = "i18n/"]
 struct Localizations;
@@ -32,7 +32,7 @@ struct Localizations;
 /// Process-wide loader holding every embedded catalog. Built once; never mutated
 /// after load. Per-request locale selection happens on cheap derived loaders.
 static LOADER: LazyLock<FluentLanguageLoader> =
-    LazyLock::new(|| vouch_i18n::build_loader("vouch", langid!("en-US"), &Localizations));
+    LazyLock::new(|| vouch_i18n::build_loader("vouch-server", langid!("en-US"), &Localizations));
 
 /// Request-scoped translation handle passed into every UI template.
 ///
@@ -200,7 +200,7 @@ fn default_context() -> &'static I18nContext {
 /// Verify the embedded i18n catalogs are healthy and refuse to start otherwise.
 ///
 /// Without this guard, a packaging mistake that ships a corrupt or missing
-/// `i18n/en-US/vouch.ftl` would let the server boot and render the UI with raw
+/// `i18n/en-US/vouch-server.ftl` would let the server boot and render the UI with raw
 /// Fluent message ids — a silent break an operator could miss until a user
 /// complained.
 ///
@@ -512,7 +512,7 @@ mod tests {
 
     #[test]
     fn term_substitution_renders_product_name() {
-        // Terms (`-product`, `-yubikey`, …) defined at the top of vouch.ftl
+        // Terms (`-product`, `-yubikey`, …) defined at the top of vouch-server.ftl
         // expand inside referencing messages. A change to the term name
         // propagates everywhere; this test pins one representative call site.
         let ctx = negotiate(None);
@@ -705,10 +705,17 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
     }
 
-    /// Every `self.tr*("id")` / `page.tr*("id")` key referenced by a template
-    /// must be defined in the `en-US` catalog. This is the compile-time-style
-    /// guard for template-embedded keys (which are runtime strings).
+    /// Every `self.tr*("id")` / `page.tr*("id")` key referenced by a template,
+    /// JS bundle, or `Tr::new("id")` Rust call site must be defined in the
+    /// `en-US` catalog. This is the runtime-resolution guard that mirrors the
+    /// CLI/agent's compile-time `fl!` checks (Askama needs runtime-string
+    /// ids, so a true compile-time check isn't available).
     #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "single cohesive completeness check (FTL parsing + template + JS + Rust scans); \
+                  splitting would obscure the catalog-vs-references diff at the end"
+    )]
     fn every_template_key_is_defined() {
         use std::collections::HashSet;
         use std::fs;
@@ -779,19 +786,23 @@ mod tests {
             ids
         }
 
-        fn collect_keys(text: &str, keys: &mut HashSet<String>) {
-            // Template call sites have the shape `self.tr("id")` or
-            // `self.tr("id").attr("attr-name")` (plus optional `.arg(...)`
-            // chains that don't affect catalog identity). Scan for `.tr("`,
-            // capture the id, then peek at the immediately-following bytes
-            // for a `.attr("attr-name")` segment so attribute references are
+        fn collect_keys_with_marker(text: &str, marker: &str, keys: &mut HashSet<String>) {
+            // Call sites have the shape `<marker>id")` or
+            // `<marker>id").attr("attr-name")` (plus optional `.arg(...)`
+            // chains that don't affect catalog identity). Capture the id,
+            // then peek at the immediately-following bytes for a
+            // `.attr("attr-name")` segment so attribute references are
             // recorded as `id.attr` — matching what `collect_ftl_ids`
             // produces.
-            for part in text.split(".tr(\"").skip(1) {
+            //
+            // We filter to kebab-case ids (`looks_like_key`) so doc-comment
+            // placeholders like `Tr::new("id")` and the test/example
+            // strings in this very file don't pollute the `used` set.
+            for part in text.split(marker).skip(1) {
                 let Some(id) = part.split('"').next() else {
                     continue;
                 };
-                if id.is_empty() {
+                if !looks_like_key(id) {
                     continue;
                 }
                 // The rest of the slice starts at the byte after the
@@ -809,6 +820,17 @@ mod tests {
                     keys.insert(id.to_owned());
                 }
             }
+        }
+
+        fn collect_keys(text: &str, keys: &mut HashSet<String>) {
+            // Template call sites: `self.tr("id")` / `page.tr("id")` etc.
+            collect_keys_with_marker(text, ".tr(\"", keys);
+        }
+
+        fn collect_rust_tr_keys(text: &str, keys: &mut HashSet<String>) {
+            // Rust call sites: `Tr::new("id")`. Optional `.attr("…")` is
+            // picked up the same way as template `.tr().attr()` chains.
+            collect_keys_with_marker(text, "Tr::new(\"", keys);
         }
 
         // A translation key in our convention: kebab-case with at least one
@@ -849,7 +871,7 @@ mod tests {
         }
 
         let root = env!("CARGO_MANIFEST_DIR");
-        let ftl = fs::read_to_string(format!("{root}/i18n/en-US/vouch.ftl")).unwrap();
+        let ftl = fs::read_to_string(format!("{root}/i18n/en-US/vouch-server.ftl")).unwrap();
         let defined = collect_ftl_ids(&ftl);
 
         let mut used = HashSet::new();
@@ -874,6 +896,21 @@ mod tests {
             let text = fs::read_to_string(&path).unwrap();
             collect_js_keys(&text, &mut js_used);
         }
+
+        // Rust call sites: any `Tr::new("id")` in src/**/*.rs (handlers,
+        // services, infra). The infra/i18n.rs module itself contains
+        // `Tr::new(...)` examples inside doc comments and unit tests; those
+        // still need to resolve, so we don't filter them out — a typo in a
+        // doc-comment example would also fail this test, which is fine.
+        let mut rust_used = HashSet::new();
+        let mut rust_files = Vec::new();
+        files_with_ext(Path::new(&format!("{root}/src")), "rs", &mut rust_files);
+        assert!(!rust_files.is_empty(), "no Rust source files found");
+        for path in rust_files {
+            let text = fs::read_to_string(&path).unwrap();
+            collect_rust_tr_keys(&text, &mut rust_used);
+        }
+        used.extend(rust_used);
 
         // Every key the JS calls must be declared in the bundle the /i18n.js
         // route ships; otherwise t() would silently return the raw key.

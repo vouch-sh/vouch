@@ -96,6 +96,7 @@ pub(crate) async fn run(args: RolesArgs) -> Result<()> {
                 .collect::<Vec<_>>(),
         )
         .with_context(|| tr!("aws-roles-err-serialize"))?;
+        // Machine-readable JSON output: stays English regardless of locale.
         println!("{json}");
     } else {
         println!(

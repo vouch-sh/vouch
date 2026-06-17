@@ -109,6 +109,8 @@ pub(crate) async fn run(host: &str, configure: bool) -> Result<()> {
     } else {
         tr_println!("setup-github-add-to-gitconfig");
         println!();
+        // Git config block: machine-readable, stays English so it can be
+        // pasted verbatim into ~/.gitconfig.
         println!("[credential \"https://{}\"]", host);
         println!("    helper = {}", helper_command);
         println!();

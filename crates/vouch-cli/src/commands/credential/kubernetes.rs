@@ -35,6 +35,7 @@ pub(crate) async fn run(server: &str, cluster: &str, audience: Option<&str>) -> 
     .await?;
 
     let json = serde_json::to_string(&data).context("failed to serialize ExecCredential")?;
+    // Machine-readable JSON output: stays English (consumed by kubectl).
     println!("{json}");
     Ok(())
 }

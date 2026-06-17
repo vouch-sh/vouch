@@ -39,7 +39,7 @@ cli-after-help =
       5  Permission denied
       6  Configuration error
 
-# enroll command -------------------------------------------------------------
+## enroll command
 
 cmd-enroll-about = Enroll with browser-based OIDC + WebAuthn (recommended for new users)
 
@@ -91,7 +91,7 @@ enroll-err-code-expired = The code has expired. Please try again.
 enroll-err-failed = Enrollment failed: { $reason }
 enroll-err-start = Failed to start enrollment
 
-# FIDO2 / CTAP2 user-facing errors -------------------------------------------
+## FIDO2 / CTAP2 user-facing errors
 
 fido2-err-credential-excluded = This { -yubikey } is already registered for this service.
 fido2-err-pin-invalid =
@@ -121,7 +121,7 @@ fido2-err-pin-policy =
 fido2-err-pin-token-expired = PIN authentication expired. Please try again.
 fido2-err-generic = { $operation } failed: { $reason }
 
-# WebAuthn (Windows) user-facing errors --------------------------------------
+## WebAuthn (Windows) user-facing errors
 
 webauthn-err-cancelled = Authentication cancelled.
 webauthn-err-device-not-found =
@@ -141,7 +141,7 @@ webauthn-err-invalid-parameter =
     Please file a bug at https://github.com/vouch-sh/vouch/issues.
 webauthn-err-generic = { $operation } failed: 0x{ $code } { $detail }
 
-# PIN setup prompts ----------------------------------------------------------
+## PIN setup prompts
 
 fido2-pin-prompt-new = New PIN (minimum 8 characters):
 fido2-pin-prompt-confirm = Confirm PIN:
@@ -184,7 +184,7 @@ fido2-err-not-passkey =
     Your { -yubikey } has a credential for this service, but it was not stored as a passkey.
     Re-enroll with `{ -cmd } enroll` to create a compatible credential.
 
-# Subcommand `about` text ----------------------------------------------------
+## Subcommand `about` text
 
 cmd-register-about = Register an additional { -yubikey } (requires login first)
 cmd-login-about = Authenticate with your { -yubikey }
@@ -208,7 +208,7 @@ cmd-diag-about = Run diagnostic test of { -yubikey } registration + authenticati
 cmd-diag-long-about =
     Not available on Windows: depends on the CTAP2 protocol which Windows blocks for non-elevated processes.
 
-# Shared arg help -----------------------------------------------------------
+## Shared arg help
 
 arg-register-name-help = Human-readable name for this { -yubikey } (e.g., "My { -yubikey } 5"). Defaults to "{ -yubikey }" if not specified.
 arg-register-timeout-help = Timeout in seconds for { -yubikey } detection (0 for no timeout).
@@ -225,13 +225,13 @@ arg-doctor-quiet-help = Suppress output (exit code only).
 arg-doctor-json-help = Output as JSON.
 arg-posture-format-help = Output format.
 
-# Session-shared lines (reused by enroll, login, register) -------------------
+## Session-shared lines (reused by enroll, login, register)
 
 session-agent-ready = Your identity is now available. Check with: { -cmd } status
 session-agent-not-running = Note: Agent not running. Start it with: vouch-agent --foreground
 session-stored-locally = Your identity is stored locally. Check with: { -cmd } status
 
-# login command --------------------------------------------------------------
+## login command
 
 login-starting = Logging in...
 login-contacting-server = Contacting server ({ $server })...
@@ -247,7 +247,7 @@ login-err-invalid-client =
     The client will be re-registered on the next attempt.
     Please run this command again. If it persists, run '{ -cmd } enroll' to start fresh.
 
-# register command ----------------------------------------------------------
+## register command
 
 register-starting = Registering additional { -yubikey } '{ $name }'...
 register-contacting-server = Contacting server...
@@ -292,12 +292,12 @@ register-manual-block =
 
     After registration, run `{ -cmd } keys` to verify.
 
-# logout command ------------------------------------------------------------
+## logout command
 
 logout-success = Logged out successfully.
 logout-not-logged-in = Not currently logged in.
 
-# status command ------------------------------------------------------------
+## status command
 
 status-not-authenticated = Not authenticated.
 status-session-expired = Session expired.
@@ -312,8 +312,15 @@ status-label-expires = Expires:
 status-agent-running = running
 status-agent-not-running = not running
 status-hint-start-agent = Hint: Start the agent for faster status checks: vouch-agent --foreground
+# Remaining-time renderer for the Expires: line. Selector branches on the
+# integer `hours` value so locales can decide whether to drop the hours
+# segment when zero or always show both.
+status-time-remaining = { $hours ->
+        [0] in { $minutes }m
+       *[other] in { $hours }h { $minutes }m
+    }
 
-# posture command -----------------------------------------------------------
+## posture command
 
 posture-title = Device Posture (v{ $version })
 posture-label-os = OS:
@@ -366,7 +373,10 @@ posture-val-yes-no = { $b ->
 posture-val-not-detected = not detected
 posture-val-not-checked = not checked
 
-# doctor command ------------------------------------------------------------
+posture-screen-lock-with-idle = (idle timeout: { $timeout }s)
+posture-uptime-d-h-m = { $days }d { $hours }h { $minutes }m
+
+## doctor command
 
 doctor-title = { -product } Doctor - Environment Diagnostics
 doctor-all-passed = All checks passed!
@@ -444,7 +454,7 @@ doctor-ssm-not-configured = SSM not configured (session-manager-plugin not found
 doctor-server-url-insecure = Server uses plain HTTP ({ $server }). Use HTTPS or set VOUCH_ALLOW_INSECURE=1.
 doctor-server-url-secure = Server URL is secure (HTTPS or localhost)
 
-# keys command --------------------------------------------------------------
+## keys command
 
 keys-none = No keys registered.
 keys-prompt-select = Select a key to manage:
@@ -485,11 +495,11 @@ keys-err-not-found = Key not found: { $id }
 keys-err-name-empty = Name cannot be empty
 keys-err-name-long = Name must be 100 characters or less
 
-# env command --------------------------------------------------------------
+## env command
 
 env-err-aws-needs-role = AWS credentials require --role.
 
-# exec command -------------------------------------------------------------
+## exec command
 
 exec-err-no-command = No command specified.
 exec-err-no-command-short = no command specified
@@ -506,7 +516,7 @@ exec-err-codeartifact-fetch = failed to get CodeArtifact token
 exec-err-rds-needs-hostname = RDS credentials require --rds-hostname.
 exec-err-rds-needs-username = RDS credentials require --rds-username.
 
-# diag command --------------------------------------------------------------
+## diag command
 
 diag-intro-block =
     === { -yubikey } Diagnostic Test ===
@@ -570,7 +580,7 @@ diag-err-authentication = Authentication failed
 diag-err-no-assertion = No assertion returned
 diag-err-fixture-save = Failed to save fixture: { $reason }
 
-# aws command --------------------------------------------------------------
+## aws command
 
 cmd-aws-login-about = Authenticate to AWS IAM Identity Center for account discovery
 cmd-aws-accounts-about = List AWS accounts you have access to via Identity Center
@@ -642,7 +652,69 @@ aws-console-err-signin-failed = federation getSigninToken failed ({ $status }): 
 aws-console-err-signin-parse = failed to parse signin token response
 aws-console-err-invalid-federation-url = invalid federation endpoint URL
 
-# setup command -------------------------------------------------------------
+## credential/ssh
+
+# Shared duration renderer ("Xh Ym"). Used wherever an SSH certificate's
+# remaining or total lifetime is shown.
+credential-ssh-duration = { $hours }h { $minutes }m
+
+credential-ssh-cached-line = SSH certificate still valid ({ $duration } remaining).
+credential-ssh-issued-line = SSH certificate provisioned (valid for { $duration }).
+credential-ssh-generated-keypair = Generated SSH keypair: { $path }
+credential-ssh-not-provisioned = SSH certificate not provisioned ({ $reason }). Run: { -cmd } credential ssh
+# Full display block for `{ -cmd } credential ssh` when the cached cert is
+# still valid. Translators can re-order lines or rename labels in place
+# without coordinating across separate keys.
+credential-ssh-cached-display =
+    SSH certificate still valid.
+      Certificate: { $cert_path }
+      Serial: { $serial }
+      Principals: { $principals }
+      Remaining: { $remaining }
+
+    Use --force to re-issue.
+credential-ssh-generating-new = Generating new SSH keypair...
+credential-ssh-created-file = Created: { $path }
+# Full display block for a freshly-issued certificate.
+credential-ssh-issued-display =
+    SSH certificate issued successfully!
+      Certificate: { $cert_path }
+      Serial: { $serial }
+      Principals: { $principals }
+      Valid for: { $valid_for }
+credential-ssh-agent-loaded =
+    SSH credentials loaded into agent.
+      SSH agent socket: { $socket_path }
+credential-ssh-hint-set-sock = To use the agent, set SSH_AUTH_SOCK:
+credential-ssh-hint-add-config = To use this certificate, add to your ~/.ssh/config:
+
+## credential helpers (shared)
+
+# Surfaced to stderr by credential helpers (Docker, Git, …) when the user
+# hasn't run `{ -cmd } enroll`. The leading "vouch:" prefix is the credential-
+# helper convention parent tools recognize.
+credential-helper-err-not-configured = vouch: not configured - run '{ -cmd } enroll' first
+
+## credential/docker
+
+credential-docker-err-unknown-registry = vouch: unknown registry type for URL: { $url }
+
+## credential/github
+
+credential-github-err-create-client = vouch: failed to create client: { $error }
+credential-github-err-fetch-token = vouch: failed to get { -github } token: { $error }
+
+## credential/cargo
+
+# Emitted when cargo invokes the credential helper for an unsupported login
+# action ({ -cmd } manages auth, not `cargo login`).
+credential-cargo-login-needed = To authenticate with registry '{ $registry }', run:
+credential-cargo-login-hint = use '{ -cmd } login' to authenticate
+credential-cargo-logout =
+    Note: 'cargo logout' does not affect your { -product } session for registry '{ $registry }'.
+    To fully log out, run: { -cmd } logout
+
+## setup command
 
 cmd-setup-aws-about = Configure AWS CLI/SDK to use { -product } credentials
 cmd-setup-ssh-about = Configure SSH to use { -product } certificates
@@ -740,7 +812,7 @@ arg-setup-codeartifact-region-help = AWS region.
 arg-setup-codeartifact-repository-help = CodeArtifact repository name.
 arg-setup-codeartifact-profile-help = Named CodeArtifact profile to use / save.
 
-# Shared setup helpers ------------------------------------------------------
+## Shared setup helpers
 
 setup-err-load-config = failed to load config - run '{ -cmd } enroll' first
 setup-err-load-vouch-config = failed to load { -product } config
@@ -748,7 +820,83 @@ setup-err-not-configured = not configured - run '{ -cmd } enroll' first
 setup-err-anthropic-not-enrolled = not configured — run '{ -cmd } enroll' first
 setup-err-no-home = could not determine home directory
 
-# setup/anthropic ----------------------------------------------------------
+## server-url validation
+
+# Emitted when `--allow-insecure` lets the CLI talk to an http:// server.
+# Newline-separated so each line surfaces independently in the terminal.
+server-url-warn-insecure =
+    WARNING: Using insecure HTTP connection to { $url }.
+    Credentials will be transmitted in plaintext.
+
+## clock-skew warning
+
+# Emitted when CLI ↔ server clock skew exceeds the threshold. Direction
+# branches on the boolean `local_behind` so translators can place the
+# adverb where it reads naturally; the platform sync hint follows on the
+# next line so translators can re-order or rephrase it within the same
+# message rather than juggling two keys.
+http-warn-clock-skew =
+    { $local_behind ->
+        [true] Warning: system clock is { $secs }s behind the server. Signed requests may fail.
+       *[other] Warning: system clock is { $secs }s ahead of the server. Signed requests may fail.
+    }
+    Sync your clock — on Windows: Settings → Time & Language → Date & Time → "Sync now"; on macOS: `sudo sntp -sS time.apple.com`.
+
+## install-path warnings
+
+# Emitted at setup time when the resolved vouch binary path is version-pinned
+# (Homebrew Cellar, Nix store, Scoop apps) and therefore likely to break on
+# the next package upgrade. Embedded shell commands stay as written so users
+# can copy-paste them verbatim. The platform-specific hint is computed in Rust
+# and passed in as `$hint` so this remains a single multi-line message.
+install-path-warn-version-pinned =
+    Warning: writing a version-pinned path to your config:
+      { $path }
+    { $hint }
+install-path-warn-bare =
+    Warning: could not determine an absolute path to the { -cmd } binary.
+    Writing bare '{ $binary }' to the config; this relies on $PATH at the time credentials are fetched.
+    If credential-fetching commands fail with "executable not found", hand-edit the config to use an absolute path.
+install-path-hint-homebrew =
+    This path will be removed by `brew upgrade`. Ensure { $stable } exists (`brew link { -cmd }`) and re-run `{ -cmd } setup ...` to use it instead.
+install-path-hint-scoop =
+    This path will be removed by `scoop update`. Ensure { $stable } exists (`scoop reset { -cmd }`) and re-run `{ -cmd } setup ...` to use it instead.
+install-path-hint-nix =
+    Nix store paths are content-addressed and may be garbage-collected. Ensure { $stable } exists and re-run `{ -cmd } setup ...` to use it instead.
+
+## setup/aws
+
+setup-aws-err-role-required = Either --role or --discover is required
+setup-aws-profile-already-exists =
+    Profile [{ $profile }] already exists in ~/.aws/config.
+    To update it, edit ~/.aws/config directly.
+setup-aws-already-configured-line = Already configured: profile [{ $profile }] uses role { $role_arn }
+setup-aws-use-it-with = Use it with:
+setup-aws-added-profile = Added profile [{ $profile }] to ~/.aws/config
+setup-aws-use-cli-block = Use AWS CLI with the profile:
+setup-aws-or-set-env = Or set the environment variable:
+# Multi-line prerequisites block. Numbered steps stay together so translators
+# can re-order or expand them without touching the Rust call site.
+setup-aws-prerequisites =
+    Prerequisites:
+      1. You must be logged in to { -product }: { -cmd } login
+      2. The AWS role must trust the { -product } OIDC provider
+setup-aws-trust-policy-hint = To configure AWS role trust policy, see:
+setup-aws-discover-skipped = Skipped [{ $profile }] — already exists
+setup-aws-discover-added = Added profile [{ $profile }] → { $role_arn }
+# Numeric arms ride as FluentValue::Number so locales can plural-form the
+# noun (e.g. "0 profil/1 profil/2 profile" rules).
+setup-aws-discover-summary = { $created ->
+        [one] { $created } profile created,
+       *[other] { $created } profiles created,
+    } { $skipped ->
+        [one] { $skipped } skipped
+       *[other] { $skipped } skipped
+    }
+setup-aws-err-no-sso-session = No SSO session found in ~/.aws/config. Run 'aws configure sso' first.
+setup-aws-err-sso-expired = SSO session expired or missing. Run '{ -cmd } aws login' first.
+
+## setup/anthropic
 
 setup-anthropic-success-block =
     Anthropic (Claude) Workload Identity Federation configured.
@@ -767,7 +915,7 @@ setup-anthropic-success-block =
         -H "content-type: application/json" \
         -d '{"{"}"model":"claude-sonnet-4-6","max_tokens":64,"messages":[{"{"}"role":"user","content":"hi"{"}"}]{"}"}'
 
-# setup/cargo --------------------------------------------------------------
+## setup/cargo
 
 setup-cargo-header =
     Cargo Credential Provider Setup
@@ -784,7 +932,7 @@ setup-cargo-more-info =
     For more information, see:
       https://doc.rust-lang.org/cargo/reference/registry-authentication.html
 
-# setup/github -------------------------------------------------------------
+## setup/github
 
 setup-github-header =
     GitHub Credential Setup
@@ -838,7 +986,7 @@ setup-github-to-verify =
     To verify, run:
       git ls-remote https://{ $host }/YOUR-ORG/YOUR-REPO.git
 
-# setup/docker -------------------------------------------------------------
+## setup/docker
 
 setup-docker-header =
     Docker Credential Helper Setup
@@ -874,7 +1022,7 @@ setup-docker-err-parse = failed to parse { $path }
 setup-docker-err-serialize = failed to serialize Docker config
 setup-docker-err-write = failed to write { $path }
 
-# setup/kubernetes ---------------------------------------------------------
+## setup/kubernetes
 
 setup-k8s-header =
     Kubernetes OIDC Setup
@@ -899,7 +1047,7 @@ setup-k8s-tail-block =
       2. Kubernetes API server must be configured with --oidc-issuer-url={ $vouch } --oidc-client-id={ $audience }
 setup-k8s-err-read-ca = failed to read certificate authority file: { $path }
 
-# setup/openai -------------------------------------------------------------
+## setup/openai
 
 setup-openai-success-block =
     OpenAI Workload Identity Federation configured.
@@ -936,7 +1084,7 @@ setup-openai-err-parse = failed to parse { $path }
 setup-openai-err-create-dir = failed to create { $path }
 setup-openai-err-write = failed to write { $path }
 
-# setup/ssh ----------------------------------------------------------------
+## setup/ssh
 
 setup-ssh-downloading-ca = Downloading SSH CA public key from server...
 setup-ssh-saved-ca = Saved CA public key: { $path }
@@ -980,7 +1128,7 @@ setup-ssh-err-ca-invalid = CA public key file does not contain a valid key
 setup-ssh-err-lock-file = failed to open lock file { $path }
 setup-ssh-err-lock-acquire = failed to acquire known_hosts lock
 
-# setup/ssm ----------------------------------------------------------------
+## setup/ssm
 
 setup-ssm-err-empty = { $label } must not be empty
 setup-ssm-err-newline = { $label } must not contain newline characters
@@ -1025,7 +1173,7 @@ setup-ssm-undo =
 setup-ssm-err-read = failed to read { $path }
 setup-ssm-err-write = failed to write { $path }
 
-# setup/eks ----------------------------------------------------------------
+## setup/eks
 
 setup-eks-err-aws-not-configured = AWS not configured. Run '{ -cmd } setup aws --role <role-arn>' first.
 setup-eks-header-block =
@@ -1050,7 +1198,7 @@ setup-eks-result-block =
       1. Run '{ -cmd } login' to authenticate
       2. EKS Access Entry must exist for the IAM role in your AWS profile
 
-# setup/codecommit ---------------------------------------------------------
+## setup/codecommit
 
 setup-codecommit-header =
     CodeCommit Credential Setup
@@ -1063,8 +1211,13 @@ setup-codecommit-success-block =
     Git configured for CodeCommit.
 
     Credential helper (HTTPS URLs):
-setup-codecommit-helper-line = { $indent }credential.{ $pattern }.helper = { $helper }
-setup-codecommit-http-path-line = { $indent }credential.{ $pattern }.useHttpPath = true
+# Two git-config lines emitted per CodeCommit URL pattern after `git config`
+# succeeds. Stays as a single multi-line message because the pair is always
+# written together and reordering or rephrasing one without the other would
+# leave the user with an inconsistent confirmation.
+setup-codecommit-helper-pair =
+    { $indent }credential.{ $pattern }.helper = { $helper }
+    { $indent }credential.{ $pattern }.useHttpPath = true
 setup-codecommit-remote-helper-block =
     Remote helper (codecommit:// URLs):
       { $symlink } -> { $vouch }
@@ -1099,7 +1252,7 @@ setup-codecommit-warn-existing-block =
       { $line }
     This may conflict. Consider removing it.
 
-# setup/codeartifact -------------------------------------------------------
+## setup/codeartifact
 
 setup-ca-header =
     CodeArtifact Setup
@@ -1171,7 +1324,7 @@ setup-ca-err-write = failed to write { $path }
 setup-ca-err-serialize-pip = failed to serialize pip config for { $path }
 setup-ca-err-fetch-token = failed to get CodeArtifact token
 
-# setup/kubeconfig ---------------------------------------------------------
+## setup/kubeconfig
 
 setup-kc-err-read = failed to read kubeconfig: { $path }
 setup-kc-err-parse = failed to parse kubeconfig: { $path }

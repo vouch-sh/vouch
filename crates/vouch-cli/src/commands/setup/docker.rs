@@ -167,6 +167,9 @@ fn configure_docker_config(registries: &[String]) -> Result<()> {
 }
 
 /// Print example Docker config.json.
+///
+/// JSON snippet: machine-readable, stays English so users can paste it
+/// verbatim into `~/.docker/config.json`.
 fn print_example_config() {
     println!("  {{");
     println!("    \"credHelpers\": {{");

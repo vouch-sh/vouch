@@ -480,6 +480,7 @@ pub(crate) async fn get_aws_credentials(server: &str, role_arn: &str) -> Result<
 pub(crate) async fn run(server: &str, role_arn: &str) -> Result<()> {
     let data = get_aws_credentials(server, role_arn).await?;
     let json = serde_json::to_string(&data).context("failed to serialize credentials")?;
+    // Machine-readable JSON output: stays English (consumed by AWS CLI).
     println!("{json}");
     Ok(())
 }

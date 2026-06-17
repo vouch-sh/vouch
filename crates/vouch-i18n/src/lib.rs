@@ -30,6 +30,23 @@ pub use unic_langid;
 /// direct dep.
 pub use fluent_bundle::FluentValue;
 
+// The four `tr!` / `tr_args!` / `tr_println!` / `tr_eprintln!` macros that
+// CLI and agent define locally are intentionally duplicated rather than
+// hoisted here. The duplication is forced by two Rust limitations:
+//
+// 1. `i18n_embed_fl::fl!` requires a literal message id and named argument
+//    idents at compile time, so the macros cannot be hidden behind a function.
+// 2. `$crate` inside a `#[macro_export]`ed `macro_rules!` always resolves to
+//    the *defining* crate (`vouch_i18n`), not the using crate, so a shared
+//    `tr!` cannot reach each binary's local `i18n::ctx()`.
+//
+// A meta-macro that generates the four macros via nested `macro_rules!`
+// avoids (2) but trips rust-lang/rust#52234: macro-expanded `#[macro_export]`
+// macros cannot be referenced by absolute path (`crate::tr!()` /
+// `use crate::tr`), which the CLI relies on extensively. A proc-macro
+// solution is the only fully-clean workaround and is not justified for ~30
+// lines of stable boilerplate per binary.
+
 /// Build a process-wide [`FluentLanguageLoader`] for the given Fluent
 /// `domain`, loading every available catalog from `assets`.
 ///
@@ -69,6 +86,53 @@ pub fn select_loader(
     } else {
         loader.select_languages_negotiate(requested, NegotiationStrategy::Filtering)
     }
+}
+
+/// Negotiate a preferred locale from a CLI flag value, environment lookup,
+/// and the OS default. Pure: takes only borrowed inputs, touches no globals.
+///
+/// Resolution order:
+///
+/// 1. `cli_lang` (typically the `--lang <BCP-47>` flag, or `None` for daemons
+///    that take no CLI args).
+/// 2. `env("VOUCH_LANG")`
+/// 3. `env("LC_ALL")`
+/// 4. `env("LC_MESSAGES")`
+/// 5. `env("LANG")`
+/// 6. `os_locale()` (typically `sys_locale::get_locale`)
+///
+/// POSIX locale strings often carry `.UTF-8` or `@modifier` suffixes; this
+/// helper strips them so `en_US.UTF-8` parses as `en-US`.
+///
+/// Returns `None` only when every source is empty or unparseable; callers
+/// fall back to the loader's default in that case.
+pub fn negotiate_env(
+    cli_lang: Option<&str>,
+    env: impl Fn(&str) -> Option<String>,
+    os_locale: impl Fn() -> Option<String>,
+) -> Option<LanguageIdentifier> {
+    let candidates = [
+        cli_lang.map(str::to_owned),
+        env("VOUCH_LANG"),
+        env("LC_ALL"),
+        env("LC_MESSAGES"),
+        env("LANG"),
+        os_locale(),
+    ];
+    for raw in candidates.into_iter().flatten() {
+        let trimmed = raw
+            .split(['.', '@'])
+            .next()
+            .unwrap_or(&raw)
+            .replace('_', "-");
+        if trimmed.is_empty() {
+            continue;
+        }
+        if let Ok(lang) = trimmed.parse::<LanguageIdentifier>() {
+            return Some(lang);
+        }
+    }
+    None
 }
 
 /// Verify the embedded catalogs are healthy and refuse to start otherwise.
@@ -166,5 +230,112 @@ mod tests {
             err.to_string().contains("does-not-exist"),
             "error should name the missing key: {err}"
         );
+    }
+
+    fn no_env(_: &str) -> Option<String> {
+        None
+    }
+    fn no_os_locale() -> Option<String> {
+        None
+    }
+
+    #[test]
+    fn cli_lang_wins_over_env() {
+        let lang = negotiate_env(
+            Some("fr-FR"),
+            |k| (k == "VOUCH_LANG").then(|| "ja-JP".to_owned()),
+            no_os_locale,
+        )
+        .unwrap();
+        assert_eq!(lang.to_string(), "fr-FR");
+    }
+
+    #[test]
+    fn vouch_lang_wins_over_lc_all() {
+        let lang = negotiate_env(
+            None,
+            |k| match k {
+                "VOUCH_LANG" => Some("ja-JP".to_owned()),
+                "LC_ALL" => Some("fr-FR".to_owned()),
+                _ => None,
+            },
+            no_os_locale,
+        )
+        .unwrap();
+        assert_eq!(lang.to_string(), "ja-JP");
+    }
+
+    #[test]
+    fn lc_all_wins_over_lc_messages_and_lang() {
+        let lang = negotiate_env(
+            None,
+            |k| match k {
+                "LC_ALL" => Some("fr-FR".to_owned()),
+                "LC_MESSAGES" => Some("ja-JP".to_owned()),
+                "LANG" => Some("de-DE".to_owned()),
+                _ => None,
+            },
+            no_os_locale,
+        )
+        .unwrap();
+        assert_eq!(lang.to_string(), "fr-FR");
+    }
+
+    #[test]
+    fn lc_messages_wins_over_lang() {
+        let lang = negotiate_env(
+            None,
+            |k| match k {
+                "LC_MESSAGES" => Some("ja-JP".to_owned()),
+                "LANG" => Some("de-DE".to_owned()),
+                _ => None,
+            },
+            no_os_locale,
+        )
+        .unwrap();
+        assert_eq!(lang.to_string(), "ja-JP");
+    }
+
+    #[test]
+    fn lang_wins_over_os_locale() {
+        let lang = negotiate_env(
+            None,
+            |k| (k == "LANG").then(|| "ja-JP".to_owned()),
+            || Some("de-DE".to_owned()),
+        )
+        .unwrap();
+        assert_eq!(lang.to_string(), "ja-JP");
+    }
+
+    #[test]
+    fn os_locale_used_when_env_empty() {
+        let lang = negotiate_env(None, no_env, || Some("ja-JP".to_owned())).unwrap();
+        assert_eq!(lang.to_string(), "ja-JP");
+    }
+
+    #[test]
+    fn posix_locale_suffix_stripped() {
+        let lang = negotiate_env(None, |_| Some("en_US.UTF-8".to_owned()), no_os_locale).unwrap();
+        assert_eq!(lang.to_string(), "en-US");
+    }
+
+    #[test]
+    fn posix_locale_modifier_stripped() {
+        let lang =
+            negotiate_env(None, |_| Some("ca_ES@valencia".to_owned()), no_os_locale).unwrap();
+        // unic-langid accepts ca-ES; modifier was dropped.
+        assert!(lang.to_string().starts_with("ca-ES"));
+    }
+
+    #[test]
+    fn unparseable_falls_through() {
+        let lang =
+            negotiate_env(Some("not-a-locale!!!"), no_env, || Some("ja-JP".to_owned())).unwrap();
+        assert_eq!(lang.to_string(), "ja-JP");
+    }
+
+    #[test]
+    fn empty_everywhere_returns_none() {
+        assert!(negotiate_env(None, no_env, no_os_locale).is_none());
     }
 }

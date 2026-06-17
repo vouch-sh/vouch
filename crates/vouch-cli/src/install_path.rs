@@ -12,6 +12,8 @@
 
 use std::path::{Component, Path, PathBuf};
 
+use crate::{tr_args, tr_eprintln};
+
 /// Maximum number of vouch profiles or candidate dirs to consider — guards
 /// against unreasonable iteration in adversarial inputs.
 const MAX_BIN_DIRS: usize = 16;
@@ -90,24 +92,18 @@ fn stable_install_path(exe: PathBuf) -> PathBuf {
         // Tier 2: verified file, fall back to current_exe()'s path. Warn if
         // it's version-pinned.
         if let Some(hint) = version_pin_hint(&exe) {
-            eprintln!("Warning: writing a version-pinned path to your config:");
-            eprintln!("  {}", exe.display());
-            eprintln!("{hint}");
+            tr_eprintln!(
+                "install-path-warn-version-pinned",
+                path = exe.display().to_string(),
+                hint = hint,
+            );
         }
         return exe;
     }
 
     // Tier 3: couldn't validate exe — fall back to bare binary name + warning.
     let fallback = fallback_binary_name();
-    eprintln!("Warning: could not determine an absolute path to the vouch binary.");
-    eprintln!(
-        "Writing bare '{fallback}' to the config; this relies on $PATH at the time \
-         credentials are fetched."
-    );
-    eprintln!(
-        "If credential-fetching commands fail with \"executable not found\", hand-edit \
-         the config to use an absolute path."
-    );
+    tr_eprintln!("install-path-warn-bare", binary = fallback);
     PathBuf::from(fallback)
 }
 
@@ -202,26 +198,23 @@ fn nix_profile_candidate(exe: &Path, home: &Path) -> Option<PathBuf> {
 /// a user-facing hint about how to get a stable path. Otherwise `None`.
 fn version_pin_hint(exe: &Path) -> Option<String> {
     if let Some(stable) = homebrew_symlink_candidate(exe) {
-        return Some(format!(
-            "This path will be removed by `brew upgrade`. Ensure {} exists \
-             (`brew link vouch`) and re-run `vouch setup ...` to use it instead.",
-            stable.display()
+        return Some(tr_args!(
+            "install-path-hint-homebrew",
+            stable = stable.display().to_string()
         ));
     }
     if let Some(stable) = scoop_shim_candidate(exe) {
-        return Some(format!(
-            "This path will be removed by `scoop update`. Ensure {} exists \
-             (`scoop reset vouch`) and re-run `vouch setup ...` to use it instead.",
-            stable.display()
+        return Some(tr_args!(
+            "install-path-hint-scoop",
+            stable = stable.display().to_string()
         ));
     }
     if let Some(home) = dirs::home_dir()
         && let Some(stable) = nix_profile_candidate(exe, &home)
     {
-        return Some(format!(
-            "Nix store paths are content-addressed and may be garbage-collected. \
-             Ensure {} exists and re-run `vouch setup ...` to use it instead.",
-            stable.display()
+        return Some(tr_args!(
+            "install-path-hint-nix",
+            stable = stable.display().to_string()
         ));
     }
     None

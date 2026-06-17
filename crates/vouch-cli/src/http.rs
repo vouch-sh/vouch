@@ -115,13 +115,13 @@ fn check_clock_skew(headers: &reqwest::header::HeaderMap) {
 
     if skew_secs >= CLOCK_SKEW_THRESHOLD_SECS {
         WARNED.get_or_init(|| {
-            let direction = if local_behind { "behind" } else { "ahead of" };
-            eprintln!(
-                "Warning: system clock is {skew_secs}s {direction} the server. \
-                 Signed requests may fail. Sync your clock — \
-                 on Windows: Settings → Time & Language → Date & Time → \"Sync now\"; \
-                 on macOS: `sudo sntp -sS time.apple.com`."
+            crate::tr_eprintln!(
+                "http-warn-clock-skew",
+                secs = skew_secs,
+                local_behind = local_behind.to_string(),
             );
+            // Tracing keeps an English direction for operators / logs.
+            let direction = if local_behind { "behind" } else { "ahead of" };
             tracing::warn!(
                 skew_seconds = skew_secs,
                 direction,

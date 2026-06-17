@@ -122,55 +122,17 @@ pub fn ctx() -> I18nContext {
     I18nContext::from_loader(loader)
 }
 
-/// Negotiate the preferred locale from CLI args (the value of `--lang`) and
-/// the process environment. Pure: takes only borrowed inputs, touches no
-/// globals.
-///
-/// Resolution order matches the module-level doc comment. Returns `None`
-/// only when every source is empty or unparseable; callers fall back to the
-/// loader's `en-US` default in that case.
-pub fn negotiate(
-    cli_lang: Option<&str>,
-    env: impl Fn(&str) -> Option<String>,
-    os_locale: impl Fn() -> Option<String>,
-) -> Option<LanguageIdentifier> {
-    let candidates = [
-        cli_lang.map(str::to_owned),
-        env("VOUCH_LANG"),
-        env("LC_ALL"),
-        env("LC_MESSAGES"),
-        env("LANG"),
-        os_locale(),
-    ];
-    for raw in candidates.into_iter().flatten() {
-        // POSIX locale strings often carry `.UTF-8` or `@modifier` suffixes;
-        // strip them so `en_US.UTF-8` parses as `en-US`.
-        let trimmed = raw
-            .split(['.', '@'])
-            .next()
-            .unwrap_or(&raw)
-            .replace('_', "-");
-        if trimmed.is_empty() {
-            continue;
-        }
-        if let Ok(lang) = trimmed.parse::<LanguageIdentifier>() {
-            return Some(lang);
-        }
-    }
-    None
-}
-
 /// Pre-scan `argv` for `--lang <value>` / `--lang=<value>` and fold in the
-/// environment-based negotiation. This runs *before* `Cli::parse()` so the
-/// locale is known when clap evaluates the `tr!()` expressions inside derive
-/// attributes.
+/// environment-based negotiation via [`vouch_i18n::negotiate_env`]. This
+/// runs *before* `Cli::parse()` so the locale is known when clap evaluates
+/// the `tr!()` expressions inside derive attributes.
 ///
 /// Only the `--lang` flag is recognized — any other argument is ignored.
 /// `--` halts scanning so `vouch -- --lang foo` (for a passthrough command)
 /// does not pick up `--lang` from the trailing args.
 pub fn preresolve_lang_from_argv_and_env() -> Option<LanguageIdentifier> {
     let cli_lang = preresolve_cli_lang(std::env::args_os());
-    negotiate(
+    vouch_i18n::negotiate_env(
         cli_lang.as_deref(),
         |key| std::env::var(key).ok(),
         sys_locale::get_locale,
@@ -201,6 +163,11 @@ where
     }
     None
 }
+
+// The four `tr*` macros below are duplicated verbatim in
+// `crates/vouch-agent/src/i18n.rs`. Sharing them via `vouch-i18n` is
+// blocked by Rust macro hygiene + rust-lang/rust#52234 — see the comment
+// in `crates/vouch-i18n/src/lib.rs` above the `FluentValue` re-export.
 
 /// Translate a message id with no arguments. Returns the locale-resolved
 /// `String`; safe to embed directly in `clap` derive attributes (`about =
@@ -271,111 +238,6 @@ macro_rules! tr_eprintln {
 )]
 mod tests {
     use super::*;
-
-    fn no_env(_: &str) -> Option<String> {
-        None
-    }
-    fn no_os_locale() -> Option<String> {
-        None
-    }
-
-    #[test]
-    fn cli_lang_wins_over_env() {
-        let lang = negotiate(
-            Some("fr-FR"),
-            |k| (k == "VOUCH_LANG").then(|| "ja-JP".to_owned()),
-            no_os_locale,
-        )
-        .unwrap();
-        assert_eq!(lang.to_string(), "fr-FR");
-    }
-
-    #[test]
-    fn vouch_lang_wins_over_lc_all() {
-        let lang = negotiate(
-            None,
-            |k| match k {
-                "VOUCH_LANG" => Some("ja-JP".to_owned()),
-                "LC_ALL" => Some("fr-FR".to_owned()),
-                _ => None,
-            },
-            no_os_locale,
-        )
-        .unwrap();
-        assert_eq!(lang.to_string(), "ja-JP");
-    }
-
-    #[test]
-    fn lc_all_wins_over_lc_messages_and_lang() {
-        let lang = negotiate(
-            None,
-            |k| match k {
-                "LC_ALL" => Some("fr-FR".to_owned()),
-                "LC_MESSAGES" => Some("ja-JP".to_owned()),
-                "LANG" => Some("de-DE".to_owned()),
-                _ => None,
-            },
-            no_os_locale,
-        )
-        .unwrap();
-        assert_eq!(lang.to_string(), "fr-FR");
-    }
-
-    #[test]
-    fn lc_messages_wins_over_lang() {
-        let lang = negotiate(
-            None,
-            |k| match k {
-                "LC_MESSAGES" => Some("ja-JP".to_owned()),
-                "LANG" => Some("de-DE".to_owned()),
-                _ => None,
-            },
-            no_os_locale,
-        )
-        .unwrap();
-        assert_eq!(lang.to_string(), "ja-JP");
-    }
-
-    #[test]
-    fn lang_wins_over_os_locale() {
-        let lang = negotiate(
-            None,
-            |k| (k == "LANG").then(|| "ja-JP".to_owned()),
-            || Some("de-DE".to_owned()),
-        )
-        .unwrap();
-        assert_eq!(lang.to_string(), "ja-JP");
-    }
-
-    #[test]
-    fn os_locale_used_when_env_empty() {
-        let lang = negotiate(None, no_env, || Some("ja-JP".to_owned())).unwrap();
-        assert_eq!(lang.to_string(), "ja-JP");
-    }
-
-    #[test]
-    fn posix_locale_suffix_stripped() {
-        let lang = negotiate(None, |_| Some("en_US.UTF-8".to_owned()), no_os_locale).unwrap();
-        assert_eq!(lang.to_string(), "en-US");
-    }
-
-    #[test]
-    fn posix_locale_modifier_stripped() {
-        let lang = negotiate(None, |_| Some("ca_ES@valencia".to_owned()), no_os_locale).unwrap();
-        // unic-langid accepts ca-ES; modifier was dropped.
-        assert!(lang.to_string().starts_with("ca-ES"));
-    }
-
-    #[test]
-    fn unparseable_falls_through() {
-        let lang = negotiate(Some("not-a-locale!!!"), no_env, || Some("ja-JP".to_owned())).unwrap();
-        assert_eq!(lang.to_string(), "ja-JP");
-    }
-
-    #[test]
-    fn empty_everywhere_returns_none() {
-        assert!(negotiate(None, no_env, no_os_locale).is_none());
-    }
 
     #[test]
     fn preresolve_cli_lang_space_form() {

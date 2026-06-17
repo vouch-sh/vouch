@@ -83,6 +83,7 @@ pub(crate) async fn run(server: &str, quiet: bool, json: bool) -> Result<()> {
                 .collect(),
             all_passed,
         };
+        // Machine-readable JSON output: stays English regardless of locale.
         println!("{}", serde_json::to_string_pretty(&json_output)?);
     }
 

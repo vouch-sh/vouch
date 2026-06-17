@@ -43,6 +43,7 @@ pub(crate) async fn run(
     role: Option<&str>,
 ) -> Result<()> {
     let token = fetch_rds_token(server, hostname, port, username, region, role).await?;
+    // Machine-readable token output: stays English (consumed by RDS driver).
     println!("{}", token.expose_secret());
     Ok(())
 }

@@ -47,6 +47,8 @@ fn show_instructions(registry: Option<&str>, command: &[&str]) {
 
     let formatted = format_toml_array(command);
 
+    // Cargo `~/.cargo/config.toml` snippet: machine-readable, stays English
+    // so the user can paste it verbatim.
     if let Some(reg) = registry {
         // Configure specific registry
         println!("[registries.{}]", reg);

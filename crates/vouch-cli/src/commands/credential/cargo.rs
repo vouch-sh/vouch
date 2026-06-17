@@ -19,6 +19,7 @@ use anyhow::{Context, Result};
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use std::io::{BufRead, Write};
+use vouch_cli::{tr, tr_eprintln};
 
 use crate::integrations::aws::codeartifact;
 use crate::session;
@@ -337,19 +338,18 @@ fn handle_login(registry: &RegistryInfo, _options: LoginOptions) -> Result<()> {
     // Vouch manages authentication via `vouch login`, not cargo login.
     // This is consistent with AWS/SSH integrations where the user
     // authenticates with Vouch once, and native tools use credential helpers.
+    let registry_name = registry.name.as_deref().unwrap_or(&registry.index_url);
     eprintln!();
-    eprintln!(
-        "To authenticate with registry '{}', run:",
-        registry.name.as_deref().unwrap_or(&registry.index_url)
-    );
+    tr_eprintln!("credential-cargo-login-needed", registry = registry_name);
     eprintln!();
+    // Shell command snippet: stays English so users can copy-paste it.
     eprintln!("    vouch login");
     eprintln!();
 
     // Return url-not-supported to indicate we don't support cargo login
     send_error(
         "url-not-supported",
-        Some("use 'vouch login' to authenticate".to_string()),
+        Some(tr!("credential-cargo-login-hint")),
     )
 }
 
@@ -357,11 +357,8 @@ fn handle_login(registry: &RegistryInfo, _options: LoginOptions) -> Result<()> {
 fn handle_logout(registry: &RegistryInfo) -> Result<()> {
     // We don't clear Vouch's session on cargo logout, as the user might
     // want to keep using Vouch for other purposes. Just acknowledge.
-    eprintln!(
-        "Note: 'cargo logout' does not affect your Vouch session for registry '{}'.",
-        registry.name.as_deref().unwrap_or(&registry.index_url)
-    );
-    eprintln!("To fully log out, run: vouch logout");
+    let registry_name = registry.name.as_deref().unwrap_or(&registry.index_url);
+    tr_eprintln!("credential-cargo-logout", registry = registry_name);
 
     send_message(&CredentialResponse::Logout)
 }

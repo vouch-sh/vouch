@@ -262,6 +262,7 @@ pub(crate) async fn list(server: &str, json: bool) -> Result<()> {
     if json {
         let json_str =
             serde_json::to_string_pretty(&response.keys).unwrap_or_else(|_| "[]".to_string());
+        // Machine-readable JSON output: stays English regardless of locale.
         println!("{json_str}");
         return Ok(());
     }
