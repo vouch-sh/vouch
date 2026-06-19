@@ -27,15 +27,6 @@ pub struct SshAgentServer {
 }
 
 impl SshAgentServer {
-    /// Create a new SSH agent server with a shutdown signal.
-    pub fn new(state: Arc<SshAgentState>, shutdown_rx: watch::Receiver<bool>) -> Self {
-        Self {
-            state,
-            agent_state: None,
-            shutdown_rx,
-        }
-    }
-
     /// Create a new SSH agent server with access to the main agent state (for refresh).
     pub fn with_agent_state(
         state: Arc<SshAgentState>,
