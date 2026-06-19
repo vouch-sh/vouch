@@ -48,8 +48,4 @@ pub enum HttpSigError {
     /// The Content-Digest header does not match the body.
     #[error("digest mismatch: {0}")]
     DigestMismatch(String),
-
-    /// The Content-Digest header is missing when one was expected.
-    #[error("missing Content-Digest header")]
-    MissingDigest,
 }
