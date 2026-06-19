@@ -441,12 +441,10 @@ mod audit_log {
                 email: "test@example.com".to_string(),
             },
             AuditEvent::SessionCleared,
-            AuditEvent::SessionExpired { email: None },
             AuditEvent::SshCertProvisioned {
                 key_path: "/tmp/key".to_string(),
                 cert_path: "/tmp/cert".to_string(),
             },
-            AuditEvent::SshSigning,
             AuditEvent::CredentialCached {
                 credential_type: "aws".to_string(),
             },

@@ -34,12 +34,6 @@ pub enum AuditEvent {
     },
     /// The session was explicitly cleared (logout).
     SessionCleared,
-    /// The session expired naturally.
-    SessionExpired {
-        /// User's email (if available at expiry time).
-        #[serde(skip_serializing_if = "Option::is_none")]
-        email: Option<String>,
-    },
     /// An SSH certificate was provisioned and stored in the agent.
     SshCertProvisioned {
         /// Path to the SSH private key.
@@ -47,8 +41,6 @@ pub enum AuditEvent {
         /// Path to the SSH certificate.
         cert_path: String,
     },
-    /// An SSH signing operation was performed via the agent.
-    SshSigning,
     /// A non-SSH credential was cached (AWS, GitHub, etc.).
     CredentialCached {
         /// The credential type key (e.g., "aws:arn:...", "github").
@@ -192,18 +184,6 @@ mod tests {
         let json = serde_json::to_string(&record).unwrap();
         assert!(json.contains("\"event\":\"credential_cached\""));
         assert!(json.contains("\"credential_type\":\"aws:arn:aws:iam::123456:role/dev\""));
-    }
-
-    #[test]
-    fn test_audit_event_session_expired_without_email() {
-        let record = AuditRecord {
-            timestamp: "2024-01-15T10:30:00Z".to_string(),
-            event: AuditEvent::SessionExpired { email: None },
-        };
-
-        let json = serde_json::to_string(&record).unwrap();
-        assert!(json.contains("\"event\":\"session_expired\""));
-        assert!(!json.contains("\"email\""));
     }
 
     #[test]
