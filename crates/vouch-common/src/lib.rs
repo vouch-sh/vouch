@@ -37,13 +37,13 @@ pub use aaguid::{
 pub use api::{
     AwsTokenResponse, BrowserLoginCompleteRequest, BrowserLoginCompleteResponse,
     BrowserLoginStartRequest, BrowserLoginStartResponse, BrowserRegisterCompleteRequest,
-    BrowserRegisterStartResponse, CloudTokenResponse,
-    DeleteKeyResponse, DeviceCodeRequest, DeviceCodeResponse, DeviceTokenRequest,
-    DeviceTokenResponse, Fido2ChallengeResponse, GitHubAccountStatus, GitHubStatusResponse,
-    GitHubTokenRequest, GitHubTokenResponse, KeyInfo, ListKeysResponse, OAuthError,
-    RegisterCompleteRequest, RegisterCompleteResponse, RegisterStartRequest, RegisterStartResponse,
-    RenameKeyRequest, RenameKeyResponse, SessionStatus, SshCaPublicKeyResponse,
-    SshCertificateRequest, SshCertificateResponse, serialize_secret_string,
+    BrowserRegisterStartResponse, CloudTokenResponse, DeleteKeyResponse, DeviceCodeRequest,
+    DeviceCodeResponse, DeviceTokenRequest, DeviceTokenResponse, Fido2ChallengeResponse,
+    GitHubAccountStatus, GitHubStatusResponse, GitHubTokenRequest, GitHubTokenResponse, KeyInfo,
+    ListKeysResponse, OAuthError, RegisterCompleteRequest, RegisterCompleteResponse,
+    RegisterStartRequest, RegisterStartResponse, RenameKeyRequest, RenameKeyResponse,
+    SessionStatus, SshCaPublicKeyResponse, SshCertificateRequest, SshCertificateResponse,
+    serialize_secret_string,
 };
 pub use cookie::{SessionCookie, clear_cookie, cookie_path, read_cookie, write_cookie};
 pub use error::ApiError;
