@@ -37,16 +37,16 @@ pub use aaguid::{
 pub use api::{
     AwsTokenResponse, BrowserLoginCompleteRequest, BrowserLoginCompleteResponse,
     BrowserLoginStartRequest, BrowserLoginStartResponse, BrowserRegisterCompleteRequest,
-    BrowserRegisterStartRequest, BrowserRegisterStartResponse, CloudTokenResponse,
-    DeleteKeyResponse, DeviceCodeRequest, DeviceCodeResponse, DeviceTokenRequest,
-    DeviceTokenResponse, Fido2ChallengeResponse, GitHubAccountStatus, GitHubStatusResponse,
-    GitHubTokenRequest, GitHubTokenResponse, KeyInfo, ListKeysResponse, OAuthError,
-    RegisterCompleteRequest, RegisterCompleteResponse, RegisterStartRequest, RegisterStartResponse,
-    RenameKeyRequest, RenameKeyResponse, SessionStatus, SshCaPublicKeyResponse,
-    SshCertificateRequest, SshCertificateResponse, serialize_secret_string,
+    BrowserRegisterStartResponse, CloudTokenResponse, DeleteKeyResponse, DeviceCodeRequest,
+    DeviceCodeResponse, DeviceTokenRequest, DeviceTokenResponse, Fido2ChallengeResponse,
+    GitHubAccountStatus, GitHubStatusResponse, GitHubTokenRequest, GitHubTokenResponse, KeyInfo,
+    ListKeysResponse, OAuthError, RegisterCompleteRequest, RegisterCompleteResponse,
+    RegisterStartRequest, RegisterStartResponse, RenameKeyRequest, RenameKeyResponse,
+    SessionStatus, SshCaPublicKeyResponse, SshCertificateRequest, SshCertificateResponse,
+    serialize_secret_string,
 };
 pub use cookie::{SessionCookie, clear_cookie, cookie_path, write_cookie};
-pub use error::{ApiError, VouchError};
+pub use error::ApiError;
 pub use url::{UrlSecurity, check_url_security, is_loopback_host};
 
 /// Session cookie name with `__Host-` prefix (RFC 6265bis).
