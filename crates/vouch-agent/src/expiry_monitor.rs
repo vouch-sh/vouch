@@ -48,6 +48,8 @@ pub async fn run(state: Arc<AgentState>) {
             if !fired_thresholds.contains(&0) {
                 fired_thresholds.push(0);
                 info!("Session has expired");
+                let email = state.current_user_email().await;
+                crate::audit::log_event(crate::audit::AuditEvent::SessionExpired { email });
                 send_notification(
                     "Vouch session expired",
                     "Your session has expired. Run 'vouch login' to re-authenticate.",

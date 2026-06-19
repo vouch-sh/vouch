@@ -70,6 +70,8 @@ pub(super) async fn handle_sign_request(
     // Sign the data (returns encoded signature blob)
     let sig_blob = sign_data(&creds.private_key, &data)?;
 
+    crate::audit::log_event(crate::audit::AuditEvent::SshSigning);
+
     build_sign_response(&sig_blob)
 }
 
