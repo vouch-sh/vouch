@@ -347,7 +347,3 @@ impl AgentClient {
     }
 }
 
-/// Check if the agent is running.
-pub async fn is_agent_running() -> bool {
-    AgentClient::connect().await.is_ok()
-}
