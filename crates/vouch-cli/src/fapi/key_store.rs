@@ -85,23 +85,6 @@ pub fn save_to_keychain(key_file: &ClientKeyFile) -> Result<(), FapiError> {
         .map_err(|e| FapiError::KeychainAccess(e.to_string()))
 }
 
-/// Delete the client key from the OS keychain.
-///
-/// Returns `Ok(())` even if the entry does not exist (idempotent).
-///
-/// # Errors
-///
-/// Returns [`FapiError::KeychainAccess`] if the keychain cannot be accessed.
-pub fn delete_from_keychain() -> Result<(), FapiError> {
-    let entry = keyring_core::Entry::new(SERVICE, ACCOUNT)
-        .map_err(|e| FapiError::KeychainAccess(e.to_string()))?;
-
-    match entry.delete_credential() {
-        Ok(()) | Err(keyring_core::Error::NoEntry) => Ok(()),
-        Err(e) => Err(FapiError::KeychainAccess(e.to_string())),
-    }
-}
-
 /// Load a [`ClientKey`] from the OS keychain or disk (read-only).
 ///
 /// Checks sources in order:
