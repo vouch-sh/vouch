@@ -953,7 +953,7 @@ setup-aws-err-sso-expired = SSO session expired or missing. Run '{ -cmd } aws lo
 setup-anthropic-success-block =
     Anthropic (Claude) Workload Identity Federation configured.
 
-      Federation params: ~/.config/vouch/config.json
+      Federation params: { $config_path }
 
     This mints a service-account token for CI/headless automation.
     Get a token:
