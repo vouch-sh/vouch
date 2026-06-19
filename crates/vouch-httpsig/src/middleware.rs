@@ -38,7 +38,6 @@ use axum::{
 };
 
 use crate::algorithm::VerifyingAlgorithm;
-use crate::signature_params::SignatureParams;
 use crate::verify::{extract_signature_labels, validate_coverage, verify_request_signature};
 
 /// Minimum components a signature must cover for the middleware to accept it.
@@ -114,7 +113,7 @@ pub async fn verify_signature<R: KeyResolver>(
 /// Axum middleware that verifies RFC 9421 HTTP signatures with a custom max age.
 pub async fn verify_signature_with_max_age<R: KeyResolver>(
     resolver: Arc<R>,
-    mut req: Request<axum::body::Body>,
+    req: Request<axum::body::Body>,
     next: Next,
     max_age: i64,
 ) -> Response {
