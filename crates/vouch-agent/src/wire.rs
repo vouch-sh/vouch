@@ -92,12 +92,6 @@ pub fn read_u32(buf: &[u8], offset: &mut usize) -> Result<u32> {
     Ok(u32::from_be_bytes(bytes))
 }
 
-/// Encode a u32 as 4-byte big-endian.
-#[inline]
-pub fn encode_u32(value: u32) -> [u8; 4] {
-    value.to_be_bytes()
-}
-
 /// Encode a string with u32 length prefix.
 ///
 /// # Errors
@@ -226,14 +220,6 @@ mod tests {
         let mut offset = 0;
         let result = read_u32(&buf, &mut offset);
         assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_encode_u32() {
-        assert_eq!(encode_u32(0), [0, 0, 0, 0]);
-        assert_eq!(encode_u32(1), [0, 0, 0, 1]);
-        assert_eq!(encode_u32(256), [0, 0, 1, 0]);
-        assert_eq!(encode_u32(0x12345678), [0x12, 0x34, 0x56, 0x78]);
     }
 
     #[test]

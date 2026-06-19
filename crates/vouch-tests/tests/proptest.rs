@@ -1010,16 +1010,6 @@ proptest! {
     // Wire Protocol: Round-trip Tests
     // =========================================================================
 
-    /// encode_u32 → read_u32 round-trip for all u32 values.
-    #[test]
-    fn prop_wire_u32_roundtrip(val: u32) {
-        let encoded = vouch_agent::wire::encode_u32(val);
-        let mut offset = 0;
-        let decoded = vouch_agent::wire::read_u32(&encoded, &mut offset).unwrap();
-        prop_assert_eq!(val, decoded);
-        prop_assert_eq!(offset, 4);
-    }
-
     /// encode_string round-trip preserves data.
     #[test]
     fn prop_wire_encode_string_roundtrip(s: String) {
