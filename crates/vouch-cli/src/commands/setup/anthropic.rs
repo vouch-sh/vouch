@@ -48,5 +48,9 @@ pub(crate) async fn run(args: SetupArgs<'_>) -> Result<()> {
 }
 
 fn print_success() {
-    tr_println!("setup-anthropic-success-block");
+    let config_path = vouch_common::paths::config_file().map_or_else(
+        || "~/.config/vouch/config.json".to_string(),
+        |p| p.display().to_string(),
+    );
+    tr_println!("setup-anthropic-success-block", config_path = config_path);
 }

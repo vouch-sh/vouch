@@ -111,9 +111,10 @@ pub fn cookie_path() -> Result<PathBuf> {
 pub fn write_cookie(cookie: &SessionCookie) -> Result<()> {
     let path = cookie_path()?;
 
-    // Ensure parent directory exists
+    // Ensure parent directory exists with owner-only (0700) permissions, matching
+    // the rest of vouch's state directory (audit log, migrated layout).
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
+        crate::paths::ensure_private_dir(parent)
             .with_context(|| format!("failed to create directory {}", parent.display()))?;
     }
 

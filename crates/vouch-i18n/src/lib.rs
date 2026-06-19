@@ -102,7 +102,8 @@ pub fn select_loader(
 /// 6. `os_locale()` (typically `sys_locale::get_locale`)
 ///
 /// POSIX locale strings often carry `.UTF-8` or `@modifier` suffixes; this
-/// helper strips them so `en_US.UTF-8` parses as `en-US`.
+/// helper strips them so `en_US.UTF-8` parses as `en-US`. Leading and trailing
+/// whitespace is also trimmed so values like `" en-US"` still parse.
 ///
 /// Returns `None` only when every source is empty or unparseable; callers
 /// fall back to the loader's default in that case.
@@ -124,6 +125,7 @@ pub fn negotiate_env(
             .split(['.', '@'])
             .next()
             .unwrap_or(&raw)
+            .trim()
             .replace('_', "-");
         if trimmed.is_empty() {
             continue;
@@ -325,6 +327,28 @@ mod tests {
             negotiate_env(None, |_| Some("ca_ES@valencia".to_owned()), no_os_locale).unwrap();
         // unic-langid accepts ca-ES; modifier was dropped.
         assert!(lang.to_string().starts_with("ca-ES"));
+    }
+
+    #[test]
+    fn leading_whitespace_normalized() {
+        let lang = negotiate_env(
+            None,
+            |k| (k == "LANG").then(|| " en-US".to_owned()),
+            no_os_locale,
+        )
+        .unwrap();
+        assert_eq!(lang.to_string(), "en-US");
+    }
+
+    #[test]
+    fn trailing_whitespace_normalized() {
+        let lang = negotiate_env(
+            None,
+            |k| (k == "LANG").then(|| "en-US ".to_owned()),
+            no_os_locale,
+        )
+        .unwrap();
+        assert_eq!(lang.to_string(), "en-US");
     }
 
     #[test]

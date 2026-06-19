@@ -407,11 +407,7 @@ impl FidoDevice for YubiKey {
         let user_handle = slice_to_vec(assertion_ref.pbUserId, assertion_ref.cbUserId)?;
 
         if user_handle.is_empty() {
-            bail!(
-                "Your authenticator has a credential for this service, \
-                 but it was not stored as a passkey.\n\
-                 Re-enroll with `vouch enroll` to create a compatible credential."
-            );
+            bail!(crate::tr!("webauthn-err-not-passkey"));
         }
 
         drop(_guard);
