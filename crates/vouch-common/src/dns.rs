@@ -372,7 +372,6 @@ impl DohResolver {
 /// resolver itself is built lazily on first use, so installation is safe
 /// outside a tokio runtime.
 struct ProcessState {
-    config: DohConfig,
     resolver: Option<Arc<DohResolver>>,
 }
 
@@ -384,11 +383,8 @@ static PROCESS_STATE: OnceLock<ProcessState> = OnceLock::new();
 /// error and the state is not replaced. This makes re-entry from tests safe
 /// and means binaries should call [`init_from`] exactly once before any
 /// HTTP client is constructed.
-pub fn install_process_resolver(cfg: DohConfig, resolver: Option<Arc<DohResolver>>) {
-    drop(PROCESS_STATE.set(ProcessState {
-        config: cfg,
-        resolver,
-    }));
+pub fn install_process_resolver(_cfg: DohConfig, resolver: Option<Arc<DohResolver>>) {
+    drop(PROCESS_STATE.set(ProcessState { resolver }));
 }
 
 /// Resolver previously installed via [`install_process_resolver`].
@@ -400,16 +396,6 @@ pub fn install_process_resolver(cfg: DohConfig, resolver: Option<Arc<DohResolver
 #[must_use]
 pub fn process_resolver() -> Option<Arc<DohResolver>> {
     PROCESS_STATE.get().and_then(|s| s.resolver.clone())
-}
-
-/// Effective [`DohConfig`] for the current process (for diagnostics).
-///
-/// Returns `Off` if no resolver has been installed.
-#[must_use]
-pub fn process_config() -> DohConfig {
-    PROCESS_STATE
-        .get()
-        .map_or(DohConfig::Off, |s| s.config.clone())
 }
 
 /// Single canonical init path for both `vouch-cli` and `vouch-agent`.
