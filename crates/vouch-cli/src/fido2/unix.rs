@@ -167,19 +167,6 @@ fn build_attestation_object(attestation: &Attestation) -> Result<Vec<u8>> {
 }
 
 impl YubiKey {
-    /// Discover and connect to a `YubiKey`.
-    ///
-    /// Returns immediately if a device is found, or an error if not.
-    #[expect(dead_code, reason = "used by binary target, not the library")]
-    pub(crate) fn discover() -> Result<Self> {
-        use crate::tr;
-
-        let cfg = LibCfg::init();
-        let device = FidoKeyHidFactory::create(&cfg).with_context(|| tr!("fido2-err-no-device"))?;
-
-        Ok(Self { device })
-    }
-
     /// Wait for a `YubiKey` to be inserted, polling until one is found or timeout.
     ///
     /// Prompts the user to insert their device and polls every 500ms.
@@ -265,17 +252,6 @@ impl YubiKey {
         }
     }
 
-    /// Get the number of PIN retry attempts remaining.
-    ///
-    /// Returns the count of attempts before the PIN is blocked.
-    #[expect(dead_code, reason = "used by binary target, not the library")]
-    pub(crate) fn pin_retries(&self) -> Result<i32> {
-        use crate::tr;
-        self.device
-            .get_pin_retries()
-            .with_context(|| tr!("fido2-err-pin-retries"))
-    }
-
     /// Set a new PIN on a `YubiKey` that doesn't have one configured.
     ///
     /// # Errors
@@ -296,15 +272,6 @@ impl YubiKey {
                 ))
             }
         })
-    }
-
-    /// Change the PIN on a `YubiKey`.
-    #[expect(dead_code, reason = "used by binary target, not the library")]
-    pub(crate) fn change_pin(&self, current_pin: &str, new_pin: &str) -> Result<()> {
-        use crate::tr;
-        self.device
-            .change_pin(current_pin, new_pin)
-            .with_context(|| tr!("fido2-err-pin-change"))
     }
 
     /// Perform FIDO2 registration (`make_credential`) with an explicit PIN.
