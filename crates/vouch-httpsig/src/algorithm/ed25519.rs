@@ -43,12 +43,6 @@ impl Ed25519Signer {
         Self::from_pkcs8(pkcs8.as_ref(), key_id)
     }
 
-    /// Get the raw 32-byte public key.
-    #[must_use]
-    pub fn public_key_bytes(&self) -> &[u8] {
-        self.key_pair.public_key().as_ref()
-    }
-
     /// Create a verifier from this signer's public key.
     #[must_use]
     pub fn verifier(&self) -> Ed25519Verifier {
@@ -99,7 +93,7 @@ impl Ed25519Verifier {
         }
     }
 
-    /// Get the key ID.
+    /// Return the key identifier.
     #[must_use]
     pub fn key_id(&self) -> &str {
         &self.key_id
