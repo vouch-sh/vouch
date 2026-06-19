@@ -391,24 +391,6 @@ pub trait HttpClientExt: HttpClient {
         }
     }
 
-    /// GET with authentication and receive JSON response.
-    fn get_json_authenticated<Resp>(
-        &self,
-        url: &str,
-        token: &SecretString,
-    ) -> impl std::future::Future<Output = Result<Resp>> + Send
-    where
-        Resp: DeserializeOwned,
-    {
-        let auth = format!("Bearer {}", token.expose_secret());
-        async move {
-            let response = self
-                .request("GET", url, None, None, Some(&auth), None)
-                .await?;
-            handle_response(response)
-        }
-    }
-
     /// POST form data and receive JSON response.
     fn post_form<Req, Resp>(
         &self,
