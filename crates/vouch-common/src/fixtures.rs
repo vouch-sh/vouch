@@ -90,11 +90,6 @@ impl Fido2Fixture {
         Ok(())
     }
 
-    /// Get the challenge bytes for registration
-    pub fn registration_challenge(&self) -> Result<Vec<u8>, hex::FromHexError> {
-        hex::decode(&self.registration.challenge_hex)
-    }
-
     /// Get the challenge bytes for authentication
     pub fn authentication_challenge(&self) -> Result<Vec<u8>, hex::FromHexError> {
         hex::decode(&self.authentication.challenge_hex)

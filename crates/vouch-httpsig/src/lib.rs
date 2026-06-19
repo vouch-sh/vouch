@@ -8,7 +8,6 @@
 //! ## Supported algorithms
 //!
 //! - `ecdsa-p256-sha256` — ECDSA with P-256 and SHA-256 (DER-encoded signatures)
-//! - `ecdsa-p384-sha384` — ECDSA with P-384 and SHA-384 (DER-encoded signatures)
 //! - `ed25519` — Ed25519 (raw 64-byte signatures)
 //! - `hmac-sha256` — HMAC with SHA-256
 //! - `rsa-pss-sha512` — RSASSA-PSS with SHA-512

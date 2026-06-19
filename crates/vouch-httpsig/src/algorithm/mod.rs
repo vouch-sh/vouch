@@ -2,7 +2,6 @@
 //! Signing and verification algorithm implementations for RFC 9421.
 
 pub mod ecdsa_p256;
-pub mod ecdsa_p384;
 pub mod ed25519;
 pub mod hmac_sha256;
 pub mod rsa_pss_sha512;

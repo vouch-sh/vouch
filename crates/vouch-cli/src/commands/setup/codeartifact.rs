@@ -636,7 +636,11 @@ async fn try_refresh_npmrc(server: &str) -> Result<()> {
     let content = match std::fs::read_to_string(&npmrc_path) {
         Ok(c) => c,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(e) => return Err(e).context("failed to read ~/.npmrc"),
+        Err(e) => {
+            return Err(e).with_context(|| {
+                vouch_cli::tr_args!("setup-ca-err-read", path = npmrc_path.display().to_string())
+            });
+        }
     };
 
     let entries = parse_npmrc_codeartifact_entries(&content);

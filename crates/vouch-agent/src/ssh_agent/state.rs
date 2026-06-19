@@ -9,7 +9,7 @@ use super::credentials::SshCredentials;
 use jiff::Timestamp;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{debug, info};
+use tracing::debug;
 
 /// Internal state protected by a single lock.
 #[derive(Default)]
@@ -148,19 +148,6 @@ impl SshAgentState {
     pub async fn get_server_url(&self) -> Option<String> {
         let guard = self.inner.read().await;
         guard.server_url.clone()
-    }
-
-    /// Clean up expired credentials.
-    pub async fn cleanup_expired(&self) {
-        let should_clear = {
-            let guard = self.inner.read().await;
-            guard.credentials.as_ref().is_some_and(|c| c.is_expired())
-        };
-
-        if should_clear {
-            info!("Cleaning up expired SSH credentials");
-            self.clear_credentials().await;
-        }
     }
 }
 

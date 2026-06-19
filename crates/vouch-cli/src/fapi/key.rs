@@ -217,21 +217,6 @@ impl ClientKey {
         Ok(())
     }
 
-    /// Load a key from disk, or generate and save a new one if the file does not exist.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`FapiError`] if loading or generating the key fails.
-    pub fn load_or_generate(path: &Path) -> Result<Self, FapiError> {
-        if path.exists() {
-            Self::load(path)
-        } else {
-            let key = Self::generate()?;
-            key.save(path)?;
-            Ok(key)
-        }
-    }
-
     /// Serialize this key as a [`ClientKeyFile`] for storage.
     ///
     /// # Errors
@@ -400,30 +385,6 @@ mod tests {
         let jwk2 = key2.public_jwk().unwrap();
         assert_eq!(jwk1.x, jwk2.x);
         assert_eq!(jwk1.y, jwk2.y);
-    }
-
-    #[test]
-    fn test_load_or_generate_creates_file() {
-        let dir = tempdir().expect("tempdir");
-        let path = dir.path().join("new_key.json");
-
-        assert!(!path.exists());
-        let key = ClientKey::load_or_generate(&path).expect("should load or generate");
-        assert!(path.exists(), "file should be created");
-        assert!(!key.kid().is_empty());
-    }
-
-    #[test]
-    fn test_load_or_generate_loads_existing() {
-        let dir = tempdir().expect("tempdir");
-        let path = dir.path().join("existing_key.json");
-
-        let key1 = ClientKey::generate().unwrap();
-        key1.save(&path).unwrap();
-        let kid1 = key1.kid().to_string();
-
-        let key2 = ClientKey::load_or_generate(&path).unwrap();
-        assert_eq!(key2.kid(), kid1, "should load the same key");
     }
 
     #[test]

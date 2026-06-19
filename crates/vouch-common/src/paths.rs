@@ -135,7 +135,7 @@ pub fn client_key_file() -> Option<PathBuf> {
 }
 
 /// Create `dir` (and parents) with owner-only `0700` permissions on Unix.
-fn ensure_private_dir(dir: &Path) -> std::io::Result<()> {
+pub(crate) fn ensure_private_dir(dir: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(dir)?;
     #[cfg(unix)]
     {
@@ -415,6 +415,24 @@ mod tests {
         // Linux case: legacy and current cache dirs are identical -> no move.
         assert!(!migrate_cache_files(&cache, &cache));
         assert!(cache.join("agent.pid").exists());
+        Ok(())
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn ensure_private_dir_sets_owner_only_permissions() -> std::io::Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir()?;
+        let dir = tmp.path().join("state/vouch");
+
+        ensure_private_dir(&dir)?;
+
+        let mode = std::fs::metadata(&dir)?.permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o700,
+            "directory should be owner-only, got {mode:04o}"
+        );
         Ok(())
     }
 }
