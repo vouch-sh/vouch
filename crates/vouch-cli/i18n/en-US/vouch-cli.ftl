@@ -166,14 +166,11 @@ fido2-setting-pin-done = done!
 fido2-err-insert-prompt =
     Timed out waiting for { -yubikey } after { $timeout }s.
     Insert your key and try again.
-fido2-err-no-device = no { -yubikey } found - please insert your { -yubikey }
 fido2-err-not-ready = { -yubikey } not ready after insertion - try removing and reinserting it
 fido2-err-pin-query = failed to query PIN status
 fido2-err-pin-unsupported = This device does not support PIN authentication
-fido2-err-pin-retries = failed to get PIN retry count
 fido2-err-pin-already-set = A PIN is already set on this { -yubikey }.
 fido2-err-pin-set-failed = Failed to set PIN: { $reason }
-fido2-err-pin-change = failed to change PIN
 fido2-err-attestation = attestation verification failed
 fido2-err-no-assertion = no assertion returned
 fido2-err-read-pin = failed to read PIN
