@@ -92,6 +92,12 @@ impl Ed25519Verifier {
             key_id: key_id.to_string(),
         }
     }
+
+    /// Return the key identifier.
+    #[must_use]
+    pub fn key_id(&self) -> &str {
+        &self.key_id
+    }
 }
 
 impl VerifyingAlgorithm for Ed25519Verifier {
