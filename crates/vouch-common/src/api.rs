@@ -232,13 +232,6 @@ impl OAuthError {
 // Browser-based WebAuthn Registration (for enrollment)
 // ============================================================================
 
-/// Request to start browser-based `WebAuthn` registration.
-#[derive(Debug, Serialize, Deserialize)]
-pub struct BrowserRegisterStartRequest {
-    /// OIDC state token (proves user completed OIDC flow).
-    pub oidc_state: String,
-}
-
 /// Response containing `WebAuthn` options for browser registration.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct BrowserRegisterStartResponse {
