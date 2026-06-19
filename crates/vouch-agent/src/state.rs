@@ -335,6 +335,24 @@ impl AgentState {
             _ => None,
         }
     }
+
+    /// Get the current session's email, if a session is stored.
+    ///
+    /// Returns the email even when the session has expired so that the expiry
+    /// monitor can attribute an `AuditEvent::SessionExpired` to the user.
+    pub async fn current_user_email(&self) -> Option<String> {
+        let guard = self.inner.read().await;
+        guard.session.as_ref().map(|s| s.user_email().to_string())
+    }
+
+    /// Get the current session's expiry timestamp, if a session is stored.
+    ///
+    /// Returned even for an expired-but-not-yet-cleared session so the expiry
+    /// monitor can detect when a new login replaces it and re-arm its warnings.
+    pub async fn current_session_expiry(&self) -> Option<Timestamp> {
+        let guard = self.inner.read().await;
+        guard.session.as_ref().map(Session::expires_at)
+    }
 }
 
 #[cfg(test)]
@@ -492,6 +510,32 @@ mod tests {
         // Expired session should not be returned
         assert!(state.get_session().await.is_none());
         assert!(state.get_token().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_current_user_email_available_for_expired_session() {
+        let state = AgentState::new();
+
+        // No session yet.
+        assert!(state.current_user_email().await.is_none());
+
+        // An expired session still yields the email so the expiry monitor can
+        // attribute the SessionExpired audit event to the user.
+        let session = Session::new(
+            SecretString::from("test_token"),
+            "user@example.com".to_string(),
+            past_timestamp(100),
+        );
+        state.store_session(session).await;
+
+        assert!(
+            state.get_session().await.is_none(),
+            "expired session hidden"
+        );
+        assert_eq!(
+            state.current_user_email().await.as_deref(),
+            Some("user@example.com")
+        );
     }
 
     // --- CachedCredential tests ---

@@ -242,7 +242,6 @@ let result = key.authenticate(&rp_id, &challenge, &pin)?;
 **PIN Handling:**
 - `key.is_pin_set()` — Check if PIN is configured
 - `key.set_new_pin(&pin)` — Set initial PIN (8+ characters required)
-- `key.change_pin(&current, &new)` — Change existing PIN
 - `ensure_pin_configured(&key)` — Detect missing PIN and guide user through setup
 - `translate_fido2_error()` — Convert CTAP2 errors to user-friendly messages
 

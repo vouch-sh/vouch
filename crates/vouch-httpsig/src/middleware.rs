@@ -38,6 +38,8 @@ use axum::{
 };
 
 use crate::algorithm::VerifyingAlgorithm;
+use crate::digest::verify_content_digest;
+use crate::error::HttpSigError;
 use crate::signature_params::SignatureParams;
 use crate::verify::{extract_signature_labels, validate_coverage, verify_request_signature};
 
@@ -46,6 +48,12 @@ use crate::verify::{extract_signature_labels, validate_coverage, verify_request_
 /// Ensures signatures protect the request method and target, preventing
 /// replay attacks where an attacker moves a signature to a different endpoint.
 const REQUIRED_COVERAGE: &[&str] = &["@method", "@path"];
+
+/// Maximum signed request body buffered for Content-Digest verification.
+///
+/// Signed `/v1/*` payloads are small JSON documents; 1 MiB is a generous cap
+/// that bounds memory use while never rejecting a legitimate request.
+const MAX_SIGNED_BODY: usize = 1024 * 1024;
 
 /// Generic error response to avoid leaking verification details to attackers.
 const SIG_VERIFY_FAILED: &str = "signature verification failed";
@@ -125,7 +133,7 @@ pub async fn verify_signature<R: KeyResolver>(
 /// Axum middleware that verifies RFC 9421 HTTP signatures with a custom max age.
 pub async fn verify_signature_with_max_age<R: KeyResolver>(
     resolver: Arc<R>,
-    mut req: Request<axum::body::Body>,
+    req: Request<axum::body::Body>,
     next: Next,
     max_age: i64,
 ) -> Response {
@@ -194,10 +202,30 @@ pub async fn verify_signature_with_max_age<R: KeyResolver>(
                 alg = ?params.alg,
                 "HTTP signature verified"
             );
-            req.extensions_mut().insert(VerifiedSignature {
+            // Enforce RFC 9530 body integrity for signed requests that carry a
+            // body, then rebuild the request for the downstream handler.
+            let (mut parts, body) = req.into_parts();
+            let bytes = match axum::body::to_bytes(body, MAX_SIGNED_BODY).await {
+                Ok(bytes) => bytes,
+                Err(e) => {
+                    tracing::debug!(error = %e, "failed to buffer signed request body");
+                    return (StatusCode::UNAUTHORIZED, SIG_VERIFY_FAILED).into_response();
+                }
+            };
+            if let Err(e) = enforce_body_digest(&params, &parts.headers, &bytes) {
+                tracing::debug!(
+                    label = %label,
+                    keyid = %keyid,
+                    error = %e,
+                    "signed request body integrity check failed"
+                );
+                return (StatusCode::UNAUTHORIZED, SIG_VERIFY_FAILED).into_response();
+            }
+            parts.extensions.insert(VerifiedSignature {
                 label: label.clone(),
                 params,
             });
+            let req = Request::from_parts(parts, axum::body::Body::from(bytes));
             let mut response = next.run(req).await;
 
             // Issue a fresh nonce for the client's next request
@@ -219,6 +247,38 @@ pub async fn verify_signature_with_max_age<R: KeyResolver>(
             (StatusCode::UNAUTHORIZED, SIG_VERIFY_FAILED).into_response()
         }
     }
+}
+
+/// Enforce RFC 9530 Content-Digest integrity for a signed request body.
+///
+/// A signed request that carries a non-empty body MUST cover `content-digest`
+/// in its signature and present a matching `Content-Digest` header. Coverage is
+/// required because an unsigned digest header could be swapped alongside the
+/// body. Empty bodies (GET and bodyless POST requests) are exempt.
+///
+/// # Errors
+///
+/// Returns [`HttpSigError::MissingDigest`] when the body is not bound by a
+/// covered, present `Content-Digest`, or [`HttpSigError::DigestMismatch`] when
+/// the digest does not match the body.
+fn enforce_body_digest(
+    params: &SignatureParams,
+    headers: &http::HeaderMap,
+    body: &[u8],
+) -> Result<(), HttpSigError> {
+    if body.is_empty() {
+        return Ok(());
+    }
+
+    validate_coverage(params, &["content-digest"]).map_err(|_| HttpSigError::MissingDigest)?;
+
+    let header = headers
+        .get("content-digest")
+        .ok_or(HttpSigError::MissingDigest)?
+        .to_str()
+        .map_err(|e| HttpSigError::SfvParse(format!("Content-Digest: {e}")))?;
+
+    verify_content_digest(header, body)
 }
 
 /// Extract the `keyid` parameter from a Signature-Input header value for a given label.
@@ -280,11 +340,29 @@ mod tests {
 
     fn build_test_router(resolver: Arc<InMemoryKeyResolver>) -> Router {
         Router::new()
-            .route("/test", get(ok_handler))
+            .route("/test", get(ok_handler).post(ok_handler))
             .layer(axum::middleware::from_fn_with_state(
                 resolver,
                 verify_signature::<InMemoryKeyResolver>,
             ))
+    }
+
+    fn params_covering(components: Vec<crate::ComponentIdentifier>) -> SignatureParams {
+        SignatureParams {
+            components,
+            alg: None,
+            keyid: None,
+            created: None,
+            expires: None,
+            nonce: None,
+            tag: None,
+        }
+    }
+
+    fn digest_header(body: &[u8]) -> http::HeaderValue {
+        crate::digest::content_digest(body, crate::digest::DigestAlgorithm::Sha256)
+            .parse()
+            .unwrap()
     }
 
     #[tokio::test]
@@ -401,6 +479,130 @@ mod tests {
         parts
             .headers
             .insert("signature", "sig1=:dGFtcGVyZWQ=:".parse().unwrap());
+        let req = Request::from_parts(parts, body);
+
+        let response =
+            <Router as tower::ServiceExt<Request<axum::body::Body>>>::oneshot(router, req)
+                .await
+                .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[test]
+    fn test_enforce_body_digest_empty_body_is_exempt() {
+        let params = params_covering(vec![]);
+        let headers = http::HeaderMap::new();
+        enforce_body_digest(&params, &headers, b"").unwrap();
+    }
+
+    #[test]
+    fn test_enforce_body_digest_valid() {
+        let body = b"{\"x\":1}";
+        let params = params_covering(vec![
+            crate::ComponentIdentifier::method(),
+            crate::ComponentIdentifier::field("content-digest"),
+        ]);
+        let mut headers = http::HeaderMap::new();
+        headers.insert("content-digest", digest_header(body));
+        enforce_body_digest(&params, &headers, body).unwrap();
+    }
+
+    #[test]
+    fn test_enforce_body_digest_missing_header() {
+        let body = b"body";
+        let params = params_covering(vec![crate::ComponentIdentifier::field("content-digest")]);
+        let headers = http::HeaderMap::new();
+        assert!(matches!(
+            enforce_body_digest(&params, &headers, body),
+            Err(HttpSigError::MissingDigest)
+        ));
+    }
+
+    #[test]
+    fn test_enforce_body_digest_not_covered() {
+        let body = b"body";
+        let params = params_covering(vec![crate::ComponentIdentifier::method()]);
+        let mut headers = http::HeaderMap::new();
+        headers.insert("content-digest", digest_header(body));
+        assert!(matches!(
+            enforce_body_digest(&params, &headers, body),
+            Err(HttpSigError::MissingDigest)
+        ));
+    }
+
+    #[test]
+    fn test_enforce_body_digest_mismatch() {
+        let params = params_covering(vec![crate::ComponentIdentifier::field("content-digest")]);
+        let mut headers = http::HeaderMap::new();
+        headers.insert("content-digest", digest_header(b"other body"));
+        assert!(matches!(
+            enforce_body_digest(&params, &headers, b"body"),
+            Err(HttpSigError::DigestMismatch(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_signed_post_with_valid_digest_succeeds() {
+        let signer = EcdsaP256Signer::generate("test-key").unwrap();
+        let mut resolver = InMemoryKeyResolver::new();
+        resolver.insert("test-key".to_string(), Arc::new(signer.verifier()));
+        let router = build_test_router(Arc::new(resolver));
+
+        let body = b"{\"hello\":\"world\"}".to_vec();
+        let mut req = Request::builder()
+            .method("POST")
+            .uri("http://example.com/test")
+            .body(axum::body::Body::from(body.clone()))
+            .unwrap();
+        crate::digest::set_content_digest(
+            req.headers_mut(),
+            &body,
+            crate::digest::DigestAlgorithm::Sha256,
+        )
+        .unwrap();
+
+        SignatureBuilder::new("sig1")
+            .method()
+            .path()
+            .field("content-digest")
+            .created_now()
+            .sign_request(&mut req, &signer)
+            .unwrap();
+
+        let (mut parts, body) = req.into_parts();
+        parts.uri = "/test".parse().unwrap();
+        let req = Request::from_parts(parts, body);
+
+        let response =
+            <Router as tower::ServiceExt<Request<axum::body::Body>>>::oneshot(router, req)
+                .await
+                .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_signed_post_without_digest_is_rejected() {
+        let signer = EcdsaP256Signer::generate("test-key").unwrap();
+        let mut resolver = InMemoryKeyResolver::new();
+        resolver.insert("test-key".to_string(), Arc::new(signer.verifier()));
+        let router = build_test_router(Arc::new(resolver));
+
+        // A signed POST whose signature does not cover the body via Content-Digest.
+        let mut req = Request::builder()
+            .method("POST")
+            .uri("http://example.com/test")
+            .body(axum::body::Body::from(b"{\"hello\":\"world\"}".to_vec()))
+            .unwrap();
+
+        SignatureBuilder::new("sig1")
+            .method()
+            .path()
+            .created_now()
+            .sign_request(&mut req, &signer)
+            .unwrap();
+
+        let (mut parts, body) = req.into_parts();
+        parts.uri = "/test".parse().unwrap();
         let req = Request::from_parts(parts, body);
 
         let response =
