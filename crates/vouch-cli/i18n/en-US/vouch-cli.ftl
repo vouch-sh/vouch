@@ -141,6 +141,9 @@ webauthn-err-invalid-parameter =
     Internal error: invalid WebAuthn parameter (HRESULT 0x{ $code }).
     Please file a bug at https://github.com/vouch-sh/vouch/issues.
 webauthn-err-generic = { $operation } failed: 0x{ $code } { $detail }
+webauthn-err-not-passkey =
+    Your authenticator has a credential for this service, but it was not stored as a passkey.
+    Re-enroll with `{ -cmd } enroll` to create a compatible credential.
 
 ## PIN setup prompts
 
