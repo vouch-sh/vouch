@@ -45,7 +45,7 @@ pub use api::{
     RenameKeyRequest, RenameKeyResponse, SessionStatus, SshCaPublicKeyResponse,
     SshCertificateRequest, SshCertificateResponse, serialize_secret_string,
 };
-pub use cookie::{SessionCookie, clear_cookie, cookie_path, read_cookie, write_cookie};
+pub use cookie::{SessionCookie, clear_cookie, cookie_path, write_cookie};
 pub use error::{ApiError, VouchError};
 pub use url::{UrlSecurity, check_url_security, is_loopback_host};
 
