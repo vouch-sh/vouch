@@ -4,37 +4,8 @@
 //! This module provides a trait-based abstraction over the IPC transport layer,
 //! enabling integration testing without running a real Unix socket server.
 
+#[cfg(any(test, feature = "test-utils"))]
 use std::io::Result;
-
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-
-/// Trait for abstracting the agent IPC transport.
-///
-/// This trait enables testing agent communication without Unix sockets.
-pub trait AgentTransport: Send + Unpin {
-    /// Write all bytes to the transport.
-    fn write_all(&mut self, buf: &[u8]) -> impl std::future::Future<Output = Result<()>> + Send;
-
-    /// Read exactly `buf.len()` bytes from the transport.
-    fn read_exact(
-        &mut self,
-        buf: &mut [u8],
-    ) -> impl std::future::Future<Output = Result<usize>> + Send;
-}
-
-// Implement for any type that implements AsyncRead + AsyncWrite + Send + Unpin
-impl<T> AgentTransport for T
-where
-    T: AsyncRead + AsyncWrite + Send + Unpin,
-{
-    async fn write_all(&mut self, buf: &[u8]) -> Result<()> {
-        AsyncWriteExt::write_all(self, buf).await
-    }
-
-    async fn read_exact(&mut self, buf: &mut [u8]) -> Result<usize> {
-        AsyncReadExt::read_exact(self, buf).await
-    }
-}
 
 /// In-memory bidirectional channel for testing agent communication.
 ///

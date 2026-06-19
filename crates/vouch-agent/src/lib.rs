@@ -57,7 +57,6 @@ pub use error::{AgentError, Result};
 #[cfg(unix)]
 pub use ssh_agent::ssh_agent_socket_path;
 pub use state::SessionInfo;
-pub use transport::AgentTransport;
 
 #[cfg(any(test, feature = "test-utils"))]
 pub use transport::{TestTransport, TestTransportPair};
