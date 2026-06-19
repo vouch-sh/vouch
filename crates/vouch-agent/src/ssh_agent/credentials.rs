@@ -74,12 +74,6 @@ impl CertificateMetadata {
                 .unwrap_or(now);
         self.expires_at < threshold
     }
-
-    /// Get remaining validity in seconds.
-    pub fn remaining_seconds(&self) -> i64 {
-        let now = Timestamp::now();
-        self.expires_at.as_second().saturating_sub(now.as_second())
-    }
 }
 
 /// SSH credentials stored by the agent.
@@ -159,11 +153,6 @@ impl SshCredentials {
         self.metadata.is_expiring_soon()
     }
 
-    /// Get remaining validity in seconds.
-    pub fn remaining_seconds(&self) -> i64 {
-        self.metadata.remaining_seconds()
-    }
-
     /// Get the public key in OpenSSH format.
     pub fn public_key_openssh(&self) -> Result<String> {
         let pub_key = self.private_key.public_key();
@@ -230,7 +219,6 @@ mod tests {
         };
 
         assert!(!metadata.is_expired());
-        assert!(metadata.remaining_seconds() > 0);
     }
 
     #[test]
@@ -247,6 +235,5 @@ mod tests {
         };
 
         assert!(metadata.is_expired());
-        assert!(metadata.remaining_seconds() < 0);
     }
 }
