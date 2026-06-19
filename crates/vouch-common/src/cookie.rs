@@ -76,24 +76,6 @@ impl SessionCookie {
             self.value
         )
     }
-
-    /// Parse from a Netscape cookie line.
-    fn from_netscape_line(line: &str) -> Option<Self> {
-        let parts: Vec<&str> = line.split('\t').collect();
-        if parts.len() != 7 {
-            return None;
-        }
-
-        Some(Self {
-            domain: parts.first()?.to_string(),
-            include_subdomains: *parts.get(1)? == "TRUE",
-            path: parts.get(2)?.to_string(),
-            secure: *parts.get(3)? == "TRUE",
-            expires: parts.get(4)?.parse().ok()?,
-            name: parts.get(5)?.to_string(),
-            value: parts.get(6)?.to_string(),
-        })
-    }
 }
 
 /// Get the path to the cookie file.
@@ -150,34 +132,6 @@ pub fn write_cookie(cookie: &SessionCookie) -> Result<()> {
     Ok(())
 }
 
-/// Read the session cookie from the cookie file.
-///
-/// Returns `None` if the file doesn't exist or doesn't contain
-/// a valid cookie.
-pub fn read_cookie() -> Result<Option<SessionCookie>> {
-    let path = cookie_path()?;
-
-    if !path.exists() {
-        return Ok(None);
-    }
-
-    let content = fs::read_to_string(&path)
-        .with_context(|| format!("failed to read cookie file {}", path.display()))?;
-
-    // Find the first non-comment, non-empty line
-    for line in content.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        if let Some(cookie) = SessionCookie::from_netscape_line(line) {
-            return Ok(Some(cookie));
-        }
-    }
-
-    Ok(None)
-}
-
 /// Clear the cookie file (logout).
 ///
 /// Removes the cookie file if it exists.
@@ -193,10 +147,6 @@ pub fn clear_cookie() -> Result<()> {
 }
 
 #[cfg(test)]
-#[expect(
-    clippy::panic,
-    reason = "test code: panic on assertion failure is acceptable"
-)]
 mod tests {
     use super::*;
 
@@ -208,22 +158,5 @@ mod tests {
             line,
             "vouch.example.com\tFALSE\t/\tTRUE\t1737849600\t__Host-vouch_session\ttoken123"
         );
-
-        let Some(parsed) = SessionCookie::from_netscape_line(&line) else {
-            panic!("failed to parse valid cookie line");
-        };
-        assert_eq!(parsed.domain, "vouch.example.com");
-        assert!(!parsed.include_subdomains);
-        assert_eq!(parsed.path, "/");
-        assert!(parsed.secure);
-        assert_eq!(parsed.expires, 1_737_849_600);
-        assert_eq!(parsed.name, "__Host-vouch_session");
-        assert_eq!(parsed.value, "token123");
-    }
-
-    #[test]
-    fn test_invalid_line() {
-        assert!(SessionCookie::from_netscape_line("invalid").is_none());
-        assert!(SessionCookie::from_netscape_line("a\tb\tc\td").is_none());
     }
 }
