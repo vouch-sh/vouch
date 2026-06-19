@@ -76,7 +76,6 @@ impl SessionCookie {
             self.value
         )
     }
-
 }
 
 /// Get the path to the cookie file.
