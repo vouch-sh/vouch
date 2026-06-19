@@ -54,11 +54,6 @@ impl Session {
         self.expires_at
     }
 
-    /// Get when the user authenticated.
-    pub fn authenticated_at(&self) -> Timestamp {
-        self.authenticated_at
-    }
-
     /// Check if the session has expired.
     pub fn is_expired(&self) -> bool {
         Timestamp::now() >= self.expires_at
@@ -215,11 +210,6 @@ impl CachedCredential {
     /// Get the expiration timestamp.
     pub fn expires_at(&self) -> Timestamp {
         self.expires_at
-    }
-
-    /// Get the cache timestamp.
-    pub fn cached_at(&self) -> Timestamp {
-        self.cached_at
     }
 
     /// Check if this cached credential is still valid (not expired).
