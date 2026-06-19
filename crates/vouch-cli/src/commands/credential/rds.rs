@@ -170,22 +170,6 @@ fn rds_cache_expiry() -> Result<String> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_rds_token_strips_https_prefix() {
-        let url = "https://mydb.us-east-1.rds.amazonaws.com:5432/?Action=connect&DBUser=admin&X-Amz-Algorithm=AWS4-HMAC-SHA256";
-        let token = url.strip_prefix("https://").unwrap_or(url);
-        assert!(token.starts_with("mydb.us-east-1.rds.amazonaws.com:5432"));
-        assert!(!token.starts_with("https://"));
-    }
-
-    #[test]
-    fn test_rds_endpoint_format() {
-        let hostname = "mydb.us-east-1.rds.amazonaws.com";
-        let port: u16 = 5432;
-        let endpoint = format!("https://{hostname}:{port}");
-        assert_eq!(endpoint, "https://mydb.us-east-1.rds.amazonaws.com:5432");
-    }
-
     /// Mirror the cache-key construction in `fetch_rds_token()` so we can lock
     /// in the invariant that agent and non-agent invocations land on different
     /// keys.
