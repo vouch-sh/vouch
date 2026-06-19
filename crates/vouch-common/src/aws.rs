@@ -304,17 +304,6 @@ impl std::fmt::Display for Arn {
     }
 }
 
-/// Compute an expiration timestamp from a duration in seconds.
-///
-/// # Errors
-///
-/// Returns an error if the resulting timestamp overflows.
-pub fn expiration_from_secs(expires_in: u64) -> Result<jiff::Timestamp, jiff::Error> {
-    jiff::Timestamp::now().checked_add(jiff::SignedDuration::from_secs(
-        i64::try_from(expires_in).unwrap_or(i64::MAX),
-    ))
-}
-
 #[cfg(test)]
 #[expect(
     clippy::unwrap_used,
