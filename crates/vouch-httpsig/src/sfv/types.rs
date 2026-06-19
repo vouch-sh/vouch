@@ -109,14 +109,11 @@ pub enum SfvDictMember {
     InnerList(SfvInnerList),
 }
 
-/// A member in an SFV list — either an item or an inner list (RFC 8941 §3.1).
-pub type SfvListMember = SfvDictMember;
-
 /// An SFV list: an ordered sequence of members (RFC 8941 §3.1).
 #[derive(Debug, Clone, PartialEq)]
 pub struct SfvList {
     /// The ordered members in the list.
-    pub members: Vec<SfvListMember>,
+    pub members: Vec<SfvDictMember>,
 }
 
 /// An SFV dictionary: an ordered map of string keys to members (RFC 8941 §3.2).
