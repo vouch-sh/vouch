@@ -50,17 +50,6 @@ const REQUIRED_COVERAGE: &[&str] = &["@method", "@path"];
 /// Generic error response to avoid leaking verification details to attackers.
 const SIG_VERIFY_FAILED: &str = "signature verification failed";
 
-/// Verified HTTP signature data stored as a request extension.
-///
-/// Handlers can retrieve this via `req.extensions().get::<VerifiedSignature>()`.
-#[derive(Debug, Clone)]
-pub struct VerifiedSignature {
-    /// The label of the verified signature (e.g., `"sig1"`).
-    pub label: String,
-    /// The parsed and verified signature parameters.
-    pub params: SignatureParams,
-}
-
 /// Async key resolver trait for looking up verification keys by `keyid`.
 ///
 /// Implementations should map the `keyid` parameter from the `Signature-Input`
@@ -107,11 +96,11 @@ pub const DEFAULT_MAX_AGE: i64 = 300;
 /// 1. Extracts signature labels
 /// 2. Resolves the verifying key via the `keyid` parameter
 /// 3. Verifies the signature against the reconstructed base
-/// 4. Stores [`VerifiedSignature`] in request extensions
+/// 4. Allows the request to proceed
 ///
 /// If no signature headers are present, the request passes through —
-/// handlers must check for the `VerifiedSignature` extension if a signature
-/// is required for their endpoint.
+/// handlers must check for a verified signature if a signed request is
+/// required for their endpoint.
 ///
 /// Returns 401 with a generic message if signature verification fails.
 pub async fn verify_signature<R: KeyResolver>(
@@ -194,10 +183,6 @@ pub async fn verify_signature_with_max_age<R: KeyResolver>(
                 alg = ?params.alg,
                 "HTTP signature verified"
             );
-            req.extensions_mut().insert(VerifiedSignature {
-                label: label.clone(),
-                params,
-            });
             let mut response = next.run(req).await;
 
             // Issue a fresh nonce for the client's next request
