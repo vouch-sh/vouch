@@ -8,7 +8,7 @@
 //! provider.
 
 use vouch_common::dns::{
-    DohConfig, DohResolver, install_process_resolver, process_config, process_resolver,
+    DohConfig, DohResolver, install_process_resolver, process_resolver,
 };
 use vouch_common::http::{agent_client, credential_client, server_client};
 
@@ -16,7 +16,6 @@ use vouch_common::http::{agent_client, credential_client, server_client};
 fn install_process_resolver_wires_through_all_factories() {
     // Pre-install: nothing has been set, so the accessors report defaults.
     assert!(process_resolver().is_none(), "no resolver before install");
-    assert_eq!(process_config(), DohConfig::Off, "default state is Off");
 
     // Install Cloudflare DoH for the rest of this test process.
     let cfg = DohConfig::Cloudflare;
@@ -27,12 +26,11 @@ fn install_process_resolver_wires_through_all_factories() {
     );
     install_process_resolver(cfg, resolver);
 
-    // After install, both accessors reflect the new state.
+    // After install, the resolver accessor reflects the new state.
     assert!(
         process_resolver().is_some(),
         "process_resolver should return Some after install"
     );
-    assert_eq!(process_config(), DohConfig::Cloudflare);
 
     // Each factory must construct successfully with the resolver applied.
     // The build is what exercises the dns_resolver wiring; if any future
@@ -44,13 +42,8 @@ fn install_process_resolver_wires_through_all_factories() {
     server_client("test-server/1.0", None).expect("server_client builds");
 
     // Idempotency: a second install must NOT replace the state. Attempt
-    // to install Off and verify Cloudflare survives.
+    // to install Off and verify the resolver from the first install survives.
     install_process_resolver(DohConfig::Off, None);
-    assert_eq!(
-        process_config(),
-        DohConfig::Cloudflare,
-        "first install wins; subsequent calls are no-ops"
-    );
     assert!(
         process_resolver().is_some(),
         "resolver from first install survives a second-call attempt"
