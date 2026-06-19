@@ -149,7 +149,6 @@ impl SshAgentState {
         let guard = self.inner.read().await;
         guard.server_url.clone()
     }
-
 }
 
 #[cfg(test)]
