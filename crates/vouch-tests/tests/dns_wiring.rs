@@ -7,9 +7,7 @@
 //! lookup path is exercised separately by `vouch doctor` against a live
 //! provider.
 
-use vouch_common::dns::{
-    DohConfig, DohResolver, install_process_resolver, process_resolver,
-};
+use vouch_common::dns::{DohConfig, DohResolver, install_process_resolver, process_resolver};
 use vouch_common::http::{agent_client, credential_client, server_client};
 
 #[test]
