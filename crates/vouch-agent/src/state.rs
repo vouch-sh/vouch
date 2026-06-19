@@ -344,6 +344,15 @@ impl AgentState {
         let guard = self.inner.read().await;
         guard.session.as_ref().map(|s| s.user_email().to_string())
     }
+
+    /// Get the current session's expiry timestamp, if a session is stored.
+    ///
+    /// Returned even for an expired-but-not-yet-cleared session so the expiry
+    /// monitor can detect when a new login replaces it and re-arm its warnings.
+    pub async fn current_session_expiry(&self) -> Option<Timestamp> {
+        let guard = self.inner.read().await;
+        guard.session.as_ref().map(Session::expires_at)
+    }
 }
 
 #[cfg(test)]
