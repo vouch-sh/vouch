@@ -7,8 +7,6 @@ use ssh_key::{PrivateKey, certificate::Certificate};
 use std::path::PathBuf;
 use zeroize::Zeroizing;
 
-use super::REFRESH_THRESHOLD_SECONDS;
-
 /// Certificate metadata for cache management.
 #[derive(Clone, Debug)]
 pub struct CertificateMetadata {
@@ -64,15 +62,6 @@ impl CertificateMetadata {
     pub fn is_expired(&self) -> bool {
         let now = Timestamp::now();
         self.expires_at < now
-    }
-
-    /// Check if the certificate is expiring soon (within threshold).
-    pub fn is_expiring_soon(&self) -> bool {
-        let now = Timestamp::now();
-        let threshold =
-            Timestamp::from_second(now.as_second().saturating_add(REFRESH_THRESHOLD_SECONDS))
-                .unwrap_or(now);
-        self.expires_at < threshold
     }
 }
 
@@ -146,19 +135,6 @@ impl SshCredentials {
     /// Check if the certificate has expired.
     pub fn is_expired(&self) -> bool {
         self.metadata.is_expired()
-    }
-
-    /// Check if the certificate is expiring soon.
-    pub fn is_expiring_soon(&self) -> bool {
-        self.metadata.is_expiring_soon()
-    }
-
-    /// Get the public key in OpenSSH format.
-    pub fn public_key_openssh(&self) -> Result<String> {
-        let pub_key = self.private_key.public_key();
-        pub_key
-            .to_openssh()
-            .map_err(|e| AgentError::Protocol(format!("failed to serialize public key: {e}")))
     }
 }
 

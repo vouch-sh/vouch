@@ -27,7 +27,8 @@ pub struct SshAgentServer {
 }
 
 impl SshAgentServer {
-    /// Create a new SSH agent server with access to the main agent state (for refresh).
+    /// Create a new SSH agent server with access to the main agent state, used
+    /// to session-gate lazy disk loading of certificates.
     pub fn with_agent_state(
         state: Arc<SshAgentState>,
         agent_state: Arc<crate::state::AgentState>,
@@ -119,9 +120,7 @@ async fn handle_ssh_connection(
             SSH_AGENTC_REQUEST_IDENTITIES => {
                 handle_request_identities(&state, agent_state.as_ref()).await
             }
-            SSH_AGENTC_SIGN_REQUEST => {
-                handle_sign_request(&buf, &state, agent_state.as_ref()).await
-            }
+            SSH_AGENTC_SIGN_REQUEST => handle_sign_request(&buf, &state).await,
             _ => {
                 debug!("Unknown SSH agent message type: {msg_type}");
                 Ok(vec![SSH_AGENT_FAILURE])
