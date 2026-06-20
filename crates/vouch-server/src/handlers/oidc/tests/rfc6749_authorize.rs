@@ -386,12 +386,15 @@ async fn test_rfc6749_authorize_access_denied_personal_scope() {
     // Create user who owns the app
     let owner = create_test_user(&state.store, "authorize-owner@example.com").await;
     // Create a Personal scope app
-    let client = create_test_oauth_client_with_options(
+    let client = create_test_client(
         &state.store,
         &owner.id,
-        crate::db::AccessScope::Personal,
-        None,
-        &[],
+        TestClientSpec {
+            access_scope: crate::db::AccessScope::Personal,
+            org_id: None,
+            resource_uris: vec![],
+            ..Default::default()
+        },
     )
     .await;
 
@@ -452,12 +455,15 @@ async fn test_rfc8707_authorize_invalid_resource_redirects_with_error() {
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
 
     // Create a client with a specific resource URI
-    let client = create_test_oauth_client_with_options(
+    let client = create_test_client(
         &state.store,
         &user.id,
-        crate::db::AccessScope::Public,
-        None,
-        &["https://api.example.com".to_string()],
+        TestClientSpec {
+            access_scope: crate::db::AccessScope::Public,
+            org_id: None,
+            resource_uris: vec!["https://api.example.com".to_string()],
+            ..Default::default()
+        },
     )
     .await;
 

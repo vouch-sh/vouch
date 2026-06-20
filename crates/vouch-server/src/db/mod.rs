@@ -139,8 +139,7 @@ pub use oauth::{
 // Re-export test-only OAuth client helpers
 #[cfg(test)]
 pub use oauth::test_helpers::{
-    set_oauth_client_active, set_oauth_client_userinfo_alg, update_oauth_client_auth_method,
-    update_oauth_client_fapi_settings, update_oauth_client_jar_settings, update_oauth_client_jwks,
+    set_oauth_client_active, set_oauth_client_userinfo_alg, update_oauth_client_fapi_settings,
 };
 
 // Re-export JWKS cache functions

@@ -63,28 +63,18 @@ async fn create_test_jwt_client(
     user_id: &str,
 ) -> (TestOAuthClient, Vec<u8>) {
     let (pkcs8_bytes, jwk) = generate_es256_signing_key();
+    let jwks_value = serde_json::json!({ "keys": [jwk] });
 
-    // Create the client first
-    let client = create_test_oauth_client(store, user_id).await;
-
-    // Get the internal ID for the client
-    let oauth_client = db::get_oauth_client_by_client_id(store, &client.client_id)
-        .await
-        .expect("DB error")
-        .expect("Client not found");
-
-    // Set inline JWKS
-    let jwks_value = serde_json::json!({
-        "keys": [jwk]
-    });
-    db::update_oauth_client_jwks(store, &oauth_client.id, &jwks_value)
-        .await
-        .expect("Failed to set JWKS");
-
-    // Set auth method to private_key_jwt
-    db::update_oauth_client_auth_method(store, &oauth_client.id, "private_key_jwt")
-        .await
-        .expect("Failed to set auth method");
+    let client = create_test_client(
+        store,
+        user_id,
+        TestClientSpec {
+            jwks: TestJwks::Custom(jwks_value),
+            token_endpoint_auth_method: Some(crate::db::TokenEndpointAuthMethod::PrivateKeyJwt),
+            ..Default::default()
+        },
+    )
+    .await;
 
     (client, pkcs8_bytes)
 }

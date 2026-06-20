@@ -1125,8 +1125,8 @@ pub enum TestJwks {
     #[default]
     None,
     /// The process-wide shared test signing key (`TEST_HTTPSIG.jwks`). Opts
-    /// a custom client into transparently-signed `/v1/*` request verification.
-    /// Folds in the old `attach_test_signing_key` post-hoc patch.
+    /// a custom client into transparently-signed `/v1/*` request verification
+    /// using the key registered for the first-party test client.
     Shared,
     /// A caller-supplied JWKS document (e.g. a per-test `ClientKey` public JWK
     /// for negative/key-mismatch tests).
@@ -1181,6 +1181,10 @@ pub struct TestClientSpec {
     pub introspection_signed_response_alg: Option<crate::db::JwsAlgorithm>,
     /// Whether to mint a client secret. `false` for public/SPA clients. Default: `true`.
     pub with_secret: bool,
+    /// Restrict request-object signing algorithm. Default: `None`.
+    pub request_object_signing_alg: Option<crate::db::JwsAlgorithm>,
+    /// Require a signed request object (JAR). Default: `None`.
+    pub require_signed_request_object: Option<bool>,
 }
 
 impl Default for TestClientSpec {
@@ -1204,6 +1208,8 @@ impl Default for TestClientSpec {
             userinfo_signed_response_alg: Option::None,
             introspection_signed_response_alg: Option::None,
             with_secret: true,
+            request_object_signing_alg: Option::None,
+            require_signed_request_object: Option::None,
         }
     }
 }
@@ -1290,8 +1296,8 @@ pub async fn create_test_client(
             },
             authorization_signed_response_alg: Option::None,
             introspection_signed_response_alg: spec.introspection_signed_response_alg,
-            request_object_signing_alg: Option::None,
-            require_signed_request_object: Option::None,
+            request_object_signing_alg: spec.request_object_signing_alg,
+            require_signed_request_object: spec.require_signed_request_object,
             userinfo_signed_response_alg: spec.userinfo_signed_response_alg,
             request_uris: Option::None,
         },
@@ -1323,27 +1329,6 @@ pub async fn create_test_client(
 /// Create a test OAuth client with a secret for use in tests.
 pub async fn create_test_oauth_client(store: &DocumentStore, user_id: &str) -> TestOAuthClient {
     create_test_client(store, user_id, TestClientSpec::default()).await
-}
-
-/// Create a test OAuth client with custom access scope and resource URIs.
-pub async fn create_test_oauth_client_with_options(
-    store: &DocumentStore,
-    user_id: &str,
-    access_scope: crate::db::AccessScope,
-    org_id: Option<&str>,
-    resource_uris: &[String],
-) -> TestOAuthClient {
-    create_test_client(
-        store,
-        user_id,
-        TestClientSpec {
-            access_scope,
-            org_id: org_id.map(str::to_string),
-            resource_uris: resource_uris.to_vec(),
-            ..Default::default()
-        },
-    )
-    .await
 }
 
 /// Create a public OAuth client (no client secret, `token_endpoint_auth_method=none`).
