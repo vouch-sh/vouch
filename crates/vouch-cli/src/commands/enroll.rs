@@ -40,25 +40,32 @@ pub(crate) async fn run(server: &str) -> Result<()> {
     tr_println!("enroll-starting");
     println!();
 
-    // Step 1: Generate or load the FAPI client key (for DPoP proofs).
-    let fapi_key = vouch_cli::fapi::key_store::load_or_create_client_key().ok();
+    // Step 1: Generate or load the FAPI client key. This key signs DPoP
+    // proofs and every post-enrollment `/v1/*` request (RFC 9421), so it is
+    // required — without it, enrollment cannot produce a client that can call
+    // the credential and key-management endpoints.
+    let fapi_key = vouch_cli::fapi::key_store::load_or_create_client_key()
+        .context("failed to initialize the hardware-backed signing key")?;
 
     // Step 2: Register as a FAPI 2.0 client BEFORE the device code flow
     // (open registration — no auth token required).
     //
     // This ensures we have a client_id before the device authorization
-    // request so the token will be bound to our registered client from
-    // the start. Registration is non-fatal: enrollment continues even
-    // if this step fails.
-    let pre_registered_client_id = if let Some(ref key) = fapi_key {
-        register_fapi_client_open(client.raw_client(), server, key).await
-    } else {
-        None
-    };
+    // request so the token binds to our registered client (and its JWKS)
+    // from the start. Registration is required: the post-enrollment
+    // `/v1/keys/register/*` calls are signed and the server can only verify
+    // them against the JWKS we register here.
+    let pre_registered_client_id =
+        register_fapi_client_open(client.raw_client(), server, &fapi_key).await?;
 
     // Step 3: Request device code (RFC 8628 Section 3.1).
-    let device_response =
-        request_device_code(&client, server, fapi_key.as_ref(), pre_registered_client_id).await?;
+    let device_response = request_device_code(
+        &client,
+        server,
+        Some(&fapi_key),
+        Some(pre_registered_client_id),
+    )
+    .await?;
 
     // Step 4: Open browser and display instructions.
     let verification_url = &device_response.verification_uri;
@@ -83,7 +90,7 @@ pub(crate) async fn run(server: &str) -> Result<()> {
     tr_println!("enroll-waiting");
 
     // Step 5: Poll for token (with optional DPoP proofs).
-    let token_response = poll_for_token(&client, &device_response, fapi_key.as_ref()).await?;
+    let token_response = poll_for_token(&client, &device_response, Some(&fapi_key)).await?;
 
     // Step 6: Compute expiration timestamp from expires_in.
     let expires_at = compute_session_expires_at(token_response.expires_in);
@@ -158,7 +165,7 @@ async fn request_device_code(
             }
 
             let new_client_id = if let Some(key) = fapi_key {
-                register_fapi_client_open(client.raw_client(), server, key).await
+                Some(register_fapi_client_open(client.raw_client(), server, key).await?)
             } else {
                 None
             };
@@ -183,51 +190,52 @@ async fn request_device_code(
 /// `POST /oauth/register` without a Bearer token when open registration
 /// is enabled.
 ///
-/// Returns `Some(client_id)` on success, `None` on any failure (non-fatal).
+/// Returns the registered `client_id`. Registration is required for
+/// enrollment, so any failure is returned as an error.
 async fn register_fapi_client_open(
     http_client: &reqwest::Client,
     base_url: &str,
     key: &vouch_cli::fapi::ClientKey,
-) -> Option<String> {
+) -> Result<String> {
     // If we already have a client_id in config for this server, skip.
     if let Ok(mut config) = Config::load() {
         config.set_server_url(base_url);
         if let Some(id) = config.client_id() {
             tracing::debug!("FAPI client already registered: client_id={id}");
-            return Some(id.to_string());
+            return Ok(id.to_string());
         }
     }
 
-    // Open registration — no auth token.
-    match vouch_cli::fapi::registration::register_fapi_client(http_client, base_url, None, key)
-        .await
-    {
-        Ok(result) => {
-            let client_id = result.client_id.clone();
+    // Open registration — no auth token. This is required: every `/v1/*`
+    // request the CLI makes after enrollment must carry an RFC 9421
+    // signature, and the server resolves the verifying key from the OAuth
+    // client's registered JWKS. Without a registered client_id the issued
+    // access token would not bind to our JWKS and signed requests could not
+    // be verified, so a failure here is fatal.
+    let result =
+        vouch_cli::fapi::registration::register_fapi_client(http_client, base_url, None, key)
+            .await
+            .context("failed to register client with the server (RFC 7591)")?;
 
-            // Save registration results to config.
-            let url = base_url.to_string();
-            if let Err(e) = Config::modify(|config| {
-                config.set_server_url(&url);
-                config.set_client_id(&result.client_id);
-                if let Some(ref rat) = result.registration_access_token {
-                    config.set_registration_access_token(rat);
-                }
-                if let Some(ref uri) = result.registration_client_uri {
-                    config.set_registration_client_uri(uri);
-                }
-                config.set_dpop_key_id(&result.dpop_key_id);
-            }) {
-                tracing::warn!("Failed to save FAPI registration to config: {e}");
-            }
+    let client_id = result.client_id.clone();
 
-            Some(client_id)
+    // Save registration results to config.
+    let url = base_url.to_string();
+    if let Err(e) = Config::modify(|config| {
+        config.set_server_url(&url);
+        config.set_client_id(&result.client_id);
+        if let Some(ref rat) = result.registration_access_token {
+            config.set_registration_access_token(rat);
         }
-        Err(e) => {
-            tracing::debug!("Pre-enrollment FAPI registration failed (non-fatal): {e}");
-            None
+        if let Some(ref uri) = result.registration_client_uri {
+            config.set_registration_client_uri(uri);
         }
+        config.set_dpop_key_id(&result.dpop_key_id);
+    }) {
+        tracing::warn!("Failed to save FAPI registration to config: {e}");
     }
+
+    Ok(client_id)
 }
 
 /// Poll the token endpoint until authorization is complete or timeout.

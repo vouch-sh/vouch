@@ -150,6 +150,10 @@ pub async fn test_app_state_with_idps(
     let store = DocumentStore::new(pool.clone(), crypto.clone());
     let audit = AuditStore::new(pool.clone(), crypto);
 
+    // Register the first-party client whose JWKS holds the shared test signing
+    // key, so transparently-signed `/v1/*` test requests verify.
+    register_test_httpsig_client(&store, &config.base_url).await;
+
     Arc::new(AppState {
         db: pool,
         store,
@@ -201,6 +205,175 @@ pub async fn test_app_with_certification() -> (Router, Arc<AppState>) {
     (router, state)
 }
 
+/// Fixed `kid` for the process-wide test HTTP message-signing key.
+const TEST_HTTPSIG_KID: &str = "vouch-test-httpsig-key";
+
+/// Process-wide P-256 key used to sign `/v1/*` test requests, plus the JWKS
+/// document registered for the first-party test client.
+struct TestHttpSig {
+    signer: vouch_httpsig::algorithm::ecdsa_p256::EcdsaP256Signer,
+    jwks: serde_json::Value,
+}
+
+static TEST_HTTPSIG: std::sync::LazyLock<TestHttpSig> = std::sync::LazyLock::new(|| {
+    use base64::Engine;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use vouch_httpsig::algorithm::ecdsa_p256::EcdsaP256Signer;
+
+    let signer = EcdsaP256Signer::generate(TEST_HTTPSIG_KID).expect("generate test httpsig key");
+    // Uncompressed SEC1 point: 0x04 || x(32) || y(32).
+    let pk = signer.public_key_bytes();
+    let x = URL_SAFE_NO_PAD.encode(pk.get(1..33).expect("x coordinate"));
+    let y = URL_SAFE_NO_PAD.encode(pk.get(33..65).expect("y coordinate"));
+    let jwks = serde_json::json!({
+        "keys": [{ "kty": "EC", "crv": "P-256", "x": x, "y": y, "kid": TEST_HTTPSIG_KID }]
+    });
+    TestHttpSig { signer, jwks }
+});
+
+/// Register the first-party OAuth client used by test sessions.
+///
+/// `create_test_session*` mint tokens whose `client_id` is the server
+/// `base_url`. The `/v1/*` routes now require an RFC 9421 signature, and the
+/// server resolves the verifying key from the token client's registered JWKS.
+/// Registering a client keyed to `base_url` with the shared test signing key
+/// lets [`build_test_request`] transparently sign `/v1/*` requests so existing
+/// handler tests keep exercising the full router.
+async fn register_test_httpsig_client(store: &DocumentStore, base_url: &str) {
+    use crate::db::documents::oauth::{
+        FapiProfile, OAuthClientDoc, OAuthClientType, TokenEndpointAuthMethod,
+    };
+
+    let doc = OAuthClientDoc {
+        user_id: None,
+        client_id: base_url.to_string(),
+        name: "Test First-Party Client".to_string(),
+        description: None,
+        application_type: OAuthClientType::Native,
+        redirect_uris: Vec::new(),
+        active: true,
+        access_scope: crate::db::AccessScope::Public,
+        org_id: None,
+        resource_uris: Vec::new(),
+        jwks: Some(TEST_HTTPSIG.jwks.clone()),
+        jwks_uri: None,
+        token_endpoint_auth_method: TokenEndpointAuthMethod::default(),
+        request_object_signing_alg: None,
+        require_signed_request_object: None,
+        fapi_profile: FapiProfile::default(),
+        dpop_bound_access_tokens: false,
+        grant_types: None,
+        response_types: None,
+        software_id: None,
+        software_version: None,
+        registration_source: Some(RegistrationSource::Manual),
+        registration_access_token_hash: None,
+        registration_metadata: None,
+        id_token_signed_response_alg: JwsAlgorithm::Es256,
+        tls_client_auth_subject_dn: None,
+        tls_client_auth_san_dns: None,
+        tls_client_auth_san_uri: None,
+        tls_client_auth_san_ip: None,
+        tls_client_auth_san_email: None,
+        tls_client_certificate_bound_access_tokens: false,
+        authorization_signed_response_alg: None,
+        introspection_signed_response_alg: None,
+        userinfo_signed_response_alg: None,
+        request_uris: None,
+    };
+    store
+        .insert(&doc)
+        .await
+        .expect("register first-party test httpsig client");
+}
+
+/// Attach the shared test signing key's JWKS to an existing OAuth client.
+///
+/// Tokens issued for custom test clients (via `create_test_oauth_client`) carry
+/// that client's `client_id`. For transparently-signed `/v1/*` requests to
+/// verify, the client's registered JWKS must hold the shared test key — call
+/// this after creating a client whose token will hit a `/v1/*` endpoint.
+pub async fn attach_test_signing_key(store: &DocumentStore, app_id: &str) {
+    use crate::db::documents::oauth::OAuthClientDoc;
+    let doc = store
+        .get::<OAuthClientDoc>(app_id)
+        .await
+        .expect("get client")
+        .expect("client exists");
+    let mut data = doc.data;
+    data.jwks = Some(TEST_HTTPSIG.jwks.clone());
+    store
+        .update(app_id, &data)
+        .await
+        .expect("update client jwks");
+}
+
+/// Whether a request to `uri` carrying these `headers` should be auto-signed.
+///
+/// Signs authenticated `/v1/*` requests (those with an `Authorization` header)
+/// except the soft `/v1/auth/status` probe, mirroring the production
+/// enforcement scope so unsigned/unauthenticated tests still see their 401s.
+fn should_auto_sign(uri: &str, headers: &[(&str, &str)]) -> bool {
+    let path = uri.split('?').next().unwrap_or(uri);
+    if !path.starts_with("/v1/") || path == "/v1/auth/status" {
+        return false;
+    }
+    headers
+        .iter()
+        .any(|(k, _)| k.eq_ignore_ascii_case("authorization"))
+}
+
+/// Compute RFC 9421 signature headers for a `/v1/*` test request using the
+/// shared test signing key.
+///
+/// `uri` may be a path (`/v1/keys`) or a full URL; the signature covers
+/// `@method` and `@path` (plus `content-digest` for bodies). Exposed so the
+/// integration harness signs `/v1/*` requests with the same shared key whose
+/// JWKS is registered for the first-party test client.
+pub fn test_signature_headers(
+    method: &str,
+    uri: &str,
+    body: Option<&[u8]>,
+) -> Vec<(String, String)> {
+    let has_body = body.is_some_and(|b| !b.is_empty());
+    let body_bytes = body.unwrap_or_default();
+    let mut req = Request::builder()
+        .method(method)
+        .uri(uri)
+        .body(body_bytes.to_vec())
+        .expect("build signing request");
+
+    if has_body {
+        vouch_httpsig::digest::set_content_digest(
+            req.headers_mut(),
+            body_bytes,
+            vouch_httpsig::DigestAlgorithm::Sha256,
+        )
+        .expect("set content-digest");
+    }
+
+    let mut sig_builder = vouch_httpsig::SignatureBuilder::new("sig1")
+        .method()
+        .path()
+        .created_now();
+    if has_body {
+        sig_builder = sig_builder.field("content-digest");
+    }
+    sig_builder
+        .sign_request(&mut req, &TEST_HTTPSIG.signer)
+        .expect("sign test request");
+
+    let mut out = Vec::new();
+    for name in ["signature-input", "signature", "content-digest"] {
+        if let Some(v) = req.headers().get(name)
+            && let Ok(s) = v.to_str()
+        {
+            out.push((name.to_string(), s.to_string()));
+        }
+    }
+    out
+}
+
 /// Build a request with standard test extensions (no mTLS cert).
 fn build_test_request(
     method: &str,
@@ -211,6 +384,12 @@ fn build_test_request(
     let mut req_builder = Request::builder().method(method).uri(uri);
     for (name, value) in headers {
         req_builder = req_builder.header(*name, *value);
+    }
+    if should_auto_sign(uri, headers) {
+        let body_ref = body.as_deref().map(str::as_bytes);
+        for (name, value) in test_signature_headers(method, uri, body_ref) {
+            req_builder = req_builder.header(name, value);
+        }
     }
     let body = match body {
         Some(b) => Body::from(b),
@@ -302,6 +481,13 @@ pub async fn http_request_full(
 
     for (name, value) in headers {
         req_builder = req_builder.header(*name, *value);
+    }
+
+    if should_auto_sign(uri, headers) {
+        let body_ref = body.as_deref().map(str::as_bytes);
+        for (name, value) in test_signature_headers(method, uri, body_ref) {
+            req_builder = req_builder.header(name, value);
+        }
     }
 
     let body = match body {

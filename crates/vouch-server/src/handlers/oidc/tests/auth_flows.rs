@@ -500,6 +500,9 @@ async fn test_revoked_token_cannot_access_resources() {
     let user = create_test_user(&state.store, "rev-d1@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
     let client = create_test_oauth_client(&state.store, &user.id).await;
+    // The token's client must hold the shared test signing key so the
+    // transparently-signed /v1/* request verifies.
+    attach_test_signing_key(&state.store, &client.app_id).await;
 
     let (access_token, _) = issue_oauth_access_token(&app, &state, &user, &auth_id, &client).await;
 

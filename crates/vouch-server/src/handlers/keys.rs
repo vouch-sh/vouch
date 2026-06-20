@@ -696,7 +696,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_register_complete_invalid_state() {
-        let (app, _state) = test_app().await;
+        let (app, state) = test_app().await;
+
+        // register/complete is reached within an authenticated session, so the
+        // request must be signed (RFC 9421); the harness signs it transparently.
+        let user = create_test_user(&state.store, "invalid-state@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
 
         // All Raw fields deserialize as Vec<u8> (JSON arrays); provide empty arrays
         // so the JSON extractor succeeds, but the state JWT decode fails with 400.
@@ -707,8 +713,13 @@ mod tests {
             "attestation_object": [],
             "client_data_json": []
         }"#;
-        let (status, resp_body) =
-            http_post_json(&app, "/v1/keys/register/complete", body, &[]).await;
+        let (status, resp_body) = http_post_json(
+            &app,
+            "/v1/keys/register/complete",
+            body,
+            &[("Authorization", &format!("Bearer {token}"))],
+        )
+        .await;
 
         assert_eq!(status, StatusCode::BAD_REQUEST);
         let json: serde_json::Value = serde_json::from_str(&resp_body).expect("valid JSON");
@@ -722,6 +733,12 @@ mod tests {
     #[tokio::test]
     async fn test_register_complete_rejects_replayed_state() {
         let (app, state) = test_app().await;
+
+        // register/complete is reached within an authenticated session, so the
+        // request must be signed (RFC 9421); the harness signs it transparently.
+        let user = create_test_user(&state.store, "replay-session@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
 
         // Build a valid RegistrationState JWT with a far-future expiry.
         let signer = &state.state_signer;
@@ -757,8 +774,13 @@ mod tests {
             "attestation_object": [],
             "client_data_json": [],
         });
-        let (status, resp_body) =
-            http_post_json(&app, "/v1/keys/register/complete", &body.to_string(), &[]).await;
+        let (status, resp_body) = http_post_json(
+            &app,
+            "/v1/keys/register/complete",
+            &body.to_string(),
+            &[("Authorization", &format!("Bearer {token}"))],
+        )
+        .await;
 
         assert_eq!(status, StatusCode::BAD_REQUEST);
         let json: serde_json::Value = serde_json::from_str(&resp_body).expect("valid JSON");

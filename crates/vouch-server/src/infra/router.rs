@@ -214,7 +214,7 @@ fn build_rate_limited_routes(
         )
         .layer(axum::middleware::from_fn_with_state(
             httpsig_resolver,
-            vouch_httpsig::middleware::verify_signature::<httpsig::OAuthClientKeyResolver>,
+            vouch_httpsig::middleware::require_signature::<httpsig::OAuthClientKeyResolver>,
         ));
 
     // RFC 7592 dynamic client registration MANAGEMENT endpoints
@@ -290,7 +290,7 @@ fn build_credential_routes(
         )
         .layer(axum::middleware::from_fn_with_state(
             httpsig_resolver,
-            vouch_httpsig::middleware::verify_signature::<httpsig::OAuthClientKeyResolver>,
+            vouch_httpsig::middleware::require_signature::<httpsig::OAuthClientKeyResolver>,
         ))
         .layer(axum::middleware::from_fn_with_state(
             Arc::clone(state),
@@ -519,7 +519,7 @@ fn build_api_management_routes(
         )
         .layer(axum::middleware::from_fn_with_state(
             httpsig_resolver,
-            vouch_httpsig::middleware::verify_signature::<httpsig::OAuthClientKeyResolver>,
+            vouch_httpsig::middleware::require_signature::<httpsig::OAuthClientKeyResolver>,
         ));
 
     // RFC 9728 protected-resource endpoints in this group. Layered with

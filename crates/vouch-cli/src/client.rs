@@ -362,6 +362,13 @@ impl<H: HttpClient> VouchClient<H> {
         let url = self.url(path);
         tracing::debug!("{method} {url} ({auth})");
 
+        // The `/v1/*` credential and key-management endpoints require a valid
+        // RFC 9421 signature on every request (FAPI 2.0 Message Signing). The
+        // soft `/v1/auth/status` probe is exempt — it is designed to answer
+        // without authentication. For required paths we fail with a clear error
+        // rather than silently downgrading to Bearer-only.
+        let signature_required = path.starts_with("/v1/") && path != "/v1/auth/status";
+
         let mut attempt = 0;
         loop {
             let response = match auth {
@@ -377,7 +384,7 @@ impl<H: HttpClient> VouchClient<H> {
                     // Sign with RFC 9421 HTTP message signatures when FAPI key is present
                     if let Some(ref key) = self.fapi_key {
                         let nonce = self.sig_nonce.lock().ok().and_then(|g| g.clone());
-                        extra_headers.extend(Self::sign_request_headers(&SignRequestParams {
+                        let sig_headers = Self::sign_request_headers(&SignRequestParams {
                             method,
                             url: &url,
                             auth_header: &hdr,
@@ -386,7 +393,22 @@ impl<H: HttpClient> VouchClient<H> {
                             body,
                             nonce: nonce.as_deref(),
                             key,
-                        }));
+                        });
+                        if signature_required && !sig_headers.iter().any(|(k, _)| k == "Signature")
+                        {
+                            return Err(anyhow::anyhow!(
+                                "failed to sign request for {path}: HTTP message signing \
+                                 produced no signature — re-run `vouch enroll` or unlock \
+                                 your keychain and try again"
+                            ));
+                        }
+                        extra_headers.extend(sig_headers);
+                    } else if signature_required {
+                        return Err(anyhow::anyhow!(
+                            "hardware-backed signing key unavailable for {path}: this \
+                             request must be signed (RFC 9421). Run `vouch enroll` (or \
+                             unlock your keychain) and try again"
+                        ));
                     }
 
                     let extra_refs: Vec<(&str, &str)> = extra_headers

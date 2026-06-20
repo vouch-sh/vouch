@@ -199,6 +199,26 @@ impl TestHarness {
         Ok((user, auth_id, token))
     }
 
+    /// RFC 9421 signature headers for an authenticated `/v1/*` request.
+    ///
+    /// The `/v1/*` routes require a valid signature; sessions created by this
+    /// harness use the first-party test client whose JWKS holds the shared test
+    /// signing key, so we sign with that same key here. Non-`/v1` paths and the
+    /// soft `/v1/auth/status` probe return no headers.
+    fn v1_sig_headers(
+        &self,
+        method: &str,
+        url: &str,
+        body: Option<&[u8]>,
+    ) -> Vec<(String, String)> {
+        let path = url.strip_prefix(self.base_url()).unwrap_or(url);
+        let path_only = path.split('?').next().unwrap_or(path);
+        if !path_only.starts_with("/v1/") || path_only == "/v1/auth/status" {
+            return Vec::new();
+        }
+        test_utils::test_signature_headers(method, url, body)
+    }
+
     /// Make a GET request.
     pub async fn get(&self, path: &str) -> Result<vouch_cli::HttpResponse> {
         let url = self.url(path);
@@ -235,8 +255,12 @@ impl TestHarness {
     ) -> Result<vouch_cli::HttpResponse> {
         let url = self.url(path);
         let auth = format!("Bearer {}", token);
+        let sig = self.v1_sig_headers("GET", &url, None);
+        let sig_refs: Vec<(&str, &str)> =
+            sig.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+        let extra = (!sig_refs.is_empty()).then_some(sig_refs.as_slice());
         self.http_client
-            .request("GET", &url, None, None, Some(&auth), None)
+            .request("GET", &url, None, None, Some(&auth), extra)
             .await
     }
 
@@ -250,6 +274,10 @@ impl TestHarness {
         let url = self.url(path);
         let json = serde_json::to_vec(body)?;
         let auth = format!("Bearer {}", token);
+        let sig = self.v1_sig_headers("POST", &url, Some(&json));
+        let sig_refs: Vec<(&str, &str)> =
+            sig.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+        let extra = (!sig_refs.is_empty()).then_some(sig_refs.as_slice());
         self.http_client
             .request(
                 "POST",
@@ -257,7 +285,7 @@ impl TestHarness {
                 Some(&json),
                 Some("application/json"),
                 Some(&auth),
-                None,
+                extra,
             )
             .await
     }
@@ -280,8 +308,12 @@ impl TestHarness {
     ) -> Result<vouch_cli::HttpResponse> {
         let url = self.url(path);
         let auth = format!("Bearer {}", token);
+        let sig = self.v1_sig_headers("DELETE", &url, None);
+        let sig_refs: Vec<(&str, &str)> =
+            sig.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+        let extra = (!sig_refs.is_empty()).then_some(sig_refs.as_slice());
         self.http_client
-            .request("DELETE", &url, None, None, Some(&auth), None)
+            .request("DELETE", &url, None, None, Some(&auth), extra)
             .await
     }
 
@@ -295,6 +327,10 @@ impl TestHarness {
         let url = self.url(path);
         let json = serde_json::to_vec(body)?;
         let auth = format!("Bearer {}", token);
+        let sig = self.v1_sig_headers("PATCH", &url, Some(&json));
+        let sig_refs: Vec<(&str, &str)> =
+            sig.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+        let extra = (!sig_refs.is_empty()).then_some(sig_refs.as_slice());
         self.http_client
             .request(
                 "PATCH",
@@ -302,7 +338,7 @@ impl TestHarness {
                 Some(&json),
                 Some("application/json"),
                 Some(&auth),
-                None,
+                extra,
             )
             .await
     }
@@ -317,6 +353,10 @@ impl TestHarness {
         let url = self.url(path);
         let json = serde_json::to_vec(body)?;
         let auth = format!("Bearer {}", token);
+        let sig = self.v1_sig_headers("PUT", &url, Some(&json));
+        let sig_refs: Vec<(&str, &str)> =
+            sig.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+        let extra = (!sig_refs.is_empty()).then_some(sig_refs.as_slice());
         self.http_client
             .request(
                 "PUT",
@@ -324,7 +364,7 @@ impl TestHarness {
                 Some(&json),
                 Some("application/json"),
                 Some(&auth),
-                None,
+                extra,
             )
             .await
     }

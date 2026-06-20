@@ -1173,6 +1173,9 @@ async fn test_dpop_resource_endpoint_post_json_without_nonce() {
     let user = create_test_user(&state.store, "dpop-post-nonce@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
     let client = create_test_oauth_client(&state.store, &user.id).await;
+    // The DPoP-bound token's client must hold the shared test signing key so
+    // the transparently-signed POST /v1/credentials/ssh request verifies.
+    attach_test_signing_key(&state.store, &client.app_id).await;
 
     // Step 1: Get a DPoP-bound access token
     let (dpop_key, dpop_jwk) = generate_dpop_key_pair();
