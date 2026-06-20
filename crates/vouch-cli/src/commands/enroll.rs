@@ -197,12 +197,24 @@ async fn register_fapi_client_open(
     base_url: &str,
     key: &vouch_cli::fapi::ClientKey,
 ) -> Result<String> {
-    // If we already have a client_id in config for this server, skip.
+    // Reuse the cached client_id only when it was registered with the *current*
+    // signing key. If the key was rotated or recreated while a stale client_id
+    // lingers in config, the server JWKS holds the old public key and every
+    // signed `/v1/*` request would fail verification. In that case fall through
+    // and re-register so the token binds to the key we actually sign with.
     if let Ok(mut config) = Config::load() {
         config.set_server_url(base_url);
         if let Some(id) = config.client_id() {
-            tracing::debug!("FAPI client already registered: client_id={id}");
-            return Ok(id.to_string());
+            let key_matches = config
+                .dpop_key_id()
+                .is_some_and(|stored_kid| stored_kid == key.kid());
+            if key_matches {
+                tracing::debug!("FAPI client already registered: client_id={id}");
+                return Ok(id.to_string());
+            }
+            tracing::debug!(
+                "cached client_id but signing key kid changed; re-registering FAPI client"
+            );
         }
     }
 
