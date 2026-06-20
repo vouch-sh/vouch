@@ -125,13 +125,14 @@ mod credentials {
             public_key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITest test@example.com".to_string(),
         };
 
-        // Config check runs before auth — SSH CA not configured returns 503
+        // /v1/* requires a valid RFC 9421 signature; the unsigned request is
+        // rejected by the signature middleware before the handler's CA check.
         let response = harness
             .post_json("/v1/credentials/ssh", &request)
             .await
             .expect("Failed to post SSH cert request");
 
-        assert_eq!(response.status, 503);
+        assert_eq!(response.status, 401);
     }
 
     /// Test that authenticated users can attempt to get SSH certificates.
@@ -368,19 +369,21 @@ mod auth_security {
             public_key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITest test@example.com".to_string(),
         };
 
-        // Config check runs before auth — SSH CA not configured returns 503
+        // /v1/* requires a valid RFC 9421 signature; the unsigned request is
+        // rejected by the signature middleware before the handler's CA check.
         let response = harness
             .post_json("/v1/credentials/ssh", &request)
             .await
             .expect("Failed to post SSH cert request");
-        assert_eq!(response.status, 503);
+        assert_eq!(response.status, 401);
 
-        // With invalid token — still 503 because config check runs first
+        // An invalid token resolves to no client, so the signature check
+        // rejects it with 401 before the handler runs.
         let response = harness
             .post_json_authenticated("/v1/credentials/ssh", &request, "invalid.token")
             .await
             .expect("Failed to post SSH cert request");
-        assert_eq!(response.status, 503);
+        assert_eq!(response.status, 401);
     }
 
     /// Test that AWS token endpoint requires valid session.
@@ -2757,20 +2760,49 @@ mod httpsig {
     }
 
     #[tokio::test]
-    async fn test_httpsig_unsigned_request_still_succeeds() {
-        // Verify backward compatibility: requests without signatures pass through
+    async fn test_httpsig_unsigned_request_rejected_on_v1_keys() {
+        // A signature-required /v1/* endpoint rejects an unsigned request.
+        let harness = TestHarness::new().await;
+        let (_user, _auth_id, token) = harness
+            .create_authenticated_user("unsigned-v1@example.com")
+            .await
+            .unwrap();
+
+        // Send an unsigned request by hitting the low-level client directly
+        // (the harness's authenticated helpers sign /v1/* requests).
+        let url = harness.url("/v1/keys");
+        let auth_header = format!("Bearer {token}");
+        let response = harness
+            .http_client
+            .request("GET", &url, None, None, Some(&auth_header), None)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response.status, 401,
+            "unsigned /v1/keys request must be rejected"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_httpsig_unsigned_auth_status_still_succeeds() {
+        // The soft /v1/auth/status probe is intentionally exempt and still
+        // answers unsigned requests.
         let harness = TestHarness::new().await;
         let key = ClientKey::generate().unwrap();
         let token = setup_user_with_httpsig_key(&harness, &key).await;
 
+        let url = harness.url("/v1/auth/status");
+        let auth_header = format!("Bearer {token}");
         let response = harness
-            .get_authenticated("/v1/auth/status", &token)
+            .http_client
+            .request("GET", &url, None, None, Some(&auth_header), None)
             .await
             .unwrap();
 
         assert_eq!(
             response.status, 200,
-            "unsigned request should still succeed"
+            "unsigned /v1/auth/status should still succeed"
         );
     }
 

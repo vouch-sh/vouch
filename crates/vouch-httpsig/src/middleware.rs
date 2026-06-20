@@ -7,7 +7,7 @@
 //!
 //! ```rust,ignore
 //! use std::sync::Arc;
-//! use vouch_httpsig::middleware::{KeyResolver, verify_signature};
+//! use vouch_httpsig::middleware::{KeyResolver, require_signature};
 //!
 //! struct MyResolver { /* ... */ }
 //!
@@ -24,7 +24,7 @@
 //!     .route("/api/resource", get(handler))
 //!     .layer(axum::middleware::from_fn_with_state(
 //!         resolver,
-//!         verify_signature::<MyResolver>,
+//!         require_signature::<MyResolver>,
 //!     ))
 //! ```
 
@@ -109,34 +109,25 @@ pub trait KeyResolver: Send + Sync + 'static {
 /// Default maximum signature age in seconds (5 minutes).
 pub const DEFAULT_MAX_AGE: i64 = 300;
 
-/// Axum middleware that verifies RFC 9421 HTTP signatures.
+/// Axum middleware that requires a valid RFC 9421 HTTP signature.
 ///
-/// If a `Signature-Input` header is present, this middleware:
+/// Every request must carry a `Signature-Input` header; an unsigned request is
+/// rejected with 401. For a signed request this middleware:
 /// 1. Extracts signature labels
 /// 2. Resolves the verifying key via the `keyid` parameter
 /// 3. Verifies the signature against the reconstructed base
-/// 4. Stores [`VerifiedSignature`] in request extensions
+/// 4. Enforces RFC 9530 `Content-Digest` integrity for request bodies
+/// 5. Stores [`VerifiedSignature`] in request extensions
 ///
-/// If no signature headers are present, the request passes through —
-/// handlers must check for the `VerifiedSignature` extension if a signature
-/// is required for their endpoint.
-///
-/// Returns 401 with a generic message if signature verification fails.
-pub async fn verify_signature<R: KeyResolver>(
+/// Used on endpoints where every request must be signed, e.g. the `/v1/*`
+/// CLI↔server channel under FAPI 2.0 Message Signing. Returns 401 with a
+/// generic message on any verification failure.
+pub async fn require_signature<R: KeyResolver>(
     State(resolver): State<Arc<R>>,
     req: Request<axum::body::Body>,
     next: Next,
 ) -> Response {
-    verify_signature_with_max_age(resolver, req, next, DEFAULT_MAX_AGE).await
-}
-
-/// Axum middleware that verifies RFC 9421 HTTP signatures with a custom max age.
-pub async fn verify_signature_with_max_age<R: KeyResolver>(
-    resolver: Arc<R>,
-    req: Request<axum::body::Body>,
-    next: Next,
-    max_age: i64,
-) -> Response {
+    let max_age = DEFAULT_MAX_AGE;
     // Trace-level logging of incoming request metadata
     tracing::trace!(
         method = %req.method(),
@@ -146,7 +137,7 @@ pub async fn verify_signature_with_max_age<R: KeyResolver>(
         "httpsig middleware"
     );
 
-    // Fetch Signature-Input once; pass through if absent.
+    // A missing Signature-Input header means the request is unsigned: reject.
     let sig_input = match req.headers().get("signature-input") {
         Some(v) => match v.to_str() {
             Ok(s) => s.to_string(),
@@ -155,7 +146,13 @@ pub async fn verify_signature_with_max_age<R: KeyResolver>(
                 return (StatusCode::UNAUTHORIZED, SIG_VERIFY_FAILED).into_response();
             }
         },
-        None => return next.run(req).await,
+        None => {
+            tracing::debug!(
+                path = %req.uri().path(),
+                "rejecting unsigned request: signature required"
+            );
+            return (StatusCode::UNAUTHORIZED, SIG_VERIFY_FAILED).into_response();
+        }
     };
 
     let labels = match extract_signature_labels(req.headers()) {
@@ -343,7 +340,7 @@ mod tests {
             .route("/test", get(ok_handler).post(ok_handler))
             .layer(axum::middleware::from_fn_with_state(
                 resolver,
-                verify_signature::<InMemoryKeyResolver>,
+                require_signature::<InMemoryKeyResolver>,
             ))
     }
 
@@ -366,7 +363,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_passthrough_without_signature() {
+    async fn test_rejects_unsigned_request() {
+        // require_signature must reject a request that carries no
+        // Signature-Input header.
         let resolver = Arc::new(InMemoryKeyResolver::new());
         let router = build_test_router(resolver);
 
@@ -379,7 +378,7 @@ mod tests {
             <Router as tower::ServiceExt<Request<axum::body::Body>>>::oneshot(router, req)
                 .await
                 .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]

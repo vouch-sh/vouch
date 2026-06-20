@@ -914,22 +914,26 @@ mod tests {
     async fn test_ssh_cert_requires_auth() {
         let (app, _state) = test_app().await;
 
-        // SSH CA is checked before auth in this handler, so 503 is returned
+        // /v1/* requires a valid RFC 9421 signature; the unsigned request is
+        // rejected by the signature middleware before the handler's CA check.
         let body =
             serde_json::json!({ "public_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI test" });
         let (status, resp_body) =
             http_post_json(&app, "/v1/credentials/ssh", &body.to_string(), &[]).await;
 
-        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
-        let error: serde_json::Value = serde_json::from_str(&resp_body).expect("Valid JSON");
-        assert_eq!(error["code"], "ssh_ca_not_configured");
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert!(
+            resp_body.contains("signature"),
+            "expected signature failure, got: {resp_body}"
+        );
     }
 
     #[tokio::test]
     async fn test_ssh_cert_rejects_invalid_token() {
         let (app, _state) = test_app().await;
 
-        // SSH CA is checked before auth, so still 503 even with a bad token
+        // The garbage token has no resolvable client, so the signature
+        // middleware rejects with 401 before the handler's CA check.
         let body =
             serde_json::json!({ "public_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI test" });
         let (status, resp_body) = http_post_json(
@@ -940,9 +944,11 @@ mod tests {
         )
         .await;
 
-        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
-        let error: serde_json::Value = serde_json::from_str(&resp_body).expect("Valid JSON");
-        assert_eq!(error["code"], "ssh_ca_not_configured");
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert!(
+            resp_body.contains("signature"),
+            "expected signature failure, got: {resp_body}"
+        );
     }
 
     // ========================================================================
@@ -1007,9 +1013,13 @@ mod tests {
 
         let (status, body) = http_get(&app, "/v1/credentials/aws/token", &[]).await;
 
+        // /v1/* requires a valid RFC 9421 signature; an unsigned request is
+        // rejected by the signature middleware before the handler runs.
         assert_eq!(status, StatusCode::UNAUTHORIZED);
-        let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
-        assert_eq!(error["code"], "unauthorized");
+        assert!(
+            body.contains("signature"),
+            "expected signature failure, got: {body}"
+        );
     }
 
     #[tokio::test]
@@ -1023,9 +1033,13 @@ mod tests {
         )
         .await;
 
+        // The garbage token has no resolvable client, so the signature
+        // middleware rejects the request with 401 before the handler runs.
         assert_eq!(status, StatusCode::UNAUTHORIZED);
-        let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
-        assert_eq!(error["code"], "invalid_token");
+        assert!(
+            body.contains("signature"),
+            "expected signature failure, got: {body}"
+        );
     }
 
     #[tokio::test]
@@ -1216,14 +1230,17 @@ mod tests {
     async fn test_github_token_requires_auth() {
         let (app, _state) = test_app().await;
 
-        // GitHub App config is checked before auth — 503 even without a token
+        // /v1/* requires a valid RFC 9421 signature; the unsigned request is
+        // rejected by the signature middleware before the handler's config check.
         let body = serde_json::json!({ "repositories": [] });
         let (status, resp_body) =
             http_post_json(&app, "/v1/credentials/github/token", &body.to_string(), &[]).await;
 
-        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
-        let error: serde_json::Value = serde_json::from_str(&resp_body).expect("Valid JSON");
-        assert_eq!(error["code"], "github_not_configured");
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert!(
+            resp_body.contains("signature"),
+            "expected signature failure, got: {resp_body}"
+        );
     }
 
     // ========================================================================

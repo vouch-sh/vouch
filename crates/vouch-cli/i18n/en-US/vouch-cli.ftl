@@ -91,6 +91,21 @@ enroll-err-denied = authorization was denied
 enroll-err-code-expired = The code has expired. Please try again.
 enroll-err-failed = Enrollment failed: { $reason }
 enroll-err-start = Failed to start enrollment
+enroll-err-key-init = Failed to initialize the hardware-backed signing key
+enroll-err-register = Failed to register client with the server (RFC 7591)
+
+## Client / session errors
+
+client-err-not-authenticated = not authenticated — run '{ -cmd } login' first
+
+## RFC 9421 HTTP message signing errors
+
+httpsig-err-no-signature =
+    Failed to sign request for { $path }: HTTP message signing produced no
+    signature — re-run { -cmd } enroll or unlock your keychain and try again
+httpsig-err-key-unavailable =
+    Hardware-backed signing key unavailable for { $path }: this request must be
+    signed (RFC 9421). Run { -cmd } enroll (or unlock your keychain) and try again
 
 ## FIDO2 / CTAP2 user-facing errors
 

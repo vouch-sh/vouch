@@ -13,6 +13,7 @@ use vouch_cli::fapi::{ClientKey, DpopProofBuilder};
 use vouch_cli::http::{
     HttpClient, HttpResponse, ReqwestClient, format_http_error, parse_www_authenticate,
 };
+use vouch_cli::{tr, tr_args};
 
 /// Parameters for building RFC 9421 HTTP signature headers.
 struct SignRequestParams<'a> {
@@ -175,9 +176,14 @@ impl<H: HttpClient> VouchClient<H> {
 
     /// Get the stored authentication token, or error if not authenticated.
     fn token(&self) -> Result<&SecretString> {
-        self.token
-            .as_ref()
-            .context("not authenticated - run 'vouch login' first")
+        self.token.as_ref().ok_or_else(|| {
+            // Typed error so `exit_code::classify` maps it by type, not by
+            // matching the (translatable) message string.
+            crate::exit_code::CliError::NotAuthenticated {
+                reason: tr!("client-err-not-authenticated"),
+            }
+            .into()
+        })
     }
 
     /// Build the `Authorization` header value and an optional `DPoP` proof.
@@ -362,6 +368,13 @@ impl<H: HttpClient> VouchClient<H> {
         let url = self.url(path);
         tracing::debug!("{method} {url} ({auth})");
 
+        // The `/v1/*` credential and key-management endpoints require a valid
+        // RFC 9421 signature on every request (FAPI 2.0 Message Signing). The
+        // soft `/v1/auth/status` probe is exempt — it is designed to answer
+        // without authentication. For required paths we fail with a clear error
+        // rather than silently downgrading to Bearer-only.
+        let signature_required = path.starts_with("/v1/") && path != "/v1/auth/status";
+
         let mut attempt = 0;
         loop {
             let response = match auth {
@@ -377,7 +390,7 @@ impl<H: HttpClient> VouchClient<H> {
                     // Sign with RFC 9421 HTTP message signatures when FAPI key is present
                     if let Some(ref key) = self.fapi_key {
                         let nonce = self.sig_nonce.lock().ok().and_then(|g| g.clone());
-                        extra_headers.extend(Self::sign_request_headers(&SignRequestParams {
+                        let sig_headers = Self::sign_request_headers(&SignRequestParams {
                             method,
                             url: &url,
                             auth_header: &hdr,
@@ -386,7 +399,20 @@ impl<H: HttpClient> VouchClient<H> {
                             body,
                             nonce: nonce.as_deref(),
                             key,
-                        }));
+                        });
+                        if signature_required && !sig_headers.iter().any(|(k, _)| k == "Signature")
+                        {
+                            return Err(crate::exit_code::CliError::NotAuthenticated {
+                                reason: tr_args!("httpsig-err-no-signature", path = path),
+                            }
+                            .into());
+                        }
+                        extra_headers.extend(sig_headers);
+                    } else if signature_required {
+                        return Err(crate::exit_code::CliError::NotAuthenticated {
+                            reason: tr_args!("httpsig-err-key-unavailable", path = path),
+                        }
+                        .into());
                     }
 
                     let extra_refs: Vec<(&str, &str)> = extra_headers
