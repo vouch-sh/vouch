@@ -2,9 +2,8 @@
 //! SSH Agent state management.
 //!
 //! Uses a single `RwLock<SshAgentInner>` to ensure atomic reads and writes
-//! across all state fields (credentials, session expiry, server URL, refresh timing).
+//! across all state fields (credentials, session expiry, server URL).
 
-use super::MIN_REFRESH_INTERVAL_SECONDS;
 use super::credentials::SshCredentials;
 use jiff::Timestamp;
 use std::sync::Arc;
@@ -18,10 +17,8 @@ struct SshAgentInner {
     credentials: Option<SshCredentials>,
     /// Session expiration timestamp (linked to Vouch session).
     session_expires_at: Option<Timestamp>,
-    /// Server URL for credential refresh.
+    /// Server URL the session is connected to.
     server_url: Option<String>,
-    /// Last refresh attempt timestamp (for rate limiting).
-    last_refresh_at: Option<Timestamp>,
 }
 
 /// SSH Agent state with session linkage.
@@ -71,13 +68,6 @@ impl SshAgentState {
         guard.credentials = None;
         guard.session_expires_at = None;
         guard.server_url = None;
-        guard.last_refresh_at = None;
-    }
-
-    /// Get current credentials (if any).
-    pub async fn get_credentials(&self) -> Option<SshCredentials> {
-        let guard = self.inner.read().await;
-        guard.credentials.clone()
     }
 
     /// Get valid credentials (not expired, session not expired).
@@ -110,41 +100,13 @@ impl SshAgentState {
         guard.credentials.is_some()
     }
 
-    /// Check if certificate needs refresh.
-    pub async fn needs_refresh(&self) -> bool {
-        let guard = self.inner.read().await;
-        guard
-            .credentials
-            .as_ref()
-            .is_some_and(|c| c.is_expiring_soon())
-    }
-
-    /// Check if we can attempt refresh (rate limiting).
-    pub async fn can_attempt_refresh(&self) -> bool {
-        let guard = self.inner.read().await;
-        match guard.last_refresh_at {
-            Some(last) => {
-                let now = Timestamp::now();
-                let elapsed = now.as_second().saturating_sub(last.as_second());
-                elapsed >= MIN_REFRESH_INTERVAL_SECONDS
-            }
-            None => true,
-        }
-    }
-
-    /// Record refresh attempt time.
-    pub async fn record_refresh_attempt(&self) {
-        let mut guard = self.inner.write().await;
-        guard.last_refresh_at = Some(Timestamp::now());
-    }
-
-    /// Set the server URL for credential refresh/lazy provisioning.
+    /// Set the server URL the session is connected to.
     pub async fn set_server_url(&self, url: String) {
         let mut guard = self.inner.write().await;
         guard.server_url = Some(url);
     }
 
-    /// Get the server URL for refresh.
+    /// Get the server URL the session is connected to.
     pub async fn get_server_url(&self) -> Option<String> {
         let guard = self.inner.read().await;
         guard.server_url.clone()
@@ -163,7 +125,7 @@ mod tests {
     async fn test_state_default_empty() {
         let state = make_mock_state();
         assert!(!state.has_credentials().await);
-        assert!(state.get_credentials().await.is_none());
+        assert!(state.get_valid_credentials().await.is_none());
         assert!(state.get_server_url().await.is_none());
     }
 
@@ -187,23 +149,9 @@ mod tests {
         state
             .set_server_url("https://example.com".to_string())
             .await;
-        state.record_refresh_attempt().await;
 
         state.clear_credentials().await;
 
         assert!(state.get_server_url().await.is_none());
-        assert!(state.can_attempt_refresh().await);
-    }
-
-    #[tokio::test]
-    async fn test_rate_limiting() {
-        let state = make_mock_state();
-
-        // Initially can attempt refresh
-        assert!(state.can_attempt_refresh().await);
-
-        // After recording attempt, should be rate limited
-        state.record_refresh_attempt().await;
-        assert!(!state.can_attempt_refresh().await);
     }
 }
