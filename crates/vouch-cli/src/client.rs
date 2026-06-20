@@ -13,6 +13,7 @@ use vouch_cli::fapi::{ClientKey, DpopProofBuilder};
 use vouch_cli::http::{
     HttpClient, HttpResponse, ReqwestClient, format_http_error, parse_www_authenticate,
 };
+use vouch_cli::tr_args;
 
 /// Parameters for building RFC 9421 HTTP signature headers.
 struct SignRequestParams<'a> {
@@ -396,19 +397,17 @@ impl<H: HttpClient> VouchClient<H> {
                         });
                         if signature_required && !sig_headers.iter().any(|(k, _)| k == "Signature")
                         {
-                            return Err(anyhow::anyhow!(
-                                "failed to sign request for {path}: HTTP message signing \
-                                 produced no signature — re-run `vouch enroll` or unlock \
-                                 your keychain and try again"
-                            ));
+                            return Err(anyhow::anyhow!(tr_args!(
+                                "httpsig-err-no-signature",
+                                path = path
+                            )));
                         }
                         extra_headers.extend(sig_headers);
                     } else if signature_required {
-                        return Err(anyhow::anyhow!(
-                            "hardware-backed signing key unavailable for {path}: this \
-                             request must be signed (RFC 9421). Run `vouch enroll` (or \
-                             unlock your keychain) and try again"
-                        ));
+                        return Err(anyhow::anyhow!(tr_args!(
+                            "httpsig-err-key-unavailable",
+                            path = path
+                        )));
                     }
 
                     let extra_refs: Vec<(&str, &str)> = extra_headers

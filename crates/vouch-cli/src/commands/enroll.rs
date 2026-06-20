@@ -45,7 +45,7 @@ pub(crate) async fn run(server: &str) -> Result<()> {
     // required — without it, enrollment cannot produce a client that can call
     // the credential and key-management endpoints.
     let fapi_key = vouch_cli::fapi::key_store::load_or_create_client_key()
-        .context("failed to initialize the hardware-backed signing key")?;
+        .with_context(|| tr!("enroll-err-key-init"))?;
 
     // Step 2: Register as a FAPI 2.0 client BEFORE the device code flow
     // (open registration — no auth token required).
@@ -215,7 +215,7 @@ async fn register_fapi_client_open(
     let result =
         vouch_cli::fapi::registration::register_fapi_client(http_client, base_url, None, key)
             .await
-            .context("failed to register client with the server (RFC 7591)")?;
+            .with_context(|| tr!("enroll-err-register"))?;
 
     let client_id = result.client_id.clone();
 
