@@ -13,7 +13,7 @@ use vouch_cli::fapi::{ClientKey, DpopProofBuilder};
 use vouch_cli::http::{
     HttpClient, HttpResponse, ReqwestClient, format_http_error, parse_www_authenticate,
 };
-use vouch_cli::tr_args;
+use vouch_cli::{tr, tr_args};
 
 /// Parameters for building RFC 9421 HTTP signature headers.
 struct SignRequestParams<'a> {
@@ -176,9 +176,14 @@ impl<H: HttpClient> VouchClient<H> {
 
     /// Get the stored authentication token, or error if not authenticated.
     fn token(&self) -> Result<&SecretString> {
-        self.token
-            .as_ref()
-            .context("not authenticated - run 'vouch login' first")
+        self.token.as_ref().ok_or_else(|| {
+            // Typed error so `exit_code::classify` maps it by type, not by
+            // matching the (translatable) message string.
+            crate::exit_code::CliError::NotAuthenticated {
+                reason: tr!("client-err-not-authenticated"),
+            }
+            .into()
+        })
     }
 
     /// Build the `Authorization` header value and an optional `DPoP` proof.
@@ -397,17 +402,17 @@ impl<H: HttpClient> VouchClient<H> {
                         });
                         if signature_required && !sig_headers.iter().any(|(k, _)| k == "Signature")
                         {
-                            return Err(anyhow::anyhow!(tr_args!(
-                                "httpsig-err-no-signature",
-                                path = path
-                            )));
+                            return Err(crate::exit_code::CliError::NotAuthenticated {
+                                reason: tr_args!("httpsig-err-no-signature", path = path),
+                            }
+                            .into());
                         }
                         extra_headers.extend(sig_headers);
                     } else if signature_required {
-                        return Err(anyhow::anyhow!(tr_args!(
-                            "httpsig-err-key-unavailable",
-                            path = path
-                        )));
+                        return Err(crate::exit_code::CliError::NotAuthenticated {
+                            reason: tr_args!("httpsig-err-key-unavailable", path = path),
+                        }
+                        .into());
                     }
 
                     let extra_refs: Vec<(&str, &str)> = extra_headers

@@ -94,6 +94,10 @@ enroll-err-start = Failed to start enrollment
 enroll-err-key-init = Failed to initialize the hardware-backed signing key
 enroll-err-register = Failed to register client with the server (RFC 7591)
 
+## Client / session errors
+
+client-err-not-authenticated = not authenticated — run '{ -cmd } login' first
+
 ## RFC 9421 HTTP message signing errors
 
 httpsig-err-no-signature =
