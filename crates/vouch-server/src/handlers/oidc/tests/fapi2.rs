@@ -260,30 +260,20 @@ async fn create_fapi_test_client(
     user_id: &str,
 ) -> (TestOAuthClient, Vec<u8>) {
     let (pkcs8_bytes, jwk) = generate_es256_signing_key();
-    let client = create_test_oauth_client(store, user_id).await;
-
-    let oauth_client = db::get_oauth_client_by_client_id(store, &client.client_id)
-        .await
-        .expect("DB error looking up client")
-        .expect("FAPI test client not found in DB");
-
     let jwks_value = serde_json::json!({ "keys": [jwk] });
-    db::update_oauth_client_jwks(store, &oauth_client.id, &jwks_value)
-        .await
-        .expect("Failed to set JWKS on FAPI client");
 
-    db::update_oauth_client_auth_method(store, &oauth_client.id, "private_key_jwt")
-        .await
-        .expect("Failed to set auth method on FAPI client");
-
-    db::update_oauth_client_fapi_settings(
+    let client = create_test_client(
         store,
-        &oauth_client.id,
-        db::FapiProfile::Fapi2Security,
-        true,
+        user_id,
+        TestClientSpec {
+            jwks: TestJwks::Custom(jwks_value),
+            token_endpoint_auth_method: Some(crate::db::TokenEndpointAuthMethod::PrivateKeyJwt),
+            fapi_profile: Some(db::FapiProfile::Fapi2Security),
+            dpop_bound_access_tokens: true,
+            ..Default::default()
+        },
     )
-    .await
-    .expect("Failed to set FAPI profile on FAPI client");
+    .await;
 
     (client, pkcs8_bytes)
 }

@@ -2632,61 +2632,37 @@ mod httpsig {
     /// Helper: create a user with an OAuth client that has JWKS containing
     /// the given ClientKey's public key, and a session bound to that client.
     async fn setup_user_with_httpsig_key(harness: &TestHarness, key: &ClientKey) -> String {
+        use vouch_server::test_utils::{TestClientSpec, TestJwks, create_test_client};
+
         let user = harness.create_user("httpsig@example.com").await.unwrap();
         let auth_id = harness.create_authenticator(&user.id).await.unwrap();
 
-        // Create OAuth client with the key's public JWK in JWKS
+        // Create OAuth client with the key's public JWK in JWKS (per-user key so
+        // the wrong-key test can register one key and sign with another).
         let public_jwk = key.public_jwk().unwrap();
         let jwks = serde_json::json!({ "keys": [public_jwk] });
 
-        let (client, client_id) = vouch_server::db::create_oauth_client(
+        let client = create_test_client(
             &harness.state.store,
-            &vouch_server::db::CreateOAuthClientParams {
-                user_id: Some(&user.id),
-                name: "Test FAPI Client",
-                description: None,
+            &user.id,
+            TestClientSpec {
+                name: "Test FAPI Client".to_string(),
                 application_type: vouch_server::db::OAuthClientType::Native,
-                redirect_uris: &[],
-                access_scope: vouch_server::db::AccessScope::Public,
-                org_id: None,
-                resource_uris: &[],
+                redirect_uris: vec![],
                 token_endpoint_auth_method: Some(
                     vouch_server::db::TokenEndpointAuthMethod::PrivateKeyJwt,
                 ),
-                jwks: Some(&jwks),
-                jwks_uri: None,
-                fapi_profile: None,
-                dpop_bound_access_tokens: Some(true),
-                grant_types: None,
-                response_types: None,
-                software_id: Some("vouch-cli"),
-                software_version: None,
-                registration_source: vouch_server::db::RegistrationSource::Dynamic,
-                registration_access_token_hash: None,
-                registration_metadata: None,
+                jwks: TestJwks::Custom(jwks),
+                dpop_bound_access_tokens: true,
                 id_token_signed_response_alg: vouch_server::db::JwsAlgorithm::Es256,
-                tls_client_auth_subject_dn: None,
-                tls_client_auth_san_dns: None,
-                tls_client_auth_san_uri: None,
-                tls_client_auth_san_ip: None,
-                tls_client_auth_san_email: None,
-                tls_client_certificate_bound_access_tokens: None,
-                authorization_signed_response_alg: None,
-                introspection_signed_response_alg: None,
-                request_object_signing_alg: None,
-                require_signed_request_object: None,
-                userinfo_signed_response_alg: None,
-                request_uris: None,
+                with_secret: false,
+                ..Default::default()
             },
         )
-        .await
-        .expect("create OAuth client");
-
-        // Ensure client_id is deterministic by reading it back
-        let _ = client;
+        .await;
 
         harness
-            .create_session_for_client(&user.id, "httpsig@example.com", &auth_id, &client_id)
+            .create_session_for_client(&user.id, "httpsig@example.com", &auth_id, &client.client_id)
             .await
             .unwrap()
     }

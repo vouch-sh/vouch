@@ -795,46 +795,6 @@ async fn test_client_assertion_jti_committed_on_success_and_rejected_on_replay()
 // Helpers local to this module
 // ========================================================================
 
-/// Create a test OAuth client configured for `private_key_jwt` with inline JWKS.
-/// Returns (TestOAuthClient, pkcs8_bytes).
-async fn create_test_jwt_client(
-    store: &db::store::DocumentStore,
-    user_id: &str,
-) -> (TestOAuthClient, Vec<u8>) {
-    use aws_lc_rs::signature::{ECDSA_P256_SHA256_FIXED_SIGNING, EcdsaKeyPair, KeyPair};
-
-    let rng = aws_lc_rs::rand::SystemRandom::new();
-    let pkcs8 = EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, &rng)
-        .expect("Failed to generate key");
-    let key_pair = EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, pkcs8.as_ref())
-        .expect("Failed to parse key");
-
-    let pub_bytes = key_pair.public_key().as_ref();
-    let x = URL_SAFE_NO_PAD.encode(&pub_bytes[1..33]);
-    let y = URL_SAFE_NO_PAD.encode(&pub_bytes[33..65]);
-
-    let jwk = serde_json::json!({
-        "kty": "EC", "crv": "P-256", "x": x, "y": y,
-        "use": "sig", "alg": "ES256", "kid": "test-key-1"
-    });
-    let jwks_value = serde_json::json!({ "keys": [jwk] });
-
-    let client = create_test_oauth_client(store, user_id).await;
-    let oauth_client = db::get_oauth_client_by_client_id(store, &client.client_id)
-        .await
-        .expect("DB error")
-        .expect("Client not found");
-
-    db::update_oauth_client_jwks(store, &oauth_client.id, &jwks_value)
-        .await
-        .expect("Failed to set JWKS");
-    db::update_oauth_client_auth_method(store, &oauth_client.id, "private_key_jwt")
-        .await
-        .expect("Failed to set auth method");
-
-    (client, pkcs8.as_ref().to_vec())
-}
-
 /// Build a `private_key_jwt` client assertion for the token endpoint.
 fn build_client_assertion(
     client_id: &str,

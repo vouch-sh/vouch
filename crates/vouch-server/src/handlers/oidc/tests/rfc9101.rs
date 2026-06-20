@@ -62,21 +62,17 @@ async fn create_test_jar_client(
     user_id: &str,
 ) -> (TestOAuthClient, Vec<u8>) {
     let (pkcs8_bytes, jwk) = generate_es256_signing_key();
+    let jwks_value = serde_json::json!({ "keys": [jwk] });
 
-    let client = create_test_oauth_client(store, user_id).await;
-
-    let oauth_client = db::get_oauth_client_by_client_id(store, &client.client_id)
-        .await
-        .expect("DB error")
-        .expect("Client not found");
-
-    // Set inline JWKS
-    let jwks_value = serde_json::json!({
-        "keys": [jwk]
-    });
-    db::update_oauth_client_jwks(store, &oauth_client.id, &jwks_value)
-        .await
-        .expect("Failed to set JWKS");
+    let client = create_test_client(
+        store,
+        user_id,
+        TestClientSpec {
+            jwks: TestJwks::Custom(jwks_value),
+            ..Default::default()
+        },
+    )
+    .await;
 
     (client, pkcs8_bytes)
 }
@@ -637,17 +633,20 @@ async fn test_rfc9101_require_signed_request_object_rejects_plain_params() {
 
     let user = create_test_user(&state.store, "jar-required@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let (client, _pkcs8_bytes) = create_test_jar_client(&state.store, &user.id).await;
     let session_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
 
-    // Set require_signed_request_object = true
-    let oauth_client = db::get_oauth_client_by_client_id(&state.store, &client.client_id)
-        .await
-        .expect("DB error")
-        .expect("Client not found");
-    db::update_oauth_client_jar_settings(&state.store, &oauth_client.id, None, true)
-        .await
-        .expect("Failed to update JAR settings");
+    let (_pkcs8_bytes, jwk) = generate_es256_signing_key();
+    let jwks_value = serde_json::json!({ "keys": [jwk] });
+    let client = create_test_client(
+        &state.store,
+        &user.id,
+        TestClientSpec {
+            jwks: TestJwks::Custom(jwks_value),
+            require_signed_request_object: Some(true),
+            ..Default::default()
+        },
+    )
+    .await;
 
     let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
     let challenge = sha256_base64url(verifier);
@@ -689,17 +688,20 @@ async fn test_rfc9101_require_signed_request_object_accepts_valid_jar() {
 
     let user = create_test_user(&state.store, "jar-reqok@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let (client, pkcs8_bytes) = create_test_jar_client(&state.store, &user.id).await;
     let session_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
 
-    // Set require_signed_request_object = true
-    let oauth_client = db::get_oauth_client_by_client_id(&state.store, &client.client_id)
-        .await
-        .expect("DB error")
-        .expect("Client not found");
-    db::update_oauth_client_jar_settings(&state.store, &oauth_client.id, None, true)
-        .await
-        .expect("Failed to update JAR settings");
+    let (pkcs8_bytes, jwk) = generate_es256_signing_key();
+    let jwks_value = serde_json::json!({ "keys": [jwk] });
+    let client = create_test_client(
+        &state.store,
+        &user.id,
+        TestClientSpec {
+            jwks: TestJwks::Custom(jwks_value),
+            require_signed_request_object: Some(true),
+            ..Default::default()
+        },
+    )
+    .await;
 
     let issuer = &state.config().base_url;
     let request_jwt = build_request_object(&client.client_id, issuer, &pkcs8_bytes);
@@ -896,21 +898,20 @@ async fn test_rfc9101_client_signing_alg_es256_rejects_rs256_jwt() {
 
     let user = create_test_user(&state.store, "jar-algenforce@example.com").await;
     let _auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let (client, pkcs8_bytes) = create_test_jar_client(&state.store, &user.id).await;
 
-    // Configure the client to require ES256 only
-    let oauth_client = db::get_oauth_client_by_client_id(&state.store, &client.client_id)
-        .await
-        .expect("DB error")
-        .expect("Client not found");
-    db::update_oauth_client_jar_settings(
+    let (pkcs8_bytes, jwk) = generate_es256_signing_key();
+    let jwks_value = serde_json::json!({ "keys": [jwk] });
+    let client = create_test_client(
         &state.store,
-        &oauth_client.id,
-        Some(db::JwsAlgorithm::Es256),
-        false,
+        &user.id,
+        TestClientSpec {
+            jwks: TestJwks::Custom(jwks_value),
+            request_object_signing_alg: Some(db::JwsAlgorithm::Es256),
+            require_signed_request_object: Some(false),
+            ..Default::default()
+        },
     )
-    .await
-    .expect("Failed to set request_object_signing_alg");
+    .await;
 
     // Build a JWT that claims to be RS256 in the header (but is signed with ES256 key)
     // The server should reject it because the header alg (RS256) != required alg (ES256)
@@ -968,22 +969,21 @@ async fn test_rfc9101_client_signing_alg_es256_accepts_es256_jwt() {
 
     let user = create_test_user(&state.store, "jar-algok@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let (client, pkcs8_bytes) = create_test_jar_client(&state.store, &user.id).await;
     let session_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
 
-    // Configure the client to require ES256 only
-    let oauth_client = db::get_oauth_client_by_client_id(&state.store, &client.client_id)
-        .await
-        .expect("DB error")
-        .expect("Client not found");
-    db::update_oauth_client_jar_settings(
+    let (pkcs8_bytes, jwk) = generate_es256_signing_key();
+    let jwks_value = serde_json::json!({ "keys": [jwk] });
+    let client = create_test_client(
         &state.store,
-        &oauth_client.id,
-        Some(db::JwsAlgorithm::Es256),
-        false,
+        &user.id,
+        TestClientSpec {
+            jwks: TestJwks::Custom(jwks_value),
+            request_object_signing_alg: Some(db::JwsAlgorithm::Es256),
+            require_signed_request_object: Some(false),
+            ..Default::default()
+        },
     )
-    .await
-    .expect("Failed to set request_object_signing_alg");
+    .await;
 
     let issuer = &state.config().base_url;
     let request_jwt = build_request_object(&client.client_id, issuer, &pkcs8_bytes);

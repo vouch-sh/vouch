@@ -194,48 +194,25 @@ async fn create_mtls_client_with_cert_binding(
     store: &db::store::DocumentStore,
     user_id: &str,
     subject_dn: &str,
+    fapi_profile: db::FapiProfile,
+    dpop_bound_access_tokens: bool,
 ) -> String {
-    let (_doc, client_id) = db::create_oauth_client(
+    create_test_client(
         store,
-        &db::CreateOAuthClientParams {
-            user_id: Some(user_id),
-            name: "Test mTLS Token Client",
-            description: None,
-            application_type: db::OAuthClientType::Web,
-            redirect_uris: &["https://example.com/callback".to_string()],
-            access_scope: db::AccessScope::Public,
-            org_id: None,
-            resource_uris: &[],
+        user_id,
+        TestClientSpec {
+            name: "Test mTLS Token Client".to_string(),
             token_endpoint_auth_method: Some(db::TokenEndpointAuthMethod::TlsClientAuth),
-            jwks: None,
-            jwks_uri: None,
-            fapi_profile: None,
-            dpop_bound_access_tokens: None,
-            grant_types: None,
-            response_types: None,
-            software_id: None,
-            software_version: None,
-            registration_source: db::RegistrationSource::Manual,
-            registration_access_token_hash: None,
-            registration_metadata: None,
-            id_token_signed_response_alg: db::JwsAlgorithm::Rs256,
-            tls_client_auth_subject_dn: Some(subject_dn),
-            tls_client_auth_san_dns: None,
-            tls_client_auth_san_uri: None,
-            tls_client_auth_san_ip: None,
-            tls_client_auth_san_email: None,
-            tls_client_certificate_bound_access_tokens: Some(true),
-            authorization_signed_response_alg: None,
-            introspection_signed_response_alg: None,
-            request_object_signing_alg: None,
-            require_signed_request_object: None,
-            userinfo_signed_response_alg: None,
-            request_uris: None,
+            tls_client_auth_subject_dn: Some(subject_dn.to_string()),
+            tls_client_certificate_bound_access_tokens: true,
+            with_secret: false,
+            fapi_profile: Some(fapi_profile),
+            dpop_bound_access_tokens,
+            ..Default::default()
         },
     )
     .await
-    .expect("Failed to create mTLS test client");
-    client_id
+    .client_id
 }
 
 /// Issue an authorization code for the given client + user using standard scope.
@@ -288,7 +265,14 @@ async fn test_rfc8705_token_mtls_authorization_code_succeeds() {
     let subject_dn = parsed.subject_dn.expect("generated cert has subject DN");
     let thumbprint = cert_thumbprint(&cert_der);
 
-    let client_id = create_mtls_client_with_cert_binding(&state.store, &user.id, &subject_dn).await;
+    let client_id = create_mtls_client_with_cert_binding(
+        &state.store,
+        &user.id,
+        &subject_dn,
+        db::FapiProfile::None,
+        false,
+    )
+    .await;
 
     let code = issue_test_authorization_code(&state, &client_id, &user, &auth_id, None).await;
     let body = format!(
@@ -327,7 +311,14 @@ async fn test_rfc8705_token_mtls_invalid_grant_when_code_already_used() {
     let parsed = crate::services::oidc::mtls::parse_client_certificate(&cert_der)
         .expect("parse generated cert");
     let subject_dn = parsed.subject_dn.expect("subject DN");
-    let client_id = create_mtls_client_with_cert_binding(&state.store, &user.id, &subject_dn).await;
+    let client_id = create_mtls_client_with_cert_binding(
+        &state.store,
+        &user.id,
+        &subject_dn,
+        db::FapiProfile::None,
+        false,
+    )
+    .await;
 
     let code = issue_test_authorization_code(&state, &client_id, &user, &auth_id, None).await;
     let body = format!(
@@ -366,8 +357,14 @@ async fn test_rfc8705_token_mtls_invalid_client_when_cert_mismatch() {
     let parsed_a =
         crate::services::oidc::mtls::parse_client_certificate(&cert_a_der).expect("parse cert A");
     let subject_dn_a = parsed_a.subject_dn.expect("cert A has subject DN");
-    let client_id =
-        create_mtls_client_with_cert_binding(&state.store, &user.id, &subject_dn_a).await;
+    let client_id = create_mtls_client_with_cert_binding(
+        &state.store,
+        &user.id,
+        &subject_dn_a,
+        db::FapiProfile::None,
+        false,
+    )
+    .await;
 
     let code = issue_test_authorization_code(&state, &client_id, &user, &auth_id, None).await;
 
@@ -403,17 +400,14 @@ async fn test_rfc8705_token_mtls_invalid_request_when_dpop_required_but_missing(
     let parsed =
         crate::services::oidc::mtls::parse_client_certificate(&cert_der).expect("parse cert");
     let subject_dn = parsed.subject_dn.expect("subject DN");
-    let client_id = create_mtls_client_with_cert_binding(&state.store, &user.id, &subject_dn).await;
-
-    // Flip the client to require DPoP-bound tokens.
-    db::update_oauth_client_fapi_settings(
+    let client_id = create_mtls_client_with_cert_binding(
         &state.store,
-        &client_id_to_app_id(&state, &client_id).await,
+        &user.id,
+        &subject_dn,
         db::FapiProfile::Fapi2Security,
         true,
     )
-    .await
-    .expect("set dpop required");
+    .await;
 
     let code = issue_test_authorization_code(&state, &client_id, &user, &auth_id, None).await;
     let body = format!(
@@ -440,15 +434,6 @@ async fn test_rfc8705_token_mtls_invalid_request_when_dpop_required_but_missing(
     );
 }
 
-/// Look up an OAuth client's internal app_id (database PK) from its public client_id.
-async fn client_id_to_app_id(state: &std::sync::Arc<crate::AppState>, client_id: &str) -> String {
-    db::get_oauth_client_by_client_id(&state.store, client_id)
-        .await
-        .expect("DB error")
-        .expect("client not found")
-        .id
-}
-
 /// RFC 8705 §3 + RFC 9449 §5: mTLS-authenticated client with DPoP-bound and
 /// cert-bound tokens exchanges code with a matching cert + DPoP proof + nonce.
 /// Returns a DPoP-token-type access token with `cnf.jkt` (and may include
@@ -463,15 +448,14 @@ async fn test_rfc8705_token_mtls_plus_dpop_succeeds() {
     let parsed =
         crate::services::oidc::mtls::parse_client_certificate(&cert_der).expect("parse cert");
     let subject_dn = parsed.subject_dn.expect("subject DN");
-    let client_id = create_mtls_client_with_cert_binding(&state.store, &user.id, &subject_dn).await;
-    db::update_oauth_client_fapi_settings(
+    let client_id = create_mtls_client_with_cert_binding(
         &state.store,
-        &client_id_to_app_id(&state, &client_id).await,
+        &user.id,
+        &subject_dn,
         db::FapiProfile::Fapi2Security,
         true,
     )
-    .await
-    .expect("set dpop required");
+    .await;
 
     let (dpop_key, dpop_jwk) = generate_dpop_key_pair();
     let jkt = dpop_jkt(&dpop_jwk);
@@ -524,15 +508,14 @@ async fn test_rfc8705_token_mtls_plus_dpop_invalid_grant_when_jkt_mismatch() {
     let parsed =
         crate::services::oidc::mtls::parse_client_certificate(&cert_der).expect("parse cert");
     let subject_dn = parsed.subject_dn.expect("subject DN");
-    let client_id = create_mtls_client_with_cert_binding(&state.store, &user.id, &subject_dn).await;
-    db::update_oauth_client_fapi_settings(
+    let client_id = create_mtls_client_with_cert_binding(
         &state.store,
-        &client_id_to_app_id(&state, &client_id).await,
+        &user.id,
+        &subject_dn,
         db::FapiProfile::Fapi2Security,
         true,
     )
-    .await
-    .expect("set dpop required");
+    .await;
 
     // Authorization bound to key A.
     let (_key_a, jwk_a) = generate_dpop_key_pair();

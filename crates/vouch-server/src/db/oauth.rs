@@ -618,67 +618,6 @@ pub async fn delete_old_oauth_usage_events(audit: &AuditStore, before: Timestamp
 pub(super) mod test_helpers {
     use super::*;
 
-    pub async fn update_oauth_client_jwks(
-        store: &DocumentStore,
-        id: &str,
-        jwks_value: &serde_json::Value,
-    ) -> Result<()> {
-        if let Some(doc) = store.get::<OAuthClientDoc>(id).await? {
-            let mut data = doc.data;
-            data.jwks = Some(jwks_value.clone());
-            store.update(id, &data).await?;
-        }
-        Ok(())
-    }
-
-    pub async fn update_oauth_client_auth_method(
-        store: &DocumentStore,
-        id: &str,
-        method: &str,
-    ) -> Result<()> {
-        if let Some(doc) = store.get::<OAuthClientDoc>(id).await? {
-            let mut data = doc.data;
-            data.token_endpoint_auth_method = match method {
-                "private_key_jwt" => TokenEndpointAuthMethod::PrivateKeyJwt,
-                "client_secret_post" => TokenEndpointAuthMethod::ClientSecretPost,
-                "none" => TokenEndpointAuthMethod::None,
-                _ => TokenEndpointAuthMethod::ClientSecretBasic,
-            };
-            store.update(id, &data).await?;
-        }
-        Ok(())
-    }
-
-    pub async fn update_oauth_client_jar_settings(
-        store: &DocumentStore,
-        id: &str,
-        request_object_signing_alg: Option<JwsAlgorithm>,
-        require_signed_request_object: bool,
-    ) -> Result<()> {
-        if let Some(doc) = store.get::<OAuthClientDoc>(id).await? {
-            let mut data = doc.data;
-            data.request_object_signing_alg = request_object_signing_alg;
-            data.require_signed_request_object = Some(require_signed_request_object);
-            store.update(id, &data).await?;
-        }
-        Ok(())
-    }
-
-    pub async fn update_oauth_client_fapi_settings(
-        store: &DocumentStore,
-        id: &str,
-        fapi_profile: FapiProfile,
-        dpop_bound_access_tokens: bool,
-    ) -> Result<()> {
-        if let Some(doc) = store.get::<OAuthClientDoc>(id).await? {
-            let mut data = doc.data;
-            data.fapi_profile = fapi_profile;
-            data.dpop_bound_access_tokens = dpop_bound_access_tokens;
-            store.update(id, &data).await?;
-        }
-        Ok(())
-    }
-
     /// Set an OAuth client's `active` flag. Used to simulate deactivated clients.
     pub async fn set_oauth_client_active(
         store: &DocumentStore,

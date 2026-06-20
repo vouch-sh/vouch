@@ -229,56 +229,27 @@ async fn test_rfc6749_authorize_missing_redirect_uri_multi_uri_shows_error_page(
 
     let user = create_test_user(&state.store, "authorize-noredir-multi@example.com").await;
     // Create a client with two redirect URIs
-    let (client_record, _) = crate::db::create_oauth_client(
+    let client = create_test_client(
         &state.store,
-        &crate::db::CreateOAuthClientParams {
-            user_id: Some(&user.id),
-            name: "Multi-URI App",
-            description: None,
-            application_type: crate::db::OAuthClientType::Web,
-            redirect_uris: &[
+        &user.id,
+        TestClientSpec {
+            name: "Multi-URI App".to_string(),
+            redirect_uris: vec![
                 "https://example.com/callback".to_string(),
                 "https://example.com/callback2".to_string(),
             ],
-            access_scope: crate::db::AccessScope::Public,
-            org_id: None,
-            resource_uris: &[],
-            token_endpoint_auth_method: None,
-            jwks: None,
-            jwks_uri: None,
-            fapi_profile: None,
-            dpop_bound_access_tokens: None,
-            grant_types: None,
-            response_types: None,
-            software_id: None,
-            software_version: None,
-            registration_source: crate::db::documents::oauth::RegistrationSource::Manual,
-            registration_access_token_hash: None,
-            registration_metadata: None,
-            id_token_signed_response_alg: crate::db::documents::oauth::JwsAlgorithm::Rs256,
-            tls_client_auth_subject_dn: None,
-            tls_client_auth_san_dns: None,
-            tls_client_auth_san_uri: None,
-            tls_client_auth_san_ip: None,
-            tls_client_auth_san_email: None,
-            tls_client_certificate_bound_access_tokens: None,
-            authorization_signed_response_alg: None,
-            introspection_signed_response_alg: None,
-            request_object_signing_alg: None,
-            require_signed_request_object: None,
-            userinfo_signed_response_alg: None,
-            request_uris: None,
+            with_secret: false,
+            ..Default::default()
         },
     )
-    .await
-    .expect("create client");
+    .await;
 
     let response = http_get_full(
         &app,
         &format!(
             "/oauth/authorize?response_type=code&client_id={}&scope=openid\
              &code_challenge=dummychallenge&code_challenge_method=S256",
-            client_record.client_id,
+            client.client_id,
         ),
         &[],
     )
@@ -415,12 +386,15 @@ async fn test_rfc6749_authorize_access_denied_personal_scope() {
     // Create user who owns the app
     let owner = create_test_user(&state.store, "authorize-owner@example.com").await;
     // Create a Personal scope app
-    let client = create_test_oauth_client_with_options(
+    let client = create_test_client(
         &state.store,
         &owner.id,
-        crate::db::AccessScope::Personal,
-        None,
-        &[],
+        TestClientSpec {
+            access_scope: crate::db::AccessScope::Personal,
+            org_id: None,
+            resource_uris: vec![],
+            ..Default::default()
+        },
     )
     .await;
 
@@ -481,12 +455,15 @@ async fn test_rfc8707_authorize_invalid_resource_redirects_with_error() {
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
 
     // Create a client with a specific resource URI
-    let client = create_test_oauth_client_with_options(
+    let client = create_test_client(
         &state.store,
         &user.id,
-        crate::db::AccessScope::Public,
-        None,
-        &["https://api.example.com".to_string()],
+        TestClientSpec {
+            access_scope: crate::db::AccessScope::Public,
+            org_id: None,
+            resource_uris: vec!["https://api.example.com".to_string()],
+            ..Default::default()
+        },
     )
     .await;
 
