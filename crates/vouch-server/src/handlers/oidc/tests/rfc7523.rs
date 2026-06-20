@@ -690,21 +690,21 @@ async fn create_test_fapi_jwt_client(
     store: &db::store::DocumentStore,
     user_id: &str,
 ) -> (TestOAuthClient, Vec<u8>) {
-    let (client, pkcs8_bytes) = create_test_jwt_client(store, user_id).await;
+    let (pkcs8_bytes, jwk) = generate_es256_signing_key();
+    let jwks_value = serde_json::json!({ "keys": [jwk] });
 
-    let oauth_client = db::get_oauth_client_by_client_id(store, &client.client_id)
-        .await
-        .expect("DB error")
-        .expect("Client not found");
-
-    db::update_oauth_client_fapi_settings(
+    let client = create_test_client(
         store,
-        &oauth_client.id,
-        db::FapiProfile::Fapi2Security,
-        true,
+        user_id,
+        TestClientSpec {
+            jwks: TestJwks::Custom(jwks_value),
+            token_endpoint_auth_method: Some(crate::db::TokenEndpointAuthMethod::PrivateKeyJwt),
+            fapi_profile: Some(db::FapiProfile::Fapi2Security),
+            dpop_bound_access_tokens: true,
+            ..Default::default()
+        },
     )
-    .await
-    .expect("Failed to set FAPI profile");
+    .await;
 
     (client, pkcs8_bytes)
 }
@@ -1727,21 +1727,21 @@ async fn test_rfc7523_token_fapi_client_invalid_request_no_dpop_or_mtls() {
     let (app, state) = test_app().await;
     let user = create_test_user(&state.store, "fapi-pkjwt-nosc@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let (client, pkcs8_bytes) = create_test_jwt_client(&state.store, &user.id).await;
-    let oauth = db::get_oauth_client_by_client_id(&state.store, &client.client_id)
-        .await
-        .expect("DB error")
-        .expect("client");
     // FAPI profile WITHOUT dpop_bound_access_tokens=true so the
     // FAPI sender-constraint check fires (instead of the DPoP-required check).
-    db::update_oauth_client_fapi_settings(
+    let (pkcs8_bytes, jwk) = generate_es256_signing_key();
+    let jwks_value = serde_json::json!({ "keys": [jwk] });
+    let client = create_test_client(
         &state.store,
-        &oauth.id,
-        db::FapiProfile::Fapi2Security,
-        false,
+        &user.id,
+        TestClientSpec {
+            jwks: TestJwks::Custom(jwks_value),
+            token_endpoint_auth_method: Some(crate::db::TokenEndpointAuthMethod::PrivateKeyJwt),
+            fapi_profile: Some(db::FapiProfile::Fapi2Security),
+            ..Default::default()
+        },
     )
-    .await
-    .expect("set FAPI profile");
+    .await;
 
     let code = pkjwt_issue_code(&state, &client.client_id, &user, &auth_id, None).await;
     let issuer = &state.config().base_url;

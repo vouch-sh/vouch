@@ -618,21 +618,6 @@ pub async fn delete_old_oauth_usage_events(audit: &AuditStore, before: Timestamp
 pub(super) mod test_helpers {
     use super::*;
 
-    pub async fn update_oauth_client_fapi_settings(
-        store: &DocumentStore,
-        id: &str,
-        fapi_profile: FapiProfile,
-        dpop_bound_access_tokens: bool,
-    ) -> Result<()> {
-        if let Some(doc) = store.get::<OAuthClientDoc>(id).await? {
-            let mut data = doc.data;
-            data.fapi_profile = fapi_profile;
-            data.dpop_bound_access_tokens = dpop_bound_access_tokens;
-            store.update(id, &data).await?;
-        }
-        Ok(())
-    }
-
     /// Set an OAuth client's `active` flag. Used to simulate deactivated clients.
     pub async fn set_oauth_client_active(
         store: &DocumentStore,

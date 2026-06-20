@@ -268,19 +268,12 @@ async fn create_fapi_test_client(
         TestClientSpec {
             jwks: TestJwks::Custom(jwks_value),
             token_endpoint_auth_method: Some(crate::db::TokenEndpointAuthMethod::PrivateKeyJwt),
+            fapi_profile: Some(db::FapiProfile::Fapi2Security),
+            dpop_bound_access_tokens: true,
             ..Default::default()
         },
     )
     .await;
-
-    db::update_oauth_client_fapi_settings(
-        store,
-        &client.app_id,
-        db::FapiProfile::Fapi2Security,
-        true,
-    )
-    .await
-    .expect("Failed to set FAPI profile on FAPI client");
 
     (client, pkcs8_bytes)
 }

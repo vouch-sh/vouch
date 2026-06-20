@@ -1670,15 +1670,21 @@ async fn create_fapi_jwt_client(
     store: &db::store::DocumentStore,
     user_id: &str,
 ) -> (TestOAuthClient, Vec<u8>) {
-    let (client, pkcs8_bytes) = create_test_jwt_client(store, user_id).await;
-    db::update_oauth_client_fapi_settings(
+    let (pkcs8_bytes, jwk) = generate_es256_signing_key();
+    let jwks_value = serde_json::json!({ "keys": [jwk] });
+
+    let client = create_test_client(
         store,
-        &client.app_id,
-        crate::db::FapiProfile::Fapi2Security,
-        false,
+        user_id,
+        TestClientSpec {
+            jwks: TestJwks::Custom(jwks_value),
+            token_endpoint_auth_method: Some(crate::db::TokenEndpointAuthMethod::PrivateKeyJwt),
+            fapi_profile: Some(crate::db::FapiProfile::Fapi2Security),
+            ..Default::default()
+        },
     )
-    .await
-    .expect("Failed to set FAPI profile");
+    .await;
+
     (client, pkcs8_bytes)
 }
 
@@ -1696,20 +1702,12 @@ async fn create_fapi_jwt_client_requiring_request_object(
         TestClientSpec {
             jwks: TestJwks::Custom(jwks_value),
             token_endpoint_auth_method: Some(crate::db::TokenEndpointAuthMethod::PrivateKeyJwt),
+            fapi_profile: Some(crate::db::FapiProfile::Fapi2Security),
             require_signed_request_object: Some(true),
             ..Default::default()
         },
     )
     .await;
-
-    db::update_oauth_client_fapi_settings(
-        store,
-        &client.app_id,
-        crate::db::FapiProfile::Fapi2Security,
-        false,
-    )
-    .await
-    .expect("Failed to set FAPI profile");
 
     (client, pkcs8_bytes)
 }
