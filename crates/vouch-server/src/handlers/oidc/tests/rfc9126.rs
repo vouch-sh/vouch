@@ -1527,47 +1527,19 @@ async fn create_mtls_oauth_client(
     user_id: &str,
     subject_dn: &str,
 ) -> String {
-    let (_client_doc, client_id) = crate::db::create_oauth_client(
+    create_test_client(
         store,
-        &crate::db::CreateOAuthClientParams {
-            user_id: Some(user_id),
-            name: "Test mTLS PAR Client",
-            description: None,
-            application_type: crate::db::OAuthClientType::Web,
-            redirect_uris: &["https://example.com/callback".to_string()],
-            access_scope: crate::db::AccessScope::Public,
-            org_id: None,
-            resource_uris: &[],
-            token_endpoint_auth_method: Some(crate::db::TokenEndpointAuthMethod::TlsClientAuth),
-            jwks: None,
-            jwks_uri: None,
-            fapi_profile: None,
-            dpop_bound_access_tokens: None,
-            grant_types: None,
-            response_types: None,
-            software_id: None,
-            software_version: None,
-            registration_source: crate::db::RegistrationSource::Manual,
-            registration_access_token_hash: None,
-            registration_metadata: None,
-            id_token_signed_response_alg: crate::db::JwsAlgorithm::Rs256,
-            tls_client_auth_subject_dn: Some(subject_dn),
-            tls_client_auth_san_dns: None,
-            tls_client_auth_san_uri: None,
-            tls_client_auth_san_ip: None,
-            tls_client_auth_san_email: None,
-            tls_client_certificate_bound_access_tokens: None,
-            authorization_signed_response_alg: None,
-            introspection_signed_response_alg: None,
-            request_object_signing_alg: None,
-            require_signed_request_object: None,
-            userinfo_signed_response_alg: None,
-            request_uris: None,
+        user_id,
+        TestClientSpec {
+            name: "Test mTLS PAR Client".to_string(),
+            token_endpoint_auth_method: Some(db::TokenEndpointAuthMethod::TlsClientAuth),
+            tls_client_auth_subject_dn: Some(subject_dn.to_string()),
+            with_secret: false,
+            ..Default::default()
         },
     )
     .await
-    .expect("Failed to create mTLS test client");
-    client_id
+    .client_id
 }
 
 #[tokio::test]
@@ -1731,46 +1703,21 @@ async fn create_fapi_mtls_client(
 ) -> (String, Vec<u8>) {
     let (pkcs8_bytes, jwk) = generate_es256_signing_key();
     let jwks_value = serde_json::json!({ "keys": [jwk] });
-    let (_doc, client_id) = crate::db::create_oauth_client(
+    let client_id = create_test_client(
         store,
-        &crate::db::CreateOAuthClientParams {
-            user_id: Some(user_id),
-            name: "Test FAPI mTLS PAR Client",
-            description: None,
-            application_type: crate::db::OAuthClientType::Web,
-            redirect_uris: &["https://example.com/callback".to_string()],
-            access_scope: crate::db::AccessScope::Public,
-            org_id: None,
-            resource_uris: &[],
-            token_endpoint_auth_method: Some(crate::db::TokenEndpointAuthMethod::TlsClientAuth),
-            jwks: Some(&jwks_value),
-            jwks_uri: None,
-            fapi_profile: Some(crate::db::FapiProfile::Fapi2Security),
-            dpop_bound_access_tokens: None,
-            grant_types: None,
-            response_types: None,
-            software_id: None,
-            software_version: None,
-            registration_source: crate::db::RegistrationSource::Manual,
-            registration_access_token_hash: None,
-            registration_metadata: None,
-            id_token_signed_response_alg: crate::db::JwsAlgorithm::Rs256,
-            tls_client_auth_subject_dn: Some(subject_dn),
-            tls_client_auth_san_dns: None,
-            tls_client_auth_san_uri: None,
-            tls_client_auth_san_ip: None,
-            tls_client_auth_san_email: None,
-            tls_client_certificate_bound_access_tokens: None,
-            authorization_signed_response_alg: None,
-            introspection_signed_response_alg: None,
-            request_object_signing_alg: None,
-            require_signed_request_object: None,
-            userinfo_signed_response_alg: None,
-            request_uris: None,
+        user_id,
+        TestClientSpec {
+            name: "Test FAPI mTLS PAR Client".to_string(),
+            token_endpoint_auth_method: Some(db::TokenEndpointAuthMethod::TlsClientAuth),
+            jwks: TestJwks::Custom(jwks_value),
+            fapi_profile: Some(db::FapiProfile::Fapi2Security),
+            tls_client_auth_subject_dn: Some(subject_dn.to_string()),
+            with_secret: false,
+            ..Default::default()
         },
     )
     .await
-    .expect("Failed to create FAPI mTLS test client");
+    .client_id;
     (client_id, pkcs8_bytes)
 }
 

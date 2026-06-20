@@ -287,27 +287,6 @@ async fn register_test_httpsig_client(store: &DocumentStore, base_url: &str) {
         .expect("register first-party test httpsig client");
 }
 
-/// Attach the shared test signing key's JWKS to an existing OAuth client.
-///
-/// Tokens issued for custom test clients (via `create_test_oauth_client`) carry
-/// that client's `client_id`. For transparently-signed `/v1/*` requests to
-/// verify, the client's registered JWKS must hold the shared test key — call
-/// this after creating a client whose token will hit a `/v1/*` endpoint.
-pub async fn attach_test_signing_key(store: &DocumentStore, app_id: &str) {
-    use crate::db::documents::oauth::OAuthClientDoc;
-    let doc = store
-        .get::<OAuthClientDoc>(app_id)
-        .await
-        .expect("get client")
-        .expect("client exists");
-    let mut data = doc.data;
-    data.jwks = Some(TEST_HTTPSIG.jwks.clone());
-    store
-        .update(app_id, &data)
-        .await
-        .expect("update client jwks");
-}
-
 /// Whether a request to `uri` carrying these `headers` should be auto-signed.
 ///
 /// Signs authenticated `/v1/*` requests (those with an `Authorization` header)
@@ -1136,6 +1115,99 @@ pub async fn create_test_scim_token(
     token
 }
 
+/// What JWKS, if any, a test OAuth client is created with.
+#[derive(Default)]
+pub enum TestJwks {
+    /// No JWKS registered (DB column stays NULL). Default — preserves the
+    /// current `create_test_oauth_client` behavior and keeps the ~4 tests
+    /// that assert `jwks IS NONE` and the ~8 private_key_jwt tests that
+    /// register their own key.
+    #[default]
+    None,
+    /// The process-wide shared test signing key (`TEST_HTTPSIG.jwks`). Opts
+    /// a custom client into transparently-signed `/v1/*` request verification.
+    /// Folds in the old `attach_test_signing_key` post-hoc patch.
+    Shared,
+    /// A caller-supplied JWKS document (e.g. a per-test `ClientKey` public JWK
+    /// for negative/key-mismatch tests).
+    Custom(serde_json::Value),
+}
+
+/// Knobs that test-client fixture sites actually vary.
+///
+/// All fields have `Default` values that reproduce the behavior of the old
+/// `create_test_oauth_client` exactly (see the mapping table in the
+/// `impl Default` below).  Use struct-update syntax to override only what the
+/// test needs:
+///
+/// ```rust,ignore
+/// create_test_client(&store, &user.id, TestClientSpec {
+///     jwks: TestJwks::Shared,
+///     ..Default::default()
+/// }).await
+/// ```
+pub struct TestClientSpec {
+    /// OAuth client display name. Default: `"Test App"`.
+    pub name: String,
+    /// Client application type. Default: `OAuthClientType::Web`.
+    pub application_type: crate::db::OAuthClientType,
+    /// Registered redirect URIs. Default: `["https://example.com/callback"]`.
+    pub redirect_uris: Vec<String>,
+    /// Access scope (Personal vs Public). Default: `AccessScope::Public`.
+    pub access_scope: crate::db::AccessScope,
+    /// Organisation the client belongs to. Default: `None`.
+    pub org_id: Option<String>,
+    /// Permitted resource URIs (RAR). Default: empty.
+    pub resource_uris: Vec<String>,
+    /// Token endpoint auth method override. Default: `None` (→ ClientSecretBasic).
+    pub token_endpoint_auth_method: Option<crate::db::TokenEndpointAuthMethod>,
+    /// JWKS to register with the client. Default: `TestJwks::None`.
+    pub jwks: TestJwks,
+    /// Require DPoP-bound access tokens. Default: `false`.
+    pub dpop_bound_access_tokens: bool,
+    /// Allowed grant types override. Default: `None`.
+    pub grant_types: Option<Vec<String>>,
+    /// FAPI security profile. Default: `None` (→ FapiProfile::None).
+    pub fapi_profile: Option<crate::db::FapiProfile>,
+    /// ID-token signing algorithm. Default: `JwsAlgorithm::Rs256`.
+    pub id_token_signed_response_alg: crate::db::JwsAlgorithm,
+    /// mTLS subject DN for `tls_client_auth`. Default: `None`.
+    pub tls_client_auth_subject_dn: Option<String>,
+    /// Bind issued tokens to the mTLS certificate. Default: `false`.
+    pub tls_client_certificate_bound_access_tokens: bool,
+    /// UserInfo JWT signing algorithm override. Default: `None`.
+    pub userinfo_signed_response_alg: Option<crate::db::JwsAlgorithm>,
+    /// Introspection JWT signing algorithm override. Default: `None`.
+    pub introspection_signed_response_alg: Option<crate::db::JwsAlgorithm>,
+    /// Whether to mint a client secret. `false` for public/SPA clients. Default: `true`.
+    pub with_secret: bool,
+}
+
+impl Default for TestClientSpec {
+    fn default() -> Self {
+        Self {
+            name: "Test App".to_string(),
+            application_type: crate::db::OAuthClientType::Web,
+            redirect_uris: vec!["https://example.com/callback".to_string()],
+            // Intentionally Public, not AccessScope::default() which is Personal.
+            access_scope: crate::db::AccessScope::Public,
+            org_id: Option::None,
+            resource_uris: vec![],
+            token_endpoint_auth_method: Option::None,
+            jwks: TestJwks::None,
+            dpop_bound_access_tokens: false,
+            grant_types: Option::None,
+            fapi_profile: Option::None,
+            id_token_signed_response_alg: crate::db::JwsAlgorithm::Rs256,
+            tls_client_auth_subject_dn: Option::None,
+            tls_client_certificate_bound_access_tokens: false,
+            userinfo_signed_response_alg: Option::None,
+            introspection_signed_response_alg: Option::None,
+            with_secret: true,
+        }
+    }
+}
+
 /// Result of creating a test OAuth client with credentials.
 pub struct TestOAuthClient {
     /// The internal application ID (database primary key).
@@ -1156,68 +1228,101 @@ impl TestOAuthClient {
     }
 }
 
-/// Create a test OAuth client with a secret for use in tests.
-pub async fn create_test_oauth_client(store: &DocumentStore, user_id: &str) -> TestOAuthClient {
+/// Create a test OAuth client from a [`TestClientSpec`].
+///
+/// This is the canonical factory. All other `create_test_*_oauth_client`
+/// helpers delegate here.
+pub async fn create_test_client(
+    store: &DocumentStore,
+    user_id: &str,
+    spec: TestClientSpec,
+) -> TestOAuthClient {
     use aws_lc_rs::rand as aws_rand;
     use base64::Engine;
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+
+    // Resolve the JWKS value from the spec variant.
+    let jwks_value: Option<serde_json::Value> = match spec.jwks {
+        TestJwks::None => Option::None,
+        TestJwks::Shared => Some(TEST_HTTPSIG.jwks.clone()),
+        TestJwks::Custom(v) => Some(v),
+    };
 
     let (client, client_id) = crate::db::create_oauth_client(
         store,
         &CreateOAuthClientParams {
             user_id: Some(user_id),
-            name: "Test App",
-            description: None,
-            application_type: crate::db::OAuthClientType::Web,
-            redirect_uris: &["https://example.com/callback".to_string()],
-            access_scope: crate::db::AccessScope::Public,
-            org_id: None,
-            resource_uris: &[],
-            token_endpoint_auth_method: None,
-            jwks: None,
-            jwks_uri: None,
-            fapi_profile: None,
-            dpop_bound_access_tokens: None,
-            grant_types: None,
-            response_types: None,
-            software_id: None,
-            software_version: None,
+            name: &spec.name,
+            description: Option::None,
+            application_type: spec.application_type,
+            redirect_uris: &spec.redirect_uris,
+            access_scope: spec.access_scope,
+            org_id: spec.org_id.as_deref(),
+            resource_uris: &spec.resource_uris,
+            token_endpoint_auth_method: spec.token_endpoint_auth_method,
+            jwks: jwks_value.as_ref(),
+            jwks_uri: Option::None,
+            fapi_profile: spec.fapi_profile,
+            dpop_bound_access_tokens: if spec.dpop_bound_access_tokens {
+                Some(true)
+            } else {
+                Option::None
+            },
+            grant_types: spec.grant_types.as_deref(),
+            response_types: Option::None,
+            software_id: Option::None,
+            software_version: Option::None,
             registration_source: RegistrationSource::Manual,
-            registration_access_token_hash: None,
-            registration_metadata: None,
-            id_token_signed_response_alg: JwsAlgorithm::Rs256,
-            tls_client_auth_subject_dn: None,
-            tls_client_auth_san_dns: None,
-            tls_client_auth_san_uri: None,
-            tls_client_auth_san_ip: None,
-            tls_client_auth_san_email: None,
-            tls_client_certificate_bound_access_tokens: None,
-            authorization_signed_response_alg: None,
-            introspection_signed_response_alg: None,
-            request_object_signing_alg: None,
-            require_signed_request_object: None,
-            userinfo_signed_response_alg: None,
-            request_uris: None,
+            registration_access_token_hash: Option::None,
+            registration_metadata: Option::None,
+            id_token_signed_response_alg: spec.id_token_signed_response_alg,
+            tls_client_auth_subject_dn: spec.tls_client_auth_subject_dn.as_deref(),
+            tls_client_auth_san_dns: Option::None,
+            tls_client_auth_san_uri: Option::None,
+            tls_client_auth_san_ip: Option::None,
+            tls_client_auth_san_email: Option::None,
+            tls_client_certificate_bound_access_tokens: if spec
+                .tls_client_certificate_bound_access_tokens
+            {
+                Some(true)
+            } else {
+                Option::None
+            },
+            authorization_signed_response_alg: Option::None,
+            introspection_signed_response_alg: spec.introspection_signed_response_alg,
+            request_object_signing_alg: Option::None,
+            require_signed_request_object: Option::None,
+            userinfo_signed_response_alg: spec.userinfo_signed_response_alg,
+            request_uris: Option::None,
         },
     )
     .await
     .expect("Failed to create test OAuth client");
 
-    // Generate a secret
-    let mut secret_bytes = [0u8; 32];
-    aws_rand::fill(&mut secret_bytes).expect("RNG failure");
-    let secret = URL_SAFE_NO_PAD.encode(secret_bytes);
-    let secret_hash = crate::handlers::hash_token(&secret);
-
-    crate::db::create_oauth_client_secret(store, &client.id, &secret_hash, Some("test"), None)
-        .await
-        .expect("Failed to create test OAuth client secret");
+    // Mint a client secret when requested (secret clients only).
+    let secret = if spec.with_secret {
+        let mut secret_bytes = [0u8; 32];
+        aws_rand::fill(&mut secret_bytes).expect("RNG failure");
+        let raw = URL_SAFE_NO_PAD.encode(secret_bytes);
+        let secret_hash = crate::handlers::hash_token(&raw);
+        crate::db::create_oauth_client_secret(store, &client.id, &secret_hash, Some("test"), None)
+            .await
+            .expect("Failed to create test OAuth client secret");
+        raw
+    } else {
+        String::new()
+    };
 
     TestOAuthClient {
         app_id: client.id,
         client_id,
         client_secret: secret,
     }
+}
+
+/// Create a test OAuth client with a secret for use in tests.
+pub async fn create_test_oauth_client(store: &DocumentStore, user_id: &str) -> TestOAuthClient {
+    create_test_client(store, user_id, TestClientSpec::default()).await
 }
 
 /// Create a test OAuth client with custom access scope and resource URIs.
@@ -1228,66 +1333,17 @@ pub async fn create_test_oauth_client_with_options(
     org_id: Option<&str>,
     resource_uris: &[String],
 ) -> TestOAuthClient {
-    use aws_lc_rs::rand as aws_rand;
-    use base64::Engine;
-    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-
-    let (client, client_id) = crate::db::create_oauth_client(
+    create_test_client(
         store,
-        &CreateOAuthClientParams {
-            user_id: Some(user_id),
-            name: "Test App",
-            description: None,
-            application_type: crate::db::OAuthClientType::Web,
-            redirect_uris: &["https://example.com/callback".to_string()],
+        user_id,
+        TestClientSpec {
             access_scope,
-            org_id,
-            resource_uris,
-            token_endpoint_auth_method: None,
-            jwks: None,
-            jwks_uri: None,
-            fapi_profile: None,
-            dpop_bound_access_tokens: None,
-            grant_types: None,
-            response_types: None,
-            software_id: None,
-            software_version: None,
-            registration_source: RegistrationSource::Manual,
-            registration_access_token_hash: None,
-            registration_metadata: None,
-            id_token_signed_response_alg: JwsAlgorithm::Rs256,
-            tls_client_auth_subject_dn: None,
-            tls_client_auth_san_dns: None,
-            tls_client_auth_san_uri: None,
-            tls_client_auth_san_ip: None,
-            tls_client_auth_san_email: None,
-            tls_client_certificate_bound_access_tokens: None,
-            authorization_signed_response_alg: None,
-            introspection_signed_response_alg: None,
-            request_object_signing_alg: None,
-            require_signed_request_object: None,
-            userinfo_signed_response_alg: None,
-            request_uris: None,
+            org_id: org_id.map(str::to_string),
+            resource_uris: resource_uris.to_vec(),
+            ..Default::default()
         },
     )
     .await
-    .expect("Failed to create test OAuth client");
-
-    // Generate a secret
-    let mut secret_bytes = [0u8; 32];
-    aws_rand::fill(&mut secret_bytes).expect("RNG failure");
-    let secret = URL_SAFE_NO_PAD.encode(secret_bytes);
-    let secret_hash = crate::handlers::hash_token(&secret);
-
-    crate::db::create_oauth_client_secret(store, &client.id, &secret_hash, Some("test"), None)
-        .await
-        .expect("Failed to create test OAuth client secret");
-
-    TestOAuthClient {
-        app_id: client.id,
-        client_id,
-        client_secret: secret,
-    }
 }
 
 /// Create a public OAuth client (no client secret, `token_endpoint_auth_method=none`).
@@ -1295,52 +1351,18 @@ pub async fn create_test_public_oauth_client(
     store: &DocumentStore,
     user_id: &str,
 ) -> TestOAuthClient {
-    let (client, client_id) = crate::db::create_oauth_client(
+    create_test_client(
         store,
-        &CreateOAuthClientParams {
-            user_id: Some(user_id),
-            name: "Public Test App",
-            description: None,
+        user_id,
+        TestClientSpec {
+            name: "Public Test App".to_string(),
             application_type: crate::db::OAuthClientType::Spa,
-            redirect_uris: &["https://example.com/callback".to_string()],
-            access_scope: crate::db::AccessScope::Public,
-            org_id: None,
-            resource_uris: &[],
             token_endpoint_auth_method: Some(crate::db::TokenEndpointAuthMethod::None),
-            jwks: None,
-            jwks_uri: None,
-            fapi_profile: None,
-            dpop_bound_access_tokens: None,
-            grant_types: None,
-            response_types: None,
-            software_id: None,
-            software_version: None,
-            registration_source: RegistrationSource::Manual,
-            registration_access_token_hash: None,
-            registration_metadata: None,
-            id_token_signed_response_alg: JwsAlgorithm::Rs256,
-            tls_client_auth_subject_dn: None,
-            tls_client_auth_san_dns: None,
-            tls_client_auth_san_uri: None,
-            tls_client_auth_san_ip: None,
-            tls_client_auth_san_email: None,
-            tls_client_certificate_bound_access_tokens: None,
-            authorization_signed_response_alg: None,
-            introspection_signed_response_alg: None,
-            request_object_signing_alg: None,
-            require_signed_request_object: None,
-            userinfo_signed_response_alg: None,
-            request_uris: None,
+            with_secret: false,
+            ..Default::default()
         },
     )
     .await
-    .expect("Failed to create test public OAuth client");
-
-    TestOAuthClient {
-        app_id: client.id,
-        client_id,
-        client_secret: String::new(),
-    }
 }
 
 // ============================================================================

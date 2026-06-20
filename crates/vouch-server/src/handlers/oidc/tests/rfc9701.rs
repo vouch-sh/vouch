@@ -2,7 +2,6 @@
 //! RFC 9701 — JWT Token Introspection Responses.
 
 use super::helpers::*;
-use crate::db::{self, CreateOAuthClientParams, JwsAlgorithm, RegistrationSource};
 
 // ============================================================================
 // Helpers
@@ -13,63 +12,17 @@ async fn create_test_client_with_introspection_jwt(
     state: &std::sync::Arc<crate::AppState>,
     user_id: &str,
 ) -> crate::test_utils::TestOAuthClient {
-    use aws_lc_rs::rand as aws_rand;
-
-    let (client, client_id) = db::create_oauth_client(
+    create_test_client(
         &state.store,
-        &CreateOAuthClientParams {
-            user_id: Some(user_id),
-            name: "JWT Introspect App",
-            description: None,
-            application_type: crate::db::OAuthClientType::Web,
-            redirect_uris: &["https://example.com/callback".to_string()],
-            access_scope: crate::db::AccessScope::Public,
-            org_id: None,
-            resource_uris: &[],
-            token_endpoint_auth_method: None,
-            jwks: None,
-            jwks_uri: None,
-            fapi_profile: None,
-            dpop_bound_access_tokens: None,
-            grant_types: None,
-            response_types: None,
-            software_id: None,
-            software_version: None,
-            registration_source: RegistrationSource::Manual,
-            registration_access_token_hash: None,
-            registration_metadata: None,
-            id_token_signed_response_alg: JwsAlgorithm::Es256,
-            tls_client_auth_subject_dn: None,
-            tls_client_auth_san_dns: None,
-            tls_client_auth_san_uri: None,
-            tls_client_auth_san_ip: None,
-            tls_client_auth_san_email: None,
-            tls_client_certificate_bound_access_tokens: None,
-            authorization_signed_response_alg: None,
-            introspection_signed_response_alg: Some(JwsAlgorithm::Es256),
-            request_object_signing_alg: None,
-            require_signed_request_object: None,
-            userinfo_signed_response_alg: None,
-            request_uris: None,
+        user_id,
+        TestClientSpec {
+            name: "JWT Introspect App".to_string(),
+            id_token_signed_response_alg: db::JwsAlgorithm::Es256,
+            introspection_signed_response_alg: Some(db::JwsAlgorithm::Es256),
+            ..Default::default()
         },
     )
     .await
-    .expect("Failed to create JWT introspect test client");
-
-    let mut secret_bytes = [0u8; 32];
-    aws_rand::fill(&mut secret_bytes).expect("RNG failure");
-    let secret = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(secret_bytes);
-    let secret_hash = crate::handlers::hash_token(&secret);
-
-    db::create_oauth_client_secret(&state.store, &client.id, &secret_hash, Some("test"), None)
-        .await
-        .expect("Failed to create test client secret");
-
-    crate::test_utils::TestOAuthClient {
-        app_id: client.id,
-        client_id,
-        client_secret: secret,
-    }
 }
 
 // ============================================================================

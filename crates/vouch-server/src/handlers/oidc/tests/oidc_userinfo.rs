@@ -394,47 +394,19 @@ async fn test_userinfo_signed_jwt_when_es256_configured() {
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
 
     // Create a client with userinfo_signed_response_alg=ES256
-    let (client_doc, client_id_str) = db::create_oauth_client(
+    let client = create_test_client(
         &state.store,
-        &db::CreateOAuthClientParams {
-            user_id: Some(&user.id),
-            name: "Signed UserInfo Test Client",
-            description: None,
-            application_type: db::OAuthClientType::Web,
-            redirect_uris: &["https://example.com/callback".to_string()],
-            access_scope: db::AccessScope::Public,
-            org_id: None,
-            resource_uris: &[],
-            token_endpoint_auth_method: None,
-            jwks: None,
-            jwks_uri: None,
-            fapi_profile: None,
-            dpop_bound_access_tokens: None,
-            grant_types: None,
-            response_types: None,
-            software_id: None,
-            software_version: None,
-            registration_source: db::RegistrationSource::Manual,
-            registration_access_token_hash: None,
-            registration_metadata: None,
+        &user.id,
+        TestClientSpec {
+            name: "Signed UserInfo Test Client".to_string(),
             id_token_signed_response_alg: db::JwsAlgorithm::Es256,
-            tls_client_auth_subject_dn: None,
-            tls_client_auth_san_dns: None,
-            tls_client_auth_san_uri: None,
-            tls_client_auth_san_ip: None,
-            tls_client_auth_san_email: None,
-            tls_client_certificate_bound_access_tokens: None,
-            authorization_signed_response_alg: None,
-            introspection_signed_response_alg: None,
-            request_object_signing_alg: None,
-            require_signed_request_object: None,
             userinfo_signed_response_alg: Some(db::JwsAlgorithm::Es256),
-            request_uris: None,
+            with_secret: false,
+            ..Default::default()
         },
     )
-    .await
-    .expect("Failed to create signed-userinfo test client");
-    let _ = client_doc;
+    .await;
+    let client_id_str = client.client_id;
 
     // Token bound to this client so client_id is populated in the access token
     let token =
@@ -505,55 +477,26 @@ async fn test_userinfo_rs256_without_rsa_key_returns_500() {
 
     // Create a client with userinfo_signed_response_alg=ES256 first (valid),
     // then override it to RS256 directly via the DB to bypass registration checks.
-    let (client_doc, client_id_str) = db::create_oauth_client(
+    let client = create_test_client(
         &state.store,
-        &db::CreateOAuthClientParams {
-            user_id: Some(&user.id),
-            name: "RS256 No Key Test Client",
-            description: None,
-            application_type: db::OAuthClientType::Web,
-            redirect_uris: &["https://example.com/callback".to_string()],
-            access_scope: db::AccessScope::Public,
-            org_id: None,
-            resource_uris: &[],
-            token_endpoint_auth_method: None,
-            jwks: None,
-            jwks_uri: None,
-            fapi_profile: None,
-            dpop_bound_access_tokens: None,
-            grant_types: None,
-            response_types: None,
-            software_id: None,
-            software_version: None,
-            registration_source: db::RegistrationSource::Manual,
-            registration_access_token_hash: None,
-            registration_metadata: None,
+        &user.id,
+        TestClientSpec {
+            name: "RS256 No Key Test Client".to_string(),
             id_token_signed_response_alg: db::JwsAlgorithm::Es256,
-            tls_client_auth_subject_dn: None,
-            tls_client_auth_san_dns: None,
-            tls_client_auth_san_uri: None,
-            tls_client_auth_san_ip: None,
-            tls_client_auth_san_email: None,
-            tls_client_certificate_bound_access_tokens: None,
-            authorization_signed_response_alg: None,
-            introspection_signed_response_alg: None,
-            request_object_signing_alg: None,
-            require_signed_request_object: None,
-            userinfo_signed_response_alg: None,
-            request_uris: None,
+            with_secret: false,
+            ..Default::default()
         },
     )
-    .await
-    .expect("Failed to create RS256-no-key test client");
+    .await;
 
     // Override userinfo_signed_response_alg to RS256 directly — registration would
     // reject RS256 when no RSA key is available, but direct DB write is needed here.
-    db::set_oauth_client_userinfo_alg(&state.store, &client_doc.id, Some(db::JwsAlgorithm::Rs256))
+    db::set_oauth_client_userinfo_alg(&state.store, &client.app_id, Some(db::JwsAlgorithm::Rs256))
         .await
         .expect("Failed to set RS256 alg");
 
     let token =
-        create_test_session_for_client(&state, &user.id, &user.email, &auth_id, &client_id_str)
+        create_test_session_for_client(&state, &user.id, &user.email, &auth_id, &client.client_id)
             .await;
 
     let response = http_request_full(
@@ -591,55 +534,26 @@ async fn test_userinfo_unsupported_signing_algorithm_returns_500() {
     let user = create_test_user(&state.store, "unsupported-alg@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
 
-    let (client_doc, client_id_str) = db::create_oauth_client(
+    let client = create_test_client(
         &state.store,
-        &db::CreateOAuthClientParams {
-            user_id: Some(&user.id),
-            name: "Unsupported Alg Test Client",
-            description: None,
-            application_type: db::OAuthClientType::Web,
-            redirect_uris: &["https://example.com/callback".to_string()],
-            access_scope: db::AccessScope::Public,
-            org_id: None,
-            resource_uris: &[],
-            token_endpoint_auth_method: None,
-            jwks: None,
-            jwks_uri: None,
-            fapi_profile: None,
-            dpop_bound_access_tokens: None,
-            grant_types: None,
-            response_types: None,
-            software_id: None,
-            software_version: None,
-            registration_source: db::RegistrationSource::Manual,
-            registration_access_token_hash: None,
-            registration_metadata: None,
+        &user.id,
+        TestClientSpec {
+            name: "Unsupported Alg Test Client".to_string(),
             id_token_signed_response_alg: db::JwsAlgorithm::Es256,
-            tls_client_auth_subject_dn: None,
-            tls_client_auth_san_dns: None,
-            tls_client_auth_san_uri: None,
-            tls_client_auth_san_ip: None,
-            tls_client_auth_san_email: None,
-            tls_client_certificate_bound_access_tokens: None,
-            authorization_signed_response_alg: None,
-            introspection_signed_response_alg: None,
-            request_object_signing_alg: None,
-            require_signed_request_object: None,
-            userinfo_signed_response_alg: None,
-            request_uris: None,
+            with_secret: false,
+            ..Default::default()
         },
     )
-    .await
-    .expect("Failed to create unsupported-alg test client");
+    .await;
 
     // Inject PS256 directly — registration correctly rejects it, but a client
     // record could have it from a future schema change or manual edit.
-    db::set_oauth_client_userinfo_alg(&state.store, &client_doc.id, Some(db::JwsAlgorithm::Ps256))
+    db::set_oauth_client_userinfo_alg(&state.store, &client.app_id, Some(db::JwsAlgorithm::Ps256))
         .await
         .expect("Failed to set PS256 alg");
 
     let token =
-        create_test_session_for_client(&state, &user.id, &user.email, &auth_id, &client_id_str)
+        create_test_session_for_client(&state, &user.id, &user.email, &auth_id, &client.client_id)
             .await;
 
     let response = http_request_full(

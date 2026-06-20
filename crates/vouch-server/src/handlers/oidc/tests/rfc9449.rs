@@ -1172,10 +1172,15 @@ async fn test_dpop_resource_endpoint_post_json_without_nonce() {
 
     let user = create_test_user(&state.store, "dpop-post-nonce@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let client = create_test_oauth_client(&state.store, &user.id).await;
-    // The DPoP-bound token's client must hold the shared test signing key so
-    // the transparently-signed POST /v1/credentials/ssh request verifies.
-    attach_test_signing_key(&state.store, &client.app_id).await;
+    let client = create_test_client(
+        &state.store,
+        &user.id,
+        TestClientSpec {
+            jwks: TestJwks::Shared,
+            ..Default::default()
+        },
+    )
+    .await;
 
     // Step 1: Get a DPoP-bound access token
     let (dpop_key, dpop_jwk) = generate_dpop_key_pair();
@@ -1407,46 +1412,19 @@ async fn test_rfc9449_token_mtls_registered_client_without_cert_rejected() {
     let subject_dn = parsed.subject_dn.expect("subject DN");
 
     // Manually create an mtls-auth client (no cert-binding required).
-    let (_doc, client_id) = db::create_oauth_client(
+    let client_id = create_test_client(
         &state.store,
-        &db::CreateOAuthClientParams {
-            user_id: Some(&user.id),
-            name: "Test mTLS Token Endpoint Client",
-            description: None,
-            application_type: db::OAuthClientType::Web,
-            redirect_uris: &["https://example.com/callback".to_string()],
-            access_scope: db::AccessScope::Public,
-            org_id: None,
-            resource_uris: &[],
+        &user.id,
+        TestClientSpec {
+            name: "Test mTLS Token Endpoint Client".to_string(),
             token_endpoint_auth_method: Some(db::TokenEndpointAuthMethod::TlsClientAuth),
-            jwks: None,
-            jwks_uri: None,
-            fapi_profile: None,
-            dpop_bound_access_tokens: None,
-            grant_types: None,
-            response_types: None,
-            software_id: None,
-            software_version: None,
-            registration_source: db::RegistrationSource::Manual,
-            registration_access_token_hash: None,
-            registration_metadata: None,
-            id_token_signed_response_alg: db::JwsAlgorithm::Rs256,
-            tls_client_auth_subject_dn: Some(&subject_dn),
-            tls_client_auth_san_dns: None,
-            tls_client_auth_san_uri: None,
-            tls_client_auth_san_ip: None,
-            tls_client_auth_san_email: None,
-            tls_client_certificate_bound_access_tokens: None,
-            authorization_signed_response_alg: None,
-            introspection_signed_response_alg: None,
-            request_object_signing_alg: None,
-            require_signed_request_object: None,
-            userinfo_signed_response_alg: None,
-            request_uris: None,
+            tls_client_auth_subject_dn: Some(subject_dn),
+            with_secret: false,
+            ..Default::default()
         },
     )
     .await
-    .expect("create mTLS-auth client");
+    .client_id;
 
     let scope = ScopeSet::parse("openid");
     let code = issue_authorization_code(

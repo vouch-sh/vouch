@@ -195,47 +195,20 @@ async fn create_mtls_client_with_cert_binding(
     user_id: &str,
     subject_dn: &str,
 ) -> String {
-    let (_doc, client_id) = db::create_oauth_client(
+    create_test_client(
         store,
-        &db::CreateOAuthClientParams {
-            user_id: Some(user_id),
-            name: "Test mTLS Token Client",
-            description: None,
-            application_type: db::OAuthClientType::Web,
-            redirect_uris: &["https://example.com/callback".to_string()],
-            access_scope: db::AccessScope::Public,
-            org_id: None,
-            resource_uris: &[],
+        user_id,
+        TestClientSpec {
+            name: "Test mTLS Token Client".to_string(),
             token_endpoint_auth_method: Some(db::TokenEndpointAuthMethod::TlsClientAuth),
-            jwks: None,
-            jwks_uri: None,
-            fapi_profile: None,
-            dpop_bound_access_tokens: None,
-            grant_types: None,
-            response_types: None,
-            software_id: None,
-            software_version: None,
-            registration_source: db::RegistrationSource::Manual,
-            registration_access_token_hash: None,
-            registration_metadata: None,
-            id_token_signed_response_alg: db::JwsAlgorithm::Rs256,
-            tls_client_auth_subject_dn: Some(subject_dn),
-            tls_client_auth_san_dns: None,
-            tls_client_auth_san_uri: None,
-            tls_client_auth_san_ip: None,
-            tls_client_auth_san_email: None,
-            tls_client_certificate_bound_access_tokens: Some(true),
-            authorization_signed_response_alg: None,
-            introspection_signed_response_alg: None,
-            request_object_signing_alg: None,
-            require_signed_request_object: None,
-            userinfo_signed_response_alg: None,
-            request_uris: None,
+            tls_client_auth_subject_dn: Some(subject_dn.to_string()),
+            tls_client_certificate_bound_access_tokens: true,
+            with_secret: false,
+            ..Default::default()
         },
     )
     .await
-    .expect("Failed to create mTLS test client");
-    client_id
+    .client_id
 }
 
 /// Issue an authorization code for the given client + user using standard scope.
