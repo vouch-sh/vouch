@@ -131,14 +131,18 @@ fn configure_ssh_config(hosts: Option<&str>) -> Result<()> {
     let key_path = default_key_path()?;
     let cert_path = PathBuf::from(format!("{}-cert.pub", key_path.display()));
     // The SSH agent socket is Unix-only: vouch-agent exposes a Unix domain socket
-    // for SSH agent forwarding, which has no equivalent on other platforms.
-    // On Unix, propagate the error rather than falling back to a stale literal
-    // (the legacy ~/.vouch/ssh-agent.sock no longer exists after the XDG migration).
-    // On non-Unix, no IdentityAgent directive is emitted at all.
+    // for SSH agent forwarding, which has no equivalent on other platforms. We
+    // resolve it lazily, only on the paths that actually need it, and propagate
+    // the error rather than falling back to a stale literal (the legacy
+    // ~/.vouch/ssh-agent.sock no longer exists after the XDG migration). Resolving
+    // eagerly would make an already-configured host fail just because the socket
+    // can't be resolved. On non-Unix no IdentityAgent directive is emitted at all.
     #[cfg(unix)]
-    let agent_socket = vouch_agent::ssh_agent_socket_path()
-        .map(|p| p.display().to_string())
-        .with_context(|| tr!("setup-ssh-err-agent-socket"))?;
+    let resolve_agent_socket = || -> Result<String> {
+        vouch_agent::ssh_agent_socket_path()
+            .map(|p| p.display().to_string())
+            .with_context(|| tr!("setup-ssh-err-agent-socket"))
+    };
 
     // Read existing config
     let existing = if config_path.exists() {
@@ -165,6 +169,7 @@ fn configure_ssh_config(hosts: Option<&str>) -> Result<()> {
     let existing = {
         let has_stale_identity_agent = existing.lines().any(is_stale_identity_agent_line);
         if has_stale_identity_agent {
+            let agent_socket = resolve_agent_socket()?;
             let mut rewritten = existing
                 .lines()
                 .map(|line| {
@@ -199,10 +204,15 @@ fn configure_ssh_config(hosts: Option<&str>) -> Result<()> {
     };
 
     // Check if Vouch config already exists.
-    // On Unix, also check for the agent socket path so we don't duplicate it.
+    // On Unix, also treat a config that already references the agent socket as
+    // configured so we don't duplicate it. Resolving the socket here is
+    // best-effort: an unresolvable socket still lets a comment-marked config
+    // short-circuit instead of erroring.
     #[cfg(unix)]
-    let already_configured =
-        existing.contains("# Vouch SSH Configuration") || existing.contains(&agent_socket);
+    let already_configured = existing.contains("# Vouch SSH Configuration")
+        || resolve_agent_socket()
+            .ok()
+            .is_some_and(|socket| existing.contains(&socket));
     #[cfg(not(unix))]
     let already_configured = existing.contains("# Vouch SSH Configuration");
 
@@ -212,49 +222,51 @@ fn configure_ssh_config(hosts: Option<&str>) -> Result<()> {
     }
 
     // Build the config block.
-    // On Unix with --hosts, add IdentityAgent for the matching hosts so the
-    // vouch SSH agent is used for those connections without conflicting with
-    // other SSH agents (e.g., 1Password).  On non-Unix there is no SSH agent
-    // support, so IdentityAgent is never emitted.
-    let vouch_config = {
-        #[cfg(unix)]
-        let host_block = hosts.map(|host_pattern| {
-            format!(
-                r#"Host {host_pattern}
-    IdentityAgent {agent_socket}
+    // With --hosts, emit a host-scoped block. On Unix it also carries
+    // IdentityAgent so the vouch SSH agent is used for those connections without
+    // conflicting with other SSH agents (e.g., 1Password). On non-Unix there is
+    // no SSH agent support, so IdentityAgent is omitted, but the host scoping is
+    // still honored.
+    let host_block = match hosts {
+        Some(host_pattern) => {
+            #[cfg(unix)]
+            let identity_agent_line = format!("\n    IdentityAgent {}", resolve_agent_socket()?);
+            #[cfg(not(unix))]
+            let identity_agent_line = String::new();
+            Some(format!(
+                r#"Host {host_pattern}{identity_agent_line}
     IdentityFile {key_path}
     CertificateFile {cert_path}
 "#,
                 key_path = key_path.display(),
                 cert_path = cert_path.display()
-            )
-        });
-        #[cfg(not(unix))]
-        let host_block: Option<String> = None;
+            ))
+        }
+        None => None,
+    };
 
-        if let Some(block) = host_block {
-            format!(
-                r#"
+    let vouch_config = if let Some(block) = host_block {
+        format!(
+            r#"
 # Vouch SSH Configuration
 # Added by: vouch setup ssh
 {block}"#
-            )
-        } else {
-            // No hosts specified (or non-Unix): only add IdentityFile and
-            // CertificateFile globally.  These are additive and won't conflict
-            // with other agents.  IdentityAgent is omitted.
-            format!(
-                r#"
+        )
+    } else {
+        // No hosts specified: only add IdentityFile and CertificateFile
+        // globally.  These are additive and won't conflict with other agents.
+        // IdentityAgent is omitted.
+        format!(
+            r#"
 # Vouch SSH Configuration
 # Added by: vouch setup ssh
 Host *
     IdentityFile {key_path}
     CertificateFile {cert_path}
 "#,
-                key_path = key_path.display(),
-                cert_path = cert_path.display()
-            )
-        }
+            key_path = key_path.display(),
+            cert_path = cert_path.display()
+        )
     };
 
     let new_config = format!("{existing}{vouch_config}");
