@@ -368,12 +368,14 @@ impl<H: HttpClient> VouchClient<H> {
         let url = self.url(path);
         tracing::debug!("{method} {url} ({auth})");
 
-        // The `/v1/*` credential and key-management endpoints require a valid
-        // RFC 9421 signature on every request (FAPI 2.0 Message Signing). The
-        // soft `/v1/auth/status` probe is exempt — it is designed to answer
-        // without authentication. For required paths we fail with a clear error
-        // rather than silently downgrading to Bearer-only.
-        let signature_required = path.starts_with("/v1/") && path != "/v1/auth/status";
+        // Consult the shared source-of-truth predicate for which vouch-server
+        // `/v1` paths require an RFC 9421 HTTP signature.  This keeps the CLI
+        // and the server middleware in sync — changing PUBLIC_V1_PATHS in
+        // vouch-httpsig automatically updates both sides.  This predicate is
+        // scoped to vouch-server traffic only; AWS/CodeArtifact/CodeCommit calls
+        // that happen to start with "/v1" go through separate SigV4 paths and
+        // never reach this code.
+        let signature_required = vouch_httpsig::requires_signature(path);
 
         let mut attempt = 0;
         loop {

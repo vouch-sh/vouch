@@ -1230,6 +1230,7 @@ setup-ssh-err-ca-empty = CA public key file is empty
 setup-ssh-err-ca-invalid = CA public key file does not contain a valid key
 setup-ssh-err-lock-file = failed to open lock file { $path }
 setup-ssh-err-lock-acquire = failed to acquire known_hosts lock
+setup-ssh-err-agent-socket = failed to resolve SSH agent socket path
 
 ## setup/ssm
 
