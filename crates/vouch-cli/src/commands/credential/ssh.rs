@@ -396,14 +396,16 @@ pub(crate) async fn run(server: &str, key_path: Option<&str>, force: bool) -> Re
                 .is_ok()
             {
                 println!();
-                let socket_path = vouch_agent::ssh_agent_socket_path().map_or_else(
-                    |_| "~/.vouch/ssh-agent.sock".to_string(),
-                    |p| p.display().to_string(),
-                );
-                tr_println!(
-                    "credential-ssh-agent-loaded",
-                    socket_path = socket_path.as_str(),
-                );
+                // Compute the actual XDG socket path for the hint message.
+                // If resolution fails (no home/cache dir) we skip the hint
+                // rather than printing a stale legacy path.
+                if let Ok(socket_path) = vouch_agent::ssh_agent_socket_path() {
+                    let socket_str = socket_path.display().to_string();
+                    tr_println!(
+                        "credential-ssh-agent-loaded",
+                        socket_path = socket_str.as_str(),
+                    );
+                }
             }
         } else {
             println!();

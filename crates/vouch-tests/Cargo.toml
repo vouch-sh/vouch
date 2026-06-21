@@ -30,6 +30,7 @@ serde = { workspace = true, features = ["std", "derive"] }
 serde_json = { workspace = true, features = ["std"] }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "signal", "time"] }
+tower = { workspace = true, features = ["util"] }
 uuid = { workspace = true, features = ["v7", "serde", "std"] }
 vouch-agent = { path = "../vouch-agent", features = ["test-utils"] }
 vouch-cli = { path = "../vouch-cli", features = ["test-utils"] }

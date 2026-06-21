@@ -50,8 +50,8 @@ check: ## Run cargo check
 
 ##@ Testing
 
-test: ## Run unit tests
-	$(CARGO) test
+test: ## Run unit tests (--all-features ensures feature-gated tests like axum middleware are included)
+	$(CARGO) test --all-features
 
 test-integration: ## Run integration tests
 	$(CARGO) test --package vouch-tests

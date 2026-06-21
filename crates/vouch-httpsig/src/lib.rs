@@ -20,6 +20,7 @@ pub mod error;
 #[cfg(feature = "axum")]
 pub mod middleware;
 pub mod sfv;
+pub mod sig_policy;
 pub mod sign;
 pub mod signature_base;
 pub mod signature_params;
@@ -29,6 +30,7 @@ pub use algorithm::{SigningAlgorithm, VerifyingAlgorithm};
 pub use component::ComponentIdentifier;
 pub use digest::DigestAlgorithm;
 pub use error::HttpSigError;
+pub use sig_policy::requires_signature;
 pub use sign::SignatureBuilder;
 pub use signature_params::SignatureParams;
 pub use verify::{verify_request_signature, verify_response_signature};

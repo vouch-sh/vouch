@@ -31,15 +31,17 @@
 use std::sync::Arc;
 
 use axum::{
-    extract::State,
+    extract::{MatchedPath, State},
     http::{Request, StatusCode},
     middleware::Next,
     response::{IntoResponse, Response},
 };
 
 use crate::algorithm::VerifyingAlgorithm;
+use crate::component::ComponentIdentifier;
 use crate::digest::verify_content_digest;
 use crate::error::HttpSigError;
+use crate::sig_policy::requires_signature;
 use crate::signature_params::SignatureParams;
 use crate::verify::{extract_signature_labels, validate_coverage, verify_request_signature};
 
@@ -57,6 +59,55 @@ const MAX_SIGNED_BODY: usize = 1024 * 1024;
 
 /// Generic error response to avoid leaking verification details to attackers.
 const SIG_VERIFY_FAILED: &str = "signature verification failed";
+
+/// The signature label used in `Accept-Signature` advertisements.
+const ACCEPT_SIG_LABEL: &str = "sig1";
+
+/// Build an RFC 9421 §5.1 `Accept-Signature` header value for a rejected request.
+///
+/// The value is a label-keyed SFV Dictionary:
+/// `sig1=("@method" "@authority" "@path" "@query" "authorization");alg="ecdsa-p256-sha256"`
+///
+/// This is an **advisory superset** of [`REQUIRED_COVERAGE`] — it advertises the
+/// full set of components the vouch CLI signs, so a conformant third-party client
+/// that follows this guidance will produce a signature that satisfies all server
+/// checks (including body integrity).  Advertising more than the strict minimum is
+/// intentional: the set here matches what the CLI signs, not what verification
+/// strictly requires.
+///
+/// `content-digest` is added only when the rejected request carried a non-empty
+/// body (`!body.is_empty()`), matching the `enforce_body_digest` exemption.
+///
+/// Returns `None` when `HeaderValue::from_str` fails (should never occur for
+/// well-formed ASCII, but the deny-lint forbids unwrap).
+fn build_accept_signature(has_body: bool) -> Option<http::HeaderValue> {
+    let mut components = vec![
+        ComponentIdentifier::method(),
+        ComponentIdentifier::authority(),
+        ComponentIdentifier::path(),
+        ComponentIdentifier::query(),
+        ComponentIdentifier::field("authorization"),
+    ];
+    if has_body {
+        components.push(ComponentIdentifier::field("content-digest"));
+    }
+
+    // Components-only params: no created/keyid so serialize() emits no trailing `;`.
+    let params = SignatureParams {
+        components,
+        alg: Some("ecdsa-p256-sha256".to_string()),
+        keyid: None,
+        created: None,
+        expires: None,
+        nonce: None,
+        tag: None,
+    };
+
+    // RFC 9421 §5.1: Accept-Signature is an SFV Dictionary, not a bare inner list.
+    // Prefix "sig1=" to form a valid Dictionary member.
+    let value = format!("{ACCEPT_SIG_LABEL}={}", params.serialize());
+    http::HeaderValue::from_str(&value).ok()
+}
 
 /// Verified HTTP signature data stored as a request extension.
 ///
@@ -111,13 +162,24 @@ pub const DEFAULT_MAX_AGE: i64 = 300;
 
 /// Axum middleware that requires a valid RFC 9421 HTTP signature.
 ///
-/// Every request must carry a `Signature-Input` header; an unsigned request is
-/// rejected with 401. For a signed request this middleware:
-/// 1. Extracts signature labels
+/// Reads [`MatchedPath`] to determine whether the route requires a signature
+/// (via [`requires_signature`]).  Public `/v1` routes (e.g. `/v1/auth/status`,
+/// `/v1/credentials/ssh/ca`) pass through immediately.  All other `/v1` routes
+/// are default-deny.
+///
+/// When `MatchedPath` is absent (no route matched, or `nest_service`), the
+/// middleware falls back to `req.uri().path()` and then applies `requires_signature`
+/// — so the worst case is over-enforcement (default-deny), never silently disabled
+/// enforcement.
+///
+/// For requests that do require a signature this middleware:
+/// 1. Extracts signature labels from `Signature-Input`
 /// 2. Resolves the verifying key via the `keyid` parameter
 /// 3. Verifies the signature against the reconstructed base
 /// 4. Enforces RFC 9530 `Content-Digest` integrity for request bodies
 /// 5. Stores [`VerifiedSignature`] in request extensions
+/// 6. Emits `Accept-Signature` (RFC 9421 §5.1) on unsigned / under-covered 401s
+///    so clients know exactly what to sign next time
 ///
 /// Used on endpoints where every request must be signed, e.g. the `/v1/*`
 /// CLI↔server channel under FAPI 2.0 Message Signing. Returns 401 with a
@@ -128,6 +190,22 @@ pub async fn require_signature<R: KeyResolver>(
     next: Next,
 ) -> Response {
     let max_age = DEFAULT_MAX_AGE;
+
+    // Determine the effective path for policy evaluation.
+    // Prefer MatchedPath (the route template, e.g. "/v1/keys/{id}") because it is
+    // the same form used in PUBLIC_V1_PATHS.  When absent (fallback/nest_service),
+    // use the concrete URI path — this funnels into default-deny, never passthrough.
+    let effective_path = req
+        .extensions()
+        .get::<MatchedPath>()
+        .map_or_else(|| req.uri().path().to_string(), |p| p.as_str().to_string());
+
+    // Bypass for routes that do not require a signature (out of scope or explicitly
+    // public).  This makes the constant in sig_policy.rs the runtime source of truth.
+    if !requires_signature(&effective_path) {
+        return next.run(req).await;
+    }
+
     // Trace-level logging of incoming request metadata
     tracing::trace!(
         method = %req.method(),
@@ -137,13 +215,36 @@ pub async fn require_signature<R: KeyResolver>(
         "httpsig middleware"
     );
 
-    // A missing Signature-Input header means the request is unsigned: reject.
+    // Whether the incoming request carried a body influences Accept-Signature.
+    // POST/PUT/PATCH are conventionally body-bearing; also probe Content-Length /
+    // Transfer-Encoding so HTTP/2 clients that omit Content-Length receive an
+    // accurate Accept-Signature hint and avoid the advertise<enforce inversion.
+    // Over-advertising content-digest for an empty POST is harmless because
+    // enforce_body_digest short-circuits on empty bodies.
+    let has_body = matches!(
+        req.method(),
+        &http::Method::POST | &http::Method::PUT | &http::Method::PATCH
+    ) || req
+        .headers()
+        .get(http::header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<u64>().ok())
+        .is_some_and(|len| len > 0)
+        || req.headers().contains_key(http::header::TRANSFER_ENCODING);
+
+    // A missing Signature-Input header means the request is unsigned: reject
+    // and advertise what the server expects (RFC 9421 §5.1).
     let sig_input = match req.headers().get("signature-input") {
         Some(v) => match v.to_str() {
             Ok(s) => s.to_string(),
             Err(e) => {
+                // Non-UTF-8 Signature-Input is equivalent to absent; same remedy.
                 tracing::debug!(error = %e, "invalid Signature-Input header encoding");
-                return (StatusCode::UNAUTHORIZED, SIG_VERIFY_FAILED).into_response();
+                let mut resp = (StatusCode::UNAUTHORIZED, SIG_VERIFY_FAILED).into_response();
+                if let Some(accept_sig) = build_accept_signature(has_body) {
+                    resp.headers_mut().insert("accept-signature", accept_sig);
+                }
+                return resp;
             }
         },
         None => {
@@ -151,7 +252,11 @@ pub async fn require_signature<R: KeyResolver>(
                 path = %req.uri().path(),
                 "rejecting unsigned request: signature required"
             );
-            return (StatusCode::UNAUTHORIZED, SIG_VERIFY_FAILED).into_response();
+            let mut resp = (StatusCode::UNAUTHORIZED, SIG_VERIFY_FAILED).into_response();
+            if let Some(accept_sig) = build_accept_signature(has_body) {
+                resp.headers_mut().insert("accept-signature", accept_sig);
+            }
+            return resp;
         }
     };
 
@@ -182,7 +287,8 @@ pub async fn require_signature<R: KeyResolver>(
 
     match verify_request_signature(&req, &label, verifier.as_ref(), Some(max_age)) {
         Ok(params) => {
-            // Reject signatures that don't cover minimum required components
+            // Reject signatures that don't cover minimum required components;
+            // advertise the expected set so the client can fix and retry.
             if let Err(e) = validate_coverage(&params, REQUIRED_COVERAGE) {
                 tracing::debug!(
                     label = %label,
@@ -190,7 +296,11 @@ pub async fn require_signature<R: KeyResolver>(
                     error = %e,
                     "HTTP signature insufficient coverage"
                 );
-                return (StatusCode::UNAUTHORIZED, SIG_VERIFY_FAILED).into_response();
+                let mut resp = (StatusCode::UNAUTHORIZED, SIG_VERIFY_FAILED).into_response();
+                if let Some(accept_sig) = build_accept_signature(has_body) {
+                    resp.headers_mut().insert("accept-signature", accept_sig);
+                }
+                return resp;
             }
 
             tracing::debug!(
@@ -225,7 +335,10 @@ pub async fn require_signature<R: KeyResolver>(
             let req = Request::from_parts(parts, axum::body::Body::from(bytes));
             let mut response = next.run(req).await;
 
-            // Issue a fresh nonce for the client's next request
+            // Issue a fresh nonce for the client's next request.
+            // Accept-Signature is NOT emitted on success — it is a remediation
+            // hint only, and emitting it on success leaks which keyid/path combos
+            // are valid.
             if let Some(nonce) = resolver.generate_nonce().await
                 && let Ok(value) = http::HeaderValue::from_str(&nonce)
             {
@@ -241,6 +354,8 @@ pub async fn require_signature<R: KeyResolver>(
                 error = %e,
                 "HTTP signature verification failed"
             );
+            // Bad-keyid / tampered / expired: no Accept-Signature to avoid
+            // leaking which keyids are valid.
             (StatusCode::UNAUTHORIZED, SIG_VERIFY_FAILED).into_response()
         }
     }
@@ -336,8 +451,11 @@ mod tests {
     }
 
     fn build_test_router(resolver: Arc<InMemoryKeyResolver>) -> Router {
+        // Route must be under /v1/ so requires_signature returns true and the
+        // middleware actually enforces signatures.  /test would be out of scope
+        // and silently bypass all enforcement after the policy bypass was added.
         Router::new()
-            .route("/test", get(ok_handler).post(ok_handler))
+            .route("/v1/test", get(ok_handler).post(ok_handler))
             .layer(axum::middleware::from_fn_with_state(
                 resolver,
                 require_signature::<InMemoryKeyResolver>,
@@ -370,7 +488,7 @@ mod tests {
         let router = build_test_router(resolver);
 
         let req = Request::builder()
-            .uri("/test")
+            .uri("/v1/test")
             .body(axum::body::Body::empty())
             .unwrap();
 
@@ -390,7 +508,7 @@ mod tests {
         let signer = EcdsaP256Signer::generate("unknown-key").unwrap();
         let mut req = Request::builder()
             .method("GET")
-            .uri("http://example.com/test")
+            .uri("http://example.com/v1/test")
             .body(axum::body::Body::empty())
             .unwrap();
 
@@ -403,7 +521,7 @@ mod tests {
 
         // Rewrite the URI to just the path (axum expects path-only)
         let (mut parts, body) = req.into_parts();
-        parts.uri = "/test".parse().unwrap();
+        parts.uri = "/v1/test".parse().unwrap();
         let req = Request::from_parts(parts, body);
 
         let response =
@@ -426,7 +544,7 @@ mod tests {
 
         let mut req = Request::builder()
             .method("GET")
-            .uri("http://example.com/test")
+            .uri("http://example.com/v1/test")
             .body(axum::body::Body::empty())
             .unwrap();
 
@@ -438,7 +556,7 @@ mod tests {
             .unwrap();
 
         let (mut parts, body) = req.into_parts();
-        parts.uri = "/test".parse().unwrap();
+        parts.uri = "/v1/test".parse().unwrap();
         let req = Request::from_parts(parts, body);
 
         let response =
@@ -461,7 +579,7 @@ mod tests {
 
         let mut req = Request::builder()
             .method("GET")
-            .uri("http://example.com/test")
+            .uri("http://example.com/v1/test")
             .body(axum::body::Body::empty())
             .unwrap();
 
@@ -474,7 +592,7 @@ mod tests {
 
         // Tamper with the Signature header
         let (mut parts, body) = req.into_parts();
-        parts.uri = "/test".parse().unwrap();
+        parts.uri = "/v1/test".parse().unwrap();
         parts
             .headers
             .insert("signature", "sig1=:dGFtcGVyZWQ=:".parse().unwrap());
@@ -550,7 +668,7 @@ mod tests {
         let body = b"{\"hello\":\"world\"}".to_vec();
         let mut req = Request::builder()
             .method("POST")
-            .uri("http://example.com/test")
+            .uri("http://example.com/v1/test")
             .body(axum::body::Body::from(body.clone()))
             .unwrap();
         crate::digest::set_content_digest(
@@ -569,7 +687,7 @@ mod tests {
             .unwrap();
 
         let (mut parts, body) = req.into_parts();
-        parts.uri = "/test".parse().unwrap();
+        parts.uri = "/v1/test".parse().unwrap();
         let req = Request::from_parts(parts, body);
 
         let response =
@@ -589,7 +707,7 @@ mod tests {
         // A signed POST whose signature does not cover the body via Content-Digest.
         let mut req = Request::builder()
             .method("POST")
-            .uri("http://example.com/test")
+            .uri("http://example.com/v1/test")
             .body(axum::body::Body::from(b"{\"hello\":\"world\"}".to_vec()))
             .unwrap();
 
@@ -601,7 +719,7 @@ mod tests {
             .unwrap();
 
         let (mut parts, body) = req.into_parts();
-        parts.uri = "/test".parse().unwrap();
+        parts.uri = "/v1/test".parse().unwrap();
         let req = Request::from_parts(parts, body);
 
         let response =
