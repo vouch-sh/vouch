@@ -615,8 +615,11 @@ pub async fn get_oauth_client_secret_by_id(
 /// 2. Short-circuits with a terminal "not found" if the secret is already revoked.
 /// 3. Loads the `OAuthClientDoc` to record its `version` (the serialization point
 ///    for all secret-set mutations on this client).
-/// 4. Counts currently-active secrets (filter, not SQL COUNT — soft-deleted rows
-///    are retained).  If only one remains, returns a terminal 409 `last_secret`.
+/// 4. Counts the *other* active secrets — those that would remain after this
+///    revoke, excluding the target row itself (filter, not SQL COUNT — soft-deleted
+///    rows are retained).  If none remain, returns a terminal 409 `last_secret`.
+///    Excluding the target matters when it is expired-but-unrevoked: revoking it
+///    must still be allowed while a different valid secret exists.
 /// 5. Soft-deletes the secret (`revoked_at`) inside the transaction.
 /// 6. Bumps the client version via `compare_and_update`.  If another concurrent
 ///    revoke committed between our read and our commit, the version won't match
@@ -695,9 +698,15 @@ pub async fn revoke_oauth_client_secret(
             .await
             .map_err(|e| map_db_err(e, "Failed to list secrets for revoke"))?;
 
-        let active_count = all_secrets
+        // Count the *other* active secrets — exclude the target row itself, so a
+        // revoke that leaves a valid secret behind is allowed even when the target
+        // is expired-but-unrevoked.  Mirrors the handler's pre-flight check.
+        let other_active_count = all_secrets
             .iter()
             .filter(|s| {
+                if s.id == secret_id {
+                    return false;
+                }
                 if s.data.revoked_at.is_some() {
                     return false;
                 }
@@ -710,8 +719,8 @@ pub async fn revoke_oauth_client_secret(
             })
             .count();
 
-        // Floor guard: must retain at least one active secret.
-        if active_count <= 1 {
+        // Floor guard: at least one *other* active secret must remain.
+        if other_active_count == 0 {
             return Err(ServiceError::api(
                 StatusCode::CONFLICT,
                 "last_secret",

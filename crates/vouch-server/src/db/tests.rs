@@ -4271,3 +4271,47 @@ async fn test_revoke_last_secret_rejected() {
         "revoking the last secret must fail with last_secret; got: {result:?}"
     );
 }
+
+/// Revoking an expired-but-unrevoked secret must succeed while another valid
+/// secret remains: the floor counts *other* active secrets, not the target.
+/// Without excluding the target, the expired row drops `active_count` to 1 and
+/// the revoke is wrongly rejected with `last_secret` (PR #557 review finding).
+#[tokio::test]
+async fn test_revoke_expired_secret_allowed_when_valid_remains() {
+    let (store, _audit) = test_db().await;
+    let app_id = create_test_client(
+        &store,
+        "occ-test-user",
+        TestClientSpec {
+            with_secret: false,
+            ..Default::default()
+        },
+    )
+    .await
+    .app_id;
+
+    // One valid secret (no expiry) plus one expired-but-unrevoked secret.
+    let _valid = create_oauth_client_secret(&store, &app_id, "hash_valid", None, None)
+        .await
+        .expect("create valid secret");
+    let past: jiff::Timestamp = "2020-01-01T00:00:00Z".parse().unwrap();
+    let expired = create_oauth_client_secret(&store, &app_id, "hash_expired", None, Some(past))
+        .await
+        .expect("create expired secret");
+
+    // Revoking the expired secret must be allowed — a valid secret still remains.
+    revoke_oauth_client_secret(&store, &expired.id, &app_id)
+        .await
+        .expect("revoking an expired secret must succeed while a valid secret remains");
+
+    // The valid secret is untouched and still active.
+    let now = jiff::Timestamp::now();
+    let secrets = get_oauth_client_secrets(&store, &app_id)
+        .await
+        .expect("list secrets");
+    let active = secrets.iter().filter(|s| s.is_valid(&now)).count();
+    assert_eq!(
+        active, 1,
+        "the valid secret must remain active; got {active}"
+    );
+}
