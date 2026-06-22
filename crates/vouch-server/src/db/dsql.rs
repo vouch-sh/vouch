@@ -157,7 +157,9 @@ pub(crate) enum DsqlEndpoint {
         region: String,
         /// DSQL cluster ID (from `dsql_cluster_id` query parameter)
         cluster_id: String,
-        /// Hostname for IAM token generation (e.g., `cluster_id.dsql.region.on.aws`)
+        /// Hostname for IAM token generation. Reuses the PrivateLink service
+        /// identifier from the VPC endpoint FQDN, not the public `dsql` label
+        /// (e.g., `cluster_id.dsql-fnh4.region.on.aws`).
         auth_hostname: String,
     },
 }
@@ -250,8 +252,12 @@ impl DsqlEndpoint {
     /// The hostname to use for IAM token generation.
     ///
     /// For direct connections this is the same as `connect_hostname()`.
-    /// For VPC endpoints this is the cluster's public hostname
-    /// (e.g., `cluster_id.dsql.region.on.aws`).
+    /// For VPC endpoints this reuses the PrivateLink service identifier from the
+    /// endpoint FQDN — `{cluster_id}.{service_id}.{region}.on.aws` (e.g.
+    /// `cluster_id.dsql-fnh4.region.on.aws`), not the public `dsql` hostname. The
+    /// cluster is identified by the `amzn-cluster-id` connection option (from the
+    /// `dsql_cluster_id` URL param), so the service-identifier label is not used
+    /// for cluster routing — which is why this form still authenticates.
     #[must_use]
     pub(crate) fn token_hostname(&self) -> &str {
         match self {
