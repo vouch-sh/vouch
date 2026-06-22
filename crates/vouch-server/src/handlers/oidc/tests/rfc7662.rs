@@ -630,3 +630,70 @@ async fn test_rfc7662_introspect_private_key_jwt_invalid_assertion_rejected() {
         "Invalid JWT assertion at introspect must be rejected, got: {status}"
     );
 }
+
+// ========================================================================
+// Issue #540 — Introspection service propagates DB errors
+//
+// Before the fix, a DB error in session lookup was swallowed and returned
+// as {"active": false}. After the fix, DB errors propagate as ServiceError::
+// Internal and the handler returns an error response, not inactive.
+//
+// This is a type-level test: we verify the service function's return type
+// correctly distinguishes errors from "token not found" (Ok(inactive)).
+// A full DB-outage test would require injecting a broken store.
+// ========================================================================
+
+#[tokio::test]
+async fn test_rfc7662_valid_token_is_active_unknown_token_is_inactive() {
+    // Baseline: valid token → active=true; unknown token → active=false.
+    // This exercises the Ok(Some) and Ok(None) branches that were previously
+    // indistinguishable from Err(_) (issue #540).
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "introspect-active-540@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+    let auth_header = client.basic_auth_header();
+
+    let (access_token, _) = issue_oauth_access_token(&app, &state, &user, &auth_id, &client).await;
+
+    // Valid token → active.
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/introspect",
+        &format!("token={access_token}"),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "Valid token must return 200: {body}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(
+        json["active"], true,
+        "Valid token must be active=true: {body}"
+    );
+
+    // Unknown token → inactive (Ok(None) path, not an error).
+    let (status2, body2) = http_post_form(
+        &app,
+        "/oauth/introspect",
+        "token=completely.unknown.token",
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+
+    assert_eq!(
+        status2,
+        StatusCode::OK,
+        "Unknown token must return 200 per RFC 7662: {body2}"
+    );
+    let json2: serde_json::Value = serde_json::from_str(&body2).expect("Valid JSON");
+    assert_eq!(
+        json2["active"], false,
+        "Unknown token must be active=false: {body2}"
+    );
+}

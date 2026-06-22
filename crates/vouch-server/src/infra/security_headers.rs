@@ -45,6 +45,10 @@ pub fn build_api_cors_layer() -> CorsLayer {
 ///
 /// These routes use cookie-based sessions and should not be accessible cross-origin
 /// by default. `VOUCH_CORS_ORIGINS` can override this for advanced use cases.
+///
+/// `VOUCH_CORS_ORIGINS` must **not** contain `"*"` — `allow_credentials(true)` and
+/// a wildcard origin are forbidden by CORS spec and cause tower-http to panic at
+/// router build time. `ServerConfig::validate()` enforces this at startup.
 pub fn build_ui_cors_layer(config: &config::ServerConfig) -> CorsLayer {
     match &config.cors_origins {
         Some(origins) if !origins.is_empty() => {

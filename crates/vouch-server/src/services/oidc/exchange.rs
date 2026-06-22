@@ -223,18 +223,24 @@ pub(crate) async fn exchange_token(
             ));
         }
 
-        // Use email from the token if available, otherwise look up the user
-        let actor_email = if let Some(email) = actor_decoded.email() {
-            email.to_string()
-        } else {
-            let actor_user = db::get_user_by_id(&state.store, actor_decoded.sub())
-                .await
-                .map_err(|e| ServiceError::Internal(format!("Database error: {e}")))?
-                .ok_or_else(|| {
-                    ServiceError::oauth(OAuthErrorCode::InvalidGrant, "Actor token user not found")
-                })?;
-            actor_user.email
-        };
+        // Always load the actor user to check the active flag (#550).
+        // Also use the canonical email from the DB when it is absent from the JWT.
+        let actor_user = db::get_user_by_id(&state.store, actor_decoded.sub())
+            .await
+            .map_err(|e| ServiceError::Internal(format!("Database error: {e}")))?
+            .ok_or_else(|| {
+                ServiceError::oauth(OAuthErrorCode::InvalidGrant, "Actor token user not found")
+            })?;
+        if !actor_user.active {
+            return Err(ServiceError::oauth(
+                OAuthErrorCode::InvalidGrant,
+                "User account is deactivated",
+            ));
+        }
+        let actor_email = actor_decoded
+            .email()
+            .map(str::to_string)
+            .unwrap_or(actor_user.email);
 
         // Preserve the existing actor chain from the subject token (if any)
         // to correctly track multi-hop delegation. The new actor wraps the

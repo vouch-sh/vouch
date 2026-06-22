@@ -679,8 +679,12 @@ async fn handle_jar_request(
 /// Look up a PAR record by request_uri and client_id.
 ///
 /// Returns `Err(Response)` on failure:
-/// - Not found / expired: error page (or redirect if fallback_redirect_uri provided).
+/// - Not found / expired: redirect with error params when `fallback_redirect_uri` is
+///   a *registered* URI for the client (OIDC conformance); error page otherwise.
 /// - DB error: error page.
+///
+/// The fallback-redirect path validates `fallback_redirect_uri` against the client's
+/// registered URIs before issuing any 302 (RFC 9126 §7.2, RFC 6749 §4.1.2.1).
 async fn lookup_par(
     state: &Arc<AppState>,
     request_uri: &str,
@@ -695,16 +699,39 @@ async fn lookup_par(
                 client_id,
                 "PAR not found, expired, or wrong client"
             );
-            if let Some(uri) = fallback_redirect_uri
-                && let Ok(mut redirect) = url::Url::parse(uri)
-            {
-                {
-                    let mut q = redirect.query_pairs_mut();
-                    q.append_pair("error", "invalid_request_uri");
-                    q.append_pair("error_description", "Invalid or expired request_uri");
-                    q.append_pair("iss", &state.config().base_url);
+            // Only redirect when the fallback URI is registered for the client.
+            // An unregistered URI is an open-redirect risk — serve the error page instead.
+            if let Some(uri) = fallback_redirect_uri {
+                match db::get_oauth_client_by_client_id(&state.store, client_id).await {
+                    Ok(Some(client)) if client.is_valid_redirect_uri(uri) => {
+                        if let Ok(mut redirect) = url::Url::parse(uri) {
+                            {
+                                let mut q = redirect.query_pairs_mut();
+                                q.append_pair("error", "invalid_request_uri");
+                                q.append_pair(
+                                    "error_description",
+                                    "Invalid or expired request_uri",
+                                );
+                                q.append_pair("iss", &state.config().base_url);
+                            }
+                            return Err(
+                                axum::response::Redirect::to(redirect.as_str()).into_response()
+                            );
+                        }
+                    }
+                    Ok(Some(_)) => {
+                        // URI not registered — fall through to error page.
+                        tracing::warn!(
+                            client_id,
+                            redirect_uri = uri,
+                            "fallback_redirect_uri is not registered; suppressing redirect \
+                             to prevent open redirect"
+                        );
+                    }
+                    Ok(None) | Err(_) => {
+                        // Client not found or DB error — fall through to error page.
+                    }
                 }
-                return Err(axum::response::Redirect::to(redirect.as_str()).into_response());
             }
             Err(AuthorizeDeniedTemplate {
                 client_name: "Unknown Application".to_string(),
@@ -1318,11 +1345,28 @@ async fn store_pending_and_redirect(
     };
 
     match db::create_pending_oauth_authorization(&state.store, pending_params).await {
-        Ok(pending_id) => Redirect::to(&format!(
-            "/login?pending_auth={}",
-            urlencoding::encode(&pending_id)
-        ))
-        .into_response(),
+        Ok(pending_id) => {
+            // Extend the PAR's TTL to match the pending-auth's 10-minute window so
+            // that the cleanup job does not delete the PAR before login completes (#542).
+            if let Some(uri) = par_request_uri
+                && let Err(e) = db::extend_par_expiration(
+                    &state.store,
+                    uri,
+                    validated.client_id(),
+                    jiff::Span::new().minutes(10),
+                )
+                .await
+            {
+                tracing::warn!("Failed to extend PAR expiration for deferred flow: {e}");
+                // Non-fatal: the deferred flow may still succeed if the PAR has not
+                // yet expired.
+            }
+            Redirect::to(&format!(
+                "/login?pending_auth={}",
+                urlencoding::encode(&pending_id)
+            ))
+            .into_response()
+        }
         Err(e) => {
             tracing::error!("Failed to create pending OAuth authorization: {}", e);
             // At this point the redirect_uri has been validated (ResolvedClient constructed),

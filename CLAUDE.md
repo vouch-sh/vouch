@@ -266,6 +266,7 @@ cargo test --features yubikey-tests -- --ignored
 6. **Don't implement crypto yourself** — Use audited libraries
 7. **Don't use `chrono`** — Use `jiff` for time
 8. **Don't use `ring`** — Use `aws-lc-rs` for crypto
+9. **Don't blind-write documents after a read** — For any document that can be mutated concurrently (users, authenticators, OAuth secrets, etc.), use `store.modify()` (optimistic concurrency) rather than `store.get()` + `store.update()`. A blind `store.update()` overwrites the whole document and silently loses concurrent writes (lost-update race).
 
 ## File Locations
 

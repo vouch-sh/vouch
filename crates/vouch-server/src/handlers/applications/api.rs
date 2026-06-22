@@ -419,8 +419,19 @@ pub(crate) async fn update_application_api(
         None
     };
 
-    // Apply updates (merge request values with existing client record)
-    let name = req.name.as_deref().unwrap_or(&client.name);
+    // Apply updates (merge request values with existing client record).
+    // Reject an explicitly provided empty/whitespace name; absent (None)
+    // means "keep the existing name" and is always accepted.
+    if let Some(new_name) = req.name.as_deref()
+        && new_name.trim().is_empty()
+    {
+        return Err(ServiceError::api(
+            StatusCode::BAD_REQUEST,
+            "invalid_name",
+            "Application name is required",
+        ));
+    }
+    let name = req.name.as_deref().map_or(client.name.as_str(), str::trim);
     let description = req.description.as_deref().or(client.description.as_deref());
     let redirect_uris = req
         .redirect_uris
@@ -979,6 +990,33 @@ pub(crate) async fn revoke_tokens_api(
                 "Internal database error",
             )
         })?;
+
+    // Terminate live M2M (client_credentials) sessions.
+    //
+    // Per RFC 9068 §2.2, client_credentials access tokens are persisted as
+    // sessions whose `user_id` equals the OAuth client's `client_id`.
+    // Revoking secrets is not enough on its own: the session cache may still
+    // serve unexpired tokens until their TTL elapses.  Deleting those sessions
+    // and invalidating the cache makes the `TokenRevoked` audit event accurate.
+    //
+    // Fail closed: if session deletion fails, do not report revocation success.
+    // Secrets are already revoked, but unexpired M2M access tokens could still
+    // validate via DB-backed session lookup, so the caller must be told the
+    // revocation was incomplete (and retry) rather than see a 204 + TokenRevoked.
+    db::delete_sessions_for_user(&state.store, &client.client_id)
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                "Failed to delete M2M sessions for {}: {e}",
+                client.client_id
+            );
+            ServiceError::api(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "db_error",
+                "Internal database error",
+            )
+        })?;
+    state.session_cache.invalidate_for_user(&client.client_id);
 
     // Log the event
     if let Err(e) = db::record_oauth_event(
@@ -2183,5 +2221,148 @@ mod tests {
         .await;
 
         assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    // ========================================================================
+    // #539 — revoke_tokens also invalidates M2M (client_credentials) sessions
+    // ========================================================================
+
+    // Count SessionDoc rows indexed under a given user_id.
+    // For client_credentials grants the session's user_id is the client_id.
+    async fn count_sessions_for_user(
+        store: &crate::db::store::DocumentStore,
+        user_id: &str,
+    ) -> i64 {
+        store
+            .count::<crate::db::documents::session::SessionDoc>("user_id", user_id)
+            .await
+            .expect("count must not error")
+    }
+
+    #[tokio::test]
+    async fn test_revoke_tokens_clears_m2m_sessions() {
+        let (app, state) = test_app().await;
+
+        // Owner user + their application
+        let user = create_test_user(&state.store, "revoke-m2m@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let owner_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let auth = bearer(&owner_token);
+        let client = create_test_oauth_client(&state.store, &user.id).await;
+
+        // Mint a client_credentials session for the OAuth client.
+        // Per RFC 9068 §2.2 the session's user_id is the client's client_id.
+        create_test_session_for_client(
+            &state,
+            &client.client_id,
+            &format!("{}@clients", client.client_id),
+            &auth_id,
+            &client.client_id,
+        )
+        .await;
+
+        // Confirm the M2M session exists before revocation.
+        let before = count_sessions_for_user(&state.store, &client.client_id).await;
+        assert!(
+            before >= 1,
+            "should have at least one M2M session before revoke"
+        );
+
+        // Issue revoke
+        let (status, _) = http_post_json(
+            &app,
+            &format!("/api/v1/applications/{}/revoke", client.app_id),
+            "{}",
+            &[("Authorization", &auth)],
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        // M2M sessions must be gone after revocation.
+        let after = count_sessions_for_user(&state.store, &client.client_id).await;
+        assert_eq!(after, 0, "M2M sessions must be deleted by revoke");
+    }
+
+    // ========================================================================
+    // #546 — update validates empty redirect_uris and empty name
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_update_application_should_reject_empty_redirect_uris() {
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "update-no-uris@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let auth = bearer(&token);
+        let client = create_test_oauth_client(&state.store, &user.id).await;
+
+        let (status, body) = http_request(
+            &app,
+            "PATCH",
+            &format!("/api/v1/applications/{}", client.app_id),
+            Some(r#"{"redirect_uris": []}"#.to_string()),
+            &[
+                ("Content-Type", "application/json"),
+                ("Authorization", &auth),
+            ],
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+        let json: serde_json::Value = serde_json::from_str(&body).expect("valid json");
+        assert_eq!(json["code"], "invalid_redirect_uris", "body: {body}");
+    }
+
+    #[tokio::test]
+    async fn test_update_application_should_reject_empty_name() {
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "update-empty-name@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let auth = bearer(&token);
+        let client = create_test_oauth_client(&state.store, &user.id).await;
+
+        let (status, body) = http_request(
+            &app,
+            "PATCH",
+            &format!("/api/v1/applications/{}", client.app_id),
+            Some(r#"{"name": ""}"#.to_string()),
+            &[
+                ("Content-Type", "application/json"),
+                ("Authorization", &auth),
+            ],
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+        let json: serde_json::Value = serde_json::from_str(&body).expect("valid json");
+        assert_eq!(json["code"], "invalid_name", "body: {body}");
+    }
+
+    #[tokio::test]
+    async fn test_update_application_absent_name_keeps_existing() {
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "update-no-name@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let auth = bearer(&token);
+        let client = create_test_oauth_client(&state.store, &user.id).await;
+
+        // PATCH without a `name` field must preserve the existing name.
+        let (status, body) = http_request(
+            &app,
+            "PATCH",
+            &format!("/api/v1/applications/{}", client.app_id),
+            Some(r#"{"redirect_uris": ["https://example.com/cb"]}"#.to_string()),
+            &[
+                ("Content-Type", "application/json"),
+                ("Authorization", &auth),
+            ],
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK, "body: {body}");
+        let json: serde_json::Value = serde_json::from_str(&body).expect("valid json");
+        assert_eq!(json["name"].as_str().unwrap(), "Test App");
     }
 }

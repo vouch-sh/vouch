@@ -4,7 +4,7 @@
 use super::document_type::Document;
 use super::documents::user::UserDoc;
 use super::store::DocumentStore;
-use anyhow::{Context, Result};
+use anyhow::Result;
 
 /// User record.
 #[derive(Debug)]
@@ -190,38 +190,41 @@ pub async fn get_users_by_org_paginated(
 }
 
 /// Update a user's org admin status.
+///
+/// Uses optimistic concurrency (`store.modify`) so concurrent field
+/// mutations on the same user doc do not silently overwrite each other.
 pub async fn update_user_admin_status(
     store: &DocumentStore,
     user_id: &str,
     is_admin: bool,
 ) -> Result<bool> {
-    if let Some(doc) = store.get::<UserDoc>(user_id).await? {
-        let mut data = doc.data;
-        data.is_org_admin = is_admin;
-        store.update(user_id, &data).await?;
-        Ok(true)
-    } else {
-        Ok(false)
-    }
+    store
+        .modify::<UserDoc, _>(user_id, |data| {
+            data.is_org_admin = is_admin;
+        })
+        .await
 }
 
 /// Update a user's active status.
+///
+/// Uses optimistic concurrency (`store.modify`) so concurrent field
+/// mutations on the same user doc do not silently overwrite each other.
 pub async fn update_user_active_status(
     store: &DocumentStore,
     user_id: &str,
     active: bool,
 ) -> Result<bool> {
-    if let Some(doc) = store.get::<UserDoc>(user_id).await? {
-        let mut data = doc.data;
-        data.active = active;
-        store.update(user_id, &data).await?;
-        Ok(true)
-    } else {
-        Ok(false)
-    }
+    store
+        .modify::<UserDoc, _>(user_id, |data| {
+            data.active = active;
+        })
+        .await
 }
 
 /// Update a user's GitHub identity.
+///
+/// Uses optimistic concurrency (`store.modify`) so a concurrent admin-status
+/// change landing between the read and write is not silently lost.
 pub async fn update_user_github_identity(
     store: &DocumentStore,
     user_id: &str,
@@ -229,16 +232,18 @@ pub async fn update_user_github_identity(
     github_login: &str,
     github_refresh_token: Option<&str>,
 ) -> Result<()> {
-    let doc = store
-        .get::<UserDoc>(user_id)
-        .await?
-        .context("user not found")?;
-    let mut data = doc.data;
-    data.github_id = Some(github_id);
-    data.github_login = Some(github_login.to_string());
-    data.github_refresh_token = github_refresh_token.map(String::from);
-    store.update(user_id, &data).await?;
-    Ok(())
+    let found = store
+        .modify::<UserDoc, _>(user_id, |data| {
+            data.github_id = Some(github_id);
+            data.github_login = Some(github_login.to_string());
+            data.github_refresh_token = github_refresh_token.map(String::from);
+        })
+        .await?;
+    if found {
+        Ok(())
+    } else {
+        Err(anyhow::anyhow!("user not found: {user_id}"))
+    }
 }
 
 /// Get a user's GitHub refresh token.
@@ -251,11 +256,15 @@ pub async fn get_user_github_refresh_token(
 }
 
 /// Clear a user's GitHub refresh token.
+///
+/// Uses optimistic concurrency (`store.modify`) so concurrent field
+/// mutations do not silently overwrite each other. A missing user is
+/// silently ignored (idempotent clear semantics).
 pub async fn clear_user_github_refresh_token(store: &DocumentStore, user_id: &str) -> Result<()> {
-    if let Some(doc) = store.get::<UserDoc>(user_id).await? {
-        let mut data = doc.data;
-        data.github_refresh_token = None;
-        store.update(user_id, &data).await?;
-    }
+    store
+        .modify::<UserDoc, _>(user_id, |data| {
+            data.github_refresh_token = None;
+        })
+        .await?;
     Ok(())
 }

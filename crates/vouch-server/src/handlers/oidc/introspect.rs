@@ -9,8 +9,7 @@ use crate::AppState;
 use crate::handlers::extractors::ClientInfo;
 use crate::services::error::{OAuthErrorResponse, ServiceError};
 use crate::services::oidc::introspection::{
-    IntrospectionResult, introspect_token as svc_introspect, revoke_token as svc_revoke,
-    sign_introspection_jwt,
+    introspect_token as svc_introspect, revoke_token as svc_revoke, sign_introspection_jwt,
 };
 use crate::services::oidc::token::ClientAuthError;
 use axum::{
@@ -214,7 +213,10 @@ pub(crate) async fn introspect(
     .await
     {
         Ok(r) => r,
-        Err(_) => IntrospectionResult::inactive(),
+        Err(e) => {
+            tracing::error!("Introspection failed: {e}");
+            return e.into_response();
+        }
     };
 
     // Commit JTI after introspection so clients can retry on failure.

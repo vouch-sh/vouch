@@ -729,6 +729,10 @@ pub(crate) async fn delete_secret_form(
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::expect_used,
+    reason = "test code: panic on assertion failure is acceptable"
+)]
 mod tests {
     use axum::http::StatusCode;
 
@@ -801,6 +805,106 @@ mod tests {
         assert!(
             body.contains("</html>") || body.contains("<!DOCTYPE"),
             "expected HTML response, got: {body}"
+        );
+    }
+
+    // ========================================================================
+    // #546 — Web form update validation: empty name + empty redirect_uris
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_web_update_form_rejects_empty_name() {
+        // Guard: submitting the web form with an empty name must be rejected
+        // with a validation error page and must NOT persist the empty value.
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "web-update-empty-name@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let session_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let client = create_test_oauth_client(&state.store, &user.id).await;
+
+        // Submit the web update form with an empty name.
+        let form_body = "name=&redirect_uris=https%3A%2F%2Fexample.com%2Fcallback";
+        let (status, body) = http_post_form(
+            &app,
+            &format!("/applications/{}", client.app_id),
+            form_body,
+            &[("Cookie", &format!("__Host-vouch_session={session_token}"))],
+        )
+        .await;
+
+        // Must be a non-redirect (error page), not a success redirect.
+        assert_ne!(
+            status,
+            StatusCode::FOUND,
+            "Empty name must not be accepted: {body}"
+        );
+        assert_ne!(
+            status,
+            StatusCode::SEE_OTHER,
+            "Empty name must not be accepted: {body}"
+        );
+        // Response must be HTML (the validation error template).
+        assert!(
+            body.contains("</html>") || body.contains("<!DOCTYPE"),
+            "Validation error must return HTML: {body}"
+        );
+
+        // Verify the DB record was not mutated: name must still be "Test App".
+        let record = crate::db::get_oauth_client_by_id(&state.store, &client.app_id)
+            .await
+            .expect("db query ok")
+            .expect("client must still exist");
+        assert_eq!(
+            record.name, "Test App",
+            "Empty name must not overwrite existing name in the database"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_web_update_form_rejects_empty_redirect_uris() {
+        // Guard: submitting the web form with blank redirect_uris must be rejected
+        // with a validation error and must NOT persist the empty list.
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "web-update-empty-uris@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let session_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let client = create_test_oauth_client(&state.store, &user.id).await;
+
+        // Submit with a valid name but blank redirect_uris textarea.
+        let form_body = "name=Test+App&redirect_uris=";
+        let (status, body) = http_post_form(
+            &app,
+            &format!("/applications/{}", client.app_id),
+            form_body,
+            &[("Cookie", &format!("__Host-vouch_session={session_token}"))],
+        )
+        .await;
+
+        // Must be a non-redirect (error page), not a success redirect.
+        assert_ne!(
+            status,
+            StatusCode::FOUND,
+            "Empty redirect_uris must not be accepted: {body}"
+        );
+        assert_ne!(
+            status,
+            StatusCode::SEE_OTHER,
+            "Empty redirect_uris must not be accepted: {body}"
+        );
+        assert!(
+            body.contains("</html>") || body.contains("<!DOCTYPE"),
+            "Validation error must return HTML: {body}"
+        );
+
+        // Verify the DB record was not mutated: redirect_uris must be unchanged.
+        let record = crate::db::get_oauth_client_by_id(&state.store, &client.app_id)
+            .await
+            .expect("db query ok")
+            .expect("client must still exist");
+        assert_eq!(
+            record.redirect_uris,
+            vec!["https://example.com/callback".to_string()],
+            "Empty redirect_uris must not overwrite existing uris in the database"
         );
     }
 }
