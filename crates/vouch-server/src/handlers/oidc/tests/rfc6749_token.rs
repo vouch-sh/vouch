@@ -431,3 +431,116 @@ async fn test_rfc6749_token_client_secret_post_succeeds() {
     );
     assert_eq!(json["token_type"].as_str(), Some("Bearer"));
 }
+
+// ========================================================================
+// Token endpoint — client lookup: DB error vs not-found vs inactive
+//
+// A DB error on client lookup must surface as a 500, not as invalid_client.
+// A missing or inactive client must still return invalid_client.
+// ========================================================================
+
+/// A non-existent client_id presented without a secret must return
+/// `invalid_client` — confirms the lookup split did not break the
+/// not-found rejection path.
+#[tokio::test]
+async fn test_token_unknown_client_id_returns_invalid_client() {
+    let (app, _state) = test_app().await;
+
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        "grant_type=authorization_code&client_id=no-such-client&code=any",
+        &[],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "Unknown client_id must return 401/invalid_client, got: {body}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(
+        json["error"], "invalid_client",
+        "Unknown client_id must produce invalid_client error, got: {body}"
+    );
+}
+
+/// An inactive (deactivated) client presented without a secret must return
+/// `invalid_client` — same as "not found" from the caller's perspective.
+#[tokio::test]
+async fn test_token_inactive_client_returns_invalid_client() {
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "inactive-client-token@example.com").await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+
+    // Deactivate the client.
+    let oauth_client = db::get_oauth_client_by_client_id(&state.store, &client.client_id)
+        .await
+        .expect("DB must not error")
+        .expect("client must exist");
+    db::set_oauth_client_active(&state.store, &oauth_client.id, false)
+        .await
+        .expect("deactivate client");
+
+    // Present the client_id without a secret (no secret → falls through to the plain client lookup).
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        &format!(
+            "grant_type=authorization_code&client_id={}&code=any",
+            client.client_id
+        ),
+        &[],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "Inactive client must return 401/invalid_client, got: {body}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(
+        json["error"], "invalid_client",
+        "Inactive client must produce invalid_client error, got: {body}"
+    );
+}
+
+/// A DB error on client lookup must return 500, not `invalid_client`.
+///
+/// Closing the pool before the request causes the in-flight `find_one` inside
+/// `get_oauth_client_by_client_id` to return an `Err`. The `map_err` block in
+/// the token handler must catch that and return 500 — not collapse it into
+/// `invalid_client` as the old `.ok().flatten()` chain did.
+///
+/// Without this test, reverting `map_err(…ServiceError::Internal…)?` back to
+/// `.ok().flatten()` leaves the two existing not-found/inactive tests green
+/// while the DB-error path goes unguarded.
+#[tokio::test]
+async fn test_token_db_error_on_client_lookup_returns_internal_server_error() {
+    let (app, state) = test_app().await;
+
+    // Close the pool so the next DB call returns Err.
+    state.db.close().await;
+
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        "grant_type=authorization_code&client_id=any-client&code=any",
+        &[],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "DB error must return 500, not invalid_client; got: {body}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_ne!(
+        json["error"], "invalid_client",
+        "DB error must not be reported as invalid_client: {body}"
+    );
+}

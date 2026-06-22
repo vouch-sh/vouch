@@ -146,63 +146,93 @@ pub async fn delete_github_installation_by_installation_id(
     Ok(false)
 }
 
+/// Resolve a GitHub installation's document ID from its `installation_id` index.
+///
+/// Returns `Some(doc_id)` on a hit or `None` if no matching installation exists.
+/// The resolved `doc_id` is the stable primary key used by `store.modify()`.
+async fn resolve_installation_doc_id(
+    store: &DocumentStore,
+    installation_id: i64,
+) -> Result<Option<String>> {
+    let doc = store
+        .find_one::<GitHubInstallationDoc>("installation_id", &installation_id.to_string())
+        .await?;
+    Ok(doc.map(|d| d.id))
+}
+
 /// Suspend GitHub installation (used by webhook handler).
+///
+/// Uses optimistic concurrency (`store.modify`) so concurrent webhook events
+/// targeting the same installation never produce a lost update. If the
+/// installation is deleted between index-resolve and modify, returns `Ok(false)`.
 pub async fn suspend_github_installation(
     store: &DocumentStore,
     installation_id: i64,
 ) -> Result<bool> {
-    let doc = store
-        .find_one::<GitHubInstallationDoc>("installation_id", &installation_id.to_string())
-        .await?;
-
-    if let Some(doc) = doc {
-        let mut data = doc.data;
-        data.suspended_at = Some(Timestamp::now());
-        store.update(&doc.id, &data).await?;
-        return Ok(true);
-    }
-    Ok(false)
+    let Some(doc_id) = resolve_installation_doc_id(store, installation_id).await? else {
+        return Ok(false);
+    };
+    store
+        .modify::<GitHubInstallationDoc, _>(&doc_id, |data| {
+            data.suspended_at = Some(Timestamp::now());
+        })
+        .await
 }
 
 /// Unsuspend GitHub installation (used by webhook handler).
+///
+/// Uses optimistic concurrency (`store.modify`) so concurrent webhook events
+/// targeting the same installation never produce a lost update. If the
+/// installation is deleted between index-resolve and modify, returns `Ok(false)`.
 pub async fn unsuspend_github_installation(
     store: &DocumentStore,
     installation_id: i64,
 ) -> Result<bool> {
-    let doc = store
-        .find_one::<GitHubInstallationDoc>("installation_id", &installation_id.to_string())
-        .await?;
-
-    if let Some(doc) = doc {
-        let mut data = doc.data;
-        data.suspended_at = None;
-        store.update(&doc.id, &data).await?;
-        return Ok(true);
-    }
-    Ok(false)
+    let Some(doc_id) = resolve_installation_doc_id(store, installation_id).await? else {
+        return Ok(false);
+    };
+    store
+        .modify::<GitHubInstallationDoc, _>(&doc_id, |data| {
+            data.suspended_at = None;
+        })
+        .await
 }
 
 /// Update repositories for a GitHub installation.
+///
+/// Uses optimistic concurrency (`store.modify`) so concurrent webhook events
+/// targeting the same installation never produce a lost update. If the
+/// installation is deleted between index-resolve and modify, returns `Ok(false)`.
 pub async fn update_github_installation_repos(
     store: &DocumentStore,
     installation_id: i64,
     repos: &[String],
 ) -> Result<bool> {
-    let doc = store
-        .find_one::<GitHubInstallationDoc>("installation_id", &installation_id.to_string())
-        .await?;
-
-    if let Some(doc) = doc {
-        let mut data = doc.data;
-        data.repositories = Some(repos.to_vec());
-        store.update(&doc.id, &data).await?;
-        return Ok(true);
-    }
-    Ok(false)
+    let Some(doc_id) = resolve_installation_doc_id(store, installation_id).await? else {
+        return Ok(false);
+    };
+    let repos_owned = repos.to_vec();
+    store
+        .modify::<GitHubInstallationDoc, _>(&doc_id, |data| {
+            data.repositories = Some(repos_owned.clone());
+        })
+        .await
 }
 
 /// Update repositories for a GitHub installation by
 /// adding/removing repos (used by webhook handler).
+///
+/// # Concurrency note
+///
+/// The read-compute-write sequence here is NOT atomic end-to-end. The initial
+/// read (`get_github_installation_by_installation_id`) and the delta merge
+/// (`for repo in added …`) happen outside the `modify` closure inside
+/// `update_github_installation_repos`, so two concurrent delta webhooks for the
+/// same installation can each read stale repo lists and silently lose the other's
+/// additions/removals. Given that GitHub delivers webhook events sequentially
+/// per installation (low real-world contention), this is deferred rather than
+/// fixed here. If contention becomes a concern the merge logic must move inside
+/// a single `store.modify` closure so it re-reads and re-merges on each OCC retry.
 pub async fn update_github_installation_repos_delta(
     store: &DocumentStore,
     installation_id: i64,

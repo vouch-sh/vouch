@@ -484,22 +484,33 @@ async fn resolve_non_jwt_auth(
     // `Some`, we already loaded the client; otherwise look it up.
     let client = match secret_auth_outcome {
         Some(auth_client) => auth_client.client,
-        None => match crate::db::get_oauth_client_by_client_id(&state.store, &c.client_id)
-            .await
-            .ok()
-            .flatten()
-            .filter(|oc| oc.active)
-        {
-            Some(client) => client,
-            None => {
-                return Err(ServiceError::oauth(
-                    OAuthErrorCode::InvalidClient,
-                    "Unknown client_id",
-                )
-                .into_oauth_response()
-                .into_response());
+        None => {
+            // Fail closed: a DB error is a transient failure (→ 500), not a
+            // missing client (→ invalid_client). Collapsing DB-Err + None +
+            // inactive into one `invalid_client` masked connectivity problems.
+            let db_result = crate::db::get_oauth_client_by_client_id(&state.store, &c.client_id)
+                .await
+                .map_err(|e| {
+                    tracing::error!(
+                        client_id = %c.client_id,
+                        "DB error looking up OAuth client: {e}"
+                    );
+                    ServiceError::Internal("Database error".to_string())
+                        .into_oauth_response()
+                        .into_response()
+                })?;
+            match db_result.filter(|oc| oc.active) {
+                Some(client) => client,
+                None => {
+                    return Err(ServiceError::oauth(
+                        OAuthErrorCode::InvalidClient,
+                        "Unknown client_id",
+                    )
+                    .into_oauth_response()
+                    .into_response());
+                }
             }
-        },
+        }
     };
     let is_mtls_registered = matches!(
         client.token_endpoint_auth_method,
