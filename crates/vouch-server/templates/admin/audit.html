@@ -50,7 +50,7 @@
                 <tbody>
                     {% for event in events %}
                     <tr class="border-b border-vouch-border last:border-b-0">
-                        <td class="px-4 py-3 text-gray-400 whitespace-nowrap">{{ event.created_at }}</td>
+                        <td class="px-4 py-3 text-gray-400 whitespace-nowrap"><time datetime="{{ event.created_at }}" data-localize-time>{{ event.created_at|humandatetime }}</time></td>
                         <td class="px-4 py-3 text-gray-400 whitespace-nowrap text-xs font-mono" title="{{ event.ip_title }}">{{ event.ip_display }}</td>
                         <td class="px-4 py-3">
                             <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium
@@ -88,4 +88,8 @@
         {% endif %}
     </div>
 </div>
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/js/common.js"></script>
 {% endblock %}

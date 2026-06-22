@@ -17,7 +17,8 @@ use secrecy::ExposeSecret;
 use serde::Deserialize;
 use std::sync::Arc;
 
-use super::{MAX_SCIM_TOKENS, compute_token_expiry, format_timestamp, generate_scim_token};
+use super::{MAX_SCIM_TOKENS, compute_token_expiry, generate_scim_token};
+use crate::filters;
 use crate::handlers::browser_login::validate_origin;
 use crate::handlers::session::{AuthContext, extract_org_admin, get_resource_auth_context};
 use crate::handlers::{ValidPath, ValidUuid};
@@ -236,12 +237,16 @@ pub(crate) async fn delete_scim_token(
 // ============================================================================
 
 /// Display row for SCIM tokens in the template.
+///
+/// Timestamps are passed through as `jiff::Timestamp` and rendered client-side
+/// in the viewer's locale and timezone (see `static/js/common.js`), with the
+/// `humandatetime` filter as the no-JS fallback.
 pub(crate) struct ScimTokenRow {
     pub id: String,
     pub description: Option<String>,
-    pub created_at: String,
-    pub last_used_at: Option<String>,
-    pub expires_at: Option<String>,
+    pub created_at: Timestamp,
+    pub last_used_at: Option<Timestamp>,
+    pub expires_at: Option<Timestamp>,
 }
 
 /// SCIM tokens page template.
@@ -309,9 +314,9 @@ pub(crate) async fn admin_scim_tokens_page(
         .map(|t| ScimTokenRow {
             id: t.id,
             description: t.description,
-            created_at: format_timestamp(&t.created_at),
-            last_used_at: t.last_used_at.as_ref().map(format_timestamp),
-            expires_at: t.expires_at.as_ref().map(format_timestamp),
+            created_at: t.created_at,
+            last_used_at: t.last_used_at,
+            expires_at: t.expires_at,
         })
         .collect();
 
@@ -424,9 +429,9 @@ pub(crate) async fn admin_create_scim_token(
         .map(|t| ScimTokenRow {
             id: t.id,
             description: t.description,
-            created_at: format_timestamp(&t.created_at),
-            last_used_at: t.last_used_at.as_ref().map(format_timestamp),
-            expires_at: t.expires_at.as_ref().map(format_timestamp),
+            created_at: t.created_at,
+            last_used_at: t.last_used_at,
+            expires_at: t.expires_at,
         })
         .collect();
 

@@ -103,10 +103,10 @@
                 {% endmatch %}
 
                 <dt class="text-gray-400">{{ self.tr("apps-detail-created") }}</dt>
-                <dd class="text-gray-200">{{ app.created_at|humandate }}</dd>
+                <dd class="text-gray-200"><time datetime="{{ app.created_at }}" data-localize-time>{{ app.created_at|humandatetime }}</time></dd>
 
                 <dt class="text-gray-400">{{ self.tr("apps-list-th-last-used") }}</dt>
-                <dd class="text-gray-200">{% match app.last_used_at %}{% when Some with (date) %}{{ date|humandate }}{% when None %}{{ self.tr("apps-list-never") }}{% endmatch %}</dd>
+                <dd class="text-gray-200">{% match app.last_used_at %}{% when Some with (date) %}<time datetime="{{ date }}" data-localize-time>{{ date|humandatetime }}</time>{% when None %}{{ self.tr("apps-list-never") }}{% endmatch %}</dd>
             </dl>
 
             <!-- JWKS / JWKS URI (for FAPI clients) -->
@@ -189,7 +189,7 @@
                             {% else %}
                             <span class="ml-2 px-1.5 inline-flex text-xs leading-5 font-semibold rounded bg-vouch-error-bg text-vouch-error">{{ self.tr("apps-detail-secret-revoked") }}</span>
                             {% endif %}
-                            <span class="ml-2 text-xs text-gray-500">{{ self.tr("apps-detail-created") }} {{ secret.created_at|humandate }}</span>
+                            <span class="ml-2 text-xs text-gray-500">{{ self.tr("apps-detail-created") }} <time datetime="{{ secret.created_at }}" data-localize-time>{{ secret.created_at|humandatetime }}</time></span>
                         </div>
                         {% if secret.active && secrets_count > 1 %}
                         <form action="/applications/{{ app.id }}/secrets/{{ secret.id }}/delete" method="POST">

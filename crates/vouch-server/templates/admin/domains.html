@@ -87,7 +87,7 @@
                             <span class="px-2 py-0.5 rounded bg-yellow-900/40 text-yellow-300 text-xs">{{ self.tr("admin-domains-status-pending") }}</span>
                             {% endmatch %}
                         </td>
-                        <td class="px-4 py-3 text-gray-400 whitespace-nowrap">{{ row.added_at.as_deref().unwrap_or("—") }}</td>
+                        <td class="px-4 py-3 text-gray-400 whitespace-nowrap"><time datetime="{{ row.added_at }}" data-localize-time>{{ row.added_at|humandatetime }}</time></td>
                         <td class="px-4 py-3 text-gray-400 whitespace-nowrap">{{ row.added_by.as_deref().unwrap_or("—") }}</td>
                         <td class="px-4 py-3 text-right whitespace-nowrap">
                             {% match row.status %}
