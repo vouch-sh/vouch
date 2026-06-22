@@ -137,8 +137,13 @@ pub(crate) const PRECONFIGURED_POLICIES: &[PreconfiguredPolicy] = &[
         cel_expression: "posture.secure_boot_enabled == true",
     },
     // OS version thresholds — review with each major OS release.
-    // Last updated: 2026-03-06
-    //   macOS: 25.0.0 = Sequoia (N-1 from Tahoe 26)
+    // Last updated: 2026-06-21
+    //   macOS: 14.0.0 (intentionally lenient N-2 floor) — as of June 2026,
+    //     macOS 26 "Tahoe" (Darwin 25) is current (N), 15.x "Sequoia" is N-1,
+    //     and 14.x "Sonoma" is N-2. The floor accepts N-2 to avoid disrupting
+    //     Sonoma users during a transition year. Uses marketing version as
+    //     reported by `sw_vers -productVersion` on the client. Darwin kernel
+    //     versions (25.x) must NOT be used here.
     //   Windows: 10.0.26100 = 24H2
     // Linux is excluded — distributions manage versions independently.
     // Admins can create custom policies for specific distro versions
@@ -149,7 +154,7 @@ pub(crate) const PRECONFIGURED_POLICIES: &[PreconfiguredPolicy] = &[
         description: "Require a supported OS version (N-1)",
         cel_expression: concat!(
             "(posture.os == \"macos\"",
-            " && semver(posture.os_version) >= semver(\"25.0.0\"))",
+            " && semver(posture.os_version) >= semver(\"14.0.0\"))",
             " || (posture.os == \"windows\"",
             " && semver(posture.os_version) >= semver(\"10.0.26100\"))",
         ),
@@ -707,7 +712,7 @@ mod tests {
             detail_type: PostureTypeTag,
             posture_version: 1,
             os: Some(OperatingSystem::MacOs),
-            os_version: Some("26.3.1".to_string()),
+            os_version: Some("15.3.1".to_string()),
             disk_encryption_enabled: Some(true),
             disk_encryption_technology: Some("filevault".to_string()),
             firewall_enabled: Some(true),
@@ -814,8 +819,9 @@ mod tests {
 
     #[test]
     fn test_evaluate_os_recency_old_macos_fail() {
+        // macOS 13.x (Ventura) is older than N-1 (14.x Sonoma) — must fail
         let mut posture = sample_posture();
-        posture.os_version = Some("24.4.0".to_string());
+        posture.os_version = Some("13.7.0".to_string());
         let ctx = build_cel_context(&posture);
         let expr = PRECONFIGURED_POLICIES
             .iter()
@@ -858,6 +864,42 @@ mod tests {
         let posture = minimal_posture();
         let ctx = build_cel_context(&posture);
         assert!(evaluate_cel("posture.os == \"\"", &ctx));
+    }
+
+    /// Regression for #544: macOS 15.x (marketing version) must pass OsRecency.
+    /// Previously the threshold used Darwin kernel version 25.0.0 instead of the
+    /// marketing version reported by `sw_vers -productVersion`.
+    #[test]
+    fn test_os_recency_macos_15_passes() {
+        let mut posture = sample_posture();
+        posture.os_version = Some("15.3.1".to_string());
+        let ctx = build_cel_context(&posture);
+        let expr = PRECONFIGURED_POLICIES
+            .iter()
+            .find(|p| p.slug == PreconfiguredSlug::OsRecency)
+            .unwrap()
+            .cel_expression;
+        assert!(
+            evaluate_cel(expr, &ctx),
+            "macOS 15.3.1 (Sequoia) must pass OsRecency (>= 14.0.0)"
+        );
+    }
+
+    /// Regression for #544: macOS 13.x must fail OsRecency (older than N-1).
+    #[test]
+    fn test_os_recency_macos_13_fails() {
+        let mut posture = sample_posture();
+        posture.os_version = Some("13.7.0".to_string());
+        let ctx = build_cel_context(&posture);
+        let expr = PRECONFIGURED_POLICIES
+            .iter()
+            .find(|p| p.slug == PreconfiguredSlug::OsRecency)
+            .unwrap()
+            .cel_expression;
+        assert!(
+            !evaluate_cel(expr, &ctx),
+            "macOS 13.7.0 (Ventura) must fail OsRecency (< 14.0.0)"
+        );
     }
 
     #[test]
@@ -946,19 +988,20 @@ mod tests {
 
     #[test]
     fn test_semver_comparison() {
+        // sample_posture() has os_version = "15.3.1" (macOS 15 Sequoia, marketing version).
         let posture = sample_posture();
         let ctx = build_cel_context(&posture);
-        // 26.3.1 >= 25.0.0
+        // 15.3.1 >= 14.0.0 (passes the lenient N-2 OsRecency floor)
         assert!(evaluate_cel(
-            "semver(posture.os_version) >= semver(\"25.0.0\")",
+            "semver(posture.os_version) >= semver(\"14.0.0\")",
             &ctx,
         ));
-        // 26.3.1 < 27.0.0
+        // 15.3.1 < 16.0.0 (does not meet a hypothetical next-year floor)
         assert!(evaluate_cel(
-            "semver(posture.os_version) < semver(\"27.0.0\")",
+            "semver(posture.os_version) < semver(\"16.0.0\")",
             &ctx,
         ));
-        // 9.0.0 should NOT be >= 14.0.0 (unlike lexicographic)
+        // 9.0.0 should NOT be >= 14.0.0 (unlike lexicographic comparison)
         let mut old = minimal_posture();
         old.os_version = Some("9.0.0".to_string());
         let old_ctx = build_cel_context(&old);
@@ -972,8 +1015,8 @@ mod tests {
     fn test_semver_compared_to_int() {
         let posture = sample_posture();
         let ctx = build_cel_context(&posture);
-        // semver("26.3.1") = 26_003_001, which is >= 25
-        assert!(evaluate_cel("semver(posture.os_version) >= 25", &ctx,));
+        // semver("15.3.1") = 15_003_001, which is >= 14
+        assert!(evaluate_cel("semver(posture.os_version) >= 14", &ctx,));
     }
 
     #[test]
