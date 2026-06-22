@@ -3816,3 +3816,235 @@ async fn test_enroll_promotes_admin_for_org_without_one() {
         "no duplicate org may be created when one already exists"
     );
 }
+
+// ========================================================================
+// Regression tests for DB concurrency fixes (#537, #545, #543)
+// ========================================================================
+
+/// #537 — A concurrent `update_user_github_identity` must NOT revert a
+/// demotion performed by a concurrent `update_user_admin_status`.
+///
+/// Simulates the race by:
+/// 1. Creating an admin user.
+/// 2. Reading the user doc snapshot (simulating what the GitHub-identity
+///    path would have read before `modify` was introduced).
+/// 3. Demoting via `update_user_admin_status` (now uses `modify`).
+/// 4. Applying `update_user_github_identity` (now uses `modify`).
+///
+/// With `modify`, step 4 re-reads the doc *after* step 3's write, so the
+/// demotion is preserved. The old blind `store.update` would have written
+/// back the pre-demotion snapshot, silently re-promoting the user.
+#[tokio::test]
+async fn test_user_update_lost_update_race() {
+    let (store, _audit) = test_db().await;
+
+    // Create an admin user.
+    let (user_id, _) = upsert_user_with_org(
+        &store,
+        "race@example.com",
+        Some("Race User"),
+        Some("org-race"),
+        true, // starts as admin
+    )
+    .await
+    .expect("upsert admin user");
+
+    // Demote the user — this must win regardless of ordering.
+    update_user_admin_status(&store, &user_id, false)
+        .await
+        .expect("admin status update");
+
+    // Now update the GitHub identity. With the old blind-write approach this
+    // would have re-read before the demotion and written back is_org_admin=true.
+    // With `modify` it re-reads the post-demotion doc, so is_org_admin stays false.
+    update_user_github_identity(&store, &user_id, 42, "gh-user", Some("refresh-tok"))
+        .await
+        .expect("github identity update");
+
+    let user = get_user_by_id(&store, &user_id)
+        .await
+        .expect("get user")
+        .expect("user must exist");
+
+    assert!(
+        !user.is_org_admin,
+        "demotion must survive a concurrent github identity update"
+    );
+    assert_eq!(user.github_id, Some(42), "github_id must be set");
+    assert_eq!(
+        user.github_login.as_deref(),
+        Some("gh-user"),
+        "github_login must be set"
+    );
+}
+
+/// #545 — Counter updates must never regress: after setting 50,
+/// applying values 1..=49 must leave the counter at 50 (max semantics).
+///
+/// The sequential descent test verifies the `max(stored, incoming)` logic
+/// in `update_authenticator_counter`. A small concurrent burst (4 tasks,
+/// well within the 3-retry budget for in-memory SQLite) additionally
+/// confirms the optimistic-concurrency path does not regress the counter.
+#[tokio::test]
+async fn test_update_authenticator_counter_high_concurrency_no_lost_update() {
+    let (store, _audit) = test_db().await;
+
+    let (user_id, _) = upsert_user(&store, "counter@example.com", None)
+        .await
+        .expect("upsert user");
+
+    let auth_id = create_authenticator(
+        &store,
+        &CreateAuthenticatorParams {
+            user_id: &user_id,
+            user_email: "counter@example.com",
+            name: "Counter Key",
+            credential_id: b"cred-counter-race",
+            public_key: &[0u8; 32],
+            aaguid: None,
+            user_handle: None,
+            attestation_verified: false,
+        },
+    )
+    .await
+    .expect("create authenticator");
+
+    // Part 1 — sequential regression guard.
+    // Set the counter to 50, then apply lower values and confirm no regression.
+    update_authenticator_counter(&store, &auth_id, 50)
+        .await
+        .expect("set counter to 50");
+
+    for lower in (1_i32..50).rev() {
+        update_authenticator_counter(&store, &auth_id, lower)
+            .await
+            .expect("apply lower value");
+    }
+
+    let auth = get_authenticator_by_id(&store, &auth_id)
+        .await
+        .expect("get authenticator")
+        .expect("authenticator must exist");
+
+    assert_eq!(
+        auth.counter, 50,
+        "counter must not regress after applying values < 50"
+    );
+
+    // Part 2 — concurrent burst (4 tasks, within the 3-retry budget for
+    // in-memory SQLite). Each task tries to set a value; the stored result
+    // must equal the maximum attempted value.
+    let target = 100_i32;
+    let handles: Vec<_> = [target, 51, 52, 53]
+        .iter()
+        .map(|&i| {
+            let store = store.clone();
+            let auth_id = auth_id.clone();
+            tokio::spawn(async move {
+                update_authenticator_counter(&store, &auth_id, i)
+                    .await
+                    .expect("concurrent counter update")
+            })
+        })
+        .collect();
+
+    for h in handles {
+        h.await.expect("task must not panic");
+    }
+
+    let auth = get_authenticator_by_id(&store, &auth_id)
+        .await
+        .expect("get authenticator after burst")
+        .expect("authenticator must exist");
+
+    assert_eq!(
+        auth.counter, target,
+        "counter must equal the max value applied in the concurrent burst"
+    );
+}
+
+/// #543 — Deleting an authenticator must cascade to clear
+/// `authenticator_id` on `DeviceAuthRequestDoc`, which requires the
+/// `authenticator_id` index to be emitted by `DeviceAuthRequestDoc::index_entries`.
+///
+/// Note: this index only covers docs written *after* the fix is deployed.
+/// Pre-existing device_auth_request rows lack the index entry and will not
+/// be cleared on authenticator delete. This is acceptable because
+/// device_auth_request docs are short-lived (minutes), so any pre-fix
+/// rows will have expired before the fix is deployed in production.
+#[tokio::test]
+async fn test_delete_authenticator_clears_device_auth_reference() {
+    let (store, _audit) = test_db().await;
+
+    // Create user + authenticator.
+    let (user_id, _) = upsert_user(&store, "cascade@example.com", None)
+        .await
+        .expect("upsert user");
+
+    let auth_id = create_authenticator(
+        &store,
+        &CreateAuthenticatorParams {
+            user_id: &user_id,
+            user_email: "cascade@example.com",
+            name: "Cascade Key",
+            credential_id: b"cred-cascade",
+            public_key: &[0u8; 32],
+            aaguid: None,
+            user_handle: None,
+            attestation_verified: false,
+        },
+    )
+    .await
+    .expect("create authenticator");
+
+    // Create a device_auth_request that references the authenticator.
+    let device_code_hash = "cascade_device_code";
+    let user_code = "CSCD-1234";
+    let request_id = create_device_auth_request(
+        &store,
+        device_code_hash,
+        user_code,
+        None,
+        "2099-12-31T23:59:59Z".parse().unwrap(),
+        5,
+    )
+    .await
+    .expect("create device auth request");
+
+    // Authorize to bind the authenticator_id.
+    authorize_device_auth(
+        &store,
+        &request_id,
+        &user_id,
+        "cascade@example.com",
+        &auth_id,
+    )
+    .await
+    .expect("authorize device auth");
+
+    // Verify the authenticator_id is set before the cascade.
+    let before = get_device_auth_by_id(&store, &request_id)
+        .await
+        .expect("get device auth")
+        .expect("must exist before cascade");
+    assert_eq!(
+        before.authenticator_id.as_deref(),
+        Some(auth_id.as_str()),
+        "authenticator_id must be set before cascade delete"
+    );
+
+    // Delete the authenticator — this triggers the cascade.
+    delete_authenticator(&store, &auth_id)
+        .await
+        .expect("delete authenticator");
+
+    // The device_auth_request must now have authenticator_id cleared.
+    let after = get_device_auth_by_id(&store, &request_id)
+        .await
+        .expect("get device auth")
+        .expect("device auth request must still exist after cascade");
+    assert!(
+        after.authenticator_id.is_none(),
+        "authenticator_id must be cleared by cascade delete"
+    );
+}

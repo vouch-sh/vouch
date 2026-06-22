@@ -170,15 +170,27 @@ pub async fn get_authenticator_by_id(
 }
 
 /// Update authenticator counter.
+///
+/// Uses optimistic concurrency (`store.modify`) and takes the max of the
+/// stored counter and the incoming value so that concurrent updates from
+/// parallel authentication flows never regress the counter. A missing
+/// authenticator is warned and ignored (the caller should not fail an
+/// ongoing authentication solely due to a missing counter record).
 pub async fn update_authenticator_counter(
     store: &DocumentStore,
     authenticator_id: &str,
     counter: i32,
 ) -> Result<()> {
-    if let Some(doc) = store.get::<AuthenticatorDoc>(authenticator_id).await? {
-        let mut data = doc.data;
-        data.counter = counter;
-        store.update(authenticator_id, &data).await?;
+    let found = store
+        .modify::<AuthenticatorDoc, _>(authenticator_id, |data| {
+            data.counter = std::cmp::max(data.counter, counter);
+        })
+        .await?;
+    if !found {
+        tracing::warn!(
+            authenticator_id,
+            "update_authenticator_counter: authenticator not found"
+        );
     }
     Ok(())
 }

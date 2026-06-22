@@ -59,6 +59,14 @@ impl DocumentType for DeviceAuthRequestDoc {
                 value: uid.clone(),
             });
         }
+        // Emit authenticator_id so delete_authenticator's update_by_index
+        // can locate and clear this reference during cascade delete (#543).
+        if let Some(ref auth_id) = self.authenticator_id {
+            entries.push(IndexEntry {
+                field: "authenticator_id",
+                value: auth_id.clone(),
+            });
+        }
         entries
     }
 

@@ -483,8 +483,14 @@ pub async fn create_scim_user(
 
 /// Update a user via SCIM, scoped to the caller's org.
 ///
-/// Returns `Ok(false)` if the user doesn't exist OR belongs to a
-/// different org. `Ok(true)` on a successful update.
+/// Returns `Ok(false)` if the user doesn't exist, belongs to a
+/// different org, or if a concurrent org-ownership change races with
+/// the modify loop and causes the mutation to be skipped (rather than
+/// reporting silent success). `Ok(true)` on a successful update.
+///
+/// Uses optimistic concurrency (`store.modify`) so concurrent field
+/// mutations (e.g. a GitHub identity update) landing between the org
+/// check and the write do not silently overwrite each other.
 pub async fn update_scim_user(
     store: &DocumentStore,
     user_id: &str,
@@ -493,18 +499,35 @@ pub async fn update_scim_user(
     external_id: Option<&str>,
     active: bool,
 ) -> Result<bool> {
+    // Org ownership check: read before entering the modify loop.
     let Some(doc) = store.get::<UserDoc>(user_id).await? else {
         return Ok(false);
     };
     if doc.data.org_id.as_deref() != Some(org_id) {
         return Ok(false);
     }
-    let mut data = doc.data;
-    data.name = name.map(String::from);
-    data.external_id = external_id.map(String::from);
-    data.active = active;
-    store.update(user_id, &data).await?;
-    Ok(true)
+
+    // Use modify for optimistic concurrency — re-check org ownership
+    // inside the closure so a concurrent org migration cannot smuggle
+    // a cross-org write through a version win.
+    //
+    // `AtomicBool` is used to signal from the `Fn` closure back to the caller
+    // whether the mutation was applied (org still matched) or skipped.
+    let applied = std::sync::atomic::AtomicBool::new(false);
+    let found = store
+        .modify::<UserDoc, _>(user_id, |data| {
+            if data.org_id.as_deref() == Some(org_id) {
+                data.name = name.map(String::from);
+                data.external_id = external_id.map(String::from);
+                data.active = active;
+                applied.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+        })
+        .await?;
+    // found=true but applied=false means a concurrent org-ownership change
+    // raced between our pre-check and the modify loop. Report it as
+    // not-found rather than silent success so the caller sees the right signal.
+    Ok(found && applied.load(std::sync::atomic::Ordering::Relaxed))
 }
 
 // ============================================================================
