@@ -1307,3 +1307,68 @@ async fn test_rfc8693_id_token_rejects_actor_token() {
     let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
     assert_eq!(error["error"], "invalid_request");
 }
+
+// ========================================================================
+// Issue #550 — Deactivated actor user must be rejected
+//
+// When a token exchange carries an actor_token, the actor user's active
+// flag must be checked symmetrically with the subject user check. A
+// deactivated actor must produce invalid_grant, not a 200 with an act claim.
+// ========================================================================
+
+#[tokio::test]
+async fn test_rfc8693_deactivated_actor_user_rejected() {
+    // Regression for #550: deactivating the actor user after its session
+    // was created must prevent it from being used in a token exchange.
+    let (app, state) = test_app().await;
+
+    let subject = create_test_user(&state.store, "actor-subject-550@example.com").await;
+    let actor = create_test_user(&state.store, "actor-deactivated-550@example.com").await;
+    let subject_auth = create_test_authenticator(&state.store, &subject.id).await;
+    let actor_auth = create_test_authenticator(&state.store, &actor.id).await;
+    let client = create_test_oauth_client(&state.store, &subject.id).await;
+
+    // Issue tokens for both users before deactivation.
+    let (subject_token, _) =
+        issue_oauth_access_token(&app, &state, &subject, &subject_auth, &client).await;
+    let (actor_token, _) =
+        issue_oauth_access_token(&app, &state, &actor, &actor_auth, &client).await;
+
+    // Deactivate the actor user.
+    crate::db::update_user_active_status(&state.store, &actor.id, false)
+        .await
+        .expect("deactivate actor user");
+
+    let auth_header = client.basic_auth_header();
+
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        &format!(
+            "grant_type=urn:ietf:params:oauth:grant-type:token-exchange\
+             &subject_token={subject_token}\
+             &subject_token_type=urn:ietf:params:oauth:token-type:access_token\
+             &actor_token={actor_token}\
+             &actor_token_type=urn:ietf:params:oauth:token-type:access_token"
+        ),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "Deactivated actor must be rejected: {body}"
+    );
+    let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(
+        error["error"], "invalid_grant",
+        "Must return invalid_grant for deactivated actor: {body}"
+    );
+    assert!(
+        error["error_description"]
+            .as_str()
+            .is_some_and(|d| d.contains("deactivated")),
+        "Error description must mention deactivated: {body}"
+    );
+}
