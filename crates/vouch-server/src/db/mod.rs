@@ -178,7 +178,7 @@ pub(crate) use par::create_pushed_authorization_request;
 pub use par::{
     CreateParParams, PAR_EXPIRES_IN, ParConsumptionMode, PushedAuthorizationRequest,
     consume_pushed_authorization_request, delete_expired_pushed_authorization_requests,
-    get_pushed_authorization_request,
+    extend_par_expiration, get_pushed_authorization_request,
 };
 
 // Re-export pending OAuth types and functions (RFC 6749, RFC 9700)

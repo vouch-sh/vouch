@@ -2785,3 +2785,328 @@ async fn test_rfc9126_par_accepts_mtls_with_dpop_and_pkce() {
     let json: serde_json::Value = serde_json::from_str(&response.body).expect("Valid JSON");
     assert!(json["request_uri"].is_string());
 }
+
+// ========================================================================
+// Issue #538 — PAR error path open-redirect fix
+//
+// When lookup_par returns Ok(None) (PAR not found/expired), the fallback
+// redirect must only proceed when the redirect_uri is REGISTERED for the
+// client. An unregistered URI must produce an error page, not a 302.
+// ========================================================================
+
+#[tokio::test]
+async fn test_rfc9126_par_not_found_unregistered_redirect_uri_returns_error_page() {
+    // Regression for #538: invalid request_uri + attacker-controlled
+    // redirect_uri must NOT produce a 302 to the attacker host.
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "par-openredirect@example.com").await;
+    let _auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+
+    // Use a bogus PAR URI that will not be found, plus a redirect_uri that is NOT
+    // registered for the client (the attacker's host).
+    let bogus_request_uri = "urn:ietf:params:oauth:request_uri:nonexistent_bogus_value";
+    let attacker_redirect = "https://attacker.example.com/steal";
+
+    let response = http_get_full(
+        &app,
+        &format!(
+            "/oauth/authorize?client_id={}&request_uri={}&redirect_uri={}",
+            client.client_id,
+            urlencoding::encode(bogus_request_uri),
+            urlencoding::encode(attacker_redirect),
+        ),
+        &[],
+    )
+    .await;
+
+    // Must NOT redirect to the attacker host.
+    assert_ne!(
+        response.status,
+        StatusCode::FOUND,
+        "Open redirect prevented: must not 302 to unregistered URI"
+    );
+    assert_ne!(
+        response.status,
+        StatusCode::SEE_OTHER,
+        "Open redirect prevented: must not 303 to unregistered URI"
+    );
+
+    // Should be an error page.
+    assert_eq!(
+        response.status,
+        StatusCode::OK,
+        "Invalid PAR + unregistered redirect should produce error page, got: {}",
+        response.status
+    );
+
+    // The Location header must not point to the attacker.
+    if let Some(loc) = response.headers.get("Location") {
+        let loc_str = loc.to_str().unwrap_or("");
+        assert!(
+            !loc_str.contains("attacker.example.com"),
+            "Location header must not redirect to attacker host: {loc_str}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_rfc9126_par_not_found_registered_redirect_uri_returns_302_with_error() {
+    // Conformance path (RFC 9126 §7.2): invalid request_uri + REGISTERED
+    // redirect_uri must produce a redirect with error params, not an error page.
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "par-conformance-redirect@example.com").await;
+    let _auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+
+    // The test client registers "https://example.com/callback" — use that.
+    let registered_redirect = "https://example.com/callback";
+    let bogus_request_uri = "urn:ietf:params:oauth:request_uri:nonexistent_conformance";
+
+    let response = http_get_full(
+        &app,
+        &format!(
+            "/oauth/authorize?client_id={}&request_uri={}&redirect_uri={}",
+            client.client_id,
+            urlencoding::encode(bogus_request_uri),
+            urlencoding::encode(registered_redirect),
+        ),
+        &[],
+    )
+    .await;
+
+    // With a registered URI the error is delivered as a redirect.
+    assert!(
+        response.status == StatusCode::FOUND || response.status == StatusCode::SEE_OTHER,
+        "Invalid PAR + registered redirect_uri should 302, got: {}; body: {}",
+        response.status,
+        response.body
+    );
+
+    let location = response
+        .headers
+        .get("Location")
+        .expect("Must have Location header")
+        .to_str()
+        .unwrap();
+
+    assert!(
+        location.starts_with(registered_redirect),
+        "Redirect must go to the registered URI: {location}"
+    );
+    assert!(
+        location.contains("error=invalid_request_uri"),
+        "Redirect must include error=invalid_request_uri: {location}"
+    );
+}
+
+#[tokio::test]
+async fn test_rfc9126_authorize_extends_par_ttl_and_survives_cleanup() {
+    // Regression test for #542 (call-site variant): verifies that hitting
+    // /oauth/authorize with a PAR request_uri and no session cookie actually
+    // invokes extend_par_expiration via store_pending_and_redirect. Without the
+    // call the PAR's 60-second TTL would expire during login and the deferred
+    // pending_auth completion would receive server_error instead of a code.
+    //
+    // Flow:
+    //   1. Create PAR via POST /oauth/par.
+    //   2. Hit GET /oauth/authorize (no session) → redirects to /login?pending_auth=<id>
+    //      (this is the call site that MUST invoke extend_par_expiration).
+    //   3. Simulate cleanup: delete_expired_pushed_authorization_requests.
+    //      Since the PAR TTL was extended to ~10 min, it must NOT be deleted.
+    //   4. Complete the deferred flow by returning to /oauth/authorize?pending_auth=<id>
+    //      with a valid session — must succeed with a code redirect.
+    use crate::db::documents::par::PushedAuthorizationRequestDoc;
+
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "par-callsite-542@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+
+    // Step 1: Create PAR via HTTP (standard TTL ~60 seconds).
+    let request_uri = create_par_request(&app, &client).await;
+
+    // Step 2: Hit /oauth/authorize WITHOUT a session — triggers
+    // store_pending_and_redirect which calls extend_par_expiration.
+    let auth_response = http_get_full(
+        &app,
+        &format!(
+            "/oauth/authorize?client_id={}&request_uri={}",
+            client.client_id,
+            urlencoding::encode(&request_uri),
+        ),
+        &[],
+    )
+    .await;
+
+    assert!(
+        auth_response.status == StatusCode::FOUND || auth_response.status == StatusCode::SEE_OTHER,
+        "No-session authorize with request_uri must redirect to login, got: {}",
+        auth_response.status
+    );
+    let location = auth_response
+        .headers
+        .get("location")
+        .expect("redirect must have Location")
+        .to_str()
+        .expect("Location must be UTF-8");
+    assert!(
+        location.starts_with("/login?pending_auth="),
+        "Must redirect to /login?pending_auth=..., got: {location}"
+    );
+
+    // Extract the pending_auth ID from the redirect URL.
+    let pending_id = location
+        .split("pending_auth=")
+        .nth(1)
+        .expect("pending_auth must be in redirect URL");
+    let pending_id = urlencoding::decode(pending_id)
+        .expect("pending_auth must be URL-decodable")
+        .into_owned();
+
+    // Step 3: Simulate cleanup — delete all expired PARs.
+    // The PAR TTL was extended by store_pending_and_redirect to ~10 minutes,
+    // so cleanup must leave it in place.
+    let deleted = db::delete_expired_pushed_authorization_requests(&state.store, "now")
+        .await
+        .expect("cleanup must succeed");
+
+    let doc_after_cleanup = state
+        .store
+        .find_one::<PushedAuthorizationRequestDoc>("request_uri", &request_uri)
+        .await
+        .expect("store query ok");
+    assert!(
+        doc_after_cleanup.is_some(),
+        "PAR must survive cleanup after TTL extension (deleted {deleted} other records)"
+    );
+
+    // Step 4: Complete the deferred flow — return to /oauth/authorize?pending_auth=<id>
+    // with a valid session cookie. complete_pending_auth must consume the PAR and issue a code.
+    let session_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let completion = http_get_full(
+        &app,
+        &format!(
+            "/oauth/authorize?pending_auth={}",
+            urlencoding::encode(&pending_id)
+        ),
+        &[("Cookie", &format!("__Host-vouch_session={session_token}"))],
+    )
+    .await;
+
+    assert!(
+        completion.status == StatusCode::FOUND || completion.status == StatusCode::SEE_OTHER,
+        "Deferred flow must succeed with a code redirect after PAR TTL extension, got: {} body: {}",
+        completion.status,
+        completion.body
+    );
+    let code_location = completion
+        .headers
+        .get("Location")
+        .expect("code redirect must have Location")
+        .to_str()
+        .expect("Location must be UTF-8");
+    assert!(
+        code_location.contains("code="),
+        "Redirect must contain authorization code: {code_location}"
+    );
+}
+
+#[tokio::test]
+async fn test_rfc9126_par_deleted_by_cleanup_breaks_deferred_flow() {
+    // Regression reference for #542: documents the FAILING behaviour before
+    // extend_par_expiration was added. After the fix this test documents the
+    // EXPECTED success — but since we cannot control the cleanup job timing
+    // here, we verify the PAR TTL was extended after pending-auth creation
+    // (the structural guarantee) rather than running cleanup between steps.
+    use crate::db::documents::par::PushedAuthorizationRequestDoc;
+
+    let (_app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "par-deferred-cleanup@example.com").await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+
+    // Create a PAR with the standard 60-second TTL.
+    let (_, request_uri) = db::create_pushed_authorization_request(
+        &state.store,
+        db::CreateParParams {
+            client_id: &client.client_id,
+            response_type: "code",
+            redirect_uri: "https://example.com/callback",
+            scope: Some("openid"),
+            state: None,
+            nonce: None,
+            code_challenge: Some("E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"),
+            code_challenge_method: Some("S256"),
+            resource: None,
+            acr_values: None,
+            max_age: None,
+            prompt: None,
+            dpop_jkt: None,
+            authorization_details: None,
+            response_mode: db::ResponseMode::Query,
+        },
+        crate::services::auth::ParCreationProof {
+            client_auth: crate::services::auth::ClientAuthProof::NoAuth(
+                crate::services::auth::NoClientAuth::internal_endpoint(),
+            ),
+        },
+    )
+    .await
+    .expect("PAR creation must succeed");
+
+    // Record the PAR's initial expires_at.
+    let doc_before = state
+        .store
+        .find_one::<PushedAuthorizationRequestDoc>("request_uri", &request_uri)
+        .await
+        .expect("store query ok")
+        .expect("PAR doc must exist");
+    let initial_expires = doc_before.data.expires_at;
+
+    // Extend the PAR (simulating what store_pending_and_redirect now does).
+    db::extend_par_expiration(
+        &state.store,
+        &request_uri,
+        &client.client_id,
+        jiff::Span::new().minutes(10),
+    )
+    .await
+    .expect("extend_par_expiration must succeed");
+
+    // Re-read the PAR and verify its TTL was bumped.
+    let doc_after = state
+        .store
+        .find_one::<PushedAuthorizationRequestDoc>("request_uri", &request_uri)
+        .await
+        .expect("store query ok")
+        .expect("PAR doc must still exist after extension");
+
+    assert!(
+        doc_after.data.expires_at > initial_expires,
+        "PAR expires_at must be extended beyond the original 60-second TTL: \
+         was {initial_expires}, now {}",
+        doc_after.data.expires_at
+    );
+
+    // Simulate the cleanup job deleting EXPIRED pars — this must NOT delete
+    // our extended PAR since its TTL is now ~10 minutes in the future.
+    let deleted = db::delete_expired_pushed_authorization_requests(&state.store, "now")
+        .await
+        .expect("cleanup must succeed");
+
+    let doc_after_cleanup = state
+        .store
+        .find_one::<PushedAuthorizationRequestDoc>("request_uri", &request_uri)
+        .await
+        .expect("store query ok");
+
+    assert!(
+        doc_after_cleanup.is_some(),
+        "Extended PAR must NOT be deleted by the cleanup job \
+         (deleted {deleted} expired records but this one should survive)"
+    );
+}

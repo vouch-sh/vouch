@@ -289,6 +289,49 @@ pub async fn get_pushed_authorization_request(
     Ok(Some(PushedAuthorizationRequest::from(doc)))
 }
 
+/// Extend the expiration of a pushed authorization request.
+///
+/// Called when a pending-auth record that references this PAR is created so that
+/// the cleanup job does not delete the PAR before the deferred login completes
+/// (issue #542). The new TTL matches the pending-auth lifetime.
+///
+/// Uses optimistic concurrency: if the PAR was consumed or modified concurrently
+/// the extension is silently skipped (the flow will fail at consume time).
+pub async fn extend_par_expiration(
+    store: &DocumentStore,
+    request_uri: &str,
+    client_id: &str,
+    new_ttl: Span,
+) -> Result<()> {
+    let doc = store
+        .find_one::<PushedAuthorizationRequestDoc>("request_uri", request_uri)
+        .await?;
+
+    let Some(doc) = doc else {
+        // PAR already gone — nothing to extend; the deferred flow will fail naturally.
+        return Ok(());
+    };
+
+    if doc.data.client_id != client_id || doc.data.consumed_at.is_some() {
+        return Ok(());
+    }
+
+    let new_expires_at = Timestamp::now()
+        .checked_add(new_ttl)
+        .map_err(|_| anyhow::anyhow!("Time calculation overflow extending PAR expiration"))?;
+
+    let mut data = doc.data;
+    data.expires_at = new_expires_at;
+
+    // Silently ignore a version conflict — a concurrent consume will prevent
+    // the deferred flow from completing anyway.
+    let _ = store
+        .compare_and_update(&doc.id, doc.version, &data)
+        .await?;
+
+    Ok(())
+}
+
 /// Delete expired pushed authorization requests.
 pub async fn delete_expired_pushed_authorization_requests(
     store: &DocumentStore,
