@@ -86,6 +86,17 @@ pub enum ServiceError {
         max_age: Option<u64>,
     },
 
+    /// OCC version-conflict signal.
+    ///
+    /// Returned by transactional operations when `compare_and_update` returns
+    /// `Ok(false)` — meaning another writer already bumped the owning document's
+    /// version between our read and our commit.  This is the **only** `ServiceError`
+    /// variant that `with_dsql_retry!` will re-run the enclosing async block for;
+    /// business-logic 409s (e.g. `max_secrets_reached`, `last_secret`) are
+    /// distinct variants and are **not** retried.
+    #[error("OCC version conflict; retry the transaction")]
+    OccConflict,
+
     /// Database error.
     #[error("database error: {0}")]
     Database(#[from] sqlx::Error),
@@ -98,6 +109,17 @@ pub enum ServiceError {
 impl From<anyhow::Error> for ServiceError {
     fn from(err: anyhow::Error) -> Self {
         Self::Internal(err.to_string())
+    }
+}
+
+impl crate::db::pool::RetryableError for ServiceError {
+    /// Only `OccConflict` triggers a retry.
+    ///
+    /// Business-logic errors (max_secrets_reached, last_secret, last_key, …)
+    /// use dedicated `ServiceError::Api` or `ServiceError::NotFound` variants and
+    /// must propagate immediately — retrying them would loop forever.
+    fn is_retryable(&self) -> bool {
+        matches!(self, Self::OccConflict)
     }
 }
 
@@ -485,7 +507,7 @@ impl ServiceError {
                 )
                     .into_response();
             }
-            Self::Database(_) | Self::Internal(_) => (
+            Self::Database(_) | Self::Internal(_) | Self::OccConflict => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "internal_error",
                 "Internal error".to_string(),

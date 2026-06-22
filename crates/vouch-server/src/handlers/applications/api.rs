@@ -19,6 +19,7 @@ use axum::{
 use axum_extra::extract::cookie::CookieJar;
 use std::sync::Arc;
 
+use super::generate_client_secret;
 use super::types::{
     AddSecretRequest, AddSecretResponse, ApplicationResponse, CreateApplicationRequest,
     CreateApplicationResponse, ListApplicationsResponse, ListSecretsResponse, SecretInfo,
@@ -28,7 +29,6 @@ use super::validate::{
     CreateAppInput, UpdateAppInput, validate_create_application, validate_update_fapi,
     validate_update_format,
 };
-use super::{MAX_ACTIVE_SECRETS, generate_client_secret};
 use crate::handlers::extractors::OptionalClientCert;
 use crate::handlers::hash_token;
 use crate::handlers::session::extract_resource_token;
@@ -74,10 +74,6 @@ pub(crate) async fn list_applications_api(
 
 /// Create a new application (API).
 /// POST /api/v1/applications
-#[expect(
-    clippy::too_many_lines,
-    reason = "dominated by the exhaustive CreateOAuthClientParams literal"
-)]
 pub(crate) async fn create_application_api(
     method: Method,
     uri: OriginalUri,
@@ -230,15 +226,7 @@ pub(crate) async fn create_application_api(
             Some("Initial secret"),
             None,
         )
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to create client secret: {e}");
-            ServiceError::api(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "db_error",
-                "Internal database error",
-            )
-        })?;
+        .await?;
 
         Some(secret)
     } else {
@@ -666,30 +654,13 @@ pub(crate) async fn add_secret_api(
         ));
     }
 
-    let now = jiff::Timestamp::now();
-    let secrets = db::get_oauth_client_secrets(&state.store, &app_id)
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to get secrets: {e}");
-            ServiceError::api(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "db_error",
-                "Internal database error",
-            )
-        })?;
-
-    let active_count = secrets.iter().filter(|s| s.is_valid(&now)).count();
-    if active_count >= MAX_ACTIVE_SECRETS {
-        return Err(ServiceError::api(
-            StatusCode::CONFLICT,
-            "max_secrets_reached",
-            "Maximum of 2 active secrets allowed",
-        ));
-    }
-
     let secret = generate_client_secret();
     let secret_hash = hash_token(&secret);
 
+    // The cap guard (≤ MAX_ACTIVE_SECRETS) is enforced inside
+    // create_oauth_client_secret via an OCC-guarded transaction — the
+    // pre-flight count that was here has been dropped because the in-tx guard
+    // is authoritative and works correctly under concurrent adds on all backends.
     let record = db::create_oauth_client_secret(
         &state.store,
         &app_id,
@@ -697,15 +668,7 @@ pub(crate) async fn add_secret_api(
         req.description.as_deref(),
         None,
     )
-    .await
-    .map_err(|e| {
-        tracing::error!("Failed to create secret: {e}");
-        ServiceError::api(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "db_error",
-            "Internal database error",
-        )
-    })?;
+    .await?;
 
     if let Err(e) = db::record_oauth_event(
         &state.audit,
@@ -901,16 +864,10 @@ pub(crate) async fn delete_secret_api(
         ));
     }
 
-    db::revoke_oauth_client_secret(&state.store, &secret_id)
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to revoke secret: {e}");
-            ServiceError::api(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "db_error",
-                "Internal database error",
-            )
-        })?;
+    // The floor guard (≥1 active) is enforced atomically inside
+    // revoke_oauth_client_secret via an OCC-guarded transaction.  The pre-flight
+    // count above remains as a fast-path for the common non-concurrent case.
+    db::revoke_oauth_client_secret(&state.store, &secret_id, &app_id).await?;
 
     if let Err(e) = db::record_oauth_event(
         &state.audit,
