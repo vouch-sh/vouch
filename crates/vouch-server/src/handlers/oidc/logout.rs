@@ -483,11 +483,11 @@ async fn clear_user_session(
 )]
 mod tests {
     use super::*;
-    use crate::db::CreateOAuthClientParams;
     use crate::services::oidc::token::IdTokenClaims;
     use crate::test_utils::{
-        create_test_authenticator, create_test_session, create_test_user, http_get, http_post_form,
-        test_app, test_app_state, test_app_state_with_rsa_key,
+        TestClientSpec, create_test_authenticator, create_test_client, create_test_session,
+        create_test_user, http_get, http_post_form, test_app, test_app_state,
+        test_app_state_with_rsa_key,
     };
 
     /// Build a minimal `IdTokenClaims` for signing in tests.
@@ -665,48 +665,17 @@ mod tests {
 
         // Create an OAuth client with a registered post_logout_redirect_uri.
         let post_logout_uri = "https://rp.example.com/logged-out";
-        let client_record = crate::db::create_oauth_client(
+        let client = create_test_client(
             &state.store,
-            &CreateOAuthClientParams {
-                user_id: Some(&user.id),
-                name: "Logout Test App",
-                description: None,
-                application_type: crate::db::OAuthClientType::Web,
-                redirect_uris: &["https://rp.example.com/callback".to_string()],
-                access_scope: crate::db::AccessScope::Personal,
-                org_id: None,
-                resource_uris: &[],
-                token_endpoint_auth_method: None,
-                jwks: None,
-                jwks_uri: None,
-                fapi_profile: None,
-                dpop_bound_access_tokens: None,
-                grant_types: None,
-                response_types: None,
-                software_id: None,
-                software_version: None,
-                registration_source: crate::db::RegistrationSource::Manual,
-                registration_access_token_hash: None,
-                registration_metadata: None,
-                id_token_signed_response_alg: crate::db::JwsAlgorithm::Rs256,
-                tls_client_auth_subject_dn: None,
-                tls_client_auth_san_dns: None,
-                tls_client_auth_san_uri: None,
-                tls_client_auth_san_ip: None,
-                tls_client_auth_san_email: None,
-                tls_client_certificate_bound_access_tokens: None,
-                authorization_signed_response_alg: None,
-                introspection_signed_response_alg: None,
-                request_object_signing_alg: None,
-                require_signed_request_object: None,
-                userinfo_signed_response_alg: None,
-                request_uris: None,
-                post_logout_redirect_uris: Some(vec![post_logout_uri.to_string()]),
+            &user.id,
+            TestClientSpec {
+                name: "Logout Test App".to_string(),
+                post_logout_redirect_uris: vec![post_logout_uri.to_string()],
+                ..Default::default()
             },
         )
-        .await
-        .unwrap();
-        let (_, client_id) = client_record;
+        .await;
+        let client_id = client.client_id;
 
         let hint = make_hint(&state, &client_id).await;
         let form_body = format!(
@@ -742,50 +711,20 @@ mod tests {
         let session_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
 
         let post_logout_uri = "https://rp.example.com/logged-out";
-        let (client_oid, client_id) = crate::db::create_oauth_client(
+        let client = create_test_client(
             &state.store,
-            &CreateOAuthClientParams {
-                user_id: Some(&user.id),
-                name: "Inactive Logout App",
-                description: None,
-                application_type: crate::db::OAuthClientType::Web,
-                redirect_uris: &["https://rp.example.com/callback".to_string()],
-                access_scope: crate::db::AccessScope::Personal,
-                org_id: None,
-                resource_uris: &[],
-                token_endpoint_auth_method: None,
-                jwks: None,
-                jwks_uri: None,
-                fapi_profile: None,
-                dpop_bound_access_tokens: None,
-                grant_types: None,
-                response_types: None,
-                software_id: None,
-                software_version: None,
-                registration_source: crate::db::RegistrationSource::Manual,
-                registration_access_token_hash: None,
-                registration_metadata: None,
-                id_token_signed_response_alg: crate::db::JwsAlgorithm::Rs256,
-                tls_client_auth_subject_dn: None,
-                tls_client_auth_san_dns: None,
-                tls_client_auth_san_uri: None,
-                tls_client_auth_san_ip: None,
-                tls_client_auth_san_email: None,
-                tls_client_certificate_bound_access_tokens: None,
-                authorization_signed_response_alg: None,
-                introspection_signed_response_alg: None,
-                request_object_signing_alg: None,
-                require_signed_request_object: None,
-                userinfo_signed_response_alg: None,
-                request_uris: None,
-                post_logout_redirect_uris: Some(vec![post_logout_uri.to_string()]),
+            &user.id,
+            TestClientSpec {
+                name: "Inactive Logout App".to_string(),
+                post_logout_redirect_uris: vec![post_logout_uri.to_string()],
+                ..Default::default()
             },
         )
-        .await
-        .unwrap();
+        .await;
+        let client_id = client.client_id;
 
         // Deactivate the client after creation.
-        crate::db::set_oauth_client_active(&state.store, &client_oid.id, false)
+        crate::db::set_oauth_client_active(&state.store, &client.app_id, false)
             .await
             .unwrap();
 

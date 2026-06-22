@@ -1233,6 +1233,8 @@ pub struct TestClientSpec {
     pub request_object_signing_alg: Option<crate::db::JwsAlgorithm>,
     /// Require a signed request object (JAR). Default: `None`.
     pub require_signed_request_object: Option<bool>,
+    /// Registered post-logout redirect URIs (RP-Initiated Logout). Default: empty.
+    pub post_logout_redirect_uris: Vec<String>,
 }
 
 impl Default for TestClientSpec {
@@ -1258,6 +1260,7 @@ impl Default for TestClientSpec {
             with_secret: true,
             request_object_signing_alg: Option::None,
             require_signed_request_object: Option::None,
+            post_logout_redirect_uris: vec![],
         }
     }
 }
@@ -1348,7 +1351,11 @@ pub async fn create_test_client(
             require_signed_request_object: spec.require_signed_request_object,
             userinfo_signed_response_alg: spec.userinfo_signed_response_alg,
             request_uris: Option::None,
-            post_logout_redirect_uris: Option::None,
+            post_logout_redirect_uris: if spec.post_logout_redirect_uris.is_empty() {
+                Option::None
+            } else {
+                Some(spec.post_logout_redirect_uris.clone())
+            },
         },
     )
     .await
