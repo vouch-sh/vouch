@@ -555,3 +555,151 @@ async fn test_rfc7592_put_rejects_invalid_userinfo_signing_alg() {
         "Invalid userinfo_signed_response_alg (HS256) in PUT must return 400"
     );
 }
+
+// =========================================================================
+// PUT /oauth/register/:client_id — contacts and URI validation
+//
+// The create path (POST /oauth/register) runs validate_contacts_and_uris.
+// The update path (PUT /oauth/register/:client_id) must apply the same
+// rules: non-HTTPS logo_uri and non-@ contacts are rejected at update time,
+// not silently stored.
+// =========================================================================
+
+/// RFC 7592 PUT with an invalid `logo_uri` (HTTP, not HTTPS) must be rejected
+/// with 400 `invalid_client_metadata`, matching the create-path behaviour.
+#[tokio::test]
+async fn test_rfc7592_put_rejects_invalid_logo_uri() {
+    let (app, _state) = test_app().await;
+    let (client_id, token) = register_dynamic_client(&app).await;
+
+    let update_body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "logo_uri": "http://insecure.example.com/logo.png"
+    });
+
+    let (status, body) = http_request(
+        &app,
+        "PUT",
+        &format!("/oauth/register/{client_id}"),
+        Some(update_body.to_string()),
+        &[
+            ("Authorization", &format!("Bearer {token}")),
+            ("Content-Type", "application/json"),
+        ],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "Non-HTTPS logo_uri in PUT must return 400, got: {body}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(
+        json["error"], "invalid_client_metadata",
+        "logo_uri rejection must use invalid_client_metadata: {body}"
+    );
+}
+
+/// RFC 7592 PUT with a contact that lacks an `@` sign must be rejected with
+/// 400 `invalid_client_metadata`, matching the create-path behaviour.
+#[tokio::test]
+async fn test_rfc7592_put_rejects_invalid_contact() {
+    let (app, _state) = test_app().await;
+    let (client_id, token) = register_dynamic_client(&app).await;
+
+    let update_body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "contacts": ["not-an-email-address"]
+    });
+
+    let (status, body) = http_request(
+        &app,
+        "PUT",
+        &format!("/oauth/register/{client_id}"),
+        Some(update_body.to_string()),
+        &[
+            ("Authorization", &format!("Bearer {token}")),
+            ("Content-Type", "application/json"),
+        ],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "Contact without @ in PUT must return 400, got: {body}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(
+        json["error"], "invalid_client_metadata",
+        "contact rejection must use invalid_client_metadata: {body}"
+    );
+}
+
+/// RFC 7592 PUT with a valid `logo_uri` (HTTPS) must succeed.
+/// Confirms the validation is not over-restrictive.
+#[tokio::test]
+async fn test_rfc7592_put_accepts_valid_logo_uri() {
+    let (app, _state) = test_app().await;
+    let (client_id, token) = register_dynamic_client(&app).await;
+
+    let update_body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "logo_uri": "https://example.com/logo.png"
+    });
+
+    let (status, body) = http_request(
+        &app,
+        "PUT",
+        &format!("/oauth/register/{client_id}"),
+        Some(update_body.to_string()),
+        &[
+            ("Authorization", &format!("Bearer {token}")),
+            ("Content-Type", "application/json"),
+        ],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "Valid HTTPS logo_uri in PUT must succeed: {body}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(
+        json["logo_uri"].as_str(),
+        Some("https://example.com/logo.png"),
+        "logo_uri must be echoed back in PUT response"
+    );
+}
+
+/// RFC 7592 PUT with valid contacts must succeed.
+#[tokio::test]
+async fn test_rfc7592_put_accepts_valid_contacts() {
+    let (app, _state) = test_app().await;
+    let (client_id, token) = register_dynamic_client(&app).await;
+
+    let update_body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "contacts": ["admin@example.com"]
+    });
+
+    let (status, body) = http_request(
+        &app,
+        "PUT",
+        &format!("/oauth/register/{client_id}"),
+        Some(update_body.to_string()),
+        &[
+            ("Authorization", &format!("Bearer {token}")),
+            ("Content-Type", "application/json"),
+        ],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "Valid contact in PUT must succeed: {body}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let contacts = json["contacts"].as_array().expect("contacts must be array");
+    assert_eq!(contacts.len(), 1, "PUT response must echo the contact list");
+    assert_eq!(contacts[0].as_str(), Some("admin@example.com"));
+}

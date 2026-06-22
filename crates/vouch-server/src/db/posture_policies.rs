@@ -180,40 +180,70 @@ pub struct UpdateCustomPolicyParams<'a> {
 }
 
 /// Update a custom posture policy.
+///
+/// Uses optimistic concurrency (`store.modify`) so concurrent mutations to the
+/// same policy (e.g. a concurrent activation toggle) do not silently overwrite
+/// each other. The org-scope check is re-evaluated inside the closure on each
+/// OCC retry. Re-fetches the document after the write to capture updated timestamps.
 pub async fn update_custom_policy(
     store: &DocumentStore,
     id: &str,
     org_id: &str,
     params: UpdateCustomPolicyParams<'_>,
 ) -> Result<Option<CustomPosturePolicy>> {
-    let doc = store.get::<CustomPosturePolicyDoc>(id).await?;
-    let Some(doc) = doc else {
+    // Pre-check: return not-found quickly without entering the modify loop
+    // if the policy is absent or belongs to a different org.
+    let Some(doc) = store.get::<CustomPosturePolicyDoc>(id).await? else {
         return Ok(None);
     };
-
-    // Verify org ownership
     if doc.data.org_id != org_id {
         return Ok(None);
     }
 
-    let updated = CustomPosturePolicyDoc {
-        name: params.name.map(String::from).unwrap_or(doc.data.name),
-        description: match params.description {
-            FieldUpdate::Keep => doc.data.description,
-            FieldUpdate::Clear => None,
-            FieldUpdate::Set(d) => Some(d.to_string()),
-        },
-        cel_expression: params
-            .cel_expression
-            .map(String::from)
-            .unwrap_or(doc.data.cel_expression),
-        active: params.active.unwrap_or(doc.data.active),
-        org_id: doc.data.org_id,
+    // Owned copies for the Fn closure (params borrows from caller stack).
+    let name_owned = params.name.map(String::from);
+    let description_owned = match params.description {
+        FieldUpdate::Keep => None,
+        FieldUpdate::Clear => Some(None::<String>),
+        FieldUpdate::Set(d) => Some(Some(d.to_string())),
     };
+    let cel_owned = params.cel_expression.map(String::from);
+    let active_owned = params.active;
 
-    store.update(id, &updated).await?;
+    let applied = std::sync::atomic::AtomicBool::new(false);
+    let found = store
+        .modify::<CustomPosturePolicyDoc, _>(id, |data| {
+            // Reset at the top of every attempt: if an earlier OCC retry set
+            // this flag but then lost the version race, the closure runs again
+            // and org ownership must be re-evaluated from scratch.
+            applied.store(false, std::sync::atomic::Ordering::Relaxed);
+            // Re-check org ownership inside the closure so a concurrent
+            // org migration cannot smuggle a cross-org write through a version win.
+            if data.org_id != org_id {
+                return;
+            }
+            if let Some(ref n) = name_owned {
+                data.name = n.clone();
+            }
+            // description is a 3-way FieldUpdate: None means Keep (no-op).
+            if let Some(ref desc_opt) = description_owned {
+                data.description = desc_opt.clone();
+            }
+            if let Some(ref cel) = cel_owned {
+                data.cel_expression = cel.clone();
+            }
+            if let Some(active) = active_owned {
+                data.active = active;
+            }
+            applied.store(true, std::sync::atomic::Ordering::Relaxed);
+        })
+        .await?;
 
-    // Re-fetch to get updated timestamps
+    if !found || !applied.load(std::sync::atomic::Ordering::Relaxed) {
+        return Ok(None);
+    }
+
+    // Re-fetch to get updated timestamps.
     let refreshed = store.get::<CustomPosturePolicyDoc>(id).await?;
     Ok(refreshed.map(CustomPosturePolicy::from))
 }

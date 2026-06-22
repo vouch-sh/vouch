@@ -254,17 +254,18 @@ pub async fn delete_authenticator_in_tx(
 }
 
 /// Update an authenticator's name.
+///
+/// Uses optimistic concurrency (`store.modify`) so a concurrent counter update
+/// cannot overwrite the name change, and vice versa.
 pub async fn update_authenticator_name(
     store: &DocumentStore,
     authenticator_id: &str,
     name: &str,
 ) -> Result<bool> {
-    if let Some(doc) = store.get::<AuthenticatorDoc>(authenticator_id).await? {
-        let mut data = doc.data;
-        data.name = name.to_string();
-        store.update(authenticator_id, &data).await?;
-        Ok(true)
-    } else {
-        Ok(false)
-    }
+    let name_owned = name.to_string();
+    store
+        .modify::<AuthenticatorDoc, _>(authenticator_id, |data| {
+            data.name = name_owned.clone();
+        })
+        .await
 }

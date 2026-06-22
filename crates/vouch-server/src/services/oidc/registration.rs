@@ -1120,6 +1120,11 @@ pub async fn update_client_configuration(
     // Validate request_uris (same rules as initial registration).
     let validated_request_uris = validate_request_uris(mutable_request.request_uris.as_deref())?;
 
+    // Validate contacts and URI fields (same rules as initial registration via
+    // register_client). Previously absent from the update path — RFC 7592
+    // clients could smuggle an invalid logo_uri or non-@ contact on PUT.
+    validate_contacts_and_uris(&mutable_request)?;
+
     // Rotate the registration access token per RFC 7592 Section 2.2
     let new_reg_token = generate_registration_token()?;
     let new_reg_token_hash = hash_token(&new_reg_token);

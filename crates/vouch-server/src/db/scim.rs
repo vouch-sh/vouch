@@ -516,6 +516,10 @@ pub async fn update_scim_user(
     let applied = std::sync::atomic::AtomicBool::new(false);
     let found = store
         .modify::<UserDoc, _>(user_id, |data| {
+            // Reset at the top of every attempt: if an earlier OCC retry set
+            // this flag but then lost the version race, the closure runs again
+            // and org ownership must be re-evaluated from scratch.
+            applied.store(false, std::sync::atomic::Ordering::Relaxed);
             if data.org_id.as_deref() == Some(org_id) {
                 data.name = name.map(String::from);
                 data.external_id = external_id.map(String::from);
@@ -853,8 +857,13 @@ fn apply_scim_group_filter(
 
 /// Update a SCIM group, scoped to the caller's org.
 ///
-/// Returns `Ok(false)` if the group doesn't exist OR belongs to a
-/// different org.
+/// Returns `Ok(false)` if the group doesn't exist, belongs to a different org,
+/// or if a concurrent org-ownership change races with the modify loop and causes
+/// the mutation to be skipped. `Ok(true)` on a successful update.
+///
+/// Uses optimistic concurrency (`store.modify`) so concurrent field mutations
+/// do not silently overwrite each other. The org-scope check is re-evaluated
+/// inside the closure on each OCC retry.
 pub async fn update_scim_group(
     store: &DocumentStore,
     id: &str,
@@ -862,21 +871,42 @@ pub async fn update_scim_group(
     display_name: Option<&str>,
     external_id: Option<&str>,
 ) -> Result<bool> {
+    // Pre-check: return not-found quickly without entering the modify loop
+    // if the group is absent or belongs to a different org.
     let Some(doc) = store.get::<ScimGroupDoc>(id).await? else {
         return Ok(false);
     };
     if doc.data.org_id != org_id {
         return Ok(false);
     }
-    let mut data = doc.data;
-    if let Some(name) = display_name {
-        data.display_name = name.to_string();
-    }
-    if let Some(ext_id) = external_id {
-        data.external_id = Some(ext_id.to_string());
-    }
-    store.update(id, &data).await?;
-    Ok(true)
+
+    // Owned copies for the Fn closure.
+    let display_name_owned = display_name.map(String::from);
+    let external_id_owned = external_id.map(String::from);
+
+    let applied = std::sync::atomic::AtomicBool::new(false);
+    let found = store
+        .modify::<ScimGroupDoc, _>(id, |data| {
+            // Reset at the top of every attempt: if an earlier OCC retry set
+            // this flag but then lost the version race, the closure runs again
+            // and org ownership must be re-evaluated from scratch.
+            applied.store(false, std::sync::atomic::Ordering::Relaxed);
+            // Re-check org ownership inside the closure so a concurrent
+            // org migration cannot smuggle a cross-org write through a version win.
+            if data.org_id != org_id {
+                return;
+            }
+            if let Some(ref name) = display_name_owned {
+                data.display_name = name.clone();
+            }
+            if let Some(ref ext_id) = external_id_owned {
+                data.external_id = Some(ext_id.clone());
+            }
+            applied.store(true, std::sync::atomic::Ordering::Relaxed);
+        })
+        .await?;
+
+    Ok(found && applied.load(std::sync::atomic::Ordering::Relaxed))
 }
 
 /// Delete a SCIM group atomically, scoped to the caller's org.
