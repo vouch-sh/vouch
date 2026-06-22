@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+
+{% block title %}{{ self.tr("logout-confirm-title") }}{% endblock %}
+
+{% block content %}
+<div class="flex items-center justify-center flex-1 p-5">
+    <div class="card max-w-md w-full text-center">
+        <svg class="w-12 h-12 text-vouch-accent mx-auto mb-4" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M15.75 9V5.25A2.25 2.25 0 0 0 13.5 3h-6a2.25 2.25 0 0 0-2.25 2.25v13.5A2.25 2.25 0 0 0 7.5 21h6a2.25 2.25 0 0 0 2.25-2.25V15m3 0 3-3m0 0-3-3m3 3H9" />
+        </svg>
+        <h1 class="text-2xl font-bold text-gray-200 mb-2">{{ self.tr("logout-confirm-heading") }}</h1>
+        <p class="text-gray-400 mb-6">{{ self.tr("logout-confirm-body") }}</p>
+
+        <form method="post" action="/oauth/logout">
+            {% if let Some(hint) = id_token_hint %}
+            <input type="hidden" name="id_token_hint" value="{{ hint }}">
+            {% endif %}
+            {% if let Some(uri) = post_logout_redirect_uri %}
+            <input type="hidden" name="post_logout_redirect_uri" value="{{ uri }}">
+            {% endif %}
+            {% if let Some(client) = client_id %}
+            <input type="hidden" name="client_id" value="{{ client }}">
+            {% endif %}
+            {% if let Some(s) = state %}
+            <input type="hidden" name="state" value="{{ s }}">
+            {% endif %}
+            {% if let Some(locales) = ui_locales %}
+            <input type="hidden" name="ui_locales" value="{{ locales }}">
+            {% endif %}
+            <div class="flex gap-3 justify-center">
+                <a href="/" class="btn-secondary">{{ self.tr("logout-confirm-cancel") }}</a>
+                <button type="submit" class="btn-primary">{{ self.tr("logout-confirm-btn") }}</button>
+            </div>
+        </form>
+    </div>
+</div>
+{% endblock %}

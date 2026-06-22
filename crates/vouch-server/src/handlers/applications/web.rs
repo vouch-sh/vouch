@@ -98,6 +98,10 @@ pub(crate) async fn create_application_page(
 
 /// Create a new application.
 /// POST /applications/new
+#[expect(
+    clippy::too_many_lines,
+    reason = "single-pass form creation: parse, validate, auth-check, create"
+)]
 pub(crate) async fn create_application_form(
     State(state): State<Arc<AppState>>,
     jar: CookieJar,
@@ -112,12 +116,26 @@ pub(crate) async fn create_application_form(
     // Parse textarea inputs, then run the shared format validation
     let redirect_uris = parse_redirect_uris(&form.redirect_uris);
     let resource_uris = parse_resource_uris(form.resource_uris.as_deref());
+    let post_logout_redirect_uris_raw = parse_redirect_uris(
+        form.post_logout_redirect_uris
+            .as_deref()
+            .unwrap_or_default(),
+    );
+    // Pass None when the textarea was empty (no post-logout URIs wanted); validation
+    // happens inside validate_create_application via the AppValidationError enum.
+    let post_logout_redirect_uris_input: Option<&[String]> =
+        if post_logout_redirect_uris_raw.is_empty() {
+            None
+        } else {
+            Some(&post_logout_redirect_uris_raw)
+        };
 
     let validated = match validate_create_application(CreateAppInput {
         name: &form.name,
         application_type: &form.application_type,
         redirect_uris: &redirect_uris,
         resource_uris: &resource_uris,
+        post_logout_redirect_uris: post_logout_redirect_uris_input,
         fapi_profile: form.fapi_profile.as_deref(),
         jwks: form.jwks.as_deref(),
         jwks_uri: form.jwks_uri.as_deref(),
@@ -204,6 +222,11 @@ pub(crate) async fn create_application_form(
             require_signed_request_object: None,
             userinfo_signed_response_alg: None,
             request_uris: None,
+            post_logout_redirect_uris: if post_logout_redirect_uris_raw.is_empty() {
+                None
+            } else {
+                Some(post_logout_redirect_uris_raw.clone())
+            },
         },
     )
     .await
@@ -412,13 +435,22 @@ pub(crate) async fn update_application_form(
         None
     };
 
-    // Parse textarea inputs, then run the shared format validation
+    // Parse textarea inputs, then run the shared format validation.
+    // The web form always submits the post_logout_redirect_uris field, so
+    // empty textarea = explicitly clear (Some(&[])), not absent (None).
     let redirect_uris = parse_redirect_uris(&form.redirect_uris);
     let resource_uris = parse_resource_uris(form.resource_uris.as_deref());
+    let post_logout_redirect_uris_raw = parse_redirect_uris(
+        form.post_logout_redirect_uris
+            .as_deref()
+            .unwrap_or_default(),
+    );
 
     let validated = match validate_update_format(UpdateAppInput {
         redirect_uris: Some(&redirect_uris),
         resource_uris: Some(&resource_uris),
+        // Always Some: empty vec = explicitly clear; validation rejects invalid URIs.
+        post_logout_redirect_uris: Some(&post_logout_redirect_uris_raw),
         fapi_profile: form.fapi_profile.as_deref(),
         jwks: form.jwks.as_deref(),
         jwks_uri: form.jwks_uri.as_deref(),
@@ -490,6 +522,7 @@ pub(crate) async fn update_application_form(
             jwks_uri: effective_jwks_uri,
             fapi_profile,
             dpop_bound_access_tokens: dpop_bound,
+            post_logout_redirect_uris: validated.post_logout_redirect_uris.map(<[String]>::to_vec),
         },
     )
     .await

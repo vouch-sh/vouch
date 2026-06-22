@@ -74,6 +74,10 @@ pub(crate) async fn list_applications_api(
 
 /// Create a new application (API).
 /// POST /api/v1/applications
+#[expect(
+    clippy::too_many_lines,
+    reason = "single-pass RFC 7591 application creation: format-validate, auth, create"
+)]
 pub(crate) async fn create_application_api(
     method: Method,
     uri: OriginalUri,
@@ -86,12 +90,14 @@ pub(crate) async fn create_application_api(
     // ── Pure format validation first — no DB cost for malformed requests ──
     // RFC 8707: Resource URIs default to empty if not provided.
     let resource_uris = req.resource_uris.as_deref().unwrap_or(&[]);
+    let post_logout_redirect_uris_raw = req.post_logout_redirect_uris.as_deref();
 
     let validated = validate_create_application(CreateAppInput {
         name: &req.name,
         application_type: &req.application_type,
         redirect_uris: &req.redirect_uris,
         resource_uris,
+        post_logout_redirect_uris: post_logout_redirect_uris_raw,
         fapi_profile: req.fapi_profile.as_deref(),
         jwks: req.jwks.as_deref(),
         jwks_uri: req.jwks_uri.as_deref(),
@@ -202,6 +208,11 @@ pub(crate) async fn create_application_api(
             require_signed_request_object: None,
             userinfo_signed_response_alg: None,
             request_uris: None,
+            post_logout_redirect_uris: req
+                .post_logout_redirect_uris
+                .as_ref()
+                .filter(|v| !v.is_empty())
+                .cloned(),
         },
     )
     .await
@@ -321,9 +332,11 @@ pub(crate) async fn update_application_api(
     Json(req): Json<UpdateApplicationRequest>,
 ) -> Result<Json<ApplicationResponse>, ServiceError> {
     // ── Pure format validation first — no DB cost for malformed requests ──
+
     let validated = validate_update_format(UpdateAppInput {
         redirect_uris: req.redirect_uris.as_deref(),
         resource_uris: req.resource_uris.as_deref(),
+        post_logout_redirect_uris: req.post_logout_redirect_uris.as_deref(),
         fapi_profile: req.fapi_profile.as_deref(),
         jwks: req.jwks.as_deref(),
         jwks_uri: req.jwks_uri.as_deref(),
@@ -496,6 +509,7 @@ pub(crate) async fn update_application_api(
             jwks_uri: effective_jwks_uri,
             fapi_profile,
             dpop_bound_access_tokens: dpop_bound,
+            post_logout_redirect_uris: validated.post_logout_redirect_uris.map(<[String]>::to_vec),
         },
     )
     .await
@@ -2321,5 +2335,146 @@ mod tests {
         assert_eq!(status, StatusCode::OK, "body: {body}");
         let json: serde_json::Value = serde_json::from_str(&body).expect("valid json");
         assert_eq!(json["name"].as_str().unwrap(), "Test App");
+    }
+
+    // ================================================================
+    // post_logout_redirect_uris — applications JSON API
+    // ================================================================
+
+    #[tokio::test]
+    async fn test_create_application_with_post_logout_redirect_uris() {
+        // POST /api/v1/applications with post_logout_redirect_uris should store them.
+        // The create response (CreateApplicationResponse) does not echo the field, so
+        // we verify storage via a subsequent GET /api/v1/applications/:id.
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "post-logout-create@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let auth = bearer(&token);
+
+        let payload = serde_json::json!({
+            "name": "Logout Test App",
+            "application_type": "web",
+            "redirect_uris": ["https://example.com/callback"],
+            "post_logout_redirect_uris": ["https://example.com/logged-out"]
+        });
+
+        let (status, body) = http_request(
+            &app,
+            "POST",
+            "/api/v1/applications",
+            Some(payload.to_string()),
+            &[
+                ("Content-Type", "application/json"),
+                ("Authorization", &auth),
+            ],
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK, "body: {body}");
+        let create_json: serde_json::Value = serde_json::from_str(&body).expect("valid json");
+        let app_id = create_json["id"].as_str().expect("id in create response");
+
+        // Verify the stored post_logout_redirect_uris via GET.
+        let (get_status, get_body) = http_request(
+            &app,
+            "GET",
+            &format!("/api/v1/applications/{app_id}"),
+            None,
+            &[("Authorization", &auth)],
+        )
+        .await;
+        assert_eq!(get_status, StatusCode::OK, "GET body: {get_body}");
+        let get_json: serde_json::Value = serde_json::from_str(&get_body).expect("valid json");
+        let post_logout = get_json["post_logout_redirect_uris"]
+            .as_array()
+            .expect("post_logout_redirect_uris must be present in GET response");
+        assert_eq!(
+            post_logout.len(),
+            1,
+            "Expected 1 post_logout_redirect_uri, got {post_logout:?}"
+        );
+        assert_eq!(
+            post_logout[0].as_str().unwrap(),
+            "https://example.com/logged-out"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_create_application_rejects_invalid_post_logout_redirect_uri() {
+        // A post_logout_redirect_uri with ftp:// scheme must be rejected.
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "post-logout-invalid-create@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let auth = bearer(&token);
+
+        let payload = serde_json::json!({
+            "name": "Bad Logout App",
+            "application_type": "web",
+            "redirect_uris": ["https://example.com/callback"],
+            "post_logout_redirect_uris": ["ftp://example.com/logged-out"]
+        });
+
+        let (status, body) = http_request(
+            &app,
+            "POST",
+            "/api/v1/applications",
+            Some(payload.to_string()),
+            &[
+                ("Content-Type", "application/json"),
+                ("Authorization", &auth),
+            ],
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+        let json: serde_json::Value = serde_json::from_str(&body).expect("valid json");
+        assert_eq!(
+            json["code"], "invalid_post_logout_redirect_uris",
+            "body: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_update_application_post_logout_redirect_uris_roundtrip() {
+        // PATCH /api/v1/applications/:id with post_logout_redirect_uris should store and return them.
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "post-logout-update@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let auth = bearer(&token);
+        let client = create_test_oauth_client(&state.store, &user.id).await;
+
+        let payload = serde_json::json!({
+            "post_logout_redirect_uris": ["https://example.com/logged-out"]
+        });
+
+        let (status, body) = http_request(
+            &app,
+            "PATCH",
+            &format!("/api/v1/applications/{}", client.app_id),
+            Some(payload.to_string()),
+            &[
+                ("Content-Type", "application/json"),
+                ("Authorization", &auth),
+            ],
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK, "body: {body}");
+        let json: serde_json::Value = serde_json::from_str(&body).expect("valid json");
+        let post_logout = json["post_logout_redirect_uris"]
+            .as_array()
+            .expect("post_logout_redirect_uris must be present after PATCH");
+        assert_eq!(
+            post_logout.len(),
+            1,
+            "Expected 1 post_logout_redirect_uri, got {post_logout:?}"
+        );
+        assert_eq!(
+            post_logout[0].as_str().unwrap(),
+            "https://example.com/logged-out"
+        );
     }
 }

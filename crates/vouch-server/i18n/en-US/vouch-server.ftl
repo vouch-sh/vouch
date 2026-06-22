@@ -143,6 +143,8 @@ apps-create-redirect-label = Redirect URIs
 apps-create-redirect-help = { -one-uri-per-line } Where users are redirected after authentication.
 apps-create-resource-label = Resource URIs (optional)
 apps-create-resource-help = { -one-uri-per-line } Target resource servers that will receive access tokens (RFC 8707). Leave empty to allow any resource.
+apps-create-postlogout-label = Post-Logout Redirect URIs (optional)
+apps-create-postlogout-help = { -one-uri-per-line } Where users are redirected after signing out (RP-Initiated Logout 1.0). Must be https:// or loopback http://, no fragment.
 apps-create-secprofile-label = Security Profile
 apps-create-secprofile-standard = Standard { -oauth }
 apps-create-secprofile-standard-desc = Standard { -oauth } with client secret authentication.
@@ -462,6 +464,7 @@ appcreate-js-jwks-json = { -jwks } must be valid JSON.
 appcreate-js-jwksuri-https = { -jwks } URI must use https://.
 appcreate-js-jwksuri-invalid = { -jwks } URI must be a valid https:// URL.
 appcreate-js-fapi-required = { -fapi } requires either a { -jwks } or { -jwks } URI.
+appcreate-js-postlogout-invalid = Invalid post-logout redirect URI(s): { $uris }. Each must be a valid https:// or loopback http:// URL without a fragment.
 
 ## Authenticated header navigation (macros/auth.html)
 nav-keys = Keys
@@ -638,3 +641,15 @@ footer-terms = Terms
 footer-status = Status
 footer-version = v{ $version }
 footer-copyright = Copyright { $year }
+
+## RP-Initiated Logout 1.0 — confirmation page (logout_confirm.html)
+logout-confirm-title = { -product } - Sign Out
+logout-confirm-heading = Sign out?
+logout-confirm-body = You are about to sign out of { -product }.
+logout-confirm-btn = Sign Out
+logout-confirm-cancel = Cancel
+
+## RP-Initiated Logout 1.0 — done page (logout_done.html)
+logout-done-title = { -product } - Signed Out
+logout-done-heading = You have been signed out.
+logout-done-body = Your session has ended. Close this tab or return to the application.

@@ -89,6 +89,16 @@ https://data.example.com"></textarea>
                 <div id="resource-uri-error" class="hidden mt-2 p-3 bg-vouch-error-bg border border-vouch-error/30 rounded-lg text-sm text-vouch-error"></div>
             </div>
 
+            <div>
+                <label for="post_logout_redirect_uris" class="block text-sm font-medium text-gray-300">{{ self.tr("apps-create-postlogout-label") }}</label>
+                <textarea name="post_logout_redirect_uris" id="post_logout_redirect_uris" rows="2"
+                    class="input-field mt-1 font-mono"
+                    placeholder="https://example.com/logged-out
+http://localhost:3000/logged-out"></textarea>
+                <p class="mt-1 text-sm text-gray-500">{{ self.tr("apps-create-postlogout-help") }}</p>
+                <div id="post-logout-redirect-uri-error" class="hidden mt-2 p-3 bg-vouch-error-bg border border-vouch-error/30 rounded-lg text-sm text-vouch-error"></div>
+            </div>
+
             <!-- Security Profile (shown only for confidential types: web, service) -->
             <div id="security-profile-section" class="hidden">
                 <label class="block text-sm font-medium text-gray-300 mb-2">{{ self.tr("apps-create-secprofile-label") }}</label>

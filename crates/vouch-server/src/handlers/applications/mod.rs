@@ -100,6 +100,57 @@ fn parse_resource_uris(input: Option<&str>) -> Vec<String> {
     }
 }
 
+/// Maximum number of post-logout redirect URIs an application may register.
+/// Matches the cap enforced during RFC 7591 dynamic registration.
+const MAX_POST_LOGOUT_REDIRECT_URIS: usize = 10;
+
+/// Validate that all post-logout redirect URIs are valid URLs with proper schemes.
+///
+/// Mirrors [`validate_redirect_uris`] rules (https or loopback http) and additionally
+/// rejects URIs that carry a fragment component, which would conflict with the
+/// redirect appended `state` parameter on the final redirect. Enforces a maximum
+/// of [`MAX_POST_LOGOUT_REDIRECT_URIS`] entries, matching the RFC 7591 cap.
+///
+/// Returns `Ok(())` if all URIs are valid, or `Err` with a list of invalid URIs.
+pub(crate) fn validate_post_logout_redirect_uris(uris: &[String]) -> Result<(), Vec<String>> {
+    if uris.len() > MAX_POST_LOGOUT_REDIRECT_URIS {
+        // Return a single-element error list describing the cap violation.
+        return Err(vec![format!(
+            "Too many post_logout_redirect_uris: maximum is {MAX_POST_LOGOUT_REDIRECT_URIS}"
+        )]);
+    }
+
+    let invalid: Vec<String> = uris
+        .iter()
+        .filter(|uri| {
+            match url::Url::parse(uri) {
+                Ok(parsed) => {
+                    // Reject fragment components.
+                    if parsed.fragment().is_some() {
+                        return true;
+                    }
+                    match parsed.scheme() {
+                        "https" => false,
+                        "http" => {
+                            let host = parsed.host_str().unwrap_or("");
+                            !matches!(host, "localhost" | "127.0.0.1" | "[::1]")
+                        }
+                        _ => true,
+                    }
+                }
+                Err(_) => true,
+            }
+        })
+        .cloned()
+        .collect();
+
+    if invalid.is_empty() {
+        Ok(())
+    } else {
+        Err(invalid)
+    }
+}
+
 /// Validate that all redirect URIs are valid URLs with proper schemes.
 ///
 /// Per RFC 8252 Section 7.3 and RFC 9700 Section 4.1.3:

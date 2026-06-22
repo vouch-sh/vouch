@@ -132,6 +132,11 @@ pub struct RegistrationRequest {
     ///
     /// Each URI must be HTTPS. When present, only these URLs are accepted as `request_uri`.
     pub request_uris: Option<Vec<String>>,
+    /// RP-Initiated Logout 1.0 Section 2: Registered post-logout redirect URIs.
+    ///
+    /// When present, only these URIs are accepted as `post_logout_redirect_uri` in
+    /// the end-session request. Absent means no redirect-back after logout.
+    pub post_logout_redirect_uris: Option<Vec<String>>,
 }
 
 impl RegistrationRequest {
@@ -248,6 +253,9 @@ pub struct RegistrationResponse {
     /// OIDC Core Section 6.2: Pre-registered request_uri values (echoed).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub request_uris: Option<Vec<String>>,
+    /// RP-Initiated Logout 1.0: Registered post-logout redirect URIs (echoed).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub post_logout_redirect_uris: Option<Vec<String>>,
 }
 
 // ============================================================================
@@ -451,6 +459,11 @@ pub async fn register_client(
     // 12b-2. Validate request_uris (OIDC Core Section 6.2).
     let validated_request_uris = validate_request_uris(request.request_uris.as_deref())?;
 
+    // 12b-3. Validate post_logout_redirect_uris (RP-Initiated Logout 1.0 Section 2).
+    let validated_post_logout_redirect_uris = validate_post_logout_redirect_uris_registration(
+        request.post_logout_redirect_uris.as_deref(),
+    )?;
+
     // 12d. Validate request_object_signing_alg (RFC 9101).
     let req_obj_alg: Option<JwsAlgorithm> = if let Some(ref s) = request.request_object_signing_alg
     {
@@ -535,6 +548,7 @@ pub async fn register_client(
             require_signed_request_object: if require_signed { Some(true) } else { None },
             userinfo_signed_response_alg: userinfo_alg,
             request_uris: validated_request_uris.clone(),
+            post_logout_redirect_uris: validated_post_logout_redirect_uris.clone(),
         },
     )
     .await
@@ -632,6 +646,7 @@ pub async fn register_client(
         require_signed_request_object: if require_signed { Some(true) } else { None },
         userinfo_signed_response_alg: userinfo_alg.map(|a| a.to_string()),
         request_uris: validated_request_uris,
+        post_logout_redirect_uris: validated_post_logout_redirect_uris,
     })
 }
 
@@ -731,6 +746,61 @@ fn validate_request_uris(uris: Option<&[String]>) -> Result<Option<Vec<String>>,
                 format!("request_uri '{uri}' must use HTTPS"),
             ));
         }
+    }
+    Ok(Some(uris.to_vec()))
+}
+
+/// Validate `post_logout_redirect_uris` for RFC 7591 registration.
+///
+/// Each URI must be a valid http or https URL without a fragment.
+/// HTTP is only allowed for loopback addresses. Max 10 entries.
+///
+/// Returns the validated list, or `None` if the field is absent or empty.
+fn validate_post_logout_redirect_uris_registration(
+    uris: Option<&[String]>,
+) -> Result<Option<Vec<String>>, ServiceError> {
+    let Some(uris) = uris else { return Ok(None) };
+    if uris.is_empty() {
+        return Ok(None);
+    }
+    const MAX_POST_LOGOUT_REDIRECT_URIS: usize = 10;
+    if uris.len() > MAX_POST_LOGOUT_REDIRECT_URIS {
+        return Err(ServiceError::oauth(
+            OAuthErrorCode::InvalidClientMetadata,
+            format!(
+                "Too many post_logout_redirect_uris: maximum is {MAX_POST_LOGOUT_REDIRECT_URIS}"
+            ),
+        ));
+    }
+    let invalid: Vec<&str> = uris
+        .iter()
+        .filter(|uri| {
+            let Ok(parsed) = url::Url::parse(uri) else {
+                return true;
+            };
+            if parsed.fragment().is_some() {
+                return true;
+            }
+            match parsed.scheme() {
+                "https" => false,
+                "http" => {
+                    let host = parsed.host_str().unwrap_or("");
+                    !matches!(host, "localhost" | "127.0.0.1" | "[::1]")
+                }
+                _ => true,
+            }
+        })
+        .map(String::as_str)
+        .collect();
+    if !invalid.is_empty() {
+        return Err(ServiceError::oauth(
+            OAuthErrorCode::InvalidClientMetadata,
+            format!(
+                "Invalid post_logout_redirect_uri(s): {}. Each URI must be https:// \
+                 or a loopback http:// URL without a fragment.",
+                invalid.join(", ")
+            ),
+        ));
     }
     Ok(Some(uris.to_vec()))
 }
@@ -1120,6 +1190,11 @@ pub async fn update_client_configuration(
     // Validate request_uris (same rules as initial registration).
     let validated_request_uris = validate_request_uris(mutable_request.request_uris.as_deref())?;
 
+    // Validate post_logout_redirect_uris (RP-Initiated Logout 1.0 Section 2).
+    let validated_post_logout_redirect_uris = validate_post_logout_redirect_uris_registration(
+        mutable_request.post_logout_redirect_uris.as_deref(),
+    )?;
+
     // Validate contacts and URI fields (same rules as initial registration via
     // register_client). Previously absent from the update path — RFC 7592
     // clients could smuggle an invalid logo_uri or non-@ contact on PUT.
@@ -1144,6 +1219,7 @@ pub async fn update_client_configuration(
             registration_metadata: Some(&registration_metadata),
             userinfo_signed_response_alg: userinfo_alg,
             request_uris: validated_request_uris.as_deref(),
+            post_logout_redirect_uris: validated_post_logout_redirect_uris.clone(),
         },
     )
     .await
@@ -1277,6 +1353,7 @@ fn build_client_response(client: OAuthClient, base_url: &str) -> RegistrationRes
         require_signed_request_object: client.require_signed_request_object,
         userinfo_signed_response_alg: client.userinfo_signed_response_alg.map(|a| a.to_string()),
         request_uris: client.request_uris,
+        post_logout_redirect_uris: client.post_logout_redirect_uris,
     }
 }
 
@@ -1947,6 +2024,7 @@ mod tests {
             require_signed_request_object: None,
             userinfo_signed_response_alg: None,
             request_uris: None,
+            post_logout_redirect_uris: None,
         };
 
         let json = serde_json::to_string(&response).unwrap();
@@ -2013,6 +2091,7 @@ mod tests {
             require_signed_request_object: None,
             userinfo_signed_response_alg: None,
             request_uris: None,
+            post_logout_redirect_uris: None,
         };
 
         let json = serde_json::to_string(&response).unwrap();

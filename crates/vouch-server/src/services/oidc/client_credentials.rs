@@ -178,6 +178,7 @@ mod tests {
                 require_signed_request_object: None,
                 userinfo_signed_response_alg: None,
                 request_uris: None,
+                post_logout_redirect_uris: None,
             },
         )
         .await

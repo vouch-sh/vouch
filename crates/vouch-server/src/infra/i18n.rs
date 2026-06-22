@@ -229,6 +229,45 @@ pub fn validate_startup() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Negotiate an [`I18nContext`] giving precedence to `ui_locales` (RP-Initiated Logout 1.0
+/// Section 3, space-separated BCP-47 tags) over `Accept-Language`.
+///
+/// If `ui_locales` is `Some` and non-empty, its tags are tried first. If none match an
+/// installed locale, fall back to `accept_language` as normal.
+pub(crate) fn negotiate_ui_locales(
+    ui_locales: Option<&str>,
+    accept_language: Option<&str>,
+) -> I18nContext {
+    if let Some(raw) = ui_locales {
+        let mut requested: Vec<LanguageIdentifier> = raw
+            .split_whitespace()
+            .filter_map(|tag| tag.parse::<LanguageIdentifier>().ok())
+            .collect();
+        if !requested.is_empty() {
+            // Append Accept-Language languages as lower-priority fallbacks.
+            if let Some(al) = accept_language {
+                requested.extend(parse_accept_language(al));
+            }
+            let loader = vouch_i18n::select_loader(&LOADER, &requested);
+            let lang = loader.current_language().to_string();
+            return I18nContext {
+                loader: Arc::new(loader),
+                lang,
+            };
+        }
+    }
+    negotiate(accept_language)
+}
+
+/// Run `f` inside the [`REQUEST_I18N`] scope of `ctx`.
+///
+/// Used by the logout handler to honour `ui_locales` for page rendering without
+/// changing the handler signature — templates pick up the locale via the
+/// task-local just as they do under [`i18n_layer`].
+pub(crate) fn sync_scope_locale<R>(ctx: I18nContext, f: impl FnOnce() -> R) -> R {
+    REQUEST_I18N.sync_scope(ctx, f)
+}
+
 /// Negotiate an [`I18nContext`] from an optional `Accept-Language` header value.
 pub(crate) fn negotiate(accept_language: Option<&str>) -> I18nContext {
     let requested = accept_language
@@ -333,6 +372,7 @@ pub(crate) const JS_I18N_KEYS: &[&str] = &[
     "admin-policies-playground-title",
     "appcreate-js-fapi-required",
     "appcreate-js-jwks-json",
+    "appcreate-js-postlogout-invalid",
     "appcreate-js-jwks-keys",
     "appcreate-js-jwksuri-https",
     "appcreate-js-jwksuri-invalid",
@@ -675,6 +715,39 @@ mod tests {
         let parsed = parse_accept_language("fr;q=0, en;q=0.5");
         let tags: Vec<String> = parsed.iter().map(ToString::to_string).collect();
         assert_eq!(tags, vec!["en"]);
+    }
+
+    #[test]
+    fn test_negotiate_ui_locales_prefers_ui_locales_over_accept_language() {
+        // When `ui_locales` is present, it takes precedence over `Accept-Language`.
+        // Both use en-US in this catalog so we verify the lang tag, not a
+        // translated string (we only ship en-US in the test binary).
+        let ctx = negotiate_ui_locales(Some("en-US"), Some("zz"));
+        assert_eq!(
+            ctx.lang(),
+            "en-US",
+            "ui_locales=en-US must win over Accept-Language=zz"
+        );
+    }
+
+    #[test]
+    fn test_negotiate_ui_locales_falls_back_to_accept_language_when_empty() {
+        // An empty ui_locales string must fall through to Accept-Language.
+        let ctx_empty = negotiate_ui_locales(Some(""), Some("en;q=0.9"));
+        assert_eq!(ctx_empty.lang(), "en-US");
+        // A None ui_locales also falls through.
+        let ctx_none = negotiate_ui_locales(None, Some("en;q=0.8"));
+        assert_eq!(ctx_none.lang(), "en-US");
+    }
+
+    #[test]
+    fn test_negotiate_ui_locales_preserves_order() {
+        // Tags in ui_locales appear before Accept-Language fallbacks.
+        // We can only verify this indirectly (single catalog), but we confirm
+        // that multiple space-separated tags are accepted without panicking.
+        let ctx = negotiate_ui_locales(Some("en-US fr-FR"), None);
+        // Must resolve to en-US (the only installed locale) without panicking.
+        assert_eq!(ctx.lang(), "en-US");
     }
 
     #[tokio::test]

@@ -775,6 +775,7 @@ async fn test_oauth_client_crud() {
             require_signed_request_object: None,
             userinfo_signed_response_alg: None,
             request_uris: None,
+            post_logout_redirect_uris: None,
         },
     )
     .await
@@ -819,6 +820,7 @@ async fn test_oauth_client_crud() {
             jwks_uri: client.jwks_uri.as_deref(),
             fapi_profile: client.fapi_profile,
             dpop_bound_access_tokens: client.dpop_bound_access_tokens,
+            post_logout_redirect_uris: None,
         },
     )
     .await
@@ -895,6 +897,7 @@ async fn test_oauth_client_types() {
                 require_signed_request_object: None,
                 userinfo_signed_response_alg: None,
                 request_uris: None,
+                post_logout_redirect_uris: None,
             },
         )
         .await
@@ -960,6 +963,7 @@ async fn test_oauth_client_list_for_user() {
                 require_signed_request_object: None,
                 userinfo_signed_response_alg: None,
                 request_uris: None,
+                post_logout_redirect_uris: None,
             },
         )
         .await
@@ -1003,6 +1007,7 @@ async fn test_oauth_client_list_for_user() {
             require_signed_request_object: None,
             userinfo_signed_response_alg: None,
             request_uris: None,
+            post_logout_redirect_uris: None,
         },
     )
     .await
@@ -1065,6 +1070,7 @@ async fn test_oauth_client_secret_management() {
             require_signed_request_object: None,
             userinfo_signed_response_alg: None,
             request_uris: None,
+            post_logout_redirect_uris: None,
         },
     )
     .await
@@ -1149,6 +1155,7 @@ async fn test_oauth_usage_recording() {
             require_signed_request_object: None,
             userinfo_signed_response_alg: None,
             request_uris: None,
+            post_logout_redirect_uris: None,
         },
     )
     .await
@@ -1850,6 +1857,7 @@ async fn test_oauth_client_cascade_delete() {
             require_signed_request_object: None,
             userinfo_signed_response_alg: None,
             request_uris: None,
+            post_logout_redirect_uris: None,
         },
     )
     .await
@@ -3058,6 +3066,7 @@ async fn test_update_oauth_client_jwks_uri_clears_cache() {
             require_signed_request_object: None,
             userinfo_signed_response_alg: None,
             request_uris: None,
+            post_logout_redirect_uris: None,
         },
     )
     .await
@@ -3089,6 +3098,7 @@ async fn test_update_oauth_client_jwks_uri_clears_cache() {
             registration_metadata: None,
             userinfo_signed_response_alg: None,
             request_uris: None,
+            post_logout_redirect_uris: None,
         },
     )
     .await
@@ -3147,6 +3157,7 @@ async fn test_jwks_refresh_does_not_modify_oauth_client_doc() {
             require_signed_request_object: None,
             userinfo_signed_response_alg: None,
             request_uris: None,
+            post_logout_redirect_uris: None,
         },
     )
     .await

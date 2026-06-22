@@ -703,3 +703,148 @@ async fn test_rfc7592_put_accepts_valid_contacts() {
     assert_eq!(contacts.len(), 1, "PUT response must echo the contact list");
     assert_eq!(contacts[0].as_str(), Some("admin@example.com"));
 }
+
+// ========================================================================
+// RP-Initiated Logout 1.0 — post_logout_redirect_uris management
+// ========================================================================
+
+#[tokio::test]
+async fn test_rfc7592_put_post_logout_redirect_uris_roundtrip() {
+    // PUT must accept post_logout_redirect_uris and echo them in the response.
+    let (app, _state) = test_app().await;
+    let (client_id, token) = register_dynamic_client(&app).await;
+
+    let update_body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "post_logout_redirect_uris": ["https://example.com/logged-out"]
+    });
+
+    let (status, body) = http_request(
+        &app,
+        "PUT",
+        &format!("/oauth/register/{client_id}"),
+        Some(update_body.to_string()),
+        &[
+            ("Authorization", &format!("Bearer {token}")),
+            ("Content-Type", "application/json"),
+        ],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "PUT with post_logout_redirect_uris must succeed: {body}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let post_logout = json["post_logout_redirect_uris"]
+        .as_array()
+        .expect("post_logout_redirect_uris must be echoed in PUT response");
+    assert_eq!(
+        post_logout.len(),
+        1,
+        "Expected 1 post_logout_redirect_uri, got {post_logout:?}"
+    );
+    assert_eq!(
+        post_logout[0].as_str().unwrap(),
+        "https://example.com/logged-out"
+    );
+}
+
+#[tokio::test]
+async fn test_rfc7592_put_post_logout_redirect_uris_clears_on_omit() {
+    // A PUT without post_logout_redirect_uris must clear the field (full-replacement semantics).
+    // Note: RFC 7592 §3 says PUT may rotate registration_access_token. We read the new
+    // token from the first PUT response and use it for the second PUT.
+    let (app, _state) = test_app().await;
+    let (client_id, token) = register_dynamic_client(&app).await;
+
+    // First PUT: set post_logout_redirect_uris; read back the (possibly rotated) token.
+    let set_body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "post_logout_redirect_uris": ["https://example.com/logged-out"]
+    });
+    let (status, first_resp) = http_request(
+        &app,
+        "PUT",
+        &format!("/oauth/register/{client_id}"),
+        Some(set_body.to_string()),
+        &[
+            ("Authorization", &format!("Bearer {token}")),
+            ("Content-Type", "application/json"),
+        ],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "First PUT must succeed: {first_resp}"
+    );
+
+    // Extract the possibly-rotated token from the response.
+    let first_json: serde_json::Value =
+        serde_json::from_str(&first_resp).expect("Valid JSON from first PUT");
+    let token2 = first_json["registration_access_token"]
+        .as_str()
+        .unwrap_or(&token)
+        .to_string();
+
+    // Second PUT: omit post_logout_redirect_uris → field should be cleared.
+    let clear_body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"]
+    });
+    let (status, body) = http_request(
+        &app,
+        "PUT",
+        &format!("/oauth/register/{client_id}"),
+        Some(clear_body.to_string()),
+        &[
+            ("Authorization", &format!("Bearer {token2}")),
+            ("Content-Type", "application/json"),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "Second PUT must succeed: {body}");
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let post_logout = json.get("post_logout_redirect_uris");
+    // Field should be absent or null/empty after full-replacement without it.
+    assert!(
+        post_logout.is_none()
+            || post_logout.is_some_and(|v| v.is_null() || v == &serde_json::json!([])),
+        "post_logout_redirect_uris must be cleared when omitted from PUT: {json}"
+    );
+}
+
+#[tokio::test]
+async fn test_rfc7592_put_post_logout_redirect_uris_invalid_rejected() {
+    // PUT with an invalid post_logout_redirect_uri must be rejected with 400.
+    let (app, _state) = test_app().await;
+    let (client_id, token) = register_dynamic_client(&app).await;
+
+    let update_body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "post_logout_redirect_uris": ["ftp://not-allowed.example.com/"]
+    });
+
+    let (status, body) = http_request(
+        &app,
+        "PUT",
+        &format!("/oauth/register/{client_id}"),
+        Some(update_body.to_string()),
+        &[
+            ("Authorization", &format!("Bearer {token}")),
+            ("Content-Type", "application/json"),
+        ],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "Invalid post_logout_redirect_uri must be rejected: {body}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    // RFC 7591/7592: registration management errors use `invalid_client_metadata`.
+    assert_eq!(
+        json["error"], "invalid_client_metadata",
+        "Error code must be invalid_client_metadata: {json}"
+    );
+}

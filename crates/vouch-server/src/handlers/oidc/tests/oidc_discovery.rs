@@ -314,6 +314,30 @@ async fn test_oidc_discovery_userinfo_signing_alg_values_supported() {
 }
 
 #[tokio::test]
+async fn test_oidc_discovery_end_session_endpoint_present() {
+    // RP-Initiated Logout 1.0 §4: end_session_endpoint must be advertised.
+    let (app, state) = test_app().await;
+
+    let (status, body) = http_get(&app, "/.well-known/openid-configuration", &[]).await;
+
+    assert_eq!(status, StatusCode::OK);
+    let discovery: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+
+    let end_session_endpoint = discovery["end_session_endpoint"]
+        .as_str()
+        .expect("end_session_endpoint must be present and a string in OIDC discovery document");
+    let expected = format!("{}/oauth/logout", state.config().base_url);
+    assert_eq!(
+        end_session_endpoint, expected,
+        "end_session_endpoint must equal <base_url>/oauth/logout"
+    );
+    assert!(
+        end_session_endpoint.starts_with("https://"),
+        "end_session_endpoint must be an absolute HTTPS URL, got: {end_session_endpoint}"
+    );
+}
+
+#[tokio::test]
 async fn test_oidc_discovery_hardware_claims_not_in_claims_supported() {
     // OIDC compliance: hardware_verified and hardware_aaguid must not appear in
     // claims_supported after removal from standard OIDC id_tokens.

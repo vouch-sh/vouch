@@ -158,6 +158,20 @@
             </div>
             {% endif %}
 
+            <!-- Post-Logout Redirect URIs (RP-Initiated Logout 1.0) -->
+            {% if let Some(uris) = &app.post_logout_redirect_uris %}
+            {% if !uris.is_empty() %}
+            <div class="border-t border-vouch-border pt-4">
+                <label class="block text-sm text-gray-400 mb-2">{{ self.tr("apps-create-postlogout-label") }}</label>
+                <ul class="bg-vouch-raised border border-vouch-border rounded-md px-3 py-2 space-y-0.5">
+                    {% for uri in uris %}
+                    <li class="font-mono text-sm text-gray-300 break-all">{{ uri }}</li>
+                    {% endfor %}
+                </ul>
+            </div>
+            {% endif %}
+            {% endif %}
+
             <!-- Client Secrets Section (for confidential clients, hidden for FAPI) -->
             {% if (app.application_type == "web" || app.application_type == "service") && app.fapi_profile != "fapi2_security" %}
             <div class="border-t border-vouch-border pt-4">
@@ -252,6 +266,15 @@
 {% endfor %}</textarea>
                 <p class="mt-1 text-sm text-gray-500">{{ self.tr("apps-detail-resource-help") }}</p>
                 <div id="resource-uri-error" class="hidden mt-2 p-3 bg-vouch-error-bg border border-vouch-error/30 rounded-lg text-sm text-vouch-error"></div>
+            </div>
+
+            <div>
+                <label for="post_logout_redirect_uris" class="block text-sm font-medium text-gray-300">{{ self.tr("apps-create-postlogout-label") }}</label>
+                <textarea name="post_logout_redirect_uris" id="post_logout_redirect_uris" rows="2"
+                    class="input-field mt-1 font-mono">{% if let Some(uris) = &app.post_logout_redirect_uris %}{% for uri in uris %}{{ uri }}
+{% endfor %}{% endif %}</textarea>
+                <p class="mt-1 text-sm text-gray-500">{{ self.tr("apps-create-postlogout-help") }}</p>
+                <div id="post-logout-redirect-uri-error" class="hidden mt-2 p-3 bg-vouch-error-bg border border-vouch-error/30 rounded-lg text-sm text-vouch-error"></div>
             </div>
 
             <!-- Security Profile (only for confidential types) -->
