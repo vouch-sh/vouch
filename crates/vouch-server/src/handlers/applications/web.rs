@@ -32,11 +32,25 @@ use super::{
     parse_resource_uris,
 };
 use crate::handlers::hash_token;
+use crate::infra::i18n::Tr;
 
-/// Render a shared validation failure as the standard error page.
+/// Render the standard application error page from translation keys, resolving
+/// them against the request locale.
+fn error_page(title: Tr<'_>, message: Tr<'_>, back_url: impl Into<String>) -> Response {
+    ApplicationErrorTemplate {
+        title: title.to_string(),
+        message: message.to_string(),
+        back_url: back_url.into(),
+    }
+    .into_response()
+}
+
+/// Render a shared validation failure as the standard error page. The title is
+/// localized; `err.message()` stays English — it is shared with the JSON API
+/// path (`ServiceError`), which is English by spec (RFC 6749 §5.2).
 fn validation_error_response(err: &AppValidationError, back_url: String) -> Response {
     ApplicationErrorTemplate {
-        title: "Invalid Input".to_string(),
+        title: Tr::new("apps-error-title-invalid-input").to_string(),
         message: err.message(),
         back_url,
     }
@@ -58,12 +72,11 @@ pub(crate) async fn list_applications_page(
         Ok(apps) => apps.into_iter().map(ApplicationInfo::from).collect(),
         Err(e) => {
             tracing::error!("Failed to list applications: {}", e);
-            return ApplicationErrorTemplate {
-                title: "Error".to_string(),
-                message: "Failed to load applications.".to_string(),
-                back_url: "/".to_string(),
-            }
-            .into_response();
+            return error_page(
+                Tr::new("apps-error-title-error"),
+                Tr::new("apps-error-load-applications"),
+                "/",
+            );
         }
     };
 
@@ -124,12 +137,11 @@ pub(crate) async fn create_application_form(
 
     // Validate: Organization scope requires user to have an org
     if access_scope == AccessScope::Organization && !auth.has_org {
-        return ApplicationErrorTemplate {
-            title: "Invalid Input".to_string(),
-            message: "Organization scope requires organization membership.".to_string(),
-            back_url: "/applications/new".to_string(),
-        }
-        .into_response();
+        return error_page(
+            Tr::new("apps-error-title-invalid-input"),
+            Tr::new("apps-error-org-scope-required"),
+            "/applications/new",
+        );
     }
 
     // All input validated — now fetch org_id from DB (only needed for org-scoped apps)
@@ -200,12 +212,11 @@ pub(crate) async fn create_application_form(
         Ok(c) => c,
         Err(e) => {
             tracing::error!("Failed to create application: {}", e);
-            return ApplicationErrorTemplate {
-                title: "Error".to_string(),
-                message: "Failed to create application.".to_string(),
-                back_url: "/applications/new".to_string(),
-            }
-            .into_response();
+            return error_page(
+                Tr::new("apps-error-title-error"),
+                Tr::new("apps-error-create-failed"),
+                "/applications/new",
+            );
         }
     };
 
@@ -230,12 +241,11 @@ pub(crate) async fn create_application_form(
                     "Failed to clean up OAuth client after secret creation failure: {cleanup_err}"
                 );
             }
-            return ApplicationErrorTemplate {
-                title: "Error".to_string(),
-                message: "Failed to create application.".to_string(),
-                back_url: "/applications/new".to_string(),
-            }
-            .into_response();
+            return error_page(
+                Tr::new("apps-error-title-error"),
+                Tr::new("apps-error-create-failed"),
+                "/applications/new",
+            );
         }
 
         Some(secret)
@@ -273,29 +283,26 @@ pub(crate) async fn detail_application_page(
     let client = match db::get_oauth_client_by_id(&state.store, &app_id).await {
         Ok(Some(c)) if c.user_id.as_deref() == Some(user_id) => c,
         Ok(Some(_)) => {
-            return ApplicationErrorTemplate {
-                title: "Not Found".to_string(),
-                message: "Application not found.".to_string(),
-                back_url: "/applications".to_string(),
-            }
-            .into_response();
+            return error_page(
+                Tr::new("apps-error-title-not-found"),
+                Tr::new("apps-error-app-not-found"),
+                "/applications",
+            );
         }
         Ok(None) => {
-            return ApplicationErrorTemplate {
-                title: "Not Found".to_string(),
-                message: "Application not found.".to_string(),
-                back_url: "/applications".to_string(),
-            }
-            .into_response();
+            return error_page(
+                Tr::new("apps-error-title-not-found"),
+                Tr::new("apps-error-app-not-found"),
+                "/applications",
+            );
         }
         Err(e) => {
             tracing::error!("Failed to get application: {}", e);
-            return ApplicationErrorTemplate {
-                title: "Error".to_string(),
-                message: "Failed to load application.".to_string(),
-                back_url: "/applications".to_string(),
-            }
-            .into_response();
+            return error_page(
+                Tr::new("apps-error-title-error"),
+                Tr::new("apps-error-load-application"),
+                "/applications",
+            );
         }
     };
 
@@ -356,12 +363,11 @@ pub(crate) async fn update_application_form(
     let client = match db::get_oauth_client_by_id(&state.store, &app_id).await {
         Ok(Some(c)) if c.user_id.as_deref() == Some(user_id) => c,
         _ => {
-            return ApplicationErrorTemplate {
-                title: "Not Found".to_string(),
-                message: "Application not found.".to_string(),
-                back_url: "/applications".to_string(),
-            }
-            .into_response();
+            return error_page(
+                Tr::new("apps-error-title-not-found"),
+                Tr::new("apps-error-app-not-found"),
+                "/applications",
+            );
         }
     };
 
@@ -382,12 +388,11 @@ pub(crate) async fn update_application_form(
 
     // Validate: Organization scope requires user to have an org
     if access_scope == Some(AccessScope::Organization) && !auth.has_org {
-        return ApplicationErrorTemplate {
-            title: "Invalid Input".to_string(),
-            message: "Organization scope requires organization membership.".to_string(),
-            back_url: format!("/applications/{}", app_id),
-        }
-        .into_response();
+        return error_page(
+            Tr::new("apps-error-title-invalid-input"),
+            Tr::new("apps-error-org-scope-required"),
+            format!("/applications/{}", app_id),
+        );
     }
 
     // Get user's org_id for org-scoped apps
@@ -490,12 +495,11 @@ pub(crate) async fn update_application_form(
     .await
     {
         tracing::error!("Failed to update application: {}", e);
-        return ApplicationErrorTemplate {
-            title: "Error".to_string(),
-            message: "Failed to update application.".to_string(),
-            back_url: format!("/applications/{}", app_id),
-        }
-        .into_response();
+        return error_page(
+            Tr::new("apps-error-title-error"),
+            Tr::new("apps-error-update-failed"),
+            format!("/applications/{}", app_id),
+        );
     }
 
     tracing::info!("Updated OAuth application: {} ({})", name, client.client_id);
@@ -520,24 +524,22 @@ pub(crate) async fn delete_application_form(
     let client = match db::get_oauth_client_by_id(&state.store, &app_id).await {
         Ok(Some(c)) if c.user_id.as_deref() == Some(user_id) => c,
         _ => {
-            return ApplicationErrorTemplate {
-                title: "Not Found".to_string(),
-                message: "Application not found.".to_string(),
-                back_url: "/applications".to_string(),
-            }
-            .into_response();
+            return error_page(
+                Tr::new("apps-error-title-not-found"),
+                Tr::new("apps-error-app-not-found"),
+                "/applications",
+            );
         }
     };
 
     // Delete the application
     if let Err(e) = db::delete_oauth_client(&state.store, &app_id).await {
         tracing::error!("Failed to delete application: {}", e);
-        return ApplicationErrorTemplate {
-            title: "Error".to_string(),
-            message: "Failed to delete application.".to_string(),
-            back_url: format!("/applications/{}", app_id),
-        }
-        .into_response();
+        return error_page(
+            Tr::new("apps-error-title-error"),
+            Tr::new("apps-error-delete-failed"),
+            format!("/applications/{}", app_id),
+        );
     }
 
     tracing::info!("Deleted OAuth application: {}", client.client_id);
@@ -561,33 +563,30 @@ pub(crate) async fn add_secret_form(
     let client = match db::get_oauth_client_by_id(&state.store, &app_id).await {
         Ok(Some(c)) if c.user_id.as_deref() == Some(user_id) => c,
         _ => {
-            return ApplicationErrorTemplate {
-                title: "Not Found".to_string(),
-                message: "Application not found.".to_string(),
-                back_url: "/applications".to_string(),
-            }
-            .into_response();
+            return error_page(
+                Tr::new("apps-error-title-not-found"),
+                Tr::new("apps-error-app-not-found"),
+                "/applications",
+            );
         }
     };
 
     if !client.application_type.requires_secret() {
-        return ApplicationErrorTemplate {
-            title: "Error".to_string(),
-            message: "This application type does not use client secrets.".to_string(),
-            back_url: format!("/applications/{app_id}"),
-        }
-        .into_response();
+        return error_page(
+            Tr::new("apps-error-title-error"),
+            Tr::new("apps-error-no-client-secrets"),
+            format!("/applications/{app_id}"),
+        );
     }
 
     if client.is_fapi()
         && client.token_endpoint_auth_method == db::TokenEndpointAuthMethod::PrivateKeyJwt
     {
-        return ApplicationErrorTemplate {
-            title: "Error".to_string(),
-            message: "FAPI clients using private_key_jwt do not use client secrets.".to_string(),
-            back_url: format!("/applications/{app_id}"),
-        }
-        .into_response();
+        return error_page(
+            Tr::new("apps-error-title-error"),
+            Tr::new("apps-error-fapi-no-secrets"),
+            format!("/applications/{app_id}"),
+        );
     }
 
     let now = jiff::Timestamp::now();
@@ -595,23 +594,21 @@ pub(crate) async fn add_secret_form(
         Ok(s) => s,
         Err(e) => {
             tracing::error!("Failed to get secrets: {e}");
-            return ApplicationErrorTemplate {
-                title: "Error".to_string(),
-                message: "Failed to add secret.".to_string(),
-                back_url: format!("/applications/{app_id}"),
-            }
-            .into_response();
+            return error_page(
+                Tr::new("apps-error-title-error"),
+                Tr::new("apps-error-secret-add-failed"),
+                format!("/applications/{app_id}"),
+            );
         }
     };
 
     let active_count = secrets.iter().filter(|s| s.is_valid(&now)).count();
     if active_count >= MAX_ACTIVE_SECRETS {
-        return ApplicationErrorTemplate {
-            title: "Error".to_string(),
-            message: "Maximum of 2 active secrets allowed.".to_string(),
-            back_url: format!("/applications/{app_id}"),
-        }
-        .into_response();
+        return error_page(
+            Tr::new("apps-error-title-error"),
+            Tr::new("apps-error-secret-max"),
+            format!("/applications/{app_id}"),
+        );
     }
 
     let secret = generate_client_secret();
@@ -623,12 +620,11 @@ pub(crate) async fn add_secret_form(
             Ok(r) => r,
             Err(e) => {
                 tracing::error!("Failed to create secret: {e}");
-                return ApplicationErrorTemplate {
-                    title: "Error".to_string(),
-                    message: "Failed to add secret.".to_string(),
-                    back_url: format!("/applications/{app_id}"),
-                }
-                .into_response();
+                return error_page(
+                    Tr::new("apps-error-title-error"),
+                    Tr::new("apps-error-secret-add-failed"),
+                    format!("/applications/{app_id}"),
+                );
             }
         };
 
@@ -661,34 +657,31 @@ pub(crate) async fn delete_secret_form(
     let client = match db::get_oauth_client_by_id(&state.store, &app_id).await {
         Ok(Some(c)) if c.user_id.as_deref() == Some(user_id) => c,
         _ => {
-            return ApplicationErrorTemplate {
-                title: "Not Found".to_string(),
-                message: "Application not found.".to_string(),
-                back_url: "/applications".to_string(),
-            }
-            .into_response();
+            return error_page(
+                Tr::new("apps-error-title-not-found"),
+                Tr::new("apps-error-app-not-found"),
+                "/applications",
+            );
         }
     };
 
     let secret = match db::get_oauth_client_secret_by_id(&state.store, &secret_id).await {
         Ok(Some(s)) if s.oauth_client_id == app_id => s,
         _ => {
-            return ApplicationErrorTemplate {
-                title: "Not Found".to_string(),
-                message: "Secret not found.".to_string(),
-                back_url: format!("/applications/{app_id}"),
-            }
-            .into_response();
+            return error_page(
+                Tr::new("apps-error-title-not-found"),
+                Tr::new("apps-error-secret-not-found"),
+                format!("/applications/{app_id}"),
+            );
         }
     };
 
     if secret.revoked_at.is_some() {
-        return ApplicationErrorTemplate {
-            title: "Not Found".to_string(),
-            message: "Secret not found.".to_string(),
-            back_url: format!("/applications/{app_id}"),
-        }
-        .into_response();
+        return error_page(
+            Tr::new("apps-error-title-not-found"),
+            Tr::new("apps-error-secret-not-found"),
+            format!("/applications/{app_id}"),
+        );
     }
 
     let now = jiff::Timestamp::now();
@@ -701,22 +694,20 @@ pub(crate) async fn delete_secret_form(
         .count();
 
     if other_active == 0 {
-        return ApplicationErrorTemplate {
-            title: "Error".to_string(),
-            message: "Cannot delete the last active secret.".to_string(),
-            back_url: format!("/applications/{app_id}"),
-        }
-        .into_response();
+        return error_page(
+            Tr::new("apps-error-title-error"),
+            Tr::new("apps-error-secret-last-active"),
+            format!("/applications/{app_id}"),
+        );
     }
 
     if let Err(e) = db::revoke_oauth_client_secret(&state.store, &secret_id).await {
         tracing::error!("Failed to revoke secret: {e}");
-        return ApplicationErrorTemplate {
-            title: "Error".to_string(),
-            message: "Failed to delete secret.".to_string(),
-            back_url: format!("/applications/{app_id}"),
-        }
-        .into_response();
+        return error_page(
+            Tr::new("apps-error-title-error"),
+            Tr::new("apps-error-secret-delete-failed"),
+            format!("/applications/{app_id}"),
+        );
     }
 
     tracing::info!(
