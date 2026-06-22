@@ -4079,10 +4079,12 @@ async fn test_github_installation_concurrent_suspend_unsuspend_no_lost_update() 
             .expect("operation must succeed");
     }
 
-    // The installation must still exist and have version ≥ 2, proving both
-    // writes landed. A blind `store.update` (non-OCC) would also leave the
-    // record present, but the version would be 1 (only one increment) because
-    // the second write would overwrite the first at the original version.
+    // Smoke check: both concurrent writes complete without error, and the
+    // record still exists with both increments applied (version ≥ 2). This does
+    // not by itself distinguish OCC from a blind `store.update` — the blind path
+    // also bumps the version unconditionally — so it only proves concurrent
+    // access doesn't error or corrupt. The lost-update regression (a sibling
+    // field being clobbered) is caught by the `*_only_*_changes` tests above.
     use crate::db::documents::github::GitHubInstallationDoc;
     let doc_after = store
         .get::<GitHubInstallationDoc>(&{
@@ -4098,7 +4100,7 @@ async fn test_github_installation_concurrent_suspend_unsuspend_no_lost_update() 
         .expect("installation must still exist after concurrent suspend/unsuspend");
     assert!(
         doc_after.version >= 2,
-        "version must be ≥2 after two concurrent writes (OCC must have retried); got version {}",
+        "both concurrent writes must land (version ≥2); got version {}",
         doc_after.version
     );
 }
