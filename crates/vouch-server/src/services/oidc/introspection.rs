@@ -170,9 +170,10 @@ pub async fn introspect_token(
         .session_cache
         .get_session_by_token_hash(&state.store, &token_hash)
         .await
+        .map_err(|e| ServiceError::Internal(format!("Database error: {e}")))?
     {
-        Ok(Some(s)) => s,
-        _ => return Ok(IntrospectionResult::inactive()),
+        Some(s) => s,
+        None => return Ok(IntrospectionResult::inactive()),
     };
 
     let DecodedToken::AccessToken(claims) = decoded;
