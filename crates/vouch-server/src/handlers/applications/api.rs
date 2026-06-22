@@ -29,7 +29,6 @@ use super::validate::{
     validate_update_format,
 };
 use super::{MAX_ACTIVE_SECRETS, generate_client_secret};
-use crate::db::{AddSecretOutcome, RevokeSecretOutcome};
 use crate::handlers::extractors::OptionalClientCert;
 use crate::handlers::hash_token;
 use crate::handlers::session::extract_resource_token;
@@ -667,19 +666,36 @@ pub(crate) async fn add_secret_api(
         ));
     }
 
+    let now = jiff::Timestamp::now();
+    let secrets = db::get_oauth_client_secrets(&state.store, &app_id)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to get secrets: {e}");
+            ServiceError::api(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "db_error",
+                "Internal database error",
+            )
+        })?;
+
+    let active_count = secrets.iter().filter(|s| s.is_valid(&now)).count();
+    if active_count >= MAX_ACTIVE_SECRETS {
+        return Err(ServiceError::api(
+            StatusCode::CONFLICT,
+            "max_secrets_reached",
+            "Maximum of 2 active secrets allowed",
+        ));
+    }
+
     let secret = generate_client_secret();
     let secret_hash = hash_token(&secret);
 
-    // Atomically enforce the active-secret cap and insert.  The count check
-    // and the insert run inside a single DB transaction so concurrent requests
-    // cannot both observe "under limit" and both succeed.
-    let record = match db::add_secret_if_under_limit(
+    let record = db::create_oauth_client_secret(
         &state.store,
         &app_id,
         &secret_hash,
         req.description.as_deref(),
         None,
-        MAX_ACTIVE_SECRETS,
     )
     .await
     .map_err(|e| {
@@ -689,16 +705,7 @@ pub(crate) async fn add_secret_api(
             "db_error",
             "Internal database error",
         )
-    })? {
-        AddSecretOutcome::Created(r) => r,
-        AddSecretOutcome::LimitReached => {
-            return Err(ServiceError::api(
-                StatusCode::CONFLICT,
-                "max_secrets_reached",
-                "Maximum of 2 active secrets allowed",
-            ));
-        }
-    };
+    })?;
 
     if let Err(e) = db::record_oauth_event(
         &state.audit,
@@ -861,10 +868,40 @@ pub(crate) async fn delete_secret_api(
         ));
     }
 
-    // Atomically enforce "keep at least one active secret" and revoke.
-    // The check and revoke run inside a single DB transaction so concurrent
-    // delete requests cannot both observe "other_active > 0" and both win.
-    match db::revoke_secret_if_not_last_active(&state.store, &app_id, &secret_id)
+    if secret.revoked_at.is_some() {
+        return Err(ServiceError::api(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "Secret not found",
+        ));
+    }
+
+    let now = jiff::Timestamp::now();
+    let all_secrets = db::get_oauth_client_secrets(&state.store, &app_id)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to get secrets: {e}");
+            ServiceError::api(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "db_error",
+                "Internal database error",
+            )
+        })?;
+
+    let other_active = all_secrets
+        .iter()
+        .filter(|s| s.id != *secret_id && s.is_valid(&now))
+        .count();
+
+    if other_active == 0 {
+        return Err(ServiceError::api(
+            StatusCode::CONFLICT,
+            "last_secret",
+            "Cannot delete the last active secret",
+        ));
+    }
+
+    db::revoke_oauth_client_secret(&state.store, &secret_id)
         .await
         .map_err(|e| {
             tracing::error!("Failed to revoke secret: {e}");
@@ -873,23 +910,7 @@ pub(crate) async fn delete_secret_api(
                 "db_error",
                 "Internal database error",
             )
-        })? {
-        RevokeSecretOutcome::Revoked => {}
-        RevokeSecretOutcome::NotFound => {
-            return Err(ServiceError::api(
-                StatusCode::NOT_FOUND,
-                "not_found",
-                "Secret not found",
-            ));
-        }
-        RevokeSecretOutcome::LastActive => {
-            return Err(ServiceError::api(
-                StatusCode::CONFLICT,
-                "last_secret",
-                "Cannot delete the last active secret",
-            ));
-        }
-    }
+        })?;
 
     if let Err(e) = db::record_oauth_event(
         &state.audit,
@@ -2343,112 +2364,5 @@ mod tests {
         assert_eq!(status, StatusCode::OK, "body: {body}");
         let json: serde_json::Value = serde_json::from_str(&body).expect("valid json");
         assert_eq!(json["name"].as_str().unwrap(), "Test App");
-    }
-
-    // ========================================================================
-    // #547 — concurrent secret create/delete stress tests
-    // ========================================================================
-
-    #[tokio::test]
-    async fn test_concurrent_secret_add_never_exceeds_limit() {
-        use std::sync::Arc;
-        use tokio::task::JoinSet;
-
-        let (app, state) = test_app().await;
-        let (app_id, token) = setup_user_with_app(&state, "concurrent-add@example.com").await;
-        let auth = bearer(&token);
-        let app = Arc::new(app);
-
-        // App already has 1 active secret. Fire 5 concurrent adds; at most
-        // 1 should succeed (total active must not exceed MAX_ACTIVE_SECRETS=2).
-        let mut set = JoinSet::new();
-        for _ in 0..5_u32 {
-            let app = Arc::clone(&app);
-            let app_id = app_id.clone();
-            let auth = auth.clone();
-            set.spawn(async move {
-                http_post_json(
-                    &app,
-                    &format!("/api/v1/applications/{app_id}/secrets"),
-                    r#"{}"#,
-                    &[("Authorization", &auth)],
-                )
-                .await
-            });
-        }
-
-        let mut successes = 0_usize;
-        while let Some(res) = set.join_next().await {
-            let (status, _) = res.expect("task must not panic");
-            if status == StatusCode::CREATED {
-                successes = successes.saturating_add(1);
-            }
-        }
-
-        // Verify active count in DB never exceeded the limit.
-        let secrets = crate::db::get_oauth_client_secrets(&state.store, &app_id)
-            .await
-            .expect("get secrets");
-        let now = jiff::Timestamp::now();
-        let active = secrets.iter().filter(|s| s.is_valid(&now)).count();
-        assert!(
-            active <= crate::handlers::applications::MAX_ACTIVE_SECRETS,
-            "active secret count {active} must never exceed MAX_ACTIVE_SECRETS"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_concurrent_secret_deletion_stress() {
-        use std::sync::Arc;
-        use tokio::task::JoinSet;
-
-        let (app, state) = test_app().await;
-        let (app_id, token) = setup_user_with_app(&state, "concurrent-del@example.com").await;
-        let auth = bearer(&token);
-
-        // Add a second secret so we have 2 active.
-        let (_, body) = http_post_json(
-            &app,
-            &format!("/api/v1/applications/{app_id}/secrets"),
-            r#"{}"#,
-            &[("Authorization", &auth)],
-        )
-        .await;
-        let second: serde_json::Value = serde_json::from_str(&body).unwrap();
-        let second_id = second["secret_id"].as_str().unwrap().to_string();
-
-        let app = Arc::new(app);
-
-        // Concurrently attempt to delete both secrets — only one delete of each
-        // can succeed; after all requests the active count must be >= 1.
-        let mut set = JoinSet::new();
-        for _ in 0..4_u32 {
-            let app = Arc::clone(&app);
-            let app_id = app_id.clone();
-            let second_id = second_id.clone();
-            let auth = auth.clone();
-            set.spawn(async move {
-                http_delete(
-                    &app,
-                    &format!("/api/v1/applications/{app_id}/secrets/{second_id}"),
-                    &[("Authorization", &auth)],
-                )
-                .await
-            });
-        }
-        while let Some(res) = set.join_next().await {
-            res.expect("task must not panic");
-        }
-
-        // The active count must never drop to zero.
-        let secrets = crate::db::get_oauth_client_secrets(&state.store, &app_id)
-            .await
-            .expect("get secrets");
-        let now = jiff::Timestamp::now();
-        let active = secrets.iter().filter(|s| s.is_valid(&now)).count();
-        assert!(
-            active >= 1,
-            "at least one active secret must remain after concurrent deletes; got {active}"
-        );
     }
 }

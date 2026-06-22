@@ -31,7 +31,6 @@ use super::{
     MAX_ACTIVE_SECRETS, extract_auth_from_cookie, generate_client_secret, parse_redirect_uris,
     parse_resource_uris,
 };
-use crate::db::{AddSecretOutcome, RevokeSecretOutcome};
 use crate::handlers::hash_token;
 
 /// Render a shared validation failure as the standard error page.
@@ -591,31 +590,11 @@ pub(crate) async fn add_secret_form(
         .into_response();
     }
 
-    let secret = generate_client_secret();
-    let secret_hash = hash_token(&secret);
-
-    // Atomically enforce the active-secret cap and insert.
-    let record = match db::add_secret_if_under_limit(
-        &state.store,
-        &app_id,
-        &secret_hash,
-        None,
-        None,
-        MAX_ACTIVE_SECRETS,
-    )
-    .await
-    {
-        Ok(AddSecretOutcome::Created(r)) => r,
-        Ok(AddSecretOutcome::LimitReached) => {
-            return ApplicationErrorTemplate {
-                title: "Error".to_string(),
-                message: "Maximum of 2 active secrets allowed.".to_string(),
-                back_url: format!("/applications/{app_id}"),
-            }
-            .into_response();
-        }
+    let now = jiff::Timestamp::now();
+    let secrets = match db::get_oauth_client_secrets(&state.store, &app_id).await {
+        Ok(s) => s,
         Err(e) => {
-            tracing::error!("Failed to create secret: {e}");
+            tracing::error!("Failed to get secrets: {e}");
             return ApplicationErrorTemplate {
                 title: "Error".to_string(),
                 message: "Failed to add secret.".to_string(),
@@ -624,6 +603,34 @@ pub(crate) async fn add_secret_form(
             .into_response();
         }
     };
+
+    let active_count = secrets.iter().filter(|s| s.is_valid(&now)).count();
+    if active_count >= MAX_ACTIVE_SECRETS {
+        return ApplicationErrorTemplate {
+            title: "Error".to_string(),
+            message: "Maximum of 2 active secrets allowed.".to_string(),
+            back_url: format!("/applications/{app_id}"),
+        }
+        .into_response();
+    }
+
+    let secret = generate_client_secret();
+    let secret_hash = hash_token(&secret);
+
+    let record =
+        match db::create_oauth_client_secret(&state.store, &app_id, &secret_hash, None, None).await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::error!("Failed to create secret: {e}");
+                return ApplicationErrorTemplate {
+                    title: "Error".to_string(),
+                    message: "Failed to add secret.".to_string(),
+                    back_url: format!("/applications/{app_id}"),
+                }
+                .into_response();
+            }
+        };
 
     tracing::info!("Added secret for OAuth application: {}", client.client_id);
 
@@ -663,9 +670,8 @@ pub(crate) async fn delete_secret_form(
         }
     };
 
-    // Verify the secret exists and belongs to this client before the atomic revoke.
-    match db::get_oauth_client_secret_by_id(&state.store, &secret_id).await {
-        Ok(Some(s)) if s.oauth_client_id == app_id => {}
+    let secret = match db::get_oauth_client_secret_by_id(&state.store, &secret_id).await {
+        Ok(Some(s)) if s.oauth_client_id == app_id => s,
         _ => {
             return ApplicationErrorTemplate {
                 title: "Not Found".to_string(),
@@ -676,34 +682,41 @@ pub(crate) async fn delete_secret_form(
         }
     };
 
-    // Atomically enforce "keep at least one active secret" and revoke.
-    match db::revoke_secret_if_not_last_active(&state.store, &app_id, &secret_id).await {
-        Ok(RevokeSecretOutcome::Revoked) => {}
-        Ok(RevokeSecretOutcome::NotFound) => {
-            return ApplicationErrorTemplate {
-                title: "Not Found".to_string(),
-                message: "Secret not found.".to_string(),
-                back_url: format!("/applications/{app_id}"),
-            }
-            .into_response();
+    if secret.revoked_at.is_some() {
+        return ApplicationErrorTemplate {
+            title: "Not Found".to_string(),
+            message: "Secret not found.".to_string(),
+            back_url: format!("/applications/{app_id}"),
         }
-        Ok(RevokeSecretOutcome::LastActive) => {
-            return ApplicationErrorTemplate {
-                title: "Error".to_string(),
-                message: "Cannot delete the last active secret.".to_string(),
-                back_url: format!("/applications/{app_id}"),
-            }
-            .into_response();
+        .into_response();
+    }
+
+    let now = jiff::Timestamp::now();
+    let all_secrets = db::get_oauth_client_secrets(&state.store, &app_id)
+        .await
+        .unwrap_or_default();
+    let other_active = all_secrets
+        .iter()
+        .filter(|s| s.id != secret_id && s.is_valid(&now))
+        .count();
+
+    if other_active == 0 {
+        return ApplicationErrorTemplate {
+            title: "Error".to_string(),
+            message: "Cannot delete the last active secret.".to_string(),
+            back_url: format!("/applications/{app_id}"),
         }
-        Err(e) => {
-            tracing::error!("Failed to revoke secret: {e}");
-            return ApplicationErrorTemplate {
-                title: "Error".to_string(),
-                message: "Failed to delete secret.".to_string(),
-                back_url: format!("/applications/{app_id}"),
-            }
-            .into_response();
+        .into_response();
+    }
+
+    if let Err(e) = db::revoke_oauth_client_secret(&state.store, &secret_id).await {
+        tracing::error!("Failed to revoke secret: {e}");
+        return ApplicationErrorTemplate {
+            title: "Error".to_string(),
+            message: "Failed to delete secret.".to_string(),
+            back_url: format!("/applications/{app_id}"),
         }
+        .into_response();
     }
 
     tracing::info!(
