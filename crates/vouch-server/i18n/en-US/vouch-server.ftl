@@ -56,6 +56,25 @@ apps-created-view-all = View All Applications
 
 ## Application error / unauthorized / secret added
 apps-error-go-back = Go Back
+# Error-page titles and messages, supplied by the applications web handlers
+# (handlers/applications/web.rs) via `error_page(...)`.
+apps-error-title-error = Error
+apps-error-title-not-found = Not Found
+apps-error-title-invalid-input = Invalid Input
+apps-error-load-applications = Failed to load applications.
+apps-error-org-scope-required = Organization scope requires organization membership.
+apps-error-create-failed = Failed to create application.
+apps-error-app-not-found = Application not found.
+apps-error-load-application = Failed to load application.
+apps-error-update-failed = Failed to update application.
+apps-error-delete-failed = Failed to delete application.
+apps-error-no-client-secrets = This application type does not use client secrets.
+apps-error-fapi-no-secrets = FAPI clients using private_key_jwt do not use client secrets.
+apps-error-secret-add-failed = Failed to add secret.
+apps-error-secret-max = Maximum of 2 active secrets allowed.
+apps-error-secret-not-found = Secret not found.
+apps-error-secret-last-active = Cannot delete the last active secret.
+apps-error-secret-delete-failed = Failed to delete secret.
 apps-unauth-page-title = Unauthorized - { -product }
 apps-unauth-heading = Sign In Required
 apps-unauth-body = You need to be signed in to manage applications.
