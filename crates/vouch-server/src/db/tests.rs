@@ -17,6 +17,7 @@ use super::*;
 use crate::crypto::document_crypto::PlaintextDocumentCrypto;
 use crate::db::audit::AuditStore;
 use crate::db::store::DocumentStore;
+use crate::test_utils::{TestClientSpec, create_test_client};
 
 /// Create an in-memory SQLite database for testing.
 ///
@@ -4051,56 +4052,8 @@ async fn test_delete_authenticator_clears_device_auth_reference() {
 }
 
 // ============================================================================
-// PR-A OCC Invariant Tests — secret cap (≤2) and floor (≥1)
+// OAuth secret cap (≤2) / floor (≥1) OCC invariant tests (#551)
 // ============================================================================
-
-/// Helper: create an OAuth client with no initial secret (to control secrets precisely).
-async fn make_client(store: &DocumentStore) -> OAuthClient {
-    use crate::db::oauth::CreateOAuthClientParams;
-    use crate::db::{AccessScope, FapiProfile, JwsAlgorithm, OAuthClientType, RegistrationSource};
-
-    let (client, _client_id) = crate::db::oauth::create_oauth_client(
-        store,
-        &CreateOAuthClientParams {
-            user_id: Some("occ-test-user"),
-            name: "OCC Test App",
-            description: None,
-            application_type: OAuthClientType::Web,
-            redirect_uris: &["https://example.com/callback".to_string()],
-            access_scope: AccessScope::Public,
-            org_id: None,
-            resource_uris: &[],
-            token_endpoint_auth_method: None,
-            jwks: None,
-            jwks_uri: None,
-            fapi_profile: Some(FapiProfile::None),
-            dpop_bound_access_tokens: None,
-            grant_types: None,
-            response_types: None,
-            software_id: None,
-            software_version: None,
-            registration_source: RegistrationSource::Manual,
-            registration_access_token_hash: None,
-            registration_metadata: None,
-            id_token_signed_response_alg: JwsAlgorithm::Rs256,
-            tls_client_auth_subject_dn: None,
-            tls_client_auth_san_dns: None,
-            tls_client_auth_san_uri: None,
-            tls_client_auth_san_ip: None,
-            tls_client_auth_san_email: None,
-            tls_client_certificate_bound_access_tokens: None,
-            authorization_signed_response_alg: None,
-            introspection_signed_response_alg: None,
-            request_object_signing_alg: None,
-            require_signed_request_object: None,
-            userinfo_signed_response_alg: None,
-            request_uris: None,
-        },
-    )
-    .await
-    .expect("create oauth client");
-    client
-}
 
 /// 4 concurrent adds → exactly 2 `Ok`, rest `409 max_secrets_reached`.
 /// Mirrors `test_update_authenticator_counter_high_concurrency_no_lost_update`.
@@ -4110,8 +4063,16 @@ async fn make_client(store: &DocumentStore) -> OAuthClient {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_concurrent_secret_add_never_exceeds_two() {
     let (store, _audit) = test_db().await;
-    let client = make_client(&store).await;
-    let app_id = client.id.clone();
+    let app_id = create_test_client(
+        &store,
+        "occ-test-user",
+        TestClientSpec {
+            with_secret: false,
+            ..Default::default()
+        },
+    )
+    .await
+    .app_id;
 
     let handles: Vec<_> = (0_u8..4)
         .map(|i| {
@@ -4161,8 +4122,16 @@ async fn test_concurrent_secret_add_never_exceeds_two() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_concurrent_secret_revoke_never_drops_below_one() {
     let (store, _audit) = test_db().await;
-    let client = make_client(&store).await;
-    let app_id = client.id.clone();
+    let app_id = create_test_client(
+        &store,
+        "occ-test-user",
+        TestClientSpec {
+            with_secret: false,
+            ..Default::default()
+        },
+    )
+    .await
+    .app_id;
 
     // Seed exactly 2 active secrets.
     let s1 = create_oauth_client_secret(&store, &app_id, "hash_s1", None, None)
@@ -4217,8 +4186,16 @@ async fn test_concurrent_secret_revoke_never_drops_below_one() {
 #[tokio::test]
 async fn test_revoke_then_add_back_to_two() {
     let (store, _audit) = test_db().await;
-    let client = make_client(&store).await;
-    let app_id = client.id.clone();
+    let app_id = create_test_client(
+        &store,
+        "occ-test-user",
+        TestClientSpec {
+            with_secret: false,
+            ..Default::default()
+        },
+    )
+    .await
+    .app_id;
 
     // Seed 2 active secrets.
     let s1 = create_oauth_client_secret(&store, &app_id, "hash_rtb_s1", None, None)
@@ -4269,13 +4246,22 @@ async fn test_revoke_then_add_back_to_two() {
 #[tokio::test]
 async fn test_revoke_last_secret_rejected() {
     let (store, _audit) = test_db().await;
-    let client = make_client(&store).await;
+    let app_id = create_test_client(
+        &store,
+        "occ-test-user",
+        TestClientSpec {
+            with_secret: false,
+            ..Default::default()
+        },
+    )
+    .await
+    .app_id;
 
-    let secret = create_oauth_client_secret(&store, &client.id, "hash_only_one", None, None)
+    let secret = create_oauth_client_secret(&store, &app_id, "hash_only_one", None, None)
         .await
         .expect("create sole secret");
 
-    let result = revoke_oauth_client_secret(&store, &secret.id, &client.id).await;
+    let result = revoke_oauth_client_secret(&store, &secret.id, &app_id).await;
 
     assert!(
         matches!(
