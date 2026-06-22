@@ -385,6 +385,10 @@ pub(crate) fn decode_token(token: &str, ctx: &TokenValidationContext<'_>) -> Opt
             // Attempt to decode as an RFC 9068 access token
             let decoding_key = ctx.oidc_key.decoding_key();
             let mut validation = Validation::new(Algorithm::ES256);
+            // No leeway: access tokens are Vouch-issued and Vouch-validated on
+            // the same clock (DPoP-bound, short-lived). A 60s grace window
+            // would let replayed tokens slip through during single-use cleanup.
+            validation.leeway = 0;
             // Validate audience when caller specifies one (RFC 8725 §3.9)
             if let Some(aud) = ctx.expected_audience {
                 validation.set_audience(&[aud]);
@@ -439,6 +443,10 @@ pub(crate) fn decode_state_token<T: DeserializeOwned>(
     secret: &[u8],
 ) -> Result<T, jsonwebtoken::errors::Error> {
     let mut validation = Validation::default();
+    // No leeway: state tokens are server-issued and server-validated on the
+    // same clock, so clock skew is zero. A 60s grace would allow replaying an
+    // expired token after its DB single-use marker is already cleaned up.
+    validation.leeway = 0;
     validation.required_spec_claims.clear();
     // Skip aud validation — callers that need it (e.g. AuthorizationCode)
     // validate iss/aud manually after decode.
@@ -813,6 +821,61 @@ mod tests {
 
         let validation = StateTokenError::Validation("bad".to_string());
         assert_eq!(format!("{validation}"), "bad");
+    }
+
+    /// Regression for #536 / B3: `decode_state_token` must reject tokens that
+    /// are a few seconds past `exp` with zero leeway (no 60s grace).
+    #[test]
+    fn test_state_token_recently_expired_rejected_no_leeway() {
+        // exp in the very recent past — previously accepted within the 60s default leeway
+        let state = TestState {
+            data: "replay-attempt".to_string(),
+            iat: 0,
+            exp: 1, // 1970-01-01 — unambiguously expired
+        };
+        let token = encode_state_token(&state, JwtType::Fido2ChallengeState, TEST_JWT_SECRET)
+            .expect("encode");
+        let result: Result<TestState, _> =
+            decode_state_token(&token, JwtType::Fido2ChallengeState, TEST_JWT_SECRET);
+        assert!(
+            result.is_err(),
+            "Expired state token must be rejected with zero leeway"
+        );
+    }
+
+    /// Regression for B3: `decode_token` must reject access tokens a few seconds
+    /// past `exp` with zero leeway (no 60s grace).
+    #[tokio::test]
+    async fn test_access_token_recently_expired_rejected_no_leeway() {
+        let key = make_test_oidc_key();
+        let ctx = make_ctx(&key);
+
+        let claims = AccessTokenClaims {
+            iss: TEST_ISSUER.to_string(),
+            sub: "user-123".to_string(),
+            aud: "client-abc".to_string(),
+            exp: 1, // 1970-01-01 — unambiguously expired
+            iat: 0,
+            nbf: None,
+            jti: "jti-1".to_string(),
+            client_id: "client-abc".to_string(),
+            scope: None,
+            email: None,
+            email_verified: None,
+            hardware_verified: false,
+            cnf: None,
+            auth_time: None,
+            act: None,
+            amr: None,
+            acr: None,
+        };
+
+        let token = key.sign_access_token_jwt(&claims).await.expect("sign");
+        let decoded = decode_token(&token, &ctx);
+        assert!(
+            decoded.is_none(),
+            "Recently expired access token must be rejected with zero leeway"
+        );
     }
 
     #[test]
