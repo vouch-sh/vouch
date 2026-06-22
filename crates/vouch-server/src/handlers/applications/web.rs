@@ -28,8 +28,7 @@ use super::validate::{
     validate_update_fapi, validate_update_format,
 };
 use super::{
-    MAX_ACTIVE_SECRETS, extract_auth_from_cookie, generate_client_secret, parse_redirect_uris,
-    parse_resource_uris,
+    extract_auth_from_cookie, generate_client_secret, parse_redirect_uris, parse_resource_uris,
 };
 use crate::handlers::hash_token;
 use crate::infra::i18n::Tr;
@@ -234,6 +233,7 @@ pub(crate) async fn create_application_form(
         )
         .await
         {
+            // ServiceError does not implement std::error::Error but does impl Display.
             tracing::error!("Failed to create client secret: {}", e);
             // Clean up the client
             if let Err(cleanup_err) = db::delete_oauth_client(&state.store, &client.id).await {
@@ -589,35 +589,25 @@ pub(crate) async fn add_secret_form(
         );
     }
 
-    let now = jiff::Timestamp::now();
-    let secrets = match db::get_oauth_client_secrets(&state.store, &app_id).await {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::error!("Failed to get secrets: {e}");
-            return error_page(
-                Tr::new("apps-error-title-error"),
-                Tr::new("apps-error-secret-add-failed"),
-                format!("/applications/{app_id}"),
-            );
-        }
-    };
-
-    let active_count = secrets.iter().filter(|s| s.is_valid(&now)).count();
-    if active_count >= MAX_ACTIVE_SECRETS {
-        return error_page(
-            Tr::new("apps-error-title-error"),
-            Tr::new("apps-error-secret-max"),
-            format!("/applications/{app_id}"),
-        );
-    }
-
     let secret = generate_client_secret();
     let secret_hash = hash_token(&secret);
 
+    // Cap guard (≤ MAX_ACTIVE_SECRETS) is enforced atomically inside
+    // create_oauth_client_secret — the pre-flight count has been dropped because
+    // the in-tx OCC guard is authoritative on all backends.
     let record =
         match db::create_oauth_client_secret(&state.store, &app_id, &secret_hash, None, None).await
         {
             Ok(r) => r,
+            Err(crate::services::error::ServiceError::Api { ref code, .. })
+                if code == "max_secrets_reached" =>
+            {
+                return error_page(
+                    Tr::new("apps-error-title-error"),
+                    Tr::new("apps-error-secret-max"),
+                    format!("/applications/{app_id}"),
+                );
+            }
             Err(e) => {
                 tracing::error!("Failed to create secret: {e}");
                 return error_page(
@@ -701,11 +691,24 @@ pub(crate) async fn delete_secret_form(
         );
     }
 
-    if let Err(e) = db::revoke_oauth_client_secret(&state.store, &secret_id).await {
-        tracing::error!("Failed to revoke secret: {e}");
+    // Floor guard (≥1 active) is enforced atomically inside
+    // revoke_oauth_client_secret — the pre-flight count above remains as a
+    // fast-path for the common non-concurrent case.  A concurrent revoke may
+    // still race us to the last secret and return last_secret 409; show the
+    // specific message rather than the generic delete-failed page.
+    if let Err(e) = db::revoke_oauth_client_secret(&state.store, &secret_id, &app_id).await {
+        let msg = match &e {
+            crate::services::error::ServiceError::Api { code, .. } if code == "last_secret" => {
+                Tr::new("apps-error-secret-last-active")
+            }
+            _ => {
+                tracing::error!("Failed to revoke secret: {e}");
+                Tr::new("apps-error-secret-delete-failed")
+            }
+        };
         return error_page(
             Tr::new("apps-error-title-error"),
-            Tr::new("apps-error-secret-delete-failed"),
+            msg,
             format!("/applications/{app_id}"),
         );
     }

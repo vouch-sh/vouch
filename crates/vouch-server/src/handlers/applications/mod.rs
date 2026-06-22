@@ -19,9 +19,6 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use super::extract_session_from_cookie;
 use super::session::AuthContext;
 
-/// Maximum number of active secrets per application.
-pub(crate) const MAX_ACTIVE_SECRETS: usize = 2;
-
 // Re-export handler functions used by the router.
 pub(crate) use api::{
     add_secret_api, create_application_api, delete_application_api, delete_secret_api,

@@ -267,6 +267,7 @@ cargo test --features yubikey-tests -- --ignored
 7. **Don't use `chrono`** — Use `jiff` for time
 8. **Don't use `ring`** — Use `aws-lc-rs` for crypto
 9. **Don't blind-write documents after a read** — For any document that can be mutated concurrently (users, authenticators, OAuth secrets, etc.), use `store.modify()` (optimistic concurrency) rather than `store.get()` + `store.update()`. A blind `store.update()` overwrites the whole document and silently loses concurrent writes (lost-update race).
+10. **Cross-row invariants (cap ≤N, floor ≥1, monotonic) → one transaction that version-bumps the owning doc via `compare_and_update`, wrapped in `with_dsql_retry!`** (the single OCC-aware bounded retry; model the conflict as `ServiceError::OccConflict` — the only variant that `is_retryable()` returns `true` for). DSQL is OCC-only (no `SELECT … FOR UPDATE`); forcing concurrent writers to collide on the owner doc's row is what makes the guard atomic on every backend. **Never hand-roll a retry loop.** (A deterministic-PK-slot design can make a true cap *conflict-free*, but we don't use it here — it would cost a new doc type or a re-keying migration; OCC reuses the existing types and the one shared macro.)
 
 ## File Locations
 
