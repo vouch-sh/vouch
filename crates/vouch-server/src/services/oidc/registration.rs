@@ -560,11 +560,7 @@ pub async fn register_client(
             Some("Dynamic registration"),
             None,
         )
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to create client secret for dynamic registration: {e}");
-            ServiceError::Internal("Failed to create client secret".to_string())
-        })?;
+        .await?;
 
         Some(secret)
     } else {

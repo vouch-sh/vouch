@@ -125,8 +125,8 @@ pub use documents::oauth::{
 // Re-export OAuth domain types and functions
 pub(crate) use oauth::JwtAssertionJtiClaim;
 pub use oauth::{
-    CreateOAuthClientParams, OAuthClient, OAuthClientSecret, OAuthEventType, OAuthUsageStats,
-    UpdateClientRegistrationParams, UpdateOAuthClientParams, create_oauth_client,
+    CreateOAuthClientParams, MAX_ACTIVE_SECRETS, OAuthClient, OAuthClientSecret, OAuthEventType,
+    OAuthUsageStats, UpdateClientRegistrationParams, UpdateOAuthClientParams, create_oauth_client,
     create_oauth_client_secret, delete_expired_jwt_assertion_jtis, delete_oauth_client,
     delete_old_oauth_usage_events, get_oauth_client_by_client_id, get_oauth_client_by_id,
     get_oauth_client_secret_by_id, get_oauth_client_secrets, get_oauth_clients_for_user,

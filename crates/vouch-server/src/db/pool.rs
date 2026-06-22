@@ -430,11 +430,34 @@ impl From<sqlx::postgres::PgQueryResult> for QueryResult {
     }
 }
 
-/// Retry an async block on transient DSQL errors.
+/// Trait for errors that signal a transient conflict worth retrying.
+///
+/// Implemented for `anyhow::Error` (delegates to `is_retryable_db_error`) and for
+/// `ServiceError` (only the dedicated `OccConflict` variant is retryable).  The
+/// `with_dsql_retry!` macro calls `e.is_retryable()` instead of the old
+/// `is_retryable_db_error(&e)` so that OCC version-bump conflicts from
+/// `compare_and_update` are retried through the same bounded loop as DSQL
+/// network-level serialization failures, without any change to the ~11 existing
+/// non-transactional call sites (their error type is still `anyhow::Error`).
+pub(crate) trait RetryableError {
+    fn is_retryable(&self) -> bool;
+}
+
+impl RetryableError for anyhow::Error {
+    fn is_retryable(&self) -> bool {
+        is_retryable_db_error(self)
+    }
+}
+
+/// Retry an async block on transient DSQL errors or OCC version conflicts.
 ///
 /// Re-evaluates the body on each attempt (creating a fresh future),
 /// so the operation is fully retried from scratch. Non-retryable
 /// errors and successes pass through immediately.
+///
+/// The error type returned by `$body` must implement [`RetryableError`].
+/// For `anyhow::Error` this is equivalent to the old `is_retryable_db_error`
+/// check.  For `ServiceError`, only the `OccConflict` variant retries.
 ///
 /// Usage: `with_dsql_retry!(async { ... }).await`
 #[macro_export]
@@ -445,13 +468,13 @@ macro_rules! with_dsql_retry {
             match $body.await {
                 Ok(val) => break Ok(val),
                 Err(e)
-                    if $crate::db::pool::is_retryable_db_error(&e)
+                    if $crate::db::pool::RetryableError::is_retryable(&e)
                         && __attempt < $crate::db::pool::MAX_DSQL_RETRIES =>
                 {
                     tracing::warn!(
                         attempt = __attempt,
                         error = %e,
-                        "transient DSQL error, retrying"
+                        "transient DSQL/OCC conflict, retrying"
                     );
                     tokio::time::sleep(
                         $crate::db::pool::retry_backoff(__attempt),
@@ -1037,5 +1060,131 @@ mod tests {
         assert!(d0.as_millis() <= 200);
         assert!(d1.as_millis() <= 400);
         assert!(d2.as_millis() <= 800);
+    }
+
+    // ========================================================================
+    // RetryableError trait and with_dsql_retry! OCC tests
+    // ========================================================================
+
+    /// A minimal error type for testing with_dsql_retry! with a custom retryable variant.
+    #[derive(Debug, PartialEq)]
+    enum TestError {
+        /// Retryable OCC conflict signal.
+        OccConflict,
+        /// Non-retryable business error.
+        BusinessError(String),
+    }
+
+    impl std::fmt::Display for TestError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            match self {
+                Self::OccConflict => write!(f, "OCC conflict"),
+                Self::BusinessError(msg) => write!(f, "business error: {msg}"),
+            }
+        }
+    }
+
+    impl RetryableError for TestError {
+        fn is_retryable(&self) -> bool {
+            matches!(self, Self::OccConflict)
+        }
+    }
+
+    /// Body returning OccConflict retries up to MAX_DSQL_RETRIES, then succeeds on
+    /// a later attempt.
+    #[tokio::test]
+    async fn test_with_dsql_retry_occ_conflict_retries_then_succeeds() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        let call_count = Arc::new(AtomicU32::new(0));
+        let call_count2 = call_count.clone();
+
+        // Fail with OccConflict on the first attempt, succeed on the second.
+        let result: Result<u32, TestError> = crate::with_dsql_retry!(async {
+            let n = call_count2.fetch_add(1, Ordering::SeqCst);
+            if n == 0 {
+                Err(TestError::OccConflict)
+            } else {
+                Ok(42)
+            }
+        });
+
+        assert_eq!(result, Ok(42));
+        assert_eq!(
+            call_count.load(Ordering::SeqCst),
+            2,
+            "must retry exactly once"
+        );
+    }
+
+    /// Body returning a non-retryable BusinessError propagates immediately without retry.
+    #[tokio::test]
+    async fn test_with_dsql_retry_business_error_no_retry() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        let call_count = Arc::new(AtomicU32::new(0));
+        let call_count2 = call_count.clone();
+
+        let result: Result<u32, TestError> = crate::with_dsql_retry!(async {
+            call_count2.fetch_add(1, Ordering::SeqCst);
+            Err(TestError::BusinessError("limit reached".to_string()))
+        });
+
+        assert_eq!(
+            result,
+            Err(TestError::BusinessError("limit reached".to_string()))
+        );
+        assert_eq!(
+            call_count.load(Ordering::SeqCst),
+            1,
+            "must not retry on business error"
+        );
+    }
+
+    /// anyhow::Error path: non-DB error is not retryable and propagates immediately.
+    #[tokio::test]
+    async fn test_with_dsql_retry_anyhow_non_retryable_propagates() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        let call_count = Arc::new(AtomicU32::new(0));
+        let call_count2 = call_count.clone();
+
+        let result: Result<u32, anyhow::Error> = crate::with_dsql_retry!(async {
+            call_count2.fetch_add(1, Ordering::SeqCst);
+            Err(anyhow::anyhow!("some non-DB error"))
+        });
+
+        assert!(result.is_err());
+        assert_eq!(
+            call_count.load(Ordering::SeqCst),
+            1,
+            "must not retry on non-retryable anyhow error"
+        );
+    }
+
+    /// OccConflict that never succeeds exhausts the retry budget and returns the error.
+    #[tokio::test]
+    async fn test_with_dsql_retry_occ_exhausts_budget() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        let call_count = Arc::new(AtomicU32::new(0));
+        let call_count2 = call_count.clone();
+
+        let result: Result<u32, TestError> = crate::with_dsql_retry!(async {
+            call_count2.fetch_add(1, Ordering::SeqCst);
+            Err(TestError::OccConflict)
+        });
+
+        assert_eq!(result, Err(TestError::OccConflict));
+        // Initial attempt + MAX_DSQL_RETRIES retries = MAX_DSQL_RETRIES + 1 total calls.
+        assert_eq!(
+            call_count.load(Ordering::SeqCst),
+            MAX_DSQL_RETRIES.saturating_add(1),
+            "must attempt exactly MAX_DSQL_RETRIES + 1 times"
+        );
     }
 }
