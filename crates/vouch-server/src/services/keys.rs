@@ -191,10 +191,12 @@ pub(crate) async fn rename_key(
 /// along with any associated sessions (via CASCADE). Returns the deleted key
 /// name and the number of revoked sessions.
 ///
-/// The flow runs inside a single transaction with a delete-then-check guard
+/// Each attempt runs inside a single transaction with a delete-then-check guard
 /// and a `compare_and_update` version bump on the User doc, so two concurrent
-/// deletes against the same user serialise on a write-write conflict — the
-/// loser sees the conflict at commit time and rolls back.
+/// deletes against the same user serialise on a write-write conflict. The loser
+/// is retried with backoff; once a sibling delete has committed, its retry
+/// re-evaluates the last-key guard and returns 400 `last_key`, so exactly one
+/// of two concurrent deletes succeeds.
 ///
 /// # Errors
 ///
@@ -202,10 +204,47 @@ pub(crate) async fn rename_key(
 /// - `ServiceError::NotFound` if the key (or user) does not exist.
 /// - `ServiceError::Forbidden` if the key does not belong to the user.
 /// - `ServiceError::Api(400 "last_key")` if this is the user's last key.
-/// - `ServiceError::Api(409 "conflict")` if a concurrent delete won the race
-///   on the User doc's optimistic-concurrency version.
+/// - `ServiceError::Api(409 "conflict")` if concurrent deletes keep conflicting
+///   on the User doc's optimistic-concurrency version past the retry budget.
 /// - `ServiceError::Internal` on database errors.
 pub(crate) async fn delete_key(
+    store: &DocumentStore,
+    user_id: &str,
+    key_id: &str,
+) -> Result<(String, u64), ServiceError> {
+    // Concurrent deletes against the same user contend on the User-doc version
+    // bump (and, on SQLite, on the write lock). A losing attempt surfaces as a
+    // 409 "conflict" — either a retryable DB error mapped to 409, or the
+    // version-bump conflict. Retry so exactly one delete wins and the rest
+    // re-evaluate the last-key guard (returning 400 "last_key") instead of all
+    // failing with 409 and leaving the key undeleted (flaky on SQLite under
+    // write contention).
+    const MAX_ATTEMPTS: u32 = 5;
+    for attempt in 1..=MAX_ATTEMPTS {
+        match delete_key_once(store, user_id, key_id).await {
+            Ok(result) => return Ok(result),
+            Err(e) => {
+                let is_conflict = match &e {
+                    ServiceError::Api { status, .. } => *status == axum::http::StatusCode::CONFLICT,
+                    _ => false,
+                };
+                if is_conflict && attempt < MAX_ATTEMPTS {
+                    tokio::time::sleep(crate::db::pool::retry_backoff(attempt)).await;
+                    continue;
+                }
+                return Err(e);
+            }
+        }
+    }
+    // The loop returns on the final attempt; this point is unreachable.
+    Err(ServiceError::Internal(
+        "key deletion retry loop exhausted".to_string(),
+    ))
+}
+
+/// A single attempt at the transactional key deletion. [`delete_key`] retries
+/// this on a 409 conflict (write-write contention on the User doc).
+async fn delete_key_once(
     store: &DocumentStore,
     user_id: &str,
     key_id: &str,
