@@ -977,12 +977,24 @@ pub(crate) async fn revoke_tokens_api(
     // Revoking secrets is not enough on its own: the session cache may still
     // serve unexpired tokens until their TTL elapses.  Deleting those sessions
     // and invalidating the cache makes the `TokenRevoked` audit event accurate.
-    if let Err(e) = db::delete_sessions_for_user(&state.store, &client.client_id).await {
-        tracing::warn!(
-            "Failed to delete M2M sessions for {}: {e}",
-            client.client_id
-        );
-    }
+    //
+    // Fail closed: if session deletion fails, do not report revocation success.
+    // Secrets are already revoked, but unexpired M2M access tokens could still
+    // validate via DB-backed session lookup, so the caller must be told the
+    // revocation was incomplete (and retry) rather than see a 204 + TokenRevoked.
+    db::delete_sessions_for_user(&state.store, &client.client_id)
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                "Failed to delete M2M sessions for {}: {e}",
+                client.client_id
+            );
+            ServiceError::api(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "db_error",
+                "Internal database error",
+            )
+        })?;
     state.session_cache.invalidate_for_user(&client.client_id);
 
     // Log the event
