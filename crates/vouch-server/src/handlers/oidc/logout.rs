@@ -256,12 +256,19 @@ pub(crate) async fn logout(
 
     // Validate post_logout_redirect_uri against the client's registered list.
     // Only pass it through if a verified hint identified the client.
-    let validated_redirect_uri = resolve_post_logout_redirect_uri(
+    let validated_redirect_uri = match resolve_post_logout_redirect_uri(
         &state,
         verified_client_id.as_deref(),
         query.post_logout_redirect_uri.as_deref(),
     )
-    .await;
+    .await
+    {
+        Ok(uri) => uri,
+        Err(e) => {
+            tracing::error!(error = %e, "logout: failed to resolve post_logout_redirect_uri");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
 
     // The confirmation form propagates the hint, redirect URI, state, and
     // ui_locales as hidden fields so the POST handler can re-validate them.
@@ -301,20 +308,35 @@ pub(crate) async fn logout_post(
 
     let verified_client_id = hint_claims.as_ref().map(|c| c.aud.clone());
 
+    // Clear the browser session first (DB deletion + cache invalidation + audit
+    // event). The user asked to log out, so a later redirect-validation database
+    // error must not prevent logout.
+    clear_user_session(&state, &jar, &headers, verified_client_id.as_deref()).await;
+
+    let clear_cookie = clear_session_cookie().to_string();
+
     // Re-validate the post_logout_redirect_uri. The POST handler must NOT trust
     // the form field without re-checking — the form is same-origin but the
     // hidden field value could be tampered with.
-    let validated_redirect_uri = resolve_post_logout_redirect_uri(
+    let validated_redirect_uri = match resolve_post_logout_redirect_uri(
         &state,
         verified_client_id.as_deref(),
         form.post_logout_redirect_uri.as_deref(),
     )
-    .await;
-
-    // Clear the browser session (DB deletion + cache invalidation + audit event).
-    clear_user_session(&state, &jar, &headers, verified_client_id.as_deref()).await;
-
-    let clear_cookie = clear_session_cookie().to_string();
+    .await
+    {
+        Ok(uri) => uri,
+        Err(e) => {
+            tracing::error!(error = %e, "logout: failed to resolve post_logout_redirect_uri");
+            // The session is already cleared; surface the server fault rather
+            // than silently skipping the redirect.
+            return Response::builder()
+                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                .header(header::SET_COOKIE, clear_cookie)
+                .body(axum::body::Body::empty())
+                .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
+        }
+    };
 
     match validated_redirect_uri {
         Some(redirect_uri) => {
@@ -363,7 +385,10 @@ pub(crate) async fn logout_post(
 // ============================================================================
 
 /// Look up the client and validate `post_logout_redirect_uri` against its
-/// registered list. Returns `Some(uri)` only when the URI is registered.
+/// registered list. Returns `Ok(Some(uri))` only when the URI is registered for
+/// an active client, `Ok(None)` when there is no valid redirect target, and
+/// `Err` when the client lookup fails — the caller surfaces that as a server
+/// error rather than silently skipping the redirect.
 ///
 /// Redirect is only permitted when a verified `id_token_hint` supplied `client_id`
 /// — the caller must pass `None` when no hint was verified.
@@ -371,20 +396,24 @@ async fn resolve_post_logout_redirect_uri(
     state: &AppState,
     client_id: Option<&str>,
     post_logout_redirect_uri: Option<&str>,
-) -> Option<String> {
-    let uri = post_logout_redirect_uri?;
-    let cid = client_id?;
+) -> anyhow::Result<Option<String>> {
+    let (Some(uri), Some(cid)) = (post_logout_redirect_uri, client_id) else {
+        return Ok(None);
+    };
 
-    let client = db::get_oauth_client_by_client_id(&state.store, cid)
-        .await
-        .ok()
-        .flatten()?;
+    let Some(client) = db::get_oauth_client_by_client_id(&state.store, cid).await? else {
+        return Ok(None);
+    };
 
-    if client.is_valid_post_logout_redirect_uri(uri) {
-        Some(uri.to_string())
-    } else {
-        None
+    // Deactivated clients cannot receive a post-logout redirect, consistent with
+    // the authorize flow which rejects inactive clients.
+    if !client.active {
+        return Ok(None);
     }
+
+    Ok(client
+        .is_valid_post_logout_redirect_uri(uri)
+        .then(|| uri.to_string()))
 }
 
 /// Delete the session associated with the current browser cookie, invalidate
@@ -699,6 +728,91 @@ mod tests {
             status,
             axum::http::StatusCode::SEE_OTHER,
             "expected 303 redirect; body: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_post_logout_inactive_client_renders_done_page() {
+        // A deactivated client must NOT receive a post-logout redirect, even with
+        // a valid hint and a registered URI — consistent with the authorize flow.
+        let (app, state) = test_app().await;
+
+        let user = create_test_user(&state.store, "logout-inactive@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let session_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+
+        let post_logout_uri = "https://rp.example.com/logged-out";
+        let (client_oid, client_id) = crate::db::create_oauth_client(
+            &state.store,
+            &CreateOAuthClientParams {
+                user_id: Some(&user.id),
+                name: "Inactive Logout App",
+                description: None,
+                application_type: crate::db::OAuthClientType::Web,
+                redirect_uris: &["https://rp.example.com/callback".to_string()],
+                access_scope: crate::db::AccessScope::Personal,
+                org_id: None,
+                resource_uris: &[],
+                token_endpoint_auth_method: None,
+                jwks: None,
+                jwks_uri: None,
+                fapi_profile: None,
+                dpop_bound_access_tokens: None,
+                grant_types: None,
+                response_types: None,
+                software_id: None,
+                software_version: None,
+                registration_source: crate::db::RegistrationSource::Manual,
+                registration_access_token_hash: None,
+                registration_metadata: None,
+                id_token_signed_response_alg: crate::db::JwsAlgorithm::Rs256,
+                tls_client_auth_subject_dn: None,
+                tls_client_auth_san_dns: None,
+                tls_client_auth_san_uri: None,
+                tls_client_auth_san_ip: None,
+                tls_client_auth_san_email: None,
+                tls_client_certificate_bound_access_tokens: None,
+                authorization_signed_response_alg: None,
+                introspection_signed_response_alg: None,
+                request_object_signing_alg: None,
+                require_signed_request_object: None,
+                userinfo_signed_response_alg: None,
+                request_uris: None,
+                post_logout_redirect_uris: Some(vec![post_logout_uri.to_string()]),
+            },
+        )
+        .await
+        .unwrap();
+
+        // Deactivate the client after creation.
+        crate::db::set_oauth_client_active(&state.store, &client_oid.id, false)
+            .await
+            .unwrap();
+
+        let hint = make_hint(&state, &client_id).await;
+        let form_body = format!(
+            "id_token_hint={}&client_id={}&post_logout_redirect_uri={}&state=opaque",
+            urlencoding::encode(&hint),
+            urlencoding::encode(&client_id),
+            urlencoding::encode(post_logout_uri),
+        );
+
+        let (status, body) = http_post_form(
+            &app,
+            "/oauth/logout",
+            &form_body,
+            &[("Cookie", &format!("__Host-vouch_session={session_token}"))],
+        )
+        .await;
+
+        assert_ne!(
+            status,
+            axum::http::StatusCode::SEE_OTHER,
+            "deactivated client must not receive a redirect; body: {body}"
+        );
+        assert!(
+            body.contains("</html>") || body.contains("<!DOCTYPE"),
+            "expected done-page HTML: {body}"
         );
     }
 
