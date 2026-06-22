@@ -81,9 +81,9 @@
                     {% for token in tokens %}
                     <tr class="border-b border-vouch-border last:border-b-0">
                         <td class="px-4 py-3 text-gray-200 max-w-xs truncate" title="{{ token.description.as_deref().unwrap_or("") }}">{{ token.description.as_deref().unwrap_or("—") }}</td>
-                        <td class="px-4 py-3 text-gray-400 whitespace-nowrap">{{ token.created_at }}</td>
-                        <td class="px-4 py-3 text-gray-400 whitespace-nowrap">{% match token.last_used_at %}{% when Some with (v) %}{{ v }}{% when None %}{{ self.tr("apps-list-never") }}{% endmatch %}</td>
-                        <td class="px-4 py-3 text-gray-400 whitespace-nowrap">{% match token.expires_at %}{% when Some with (v) %}{{ v }}{% when None %}{{ self.tr("apps-list-never") }}{% endmatch %}</td>
+                        <td class="px-4 py-3 text-gray-400 whitespace-nowrap"><time datetime="{{ token.created_at }}" data-localize-time>{{ token.created_at|humandatetime }}</time></td>
+                        <td class="px-4 py-3 text-gray-400 whitespace-nowrap">{% match token.last_used_at %}{% when Some with (v) %}<time datetime="{{ v }}" data-localize-time>{{ v|humandatetime }}</time>{% when None %}{{ self.tr("apps-list-never") }}{% endmatch %}</td>
+                        <td class="px-4 py-3 text-gray-400 whitespace-nowrap">{% match token.expires_at %}{% when Some with (v) %}<time datetime="{{ v }}" data-localize-time>{{ v|humandatetime }}</time>{% when None %}{{ self.tr("apps-list-never") }}{% endmatch %}</td>
                         <td class="px-4 py-3 text-right">
                             <form method="POST" action="/admin/scim-tokens/{{ token.id }}/revoke" data-confirm-message="{{ self.tr("admin-scim-revoke-confirm") }}">
                                 <button type="submit" class="px-2 py-1 text-xs rounded bg-red-900/40 text-red-400 hover:bg-red-900/60">{{ self.tr("apps-detail-revoke") }}</button>
@@ -108,5 +108,6 @@
 {% endblock %}
 
 {% block scripts %}
+<script src="/static/js/common.js"></script>
 <script src="/static/js/admin.js"></script>
 {% endblock %}

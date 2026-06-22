@@ -7,6 +7,7 @@
 
 use crate::AppState;
 use crate::db;
+use crate::filters;
 use crate::handlers::admin::flash;
 use crate::handlers::browser_login::validate_origin;
 use crate::handlers::session::{AuthContext, extract_org_admin, get_resource_auth_context};
@@ -18,6 +19,7 @@ use axum::extract::{OriginalUri, Path, State};
 use axum::http::{HeaderMap, Method};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum_extra::extract::cookie::CookieJar;
+use jiff::Timestamp;
 use serde::Deserialize;
 use std::sync::Arc;
 
@@ -46,7 +48,10 @@ pub(crate) struct DomainRow {
     pub unicode: Option<String>,
     pub status: DomainRowStatus,
     pub verification_token: Option<String>,
-    pub added_at: Option<String>,
+    /// When the domain was added — `org.created_at` for the primary domain,
+    /// `ad.added_at` for additional domains. Rendered client-side in the
+    /// viewer's locale and timezone (`humandatetime` is the no-JS fallback).
+    pub added_at: Timestamp,
     /// Email of the admin who added this domain. `None` for the primary
     /// (provisioned at org creation).
     pub added_by: Option<String>,
@@ -96,7 +101,7 @@ fn build_rows(org: &db::Organization) -> Vec<DomainRow> {
         unicode: db::unicode_form(&org.domain),
         status: DomainRowStatus::Primary,
         verification_token: None,
-        added_at: None,
+        added_at: org.created_at,
         added_by: None,
     });
     for ad in &org.additional_domains {
@@ -117,7 +122,7 @@ fn build_rows(org: &db::Organization) -> Vec<DomainRow> {
             unicode: db::unicode_form(&ad.domain),
             status,
             verification_token,
-            added_at: Some(ad.added_at.strftime("%Y-%m-%d %H:%M UTC").to_string()),
+            added_at: ad.added_at,
             added_by: Some(ad.added_by_email.clone()),
         });
     }

@@ -7,7 +7,8 @@
 
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
+use jiff::Timestamp;
 use sea_query::{Expr, ExprTrait, Iden, Order, Query};
 
 use super::pool::Pool;
@@ -64,8 +65,8 @@ pub struct AuditEvent {
     pub email_hmac: Option<String>,
     /// JSON event data.
     pub data: String,
-    /// ISO 8601 creation timestamp.
-    pub created_at: String,
+    /// Creation timestamp (parsed from the stored RFC 3339 string).
+    pub created_at: Timestamp,
 }
 
 /// Filter criteria for querying audit events.
@@ -214,7 +215,7 @@ impl AuditStore {
 
         let mut events = Vec::with_capacity(rows.len());
         for row in rows {
-            events.push(raw_to_audit_event(row));
+            events.push(raw_to_audit_event(row)?);
         }
         Ok(events)
     }
@@ -288,16 +289,20 @@ fn extract_domain(email: &str) -> Option<String> {
 }
 
 /// Convert a raw row to an `AuditEvent`.
-fn raw_to_audit_event(row: RawAuditRow) -> AuditEvent {
-    AuditEvent {
+fn raw_to_audit_event(row: RawAuditRow) -> Result<AuditEvent> {
+    let created_at: Timestamp = row
+        .created_at
+        .parse()
+        .context("failed to parse audit event created_at timestamp")?;
+    Ok(AuditEvent {
         id: row.id,
         event_type: row.event_type,
         user_id: row.user_id,
         email_domain: row.email_domain,
         email_hmac: row.email_hmac,
         data: row.data,
-        created_at: row.created_at,
-    }
+        created_at,
+    })
 }
 
 // ============================================================================

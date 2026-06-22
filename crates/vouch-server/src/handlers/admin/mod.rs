@@ -88,11 +88,6 @@ pub(crate) fn compute_token_expiry(days: i64) -> Result<Timestamp, ServiceError>
     })
 }
 
-/// Format a `jiff::Timestamp` as a date string for display.
-pub(crate) fn format_timestamp(ts: &Timestamp) -> String {
-    ts.strftime("%Y-%m-%d %H:%M UTC").to_string()
-}
-
 /// Helper: extract org admin from cookie, verify target is in same org.
 pub(crate) async fn extract_admin_and_target(
     state: &AppState,

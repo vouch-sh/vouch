@@ -14,7 +14,7 @@ use jiff::Timestamp;
 use serde::Deserialize;
 use std::sync::Arc;
 
-use super::format_timestamp;
+use crate::filters;
 use crate::handlers::session::{AuthContext, get_resource_auth_context};
 
 /// Page size for the audit log.
@@ -47,7 +47,9 @@ pub(crate) struct AuditRow {
     pub event_type: String,
     pub email_domain: Option<String>,
     pub data: String,
-    pub created_at: String,
+    /// Event timestamp, rendered client-side in the viewer's locale and
+    /// timezone (`humandatetime` is the no-JS fallback).
+    pub created_at: Timestamp,
     /// Pre-formatted IP cell text, e.g. "🇺🇸 8.8.8.8" or "-".
     pub ip_display: String,
     /// Tooltip for the IP cell with country code and ASN.
@@ -129,16 +131,12 @@ pub(crate) async fn admin_audit_page(
         .iter()
         .map(|e| {
             let geo = GeoFields::from_json(&e.data);
-            let created_at = e
-                .created_at
-                .parse::<Timestamp>()
-                .map_or_else(|_| e.created_at.clone(), |ts| format_timestamp(&ts));
             AuditRow {
                 id: e.id.clone(),
                 event_type: e.event_type.clone(),
                 email_domain: e.email_domain.clone(),
                 data: e.data.clone(),
-                created_at,
+                created_at: e.created_at,
                 ip_display: geo.ip_display(),
                 ip_title: geo.ip_title(),
             }
