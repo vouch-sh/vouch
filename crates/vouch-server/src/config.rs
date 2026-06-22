@@ -919,6 +919,22 @@ impl ServerConfig {
             );
         }
 
+        // Reject wildcard in VOUCH_CORS_ORIGINS for UI routes: those routes use
+        // cookie-based credentialed sessions, and `Access-Control-Allow-Origin: *`
+        // is forbidden with `Access-Control-Allow-Credentials: true` (CORS spec
+        // §3.2 and tower-http panic at router build time). List explicit origins.
+        if let Some(origins) = &self.cors_origins {
+            for origin in origins {
+                if origin == "*" {
+                    anyhow::bail!(
+                        "VOUCH_CORS_ORIGINS must not contain '*'. UI routes use credentialed \
+                         cookie sessions; wildcard origin is forbidden with Allow-Credentials. \
+                         List explicit origins instead, e.g. https://app.example.com"
+                    );
+                }
+            }
+        }
+
         // Skip jwt_secret validation when KMS HMAC signing is configured.
         if self.jwt_hmac_kms_key_id.is_none() {
             let secret = self.jwt_secret.expose_secret();
@@ -1226,5 +1242,34 @@ mod tests {
         // test_config sets one OIDC provider
         assert!(config.has_idps());
         assert!(config.has_oidc_idp());
+    }
+
+    /// Regression for #541: wildcard CORS origin must be rejected at startup
+    /// because UI routes use credentialed cookie sessions, and `*` + credentials
+    /// is forbidden by CORS spec and causes tower-http to panic at router build.
+    #[test]
+    fn test_validate_rejects_wildcard_cors_origin() {
+        let mut config = test_config();
+        config.cors_origins = Some(vec!["*".to_string()]);
+        let err = config.validate().unwrap_err();
+        assert!(
+            err.to_string().contains("VOUCH_CORS_ORIGINS"),
+            "Error should name the offending variable: {err}"
+        );
+        assert!(
+            err.to_string().contains("wildcard"),
+            "Error should mention wildcard: {err}"
+        );
+    }
+
+    /// Regression for #541: explicit HTTPS origins must be accepted.
+    #[test]
+    fn test_validate_accepts_explicit_cors_origins() {
+        let mut config = test_config();
+        config.cors_origins = Some(vec![
+            "https://app.example.com".to_string(),
+            "https://other.example.com:8443".to_string(),
+        ]);
+        assert!(config.validate().is_ok());
     }
 }

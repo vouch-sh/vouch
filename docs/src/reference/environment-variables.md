@@ -103,7 +103,7 @@ The previous flat single-IdP variables — `VOUCH_OIDC_ISSUER`, `VOUCH_OIDC_CLIE
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `VOUCH_CORS_ORIGINS` | No | _(none)_ | Comma-separated list of CORS allowed origins. Empty means same-origin only. Use `*` to allow all origins (not recommended for production). |
+| `VOUCH_CORS_ORIGINS` | No | _(none)_ | Comma-separated list of explicit CORS allowed origins for UI routes (e.g. `https://app.example.com`). Empty means same-origin only. Wildcard (`*`) is not supported — UI routes use credentialed cookie sessions, which are incompatible with wildcard origins per the CORS spec. |
 
 ## GitHub App
 
