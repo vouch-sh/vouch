@@ -444,10 +444,9 @@ impl Commands {
             }
             #[cfg(not(target_os = "windows"))]
             Commands::Diag(_) => false,
-            Commands::Completions(_)
-            | Commands::Logout
-            | Commands::Init { .. }
-            | Commands::Posture { .. } => false,
+            // Logout POSTs token + client_assertion to /oauth/revoke — it
+            // contacts the server and must receive HTTPS enforcement.
+            Commands::Completions(_) | Commands::Init { .. } | Commands::Posture { .. } => false,
             _ => true,
         }
     }
@@ -877,6 +876,43 @@ async fn run() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -- uses_server --
+
+    /// Regression for #548: logout contacts /oauth/revoke and must be subject
+    /// to HTTPS enforcement (`uses_server` must return `true`).
+    #[test]
+    fn test_logout_uses_server() {
+        assert!(
+            Commands::Logout.uses_server(),
+            "Logout posts to /oauth/revoke; uses_server() must be true"
+        );
+    }
+
+    /// Completions is a purely local operation and must not require a server URL.
+    #[test]
+    fn test_completions_does_not_use_server() {
+        let args = commands::completions::CompletionsArgs {
+            shell: clap_complete::Shell::Bash,
+        };
+        assert!(
+            !Commands::Completions(args).uses_server(),
+            "Completions is local; uses_server() must be false"
+        );
+    }
+
+    // -- posture does not use server --
+
+    #[test]
+    fn test_posture_does_not_use_server() {
+        assert!(
+            !Commands::Posture {
+                format: commands::posture::OutputFormat::Text
+            }
+            .uses_server(),
+            "Posture is local; uses_server() must be false"
+        );
+    }
 
     // -- docker-credential-vouch --
 
