@@ -29,6 +29,7 @@ use super::validate::{
     validate_update_format,
 };
 use super::{MAX_ACTIVE_SECRETS, generate_client_secret};
+use crate::db::{AddSecretOutcome, RevokeSecretOutcome};
 use crate::handlers::extractors::OptionalClientCert;
 use crate::handlers::hash_token;
 use crate::handlers::session::extract_resource_token;
@@ -419,8 +420,19 @@ pub(crate) async fn update_application_api(
         None
     };
 
-    // Apply updates (merge request values with existing client record)
-    let name = req.name.as_deref().unwrap_or(&client.name);
+    // Apply updates (merge request values with existing client record).
+    // Reject an explicitly provided empty/whitespace name; absent (None)
+    // means "keep the existing name" and is always accepted.
+    if let Some(new_name) = req.name.as_deref()
+        && new_name.trim().is_empty()
+    {
+        return Err(ServiceError::api(
+            StatusCode::BAD_REQUEST,
+            "invalid_name",
+            "Application name is required",
+        ));
+    }
+    let name = req.name.as_deref().map_or(client.name.as_str(), str::trim);
     let description = req.description.as_deref().or(client.description.as_deref());
     let redirect_uris = req
         .redirect_uris
@@ -655,36 +667,19 @@ pub(crate) async fn add_secret_api(
         ));
     }
 
-    let now = jiff::Timestamp::now();
-    let secrets = db::get_oauth_client_secrets(&state.store, &app_id)
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to get secrets: {e}");
-            ServiceError::api(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "db_error",
-                "Internal database error",
-            )
-        })?;
-
-    let active_count = secrets.iter().filter(|s| s.is_valid(&now)).count();
-    if active_count >= MAX_ACTIVE_SECRETS {
-        return Err(ServiceError::api(
-            StatusCode::CONFLICT,
-            "max_secrets_reached",
-            "Maximum of 2 active secrets allowed",
-        ));
-    }
-
     let secret = generate_client_secret();
     let secret_hash = hash_token(&secret);
 
-    let record = db::create_oauth_client_secret(
+    // Atomically enforce the active-secret cap and insert.  The count check
+    // and the insert run inside a single DB transaction so concurrent requests
+    // cannot both observe "under limit" and both succeed.
+    let record = match db::add_secret_if_under_limit(
         &state.store,
         &app_id,
         &secret_hash,
         req.description.as_deref(),
         None,
+        MAX_ACTIVE_SECRETS,
     )
     .await
     .map_err(|e| {
@@ -694,7 +689,16 @@ pub(crate) async fn add_secret_api(
             "db_error",
             "Internal database error",
         )
-    })?;
+    })? {
+        AddSecretOutcome::Created(r) => r,
+        AddSecretOutcome::LimitReached => {
+            return Err(ServiceError::api(
+                StatusCode::CONFLICT,
+                "max_secrets_reached",
+                "Maximum of 2 active secrets allowed",
+            ));
+        }
+    };
 
     if let Err(e) = db::record_oauth_event(
         &state.audit,
@@ -857,40 +861,10 @@ pub(crate) async fn delete_secret_api(
         ));
     }
 
-    if secret.revoked_at.is_some() {
-        return Err(ServiceError::api(
-            StatusCode::NOT_FOUND,
-            "not_found",
-            "Secret not found",
-        ));
-    }
-
-    let now = jiff::Timestamp::now();
-    let all_secrets = db::get_oauth_client_secrets(&state.store, &app_id)
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to get secrets: {e}");
-            ServiceError::api(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "db_error",
-                "Internal database error",
-            )
-        })?;
-
-    let other_active = all_secrets
-        .iter()
-        .filter(|s| s.id != *secret_id && s.is_valid(&now))
-        .count();
-
-    if other_active == 0 {
-        return Err(ServiceError::api(
-            StatusCode::CONFLICT,
-            "last_secret",
-            "Cannot delete the last active secret",
-        ));
-    }
-
-    db::revoke_oauth_client_secret(&state.store, &secret_id)
+    // Atomically enforce "keep at least one active secret" and revoke.
+    // The check and revoke run inside a single DB transaction so concurrent
+    // delete requests cannot both observe "other_active > 0" and both win.
+    match db::revoke_secret_if_not_last_active(&state.store, &app_id, &secret_id)
         .await
         .map_err(|e| {
             tracing::error!("Failed to revoke secret: {e}");
@@ -899,7 +873,23 @@ pub(crate) async fn delete_secret_api(
                 "db_error",
                 "Internal database error",
             )
-        })?;
+        })? {
+        RevokeSecretOutcome::Revoked => {}
+        RevokeSecretOutcome::NotFound => {
+            return Err(ServiceError::api(
+                StatusCode::NOT_FOUND,
+                "not_found",
+                "Secret not found",
+            ));
+        }
+        RevokeSecretOutcome::LastActive => {
+            return Err(ServiceError::api(
+                StatusCode::CONFLICT,
+                "last_secret",
+                "Cannot delete the last active secret",
+            ));
+        }
+    }
 
     if let Err(e) = db::record_oauth_event(
         &state.audit,
@@ -979,6 +969,21 @@ pub(crate) async fn revoke_tokens_api(
                 "Internal database error",
             )
         })?;
+
+    // Terminate live M2M (client_credentials) sessions.
+    //
+    // Per RFC 9068 §2.2, client_credentials access tokens are persisted as
+    // sessions whose `user_id` equals the OAuth client's `client_id`.
+    // Revoking secrets is not enough on its own: the session cache may still
+    // serve unexpired tokens until their TTL elapses.  Deleting those sessions
+    // and invalidating the cache makes the `TokenRevoked` audit event accurate.
+    if let Err(e) = db::delete_sessions_for_user(&state.store, &client.client_id).await {
+        tracing::warn!(
+            "Failed to delete M2M sessions for {}: {e}",
+            client.client_id
+        );
+    }
+    state.session_cache.invalidate_for_user(&client.client_id);
 
     // Log the event
     if let Err(e) = db::record_oauth_event(
@@ -2183,5 +2188,255 @@ mod tests {
         .await;
 
         assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    // ========================================================================
+    // #539 — revoke_tokens also invalidates M2M (client_credentials) sessions
+    // ========================================================================
+
+    // Count SessionDoc rows indexed under a given user_id.
+    // For client_credentials grants the session's user_id is the client_id.
+    async fn count_sessions_for_user(
+        store: &crate::db::store::DocumentStore,
+        user_id: &str,
+    ) -> i64 {
+        store
+            .count::<crate::db::documents::session::SessionDoc>("user_id", user_id)
+            .await
+            .expect("count must not error")
+    }
+
+    #[tokio::test]
+    async fn test_revoke_tokens_clears_m2m_sessions() {
+        let (app, state) = test_app().await;
+
+        // Owner user + their application
+        let user = create_test_user(&state.store, "revoke-m2m@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let owner_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let auth = bearer(&owner_token);
+        let client = create_test_oauth_client(&state.store, &user.id).await;
+
+        // Mint a client_credentials session for the OAuth client.
+        // Per RFC 9068 §2.2 the session's user_id is the client's client_id.
+        create_test_session_for_client(
+            &state,
+            &client.client_id,
+            &format!("{}@clients", client.client_id),
+            &auth_id,
+            &client.client_id,
+        )
+        .await;
+
+        // Confirm the M2M session exists before revocation.
+        let before = count_sessions_for_user(&state.store, &client.client_id).await;
+        assert!(
+            before >= 1,
+            "should have at least one M2M session before revoke"
+        );
+
+        // Issue revoke
+        let (status, _) = http_post_json(
+            &app,
+            &format!("/api/v1/applications/{}/revoke", client.app_id),
+            "{}",
+            &[("Authorization", &auth)],
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        // M2M sessions must be gone after revocation.
+        let after = count_sessions_for_user(&state.store, &client.client_id).await;
+        assert_eq!(after, 0, "M2M sessions must be deleted by revoke");
+    }
+
+    // ========================================================================
+    // #546 — update validates empty redirect_uris and empty name
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_update_application_should_reject_empty_redirect_uris() {
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "update-no-uris@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let auth = bearer(&token);
+        let client = create_test_oauth_client(&state.store, &user.id).await;
+
+        let (status, body) = http_request(
+            &app,
+            "PATCH",
+            &format!("/api/v1/applications/{}", client.app_id),
+            Some(r#"{"redirect_uris": []}"#.to_string()),
+            &[
+                ("Content-Type", "application/json"),
+                ("Authorization", &auth),
+            ],
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+        let json: serde_json::Value = serde_json::from_str(&body).expect("valid json");
+        assert_eq!(json["code"], "invalid_redirect_uris", "body: {body}");
+    }
+
+    #[tokio::test]
+    async fn test_update_application_should_reject_empty_name() {
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "update-empty-name@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let auth = bearer(&token);
+        let client = create_test_oauth_client(&state.store, &user.id).await;
+
+        let (status, body) = http_request(
+            &app,
+            "PATCH",
+            &format!("/api/v1/applications/{}", client.app_id),
+            Some(r#"{"name": ""}"#.to_string()),
+            &[
+                ("Content-Type", "application/json"),
+                ("Authorization", &auth),
+            ],
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+        let json: serde_json::Value = serde_json::from_str(&body).expect("valid json");
+        assert_eq!(json["code"], "invalid_name", "body: {body}");
+    }
+
+    #[tokio::test]
+    async fn test_update_application_absent_name_keeps_existing() {
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "update-no-name@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let auth = bearer(&token);
+        let client = create_test_oauth_client(&state.store, &user.id).await;
+
+        // PATCH without a `name` field must preserve the existing name.
+        let (status, body) = http_request(
+            &app,
+            "PATCH",
+            &format!("/api/v1/applications/{}", client.app_id),
+            Some(r#"{"redirect_uris": ["https://example.com/cb"]}"#.to_string()),
+            &[
+                ("Content-Type", "application/json"),
+                ("Authorization", &auth),
+            ],
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK, "body: {body}");
+        let json: serde_json::Value = serde_json::from_str(&body).expect("valid json");
+        assert_eq!(json["name"].as_str().unwrap(), "Test App");
+    }
+
+    // ========================================================================
+    // #547 — concurrent secret create/delete stress tests
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_concurrent_secret_add_never_exceeds_limit() {
+        use std::sync::Arc;
+        use tokio::task::JoinSet;
+
+        let (app, state) = test_app().await;
+        let (app_id, token) = setup_user_with_app(&state, "concurrent-add@example.com").await;
+        let auth = bearer(&token);
+        let app = Arc::new(app);
+
+        // App already has 1 active secret. Fire 5 concurrent adds; at most
+        // 1 should succeed (total active must not exceed MAX_ACTIVE_SECRETS=2).
+        let mut set = JoinSet::new();
+        for _ in 0..5_u32 {
+            let app = Arc::clone(&app);
+            let app_id = app_id.clone();
+            let auth = auth.clone();
+            set.spawn(async move {
+                http_post_json(
+                    &app,
+                    &format!("/api/v1/applications/{app_id}/secrets"),
+                    r#"{}"#,
+                    &[("Authorization", &auth)],
+                )
+                .await
+            });
+        }
+
+        let mut successes = 0_usize;
+        while let Some(res) = set.join_next().await {
+            let (status, _) = res.expect("task must not panic");
+            if status == StatusCode::CREATED {
+                successes = successes.saturating_add(1);
+            }
+        }
+
+        // Verify active count in DB never exceeded the limit.
+        let secrets = crate::db::get_oauth_client_secrets(&state.store, &app_id)
+            .await
+            .expect("get secrets");
+        let now = jiff::Timestamp::now();
+        let active = secrets.iter().filter(|s| s.is_valid(&now)).count();
+        assert!(
+            active <= crate::handlers::applications::MAX_ACTIVE_SECRETS,
+            "active secret count {active} must never exceed MAX_ACTIVE_SECRETS"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_secret_deletion_stress() {
+        use std::sync::Arc;
+        use tokio::task::JoinSet;
+
+        let (app, state) = test_app().await;
+        let (app_id, token) = setup_user_with_app(&state, "concurrent-del@example.com").await;
+        let auth = bearer(&token);
+
+        // Add a second secret so we have 2 active.
+        let (_, body) = http_post_json(
+            &app,
+            &format!("/api/v1/applications/{app_id}/secrets"),
+            r#"{}"#,
+            &[("Authorization", &auth)],
+        )
+        .await;
+        let second: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let second_id = second["secret_id"].as_str().unwrap().to_string();
+
+        let app = Arc::new(app);
+
+        // Concurrently attempt to delete both secrets — only one delete of each
+        // can succeed; after all requests the active count must be >= 1.
+        let mut set = JoinSet::new();
+        for _ in 0..4_u32 {
+            let app = Arc::clone(&app);
+            let app_id = app_id.clone();
+            let second_id = second_id.clone();
+            let auth = auth.clone();
+            set.spawn(async move {
+                http_delete(
+                    &app,
+                    &format!("/api/v1/applications/{app_id}/secrets/{second_id}"),
+                    &[("Authorization", &auth)],
+                )
+                .await
+            });
+        }
+        while let Some(res) = set.join_next().await {
+            res.expect("task must not panic");
+        }
+
+        // The active count must never drop to zero.
+        let secrets = crate::db::get_oauth_client_secrets(&state.store, &app_id)
+            .await
+            .expect("get secrets");
+        let now = jiff::Timestamp::now();
+        let active = secrets.iter().filter(|s| s.is_valid(&now)).count();
+        assert!(
+            active >= 1,
+            "at least one active secret must remain after concurrent deletes; got {active}"
+        );
     }
 }

@@ -466,6 +466,122 @@ pub async fn revoke_oauth_client_secret(store: &DocumentStore, id: &str) -> Resu
         .await
 }
 
+/// Outcome returned by [`add_secret_if_under_limit`].
+pub enum AddSecretOutcome {
+    /// Secret created successfully.
+    Created(OAuthClientSecret),
+    /// Limit already reached — no secret was created.
+    LimitReached,
+}
+
+/// Atomically add a client secret, enforcing the per-client active-secret cap.
+///
+/// The count check and the insert execute inside a single database transaction,
+/// eliminating the TOCTOU race that exists when handlers do a separate
+/// read-check-then-write.
+///
+/// Returns [`AddSecretOutcome::LimitReached`] when `active_count >= max_active`.
+pub async fn add_secret_if_under_limit(
+    store: &DocumentStore,
+    oauth_client_id: &str,
+    secret_hash: &str,
+    description: Option<&str>,
+    expires_at: Option<Timestamp>,
+    max_active: usize,
+) -> Result<AddSecretOutcome> {
+    let mut tx = store.begin().await?;
+
+    // Count active secrets inside the transaction.
+    let all_secrets = tx
+        .find_all::<OAuthClientSecretDoc>("oauth_client_id", oauth_client_id)
+        .await?;
+
+    let now = Timestamp::now();
+    let active_count = all_secrets
+        .iter()
+        .filter(|s| s.data.revoked_at.is_none() && s.data.expires_at.is_none_or(|exp| exp > now))
+        .count();
+
+    if active_count >= max_active {
+        // Drop the transaction (rollback on drop is a no-op for reads-only tx).
+        return Ok(AddSecretOutcome::LimitReached);
+    }
+
+    let doc = OAuthClientSecretDoc {
+        oauth_client_id: oauth_client_id.to_string(),
+        secret_hash: secret_hash.to_string(),
+        description: description.map(String::from),
+        expires_at,
+        revoked_at: None,
+    };
+    let result = tx.insert(&doc).await?;
+    tx.commit().await?;
+
+    Ok(AddSecretOutcome::Created(OAuthClientSecret::from(result)))
+}
+
+/// Outcome returned by [`revoke_secret_if_not_last_active`].
+pub enum RevokeSecretOutcome {
+    /// Secret was revoked.
+    Revoked,
+    /// The target secret was not found or already revoked.
+    NotFound,
+    /// Revoking would leave zero active secrets — not allowed.
+    LastActive,
+}
+
+/// Atomically revoke a single secret, ensuring at least one active secret remains.
+///
+/// The "other active" check and the revoke execute inside a single database
+/// transaction, eliminating the TOCTOU race between concurrent delete requests.
+pub async fn revoke_secret_if_not_last_active(
+    store: &DocumentStore,
+    oauth_client_id: &str,
+    secret_id: &str,
+) -> Result<RevokeSecretOutcome> {
+    let mut tx = store.begin().await?;
+
+    // Load all secrets inside the transaction.
+    let all_secrets = tx
+        .find_all::<OAuthClientSecretDoc>("oauth_client_id", oauth_client_id)
+        .await?;
+
+    let now = Timestamp::now();
+
+    // Check the target secret is present and not already revoked.
+    let target = all_secrets.iter().find(|s| s.id == secret_id);
+
+    let Some(target) = target else {
+        return Ok(RevokeSecretOutcome::NotFound);
+    };
+
+    if target.data.revoked_at.is_some() {
+        return Ok(RevokeSecretOutcome::NotFound);
+    }
+
+    // Count other active secrets (excluding the target).
+    let other_active = all_secrets
+        .iter()
+        .filter(|s| {
+            s.id != secret_id
+                && s.data.revoked_at.is_none()
+                && s.data.expires_at.is_none_or(|exp| exp > now)
+        })
+        .count();
+
+    if other_active == 0 {
+        return Ok(RevokeSecretOutcome::LastActive);
+    }
+
+    // Revoke inside the transaction.
+    let mut updated_data = target.data.clone();
+    updated_data.revoked_at = Some(now);
+    tx.update(secret_id, &updated_data).await?;
+    tx.commit().await?;
+
+    Ok(RevokeSecretOutcome::Revoked)
+}
+
 // ============================================================================
 // OAuth Usage Events (now via AuditStore)
 // ============================================================================

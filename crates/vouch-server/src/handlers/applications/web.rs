@@ -31,6 +31,7 @@ use super::{
     MAX_ACTIVE_SECRETS, extract_auth_from_cookie, generate_client_secret, parse_redirect_uris,
     parse_resource_uris,
 };
+use crate::db::{AddSecretOutcome, RevokeSecretOutcome};
 use crate::handlers::hash_token;
 
 /// Render a shared validation failure as the standard error page.
@@ -590,11 +591,31 @@ pub(crate) async fn add_secret_form(
         .into_response();
     }
 
-    let now = jiff::Timestamp::now();
-    let secrets = match db::get_oauth_client_secrets(&state.store, &app_id).await {
-        Ok(s) => s,
+    let secret = generate_client_secret();
+    let secret_hash = hash_token(&secret);
+
+    // Atomically enforce the active-secret cap and insert.
+    let record = match db::add_secret_if_under_limit(
+        &state.store,
+        &app_id,
+        &secret_hash,
+        None,
+        None,
+        MAX_ACTIVE_SECRETS,
+    )
+    .await
+    {
+        Ok(AddSecretOutcome::Created(r)) => r,
+        Ok(AddSecretOutcome::LimitReached) => {
+            return ApplicationErrorTemplate {
+                title: "Error".to_string(),
+                message: "Maximum of 2 active secrets allowed.".to_string(),
+                back_url: format!("/applications/{app_id}"),
+            }
+            .into_response();
+        }
         Err(e) => {
-            tracing::error!("Failed to get secrets: {e}");
+            tracing::error!("Failed to create secret: {e}");
             return ApplicationErrorTemplate {
                 title: "Error".to_string(),
                 message: "Failed to add secret.".to_string(),
@@ -603,34 +624,6 @@ pub(crate) async fn add_secret_form(
             .into_response();
         }
     };
-
-    let active_count = secrets.iter().filter(|s| s.is_valid(&now)).count();
-    if active_count >= MAX_ACTIVE_SECRETS {
-        return ApplicationErrorTemplate {
-            title: "Error".to_string(),
-            message: "Maximum of 2 active secrets allowed.".to_string(),
-            back_url: format!("/applications/{app_id}"),
-        }
-        .into_response();
-    }
-
-    let secret = generate_client_secret();
-    let secret_hash = hash_token(&secret);
-
-    let record =
-        match db::create_oauth_client_secret(&state.store, &app_id, &secret_hash, None, None).await
-        {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::error!("Failed to create secret: {e}");
-                return ApplicationErrorTemplate {
-                    title: "Error".to_string(),
-                    message: "Failed to add secret.".to_string(),
-                    back_url: format!("/applications/{app_id}"),
-                }
-                .into_response();
-            }
-        };
 
     tracing::info!("Added secret for OAuth application: {}", client.client_id);
 
@@ -670,8 +663,9 @@ pub(crate) async fn delete_secret_form(
         }
     };
 
-    let secret = match db::get_oauth_client_secret_by_id(&state.store, &secret_id).await {
-        Ok(Some(s)) if s.oauth_client_id == app_id => s,
+    // Verify the secret exists and belongs to this client before the atomic revoke.
+    match db::get_oauth_client_secret_by_id(&state.store, &secret_id).await {
+        Ok(Some(s)) if s.oauth_client_id == app_id => {}
         _ => {
             return ApplicationErrorTemplate {
                 title: "Not Found".to_string(),
@@ -682,41 +676,34 @@ pub(crate) async fn delete_secret_form(
         }
     };
 
-    if secret.revoked_at.is_some() {
-        return ApplicationErrorTemplate {
-            title: "Not Found".to_string(),
-            message: "Secret not found.".to_string(),
-            back_url: format!("/applications/{app_id}"),
+    // Atomically enforce "keep at least one active secret" and revoke.
+    match db::revoke_secret_if_not_last_active(&state.store, &app_id, &secret_id).await {
+        Ok(RevokeSecretOutcome::Revoked) => {}
+        Ok(RevokeSecretOutcome::NotFound) => {
+            return ApplicationErrorTemplate {
+                title: "Not Found".to_string(),
+                message: "Secret not found.".to_string(),
+                back_url: format!("/applications/{app_id}"),
+            }
+            .into_response();
         }
-        .into_response();
-    }
-
-    let now = jiff::Timestamp::now();
-    let all_secrets = db::get_oauth_client_secrets(&state.store, &app_id)
-        .await
-        .unwrap_or_default();
-    let other_active = all_secrets
-        .iter()
-        .filter(|s| s.id != secret_id && s.is_valid(&now))
-        .count();
-
-    if other_active == 0 {
-        return ApplicationErrorTemplate {
-            title: "Error".to_string(),
-            message: "Cannot delete the last active secret.".to_string(),
-            back_url: format!("/applications/{app_id}"),
+        Ok(RevokeSecretOutcome::LastActive) => {
+            return ApplicationErrorTemplate {
+                title: "Error".to_string(),
+                message: "Cannot delete the last active secret.".to_string(),
+                back_url: format!("/applications/{app_id}"),
+            }
+            .into_response();
         }
-        .into_response();
-    }
-
-    if let Err(e) = db::revoke_oauth_client_secret(&state.store, &secret_id).await {
-        tracing::error!("Failed to revoke secret: {e}");
-        return ApplicationErrorTemplate {
-            title: "Error".to_string(),
-            message: "Failed to delete secret.".to_string(),
-            back_url: format!("/applications/{app_id}"),
+        Err(e) => {
+            tracing::error!("Failed to revoke secret: {e}");
+            return ApplicationErrorTemplate {
+                title: "Error".to_string(),
+                message: "Failed to delete secret.".to_string(),
+                back_url: format!("/applications/{app_id}"),
+            }
+            .into_response();
         }
-        .into_response();
     }
 
     tracing::info!(
@@ -729,6 +716,10 @@ pub(crate) async fn delete_secret_form(
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::expect_used,
+    reason = "test code: panic on assertion failure is acceptable"
+)]
 mod tests {
     use axum::http::StatusCode;
 
@@ -801,6 +792,106 @@ mod tests {
         assert!(
             body.contains("</html>") || body.contains("<!DOCTYPE"),
             "expected HTML response, got: {body}"
+        );
+    }
+
+    // ========================================================================
+    // #546 — Web form update validation: empty name + empty redirect_uris
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_web_update_form_rejects_empty_name() {
+        // Guard: submitting the web form with an empty name must be rejected
+        // with a validation error page and must NOT persist the empty value.
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "web-update-empty-name@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let session_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let client = create_test_oauth_client(&state.store, &user.id).await;
+
+        // Submit the web update form with an empty name.
+        let form_body = "name=&redirect_uris=https%3A%2F%2Fexample.com%2Fcallback";
+        let (status, body) = http_post_form(
+            &app,
+            &format!("/applications/{}", client.app_id),
+            form_body,
+            &[("Cookie", &format!("__Host-vouch_session={session_token}"))],
+        )
+        .await;
+
+        // Must be a non-redirect (error page), not a success redirect.
+        assert_ne!(
+            status,
+            StatusCode::FOUND,
+            "Empty name must not be accepted: {body}"
+        );
+        assert_ne!(
+            status,
+            StatusCode::SEE_OTHER,
+            "Empty name must not be accepted: {body}"
+        );
+        // Response must be HTML (the validation error template).
+        assert!(
+            body.contains("</html>") || body.contains("<!DOCTYPE"),
+            "Validation error must return HTML: {body}"
+        );
+
+        // Verify the DB record was not mutated: name must still be "Test App".
+        let record = crate::db::get_oauth_client_by_id(&state.store, &client.app_id)
+            .await
+            .expect("db query ok")
+            .expect("client must still exist");
+        assert_eq!(
+            record.name, "Test App",
+            "Empty name must not overwrite existing name in the database"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_web_update_form_rejects_empty_redirect_uris() {
+        // Guard: submitting the web form with blank redirect_uris must be rejected
+        // with a validation error and must NOT persist the empty list.
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "web-update-empty-uris@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let session_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let client = create_test_oauth_client(&state.store, &user.id).await;
+
+        // Submit with a valid name but blank redirect_uris textarea.
+        let form_body = "name=Test+App&redirect_uris=";
+        let (status, body) = http_post_form(
+            &app,
+            &format!("/applications/{}", client.app_id),
+            form_body,
+            &[("Cookie", &format!("__Host-vouch_session={session_token}"))],
+        )
+        .await;
+
+        // Must be a non-redirect (error page), not a success redirect.
+        assert_ne!(
+            status,
+            StatusCode::FOUND,
+            "Empty redirect_uris must not be accepted: {body}"
+        );
+        assert_ne!(
+            status,
+            StatusCode::SEE_OTHER,
+            "Empty redirect_uris must not be accepted: {body}"
+        );
+        assert!(
+            body.contains("</html>") || body.contains("<!DOCTYPE"),
+            "Validation error must return HTML: {body}"
+        );
+
+        // Verify the DB record was not mutated: redirect_uris must be unchanged.
+        let record = crate::db::get_oauth_client_by_id(&state.store, &client.app_id)
+            .await
+            .expect("db query ok")
+            .expect("client must still exist");
+        assert_eq!(
+            record.redirect_uris,
+            vec!["https://example.com/callback".to_string()],
+            "Empty redirect_uris must not overwrite existing uris in the database"
         );
     }
 }

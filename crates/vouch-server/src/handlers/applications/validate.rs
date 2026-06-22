@@ -179,6 +179,8 @@ pub(super) struct ValidatedUpdateApp<'a> {
     pub jwks: Option<serde_json::Value>,
     /// Trimmed, https-validated JWKS URI (if provided).
     pub jwks_uri: Option<&'a str>,
+    /// Redirect URIs from the request (`None` = field absent, `Some(&[])` = explicitly cleared).
+    pub redirect_uris: Option<&'a [String]>,
 }
 
 /// Validate the format of an update-application request.
@@ -191,7 +193,12 @@ pub(super) fn validate_update_format<'a>(
     input: UpdateAppInput<'a>,
 ) -> Result<ValidatedUpdateApp<'a>, AppValidationError> {
     if let Some(uris) = input.redirect_uris {
-        validate_redirect_uris(uris).map_err(AppValidationError::InvalidRedirectUris)?;
+        // Only validate URIs if the list is non-empty.  An empty list is
+        // accepted here and checked later by `validate_update_fapi` against
+        // the persisted client type.
+        if !uris.is_empty() {
+            validate_redirect_uris(uris).map_err(AppValidationError::InvalidRedirectUris)?;
+        }
     }
 
     if let Some(uris) = input.resource_uris {
@@ -208,16 +215,29 @@ pub(super) fn validate_update_format<'a>(
         is_fapi,
         jwks,
         jwks_uri,
+        redirect_uris: input.redirect_uris,
     })
 }
 
-/// Validate FAPI rules for an update against the existing client record.
+/// Validate semantic rules for an update against the existing client record.
 ///
-/// Call after authentication and the ownership check.
+/// Call after authentication and the ownership check.  This covers rules that
+/// depend on persisted state (e.g. the client's application_type) and
+/// therefore cannot run in the pre-auth format pass.
 pub(super) fn validate_update_fapi(
     validated: &ValidatedUpdateApp<'_>,
     client: &OAuthClient,
 ) -> Result<(), AppValidationError> {
+    // An explicit empty redirect_uris list is only valid for service apps.
+    // We skip this check in the pre-auth format pass (application_type=None
+    // there), and enforce it here once we have the persisted client type.
+    if let Some(uris) = validated.redirect_uris
+        && uris.is_empty()
+        && !matches!(client.application_type, OAuthClientType::Service)
+    {
+        return Err(AppValidationError::MissingRedirectUris);
+    }
+
     if !validated.is_fapi {
         return Ok(());
     }
