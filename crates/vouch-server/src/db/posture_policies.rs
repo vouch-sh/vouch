@@ -213,6 +213,10 @@ pub async fn update_custom_policy(
     let applied = std::sync::atomic::AtomicBool::new(false);
     let found = store
         .modify::<CustomPosturePolicyDoc, _>(id, |data| {
+            // Reset at the top of every attempt: if an earlier OCC retry set
+            // this flag but then lost the version race, the closure runs again
+            // and org ownership must be re-evaluated from scratch.
+            applied.store(false, std::sync::atomic::Ordering::Relaxed);
             // Re-check org ownership inside the closure so a concurrent
             // org migration cannot smuggle a cross-org write through a version win.
             if data.org_id != org_id {
