@@ -8,6 +8,8 @@
         var redirectError = document.getElementById('redirect-uri-error');
         var resourceTextarea = document.getElementById('resource_uris');
         var resourceError = document.getElementById('resource-uri-error');
+        var postLogoutTextarea = document.getElementById('post_logout_redirect_uris');
+        var postLogoutError = document.getElementById('post-logout-redirect-uri-error');
         var nameInput = document.getElementById('name');
         var form = document.querySelector('form');
         var securityProfileSection = document.getElementById('security-profile-section');
@@ -91,6 +93,45 @@
 
             if (errors.length > 0) {
                 return t('appcreate-js-resource-invalid', { errors: errors.join('; ') });
+            }
+
+            return null;
+        }
+
+        // Validate post-logout redirect URIs and return error message (or null if valid).
+        // Optional field. Rules mirror the server: https://, or loopback http://
+        // (localhost / 127.0.0.1 / [::1]), and no fragment component.
+        function validatePostLogoutUris() {
+            if (!postLogoutTextarea) {
+                return null;
+            }
+
+            var uris = postLogoutTextarea.value.trim().split('\n').filter(function(line) {
+                return line.trim();
+            });
+
+            if (uris.length === 0) {
+                return null;
+            }
+
+            var invalid = [];
+            for (var i = 0; i < uris.length; i++) {
+                var trimmed = uris[i].trim();
+                try {
+                    var url = new URL(trimmed);
+                    var loopbackHttp = url.protocol === 'http:' &&
+                        (url.hostname === 'localhost' || url.hostname === '127.0.0.1' || url.hostname === '[::1]');
+                    var valid = (url.protocol === 'https:' || loopbackHttp) && !url.hash;
+                    if (!valid) {
+                        invalid.push(trimmed);
+                    }
+                } catch (e) {
+                    invalid.push(trimmed);
+                }
+            }
+
+            if (invalid.length > 0) {
+                return t('appcreate-js-postlogout-invalid', { uris: invalid.join(', ') });
             }
 
             return null;
@@ -267,6 +308,25 @@
             }
         });
 
+        // Validate post-logout redirect URIs on blur
+        if (postLogoutTextarea) {
+            postLogoutTextarea.addEventListener('blur', function() {
+                if (postLogoutTextarea.value.trim()) {
+                    showFieldError(postLogoutError, postLogoutTextarea, validatePostLogoutUris());
+                }
+            });
+
+            // Clear post-logout error styling when user starts typing
+            postLogoutTextarea.addEventListener('input', function() {
+                if (postLogoutTextarea.classList.contains('border-vouch-error')) {
+                    clearTimeout(postLogoutTextarea.validateTimeout);
+                    postLogoutTextarea.validateTimeout = setTimeout(function() {
+                        showFieldError(postLogoutError, postLogoutTextarea, validatePostLogoutUris());
+                    }, 500);
+                }
+            });
+        }
+
         // Validate JWKS on blur
         jwksTextarea.addEventListener('blur', function() {
             if (jwksTextarea.value.trim()) {
@@ -313,6 +373,17 @@
                 if (!hasError) {
                     resourceTextarea.scrollIntoView({ behavior: 'smooth', block: 'center' });
                     resourceTextarea.focus();
+                }
+                hasError = true;
+            }
+
+            var postLogoutUriError = validatePostLogoutUris();
+            if (postLogoutUriError) {
+                e.preventDefault();
+                showFieldError(postLogoutError, postLogoutTextarea, postLogoutUriError);
+                if (!hasError) {
+                    postLogoutTextarea.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                    postLogoutTextarea.focus();
                 }
                 hasError = true;
             }

@@ -10,6 +10,8 @@
         var redirectError = document.getElementById('redirect-uri-error');
         var resourceTextarea = document.getElementById('resource_uris');
         var resourceError = document.getElementById('resource-uri-error');
+        var postLogoutTextarea = document.getElementById('post_logout_redirect_uris');
+        var postLogoutError = document.getElementById('post-logout-redirect-uri-error');
 
         // FAPI edit elements (may not exist for non-confidential types)
         var editFapiJwksSection = document.getElementById('edit-fapi-jwks-section');
@@ -102,6 +104,43 @@
             return null;
         }
 
+        // Optional. Rules mirror the server: https://, or loopback http://
+        // (localhost / 127.0.0.1 / [::1]), and no fragment component.
+        function validatePostLogoutUris() {
+            if (!postLogoutTextarea) {
+                return null;
+            }
+
+            var uris = postLogoutTextarea.value.trim().split('\n').filter(function(line) {
+                return line.trim();
+            });
+
+            if (uris.length === 0) {
+                return null;
+            }
+
+            var invalid = [];
+            for (var i = 0; i < uris.length; i++) {
+                var trimmed = uris[i].trim();
+                try {
+                    var url = new URL(trimmed);
+                    var loopbackHttp = url.protocol === 'http:' &&
+                        (url.hostname === 'localhost' || url.hostname === '127.0.0.1' || url.hostname === '[::1]');
+                    var valid = (url.protocol === 'https:' || loopbackHttp) && !url.hash;
+                    if (!valid) {
+                        invalid.push(trimmed);
+                    }
+                } catch (e) {
+                    invalid.push(trimmed);
+                }
+            }
+
+            if (invalid.length > 0) {
+                return t('appcreate-js-postlogout-invalid', { uris: invalid.join(', ') });
+            }
+            return null;
+        }
+
         function showFieldError(errorEl, textarea, message) {
             if (message) {
                 errorEl.textContent = message;
@@ -142,6 +181,23 @@
                     clearTimeout(resourceTextarea.validateTimeout);
                     resourceTextarea.validateTimeout = setTimeout(function() {
                         showFieldError(resourceError, resourceTextarea, validateResourceUris());
+                    }, 500);
+                }
+            });
+        }
+
+        if (postLogoutTextarea && postLogoutError) {
+            postLogoutTextarea.addEventListener('blur', function() {
+                if (postLogoutTextarea.value.trim()) {
+                    showFieldError(postLogoutError, postLogoutTextarea, validatePostLogoutUris());
+                }
+            });
+
+            postLogoutTextarea.addEventListener('input', function() {
+                if (postLogoutTextarea.classList.contains('border-vouch-error')) {
+                    clearTimeout(postLogoutTextarea.validateTimeout);
+                    postLogoutTextarea.validateTimeout = setTimeout(function() {
+                        showFieldError(postLogoutError, postLogoutTextarea, validatePostLogoutUris());
                     }, 500);
                 }
             });
@@ -254,6 +310,19 @@
                         if (!hasError) {
                             resourceTextarea.scrollIntoView({ behavior: 'smooth', block: 'center' });
                             resourceTextarea.focus();
+                        }
+                        hasError = true;
+                    }
+                }
+
+                if (postLogoutTextarea && postLogoutError) {
+                    var postLogoutErr = validatePostLogoutUris();
+                    if (postLogoutErr) {
+                        e.preventDefault();
+                        showFieldError(postLogoutError, postLogoutTextarea, postLogoutErr);
+                        if (!hasError) {
+                            postLogoutTextarea.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                            postLogoutTextarea.focus();
                         }
                         hasError = true;
                     }
