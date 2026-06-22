@@ -64,6 +64,11 @@ pub struct AuthEventParams {
     pub client_version: Option<String>,
     pub success: bool,
     pub failure_reason: Option<String>,
+    /// OAuth client ID of the RP that initiated logout, when applicable.
+    /// Included in the `data` JSON blob so RP-initiated logouts are
+    /// distinguishable from user-initiated ones without a schema migration.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub client_id: Option<String>,
 }
 
 impl AuthEventParams {
@@ -220,6 +225,39 @@ mod tests {
         assert_eq!(params.client_os, None);
         assert_eq!(params.client_arch, None);
         assert_eq!(params.client_version, None);
+    }
+
+    #[test]
+    fn test_audit_data_includes_client_id_when_set() {
+        let params = AuthEventParams {
+            user_id: "u1".into(),
+            event_type: AuthEventType::Logout,
+            success: true,
+            client_id: Some("my-rp-client".to_string()),
+            ..AuthEventParams::default()
+        };
+        let value = serde_json::to_value(&params).unwrap();
+        assert_eq!(
+            value.get("client_id").and_then(|v| v.as_str()),
+            Some("my-rp-client"),
+            "audit data must include client_id when set"
+        );
+    }
+
+    #[test]
+    fn test_audit_data_omits_client_id_when_none() {
+        let params = AuthEventParams {
+            user_id: "u1".into(),
+            event_type: AuthEventType::LoginSuccess,
+            success: true,
+            client_id: None,
+            ..AuthEventParams::default()
+        };
+        let value = serde_json::to_value(&params).unwrap();
+        assert!(
+            value.get("client_id").is_none(),
+            "audit data must omit client_id when None"
+        );
     }
 
     #[tokio::test]

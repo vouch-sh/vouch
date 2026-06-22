@@ -763,33 +763,18 @@ fn validate_post_logout_redirect_uris_registration(
     if uris.is_empty() {
         return Ok(None);
     }
-    const MAX_POST_LOGOUT_REDIRECT_URIS: usize = 10;
-    if uris.len() > MAX_POST_LOGOUT_REDIRECT_URIS {
+    if uris.len() > db::MAX_POST_LOGOUT_REDIRECT_URIS {
         return Err(ServiceError::oauth(
             OAuthErrorCode::InvalidClientMetadata,
             format!(
-                "Too many post_logout_redirect_uris: maximum is {MAX_POST_LOGOUT_REDIRECT_URIS}"
+                "Too many post_logout_redirect_uris: maximum is {}",
+                db::MAX_POST_LOGOUT_REDIRECT_URIS
             ),
         ));
     }
     let invalid: Vec<&str> = uris
         .iter()
-        .filter(|uri| {
-            let Ok(parsed) = url::Url::parse(uri) else {
-                return true;
-            };
-            if parsed.fragment().is_some() {
-                return true;
-            }
-            match parsed.scheme() {
-                "https" => false,
-                "http" => {
-                    let host = parsed.host_str().unwrap_or("");
-                    !matches!(host, "localhost" | "127.0.0.1" | "[::1]")
-                }
-                _ => true,
-            }
-        })
+        .filter(|uri| !db::is_valid_post_logout_redirect_uri_str(uri))
         .map(String::as_str)
         .collect();
     if !invalid.is_empty() {

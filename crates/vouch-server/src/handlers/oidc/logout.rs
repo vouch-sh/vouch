@@ -199,6 +199,25 @@ fn verify_id_token_hint(state: &AppState, hint: &str) -> Option<IdTokenHintClaim
 }
 
 // ============================================================================
+// Helpers for hint/client_id consistency
+// ============================================================================
+
+/// Enforce the `client_id == hint.aud` constraint from RP-Initiated Logout 1.0 §3.
+///
+/// When both a verified hint and an explicit `client_id` are present they MUST agree.
+/// On mismatch, the hint is discarded so the request falls through to the local done
+/// page — never redirecting to an unvalidated URI.
+fn filter_hint_by_client_id(
+    hint: Option<IdTokenHintClaims>,
+    client_id: Option<&str>,
+) -> Option<IdTokenHintClaims> {
+    match (&hint, client_id) {
+        (Some(c), Some(cid)) if c.aud != cid => None,
+        _ => hint,
+    }
+}
+
+// ============================================================================
 // Handlers
 // ============================================================================
 
@@ -229,10 +248,7 @@ pub(crate) async fn logout(
     // When both a verified hint and a bare client_id are present, they MUST agree.
     // Spec §3: "If client_id is given, it MUST match the aud of id_token_hint."
     // On mismatch: treat as no verified hint (fall through to local done page).
-    let hint_claims = match (&hint_claims, &query.client_id) {
-        (Some(c), Some(qcid)) if c.aud != *qcid => None,
-        _ => hint_claims,
-    };
+    let hint_claims = filter_hint_by_client_id(hint_claims, query.client_id.as_deref());
 
     // Determine the RP client_id from the verified hint. The bare `client_id`
     // query param is used for display only; it does NOT gate a redirect.
@@ -281,10 +297,7 @@ pub(crate) async fn logout_post(
         .and_then(|hint| verify_id_token_hint(&state, hint));
 
     // Enforce client_id == hint.aud on the POST leg as well.
-    let hint_claims = match (&hint_claims, &form.client_id) {
-        (Some(c), Some(fcid)) if c.aud != *fcid => None,
-        _ => hint_claims,
-    };
+    let hint_claims = filter_hint_by_client_id(hint_claims, form.client_id.as_deref());
 
     let verified_client_id = hint_claims.as_ref().map(|c| c.aud.clone());
 
@@ -416,6 +429,7 @@ async fn clear_user_session(
                         user_id: session.user_id.clone(),
                         event_type: db::AuthEventType::Logout,
                         success: true,
+                        client_id: rp_client_id.map(str::to_string),
                         ..Default::default()
                     }
                     .with_client_info(client_info);

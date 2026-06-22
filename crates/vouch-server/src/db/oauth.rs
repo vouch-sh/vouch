@@ -168,6 +168,42 @@ impl OAuthClient {
     }
 }
 
+// ============================================================================
+// Post-logout redirect URI validation helpers (shared between handlers and
+// services so the per-URI rule and the cap live in exactly one place)
+// ============================================================================
+
+/// Maximum number of post-logout redirect URIs an application may register.
+///
+/// Enforced both at RFC 7591 dynamic registration time (services layer) and at
+/// self-service application creation time (handlers layer).
+pub const MAX_POST_LOGOUT_REDIRECT_URIS: usize = 10;
+
+/// Return `true` when `uri` is a syntactically valid post-logout redirect URI.
+///
+/// Valid URIs must:
+/// - Parse as an absolute URL.
+/// - Use `https://` for non-loopback hosts.
+/// - Use `http://` only for loopback addresses (`localhost`, `127.0.0.1`, `[::1]`).
+/// - Carry no fragment component (would conflict with the echoed `state` parameter).
+#[must_use]
+pub fn is_valid_post_logout_redirect_uri_str(uri: &str) -> bool {
+    let Ok(parsed) = url::Url::parse(uri) else {
+        return false;
+    };
+    if parsed.fragment().is_some() {
+        return false;
+    }
+    match parsed.scheme() {
+        "https" => true,
+        "http" => {
+            let host = parsed.host_str().unwrap_or("");
+            matches!(host, "localhost" | "127.0.0.1" | "[::1]")
+        }
+        _ => false,
+    }
+}
+
 /// Parameters for creating a new OAuth client application.
 pub struct CreateOAuthClientParams<'a> {
     pub user_id: Option<&'a str>,
