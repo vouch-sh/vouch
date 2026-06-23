@@ -266,7 +266,7 @@ pub(crate) async fn logout(
     )
     .await
     .unwrap_or_else(|e| {
-        tracing::warn!(error = %e, "logout: post_logout_redirect_uri resolution failed; not redirecting");
+        tracing::error!(error = %e, "logout: post_logout_redirect_uri resolution failed; not redirecting");
         None
     });
 
@@ -327,7 +327,7 @@ pub(crate) async fn logout_post(
     )
     .await
     .unwrap_or_else(|e| {
-        tracing::warn!(error = %e, "logout: post_logout_redirect_uri resolution failed; not redirecting");
+        tracing::error!(error = %e, "logout: post_logout_redirect_uri resolution failed; not redirecting");
         None
     });
 

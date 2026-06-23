@@ -1228,6 +1228,35 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_is_valid_post_logout_redirect_uri_str() {
+        // https is always allowed.
+        assert!(is_valid_post_logout_redirect_uri_str(
+            "https://rp.example.com/out"
+        ));
+        // Loopback http is allowed for all three loopback forms. The `url` crate
+        // serializes IPv6 hosts WITH brackets in host_str(), so "[::1]" matches.
+        assert!(is_valid_post_logout_redirect_uri_str(
+            "http://localhost/out"
+        ));
+        assert!(is_valid_post_logout_redirect_uri_str(
+            "http://127.0.0.1:8080/out"
+        ));
+        assert!(is_valid_post_logout_redirect_uri_str(
+            "http://[::1]:8080/out"
+        ));
+        // Non-loopback http is rejected.
+        assert!(!is_valid_post_logout_redirect_uri_str(
+            "http://rp.example.com/out"
+        ));
+        // Fragments are rejected (would clash with the echoed `state`).
+        assert!(!is_valid_post_logout_redirect_uri_str(
+            "https://rp.example.com/out#x"
+        ));
+        // Garbage / relative URIs are rejected.
+        assert!(!is_valid_post_logout_redirect_uri_str("not-a-url"));
+    }
+
+    #[test]
     fn test_access_scope_from_str() {
         let result: Result<AccessScope, _> = "organization".parse();
         assert_eq!(result, Ok(AccessScope::Organization));
