@@ -52,6 +52,9 @@ use crate::services::oidc::ScopeSet;
 #[template(path = "device_verify.html")]
 pub(crate) struct DeviceVerifyTemplate {
     pub error: Option<String>,
+    /// Pre-filled code from `verification_uri_complete` (RFC 8628 §3.3.1),
+    /// already normalized and format-validated; `None` leaves the box empty.
+    pub user_code: Option<String>,
 }
 
 /// A single security key, pre-formatted for server-side rendering.
@@ -226,10 +229,27 @@ impl BrowserRegistrationState {
 // Handlers
 // ============================================================================
 
+/// Query parameters for the device verification page.
+#[derive(Debug, Deserialize)]
+pub(crate) struct DeviceVerifyQuery {
+    /// RFC 8628 §3.3.1 `user_code` carried by `verification_uri_complete`.
+    user_code: Option<String>,
+}
+
 /// Show device code entry page.
-/// GET /device
-pub(crate) async fn device_verify_page() -> impl IntoResponse {
-    DeviceVerifyTemplate { error: None }
+/// GET /device[?user_code=XXXX-XXXX]
+pub(crate) async fn device_verify_page(
+    Query(query): Query<DeviceVerifyQuery>,
+) -> impl IntoResponse {
+    // Pre-fill only well-formed codes; arbitrary query input is never reflected.
+    let user_code = query
+        .user_code
+        .map(|c| normalize_user_code(&c))
+        .filter(|c| is_valid_user_code_format(c));
+    DeviceVerifyTemplate {
+        error: None,
+        user_code,
+    }
 }
 
 /// Handle device code submission.
@@ -239,16 +259,7 @@ pub(crate) async fn device_verify_submit(
     Form(form): Form<UserCodeForm>,
 ) -> Response {
     // Normalize user code (uppercase, strip whitespace, ensure dash)
-    let user_code = form.user_code.to_uppercase().trim().to_string();
-    let user_code = if user_code.chars().count() == 8 && !user_code.contains('-') {
-        format!(
-            "{}-{}",
-            user_code.chars().take(4).collect::<String>(),
-            user_code.chars().skip(4).collect::<String>()
-        )
-    } else {
-        user_code
-    };
+    let user_code = normalize_user_code(&form.user_code);
 
     // Validate user code format before DB lookup.
     // Valid codes are "XXXX-XXXX" where X is from the device code alphabet
@@ -256,6 +267,7 @@ pub(crate) async fn device_verify_submit(
     if !is_valid_user_code_format(&user_code) {
         return DeviceVerifyTemplate {
             error: Some("Invalid code. Please check and try again.".to_string()),
+            user_code: None,
         }
         .into_response();
     }
@@ -266,12 +278,14 @@ pub(crate) async fn device_verify_submit(
         Ok(None) => {
             return DeviceVerifyTemplate {
                 error: Some("Invalid code. Please check and try again.".to_string()),
+                user_code: None,
             }
             .into_response();
         }
         Err(_) => {
             return DeviceVerifyTemplate {
                 error: Some("An error occurred. Please try again.".to_string()),
+                user_code: None,
             }
             .into_response();
         }
@@ -282,6 +296,7 @@ pub(crate) async fn device_verify_submit(
     if now > request.expires_at {
         return DeviceVerifyTemplate {
             error: Some("This code has expired. Please request a new one.".to_string()),
+            user_code: None,
         }
         .into_response();
     }
@@ -290,6 +305,7 @@ pub(crate) async fn device_verify_submit(
     if request.status != db::DeviceAuthStatus::Pending {
         return DeviceVerifyTemplate {
             error: Some("This code has already been used.".to_string()),
+            user_code: None,
         }
         .into_response();
     }
@@ -1719,6 +1735,25 @@ pub(crate) async fn direct_enroll_start(
 /// Must match the alphabet in `device.rs`.
 const USER_CODE_CHARS: &[u8] = b"BCDFGHJKLMNPQRSTVWXZ";
 
+/// Normalize a user- or URL-supplied device code to canonical `XXXX-XXXX`
+/// form: uppercase, trimmed, with a dash inserted for bare 8-char input.
+///
+/// Shared by the `GET /device` pre-fill path and the `POST /device` submit
+/// path so both accept identical inputs.
+fn normalize_user_code(raw: &str) -> String {
+    let upper = raw.to_uppercase();
+    let trimmed = upper.trim();
+    if trimmed.chars().count() == 8 && !trimmed.contains('-') {
+        format!(
+            "{}-{}",
+            trimmed.chars().take(4).collect::<String>(),
+            trimmed.chars().skip(4).collect::<String>(),
+        )
+    } else {
+        trimmed.to_string()
+    }
+}
+
 /// Validate that a user code matches the expected `XXXX-XXXX` format
 /// where each character is from the device code alphabet.
 ///
@@ -2309,6 +2344,37 @@ mod tests {
         assert!(
             location.starts_with("https://accounts.google.com"),
             "expected Google auth URL, got: {location}"
+        );
+    }
+
+    // ── Device verification page pre-fill tests ──────────────────────────
+
+    #[tokio::test]
+    async fn device_verify_page_prefills_valid_user_code() {
+        // GET /device?user_code=<valid> pre-fills the input via
+        // verification_uri_complete (RFC 8628 §3.3.1).
+        let (app, _state) = test_app().await;
+        let (status, body) =
+            crate::test_utils::http_get(&app, "/device?user_code=QHJT-ZLFH", &[]).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            body.contains(r#"value="QHJT-ZLFH""#),
+            "valid code must be pre-filled, got: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn device_verify_page_ignores_invalid_user_code() {
+        // A malformed user_code must not be reflected into the page.
+        let (app, _state) = test_app().await;
+        let (status, body) =
+            crate::test_utils::http_get(&app, "/device?user_code=garbage", &[]).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            !body.contains("GARBAGE"),
+            "invalid code must not be reflected, got: {body}"
         );
     }
 }
