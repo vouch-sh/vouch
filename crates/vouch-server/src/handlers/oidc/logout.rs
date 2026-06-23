@@ -255,20 +255,20 @@ pub(crate) async fn logout(
     let verified_client_id = hint_claims.as_ref().map(|c| c.aud.clone());
 
     // Validate post_logout_redirect_uri against the client's registered list.
-    // Only pass it through if a verified hint identified the client.
-    let validated_redirect_uri = match resolve_post_logout_redirect_uri(
+    // Only pass it through if a verified hint identified the client. A transient
+    // client-lookup failure degrades to "no redirect target" (logged, not
+    // silently dropped) — the same outcome as an unregistered URI — rather than
+    // blocking the confirmation page with a 500.
+    let validated_redirect_uri = resolve_post_logout_redirect_uri(
         &state,
         verified_client_id.as_deref(),
         query.post_logout_redirect_uri.as_deref(),
     )
     .await
-    {
-        Ok(uri) => uri,
-        Err(e) => {
-            tracing::error!(error = %e, "logout: failed to resolve post_logout_redirect_uri");
-            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-        }
-    };
+    .unwrap_or_else(|e| {
+        tracing::warn!(error = %e, "logout: post_logout_redirect_uri resolution failed; not redirecting");
+        None
+    });
 
     // The confirmation form propagates the hint, redirect URI, state, and
     // ui_locales as hidden fields so the POST handler can re-validate them.
@@ -317,26 +317,19 @@ pub(crate) async fn logout_post(
 
     // Re-validate the post_logout_redirect_uri. The POST handler must NOT trust
     // the form field without re-checking — the form is same-origin but the
-    // hidden field value could be tampered with.
-    let validated_redirect_uri = match resolve_post_logout_redirect_uri(
+    // hidden field value could be tampered with. A transient client-lookup
+    // failure degrades to "no redirect" (logged): the session is already
+    // cleared, so logout still succeeds and we fall through to the done page.
+    let validated_redirect_uri = resolve_post_logout_redirect_uri(
         &state,
         verified_client_id.as_deref(),
         form.post_logout_redirect_uri.as_deref(),
     )
     .await
-    {
-        Ok(uri) => uri,
-        Err(e) => {
-            tracing::error!(error = %e, "logout: failed to resolve post_logout_redirect_uri");
-            // The session is already cleared; surface the server fault rather
-            // than silently skipping the redirect.
-            return Response::builder()
-                .status(StatusCode::INTERNAL_SERVER_ERROR)
-                .header(header::SET_COOKIE, clear_cookie)
-                .body(axum::body::Body::empty())
-                .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
-        }
-    };
+    .unwrap_or_else(|e| {
+        tracing::warn!(error = %e, "logout: post_logout_redirect_uri resolution failed; not redirecting");
+        None
+    });
 
     match validated_redirect_uri {
         Some(redirect_uri) => {
@@ -436,12 +429,19 @@ async fn clear_user_session(
 
     let token_hash = hash_token(&token);
 
-    let session_info = state
+    let session_info = match state
         .session_cache
         .get_session_by_token_hash(&state.store, &token_hash)
         .await
-        .ok()
-        .flatten();
+    {
+        Ok(info) => info,
+        Err(e) => {
+            // Don't silently drop the error: log it and proceed. The session is
+            // still deleted below; only the audit event's user context is lost.
+            tracing::warn!(error = %e, "RP-Initiated Logout: session lookup for audit failed");
+            None
+        }
+    };
 
     match db::delete_session_by_token_hash(&state.store, &token_hash).await {
         Ok(deleted) => {
