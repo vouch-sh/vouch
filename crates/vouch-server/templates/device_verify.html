@@ -14,6 +14,7 @@
 
         <form method="POST" action="/device">
             <input type="text" name="user_code" placeholder="XXXX-XXXX" maxlength="9" required autofocus
+                   {% if let Some(code) = user_code %}value="{{ code }}"{% endif %}
                    autocomplete="off" autocorrect="off" autocapitalize="characters" spellcheck="false"
                    class="input-code mb-4">
             <button type="submit" class="btn-primary w-full">{{ self.tr("device-continue") }}</button>
