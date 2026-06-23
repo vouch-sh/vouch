@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+
+{% block title %}{{ self.tr("logout-done-title") }}{% endblock %}
+
+{% block content %}
+<div class="flex items-center justify-center flex-1 p-5">
+    <div class="card max-w-md w-full text-center">
+        <svg class="w-12 h-12 text-vouch-success mx-auto mb-4" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75 11.25 15 15 9.75M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z" />
+        </svg>
+        <h1 class="text-2xl font-bold text-gray-200 mb-2">{{ self.tr("logout-done-heading") }}</h1>
+        <p class="text-gray-400">{{ self.tr("logout-done-body") }}</p>
+    </div>
+</div>
+{% endblock %}

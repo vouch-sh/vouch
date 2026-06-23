@@ -54,6 +54,8 @@ pub(crate) struct ApplicationInfo {
     pub jwks: Option<String>,
     /// Remote JWKS URI (RFC 7523).
     pub jwks_uri: Option<String>,
+    /// RP-Initiated Logout 1.0: Registered post-logout redirect URIs.
+    pub post_logout_redirect_uris: Option<Vec<String>>,
 }
 
 impl From<OAuthClient> for ApplicationInfo {
@@ -79,6 +81,7 @@ impl From<OAuthClient> for ApplicationInfo {
             fapi_profile,
             jwks,
             jwks_uri,
+            post_logout_redirect_uris: client.post_logout_redirect_uris,
         }
     }
 }
@@ -202,6 +205,9 @@ pub(crate) struct CreateApplicationForm {
     /// RFC 7523: Remote JWKS endpoint URL for private_key_jwt authentication.
     #[serde(default)]
     pub jwks_uri: Option<String>,
+    /// RP-Initiated Logout 1.0: Post-logout redirect URIs (newline or comma separated, optional).
+    #[serde(default)]
+    pub post_logout_redirect_uris: Option<String>,
 }
 
 /// Form data for updating an application.
@@ -223,6 +229,9 @@ pub(crate) struct UpdateApplicationForm {
     /// RFC 7523: Remote JWKS endpoint URL for private_key_jwt authentication.
     #[serde(default)]
     pub jwks_uri: Option<String>,
+    /// RP-Initiated Logout 1.0: Post-logout redirect URIs (newline or comma separated, optional).
+    #[serde(default)]
+    pub post_logout_redirect_uris: Option<String>,
 }
 
 /// API request for creating an application.
@@ -245,6 +254,9 @@ pub(crate) struct CreateApplicationRequest {
     /// RFC 7523: Remote JWKS endpoint URL for private_key_jwt authentication.
     #[serde(default)]
     pub jwks_uri: Option<String>,
+    /// RP-Initiated Logout 1.0: Registered post-logout redirect URIs.
+    #[serde(default)]
+    pub post_logout_redirect_uris: Option<Vec<String>>,
 }
 
 /// API request for updating an application.
@@ -266,6 +278,9 @@ pub(crate) struct UpdateApplicationRequest {
     /// RFC 7523: Remote JWKS endpoint URL for private_key_jwt authentication.
     #[serde(default)]
     pub jwks_uri: Option<String>,
+    /// RP-Initiated Logout 1.0: Registered post-logout redirect URIs.
+    #[serde(default)]
+    pub post_logout_redirect_uris: Option<Vec<String>>,
 }
 
 /// API response for a created application.
@@ -314,6 +329,9 @@ pub(crate) struct ApplicationResponse {
     pub jwks_configured: bool,
     /// Remote JWKS URI if configured.
     pub jwks_uri: Option<String>,
+    /// RP-Initiated Logout 1.0: Registered post-logout redirect URIs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub post_logout_redirect_uris: Option<Vec<String>>,
 }
 
 impl From<OAuthClient> for ApplicationResponse {
@@ -338,6 +356,7 @@ impl From<OAuthClient> for ApplicationResponse {
             fapi_profile: client.fapi_profile.as_str().to_string(),
             jwks_configured,
             jwks_uri,
+            post_logout_redirect_uris: client.post_logout_redirect_uris,
         }
     }
 }

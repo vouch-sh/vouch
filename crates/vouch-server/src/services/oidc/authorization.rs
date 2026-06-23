@@ -892,6 +892,7 @@ mod tests {
             introspection_signed_response_alg: None,
             userinfo_signed_response_alg: None,
             request_uris: None,
+            post_logout_redirect_uris: None,
         }
     }
 
@@ -961,6 +962,7 @@ mod tests {
             introspection_signed_response_alg: None,
             userinfo_signed_response_alg: None,
             request_uris: None,
+            post_logout_redirect_uris: None,
         }
     }
 

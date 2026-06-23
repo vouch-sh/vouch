@@ -1164,3 +1164,104 @@ async fn test_rfc7591_e2e_registered_client_auth_code_flow() {
         serde_json::from_str(&userinfo_body).expect("Valid JSON userinfo");
     assert_eq!(userinfo["email"], "e2e-dynamic-user@example.com");
 }
+
+// ========================================================================
+// RP-Initiated Logout 1.0 — post_logout_redirect_uris registration
+// ========================================================================
+
+#[tokio::test]
+async fn test_rfc7591_post_logout_redirect_uris_roundtrip() {
+    // RFC 7591: post_logout_redirect_uris must be echoed back in the registration response.
+    let (app, _state) = test_app().await;
+
+    let body = serde_json::json!({
+        "redirect_uris": ["https://rp.example.com/callback"],
+        "post_logout_redirect_uris": ["https://rp.example.com/logged-out"]
+    });
+
+    let (status, resp) = http_post_json(&app, "/oauth/register", &body.to_string(), &[]).await;
+    assert_eq!(status, StatusCode::CREATED, "Registration failed: {resp}");
+
+    let json: serde_json::Value = serde_json::from_str(&resp).expect("Valid JSON");
+    let post_logout = json
+        .get("post_logout_redirect_uris")
+        .and_then(|v| v.as_array())
+        .expect("post_logout_redirect_uris must be echoed in the registration response");
+    assert_eq!(
+        post_logout.len(),
+        1,
+        "Expected 1 post_logout_redirect_uri, got {post_logout:?}"
+    );
+    assert_eq!(
+        post_logout[0].as_str().unwrap(),
+        "https://rp.example.com/logged-out"
+    );
+}
+
+#[tokio::test]
+async fn test_rfc7591_post_logout_redirect_uris_invalid_scheme_rejected() {
+    // A post_logout_redirect_uri with an invalid scheme (ftp://) must be rejected.
+    let (app, _state) = test_app().await;
+
+    let body = serde_json::json!({
+        "redirect_uris": ["https://rp.example.com/callback"],
+        "post_logout_redirect_uris": ["ftp://rp.example.com/logged-out"]
+    });
+
+    let (status, resp) = http_post_json(&app, "/oauth/register", &body.to_string(), &[]).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "ftp:// post_logout_redirect_uri must be rejected: {resp}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&resp).expect("Valid JSON");
+    // RFC 7591 §3.2.2: registration errors use `invalid_client_metadata`.
+    assert_eq!(json["error"], "invalid_client_metadata");
+}
+
+#[tokio::test]
+async fn test_rfc7591_post_logout_redirect_uris_fragment_rejected() {
+    // A post_logout_redirect_uri carrying a fragment must be rejected.
+    let (app, _state) = test_app().await;
+
+    let body = serde_json::json!({
+        "redirect_uris": ["https://rp.example.com/callback"],
+        "post_logout_redirect_uris": ["https://rp.example.com/logged-out#section"]
+    });
+
+    let (status, resp) = http_post_json(&app, "/oauth/register", &body.to_string(), &[]).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "fragment in post_logout_redirect_uri must be rejected: {resp}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&resp).expect("Valid JSON");
+    // RFC 7591 §3.2.2: registration errors use `invalid_client_metadata`.
+    assert_eq!(json["error"], "invalid_client_metadata");
+}
+
+#[tokio::test]
+async fn test_rfc7591_post_logout_redirect_uris_loopback_http_allowed() {
+    // Loopback http:// is allowed for native app testing.
+    let (app, _state) = test_app().await;
+
+    let body = serde_json::json!({
+        "redirect_uris": ["http://localhost:3000/callback"],
+        "post_logout_redirect_uris": ["http://localhost:3000/logged-out"]
+    });
+
+    let (status, resp) = http_post_json(&app, "/oauth/register", &body.to_string(), &[]).await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "loopback http:// post_logout_redirect_uri must be accepted: {resp}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&resp).expect("Valid JSON");
+    let post_logout = json["post_logout_redirect_uris"]
+        .as_array()
+        .expect("post_logout_redirect_uris present");
+    assert_eq!(
+        post_logout[0].as_str().unwrap(),
+        "http://localhost:3000/logged-out"
+    );
+}

@@ -173,6 +173,53 @@ pub async fn test_app_state_with_idps(
     })
 }
 
+/// Create a test AppState with an RSA signing key provisioned.
+///
+/// Used by tests that exercise the RS256 `id_token_hint` verification branch.
+/// Mirrors `test_app_state_with_idps` but sets `oidc_rsa_key` to a freshly
+/// generated RSA-3072 key pair.
+pub async fn test_app_state_with_rsa_key() -> Arc<AppState> {
+    use crate::services::oidc::OidcRsaSigningKey;
+
+    let pool = test_db().await;
+    let config = test_config();
+
+    let rp_origin = url::Url::parse(&config.base_url).expect("Invalid RP origin");
+    let webauthn = webauthn_rs::WebauthnBuilder::new(&config.rp_id, &rp_origin)
+        .expect("Failed to create WebauthnBuilder")
+        .rp_name(&config.rp_name)
+        .build()
+        .expect("Failed to build Webauthn");
+
+    let oidc_key = OidcSigningKey::generate().expect("Failed to generate test OIDC key");
+    let oidc_rsa_key = OidcRsaSigningKey::generate().expect("Failed to generate test RSA key");
+
+    let crypto: Arc<dyn crate::crypto::document_crypto::DocumentCrypto> =
+        Arc::new(PlaintextDocumentCrypto);
+    let store = DocumentStore::new(pool.clone(), crypto.clone());
+    let audit = AuditStore::new(pool.clone(), crypto);
+
+    register_test_httpsig_client(&store, &config.base_url).await;
+
+    Arc::new(AppState {
+        db: pool,
+        store,
+        audit,
+        config: Arc::new(ArcSwap::from_pointee(config)),
+        webauthn,
+        ssh_ca: None,
+        oidc_key,
+        oidc_rsa_key: Some(oidc_rsa_key),
+        state_signer: crate::crypto::jwt::StateTokenSigner::local(
+            b"test_jwt_secret_must_be_at_least_32_characters_long".to_vec(),
+        ),
+        github_app: None,
+        http_client: reqwest::Client::new(),
+        session_cache: crate::db::SessionCache::new(10_000, 30),
+        idps: Vec::new(),
+    })
+}
+
 /// Create test app (router + state) for handler testing.
 pub async fn test_app() -> (Router, Arc<AppState>) {
     let state = test_app_state().await;
@@ -280,6 +327,7 @@ async fn register_test_httpsig_client(store: &DocumentStore, base_url: &str) {
         introspection_signed_response_alg: None,
         userinfo_signed_response_alg: None,
         request_uris: None,
+        post_logout_redirect_uris: None,
     };
     store
         .insert(&doc)
@@ -1185,6 +1233,8 @@ pub struct TestClientSpec {
     pub request_object_signing_alg: Option<crate::db::JwsAlgorithm>,
     /// Require a signed request object (JAR). Default: `None`.
     pub require_signed_request_object: Option<bool>,
+    /// Registered post-logout redirect URIs (RP-Initiated Logout). Default: empty.
+    pub post_logout_redirect_uris: Vec<String>,
 }
 
 impl Default for TestClientSpec {
@@ -1210,6 +1260,7 @@ impl Default for TestClientSpec {
             with_secret: true,
             request_object_signing_alg: Option::None,
             require_signed_request_object: Option::None,
+            post_logout_redirect_uris: vec![],
         }
     }
 }
@@ -1300,6 +1351,11 @@ pub async fn create_test_client(
             require_signed_request_object: spec.require_signed_request_object,
             userinfo_signed_response_alg: spec.userinfo_signed_response_alg,
             request_uris: Option::None,
+            post_logout_redirect_uris: if spec.post_logout_redirect_uris.is_empty() {
+                Option::None
+            } else {
+                Some(spec.post_logout_redirect_uris.clone())
+            },
         },
     )
     .await

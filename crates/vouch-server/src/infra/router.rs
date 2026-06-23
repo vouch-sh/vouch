@@ -370,6 +370,10 @@ fn build_general_limited_routes(
             "/oauth/authorize",
             get(handlers::oidc::authorize).post(handlers::oidc::authorize_post),
         )
+        .route(
+            "/oauth/logout",
+            get(handlers::oidc::logout).post(handlers::oidc::logout_post),
+        )
         .merge(protected_api_routes)
         .layer(maybe_rate_limit!(
             rate_limit::build_general_rate_limiter,

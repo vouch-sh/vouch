@@ -133,6 +133,8 @@ pub struct OidcDiscoveryDocument {
     /// OIDC Discovery 1.0 Section 3: OPTIONAL. Supported JWS alg values for UserInfo signing.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub userinfo_signing_alg_values_supported: Option<Vec<JwsAlgorithm>>,
+    /// RP-Initiated Logout 1.0 Section 2.4: URL of the end-session endpoint.
+    pub end_session_endpoint: String,
 }
 
 /// RFC 8705 Section 5: mTLS endpoint aliases.
@@ -303,6 +305,8 @@ pub fn build_discovery_document(state: &Arc<AppState>) -> OidcDiscoveryDocument 
         } else {
             vec![JwsAlgorithm::Es256]
         }),
+        // RP-Initiated Logout 1.0 Section 2.4.
+        end_session_endpoint: format!("{base_url}/oauth/logout"),
     }
 }
 

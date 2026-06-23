@@ -14,6 +14,7 @@
 //! - `GET /oauth/userinfo` — OIDC Core 1.0 Section 5.3 (UserInfo Endpoint)
 //! - `POST /oauth/revoke` — RFC 7009 Section 2 (Token Revocation)
 //! - `POST /oauth/introspect` — RFC 7662 Section 2 (Token Introspection)
+//! - `GET|POST /oauth/logout` — RP-Initiated Logout 1.0
 //!
 //! ## Token Claims
 //!
@@ -27,6 +28,7 @@ pub(crate) mod client_auth;
 mod discovery;
 mod fido2_challenge;
 mod introspect;
+mod logout;
 mod par;
 mod protected_resource;
 mod register;
@@ -87,6 +89,7 @@ pub(crate) use authorize::{authorize, authorize_post};
 pub(crate) use discovery::{discovery, jwks};
 pub(crate) use fido2_challenge::fido2_challenge;
 pub(crate) use introspect::{introspect, revoke};
+pub(crate) use logout::{logout, logout_post};
 pub(crate) use par::par;
 pub(crate) use protected_resource::{
     protected_resource_metadata_root, protected_resource_metadata_subpath,

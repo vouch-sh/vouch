@@ -12,7 +12,7 @@ use crate::db::{OAuthClient, OAuthClientType};
 use crate::services::error::ServiceError;
 use crate::services::oidc::ResourceUri;
 
-use super::validate_redirect_uris;
+use super::{validate_post_logout_redirect_uris, validate_redirect_uris};
 
 /// A validation failure: a machine-readable code plus a human message.
 #[derive(Debug)]
@@ -21,6 +21,7 @@ pub(super) enum AppValidationError {
     InvalidApplicationType,
     MissingRedirectUris,
     InvalidRedirectUris(Vec<String>),
+    InvalidPostLogoutRedirectUris(Vec<String>),
     InvalidResourceUri { uri: String, detail: String },
     FapiRequiresConfidentialClient,
     FapiMissingJwks,
@@ -36,6 +37,7 @@ impl AppValidationError {
             Self::EmptyName => "invalid_name",
             Self::InvalidApplicationType => "invalid_type",
             Self::MissingRedirectUris | Self::InvalidRedirectUris(_) => "invalid_redirect_uris",
+            Self::InvalidPostLogoutRedirectUris(_) => "invalid_post_logout_redirect_uris",
             Self::InvalidResourceUri { .. } => "invalid_resource_uri",
             Self::FapiRequiresConfidentialClient => "invalid_fapi_profile",
             Self::FapiMissingJwks => "missing_jwks",
@@ -54,6 +56,11 @@ impl AppValidationError {
             Self::MissingRedirectUris => "At least one redirect URI is required".to_string(),
             Self::InvalidRedirectUris(invalid) => format!(
                 "Invalid redirect URI(s): {}. Each URI must be a valid http:// or https:// URL.",
+                invalid.join(", ")
+            ),
+            Self::InvalidPostLogoutRedirectUris(invalid) => format!(
+                "Invalid post_logout_redirect_uri(s): {}. \
+                 Each URI must be a valid http:// or https:// URL without a fragment.",
                 invalid.join(", ")
             ),
             Self::InvalidResourceUri { uri, detail } => format!(
@@ -88,6 +95,8 @@ pub(super) struct CreateAppInput<'a> {
     pub application_type: &'a str,
     pub redirect_uris: &'a [String],
     pub resource_uris: &'a [String],
+    /// `None` means not provided (field absent); `Some(&[])` is accepted (no post-logout URIs).
+    pub post_logout_redirect_uris: Option<&'a [String]>,
     pub fapi_profile: Option<&'a str>,
     pub jwks: Option<&'a str>,
     pub jwks_uri: Option<&'a str>,
@@ -130,6 +139,11 @@ pub(super) fn validate_create_application<'a>(
 
     validate_redirect_uris(input.redirect_uris).map_err(AppValidationError::InvalidRedirectUris)?;
 
+    if let Some(uris) = input.post_logout_redirect_uris {
+        validate_post_logout_redirect_uris(uris)
+            .map_err(AppValidationError::InvalidPostLogoutRedirectUris)?;
+    }
+
     // Validate resource URIs per RFC 8707 (absolute URI, no fragment).
     validate_resource_uris(input.resource_uris)?;
 
@@ -167,6 +181,8 @@ pub(super) fn validate_create_application<'a>(
 pub(super) struct UpdateAppInput<'a> {
     pub redirect_uris: Option<&'a [String]>,
     pub resource_uris: Option<&'a [String]>,
+    /// `None` = field absent (preserve existing). `Some(&[])` = explicitly clear the list.
+    pub post_logout_redirect_uris: Option<&'a [String]>,
     pub fapi_profile: Option<&'a str>,
     pub jwks: Option<&'a str>,
     pub jwks_uri: Option<&'a str>,
@@ -181,6 +197,8 @@ pub(super) struct ValidatedUpdateApp<'a> {
     pub jwks_uri: Option<&'a str>,
     /// Redirect URIs from the request (`None` = field absent, `Some(&[])` = explicitly cleared).
     pub redirect_uris: Option<&'a [String]>,
+    /// Post-logout redirect URIs (`None` = preserve existing, `Some(&[])` = explicitly clear).
+    pub post_logout_redirect_uris: Option<&'a [String]>,
 }
 
 /// Validate the format of an update-application request.
@@ -205,6 +223,13 @@ pub(super) fn validate_update_format<'a>(
         validate_resource_uris(uris)?;
     }
 
+    if let Some(uris) = input.post_logout_redirect_uris
+        && !uris.is_empty()
+    {
+        validate_post_logout_redirect_uris(uris)
+            .map_err(AppValidationError::InvalidPostLogoutRedirectUris)?;
+    }
+
     let is_fapi = input.fapi_profile.is_some_and(|p| p == "fapi2_security");
 
     let jwks = trim_nonempty(input.jwks).map(parse_jwks).transpose()?;
@@ -216,6 +241,7 @@ pub(super) fn validate_update_format<'a>(
         jwks,
         jwks_uri,
         redirect_uris: input.redirect_uris,
+        post_logout_redirect_uris: input.post_logout_redirect_uris,
     })
 }
 

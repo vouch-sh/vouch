@@ -84,6 +84,8 @@ pub struct OAuthClient {
     /// When `Some`, only the listed HTTPS URLs are accepted as `request_uri` values.
     /// When `None`, any HTTPS `request_uri` is accepted.
     pub request_uris: Option<Vec<String>>,
+    /// RP-Initiated Logout 1.0 Section 2: Registered post-logout redirect URIs.
+    pub post_logout_redirect_uris: Option<Vec<String>>,
 }
 
 impl From<Document<OAuthClientDoc>> for OAuthClient {
@@ -130,6 +132,7 @@ impl From<Document<OAuthClientDoc>> for OAuthClient {
             introspection_signed_response_alg: doc.data.introspection_signed_response_alg,
             userinfo_signed_response_alg: doc.data.userinfo_signed_response_alg,
             request_uris: doc.data.request_uris,
+            post_logout_redirect_uris: doc.data.post_logout_redirect_uris,
         }
     }
 }
@@ -151,6 +154,53 @@ impl OAuthClient {
     #[must_use]
     pub fn is_fapi(&self) -> bool {
         self.fapi_profile != FapiProfile::None
+    }
+
+    /// Return `true` when `uri` is in the client's registered
+    /// `post_logout_redirect_uris` (exact match, case-sensitive).
+    ///
+    /// Returns `false` when the list is absent or does not contain `uri`.
+    #[must_use]
+    pub fn is_valid_post_logout_redirect_uri(&self, uri: &str) -> bool {
+        self.post_logout_redirect_uris
+            .as_deref()
+            .is_some_and(|uris| uris.iter().any(|u| u == uri))
+    }
+}
+
+// ============================================================================
+// Post-logout redirect URI validation helpers (shared between handlers and
+// services so the per-URI rule and the cap live in exactly one place)
+// ============================================================================
+
+/// Maximum number of post-logout redirect URIs an application may register.
+///
+/// Enforced both at RFC 7591 dynamic registration time (services layer) and at
+/// self-service application creation time (handlers layer).
+pub const MAX_POST_LOGOUT_REDIRECT_URIS: usize = 10;
+
+/// Return `true` when `uri` is a syntactically valid post-logout redirect URI.
+///
+/// Valid URIs must:
+/// - Parse as an absolute URL.
+/// - Use `https://` for non-loopback hosts.
+/// - Use `http://` only for loopback addresses (`localhost`, `127.0.0.1`, `[::1]`).
+/// - Carry no fragment component (would conflict with the echoed `state` parameter).
+#[must_use]
+pub fn is_valid_post_logout_redirect_uri_str(uri: &str) -> bool {
+    let Ok(parsed) = url::Url::parse(uri) else {
+        return false;
+    };
+    if parsed.fragment().is_some() {
+        return false;
+    }
+    match parsed.scheme() {
+        "https" => true,
+        "http" => {
+            let host = parsed.host_str().unwrap_or("");
+            matches!(host, "localhost" | "127.0.0.1" | "[::1]")
+        }
+        _ => false,
     }
 }
 
@@ -196,6 +246,8 @@ pub struct CreateOAuthClientParams<'a> {
     pub userinfo_signed_response_alg: Option<JwsAlgorithm>,
     /// OIDC Core Section 6.2: Pre-registered request_uri allowlist.
     pub request_uris: Option<Vec<String>>,
+    /// RP-Initiated Logout 1.0: Registered post-logout redirect URIs.
+    pub post_logout_redirect_uris: Option<Vec<String>>,
 }
 
 /// Create a new OAuth client application.
@@ -243,6 +295,7 @@ pub async fn create_oauth_client(
         introspection_signed_response_alg: params.introspection_signed_response_alg,
         userinfo_signed_response_alg: params.userinfo_signed_response_alg,
         request_uris: params.request_uris.clone(),
+        post_logout_redirect_uris: params.post_logout_redirect_uris.clone(),
     };
 
     let result = store.insert(&doc).await?;
@@ -294,6 +347,9 @@ pub struct UpdateOAuthClientParams<'a> {
     pub jwks_uri: Option<&'a str>,
     pub fapi_profile: FapiProfile,
     pub dpop_bound_access_tokens: bool,
+    /// RP-Initiated Logout 1.0: Registered post-logout redirect URIs.
+    /// `None` preserves the existing value; `Some(vec![])` clears the list.
+    pub post_logout_redirect_uris: Option<Vec<String>>,
 }
 
 /// Update an OAuth client.
@@ -315,6 +371,13 @@ pub async fn update_oauth_client(
             data.jwks_uri = params.jwks_uri.map(String::from);
             data.fapi_profile = params.fapi_profile;
             data.dpop_bound_access_tokens = params.dpop_bound_access_tokens;
+            if let Some(ref uris) = params.post_logout_redirect_uris {
+                data.post_logout_redirect_uris = if uris.is_empty() {
+                    None
+                } else {
+                    Some(uris.clone())
+                };
+            }
 
             if let Some(scope) = params.access_scope {
                 data.access_scope = scope;
@@ -959,6 +1022,8 @@ pub struct UpdateClientRegistrationParams<'a> {
     pub registration_metadata: Option<&'a serde_json::Value>,
     pub userinfo_signed_response_alg: Option<JwsAlgorithm>,
     pub request_uris: Option<&'a [String]>,
+    /// RP-Initiated Logout 1.0: Registered post-logout redirect URIs.
+    pub post_logout_redirect_uris: Option<Vec<String>>,
 }
 
 /// Update a dynamically registered OAuth client (RFC 7592 Section 2.2).
@@ -1005,6 +1070,7 @@ pub async fn update_oauth_client_registration(
             // RFC 7592: PUT is a full replacement — clear fields not present.
             data.userinfo_signed_response_alg = params.userinfo_signed_response_alg;
             data.request_uris = params.request_uris.map(|u| u.to_vec());
+            data.post_logout_redirect_uris = params.post_logout_redirect_uris.clone();
         })
         .await?;
 
@@ -1160,6 +1226,35 @@ pub async fn validate_oauth_client_credentials(
 )]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_is_valid_post_logout_redirect_uri_str() {
+        // https is always allowed.
+        assert!(is_valid_post_logout_redirect_uri_str(
+            "https://rp.example.com/out"
+        ));
+        // Loopback http is allowed for all three loopback forms. The `url` crate
+        // serializes IPv6 hosts WITH brackets in host_str(), so "[::1]" matches.
+        assert!(is_valid_post_logout_redirect_uri_str(
+            "http://localhost/out"
+        ));
+        assert!(is_valid_post_logout_redirect_uri_str(
+            "http://127.0.0.1:8080/out"
+        ));
+        assert!(is_valid_post_logout_redirect_uri_str(
+            "http://[::1]:8080/out"
+        ));
+        // Non-loopback http is rejected.
+        assert!(!is_valid_post_logout_redirect_uri_str(
+            "http://rp.example.com/out"
+        ));
+        // Fragments are rejected (would clash with the echoed `state`).
+        assert!(!is_valid_post_logout_redirect_uri_str(
+            "https://rp.example.com/out#x"
+        ));
+        // Garbage / relative URIs are rejected.
+        assert!(!is_valid_post_logout_redirect_uri_str("not-a-url"));
+    }
 
     #[test]
     fn test_access_scope_from_str() {
@@ -1380,6 +1475,7 @@ mod tests {
                 require_signed_request_object: None,
                 userinfo_signed_response_alg: None,
                 request_uris: None,
+                post_logout_redirect_uris: None,
             },
         )
         .await

@@ -434,6 +434,13 @@ pub struct OAuthClientDoc {
     /// When `None`, any HTTPS `request_uri` is accepted (no allowlist enforced).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_uris: Option<Vec<String>>,
+    /// RP-Initiated Logout 1.0 Section 2: Registered post-logout redirect URIs.
+    ///
+    /// When `Some`, only the listed URIs are accepted as `post_logout_redirect_uri`
+    /// values in the end-session request. Absent field (legacy records) deserializes
+    /// to `None` — no migration needed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub post_logout_redirect_uris: Option<Vec<String>>,
 }
 
 impl DocumentType for OAuthClientDoc {
