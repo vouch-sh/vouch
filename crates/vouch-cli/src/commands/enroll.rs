@@ -68,10 +68,16 @@ pub(crate) async fn run(server: &str) -> Result<()> {
     .await?;
 
     // Step 4: Open browser and display instructions.
+    // Prefer the RFC 8628 §3.3.1 verification_uri_complete (embeds user_code) so the
+    // /device form is pre-filled; fall back to the plain verification_uri.
+    let open_url = device_response
+        .verification_uri_complete
+        .as_deref()
+        .unwrap_or(&device_response.verification_uri);
     let verification_url = &device_response.verification_uri;
 
     // Try to open the browser automatically
-    match open::that(verification_url) {
+    match open::that(open_url) {
         Ok(()) => tr_println!(
             "enroll-browser-block",
             url = verification_url.as_str(),
