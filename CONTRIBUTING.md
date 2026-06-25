@@ -62,7 +62,7 @@ vouch/
 │   │   ├── src/db/         # Database layer (sqlx)
 │   │   ├── migrations/     # sqlite/ and postgres/
 │   │   ├── templates/      # Askama HTML templates
-│   │   └── i18n/           # Fluent translation catalogs (en-US/vouch.ftl)
+│   │   └── i18n/           # Fluent translation catalogs (en-US/vouch-server.ftl)
 │   └── vouch-tests/        # Integration + property-based tests
 │       └── tests/
 │           ├── integration.rs
@@ -187,10 +187,20 @@ Before adding a dependency:
 
 ### Commit Messages
 
-Write clear, concise commit messages. Use a short summary line followed by an optional body explaining the "why":
+Follow [Conventional Commits](https://www.conventionalcommits.org/):
 
 ```
-Add vouch status command
+<type>[optional scope]: <description>
+
+[optional body]
+
+[optional footer(s)]
+```
+
+Example:
+
+```
+feat(cli): add vouch status command
 
 Show current session state including expiration time
 and active delegations.

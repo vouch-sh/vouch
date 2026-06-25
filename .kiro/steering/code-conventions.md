@@ -89,10 +89,20 @@ Configuration: edition 2024, max width 100, Unix newlines.
 
 ## Commit Messages
 
-Short summary line, optional body explaining "why":
+Follow [Conventional Commits](https://www.conventionalcommits.org/):
 
 ```
-Add vouch status command
+<type>[optional scope]: <description>
+
+[optional body]
+
+[optional footer(s)]
+```
+
+Example:
+
+```
+feat(cli): add vouch status command
 
 Show current session state including expiration time
 and active delegations.
