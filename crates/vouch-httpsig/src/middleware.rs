@@ -739,11 +739,63 @@ mod tests {
         // A verified-but-under-covered signature (missing content-digest) must
         // still carry the Accept-Signature remediation hint, like base-component
         // coverage failures (#571).
-        // A missing-digest coverage failure must advertise Accept-Signature.
         let accept_sig = response.headers().get("accept-signature").unwrap();
         assert!(
             accept_sig.to_str().unwrap().contains("content-digest"),
             "Accept-Signature for a body request must advertise content-digest, got {accept_sig:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_signed_post_with_tampered_body_omits_accept_signature() {
+        // A signature that DOES cover content-digest, but whose body was altered
+        // after signing, fails with DigestMismatch (not MissingDigest). That is a
+        // tamper/corruption, not a coverage gap: the client already signed the
+        // right components, so no Accept-Signature remediation hint applies (#571).
+        let signer = EcdsaP256Signer::generate("test-key").unwrap();
+        let mut resolver = InMemoryKeyResolver::new();
+        resolver.insert("test-key".to_string(), Arc::new(signer.verifier()));
+        let router = build_test_router(Arc::new(resolver));
+
+        let original = b"{\"hello\":\"world\"}".to_vec();
+        let mut req = Request::builder()
+            .method("POST")
+            .uri("http://example.com/v1/test")
+            .body(axum::body::Body::from(original.clone()))
+            .unwrap();
+        // Digest + signature both bind the ORIGINAL body.
+        crate::digest::set_content_digest(
+            req.headers_mut(),
+            &original,
+            crate::digest::DigestAlgorithm::Sha256,
+        )
+        .unwrap();
+        SignatureBuilder::new("sig1")
+            .method()
+            .path()
+            .field("content-digest")
+            .created_now()
+            .sign_request(&mut req, &signer)
+            .unwrap();
+
+        // Swap in a different body while keeping the original digest header and
+        // signature: the signature still verifies (it covers the unchanged header
+        // value), but the body no longer matches the digest -> DigestMismatch.
+        let (mut parts, _original_body) = req.into_parts();
+        parts.uri = "/v1/test".parse().unwrap();
+        let req = Request::from_parts(
+            parts,
+            axum::body::Body::from(b"{\"hello\":\"evil\"}".to_vec()),
+        );
+
+        let response =
+            <Router as tower::ServiceExt<Request<axum::body::Body>>>::oneshot(router, req)
+                .await
+                .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert!(
+            response.headers().get("accept-signature").is_none(),
+            "DigestMismatch (tampered body) must NOT advertise Accept-Signature"
         );
     }
 }
