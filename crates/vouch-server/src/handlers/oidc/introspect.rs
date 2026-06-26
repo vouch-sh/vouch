@@ -215,7 +215,7 @@ pub(crate) async fn introspect(
         Ok(r) => r,
         Err(e) => {
             tracing::error!("Introspection failed: {e}");
-            return e.into_response();
+            return e.into_oauth_response().into_response();
         }
     };
 
