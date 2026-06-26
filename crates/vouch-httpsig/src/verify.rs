@@ -6,9 +6,7 @@ use crate::error::HttpSigError;
 use crate::sfv::parse::parse_dictionary;
 use crate::sfv::serialize::serialize_inner_list_to_string;
 use crate::sfv::types::{SfvBareItem, SfvDictMember};
-use crate::signature_base::{
-    build_request_base_with_params_str, build_response_base_with_params_str,
-};
+use crate::signature_base::build_request_base_with_params_str;
 use crate::signature_params::SignatureParams;
 
 /// Verify a signature on an HTTP request.
@@ -38,29 +36,6 @@ pub fn verify_request_signature<T>(
     validate_timestamps(&params, max_age)?;
 
     let base = build_request_base_with_params_str(req, &params, &params_str)?;
-    verifier.verify(&base, &signature_bytes)?;
-
-    Ok(params)
-}
-
-/// Verify a signature on an HTTP response.
-///
-/// # Errors
-///
-/// Returns [`HttpSigError`] on missing headers, parse errors, expired
-/// signatures, or verification failures.
-pub fn verify_response_signature<T, U>(
-    resp: &http::Response<T>,
-    label: &str,
-    verifier: &dyn VerifyingAlgorithm,
-    req: Option<&http::Request<U>>,
-    max_age: Option<i64>,
-) -> Result<SignatureParams, HttpSigError> {
-    let (params, params_str, signature_bytes) = extract_signature_parts(resp.headers(), label)?;
-    validate_algorithm(&params, verifier)?;
-    validate_timestamps(&params, max_age)?;
-
-    let base = build_response_base_with_params_str(resp, req, &params, &params_str)?;
     verifier.verify(&base, &signature_bytes)?;
 
     Ok(params)
@@ -472,26 +447,6 @@ mod tests {
         );
 
         verify_request_signature(&req, "sig1", &key, None).unwrap();
-    }
-
-    #[test]
-    fn test_response_sign_verify() {
-        let key = HmacSha256Key::new(b"secret", "server-key");
-        let mut resp = http::Response::builder()
-            .status(200)
-            .header("content-type", "application/json")
-            .body(())
-            .unwrap();
-
-        SignatureBuilder::new("sig1")
-            .status()
-            .field("content-type")
-            .created(1_618_884_473)
-            .tag("vouch-server")
-            .sign_response(&mut resp, None::<&http::Request<()>>, &key)
-            .unwrap();
-
-        verify_response_signature(&resp, "sig1", &key, None::<&http::Request<()>>, None).unwrap();
     }
 
     #[test]
