@@ -326,7 +326,16 @@ pub async fn require_signature<R: KeyResolver>(
                     error = %e,
                     "signed request body integrity check failed"
                 );
-                return (StatusCode::UNAUTHORIZED, SIG_VERIFY_FAILED).into_response();
+                let mut resp = (StatusCode::UNAUTHORIZED, SIG_VERIFY_FAILED).into_response();
+                // A coverage failure (signature verified but content-digest not
+                // covered) gets the same Accept-Signature remediation hint as the
+                // base-component coverage failure above.
+                if matches!(e, HttpSigError::MissingDigest)
+                    && let Some(accept_sig) = build_accept_signature(has_body)
+                {
+                    resp.headers_mut().insert("accept-signature", accept_sig);
+                }
+                return resp;
             }
             parts.extensions.insert(VerifiedSignature {
                 label: label.clone(),
@@ -727,5 +736,14 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        // A verified-but-under-covered signature (missing content-digest) must
+        // still carry the Accept-Signature remediation hint, like base-component
+        // coverage failures (#571).
+        // A missing-digest coverage failure must advertise Accept-Signature.
+        let accept_sig = response.headers().get("accept-signature").unwrap();
+        assert!(
+            accept_sig.to_str().unwrap().contains("content-digest"),
+            "Accept-Signature for a body request must advertise content-digest, got {accept_sig:?}"
+        );
     }
 }
