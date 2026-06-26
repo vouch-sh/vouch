@@ -302,6 +302,9 @@ pub(crate) struct CreateApplicationResponse {
     pub jwks_configured: bool,
     /// Remote JWKS URI if configured.
     pub jwks_uri: Option<String>,
+    /// RP-Initiated Logout 1.0: Registered post-logout redirect URIs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub post_logout_redirect_uris: Option<Vec<String>>,
 }
 
 /// API response for application details.

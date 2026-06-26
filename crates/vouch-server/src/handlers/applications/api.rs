@@ -261,6 +261,7 @@ pub(crate) async fn create_application_api(
         fapi_profile: client.fapi_profile.as_str().to_string(),
         jwks_configured,
         jwks_uri: response_jwks_uri,
+        post_logout_redirect_uris: client.post_logout_redirect_uris,
     }))
 }
 
@@ -2343,9 +2344,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_create_application_with_post_logout_redirect_uris() {
-        // POST /api/v1/applications with post_logout_redirect_uris should store them.
-        // The create response (CreateApplicationResponse) does not echo the field, so
-        // we verify storage via a subsequent GET /api/v1/applications/:id.
+        // POST /api/v1/applications with post_logout_redirect_uris should store them
+        // and echo them back in the create response, mirroring resource_uris.
         let (app, state) = test_app().await;
         let user = create_test_user(&state.store, "post-logout-create@example.com").await;
         let auth_id = create_test_authenticator(&state.store, &user.id).await;
@@ -2374,6 +2374,20 @@ mod tests {
         assert_eq!(status, StatusCode::OK, "body: {body}");
         let create_json: serde_json::Value = serde_json::from_str(&body).expect("valid json");
         let app_id = create_json["id"].as_str().expect("id in create response");
+
+        // The create response itself must echo post_logout_redirect_uris (#574).
+        let created_post_logout = create_json["post_logout_redirect_uris"]
+            .as_array()
+            .expect("post_logout_redirect_uris must be present in create response");
+        assert_eq!(
+            created_post_logout.len(),
+            1,
+            "Expected 1 post_logout_redirect_uri in create response, got {created_post_logout:?}"
+        );
+        assert_eq!(
+            created_post_logout[0].as_str().unwrap(),
+            "https://example.com/logged-out"
+        );
 
         // Verify the stored post_logout_redirect_uris via GET.
         let (get_status, get_body) = http_request(

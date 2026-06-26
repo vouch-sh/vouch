@@ -102,7 +102,7 @@
                             </div>
                             {% else if policy.slug == "os_recency" %}
                             <div class="text-xs text-gray-500 space-y-1">
-                                <p class="flex items-center gap-1.5">{{ os::apple("w-3.5 h-3.5 text-gray-500 shrink-0") }} semver(os_version) &ge; semver("25.0.0") (Sequoia+)</p>
+                                <p class="flex items-center gap-1.5">{{ os::apple("w-3.5 h-3.5 text-gray-500 shrink-0") }} semver(os_version) &ge; semver("14.0.0") (Sonoma+)</p>
                                 <p class="flex items-center gap-1.5">{{ os::windows("w-3.5 h-3.5 text-gray-500 shrink-0") }} semver(os_version) &ge; semver("10.0.26100") (24H2+)</p>
                                 <p class="flex items-center gap-1.5">{{ os::linux("w-3.5 h-3.5 text-gray-500 shrink-0") }} {{ self.tr("admin-policies-osrecency-linux") }}</p>
                                 <p class="mt-1 text-gray-600"><span class="font-mono">semver()</span> {{ self.tr("admin-policies-semver-explain") }} (<span class="font-mono">"9" &lt; "14"</span>)</p>

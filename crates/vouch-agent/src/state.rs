@@ -345,13 +345,23 @@ impl AgentState {
         guard.session.as_ref().map(|s| s.user_email().to_string())
     }
 
-    /// Get the current session's expiry timestamp, if a session is stored.
+    /// Get the current session's expiry timestamp and remaining seconds under a
+    /// single read lock.
     ///
-    /// Returned even for an expired-but-not-yet-cleared session so the expiry
+    /// Both values are read atomically so the expiry monitor never observes a
+    /// torn pair where the timestamp comes from one session and the remaining
+    /// seconds from a session that replaced it between two separate reads.
+    /// Values are returned even for an expired-but-not-yet-cleared session so the
     /// monitor can detect when a new login replaces it and re-arm its warnings.
-    pub async fn current_session_expiry(&self) -> Option<Timestamp> {
+    pub async fn session_expiry_info(&self) -> (Option<Timestamp>, Option<u64>) {
         let guard = self.inner.read().await;
-        guard.session.as_ref().map(Session::expires_at)
+        match guard.session.as_ref() {
+            Some(session) => (
+                Some(session.expires_at()),
+                Some(session.expires_in_seconds()),
+            ),
+            None => (None, None),
+        }
     }
 }
 
