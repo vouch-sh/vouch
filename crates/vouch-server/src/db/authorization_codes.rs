@@ -87,33 +87,6 @@ pub async fn try_consume_authorization_code(
     }
 }
 
-/// Check if an authorization code has already been consumed.
-pub async fn is_authorization_code_consumed(
-    store: &DocumentStore,
-    code_hash: &str,
-) -> Result<bool> {
-    let doc = store
-        .find_one::<AuthorizationCodeDoc>("code_hash", code_hash)
-        .await?;
-    match doc {
-        Some(d) => Ok(d.data.consumed_at.is_some()),
-        None => Ok(false),
-    }
-}
-
-/// Get user_id and client_id for a consumed authorization code.
-///
-/// Used during replay detection (RFC 6749 Section 10.5).
-pub async fn get_authorization_code_owner(
-    store: &DocumentStore,
-    code_hash: &str,
-) -> Result<Option<(String, String)>> {
-    let doc = store
-        .find_one::<AuthorizationCodeDoc>("code_hash", code_hash)
-        .await?;
-    Ok(doc.map(|d| (d.data.user_id, d.data.client_id)))
-}
-
 /// Check if consumed and return owner info for revocation.
 pub async fn get_consumed_code_owner(
     store: &DocumentStore,
