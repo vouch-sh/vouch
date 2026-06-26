@@ -155,8 +155,8 @@ pub use dpop::{
 // Re-export credentials types and functions
 pub use credentials::{
     EnrollmentSession, InsertTokenExchangeParams, IssuedSshCertificate, RevokedSshCertificate,
-    create_enrollment_session, delete_expired_enrollment_sessions,
-    delete_expired_ssh_issued_certs, delete_expired_ssh_revocations, delete_old_token_exchanges,
+    create_enrollment_session, delete_expired_enrollment_sessions, delete_expired_ssh_issued_certs,
+    delete_expired_ssh_revocations, delete_old_token_exchanges,
     get_enrollment_session_by_token_hash, get_issued_ssh_certificates_for_user,
     get_revoked_ssh_certificates, insert_token_exchange, is_ssh_certificate_revoked,
     record_ssh_certificate_issuance, revoke_all_ssh_certificates_for_user,
