@@ -7,7 +7,7 @@
 
 use crate::AppState;
 use crate::handlers::extractors::ClientInfo;
-use crate::services::error::{OAuthErrorResponse, ServiceError};
+use crate::services::error::ServiceError;
 use crate::services::oidc::introspection::{
     introspect_token as svc_introspect, revoke_token as svc_revoke, sign_introspection_jwt,
 };
@@ -215,7 +215,7 @@ pub(crate) async fn introspect(
         Ok(r) => r,
         Err(e) => {
             tracing::error!("Introspection failed: {e}");
-            return e.into_oauth_response().into_response();
+            return introspect_error_response(e);
         }
     };
 
@@ -245,12 +245,25 @@ pub(crate) async fn introspect(
     }
 }
 
+/// Render any introspection-endpoint `ServiceError` as an RFC 6749 §5.2 OAuth
+/// error response (e.g. `{"error": "server_error", ...}`).
+///
+/// Both error-producing paths in this endpoint — the introspection-service
+/// failure (store/DB errors) and the JWT-signing failure — funnel through this
+/// helper so the endpoint can never emit two different error shapes for the same
+/// `ServiceError` (issue #572). Do not hand-roll an error response here; route it
+/// through `ServiceError::into_oauth_response`.
+fn introspect_error_response(e: ServiceError) -> Response {
+    e.into_oauth_response().into_response()
+}
+
 /// Map a signed-introspection-JWT result to an HTTP response.
 ///
 /// Returns 200 with Content-Type `application/token-introspection+jwt` on success
-/// (RFC 9701 §5). On signing failure, returns 500 `server_error` and logs the
-/// underlying error — never `{"active": false}`, which would misrepresent a
-/// validated active token as inactive (issue #396).
+/// (RFC 9701 §5). On signing failure, returns the OAuth `server_error` response
+/// (via [`introspect_error_response`]) and logs the underlying error — never
+/// `{"active": false}`, which would misrepresent a validated active token as
+/// inactive (issue #396).
 fn jwt_introspect_response(jwt_result: Result<String, ServiceError>) -> Response {
     match jwt_result {
         Ok(jwt) => (
@@ -264,15 +277,7 @@ fn jwt_introspect_response(jwt_result: Result<String, ServiceError>) -> Response
             .into_response(),
         Err(e) => {
             tracing::error!("Failed to sign introspection JWT: {e}");
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(OAuthErrorResponse {
-                    error: "server_error".to_string(),
-                    error_description: Some("Failed to sign introspection response".to_string()),
-                    error_uri: None,
-                }),
-            )
-                .into_response()
+            introspect_error_response(e)
         }
     }
 }
@@ -328,6 +333,35 @@ mod tests {
             "Response must NOT contain 'active' field — that would leak \
              the buggy inactive payload (issue #396): {body}"
         );
+    }
+
+    /// Regression guard for issue #572: every `ServiceError` from this endpoint
+    /// — whether from the introspection service (store/DB) or JWT signing — must
+    /// render as an RFC 6749 §5.2 OAuth error (`{"error": "server_error"}`),
+    /// never the API error envelope (`{"code": ..., "message": ...}`). Both arms
+    /// funnel through `introspect_error_response`, so testing it pins the single
+    /// rendering contract the two paths share.
+    #[tokio::test]
+    async fn test_introspect_error_response_uses_oauth_error_shape() {
+        for err in [
+            ServiceError::Internal("simulated store failure".to_string()),
+            ServiceError::OccConflict,
+        ] {
+            let response = introspect_error_response(err);
+            let (status, _content_type, body) = read_body(response).await;
+            assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "body: {body}");
+
+            let json: serde_json::Value =
+                serde_json::from_str(&body).expect("Body must be JSON OAuth error");
+            assert_eq!(
+                json["error"], "server_error",
+                "Must use OAuth 'error' field per RFC 6749 §5.2, not API 'code': {body}"
+            );
+            assert!(
+                json.get("code").is_none() && json.get("message").is_none(),
+                "Must NOT use the API error envelope ({{code, message}}): {body}"
+            );
+        }
     }
 
     /// Happy path: signed JWT is returned verbatim with the RFC 9701
