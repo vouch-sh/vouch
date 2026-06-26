@@ -5,7 +5,6 @@
 //! converted into appropriate HTTP responses for different protocols:
 //! - Standard HTTP error responses
 //! - OAuth 2.0 error responses (RFC 6749 Section 5.2)
-//! - SCIM error responses (RFC 7644 Section 3.12)
 
 use axum::{
     Json,
@@ -45,17 +44,6 @@ pub enum ServiceError {
         code: OAuthErrorCode,
         /// Human-readable description.
         description: String,
-    },
-
-    /// SCIM protocol error (RFC 7644 Section 3.12).
-    #[error("scim error: {status} {detail}")]
-    Scim {
-        /// HTTP status code.
-        status: u16,
-        /// Error detail message.
-        detail: String,
-        /// SCIM error type (e.g., "invalidValue", "uniqueness").
-        scim_type: Option<String>,
     },
 
     /// Structured API error with explicit status code, error code, and message.
@@ -253,20 +241,6 @@ pub struct OAuthErrorResponse {
     pub error_uri: Option<String>,
 }
 
-/// SCIM error response (RFC 7644 Section 3.12).
-#[derive(Debug, Serialize)]
-pub(crate) struct ScimErrorResponse {
-    /// SCIM schema URIs.
-    pub schemas: Vec<String>,
-    /// Error detail message.
-    pub detail: String,
-    /// HTTP status code.
-    pub status: String,
-    /// SCIM error type.
-    #[serde(rename = "scimType", skip_serializing_if = "Option::is_none")]
-    pub scim_type: Option<String>,
-}
-
 impl ServiceError {
     /// Create an OAuth error.
     #[must_use]
@@ -289,16 +263,6 @@ impl ServiceError {
             status,
             code: code.into(),
             message: message.into(),
-        }
-    }
-
-    /// Create a SCIM error.
-    #[must_use]
-    pub fn scim(status: u16, detail: impl Into<String>, scim_type: Option<&str>) -> Self {
-        Self::Scim {
-            status,
-            detail: detail.into(),
-            scim_type: scim_type.map(String::from),
         }
     }
 
@@ -364,86 +328,6 @@ impl ServiceError {
                 }),
             ),
         }
-    }
-
-    /// Convert to a SCIM error response.
-    pub fn into_scim_response(self) -> Response {
-        let (status, body) = match self {
-            Self::Scim {
-                status,
-                detail,
-                scim_type,
-            } => (
-                StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
-                ScimErrorResponse {
-                    schemas: vec!["urn:ietf:params:scim:api:messages:2.0:Error".to_string()],
-                    detail,
-                    status: status.to_string(),
-                    scim_type,
-                },
-            ),
-            Self::NotFound(entity) => (
-                StatusCode::NOT_FOUND,
-                ScimErrorResponse {
-                    schemas: vec!["urn:ietf:params:scim:api:messages:2.0:Error".to_string()],
-                    detail: format!("{entity} not found"),
-                    status: "404".to_string(),
-                    scim_type: None,
-                },
-            ),
-            Self::Validation(msg) => (
-                StatusCode::BAD_REQUEST,
-                ScimErrorResponse {
-                    schemas: vec!["urn:ietf:params:scim:api:messages:2.0:Error".to_string()],
-                    detail: msg,
-                    status: "400".to_string(),
-                    scim_type: Some("invalidValue".to_string()),
-                },
-            ),
-            Self::Conflict(msg) => (
-                StatusCode::CONFLICT,
-                ScimErrorResponse {
-                    schemas: vec!["urn:ietf:params:scim:api:messages:2.0:Error".to_string()],
-                    detail: msg,
-                    status: "409".to_string(),
-                    scim_type: Some("uniqueness".to_string()),
-                },
-            ),
-            Self::Unauthorized(_) => (
-                StatusCode::UNAUTHORIZED,
-                ScimErrorResponse {
-                    schemas: vec!["urn:ietf:params:scim:api:messages:2.0:Error".to_string()],
-                    detail: "Authentication required".to_string(),
-                    status: "401".to_string(),
-                    scim_type: None,
-                },
-            ),
-            Self::Forbidden(_) => (
-                StatusCode::FORBIDDEN,
-                ScimErrorResponse {
-                    schemas: vec!["urn:ietf:params:scim:api:messages:2.0:Error".to_string()],
-                    detail: "Permission denied".to_string(),
-                    status: "403".to_string(),
-                    scim_type: None,
-                },
-            ),
-            _ => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                ScimErrorResponse {
-                    schemas: vec!["urn:ietf:params:scim:api:messages:2.0:Error".to_string()],
-                    detail: "Internal server error".to_string(),
-                    status: "500".to_string(),
-                    scim_type: None,
-                },
-            ),
-        };
-
-        (
-            status,
-            [("Content-Type", "application/scim+json")],
-            Json(body),
-        )
-            .into_response()
     }
 
     /// Build a `WWW-Authenticate` header value for RFC 9470 step-up challenges.
@@ -513,7 +397,6 @@ impl ServiceError {
                 "Internal error".to_string(),
             ),
             Self::OAuth { .. } => return self.into_oauth_response().into_response(),
-            Self::Scim { .. } => return self.into_scim_response(),
         };
 
         (status, Json(ApiError::new(code, &message))).into_response()
@@ -685,26 +568,6 @@ mod tests {
 
         assert_eq!(json["error"], "invalid_grant");
         assert_eq!(json["error_description"], "Token expired");
-    }
-
-    #[test]
-    fn test_service_error_scim_factory() {
-        let err = ServiceError::scim(400, "Invalid attribute", Some("invalidValue"));
-        assert!(
-            matches!(err, ServiceError::Scim { .. }),
-            "Expected ServiceError::Scim"
-        );
-        let ServiceError::Scim {
-            status,
-            detail,
-            scim_type,
-        } = err
-        else {
-            return;
-        };
-        assert_eq!(status, 400);
-        assert_eq!(detail, "Invalid attribute");
-        assert_eq!(scim_type, Some("invalidValue".to_string()));
     }
 
     // =========================================================================
