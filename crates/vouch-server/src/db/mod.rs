@@ -77,10 +77,10 @@ pub use documents::organization::{AdditionalDomain, UNVERIFY_FAILURE_THRESHOLD};
 pub use organizations::{
     AddedDomain, DomainRemovalSummary, MAX_ADDITIONAL_DOMAINS, Organization, RecheckEffect,
     RecheckOutcome, StaleDomainRemoval, VerifiedDomainRecord, add_additional_domain,
-    cleanup_stale_additional_domains, delete_organization, get_organization,
-    get_organization_domain, get_verification_token, list_additional_domains,
-    list_all_verified_additional_domains, mark_additional_domain_verified, normalize_domain,
-    record_recheck_result, remove_additional_domain, unicode_form,
+    cleanup_stale_additional_domains, get_organization, get_organization_domain,
+    get_verification_token, list_additional_domains, list_all_verified_additional_domains,
+    mark_additional_domain_verified, normalize_domain, record_recheck_result,
+    remove_additional_domain, unicode_form,
 };
 
 // Re-export organization test helpers (only available in tests)
