@@ -200,16 +200,6 @@ pub async fn count_authenticators_for_user(store: &DocumentStore, user_id: &str)
     store.count::<AuthenticatorDoc>("user_id", user_id).await
 }
 
-/// Count the number of sessions for an authenticator.
-pub async fn count_sessions_for_authenticator(
-    store: &DocumentStore,
-    authenticator_id: &str,
-) -> Result<i64> {
-    store
-        .count::<SessionDoc>("authenticator_id", authenticator_id)
-        .await
-}
-
 /// Delete an authenticator by ID.
 ///
 /// Performs application-level cascade deletes:
