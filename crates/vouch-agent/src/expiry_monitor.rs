@@ -37,8 +37,7 @@ pub async fn run(state: Arc<AgentState>) {
     loop {
         tokio::time::sleep(tokio::time::Duration::from_secs(CHECK_INTERVAL_SECS)).await;
 
-        let session_expiry = state.current_session_expiry().await;
-        let remaining_secs = state.expires_in_seconds().await;
+        let (session_expiry, remaining_secs) = state.session_expiry_info().await;
 
         for threshold in thresholds_to_fire(
             &mut tracked_session,
