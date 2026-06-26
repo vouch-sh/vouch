@@ -47,9 +47,3 @@ impl fmt::Display for ClaimError {
 }
 
 impl std::error::Error for ClaimError {}
-
-impl From<anyhow::Error> for ClaimError {
-    fn from(err: anyhow::Error) -> Self {
-        Self::Database(err.to_string())
-    }
-}
