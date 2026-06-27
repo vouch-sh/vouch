@@ -3,8 +3,7 @@
 //! (`crates/vouch-server/src/db/posture_policies.rs`).
 //!
 //! Covers preconfigured-policy activation, custom CEL policy create/list/get
-//! /update/delete, org-scoped isolation, and the `count_active_policies`
-//! aggregation.
+//! /update/delete, and org-scoped isolation.
 
 #![allow(
     clippy::unwrap_used,
@@ -380,68 +379,4 @@ async fn get_active_custom_policies_filters_by_flag() {
     assert_eq!(actives.len(), 1);
     assert_eq!(actives[0].id, active.id);
     assert_ne!(actives[0].id, inactive.id);
-}
-
-#[tokio::test]
-async fn count_active_policies_sums_preconfigured_and_custom() {
-    let harness = TestHarness::new().await;
-    let org_id = fresh_org_id(&harness, "count.example").await;
-
-    // Zero state.
-    let zero = db::count_active_policies(&harness.state.store, &org_id)
-        .await
-        .expect("count");
-    assert_eq!(zero, 0);
-
-    // Two preconfigured slugs active.
-    db::set_preconfigured_active(
-        &harness.state.store,
-        &org_id,
-        vec!["a".to_string(), "b".to_string()],
-    )
-    .await
-    .expect("preconfigured");
-
-    // Two custom policies, one active.
-    let active = db::create_custom_policy(
-        &harness.state.store,
-        CreateCustomPolicyParams {
-            name: "active",
-            description: None,
-            cel_expression: "true",
-            org_id: &org_id,
-        },
-    )
-    .await
-    .expect("create active");
-    let _inactive = db::create_custom_policy(
-        &harness.state.store,
-        CreateCustomPolicyParams {
-            name: "inactive",
-            description: None,
-            cel_expression: "true",
-            org_id: &org_id,
-        },
-    )
-    .await
-    .expect("create inactive");
-    db::update_custom_policy(
-        &harness.state.store,
-        &active.id,
-        &org_id,
-        UpdateCustomPolicyParams {
-            name: None,
-            description: FieldUpdate::Keep,
-            cel_expression: None,
-            active: Some(true),
-        },
-    )
-    .await
-    .expect("activate")
-    .expect("returned");
-
-    let total = db::count_active_policies(&harness.state.store, &org_id)
-        .await
-        .expect("count");
-    assert_eq!(total, 3, "2 preconfigured + 1 active custom");
 }

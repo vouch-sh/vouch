@@ -265,4 +265,3 @@ pub async fn delete_custom_policy(store: &DocumentStore, id: &str, org_id: &str)
     store.delete(id).await?;
     Ok(true)
 }
-
