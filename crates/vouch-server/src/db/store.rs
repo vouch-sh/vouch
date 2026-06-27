@@ -462,32 +462,6 @@ impl DocumentStore {
         }
     }
 
-    /// Get multiple documents by their IDs.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if decryption or deserialization fails.
-    pub async fn get_many<T: DocumentType>(&self, ids: &[&str]) -> Result<Vec<Document<T>>> {
-        if ids.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        let stmt = Query::select()
-            .columns(DOC_COLUMNS)
-            .from(Documents::Table)
-            .and_where(Expr::col(Documents::Id).is_in(ids.iter().copied()))
-            .and_where(Expr::col(Documents::DocType).eq(T::DOC_TYPE))
-            .to_owned();
-
-        let rows: Vec<RawDocumentRow> = crate::db_fetch_all!(&self.pool, stmt, RawDocumentRow)?;
-
-        let mut results = Vec::with_capacity(rows.len());
-        for row in rows {
-            results.push(raw_to_document::<T>(&self.crypto, row)?);
-        }
-        Ok(results)
-    }
-
     // ========================================================================
     // Find by Index
     // ========================================================================
@@ -987,31 +961,6 @@ impl DocumentStore {
             .to_owned();
 
         // Use a simple FromRow struct for the count result
-        #[derive(sqlx::FromRow)]
-        struct CountRow {
-            #[sqlx(default)]
-            count: i64,
-        }
-
-        let row: CountRow = crate::db_fetch_one!(&self.pool, stmt, CountRow)?;
-        Ok(row.count)
-    }
-
-    /// Count all documents of a given type (no index join needed).
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the query fails.
-    pub async fn count_all<T: DocumentType>(&self) -> Result<i64> {
-        let stmt = Query::select()
-            .expr_as(
-                Expr::col(Documents::Id).count(),
-                sea_query::Alias::new("count"),
-            )
-            .from(Documents::Table)
-            .and_where(Expr::col(Documents::DocType).eq(T::DOC_TYPE))
-            .to_owned();
-
         #[derive(sqlx::FromRow)]
         struct CountRow {
             #[sqlx(default)]
@@ -2001,25 +1950,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn get_many() {
-        let store = test_store().await;
-
-        let mut ids = Vec::new();
-        for i in 0..3 {
-            let doc = TestDoc {
-                name: format!("batch-{i}"),
-                value: i,
-            };
-            let result = store.insert(&doc).await.unwrap();
-            ids.push(result.id);
-        }
-
-        let id_refs: Vec<&str> = ids.iter().map(String::as_str).collect();
-        let fetched = store.get_many::<TestDoc>(&id_refs).await.unwrap();
-        assert_eq!(fetched.len(), 3);
-    }
-
-    #[tokio::test]
     async fn update_by_index() {
         let store = test_store().await;
 
@@ -2173,22 +2103,6 @@ mod tests {
         let fetched = store.get::<TestDoc>(&inserted.id).await.unwrap().unwrap();
         assert_eq!(fetched.data.value, 2);
         assert_eq!(fetched.version, 2);
-    }
-
-    #[tokio::test]
-    async fn count_all_documents() {
-        let store = test_store().await;
-
-        for i in 0..4 {
-            let doc = TestDoc {
-                name: format!("count-all-{i}"),
-                value: i,
-            };
-            store.insert(&doc).await.unwrap();
-        }
-
-        let count = store.count_all::<TestDoc>().await.unwrap();
-        assert_eq!(count, 4);
     }
 
     #[tokio::test]
