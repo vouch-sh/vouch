@@ -2364,7 +2364,6 @@ async fn test_scim_group_delete_cascades_members() {
         user_exists.is_some(),
         "user should not be deleted when group is deleted"
     );
-
 }
 
 // ========================================================================
