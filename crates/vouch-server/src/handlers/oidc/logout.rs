@@ -626,6 +626,12 @@ mod tests {
             body.contains("</html>") || body.contains("<!DOCTYPE"),
             "expected HTML: {body}"
         );
+        // The confirmation button carries the `cert-logout` automation hook that
+        // the RP-Initiated Logout conformance suite clicks to confirm logout.
+        assert!(
+            body.contains(r#"id="cert-logout""#),
+            "confirm button must carry the cert-logout hook: {body}"
+        );
     }
 
     #[tokio::test]
