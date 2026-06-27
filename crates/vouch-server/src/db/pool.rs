@@ -348,7 +348,6 @@ impl Pool {
             }
         }
     }
-
 }
 
 /// Database transaction that wraps both SQLite and PostgreSQL transactions.
@@ -377,7 +376,6 @@ impl Transaction<'_> {
             }
         }
     }
-
 }
 
 // ============================================================================
