@@ -682,24 +682,6 @@ impl From<Document<ScimGroupDoc>> for ScimGroupRecord {
     }
 }
 
-/// SCIM Group member record.
-#[derive(Debug)]
-pub struct ScimGroupMemberRecord {
-    pub group_id: String,
-    pub user_id: String,
-    pub created_at: Timestamp,
-}
-
-impl From<Document<ScimGroupMemberDoc>> for ScimGroupMemberRecord {
-    fn from(doc: Document<ScimGroupMemberDoc>) -> Self {
-        Self {
-            group_id: doc.data.group_id,
-            user_id: doc.data.user_id,
-            created_at: doc.created_at,
-        }
-    }
-}
-
 /// Create a new SCIM group bound to the caller's org.
 pub async fn create_scim_group(
     store: &DocumentStore,
@@ -729,18 +711,6 @@ pub async fn get_scim_group(
         return Ok(None);
     }
     Ok(Some(ScimGroupRecord::from(doc)))
-}
-
-/// Get a SCIM group by display name, scoped to the caller's org.
-pub async fn get_scim_group_by_name(
-    store: &DocumentStore,
-    org_id: &str,
-    display_name: &str,
-) -> Result<Option<ScimGroupRecord>> {
-    let docs = store
-        .find_by_indexes::<ScimGroupDoc>(&[("display_name", display_name), ("org_id", org_id)])
-        .await?;
-    Ok(docs.into_iter().next().map(ScimGroupRecord::from))
 }
 
 /// List SCIM groups with pagination.
@@ -1023,29 +993,6 @@ pub async fn get_scim_group_members(
 
     users.sort_by(|a, b| a.email.cmp(&b.email));
     Ok(Some(users))
-}
-
-/// Get all groups a user belongs to, scoped to the caller's org.
-pub async fn get_user_scim_groups(
-    store: &DocumentStore,
-    user_id: &str,
-    org_id: &str,
-) -> Result<Vec<ScimGroupRecord>> {
-    let member_docs = store
-        .find_all::<ScimGroupMemberDoc>("user_id", user_id)
-        .await?;
-
-    let mut groups = Vec::with_capacity(member_docs.len());
-    for member in &member_docs {
-        if let Some(group_doc) = store.get::<ScimGroupDoc>(&member.data.group_id).await?
-            && group_doc.data.org_id == org_id
-        {
-            groups.push(ScimGroupRecord::from(group_doc));
-        }
-    }
-
-    groups.sort_by(|a, b| a.display_name.cmp(&b.display_name));
-    Ok(groups)
 }
 
 /// Replace all members of a SCIM group atomically, scoped to the

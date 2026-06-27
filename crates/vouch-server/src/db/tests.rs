@@ -2130,13 +2130,6 @@ async fn test_scim_group_lifecycle() {
         .expect("group should exist");
     assert_eq!(fetched.display_name, "Engineering");
 
-    // Get by display name
-    let by_name = get_scim_group_by_name(&store, TEST_ORG_ID, "Engineering")
-        .await
-        .expect("get_scim_group_by_name failed")
-        .expect("should find by name");
-    assert_eq!(by_name.id, group.id);
-
     // Update
     let _ = update_scim_group(
         &store,
@@ -2224,13 +2217,6 @@ async fn test_scim_group_member_add_remove() {
         1,
         "idempotent add should not duplicate"
     );
-
-    // User's groups
-    let user_groups = get_user_scim_groups(&store, &user.id, TEST_ORG_ID)
-        .await
-        .expect("get_user_scim_groups failed");
-    assert_eq!(user_groups.len(), 1);
-    assert_eq!(user_groups[0].id, group.id);
 
     // Remove member
     let removed = remove_scim_group_member(&store, &group.id, TEST_ORG_ID, &user.id)
@@ -2366,15 +2352,6 @@ async fn test_scim_group_delete_cascades_members() {
     assert!(
         user_exists.is_some(),
         "user should not be deleted when group is deleted"
-    );
-
-    // User's group memberships should be cleaned up
-    let user_groups = get_user_scim_groups(&store, &user.id, TEST_ORG_ID)
-        .await
-        .expect("get user groups");
-    assert!(
-        user_groups.is_empty(),
-        "group membership should be cascade-deleted with the group"
     );
 }
 

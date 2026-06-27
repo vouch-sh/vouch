@@ -77,9 +77,9 @@ impl DocumentType for ScimGroupDoc {
 
 /// A SCIM group membership (linking group to user).
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ScimGroupMemberDoc {
-    pub group_id: String,
-    pub user_id: String,
+pub(crate) struct ScimGroupMemberDoc {
+    pub(crate) group_id: String,
+    pub(crate) user_id: String,
 }
 
 impl DocumentType for ScimGroupMemberDoc {
