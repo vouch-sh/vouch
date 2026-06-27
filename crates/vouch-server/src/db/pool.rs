@@ -348,15 +348,6 @@ impl Pool {
             }
         }
     }
-
-    /// Check if the pool has been closed.
-    #[must_use]
-    pub fn is_closed(&self) -> bool {
-        match self {
-            Self::Sqlite(pool) => pool.is_closed(),
-            Self::Postgres(pool) => pool.is_closed(),
-        }
-    }
 }
 
 /// Database transaction that wraps both SQLite and PostgreSQL transactions.
@@ -383,15 +374,6 @@ impl Transaction<'_> {
                 tx.commit().await?;
                 Ok(())
             }
-        }
-    }
-
-    /// Get the database type for this transaction.
-    #[must_use]
-    pub fn db_type(&self) -> DatabaseType {
-        match self {
-            Self::Sqlite(_) => DatabaseType::Sqlite,
-            Self::Postgres(_) => DatabaseType::Postgres,
         }
     }
 }
