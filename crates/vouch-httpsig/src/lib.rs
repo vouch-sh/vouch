@@ -33,4 +33,4 @@ pub use error::HttpSigError;
 pub use sig_policy::requires_signature;
 pub use sign::SignatureBuilder;
 pub use signature_params::SignatureParams;
-pub use verify::{verify_request_signature, verify_response_signature};
+pub use verify::verify_request_signature;
