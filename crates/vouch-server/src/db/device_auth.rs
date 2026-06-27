@@ -446,14 +446,6 @@ pub async fn try_consume_oidc_state(
     }
 }
 
-/// Delete an OIDC state.
-pub async fn delete_oidc_state(store: &DocumentStore, state: &str) -> Result<()> {
-    store
-        .delete_by_index::<OidcStateDoc>("state", state)
-        .await?;
-    Ok(())
-}
-
 /// Delete expired OIDC states.
 pub async fn delete_expired_oidc_states(store: &DocumentStore, _now: &str) -> Result<u64> {
     use super::document_type::DocumentType;

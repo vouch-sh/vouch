@@ -711,17 +711,6 @@ async fn test_oidc_state_lifecycle() {
     assert_eq!(oidc_state.state, state);
     assert_eq!(oidc_state.device_auth_id, device_auth_id);
     assert_eq!(oidc_state.nonce, nonce);
-
-    // Delete OIDC state
-    delete_oidc_state(&store, state)
-        .await
-        .expect("Failed to delete OIDC state");
-
-    // Verify deleted
-    let oidc_state = get_oidc_state(&store, state)
-        .await
-        .expect("Query should succeed");
-    assert!(oidc_state.is_none());
 }
 
 // ========================================================================
