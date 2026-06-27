@@ -265,10 +265,3 @@ pub async fn delete_custom_policy(store: &DocumentStore, id: &str, org_id: &str)
     store.delete(id).await?;
     Ok(true)
 }
-
-/// Count total active policies for an org (preconfigured + custom).
-pub async fn count_active_policies(store: &DocumentStore, org_id: &str) -> Result<usize> {
-    let preconfigured_count = get_active_preconfigured_slugs(store, org_id).await?.len();
-    let custom_active = get_active_custom_policies(store, org_id).await?.len();
-    Ok(preconfigured_count.saturating_add(custom_active))
-}
