@@ -867,51 +867,6 @@ async fn find_conflicting_claim_in_other_org(
     }
 }
 
-/// Delete an organization and all associated data.
-///
-/// Performs application-level cascade deletes:
-/// 1. Delete GitHub installations
-/// 2. Delete SCIM tokens (with audit log SET NULL)
-/// 3. Unlink OAuth clients (SET NULL org_id, downgrade scope)
-/// 4. Unlink users (SET NULL org_id)
-/// 5. Delete the organization
-pub async fn delete_organization(store: &DocumentStore, org_id: &str) -> Result<bool> {
-    use super::documents::github::GitHubInstallationDoc;
-    use super::documents::oauth::OAuthClientDoc;
-    use super::documents::scim::ScimTokenDoc;
-    use super::documents::user::UserDoc;
-
-    // 1. Delete GitHub installations
-    store
-        .delete_by_index::<GitHubInstallationDoc>("org_id", org_id)
-        .await?;
-
-    // 3. Delete SCIM tokens
-    store
-        .delete_by_index::<ScimTokenDoc>("org_id", org_id)
-        .await?;
-
-    // 4. Unlink OAuth clients (set org_id to None, downgrade scope)
-    store
-        .update_by_index::<OAuthClientDoc, _>("org_id", org_id, |d| {
-            d.org_id = None;
-            d.access_scope = super::documents::oauth::AccessScope::Personal;
-        })
-        .await?;
-
-    // 5. Unlink users (set org_id to None, clear admin flag)
-    store
-        .update_by_index::<UserDoc, _>("org_id", org_id, |d| {
-            d.org_id = None;
-            d.is_org_admin = false;
-        })
-        .await?;
-
-    // 6. Delete the organization
-    store.delete(org_id).await?;
-    Ok(true)
-}
-
 #[cfg(test)]
 #[expect(
     clippy::unwrap_used,
