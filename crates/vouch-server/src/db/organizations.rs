@@ -867,7 +867,6 @@ async fn find_conflicting_claim_in_other_org(
     }
 }
 
-
 #[cfg(test)]
 #[expect(
     clippy::unwrap_used,
