@@ -274,23 +274,6 @@ mod tests {
     use super::*;
     use crate::test_utils::test_config;
 
-    /// Extract the email domain from an ID token.
-    ///
-    /// For Google issuers, only the Workspace `hd` claim is used so consumer
-    /// accounts do not get grouped into a shared public-email organization.
-    /// For non-Google issuers, falls back to extracting the domain from email.
-    fn extract_email_domain<'a>(
-        issuer: &str,
-        hd: Option<&'a str>,
-        email: &'a str,
-    ) -> Option<&'a str> {
-        if matches!(IdpBrand::from_issuer(issuer), IdpBrand::Google) {
-            hd
-        } else {
-            hd.or_else(|| email.split('@').nth(1))
-        }
-    }
-
     // =========================================================================
     // IdpBrand::from_issuer tests
     // =========================================================================
@@ -658,58 +641,6 @@ mod tests {
                 }
             }
         }
-    }
-
-    // =========================================================================
-    // extract_email_domain tests
-    // =========================================================================
-
-    #[test]
-    fn extract_domain_from_hd() {
-        assert_eq!(
-            extract_email_domain(
-                "https://accounts.google.com",
-                Some("acme.com"),
-                "user@acme.com"
-            ),
-            Some("acme.com"),
-        );
-    }
-
-    #[test]
-    fn extract_domain_from_email() {
-        assert_eq!(
-            extract_email_domain("https://idp.example.com", None, "user@example.org"),
-            Some("example.org"),
-        );
-    }
-
-    #[test]
-    fn extract_domain_hd_takes_precedence() {
-        assert_eq!(
-            extract_email_domain(
-                "https://idp.example.com",
-                Some("corp.com"),
-                "user@gmail.com"
-            ),
-            Some("corp.com"),
-        );
-    }
-
-    #[test]
-    fn extract_domain_no_at_sign() {
-        assert_eq!(
-            extract_email_domain("https://idp.example.com", None, "invalid"),
-            None
-        );
-    }
-
-    #[test]
-    fn extract_domain_google_consumer_without_hd() {
-        assert_eq!(
-            extract_email_domain("https://accounts.google.com", None, "user@gmail.com"),
-            None,
-        );
     }
 
     // =========================================================================
