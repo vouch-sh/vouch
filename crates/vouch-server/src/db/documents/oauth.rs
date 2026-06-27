@@ -512,14 +512,14 @@ impl DocumentType for OAuthClientSecretDoc {
 
 /// A token exchange record (RFC 8693).
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TokenExchangeDoc {
-    pub subject_user_id: String,
-    pub subject_token_hash: String,
-    pub actor_user_id: Option<String>,
-    pub issued_token_hash: String,
-    pub requested_audience: Option<String>,
-    pub granted_scope: Option<String>,
-    pub expires_at: Timestamp,
+pub(crate) struct TokenExchangeDoc {
+    pub(crate) subject_user_id: String,
+    pub(crate) subject_token_hash: String,
+    pub(crate) actor_user_id: Option<String>,
+    pub(crate) issued_token_hash: String,
+    pub(crate) requested_audience: Option<String>,
+    pub(crate) granted_scope: Option<String>,
+    pub(crate) expires_at: Timestamp,
 }
 
 impl DocumentType for TokenExchangeDoc {

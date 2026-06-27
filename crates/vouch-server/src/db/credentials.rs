@@ -47,48 +47,6 @@ pub async fn delete_old_token_exchanges(store: &DocumentStore) -> Result<u64> {
     store.delete_expired(TokenExchangeDoc::DOC_TYPE).await
 }
 
-/// Token exchange audit record.
-#[derive(Debug)]
-pub struct TokenExchangeRecord {
-    pub id: String,
-    pub subject_user_id: String,
-    pub subject_token_hash: String,
-    pub actor_user_id: Option<String>,
-    pub issued_token_hash: String,
-    pub requested_audience: Option<String>,
-    pub granted_scope: Option<String>,
-    pub created_at: Timestamp,
-    pub expires_at: Timestamp,
-}
-
-impl From<Document<TokenExchangeDoc>> for TokenExchangeRecord {
-    fn from(doc: Document<TokenExchangeDoc>) -> Self {
-        Self {
-            id: doc.id,
-            subject_user_id: doc.data.subject_user_id,
-            subject_token_hash: doc.data.subject_token_hash,
-            actor_user_id: doc.data.actor_user_id,
-            issued_token_hash: doc.data.issued_token_hash,
-            requested_audience: doc.data.requested_audience,
-            granted_scope: doc.data.granted_scope,
-            created_at: doc.created_at,
-            expires_at: doc.data.expires_at,
-        }
-    }
-}
-
-/// Get token exchange records for a user.
-pub async fn get_token_exchanges_for_user(
-    store: &DocumentStore,
-    user_id: &str,
-    _limit: i64,
-) -> Result<Vec<TokenExchangeRecord>> {
-    let docs = store
-        .find_all::<TokenExchangeDoc>("subject_user_id", user_id)
-        .await?;
-    Ok(docs.into_iter().map(TokenExchangeRecord::from).collect())
-}
-
 // ============================================================
 // Enrollment Sessions
 // ============================================================
@@ -254,29 +212,6 @@ impl From<Document<SshRevokedCertDoc>> for RevokedSshCertificate {
             revoked_by: doc.data.revoked_by,
         }
     }
-}
-
-/// Revoke an SSH certificate.
-pub async fn revoke_ssh_certificate(
-    store: &DocumentStore,
-    serial: &str,
-    user_id: &str,
-    expires_at: Timestamp,
-    reason: Option<&str>,
-    revoked_by: Option<&str>,
-) -> Result<String> {
-    let now = Timestamp::now();
-
-    let doc = SshRevokedCertDoc {
-        serial: serial.to_string(),
-        user_id: user_id.to_string(),
-        reason: reason.map(String::from),
-        revoked_at: now,
-        expires_at,
-        revoked_by: revoked_by.map(String::from),
-    };
-    let result = store.insert(&doc).await?;
-    Ok(result.id)
 }
 
 /// Check if an SSH certificate is revoked.
