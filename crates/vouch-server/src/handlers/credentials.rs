@@ -427,9 +427,7 @@ pub(crate) async fn get_aws_token(
         config.session_hours,
         &state.oidc_key,
         &user_email,
-        token.hardware_aaguid.clone(),
-        token.org_domain.clone(),
-        token.dpop_source.as_deref(),
+        &token,
     )
     .await
     .map_err(map_aws_error)?;
@@ -480,9 +478,7 @@ pub(crate) async fn get_aws_sso_token(
         config.session_hours,
         rsa_key,
         &user_email,
-        token.hardware_aaguid.clone(),
-        token.org_domain.clone(),
-        token.dpop_source.as_deref(),
+        &token,
     )
     .await
     .map_err(map_aws_error)?;

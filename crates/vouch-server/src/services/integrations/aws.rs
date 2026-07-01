@@ -30,6 +30,7 @@
 //! }
 //! ```
 
+use crate::handlers::session::ValidatedResourceToken;
 use crate::redact_email;
 use crate::services::oidc::{
     AwsSessionTags, OidcIdTokenClaimsBuilder, OidcRsaSigningKey, OidcSigningKey,
@@ -110,29 +111,31 @@ fn build_aws_session_tags(
 /// * `base_url` - Server base URL (issuer)
 /// * `session_hours` - Session duration in hours
 /// * `oidc_key` - OIDC signing key
-/// * `user_email` - The authenticated user's email
-/// * `hardware_aaguid` - AAGUID snapshot from the session record
-/// * `hd` - Organization domain snapshot from the session record
-/// * `source` - AI coding agent identifier (e.g., "claude-code", "cursor")
+/// * `user_email` - The authenticated user's email (resolved with a DB fallback,
+///   so it is passed explicitly rather than read from the token)
+/// * `token` - The validated resource token; supplies the session-snapshot
+///   `hardware_aaguid`, `org_domain` (`hd`), and `dpop_source` federation claims
 pub(crate) async fn issue_aws_token(
     base_url: &str,
     session_hours: u64,
     oidc_key: &OidcSigningKey,
     user_email: &str,
-    hardware_aaguid: Option<String>,
-    hd: Option<String>,
-    source: Option<&str>,
+    token: &ValidatedResourceToken,
 ) -> AwsResult<AwsTokenResult> {
     // Token validity matches session duration
     let expires_in = session_hours.saturating_mul(3600);
 
-    let aws_tags = build_aws_session_tags(user_email, hd.as_deref(), source);
+    let aws_tags = build_aws_session_tags(
+        user_email,
+        token.org_domain.as_deref(),
+        token.dpop_source.as_deref(),
+    );
 
     // Build OIDC claims
     // For AWS, the audience is the issuer URL (AWS matches against the OIDC provider)
     let id_claims = OidcIdTokenClaimsBuilder::for_aws(base_url, user_email)
-        .hardware_aaguid(hardware_aaguid)
-        .hd(hd)
+        .hardware_aaguid(token.hardware_aaguid.clone())
+        .hd(token.org_domain.clone())
         .aws_tags(aws_tags)
         .valid_for_seconds(expires_in)
         .build()
@@ -176,29 +179,32 @@ pub(crate) async fn issue_aws_token(
 /// * `base_url` - Server base URL (issuer and `aud`; must match the registered TTI)
 /// * `session_hours` - Session duration in hours
 /// * `oidc_rsa_key` - OIDC RSA (RS256) signing key
-/// * `user_email` - Authenticated user's email (maps to the Identity Store user)
-/// * `hardware_aaguid` - AAGUID snapshot from the session record
-/// * `hd` - Organization domain snapshot from the session record
-/// * `source` - AI coding agent identifier (for CloudTrail attribution tags)
+/// * `user_email` - Authenticated user's email (maps to the Identity Store user;
+///   resolved with a DB fallback, so it is passed explicitly rather than read
+///   from the token)
+/// * `token` - The validated resource token; supplies the session-snapshot
+///   `hardware_aaguid`, `org_domain` (`hd`), and `dpop_source` federation claims
 pub(crate) async fn issue_sso_jwt(
     base_url: &str,
     session_hours: u64,
     oidc_rsa_key: &OidcRsaSigningKey,
     user_email: &str,
-    hardware_aaguid: Option<String>,
-    hd: Option<String>,
-    source: Option<&str>,
+    token: &ValidatedResourceToken,
 ) -> AwsResult<AwsTokenResult> {
     let expires_in = session_hours.saturating_mul(3600);
 
     // Reuse the same AWS session tags as the web-identity path for consistent
     // ABAC/CloudTrail attribution.
-    let aws_tags = build_aws_session_tags(user_email, hd.as_deref(), source);
+    let aws_tags = build_aws_session_tags(
+        user_email,
+        token.org_domain.as_deref(),
+        token.dpop_source.as_deref(),
+    );
 
     // aud = issuer (server base URL), same as the STS token.
     let id_claims = OidcIdTokenClaimsBuilder::for_aws(base_url, user_email)
-        .hardware_aaguid(hardware_aaguid)
-        .hd(hd)
+        .hardware_aaguid(token.hardware_aaguid.clone())
+        .hd(token.org_domain.clone())
         .aws_tags(aws_tags)
         .valid_for_seconds(expires_in)
         .build()
@@ -259,6 +265,31 @@ mod tests {
     const SESSION_HOURS: u64 = 8;
     const USER_EMAIL: &str = "user@example.com";
     const TEST_AAGUID: &str = "ee882879-721c-4913-9775-3dfcce97072a";
+
+    /// Build a `ValidatedResourceToken` carrying only the federation-snapshot
+    /// fields the `issue_*` functions read (`hardware_aaguid`, `org_domain`,
+    /// `dpop_source`). The remaining fields are placeholders; a hardware-verified
+    /// session is assumed since these functions run only after that gate.
+    fn test_token(
+        hardware_aaguid: Option<String>,
+        org_domain: Option<String>,
+        dpop_source: Option<String>,
+    ) -> super::ValidatedResourceToken {
+        super::ValidatedResourceToken {
+            sub: "user-id".to_string(),
+            email: None,
+            client_id: "test-client".to_string(),
+            scope: None,
+            authenticator_id: None,
+            hardware_verified: true,
+            auth_time: None,
+            token_hash: String::new(),
+            dpop_source,
+            hardware_aaguid,
+            org_domain,
+        }
+    }
+
     /// The Identity Center JWT must be signed with RS256 (AWS TTI requirement),
     /// unlike the ES256 `AssumeRoleWithWebIdentity` token.
     #[tokio::test]
@@ -270,9 +301,7 @@ mod tests {
             SESSION_HOURS,
             &rsa_key,
             USER_EMAIL,
-            Some(TEST_AAGUID.to_string()),
-            None,
-            None,
+            &test_token(Some(TEST_AAGUID.to_string()), None, None),
         )
         .await
         .expect("issue_sso_jwt should succeed");
@@ -292,9 +321,11 @@ mod tests {
             SESSION_HOURS,
             &rsa_key,
             USER_EMAIL,
-            None,
-            Some("example.com".to_string()),
-            Some("claude-code"),
+            &test_token(
+                None,
+                Some("example.com".to_string()),
+                Some("claude-code".to_string()),
+            ),
         )
         .await
         .expect("issue_sso_jwt should succeed");
@@ -330,9 +361,7 @@ mod tests {
             SESSION_HOURS,
             &key,
             USER_EMAIL,
-            Some(TEST_AAGUID.to_string()),
-            None,
-            None, // no source
+            &test_token(Some(TEST_AAGUID.to_string()), None, None),
         )
         .await
         .expect("issue_aws_token should succeed");
@@ -367,9 +396,11 @@ mod tests {
             SESSION_HOURS,
             &key,
             USER_EMAIL,
-            Some(TEST_AAGUID.to_string()),
-            Some("example.com".to_string()),
-            None,
+            &test_token(
+                Some(TEST_AAGUID.to_string()),
+                Some("example.com".to_string()),
+                None,
+            ),
         )
         .await
         .expect("issue_aws_token should succeed");
@@ -401,9 +432,11 @@ mod tests {
             SESSION_HOURS,
             &key,
             USER_EMAIL,
-            Some(TEST_AAGUID.to_string()),
-            None,
-            Some("claude-code"),
+            &test_token(
+                Some(TEST_AAGUID.to_string()),
+                None,
+                Some("claude-code".to_string()),
+            ),
         )
         .await
         .expect("issue_aws_token should succeed");
@@ -440,9 +473,11 @@ mod tests {
             SESSION_HOURS,
             &key,
             USER_EMAIL,
-            Some(TEST_AAGUID.to_string()),
-            Some("example.com".to_string()), // hd present, but no source
-            None,
+            &test_token(
+                Some(TEST_AAGUID.to_string()),
+                Some("example.com".to_string()),
+                None,
+            ),
         )
         .await
         .expect("issue_aws_token should succeed");
@@ -472,9 +507,11 @@ mod tests {
             SESSION_HOURS,
             &key,
             USER_EMAIL,
-            Some(TEST_AAGUID.to_string()),
-            Some("example.com".to_string()),
-            Some("cursor"),
+            &test_token(
+                Some(TEST_AAGUID.to_string()),
+                Some("example.com".to_string()),
+                Some("cursor".to_string()),
+            ),
         )
         .await
         .expect("issue_aws_token should succeed");
@@ -527,9 +564,7 @@ mod tests {
             4, // 4 hours
             &key,
             USER_EMAIL,
-            Some(TEST_AAGUID.to_string()),
-            None,
-            None,
+            &test_token(Some(TEST_AAGUID.to_string()), None, None),
         )
         .await
         .expect("issue_aws_token should succeed");
@@ -551,9 +586,7 @@ mod tests {
             SESSION_HOURS,
             &key,
             USER_EMAIL,
-            Some(TEST_AAGUID.to_string()),
-            None,
-            None,
+            &test_token(Some(TEST_AAGUID.to_string()), None, None),
         )
         .await
         .expect("issue_aws_token should succeed");
