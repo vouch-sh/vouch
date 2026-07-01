@@ -567,21 +567,6 @@ async fn run_identity_center(
     .await
 }
 
-/// Look up the per-session Vouch config for a resolved `[sso-session]` name.
-///
-/// Requires an exact match between the AWS `[sso-session]` name and the
-/// `sso_sessions` key. There is deliberately no single-entry fallback: with
-/// several `~/.aws/config` sessions, honoring a lone Vouch entry under a
-/// mismatched key would apply one org's `identity_center_application_arn` /
-/// `management_role` to a different org's session. On a miss the caller falls
-/// back to its non-IdC path (device token / STS).
-pub(crate) fn resolve_session_config<'a>(
-    aws: &'a crate::config::AwsMultiAccountConfig,
-    session_name: &str,
-) -> Option<&'a SsoSessionConfig> {
-    aws.sso_sessions.get(session_name)
-}
-
 /// Resolve the Identity Center bearer token for an SSO session: trusted-token-
 /// issuer exchange when configured, otherwise the cached `vouch aws login`
 /// device token.
@@ -597,9 +582,11 @@ pub(crate) async fn resolve_bearer_token(
     // `Config::default()` (no `aws` block) rather than an error, so the device
     // fallback below still applies for users without Vouch config.
     let vouch_config = crate::config::Config::load()?;
+    // Exact `[sso-session]`-name → key match, no fallback: a lone Vouch entry
+    // under a mismatched key must not apply one org's config to another's session.
     let ic_session = vouch_config
         .aws()
-        .and_then(|a| resolve_session_config(a, &session.name))
+        .and_then(|a| a.sso_sessions.get(&session.name))
         .filter(|c| c.identity_center_application_arn.is_some());
 
     if let Some(cfg) = ic_session {
@@ -945,20 +932,5 @@ mod tests {
         let b = build_cache_key(ROLE, Some(MGMT), Some("claude-code"));
         assert_eq!(a, b);
         assert_eq!(a, format!("aws:chain:{MGMT}:{ROLE}:agent:claude-code"));
-    }
-
-    /// `resolve_session_config` requires an exact `[sso-session]`-name → key
-    /// match. A single configured entry must NOT be applied to a different
-    /// session name (regression guard against the cross-org lone-entry fallback).
-    #[test]
-    fn test_resolve_session_config_requires_exact_match() {
-        let mut aws = crate::config::AwsMultiAccountConfig::default();
-        aws.sso_sessions
-            .insert("orgA".to_string(), SsoSessionConfig::default());
-
-        // Exact match resolves.
-        assert!(resolve_session_config(&aws, "orgA").is_some());
-        // A mismatched session name does NOT fall back to the lone entry.
-        assert!(resolve_session_config(&aws, "orgB").is_none());
     }
 }

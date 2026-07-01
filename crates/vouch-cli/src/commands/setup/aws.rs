@@ -151,7 +151,7 @@ async fn run_discover(
     let session = crate::commands::aws::resolve_sso_session(&aws_cli_config, None)?;
     let session_cfg = vouch_config
         .aws()
-        .and_then(|a| crate::commands::credential::aws::resolve_session_config(a, &session.name))
+        .and_then(|a| a.sso_sessions.get(&session.name))
         .cloned()
         .unwrap_or_default();
 
@@ -409,7 +409,7 @@ async fn run_interactive_identity_center(
     let vouch_config = crate::config::Config::load()?;
     let has_idc = vouch_config
         .aws()
-        .and_then(|a| crate::commands::credential::aws::resolve_session_config(a, &session.name))
+        .and_then(|a| a.sso_sessions.get(&session.name))
         .is_some_and(|c| c.identity_center_application_arn.is_some());
     if !has_idc {
         return Err(
