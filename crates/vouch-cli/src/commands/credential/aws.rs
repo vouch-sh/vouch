@@ -541,6 +541,24 @@ async fn run_identity_center(
     Ok(output.to_json())
 }
 
+/// Look up the per-session Vouch config for a resolved `[sso-session]` name.
+///
+/// Mirrors [`resolve_management_role`]'s fallback: if there is no exact key
+/// match but exactly one `sso_sessions` entry is configured, use it (so a lone
+/// Identity Center block under a differently-named key is still honored).
+fn resolve_session_config<'a>(
+    aws: &'a crate::config::AwsMultiAccountConfig,
+    session_name: &str,
+) -> Option<&'a SsoSessionConfig> {
+    aws.sso_sessions.get(session_name).or_else(|| {
+        if aws.sso_sessions.len() == 1 {
+            aws.sso_sessions.values().next()
+        } else {
+            None
+        }
+    })
+}
+
 /// Resolve the Identity Center bearer token for an SSO session: trusted-token-
 /// issuer exchange when configured, otherwise the cached `vouch aws login`
 /// device token.
@@ -552,11 +570,13 @@ pub(crate) async fn resolve_bearer_token(
     session: &SsoSession,
     region: &str,
 ) -> Result<SecretString> {
-    let vouch_config = crate::config::Config::load().ok();
+    // Propagate a genuine config read/parse error; a missing config file yields
+    // `Config::default()` (no `aws` block) rather than an error, so the device
+    // fallback below still applies for users without Vouch config.
+    let vouch_config = crate::config::Config::load()?;
     let ic_session = vouch_config
-        .as_ref()
-        .and_then(|c| c.aws())
-        .and_then(|a| a.sso_sessions.get(&session.name))
+        .aws()
+        .and_then(|a| resolve_session_config(a, &session.name))
         .filter(|c| {
             c.identity_center_application_arn.is_some() && c.identity_center_audience.is_some()
         });
