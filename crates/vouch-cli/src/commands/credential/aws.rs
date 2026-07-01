@@ -569,20 +569,17 @@ async fn run_identity_center(
 
 /// Look up the per-session Vouch config for a resolved `[sso-session]` name.
 ///
-/// Mirrors [`resolve_management_role`]'s fallback: if there is no exact key
-/// match but exactly one `sso_sessions` entry is configured, use it (so a lone
-/// Identity Center block under a differently-named key is still honored).
+/// Requires an exact match between the AWS `[sso-session]` name and the
+/// `sso_sessions` key. There is deliberately no single-entry fallback: with
+/// several `~/.aws/config` sessions, honoring a lone Vouch entry under a
+/// mismatched key would apply one org's `identity_center_application_arn` /
+/// `management_role` to a different org's session. On a miss the caller falls
+/// back to its non-IdC path (device token / STS).
 pub(crate) fn resolve_session_config<'a>(
     aws: &'a crate::config::AwsMultiAccountConfig,
     session_name: &str,
 ) -> Option<&'a SsoSessionConfig> {
-    aws.sso_sessions.get(session_name).or_else(|| {
-        if aws.sso_sessions.len() == 1 {
-            aws.sso_sessions.values().next()
-        } else {
-            None
-        }
-    })
+    aws.sso_sessions.get(session_name)
 }
 
 /// Resolve the Identity Center bearer token for an SSO session: trusted-token-
@@ -948,5 +945,20 @@ mod tests {
         let b = build_cache_key(ROLE, Some(MGMT), Some("claude-code"));
         assert_eq!(a, b);
         assert_eq!(a, format!("aws:chain:{MGMT}:{ROLE}:agent:claude-code"));
+    }
+
+    /// `resolve_session_config` requires an exact `[sso-session]`-name → key
+    /// match. A single configured entry must NOT be applied to a different
+    /// session name (regression guard against the cross-org lone-entry fallback).
+    #[test]
+    fn test_resolve_session_config_requires_exact_match() {
+        let mut aws = crate::config::AwsMultiAccountConfig::default();
+        aws.sso_sessions
+            .insert("orgA".to_string(), SsoSessionConfig::default());
+
+        // Exact match resolves.
+        assert!(resolve_session_config(&aws, "orgA").is_some());
+        // A mismatched session name does NOT fall back to the lone entry.
+        assert!(resolve_session_config(&aws, "orgB").is_none());
     }
 }
