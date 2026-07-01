@@ -546,7 +546,7 @@ async fn run_identity_center(
 /// Mirrors [`resolve_management_role`]'s fallback: if there is no exact key
 /// match but exactly one `sso_sessions` entry is configured, use it (so a lone
 /// Identity Center block under a differently-named key is still honored).
-fn resolve_session_config<'a>(
+pub(crate) fn resolve_session_config<'a>(
     aws: &'a crate::config::AwsMultiAccountConfig,
     session_name: &str,
 ) -> Option<&'a SsoSessionConfig> {
