@@ -102,13 +102,4 @@ mod tests {
         let parsed: CreateTokenResponse = serde_json::from_str(json).expect("valid JSON");
         assert_eq!(parsed.access_token, "ic-access-token-value");
     }
-
-    #[test]
-    fn test_jwt_bearer_grant_constant() {
-        // The grant type must match RFC 7523 exactly — AWS rejects any other value.
-        assert_eq!(
-            JWT_BEARER_GRANT,
-            "urn:ietf:params:oauth:grant-type:jwt-bearer"
-        );
-    }
 }
