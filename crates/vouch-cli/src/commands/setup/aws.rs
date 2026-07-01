@@ -44,26 +44,34 @@ fn sanitize_profile_name(name: &str) -> String {
     result.trim_matches('-').to_string()
 }
 
-/// Run the AWS setup command with an explicit role ARN.
+/// Run the AWS setup command. Writes AWS profiles to `~/.aws/config` whose
+/// `credential_process` invokes `vouch credential aws`.
 ///
-/// Automatically adds a vouch profile to ~/.aws/config with smart naming:
-/// - If `--profile` is given, uses that name (exits early if it already exists).
-/// - Otherwise, checks existing vouch profiles for a role match (exits early if found),
-///   then picks the next available name: "vouch", "vouch-2", "vouch-3", etc.
+/// - `--discover` → discover accounts/roles via SSO and write a profile each.
+///   Uses the IAM Identity Center portal (writing `--account/--role` process
+///   lines) when the session has Identity Center configured, otherwise STS
+///   role-chaining (writing `--role <arn>` lines).
+/// - `--role <arn>` → write a single STS profile for that role ARN.
+/// - neither → interactive single-account Identity Center setup (pick account +
+///   permission-set), when the session has Identity Center configured.
 pub(crate) async fn run(
+    server: &str,
     profile: Option<&str>,
     role_arn: Option<&str>,
     region: Option<&str>,
     discover: bool,
 ) -> Result<()> {
     if discover {
-        return run_discover(profile, region).await;
+        return run_discover(server, profile, region).await;
     }
+    match role_arn {
+        Some(role_arn) => run_explicit_role(profile, role_arn, region),
+        None => run_interactive_identity_center(server, profile, region).await,
+    }
+}
 
-    let role_arn = role_arn.ok_or_else(|| {
-        crate::exit_code::CliError::ConfigError(tr!("setup-aws-err-role-required"))
-    })?;
-
+/// Write a single STS profile for an explicit role ARN (patterns 1 & 2).
+fn run_explicit_role(profile: Option<&str>, role_arn: &str, region: Option<&str>) -> Result<()> {
     let vouch_path = resolve_install_path();
 
     let config_path = AwsConfig::default_path()?;
@@ -122,7 +130,14 @@ pub(crate) async fn run(
 }
 
 /// Discover AWS accounts/roles via SSO and create profiles automatically.
-async fn run_discover(profile_prefix: Option<&str>, region: Option<&str>) -> Result<()> {
+///
+/// Uses the IAM Identity Center portal (permission-set profiles) when the
+/// session has Identity Center configured, otherwise STS role-chaining.
+async fn run_discover(
+    server: &str,
+    profile_prefix: Option<&str>,
+    region: Option<&str>,
+) -> Result<()> {
     use crate::integrations::aws::config::AwsConfig as AwsCliConfig;
     use crate::integrations::aws::sso::{SsoConfig, load_cached_token};
     use crate::integrations::aws::sso_portal::{list_account_roles, list_accounts};
@@ -139,6 +154,13 @@ async fn run_discover(profile_prefix: Option<&str>, region: Option<&str>) -> Res
         .and_then(|a| a.sso_sessions.get(&session.name))
         .cloned()
         .unwrap_or_default();
+
+    // Identity Center configured → portal discovery (permission-set profiles).
+    if session_cfg.identity_center_application_arn.is_some()
+        && session_cfg.identity_center_audience.is_some()
+    {
+        return discover_identity_center(server, &session, profile_prefix, region).await;
+    }
 
     let sso_region = session.region.clone();
     let sso_config = SsoConfig::from_session(&session);
@@ -236,6 +258,278 @@ async fn run_discover(profile_prefix: Option<&str>, region: Option<&str>) -> Res
         skipped = skipped_count
     );
     Ok(())
+}
+
+/// An account choice shown in the interactive picker.
+struct AccountChoice {
+    id: String,
+    name: String,
+}
+
+impl std::fmt::Display for AccountChoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} ({})", self.name, self.id)
+    }
+}
+
+/// Build the `credential_process` line for an Identity Center permission-set
+/// profile: `vouch credential aws --sso-session <name> --account <id> --role <ps>`.
+fn idc_credential_process(
+    vouch_path: &std::path::Path,
+    session_name: &str,
+    account_id: &str,
+    role_name: &str,
+) -> String {
+    format!(
+        "{} credential aws --sso-session {session_name} --account {account_id} --role {role_name}",
+        vouch_path.display()
+    )
+}
+
+/// Discover accounts/permission-sets via the Identity Center portal and write a
+/// profile per account+role (`vouch setup aws --discover` with IdC configured).
+async fn discover_identity_center(
+    server: &str,
+    session: &crate::integrations::aws::config::SsoSession,
+    profile_prefix: Option<&str>,
+    region: Option<&str>,
+) -> Result<()> {
+    use crate::integrations::aws::sso_portal::{list_account_roles, list_accounts};
+
+    let sso_region = session.region.clone();
+    let bearer =
+        crate::commands::credential::aws::resolve_bearer_token(server, session, &sso_region)
+            .await?;
+
+    let http_client =
+        vouch_common::http::credential_client(&format!("vouch-cli/{}", env!("CARGO_PKG_VERSION")))
+            .context("failed to create HTTP client")?;
+
+    let accounts = list_accounts(&http_client, &sso_region, &bearer)
+        .await
+        .context("failed to list SSO accounts")?;
+
+    let vouch_path = resolve_install_path();
+    let config_path = AwsConfig::default_path()?;
+    let aws_dir = dirs::home_dir()
+        .context("could not determine home directory")?
+        .join(".aws");
+    ensure_secure_dir(&aws_dir)?;
+    let mut config =
+        AwsConfig::load_from(config_path.clone()).unwrap_or_else(|_| AwsConfig::empty(config_path));
+
+    let mut created_count: u32 = 0;
+    let mut skipped_count: u32 = 0;
+
+    for account in &accounts {
+        let roles = list_account_roles(&http_client, &sso_region, &bearer, &account.account_id)
+            .await
+            .with_context(|| format!("failed to list roles for account {}", account.account_id))?;
+
+        let safe_account = sanitize_profile_name(&account.account_name);
+        let account_part = if safe_account.is_empty() {
+            account.account_id.clone()
+        } else {
+            safe_account
+        };
+
+        for role in &roles {
+            let role_part = sanitize_profile_name(&role.role_name);
+            let base = format!("{account_part}-{role_part}");
+            let profile_name = match profile_prefix {
+                Some(prefix) => format!("{prefix}-{base}"),
+                None => format!("vouch-sso-{base}"),
+            };
+
+            if config.profile_exists(&profile_name) {
+                tr_println!(
+                    "setup-aws-discover-skipped",
+                    profile = profile_name.as_str()
+                );
+                skipped_count = skipped_count.saturating_add(1);
+                continue;
+            }
+
+            config.set_profile(&AwsProfile {
+                name: profile_name.clone(),
+                credential_process: Some(idc_credential_process(
+                    &vouch_path,
+                    &session.name,
+                    &account.account_id,
+                    &role.role_name,
+                )),
+                region: region
+                    .map(str::to_string)
+                    .or_else(|| Some(sso_region.clone())),
+                output: Some("json".to_string()),
+            });
+
+            tr_println!(
+                "setup-aws-discover-added",
+                profile = profile_name.as_str(),
+                role_arn = role.role_name.as_str()
+            );
+            created_count = created_count.saturating_add(1);
+        }
+    }
+
+    if created_count > 0 {
+        config.save()?;
+    }
+
+    println!();
+    tr_println!(
+        "setup-aws-discover-summary",
+        created = created_count,
+        skipped = skipped_count
+    );
+    Ok(())
+}
+
+/// Interactive single-account Identity Center setup: pick an account and
+/// permission-set role, then write one profile (`vouch setup aws` with no
+/// `--role`/`--discover`). Requires the session to have Identity Center
+/// configured.
+async fn run_interactive_identity_center(
+    server: &str,
+    profile: Option<&str>,
+    region: Option<&str>,
+) -> Result<()> {
+    use crate::integrations::aws::sso_portal::{list_account_roles, list_accounts};
+
+    let aws_cli_config = AwsConfig::load()?;
+    let session = aws_cli_config.find_sso_session(None).ok_or_else(|| {
+        crate::exit_code::CliError::ConfigError(tr!("setup-aws-err-no-sso-session"))
+    })?;
+
+    // Interactive setup only applies to the Identity Center route; without it,
+    // an explicit `--role <arn>` (or `--discover`) is required.
+    let vouch_config = crate::config::Config::load()?;
+    let has_idc = vouch_config
+        .aws()
+        .and_then(|a| a.sso_sessions.get(&session.name))
+        .is_some_and(|c| {
+            c.identity_center_application_arn.is_some() && c.identity_center_audience.is_some()
+        });
+    if !has_idc {
+        return Err(
+            crate::exit_code::CliError::ConfigError(tr!("setup-aws-err-role-required")).into(),
+        );
+    }
+
+    require_terminal()?;
+
+    let sso_region = session.region.clone();
+    let bearer =
+        crate::commands::credential::aws::resolve_bearer_token(server, &session, &sso_region)
+            .await?;
+    let http_client =
+        vouch_common::http::credential_client(&format!("vouch-cli/{}", env!("CARGO_PKG_VERSION")))
+            .context("failed to create HTTP client")?;
+
+    // Pick account.
+    let accounts = list_accounts(&http_client, &sso_region, &bearer)
+        .await
+        .context("failed to list SSO accounts")?;
+    if accounts.is_empty() {
+        anyhow::bail!("no AWS accounts are assigned to you via Identity Center");
+    }
+    let account_choices: Vec<AccountChoice> = accounts
+        .into_iter()
+        .map(|a| AccountChoice {
+            id: a.account_id,
+            name: a.account_name,
+        })
+        .collect();
+    let account = prompt_select("Select an AWS account", account_choices)?;
+
+    // Pick permission-set role.
+    let roles = list_account_roles(&http_client, &sso_region, &bearer, &account.id)
+        .await
+        .with_context(|| format!("failed to list roles for account {}", account.id))?;
+    if roles.is_empty() {
+        anyhow::bail!("no roles are assigned to you in account {}", account.id);
+    }
+    let role_names: Vec<String> = roles.into_iter().map(|r| r.role_name).collect();
+    let role_name = prompt_select("Select a role", role_names)?;
+
+    // Write the profile.
+    let profile_name = match profile {
+        Some(p) => p.to_string(),
+        None => {
+            let safe_account = sanitize_profile_name(&account.name);
+            let account_part = if safe_account.is_empty() {
+                account.id.clone()
+            } else {
+                safe_account
+            };
+            format!(
+                "vouch-sso-{account_part}-{}",
+                sanitize_profile_name(&role_name)
+            )
+        }
+    };
+
+    let config_path = AwsConfig::default_path()?;
+    let aws_dir = dirs::home_dir()
+        .context("could not determine home directory")?
+        .join(".aws");
+    ensure_secure_dir(&aws_dir)?;
+    let mut config =
+        AwsConfig::load_from(config_path.clone()).unwrap_or_else(|_| AwsConfig::empty(config_path));
+
+    if config.profile_exists(&profile_name) {
+        tr_println!(
+            "setup-aws-profile-already-exists",
+            profile = profile_name.as_str()
+        );
+        return Ok(());
+    }
+
+    let vouch_path = resolve_install_path();
+    config.set_profile(&AwsProfile {
+        name: profile_name.clone(),
+        credential_process: Some(idc_credential_process(
+            &vouch_path,
+            &session.name,
+            &account.id,
+            &role_name,
+        )),
+        region: region.map(str::to_string).or(Some(sso_region)),
+        output: Some("json".to_string()),
+    });
+    config.save()?;
+
+    tr_println!(
+        "setup-aws-added-profile-block",
+        profile = profile_name.as_str(),
+    );
+    Ok(())
+}
+
+/// Error out when stdin is not a terminal (interactive selection impossible).
+fn require_terminal() -> Result<()> {
+    use std::io::IsTerminal;
+    if std::io::stdin().is_terminal() {
+        return Ok(());
+    }
+    Err(crate::exit_code::CliError::ConfigError(
+        "run interactively, or pass --role <arn> / --discover".to_string(),
+    )
+    .into())
+}
+
+/// Show an interactive single-select prompt, mapping cancellation to a clean error.
+fn prompt_select<T: std::fmt::Display>(prompt: &str, options: Vec<T>) -> Result<T> {
+    inquire::Select::new(prompt, options)
+        .prompt()
+        .map_err(|e| match e {
+            inquire::InquireError::OperationCanceled
+            | inquire::InquireError::OperationInterrupted => {
+                crate::exit_code::CliError::ConfigError("selection cancelled".to_string()).into()
+            }
+            other => anyhow::anyhow!("selection failed: {other}"),
+        })
 }
 
 #[cfg(test)]
