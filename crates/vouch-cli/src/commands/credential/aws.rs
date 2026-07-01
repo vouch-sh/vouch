@@ -6,6 +6,7 @@
 use anyhow::{Context, Result};
 use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
+use vouch_cli::tr_args;
 
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -516,6 +517,18 @@ async fn run_identity_center(
     role_name: &str,
     sso_session: Option<&str>,
 ) -> Result<serde_json::Value> {
+    // Fail closed for coding agents: the SSO portal's `GetRoleCredentials` returns
+    // the permission set's full access and accepts no inline session policy, so we
+    // cannot apply the `ReadOnlyAccess` downscoping the STS `--role` path uses
+    // (issue #398). Refuse rather than silently hand an agent unrestricted creds.
+    if let Some(source) = detect_agent_source() {
+        return Err(crate::exit_code::CliError::ConfigError(tr_args!(
+            "aws-err-agent-idc-readonly-unsupported",
+            source = source,
+        ))
+        .into());
+    }
+
     let aws_config = crate::integrations::aws::config::AwsConfig::load()?;
     let session = crate::commands::aws::resolve_sso_session(&aws_config, sso_session)?;
     let region = session.region.clone();

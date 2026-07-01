@@ -146,9 +146,9 @@ async fn run_discover(
     let vouch_config = crate::config::Config::load()?;
     let aws_cli_config = AwsCliConfig::load()?;
 
-    let session = aws_cli_config.find_sso_session(None).ok_or_else(|| {
-        crate::exit_code::CliError::ConfigError(tr!("setup-aws-err-no-sso-session"))
-    })?;
+    // Mirror `vouch credential aws`: honor a single session silently, but emit a
+    // stderr hint naming the auto-selected session when several are configured.
+    let session = crate::commands::aws::resolve_sso_session(&aws_cli_config, None)?;
     let session_cfg = vouch_config
         .aws()
         .and_then(|a| crate::commands::credential::aws::resolve_session_config(a, &session.name))
@@ -400,9 +400,9 @@ async fn run_interactive_identity_center(
     use crate::integrations::aws::sso_portal::{list_account_roles, list_accounts};
 
     let aws_cli_config = AwsConfig::load()?;
-    let session = aws_cli_config.find_sso_session(None).ok_or_else(|| {
-        crate::exit_code::CliError::ConfigError(tr!("setup-aws-err-no-sso-session"))
-    })?;
+    // Mirror `vouch credential aws`: honor a single session silently, but emit a
+    // stderr hint naming the auto-selected session when several are configured.
+    let session = crate::commands::aws::resolve_sso_session(&aws_cli_config, None)?;
 
     // Interactive setup only applies to the Identity Center route; without it,
     // an explicit `--role <arn>` (or `--discover`) is required.
