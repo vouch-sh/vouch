@@ -533,25 +533,38 @@ async fn run_identity_center(
     let session = crate::commands::aws::resolve_sso_session(&aws_config, sso_session)?;
     let region = session.region.clone();
 
-    let http_client =
-        vouch_common::http::credential_client(&format!("vouch-cli/{}", env!("CARGO_PKG_VERSION")))
-            .context("failed to create HTTP client")?;
+    // Cache the credential_process output keyed by SSO session + target account +
+    // permission set, mirroring the STS `--role` path: repeated AWS CLI refreshes
+    // reuse credentials until expiry (instead of repeating web identity → RS256 →
+    // CreateTokenWithIAM → GetRoleCredentials every time) and fall back to the
+    // cached entry on network errors. Coding agents fail closed above and never
+    // reach this cache.
+    let cache_key = format!("aws:idc:{}:{account_id}:{role_name}", session.name);
+    super::cache::get_or_fetch(&cache_key, "AWS credentials", || async move {
+        let http_client = vouch_common::http::credential_client(&format!(
+            "vouch-cli/{}",
+            env!("CARGO_PKG_VERSION")
+        ))
+        .context("failed to create HTTP client")?;
 
-    let bearer = resolve_bearer_token(server, &session, &region).await?;
-    let creds = get_role_credentials(&http_client, &region, &bearer, account_id, role_name)
-        .await
-        .with_context(|| {
-            format!("failed to get role credentials for account {account_id} role {role_name}")
-        })?;
+        let bearer = resolve_bearer_token(server, &session, &region).await?;
+        let creds = get_role_credentials(&http_client, &region, &bearer, account_id, role_name)
+            .await
+            .with_context(|| {
+                format!("failed to get role credentials for account {account_id} role {role_name}")
+            })?;
 
-    let output = CredentialProcessOutput {
-        version: 1,
-        access_key_id: creds.access_key_id,
-        secret_access_key: creds.secret_access_key,
-        session_token: creds.session_token,
-        expiration: creds.expiration.to_string(),
-    };
-    Ok(output.to_json())
+        let output = CredentialProcessOutput {
+            version: 1,
+            access_key_id: creds.access_key_id,
+            secret_access_key: creds.secret_access_key,
+            session_token: creds.session_token,
+            expiration: creds.expiration.to_string(),
+        };
+        let expires_at = output.expiration.clone();
+        Ok((output.to_json(), expires_at))
+    })
+    .await
 }
 
 /// Look up the per-session Vouch config for a resolved `[sso-session]` name.
