@@ -618,11 +618,15 @@ async fn obtain_identity_center_token(
         .as_deref()
         .context("identity_center_audience not configured")?;
 
+    // Assume *this* session's management role directly via web identity — it is
+    // the SigV4 caller for CreateTokenWithIAM. Set `management_role` equal to the
+    // target so no chaining hop is added and the role is not re-resolved from the
+    // first `~/.aws/config` session (which may belong to a different org).
     let mgmt = exchange_for_sts_credentials(StsRequest {
         server,
         role_arn: &cfg.management_role,
         region,
-        management_role: None,
+        management_role: Some(cfg.management_role.as_str()),
         agent_source: None,
     })
     .await
