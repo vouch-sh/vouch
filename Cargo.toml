@@ -125,7 +125,7 @@ allow_attributes_without_reason = "deny"
 # pedantic = { level = "warn", priority = -1 }
 
 [workspace.dependencies]
-anyhow = { version = "=1.0.102", default-features = false }
+anyhow = { version = "=1.0.103", default-features = false }
 apple-native-keyring-store = { version = "=1.0.0", default-features = false }
 arc-swap = { version = "=1.9.1", default-features = false }
 askama = { version = "=0.16.0", default-features = false }
