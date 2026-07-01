@@ -42,18 +42,14 @@ pub(crate) struct SsoSessionConfig {
     )]
     pub member_role_path: String,
     /// IAM Identity Center customer-managed application ARN (the `clientId`
-    /// for `sso-oidc:CreateTokenWithIAM`). When set together with
-    /// `identity_center_audience`, `credential aws --account/--role` exchanges a
-    /// Vouch RS256 token for an Identity Center token instead of requiring a
-    /// separate `vouch aws login` — reaching any assigned account with no role
-    /// chaining and no per-role IAM trust policy.
+    /// for `sso-oidc:CreateTokenWithIAM`). When set, `credential aws
+    /// --account/--role` exchanges a Vouch RS256 token for an Identity Center
+    /// token instead of requiring a separate `vouch aws login` — reaching any
+    /// assigned account with no role chaining and no per-role IAM trust policy.
+    /// The token's `aud` is the Vouch server URL, so the customer-managed
+    /// application's Aud claim must be set to that same URL.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub identity_center_application_arn: Option<String>,
-    /// Aud claim configured on the customer-managed application's trusted token
-    /// issuer. Requested as the `audience` on the Vouch RS256 token so AWS
-    /// accepts it during the exchange.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub identity_center_audience: Option<String>,
 }
 
 impl Default for SsoSessionConfig {
@@ -63,7 +59,6 @@ impl Default for SsoSessionConfig {
             member_role_name: default_member_role_name(),
             member_role_path: default_member_role_path(),
             identity_center_application_arn: None,
-            identity_center_audience: None,
         }
     }
 }

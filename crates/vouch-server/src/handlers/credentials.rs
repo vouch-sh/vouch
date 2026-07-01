@@ -8,7 +8,7 @@ use crate::services::integrations::aws::{AwsError, issue_aws_token, issue_sso_jw
 use crate::services::integrations::github::{GitHubInstallationId, minimal_git_permissions};
 use axum::extract::OriginalUri;
 use axum::http::Method;
-use axum::{Json, extract::Query, extract::State, http::HeaderMap, http::StatusCode};
+use axum::{Json, extract::State, http::HeaderMap, http::StatusCode};
 use axum_extra::extract::cookie::CookieJar;
 use jiff::Timestamp;
 use serde::Serialize;
@@ -312,17 +312,6 @@ pub(crate) struct SshRevocationCheckResponse {
 // AWS Token Endpoint
 // ============================================================================
 
-/// Maximum accepted length for the Identity Center audience parameter.
-const MAX_AUDIENCE_LEN: usize = 2048;
-
-/// Query parameters for the AWS Identity Center token endpoint.
-#[derive(serde::Deserialize)]
-pub(crate) struct AwsSsoTokenQuery {
-    /// The customer-managed application's configured Aud claim — the audience
-    /// of the issued RS256 token (REQUIRED).
-    audience: String,
-}
-
 /// Shared preamble for the AWS credential endpoints: authenticate the request,
 /// require a hardware-verified session, confirm the user is active, and resolve
 /// the user's email.
@@ -456,30 +445,22 @@ pub(crate) async fn get_aws_token(
 /// Get an RS256 OIDC ID token for AWS IAM Identity Center trusted identity
 /// propagation.
 ///
-/// GET /v1/credentials/aws/sso/token?audience=<aud>
+/// GET /v1/credentials/aws/sso/token
 ///
 /// The token is the subject (`assertion`) for `sso-oidc:CreateTokenWithIAM`
 /// (`jwt-bearer` grant). This is a distinct endpoint from the ES256
 /// `AssumeRoleWithWebIdentity` token because AWS's trusted-token-issuer contract
-/// requires RS256. `audience` is the customer-managed application's Aud claim.
-/// The same hardware-verification gate and AWS session tags apply.
+/// requires RS256. The token's `aud` is the Vouch issuer (server base URL); the
+/// customer-managed application's Aud claim must be set to that same URL. The
+/// same hardware-verification gate and AWS session tags apply.
 pub(crate) async fn get_aws_sso_token(
     method: Method,
     uri: OriginalUri,
     headers: HeaderMap,
     jar: CookieJar,
-    Query(query): Query<AwsSsoTokenQuery>,
     State(state): State<Arc<AppState>>,
     client_cert: OptionalClientCert,
 ) -> Result<Json<AwsTokenResponse>, ServiceError> {
-    if query.audience.is_empty() || query.audience.len() > MAX_AUDIENCE_LEN {
-        return Err(ServiceError::api(
-            StatusCode::BAD_REQUEST,
-            "invalid_audience",
-            "audience must be between 1 and 2048 characters",
-        ));
-    }
-
     let (token, user_email) =
         authorize_aws_token_request(&state, &headers, &jar, &method, uri.path(), &client_cert)
             .await?;
@@ -499,7 +480,6 @@ pub(crate) async fn get_aws_sso_token(
         config.session_hours,
         rsa_key,
         &user_email,
-        &query.audience,
         token.hardware_aaguid.clone(),
         token.org_domain.clone(),
         token.dpop_source.as_deref(),
@@ -1175,7 +1155,7 @@ mod tests {
 
         let (status, body) = http_get(
             &app,
-            "/v1/credentials/aws/sso/token?audience=vouch-identity-center",
+            "/v1/credentials/aws/sso/token",
             &[("Authorization", &format!("Bearer {token}"))],
         )
         .await;
@@ -1191,27 +1171,6 @@ mod tests {
             .expect("base64url header");
         let header: serde_json::Value = serde_json::from_slice(&header_bytes).expect("header JSON");
         assert_eq!(header["alg"], "RS256");
-    }
-
-    /// The Identity Center endpoint requires the `audience` query parameter.
-    #[tokio::test]
-    async fn test_aws_sso_token_requires_audience() {
-        let state = test_app_state_with_rsa_key().await;
-        let config = state.config();
-        let app = crate::infra::router::build_app(state.clone(), &config).expect("build app");
-
-        let user = create_test_user(&state.store, "sso-noaud@example.com").await;
-        let auth_id = create_test_authenticator(&state.store, &user.id).await;
-        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
-
-        let (status, _body) = http_get(
-            &app,
-            "/v1/credentials/aws/sso/token",
-            &[("Authorization", &format!("Bearer {token}"))],
-        )
-        .await;
-
-        assert_eq!(status, StatusCode::BAD_REQUEST);
     }
 
     /// Regression for #451: a non-hardware-verified bootstrap session

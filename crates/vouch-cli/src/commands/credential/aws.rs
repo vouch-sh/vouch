@@ -577,9 +577,7 @@ pub(crate) async fn resolve_bearer_token(
     let ic_session = vouch_config
         .aws()
         .and_then(|a| resolve_session_config(a, &session.name))
-        .filter(|c| {
-            c.identity_center_application_arn.is_some() && c.identity_center_audience.is_some()
-        });
+        .filter(|c| c.identity_center_application_arn.is_some());
 
     if let Some(cfg) = ic_session {
         obtain_identity_center_token(server, cfg, region).await
@@ -601,8 +599,8 @@ pub(crate) async fn resolve_bearer_token(
 ///    is applied here (the caller only needs `sso-oauth:CreateTokenWithIAM`,
 ///    which `ReadOnlyAccess` would strip); agent attribution still flows via
 ///    the RS256 token's session tags.
-/// 2. Fetch the RS256 assertion token from Vouch (`audience` = the app's Aud
-///    claim), carrying agent attribution when running inside a coding agent.
+/// 2. Fetch the RS256 assertion token from Vouch (its `aud` is the Vouch server
+///    URL), carrying agent attribution when running inside a coding agent.
 /// 3. Exchange the assertion for an Identity Center access token.
 async fn obtain_identity_center_token(
     server: &str,
@@ -613,10 +611,6 @@ async fn obtain_identity_center_token(
         .identity_center_application_arn
         .as_deref()
         .context("identity_center_application_arn not configured")?;
-    let audience = cfg
-        .identity_center_audience
-        .as_deref()
-        .context("identity_center_audience not configured")?;
 
     // Assume *this* session's management role directly via web identity — it is
     // the SigV4 caller for CreateTokenWithIAM. Set `management_role` equal to the
@@ -638,12 +632,8 @@ async fn obtain_identity_center_token(
         client.set_dpop_source(src);
     }
 
-    let path = format!(
-        "/v1/credentials/aws/sso/token?audience={}",
-        urlencoding::encode(audience)
-    );
     let assertion: OidcTokenResponse = client
-        .get_authenticated(&path)
+        .get_authenticated("/v1/credentials/aws/sso/token")
         .await
         .context("failed to get Identity Center assertion token from Vouch server")?;
 

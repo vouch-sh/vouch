@@ -156,9 +156,7 @@ async fn run_discover(
         .unwrap_or_default();
 
     // Identity Center configured → portal discovery (permission-set profiles).
-    if session_cfg.identity_center_application_arn.is_some()
-        && session_cfg.identity_center_audience.is_some()
-    {
+    if session_cfg.identity_center_application_arn.is_some() {
         return discover_identity_center(server, &session, profile_prefix, region).await;
     }
 
@@ -412,9 +410,7 @@ async fn run_interactive_identity_center(
     let has_idc = vouch_config
         .aws()
         .and_then(|a| crate::commands::credential::aws::resolve_session_config(a, &session.name))
-        .is_some_and(|c| {
-            c.identity_center_application_arn.is_some() && c.identity_center_audience.is_some()
-        });
+        .is_some_and(|c| c.identity_center_application_arn.is_some());
     if !has_idc {
         return Err(
             crate::exit_code::CliError::ConfigError(tr!("setup-aws-err-role-required")).into(),

@@ -167,25 +167,24 @@ pub(crate) async fn issue_aws_token(
 /// matches the Vouch OIDC discovery document and its public key is published in
 /// the JWKS, so Identity Center can verify the signature.
 ///
+/// The `aud` claim is set to the issuer (server base URL), matching the STS
+/// token ([`issue_aws_token`]); the customer-managed application's Aud claim
+/// must be configured to that same URL. This path therefore differs from
+/// [`issue_aws_token`] only by signing algorithm.
+///
 /// # Arguments
-/// * `base_url` - Server base URL (issuer; must match the registered TTI)
+/// * `base_url` - Server base URL (issuer and `aud`; must match the registered TTI)
 /// * `session_hours` - Session duration in hours
 /// * `oidc_rsa_key` - OIDC RSA (RS256) signing key
 /// * `user_email` - Authenticated user's email (maps to the Identity Store user)
-/// * `audience` - The customer-managed application's configured Aud claim
 /// * `hardware_aaguid` - AAGUID snapshot from the session record
 /// * `hd` - Organization domain snapshot from the session record
 /// * `source` - AI coding agent identifier (for CloudTrail attribution tags)
-#[expect(
-    clippy::too_many_arguments,
-    reason = "Identity Center token issuance mirrors issue_aws_token plus an audience override"
-)]
 pub(crate) async fn issue_sso_jwt(
     base_url: &str,
     session_hours: u64,
     oidc_rsa_key: &OidcRsaSigningKey,
     user_email: &str,
-    audience: &str,
     hardware_aaguid: Option<String>,
     hd: Option<String>,
     source: Option<&str>,
@@ -196,7 +195,8 @@ pub(crate) async fn issue_sso_jwt(
     // ABAC/CloudTrail attribution.
     let aws_tags = build_aws_session_tags(user_email, hd.as_deref(), source);
 
-    let id_claims = OidcIdTokenClaimsBuilder::for_audience(base_url, user_email, audience)
+    // aud = issuer (server base URL), same as the STS token.
+    let id_claims = OidcIdTokenClaimsBuilder::for_aws(base_url, user_email)
         .hardware_aaguid(hardware_aaguid)
         .hd(hd)
         .aws_tags(aws_tags)
@@ -259,8 +259,6 @@ mod tests {
     const SESSION_HOURS: u64 = 8;
     const USER_EMAIL: &str = "user@example.com";
     const TEST_AAGUID: &str = "ee882879-721c-4913-9775-3dfcce97072a";
-    const IC_AUDIENCE: &str = "vouch-identity-center";
-
     /// The Identity Center JWT must be signed with RS256 (AWS TTI requirement),
     /// unlike the ES256 `AssumeRoleWithWebIdentity` token.
     #[tokio::test]
@@ -272,7 +270,6 @@ mod tests {
             SESSION_HOURS,
             &rsa_key,
             USER_EMAIL,
-            IC_AUDIENCE,
             Some(TEST_AAGUID.to_string()),
             None,
             None,
@@ -284,7 +281,7 @@ mod tests {
         assert_eq!(header["alg"], "RS256", "Identity Center JWT must use RS256");
     }
 
-    /// The JWT carries `iss` = issuer, `aud` = the configured Aud claim, `sub` =
+    /// The JWT carries `iss` = issuer, `aud` = issuer (server base URL), `sub` =
     /// the user email, and the same AWS session tags as the web-identity path.
     #[tokio::test]
     async fn test_sso_jwt_claims_and_tags() {
@@ -295,7 +292,6 @@ mod tests {
             SESSION_HOURS,
             &rsa_key,
             USER_EMAIL,
-            IC_AUDIENCE,
             None,
             Some("example.com".to_string()),
             Some("claude-code"),
@@ -305,7 +301,7 @@ mod tests {
 
         let claims = decode_jwt_payload(&result.id_token);
         assert_eq!(claims["iss"], BASE_URL, "iss must match the issuer URL");
-        assert_eq!(claims["aud"], IC_AUDIENCE, "aud must be the Aud claim");
+        assert_eq!(claims["aud"], BASE_URL, "aud must be the issuer URL");
         assert_eq!(claims["sub"], USER_EMAIL, "sub must be the user email");
 
         let principal_tags = &claims["https://aws.amazon.com/tags"]["principal_tags"];
