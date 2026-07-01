@@ -113,7 +113,7 @@ fn run_explicit_role(profile: Option<&str>, role_arn: &str, region: Option<&str>
     config.set_profile(&AwsProfile {
         name: profile_name.clone(),
         credential_process: Some(format!(
-            "{} credential aws --role {role_arn}",
+            "\"{}\" credential aws --role {role_arn}",
             vouch_path.display()
         )),
         region: region.map(str::to_string),
@@ -230,7 +230,7 @@ async fn run_discover(
         config.set_profile(&AwsProfile {
             name: profile_name.clone(),
             credential_process: Some(format!(
-                "{} credential aws --role {role_arn}",
+                "\"{}\" credential aws --role {role_arn}",
                 vouch_path.display()
             )),
             region: region.map(str::to_string),
@@ -273,9 +273,9 @@ impl std::fmt::Display for AccountChoice {
 /// Build the `credential_process` line for an Identity Center permission-set
 /// profile: `vouch credential aws --sso-session <name> --account <id> --role <ps>`.
 ///
-/// The session and permission-set names are double-quoted so values containing
-/// spaces are passed as single argv tokens (AWS parses `credential_process`
-/// with shell-like tokenization that respects quotes).
+/// The binary path, session name, and permission-set name are double-quoted so
+/// values containing spaces are passed as single argv tokens (AWS parses
+/// `credential_process` with shell-like tokenization that respects quotes).
 fn idc_credential_process(
     vouch_path: &std::path::Path,
     session_name: &str,
@@ -283,7 +283,7 @@ fn idc_credential_process(
     role_name: &str,
 ) -> String {
     format!(
-        "{} credential aws --sso-session \"{session_name}\" --account {account_id} --role \"{role_name}\"",
+        "\"{}\" credential aws --sso-session \"{session_name}\" --account {account_id} --role \"{role_name}\"",
         vouch_path.display()
     )
 }
