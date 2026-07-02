@@ -408,9 +408,12 @@ async fn run_discover(
 
         config.set_profile(&AwsProfile {
             name: profile_name.clone(),
+            // Pin --sso-session so `vouch credential aws` resolves this session's
+            // management role for chaining, not the first `[sso-session]` found.
             credential_process: Some(format!(
-                "\"{}\" credential aws --role {role_arn}",
-                vouch_path.display()
+                "\"{}\" credential aws --sso-session \"{}\" --role {role_arn}",
+                vouch_path.display(),
+                session.name
             )),
             region: region.map(str::to_string),
             output: Some("json".to_string()),
@@ -739,7 +742,7 @@ fn server_host(server: &str) -> Result<String> {
 /// Write one AWS profile per account for the role-chaining pattern.
 fn write_chaining_profiles(
     accounts: &[crate::integrations::aws::organizations::Account],
-    _session_name: &str,
+    session_name: &str,
     member_role_name: &str,
     member_role_path: &str,
     partition: vouch_common::aws::Partition,
@@ -788,9 +791,12 @@ fn write_chaining_profiles(
 
         config.set_profile(&AwsProfile {
             name: profile_name.clone(),
+            // Pin --sso-session so `vouch credential aws` resolves this session's
+            // management role for chaining, not the first `[sso-session]` found.
             credential_process: Some(format!(
-                "\"{}\" credential aws --role {role_arn}",
-                vouch_path.display()
+                "\"{}\" credential aws --sso-session \"{}\" --role {role_arn}",
+                vouch_path.display(),
+                session_name
             )),
             region: region.map(str::to_string),
             output: Some("json".to_string()),
@@ -942,7 +948,7 @@ fn require_terminal() -> Result<()> {
     if std::io::stdin().is_terminal() {
         return Ok(());
     }
-    Err(crate::exit_code::CliError::ConfigError(tr!("setup-aws-err-role-required")).into())
+    Err(crate::exit_code::CliError::ConfigError(tr!("setup-aws-err-needs-terminal")).into())
 }
 
 /// Show an interactive single-select prompt.

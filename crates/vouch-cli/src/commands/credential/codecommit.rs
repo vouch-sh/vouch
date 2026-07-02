@@ -142,7 +142,7 @@ async fn get_sts_credentials() -> Result<StsCredentials> {
         )
     })?;
 
-    let data = super::aws::get_aws_credentials(&server, &role_arn).await?;
+    let data = super::aws::get_aws_credentials(&server, &role_arn, None).await?;
 
     // Extract STS credentials from the cached JSON
     let access_key_id = data

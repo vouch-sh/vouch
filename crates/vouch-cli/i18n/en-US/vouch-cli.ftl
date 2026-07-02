@@ -638,6 +638,9 @@ arg-aws-console-account-help = AWS account ID for the Identity Center path (inte
 
 ## setup aws wizard
 
+setup-aws-err-needs-terminal =
+    `{ -cmd } setup aws` needs an interactive terminal for guided setup.
+    For non-interactive use, pass --role <arn> or --discover.
 wizard-aws-prompt-role-arn = Enter the IAM role ARN Vouch should assume
 wizard-aws-err-invalid-role-arn = invalid IAM role ARN
 wizard-aws-trust-policy-header = Add this trust policy to the role so Vouch can assume it:
@@ -913,7 +916,6 @@ install-path-hint-nix =
 
 ## setup/aws
 
-setup-aws-err-role-required = Either --role or --discover is required
 setup-aws-profile-already-exists =
     Profile [{ $profile }] already exists in ~/.aws/config.
     To update it, edit ~/.aws/config directly.

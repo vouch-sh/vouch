@@ -278,7 +278,7 @@ pub(crate) async fn exchange_for_sts_credentials(req: StsRequest<'_>) -> Result<
         None => {
             resolved = crate::config::Config::load()
                 .ok()
-                .and_then(|c| resolve_management_role(&c).ok())
+                .and_then(|c| resolve_management_role(&c, None).ok())
                 .flatten();
             resolved.as_deref()
         }
@@ -426,16 +426,18 @@ fn agent_session_policies(agent_source: Option<&str>) -> AgentSessionPolicies {
 /// Returns `None` if no chaining config is found (direct auth is used).
 pub(crate) fn resolve_management_role(
     vouch_config: &crate::config::Config,
+    sso_session: Option<&str>,
 ) -> Result<Option<String>> {
     let aws_cfg = match vouch_config.aws() {
         Some(cfg) if !cfg.sso_sessions.is_empty() => cfg,
         _ => return Ok(None),
     };
 
-    // Try to match via SSO session name from ~/.aws/config
+    // Match the requested `[sso-session]` (or the first one when unspecified)
+    // to a vouch `sso_sessions` entry so the correct management role is used.
     let aws_config = crate::integrations::aws::config::AwsConfig::load()?;
     if let Some(session_cfg) = aws_config
-        .find_sso_session(None)
+        .find_sso_session(sso_session)
         .and_then(|s| aws_cfg.sso_sessions.get(&s.name))
     {
         return Ok(Some(session_cfg.management_role.clone()));
@@ -454,9 +456,14 @@ pub(crate) fn resolve_management_role(
 /// Shared entry point for `vouch credential aws`, `vouch credential
 /// codecommit`, and `vouch exec`. Resolves the management role once
 /// and uses it for both the cache key and credential exchange.
-pub(crate) async fn get_aws_credentials(server: &str, role_arn: &str) -> Result<serde_json::Value> {
+pub(crate) async fn get_aws_credentials(
+    server: &str,
+    role_arn: &str,
+    sso_session: Option<&str>,
+) -> Result<serde_json::Value> {
     let vouch_config = crate::config::Config::load()?;
-    let management_role = resolve_management_role(&vouch_config)?.filter(|m| m != role_arn);
+    let management_role =
+        resolve_management_role(&vouch_config, sso_session)?.filter(|m| m != role_arn);
 
     // Detect agent context BEFORE the cache lookup. Folding the source into
     // the cache key ensures agent and non-agent invocations never share a
@@ -500,7 +507,7 @@ pub(crate) async fn run(
         run_identity_center(server, account_id, role, sso_session).await?
     } else {
         // STS web-identity: `role` is a role ARN.
-        get_aws_credentials(server, role).await?
+        get_aws_credentials(server, role, sso_session).await?
     };
     let json = serde_json::to_string(&data).context("failed to serialize credentials")?;
     // Machine-readable JSON output: stays English (consumed by AWS CLI).
