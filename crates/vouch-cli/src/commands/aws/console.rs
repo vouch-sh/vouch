@@ -151,6 +151,17 @@ async fn get_sts_creds(server: &str, args: &ConsoleArgs) -> Result<FedInfo> {
 async fn get_idc_creds(server: &str, args: &ConsoleArgs, account_id: &str) -> Result<FedInfo> {
     use crate::integrations::aws::sso_portal::get_role_credentials;
 
+    // Fail closed for coding agents, matching the credential IdC path: SSO portal
+    // `GetRoleCredentials` returns the permission set's full access and cannot be
+    // downscoped to ReadOnlyAccess, so an agent must not obtain it (issue #398).
+    if let Some(source) = crate::commands::credential::aws::detect_agent_source() {
+        return Err(crate::exit_code::CliError::ConfigError(tr_args!(
+            "aws-err-agent-idc-readonly-unsupported",
+            source = source,
+        ))
+        .into());
+    }
+
     let role_name = args.role.as_deref().ok_or_else(|| {
         anyhow::anyhow!("--role (permission-set name) is required with --account")
     })?;

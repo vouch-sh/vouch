@@ -340,13 +340,16 @@ async fn run_discover(
 
     println!("{}", tr!("wizard-aws-enumerating-accounts"));
 
+    // Carry agent attribution (and ReadOnlyAccess) onto the management-role STS
+    // creds used for enumeration, matching the STS credential path.
+    let agent_source = crate::commands::credential::aws::detect_agent_source();
     let mgmt_result = crate::commands::credential::aws::exchange_for_sts_credentials(
         crate::commands::credential::aws::StsRequest {
             server,
             role_arn: &session_cfg.management_role,
             region: effective_region,
             management_role: Some(&session_cfg.management_role),
-            agent_source: None,
+            agent_source: agent_source.as_deref(),
         },
     )
     .await
@@ -572,13 +575,14 @@ async fn wizard_chaining(
     let effective_region = resolve_effective_region(region, account_id, partition)?;
     tr_println!("wizard-aws-enumerating-accounts");
 
+    let agent_source = crate::commands::credential::aws::detect_agent_source();
     let mgmt_result = crate::commands::credential::aws::exchange_for_sts_credentials(
         crate::commands::credential::aws::StsRequest {
             server,
             role_arn: management_role_arn,
             region: &effective_region,
             management_role: Some(management_role_arn),
-            agent_source: None,
+            agent_source: agent_source.as_deref(),
         },
     )
     .await
