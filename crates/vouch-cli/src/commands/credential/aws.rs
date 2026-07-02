@@ -103,6 +103,22 @@ fn extract_sub_from_jwt(token: &str) -> Result<String> {
     Ok(claims.sub.chars().take(64).collect())
 }
 
+/// Extract the domain portion of the `email` claim (e.g. `"acme.com"`) from a
+/// JWT payload without signature verification.
+///
+/// Returns `None` when the token is malformed or carries no `email` claim (or an
+/// address with no domain). Used by `vouch setup aws` to scope the generated
+/// trust policy's subject to the caller's domain — read from the locally
+/// resolved session token, with no additional server call.
+pub(crate) fn extract_email_domain_from_jwt(token: &str) -> Option<String> {
+    let payload = token.split('.').nth(1)?;
+    let decoded = URL_SAFE_NO_PAD.decode(payload).ok()?;
+    let claims: serde_json::Value = serde_json::from_slice(&decoded).ok()?;
+    let email = claims.get("email")?.as_str()?;
+    let (_, domain) = email.rsplit_once('@')?;
+    (!domain.is_empty()).then(|| domain.to_string())
+}
+
 /// Result of the OIDC → STS credential exchange.
 ///
 /// Provides everything downstream AWS API calls need: an HTTP client,

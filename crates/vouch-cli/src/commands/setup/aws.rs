@@ -25,15 +25,34 @@ mod policy {
 
     /// Build the OIDC federation trust policy for the given role.
     ///
-    /// Allows `sts:AssumeRoleWithWebIdentity` for any identity issued by
-    /// `issuer_host` (the Vouch server's hostname), gated on the audience
-    /// matching `issuer_url` (the full Vouch server URL).
+    /// Allows the Vouch OIDC provider (`issuer_host`) to assume the role via
+    /// `sts:AssumeRoleWithWebIdentity`. `sts:TagSession` and
+    /// `sts:SetSourceIdentity` are also allowed because Vouch embeds session
+    /// tags in the token (`https://aws.amazon.com/tags`) and sets a source
+    /// identity — STS rejects the assume without those permissions.
+    ///
+    /// Conditions:
+    /// - `StringEquals { <host>:aud = <issuer_url> }` — audience must be Vouch.
+    /// - `StringLike { sts:RoleSessionName = ${<host>:sub} }` — the session name
+    ///   must equal the caller's subject (the CLI sets it to the user's `sub`).
+    /// - When `subject_pattern` is `Some` (e.g. `*@example.com`), also
+    ///   `StringLike { <host>:sub = <subject_pattern> }` to restrict which
+    ///   identities may assume the role.
     pub(super) fn trust(
         partition: &str,
         account_id: &str,
         issuer_host: &str,
         issuer_url: &str,
+        subject_pattern: Option<&str>,
     ) -> Value {
+        let mut string_like = serde_json::Map::new();
+        string_like.insert(
+            "sts:RoleSessionName".to_string(),
+            json!(format!("${{{issuer_host}:sub}}")),
+        );
+        if let Some(sub) = subject_pattern {
+            string_like.insert(format!("{issuer_host}:sub"), json!(sub));
+        }
         json!({
             "Version": "2012-10-17",
             "Statement": [{
@@ -41,11 +60,16 @@ mod policy {
                 "Principal": {
                     "Federated": format!("arn:{partition}:iam::{account_id}:oidc-provider/{issuer_host}")
                 },
-                "Action": "sts:AssumeRoleWithWebIdentity",
+                "Action": [
+                    "sts:AssumeRoleWithWebIdentity",
+                    "sts:TagSession",
+                    "sts:SetSourceIdentity"
+                ],
                 "Condition": {
                     "StringEquals": {
                         format!("{issuer_host}:aud"): issuer_url
-                    }
+                    },
+                    "StringLike": Value::Object(string_like)
                 }
             }]
         })
@@ -103,37 +127,83 @@ mod policy {
         use super::*;
 
         #[test]
-        fn trust_policy_has_correct_principal() {
+        fn trust_policy_has_correct_principal_and_actions() {
             let p = trust(
                 "aws",
                 "123456789012",
                 "vouch.example.com",
                 "https://vouch.example.com",
+                None,
             );
             let stmt = &p["Statement"][0];
             assert_eq!(
                 stmt["Principal"]["Federated"].as_str().unwrap(),
                 "arn:aws:iam::123456789012:oidc-provider/vouch.example.com"
             );
+            // AssumeRoleWithWebIdentity plus TagSession/SetSourceIdentity, which
+            // Vouch's session tags / source identity require.
+            let actions: Vec<&str> = stmt["Action"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|a| a.as_str().unwrap())
+                .collect();
             assert_eq!(
-                stmt["Action"].as_str().unwrap(),
-                "sts:AssumeRoleWithWebIdentity"
+                actions,
+                [
+                    "sts:AssumeRoleWithWebIdentity",
+                    "sts:TagSession",
+                    "sts:SetSourceIdentity"
+                ]
             );
         }
 
         #[test]
-        fn trust_policy_condition_uses_issuer_host_as_key() {
+        fn trust_policy_conditions() {
             let p = trust(
                 "aws",
                 "123456789012",
                 "vouch.example.com",
                 "https://vouch.example.com",
+                Some("*@vouch.example.com"),
             );
-            let cond = &p["Statement"][0]["Condition"]["StringEquals"];
+            let cond = &p["Statement"][0]["Condition"];
             assert_eq!(
-                cond["vouch.example.com:aud"].as_str().unwrap(),
+                cond["StringEquals"]["vouch.example.com:aud"]
+                    .as_str()
+                    .unwrap(),
                 "https://vouch.example.com"
             );
+            // RoleSessionName is always bound to the subject.
+            assert_eq!(
+                cond["StringLike"]["sts:RoleSessionName"].as_str().unwrap(),
+                "${vouch.example.com:sub}"
+            );
+            // The subject pattern restricts which identities may assume.
+            assert_eq!(
+                cond["StringLike"]["vouch.example.com:sub"]
+                    .as_str()
+                    .unwrap(),
+                "*@vouch.example.com"
+            );
+        }
+
+        #[test]
+        fn trust_policy_without_subject_still_binds_session_name() {
+            let p = trust(
+                "aws",
+                "123456789012",
+                "vouch.example.com",
+                "https://vouch.example.com",
+                None,
+            );
+            let string_like = &p["Statement"][0]["Condition"]["StringLike"];
+            assert_eq!(
+                string_like["sts:RoleSessionName"].as_str().unwrap(),
+                "${vouch.example.com:sub}"
+            );
+            // No subject filter when the domain is unknown.
+            assert!(string_like.get("vouch.example.com:sub").is_none());
         }
 
         #[test]
@@ -491,8 +561,16 @@ async fn run_wizard(server: &str, profile: Option<&str>, region: Option<&str>) -
     let partition = arn.partition;
     let issuer_host = server_host(server)?;
 
-    // Print trust policy and OIDC provider setup hint.
-    let trust = policy::trust(partition.as_str(), &account_id, &issuer_host, server);
+    // Print trust policy and OIDC provider setup hint. Restrict the subject to
+    // the caller's email domain when we can read it from the session token.
+    let subject_pattern = current_user_subject_pattern().await;
+    let trust = policy::trust(
+        partition.as_str(),
+        &account_id,
+        &issuer_host,
+        server,
+        subject_pattern.as_deref(),
+    );
     let trust_json =
         serde_json::to_string_pretty(&trust).context("failed to serialize trust policy")?;
 
@@ -729,6 +807,20 @@ fn resolve_effective_region(
         Ok(r) => Ok(r),
         Err(_) => Ok(partition.default_sts_region().to_string()),
     }
+}
+
+/// Derive the caller's subject restriction (`*@<domain>`) from the `email`
+/// claim of the locally-resolved session token.
+///
+/// Fully local — no extra server call. Best-effort: returns `None` when no
+/// session is available or the token carries no `email` claim, in which case the
+/// trust policy omits the subject filter (it still binds `sts:RoleSessionName`).
+async fn current_user_subject_pattern() -> Option<String> {
+    let session = crate::session::resolve_session().await.ok()?;
+    let domain = crate::commands::credential::aws::extract_email_domain_from_jwt(
+        secrecy::ExposeSecret::expose_secret(&session.token),
+    )?;
+    Some(format!("*@{domain}"))
 }
 
 /// Extract the hostname from a server URL, stripping the scheme.
