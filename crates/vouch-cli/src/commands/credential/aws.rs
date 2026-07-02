@@ -648,6 +648,19 @@ async fn obtain_identity_center_token(
         .as_deref()
         .context("identity_center_application_arn not configured")?;
 
+    // Fail closed for coding agents: this hop assumes the management role as the
+    // SigV4 caller for CreateTokenWithIAM and cannot be downscoped to
+    // ReadOnlyAccess (that would strip sso-oauth:CreateTokenWithIAM). Like the
+    // credential and console Identity Center paths, an agent must not reach it —
+    // including via `setup aws --discover`, which has no terminal gate (#398).
+    if let Some(source) = detect_agent_source() {
+        return Err(crate::exit_code::CliError::ConfigError(tr_args!(
+            "aws-err-agent-idc-readonly-unsupported",
+            source = source,
+        ))
+        .into());
+    }
+
     // Assume *this* session's management role directly via web identity — it is
     // the SigV4 caller for CreateTokenWithIAM. Set `management_role` equal to the
     // target so no chaining hop is added and the role is not re-resolved from the
@@ -662,12 +675,7 @@ async fn obtain_identity_center_token(
     .await
     .context("failed to assume management role for Identity Center token exchange")?;
 
-    let mut client = VouchClient::new(server).await?;
-    let agent_source = detect_agent_source();
-    if let Some(src) = agent_source.as_deref() {
-        client.set_dpop_source(src);
-    }
-
+    let client = VouchClient::new(server).await?;
     let assertion: OidcTokenResponse = client
         .get_authenticated("/v1/credentials/aws/sso/token")
         .await
