@@ -131,13 +131,23 @@ async fn get_sts_creds(server: &str, args: &ConsoleArgs) -> Result<FedInfo> {
         }
     };
 
+    // Resolve the management-role hop from the requested SSO session so a
+    // multi-session chaining setup opens the console via the correct org,
+    // rather than falling back to the first session inside the exchange.
+    let vouch_config = crate::config::Config::load()?;
+    let management_role = crate::commands::credential::aws::resolve_management_role(
+        &vouch_config,
+        args.sso_session.as_deref(),
+    )?
+    .filter(|m| m != &role_arn);
+
     let agent_source = crate::commands::credential::aws::detect_agent_source();
     let result = crate::commands::credential::aws::exchange_for_sts_credentials(
         crate::commands::credential::aws::StsRequest {
             server,
             role_arn: &role_arn,
             region: &region,
-            management_role: None,
+            management_role: management_role.as_deref(),
             agent_source: agent_source.as_deref(),
         },
     )
