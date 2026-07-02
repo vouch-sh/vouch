@@ -30,8 +30,11 @@
 //! }
 //! ```
 
+use crate::handlers::session::ValidatedResourceToken;
 use crate::redact_email;
-use crate::services::oidc::{AwsSessionTags, OidcIdTokenClaimsBuilder, OidcSigningKey};
+use crate::services::oidc::{
+    AwsSessionTags, OidcIdTokenClaimsBuilder, OidcRsaSigningKey, OidcSigningKey,
+};
 
 /// Error types for AWS integration operations.
 #[derive(Debug, thiserror::Error)]
@@ -57,6 +60,43 @@ pub(crate) struct AwsTokenResult {
     pub expires_in: u64,
 }
 
+/// Build the AWS session tags embedded in the `https://aws.amazon.com/tags`
+/// claim for ABAC and CloudTrail attribution.
+///
+/// `vouch:Email` is always present (and transitive). `vouch:Domain` is added
+/// when the org domain (`hd`) is known. When an AI coding agent is detected
+/// (`source`, set by the CLI via env-var sniffing and carried tamperproof in
+/// the DPoP proof), `vouch:AccessType=ai` and `vouch:Agent=<source>` are added.
+/// All tags are transitive so they propagate through role chains.
+fn build_aws_session_tags(
+    user_email: &str,
+    hd: Option<&str>,
+    source: Option<&str>,
+) -> AwsSessionTags {
+    let mut principal_tags = std::collections::HashMap::new();
+    let mut transitive_tag_keys = Vec::new();
+
+    principal_tags.insert("vouch:Email".to_string(), vec![user_email.to_string()]);
+    transitive_tag_keys.push("vouch:Email".to_string());
+
+    if let Some(domain) = hd {
+        principal_tags.insert("vouch:Domain".to_string(), vec![domain.to_string()]);
+        transitive_tag_keys.push("vouch:Domain".to_string());
+    }
+
+    if let Some(agent) = source {
+        principal_tags.insert("vouch:AccessType".to_string(), vec!["ai".to_string()]);
+        transitive_tag_keys.push("vouch:AccessType".to_string());
+        principal_tags.insert("vouch:Agent".to_string(), vec![agent.to_string()]);
+        transitive_tag_keys.push("vouch:Agent".to_string());
+    }
+
+    AwsSessionTags {
+        principal_tags,
+        transitive_tag_keys,
+    }
+}
+
 /// Issue an OIDC ID token for AWS STS.
 ///
 /// The token can be used with `AssumeRoleWithWebIdentity` to get temporary
@@ -71,58 +111,31 @@ pub(crate) struct AwsTokenResult {
 /// * `base_url` - Server base URL (issuer)
 /// * `session_hours` - Session duration in hours
 /// * `oidc_key` - OIDC signing key
-/// * `user_email` - The authenticated user's email
-/// * `hardware_aaguid` - AAGUID snapshot from the session record
-/// * `hd` - Organization domain snapshot from the session record
-/// * `source` - AI coding agent identifier (e.g., "claude-code", "cursor")
+/// * `user_email` - The authenticated user's email (resolved with a DB fallback,
+///   so it is passed explicitly rather than read from the token)
+/// * `token` - The validated resource token; supplies the session-snapshot
+///   `hardware_aaguid`, `org_domain` (`hd`), and `dpop_source` federation claims
 pub(crate) async fn issue_aws_token(
     base_url: &str,
     session_hours: u64,
     oidc_key: &OidcSigningKey,
     user_email: &str,
-    hardware_aaguid: Option<String>,
-    hd: Option<String>,
-    source: Option<&str>,
+    token: &ValidatedResourceToken,
 ) -> AwsResult<AwsTokenResult> {
     // Token validity matches session duration
     let expires_in = session_hours.saturating_mul(3600);
 
-    // Build AWS session tags for ABAC and CloudTrail attribution.
-    // Tags are embedded in the JWT so AWS extracts them during
-    // AssumeRoleWithWebIdentity and logs them as principalTags in CloudTrail.
-    let mut principal_tags = std::collections::HashMap::new();
-    let mut transitive_tag_keys = Vec::new();
-
-    principal_tags.insert("vouch:Email".to_string(), vec![user_email.to_string()]);
-    transitive_tag_keys.push("vouch:Email".to_string());
-
-    if let Some(ref domain) = hd {
-        principal_tags.insert("vouch:Domain".to_string(), vec![domain.clone()]);
-        transitive_tag_keys.push("vouch:Domain".to_string());
-    }
-
-    // Add AI-specific tags when a coding agent is detected.
-    // The `source` claim is set by the CLI via env-var sniffing (CLAUDECODE,
-    // CURSOR_AGENT, etc.) and carried tamperproof in the DPoP proof JWT.
-    // These tags enable IAM condition keys (aws:PrincipalTag/vouch:access-type)
-    // and CloudTrail filtering for agent-initiated API calls.
-    if let Some(agent) = source {
-        principal_tags.insert("vouch:AccessType".to_string(), vec!["ai".to_string()]);
-        transitive_tag_keys.push("vouch:AccessType".to_string());
-        principal_tags.insert("vouch:Agent".to_string(), vec![agent.to_string()]);
-        transitive_tag_keys.push("vouch:Agent".to_string());
-    }
-
-    let aws_tags = AwsSessionTags {
-        principal_tags,
-        transitive_tag_keys,
-    };
+    let aws_tags = build_aws_session_tags(
+        user_email,
+        token.org_domain.as_deref(),
+        token.dpop_source.as_deref(),
+    );
 
     // Build OIDC claims
     // For AWS, the audience is the issuer URL (AWS matches against the OIDC provider)
     let id_claims = OidcIdTokenClaimsBuilder::for_aws(base_url, user_email)
-        .hardware_aaguid(hardware_aaguid)
-        .hd(hd)
+        .hardware_aaguid(token.hardware_aaguid.clone())
+        .hd(token.org_domain.clone())
         .aws_tags(aws_tags)
         .valid_for_seconds(expires_in)
         .build()
@@ -142,6 +155,79 @@ pub(crate) async fn issue_aws_token(
     })
 }
 
+/// Issue an **RS256**-signed OIDC ID token for AWS IAM Identity Center trusted
+/// identity propagation.
+///
+/// This token is the subject (`assertion`) for the IAM Identity Center
+/// `sso-oidc:CreateTokenWithIAM` call (`jwt-bearer` grant), which exchanges it
+/// for an Identity Center token. That token then drives the SSO Portal
+/// (`ListAccounts`/`ListAccountRoles`/`GetRoleCredentials`) to reach every
+/// account+permission-set the user is assigned to — without role chaining.
+///
+/// AWS's trusted-token-issuer contract **requires RS256** (the
+/// `AssumeRoleWithWebIdentity` path uses ES256 via [`issue_aws_token`]; this
+/// path is distinct and signs with [`OidcRsaSigningKey`]). The token's `iss`
+/// matches the Vouch OIDC discovery document and its public key is published in
+/// the JWKS, so Identity Center can verify the signature.
+///
+/// The `aud` claim is set to the issuer (server base URL), matching the STS
+/// token ([`issue_aws_token`]); the customer-managed application's Aud claim
+/// must be configured to that same URL. This path therefore differs from
+/// [`issue_aws_token`] only by signing algorithm.
+///
+/// # Arguments
+/// * `base_url` - Server base URL (issuer and `aud`; must match the registered TTI)
+/// * `session_hours` - Session duration in hours
+/// * `oidc_rsa_key` - OIDC RSA (RS256) signing key
+/// * `user_email` - Authenticated user's email (maps to the Identity Store user;
+///   resolved with a DB fallback, so it is passed explicitly rather than read
+///   from the token)
+/// * `token` - The validated resource token; supplies the session-snapshot
+///   `hardware_aaguid`, `org_domain` (`hd`), and `dpop_source` federation claims
+pub(crate) async fn issue_sso_jwt(
+    base_url: &str,
+    session_hours: u64,
+    oidc_rsa_key: &OidcRsaSigningKey,
+    user_email: &str,
+    token: &ValidatedResourceToken,
+) -> AwsResult<AwsTokenResult> {
+    let expires_in = session_hours.saturating_mul(3600);
+
+    // Reuse the same AWS session tags as the web-identity path for consistent
+    // ABAC/CloudTrail attribution.
+    let aws_tags = build_aws_session_tags(
+        user_email,
+        token.org_domain.as_deref(),
+        token.dpop_source.as_deref(),
+    );
+
+    // aud = issuer (server base URL), same as the STS token.
+    let id_claims = OidcIdTokenClaimsBuilder::for_aws(base_url, user_email)
+        .hardware_aaguid(token.hardware_aaguid.clone())
+        .hd(token.org_domain.clone())
+        .aws_tags(aws_tags)
+        .valid_for_seconds(expires_in)
+        .build()
+        .map_err(|e| AwsError::ClaimsBuild(e.to_string()))?;
+
+    // Sign with RS256 — required by the AWS IAM Identity Center trusted token
+    // issuer contract.
+    let id_token = oidc_rsa_key
+        .sign_jwt(&id_claims)
+        .await
+        .map_err(|e| AwsError::TokenSign(e.to_string()))?;
+
+    tracing::info!(
+        "Issued AWS Identity Center JWT (RS256) for {}",
+        redact_email(user_email)
+    );
+
+    Ok(AwsTokenResult {
+        id_token,
+        expires_in,
+    })
+}
+
 #[cfg(test)]
 #[expect(
     clippy::expect_used,
@@ -150,7 +236,7 @@ pub(crate) async fn issue_aws_token(
 )]
 mod tests {
     use super::*;
-    use crate::services::oidc::OidcSigningKey;
+    use crate::services::oidc::{OidcRsaSigningKey, OidcSigningKey};
     use base64::Engine;
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
@@ -165,10 +251,104 @@ mod tests {
         serde_json::from_slice(&payload_bytes).expect("Failed to parse JWT payload as JSON")
     }
 
+    /// Decode a JWT header (first part) into a `serde_json::Value`.
+    fn decode_jwt_header(token: &str) -> serde_json::Value {
+        let parts: Vec<&str> = token.split('.').collect();
+        assert_eq!(parts.len(), 3, "JWT must have exactly 3 parts");
+        let header_bytes = URL_SAFE_NO_PAD
+            .decode(parts[0])
+            .expect("Failed to base64url-decode JWT header");
+        serde_json::from_slice(&header_bytes).expect("Failed to parse JWT header as JSON")
+    }
+
     const BASE_URL: &str = "https://vouch.example.com";
     const SESSION_HOURS: u64 = 8;
     const USER_EMAIL: &str = "user@example.com";
     const TEST_AAGUID: &str = "ee882879-721c-4913-9775-3dfcce97072a";
+
+    /// Build a `ValidatedResourceToken` carrying only the federation-snapshot
+    /// fields the `issue_*` functions read (`hardware_aaguid`, `org_domain`,
+    /// `dpop_source`). The remaining fields are placeholders; a hardware-verified
+    /// session is assumed since these functions run only after that gate.
+    fn test_token(
+        hardware_aaguid: Option<String>,
+        org_domain: Option<String>,
+        dpop_source: Option<String>,
+    ) -> super::ValidatedResourceToken {
+        super::ValidatedResourceToken {
+            sub: "user-id".to_string(),
+            email: None,
+            client_id: "test-client".to_string(),
+            scope: None,
+            authenticator_id: None,
+            hardware_verified: true,
+            auth_time: None,
+            token_hash: String::new(),
+            dpop_source,
+            hardware_aaguid,
+            org_domain,
+        }
+    }
+
+    /// The Identity Center JWT must be signed with RS256 (AWS TTI requirement),
+    /// unlike the ES256 `AssumeRoleWithWebIdentity` token.
+    #[tokio::test]
+    async fn test_sso_jwt_is_rs256_signed() {
+        let rsa_key = OidcRsaSigningKey::generate().expect("Failed to generate RSA key");
+
+        let result = issue_sso_jwt(
+            BASE_URL,
+            SESSION_HOURS,
+            &rsa_key,
+            USER_EMAIL,
+            &test_token(Some(TEST_AAGUID.to_string()), None, None),
+        )
+        .await
+        .expect("issue_sso_jwt should succeed");
+
+        let header = decode_jwt_header(&result.id_token);
+        assert_eq!(header["alg"], "RS256", "Identity Center JWT must use RS256");
+    }
+
+    /// The JWT carries `iss` = issuer, `aud` = issuer (server base URL), `sub` =
+    /// the user email, and the same AWS session tags as the web-identity path.
+    #[tokio::test]
+    async fn test_sso_jwt_claims_and_tags() {
+        let rsa_key = OidcRsaSigningKey::generate().expect("Failed to generate RSA key");
+
+        let result = issue_sso_jwt(
+            BASE_URL,
+            SESSION_HOURS,
+            &rsa_key,
+            USER_EMAIL,
+            &test_token(
+                None,
+                Some("example.com".to_string()),
+                Some("claude-code".to_string()),
+            ),
+        )
+        .await
+        .expect("issue_sso_jwt should succeed");
+
+        let claims = decode_jwt_payload(&result.id_token);
+        assert_eq!(claims["iss"], BASE_URL, "iss must match the issuer URL");
+        assert_eq!(claims["aud"], BASE_URL, "aud must be the issuer URL");
+        assert_eq!(claims["sub"], USER_EMAIL, "sub must be the user email");
+
+        let principal_tags = &claims["https://aws.amazon.com/tags"]["principal_tags"];
+        assert_eq!(
+            principal_tags["vouch:Email"],
+            serde_json::json!([USER_EMAIL])
+        );
+        assert_eq!(
+            principal_tags["vouch:Domain"],
+            serde_json::json!(["example.com"])
+        );
+        assert_eq!(
+            principal_tags["vouch:Agent"],
+            serde_json::json!(["claude-code"])
+        );
+    }
 
     /// Default tags present: `vouch:Email` is always included; `vouch:AccessType`
     /// and `vouch:Agent` must NOT be present when `source` is `None`.
@@ -181,9 +361,7 @@ mod tests {
             SESSION_HOURS,
             &key,
             USER_EMAIL,
-            Some(TEST_AAGUID.to_string()),
-            None,
-            None, // no source
+            &test_token(Some(TEST_AAGUID.to_string()), None, None),
         )
         .await
         .expect("issue_aws_token should succeed");
@@ -218,9 +396,11 @@ mod tests {
             SESSION_HOURS,
             &key,
             USER_EMAIL,
-            Some(TEST_AAGUID.to_string()),
-            Some("example.com".to_string()),
-            None,
+            &test_token(
+                Some(TEST_AAGUID.to_string()),
+                Some("example.com".to_string()),
+                None,
+            ),
         )
         .await
         .expect("issue_aws_token should succeed");
@@ -252,9 +432,11 @@ mod tests {
             SESSION_HOURS,
             &key,
             USER_EMAIL,
-            Some(TEST_AAGUID.to_string()),
-            None,
-            Some("claude-code"),
+            &test_token(
+                Some(TEST_AAGUID.to_string()),
+                None,
+                Some("claude-code".to_string()),
+            ),
         )
         .await
         .expect("issue_aws_token should succeed");
@@ -291,9 +473,11 @@ mod tests {
             SESSION_HOURS,
             &key,
             USER_EMAIL,
-            Some(TEST_AAGUID.to_string()),
-            Some("example.com".to_string()), // hd present, but no source
-            None,
+            &test_token(
+                Some(TEST_AAGUID.to_string()),
+                Some("example.com".to_string()),
+                None,
+            ),
         )
         .await
         .expect("issue_aws_token should succeed");
@@ -323,9 +507,11 @@ mod tests {
             SESSION_HOURS,
             &key,
             USER_EMAIL,
-            Some(TEST_AAGUID.to_string()),
-            Some("example.com".to_string()),
-            Some("cursor"),
+            &test_token(
+                Some(TEST_AAGUID.to_string()),
+                Some("example.com".to_string()),
+                Some("cursor".to_string()),
+            ),
         )
         .await
         .expect("issue_aws_token should succeed");
@@ -378,9 +564,7 @@ mod tests {
             4, // 4 hours
             &key,
             USER_EMAIL,
-            Some(TEST_AAGUID.to_string()),
-            None,
-            None,
+            &test_token(Some(TEST_AAGUID.to_string()), None, None),
         )
         .await
         .expect("issue_aws_token should succeed");
@@ -402,9 +586,7 @@ mod tests {
             SESSION_HOURS,
             &key,
             USER_EMAIL,
-            Some(TEST_AAGUID.to_string()),
-            None,
-            None,
+            &test_token(Some(TEST_AAGUID.to_string()), None, None),
         )
         .await
         .expect("issue_aws_token should succeed");

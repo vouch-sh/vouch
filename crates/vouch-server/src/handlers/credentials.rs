@@ -4,7 +4,7 @@
 use crate::AppState;
 use crate::db::{self, GitHubCredentialAuditData};
 use crate::services::error::ServiceError;
-use crate::services::integrations::aws::{AwsError, issue_aws_token};
+use crate::services::integrations::aws::{AwsError, issue_aws_token, issue_sso_jwt};
 use crate::services::integrations::github::{GitHubInstallationId, minimal_git_permissions};
 use axum::extract::OriginalUri;
 use axum::http::Method;
@@ -19,7 +19,9 @@ use vouch_common::{
 };
 
 use super::extractors::{ClientInfo, OptionalClientCert};
-use super::session::{extract_resource_token, extract_resource_token_with_email};
+use super::session::{
+    ValidatedResourceToken, extract_resource_token, extract_resource_token_with_email,
+};
 use crate::redact_email;
 
 /// Issue an SSH certificate for the authenticated user.
@@ -310,42 +312,34 @@ pub(crate) struct SshRevocationCheckResponse {
 // AWS Token Endpoint
 // ============================================================================
 
-/// Get an OIDC ID token for AWS STS AssumeRoleWithWebIdentity.
+/// Shared preamble for the AWS credential endpoints: authenticate the request,
+/// require a hardware-verified session, confirm the user is active, and resolve
+/// the user's email.
 ///
-/// GET /v1/credentials/aws/token
-///
-/// Returns an OIDC ID token that can be used with AWS STS to assume a role.
-/// The AWS IAM role must be configured to trust the Vouch OIDC provider.
-///
-/// When the DPoP proof includes a `source` custom claim (e.g., "claude-code"),
-/// the issued token includes AI-specific session tags (`vouch:AccessType=AI`,
-/// `vouch:Agent=<agent>`) for CloudTrail differentiation and IAM condition keys.
-pub(crate) async fn get_aws_token(
-    method: Method,
-    uri: OriginalUri,
-    headers: HeaderMap,
-    jar: CookieJar,
-    State(state): State<Arc<AppState>>,
-    client_cert: OptionalClientCert,
-) -> Result<Json<AwsTokenResponse>, ServiceError> {
-    // Single auth + user lookup (avoids duplicate get_user_by_id)
+/// AWS federation mints an OIDC token whose claims hardcode
+/// `hardware_verified: true`, so the *current session* must itself be
+/// hardware-verified — otherwise a non-verified bootstrap session could be
+/// laundered into a verified assertion (#451). The gate is on the access-token
+/// `hardware_verified` claim, not `authenticator_id` (a re-enrollment bootstrap
+/// session can have an `authenticator_id` while `hardware_verified` is false).
+async fn authorize_aws_token_request(
+    state: &Arc<AppState>,
+    headers: &HeaderMap,
+    jar: &CookieJar,
+    method: &Method,
+    path: &str,
+    client_cert: &OptionalClientCert,
+) -> Result<(ValidatedResourceToken, String), ServiceError> {
     let token = extract_resource_token(
-        &state,
-        &headers,
-        &jar,
+        state,
+        headers,
+        jar,
         method.as_str(),
-        uri.path(),
+        path,
         client_cert.0.as_ref(),
     )
     .await?;
 
-    // AWS federation mints an OIDC ID token whose claims hardcode
-    // `hardware_verified: true`, so the *current session* must itself
-    // be hardware-verified — otherwise we'd be laundering a non-verified
-    // bootstrap session into a verified assertion (#451). Gate on the
-    // access-token `hardware_verified` claim, not on `authenticator_id`:
-    // a re-enrollment bootstrap session can legitimately have an
-    // `authenticator_id` set while `hardware_verified` is false.
     if !token.hardware_verified {
         return Err(ServiceError::api(
             StatusCode::FORBIDDEN,
@@ -379,20 +373,12 @@ pub(crate) async fn get_aws_token(
     }
 
     let user_email = token.email.clone().unwrap_or_else(|| user.email.clone());
+    Ok((token, user_email))
+}
 
-    // Issue AWS token using the session-time snapshot of aaguid and org domain.
-    let config = state.config();
-    let result = issue_aws_token(
-        &config.base_url,
-        config.session_hours,
-        &state.oidc_key,
-        &user_email,
-        token.hardware_aaguid.clone(),
-        token.org_domain.clone(),
-        token.dpop_source.as_deref(),
-    )
-    .await
-    .map_err(|e| match e {
+/// Map an [`AwsError`] to a `ServiceError`.
+fn map_aws_error(e: AwsError) -> ServiceError {
+    match e {
         AwsError::ClaimsBuild(ref err) => {
             tracing::error!("AWS token claims build error: {err}");
             ServiceError::api(
@@ -409,9 +395,95 @@ pub(crate) async fn get_aws_token(
                 "Failed to sign token",
             )
         }
-    })?;
+    }
+}
+
+/// Get an OIDC ID token for AWS STS AssumeRoleWithWebIdentity.
+///
+/// GET /v1/credentials/aws/token
+///
+/// Returns an **ES256** OIDC ID token that can be used with AWS STS to assume a
+/// role. The AWS IAM role must be configured to trust the Vouch OIDC provider.
+///
+/// When the DPoP proof includes a `source` custom claim (e.g., "claude-code"),
+/// the issued token includes AI-specific session tags (`vouch:AccessType=AI`,
+/// `vouch:Agent=<agent>`) for CloudTrail differentiation and IAM condition keys.
+pub(crate) async fn get_aws_token(
+    method: Method,
+    uri: OriginalUri,
+    headers: HeaderMap,
+    jar: CookieJar,
+    State(state): State<Arc<AppState>>,
+    client_cert: OptionalClientCert,
+) -> Result<Json<AwsTokenResponse>, ServiceError> {
+    let (token, user_email) =
+        authorize_aws_token_request(&state, &headers, &jar, &method, uri.path(), &client_cert)
+            .await?;
+
+    // Issue AWS token using the session-time snapshot of aaguid and org domain.
+    let config = state.config();
+    let result = issue_aws_token(
+        &config.base_url,
+        config.session_hours,
+        &state.oidc_key,
+        &user_email,
+        &token,
+    )
+    .await
+    .map_err(map_aws_error)?;
 
     crate::infra::metrics::record_credential_issuance("aws");
+
+    Ok(Json(AwsTokenResponse {
+        id_token: result.id_token,
+        expires_in: result.expires_in,
+    }))
+}
+
+/// Get an RS256 OIDC ID token for AWS IAM Identity Center trusted identity
+/// propagation.
+///
+/// GET /v1/credentials/aws/sso/token
+///
+/// The token is the subject (`assertion`) for `sso-oidc:CreateTokenWithIAM`
+/// (`jwt-bearer` grant). This is a distinct endpoint from the ES256
+/// `AssumeRoleWithWebIdentity` token because AWS's trusted-token-issuer contract
+/// requires RS256. The token's `aud` is the Vouch issuer (server base URL); the
+/// customer-managed application's Aud claim must be set to that same URL. The
+/// same hardware-verification gate and AWS session tags apply.
+pub(crate) async fn get_aws_sso_token(
+    method: Method,
+    uri: OriginalUri,
+    headers: HeaderMap,
+    jar: CookieJar,
+    State(state): State<Arc<AppState>>,
+    client_cert: OptionalClientCert,
+) -> Result<Json<AwsTokenResponse>, ServiceError> {
+    let (token, user_email) =
+        authorize_aws_token_request(&state, &headers, &jar, &method, uri.path(), &client_cert)
+            .await?;
+
+    let rsa_key = state.oidc_rsa_key.as_ref().ok_or_else(|| {
+        tracing::error!("Identity Center token requested but no OIDC RSA key configured");
+        ServiceError::api(
+            StatusCode::NOT_IMPLEMENTED,
+            "rsa_key_unavailable",
+            "RS256 signing key is not configured on this server",
+        )
+    })?;
+
+    let config = state.config();
+    let result = issue_sso_jwt(
+        &config.base_url,
+        config.session_hours,
+        rsa_key,
+        &user_email,
+        &token,
+    )
+    .await
+    .map_err(map_aws_error)?;
+
+    crate::infra::metrics::record_credential_issuance("aws_sso");
 
     Ok(Json(AwsTokenResponse {
         id_token: result.id_token,
@@ -1061,6 +1133,40 @@ mod tests {
         let resp: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
         assert!(resp["id_token"].is_string());
         assert!(resp["expires_in"].is_number());
+    }
+
+    /// The dedicated Identity Center endpoint issues an RS256 token (AWS trusted
+    /// token issuer contract) for a hardware-verified session.
+    #[tokio::test]
+    async fn test_aws_sso_token_returns_rs256_for_valid_session() {
+        use base64::Engine;
+
+        let state = test_app_state_with_rsa_key().await;
+        let config = state.config();
+        let app = crate::infra::router::build_app(state.clone(), &config).expect("build app");
+
+        let user = create_test_user(&state.store, "sso@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+
+        let (status, body) = http_get(
+            &app,
+            "/v1/credentials/aws/sso/token",
+            &[("Authorization", &format!("Bearer {token}"))],
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        let resp: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+        let id_token = resp["id_token"].as_str().expect("id_token string");
+
+        // The header `alg` must be RS256 (vs ES256 for the web-identity endpoint).
+        let header_b64 = id_token.split('.').next().expect("jwt header");
+        let header_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(header_b64)
+            .expect("base64url header");
+        let header: serde_json::Value = serde_json::from_slice(&header_bytes).expect("header JSON");
+        assert_eq!(header["alg"], "RS256");
     }
 
     /// Regression for #451: a non-hardware-verified bootstrap session

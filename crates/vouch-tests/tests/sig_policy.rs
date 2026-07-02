@@ -41,6 +41,7 @@ const V1_ROUTES: &[(&str, &str, bool)] = &[
     ("POST", "/v1/keys/register/complete", true),
     ("POST", "/v1/credentials/ssh", true),
     ("GET", "/v1/credentials/aws/token", true),
+    ("GET", "/v1/credentials/aws/sso/token", true),
     ("POST", "/v1/credentials/github/token", true),
     ("GET", "/v1/auth/status", false),
     ("GET", "/v1/credentials/ssh/ca", false),
