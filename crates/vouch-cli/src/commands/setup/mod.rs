@@ -27,10 +27,8 @@ pub(crate) enum SetupCommands {
         /// AWS profile name to configure. Defaults to "vouch" if not specified.
         #[arg(long, help = tr!("arg-setup-aws-profile-help"))]
         profile: Option<String>,
-        /// AWS IAM role ARN to assume. When omitted (and not --discover),
-        /// an interactive Identity Center setup runs if the session is
-        /// configured for it.
-        #[arg(long, help = tr!("arg-setup-aws-role-help"))]
+        /// AWS IAM role ARN to assume. Required unless --discover is set.
+        #[arg(long, required_unless_present = "discover", help = tr!("arg-setup-aws-role-help"))]
         role: Option<String>,
         /// AWS region to set in the profile.
         #[arg(long, help = tr!("arg-setup-aws-region-help"))]

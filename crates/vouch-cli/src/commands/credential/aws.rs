@@ -6,17 +6,11 @@
 use anyhow::{Context, Result};
 use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
-use vouch_cli::tr_args;
 
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
 use crate::client::VouchClient;
-use crate::config::SsoSessionConfig;
-use crate::integrations::aws::config::SsoSession;
-use crate::integrations::aws::identity_center::create_token_with_iam;
-use crate::integrations::aws::sso::{SsoConfig, load_cached_token};
-use crate::integrations::aws::sso_portal::get_role_credentials;
 
 /// AWS credential process output format.
 /// See: https://docs.aws.amazon.com/cli/latest/userguide/cli-configure-sourcing-external.html
@@ -480,181 +474,15 @@ pub(crate) async fn get_aws_credentials(server: &str, role_arn: &str) -> Result<
     .await
 }
 
-/// Run the AWS credential command (a non-interactive `credential_process` helper).
-///
-/// Serves all three access patterns from one command, selected by the target
-/// form:
-/// - `--role <arn>` (no `--account`) → STS `AssumeRoleWithWebIdentity`, chaining
-///   through the management role when configured (patterns 1 & 2).
-/// - `--account <id> --role <permission-set>` → IAM Identity Center portal
-///   `GetRoleCredentials` (pattern 3).
+/// Run the AWS credential command.
 ///
 /// Outputs AWS credential_process JSON to stdout.
-pub(crate) async fn run(
-    server: &str,
-    role: &str,
-    account: Option<&str>,
-    sso_session: Option<&str>,
-) -> Result<()> {
-    let data = if let Some(account_id) = account {
-        // IdC portal: `role` is a permission-set name.
-        run_identity_center(server, account_id, role, sso_session).await?
-    } else {
-        // STS web-identity: `role` is a role ARN.
-        get_aws_credentials(server, role).await?
-    };
+pub(crate) async fn run(server: &str, role_arn: &str) -> Result<()> {
+    let data = get_aws_credentials(server, role_arn).await?;
     let json = serde_json::to_string(&data).context("failed to serialize credentials")?;
     // Machine-readable JSON output: stays English (consumed by AWS CLI).
     println!("{json}");
     Ok(())
-}
-
-/// Pattern 3: issue credentials for a permission-set role via the IAM Identity
-/// Center portal `GetRoleCredentials`.
-async fn run_identity_center(
-    server: &str,
-    account_id: &str,
-    role_name: &str,
-    sso_session: Option<&str>,
-) -> Result<serde_json::Value> {
-    // Fail closed for coding agents: the SSO portal's `GetRoleCredentials` returns
-    // the permission set's full access and accepts no inline session policy, so we
-    // cannot apply the `ReadOnlyAccess` downscoping the STS `--role` path uses
-    // (issue #398). Refuse rather than silently hand an agent unrestricted creds.
-    if let Some(source) = detect_agent_source() {
-        return Err(crate::exit_code::CliError::ConfigError(tr_args!(
-            "aws-err-agent-idc-readonly-unsupported",
-            source = source,
-        ))
-        .into());
-    }
-
-    let aws_config = crate::integrations::aws::config::AwsConfig::load()?;
-    let session = crate::commands::aws::resolve_sso_session(&aws_config, sso_session)?;
-    let region = session.region.clone();
-
-    // Cache the credential_process output keyed by SSO session + target account +
-    // permission set, mirroring the STS `--role` path: repeated AWS CLI refreshes
-    // reuse credentials until expiry (instead of repeating web identity → RS256 →
-    // CreateTokenWithIAM → GetRoleCredentials every time) and fall back to the
-    // cached entry on network errors. Coding agents fail closed above and never
-    // reach this cache.
-    let cache_key = format!("aws:idc:{}:{account_id}:{role_name}", session.name);
-    super::cache::get_or_fetch(&cache_key, "AWS credentials", || async move {
-        let http_client = vouch_common::http::credential_client(&format!(
-            "vouch-cli/{}",
-            env!("CARGO_PKG_VERSION")
-        ))
-        .context("failed to create HTTP client")?;
-
-        let bearer = resolve_bearer_token(server, &session, &region).await?;
-        let creds = get_role_credentials(&http_client, &region, &bearer, account_id, role_name)
-            .await
-            .with_context(|| {
-                format!("failed to get role credentials for account {account_id} role {role_name}")
-            })?;
-
-        let output = CredentialProcessOutput {
-            version: 1,
-            access_key_id: creds.access_key_id,
-            secret_access_key: creds.secret_access_key,
-            session_token: creds.session_token,
-            expiration: creds.expiration.to_string(),
-        };
-        let expires_at = output.expiration.clone();
-        Ok((output.to_json(), expires_at))
-    })
-    .await
-}
-
-/// Resolve the Identity Center bearer token for an SSO session: trusted-token-
-/// issuer exchange when configured, otherwise the cached `vouch aws login`
-/// device token.
-///
-/// Shared with `vouch setup aws`, which uses it to enumerate accounts and roles
-/// during IdC profile discovery.
-pub(crate) async fn resolve_bearer_token(
-    server: &str,
-    session: &SsoSession,
-    region: &str,
-) -> Result<SecretString> {
-    // Propagate a genuine config read/parse error; a missing config file yields
-    // `Config::default()` (no `aws` block) rather than an error, so the device
-    // fallback below still applies for users without Vouch config.
-    let vouch_config = crate::config::Config::load()?;
-    // Exact `[sso-session]`-name → key match, no fallback: a lone Vouch entry
-    // under a mismatched key must not apply one org's config to another's session.
-    let ic_session = vouch_config
-        .aws()
-        .and_then(|a| a.sso_sessions.get(&session.name))
-        .filter(|c| c.identity_center_application_arn.is_some());
-
-    if let Some(cfg) = ic_session {
-        obtain_identity_center_token(server, cfg, region).await
-    } else {
-        let sso_config = SsoConfig::from_session(session);
-        let token = load_cached_token(&sso_config).ok_or_else(|| {
-            crate::exit_code::CliError::NotAuthenticated {
-                reason: "SSO session expired or missing. Run 'vouch aws login' first.".to_string(),
-            }
-        })?;
-        Ok(token.token())
-    }
-}
-
-/// Obtain an Identity Center access token via the trusted-token-issuer exchange.
-///
-/// 1. Assume the management role via `AssumeRoleWithWebIdentity` — the SigV4
-///    caller for `CreateTokenWithIAM`. No AI-agent `ReadOnlyAccess` restriction
-///    is applied here (the caller only needs `sso-oauth:CreateTokenWithIAM`,
-///    which `ReadOnlyAccess` would strip); agent attribution still flows via
-///    the RS256 token's session tags.
-/// 2. Fetch the RS256 assertion token from Vouch (its `aud` is the Vouch server
-///    URL), carrying agent attribution when running inside a coding agent.
-/// 3. Exchange the assertion for an Identity Center access token.
-async fn obtain_identity_center_token(
-    server: &str,
-    cfg: &SsoSessionConfig,
-    region: &str,
-) -> Result<SecretString> {
-    let application_arn = cfg
-        .identity_center_application_arn
-        .as_deref()
-        .context("identity_center_application_arn not configured")?;
-
-    // Assume *this* session's management role directly via web identity — it is
-    // the SigV4 caller for CreateTokenWithIAM. Set `management_role` equal to the
-    // target so no chaining hop is added and the role is not re-resolved from the
-    // first `~/.aws/config` session (which may belong to a different org).
-    let mgmt = exchange_for_sts_credentials(StsRequest {
-        server,
-        role_arn: &cfg.management_role,
-        region,
-        management_role: Some(cfg.management_role.as_str()),
-        agent_source: None,
-    })
-    .await
-    .context("failed to assume management role for Identity Center token exchange")?;
-
-    let mut client = VouchClient::new(server).await?;
-    let agent_source = detect_agent_source();
-    if let Some(src) = agent_source.as_deref() {
-        client.set_dpop_source(src);
-    }
-
-    let assertion: OidcTokenResponse = client
-        .get_authenticated("/v1/credentials/aws/sso/token")
-        .await
-        .context("failed to get Identity Center assertion token from Vouch server")?;
-
-    create_token_with_iam(
-        &mgmt.http_client,
-        region,
-        application_arn,
-        assertion.id_token.expose_secret(),
-        &mgmt.credentials,
-    )
-    .await
 }
 
 /// Fetch an OIDC token and exchange it for STS credentials.

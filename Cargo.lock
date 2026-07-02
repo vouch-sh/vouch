@@ -6307,6 +6307,7 @@ dependencies = [
  "tracing-subscriber",
  "unic-langid",
  "url",
+ "urlencoding",
  "uuid",
  "vouch-agent",
  "vouch-common",

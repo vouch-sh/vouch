@@ -620,10 +620,6 @@ aws-err-sso-expired = SSO session expired or missing. Run '{ -cmd } aws login' f
 aws-err-not-configured =
     AWS not configured.
     Run '{ -cmd } setup aws --role <role-arn>' first, or specify --role.
-aws-err-agent-idc-readonly-unsupported =
-    Coding agent detected ({ $source }): Identity Center portal credentials
-    (--account) cannot be restricted to ReadOnlyAccess, unlike the STS --role path.
-    Use an STS role (--role <arn>) or a dedicated read-only permission set instead.
 
 aws-login-already-authenticated = Already authenticated (expires { $expires_at })
 aws-login-browser-prompt =
