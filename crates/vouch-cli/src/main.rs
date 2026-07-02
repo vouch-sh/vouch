@@ -869,9 +869,6 @@ async fn run() -> Result<()> {
             }
         },
         Commands::Aws { command } => match command {
-            AwsCommands::Login(args) => commands::aws::login::run(args).await,
-            AwsCommands::Accounts(args) => commands::aws::accounts::run(args).await,
-            AwsCommands::Roles(args) => commands::aws::roles::run(args).await,
             AwsCommands::Console(args) => commands::aws::console::run(server, args).await,
         },
         Commands::Completions(args) => {

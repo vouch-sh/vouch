@@ -15,7 +15,6 @@ use crate::client::VouchClient;
 use crate::config::SsoSessionConfig;
 use crate::integrations::aws::config::SsoSession;
 use crate::integrations::aws::identity_center::create_token_with_iam;
-use crate::integrations::aws::sso::{SsoConfig, load_cached_token};
 use crate::integrations::aws::sso_portal::get_role_credentials;
 
 /// AWS credential process output format.
@@ -567,39 +566,37 @@ async fn run_identity_center(
     .await
 }
 
-/// Resolve the Identity Center bearer token for an SSO session: trusted-token-
-/// issuer exchange when configured, otherwise the cached `vouch aws login`
-/// device token.
+/// Resolve an Identity Center bearer token for an SSO session via the
+/// trusted-token-issuer (TTI) exchange.
 ///
-/// Shared with `vouch setup aws`, which uses it to enumerate accounts and roles
-/// during IdC profile discovery.
+/// Requires that the Vouch config has an `aws.sso_sessions.<name>` entry with
+/// `identity_center_application_arn` set (written by `vouch setup aws`). If the
+/// entry is missing, returns a [`crate::exit_code::CliError::ConfigError`] that
+/// directs the user to run `vouch setup aws`.
+///
+/// Shared with `vouch setup aws --discover`, which uses it for IdC portal
+/// account enumeration.
 pub(crate) async fn resolve_bearer_token(
     server: &str,
     session: &SsoSession,
     region: &str,
 ) -> Result<SecretString> {
-    // Propagate a genuine config read/parse error; a missing config file yields
-    // `Config::default()` (no `aws` block) rather than an error, so the device
-    // fallback below still applies for users without Vouch config.
     let vouch_config = crate::config::Config::load()?;
     // Exact `[sso-session]`-name → key match, no fallback: a lone Vouch entry
     // under a mismatched key must not apply one org's config to another's session.
-    let ic_session = vouch_config
+    let cfg = vouch_config
         .aws()
         .and_then(|a| a.sso_sessions.get(&session.name))
-        .filter(|c| c.identity_center_application_arn.is_some());
-
-    if let Some(cfg) = ic_session {
-        obtain_identity_center_token(server, cfg, region).await
-    } else {
-        let sso_config = SsoConfig::from_session(session);
-        let token = load_cached_token(&sso_config).ok_or_else(|| {
-            crate::exit_code::CliError::NotAuthenticated {
-                reason: "SSO session expired or missing. Run 'vouch aws login' first.".to_string(),
-            }
+        .filter(|c| c.identity_center_application_arn.is_some())
+        .ok_or_else(|| {
+            crate::exit_code::CliError::ConfigError(
+                "Identity Center not configured for this SSO session.\n\
+                 Run 'vouch setup aws' to complete the setup."
+                    .to_string(),
+            )
         })?;
-        Ok(token.token())
-    }
+
+    obtain_identity_center_token(server, cfg, region).await
 }
 
 /// Obtain an Identity Center access token via the trusted-token-issuer exchange.

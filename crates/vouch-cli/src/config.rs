@@ -580,13 +580,15 @@ impl Config {
         self.aws.as_ref()
     }
 
-    /// Set the AWS multi-account configuration (in memory only, call `save()` to persist).
-    #[allow(
-        dead_code,
-        reason = "API exposed for callers; lint fires inconsistently across compilation targets"
-    )]
-    pub(crate) fn set_aws(&mut self, config: AwsMultiAccountConfig) {
-        self.aws = Some(config);
+    /// Upsert an SSO session entry in the AWS multi-account config (in memory only).
+    ///
+    /// Creates the `aws.sso_sessions` block if it does not exist, then
+    /// inserts or replaces the entry keyed by `name`. Call `save()` to persist.
+    pub(crate) fn set_sso_session(&mut self, name: String, session: SsoSessionConfig) {
+        self.aws
+            .get_or_insert_with(AwsMultiAccountConfig::default)
+            .sso_sessions
+            .insert(name, session);
     }
 
     // =====================================================================
@@ -1480,10 +1482,12 @@ mod tests {
 
     #[test]
     fn test_aws_empty_sso_sessions_serializes_correctly() {
-        let mut config = Config::default();
-        config.set_aws(AwsMultiAccountConfig {
-            sso_sessions: BTreeMap::new(),
-        });
+        let config = Config {
+            aws: Some(AwsMultiAccountConfig {
+                sso_sessions: BTreeMap::new(),
+            }),
+            ..Default::default()
+        };
 
         let file = ConfigFile::from(&config);
         let json = serde_json::to_string(&file).unwrap();

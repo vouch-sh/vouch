@@ -598,15 +598,9 @@ diag-err-fixture-save = Failed to save fixture: { $reason }
 
 ## aws command
 
-cmd-aws-login-about = Authenticate to AWS IAM Identity Center for account discovery
-cmd-aws-accounts-about = List AWS accounts you have access to via Identity Center
-cmd-aws-roles-about = List available roles across your AWS accounts
 cmd-aws-console-about = Open the AWS Management Console in your browser
 
 arg-aws-sso-session-help = SSO session name from ~/.aws/config (default: first found).
-arg-aws-accounts-json-help = Output as JSON.
-arg-aws-roles-account-help = Filter by account ID (show roles for a single account only).
-arg-aws-roles-json-help = Output as JSON.
 arg-aws-console-role-help = AWS IAM role ARN to assume (auto-detected from ~/.aws/config if not specified).
 
 aws-err-sso-session-not-found =
@@ -616,7 +610,6 @@ aws-err-no-sso-session =
     No SSO session found in ~/.aws/config.
     Run 'aws configure sso' first.
 aws-using-sso-session = Using SSO session '{ $name }'. Specify --sso-session to use a different one.
-aws-err-sso-expired = SSO session expired or missing. Run '{ -cmd } aws login' first.
 aws-err-not-configured =
     AWS not configured.
     Run '{ -cmd } setup aws --role <role-arn>' first, or specify --role.
@@ -625,42 +618,12 @@ aws-err-agent-idc-readonly-unsupported =
     (--account) cannot be restricted to ReadOnlyAccess, unlike the STS --role path.
     Use an STS role (--role <arn>) or a dedicated read-only permission set instead.
 
-aws-login-already-authenticated = Already authenticated (expires { $expires_at })
-aws-login-browser-prompt =
-    Open the following URL in your browser:
-
-      { $url }
-
-    Enter code: { $code }
-aws-login-waiting = Waiting for authorization...
-aws-login-success = Authenticated successfully. Token expires at { $expires_at }
-aws-login-err-http-client = failed to create HTTP client
-aws-login-err-register = failed to register SSO OIDC client
-aws-login-err-device-auth = failed to start device authorization
-aws-login-err-authorization = SSO authorization failed
-aws-login-err-cache-token = failed to cache SSO access token
-
-aws-accounts-table-account-id = ACCOUNT ID
-aws-accounts-table-name = NAME
-aws-accounts-table-email = EMAIL
+# Retained: exercised by the i18n pluralization test (`every_catalog_key_resolves`).
 aws-accounts-summary =
     { $count ->
         [one] { $count } account
        *[other] { $count } accounts
     }
-aws-accounts-err-list = failed to list SSO accounts
-aws-accounts-err-serialize = failed to serialize accounts
-
-aws-roles-table-account-id = ACCOUNT ID
-aws-roles-table-account-name = ACCOUNT NAME
-aws-roles-table-role-name = ROLE NAME
-aws-roles-summary =
-    { $count ->
-        [one] { $count } role
-       *[other] { $count } roles
-    }
-aws-roles-err-list-roles = failed to list roles for account { $account_id }
-aws-roles-err-serialize = failed to serialize roles
 
 aws-console-opening = Opening AWS Console...
 aws-console-browser-failed = Could not open browser automatically. Open the URL above in your browser.
@@ -671,6 +634,41 @@ aws-console-err-signin-request = failed to request signin token
 aws-console-err-signin-failed = federation getSigninToken failed ({ $status }): { $body }
 aws-console-err-signin-parse = failed to parse signin token response
 aws-console-err-invalid-federation-url = invalid federation endpoint URL
+arg-aws-console-account-help = AWS account ID for the Identity Center path (interprets --role as a permission-set name).
+
+## setup aws wizard
+
+wizard-aws-prompt-role-arn = Enter the IAM role ARN Vouch should assume
+wizard-aws-err-invalid-role-arn = invalid IAM role ARN
+wizard-aws-trust-policy-header = Add this trust policy to the role so Vouch can assume it:
+wizard-aws-oidc-provider-hint =
+    If you have not yet registered Vouch as an OIDC provider, create it once:
+      aws iam create-open-id-connect-provider --url { $issuer_url } --client-id-list { $audience }
+wizard-aws-press-enter = Press Enter once the policy is applied in AWS...
+wizard-aws-pattern-select = Choose your AWS access pattern
+wizard-aws-pattern-single = Single account (assume one role directly)
+wizard-aws-pattern-chain = Management account + role chaining (many accounts)
+wizard-aws-pattern-idc = Management account + IAM Identity Center
+wizard-aws-prompt-member-role-name = Member-account role name to assume
+wizard-aws-prompt-member-role-path = Member-account role path
+wizard-aws-permission-policy-header = Attach this permission policy to { $role_arn }:
+wizard-aws-prompt-session-name = SSO session name to save this under
+wizard-aws-saved-vouch-config = Saved Vouch configuration for session '{ $name }'.
+wizard-aws-enumerating-accounts = Enumerating accounts via AWS Organizations...
+wizard-aws-no-accounts-found = No active accounts found.
+wizard-aws-err-management-role-not-configured =
+    No management role configured for this SSO session.
+    Run '{ -cmd } setup aws' to complete setup.
+wizard-aws-idc-setup-hint =
+    In IAM Identity Center, register Vouch as a trusted token issuer and add a
+    customer-managed application:
+      Issuer URL:  { $issuer_url }
+      Aud claim:   { $audience }
+    Grant this role sso-oauth:CreateTokenWithIAM on the application.
+wizard-aws-prompt-idc-app-arn = Enter the Identity Center customer-managed application ARN
+wizard-aws-prompt-session-start-url = SSO start URL
+wizard-aws-prompt-session-region = SSO region
+wizard-aws-created-sso-session = Created [sso-session { $name }] in ~/.aws/config.
 
 ## credential/ssh
 

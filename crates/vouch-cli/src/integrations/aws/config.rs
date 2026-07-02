@@ -48,15 +48,6 @@ impl AwsConfig {
         Ok(Self { ini, path })
     }
 
-    /// Create an empty config for a specific path.
-    #[must_use]
-    pub(crate) fn empty(path: PathBuf) -> Self {
-        Self {
-            ini: Ini::new(),
-            path,
-        }
-    }
-
     /// Check if a profile exists in the config.
     #[must_use]
     pub(crate) fn profile_exists(&self, name: &str) -> bool {
@@ -181,6 +172,23 @@ impl AwsConfig {
             .with_context(|| format!("failed to write {}", self.path.display()))
     }
 
+    /// Write or update an `[sso-session <name>]` block in `~/.aws/config`.
+    ///
+    /// Sets `sso_start_url`, `sso_region`, and `sso_registration_scopes`.
+    /// Existing keys not listed here are left untouched.
+    pub(crate) fn set_sso_session(&mut self, name: &str, start_url: &str, region: &str) {
+        let section = format!("sso-session {name}");
+        self.ini
+            .with_section(Some(section.clone()))
+            .set("sso_start_url", start_url);
+        self.ini
+            .with_section(Some(section.clone()))
+            .set("sso_region", region);
+        self.ini
+            .with_section(Some(section))
+            .set("sso_registration_scopes", "sso:account:access");
+    }
+
     /// Convert a profile name to its INI section name.
     ///
     /// The "default" profile is stored as `[default]`, while all other
@@ -216,12 +224,8 @@ impl AwsConfig {
 pub(crate) struct SsoSession {
     /// Session name (e.g., "smoketurner").
     pub name: String,
-    /// SSO start URL.
-    pub start_url: String,
     /// SSO region.
     pub region: String,
-    /// OAuth scopes (default: `["sso:account:access"]`).
-    pub scopes: Vec<String>,
 }
 
 impl AwsConfig {
@@ -244,21 +248,17 @@ impl AwsConfig {
             let Some(session_name) = section_str.strip_prefix("sso-session ") else {
                 continue;
             };
-            let Some(start_url) = props.get("sso_start_url") else {
+            // A valid [sso-session] must declare a start URL; the value itself
+            // is unused once TTI / portal calls derive everything from region.
+            if props.get("sso_start_url").is_none() {
                 continue;
-            };
+            }
             let Some(region) = props.get("sso_region") else {
                 continue;
             };
-            let scopes = props.get("sso_registration_scopes").map_or_else(
-                || vec!["sso:account:access".to_string()],
-                |s| s.split(',').map(|s| s.trim().to_string()).collect(),
-            );
             sessions.push(SsoSession {
                 name: session_name.to_string(),
-                start_url: start_url.to_string(),
                 region: region.to_string(),
-                scopes,
             });
         }
         sessions
@@ -810,9 +810,7 @@ sso_region = eu-west-1
 
         let session = config.find_sso_session(Some("smoketurner")).unwrap();
         assert_eq!(session.name, "smoketurner");
-        assert_eq!(session.start_url, "https://smoketurner.awsapps.com/start");
         assert_eq!(session.region, "us-east-1");
-        assert_eq!(session.scopes, vec!["sso:account:access"]);
     }
 
     #[test]
@@ -842,21 +840,6 @@ credential_process = vouch credential aws --role arn:aws:iam::111:role/Prod
 
         assert!(config.find_sso_session(Some("nonexistent")).is_none());
         assert!(config.find_sso_session(None).is_none());
-    }
-
-    #[test]
-    fn test_find_sso_session_default_scopes() {
-        // When sso_registration_scopes is absent, default to "sso:account:access"
-        let content = r#"
-[sso-session my-session]
-sso_start_url = https://example.awsapps.com/start
-sso_region = us-east-1
-"#;
-        let file = create_temp_config(content);
-        let config = AwsConfig::load_from(file.path().to_path_buf()).unwrap();
-
-        let session = config.find_sso_session(None).unwrap();
-        assert_eq!(session.scopes, vec!["sso:account:access"]);
     }
 
     #[test]

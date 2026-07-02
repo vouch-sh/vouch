@@ -18,7 +18,6 @@ use super::sts::StsCredentials;
 pub(crate) struct SsoAccount {
     pub account_id: String,
     pub account_name: String,
-    pub email_address: String,
 }
 
 /// A role available to the user in a specific SSO-assigned account.
@@ -400,7 +399,6 @@ mod tests {
         let account: SsoAccount = serde_json::from_str(json).expect("valid JSON");
         assert_eq!(account.account_id, "123456789012");
         assert_eq!(account.account_name, "My Account");
-        assert_eq!(account.email_address, "admin@example.com");
     }
 
     #[test]

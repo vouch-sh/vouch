@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
-//! AWS Identity Center commands for multi-account management.
+//! AWS Identity Center commands.
 
 use anyhow::Result;
 use clap::Subcommand;
@@ -7,23 +7,11 @@ use vouch_cli::{tr, tr_args};
 
 use crate::integrations::aws::config::{AwsConfig, SsoSession};
 
-pub(crate) mod accounts;
 pub(crate) mod console;
-pub(crate) mod login;
-pub(crate) mod roles;
 
-/// AWS Identity Center subcommands.
+/// AWS subcommands.
 #[derive(Subcommand)]
 pub(crate) enum AwsCommands {
-    /// Authenticate to AWS IAM Identity Center for account discovery.
-    #[command(about = tr!("cmd-aws-login-about"))]
-    Login(login::LoginArgs),
-    /// List AWS accounts you have access to via Identity Center.
-    #[command(about = tr!("cmd-aws-accounts-about"))]
-    Accounts(accounts::AccountsArgs),
-    /// List available roles across your AWS accounts.
-    #[command(about = tr!("cmd-aws-roles-about"))]
-    Roles(roles::RolesArgs),
     /// Open the AWS Management Console in your browser.
     #[command(about = tr!("cmd-aws-console-about"))]
     Console(console::ConsoleArgs),

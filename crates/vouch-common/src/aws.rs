@@ -188,6 +188,47 @@ impl Partition {
             Self::AwsIsoF => "csp.hci.ic.gov",
         }
     }
+
+    /// SigV4 signing region for the AWS Organizations global endpoint.
+    ///
+    /// Organizations is a global service with a fixed regional endpoint per
+    /// partition: commercial `us-east-1`, China `cn-northwest-1`, GovCloud
+    /// `us-gov-west-1`, European Sovereign Cloud `eusc-de-east-1`. The ISO
+    /// partitions do not have an Organizations service.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OrganizationsError`] for partitions without an Organizations
+    /// endpoint (all ISO variants).
+    pub fn organizations_signing_region(self) -> Result<&'static str, OrganizationsError> {
+        match self {
+            Self::Aws => Ok("us-east-1"),
+            Self::AwsCn => Ok("cn-northwest-1"),
+            Self::AwsUsGov => Ok("us-gov-west-1"),
+            Self::AwsEusc => Ok("eusc-de-east-1"),
+            Self::AwsIso | Self::AwsIsoB | Self::AwsIsoE | Self::AwsIsoF => {
+                Err(OrganizationsError(self))
+            }
+        }
+    }
+
+    /// AWS Organizations API endpoint for this partition.
+    ///
+    /// Returns a fully-qualified HTTPS URL for the Organizations global
+    /// endpoint (e.g. `https://organizations.us-east-1.amazonaws.com`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OrganizationsError`] for partitions without an Organizations
+    /// endpoint.
+    pub fn organizations_endpoint(self) -> Result<String, OrganizationsError> {
+        let region = self.organizations_signing_region()?;
+        Ok(format!(
+            "https://organizations.{}.{}",
+            region,
+            self.dns_suffix()
+        ))
+    }
 }
 
 impl std::fmt::Display for Partition {
@@ -210,6 +251,15 @@ pub struct PartitionError(String);
 #[derive(Debug, thiserror::Error)]
 #[error("AWS Console federation is not supported for the '{0}' partition")]
 pub struct FederationError(Partition);
+
+/// Error returned when AWS Organizations is not available for a partition.
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "AWS Organizations is not available in the '{0}' partition.\n\
+     Organizations is only supported in commercial (aws), China (aws-cn), \
+     GovCloud (aws-us-gov), and European Sovereign Cloud (aws-eusc) partitions."
+)]
+pub struct OrganizationsError(Partition);
 
 /// Parsed AWS ARN (Amazon Resource Name).
 ///
@@ -671,5 +721,81 @@ mod tests {
         assert_eq!(Partition::Aws.to_string(), "aws");
         assert_eq!(Partition::AwsCn.to_string(), "aws-cn");
         assert_eq!(Partition::AwsUsGov.to_string(), "aws-us-gov");
+    }
+
+    // =========================================================================
+    // Organizations endpoint tests
+    // =========================================================================
+
+    #[test]
+    fn test_organizations_signing_region_commercial() {
+        assert_eq!(
+            Partition::Aws.organizations_signing_region().unwrap(),
+            "us-east-1"
+        );
+    }
+
+    #[test]
+    fn test_organizations_signing_region_china() {
+        assert_eq!(
+            Partition::AwsCn.organizations_signing_region().unwrap(),
+            "cn-northwest-1"
+        );
+    }
+
+    #[test]
+    fn test_organizations_signing_region_govcloud() {
+        assert_eq!(
+            Partition::AwsUsGov.organizations_signing_region().unwrap(),
+            "us-gov-west-1"
+        );
+    }
+
+    #[test]
+    fn test_organizations_signing_region_eusc() {
+        assert_eq!(
+            Partition::AwsEusc.organizations_signing_region().unwrap(),
+            "eusc-de-east-1"
+        );
+    }
+
+    #[test]
+    fn test_organizations_signing_region_unsupported() {
+        assert!(Partition::AwsIso.organizations_signing_region().is_err());
+        assert!(Partition::AwsIsoB.organizations_signing_region().is_err());
+        assert!(Partition::AwsIsoE.organizations_signing_region().is_err());
+        assert!(Partition::AwsIsoF.organizations_signing_region().is_err());
+    }
+
+    #[test]
+    fn test_organizations_endpoint_commercial() {
+        assert_eq!(
+            Partition::Aws.organizations_endpoint().unwrap(),
+            "https://organizations.us-east-1.amazonaws.com"
+        );
+    }
+
+    #[test]
+    fn test_organizations_endpoint_china() {
+        assert_eq!(
+            Partition::AwsCn.organizations_endpoint().unwrap(),
+            "https://organizations.cn-northwest-1.amazonaws.com.cn"
+        );
+    }
+
+    #[test]
+    fn test_organizations_endpoint_govcloud() {
+        assert_eq!(
+            Partition::AwsUsGov.organizations_endpoint().unwrap(),
+            "https://organizations.us-gov-west-1.amazonaws.com"
+        );
+    }
+
+    #[test]
+    fn test_organizations_endpoint_eusc() {
+        assert_eq!(
+            Partition::AwsEusc.organizations_endpoint().unwrap(),
+            "https://organizations.eusc-de-east-1.amazonaws.eu"
+        );
     }
 }

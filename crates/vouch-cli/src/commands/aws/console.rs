@@ -10,14 +10,24 @@ use serde::Deserialize;
 use vouch_cli::{tr, tr_args, tr_eprintln, tr_println};
 
 use crate::integrations::aws;
+use crate::integrations::aws::sts::StsCredentials;
 
 /// Arguments for `vouch aws console`.
 #[derive(clap::Args)]
 pub(crate) struct ConsoleArgs {
-    /// AWS IAM role ARN to assume (auto-detected from ~/.aws/config
-    /// if not specified).
+    /// AWS IAM role ARN to assume (STS path), or permission-set name
+    /// (IdC path when --account is set). Auto-detected from ~/.aws/config
+    /// if not specified and --account is not set.
     #[arg(long, help = tr!("arg-aws-console-role-help"))]
     pub role: Option<String>,
+    /// AWS account ID for the Identity Center path. When set, --role is
+    /// interpreted as a permission-set name (not an ARN) and credentials
+    /// are obtained via the SSO portal `GetRoleCredentials` call.
+    #[arg(long, help = tr!("arg-aws-console-account-help"))]
+    pub account: Option<String>,
+    /// SSO session name from ~/.aws/config (auto-detected if not specified).
+    #[arg(long, help = tr!("arg-aws-sso-session-help"))]
+    pub sso_session: Option<String>,
 }
 
 /// Response from the AWS federation `getSigninToken` action.
@@ -29,50 +39,13 @@ struct SigninTokenResponse {
 
 /// Run `vouch aws console`.
 pub(crate) async fn run(server: &str, args: ConsoleArgs) -> Result<()> {
-    // 1. Resolve role ARN
-    let role_arn = match args.role {
-        Some(r) => r,
-        None => aws::get_local_aws_role()
-            .ok_or_else(|| anyhow::anyhow!(tr!("aws-err-not-configured")))?,
+    let (creds, federation_url, console_url) = if let Some(account_id) = args.account.as_deref() {
+        get_idc_creds(server, &args, account_id).await?
+    } else {
+        get_sts_creds(server, &args).await?
     };
 
-    // 2. Determine partition and federation endpoints from role ARN
-    let partition = vouch_common::aws::Partition::from_arn(&role_arn)
-        .with_context(|| tr!("aws-console-err-invalid-role-arn"))?;
-    let federation_url = partition.federation_endpoint()?;
-    let console_url = partition.console_url()?;
-
-    // 3. Resolve region (for STS call)
-    let profile_name = aws::resolve_profile(None).unwrap_or_default();
-    let region = match aws::resolve_region(None, &profile_name) {
-        Ok(r) => r,
-        Err(_) => {
-            let default = partition.default_sts_region();
-            tracing::debug!("no region configured, defaulting to {default}");
-            default.to_string()
-        }
-    };
-
-    // 4. Exchange Vouch session for STS credentials.
-    //    Uses exchange_for_sts_credentials directly to keep
-    //    SecretAccessKey/SessionToken as SecretString until
-    //    serialization.
-    let agent_source = crate::commands::credential::aws::detect_agent_source();
-    let result = crate::commands::credential::aws::exchange_for_sts_credentials(
-        crate::commands::credential::aws::StsRequest {
-            server,
-            role_arn: &role_arn,
-            region: &region,
-            management_role: None,
-            agent_source: agent_source.as_deref(),
-        },
-    )
-    .await
-    .with_context(|| tr!("aws-console-err-aws-credentials"))?;
-
-    let creds = &result.credentials;
-
-    // 5. Build federation session JSON — expose secrets only here
+    // Build federation session JSON — expose secrets only here.
     let session_encoded = serde_json::to_string(&serde_json::json!({
         "sessionId": creds.access_key_id,
         "sessionKey": creds.secret_access_key.expose_secret(),
@@ -80,9 +53,12 @@ pub(crate) async fn run(server: &str, args: ConsoleArgs) -> Result<()> {
     }))
     .with_context(|| tr!("aws-console-err-serialize-session"))?;
 
-    // 6. POST to federation endpoint for a signin token
-    let resp = result
-        .http_client
+    // POST to federation endpoint for a signin token.
+    let http_client =
+        vouch_common::http::credential_client(&format!("vouch-cli/{}", env!("CARGO_PKG_VERSION")))
+            .context("failed to create HTTP client")?;
+
+    let resp = http_client
         .post(federation_url)
         .form(&[("Action", "getSigninToken"), ("Session", &session_encoded)])
         .send()
@@ -104,7 +80,7 @@ pub(crate) async fn run(server: &str, args: ConsoleArgs) -> Result<()> {
         .await
         .with_context(|| tr!("aws-console-err-signin-parse"))?;
 
-    // 7. Construct login URL using url::Url for safe encoding
+    // Construct login URL using url::Url for safe encoding.
     let mut login_url = url::Url::parse(federation_url)
         .with_context(|| tr!("aws-console-err-invalid-federation-url"))?;
     login_url
@@ -114,7 +90,6 @@ pub(crate) async fn run(server: &str, args: ConsoleArgs) -> Result<()> {
         .append_pair("Destination", console_url)
         .append_pair("SigninToken", &token_resp.signin_token);
 
-    // 8. Open browser (print URL only as fallback)
     let login_str = login_url.as_str();
     match open::that(login_str) {
         Ok(()) => {
@@ -128,6 +103,80 @@ pub(crate) async fn run(server: &str, args: ConsoleArgs) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Credentials plus the federation and console URLs for the caller's partition.
+type FedInfo = (StsCredentials, &'static str, &'static str);
+
+/// STS `AssumeRoleWithWebIdentity` credential path (single account / chaining).
+async fn get_sts_creds(server: &str, args: &ConsoleArgs) -> Result<FedInfo> {
+    let role_arn = match &args.role {
+        Some(r) => r.clone(),
+        None => aws::get_local_aws_role()
+            .ok_or_else(|| anyhow::anyhow!(tr!("aws-err-not-configured")))?,
+    };
+
+    let partition = vouch_common::aws::Partition::from_arn(&role_arn)
+        .with_context(|| tr!("aws-console-err-invalid-role-arn"))?;
+    let federation_url = partition.federation_endpoint()?;
+    let console_url = partition.console_url()?;
+
+    let profile_name = aws::resolve_profile(None).unwrap_or_default();
+    let region = match aws::resolve_region(None, &profile_name) {
+        Ok(r) => r,
+        Err(_) => {
+            let default = partition.default_sts_region();
+            tracing::debug!("no region configured, defaulting to {default}");
+            default.to_string()
+        }
+    };
+
+    let agent_source = crate::commands::credential::aws::detect_agent_source();
+    let result = crate::commands::credential::aws::exchange_for_sts_credentials(
+        crate::commands::credential::aws::StsRequest {
+            server,
+            role_arn: &role_arn,
+            region: &region,
+            management_role: None,
+            agent_source: agent_source.as_deref(),
+        },
+    )
+    .await
+    .with_context(|| tr!("aws-console-err-aws-credentials"))?;
+
+    Ok((result.credentials, federation_url, console_url))
+}
+
+/// Identity Center portal `GetRoleCredentials` path (TTI exchange + portal).
+async fn get_idc_creds(server: &str, args: &ConsoleArgs, account_id: &str) -> Result<FedInfo> {
+    use crate::integrations::aws::sso_portal::get_role_credentials;
+
+    let role_name = args.role.as_deref().ok_or_else(|| {
+        anyhow::anyhow!("--role (permission-set name) is required with --account")
+    })?;
+
+    let aws_config = crate::integrations::aws::config::AwsConfig::load()?;
+    let session =
+        crate::commands::aws::resolve_sso_session(&aws_config, args.sso_session.as_deref())?;
+    let region = session.region.clone();
+
+    let partition = vouch_common::aws::Partition::from_region(&region);
+    let federation_url = partition.federation_endpoint()?;
+    let console_url = partition.console_url()?;
+
+    let http_client =
+        vouch_common::http::credential_client(&format!("vouch-cli/{}", env!("CARGO_PKG_VERSION")))
+            .context("failed to create HTTP client")?;
+
+    let bearer = crate::commands::credential::aws::resolve_bearer_token(server, &session, &region)
+        .await
+        .with_context(|| tr!("aws-console-err-aws-credentials"))?;
+
+    let creds = get_role_credentials(&http_client, &region, &bearer, account_id, role_name)
+        .await
+        .with_context(|| tr!("aws-console-err-aws-credentials"))?;
+
+    Ok((creds, federation_url, console_url))
 }
 
 #[cfg(test)]
