@@ -74,7 +74,7 @@ The previous flat single-IdP variables — `VOUCH_OIDC_ISSUER`, `VOUCH_OIDC_CLIE
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `VOUCH_OIDC_SIGNING_KEY` | No | _(auto-generate)_ | OIDC signing key content (base64-encoded PEM format, P-256 ECDSA). Used for signing access tokens and ID tokens with ES256 algorithm. If not set, an ephemeral key is generated on each server restart (not recommended for production). |
-| `VOUCH_OIDC_RSA_SIGNING_KEY` | No | _(auto-generate)_ | OIDC RSA signing key content (base64-encoded PEM format, RSA-3072). Used for signing ID tokens with RS256 algorithm per OIDC Core Section 3.1.3.7. Minimum 3072-bit key enforced. If not set, an ephemeral key is generated on each server restart. |
+| `VOUCH_OIDC_RSA_SIGNING_KEY` | No | _(auto-generate)_ | OIDC RSA signing key content (base64-encoded PEM format, RSA-3072). Used for signing ID tokens with RS256 algorithm per OIDC Core Section 3.1.3.7 and AWS IAM Identity Center trusted-token-issuer tokens (`/v1/credentials/aws/sso/token`). Minimum 3072-bit key enforced. If not set, an ephemeral key is generated on each server restart. |
 
 ## AWS KMS
 
