@@ -643,7 +643,7 @@ async fn wizard_chaining(
     let session_cfg = crate::config::SsoSessionConfig {
         management_role: management_role_arn.to_string(),
         member_role_name: member_role_name.clone(),
-        member_role_path: normalized_path,
+        member_role_path: normalized_path.clone(),
         identity_center_application_arn: None,
     };
     crate::config::Config::modify(|c| c.set_sso_session(session_name.clone(), session_cfg))?;
@@ -690,8 +690,7 @@ async fn wizard_chaining(
         &accounts,
         &session_name,
         &member_role_name,
-        &crate::config::normalize_member_role_path(&member_role_path)
-            .unwrap_or_else(|_| "/".to_string()),
+        &normalized_path,
         partition,
         profile_prefix,
         region,
