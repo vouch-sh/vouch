@@ -25,10 +25,9 @@ pub(crate) struct ConsoleArgs {
     /// are obtained via the SSO portal `GetRoleCredentials` call.
     #[arg(long, help = tr!("arg-aws-console-account-help"))]
     pub account: Option<String>,
-    /// SSO session name from ~/.aws/config (auto-detected if not specified).
-    #[arg(long, help = tr!("arg-aws-sso-session-help"))]
-    pub sso_session: Option<String>,
-    /// Management role ARN to chain through before assuming --role (STS path).
+    /// Management role ARN. For STS (`--role` ARN) it is the chaining hop; for
+    /// Identity Center (`--account`) it is the CreateTokenWithIAM caller whose
+    /// application ARN/region are configured in vouch.
     #[arg(long, help = tr!("arg-aws-console-management-role-help"))]
     pub management_role: Option<String>,
 }
@@ -168,15 +167,17 @@ async fn get_idc_creds(server: &str, args: &ConsoleArgs, account_id: &str) -> Re
         .into());
     }
 
-    let role_name = args
+    let permission_set = args
         .role
         .as_deref()
         .ok_or_else(|| anyhow::anyhow!(tr!("aws-console-err-role-required-with-account")))?;
+    let management_role = args
+        .management_role
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!(tr!("aws-console-err-idc-needs-management-role")))?;
 
-    let aws_config = crate::integrations::aws::config::AwsConfig::load()?;
-    let session =
-        crate::commands::aws::resolve_sso_session(&aws_config, args.sso_session.as_deref())?;
-    let region = session.region.clone();
+    let (application_arn, region) =
+        crate::commands::credential::aws::idc_application_for(management_role)?;
 
     let partition = vouch_common::aws::Partition::from_region(&region);
     let federation_url = partition.federation_endpoint()?;
@@ -186,11 +187,16 @@ async fn get_idc_creds(server: &str, args: &ConsoleArgs, account_id: &str) -> Re
         vouch_common::http::credential_client(&format!("vouch-cli/{}", env!("CARGO_PKG_VERSION")))
             .context("failed to create HTTP client")?;
 
-    let bearer = crate::commands::credential::aws::resolve_bearer_token(server, &session, &region)
-        .await
-        .with_context(|| tr!("aws-console-err-aws-credentials"))?;
+    let bearer = crate::commands::credential::aws::obtain_identity_center_token(
+        server,
+        management_role,
+        &application_arn,
+        &region,
+    )
+    .await
+    .with_context(|| tr!("aws-console-err-aws-credentials"))?;
 
-    let creds = get_role_credentials(&http_client, &region, &bearer, account_id, role_name)
+    let creds = get_role_credentials(&http_client, &region, &bearer, account_id, permission_set)
         .await
         .with_context(|| tr!("aws-console-err-aws-credentials"))?;
 

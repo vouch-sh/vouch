@@ -12,8 +12,6 @@ use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
 use crate::client::VouchClient;
-use crate::config::SsoSessionConfig;
-use crate::integrations::aws::config::SsoSession;
 use crate::integrations::aws::identity_center::create_token_with_iam;
 use crate::integrations::aws::sso_portal::get_role_credentials;
 
@@ -288,8 +286,27 @@ pub(crate) async fn exchange_for_sts_credentials(req: StsRequest<'_>) -> Result<
     } = req;
 
     // The management role, when present, is passed explicitly by the caller
-    // (chaining `--management-role`); `None` means a direct web-identity assume.
-    let mgmt = management_role;
+    // (chaining `--management-role`). Otherwise, recover it from the vouch
+    // profile whose `credential_process` targets this exact role — so callers
+    // that read the role from `~/.aws/config` (exec, codecommit, rds, redshift,
+    // eks, codeartifact, docker, aws console) still chain instead of doing a
+    // bare web-identity assume. `None` here means a direct assume.
+    let resolved;
+    let mgmt = match management_role {
+        Some(m) => Some(m),
+        None => {
+            resolved = crate::integrations::aws::config::AwsConfig::load()
+                .ok()
+                .and_then(|c| c.find_vouch_profile_for_role(role_arn))
+                .and_then(|p| p.credential_process)
+                .and_then(|cp| {
+                    crate::integrations::aws::config::extract_management_role_from_credential_process(
+                        &cp,
+                    )
+                });
+            resolved.as_deref()
+        }
+    };
 
     let arn = parse_role_arn(role_arn)?;
     let domain_suffix = arn.partition.dns_suffix();
@@ -466,21 +483,22 @@ pub(crate) async fn get_aws_credentials(
 /// Serves all three access patterns from one command, selected by the target
 /// form:
 /// - `--role <arn>` (no `--account`) → STS `AssumeRoleWithWebIdentity`, chaining
-///   through the management role when configured (patterns 1 & 2).
-/// - `--account <id> --role <permission-set>` → IAM Identity Center portal
-///   `GetRoleCredentials` (pattern 3).
+///   through the explicit `--management-role` when set (patterns 1 & 2).
+/// - `--account <id> --role <permission-set> --management-role <mgmt>` → IAM
+///   Identity Center portal `GetRoleCredentials` (pattern 3).
 ///
 /// Outputs AWS credential_process JSON to stdout.
 pub(crate) async fn run(
     server: &str,
     role: &str,
     account: Option<&str>,
-    sso_session: Option<&str>,
     management_role: Option<&str>,
 ) -> Result<()> {
     let data = if let Some(account_id) = account {
-        // IdC portal: `role` is a permission-set name; `--sso-session` selects it.
-        run_identity_center(server, account_id, role, sso_session).await?
+        // IdC portal: `role` is a permission-set name; `--management-role`
+        // selects the Identity Center application (its ARN/region are configured
+        // for that management role).
+        run_identity_center(server, account_id, role, management_role).await?
     } else {
         // STS web-identity: `role` is a role ARN, optionally chained through
         // an explicit `--management-role`.
@@ -492,13 +510,38 @@ pub(crate) async fn run(
     Ok(())
 }
 
+/// Look up the Identity Center application ARN and portal region configured for
+/// `management_role` in `aws.management_roles`. Errors (pointing the user to
+/// `vouch setup aws`) when the management role has no Identity Center config.
+///
+/// Shared by the credential and console Identity Center paths.
+pub(crate) fn idc_application_for(management_role: &str) -> Result<(String, String)> {
+    let vouch_config = crate::config::Config::load()?;
+    vouch_config
+        .aws()
+        .and_then(|a| a.management_roles.get(management_role))
+        .and_then(|c| {
+            Some((
+                c.identity_center_application_arn.clone()?,
+                c.identity_center_region.clone()?,
+            ))
+        })
+        .ok_or_else(|| {
+            crate::exit_code::CliError::ConfigError(tr!("aws-err-idc-not-configured")).into()
+        })
+}
+
 /// Pattern 3: issue credentials for a permission-set role via the IAM Identity
 /// Center portal `GetRoleCredentials`.
+///
+/// The management role (the `CreateTokenWithIAM` caller) is passed explicitly;
+/// its Identity Center application ARN and portal region are read from
+/// `aws.management_roles.<mgmt>` in the Vouch config.
 async fn run_identity_center(
     server: &str,
     account_id: &str,
-    role_name: &str,
-    sso_session: Option<&str>,
+    permission_set: &str,
+    management_role: Option<&str>,
 ) -> Result<serde_json::Value> {
     // Fail closed for coding agents: the SSO portal's `GetRoleCredentials` returns
     // the permission set's full access and accepts no inline session policy, so we
@@ -512,17 +555,17 @@ async fn run_identity_center(
         .into());
     }
 
-    let aws_config = crate::integrations::aws::config::AwsConfig::load()?;
-    let session = crate::commands::aws::resolve_sso_session(&aws_config, sso_session)?;
-    let region = session.region.clone();
+    let management_role = management_role.ok_or_else(|| {
+        crate::exit_code::CliError::ConfigError(tr!("aws-err-idc-needs-management-role"))
+    })?;
+    let (application_arn, region) = idc_application_for(management_role)?;
 
-    // Cache the credential_process output keyed by SSO session + target account +
-    // permission set, mirroring the STS `--role` path: repeated AWS CLI refreshes
-    // reuse credentials until expiry (instead of repeating web identity → RS256 →
-    // CreateTokenWithIAM → GetRoleCredentials every time) and fall back to the
-    // cached entry on network errors. Coding agents fail closed above and never
-    // reach this cache.
-    let cache_key = format!("aws:idc:{}:{account_id}:{role_name}", session.name);
+    // Cache the credential_process output keyed by management role + target
+    // account + permission set, mirroring the STS `--role` path: repeated AWS CLI
+    // refreshes reuse credentials until expiry (instead of repeating web identity
+    // → RS256 → CreateTokenWithIAM → GetRoleCredentials every time) and fall back
+    // to the cached entry on network errors. Coding agents fail closed above.
+    let cache_key = format!("aws:idc:{management_role}:{account_id}:{permission_set}");
     super::cache::get_or_fetch(&cache_key, "AWS credentials", || async move {
         let http_client = vouch_common::http::credential_client(&format!(
             "vouch-cli/{}",
@@ -530,12 +573,18 @@ async fn run_identity_center(
         ))
         .context("failed to create HTTP client")?;
 
-        let bearer = resolve_bearer_token(server, &session, &region).await?;
-        let creds = get_role_credentials(&http_client, &region, &bearer, account_id, role_name)
-            .await
-            .with_context(|| {
-                format!("failed to get role credentials for account {account_id} role {role_name}")
-            })?;
+        let bearer =
+            obtain_identity_center_token(server, management_role, &application_arn, &region)
+                .await?;
+        let creds =
+            get_role_credentials(&http_client, &region, &bearer, account_id, permission_set)
+                .await
+                .with_context(|| {
+                    format!(
+                        "failed to get role credentials for account {account_id} \
+                         permission set {permission_set}"
+                    )
+                })?;
 
         let output = CredentialProcessOutput {
             version: 1,
@@ -550,60 +599,26 @@ async fn run_identity_center(
     .await
 }
 
-/// Resolve an Identity Center bearer token for an SSO session via the
-/// trusted-token-issuer (TTI) exchange.
+/// Obtain an Identity Center access token via the trusted-token-issuer exchange:
 ///
-/// Requires that the Vouch config has an `aws.sso_sessions.<name>` entry with
-/// `identity_center_application_arn` set (written by `vouch setup aws`). If the
-/// entry is missing, returns a [`crate::exit_code::CliError::ConfigError`] that
-/// directs the user to run `vouch setup aws`.
-///
-/// Shared with `vouch setup aws --discover`, which uses it for IdC portal
-/// account enumeration.
-pub(crate) async fn resolve_bearer_token(
-    server: &str,
-    session: &SsoSession,
-    region: &str,
-) -> Result<SecretString> {
-    let vouch_config = crate::config::Config::load()?;
-    // Exact `[sso-session]`-name → key match, no fallback: a lone Vouch entry
-    // under a mismatched key must not apply one org's config to another's session.
-    let cfg = vouch_config
-        .aws()
-        .and_then(|a| a.sso_sessions.get(&session.name))
-        .filter(|c| c.identity_center_application_arn.is_some())
-        .ok_or_else(|| {
-            crate::exit_code::CliError::ConfigError(tr!("aws-err-idc-not-configured"))
-        })?;
-
-    obtain_identity_center_token(server, cfg, region).await
-}
-
-/// Obtain an Identity Center access token via the trusted-token-issuer exchange.
-///
-/// 1. Assume the management role via `AssumeRoleWithWebIdentity` — the SigV4
-///    caller for `CreateTokenWithIAM`. No AI-agent `ReadOnlyAccess` restriction
-///    is applied here (the caller only needs `sso-oauth:CreateTokenWithIAM`,
-///    which `ReadOnlyAccess` would strip); agent attribution still flows via
-///    the RS256 token's session tags.
+/// 1. Assume `management_role_arn` via `AssumeRoleWithWebIdentity` — the SigV4
+///    caller for `CreateTokenWithIAM`.
 /// 2. Fetch the RS256 assertion token from Vouch (its `aud` is the Vouch server
-///    URL), carrying agent attribution when running inside a coding agent.
+///    URL).
 /// 3. Exchange the assertion for an Identity Center access token.
-async fn obtain_identity_center_token(
+///
+/// Fails closed for coding agents: this hop assumes the management role and
+/// cannot be downscoped to `ReadOnlyAccess` (that would strip
+/// `sso-oauth:CreateTokenWithIAM`), so — like the credential and console
+/// Identity Center paths — an agent must not reach it, including via `setup aws
+/// --discover`, which has no terminal gate (#398). Shared with `setup aws`
+/// account enumeration.
+pub(crate) async fn obtain_identity_center_token(
     server: &str,
-    cfg: &SsoSessionConfig,
+    management_role_arn: &str,
+    application_arn: &str,
     region: &str,
 ) -> Result<SecretString> {
-    let application_arn = cfg
-        .identity_center_application_arn
-        .as_deref()
-        .context("identity_center_application_arn not configured")?;
-
-    // Fail closed for coding agents: this hop assumes the management role as the
-    // SigV4 caller for CreateTokenWithIAM and cannot be downscoped to
-    // ReadOnlyAccess (that would strip sso-oauth:CreateTokenWithIAM). Like the
-    // credential and console Identity Center paths, an agent must not reach it —
-    // including via `setup aws --discover`, which has no terminal gate (#398).
     if let Some(source) = detect_agent_source() {
         return Err(crate::exit_code::CliError::ConfigError(tr_args!(
             "aws-err-agent-idc-readonly-unsupported",
@@ -612,15 +627,13 @@ async fn obtain_identity_center_token(
         .into());
     }
 
-    // Assume *this* session's management role directly via web identity — it is
-    // the SigV4 caller for CreateTokenWithIAM. Set `management_role` equal to the
-    // target so no chaining hop is added and the role is not re-resolved from the
-    // first `~/.aws/config` session (which may belong to a different org).
+    // Assume the management role directly via web identity — pin `management_role`
+    // to the target so no chaining hop is added.
     let mgmt = exchange_for_sts_credentials(StsRequest {
         server,
-        role_arn: &cfg.management_role,
+        role_arn: management_role_arn,
         region,
-        management_role: Some(cfg.management_role.as_str()),
+        management_role: Some(management_role_arn),
         agent_source: None,
     })
     .await

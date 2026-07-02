@@ -4,9 +4,9 @@
 //! Configures AWS CLI/SDK to use Vouch for credential federation. Entry
 //! point is `run`; call paths:
 //!
-//! - `--role <arn>`  → `run_explicit_role` (non-interactive, single account)
-//! - `--discover`    → `run_discover` (non-interactive, re-enumerates sessions)
-//! - no flags + TTY  → `run_wizard` (interactive wizard, role-first)
+//! - `--role <arn>`  → `run_explicit_role` (non-interactive; add `--management-role` to chain)
+//! - `--discover`    → `run_discover` (non-interactive, re-enumerates an Identity Center management role)
+//! - no flags + TTY  → `run_wizard` (interactive; detects existing setup, else pattern-first)
 
 use anyhow::{Context, Result};
 use vouch_cli::{tr, tr_args, tr_println};
@@ -285,7 +285,7 @@ pub(crate) async fn run(
     discover: bool,
 ) -> Result<()> {
     if discover {
-        return run_discover(server, profile, region).await;
+        return run_discover(server, profile, management_role).await;
     }
     match role_arn {
         Some(role_arn) => run_explicit_role(profile, role_arn, management_role, region),
@@ -371,28 +371,55 @@ fn run_explicit_role(
 async fn run_discover(
     server: &str,
     profile_prefix: Option<&str>,
-    region: Option<&str>,
+    management_role: Option<&str>,
 ) -> Result<()> {
-    use crate::integrations::aws::config::AwsConfig as AwsCliConfig;
-
+    // Only Identity Center management roles enumerate accounts/roles from the
+    // portal; role chaining uses explicit per-account profiles.
     let vouch_config = crate::config::Config::load()?;
-    let aws_cli_config = AwsCliConfig::load()?;
-
-    let session = crate::commands::aws::resolve_sso_session(&aws_cli_config, None)?;
-    let session_cfg = vouch_config
+    let idc: Vec<(String, String, String)> = vouch_config
         .aws()
-        .and_then(|a| a.sso_sessions.get(&session.name))
-        .cloned()
+        .map(|a| {
+            a.management_roles
+                .iter()
+                .filter_map(|(mgmt, c)| {
+                    Some((
+                        mgmt.clone(),
+                        c.identity_center_application_arn.clone()?,
+                        c.identity_center_region.clone()?,
+                    ))
+                })
+                .collect()
+        })
         .unwrap_or_default();
 
-    if session_cfg.identity_center_application_arn.is_some() {
-        return discover_identity_center(server, &session, profile_prefix, region).await;
-    }
+    let (mgmt, app_arn, region) = match management_role {
+        Some(m) => idc
+            .into_iter()
+            .find(|(role, _, _)| role == m)
+            .ok_or_else(|| {
+                crate::exit_code::CliError::ConfigError(tr!("aws-err-idc-not-configured"))
+            })?,
+        None => {
+            let mut roles = idc.into_iter();
+            match (roles.next(), roles.next()) {
+                (Some(only), None) => only,
+                (None, _) => {
+                    return Err(crate::exit_code::CliError::ConfigError(tr!(
+                        "setup-aws-err-discover-not-idc"
+                    ))
+                    .into());
+                }
+                (Some(_), Some(_)) => {
+                    return Err(crate::exit_code::CliError::ConfigError(tr!(
+                        "setup-aws-err-discover-ambiguous"
+                    ))
+                    .into());
+                }
+            }
+        }
+    };
 
-    // Only Identity Center sessions enumerate accounts/roles from the SSO
-    // portal. Role chaining is configured with explicit per-account profiles
-    // (`setup aws --role <arn> --management-role <mgmt-arn>`).
-    Err(crate::exit_code::CliError::ConfigError(tr!("setup-aws-err-discover-not-idc")).into())
+    discover_identity_center(server, profile_prefix, &mgmt, &app_arn, &region).await
 }
 
 // =========================================================================
@@ -403,7 +430,8 @@ async fn run_discover(
 enum AccessPattern {
     /// STS `AssumeRoleWithWebIdentity` — single account.
     Single,
-    /// Role chaining through a management role, accounts via Organizations.
+    /// Role chaining through a management role; chained accounts are added as
+    /// explicit per-account profiles.
     Chain,
     /// IAM Identity Center trusted-token-issuer exchange.
     Idc,
@@ -419,22 +447,171 @@ impl std::fmt::Display for AccessPattern {
     }
 }
 
-/// Role-first interactive wizard.
+/// Interactive wizard.
 ///
-/// Guides the user through configuring AWS federation for one of three
-/// access patterns: single account STS, multi-account role chaining, or
-/// IAM Identity Center TTI.
+/// Detects existing AWS setup (in `~/.config/vouch/config.json` and
+/// `~/.aws/config`) and offers context-aware actions on a re-run; otherwise
+/// runs the first-time, pattern-first setup.
 async fn run_wizard(server: &str, profile: Option<&str>, region: Option<&str>) -> Result<()> {
-    use crate::integrations::aws::sts::parse_role_arn;
-
     require_terminal()?;
 
-    // Step 1: role ARN.
-    let role_arn = prompt_text(&tr!("wizard-aws-prompt-role-arn"))?;
+    let existing = ExistingSetup::detect();
+    if existing.chaining_mgmt_roles.is_empty() && existing.idc_mgmt_roles.is_empty() {
+        new_setup(server, profile, region).await
+    } else {
+        reconfigure(server, profile, region, &existing).await
+    }
+}
+
+/// Existing AWS setup with re-run actions, classified from the two sources of
+/// truth: the management role / Identity Center config stored in
+/// `~/.config/vouch/config.json`, and the vouch profiles already written to
+/// `~/.aws/config`. Single-account profiles carry no distinct re-run action and
+/// are not tracked.
+struct ExistingSetup {
+    /// Management-role ARNs available for chaining (no Identity Center config).
+    chaining_mgmt_roles: Vec<String>,
+    /// Management-role ARNs configured for Identity Center (application ARN set).
+    idc_mgmt_roles: Vec<String>,
+}
+
+impl ExistingSetup {
+    fn detect() -> Self {
+        use crate::integrations::aws::config::{
+            AwsConfig, extract_management_role_from_credential_process,
+        };
+        let mut chaining = std::collections::BTreeSet::new();
+        let mut idc = std::collections::BTreeSet::new();
+
+        // Vouch config: a management-role entry with an application ARN is
+        // Identity Center; otherwise it is a chaining hop.
+        if let Ok(cfg) = crate::config::Config::load()
+            && let Some(aws) = cfg.aws()
+        {
+            for (mgmt, entry) in &aws.management_roles {
+                if entry.identity_center_application_arn.is_some() {
+                    idc.insert(mgmt.clone());
+                } else {
+                    chaining.insert(mgmt.clone());
+                }
+            }
+        }
+
+        // Profiles in ~/.aws/config: `--account` is an Identity Center profile
+        // (its management role is captured from vouch config above) and
+        // `--management-role` on a bare `--role` profile is a chaining hop. A
+        // profile with no `--management-role` is single-account and ignored.
+        if let Ok(aws_config) = AwsConfig::load() {
+            for profile in aws_config.find_all_vouch_profiles() {
+                if let Some(cp) = profile.credential_process.as_deref()
+                    && !cp.contains("--account")
+                    && let Some(mgmt) = extract_management_role_from_credential_process(cp)
+                {
+                    chaining.insert(mgmt);
+                }
+            }
+        }
+
+        // A role configured for Identity Center is presented as IdC, not chaining.
+        chaining.retain(|mgmt| !idc.contains(mgmt));
+
+        Self {
+            chaining_mgmt_roles: chaining.into_iter().collect(),
+            idc_mgmt_roles: idc.into_iter().collect(),
+        }
+    }
+}
+
+/// A context-aware action offered on a re-run.
+enum ReconfigAction {
+    /// Add a chained account through the given management role.
+    AddChaining(String),
+    /// Re-enumerate the accounts/roles of an Identity Center management role.
+    RediscoverIdc(String),
+    /// Start a fresh access-pattern setup.
+    NewPattern,
+}
+
+impl std::fmt::Display for ReconfigAction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::AddChaining(mgmt) => f.write_str(&tr_args!(
+                "wizard-aws-reconfig-add-chaining",
+                mgmt = mgmt.as_str()
+            )),
+            Self::RediscoverIdc(mgmt) => f.write_str(&tr_args!(
+                "wizard-aws-reconfig-rediscover-idc",
+                mgmt = mgmt.as_str()
+            )),
+            Self::NewPattern => f.write_str(&tr!("wizard-aws-reconfig-new-pattern")),
+        }
+    }
+}
+
+/// Re-run: present context-aware actions derived from the existing setup and
+/// carry them out.
+async fn reconfigure(
+    server: &str,
+    profile: Option<&str>,
+    region: Option<&str>,
+    existing: &ExistingSetup,
+) -> Result<()> {
+    let mut actions: Vec<ReconfigAction> = Vec::new();
+    for mgmt in &existing.chaining_mgmt_roles {
+        actions.push(ReconfigAction::AddChaining(mgmt.clone()));
+    }
+    for mgmt in &existing.idc_mgmt_roles {
+        actions.push(ReconfigAction::RediscoverIdc(mgmt.clone()));
+    }
+    actions.push(ReconfigAction::NewPattern);
+
+    println!();
+    let choice = prompt_select(&tr!("wizard-aws-reconfig-prompt"), actions)?;
+    println!();
+
+    match choice {
+        ReconfigAction::AddChaining(mgmt) => {
+            let account_role = prompt_text(&tr!("wizard-aws-prompt-account-role"))?;
+            crate::integrations::aws::sts::parse_role_arn(&account_role).map_err(|_| {
+                crate::exit_code::CliError::ConfigError(tr!("wizard-aws-err-invalid-role-arn"))
+            })?;
+            run_explicit_role(profile, &account_role, Some(&mgmt), region)
+        }
+        ReconfigAction::RediscoverIdc(mgmt) => {
+            let (application_arn, idc_region) =
+                crate::commands::credential::aws::idc_application_for(&mgmt)?;
+            discover_identity_center(server, profile, &mgmt, &application_arn, &idc_region).await
+        }
+        ReconfigAction::NewPattern => new_setup(server, profile, region).await,
+    }
+}
+
+/// First-time setup: choose an access pattern, then configure it. Each branch
+/// prompts for its role, prints the trust policy, and finishes the pattern.
+async fn new_setup(server: &str, profile: Option<&str>, region: Option<&str>) -> Result<()> {
+    use crate::integrations::aws::sts::parse_role_arn;
+
+    println!();
+    let pattern = prompt_select(
+        &tr!("wizard-aws-pattern-select"),
+        vec![
+            AccessPattern::Single,
+            AccessPattern::Chain,
+            AccessPattern::Idc,
+        ],
+    )?;
+    println!();
+
+    // Single account trusts Vouch directly; chaining and Identity Center prompt
+    // for the management-account role that Vouch's OIDC provider trusts.
+    let role_prompt = match pattern {
+        AccessPattern::Single => tr!("wizard-aws-prompt-role-single"),
+        AccessPattern::Chain | AccessPattern::Idc => tr!("wizard-aws-prompt-role-management"),
+    };
+    let role_arn = prompt_text(&role_prompt)?;
     let arn = parse_role_arn(&role_arn).map_err(|_| {
         crate::exit_code::CliError::ConfigError(tr!("wizard-aws-err-invalid-role-arn"))
     })?;
-
     let account_id = arn
         .account
         .as_deref()
@@ -442,16 +619,31 @@ async fn run_wizard(server: &str, profile: Option<&str>, region: Option<&str>) -
             crate::exit_code::CliError::ConfigError(tr!("wizard-aws-err-invalid-role-arn"))
         })?
         .to_string();
-
     let partition = arn.partition;
-    let issuer_host = server_host(server)?;
 
-    // Print trust policy and OIDC provider setup hint. Restrict the subject to
-    // the caller's email domain when we can read it from the session token.
+    print_trust_policy(server, &account_id, partition).await?;
+    prompt_continue()?;
+
+    match pattern {
+        AccessPattern::Single => run_explicit_role(profile, &role_arn, None, region),
+        AccessPattern::Chain => wizard_chaining(&role_arn, partition),
+        AccessPattern::Idc => wizard_idc(server, profile, &role_arn, partition, region).await,
+    }
+}
+
+/// Print the OIDC federation trust policy for `role`'s account, plus the
+/// one-time OIDC-provider registration hint. The subject is restricted to the
+/// caller's email domain when it can be read from the session token.
+async fn print_trust_policy(
+    server: &str,
+    account_id: &str,
+    partition: vouch_common::aws::Partition,
+) -> Result<()> {
+    let issuer_host = server_host(server)?;
     let subject_pattern = current_user_subject_pattern().await;
     let trust = policy::trust(
         partition.as_str(),
-        &account_id,
+        account_id,
         &issuer_host,
         server,
         subject_pattern.as_deref(),
@@ -469,34 +661,11 @@ async fn run_wizard(server: &str, profile: Option<&str>, region: Option<&str>) -
             audience = server,
         )
     );
-
-    prompt_continue()?;
-
-    // Step 2: access pattern.
-    println!();
-    let patterns = vec![
-        AccessPattern::Single,
-        AccessPattern::Chain,
-        AccessPattern::Idc,
-    ];
-    let pattern = prompt_select(&tr!("wizard-aws-pattern-select"), patterns)?;
-    println!();
-
-    match pattern {
-        AccessPattern::Single => run_explicit_role(profile, &role_arn, None, region),
-        AccessPattern::Chain => wizard_chaining(&role_arn, partition),
-        AccessPattern::Idc => {
-            wizard_idc(server, profile, &role_arn, region, &account_id, partition).await
-        }
-    }
+    Ok(())
 }
 
-/// Wizard branch: role chaining.
-///
-/// Prints the management-role permission policy and explains how to add each
-/// chained account's profile explicitly (`setup aws --role <account-role-arn>
-/// --management-role <this-role>`). No account enumeration and no per-account
-/// role templating — each profile carries its exact role ARN.
+/// Wizard branch: role chaining. Prints the management-role permission policy
+/// and explains how to add each chained account explicitly.
 fn wizard_chaining(
     management_role_arn: &str,
     partition: vouch_common::aws::Partition,
@@ -529,16 +698,16 @@ fn wizard_chaining(
     Ok(())
 }
 
-/// Wizard branch: IAM Identity Center TTI.
+/// Wizard branch: IAM Identity Center TTI. Stores the management role's
+/// application ARN and portal region, then enumerates the caller's real accounts
+/// and roles.
 async fn wizard_idc(
     server: &str,
-    profile_prefix: Option<&str>,
+    profile: Option<&str>,
     management_role_arn: &str,
-    region: Option<&str>,
-    _account_id: &str,
     partition: vouch_common::aws::Partition,
+    region: Option<&str>,
 ) -> Result<()> {
-    // Print IdC setup instructions.
     println!(
         "\n{}\n",
         tr_args!(
@@ -547,12 +716,10 @@ async fn wizard_idc(
             audience = server,
         )
     );
-
     prompt_continue()?;
 
     let app_arn = prompt_text(&tr!("wizard-aws-prompt-idc-app-arn"))?;
 
-    // Print permission policy.
     let perm = policy::idc(&app_arn);
     let perm_json =
         serde_json::to_string_pretty(&perm).context("failed to serialize permission policy")?;
@@ -564,60 +731,29 @@ async fn wizard_idc(
         )
     );
     println!("{perm_json}\n");
-
     prompt_continue()?;
 
-    let session_name = prompt_text(&tr!("wizard-aws-prompt-session-name"))?;
-    ensure_sso_session(&session_name)?;
-
-    let session_cfg = crate::config::SsoSessionConfig {
-        management_role: management_role_arn.to_string(),
-        identity_center_application_arn: Some(app_arn),
-    };
-    crate::config::Config::modify(|c| c.set_sso_session(session_name.clone(), session_cfg))?;
-    tr_println!(
-        "wizard-aws-saved-vouch-config",
-        name = session_name.as_str()
+    let default_region = region.map_or_else(
+        || partition.default_sts_region().to_string(),
+        str::to_string,
     );
+    let idc_region = prompt_text_default(&tr!("wizard-aws-prompt-idc-region"), &default_region)?;
 
-    let aws_cli_config = crate::integrations::aws::config::AwsConfig::load()?;
-    let session = crate::commands::aws::resolve_sso_session(&aws_cli_config, Some(&session_name))?;
+    let config = crate::config::ManagementRoleConfig {
+        identity_center_application_arn: Some(app_arn.clone()),
+        identity_center_region: Some(idc_region.clone()),
+    };
+    crate::config::Config::modify(|c| {
+        c.set_management_role(management_role_arn.to_string(), config);
+    })?;
+    tr_println!("wizard-aws-saved-vouch-config", name = management_role_arn);
 
-    let effective_region = region.unwrap_or(&session.region).to_string();
-    let _ = partition; // partition inferred from session region inside discover_identity_center
-
-    discover_identity_center(server, &session, profile_prefix, Some(&effective_region)).await
+    discover_identity_center(server, profile, management_role_arn, &app_arn, &idc_region).await
 }
 
 // =========================================================================
 // Shared wizard helpers
 // =========================================================================
-
-/// Ensure an `[sso-session <name>]` block exists in `~/.aws/config`.
-///
-/// If the session is not found, prompts for the start URL and region, then
-/// writes the block and saves `~/.aws/config`.
-fn ensure_sso_session(name: &str) -> Result<()> {
-    let config_path = AwsConfig::default_path()?;
-    let aws_dir = dirs::home_dir()
-        .context("could not determine home directory")?
-        .join(".aws");
-    ensure_secure_dir(&aws_dir)?;
-    let mut config = AwsConfig::load_from(config_path)?;
-
-    if config.find_sso_session(Some(name)).is_some() {
-        return Ok(());
-    }
-
-    // Session not found — prompt and create it.
-    let start_url = prompt_text(&tr!("wizard-aws-prompt-session-start-url"))?;
-    let sso_region = prompt_text(&tr!("wizard-aws-prompt-session-region"))?;
-
-    config.set_sso_session(name, &start_url, &sso_region);
-    config.save()?;
-    tr_println!("wizard-aws-created-sso-session", name = name);
-    Ok(())
-}
 
 /// Derive the caller's subject restriction (`*@<domain>`) from the `email`
 /// claim of the locally-resolved session token.
@@ -648,35 +784,40 @@ fn server_host(server: &str) -> Result<String> {
 /// Build the `credential_process` line for an Identity Center profile.
 fn idc_credential_process(
     vouch_path: &std::path::Path,
-    session_name: &str,
     account_id: &str,
-    role_name: &str,
+    permission_set: &str,
+    management_role: &str,
 ) -> String {
     format!(
-        "\"{}\" credential aws --sso-session \"{session_name}\" --account {account_id} --role \"{role_name}\"",
+        "\"{}\" credential aws --account {account_id} --role \"{permission_set}\" --management-role {management_role}",
         vouch_path.display()
     )
 }
 
-/// Discover accounts/permission-sets via the Identity Center portal.
+/// Discover accounts/permission-sets via the Identity Center portal for the
+/// given management role and write a profile per (account × permission set).
 async fn discover_identity_center(
     server: &str,
-    session: &crate::integrations::aws::config::SsoSession,
     profile_prefix: Option<&str>,
-    region: Option<&str>,
+    management_role: &str,
+    application_arn: &str,
+    region: &str,
 ) -> Result<()> {
     use crate::integrations::aws::sso_portal::{list_account_roles, list_accounts};
 
-    let sso_region = session.region.clone();
-    let bearer =
-        crate::commands::credential::aws::resolve_bearer_token(server, session, &sso_region)
-            .await?;
+    let bearer = crate::commands::credential::aws::obtain_identity_center_token(
+        server,
+        management_role,
+        application_arn,
+        region,
+    )
+    .await?;
 
     let http_client =
         vouch_common::http::credential_client(&format!("vouch-cli/{}", env!("CARGO_PKG_VERSION")))
             .context("failed to create HTTP client")?;
 
-    let accounts = list_accounts(&http_client, &sso_region, &bearer)
+    let accounts = list_accounts(&http_client, region, &bearer)
         .await
         .context("failed to list SSO accounts")?;
 
@@ -692,7 +833,7 @@ async fn discover_identity_center(
     let mut skipped_count: u32 = 0;
 
     for account in &accounts {
-        let roles = list_account_roles(&http_client, &sso_region, &bearer, &account.account_id)
+        let roles = list_account_roles(&http_client, region, &bearer, &account.account_id)
             .await
             .with_context(|| format!("failed to list roles for account {}", account.account_id))?;
 
@@ -724,13 +865,11 @@ async fn discover_identity_center(
                 name: profile_name.clone(),
                 credential_process: Some(idc_credential_process(
                     &vouch_path,
-                    &session.name,
                     &account.account_id,
                     &role.role_name,
+                    management_role,
                 )),
-                region: region
-                    .map(str::to_string)
-                    .or_else(|| Some(sso_region.clone())),
+                region: Some(region.to_string()),
                 output: Some("json".to_string()),
             });
 

@@ -34,17 +34,17 @@ pub(crate) enum CredentialCommands {
     /// (no role chaining, no per-role IAM trust). Invoked non-interactively as
     /// an AWS `credential_process`; configure it with `vouch setup aws`.
     Aws {
-        /// STS role ARN, or the permission-set role name when `--account` is set.
+        /// STS role ARN, or the permission-set name when `--account` is set.
         #[arg(long)]
         role: String,
-        /// AWS account ID — switches to the Identity Center portal for `--role`.
+        /// AWS account ID — switches to the Identity Center portal, with `--role`
+        /// read as a permission-set name.
         #[arg(long)]
         account: Option<String>,
-        /// SSO session name from ~/.aws/config (Identity Center mode).
-        #[arg(long)]
-        sso_session: Option<String>,
-        /// Management role ARN to chain through before assuming `--role`
-        /// (`sts:AssumeRole`). Omit for a direct web-identity assume.
+        /// Management role ARN. For chaining (`--role` ARN) it is the hop assumed
+        /// before `--role`; for Identity Center (`--account`) it is the
+        /// `CreateTokenWithIAM` caller whose application ARN/region are
+        /// configured in vouch. Omit for a direct web-identity assume.
         #[arg(long)]
         management_role: Option<String>,
     },

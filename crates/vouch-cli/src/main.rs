@@ -626,14 +626,12 @@ async fn run() -> Result<()> {
             CredentialCommands::Aws {
                 role,
                 account,
-                sso_session,
                 management_role,
             } => {
                 commands::credential::aws::run(
                     server,
                     &role,
                     account.as_deref(),
-                    sso_session.as_deref(),
                     management_role.as_deref(),
                 )
                 .await

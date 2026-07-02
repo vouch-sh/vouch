@@ -172,23 +172,6 @@ impl AwsConfig {
             .with_context(|| format!("failed to write {}", self.path.display()))
     }
 
-    /// Write or update an `[sso-session <name>]` block in `~/.aws/config`.
-    ///
-    /// Sets `sso_start_url`, `sso_region`, and `sso_registration_scopes`.
-    /// Existing keys not listed here are left untouched.
-    pub(crate) fn set_sso_session(&mut self, name: &str, start_url: &str, region: &str) {
-        let section = format!("sso-session {name}");
-        self.ini
-            .with_section(Some(section.clone()))
-            .set("sso_start_url", start_url);
-        self.ini
-            .with_section(Some(section.clone()))
-            .set("sso_region", region);
-        self.ini
-            .with_section(Some(section))
-            .set("sso_registration_scopes", "sso:account:access");
-    }
-
     /// Convert a profile name to its INI section name.
     ///
     /// The "default" profile is stored as `[default]`, while all other
@@ -219,69 +202,35 @@ impl AwsConfig {
     }
 }
 
-/// An SSO session from a `[sso-session <name>]` block in `~/.aws/config`.
-#[derive(Debug, Clone)]
-pub(crate) struct SsoSession {
-    /// Session name (e.g., "smoketurner").
-    pub name: String,
-    /// SSO region.
-    pub region: String,
-}
-
-impl AwsConfig {
-    /// Find an SSO session by name, or return the first one found if `name` is `None`.
-    #[must_use]
-    pub(crate) fn find_sso_session(&self, name: Option<&str>) -> Option<SsoSession> {
-        self.find_all_sso_sessions()
-            .into_iter()
-            .find(|s| name.is_none_or(|target| s.name == target))
-    }
-
-    /// Return all `[sso-session]` blocks from `~/.aws/config`, in file order.
-    #[must_use]
-    pub(crate) fn find_all_sso_sessions(&self) -> Vec<SsoSession> {
-        let mut sessions = Vec::new();
-        for (section_name, props) in &self.ini {
-            let Some(section_str) = section_name else {
-                continue;
-            };
-            let Some(session_name) = section_str.strip_prefix("sso-session ") else {
-                continue;
-            };
-            // A valid [sso-session] must declare a start URL; the value itself
-            // is unused once TTI / portal calls derive everything from region.
-            if props.get("sso_start_url").is_none() {
-                continue;
-            }
-            let Some(region) = props.get("sso_region") else {
-                continue;
-            };
-            sessions.push(SsoSession {
-                name: session_name.to_string(),
-                region: region.to_string(),
-            });
-        }
-        sessions
-    }
-}
-
-/// Extract the AWS role ARN from a credential_process command.
-///
-/// Looks for `--role <arn>` in the command string.
+/// Extract the AWS role ARN from a credential_process command (`--role <arn>`).
 #[must_use]
 pub(crate) fn extract_role_from_credential_process(credential_process: &str) -> Option<String> {
-    // Find --role and extract the next token
-    if let Some(role_start) = credential_process.find("--role") {
-        let after_flag = credential_process
-            .get(role_start.saturating_add(6)..)?
-            .trim_start();
-        // Role ARN is the next whitespace-delimited token
-        let role_arn = after_flag.split_whitespace().next()?;
-        if role_arn.starts_with("arn:aws") {
-            return Some(role_arn.to_string());
-        }
-    }
-    None
+    extract_arn_flag(credential_process, "--role")
+}
+
+/// Extract the management-role ARN from a credential_process command
+/// (`--management-role <arn>`).
+///
+/// Used to re-chain a profile-sourced role: the chaining hop is embedded in the
+/// profile's `credential_process`, so callers that read the role from
+/// `~/.aws/config` recover the management role from the same command.
+#[must_use]
+pub(crate) fn extract_management_role_from_credential_process(
+    credential_process: &str,
+) -> Option<String> {
+    extract_arn_flag(credential_process, "--management-role")
+}
+
+/// Extract the `arn:aws…` value immediately following `flag` in a
+/// credential_process command. `--role` is not a substring of
+/// `--management-role`, so the two flags resolve independently.
+fn extract_arn_flag(credential_process: &str, flag: &str) -> Option<String> {
+    let flag_start = credential_process.find(flag)?;
+    let after_flag = credential_process
+        .get(flag_start.saturating_add(flag.len())..)?
+        .trim_start();
+    let arn = after_flag.split_whitespace().next()?;
+    arn.starts_with("arn:aws").then(|| arn.to_string())
 }
 
 #[cfg(test)]
@@ -791,67 +740,5 @@ credential_process = vouch credential aws --role arn:aws:iam::222:role/Staging
         let config = AwsConfig::load_from(file.path().to_path_buf()).unwrap();
 
         assert_eq!(config.next_vouch_profile_name(), "vouch-3");
-    }
-
-    #[test]
-    fn test_find_sso_session_by_name() {
-        let content = r#"
-[sso-session smoketurner]
-sso_start_url = https://smoketurner.awsapps.com/start
-sso_region = us-east-1
-sso_registration_scopes = sso:account:access
-
-[sso-session other]
-sso_start_url = https://other.awsapps.com/start
-sso_region = eu-west-1
-"#;
-        let file = create_temp_config(content);
-        let config = AwsConfig::load_from(file.path().to_path_buf()).unwrap();
-
-        let session = config.find_sso_session(Some("smoketurner")).unwrap();
-        assert_eq!(session.name, "smoketurner");
-        assert_eq!(session.region, "us-east-1");
-    }
-
-    #[test]
-    fn test_find_sso_session_first_when_no_name() {
-        let content = r#"
-[sso-session only-session]
-sso_start_url = https://example.awsapps.com/start
-sso_region = us-west-2
-"#;
-        let file = create_temp_config(content);
-        let config = AwsConfig::load_from(file.path().to_path_buf()).unwrap();
-
-        // Without a name, returns the first session found
-        let session = config.find_sso_session(None).unwrap();
-        assert_eq!(session.name, "only-session");
-        assert_eq!(session.region, "us-west-2");
-    }
-
-    #[test]
-    fn test_find_sso_session_not_found() {
-        let content = r#"
-[profile vouch]
-credential_process = vouch credential aws --role arn:aws:iam::111:role/Prod
-"#;
-        let file = create_temp_config(content);
-        let config = AwsConfig::load_from(file.path().to_path_buf()).unwrap();
-
-        assert!(config.find_sso_session(Some("nonexistent")).is_none());
-        assert!(config.find_sso_session(None).is_none());
-    }
-
-    #[test]
-    fn test_find_sso_session_skips_wrong_name() {
-        let content = r#"
-[sso-session dev]
-sso_start_url = https://dev.awsapps.com/start
-sso_region = us-east-1
-"#;
-        let file = create_temp_config(content);
-        let config = AwsConfig::load_from(file.path().to_path_buf()).unwrap();
-
-        assert!(config.find_sso_session(Some("prod")).is_none());
     }
 }

@@ -13,40 +13,36 @@ use std::fs;
 use std::path::PathBuf;
 use vouch_common::dns::{DohConfigSerde, NetworkConfig};
 
-/// AWS multi-account configuration in `$XDG_CONFIG_HOME/vouch/config.json`.
+/// AWS configuration in `$XDG_CONFIG_HOME/vouch/config.json`.
 ///
-/// Keyed by SSO session name (matching `[sso-session <name>]` in `~/.aws/config`).
-/// SSO connection details (start URL, region, scopes) are read from `~/.aws/config`
-/// — only role chaining config lives here.
+/// Keyed by management-role ARN. Role chaining needs no vouch config (the hop is
+/// carried in the profile's `--management-role`); an entry exists so the setup
+/// wizard remembers the role and, for Identity Center, stores the application
+/// ARN and region.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub(crate) struct AwsMultiAccountConfig {
-    /// Per-SSO-session role chaining configuration, keyed by session name.
+    /// Per-management-role configuration, keyed by the management-role ARN.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub sso_sessions: BTreeMap<String, SsoSessionConfig>,
+    pub management_roles: BTreeMap<String, ManagementRoleConfig>,
 }
 
-/// Per-SSO-session configuration.
+/// Per-management-role configuration.
 ///
-/// Holds the management-account role for role chaining and/or the IAM Identity
-/// Center application ARN. Member-account roles are never templated here — a
-/// chained account's profile carries its exact role ARN (`credential aws
-/// --sso-session <name> --role <arn>`), and Identity Center enumerates the
-/// caller's real permission sets from the SSO portal.
+/// A chaining-only management role has an empty config (both fields `None`); an
+/// Identity Center management role stores the customer-managed application ARN
+/// (the `clientId` for `sso-oidc:CreateTokenWithIAM`, whose Aud claim must be
+/// the Vouch server URL) and the region its portal lives in.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub(crate) struct SsoSessionConfig {
-    /// Management account role ARN (Vouch OIDC trust deployed here). The SigV4
-    /// caller for chaining (`sts:AssumeRole`) and for Identity Center
-    /// (`sso-oauth:CreateTokenWithIAM`).
-    pub management_role: String,
-    /// IAM Identity Center customer-managed application ARN (the `clientId`
-    /// for `sso-oidc:CreateTokenWithIAM`). When set, `credential aws
-    /// --account/--role` exchanges a Vouch RS256 token for an Identity Center
-    /// token instead of requiring a separate `vouch aws login` — reaching any
-    /// assigned account with no role chaining and no per-role IAM trust policy.
-    /// The token's `aud` is the Vouch server URL, so the customer-managed
-    /// application's Aud claim must be set to that same URL.
+pub(crate) struct ManagementRoleConfig {
+    /// IAM Identity Center customer-managed application ARN. When set, the
+    /// management role is the `CreateTokenWithIAM` caller for the Identity
+    /// Center path; when absent, the role is a plain chaining hop.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub identity_center_application_arn: Option<String>,
+    /// Region of the Identity Center portal (`GetRoleCredentials` /
+    /// `CreateTokenWithIAM`). Set alongside the application ARN.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity_center_region: Option<String>,
 }
 
 /// CLI configuration stored in `$XDG_CONFIG_HOME/vouch/config.json`
@@ -507,15 +503,16 @@ impl Config {
         self.aws.as_ref()
     }
 
-    /// Upsert an SSO session entry in the AWS multi-account config (in memory only).
+    /// Upsert a management-role entry in the AWS config (in memory only).
     ///
-    /// Creates the `aws.sso_sessions` block if it does not exist, then
-    /// inserts or replaces the entry keyed by `name`. Call `save()` to persist.
-    pub(crate) fn set_sso_session(&mut self, name: String, session: SsoSessionConfig) {
+    /// Creates the `aws.management_roles` block if it does not exist, then
+    /// inserts or replaces the entry keyed by the management-role `arn`. Call
+    /// `save()` to persist.
+    pub(crate) fn set_management_role(&mut self, arn: String, config: ManagementRoleConfig) {
         self.aws
             .get_or_insert_with(AwsMultiAccountConfig::default)
-            .sso_sessions
-            .insert(name, session);
+            .management_roles
+            .insert(arn, config);
     }
 
     // =====================================================================
@@ -1233,9 +1230,10 @@ mod tests {
                 }
             },
             "aws": {
-                "sso_sessions": {
-                    "smoketurner": {
-                        "management_role": "arn:aws:iam::111:role/VouchManagement"
+                "management_roles": {
+                    "arn:aws:iam::111:role/VouchManagement": {
+                        "identity_center_application_arn": "arn:aws:sso::111:application/ssoins-x/apl-y",
+                        "identity_center_region": "us-east-1"
                     }
                 }
             }
@@ -1245,16 +1243,17 @@ mod tests {
         let config = Config::from(file);
 
         let aws = config.aws().expect("aws config should exist");
-        assert_eq!(aws.sso_sessions.len(), 1);
+        assert_eq!(aws.management_roles.len(), 1);
 
-        let session = aws
-            .sso_sessions
-            .get("smoketurner")
-            .expect("smoketurner session");
+        let entry = aws
+            .management_roles
+            .get("arn:aws:iam::111:role/VouchManagement")
+            .expect("management role entry");
         assert_eq!(
-            session.management_role,
-            "arn:aws:iam::111:role/VouchManagement"
+            entry.identity_center_application_arn.as_deref(),
+            Some("arn:aws:sso::111:application/ssoins-x/apl-y")
         );
+        assert_eq!(entry.identity_center_region.as_deref(), Some("us-east-1"));
 
         // Round-trip through JSON
         let file2 = ConfigFile::from(&config);
@@ -1263,28 +1262,28 @@ mod tests {
         let config2 = Config::from(file3);
 
         let aws2 = config2.aws().expect("aws config should survive round-trip");
-        let session2 = aws2
-            .sso_sessions
-            .get("smoketurner")
-            .expect("smoketurner session");
+        let entry2 = aws2
+            .management_roles
+            .get("arn:aws:iam::111:role/VouchManagement")
+            .expect("management role entry");
         assert_eq!(
-            session2.management_role,
-            "arn:aws:iam::111:role/VouchManagement"
+            entry2.identity_center_application_arn.as_deref(),
+            Some("arn:aws:sso::111:application/ssoins-x/apl-y")
         );
     }
 
     #[test]
-    fn test_sso_session_config_default() {
-        let cfg = SsoSessionConfig::default();
-        assert_eq!(cfg.management_role, "");
+    fn test_management_role_config_default() {
+        let cfg = ManagementRoleConfig::default();
         assert!(cfg.identity_center_application_arn.is_none());
+        assert!(cfg.identity_center_region.is_none());
     }
 
     #[test]
-    fn test_aws_empty_sso_sessions_serializes_correctly() {
+    fn test_aws_empty_management_roles_serializes_correctly() {
         let config = Config {
             aws: Some(AwsMultiAccountConfig {
-                sso_sessions: BTreeMap::new(),
+                management_roles: BTreeMap::new(),
             }),
             ..Default::default()
         };
@@ -1292,8 +1291,8 @@ mod tests {
         let file = ConfigFile::from(&config);
         let json = serde_json::to_string(&file).unwrap();
 
-        // Empty sso_sessions map is skipped due to skip_serializing_if
-        assert!(!json.contains("sso_sessions"));
+        // Empty management_roles map is skipped due to skip_serializing_if
+        assert!(!json.contains("management_roles"));
     }
 
     // -----------------------------------------------------------------

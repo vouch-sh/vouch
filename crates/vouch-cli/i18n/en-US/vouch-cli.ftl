@@ -600,16 +600,8 @@ diag-err-fixture-save = Failed to save fixture: { $reason }
 
 cmd-aws-console-about = Open the AWS Management Console in your browser
 
-arg-aws-sso-session-help = SSO session name from ~/.aws/config (default: first found).
 arg-aws-console-role-help = AWS IAM role ARN to assume (auto-detected from ~/.aws/config if not specified).
 
-aws-err-sso-session-not-found =
-    SSO session '{ $name }' not found in ~/.aws/config.
-    Run 'aws configure sso' or check --sso-session.
-aws-err-no-sso-session =
-    No SSO session found in ~/.aws/config.
-    Run 'aws configure sso' first.
-aws-using-sso-session = Using SSO session '{ $name }'. Specify --sso-session to use a different one.
 aws-err-not-configured =
     AWS not configured.
     Run '{ -cmd } setup aws --role <role-arn>' first, or specify --role.
@@ -618,8 +610,12 @@ aws-err-agent-idc-readonly-unsupported =
     (--account) cannot be restricted to ReadOnlyAccess, unlike the STS --role path.
     Use an STS role (--role <arn>) or a dedicated read-only permission set instead.
 aws-err-idc-not-configured =
-    Identity Center not configured for this SSO session.
+    Identity Center is not configured for this management role.
     Run '{ -cmd } setup aws' to complete the setup.
+aws-err-idc-needs-management-role =
+    Identity Center access requires --management-role (the CreateTokenWithIAM caller).
+aws-console-err-idc-needs-management-role =
+    --account (Identity Center) requires --management-role.
 
 # Retained: exercised by the i18n pluralization test (`every_catalog_key_resolves`).
 aws-accounts-summary =
@@ -646,7 +642,9 @@ arg-aws-console-management-role-help = Management role ARN to chain through befo
 setup-aws-err-needs-terminal =
     `{ -cmd } setup aws` needs an interactive terminal for guided setup.
     For non-interactive use, pass --role <arn> or --discover.
-wizard-aws-prompt-role-arn = Enter the IAM role ARN Vouch should assume
+wizard-aws-prompt-role-single = IAM role ARN to assume (its trust policy will trust Vouch directly):
+wizard-aws-prompt-role-management = Management account role ARN (the role Vouch's OIDC provider trusts):
+wizard-aws-prompt-account-role = Account role ARN to assume via chaining:
 wizard-aws-err-invalid-role-arn = invalid IAM role ARN
 wizard-aws-trust-policy-header = Add this trust policy to the role so Vouch can assume it:
 wizard-aws-oidc-provider-hint =
@@ -654,28 +652,29 @@ wizard-aws-oidc-provider-hint =
       aws iam create-open-id-connect-provider --url { $issuer_url } --client-id-list { $audience }
 wizard-aws-press-enter = Press Enter once the policy is applied in AWS...
 wizard-aws-err-cancelled = Setup cancelled.
+wizard-aws-reconfig-prompt = Existing AWS setup detected — what would you like to do?
+wizard-aws-reconfig-add-chaining = Add an account (chain through { $mgmt })
+wizard-aws-reconfig-rediscover-idc = Re-discover Identity Center accounts (via { $mgmt })
+wizard-aws-reconfig-new-pattern = Set up a new access pattern
 wizard-aws-pattern-select = Choose your AWS access pattern
 wizard-aws-pattern-single = Single account (assume one role directly)
 wizard-aws-pattern-chain = Management account + role chaining (many accounts)
 wizard-aws-pattern-idc = Management account + IAM Identity Center
 wizard-aws-permission-policy-header = Attach this permission policy to { $role_arn }:
-wizard-aws-prompt-chaining-resource = sts:AssumeRole resource for the management role (wildcard OK)
+wizard-aws-prompt-chaining-resource = sts:AssumeRole resource for the management role (wildcard OK):
 wizard-aws-chaining-add-accounts =
     Role chaining is ready. Add each account you want to reach as its own profile:
       { -cmd } setup aws --role arn:aws:iam::<account-id>:role/<AccountRole> --management-role { $management_role }
     Each profile carries its exact role ARN — no assumptions about which roles exist where.
-wizard-aws-prompt-session-name = SSO session name to save this under
-wizard-aws-saved-vouch-config = Saved Vouch configuration for session '{ $name }'.
+wizard-aws-saved-vouch-config = Saved Vouch configuration for management role '{ $name }'.
 wizard-aws-idc-setup-hint =
     In IAM Identity Center, register Vouch as a trusted token issuer and add a
     customer-managed application:
       Issuer URL:  { $issuer_url }
       Aud claim:   { $audience }
     Grant this role sso-oauth:CreateTokenWithIAM on the application.
-wizard-aws-prompt-idc-app-arn = Enter the Identity Center customer-managed application ARN
-wizard-aws-prompt-session-start-url = SSO start URL
-wizard-aws-prompt-session-region = SSO region
-wizard-aws-created-sso-session = Created [sso-session { $name }] in ~/.aws/config.
+wizard-aws-prompt-idc-app-arn = Enter the Identity Center customer-managed application ARN:
+wizard-aws-prompt-idc-region = Identity Center region:
 
 ## credential/ssh
 
@@ -970,8 +969,10 @@ setup-aws-discover-summary = { $created ->
        *[other] { $skipped } skipped
     }
 setup-aws-err-discover-not-idc =
-    --discover only enumerates IAM Identity Center sessions. For role chaining,
-    add each account with '{ -cmd } setup aws --role <arn> --management-role <mgmt-arn>'.
+    --discover only enumerates IAM Identity Center management roles. For role
+    chaining, add each account with '{ -cmd } setup aws --role <arn> --management-role <mgmt-arn>'.
+setup-aws-err-discover-ambiguous =
+    Multiple Identity Center management roles are configured. Pass --management-role <arn> to pick one.
 setup-aws-err-no-sso-session = No SSO session found in ~/.aws/config. Run 'aws configure sso' first.
 setup-aws-err-sso-expired = SSO session expired or missing. Run '{ -cmd } aws login' first.
 
