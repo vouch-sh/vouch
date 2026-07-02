@@ -455,12 +455,15 @@ pub(crate) fn resolve_management_role(
     if let Some(session_cfg) = aws_config
         .find_sso_session(sso_session)
         .and_then(|s| aws_cfg.sso_sessions.get(&s.name))
+        .filter(|c| !c.management_role.is_empty())
     {
         return Ok(Some(session_cfg.management_role.clone()));
     }
 
     // No lone-entry fallback: a mismatched or absent `[sso-session]` name must
-    // not silently resolve to another org's management role.
+    // not silently resolve to another org's management role. An empty
+    // `management_role` (hand-edited config) resolves to `None`, not an empty
+    // ARN that would fail deeper in the STS exchange with a confusing error.
     Ok(None)
 }
 
