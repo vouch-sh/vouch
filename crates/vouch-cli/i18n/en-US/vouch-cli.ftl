@@ -598,65 +598,15 @@ diag-err-fixture-save = Failed to save fixture: { $reason }
 
 ## aws command
 
-cmd-aws-login-about = Authenticate to AWS IAM Identity Center for account discovery
-cmd-aws-accounts-about = List AWS accounts you have access to via Identity Center
-cmd-aws-roles-about = List available roles across your AWS accounts
 cmd-aws-console-about = Open the AWS Management Console in your browser
 
-arg-aws-sso-session-help = SSO session name from ~/.aws/config (default: first found).
-arg-aws-accounts-json-help = Output as JSON.
-arg-aws-roles-account-help = Filter by account ID (show roles for a single account only).
-arg-aws-roles-json-help = Output as JSON.
 arg-aws-console-role-help = AWS IAM role ARN to assume (auto-detected from ~/.aws/config if not specified).
 
-aws-err-sso-session-not-found =
-    SSO session '{ $name }' not found in ~/.aws/config.
-    Run 'aws configure sso' or check --sso-session.
-aws-err-no-sso-session =
-    No SSO session found in ~/.aws/config.
-    Run 'aws configure sso' first.
-aws-using-sso-session = Using SSO session '{ $name }'. Specify --sso-session to use a different one.
-aws-err-sso-expired = SSO session expired or missing. Run '{ -cmd } aws login' first.
 aws-err-not-configured =
     AWS not configured.
     Run '{ -cmd } setup aws --role <role-arn>' first, or specify --role.
 
-aws-login-already-authenticated = Already authenticated (expires { $expires_at })
-aws-login-browser-prompt =
-    Open the following URL in your browser:
-
-      { $url }
-
-    Enter code: { $code }
-aws-login-waiting = Waiting for authorization...
-aws-login-success = Authenticated successfully. Token expires at { $expires_at }
-aws-login-err-http-client = failed to create HTTP client
-aws-login-err-register = failed to register SSO OIDC client
-aws-login-err-device-auth = failed to start device authorization
-aws-login-err-authorization = SSO authorization failed
-aws-login-err-cache-token = failed to cache SSO access token
-
-aws-accounts-table-account-id = ACCOUNT ID
-aws-accounts-table-name = NAME
-aws-accounts-table-email = EMAIL
-aws-accounts-summary =
-    { $count ->
-        [one] { $count } account
-       *[other] { $count } accounts
-    }
-aws-accounts-err-list = failed to list SSO accounts
-aws-accounts-err-serialize = failed to serialize accounts
-
-aws-roles-table-account-id = ACCOUNT ID
-aws-roles-table-account-name = ACCOUNT NAME
-aws-roles-table-role-name = ROLE NAME
-aws-roles-summary =
-    { $count ->
-        [one] { $count } role
-       *[other] { $count } roles
-    }
-aws-roles-err-list-roles = failed to list roles for account { $account_id }
-aws-roles-err-serialize = failed to serialize roles
+sso-portal-err-token-expired = SSO token is invalid or expired. Run 'aws sso login' first.
 
 aws-console-opening = Opening AWS Console...
 aws-console-browser-failed = Could not open browser automatically. Open the URL above in your browser.
@@ -961,7 +911,7 @@ setup-aws-discover-summary = { $created ->
        *[other] { $skipped } skipped
     }
 setup-aws-err-no-sso-session = No SSO session found in ~/.aws/config. Run 'aws configure sso' first.
-setup-aws-err-sso-expired = SSO session expired or missing. Run '{ -cmd } aws login' first.
+setup-aws-err-sso-expired = SSO session expired or missing. Run 'aws sso login' first.
 
 ## setup/anthropic
 

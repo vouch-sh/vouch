@@ -335,25 +335,6 @@ mod tests {
         }
     }
 
-    /// Locks in the contract that numeric arg values flow through
-    /// `FluentValue::Number`, so CLDR plural rules pick `[one]` for count = 1
-    /// and `*[other]` for count = 2. The bug this guards against: a previous
-    /// `tr_args!` macro stringified every value, so `[one]` never matched and
-    /// summary lines always read "1 accounts".
-    #[test]
-    fn aws_accounts_summary_singular_plural() {
-        let singular = crate::tr_args!("aws-accounts-summary", count = 1_usize);
-        assert!(
-            singular.contains("1 account") && !singular.contains("accounts"),
-            "count = 1 should pick the [one] arm, got {singular:?}"
-        );
-        let plural = crate::tr_args!("aws-accounts-summary", count = 2_usize);
-        assert!(
-            plural.contains("2 accounts"),
-            "count = 2 should pick the [other] arm, got {plural:?}"
-        );
-    }
-
     /// Locks in the contract that `bool.to_string()` produces strings that
     /// match the FTL's explicit `[true]` / `[false]` variant arms.
     #[test]
