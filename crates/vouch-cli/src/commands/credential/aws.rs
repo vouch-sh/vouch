@@ -444,27 +444,37 @@ pub(crate) fn resolve_management_role(
     vouch_config: &crate::config::Config,
     sso_session: Option<&str>,
 ) -> Result<Option<String>> {
-    let aws_cfg = match vouch_config.aws() {
-        Some(cfg) if !cfg.sso_sessions.is_empty() => cfg,
-        _ => return Ok(None),
+    // Only touch `~/.aws/config` when vouch actually has chaining config.
+    let Some(aws) = vouch_config.aws().filter(|c| !c.sso_sessions.is_empty()) else {
+        return Ok(None);
     };
 
     // Match the requested `[sso-session]` (or the first one when unspecified)
     // to a vouch `sso_sessions` entry so the correct management role is used.
     let aws_config = crate::integrations::aws::config::AwsConfig::load()?;
-    if let Some(session_cfg) = aws_config
-        .find_sso_session(sso_session)
-        .and_then(|s| aws_cfg.sso_sessions.get(&s.name))
-        .filter(|c| !c.management_role.is_empty())
-    {
-        return Ok(Some(session_cfg.management_role.clone()));
-    }
+    let resolved_name = aws_config.find_sso_session(sso_session).map(|s| s.name);
+    Ok(resolve_management_role_from(
+        Some(aws),
+        resolved_name.as_deref(),
+    ))
+}
 
-    // No lone-entry fallback: a mismatched or absent `[sso-session]` name must
-    // not silently resolve to another org's management role. An empty
-    // `management_role` (hand-edited config) resolves to `None`, not an empty
-    // ARN that would fail deeper in the STS exchange with a confusing error.
-    Ok(None)
+/// Pure resolution step shared by [`resolve_management_role`]: given the vouch
+/// AWS config and the `[sso-session]` name resolved from `~/.aws/config`, return
+/// the management role for an exact, non-empty key match, else `None`.
+///
+/// Exact-match only: a mismatched or absent session name must not silently
+/// resolve to another org's management role (no lone-entry fallback). An empty
+/// `management_role` (hand-edited config) also resolves to `None` rather than an
+/// invalid ARN that would fail deeper in the STS exchange with a confusing error.
+fn resolve_management_role_from(
+    aws: Option<&crate::config::AwsMultiAccountConfig>,
+    resolved_session_name: Option<&str>,
+) -> Option<String> {
+    aws?.sso_sessions
+        .get(resolved_session_name?)
+        .filter(|c| !c.management_role.is_empty())
+        .map(|c| c.management_role.clone())
 }
 
 /// Get cached AWS credentials, fetching fresh ones if needed.
@@ -952,5 +962,72 @@ mod tests {
         let b = build_cache_key(ROLE, Some(MGMT), Some("claude-code"));
         assert_eq!(a, b);
         assert_eq!(a, format!("aws:chain:{MGMT}:{ROLE}:agent:claude-code"));
+    }
+
+    use crate::config::AwsMultiAccountConfig;
+    use std::collections::BTreeMap;
+
+    fn aws_with(sessions: &[(&str, &str)]) -> AwsMultiAccountConfig {
+        let mut sso_sessions = BTreeMap::new();
+        for (name, mgmt) in sessions {
+            sso_sessions.insert(
+                (*name).to_string(),
+                SsoSessionConfig {
+                    management_role: (*mgmt).to_string(),
+                    ..Default::default()
+                },
+            );
+        }
+        AwsMultiAccountConfig { sso_sessions }
+    }
+
+    #[test]
+    fn resolve_mgmt_exact_match_returns_role() {
+        let aws = aws_with(&[("prod", "arn:aws:iam::111:role/Mgmt")]);
+        assert_eq!(
+            resolve_management_role_from(Some(&aws), Some("prod")),
+            Some("arn:aws:iam::111:role/Mgmt".to_string())
+        );
+    }
+
+    /// Security: a mismatched session name must NOT fall back to the sole entry.
+    #[test]
+    fn resolve_mgmt_mismatched_name_returns_none_no_fallback() {
+        let aws = aws_with(&[("my-org", "arn:aws:iam::111:role/Mgmt")]);
+        assert_eq!(
+            resolve_management_role_from(Some(&aws), Some("other-org")),
+            None
+        );
+    }
+
+    /// A `None` resolved session name (no `[sso-session]` matched) must not fall
+    /// back to the sole entry either.
+    #[test]
+    fn resolve_mgmt_absent_session_name_returns_none() {
+        let aws = aws_with(&[("my-org", "arn:aws:iam::111:role/Mgmt")]);
+        assert_eq!(resolve_management_role_from(Some(&aws), None), None);
+    }
+
+    #[test]
+    fn resolve_mgmt_picks_exact_among_multiple() {
+        let aws = aws_with(&[
+            ("orgA", "arn:aws:iam::111:role/A"),
+            ("orgB", "arn:aws:iam::222:role/B"),
+        ]);
+        assert_eq!(
+            resolve_management_role_from(Some(&aws), Some("orgB")),
+            Some("arn:aws:iam::222:role/B".to_string())
+        );
+    }
+
+    #[test]
+    fn resolve_mgmt_empty_role_returns_none() {
+        let aws = aws_with(&[("prod", "")]);
+        assert_eq!(resolve_management_role_from(Some(&aws), Some("prod")), None);
+    }
+
+    #[test]
+    fn resolve_mgmt_no_aws_config_returns_none() {
+        assert_eq!(resolve_management_role_from(None, Some("prod")), None);
     }
 }
