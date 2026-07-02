@@ -7,6 +7,7 @@
 use anyhow::{Context, Result};
 use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
+use vouch_cli::tr;
 use vouch_common::aws::Partition;
 
 /// An AWS account the user has access to via SSO.
@@ -15,6 +16,10 @@ use vouch_common::aws::Partition;
 pub(crate) struct SsoAccount {
     pub account_id: String,
     pub account_name: String,
+    #[allow(
+        dead_code,
+        reason = "deserialized from AWS SSO portal listing; read in tests, dead in non-test builds"
+    )]
     pub email_address: String,
 }
 
@@ -25,7 +30,7 @@ pub(crate) struct SsoRole {
     pub role_name: String,
     #[allow(
         dead_code,
-        reason = "deserialized from AWS SSO portal listing; lint fires inconsistently across compilation targets"
+        reason = "deserialized from AWS SSO portal listing; read in tests, dead in non-test builds"
     )]
     pub account_id: String,
 }
@@ -77,7 +82,7 @@ pub(crate) async fn list_accounts(
 
         if response.status() == reqwest::StatusCode::UNAUTHORIZED {
             return Err(crate::exit_code::CliError::NotAuthenticated {
-                reason: "SSO token is invalid or expired. Run 'vouch aws login' first.".to_string(),
+                reason: tr!("sso-portal-err-token-expired"),
             }
             .into());
         }
@@ -149,7 +154,7 @@ pub(crate) async fn list_account_roles(
 
         if response.status() == reqwest::StatusCode::UNAUTHORIZED {
             return Err(crate::exit_code::CliError::NotAuthenticated {
-                reason: "SSO token is invalid or expired. Run 'vouch aws login' first.".to_string(),
+                reason: tr!("sso-portal-err-token-expired"),
             }
             .into());
         }
