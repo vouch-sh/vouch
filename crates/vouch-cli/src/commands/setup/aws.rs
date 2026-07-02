@@ -1049,7 +1049,7 @@ fn prompt_select<T: std::fmt::Display>(prompt: &str, options: Vec<T>) -> Result<
         .map_err(|e| match e {
             inquire::InquireError::OperationCanceled
             | inquire::InquireError::OperationInterrupted => {
-                crate::exit_code::CliError::ConfigError("selection cancelled".to_string()).into()
+                crate::exit_code::CliError::ConfigError(tr!("wizard-aws-err-cancelled")).into()
             }
             other => anyhow::anyhow!("selection failed: {other}"),
         })
@@ -1059,7 +1059,7 @@ fn prompt_select<T: std::fmt::Display>(prompt: &str, options: Vec<T>) -> Result<
 fn prompt_text(prompt: &str) -> Result<String> {
     inquire::Text::new(prompt).prompt().map_err(|e| match e {
         inquire::InquireError::OperationCanceled | inquire::InquireError::OperationInterrupted => {
-            crate::exit_code::CliError::ConfigError("input cancelled".to_string()).into()
+            crate::exit_code::CliError::ConfigError(tr!("wizard-aws-err-cancelled")).into()
         }
         other => anyhow::anyhow!("prompt failed: {other}"),
     })
@@ -1073,7 +1073,7 @@ fn prompt_text_default(prompt: &str, default: &str) -> Result<String> {
         .map_err(|e| match e {
             inquire::InquireError::OperationCanceled
             | inquire::InquireError::OperationInterrupted => {
-                crate::exit_code::CliError::ConfigError("input cancelled".to_string()).into()
+                crate::exit_code::CliError::ConfigError(tr!("wizard-aws-err-cancelled")).into()
             }
             other => anyhow::anyhow!("prompt failed: {other}"),
         })
@@ -1091,7 +1091,7 @@ fn prompt_continue() -> Result<()> {
         .map_err(|e| match e {
             inquire::InquireError::OperationCanceled
             | inquire::InquireError::OperationInterrupted => {
-                crate::exit_code::CliError::ConfigError("wizard cancelled".to_string()).into()
+                crate::exit_code::CliError::ConfigError(tr!("wizard-aws-err-cancelled")).into()
             }
             other => anyhow::anyhow!("prompt failed: {other}"),
         })

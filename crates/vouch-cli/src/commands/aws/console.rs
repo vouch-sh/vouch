@@ -172,9 +172,10 @@ async fn get_idc_creds(server: &str, args: &ConsoleArgs, account_id: &str) -> Re
         .into());
     }
 
-    let role_name = args.role.as_deref().ok_or_else(|| {
-        anyhow::anyhow!("--role (permission-set name) is required with --account")
-    })?;
+    let role_name = args
+        .role
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!(tr!("aws-console-err-role-required-with-account")))?;
 
     let aws_config = crate::integrations::aws::config::AwsConfig::load()?;
     let session =

@@ -617,6 +617,9 @@ aws-err-agent-idc-readonly-unsupported =
     Coding agent detected ({ $source }): Identity Center portal credentials
     (--account) cannot be restricted to ReadOnlyAccess, unlike the STS --role path.
     Use an STS role (--role <arn>) or a dedicated read-only permission set instead.
+aws-err-idc-not-configured =
+    Identity Center not configured for this SSO session.
+    Run '{ -cmd } setup aws' to complete the setup.
 
 # Retained: exercised by the i18n pluralization test (`every_catalog_key_resolves`).
 aws-accounts-summary =
@@ -634,6 +637,7 @@ aws-console-err-signin-request = failed to request signin token
 aws-console-err-signin-failed = federation getSigninToken failed ({ $status }): { $body }
 aws-console-err-signin-parse = failed to parse signin token response
 aws-console-err-invalid-federation-url = invalid federation endpoint URL
+aws-console-err-role-required-with-account = --role (permission-set name) is required with --account
 arg-aws-console-account-help = AWS account ID for the Identity Center path (interprets --role as a permission-set name).
 
 ## setup aws wizard
@@ -648,6 +652,7 @@ wizard-aws-oidc-provider-hint =
     If you have not yet registered Vouch as an OIDC provider, create it once:
       aws iam create-open-id-connect-provider --url { $issuer_url } --client-id-list { $audience }
 wizard-aws-press-enter = Press Enter once the policy is applied in AWS...
+wizard-aws-err-cancelled = Setup cancelled.
 wizard-aws-pattern-select = Choose your AWS access pattern
 wizard-aws-pattern-single = Single account (assume one role directly)
 wizard-aws-pattern-chain = Management account + role chaining (many accounts)

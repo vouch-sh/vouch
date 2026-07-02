@@ -6,7 +6,7 @@
 use anyhow::{Context, Result};
 use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
-use vouch_cli::tr_args;
+use vouch_cli::{tr, tr_args};
 
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -622,11 +622,7 @@ pub(crate) async fn resolve_bearer_token(
         .and_then(|a| a.sso_sessions.get(&session.name))
         .filter(|c| c.identity_center_application_arn.is_some())
         .ok_or_else(|| {
-            crate::exit_code::CliError::ConfigError(
-                "Identity Center not configured for this SSO session.\n\
-                 Run 'vouch setup aws' to complete the setup."
-                    .to_string(),
-            )
+            crate::exit_code::CliError::ConfigError(tr!("aws-err-idc-not-configured"))
         })?;
 
     obtain_identity_center_token(server, cfg, region).await
