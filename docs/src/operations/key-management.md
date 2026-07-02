@@ -101,7 +101,7 @@ When rotating the OIDC signing key:
 
 ## OIDC RSA Signing Key (RS256)
 
-Used to sign ID tokens with RS256 algorithm per [OIDC Core Section 3.1.3.7](https://openid.net/specs/openid-connect-core-1_0.html#IDToken). RS256 is the default `id_token_signed_response_alg` in the OIDC specification and must be supported for conformance. Clients can select RS256 via OAuth 2.0 Dynamic Client Registration (`id_token_signed_response_alg` field).
+Used to sign ID tokens with RS256 algorithm per [OIDC Core Section 3.1.3.7](https://openid.net/specs/openid-connect-core-1_0.html#IDToken) and AWS IAM Identity Center trusted-token-issuer tokens. RS256 is the default `id_token_signed_response_alg` in the OIDC specification and must be supported for conformance. Clients can select RS256 via OAuth 2.0 Dynamic Client Registration (`id_token_signed_response_alg` field). AWS's trusted-token-issuer contract also requires RS256 — the Identity Center endpoint (`/v1/credentials/aws/sso/token`) issues RS256-signed tokens for `sso-oidc:CreateTokenWithIAM`, distinct from the ES256 `AssumeRoleWithWebIdentity` token (`/v1/credentials/aws/token`).
 
 Access tokens are always signed with ES256 (the OIDC Signing Key above).
 
