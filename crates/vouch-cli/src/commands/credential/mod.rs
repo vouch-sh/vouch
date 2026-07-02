@@ -43,6 +43,10 @@ pub(crate) enum CredentialCommands {
         /// SSO session name from ~/.aws/config (Identity Center mode).
         #[arg(long)]
         sso_session: Option<String>,
+        /// Management role ARN to chain through before assuming `--role`
+        /// (`sts:AssumeRole`). Omit for a direct web-identity assume.
+        #[arg(long)]
+        management_role: Option<String>,
     },
     /// Obtain an SSH certificate.
     Ssh {

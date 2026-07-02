@@ -627,12 +627,14 @@ async fn run() -> Result<()> {
                 role,
                 account,
                 sso_session,
+                management_role,
             } => {
                 commands::credential::aws::run(
                     server,
                     &role,
                     account.as_deref(),
                     sso_session.as_deref(),
+                    management_role.as_deref(),
                 )
                 .await
             }
@@ -739,6 +741,7 @@ async fn run() -> Result<()> {
             SetupCommands::Aws {
                 profile,
                 role,
+                management_role,
                 region,
                 discover,
             } => {
@@ -746,6 +749,7 @@ async fn run() -> Result<()> {
                     server,
                     profile.as_deref(),
                     role.as_deref(),
+                    management_role.as_deref(),
                     region.as_deref(),
                     discover,
                 )

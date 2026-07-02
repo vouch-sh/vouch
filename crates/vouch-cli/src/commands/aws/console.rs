@@ -28,6 +28,9 @@ pub(crate) struct ConsoleArgs {
     /// SSO session name from ~/.aws/config (auto-detected if not specified).
     #[arg(long, help = tr!("arg-aws-sso-session-help"))]
     pub sso_session: Option<String>,
+    /// Management role ARN to chain through before assuming --role (STS path).
+    #[arg(long, help = tr!("arg-aws-console-management-role-help"))]
+    pub management_role: Option<String>,
 }
 
 /// Response from the AWS federation `getSigninToken` action.
@@ -131,15 +134,8 @@ async fn get_sts_creds(server: &str, args: &ConsoleArgs) -> Result<FedInfo> {
         }
     };
 
-    // Resolve the management-role hop from the requested SSO session so a
-    // multi-session chaining setup opens the console via the correct org,
-    // rather than falling back to the first session inside the exchange.
-    let vouch_config = crate::config::Config::load()?;
-    let management_role = crate::commands::credential::aws::resolve_management_role(
-        &vouch_config,
-        args.sso_session.as_deref(),
-    )?
-    .filter(|m| m != &role_arn);
+    // Chain through an explicit management role when provided.
+    let management_role = args.management_role.as_deref().filter(|m| *m != role_arn);
 
     let agent_source = crate::commands::credential::aws::detect_agent_source();
     let result = crate::commands::credential::aws::exchange_for_sts_credentials(
@@ -147,7 +143,7 @@ async fn get_sts_creds(server: &str, args: &ConsoleArgs) -> Result<FedInfo> {
             server,
             role_arn: &role_arn,
             region: &region,
-            management_role: management_role.as_deref(),
+            management_role,
             agent_source: agent_source.as_deref(),
         },
     )

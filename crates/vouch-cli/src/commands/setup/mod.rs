@@ -28,10 +28,13 @@ pub(crate) enum SetupCommands {
         #[arg(long, help = tr!("arg-setup-aws-profile-help"))]
         profile: Option<String>,
         /// AWS IAM role ARN to assume. When omitted (and not --discover),
-        /// an interactive Identity Center setup runs if the session is
-        /// configured for it.
+        /// the interactive wizard runs.
         #[arg(long, help = tr!("arg-setup-aws-role-help"))]
         role: Option<String>,
+        /// Management role ARN to chain through before assuming --role. Writes a
+        /// role-chaining profile (`credential aws --role … --management-role …`).
+        #[arg(long, requires = "role", help = tr!("arg-setup-aws-management-role-help"))]
+        management_role: Option<String>,
         /// AWS region to set in the profile.
         #[arg(long, help = tr!("arg-setup-aws-region-help"))]
         region: Option<String>,

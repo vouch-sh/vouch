@@ -77,29 +77,18 @@ mod policy {
 
     /// Build the permission policy for the role-chaining management role.
     ///
-    /// Grants `sts:AssumeRole` to member-account roles and
-    /// `organizations:ListAccounts` for account enumeration.
-    pub(super) fn chaining(
-        partition: &str,
-        member_role_path: &str,
-        member_role_name: &str,
-    ) -> Value {
-        let member_resource =
-            format!("arn:{partition}:iam::*:role{member_role_path}{member_role_name}");
+    /// Grants `sts:AssumeRole` (plus `sts:TagSession` / `sts:SetSourceIdentity`,
+    /// which Vouch's session tags and source identity require) on the
+    /// caller-provided `resource` — a wildcard like `arn:aws:iam::*:role/*` by
+    /// default, narrowable to specific member roles.
+    pub(super) fn chaining(resource: &str) -> Value {
         json!({
             "Version": "2012-10-17",
-            "Statement": [
-                {
-                    "Effect": "Allow",
-                    "Action": ["sts:AssumeRole", "sts:TagSession", "sts:SetSourceIdentity"],
-                    "Resource": member_resource
-                },
-                {
-                    "Effect": "Allow",
-                    "Action": "organizations:ListAccounts",
-                    "Resource": "*"
-                }
-            ]
+            "Statement": [{
+                "Effect": "Allow",
+                "Action": ["sts:AssumeRole", "sts:TagSession", "sts:SetSourceIdentity"],
+                "Resource": resource
+            }]
         })
     }
 
@@ -207,34 +196,24 @@ mod policy {
         }
 
         #[test]
-        fn chaining_policy_has_sts_and_organizations() {
-            let p = chaining("aws", "/", "VouchAccess");
+        fn chaining_policy_grants_assume_role_on_resource() {
+            let p = chaining("arn:aws:iam::*:role/*");
             let stmts = p["Statement"].as_array().unwrap();
-            assert_eq!(stmts.len(), 2);
-            // sts:AssumeRole
-            assert!(
-                stmts[0]["Action"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .any(|a| a.as_str() == Some("sts:AssumeRole"))
+            assert_eq!(stmts.len(), 1);
+            let actions: Vec<&str> = stmts[0]["Action"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|a| a.as_str().unwrap())
+                .collect();
+            assert_eq!(
+                actions,
+                ["sts:AssumeRole", "sts:TagSession", "sts:SetSourceIdentity"]
             );
             assert_eq!(
                 stmts[0]["Resource"].as_str().unwrap(),
-                "arn:aws:iam::*:role/VouchAccess"
+                "arn:aws:iam::*:role/*"
             );
-            // organizations:ListAccounts
-            assert_eq!(
-                stmts[1]["Action"].as_str().unwrap(),
-                "organizations:ListAccounts"
-            );
-        }
-
-        #[test]
-        fn chaining_policy_path_included_in_resource() {
-            let p = chaining("aws", "/teams/sec/", "VouchAccess");
-            let resource = p["Statement"][0]["Resource"].as_str().unwrap();
-            assert_eq!(resource, "arn:aws:iam::*:role/teams/sec/VouchAccess");
         }
 
         #[test]
@@ -301,6 +280,7 @@ pub(crate) async fn run(
     server: &str,
     profile: Option<&str>,
     role_arn: Option<&str>,
+    management_role: Option<&str>,
     region: Option<&str>,
     discover: bool,
 ) -> Result<()> {
@@ -308,7 +288,7 @@ pub(crate) async fn run(
         return run_discover(server, profile, region).await;
     }
     match role_arn {
-        Some(role_arn) => run_explicit_role(profile, role_arn, region),
+        Some(role_arn) => run_explicit_role(profile, role_arn, management_role, region),
         None => run_wizard(server, profile, region).await,
     }
 }
@@ -317,8 +297,15 @@ pub(crate) async fn run(
 // Scriptable paths
 // =========================================================================
 
-/// Write a single STS profile for an explicit role ARN (scriptable, non-interactive).
-fn run_explicit_role(profile: Option<&str>, role_arn: &str, region: Option<&str>) -> Result<()> {
+/// Write a single STS profile for an explicit role ARN (scriptable,
+/// non-interactive). When `management_role` is set, the profile chains through
+/// it (`--management-role`) before assuming `role_arn`.
+fn run_explicit_role(
+    profile: Option<&str>,
+    role_arn: &str,
+    management_role: Option<&str>,
+    region: Option<&str>,
+) -> Result<()> {
     let vouch_path = resolve_install_path();
 
     let config_path = AwsConfig::default_path()?;
@@ -351,12 +338,19 @@ fn run_explicit_role(profile: Option<&str>, role_arn: &str, region: Option<&str>
         }
     };
 
-    config.set_profile(&AwsProfile {
-        name: profile_name.clone(),
-        credential_process: Some(format!(
+    let credential_process = match management_role {
+        Some(mgmt) => format!(
+            "\"{}\" credential aws --role {role_arn} --management-role {mgmt}",
+            vouch_path.display()
+        ),
+        None => format!(
             "\"{}\" credential aws --role {role_arn}",
             vouch_path.display()
-        )),
+        ),
+    };
+    config.set_profile(&AwsProfile {
+        name: profile_name.clone(),
+        credential_process: Some(credential_process),
         region: region.map(str::to_string),
         output: Some("json".to_string()),
     });
@@ -380,7 +374,6 @@ async fn run_discover(
     region: Option<&str>,
 ) -> Result<()> {
     use crate::integrations::aws::config::AwsConfig as AwsCliConfig;
-    use vouch_common::aws::Partition;
 
     let vouch_config = crate::config::Config::load()?;
     let aws_cli_config = AwsCliConfig::load()?;
@@ -396,124 +389,10 @@ async fn run_discover(
         return discover_identity_center(server, &session, profile_prefix, region).await;
     }
 
-    // Role-chaining path: assume management role, enumerate via Organizations.
-    if session_cfg.management_role.is_empty() {
-        return Err(crate::exit_code::CliError::ConfigError(tr!(
-            "wizard-aws-err-management-role-not-configured"
-        ))
-        .into());
-    }
-
-    let sso_region = session.region.clone();
-    let effective_region = region.unwrap_or(&sso_region);
-    let partition = Partition::from_region(effective_region);
-
-    println!("{}", tr!("wizard-aws-enumerating-accounts"));
-
-    // Carry agent attribution (and ReadOnlyAccess) onto the management-role STS
-    // creds used for enumeration, matching the STS credential path.
-    let agent_source = crate::commands::credential::aws::detect_agent_source();
-    let mgmt_result = crate::commands::credential::aws::exchange_for_sts_credentials(
-        crate::commands::credential::aws::StsRequest {
-            server,
-            role_arn: &session_cfg.management_role,
-            region: effective_region,
-            management_role: Some(&session_cfg.management_role),
-            agent_source: agent_source.as_deref(),
-        },
-    )
-    .await
-    .context("failed to assume management role for account discovery")?;
-
-    let http_client =
-        vouch_common::http::credential_client(&format!("vouch-cli/{}", env!("CARGO_PKG_VERSION")))
-            .context("failed to create HTTP client")?;
-
-    let accounts = crate::integrations::aws::organizations::list_accounts(
-        &http_client,
-        effective_region,
-        &mgmt_result.credentials,
-    )
-    .await
-    .context("failed to enumerate accounts via Organizations")?;
-
-    if accounts.is_empty() {
-        tr_println!("wizard-aws-no-accounts-found");
-        return Ok(());
-    }
-
-    let vouch_path = resolve_install_path();
-    let config_path = AwsConfig::default_path()?;
-    let aws_dir = dirs::home_dir()
-        .context("could not determine home directory")?
-        .join(".aws");
-    ensure_secure_dir(&aws_dir)?;
-    let mut config = AwsConfig::load_from(config_path)?;
-
-    let mut created_count: u32 = 0;
-    let mut skipped_count: u32 = 0;
-
-    for account in &accounts {
-        let role_arn = session_cfg.role_arn_in(partition.as_str(), &account.id);
-
-        let safe_name = sanitize_profile_name(&account.name);
-        let name_part = if safe_name.is_empty() {
-            account.id.clone()
-        } else {
-            safe_name
-        };
-        let profile_name = match profile_prefix {
-            Some(prefix) => format!("{prefix}-{name_part}"),
-            None => format!("vouch-{name_part}"),
-        };
-
-        if config.profile_exists(&profile_name) {
-            tr_println!(
-                "setup-aws-discover-skipped",
-                profile = profile_name.as_str()
-            );
-            skipped_count = skipped_count.saturating_add(1);
-            continue;
-        }
-
-        config.set_profile(&AwsProfile {
-            name: profile_name.clone(),
-            // Pin --sso-session so `vouch credential aws` resolves this session's
-            // management role for chaining, not the first `[sso-session]` found.
-            credential_process: Some(format!(
-                "\"{}\" credential aws --sso-session \"{}\" --role {role_arn}",
-                vouch_path.display(),
-                session.name
-            )),
-            region: region.map(str::to_string),
-            output: Some("json".to_string()),
-        });
-
-        tr_println!(
-            "setup-aws-discover-added",
-            profile = profile_name.as_str(),
-            role_arn = role_arn.as_str()
-        );
-        created_count = created_count.saturating_add(1);
-    }
-
-    if created_count > 0 {
-        config.save()?;
-    }
-
-    println!();
-    tr_println!(
-        "setup-aws-discover-summary",
-        created = created_count,
-        skipped = skipped_count
-    );
-    if created_count > 0 {
-        tr_println!(
-            "wizard-aws-chaining-role-note",
-            role = session_cfg.member_role_name.as_str()
-        );
-    }
-    Ok(())
+    // Only Identity Center sessions enumerate accounts/roles from the SSO
+    // portal. Role chaining is configured with explicit per-account profiles
+    // (`setup aws --role <arn> --management-role <mgmt-arn>`).
+    Err(crate::exit_code::CliError::ConfigError(tr!("setup-aws-err-discover-not-idc")).into())
 }
 
 // =========================================================================
@@ -594,42 +473,41 @@ async fn run_wizard(server: &str, profile: Option<&str>, region: Option<&str>) -
     prompt_continue()?;
 
     // Step 2: access pattern.
+    println!();
     let patterns = vec![
         AccessPattern::Single,
         AccessPattern::Chain,
         AccessPattern::Idc,
     ];
     let pattern = prompt_select(&tr!("wizard-aws-pattern-select"), patterns)?;
+    println!();
 
     match pattern {
-        AccessPattern::Single => run_explicit_role(profile, &role_arn, region),
-        AccessPattern::Chain => {
-            wizard_chaining(server, profile, &role_arn, region, &account_id, partition).await
-        }
+        AccessPattern::Single => run_explicit_role(profile, &role_arn, None, region),
+        AccessPattern::Chain => wizard_chaining(&role_arn, partition),
         AccessPattern::Idc => {
             wizard_idc(server, profile, &role_arn, region, &account_id, partition).await
         }
     }
 }
 
-/// Wizard branch: multi-account role chaining via AWS Organizations.
-async fn wizard_chaining(
-    server: &str,
-    profile_prefix: Option<&str>,
+/// Wizard branch: role chaining.
+///
+/// Prints the management-role permission policy and explains how to add each
+/// chained account's profile explicitly (`setup aws --role <account-role-arn>
+/// --management-role <this-role>`). No account enumeration and no per-account
+/// role templating — each profile carries its exact role ARN.
+fn wizard_chaining(
     management_role_arn: &str,
-    region: Option<&str>,
-    account_id: &str,
     partition: vouch_common::aws::Partition,
 ) -> Result<()> {
-    // Prompt configuration.
-    let member_role_name =
-        prompt_text_default(&tr!("wizard-aws-prompt-member-role-name"), "VouchAccess")?;
-    let member_role_path = prompt_text_default(&tr!("wizard-aws-prompt-member-role-path"), "/")?;
-    let normalized_path = crate::config::normalize_member_role_path(&member_role_path)
-        .map_err(|e| crate::exit_code::CliError::ConfigError(format!("Invalid role path: {e}")))?;
+    let default_resource = format!("arn:{}:iam::*:role/*", partition.as_str());
+    let resource = prompt_text_default(
+        &tr!("wizard-aws-prompt-chaining-resource"),
+        &default_resource,
+    )?;
 
-    // Print permission policy.
-    let perm = policy::chaining(partition.as_str(), &normalized_path, &member_role_name);
+    let perm = policy::chaining(&resource);
     let perm_json =
         serde_json::to_string_pretty(&perm).context("failed to serialize permission policy")?;
     println!(
@@ -641,66 +519,14 @@ async fn wizard_chaining(
     );
     println!("{perm_json}\n");
 
-    prompt_continue()?;
-
-    let session_name = prompt_text(&tr!("wizard-aws-prompt-session-name"))?;
-    ensure_sso_session(&session_name)?;
-
-    let session_cfg = crate::config::SsoSessionConfig {
-        management_role: management_role_arn.to_string(),
-        member_role_name: member_role_name.clone(),
-        member_role_path: normalized_path.clone(),
-        identity_center_application_arn: None,
-    };
-    crate::config::Config::modify(|c| c.set_sso_session(session_name.clone(), session_cfg))?;
-    tr_println!(
-        "wizard-aws-saved-vouch-config",
-        name = session_name.as_str()
+    println!(
+        "{}",
+        tr_args!(
+            "wizard-aws-chaining-add-accounts",
+            management_role = management_role_arn
+        )
     );
-
-    // Enumerate accounts and write profiles.
-    let effective_region = resolve_effective_region(region, account_id, partition)?;
-    tr_println!("wizard-aws-enumerating-accounts");
-
-    let agent_source = crate::commands::credential::aws::detect_agent_source();
-    let mgmt_result = crate::commands::credential::aws::exchange_for_sts_credentials(
-        crate::commands::credential::aws::StsRequest {
-            server,
-            role_arn: management_role_arn,
-            region: &effective_region,
-            management_role: Some(management_role_arn),
-            agent_source: agent_source.as_deref(),
-        },
-    )
-    .await
-    .context("failed to assume management role")?;
-
-    let http_client =
-        vouch_common::http::credential_client(&format!("vouch-cli/{}", env!("CARGO_PKG_VERSION")))
-            .context("failed to create HTTP client")?;
-
-    let accounts = crate::integrations::aws::organizations::list_accounts(
-        &http_client,
-        &effective_region,
-        &mgmt_result.credentials,
-    )
-    .await
-    .context("failed to enumerate accounts via Organizations")?;
-
-    if accounts.is_empty() {
-        tr_println!("wizard-aws-no-accounts-found");
-        return Ok(());
-    }
-
-    write_chaining_profiles(
-        &accounts,
-        &session_name,
-        &member_role_name,
-        &normalized_path,
-        partition,
-        profile_prefix,
-        region,
-    )
+    Ok(())
 }
 
 /// Wizard branch: IAM Identity Center TTI.
@@ -746,8 +572,6 @@ async fn wizard_idc(
 
     let session_cfg = crate::config::SsoSessionConfig {
         management_role: management_role_arn.to_string(),
-        member_role_name: crate::config::SsoSessionConfig::default().member_role_name,
-        member_role_path: crate::config::SsoSessionConfig::default().member_role_path,
         identity_center_application_arn: Some(app_arn),
     };
     crate::config::Config::modify(|c| c.set_sso_session(session_name.clone(), session_cfg))?;
@@ -795,25 +619,6 @@ fn ensure_sso_session(name: &str) -> Result<()> {
     Ok(())
 }
 
-/// Derive the effective AWS region for STS / Organizations calls.
-///
-/// Prefers the explicit `region` flag; falls back to the partition's default
-/// STS region when no region is configured anywhere.
-fn resolve_effective_region(
-    region: Option<&str>,
-    _account_id: &str,
-    partition: vouch_common::aws::Partition,
-) -> Result<String> {
-    if let Some(r) = region {
-        return Ok(r.to_string());
-    }
-    let profile_name = crate::integrations::aws::resolve_profile(None).unwrap_or_default();
-    match crate::integrations::aws::resolve_region(None, &profile_name) {
-        Ok(r) => Ok(r),
-        Err(_) => Ok(partition.default_sts_region().to_string()),
-    }
-}
-
 /// Derive the caller's subject restriction (`*@<domain>`) from the `email`
 /// claim of the locally-resolved session token.
 ///
@@ -834,93 +639,6 @@ fn server_host(server: &str) -> Result<String> {
     url.host_str()
         .ok_or_else(|| anyhow::anyhow!("server URL has no host: {server}"))
         .map(str::to_string)
-}
-
-/// Write one AWS profile per account for the role-chaining pattern.
-fn write_chaining_profiles(
-    accounts: &[crate::integrations::aws::organizations::Account],
-    session_name: &str,
-    member_role_name: &str,
-    member_role_path: &str,
-    partition: vouch_common::aws::Partition,
-    profile_prefix: Option<&str>,
-    region: Option<&str>,
-) -> Result<()> {
-    let vouch_path = resolve_install_path();
-    let config_path = AwsConfig::default_path()?;
-    let aws_dir = dirs::home_dir()
-        .context("could not determine home directory")?
-        .join(".aws");
-    ensure_secure_dir(&aws_dir)?;
-    let mut config = AwsConfig::load_from(config_path)?;
-
-    let mut created_count: u32 = 0;
-    let mut skipped_count: u32 = 0;
-
-    let session_cfg = crate::config::SsoSessionConfig {
-        management_role: String::new(),
-        member_role_name: member_role_name.to_string(),
-        member_role_path: member_role_path.to_string(),
-        identity_center_application_arn: None,
-    };
-
-    for account in accounts {
-        let role_arn = session_cfg.role_arn_in(partition.as_str(), &account.id);
-        let safe_name = sanitize_profile_name(&account.name);
-        let name_part = if safe_name.is_empty() {
-            account.id.clone()
-        } else {
-            safe_name
-        };
-        let profile_name = match profile_prefix {
-            Some(prefix) => format!("{prefix}-{name_part}"),
-            None => format!("vouch-{name_part}"),
-        };
-
-        if config.profile_exists(&profile_name) {
-            tr_println!(
-                "setup-aws-discover-skipped",
-                profile = profile_name.as_str()
-            );
-            skipped_count = skipped_count.saturating_add(1);
-            continue;
-        }
-
-        config.set_profile(&AwsProfile {
-            name: profile_name.clone(),
-            // Pin --sso-session so `vouch credential aws` resolves this session's
-            // management role for chaining, not the first `[sso-session]` found.
-            credential_process: Some(format!(
-                "\"{}\" credential aws --sso-session \"{}\" --role {role_arn}",
-                vouch_path.display(),
-                session_name
-            )),
-            region: region.map(str::to_string),
-            output: Some("json".to_string()),
-        });
-
-        tr_println!(
-            "setup-aws-discover-added",
-            profile = profile_name.as_str(),
-            role_arn = role_arn.as_str()
-        );
-        created_count = created_count.saturating_add(1);
-    }
-
-    if created_count > 0 {
-        config.save()?;
-    }
-
-    println!();
-    tr_println!(
-        "setup-aws-discover-summary",
-        created = created_count,
-        skipped = skipped_count
-    );
-    if created_count > 0 {
-        tr_println!("wizard-aws-chaining-role-note", role = member_role_name);
-    }
-    Ok(())
 }
 
 // =========================================================================

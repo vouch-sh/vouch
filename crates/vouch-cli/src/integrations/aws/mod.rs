@@ -8,7 +8,6 @@ pub(crate) mod codeartifact;
 pub(crate) mod codecommit;
 pub(crate) mod config;
 pub(crate) mod identity_center;
-pub(crate) mod organizations;
 pub(crate) mod redshift;
 pub(crate) mod sigv4;
 pub(crate) mod sso_portal;
@@ -157,10 +156,10 @@ enum AwsStatusKind {
     NotConfigured,
     /// One or more vouch profiles are present and aligned with vouch config.
     Configured { profiles: Vec<VouchProfile> },
-    /// The SSO session named in `~/.aws/config` has no matching key in
-    /// `~/.config/vouch/config.json`. Role chaining fails closed
-    /// (`resolve_management_role` requires an exact session-name match), so this
-    /// must be reconciled before chained credential fetching works.
+    /// The SSO session named in `~/.aws/config` has no matching Identity Center
+    /// entry in `~/.config/vouch/config.json`, so `credential aws --sso-session`
+    /// can't resolve its application ARN. Reconcile before Identity Center
+    /// credential fetching works.
     Mismatched {
         aws_session_name: String,
         vouch_session_name: String,

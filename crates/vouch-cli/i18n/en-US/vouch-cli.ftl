@@ -639,6 +639,7 @@ aws-console-err-signin-parse = failed to parse signin token response
 aws-console-err-invalid-federation-url = invalid federation endpoint URL
 aws-console-err-role-required-with-account = --role (permission-set name) is required with --account
 arg-aws-console-account-help = AWS account ID for the Identity Center path (interprets --role as a permission-set name).
+arg-aws-console-management-role-help = Management role ARN to chain through before assuming --role (STS path).
 
 ## setup aws wizard
 
@@ -657,16 +658,14 @@ wizard-aws-pattern-select = Choose your AWS access pattern
 wizard-aws-pattern-single = Single account (assume one role directly)
 wizard-aws-pattern-chain = Management account + role chaining (many accounts)
 wizard-aws-pattern-idc = Management account + IAM Identity Center
-wizard-aws-prompt-member-role-name = Member-account role name to assume
-wizard-aws-prompt-member-role-path = Member-account role path
 wizard-aws-permission-policy-header = Attach this permission policy to { $role_arn }:
+wizard-aws-prompt-chaining-resource = sts:AssumeRole resource for the management role (wildcard OK)
+wizard-aws-chaining-add-accounts =
+    Role chaining is ready. Add each account you want to reach as its own profile:
+      { -cmd } setup aws --role arn:aws:iam::<account-id>:role/<AccountRole> --management-role { $management_role }
+    Each profile carries its exact role ARN — no assumptions about which roles exist where.
 wizard-aws-prompt-session-name = SSO session name to save this under
 wizard-aws-saved-vouch-config = Saved Vouch configuration for session '{ $name }'.
-wizard-aws-enumerating-accounts = Enumerating accounts via AWS Organizations...
-wizard-aws-no-accounts-found = No active accounts found.
-wizard-aws-err-management-role-not-configured =
-    No management role configured for this SSO session.
-    Run '{ -cmd } setup aws' to complete setup.
 wizard-aws-idc-setup-hint =
     In IAM Identity Center, register Vouch as a trusted token issuer and add a
     customer-managed application:
@@ -802,6 +801,7 @@ cmd-setup-codeartifact-about = Configure a package manager for AWS CodeArtifact
 # setup/aws arg help
 arg-setup-aws-profile-help = AWS profile name to configure. Defaults to "vouch" if not specified.
 arg-setup-aws-role-help = AWS IAM role ARN to assume. Required unless --discover is set.
+arg-setup-aws-management-role-help = Management role ARN to chain through before assuming --role (writes a role-chaining profile).
 arg-setup-aws-region-help = AWS region to set in the profile.
 arg-setup-aws-discover-help = Discover accounts and roles via SSO and generate profiles automatically.
 
@@ -969,10 +969,9 @@ setup-aws-discover-summary = { $created ->
         [one] { $skipped } skipped
        *[other] { $skipped } skipped
     }
-wizard-aws-chaining-role-note =
-    Note: a profile was written for every active account. Accounts where the
-    '{ $role }' role is not deployed will fail only when credentials are fetched —
-    remove those profiles or deploy the role there.
+setup-aws-err-discover-not-idc =
+    --discover only enumerates IAM Identity Center sessions. For role chaining,
+    add each account with '{ -cmd } setup aws --role <arn> --management-role <mgmt-arn>'.
 setup-aws-err-no-sso-session = No SSO session found in ~/.aws/config. Run 'aws configure sso' first.
 setup-aws-err-sso-expired = SSO session expired or missing. Run '{ -cmd } aws login' first.
 
