@@ -158,9 +158,9 @@ enum AwsStatusKind {
     /// One or more vouch profiles are present and aligned with vouch config.
     Configured { profiles: Vec<VouchProfile> },
     /// The SSO session named in `~/.aws/config` has no matching key in
-    /// `~/.config/vouch/config.json`. Credential fetching may still work via the
-    /// single-entry fallback in `resolve_management_role`, but it will
-    /// silently break once a second SSO session is added.
+    /// `~/.config/vouch/config.json`. Role chaining fails closed
+    /// (`resolve_management_role` requires an exact session-name match), so this
+    /// must be reconciled before chained credential fetching works.
     Mismatched {
         aws_session_name: String,
         vouch_session_name: String,

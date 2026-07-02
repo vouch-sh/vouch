@@ -435,10 +435,10 @@ fn agent_session_policies(agent_source: Option<&str>) -> AgentSessionPolicies {
 
 /// Resolve the management role ARN from vouch config.
 ///
-/// Tries to match an SSO session from `~/.aws/config` to a key in
-/// `aws.sso_sessions`. If no SSO session is found but there's exactly
-/// one entry in `sso_sessions`, uses that directly (chaining doesn't
-/// require SSO discovery).
+/// Matches the requested `[sso-session]` name (or the first one when
+/// unspecified) from `~/.aws/config` to a key in `aws.sso_sessions`. A
+/// mismatched or absent session resolves to `None` — there is no lone-entry
+/// fallback, so credentials never chain through the wrong org's management role.
 /// Returns `None` if no chaining config is found (direct auth is used).
 pub(crate) fn resolve_management_role(
     vouch_config: &crate::config::Config,
@@ -459,11 +459,8 @@ pub(crate) fn resolve_management_role(
         return Ok(Some(session_cfg.management_role.clone()));
     }
 
-    // Fallback: if there's exactly one sso_sessions entry, use it
-    if let [only] = aws_cfg.sso_sessions.values().collect::<Vec<_>>().as_slice() {
-        return Ok(Some(only.management_role.clone()));
-    }
-
+    // No lone-entry fallback: a mismatched or absent `[sso-session]` name must
+    // not silently resolve to another org's management role.
     Ok(None)
 }
 
