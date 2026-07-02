@@ -969,6 +969,10 @@ setup-aws-discover-summary = { $created ->
         [one] { $skipped } skipped
        *[other] { $skipped } skipped
     }
+wizard-aws-chaining-role-note =
+    Note: a profile was written for every active account. Accounts where the
+    '{ $role }' role is not deployed will fail only when credentials are fetched —
+    remove those profiles or deploy the role there.
 setup-aws-err-no-sso-session = No SSO session found in ~/.aws/config. Run 'aws configure sso' first.
 setup-aws-err-sso-expired = SSO session expired or missing. Run '{ -cmd } aws login' first.
 

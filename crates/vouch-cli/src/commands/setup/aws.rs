@@ -507,6 +507,12 @@ async fn run_discover(
         created = created_count,
         skipped = skipped_count
     );
+    if created_count > 0 {
+        tr_println!(
+            "wizard-aws-chaining-role-note",
+            role = session_cfg.member_role_name.as_str()
+        );
+    }
     Ok(())
 }
 
@@ -911,6 +917,9 @@ fn write_chaining_profiles(
         created = created_count,
         skipped = skipped_count
     );
+    if created_count > 0 {
+        tr_println!("wizard-aws-chaining-role-note", role = member_role_name);
+    }
     Ok(())
 }
 
