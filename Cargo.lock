@@ -3436,9 +3436,9 @@ checksum = "47e1ffaa40ddd1f3ed91f717a33c8c0ee23fff369e3aa8772b9605cc1d22f4c3"
 
 [[package]]
 name = "maxminddb"
-version = "0.28.1"
+version = "0.29.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "faf6467428ad055b71e588bcedcbaf2ff605b3251deb0c52be4a04b674c546dd"
+checksum = "65e84ef32bcbf18a95548989e880db4af6fafd563463753afb4b9a149fb2782c"
 dependencies = [
  "ipnetwork",
  "log",
@@ -6222,7 +6222,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "vouch-agent"
-version = "2026.6.4"
+version = "2026.7.1"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -6254,7 +6254,7 @@ dependencies = [
 
 [[package]]
 name = "vouch-cli"
-version = "2026.6.4"
+version = "2026.7.1"
 dependencies = [
  "anyhow",
  "apple-native-keyring-store",
@@ -6316,7 +6316,7 @@ dependencies = [
 
 [[package]]
 name = "vouch-common"
-version = "2026.6.4"
+version = "2026.7.1"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -6338,7 +6338,7 @@ dependencies = [
 
 [[package]]
 name = "vouch-httpsig"
-version = "2026.6.4"
+version = "2026.7.1"
 dependencies = [
  "aws-lc-rs",
  "axum",
@@ -6354,7 +6354,7 @@ dependencies = [
 
 [[package]]
 name = "vouch-i18n"
-version = "2026.6.4"
+version = "2026.7.1"
 dependencies = [
  "anyhow",
  "fluent-bundle",
@@ -6366,7 +6366,7 @@ dependencies = [
 
 [[package]]
 name = "vouch-server"
-version = "2026.6.4"
+version = "2026.7.1"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -6453,7 +6453,7 @@ dependencies = [
 
 [[package]]
 name = "vouch-tests"
-version = "2026.6.4"
+version = "2026.7.1"
 dependencies = [
  "anyhow",
  "aws-lc-rs",
