@@ -27,22 +27,10 @@ pub(crate) mod wif;
 #[derive(Subcommand)]
 pub(crate) enum CredentialCommands {
     /// Obtain temporary AWS credentials.
-    ///
-    /// `--role <arn>` uses STS `AssumeRoleWithWebIdentity` (chaining through the
-    /// configured management role when set). `--account <id> --role <name>`
-    /// instead uses the IAM Identity Center portal for a permission-set role
-    /// (no role chaining, no per-role IAM trust). Invoked non-interactively as
-    /// an AWS `credential_process`; configure it with `vouch setup aws`.
     Aws {
-        /// STS role ARN, or the permission-set role name when `--account` is set.
+        /// AWS IAM role ARN to assume.
         #[arg(long)]
         role: String,
-        /// AWS account ID — switches to the Identity Center portal for `--role`.
-        #[arg(long)]
-        account: Option<String>,
-        /// SSO session name from ~/.aws/config (Identity Center mode).
-        #[arg(long)]
-        sso_session: Option<String>,
     },
     /// Obtain an SSH certificate.
     Ssh {

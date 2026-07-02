@@ -623,19 +623,7 @@ async fn run() -> Result<()> {
             .await
         }
         Commands::Credential { command } => match command {
-            CredentialCommands::Aws {
-                role,
-                account,
-                sso_session,
-            } => {
-                commands::credential::aws::run(
-                    server,
-                    &role,
-                    account.as_deref(),
-                    sso_session.as_deref(),
-                )
-                .await
-            }
+            CredentialCommands::Aws { role } => commands::credential::aws::run(server, &role).await,
             CredentialCommands::Ssh { key, force } => {
                 commands::credential::ssh::run(server, key.as_deref(), force).await
             }
@@ -743,7 +731,6 @@ async fn run() -> Result<()> {
                 discover,
             } => {
                 commands::setup::aws::run(
-                    server,
                     profile.as_deref(),
                     role.as_deref(),
                     region.as_deref(),
