@@ -125,24 +125,6 @@ impl VouchClient<ReqwestClient> {
 }
 
 impl<H: HttpClient> VouchClient<H> {
-    /// Create a client with a custom HTTP implementation.
-    ///
-    /// Used for testing with `TestHttpClient`.
-    #[expect(
-        dead_code,
-        reason = "constructor used by TestHttpClient in test contexts"
-    )]
-    pub(crate) fn with_http(http: H, base_url: &str) -> Self {
-        Self {
-            http,
-            base_url: base_url.trim_end_matches('/').to_string(),
-            token: None,
-            fapi_key: None,
-            sig_nonce: std::sync::Mutex::new(None),
-            dpop_source: None,
-        }
-    }
-
     /// Set an explicit authentication token.
     ///
     /// Used when the caller has already resolved the token (e.g., from
