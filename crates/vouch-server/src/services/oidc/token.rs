@@ -1096,8 +1096,8 @@ pub async fn validate_session_token(
     reason = "test code: panic on assertion failure is acceptable"
 )]
 mod tests {
-    use super::*;
     use super::super::authorization::CodeChallengeMethod;
+    use super::*;
 
     fn assert_oauth_error<T: std::fmt::Debug>(
         result: Result<T, ServiceError>,
