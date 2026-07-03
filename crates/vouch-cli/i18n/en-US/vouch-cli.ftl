@@ -216,7 +216,7 @@ cmd-keys-long-about = Without a subcommand, opens an interactive menu.
 cmd-exec-about = Run a command with { -product }-provided credentials in the environment
 cmd-credential-about = Obtain credentials for various services
 cmd-setup-about = Configure integrations
-cmd-aws-about = AWS Identity Center commands for multi-account management
+cmd-aws-about = AWS Management Console access
 cmd-completions-about = Generate shell completions
 cmd-doctor-about = Check your { -product } environment for common issues
 cmd-posture-about = Show device posture signals (what the CLI detects about this machine)
@@ -762,7 +762,7 @@ cmd-setup-codeartifact-about = Configure a package manager for AWS CodeArtifact
 
 # setup/aws arg help
 arg-setup-aws-profile-help = AWS profile name to configure. Defaults to "vouch" if not specified.
-arg-setup-aws-role-help = Target AWS IAM role ARN. Required for single-account setup.
+arg-setup-aws-role-help = Target AWS IAM role ARN for single-account setup. Omit all flags to launch the interactive wizard.
 arg-setup-aws-management-role-help =
     Management role ARN — the OIDC-trusted anchor for multi-account and Identity Center
     access. Stored in { -product } config as an organization entry.
@@ -893,6 +893,27 @@ install-path-hint-nix =
 
 setup-aws-err-role-required = Either --role or --discover is required
 setup-aws-err-region-required = --region is required when --identity-center-application is specified
+
+# Interactive first-run wizard (bare `vouch setup aws`).
+setup-aws-wizard-intro = Let's set up AWS access with { -product }.
+setup-aws-wizard-mode-prompt = How do you access AWS?
+setup-aws-wizard-mode-single = Single account — one IAM role
+setup-aws-wizard-mode-chain = Multiple accounts — a management role that assumes into member roles
+setup-aws-wizard-mode-idc = Identity Center (SSO) — permission sets
+setup-aws-wizard-cancelled = Setup cancelled. No changes were made.
+setup-aws-wizard-role-prompt = Role ARN to assume:
+setup-aws-wizard-mgmt-role-prompt = Management role ARN (the role that trusts { -product }'s OIDC provider):
+setup-aws-wizard-target-role-prompt = Target role ARN:
+setup-aws-wizard-region-prompt = Region (optional, press Enter to skip):
+setup-aws-wizard-idc-region-prompt = Identity Center region (e.g. us-east-1):
+setup-aws-wizard-idc-app-prompt = Identity Center application ARN:
+setup-aws-wizard-idc-aud-reminder = Reminder: set this application's audience (aud) claim to your { -product } issuer: { $issuer }
+setup-aws-wizard-add-target = Add a target role now?
+setup-aws-wizard-add-another = Add another target role?
+setup-aws-wizard-discover = Discover accounts and permission sets now?
+setup-aws-wizard-invalid-role-arn = That doesn't look like an IAM role ARN (expected arn:PARTITION:iam::ACCOUNT:role/NAME). Try again.
+setup-aws-wizard-invalid-idc-arn = That doesn't look like an Identity Center application ARN (expected arn:PARTITION:sso::ACCOUNT:application/...). Try again.
+setup-aws-wizard-err-input = Input error: { $reason }
 setup-aws-profile-already-exists =
     Profile [{ $profile }] already exists in ~/.aws/config.
     To update it, edit ~/.aws/config directly.

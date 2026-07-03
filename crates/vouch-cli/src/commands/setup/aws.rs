@@ -11,7 +11,8 @@
 //!   --region <region> [--discover]` — stores org + IdC, optionally enumerates.
 
 use anyhow::{Context, Result};
-use vouch_cli::{tr, tr_println};
+use inquire::{Confirm, InquireError, Select, Text};
+use vouch_cli::{tr, tr_args, tr_println};
 
 use crate::config::{AwsIdentityCenter, AwsOrganization};
 use crate::install_path::resolve_install_path;
@@ -83,6 +84,17 @@ pub(crate) async fn run(
     discover: bool,
     server: &str,
 ) -> Result<()> {
+    // No flags supplied → launch the interactive first-run wizard.
+    if profile.is_none()
+        && role_arn.is_none()
+        && management_role.is_none()
+        && identity_center_application.is_none()
+        && region.is_none()
+        && !discover
+    {
+        return run_wizard(server).await;
+    }
+
     // Store the org in vouch config if a management role was provided.
     if let Some(mgmt) = management_role {
         store_org(mgmt, identity_center_application, region)?;
@@ -109,6 +121,218 @@ pub(crate) async fn run(
     };
 
     write_sts_profile(profile, role, management_role.unwrap_or(role), region)
+}
+
+/// Interactive first-run wizard, launched when `setup aws` is run with no flags.
+///
+/// Establishes one organization per run, reusing the same helpers as the
+/// flag-based paths (`store_org` / `write_sts_profile` / `run_discover`).
+async fn run_wizard(server: &str) -> Result<()> {
+    tr_println!("setup-aws-wizard-intro");
+
+    let single = tr!("setup-aws-wizard-mode-single");
+    let chain = tr!("setup-aws-wizard-mode-chain");
+    let idc = tr!("setup-aws-wizard-mode-idc");
+    let options = vec![single.clone(), chain.clone(), idc.clone()];
+
+    let choice = match Select::new(&tr!("setup-aws-wizard-mode-prompt"), options).prompt() {
+        Ok(c) => c,
+        Err(InquireError::OperationCanceled | InquireError::OperationInterrupted) => {
+            tr_println!("setup-aws-wizard-cancelled");
+            return Ok(());
+        }
+        Err(e) => return Err(wizard_input_error(&e)),
+    };
+
+    if choice == single {
+        wizard_single_account()
+    } else if choice == chain {
+        wizard_management_chain()
+    } else {
+        wizard_identity_center(server).await
+    }
+}
+
+/// Single account: prompt for a role ARN and write one profile.
+fn wizard_single_account() -> Result<()> {
+    let Some(role) = prompt_role_arn(&tr!("setup-aws-wizard-role-prompt"), None)? else {
+        tr_println!("setup-aws-wizard-cancelled");
+        return Ok(());
+    };
+    let region = prompt_optional(&tr!("setup-aws-wizard-region-prompt"))?;
+    write_sts_profile(None, &role, &role, region.as_deref())
+}
+
+/// Management-role chain: store the org, then optionally add target-role profiles.
+fn wizard_management_chain() -> Result<()> {
+    let orgs = configured_orgs();
+    let mgmt_default = orgs.first().map(|o| o.management_role.as_str());
+    let Some(mgmt) = prompt_role_arn(&tr!("setup-aws-wizard-mgmt-role-prompt"), mgmt_default)?
+    else {
+        tr_println!("setup-aws-wizard-cancelled");
+        return Ok(());
+    };
+    store_org(&mgmt, None, None)?;
+
+    if prompt_confirm(&tr!("setup-aws-wizard-add-target"), true)? {
+        loop {
+            let Some(role) = prompt_role_arn(&tr!("setup-aws-wizard-target-role-prompt"), None)?
+            else {
+                break;
+            };
+            let region = prompt_optional(&tr!("setup-aws-wizard-region-prompt"))?;
+            write_sts_profile(None, &role, &mgmt, region.as_deref())?;
+            if !prompt_confirm(&tr!("setup-aws-wizard-add-another"), false)? {
+                break;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Identity Center: store the org + IdC anchor, show the audience reminder for
+/// the current issuer, and optionally run discovery.
+async fn wizard_identity_center(server: &str) -> Result<()> {
+    let orgs = configured_orgs();
+    let mgmt_default = orgs.first().map(|o| o.management_role.as_str());
+    let Some(mgmt) = prompt_role_arn(&tr!("setup-aws-wizard-mgmt-role-prompt"), mgmt_default)?
+    else {
+        tr_println!("setup-aws-wizard-cancelled");
+        return Ok(());
+    };
+
+    // The customer's Identity Center application must set its audience claim to
+    // this Vouch issuer, or CreateTokenWithIAM rejects the assertion.
+    tr_println!("setup-aws-wizard-idc-aud-reminder", issuer = server);
+
+    // If the org for this management role already has Identity Center configured,
+    // offer its application ARN and region as defaults.
+    let existing_idc = orgs
+        .iter()
+        .find(|o| o.management_role == mgmt)
+        .and_then(|o| o.identity_center.as_ref());
+
+    let Some(app) = prompt_idc_application(
+        &tr!("setup-aws-wizard-idc-app-prompt"),
+        existing_idc.map(|i| i.application_arn.as_str()),
+    )?
+    else {
+        tr_println!("setup-aws-wizard-cancelled");
+        return Ok(());
+    };
+
+    // Region is required for Identity Center; prompt until provided or cancelled.
+    let region_default = existing_idc.map(|i| i.region.as_str());
+    let region_prompt = tr!("setup-aws-wizard-idc-region-prompt");
+    let region = loop {
+        let text = match region_default {
+            Some(d) => Text::new(&region_prompt).with_default(d),
+            None => Text::new(&region_prompt),
+        };
+        match text.prompt() {
+            Ok(input) if !input.trim().is_empty() => break input.trim().to_string(),
+            Ok(_) => continue,
+            Err(InquireError::OperationCanceled | InquireError::OperationInterrupted) => {
+                tr_println!("setup-aws-wizard-cancelled");
+                return Ok(());
+            }
+            Err(e) => return Err(wizard_input_error(&e)),
+        }
+    };
+
+    store_org(&mgmt, Some(app.as_str()), Some(region.as_str()))?;
+
+    if prompt_confirm(&tr!("setup-aws-wizard-discover"), true)? {
+        run_discover(None, Some(app.as_str()), server).await?;
+    }
+    Ok(())
+}
+
+/// Prompt for a required IAM role ARN, re-prompting until it parses or the user
+/// cancels. Returns `Ok(None)` on cancel (Esc / Ctrl-C).
+fn prompt_role_arn(prompt: &str, default: Option<&str>) -> Result<Option<String>> {
+    loop {
+        let text = match default {
+            Some(d) => Text::new(prompt).with_default(d),
+            None => Text::new(prompt),
+        };
+        match text.prompt() {
+            Ok(input) => {
+                let trimmed = input.trim();
+                if crate::integrations::aws::sts::parse_role_arn(trimmed).is_ok() {
+                    return Ok(Some(trimmed.to_string()));
+                }
+                tr_println!("setup-aws-wizard-invalid-role-arn");
+            }
+            Err(InquireError::OperationCanceled | InquireError::OperationInterrupted) => {
+                return Ok(None);
+            }
+            Err(e) => return Err(wizard_input_error(&e)),
+        }
+    }
+}
+
+/// Prompt for a required Identity Center application ARN (service `sso`),
+/// re-prompting until valid or cancelled.
+fn prompt_idc_application(prompt: &str, default: Option<&str>) -> Result<Option<String>> {
+    loop {
+        let text = match default {
+            Some(d) => Text::new(prompt).with_default(d),
+            None => Text::new(prompt),
+        };
+        match text.prompt() {
+            Ok(input) => {
+                let trimmed = input.trim();
+                let is_sso =
+                    vouch_common::aws::Arn::parse(trimmed).is_ok_and(|a| a.service == "sso");
+                if is_sso {
+                    return Ok(Some(trimmed.to_string()));
+                }
+                tr_println!("setup-aws-wizard-invalid-idc-arn");
+            }
+            Err(InquireError::OperationCanceled | InquireError::OperationInterrupted) => {
+                return Ok(None);
+            }
+            Err(e) => return Err(wizard_input_error(&e)),
+        }
+    }
+}
+
+/// Prompt for an optional value; empty input or cancel → `None`.
+fn prompt_optional(prompt: &str) -> Result<Option<String>> {
+    match Text::new(prompt).prompt() {
+        Ok(input) if input.trim().is_empty() => Ok(None),
+        Ok(input) => Ok(Some(input.trim().to_string())),
+        Err(InquireError::OperationCanceled | InquireError::OperationInterrupted) => Ok(None),
+        Err(e) => Err(wizard_input_error(&e)),
+    }
+}
+
+/// Yes/no confirmation with a default; cancel is treated as "no".
+fn prompt_confirm(prompt: &str, default: bool) -> Result<bool> {
+    match Confirm::new(prompt).with_default(default).prompt() {
+        Ok(b) => Ok(b),
+        Err(InquireError::OperationCanceled | InquireError::OperationInterrupted) => Ok(false),
+        Err(e) => Err(wizard_input_error(&e)),
+    }
+}
+
+/// Map an unexpected inquire error into a user-facing error.
+fn wizard_input_error(e: &InquireError) -> anyhow::Error {
+    anyhow::anyhow!(tr_args!(
+        "setup-aws-wizard-err-input",
+        reason = e.to_string()
+    ))
+}
+
+/// The organizations currently in vouch config, used to pre-fill wizard defaults.
+/// Returns an empty list on any load error (the wizard still works, just without
+/// pre-filled values).
+fn configured_orgs() -> Vec<AwsOrganization> {
+    crate::config::Config::load()
+        .ok()
+        .and_then(|c| c.aws().map(|a| a.organizations.clone()))
+        .unwrap_or_default()
 }
 
 /// Append or update the org entry in vouch config.

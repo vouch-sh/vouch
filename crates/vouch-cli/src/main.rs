@@ -396,7 +396,7 @@ enum Commands {
         #[command(subcommand)]
         command: SetupCommands,
     },
-    /// AWS Identity Center commands for multi-account management.
+    /// AWS Management Console access.
     #[command(about = tr!("cmd-aws-about"))]
     Aws {
         #[command(subcommand)]
