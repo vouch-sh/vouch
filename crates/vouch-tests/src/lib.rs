@@ -13,7 +13,7 @@ pub use harness::TestHarness;
 pub use mock_fido::IntegrationMockDevice;
 
 // Re-export commonly used types from other crates
-pub use clock::{Clock, SystemClock, TestClock};
+pub use clock::{Clock, TestClock};
 pub use vouch_agent::{TestTransport, TestTransportPair};
 pub use vouch_cli::{FidoDevice, HttpClient, MockFidoDevice, TestHttpClient};
 pub use vouch_server::crypto::webauthn_verify::{CoseVerifier, RealCoseVerifier, TestCoseVerifier};
