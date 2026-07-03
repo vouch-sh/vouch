@@ -6,7 +6,6 @@
 //! - RFC 7636 - PKCE (Proof Key for Code Exchange)
 //! - RFC 9449 - DPoP (Demonstrating Proof of Possession)
 
-use super::authorization::CodeChallengeMethod;
 use super::authorization_details::AuthorizationDetails;
 use super::dpop::{self, CnfClaim, DpopError, ValidatedDpopProof};
 use super::scope::{OAuthScope, ScopeSet};
@@ -675,12 +674,6 @@ impl AuthorizationCode {
             ServiceError::oauth(OAuthErrorCode::InvalidGrant, "Missing code_verifier")
         })?;
 
-        // RFC 9700 Section 2.1.1: Only S256 is supported.
-        // Default to S256 for backward compatibility with codes that don't store the method.
-        let _method = self
-            .code_challenge_method
-            .unwrap_or(CodeChallengeMethod::S256);
-
         let computed_challenge = {
             let hash = digest::digest(&SHA256, code_verifier.as_bytes());
             URL_SAFE_NO_PAD.encode(hash.as_ref())
@@ -1104,6 +1097,7 @@ pub async fn validate_session_token(
 )]
 mod tests {
     use super::*;
+    use super::super::authorization::CodeChallengeMethod;
 
     fn assert_oauth_error<T: std::fmt::Debug>(
         result: Result<T, ServiceError>,
