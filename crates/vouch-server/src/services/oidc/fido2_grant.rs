@@ -34,9 +34,6 @@ use uuid::Uuid;
 use vouch_common::encoding::Raw;
 use vouch_common::fido2_types::Challenge;
 
-/// FIDO2 assertion grant URI.
-pub const FIDO2_ASSERTION_GRANT_TYPE: &str = "urn:ietf:params:oauth:grant-type:fido2-assertion";
-
 /// State embedded in the challenge JWT (must match the challenge endpoint).
 #[derive(Debug, Serialize, Deserialize)]
 struct Fido2ChallengeState {
