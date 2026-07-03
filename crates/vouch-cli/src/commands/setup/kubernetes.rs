@@ -94,7 +94,7 @@ pub(crate) async fn run(
                 env: None,
                 interactive_mode: Some("Never".to_string()),
             }),
-            other: serde_yaml::Value::Mapping(serde_yaml::Mapping::new()),
+            other: serde_json::Value::Object(serde_json::Map::new()),
         },
     });
 

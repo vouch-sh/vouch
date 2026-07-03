@@ -113,7 +113,7 @@ fn find_vouch_eks_contexts() -> Vec<String> {
         Err(_) => return Vec::new(),
     };
 
-    let config: Kubeconfig = match serde_yaml::from_str(&content) {
+    let config: Kubeconfig = match serde_saphyr::from_str(&content) {
         Ok(c) => c,
         Err(_) => return Vec::new(),
     };
@@ -267,7 +267,7 @@ users:
     token: some-token
 "#;
 
-        let config: Kubeconfig = serde_yaml::from_str(yaml).expect("should parse");
+        let config: Kubeconfig = serde_saphyr::from_str(yaml).expect("should parse");
 
         assert_eq!(config.contexts.len(), 2);
         assert_eq!(config.users.len(), 2);
@@ -291,7 +291,7 @@ contexts: []
 users: []
 "#;
 
-        let config: Kubeconfig = serde_yaml::from_str(yaml).expect("should parse");
+        let config: Kubeconfig = serde_saphyr::from_str(yaml).expect("should parse");
 
         assert!(config.contexts.is_empty());
         assert!(config.users.is_empty());
@@ -304,7 +304,7 @@ apiVersion: v1
 kind: Config
 "#;
 
-        let config: Kubeconfig = serde_yaml::from_str(yaml).expect("should parse");
+        let config: Kubeconfig = serde_saphyr::from_str(yaml).expect("should parse");
 
         assert!(config.contexts.is_empty());
         assert!(config.users.is_empty());

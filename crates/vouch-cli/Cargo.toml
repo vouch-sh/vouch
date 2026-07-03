@@ -48,7 +48,7 @@ sys-locale = { workspace = true }
 serde = { workspace = true, features = ["std", "derive"] }
 serde_json = { workspace = true, features = ["std"] }
 serde_urlencoded = { workspace = true }
-serde_yaml = { workspace = true }
+serde-saphyr = { workspace = true, features = ["serialize", "deserialize"] }
 ssh-key = { workspace = true, features = ["std", "ed25519", "encryption", "rand_core", "getrandom"] }
 tempfile = { workspace = true }
 thiserror = { workspace = true }

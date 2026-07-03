@@ -192,7 +192,7 @@ secrecy = { version = "=0.10.3", default-features = false }
 serde = { version = "=1.0.228", default-features = false }
 serde_json = { version = "=1.0.150", default-features = false }
 serde_urlencoded = { version = "=0.7.1", default-features = false }
-serde_yaml = { version = "=0.9.34", default-features = false }
+serde-saphyr = { version = "=0.0.29", default-features = false }
 sqlx = { version = "=0.9.0", default-features = false }
 signature = { version = "=2.2.0", default-features = false }
 spki = { version = "=0.7.3", default-features = false }
