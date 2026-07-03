@@ -118,7 +118,9 @@ vouch enroll
 
 # Configure integrations
 vouch setup ssh                                    # SSH certificates
-vouch setup aws --role arn:aws:iam::ID:role/name   # AWS credential_process
+vouch setup aws --role arn:aws:iam::ID:role/name   # AWS credential_process (single account)
+# For AWS Organizations + Identity Center:
+# vouch setup aws --management-role arn:aws:iam::ID:role/Mgmt --identity-center-application <arn> --region <region> --discover
 vouch setup eks --cluster my-cluster               # kubectl for EKS via IAM
 vouch setup k8s --cluster my-cluster --server URL  # kubectl via OIDC
 vouch setup github --configure                     # Git credential helper for GitHub
