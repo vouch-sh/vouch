@@ -542,9 +542,10 @@ pub(crate) fn resolve_management_role_for(
                     .and_then(|o| chain_if_different_role(o, target_role_arn)));
             }
             0 => {
-                // No configured org's management account covers this target.
-                // "specify --via" would be misleading — the account simply has
-                // no organization set up for it.
+                // No org's management account matches the target account. The
+                // target may be a member account reachable by chaining through a
+                // configured org (--via), or an account no org covers (setup aws) —
+                // config doesn't record member accounts, so the message offers both.
                 return Err(crate::exit_code::CliError::ConfigError(tr_args!(
                     "aws-err-no-org-covers-account",
                     account = acct.to_string()
@@ -1231,17 +1232,22 @@ mod tests {
 
     #[test]
     fn resolve_multi_org_no_match_returns_no_coverage_error() {
-        // Two orgs; target account matches neither management account. This is
-        // "no org covers the account", not --via ambiguity: the message names
-        // the uncovered account rather than telling the user to specify --via.
+        // Two orgs; target account matches neither management account. The target
+        // may be a member account reachable via --via, so the message names the
+        // account and recommends --via (with setup aws as the fallback).
         let mgmt1 = "arn:aws:iam::111:role/Mgmt1";
         let mgmt2 = "arn:aws:iam::222:role/Mgmt2";
         let target = "arn:aws:iam::333:role/Target";
         let cfg = make_config(&[mgmt1, mgmt2]);
         let err = resolve_management_role_for(&cfg, target, None).unwrap_err();
+        let msg = err.to_string();
         assert!(
-            err.to_string().contains("333"),
-            "no-coverage error should name the uncovered account 333: {err}"
+            msg.contains("333"),
+            "no-coverage error should name the target account 333: {msg}"
+        );
+        assert!(
+            msg.contains("--via"),
+            "no-coverage error should recommend --via for member-account targets: {msg}"
         );
     }
 
