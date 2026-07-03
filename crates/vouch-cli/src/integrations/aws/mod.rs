@@ -7,9 +7,9 @@
 pub(crate) mod codeartifact;
 pub(crate) mod codecommit;
 pub(crate) mod config;
+pub(crate) mod identity_center;
 pub(crate) mod redshift;
 pub(crate) mod sigv4;
-pub(crate) mod sso;
 pub(crate) mod sso_portal;
 pub(crate) mod sts;
 
@@ -119,7 +119,7 @@ pub(crate) fn resolve_role_and_region(
 }
 
 use super::{ConfiguredDetails, IntegrationCheck, IntegrationState};
-use crate::config::{AwsMultiAccountConfig, Config};
+use crate::config::Config;
 
 /// AWS integration checker.
 pub(crate) struct AwsIntegration;
@@ -147,22 +147,18 @@ const SETUP_HINT: &str = "vouch setup aws --role <role-arn>";
 /// A vouch-managed AWS profile discovered in `~/.aws/config`.
 struct VouchProfile {
     name: String,
-    role_arn: Option<String>,
+    /// Pre-formatted credential target: STS role ARN, or `"IdC {account}/{permission-set}"`.
+    target: Option<String>,
 }
 
 /// What `vouch status` learned about the AWS integration.
 enum AwsStatusKind {
     /// No vouch-managed profiles in `~/.aws/config`.
     NotConfigured,
-    /// One or more vouch profiles are present and aligned with vouch config.
-    Configured { profiles: Vec<VouchProfile> },
-    /// The SSO session named in `~/.aws/config` has no matching key in
-    /// `~/.config/vouch/config.json`. Credential fetching may still work via the
-    /// single-entry fallback in `resolve_management_role`, but it will
-    /// silently break once a second SSO session is added.
-    Mismatched {
-        aws_session_name: String,
-        vouch_session_name: String,
+    /// One or more vouch profiles are present.
+    Configured {
+        profiles: Vec<VouchProfile>,
+        org_count: usize,
     },
 }
 
@@ -178,53 +174,40 @@ impl IntegrationCheck for AwsIntegration {
             };
         };
         let vouch_cfg = Config::load().ok();
-        let kind = check_aws_status(&aws_config, vouch_cfg.as_ref().and_then(Config::aws));
-        render(kind)
+        let vouch_aws = vouch_cfg.as_ref().and_then(|c| c.aws());
+        render(check_aws_status(&aws_config, vouch_aws))
     }
 }
 
-/// Pure logic: classify the AWS integration state from parsed configs.
+/// Pure logic: classify the AWS integration state from parsed `~/.aws/config`.
 fn check_aws_status(
     aws_config: &AwsConfig,
-    vouch_aws: Option<&AwsMultiAccountConfig>,
+    vouch_aws: Option<&crate::config::AwsOrgsConfig>,
 ) -> AwsStatusKind {
+    let org_count = vouch_aws.map_or(0, |a| a.organizations.len());
     let profiles: Vec<VouchProfile> = aws_config
         .find_all_vouch_profiles()
         .into_iter()
         .map(|p| {
-            let role_arn = p
-                .credential_process
-                .as_ref()
-                .and_then(|cp| extract_role_from_credential_process(cp));
+            let target = p.credential_process.as_ref().and_then(|cp| {
+                extract_role_from_credential_process(cp)
+                    .or_else(|| config::extract_idc_target_from_credential_process(cp))
+            });
             VouchProfile {
                 name: p.name,
-                role_arn,
+                target,
             }
         })
         .collect();
 
     if profiles.is_empty() {
-        return AwsStatusKind::NotConfigured;
+        AwsStatusKind::NotConfigured
+    } else {
+        AwsStatusKind::Configured {
+            profiles,
+            org_count,
+        }
     }
-
-    if let Some(vouch_aws) = vouch_aws
-        && !vouch_aws.sso_sessions.is_empty()
-        && let Some(aws_session) = aws_config.find_sso_session(None)
-        && !vouch_aws.sso_sessions.contains_key(&aws_session.name)
-    {
-        let vouch_session_name = vouch_aws
-            .sso_sessions
-            .keys()
-            .next()
-            .cloned()
-            .unwrap_or_default();
-        return AwsStatusKind::Mismatched {
-            aws_session_name: aws_session.name,
-            vouch_session_name,
-        };
-    }
-
-    AwsStatusKind::Configured { profiles }
 }
 
 /// Map an `AwsStatusKind` into the shared `IntegrationState` enum.
@@ -233,50 +216,51 @@ fn render(kind: AwsStatusKind) -> IntegrationState {
         AwsStatusKind::NotConfigured => IntegrationState::NotConfigured {
             setup_hint: SETUP_HINT.to_string(),
         },
-        AwsStatusKind::Mismatched {
-            aws_session_name,
-            vouch_session_name,
-        } => IntegrationState::Partial {
-            message: format!(
-                "SSO session name mismatch (\"{aws_session_name}\" vs \
-                 \"{vouch_session_name}\")"
-            ),
-            setup_hint: None,
-        },
-        AwsStatusKind::Configured { profiles } => render_configured(&profiles),
+        AwsStatusKind::Configured {
+            profiles,
+            org_count,
+        } => render_configured(&profiles, org_count),
     }
 }
 
-fn render_configured(profiles: &[VouchProfile]) -> IntegrationState {
+fn render_configured(profiles: &[VouchProfile], org_count: usize) -> IntegrationState {
     match profiles {
         [] => IntegrationState::NotConfigured {
             setup_hint: SETUP_HINT.to_string(),
         },
-        [single] => render_single(single),
-        _ => render_multi(profiles),
+        [single] => render_single(single, org_count),
+        _ => render_multi(profiles, org_count),
     }
 }
 
-fn render_single(p: &VouchProfile) -> IntegrationState {
+fn render_single(p: &VouchProfile, org_count: usize) -> IntegrationState {
     let summary = if p.name == "default" {
         "default profile".to_string()
     } else {
         format!("profile: {}", p.name)
     };
     let mut details = Vec::new();
-    if let Some(role) = &p.role_arn {
-        details.push(("Role".to_string(), role.clone()));
+    if let Some(target) = &p.target {
+        details.push(("Role".to_string(), target.clone()));
+    }
+    if org_count > 0 {
+        details.push(("Organizations".to_string(), org_count.to_string()));
     }
     IntegrationState::Configured(ConfiguredDetails { summary, details })
 }
 
-fn render_multi(profiles: &[VouchProfile]) -> IntegrationState {
+fn render_multi(profiles: &[VouchProfile], org_count: usize) -> IntegrationState {
     let count = profiles.len();
     let shown = count.min(MAX_LISTED_PROFILES);
-    let summary = if count > shown {
-        format!("{count} profiles, showing {shown}")
+    let orgs_suffix = if org_count > 0 {
+        format!(" ({org_count} orgs)")
     } else {
-        format!("{count} profiles")
+        String::new()
+    };
+    let summary = if count > shown {
+        format!("{count} profiles{orgs_suffix}, showing {shown}")
+    } else {
+        format!("{count} profiles{orgs_suffix}")
     };
     let name_width = profiles
         .iter()
@@ -284,15 +268,15 @@ fn render_multi(profiles: &[VouchProfile]) -> IntegrationState {
         .map(|p| p.name.len())
         .max()
         .unwrap_or(0);
-    // Use empty key + pre-formatted "name = arn" so the renderer emits raw
+    // Use empty key + pre-formatted "name = target" so the renderer emits raw
     // lines. Avoids stacking the kv `:` against the colon-heavy ARN.
     let details = profiles
         .iter()
         .take(shown)
         .map(|p| {
             let name = &p.name;
-            let role = p.role_arn.as_deref().unwrap_or("(no --role)");
-            let row = format!("{name:name_width$} = {role}");
+            let target = p.target.as_deref().unwrap_or("(no --role)");
+            let row = format!("{name:name_width$} = {target}");
             (String::new(), row)
         })
         .collect();
@@ -308,8 +292,6 @@ fn render_multi(profiles: &[VouchProfile]) -> IntegrationState {
 )]
 mod tests {
     use super::*;
-    use crate::config::SsoSessionConfig;
-    use std::collections::BTreeMap;
     use std::io::Write;
     use tempfile::NamedTempFile;
 
@@ -318,20 +300,6 @@ mod tests {
         file.write_all(content.as_bytes())
             .expect("failed to write temp file");
         AwsConfig::load_from(file.path().to_path_buf()).expect("failed to load aws config")
-    }
-
-    fn vouch_aws_with_sessions(names: &[&str]) -> AwsMultiAccountConfig {
-        let mut sso_sessions = BTreeMap::new();
-        for name in names {
-            sso_sessions.insert(
-                (*name).to_string(),
-                SsoSessionConfig {
-                    management_role: format!("arn:aws:iam::111:role/Mgmt-{name}"),
-                    ..SsoSessionConfig::default()
-                },
-            );
-        }
-        AwsMultiAccountConfig { sso_sessions }
     }
 
     #[test]
@@ -380,13 +348,17 @@ credential_process = vouch credential aws --role arn:aws:iam::123:role/MyRole
 region = us-east-1
 "#;
         let aws = load_config(content);
-        let AwsStatusKind::Configured { profiles } = check_aws_status(&aws, None) else {
+        let AwsStatusKind::Configured {
+            profiles,
+            org_count: _,
+        } = check_aws_status(&aws, None)
+        else {
             panic!("expected Configured");
         };
         assert_eq!(profiles.len(), 1);
         assert_eq!(profiles[0].name, "vouch");
         assert_eq!(
-            profiles[0].role_arn.as_deref(),
+            profiles[0].target.as_deref(),
             Some("arn:aws:iam::123:role/MyRole")
         );
     }
@@ -398,11 +370,15 @@ region = us-east-1
 credential_process = /usr/local/bin/vouch credential aws
 "#;
         let aws = load_config(content);
-        let AwsStatusKind::Configured { profiles } = check_aws_status(&aws, None) else {
+        let AwsStatusKind::Configured {
+            profiles,
+            org_count: _,
+        } = check_aws_status(&aws, None)
+        else {
             panic!("expected Configured");
         };
         assert_eq!(profiles.len(), 1);
-        assert!(profiles[0].role_arn.is_none());
+        assert!(profiles[0].target.is_none());
     }
 
     #[test]
@@ -418,72 +394,30 @@ credential_process = vouch credential aws --role arn:aws:iam::222:role/Staging
 credential_process = vouch credential aws --role arn:aws:iam::333:role/Dev
 "#;
         let aws = load_config(content);
-        let AwsStatusKind::Configured { profiles } = check_aws_status(&aws, None) else {
+        let AwsStatusKind::Configured {
+            profiles,
+            org_count: _,
+        } = check_aws_status(&aws, None)
+        else {
             panic!("expected Configured");
         };
         assert_eq!(profiles.len(), 3);
     }
 
     #[test]
-    fn detects_sso_session_name_mismatch() {
+    fn sso_session_block_alongside_vouch_profile_returns_configured() {
+        // SSO session blocks are not profiles; a co-located vouch profile is still Configured.
         let content = r#"
 [sso-session sealodge]
 sso_start_url = https://example.awsapps.com/start
 sso_region = us-east-1
-sso_registration_scopes = sso:account:access
 
 [profile vouch-x]
 credential_process = vouch credential aws --role arn:aws:iam::111:role/X
 "#;
         let aws = load_config(content);
-        let vouch_aws = vouch_aws_with_sessions(&["sealodge-prod"]);
-        let AwsStatusKind::Mismatched {
-            aws_session_name,
-            vouch_session_name,
-        } = check_aws_status(&aws, Some(&vouch_aws))
-        else {
-            panic!("expected Mismatched");
-        };
-        assert_eq!(aws_session_name, "sealodge");
-        assert_eq!(vouch_session_name, "sealodge-prod");
-    }
-
-    #[test]
-    fn matching_sso_session_returns_configured() {
-        let content = r#"
-[sso-session sealodge]
-sso_start_url = https://example.awsapps.com/start
-sso_region = us-east-1
-sso_registration_scopes = sso:account:access
-
-[profile vouch-x]
-credential_process = vouch credential aws --role arn:aws:iam::111:role/X
-"#;
-        let aws = load_config(content);
-        let vouch_aws = vouch_aws_with_sessions(&["sealodge"]);
         assert!(matches!(
-            check_aws_status(&aws, Some(&vouch_aws)),
-            AwsStatusKind::Configured { .. }
-        ));
-    }
-
-    #[test]
-    fn empty_vouch_sso_sessions_does_not_trigger_mismatch() {
-        // sso_sessions empty -> mismatch detection skipped even if ~/.aws/config
-        // names an SSO session.
-        let content = r#"
-[sso-session sealodge]
-sso_start_url = https://example.awsapps.com/start
-sso_region = us-east-1
-sso_registration_scopes = sso:account:access
-
-[profile vouch-x]
-credential_process = vouch credential aws --role arn:aws:iam::111:role/X
-"#;
-        let aws = load_config(content);
-        let vouch_aws = AwsMultiAccountConfig::default();
-        assert!(matches!(
-            check_aws_status(&aws, Some(&vouch_aws)),
+            check_aws_status(&aws, None),
             AwsStatusKind::Configured { .. }
         ));
     }
@@ -492,9 +426,9 @@ credential_process = vouch credential aws --role arn:aws:iam::111:role/X
     fn render_single_profile_preserves_existing_shape() {
         let p = VouchProfile {
             name: "sealodge-admin".to_string(),
-            role_arn: Some("arn:aws:iam::861:role/VouchAdmin".to_string()),
+            target: Some("arn:aws:iam::861:role/VouchAdmin".to_string()),
         };
-        let IntegrationState::Configured(details) = render_single(&p) else {
+        let IntegrationState::Configured(details) = render_single(&p, 0) else {
             panic!("expected Configured");
         };
         assert_eq!(details.summary, "profile: sealodge-admin");
@@ -511,9 +445,9 @@ credential_process = vouch credential aws --role arn:aws:iam::111:role/X
     fn render_single_default_profile_uses_default_phrase() {
         let p = VouchProfile {
             name: "default".to_string(),
-            role_arn: Some("arn:aws:iam::111:role/Default".to_string()),
+            target: Some("arn:aws:iam::111:role/Default".to_string()),
         };
-        let IntegrationState::Configured(details) = render_single(&p) else {
+        let IntegrationState::Configured(details) = render_single(&p, 0) else {
             panic!("expected Configured");
         };
         assert_eq!(details.summary, "default profile");
@@ -523,26 +457,47 @@ credential_process = vouch credential aws --role arn:aws:iam::111:role/X
     fn render_single_omits_role_line_when_missing() {
         let p = VouchProfile {
             name: "vouch".to_string(),
-            role_arn: None,
+            target: None,
         };
-        let IntegrationState::Configured(details) = render_single(&p) else {
+        let IntegrationState::Configured(details) = render_single(&p, 0) else {
             panic!("expected Configured");
         };
         assert!(details.details.is_empty());
+    }
+
+    #[test]
+    fn render_single_shows_org_count_when_nonzero() {
+        let p = VouchProfile {
+            name: "vouch-prod".to_string(),
+            target: Some("arn:aws:iam::111:role/Admin".to_string()),
+        };
+        let IntegrationState::Configured(details) = render_single(&p, 2) else {
+            panic!("expected Configured");
+        };
+        assert_eq!(
+            details.details,
+            vec![
+                (
+                    "Role".to_string(),
+                    "arn:aws:iam::111:role/Admin".to_string()
+                ),
+                ("Organizations".to_string(), "2".to_string()),
+            ]
+        );
     }
 
     fn make_profiles(count: usize) -> Vec<VouchProfile> {
         (1..=count)
             .map(|i| VouchProfile {
                 name: format!("vouch-{i}"),
-                role_arn: Some(format!("arn:aws:iam::{i}11:role/R{i}")),
+                target: Some(format!("arn:aws:iam::{i}11:role/R{i}")),
             })
             .collect()
     }
 
     #[test]
     fn render_three_profiles_lists_all() {
-        let IntegrationState::Configured(details) = render_multi(&make_profiles(3)) else {
+        let IntegrationState::Configured(details) = render_multi(&make_profiles(3), 0) else {
             panic!("expected Configured");
         };
         assert_eq!(details.summary, "3 profiles");
@@ -557,14 +512,14 @@ credential_process = vouch credential aws --role arn:aws:iam::111:role/X
         let profiles = vec![
             VouchProfile {
                 name: "short".to_string(),
-                role_arn: Some("arn:aws:iam::111:role/A".to_string()),
+                target: Some("arn:aws:iam::111:role/A".to_string()),
             },
             VouchProfile {
                 name: "much-longer-name".to_string(),
-                role_arn: Some("arn:aws:iam::222:role/B".to_string()),
+                target: Some("arn:aws:iam::222:role/B".to_string()),
             },
         ];
-        let IntegrationState::Configured(details) = render_multi(&profiles) else {
+        let IntegrationState::Configured(details) = render_multi(&profiles, 0) else {
             panic!("expected Configured");
         };
         // Padded to the longest name (16 chars), then " = ", then the ARN.
@@ -580,7 +535,7 @@ credential_process = vouch credential aws --role arn:aws:iam::111:role/X
 
     #[test]
     fn render_five_profiles_truncates_to_three() {
-        let IntegrationState::Configured(details) = render_multi(&make_profiles(5)) else {
+        let IntegrationState::Configured(details) = render_multi(&make_profiles(5), 0) else {
             panic!("expected Configured");
         };
         assert_eq!(details.summary, "5 profiles, showing 3");
@@ -588,18 +543,26 @@ credential_process = vouch credential aws --role arn:aws:iam::111:role/X
     }
 
     #[test]
+    fn render_multi_with_orgs_folds_org_count_into_summary() {
+        let IntegrationState::Configured(details) = render_multi(&make_profiles(2), 3) else {
+            panic!("expected Configured");
+        };
+        assert_eq!(details.summary, "2 profiles (3 orgs)");
+    }
+
+    #[test]
     fn render_profile_without_role_shows_placeholder() {
         let profiles = vec![
             VouchProfile {
                 name: "vouch-a".to_string(),
-                role_arn: None,
+                target: None,
             },
             VouchProfile {
                 name: "vouch-b".to_string(),
-                role_arn: Some("arn:aws:iam::111:role/B".to_string()),
+                target: Some("arn:aws:iam::111:role/B".to_string()),
             },
         ];
-        let IntegrationState::Configured(details) = render_multi(&profiles) else {
+        let IntegrationState::Configured(details) = render_multi(&profiles, 0) else {
             panic!("expected Configured");
         };
         assert!(details.details[0].1.ends_with("= (no --role)"));
@@ -607,21 +570,25 @@ credential_process = vouch credential aws --role arn:aws:iam::111:role/X
     }
 
     #[test]
-    fn render_mismatched_returns_partial() {
-        let state = render(AwsStatusKind::Mismatched {
-            aws_session_name: "sealodge".to_string(),
-            vouch_session_name: "sealodge-prod".to_string(),
-        });
-        let IntegrationState::Partial {
-            message,
-            setup_hint,
-        } = state
-        else {
-            panic!("expected Partial");
+    fn render_idc_profile_shows_idc_target() {
+        let profiles = vec![VouchProfile {
+            name: "vouch-prod-admin".to_string(),
+            target: Some("IdC 123456789012/AdministratorAccess".to_string()),
+        }];
+        let IntegrationState::Configured(details) = render_configured(&profiles, 1) else {
+            panic!("expected Configured");
         };
-        assert!(message.contains("sealodge"));
-        assert!(message.contains("sealodge-prod"));
-        assert!(setup_hint.is_none());
+        assert_eq!(details.summary, "profile: vouch-prod-admin");
+        assert_eq!(
+            details.details,
+            vec![
+                (
+                    "Role".to_string(),
+                    "IdC 123456789012/AdministratorAccess".to_string()
+                ),
+                ("Organizations".to_string(), "1".to_string()),
+            ]
+        );
     }
 
     #[test]

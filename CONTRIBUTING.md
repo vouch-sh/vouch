@@ -136,9 +136,9 @@ let session = Session::new(user.id, None, Some(8), true, None)?;
 ```rust
 // Good: Document public APIs
 /// Authenticates a user with their FIDO2 credential.
-/// 
+///
 /// # Errors
-/// 
+///
 /// Returns `AuthError::InvalidCredential` if the assertion is invalid.
 /// Returns `AuthError::SessionExpired` if the session has expired.
 pub fn authenticate(credential: &Credential) -> Result<Session, AuthError> { ... }

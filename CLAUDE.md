@@ -130,7 +130,7 @@ let session = SessionBuilder::new()
 
 // Document public APIs with examples
 /// Authenticates using FIDO2 assertion.
-/// 
+///
 /// # Errors
 /// Returns `AuthError::InvalidCredential` if assertion is invalid.
 pub fn authenticate(...) -> Result<...>

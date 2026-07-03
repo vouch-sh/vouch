@@ -6,6 +6,7 @@
 use anyhow::{Context, Result};
 use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
+use vouch_cli::{tr, tr_args};
 
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -125,9 +126,6 @@ pub(crate) struct StsRequest<'a> {
     pub(crate) agent_source: Option<&'a str>,
 }
 
-/// Exchange a Vouch session for AWS STS credentials.
-///
-/// Handles the full flow: OIDC token fetch → JWT decode for session tags →
 /// Detect if running inside an AI coding agent by checking environment variables.
 ///
 /// Returns the agent identifier (e.g., "claude-code/2.1.120/agent", "cursor")
@@ -266,14 +264,17 @@ pub(crate) async fn exchange_for_sts_credentials(req: StsRequest<'_>) -> Result<
         agent_source,
     } = req;
 
-    // If caller didn't pre-resolve, resolve now from config
+    // If caller didn't pre-resolve, resolve now from config. External callers
+    // (eks, rds, etc.) pass None; `resolve_management_role_for` applies the
+    // chain-if-different-role test so they get chaining for free.
     let resolved;
     let mgmt = match management_role {
         Some(m) => Some(m),
         None => {
             resolved = crate::config::Config::load()
                 .ok()
-                .and_then(|c| resolve_management_role(&c).ok())
+                .map(|c| resolve_management_role_for(&c, role_arn, None))
+                .transpose()?
                 .flatten();
             resolved.as_deref()
         }
@@ -412,46 +413,305 @@ fn agent_session_policies(agent_source: Option<&str>) -> AgentSessionPolicies {
     }
 }
 
-/// Resolve the management role ARN from vouch config.
+/// Decide whether to chain through a management role for a target.
 ///
-/// Tries to match an SSO session from `~/.aws/config` to a key in
-/// `aws.sso_sessions`. If no SSO session is found but there's exactly
-/// one entry in `sso_sessions`, uses that directly (chaining doesn't
-/// require SSO discovery).
-/// Returns `None` if no chaining config is found (direct auth is used).
-pub(crate) fn resolve_management_role(
+/// Returns `Some(management_role)` when the management role differs from the
+/// target (same full-ARN comparison as the existing `mgmt.filter(|m| m != role_arn)`
+/// at `exchange_for_sts_credentials`), or `None` for a direct assumption.
+fn chain_if_different_role(
+    org: &crate::config::AwsOrganization,
+    target_role_arn: &str,
+) -> Option<String> {
+    (org.management_role != target_role_arn).then(|| org.management_role.clone())
+}
+
+/// Extract the AWS account ID segment from a role ARN.
+///
+/// Role ARNs have the form `arn:partition:iam::ACCOUNT:role/NAME`.
+/// Returns `None` for any ARN that doesn't have a non-empty account field.
+fn extract_account_from_arn(arn: &str) -> Option<&str> {
+    arn.split(':').nth(4).filter(|s| !s.is_empty())
+}
+
+/// Resolve the management role ARN to chain through for a given target role.
+///
+/// - No organizations configured → `None` (direct `AssumeRoleWithWebIdentity`).
+/// - One organization → use `chain_if_different_role` to decide.
+/// - `via` supplied → match the org whose `management_role` equals the given full ARN
+///   exactly; error if no match.
+/// - Multiple orgs, no `via` → disambiguate by account ID: if the target role's
+///   account matches exactly one org's management-role account, use that org;
+///   otherwise return an error requiring `--via`.
+///
+/// Returns `Err` if `via` matches no org, or if multiple orgs are configured and
+/// the target account is ambiguous.
+pub(crate) fn resolve_management_role_for(
     vouch_config: &crate::config::Config,
+    target_role_arn: &str,
+    via: Option<&str>,
 ) -> Result<Option<String>> {
     let aws_cfg = match vouch_config.aws() {
-        Some(cfg) if !cfg.sso_sessions.is_empty() => cfg,
+        Some(cfg) if !cfg.organizations.is_empty() => cfg,
         _ => return Ok(None),
     };
 
-    // Try to match via SSO session name from ~/.aws/config
-    let aws_config = crate::integrations::aws::config::AwsConfig::load()?;
-    if let Some(session_cfg) = aws_config
-        .find_sso_session(None)
-        .and_then(|s| aws_cfg.sso_sessions.get(&s.name))
+    if let Some(via_role) = via {
+        // Explicit --via: must match an org by its full management-role ARN.
+        let org = aws_cfg
+            .organizations
+            .iter()
+            .find(|o| o.management_role == via_role)
+            .ok_or_else(|| {
+                crate::exit_code::CliError::ConfigError(tr_args!(
+                    "aws-err-via-not-found",
+                    management_role = via_role.to_string()
+                ))
+            })?;
+        return Ok(chain_if_different_role(org, target_role_arn));
+    }
+
+    // Single org: chain only when the management role differs from the target.
+    if aws_cfg.organizations.len() == 1 {
+        return Ok(aws_cfg
+            .organizations
+            .first()
+            .and_then(|o| chain_if_different_role(o, target_role_arn)));
+    }
+
+    // Multiple orgs, no --via: disambiguate by matching the target account ID to
+    // an org's management-role account. If exactly one org matches, use it.
+    // Never silently pick an arbitrary org — wrong account is a silent security bug.
+    let target_account = extract_account_from_arn(target_role_arn);
+    if let Some(acct) = target_account {
+        let matches: Vec<_> = aws_cfg
+            .organizations
+            .iter()
+            .filter(|o| extract_account_from_arn(&o.management_role) == Some(acct))
+            .collect();
+        if matches.len() == 1 {
+            return Ok(matches
+                .first()
+                .and_then(|o| chain_if_different_role(o, target_role_arn)));
+        }
+    }
+    Err(crate::exit_code::CliError::ConfigError(tr!("aws-err-via-ambiguous")).into())
+}
+
+/// Resolve the Identity Center instance config for credential issuance.
+///
+/// Returns the owning `AwsOrganization` alongside the `AwsIdentityCenter` so
+/// callers always derive the management role from the same org as the IdC
+/// instance, preventing cross-org mismatches.
+///
+/// - `idc_application_arn` provided → match by ARN (`None` if not found).
+/// - Single org → use its IdC if present, `None` if absent.
+/// - Multiple orgs, exactly one has IdC → use it (unambiguous).
+/// - Multiple orgs, more than one has IdC, no hint → `Err(aws-err-idc-ambiguous)`.
+/// - No org has IdC → `Ok(None)`.
+pub(crate) fn resolve_identity_center<'a>(
+    aws_cfg: &'a crate::config::AwsOrgsConfig,
+    idc_application_arn: Option<&str>,
+) -> Result<
+    Option<(
+        &'a crate::config::AwsOrganization,
+        &'a crate::config::AwsIdentityCenter,
+    )>,
+> {
+    if let Some(arn) = idc_application_arn {
+        return Ok(aws_cfg.organizations.iter().find_map(|o| {
+            o.identity_center
+                .as_ref()
+                .filter(|idc| idc.application_arn == arn)
+                .map(|idc| (o, idc))
+        }));
+    }
+    // Single org: use its IdC if present.
+    if aws_cfg.organizations.len() == 1 {
+        return Ok(aws_cfg
+            .organizations
+            .first()
+            .and_then(|o| o.identity_center.as_ref().map(|idc| (o, idc))));
+    }
+    // Multiple orgs, no hint: error if more than one has IdC (ambiguous).
+    // If exactly one has IdC it is unambiguous; if none have it, return None.
+    let idc_count = aws_cfg
+        .organizations
+        .iter()
+        .filter(|o| o.identity_center.is_some())
+        .count();
+    if idc_count > 1 {
+        return Err(crate::exit_code::CliError::ConfigError(tr!("aws-err-idc-ambiguous")).into());
+    }
+    Ok(aws_cfg
+        .organizations
+        .iter()
+        .find_map(|o| o.identity_center.as_ref().map(|idc| (o, idc))))
+}
+
+/// Obtain an IAM Identity Center access token via the trusted-token-issuer
+/// (TTI) exchange.
+///
+/// Called by `credential aws --account/--permission-set`, `aws console`
+/// (IdC path), and `setup aws --discover`. Blocks AI agents — permission-set
+/// credentials cannot be downscoped — so caller credentials are always full
+/// (no `ReadOnlyAccess` policy, no DPoP source tag).
+///
+/// 1. Assume the management role via `AssumeRoleWithWebIdentity` (full creds).
+/// 2. Fetch an RS256 JWT from `GET /v1/credentials/aws/sso/token`.
+/// 3. Exchange it for an IdC access token via `CreateTokenWithIAM`.
+pub(crate) async fn obtain_identity_center_token(
+    http_client: &reqwest::Client,
+    server: &str,
+    management_role: &str,
+    idc: &crate::config::AwsIdentityCenter,
+) -> Result<secrecy::SecretString> {
+    use crate::integrations::aws::sts::{WebIdentityRequest, assume_role_with_web_identity};
+    use secrecy::ExposeSecret;
+
+    // Block AI agents: GetRoleCredentials returns full permission-set access
+    // that cannot be downscoped with inline session policies, and the
+    // vouch:AccessType=ai tag does not reliably propagate through it.
+    if detect_agent_source().is_some() {
+        return Err(
+            crate::exit_code::CliError::ConfigError(tr!("aws-err-agent-idc-unsupported")).into(),
+        );
+    }
+
+    // Step 1: assume the management role with full (unrestricted) credentials.
+    let region = crate::integrations::aws::resolve_region_with_fallback(management_role)?;
+    let mgmt_arn = crate::integrations::aws::sts::parse_role_arn(management_role)?;
+    let domain_suffix = mgmt_arn.partition.dns_suffix();
+
+    let client = VouchClient::new(server).await?;
+    let token_response: OidcTokenResponse = client
+        .get_authenticated("/v1/credentials/aws/token")
+        .await
+        .context("failed to get OIDC token for management role")?;
+    let id_token = token_response.id_token.expose_secret();
+    let session = extract_sub_from_jwt(id_token).context("server returned invalid OIDC token")?;
+
+    let caller_creds = assume_role_with_web_identity(WebIdentityRequest {
+        http_client,
+        role_arn: management_role,
+        role_session_name: &session,
+        web_identity_token: id_token,
+        region: &region,
+        domain_suffix,
+        session_policy_names: &[],
+        session_policy: None,
+    })
+    .await
+    .context("failed to assume management role for IdC exchange")?;
+
+    // Step 2: fetch the RS256 JWT (the TTI assertion). Reuse `client` — the
+    // first `get_authenticated` call doesn't consume it, so there's no need
+    // for a second VouchClient::new (which would waste an IPC + keychain round-trip).
+    let rs256_token: OidcTokenResponse = client
+        .get_authenticated("/v1/credentials/aws/sso/token")
+        .await
+        .context("failed to get RS256 IdC token from Vouch server")?;
+
+    // Step 3: exchange for IdC access token.
+    crate::integrations::aws::identity_center::create_token_with_iam(
+        http_client,
+        &idc.region,
+        &idc.application_arn,
+        rs256_token.id_token.expose_secret(),
+        &caller_creds,
+    )
+    .await
+}
+
+/// Get cached Identity Center credentials, fetching fresh ones if needed.
+pub(crate) async fn get_idc_credentials(
+    server: &str,
+    account_id: &str,
+    permission_set: &str,
+    idc_application_arn: Option<&str>,
+    via: Option<&str>,
+) -> Result<serde_json::Value> {
+    use crate::integrations::aws::sso_portal::get_role_credentials;
+    use vouch_common::http::credential_client;
+
+    // Block AI agents early (fast-fail before config load): GetRoleCredentials
+    // returns full permission-set access that cannot be downscoped with inline
+    // session policies, and the vouch:AccessType=ai tag does not propagate.
+    if detect_agent_source().is_some() {
+        return Err(
+            crate::exit_code::CliError::ConfigError(tr!("aws-err-agent-idc-unsupported")).into(),
+        );
+    }
+
+    let vouch_config = crate::config::Config::load()?;
+    let aws_cfg = vouch_config.aws().ok_or_else(|| {
+        crate::exit_code::CliError::ConfigError(tr!("aws-err-idc-not-configured"))
+    })?;
+
+    // `resolve_identity_center` returns the owning org+idc pair so the
+    // management role always comes from the same org as the IdC instance.
+    let (org, idc) = resolve_identity_center(aws_cfg, idc_application_arn)?.ok_or_else(|| {
+        crate::exit_code::CliError::ConfigError(tr!("aws-err-idc-not-configured"))
+    })?;
+
+    // If --via is supplied it must match the owning org's management role;
+    // cross-org pairings are rejected.
+    if let Some(via_role) = via
+        && via_role != org.management_role
     {
-        return Ok(Some(session_cfg.management_role.clone()));
+        return Err(crate::exit_code::CliError::ConfigError(tr_args!(
+            "aws-err-via-not-found",
+            management_role = via_role.to_string()
+        ))
+        .into());
     }
+    let management_role = org.management_role.clone();
 
-    // Fallback: if there's exactly one sso_sessions entry, use it
-    if let [only] = aws_cfg.sso_sessions.values().collect::<Vec<_>>().as_slice() {
-        return Ok(Some(only.management_role.clone()));
-    }
+    let idc = idc.clone();
+    let cache_key = format!(
+        "aws:idc:{}:{}:{}",
+        idc.application_arn, account_id, permission_set
+    );
+    let account_id = account_id.to_string();
+    let permission_set = permission_set.to_string();
 
-    Ok(None)
+    super::cache::get_or_fetch(&cache_key, "IdC credentials", || async move {
+        let http_client = credential_client(&format!("vouch-cli/{}", env!("CARGO_PKG_VERSION")))
+            .context("failed to create HTTP client")?;
+
+        let idc_token =
+            obtain_identity_center_token(&http_client, server, &management_role, &idc).await?;
+
+        let creds = get_role_credentials(
+            &http_client,
+            &idc.region,
+            &idc_token,
+            &account_id,
+            &permission_set,
+        )
+        .await?;
+
+        let expiration = creds.expiration.to_string();
+        let output = CredentialProcessOutput {
+            version: 1,
+            access_key_id: creds.access_key_id,
+            secret_access_key: creds.secret_access_key,
+            session_token: creds.session_token,
+            expiration,
+        };
+        let expires_at = output.expiration.clone();
+        Ok((output.to_json(), expires_at))
+    })
+    .await
 }
 
 /// Get cached AWS credentials, fetching fresh ones if needed.
 ///
-/// Shared entry point for `vouch credential aws`, `vouch credential
+/// Shared entry point for `vouch credential aws --role`, `vouch credential
 /// codecommit`, and `vouch exec`. Resolves the management role once
 /// and uses it for both the cache key and credential exchange.
 pub(crate) async fn get_aws_credentials(server: &str, role_arn: &str) -> Result<serde_json::Value> {
     let vouch_config = crate::config::Config::load()?;
-    let management_role = resolve_management_role(&vouch_config)?.filter(|m| m != role_arn);
+    let management_role = resolve_management_role_for(&vouch_config, role_arn, None)?;
 
     // Detect agent context BEFORE the cache lookup. Folding the source into
     // the cache key ensures agent and non-agent invocations never share a
@@ -476,9 +736,44 @@ pub(crate) async fn get_aws_credentials(server: &str, role_arn: &str) -> Result<
 
 /// Run the AWS credential command.
 ///
-/// Outputs AWS credential_process JSON to stdout.
-pub(crate) async fn run(server: &str, role_arn: &str) -> Result<()> {
-    let data = get_aws_credentials(server, role_arn).await?;
+/// Dispatches to the STS path (`--role`) or the Identity Center path
+/// (`--account` + `--permission-set`) and outputs credential_process JSON.
+pub(crate) async fn run(
+    server: &str,
+    role: Option<&str>,
+    account: Option<&str>,
+    permission_set: Option<&str>,
+    via: Option<&str>,
+    idc_application: Option<&str>,
+) -> Result<()> {
+    let data = if let Some(role_arn) = role {
+        // STS path: direct AssumeRoleWithWebIdentity (no management role) or
+        // management-role chain (chain_if_different_role returns Some).
+        let vouch_config = crate::config::Config::load()?;
+        let management_role = resolve_management_role_for(&vouch_config, role_arn, via)?;
+
+        let agent_source = detect_agent_source();
+        let cache_key = build_cache_key(
+            role_arn,
+            management_role.as_deref(),
+            agent_source.as_deref(),
+        );
+        let mgmt = management_role;
+        let agent = agent_source;
+        super::cache::get_or_fetch(&cache_key, "AWS credentials", || async move {
+            let output =
+                fetch_and_assume(server, role_arn, mgmt.as_deref(), agent.as_deref()).await?;
+            let expires_at = output.expiration.clone();
+            Ok((output.to_json(), expires_at))
+        })
+        .await?
+    } else {
+        // Identity Center path
+        let acct = account.context("--account is required for Identity Center path")?;
+        let ps = permission_set.context("--permission-set is required for Identity Center path")?;
+        get_idc_credentials(server, acct, ps, idc_application, via).await?
+    };
+
     let json = serde_json::to_string(&data).context("failed to serialize credentials")?;
     // Machine-readable JSON output: stays English (consumed by AWS CLI).
     println!("{json}");
@@ -513,6 +808,18 @@ async fn fetch_and_assume(
         session_token: creds.session_token.clone(),
         expiration: creds.expiration.to_string(),
     })
+}
+
+/// Process-wide lock used by tests that mutate `CLAUDECODE` (or other agent-
+/// detection env vars). Acquired before `set_var` and held until `remove_var`
+/// so parallel test threads cannot observe each other's env mutations.
+///
+/// `tokio::sync::Mutex` is used so the guard can be held across `.await`
+/// points without triggering `await_holding_lock`; `std::sync::Mutex` would
+/// also block a tokio thread and trip the workspace lint.
+#[cfg(test)]
+pub(crate) mod test_support {
+    pub(crate) static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 }
 
 #[cfg(test)]
@@ -760,5 +1067,319 @@ mod tests {
         let b = build_cache_key(ROLE, Some(MGMT), Some("claude-code"));
         assert_eq!(a, b);
         assert_eq!(a, format!("aws:chain:{MGMT}:{ROLE}:agent:claude-code"));
+    }
+
+    // --- extract_account_from_arn -------------------------------------------------
+
+    #[test]
+    fn extract_account_parses_standard_role_arn() {
+        assert_eq!(
+            extract_account_from_arn("arn:aws:iam::123456789012:role/Admin"),
+            Some("123456789012")
+        );
+    }
+
+    #[test]
+    fn extract_account_parses_govcloud_role_arn() {
+        assert_eq!(
+            extract_account_from_arn("arn:aws-us-gov:iam::999000111222:role/Ops"),
+            Some("999000111222")
+        );
+    }
+
+    #[test]
+    fn extract_account_returns_none_for_malformed_arn() {
+        assert_eq!(extract_account_from_arn("not-an-arn"), None);
+    }
+
+    // --- resolve_management_role_for ---------------------------------------------
+
+    fn make_config(management_roles: &[&str]) -> crate::config::Config {
+        let mut cfg = crate::config::Config::default();
+        for mgmt in management_roles {
+            cfg.append_aws_org(crate::config::AwsOrganization {
+                management_role: (*mgmt).to_string(),
+                identity_center: None,
+            });
+        }
+        cfg
+    }
+
+    #[test]
+    fn resolve_no_orgs_returns_none() {
+        let cfg = crate::config::Config::default();
+        let result = resolve_management_role_for(&cfg, "arn:aws:iam::111:role/Target", None);
+        assert_eq!(result.unwrap(), None);
+    }
+
+    #[test]
+    fn resolve_single_org_same_arn_returns_none() {
+        // Management role == target → direct assume, no chain.
+        let mgmt = "arn:aws:iam::111:role/Mgmt";
+        let cfg = make_config(&[mgmt]);
+        let result = resolve_management_role_for(&cfg, mgmt, None);
+        assert_eq!(result.unwrap(), None);
+    }
+
+    #[test]
+    fn resolve_single_org_different_arn_returns_management_role() {
+        let mgmt = "arn:aws:iam::111:role/Mgmt";
+        let target = "arn:aws:iam::222:role/Target";
+        let cfg = make_config(&[mgmt]);
+        let result = resolve_management_role_for(&cfg, target, None);
+        assert_eq!(result.unwrap().as_deref(), Some(mgmt));
+    }
+
+    #[test]
+    fn resolve_via_matches_exact_arn() {
+        let mgmt1 = "arn:aws:iam::111:role/Mgmt1";
+        let mgmt2 = "arn:aws:iam::222:role/Mgmt2";
+        let target = "arn:aws:iam::333:role/Target";
+        let cfg = make_config(&[mgmt1, mgmt2]);
+        let result = resolve_management_role_for(&cfg, target, Some(mgmt2));
+        assert_eq!(result.unwrap().as_deref(), Some(mgmt2));
+    }
+
+    #[test]
+    fn resolve_via_not_found_returns_error() {
+        let mgmt = "arn:aws:iam::111:role/Mgmt";
+        let cfg = make_config(&[mgmt]);
+        let result = resolve_management_role_for(
+            &cfg,
+            "arn:aws:iam::333:role/T",
+            Some("arn:aws:iam::999:role/Unknown"),
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn resolve_multi_org_account_disambiguates() {
+        // Two orgs in different accounts; target is in org1's account.
+        let mgmt1 = "arn:aws:iam::111:role/Mgmt1";
+        let mgmt2 = "arn:aws:iam::222:role/Mgmt2";
+        // Target is in account 111 — matches mgmt1.
+        let target = "arn:aws:iam::111:role/Target";
+        let cfg = make_config(&[mgmt1, mgmt2]);
+        let result = resolve_management_role_for(&cfg, target, None);
+        // mgmt1 != target → chain through mgmt1.
+        assert_eq!(result.unwrap().as_deref(), Some(mgmt1));
+    }
+
+    #[test]
+    fn resolve_multi_org_no_match_returns_ambiguous_error() {
+        // Two orgs; target account doesn't match either management account.
+        let mgmt1 = "arn:aws:iam::111:role/Mgmt1";
+        let mgmt2 = "arn:aws:iam::222:role/Mgmt2";
+        let target = "arn:aws:iam::333:role/Target";
+        let cfg = make_config(&[mgmt1, mgmt2]);
+        let result = resolve_management_role_for(&cfg, target, None);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn resolve_multi_org_both_match_returns_ambiguous_error() {
+        // Two orgs in the SAME account; target in that account → ambiguous.
+        let mgmt1 = "arn:aws:iam::111:role/Mgmt1";
+        let mgmt2 = "arn:aws:iam::111:role/Mgmt2";
+        let target = "arn:aws:iam::111:role/Target";
+        let cfg = make_config(&[mgmt1, mgmt2]);
+        let result = resolve_management_role_for(&cfg, target, None);
+        assert!(result.is_err());
+    }
+
+    // --- resolve_identity_center -----------------------------------------------
+
+    /// Fixture: build a Config with IdC-aware orgs.
+    /// Each entry is `(management_role_arn, Option<(app_arn, region)>)`.
+    fn make_idc_config(orgs: &[(&str, Option<(&str, &str)>)]) -> crate::config::Config {
+        let mut cfg = crate::config::Config::default();
+        for (mgmt, idc_opt) in orgs {
+            cfg.append_aws_org(crate::config::AwsOrganization {
+                management_role: (*mgmt).to_string(),
+                identity_center: idc_opt.map(|(arn, region)| crate::config::AwsIdentityCenter {
+                    application_arn: arn.to_string(),
+                    region: region.to_string(),
+                }),
+            });
+        }
+        cfg
+    }
+
+    const MGMT1: &str = "arn:aws:iam::111:role/Mgmt1";
+    const MGMT2: &str = "arn:aws:iam::222:role/Mgmt2";
+    const APP1: &str = "arn:aws:sso::111:application/ssoins-x/apl-a";
+    const APP2: &str = "arn:aws:sso::222:application/ssoins-y/apl-b";
+
+    #[test]
+    fn idc_explicit_arn_returns_owning_org_and_idc() {
+        // Two orgs both have IdC; explicit ARN picks the matching one.
+        let cfg = make_idc_config(&[
+            (MGMT1, Some((APP1, "us-east-1"))),
+            (MGMT2, Some((APP2, "eu-west-1"))),
+        ]);
+        let aws_cfg = cfg.aws().unwrap();
+        let (org, idc) = resolve_identity_center(aws_cfg, Some(APP2))
+            .unwrap()
+            .unwrap();
+        assert_eq!(org.management_role, MGMT2);
+        assert_eq!(idc.application_arn, APP2);
+    }
+
+    #[test]
+    fn idc_explicit_arn_no_match_returns_none() {
+        let cfg = make_idc_config(&[(MGMT1, Some((APP1, "us-east-1")))]);
+        let aws_cfg = cfg.aws().unwrap();
+        let result =
+            resolve_identity_center(aws_cfg, Some("arn:aws:sso::999:application/unknown")).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn idc_single_org_with_idc_returns_pair() {
+        let cfg = make_idc_config(&[(MGMT1, Some((APP1, "us-east-1")))]);
+        let aws_cfg = cfg.aws().unwrap();
+        let (org, idc) = resolve_identity_center(aws_cfg, None).unwrap().unwrap();
+        assert_eq!(org.management_role, MGMT1);
+        assert_eq!(idc.application_arn, APP1);
+    }
+
+    #[test]
+    fn idc_single_org_without_idc_returns_none() {
+        let cfg = make_idc_config(&[(MGMT1, None)]);
+        let aws_cfg = cfg.aws().unwrap();
+        let result = resolve_identity_center(aws_cfg, None).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn idc_multi_org_exactly_one_idc_is_unambiguous() {
+        // Only the first org has IdC; second has none. Must return the first org's pair.
+        let cfg = make_idc_config(&[(MGMT1, Some((APP1, "us-east-1"))), (MGMT2, None)]);
+        let aws_cfg = cfg.aws().unwrap();
+        let (org, idc) = resolve_identity_center(aws_cfg, None).unwrap().unwrap();
+        assert_eq!(org.management_role, MGMT1);
+        assert_eq!(idc.application_arn, APP1);
+    }
+
+    #[test]
+    fn idc_multi_org_two_idc_no_hint_errors_with_ambiguous() {
+        // Both orgs have IdC and no --idc-application given → must error.
+        let cfg = make_idc_config(&[
+            (MGMT1, Some((APP1, "us-east-1"))),
+            (MGMT2, Some((APP2, "eu-west-1"))),
+        ]);
+        let aws_cfg = cfg.aws().unwrap();
+        let err = resolve_identity_center(aws_cfg, None).unwrap_err();
+        assert!(
+            err.downcast_ref::<crate::exit_code::CliError>().is_some(),
+            "expected CliError, got: {err}"
+        );
+    }
+
+    #[test]
+    fn idc_multi_org_zero_idc_returns_none() {
+        // Neither org has IdC configured.
+        let cfg = make_idc_config(&[(MGMT1, None), (MGMT2, None)]);
+        let aws_cfg = cfg.aws().unwrap();
+        let result = resolve_identity_center(aws_cfg, None).unwrap();
+        assert!(result.is_none());
+    }
+
+    // Pairing: the returned org always owns the resolved IdC instance.
+
+    #[test]
+    fn idc_pairing_management_role_comes_from_owning_org() {
+        // orgA (MGMT1) has IdC; orgB (MGMT2) does not. The pair must be
+        // (MGMT1, APP1) — never (MGMT2, APP1).
+        let cfg = make_idc_config(&[(MGMT1, Some((APP1, "us-east-1"))), (MGMT2, None)]);
+        let aws_cfg = cfg.aws().unwrap();
+        let (org, idc) = resolve_identity_center(aws_cfg, None).unwrap().unwrap();
+        assert_eq!(
+            org.management_role, MGMT1,
+            "management role must come from the org that owns the IdC instance, not a different org"
+        );
+        assert_eq!(idc.application_arn, APP1);
+    }
+
+    #[test]
+    fn idc_explicit_arn_picks_owning_org_when_first_org_lacks_idc() {
+        // orgA (MGMT1) has no IdC; orgB (MGMT2) has APP2.
+        // Selecting APP2 must return MGMT2, not MGMT1.
+        let cfg = make_idc_config(&[(MGMT1, None), (MGMT2, Some((APP2, "eu-west-1")))]);
+        let aws_cfg = cfg.aws().unwrap();
+        let (org, idc) = resolve_identity_center(aws_cfg, Some(APP2))
+            .unwrap()
+            .unwrap();
+        assert_eq!(org.management_role, MGMT2);
+        assert_eq!(idc.application_arn, APP2);
+    }
+
+    // Agent-block tests -------------------------------------------------------
+    //
+    // These set an env var to simulate an agent environment. The agent check
+    // fires as the very first statement in each function, before any config
+    // load or network I/O, so the tests do not need real server/config state.
+
+    #[tokio::test]
+    #[expect(
+        unsafe_code,
+        reason = "env mutation to trigger agent detection in an isolated test; var is restored after assertion"
+    )]
+    async fn agent_block_in_get_idc_credentials_fires_before_config_load() {
+        let _guard = crate::commands::credential::aws::test_support::ENV_LOCK
+            .lock()
+            .await;
+        // SAFETY: agent check is the first statement; Config::load is never reached.
+        unsafe {
+            std::env::set_var("CLAUDECODE", "1");
+        }
+        let result =
+            get_idc_credentials("https://example.com", "111111111111", "Admin", None, None).await;
+        // SAFETY: env var restored regardless of assertion outcome.
+        unsafe {
+            std::env::remove_var("CLAUDECODE");
+        }
+        let err = result.unwrap_err();
+        assert!(
+            matches!(
+                err.downcast_ref::<crate::exit_code::CliError>(),
+                Some(crate::exit_code::CliError::ConfigError(_))
+            ),
+            "expected ConfigError(aws-err-agent-idc-unsupported), got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    #[expect(
+        unsafe_code,
+        reason = "env mutation to trigger agent detection in an isolated test; var is restored after assertion"
+    )]
+    async fn agent_block_in_obtain_identity_center_token_fires_before_network() {
+        let _guard = crate::commands::credential::aws::test_support::ENV_LOCK
+            .lock()
+            .await;
+        // SAFETY: agent check is the first statement; no disk or network I/O occurs.
+        unsafe {
+            std::env::set_var("CLAUDECODE", "1");
+        }
+        let http_client = reqwest::Client::new();
+        let idc = crate::config::AwsIdentityCenter {
+            application_arn: APP1.to_string(),
+            region: "us-east-1".to_string(),
+        };
+        let result =
+            obtain_identity_center_token(&http_client, "https://example.com", MGMT1, &idc).await;
+        // SAFETY: env var restored regardless of assertion outcome.
+        unsafe {
+            std::env::remove_var("CLAUDECODE");
+        }
+        let err = result.unwrap_err();
+        assert!(
+            matches!(
+                err.downcast_ref::<crate::exit_code::CliError>(),
+                Some(crate::exit_code::CliError::ConfigError(_))
+            ),
+            "expected ConfigError(aws-err-agent-idc-unsupported), got: {err}"
+        );
     }
 }

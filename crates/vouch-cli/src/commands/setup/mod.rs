@@ -22,19 +22,52 @@ pub(crate) mod ssm;
 #[derive(Subcommand)]
 pub(crate) enum SetupCommands {
     /// Configure AWS CLI/SDK to use Vouch credentials.
+    ///
+    /// Three patterns:
+    ///
+    ///   Single account: `--role <full-arn>`. Writes a profile; no org stored.
+    ///
+    ///   Management-role chain: `--management-role <arn> --role <target-arn>`.
+    ///   Stores the management role as an organization and writes a profile.
+    ///
+    ///   Identity Center: `--management-role <arn>
+    ///   --identity-center-application <app-arn> --region <region> [--discover]`.
+    ///   Stores the org+IdC config; `--discover` enumerates accounts and
+    ///   permission-sets and writes one profile per assignment.
+    ///
+    /// Re-running with the same --management-role updates the existing org entry.
+    /// Re-running with a new --management-role appends a second organization.
     #[command(about = tr!("cmd-setup-aws-about"))]
     Aws {
-        /// AWS profile name to configure. Defaults to "vouch" if not specified.
+        /// AWS profile name for the generated profile.
         #[arg(long, help = tr!("arg-setup-aws-profile-help"))]
         profile: Option<String>,
-        /// AWS IAM role ARN to assume. Required unless --discover is set.
-        #[arg(long, required_unless_present = "discover", help = tr!("arg-setup-aws-role-help"))]
+        /// Target role ARN. Required for single-account setup; optional with --discover.
+        #[arg(
+            long,
+            required_unless_present_any = ["management_role", "discover"],
+            help = tr!("arg-setup-aws-role-help"),
+        )]
         role: Option<String>,
-        /// AWS region to set in the profile.
+        /// Management role ARN — the OIDC-trusted anchor for multi-account and
+        /// Identity Center access. Stored in vouch config as an organization entry.
+        #[arg(long, help = tr!("arg-setup-aws-management-role-help"))]
+        management_role: Option<String>,
+        /// IAM Identity Center application ARN for the trusted-token-issuer exchange.
+        /// Stored in vouch config alongside the management role.
+        #[arg(
+            long,
+            requires = "management_role",
+            help = tr!("arg-setup-aws-identity-center-application-help"),
+        )]
+        identity_center_application: Option<String>,
+        /// AWS region to set in the profile (required for Identity Center).
         #[arg(long, help = tr!("arg-setup-aws-region-help"))]
         region: Option<String>,
-        /// Discover accounts and roles via SSO and generate profiles automatically.
-        #[arg(long, conflicts_with = "role", help = tr!("arg-setup-aws-discover-help"))]
+        /// Enumerate accounts and permission-sets via Identity Center and write
+        /// one profile per assignment. Requires IdC config from this run or
+        /// previously stored with `vouch setup aws`.
+        #[arg(long, help = tr!("arg-setup-aws-discover-help"))]
         discover: bool,
     },
     /// Configure SSH to use Vouch certificates.
