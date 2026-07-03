@@ -28,7 +28,7 @@ pub(crate) struct Kubeconfig {
     #[serde(default)]
     pub users: Vec<KubeconfigUser>,
     #[serde(default)]
-    pub preferences: serde_yaml::Value,
+    pub preferences: serde_json::Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -73,7 +73,7 @@ pub(crate) struct KubeconfigUserData {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exec: Option<ExecConfig>,
     #[serde(flatten)]
-    pub other: serde_yaml::Value,
+    pub other: serde_json::Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -124,7 +124,7 @@ pub(crate) fn load_kubeconfig(path: &std::path::Path) -> Result<Kubeconfig> {
     let content = std::fs::read_to_string(path).with_context(|| {
         vouch_cli::tr_args!("setup-kc-err-read", path = path.display().to_string())
     })?;
-    let config: Kubeconfig = serde_yaml::from_str(&content).with_context(|| {
+    let config: Kubeconfig = serde_saphyr::from_str(&content).with_context(|| {
         vouch_cli::tr_args!("setup-kc-err-parse", path = path.display().to_string())
     })?;
     Ok(config)
@@ -136,8 +136,8 @@ pub(crate) fn save_kubeconfig(path: &std::path::Path, config: &Kubeconfig) -> Re
         ensure_secure_dir(parent)?;
     }
 
-    let content =
-        serde_yaml::to_string(config).with_context(|| vouch_cli::tr!("setup-kc-err-serialize"))?;
+    let content = serde_saphyr::to_string(config)
+        .with_context(|| vouch_cli::tr!("setup-kc-err-serialize"))?;
     write_secure_file(path, &content)?;
     Ok(())
 }
@@ -182,7 +182,7 @@ users:
       interactiveMode: Never
 "#;
 
-        let config: Kubeconfig = serde_yaml::from_str(yaml).expect("should parse");
+        let config: Kubeconfig = serde_saphyr::from_str(yaml).expect("should parse");
 
         assert_eq!(config.clusters.len(), 1);
         assert_eq!(config.clusters[0].name, "my-cluster");
@@ -214,7 +214,7 @@ contexts: []
 users: []
 "#;
 
-        let config: Kubeconfig = serde_yaml::from_str(yaml).expect("should parse");
+        let config: Kubeconfig = serde_saphyr::from_str(yaml).expect("should parse");
 
         assert!(config.clusters.is_empty());
         assert!(config.contexts.is_empty());
@@ -238,7 +238,7 @@ users: []
             interactive_mode: Some("Never".to_string()),
         };
 
-        let yaml = serde_yaml::to_string(&exec).expect("should serialize");
+        let yaml = serde_saphyr::to_string(&exec).expect("should serialize");
         assert!(yaml.contains("apiVersion: client.authentication.k8s.io/v1"));
         assert!(yaml.contains("command: vouch"));
         assert!(yaml.contains("interactiveMode: Never"));
@@ -257,7 +257,7 @@ users: []
             },
         };
 
-        let yaml = serde_yaml::to_string(&context).expect("should serialize");
+        let yaml = serde_saphyr::to_string(&context).expect("should serialize");
         assert!(yaml.contains("name: my-cluster-vouch"));
         assert!(yaml.contains("cluster: my-cluster"));
         assert!(yaml.contains("user: vouch-k8s-my-cluster"));
@@ -274,7 +274,7 @@ users: []
             },
         };
 
-        let yaml = serde_yaml::to_string(&cluster).expect("should serialize");
+        let yaml = serde_saphyr::to_string(&cluster).expect("should serialize");
         assert!(yaml.contains("certificate-authority-data:"));
         assert!(yaml.contains("LS0tLS1CRUdJTi..."));
     }
@@ -289,8 +289,49 @@ users: []
             },
         };
 
-        let yaml = serde_yaml::to_string(&cluster).expect("should serialize");
+        let yaml = serde_saphyr::to_string(&cluster).expect("should serialize");
         assert!(yaml.contains("name: dev"));
         assert!(!yaml.contains("certificate-authority-data"));
+    }
+
+    /// The `#[serde(flatten)] other` field must preserve arbitrary user auth
+    /// fields (token, client-certificate-data, etc.) losslessly across a
+    /// load -> save -> load round-trip. This is the behaviour serde_yaml's
+    /// untyped `Value` catch-all provided and that the serde-saphyr +
+    /// serde_json::Value migration must keep (#595).
+    #[test]
+    fn test_kubeconfig_flatten_preserves_arbitrary_user_fields() {
+        let yaml = r#"
+apiVersion: v1
+kind: Config
+clusters: []
+contexts: []
+users:
+- name: legacy-user
+  user:
+    token: super-secret-token
+    client-certificate-data: LS0tLS1DRVJU
+    username: admin
+"#;
+
+        let config: Kubeconfig = serde_saphyr::from_str(yaml).expect("should parse");
+        let other = &config.users[0].user.other;
+        assert_eq!(other["token"], "super-secret-token");
+        assert_eq!(other["client-certificate-data"], "LS0tLS1DRVJU");
+        assert_eq!(other["username"], "admin");
+
+        // Round-trip: serialize, then re-parse, and confirm the fields survive.
+        let serialized = serde_saphyr::to_string(&config).expect("should serialize");
+        assert!(serialized.contains("super-secret-token"), "{serialized}");
+        assert!(
+            serialized.contains("client-certificate-data"),
+            "{serialized}"
+        );
+
+        let reparsed: Kubeconfig = serde_saphyr::from_str(&serialized).expect("should re-parse");
+        let other2 = &reparsed.users[0].user.other;
+        assert_eq!(other2["token"], "super-secret-token");
+        assert_eq!(other2["client-certificate-data"], "LS0tLS1DRVJU");
+        assert_eq!(other2["username"], "admin");
     }
 }
