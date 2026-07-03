@@ -109,7 +109,6 @@ fn append_resource_metadata(headers: &mut axum::http::HeaderMap, url: &str) {
             }
         }
     }
-
 }
 
 /// Check whether a `WWW-Authenticate` header contains auth-params
