@@ -13,103 +13,59 @@ use std::fs;
 use std::path::PathBuf;
 use vouch_common::dns::{DohConfigSerde, NetworkConfig};
 
-/// AWS multi-account configuration in `$XDG_CONFIG_HOME/vouch/config.json`.
+/// Minimal legacy SSO session record.
 ///
-/// Keyed by SSO session name (matching `[sso-session <name>]` in `~/.aws/config`).
-/// SSO connection details (start URL, region, scopes) are read from `~/.aws/config`
-/// — only role chaining config lives here.
+/// Only `management_role` is extracted; `member_role_name`, `member_role_path`,
+/// and the session name are dropped during migration. Needs `Serialize` because
+/// it is a field of `AwsOrgsConfig`, which derives `Serialize` — the field itself
+/// is `skip_serializing` so this impl is never actually called.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub(crate) struct AwsMultiAccountConfig {
-    /// Per-SSO-session role chaining configuration, keyed by session name.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub sso_sessions: BTreeMap<String, SsoSessionConfig>,
+struct LegacySsoSession {
+    #[serde(default)]
+    management_role: String,
 }
 
-/// Per-SSO-session configuration for role chaining.
+/// AWS organizations configuration in `$XDG_CONFIG_HOME/vouch/config.json`.
+///
+/// Each entry represents one AWS Organization (management account + optional
+/// Identity Center instance). Re-running `vouch setup aws` appends a second
+/// organization; there is no name key.
+///
+/// The `sso_sessions` field is read for legacy-format migration but never
+/// written back (`skip_serializing`). After `From<ConfigFile> for Config`
+/// runs, `sso_sessions` is always empty in memory.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub(crate) struct AwsOrgsConfig {
+    /// Configured AWS organizations.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub organizations: Vec<AwsOrganization>,
+
+    /// Legacy `aws.sso_sessions` — read for migration, never written back.
+    /// Nested under the `aws` object, so it lives on this type (serde cannot
+    /// hoist a nested legacy field to `ConfigFile` top-level).
+    #[serde(default, skip_serializing)]
+    sso_sessions: BTreeMap<String, LegacySsoSession>,
+}
+
+/// One AWS Organization: management account (OIDC-trusted anchor) plus optional
+/// Identity Center configuration for the TTI credential flow.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct SsoSessionConfig {
+pub(crate) struct AwsOrganization {
     /// Management account role ARN (Vouch OIDC trust deployed here).
     pub management_role: String,
-    /// Role name to assume in member accounts.
-    #[serde(default = "default_member_role_name")]
-    pub member_role_name: String,
-    /// IAM Path of the member-account role, always canonical (starts and
-    /// ends with `/`, e.g. `/teams/sec/`; `/` means no path). User input is
-    /// normalized at deserialization via [`normalize_member_role_path`].
-    #[serde(
-        default = "default_member_role_path",
-        deserialize_with = "deserialize_member_role_path"
-    )]
-    pub member_role_path: String,
+    /// Identity Center configuration for the TTI (`CreateTokenWithIAM`) flow.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub identity_center: Option<AwsIdentityCenter>,
 }
 
-impl Default for SsoSessionConfig {
-    fn default() -> Self {
-        Self {
-            management_role: String::new(),
-            member_role_name: default_member_role_name(),
-            member_role_path: default_member_role_path(),
-        }
-    }
-}
-
-impl SsoSessionConfig {
-    /// Build the assumable member-account role ARN for the given account.
-    pub(crate) fn role_arn_in(&self, partition: &str, account_id: &str) -> String {
-        format!(
-            "arn:{partition}:iam::{account_id}:role{path}{name}",
-            path = self.member_role_path,
-            name = self.member_role_name,
-        )
-    }
-}
-
-fn default_member_role_name() -> String {
-    "VouchAccess".to_string()
-}
-
-fn default_member_role_path() -> String {
-    "/".to_string()
-}
-
-fn deserialize_member_role_path<'de, D>(deserializer: D) -> std::result::Result<String, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let raw = String::deserialize(deserializer)?;
-    normalize_member_role_path(&raw).map_err(serde::de::Error::custom)
-}
-
-/// Normalize an IAM Path string so it starts and ends with `/`.
-///
-/// Accepts forms like `""`, `"/"`, `"teams/sec"`, `"/teams/sec"`,
-/// `"teams/sec/"`, `"/teams/sec/"` and returns `/teams/sec/` (or `/` for
-/// the empty/root case). Rejects whitespace and embedded ARN fragments.
-pub(crate) fn normalize_member_role_path(raw: &str) -> Result<String> {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() || trimmed == "/" {
-        return Ok("/".to_string());
-    }
-    if trimmed.chars().any(char::is_whitespace) {
-        anyhow::bail!("member_role_path must not contain whitespace: {raw:?}");
-    }
-    if trimmed.contains("//") {
-        anyhow::bail!("member_role_path must not contain empty segments: {raw:?}");
-    }
-    if trimmed.contains(':') || trimmed.contains("arn:") {
-        anyhow::bail!("member_role_path must be a path, not an ARN: {raw:?}");
-    }
-    let with_leading = if trimmed.starts_with('/') {
-        trimmed.to_string()
-    } else {
-        format!("/{trimmed}")
-    };
-    let canonical = if with_leading.ends_with('/') {
-        with_leading
-    } else {
-        format!("{with_leading}/")
-    };
-    Ok(canonical)
+/// AWS IAM Identity Center configuration for one instance.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct AwsIdentityCenter {
+    /// Customer-managed application ARN
+    /// (e.g., `arn:aws:sso::111:application/ssoins-x/apl-y`).
+    pub application_arn: String,
+    /// AWS region where this IdC instance is hosted (e.g., `us-east-1`).
+    pub region: String,
 }
 
 /// CLI configuration stored in `$XDG_CONFIG_HOME/vouch/config.json`
@@ -128,8 +84,8 @@ pub(crate) struct Config {
     servers: BTreeMap<String, ServerConfig>,
     /// Global CodeArtifact profile configuration.
     codeartifact: Option<CodeArtifactConfig>,
-    /// AWS multi-account configuration (role chaining + SSO discovery).
-    aws: Option<AwsMultiAccountConfig>,
+    /// AWS organizations configuration (role chaining + IdC).
+    aws: Option<AwsOrgsConfig>,
     /// Global network configuration (DoH, …).
     network: Option<NetworkConfig>,
     /// AI provider Workload Identity Federation configuration.
@@ -260,7 +216,7 @@ struct ConfigFile {
     codeartifact: Option<CodeArtifactConfig>,
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    aws: Option<AwsMultiAccountConfig>,
+    aws: Option<AwsOrgsConfig>,
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     network: Option<NetworkConfig>,
@@ -564,19 +520,31 @@ impl Config {
     // AWS multi-account (global, not per-server)
     // =====================================================================
 
-    /// Get the AWS multi-account configuration.
+    /// Get the AWS organizations configuration.
     #[must_use]
-    pub(crate) fn aws(&self) -> Option<&AwsMultiAccountConfig> {
+    pub(crate) fn aws(&self) -> Option<&AwsOrgsConfig> {
         self.aws.as_ref()
     }
 
-    /// Set the AWS multi-account configuration (in memory only, call `save()` to persist).
-    #[allow(
-        dead_code,
-        reason = "API exposed for callers; lint fires inconsistently across compilation targets"
-    )]
-    pub(crate) fn set_aws(&mut self, config: AwsMultiAccountConfig) {
-        self.aws = Some(config);
+    /// Append an organization to the AWS organizations list (in memory only).
+    ///
+    /// If an organization with the same management role already exists, its
+    /// `identity_center` is updated only when the incoming value is `Some`;
+    /// otherwise the existing `identity_center` is preserved. Call `save()`
+    /// to persist.
+    pub(crate) fn append_aws_org(&mut self, org: AwsOrganization) {
+        let orgs = self.aws.get_or_insert_with(AwsOrgsConfig::default);
+        if let Some(existing) = orgs
+            .organizations
+            .iter_mut()
+            .find(|o| o.management_role == org.management_role)
+        {
+            if org.identity_center.is_some() {
+                existing.identity_center = org.identity_center;
+            }
+        } else {
+            orgs.organizations.push(org);
+        }
     }
 
     // =====================================================================
@@ -727,11 +695,37 @@ impl From<ConfigFile> for Config {
             servers.insert(hostname, sc);
         }
 
+        // Migrate legacy sso_sessions → organizations.
+        //
+        // When `sso_sessions` is non-empty and `organizations` is empty,
+        // each legacy entry becomes an `AwsOrganization` with only the
+        // management_role preserved (name key and member_role_* fields are
+        // dropped). De-dup by management_role to prevent duplicates on
+        // repeated migration runs.
+        let aws = file.aws.take().map(|mut a| {
+            if a.organizations.is_empty() && !a.sso_sessions.is_empty() {
+                let mut seen = std::collections::BTreeSet::new();
+                for legacy in std::mem::take(&mut a.sso_sessions).into_values() {
+                    if !legacy.management_role.is_empty()
+                        && seen.insert(legacy.management_role.clone())
+                    {
+                        a.organizations.push(AwsOrganization {
+                            management_role: legacy.management_role,
+                            identity_center: None,
+                        });
+                    }
+                }
+            }
+            // Ensure sso_sessions is always empty in memory after migration.
+            a.sso_sessions = BTreeMap::new();
+            a
+        });
+
         Self {
             current_server,
             servers,
             codeartifact: file.codeartifact.take(),
-            aws: file.aws.take(),
+            aws,
             network: file.network.take(),
             ai: file.ai.take(),
         }
@@ -763,11 +757,17 @@ impl From<&Config> for ConfigFile {
             servers.insert(hostname.clone(), ServerConfigFile::from(sc));
         }
 
+        // Guard: an AwsOrgsConfig with empty organizations would serialize as `{}`
+        // (the outer Option is not enough — AwsOrgsConfig itself doesn't know to
+        // suppress itself when empty). Map empty orgs to None so a user who has
+        // not run 'vouch setup aws' has no `aws` key in their config file.
+        let aws = config.aws.clone().filter(|a| !a.organizations.is_empty());
+
         Self {
             current_server: config.current_server.clone(),
             servers,
             codeartifact: config.codeartifact.clone(),
-            aws: config.aws.clone(),
+            aws,
             network: config.network.clone(),
             ai: config.ai.clone(),
             // Legacy fields are never written.
@@ -806,6 +806,7 @@ impl From<&ServerConfig> for ServerConfigFile {
 #[expect(
     clippy::unwrap_used,
     clippy::expect_used,
+    clippy::indexing_slicing,
     reason = "test code: panic on assertion failure is acceptable"
 )]
 mod tests {
@@ -1280,25 +1281,86 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // AwsMultiAccountConfig round-trip serialization
+    // AwsOrgsConfig: new-format round-trip + migration
     // -----------------------------------------------------------------
 
     #[test]
-    fn test_aws_multi_account_config_round_trip() {
+    fn test_aws_orgs_config_new_format_round_trip() {
         let json = r#"{
-            "current_server": "us.vouch.sh",
-            "servers": {
-                "us.vouch.sh": {
-                    "server_url": "https://us.vouch.sh",
-                    "token": "test-token"
-                }
-            },
+            "aws": {
+                "organizations": [
+                    {
+                        "management_role": "arn:aws:iam::111:role/VouchManagement",
+                        "identity_center": {
+                            "application_arn": "arn:aws:sso::111:application/ssoins-x/apl-y",
+                            "region": "us-east-1"
+                        }
+                    }
+                ]
+            }
+        }"#;
+
+        let file: ConfigFile = serde_json::from_str(json).unwrap();
+        let config = Config::from(file);
+
+        let aws = config.aws().expect("aws config should exist");
+        assert_eq!(aws.organizations.len(), 1);
+
+        let org = &aws.organizations[0];
+        assert_eq!(org.management_role, "arn:aws:iam::111:role/VouchManagement");
+        let idc = org.identity_center.as_ref().expect("identity_center");
+        assert_eq!(
+            idc.application_arn,
+            "arn:aws:sso::111:application/ssoins-x/apl-y"
+        );
+        assert_eq!(idc.region, "us-east-1");
+
+        // Round-trip through JSON must preserve the new format.
+        let file2 = ConfigFile::from(&config);
+        let json2 = serde_json::to_string_pretty(&file2).unwrap();
+        assert!(json2.contains("organizations"));
+        assert!(!json2.contains("sso_sessions"));
+
+        let file3: ConfigFile = serde_json::from_str(&json2).unwrap();
+        let config2 = Config::from(file3);
+        let aws2 = config2.aws().expect("aws config survives round-trip");
+        assert_eq!(aws2.organizations.len(), 1);
+        assert_eq!(
+            aws2.organizations[0].management_role,
+            "arn:aws:iam::111:role/VouchManagement"
+        );
+    }
+
+    #[test]
+    fn test_aws_orgs_config_no_identity_center() {
+        let json = r#"{
+            "aws": {
+                "organizations": [
+                    { "management_role": "arn:aws:iam::222:role/Mgmt" }
+                ]
+            }
+        }"#;
+
+        let file: ConfigFile = serde_json::from_str(json).unwrap();
+        let config = Config::from(file);
+        let aws = config.aws().expect("aws config should exist");
+        assert_eq!(aws.organizations.len(), 1);
+        assert!(aws.organizations[0].identity_center.is_none());
+    }
+
+    #[test]
+    fn test_aws_orgs_config_migrates_legacy_sso_sessions() {
+        // A config written by the old code, with two sso_sessions entries.
+        let json = r#"{
             "aws": {
                 "sso_sessions": {
                     "smoketurner": {
                         "management_role": "arn:aws:iam::111:role/VouchManagement",
                         "member_role_name": "VouchAccess",
                         "member_role_path": "/teams/sec/"
+                    },
+                    "other-session": {
+                        "management_role": "arn:aws:iam::222:role/Mgmt"
                     }
                 }
             }
@@ -1307,179 +1369,102 @@ mod tests {
         let file: ConfigFile = serde_json::from_str(json).unwrap();
         let config = Config::from(file);
 
-        let aws = config.aws().expect("aws config should exist");
-        assert_eq!(aws.sso_sessions.len(), 1);
+        let aws = config
+            .aws()
+            .expect("aws config should exist after migration");
+        assert_eq!(aws.organizations.len(), 2);
 
-        let session = aws
-            .sso_sessions
-            .get("smoketurner")
-            .expect("smoketurner session");
-        assert_eq!(
-            session.management_role,
-            "arn:aws:iam::111:role/VouchManagement"
-        );
-        assert_eq!(session.member_role_name, "VouchAccess");
-        assert_eq!(session.member_role_path, "/teams/sec/");
+        // Both management_roles must be present; name key + role fields dropped.
+        let mgmt_roles: Vec<&str> = aws
+            .organizations
+            .iter()
+            .map(|o| o.management_role.as_str())
+            .collect();
+        assert!(mgmt_roles.contains(&"arn:aws:iam::111:role/VouchManagement"));
+        assert!(mgmt_roles.contains(&"arn:aws:iam::222:role/Mgmt"));
 
-        // Round-trip through JSON
+        // After migration, serializing writes the new format.
         let file2 = ConfigFile::from(&config);
-        let json2 = serde_json::to_string_pretty(&file2).unwrap();
-        let file3: ConfigFile = serde_json::from_str(&json2).unwrap();
-        let config2 = Config::from(file3);
-
-        let aws2 = config2.aws().expect("aws config should survive round-trip");
-        let session2 = aws2
-            .sso_sessions
-            .get("smoketurner")
-            .expect("smoketurner session");
-        assert_eq!(
-            session2.management_role,
-            "arn:aws:iam::111:role/VouchManagement"
-        );
-        assert_eq!(session2.member_role_name, "VouchAccess");
-        assert_eq!(session2.member_role_path, "/teams/sec/");
+        let json2 = serde_json::to_string(&file2).unwrap();
+        assert!(json2.contains("organizations"));
+        assert!(!json2.contains("sso_sessions"));
+        assert!(!json2.contains("member_role_name"));
     }
 
     #[test]
-    fn test_aws_member_role_name_default_when_omitted() {
-        let json = r#"{
-            "aws": {
-                "sso_sessions": {
-                    "my-session": {
-                        "management_role": "arn:aws:iam::123456789012:role/Mgmt"
-                    }
-                }
-            }
-        }"#;
-
-        let file: ConfigFile = serde_json::from_str(json).unwrap();
-        let config = Config::from(file);
-
-        let aws = config.aws().expect("aws config should exist");
-        let session = aws.sso_sessions.get("my-session").expect("session");
-        assert_eq!(session.member_role_name, "VouchAccess");
-        assert_eq!(session.member_role_path, "/");
-    }
-
-    #[test]
-    fn test_normalize_member_role_path_canonical_forms() {
-        assert_eq!(normalize_member_role_path("").unwrap(), "/");
-        assert_eq!(normalize_member_role_path("/").unwrap(), "/");
-        assert_eq!(
-            normalize_member_role_path("teams/sec").unwrap(),
-            "/teams/sec/"
-        );
-        assert_eq!(
-            normalize_member_role_path("/teams/sec").unwrap(),
-            "/teams/sec/"
-        );
-        assert_eq!(
-            normalize_member_role_path("teams/sec/").unwrap(),
-            "/teams/sec/"
-        );
-        assert_eq!(
-            normalize_member_role_path("/teams/sec/").unwrap(),
-            "/teams/sec/"
-        );
-    }
-
-    #[test]
-    fn test_normalize_member_role_path_rejects_invalid() {
-        assert!(normalize_member_role_path("teams sec").is_err());
-        assert!(normalize_member_role_path("//teams//sec").is_err());
-        assert!(normalize_member_role_path("arn:aws:iam::1:role/foo").is_err());
-    }
-
-    #[test]
-    fn test_sso_session_config_default() {
-        let cfg = SsoSessionConfig::default();
-        assert_eq!(cfg.management_role, "");
-        assert_eq!(cfg.member_role_name, "VouchAccess");
-        assert_eq!(cfg.member_role_path, "/");
-    }
-
-    #[test]
-    fn test_role_arn_in_no_path() {
-        let cfg = SsoSessionConfig::default();
-        assert_eq!(
-            cfg.role_arn_in("aws", "123456789012"),
-            "arn:aws:iam::123456789012:role/VouchAccess"
-        );
-    }
-
-    #[test]
-    fn test_role_arn_in_with_path() {
-        let cfg = SsoSessionConfig {
-            member_role_path: "/teams/sec/".to_string(),
-            ..SsoSessionConfig::default()
-        };
-        assert_eq!(
-            cfg.role_arn_in("aws", "123456789012"),
-            "arn:aws:iam::123456789012:role/teams/sec/VouchAccess"
-        );
-    }
-
-    #[test]
-    fn test_role_arn_in_partition_govcloud() {
-        let cfg = SsoSessionConfig {
-            member_role_path: "/teams/".to_string(),
-            ..SsoSessionConfig::default()
-        };
-        assert_eq!(
-            cfg.role_arn_in("aws-us-gov", "123"),
-            "arn:aws-us-gov:iam::123:role/teams/VouchAccess"
-        );
-    }
-
-    #[test]
-    fn test_member_role_path_normalized_on_deserialize() {
-        let json = r#"{
-            "aws": {
-                "sso_sessions": {
-                    "my-session": {
-                        "management_role": "arn:aws:iam::1:role/Mgmt",
-                        "member_role_path": "teams/sec"
-                    }
-                }
-            }
-        }"#;
-
-        let file: ConfigFile = serde_json::from_str(json).unwrap();
-        let config = Config::from(file);
-        let aws = config.aws().expect("aws config should exist");
-        let session = aws.sso_sessions.get("my-session").expect("session");
-        assert_eq!(session.member_role_path, "/teams/sec/");
-    }
-
-    #[test]
-    fn test_member_role_path_invalid_rejected_on_deserialize() {
-        let json = r#"{
-            "aws": {
-                "sso_sessions": {
-                    "my-session": {
-                        "management_role": "arn:aws:iam::1:role/Mgmt",
-                        "member_role_path": "arn:aws:iam::1:role/foo"
-                    }
-                }
-            }
-        }"#;
-
-        let result: std::result::Result<ConfigFile, _> = serde_json::from_str(json);
-        assert!(result.is_err(), "ARN-shaped paths must be rejected");
-    }
-
-    #[test]
-    fn test_aws_empty_sso_sessions_serializes_correctly() {
-        let mut config = Config::default();
-        config.set_aws(AwsMultiAccountConfig {
-            sso_sessions: BTreeMap::new(),
-        });
+    fn test_aws_empty_organizations_omitted_from_json() {
+        // Start from default — no aws section.
+        let config = Config::default();
+        assert!(config.aws().is_none());
 
         let file = ConfigFile::from(&config);
         let json = serde_json::to_string(&file).unwrap();
 
-        // Empty sso_sessions map is skipped due to skip_serializing_if
-        assert!(!json.contains("sso_sessions"));
+        // Empty organizations list is skipped; entire aws block may be omitted.
+        assert!(!json.contains("organizations"));
+    }
+
+    #[test]
+    fn test_append_aws_org_adds_new() {
+        let mut config = Config::default();
+        config.append_aws_org(AwsOrganization {
+            management_role: "arn:aws:iam::111:role/Mgmt".to_string(),
+            identity_center: None,
+        });
+        assert_eq!(config.aws().unwrap().organizations.len(), 1);
+
+        config.append_aws_org(AwsOrganization {
+            management_role: "arn:aws:iam::222:role/Mgmt".to_string(),
+            identity_center: None,
+        });
+        assert_eq!(config.aws().unwrap().organizations.len(), 2);
+    }
+
+    #[test]
+    fn test_append_aws_org_replaces_existing() {
+        let mut config = Config::default();
+        config.append_aws_org(AwsOrganization {
+            management_role: "arn:aws:iam::111:role/Mgmt".to_string(),
+            identity_center: None,
+        });
+
+        // Same management role → replace.
+        config.append_aws_org(AwsOrganization {
+            management_role: "arn:aws:iam::111:role/Mgmt".to_string(),
+            identity_center: Some(AwsIdentityCenter {
+                application_arn: "arn:aws:sso::111:application/x/y".to_string(),
+                region: "us-east-1".to_string(),
+            }),
+        });
+        let orgs = &config.aws().unwrap().organizations;
+        assert_eq!(orgs.len(), 1);
+        assert!(orgs[0].identity_center.is_some());
+    }
+
+    #[test]
+    fn test_append_aws_org_preserves_identity_center_on_merge() {
+        // First call: store org with IdC configured.
+        let mut config = Config::default();
+        config.append_aws_org(AwsOrganization {
+            management_role: "arn:aws:iam::111:role/Mgmt".to_string(),
+            identity_center: Some(AwsIdentityCenter {
+                application_arn: "arn:aws:sso::111:application/x/y".to_string(),
+                region: "us-east-1".to_string(),
+            }),
+        });
+
+        // Second call: same management role but no IdC (re-run without --identity-center-application).
+        // The existing IdC must be preserved.
+        config.append_aws_org(AwsOrganization {
+            management_role: "arn:aws:iam::111:role/Mgmt".to_string(),
+            identity_center: None,
+        });
+
+        let orgs = &config.aws().unwrap().organizations;
+        assert_eq!(orgs.len(), 1);
+        let idc = orgs[0].identity_center.as_ref().expect("IdC preserved");
+        assert_eq!(idc.application_arn, "arn:aws:sso::111:application/x/y");
+        assert_eq!(idc.region, "us-east-1");
     }
 
     // -----------------------------------------------------------------

@@ -27,10 +27,43 @@ pub(crate) mod wif;
 #[derive(Subcommand)]
 pub(crate) enum CredentialCommands {
     /// Obtain temporary AWS credentials.
+    ///
+    /// Two access patterns:
+    ///
+    ///   STS role: `--role <full-arn>` — assumes the role directly,
+    ///   or chains through the configured management role when the target
+    ///   is in another account.
+    ///
+    ///   Identity Center: `--account <id> --permission-set <name>` —
+    ///   exchanges a Vouch RS256 token for an IdC access token, then calls
+    ///   `GetRoleCredentials`. Requires Identity Center configured via
+    ///   `vouch setup aws`.
     Aws {
-        /// AWS IAM role ARN to assume.
-        #[arg(long)]
-        role: String,
+        /// AWS IAM role ARN to assume (STS role path).
+        #[arg(
+            long,
+            conflicts_with_all = ["account", "permission_set"],
+            required_unless_present_any = ["account", "permission_set"],
+        )]
+        role: Option<String>,
+
+        /// AWS account ID (Identity Center path).
+        #[arg(long, requires = "permission_set", conflicts_with = "role")]
+        account: Option<String>,
+
+        /// IAM Identity Center permission-set name.
+        #[arg(long, requires = "account", conflicts_with = "role")]
+        permission_set: Option<String>,
+
+        /// Management role ARN to chain through when multiple organizations
+        /// are configured (STS paths only; not valid with --account/--permission-set).
+        #[arg(long, conflicts_with_all = ["idc_application", "account", "permission_set"])]
+        via: Option<String>,
+
+        /// Identity Center application ARN to use when multiple IdC instances
+        /// are configured (Identity Center path only; omit for single-instance setups).
+        #[arg(long, conflicts_with = "via")]
+        idc_application: Option<String>,
     },
     /// Obtain an SSH certificate.
     Ssh {

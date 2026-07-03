@@ -602,11 +602,32 @@ cmd-aws-console-about = Open the AWS Management Console in your browser
 
 arg-aws-console-role-help = AWS IAM role ARN to assume (auto-detected from ~/.aws/config if not specified).
 
+aws-err-agent-idc-unsupported =
+    AI-agent credential issuance is not supported on the Identity Center path
+    (permission-set credentials cannot be downscoped).
+    Use an STS role instead: '{ -cmd } credential aws --role <arn>'.
+
+aws-err-via-not-found =
+    No organization found with management role '{ $management_role }'.
+    Check '{ -cmd } status' or re-run '{ -cmd } setup aws'.
+
+aws-err-via-ambiguous =
+    Multiple AWS organizations are configured; specify --via <management-role-arn> to select one.
+    Run '{ -cmd } status' to see configured organizations.
+
+aws-err-idc-not-configured =
+    No AWS organizations configured. Run '{ -cmd } setup aws --management-role <arn>
+    --identity-center-application <arn> --region <region>' first.
+
+aws-err-idc-ambiguous =
+    Multiple Identity Center instances are configured.
+    Specify one with --idc-application <application-arn>.
+
 aws-err-not-configured =
     AWS not configured.
     Run '{ -cmd } setup aws --role <role-arn>' first, or specify --role.
 
-sso-portal-err-token-expired = SSO token is invalid or expired. Run 'aws sso login' first.
+sso-portal-err-token-expired = Identity Center access token is invalid or expired. Run '{ -cmd } login' to re-authenticate.
 
 aws-console-opening = Opening AWS Console...
 aws-console-browser-failed = Could not open browser automatically. Open the URL above in your browser.
@@ -741,9 +762,18 @@ cmd-setup-codeartifact-about = Configure a package manager for AWS CodeArtifact
 
 # setup/aws arg help
 arg-setup-aws-profile-help = AWS profile name to configure. Defaults to "vouch" if not specified.
-arg-setup-aws-role-help = AWS IAM role ARN to assume. Required unless --discover is set.
-arg-setup-aws-region-help = AWS region to set in the profile.
-arg-setup-aws-discover-help = Discover accounts and roles via SSO and generate profiles automatically.
+arg-setup-aws-role-help = Target AWS IAM role ARN. Required for single-account setup.
+arg-setup-aws-management-role-help =
+    Management role ARN — the OIDC-trusted anchor for multi-account and Identity Center
+    access. Stored in { -product } config as an organization entry.
+arg-setup-aws-identity-center-application-help =
+    IAM Identity Center application ARN for the trusted-token-issuer exchange.
+    Stored alongside the management role. Requires --region.
+arg-setup-aws-region-help = AWS region to set in the profile (required for Identity Center).
+arg-setup-aws-discover-help =
+    Enumerate accounts and permission-sets via Identity Center and write one profile
+    per assignment. Requires Identity Center config from this run or a prior
+    'vouch setup aws' invocation.
 
 # setup/ssh arg help
 arg-setup-ssh-hosts-help = Host patterns to trust with this CA (e.g., "*.example.com"). If specified, adds entry to ~/.ssh/known_hosts.
@@ -862,6 +892,7 @@ install-path-hint-nix =
 ## setup/aws
 
 setup-aws-err-role-required = Either --role or --discover is required
+setup-aws-err-region-required = --region is required when --identity-center-application is specified
 setup-aws-profile-already-exists =
     Profile [{ $profile }] already exists in ~/.aws/config.
     To update it, edit ~/.aws/config directly.
@@ -910,8 +941,14 @@ setup-aws-discover-summary = { $created ->
         [one] { $skipped } skipped
        *[other] { $skipped } skipped
     }
-setup-aws-err-no-sso-session = No SSO session found in ~/.aws/config. Run 'aws configure sso' first.
-setup-aws-err-sso-expired = SSO session expired or missing. Run 'aws sso login' first.
+setup-aws-org-stored =
+    Organization stored: management role { $management_role }
+    To add profiles, re-run with --role <arn> or --discover.
+
+setup-aws-org-stored-no-profile =
+    Organization stored in { -product } config.
+    Run 'vouch setup aws --role <target-arn>' to add a profile, or
+    '--discover' to enumerate accounts via Identity Center.
 
 ## setup/anthropic
 

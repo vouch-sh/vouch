@@ -211,60 +211,6 @@ impl AwsConfig {
     }
 }
 
-/// An SSO session from a `[sso-session <name>]` block in `~/.aws/config`.
-#[derive(Debug, Clone)]
-pub(crate) struct SsoSession {
-    /// Session name (e.g., "smoketurner").
-    pub name: String,
-    /// SSO start URL.
-    pub start_url: String,
-    /// SSO region.
-    pub region: String,
-    /// OAuth scopes (default: `["sso:account:access"]`).
-    pub scopes: Vec<String>,
-}
-
-impl AwsConfig {
-    /// Find an SSO session by name, or return the first one found if `name` is `None`.
-    #[must_use]
-    pub(crate) fn find_sso_session(&self, name: Option<&str>) -> Option<SsoSession> {
-        self.find_all_sso_sessions()
-            .into_iter()
-            .find(|s| name.is_none_or(|target| s.name == target))
-    }
-
-    /// Return all `[sso-session]` blocks from `~/.aws/config`, in file order.
-    #[must_use]
-    pub(crate) fn find_all_sso_sessions(&self) -> Vec<SsoSession> {
-        let mut sessions = Vec::new();
-        for (section_name, props) in &self.ini {
-            let Some(section_str) = section_name else {
-                continue;
-            };
-            let Some(session_name) = section_str.strip_prefix("sso-session ") else {
-                continue;
-            };
-            let Some(start_url) = props.get("sso_start_url") else {
-                continue;
-            };
-            let Some(region) = props.get("sso_region") else {
-                continue;
-            };
-            let scopes = props.get("sso_registration_scopes").map_or_else(
-                || vec!["sso:account:access".to_string()],
-                |s| s.split(',').map(|s| s.trim().to_string()).collect(),
-            );
-            sessions.push(SsoSession {
-                name: session_name.to_string(),
-                start_url: start_url.to_string(),
-                region: region.to_string(),
-                scopes,
-            });
-        }
-        sessions
-    }
-}
-
 /// Extract the AWS role ARN from a credential_process command.
 ///
 /// Looks for `--role <arn>` in the command string.
@@ -282,6 +228,27 @@ pub(crate) fn extract_role_from_credential_process(credential_process: &str) -> 
         }
     }
     None
+}
+
+/// Extract an Identity Center target description from a credential_process command.
+///
+/// Looks for `--account <id> --permission-set <name>` and returns a pre-formatted
+/// `"IdC <account>/<permission-set>"` string for status display.
+#[must_use]
+pub(crate) fn extract_idc_target_from_credential_process(
+    credential_process: &str,
+) -> Option<String> {
+    fn extract_flag_value<'a>(s: &'a str, flag: &str) -> Option<&'a str> {
+        let start = s.find(flag)?;
+        let after = s.get(start.saturating_add(flag.len())..)?.trim_start();
+        // Value may be quoted; strip surrounding double-quotes if present.
+        let raw = after.split(|c: char| c.is_ascii_whitespace()).next()?;
+        Some(raw.trim_matches('"'))
+    }
+
+    let account = extract_flag_value(credential_process, "--account")?;
+    let ps = extract_flag_value(credential_process, "--permission-set")?;
+    Some(format!("IdC {account}/{ps}"))
 }
 
 #[cfg(test)]
@@ -791,84 +758,5 @@ credential_process = vouch credential aws --role arn:aws:iam::222:role/Staging
         let config = AwsConfig::load_from(file.path().to_path_buf()).unwrap();
 
         assert_eq!(config.next_vouch_profile_name(), "vouch-3");
-    }
-
-    #[test]
-    fn test_find_sso_session_by_name() {
-        let content = r#"
-[sso-session smoketurner]
-sso_start_url = https://smoketurner.awsapps.com/start
-sso_region = us-east-1
-sso_registration_scopes = sso:account:access
-
-[sso-session other]
-sso_start_url = https://other.awsapps.com/start
-sso_region = eu-west-1
-"#;
-        let file = create_temp_config(content);
-        let config = AwsConfig::load_from(file.path().to_path_buf()).unwrap();
-
-        let session = config.find_sso_session(Some("smoketurner")).unwrap();
-        assert_eq!(session.name, "smoketurner");
-        assert_eq!(session.start_url, "https://smoketurner.awsapps.com/start");
-        assert_eq!(session.region, "us-east-1");
-        assert_eq!(session.scopes, vec!["sso:account:access"]);
-    }
-
-    #[test]
-    fn test_find_sso_session_first_when_no_name() {
-        let content = r#"
-[sso-session only-session]
-sso_start_url = https://example.awsapps.com/start
-sso_region = us-west-2
-"#;
-        let file = create_temp_config(content);
-        let config = AwsConfig::load_from(file.path().to_path_buf()).unwrap();
-
-        // Without a name, returns the first session found
-        let session = config.find_sso_session(None).unwrap();
-        assert_eq!(session.name, "only-session");
-        assert_eq!(session.region, "us-west-2");
-    }
-
-    #[test]
-    fn test_find_sso_session_not_found() {
-        let content = r#"
-[profile vouch]
-credential_process = vouch credential aws --role arn:aws:iam::111:role/Prod
-"#;
-        let file = create_temp_config(content);
-        let config = AwsConfig::load_from(file.path().to_path_buf()).unwrap();
-
-        assert!(config.find_sso_session(Some("nonexistent")).is_none());
-        assert!(config.find_sso_session(None).is_none());
-    }
-
-    #[test]
-    fn test_find_sso_session_default_scopes() {
-        // When sso_registration_scopes is absent, default to "sso:account:access"
-        let content = r#"
-[sso-session my-session]
-sso_start_url = https://example.awsapps.com/start
-sso_region = us-east-1
-"#;
-        let file = create_temp_config(content);
-        let config = AwsConfig::load_from(file.path().to_path_buf()).unwrap();
-
-        let session = config.find_sso_session(None).unwrap();
-        assert_eq!(session.scopes, vec!["sso:account:access"]);
-    }
-
-    #[test]
-    fn test_find_sso_session_skips_wrong_name() {
-        let content = r#"
-[sso-session dev]
-sso_start_url = https://dev.awsapps.com/start
-sso_region = us-east-1
-"#;
-        let file = create_temp_config(content);
-        let config = AwsConfig::load_from(file.path().to_path_buf()).unwrap();
-
-        assert!(config.find_sso_session(Some("prod")).is_none());
     }
 }

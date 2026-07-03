@@ -361,6 +361,107 @@ pub(crate) async fn sign_and_send_form_post(
         .context("failed to read AWS API response body")
 }
 
+/// Send a SigV4-signed JSON POST request to an AWS service.
+///
+/// Used by `sso-oauth:CreateTokenWithIAM` and other AWS APIs that accept
+/// `application/json` request bodies. The `path` and `query_params` are
+/// URI-encoded and included in the canonical request.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "AWS SigV4 JSON POST requires all listed parameters"
+)]
+pub(crate) async fn sign_and_send_json_post(
+    http_client: &reqwest::Client,
+    endpoint: &str,
+    path: &str,
+    query_params: &[(&str, &str)],
+    service: &str,
+    region: &str,
+    creds: &StsCredentials,
+    body: &serde_json::Value,
+) -> Result<String> {
+    let host = endpoint
+        .strip_prefix("https://")
+        .unwrap_or(endpoint)
+        .trim_end_matches('/');
+
+    let mut sorted_params: Vec<(&str, &str)> = query_params.to_vec();
+    sorted_params.sort_by(|a, b| a.0.cmp(b.0));
+    let canonical_query_string: String = sorted_params
+        .iter()
+        .map(|(k, v)| format!("{}={}", uri_encode(k), uri_encode(v)))
+        .collect::<Vec<_>>()
+        .join("&");
+
+    let body_str = body.to_string();
+    let now = jiff::Timestamp::now();
+    let amz_date = format_amz_date(now);
+    let date_stamp = format_date_stamp(now);
+
+    let payload_hash = sha256_hex(body_str.as_bytes());
+
+    let canonical_headers = format!(
+        "content-type:application/json\n\
+         host:{host}\nx-amz-date:{amz_date}\n\
+         x-amz-security-token:{}\n",
+        creds.session_token.expose_secret()
+    );
+    let signed_headers = "content-type;host;x-amz-date;x-amz-security-token";
+
+    let canonical_request = format!(
+        "POST\n{path}\n{canonical_query_string}\n\
+         {canonical_headers}\n{signed_headers}\n{payload_hash}"
+    );
+
+    let algorithm = "AWS4-HMAC-SHA256";
+    let credential_scope = format!("{date_stamp}/{region}/{service}/aws4_request");
+    let canonical_request_hash = sha256_hex(canonical_request.as_bytes());
+
+    let string_to_sign =
+        format!("{algorithm}\n{amz_date}\n{credential_scope}\n{canonical_request_hash}");
+
+    let k_signing = derive_signing_key(&creds.secret_access_key, &date_stamp, region, service);
+    let signature = hex::encode(hmac_sha256(&k_signing, string_to_sign.as_bytes()));
+
+    let authorization = format!(
+        "{algorithm} Credential={}/{credential_scope}, \
+         SignedHeaders={signed_headers}, Signature={signature}",
+        creds.access_key_id
+    );
+
+    let url = if canonical_query_string.is_empty() {
+        format!("{endpoint}{path}")
+    } else {
+        format!("{endpoint}{path}?{canonical_query_string}")
+    };
+
+    let response = http_client
+        .post(&url)
+        .header("Content-Type", "application/json")
+        .header("X-Amz-Date", &amz_date)
+        .header("X-Amz-Security-Token", creds.session_token.expose_secret())
+        .header("Authorization", &authorization)
+        .body(body_str)
+        .send()
+        .await
+        .context("failed to send AWS API request")?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let response_body = response.text().await.unwrap_or_default();
+        let truncated = truncate_error_body(&response_body, 500);
+        return Err(crate::exit_code::CliError::NetworkError(format!(
+            "{service} returned error {status}: {truncated}"
+        ))
+        .into());
+    }
+
+    response
+        .text()
+        .await
+        .context("failed to read AWS API response body")
+}
+
 /// Parameters for building a SigV4 presigned URL.
 pub(crate) struct PresignedUrlParams<'a> {
     /// HTTP method (typically "GET").

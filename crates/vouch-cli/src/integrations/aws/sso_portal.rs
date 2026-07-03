@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
-//! AWS SSO Portal API for listing accounts and roles.
+//! AWS SSO Portal API for listing accounts and roles and retrieving role
+//! credentials.
 //!
 //! Uses Bearer token auth via the `x-amz-sso_bearer_token` header (not
 //! standard `Authorization: Bearer` — this is what the AWS SDK uses).
@@ -9,6 +10,31 @@ use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
 use vouch_cli::tr;
 use vouch_common::aws::Partition;
+
+use super::sts::StsCredentials;
+
+/// AWS SSO Portal `GetRoleCredentials` response envelope.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RoleCredentialsResponse {
+    role_credentials: PortalRoleCredentials,
+}
+
+/// Temporary role credentials returned by the SSO Portal `GetRoleCredentials`
+/// API. `expiration` is Unix epoch **milliseconds** (not seconds).
+///
+/// The secret fields are deserialized as plain `String` (the workspace builds
+/// `secrecy` without its `serde` feature, so `SecretString` is not
+/// `Deserialize`) and wrapped into `SecretString` in [`get_role_credentials`].
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PortalRoleCredentials {
+    access_key_id: String,
+    secret_access_key: String,
+    session_token: String,
+    /// Expiry as Unix epoch milliseconds.
+    expiration: i64,
+}
 
 /// An AWS account the user has access to via SSO.
 #[derive(Debug, Clone, Deserialize)]
@@ -192,6 +218,70 @@ pub(crate) async fn list_account_roles(
     Ok(roles)
 }
 
+/// Retrieve temporary AWS credentials for a permission-set role in a specific
+/// account, on behalf of the SSO-authenticated user.
+///
+/// This is the credential-issuing counterpart to [`list_accounts`] /
+/// [`list_account_roles`]: given an account and a role name from those
+/// listings, it returns STS-equivalent credentials directly from the SSO
+/// Portal — no `AssumeRole` chaining and no per-role IAM trust policy. Access
+/// is governed entirely by the user's IAM Identity Center permission-set
+/// assignments.
+///
+/// `role_name` is the permission-set name (as returned by
+/// [`list_account_roles`]); the portal resolves it to the corresponding
+/// `AWSReservedSSO_*` role in `account_id`.
+pub(crate) async fn get_role_credentials(
+    http_client: &reqwest::Client,
+    region: &str,
+    access_token: &SecretString,
+    account_id: &str,
+    role_name: &str,
+) -> Result<StsCredentials> {
+    let partition = Partition::from_region(region);
+    let base_url = partition.sso_portal_endpoint(region);
+    let url = format!("{base_url}/federation/credentials");
+
+    let response = http_client
+        .get(&url)
+        .header("x-amz-sso_bearer_token", access_token.expose_secret())
+        .query(&[("account_id", account_id), ("role_name", role_name)])
+        .send()
+        .await
+        .context("failed to call SSO Portal get role credentials")?;
+
+    if response.status() == reqwest::StatusCode::UNAUTHORIZED {
+        return Err(crate::exit_code::CliError::NotAuthenticated {
+            reason: tr!("sso-portal-err-token-expired"),
+        }
+        .into());
+    }
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let text = response.text().await.unwrap_or_default();
+        return Err(crate::exit_code::CliError::NetworkError(format!(
+            "SSO Portal get role credentials failed {status}: {text}"
+        ))
+        .into());
+    }
+
+    let resp: RoleCredentialsResponse = response
+        .json()
+        .await
+        .context("failed to parse SSO Portal role credentials response")?;
+
+    let expiration = jiff::Timestamp::from_millisecond(resp.role_credentials.expiration)
+        .context("SSO Portal returned an out-of-range credential expiration")?;
+
+    Ok(StsCredentials {
+        access_key_id: resp.role_credentials.access_key_id,
+        secret_access_key: SecretString::from(resp.role_credentials.secret_access_key),
+        session_token: SecretString::from(resp.role_credentials.session_token),
+        expiration,
+    })
+}
+
 #[cfg(test)]
 #[expect(
     clippy::expect_used,
@@ -307,5 +397,25 @@ mod tests {
         let role: SsoRole = serde_json::from_str(json).expect("valid JSON");
         assert_eq!(role.role_name, "ReadOnly");
         assert_eq!(role.account_id, "987654321098");
+    }
+
+    #[test]
+    fn test_role_credentials_response_deserialization() {
+        // `expiration` is Unix epoch milliseconds in the SSO Portal response.
+        let json = r#"{
+            "roleCredentials": {
+                "accessKeyId": "ASIAEXAMPLE",
+                "secretAccessKey": "secretkeyexample",
+                "sessionToken": "sessiontokenexample",
+                "expiration": 1705257600000
+            }
+        }"#;
+
+        let resp: RoleCredentialsResponse = serde_json::from_str(json).expect("valid JSON");
+        assert_eq!(resp.role_credentials.access_key_id, "ASIAEXAMPLE");
+        assert_eq!(resp.role_credentials.expiration, 1_705_257_600_000);
+        let ts = jiff::Timestamp::from_millisecond(resp.role_credentials.expiration)
+            .expect("valid timestamp");
+        assert_eq!(ts.as_millisecond(), 1_705_257_600_000);
     }
 }
