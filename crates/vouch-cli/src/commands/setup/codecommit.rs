@@ -71,8 +71,10 @@ pub(crate) async fn run(
     // Get vouch binary path for the credential helper command and symlink
     let vouch_path = resolve_install_path();
 
-    // Build the native credential helper command
-    let helper_command = format!("{} credential codecommit", vouch_path.display());
+    // Build the native credential helper command. Git runs credential helpers
+    // through a shell, so the path must be quoted or it breaks when the vouch
+    // binary lives under a path containing spaces (matches setup/github.rs).
+    let helper_command = format!("\"{}\" credential codecommit", vouch_path.display());
 
     // Determine the credential pattern(s)
     let patterns: Vec<String> = if let Some(r) = region {
@@ -262,4 +264,26 @@ fn detect_conflicting_helpers() -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    /// Git runs credential helpers through a shell, so a vouch binary path
+    /// containing spaces must stay quoted as a single token. This guards
+    /// against re-dropping the quotes (the bug regressed once via the #597
+    /// revert). Mirrors the `helper_command` format built in `run`.
+    #[test]
+    fn helper_command_quotes_path_with_spaces() {
+        let vouch_path = std::path::Path::new("/Users/John Smith/.cargo/bin/vouch");
+        let helper_command = format!("\"{}\" credential codecommit", vouch_path.display());
+
+        assert_eq!(
+            helper_command,
+            "\"/Users/John Smith/.cargo/bin/vouch\" credential codecommit"
+        );
+        assert!(
+            helper_command.starts_with('"'),
+            "helper command must quote the binary path: {helper_command}"
+        );
+    }
 }

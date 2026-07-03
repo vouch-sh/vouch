@@ -62,6 +62,18 @@ fn load_or_create_aws_config() -> Result<AwsConfig> {
     Ok(AwsConfig::load_from(config_path.clone()).unwrap_or_else(|_| AwsConfig::empty(config_path)))
 }
 
+/// Arguments for `setup aws`, one field per CLI flag. Grouped into a borrow
+/// struct to stay within the positional-parameter limit.
+pub(crate) struct SetupAwsArgs<'a> {
+    pub profile: Option<&'a str>,
+    pub role_arn: Option<&'a str>,
+    pub management_role: Option<&'a str>,
+    pub identity_center_application: Option<&'a str>,
+    pub region: Option<&'a str>,
+    pub discover: bool,
+    pub server: &'a str,
+}
+
 /// Run the AWS setup command.
 ///
 /// Dispatches based on the combination of flags:
@@ -71,19 +83,16 @@ fn load_or_create_aws_config() -> Result<AwsConfig> {
 /// - `--management-role` + `--identity-center-application` + `--region` + `--discover`:
 ///   IdC discovery (org + IdC stored, profiles written per account/permission-set).
 /// - `--discover` alone: IdC discovery using an already-stored org.
-#[allow(
-    clippy::too_many_arguments,
-    reason = "setup aws takes one arg per distinct CLI flag; no reasonable grouping exists"
-)]
-pub(crate) async fn run(
-    profile: Option<&str>,
-    role_arn: Option<&str>,
-    management_role: Option<&str>,
-    identity_center_application: Option<&str>,
-    region: Option<&str>,
-    discover: bool,
-    server: &str,
-) -> Result<()> {
+pub(crate) async fn run(args: SetupAwsArgs<'_>) -> Result<()> {
+    let SetupAwsArgs {
+        profile,
+        role_arn,
+        management_role,
+        identity_center_application,
+        region,
+        discover,
+        server,
+    } = args;
     // No flags supplied → launch the interactive first-run wizard.
     if profile.is_none()
         && role_arn.is_none()

@@ -253,7 +253,7 @@ where
 /// claim for CloudTrail attribution.
 pub(crate) async fn exchange_for_sts_credentials(req: StsRequest<'_>) -> Result<StsExchangeResult> {
     use crate::integrations::aws::sts::{
-        WebIdentityRequest, assume_role, assume_role_with_web_identity, parse_role_arn,
+        WebIdentityRequest, assume_role_with_web_identity, parse_role_arn,
     };
 
     let StsRequest {
@@ -289,64 +289,26 @@ pub(crate) async fn exchange_for_sts_credentials(req: StsRequest<'_>) -> Result<
     // credentials minted in the wrong context (issue #398).
     let policies = agent_session_policies(agent_source);
 
-    let mut client = VouchClient::new(server).await?;
+    let (http_client, id_token_secret, session) =
+        fetch_aws_oidc_token(server, agent_source).await?;
+    let id_token = id_token_secret.expose_secret();
 
-    // Set DPoP source claim for agent attribution (tamperproof via DPoP signature).
-    // Server extracts this to add AI-specific session tags to the JWT.
-    if let Some(source) = agent_source {
-        tracing::info!("AI agent detected ({source}), applying ReadOnlyAccess session policy");
-        client.set_dpop_source(source);
-    }
-
-    let token_response: OidcTokenResponse = client
-        .get_authenticated("/v1/credentials/aws/token")
-        .await
-        .context("failed to get OIDC token from Vouch server")?;
-
-    let id_token = token_response.id_token.expose_secret();
-
-    // Session tags are now embedded in the JWT via the
-    // https://aws.amazon.com/tags claim (server-side). AWS extracts them
-    // during AssumeRoleWithWebIdentity and logs them as principalTags in
-    // CloudTrail. Tags must NOT also be passed as STS API parameters —
-    // AWS rejects requests that include both.
-
-    let http_client =
-        vouch_common::http::credential_client(&format!("vouch-cli/{}", env!("CARGO_PKG_VERSION")))
-            .context("failed to create HTTP client")?;
-
-    let session = extract_sub_from_jwt(id_token).context("server returned invalid OIDC token")?;
+    // Session tags travel inside the JWT (server-side `https://aws.amazon.com/tags`
+    // claim); AWS extracts them during AssumeRoleWithWebIdentity and logs them as
+    // principalTags, so they must NOT also be passed as STS API parameters.
 
     if let Some(mgmt_role_arn) = mgmt.filter(|m| *m != role_arn) {
-        // Chain: AssumeRoleWithWebIdentity into management role, then AssumeRole into target.
-        // Management hop gets an inline STS-only policy; final hop gets ReadOnlyAccess.
-        let mgmt_arn = parse_role_arn(mgmt_role_arn)?;
-        let mgmt_domain_suffix = mgmt_arn.partition.dns_suffix();
-
-        let mgmt_credentials = assume_role_with_web_identity(WebIdentityRequest {
+        // Chain through the management role, then assume the target role.
+        let credentials = assume_role_via_management_chain(ChainInputs {
             http_client: &http_client,
-            role_arn: mgmt_role_arn,
-            role_session_name: &session,
-            web_identity_token: id_token,
-            region,
-            domain_suffix: mgmt_domain_suffix,
-            session_policy_names: &[],
-            session_policy: policies.mgmt_hop_policy.as_ref(),
-        })
-        .await
-        .context("failed to assume management role")?;
-
-        let credentials = assume_role(
-            &http_client,
+            id_token,
+            session: &session,
             role_arn,
-            &session,
+            mgmt_role_arn,
             region,
-            &mgmt_credentials,
-            policies.session_policy_names,
-            None,
-        )
-        .await
-        .context("failed to assume target role via chaining")?;
+            policies: &policies,
+        })
+        .await?;
 
         return Ok(StsExchangeResult {
             http_client,
@@ -374,6 +336,90 @@ pub(crate) async fn exchange_for_sts_credentials(req: StsRequest<'_>) -> Result<
         credentials,
         domain_suffix,
     })
+}
+
+/// Fetch a fresh OIDC ID token from the Vouch server and derive the STS
+/// role-session name from its `sub` claim.
+///
+/// When `agent_source` is set, the DPoP source claim is attached so the server
+/// embeds the AI-agent session tags. Returns the HTTP client used for the
+/// subsequent STS calls, the ID token, and the session name.
+async fn fetch_aws_oidc_token(
+    server: &str,
+    agent_source: Option<&str>,
+) -> Result<(reqwest::Client, SecretString, String)> {
+    let mut client = VouchClient::new(server).await?;
+
+    // Set DPoP source claim for agent attribution (tamperproof via DPoP signature).
+    // Server extracts this to add AI-specific session tags to the JWT.
+    if let Some(source) = agent_source {
+        tracing::info!("AI agent detected ({source}), applying ReadOnlyAccess session policy");
+        client.set_dpop_source(source);
+    }
+
+    let token_response: OidcTokenResponse = client
+        .get_authenticated("/v1/credentials/aws/token")
+        .await
+        .context("failed to get OIDC token from Vouch server")?;
+
+    let http_client =
+        vouch_common::http::credential_client(&format!("vouch-cli/{}", env!("CARGO_PKG_VERSION")))
+            .context("failed to create HTTP client")?;
+
+    let session = extract_sub_from_jwt(token_response.id_token.expose_secret())
+        .context("server returned invalid OIDC token")?;
+
+    Ok((http_client, token_response.id_token, session))
+}
+
+/// Borrowed inputs to the two-hop management-role chain.
+struct ChainInputs<'a> {
+    http_client: &'a reqwest::Client,
+    id_token: &'a str,
+    session: &'a str,
+    role_arn: &'a str,
+    mgmt_role_arn: &'a str,
+    region: &'a str,
+    policies: &'a AgentSessionPolicies,
+}
+
+/// Assume the target role by chaining through a management role:
+/// `AssumeRoleWithWebIdentity` into the management role (with an inline
+/// STS-only policy when agent-restricted), then `AssumeRole` into the target.
+async fn assume_role_via_management_chain(
+    input: ChainInputs<'_>,
+) -> Result<crate::integrations::aws::sts::StsCredentials> {
+    use crate::integrations::aws::sts::{
+        WebIdentityRequest, assume_role, assume_role_with_web_identity, parse_role_arn,
+    };
+
+    let mgmt_arn = parse_role_arn(input.mgmt_role_arn)?;
+    let mgmt_domain_suffix = mgmt_arn.partition.dns_suffix();
+
+    let mgmt_credentials = assume_role_with_web_identity(WebIdentityRequest {
+        http_client: input.http_client,
+        role_arn: input.mgmt_role_arn,
+        role_session_name: input.session,
+        web_identity_token: input.id_token,
+        region: input.region,
+        domain_suffix: mgmt_domain_suffix,
+        session_policy_names: &[],
+        session_policy: input.policies.mgmt_hop_policy.as_ref(),
+    })
+    .await
+    .context("failed to assume management role")?;
+
+    assume_role(
+        input.http_client,
+        input.role_arn,
+        input.session,
+        input.region,
+        &mgmt_credentials,
+        input.policies.session_policy_names,
+        None,
+    )
+    .await
+    .context("failed to assume target role via chaining")
 }
 
 /// Session policies applied to STS calls, restricted when an AI coding
@@ -440,11 +486,12 @@ fn extract_account_from_arn(arn: &str) -> Option<&str> {
 /// - `via` supplied → match the org whose `management_role` equals the given full ARN
 ///   exactly; error if no match.
 /// - Multiple orgs, no `via` → disambiguate by account ID: if the target role's
-///   account matches exactly one org's management-role account, use that org;
-///   otherwise return an error requiring `--via`.
+///   account matches exactly one org's management-role account, use that org.
+///   Zero matches → `aws-err-no-org-covers-account`; multiple matches →
+///   `aws-err-via-ambiguous`.
 ///
-/// Returns `Err` if `via` matches no org, or if multiple orgs are configured and
-/// the target account is ambiguous.
+/// Returns `Err` if `via` matches no org, if no configured org covers the target
+/// account, or if multiple orgs match the target account (true ambiguity).
 pub(crate) fn resolve_management_role_for(
     vouch_config: &crate::config::Config,
     target_role_arn: &str,
@@ -488,10 +535,28 @@ pub(crate) fn resolve_management_role_for(
             .iter()
             .filter(|o| extract_account_from_arn(&o.management_role) == Some(acct))
             .collect();
-        if matches.len() == 1 {
-            return Ok(matches
-                .first()
-                .and_then(|o| chain_if_different_role(o, target_role_arn)));
+        match matches.len() {
+            1 => {
+                return Ok(matches
+                    .first()
+                    .and_then(|o| chain_if_different_role(o, target_role_arn)));
+            }
+            0 => {
+                // No org's management account matches the target account. The
+                // target may be a member account reachable by chaining through a
+                // configured org (--via), or an account no org covers (setup aws) —
+                // config doesn't record member accounts, so the message offers both.
+                return Err(crate::exit_code::CliError::ConfigError(tr_args!(
+                    "aws-err-no-org-covers-account",
+                    account = acct.to_string()
+                ))
+                .into());
+            }
+            _ => {
+                return Err(
+                    crate::exit_code::CliError::ConfigError(tr!("aws-err-via-ambiguous")).into(),
+                );
+            }
         }
     }
     Err(crate::exit_code::CliError::ConfigError(tr!("aws-err-via-ambiguous")).into())
@@ -1166,25 +1231,39 @@ mod tests {
     }
 
     #[test]
-    fn resolve_multi_org_no_match_returns_ambiguous_error() {
-        // Two orgs; target account doesn't match either management account.
+    fn resolve_multi_org_no_match_returns_no_coverage_error() {
+        // Two orgs; target account matches neither management account. The target
+        // may be a member account reachable via --via, so the message names the
+        // account and recommends --via (with setup aws as the fallback).
         let mgmt1 = "arn:aws:iam::111:role/Mgmt1";
         let mgmt2 = "arn:aws:iam::222:role/Mgmt2";
         let target = "arn:aws:iam::333:role/Target";
         let cfg = make_config(&[mgmt1, mgmt2]);
-        let result = resolve_management_role_for(&cfg, target, None);
-        assert!(result.is_err());
+        let err = resolve_management_role_for(&cfg, target, None).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("333"),
+            "no-coverage error should name the target account 333: {msg}"
+        );
+        assert!(
+            msg.contains("--via"),
+            "no-coverage error should recommend --via for member-account targets: {msg}"
+        );
     }
 
     #[test]
     fn resolve_multi_org_both_match_returns_ambiguous_error() {
-        // Two orgs in the SAME account; target in that account → ambiguous.
+        // Two orgs in the SAME account; target in that account → true ambiguity,
+        // so the error tells the user to disambiguate with --via.
         let mgmt1 = "arn:aws:iam::111:role/Mgmt1";
         let mgmt2 = "arn:aws:iam::111:role/Mgmt2";
         let target = "arn:aws:iam::111:role/Target";
         let cfg = make_config(&[mgmt1, mgmt2]);
-        let result = resolve_management_role_for(&cfg, target, None);
-        assert!(result.is_err());
+        let err = resolve_management_role_for(&cfg, target, None).unwrap_err();
+        assert!(
+            err.to_string().contains("--via"),
+            "true ambiguity should tell the user to specify --via: {err}"
+        );
     }
 
     // --- resolve_identity_center -----------------------------------------------

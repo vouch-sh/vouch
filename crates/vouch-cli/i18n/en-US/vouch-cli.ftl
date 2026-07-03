@@ -615,6 +615,11 @@ aws-err-via-ambiguous =
     Multiple AWS organizations are configured; specify --via <management-role-arn> to select one.
     Run '{ -cmd } status' to see configured organizations.
 
+aws-err-no-org-covers-account =
+    No configured organization's management account matches account { $account }.
+    Specify --via <management-role-arn> to chain through a configured organization,
+    or run '{ -cmd } setup aws' if none covers this account.
+
 aws-err-idc-not-configured =
     No AWS organizations configured. Run '{ -cmd } setup aws --management-role <arn>
     --identity-center-application <arn> --region <region>' first.
