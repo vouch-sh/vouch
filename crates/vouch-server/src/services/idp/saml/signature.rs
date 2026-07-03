@@ -36,9 +36,6 @@ const TRANSFORM_ENVELOPED: &str = "http://www.w3.org/2000/09/xmldsig#enveloped-s
 /// Exclusive XML Canonicalization transform URI.
 const TRANSFORM_EXC_C14N: &str = "http://www.w3.org/2001/10/xml-exc-c14n#";
 
-/// SHA-256 digest algorithm URI.
-const _DIGEST_SHA256: &str = "http://www.w3.org/2001/04/xmlenc#sha256";
-
 /// RSA-SHA256 signature algorithm URI.
 const SIG_RSA_SHA256: &str = "http://www.w3.org/2001/04/xmldsig-more#rsa-sha256";
 
