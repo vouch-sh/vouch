@@ -26,7 +26,7 @@
 use crate::AppState;
 use axum::{
     extract::{Request, State},
-    http::{HeaderName, HeaderValue, StatusCode, header::WWW_AUTHENTICATE},
+    http::{HeaderValue, StatusCode, header::WWW_AUTHENTICATE},
     middleware::Next,
     response::Response,
 };
@@ -109,11 +109,6 @@ fn append_resource_metadata(headers: &mut axum::http::HeaderMap, url: &str) {
             }
         }
     }
-
-    // `HeaderName` comparison guard: silence unused_imports if the
-    // module is compiled without any WWW_AUTHENTICATE usage (it is
-    // always used above, but clippy sometimes grumbles).
-    let _ = HeaderName::from_static("www-authenticate");
 }
 
 /// Check whether a `WWW-Authenticate` header contains auth-params
