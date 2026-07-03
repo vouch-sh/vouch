@@ -73,6 +73,179 @@ pub(crate) fn derive_signing_key(
     Zeroizing::new(hmac_sha256(&k_service, b"aws4_request"))
 }
 
+/// Inputs to the SigV4 signing core ([`sign`](Self::sign)).
+///
+/// Borrowed fields mirror the [`PresignedUrlParams`] pattern so the many
+/// inputs do not exceed the positional-parameter limit.
+struct SigV4SigningInput<'a> {
+    /// HTTP method.
+    method: &'a reqwest::Method,
+    /// Host with scheme and any trailing slash already stripped.
+    host: &'a str,
+    /// URI path (`/` or a caller-specific path).
+    path: &'a str,
+    /// Query parameters, unsorted; the core sorts by key then value.
+    query: &'a [(&'a str, &'a str)],
+    /// Signed headers beyond host/x-amz-date/x-amz-security-token, with
+    /// lowercase names (e.g. `content-type`, `x-amz-target`).
+    signed_extra_headers: &'a [(&'a str, &'a str)],
+    /// Request body bytes (empty for GET / REST calls).
+    body: &'a [u8],
+    /// AWS service name for signing (e.g. `ecr`, `sts`).
+    service: &'a str,
+    /// AWS region.
+    region: &'a str,
+    /// Temporary AWS credentials from STS.
+    creds: &'a StsCredentials,
+}
+
+/// Output of the SigV4 signing core.
+struct SignedSigV4 {
+    /// Value for the `Authorization` header.
+    authorization: String,
+    /// `X-Amz-Date` value bound into the signature.
+    amz_date: String,
+    /// Canonical (sorted, URI-encoded) query string, for building the URL.
+    canonical_query_string: String,
+}
+
+impl SigV4SigningInput<'_> {
+    /// Compute the SigV4 `Authorization` header, stamping the current time.
+    ///
+    /// Shared by every `sign_and_send_*` helper.
+    #[must_use]
+    fn sign(&self) -> SignedSigV4 {
+        self.sign_at(jiff::Timestamp::now())
+    }
+
+    /// Compute the SigV4 `Authorization` header at a fixed timestamp.
+    ///
+    /// Split from [`sign`](Self::sign) so tests can pin `now` and assert
+    /// against known-answer signatures.
+    #[must_use]
+    fn sign_at(&self, now: jiff::Timestamp) -> SignedSigV4 {
+        let SigV4SigningInput {
+            method,
+            host,
+            path,
+            query,
+            signed_extra_headers,
+            body,
+            service,
+            region,
+            creds,
+        } = *self;
+        let method = method.as_str();
+
+        let amz_date = format_amz_date(now);
+        let date_stamp = format_date_stamp(now);
+
+        // SigV4 sorts the canonical query string by key, then by value so that
+        // duplicate parameter names order deterministically. Sorting on the raw
+        // key/value matches `build_presigned_url`; all current callers use
+        // ASCII-safe names where raw and percent-encoded orderings coincide.
+        let mut sorted_query: Vec<(&str, &str)> = query.to_vec();
+        sorted_query.sort_by(|a, b| a.0.cmp(b.0).then_with(|| a.1.cmp(b.1)));
+        let mut canonical_query_string = String::new();
+        for &(key, value) in &sorted_query {
+            if !canonical_query_string.is_empty() {
+                canonical_query_string.push('&');
+            }
+            canonical_query_string.push_str(&uri_encode(key));
+            canonical_query_string.push('=');
+            canonical_query_string.push_str(&uri_encode(value));
+        }
+
+        let session_token = creds.session_token.expose_secret();
+        let (signed_headers, canonical_headers) = {
+            // BTreeMap yields the alphabetical header order SigV4 requires.
+            let mut headers: BTreeMap<&str, &str> = BTreeMap::new();
+            headers.insert("host", host);
+            headers.insert("x-amz-date", amz_date.as_str());
+            headers.insert("x-amz-security-token", session_token);
+            for &(name, value) in signed_extra_headers {
+                debug_assert!(
+                    name != "host" && name != "x-amz-date" && name != "x-amz-security-token",
+                    "signed_extra_headers must not override a fixed SigV4 header: {name}"
+                );
+                headers.insert(name, value);
+            }
+            let signed = headers.keys().copied().collect::<Vec<_>>().join(";");
+            let mut canonical = String::new();
+            for (name, value) in &headers {
+                canonical.push_str(name);
+                canonical.push(':');
+                canonical.push_str(value);
+                canonical.push('\n');
+            }
+            (signed, canonical)
+        };
+
+        let payload_hash = sha256_hex(body);
+        let canonical_request = format!(
+            "{method}\n{path}\n{canonical_query_string}\n\
+         {canonical_headers}\n{signed_headers}\n{payload_hash}"
+        );
+
+        let algorithm = "AWS4-HMAC-SHA256";
+        let credential_scope = format!("{date_stamp}/{region}/{service}/aws4_request");
+        let canonical_request_hash = sha256_hex(canonical_request.as_bytes());
+        let string_to_sign =
+            format!("{algorithm}\n{amz_date}\n{credential_scope}\n{canonical_request_hash}");
+
+        let k_signing = derive_signing_key(&creds.secret_access_key, &date_stamp, region, service);
+        let signature = hex::encode(hmac_sha256(&k_signing, string_to_sign.as_bytes()));
+
+        let authorization = format!(
+            "{algorithm} Credential={}/{credential_scope}, \
+         SignedHeaders={signed_headers}, Signature={signature}",
+            creds.access_key_id
+        );
+
+        SignedSigV4 {
+            authorization,
+            amz_date,
+            canonical_query_string,
+        }
+    }
+}
+
+/// Apply the SigV4 signature headers, send the request, and return the body.
+///
+/// Adds `X-Amz-Date`, `X-Amz-Security-Token`, and `Authorization` (shared by
+/// every signed request), then maps a non-2xx response to a truncated
+/// [`CliError::NetworkError`] (`crate::exit_code`) so account IDs and ARNs are
+/// not over-exposed.
+async fn send_signed_request(
+    request: reqwest::RequestBuilder,
+    creds: &StsCredentials,
+    signed: &SignedSigV4,
+    service: &str,
+) -> Result<String> {
+    let response = request
+        .header("X-Amz-Date", &signed.amz_date)
+        .header("X-Amz-Security-Token", creds.session_token.expose_secret())
+        .header("Authorization", &signed.authorization)
+        .send()
+        .await
+        .context("failed to send AWS API request")?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let response_body = response.text().await.unwrap_or_default();
+        let truncated = truncate_error_body(&response_body, 500);
+        return Err(crate::exit_code::CliError::NetworkError(format!(
+            "{service} returned error {status}: {truncated}"
+        ))
+        .into());
+    }
+
+    response
+        .text()
+        .await
+        .context("failed to read AWS API response body")
+}
+
 /// Send a SigV4-signed JSON-RPC style POST request to an AWS service.
 ///
 /// Many AWS services (ECR, etc.) use the same pattern:
@@ -99,69 +272,34 @@ pub(crate) async fn sign_and_send_json_rpc(
     creds: &StsCredentials,
     body: &serde_json::Value,
 ) -> Result<String> {
-    // Extract host from endpoint URL
     let host = endpoint
         .strip_prefix("https://")
         .unwrap_or(endpoint)
         .trim_end_matches('/');
-
     let body_str = body.to_string();
-    let now = jiff::Timestamp::now();
-    let amz_date = format_amz_date(now);
-    let date_stamp = format_date_stamp(now);
 
-    let payload_hash = sha256_hex(body_str.as_bytes());
+    let signed = SigV4SigningInput {
+        method: &reqwest::Method::POST,
+        host,
+        path: "/",
+        query: &[],
+        signed_extra_headers: &[
+            ("content-type", "application/x-amz-json-1.1"),
+            ("x-amz-target", target),
+        ],
+        body: body_str.as_bytes(),
+        service,
+        region,
+        creds,
+    }
+    .sign();
 
-    let canonical_headers = format!(
-        "content-type:application/x-amz-json-1.1\nhost:{host}\nx-amz-date:{amz_date}\nx-amz-security-token:{}\nx-amz-target:{target}\n",
-        creds.session_token.expose_secret()
-    );
-    let signed_headers = "content-type;host;x-amz-date;x-amz-security-token;x-amz-target";
-
-    let canonical_request =
-        format!("POST\n/\n\n{canonical_headers}\n{signed_headers}\n{payload_hash}");
-
-    let algorithm = "AWS4-HMAC-SHA256";
-    let credential_scope = format!("{date_stamp}/{region}/{service}/aws4_request");
-    let canonical_request_hash = sha256_hex(canonical_request.as_bytes());
-
-    let string_to_sign =
-        format!("{algorithm}\n{amz_date}\n{credential_scope}\n{canonical_request_hash}");
-
-    let k_signing = derive_signing_key(&creds.secret_access_key, &date_stamp, region, service);
-    let signature = hex::encode(hmac_sha256(&k_signing, string_to_sign.as_bytes()));
-
-    let authorization = format!(
-        "{algorithm} Credential={}/{credential_scope}, SignedHeaders={signed_headers}, Signature={signature}",
-        creds.access_key_id
-    );
-
-    let response = http_client
+    let request = http_client
         .post(endpoint)
         .header("Content-Type", "application/x-amz-json-1.1")
-        .header("X-Amz-Date", &amz_date)
-        .header("X-Amz-Security-Token", creds.session_token.expose_secret())
         .header("X-Amz-Target", target)
-        .header("Authorization", &authorization)
-        .body(body_str)
-        .send()
-        .await
-        .context("failed to send AWS API request")?;
-
-    if !response.status().is_success() {
-        let status = response.status();
-        let response_body = response.text().await.unwrap_or_default();
-        let truncated = truncate_error_body(&response_body, 500);
-        return Err(crate::exit_code::CliError::NetworkError(format!(
-            "{service} returned error {status}: {truncated}"
-        ))
-        .into());
-    }
-
-    response
-        .text()
-        .await
-        .context("failed to read AWS API response body")
+        .body(body_str);
+    send_signed_request(request, creds, &signed, service).await
 }
 
 /// Send a SigV4-signed REST-style request to an AWS service.
@@ -197,79 +335,27 @@ pub(crate) async fn sign_and_send_rest(
         .unwrap_or(endpoint)
         .trim_end_matches('/');
 
-    let mut sorted_params: Vec<(&str, &str)> = query_params.to_vec();
-    sorted_params.sort_by(|a, b| a.0.cmp(b.0));
-    let canonical_query_string: String = sorted_params
-        .iter()
-        .map(|(k, v)| format!("{}={}", uri_encode(k), uri_encode(v)))
-        .collect::<Vec<_>>()
-        .join("&");
+    let signed = SigV4SigningInput {
+        method: &method,
+        host,
+        path,
+        query: query_params,
+        signed_extra_headers: &[],
+        body: &[],
+        service,
+        region,
+        creds,
+    }
+    .sign();
 
-    let now = jiff::Timestamp::now();
-    let amz_date = format_amz_date(now);
-    let date_stamp = format_date_stamp(now);
-
-    let payload_hash = sha256_hex(b"");
-
-    let canonical_headers = format!(
-        "host:{host}\nx-amz-date:{amz_date}\nx-amz-security-token:{}\n",
-        creds.session_token.expose_secret()
-    );
-    let signed_headers = "host;x-amz-date;x-amz-security-token";
-
-    let method_str = method.as_str();
-    let canonical_request = format!(
-        "{method_str}\n{path}\n{canonical_query_string}\n\
-         {canonical_headers}\n{signed_headers}\n{payload_hash}"
-    );
-
-    let algorithm = "AWS4-HMAC-SHA256";
-    let credential_scope = format!("{date_stamp}/{region}/{service}/aws4_request");
-    let canonical_request_hash = sha256_hex(canonical_request.as_bytes());
-
-    let string_to_sign = format!(
-        "{algorithm}\n{amz_date}\n{credential_scope}\n\
-         {canonical_request_hash}"
-    );
-
-    let k_signing = derive_signing_key(&creds.secret_access_key, &date_stamp, region, service);
-    let signature = hex::encode(hmac_sha256(&k_signing, string_to_sign.as_bytes()));
-
-    let authorization = format!(
-        "{algorithm} Credential={}/{credential_scope}, \
-         SignedHeaders={signed_headers}, Signature={signature}",
-        creds.access_key_id
-    );
-
-    let url = if canonical_query_string.is_empty() {
+    let url = if signed.canonical_query_string.is_empty() {
         format!("{endpoint}{path}")
     } else {
-        format!("{endpoint}{path}?{canonical_query_string}")
+        format!("{endpoint}{path}?{}", signed.canonical_query_string)
     };
 
-    let response = http_client
-        .request(method, &url)
-        .header("X-Amz-Date", &amz_date)
-        .header("X-Amz-Security-Token", creds.session_token.expose_secret())
-        .header("Authorization", &authorization)
-        .send()
-        .await
-        .context("failed to send AWS API request")?;
-
-    if !response.status().is_success() {
-        let status = response.status();
-        let response_body = response.text().await.unwrap_or_default();
-        let truncated = truncate_error_body(&response_body, 500);
-        return Err(crate::exit_code::CliError::NetworkError(format!(
-            "{service} returned error {status}: {truncated}"
-        ))
-        .into());
-    }
-
-    response
-        .text()
-        .await
-        .context("failed to read AWS API response body")
+    let request = http_client.request(method, &url);
+    send_signed_request(request, creds, &signed, service).await
 }
 
 /// Send a SigV4-signed form-encoded POST request to an AWS service.
@@ -290,75 +376,40 @@ pub(crate) async fn sign_and_send_form_post(
         .unwrap_or(endpoint)
         .trim_end_matches('/');
 
-    // Build sorted form body (SigV4 requires sorted params in body)
+    // Sort the form body for a deterministic wire representation. Unlike the
+    // canonical query string, SigV4 does not prescribe an ordering for form-body
+    // parameters; any stable order is valid as long as the bytes we hash are the
+    // bytes we send (they are — the same `body_str` feeds both).
     let mut sorted_params: Vec<(&str, &str)> = form_params.to_vec();
     sorted_params.sort_by(|a, b| a.0.cmp(b.0));
-    let body_str: String = sorted_params
-        .iter()
-        .map(|(k, v)| format!("{}={}", uri_encode(k), uri_encode(v)))
-        .collect::<Vec<_>>()
-        .join("&");
-
-    let now = jiff::Timestamp::now();
-    let amz_date = format_amz_date(now);
-    let date_stamp = format_date_stamp(now);
-
-    let payload_hash = sha256_hex(body_str.as_bytes());
-
-    let canonical_headers = format!(
-        "content-type:application/x-www-form-urlencoded\n\
-         host:{host}\nx-amz-date:{amz_date}\n\
-         x-amz-security-token:{}\n",
-        creds.session_token.expose_secret()
-    );
-    let signed_headers = "content-type;host;x-amz-date;x-amz-security-token";
-
-    let canonical_request =
-        format!("POST\n/\n\n{canonical_headers}\n{signed_headers}\n{payload_hash}");
-
-    let algorithm = "AWS4-HMAC-SHA256";
-    let credential_scope = format!("{date_stamp}/{region}/{service}/aws4_request");
-    let canonical_request_hash = sha256_hex(canonical_request.as_bytes());
-
-    let string_to_sign = format!(
-        "{algorithm}\n{amz_date}\n{credential_scope}\n\
-         {canonical_request_hash}"
-    );
-
-    let k_signing = derive_signing_key(&creds.secret_access_key, &date_stamp, region, service);
-    let signature = hex::encode(hmac_sha256(&k_signing, string_to_sign.as_bytes()));
-
-    let authorization = format!(
-        "{algorithm} Credential={}/{credential_scope}, \
-         SignedHeaders={signed_headers}, Signature={signature}",
-        creds.access_key_id
-    );
-
-    let response = http_client
-        .post(endpoint)
-        .header("Content-Type", "application/x-www-form-urlencoded")
-        .header("X-Amz-Date", &amz_date)
-        .header("X-Amz-Security-Token", creds.session_token.expose_secret())
-        .header("Authorization", &authorization)
-        .body(body_str)
-        .send()
-        .await
-        .context("failed to send AWS API request")?;
-
-    if !response.status().is_success() {
-        let status = response.status();
-        let response_body = response.text().await.unwrap_or_default();
-        let truncated = truncate_error_body(&response_body, 500);
-        return Err(crate::exit_code::CliError::NetworkError(format!(
-            "{service} returned error {status}: {truncated}"
-        ))
-        .into());
+    let mut body_str = String::new();
+    for &(key, value) in &sorted_params {
+        if !body_str.is_empty() {
+            body_str.push('&');
+        }
+        body_str.push_str(&uri_encode(key));
+        body_str.push('=');
+        body_str.push_str(&uri_encode(value));
     }
 
-    response
-        .text()
-        .await
-        .context("failed to read AWS API response body")
+    let signed = SigV4SigningInput {
+        method: &reqwest::Method::POST,
+        host,
+        path: "/",
+        query: &[],
+        signed_extra_headers: &[("content-type", "application/x-www-form-urlencoded")],
+        body: body_str.as_bytes(),
+        service,
+        region,
+        creds,
+    }
+    .sign();
+
+    let request = http_client
+        .post(endpoint)
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body(body_str);
+    send_signed_request(request, creds, &signed, service).await
 }
 
 /// Send a SigV4-signed JSON POST request to an AWS service.
@@ -384,82 +435,32 @@ pub(crate) async fn sign_and_send_json_post(
         .strip_prefix("https://")
         .unwrap_or(endpoint)
         .trim_end_matches('/');
-
-    let mut sorted_params: Vec<(&str, &str)> = query_params.to_vec();
-    sorted_params.sort_by(|a, b| a.0.cmp(b.0));
-    let canonical_query_string: String = sorted_params
-        .iter()
-        .map(|(k, v)| format!("{}={}", uri_encode(k), uri_encode(v)))
-        .collect::<Vec<_>>()
-        .join("&");
-
     let body_str = body.to_string();
-    let now = jiff::Timestamp::now();
-    let amz_date = format_amz_date(now);
-    let date_stamp = format_date_stamp(now);
 
-    let payload_hash = sha256_hex(body_str.as_bytes());
+    let signed = SigV4SigningInput {
+        method: &reqwest::Method::POST,
+        host,
+        path,
+        query: query_params,
+        signed_extra_headers: &[("content-type", "application/json")],
+        body: body_str.as_bytes(),
+        service,
+        region,
+        creds,
+    }
+    .sign();
 
-    let canonical_headers = format!(
-        "content-type:application/json\n\
-         host:{host}\nx-amz-date:{amz_date}\n\
-         x-amz-security-token:{}\n",
-        creds.session_token.expose_secret()
-    );
-    let signed_headers = "content-type;host;x-amz-date;x-amz-security-token";
-
-    let canonical_request = format!(
-        "POST\n{path}\n{canonical_query_string}\n\
-         {canonical_headers}\n{signed_headers}\n{payload_hash}"
-    );
-
-    let algorithm = "AWS4-HMAC-SHA256";
-    let credential_scope = format!("{date_stamp}/{region}/{service}/aws4_request");
-    let canonical_request_hash = sha256_hex(canonical_request.as_bytes());
-
-    let string_to_sign =
-        format!("{algorithm}\n{amz_date}\n{credential_scope}\n{canonical_request_hash}");
-
-    let k_signing = derive_signing_key(&creds.secret_access_key, &date_stamp, region, service);
-    let signature = hex::encode(hmac_sha256(&k_signing, string_to_sign.as_bytes()));
-
-    let authorization = format!(
-        "{algorithm} Credential={}/{credential_scope}, \
-         SignedHeaders={signed_headers}, Signature={signature}",
-        creds.access_key_id
-    );
-
-    let url = if canonical_query_string.is_empty() {
+    let url = if signed.canonical_query_string.is_empty() {
         format!("{endpoint}{path}")
     } else {
-        format!("{endpoint}{path}?{canonical_query_string}")
+        format!("{endpoint}{path}?{}", signed.canonical_query_string)
     };
 
-    let response = http_client
+    let request = http_client
         .post(&url)
         .header("Content-Type", "application/json")
-        .header("X-Amz-Date", &amz_date)
-        .header("X-Amz-Security-Token", creds.session_token.expose_secret())
-        .header("Authorization", &authorization)
-        .body(body_str)
-        .send()
-        .await
-        .context("failed to send AWS API request")?;
-
-    if !response.status().is_success() {
-        let status = response.status();
-        let response_body = response.text().await.unwrap_or_default();
-        let truncated = truncate_error_body(&response_body, 500);
-        return Err(crate::exit_code::CliError::NetworkError(format!(
-            "{service} returned error {status}: {truncated}"
-        ))
-        .into());
-    }
-
-    response
-        .text()
-        .await
-        .context("failed to read AWS API response body")
+        .body(body_str);
+    send_signed_request(request, creds, &signed, service).await
 }
 
 /// Parameters for building a SigV4 presigned URL.
@@ -628,6 +629,257 @@ fn truncate_error_body(body: &str, max_len: usize) -> &str {
 )]
 mod tests {
     use super::*;
+
+    /// Fixed credentials for known-answer tests (all in `us-east-1`).
+    fn kat_creds() -> StsCredentials {
+        StsCredentials {
+            access_key_id: "AKIAIOSFODNN7EXAMPLE".to_string(),
+            secret_access_key: SecretString::from(
+                "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY".to_string(),
+            ),
+            session_token: SecretString::from("SESSIONTOKEN".to_string()),
+            expiration: "2024-01-15T18:30:45Z".parse().unwrap(),
+        }
+    }
+
+    /// Timestamp `2024-01-15T10:50:45Z` → `20240115T105045Z` / `20240115`.
+    fn kat_timestamp() -> jiff::Timestamp {
+        jiff::Timestamp::from_second(1705315845).expect("valid timestamp")
+    }
+
+    /// Independently derive the expected `Authorization` header from a
+    /// literal canonical request, using the same crypto primitives the core
+    /// uses. Pins the canonical-request byte layout each caller produces.
+    fn known_answer_auth(
+        canonical_request: &str,
+        signed_headers: &str,
+        amz_date: &str,
+        date_stamp: &str,
+        service: &str,
+        creds: &StsCredentials,
+    ) -> String {
+        let scope = format!("{date_stamp}/us-east-1/{service}/aws4_request");
+        let string_to_sign = format!(
+            "AWS4-HMAC-SHA256\n{amz_date}\n{scope}\n{}",
+            sha256_hex(canonical_request.as_bytes())
+        );
+        let key = derive_signing_key(&creds.secret_access_key, date_stamp, "us-east-1", service);
+        let signature = hex::encode(hmac_sha256(&key, string_to_sign.as_bytes()));
+        format!(
+            "AWS4-HMAC-SHA256 Credential={}/{scope}, \
+             SignedHeaders={signed_headers}, Signature={signature}",
+            creds.access_key_id
+        )
+    }
+
+    #[test]
+    fn test_sign_sigv4_json_rpc_known_answer() {
+        let creds = kat_creds();
+        let signed = SigV4SigningInput {
+            method: &reqwest::Method::POST,
+            host: "api.ecr.us-east-1.amazonaws.com",
+            path: "/",
+            query: &[],
+            signed_extra_headers: &[
+                ("content-type", "application/x-amz-json-1.1"),
+                ("x-amz-target", "Target.Op"),
+            ],
+            body: b"{}",
+            service: "ecr",
+            region: "us-east-1",
+            creds: &creds,
+        }
+        .sign_at(kat_timestamp());
+
+        let signed_headers = "content-type;host;x-amz-date;x-amz-security-token;x-amz-target";
+        let canonical_headers = "content-type:application/x-amz-json-1.1\n\
+             host:api.ecr.us-east-1.amazonaws.com\n\
+             x-amz-date:20240115T105045Z\n\
+             x-amz-security-token:SESSIONTOKEN\n\
+             x-amz-target:Target.Op\n";
+        let payload_hash = sha256_hex(b"{}");
+        let canonical_request =
+            format!("POST\n/\n\n{canonical_headers}\n{signed_headers}\n{payload_hash}");
+
+        assert_eq!(signed.amz_date, "20240115T105045Z");
+        assert_eq!(signed.canonical_query_string, "");
+        assert_eq!(
+            signed.authorization,
+            known_answer_auth(
+                &canonical_request,
+                signed_headers,
+                "20240115T105045Z",
+                "20240115",
+                "ecr",
+                &creds,
+            )
+        );
+    }
+
+    #[test]
+    fn test_sign_sigv4_rest_get_known_answer() {
+        let creds = kat_creds();
+        let signed = SigV4SigningInput {
+            method: &reqwest::Method::GET,
+            host: "eks.us-east-1.amazonaws.com",
+            path: "/clusters/demo",
+            query: &[("include", "all")],
+            signed_extra_headers: &[],
+            body: &[],
+            service: "eks",
+            region: "us-east-1",
+            creds: &creds,
+        }
+        .sign_at(kat_timestamp());
+
+        let signed_headers = "host;x-amz-date;x-amz-security-token";
+        let canonical_headers = "host:eks.us-east-1.amazonaws.com\n\
+             x-amz-date:20240115T105045Z\n\
+             x-amz-security-token:SESSIONTOKEN\n";
+        let canonical_request = format!(
+            "GET\n/clusters/demo\ninclude=all\n{canonical_headers}\n{signed_headers}\n{}",
+            sha256_hex(b"")
+        );
+
+        assert_eq!(signed.canonical_query_string, "include=all");
+        assert_eq!(
+            signed.authorization,
+            known_answer_auth(
+                &canonical_request,
+                signed_headers,
+                "20240115T105045Z",
+                "20240115",
+                "eks",
+                &creds,
+            )
+        );
+    }
+
+    #[test]
+    fn test_sign_sigv4_json_post_known_answer() {
+        let creds = kat_creds();
+        let signed = SigV4SigningInput {
+            method: &reqwest::Method::POST,
+            host: "oidc.us-east-1.amazonaws.com",
+            path: "/token",
+            query: &[("aws_iam", "t")],
+            signed_extra_headers: &[("content-type", "application/json")],
+            body: br#"{"grantType":"x"}"#,
+            service: "sso-oauth",
+            region: "us-east-1",
+            creds: &creds,
+        }
+        .sign_at(kat_timestamp());
+
+        let signed_headers = "content-type;host;x-amz-date;x-amz-security-token";
+        let canonical_headers = "content-type:application/json\n\
+             host:oidc.us-east-1.amazonaws.com\n\
+             x-amz-date:20240115T105045Z\n\
+             x-amz-security-token:SESSIONTOKEN\n";
+        let payload_hash = sha256_hex(br#"{"grantType":"x"}"#);
+        let canonical_request = format!(
+            "POST\n/token\naws_iam=t\n{canonical_headers}\n{signed_headers}\n{payload_hash}"
+        );
+
+        assert_eq!(signed.canonical_query_string, "aws_iam=t");
+        assert_eq!(
+            signed.authorization,
+            known_answer_auth(
+                &canonical_request,
+                signed_headers,
+                "20240115T105045Z",
+                "20240115",
+                "sso-oauth",
+                &creds,
+            )
+        );
+    }
+
+    #[test]
+    fn test_sign_sigv4_form_post_known_answer() {
+        let creds = kat_creds();
+        let body = b"Action=AssumeRole&Version=2011-06-15";
+        let signed = SigV4SigningInput {
+            method: &reqwest::Method::POST,
+            host: "sts.us-east-1.amazonaws.com",
+            path: "/",
+            query: &[],
+            signed_extra_headers: &[("content-type", "application/x-www-form-urlencoded")],
+            body,
+            service: "sts",
+            region: "us-east-1",
+            creds: &creds,
+        }
+        .sign_at(kat_timestamp());
+
+        let signed_headers = "content-type;host;x-amz-date;x-amz-security-token";
+        let canonical_headers = "content-type:application/x-www-form-urlencoded\n\
+             host:sts.us-east-1.amazonaws.com\n\
+             x-amz-date:20240115T105045Z\n\
+             x-amz-security-token:SESSIONTOKEN\n";
+        let canonical_request = format!(
+            "POST\n/\n\n{canonical_headers}\n{signed_headers}\n{}",
+            sha256_hex(body)
+        );
+
+        assert_eq!(signed.canonical_query_string, "");
+        assert_eq!(
+            signed.authorization,
+            known_answer_auth(
+                &canonical_request,
+                signed_headers,
+                "20240115T105045Z",
+                "20240115",
+                "sts",
+                &creds,
+            )
+        );
+    }
+
+    /// Regression: the canonical query string must sort duplicate parameter
+    /// names by value, not by key alone. The order is load-bearing — a
+    /// signature over the reversed query string differs.
+    #[test]
+    fn test_sign_sigv4_sorts_duplicate_query_keys_by_value() {
+        let creds = kat_creds();
+        let signed = SigV4SigningInput {
+            method: &reqwest::Method::GET,
+            host: "svc.us-east-1.amazonaws.com",
+            path: "/",
+            query: &[("p", "2"), ("p", "1")],
+            signed_extra_headers: &[],
+            body: &[],
+            service: "svc",
+            region: "us-east-1",
+            creds: &creds,
+        }
+        .sign_at(kat_timestamp());
+
+        // (key, value) sort places value "1" before "2".
+        assert_eq!(signed.canonical_query_string, "p=1&p=2");
+
+        let signed_headers = "host;x-amz-date;x-amz-security-token";
+        let canonical_headers = "host:svc.us-east-1.amazonaws.com\n\
+             x-amz-date:20240115T105045Z\n\
+             x-amz-security-token:SESSIONTOKEN\n";
+        let auth_for = |cqs: &str| {
+            let canonical_request = format!(
+                "GET\n/\n{cqs}\n{canonical_headers}\n{signed_headers}\n{}",
+                sha256_hex(b"")
+            );
+            known_answer_auth(
+                &canonical_request,
+                signed_headers,
+                "20240115T105045Z",
+                "20240115",
+                "svc",
+                &creds,
+            )
+        };
+
+        assert_eq!(signed.authorization, auth_for("p=1&p=2"));
+        assert_ne!(auth_for("p=1&p=2"), auth_for("p=2&p=1"));
+    }
 
     #[test]
     fn test_format_amz_date() {
