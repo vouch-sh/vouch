@@ -18,9 +18,6 @@ pub const FAPI_AUTH_CODE_LIFETIME_SECONDS: i64 = 60;
 /// Matches the FAPI 2.0 recommendation — no reason for standard clients to be laxer.
 pub const STANDARD_AUTH_CODE_LIFETIME_SECONDS: i64 = 60;
 
-/// FAPI 2.0 PAR request lifetime in seconds.
-pub const FAPI_PAR_EXPIRES_IN: i64 = 60;
-
 /// Algorithms allowed for FAPI 2.0 clients.
 ///
 /// RS256 is explicitly excluded per FAPI 2.0 Section 5.2.2 due to known weaknesses.
@@ -29,69 +26,11 @@ pub const FAPI_ALLOWED_ALGORITHMS: &[&str] = &["PS256", "ES256", "EdDSA"];
 /// FAPI 2.0 clock skew tolerance for acceptance (tighter than standard).
 pub const FAPI_CLOCK_SKEW_ACCEPT_SECONDS: i64 = 10;
 
-/// FAPI 2.0 clock skew tolerance for rejection (beyond this, always reject).
-pub const FAPI_CLOCK_SKEW_REJECT_SECONDS: i64 = 60;
-
 /// Standard (non-FAPI) clock skew tolerance in seconds.
 ///
 /// 10 seconds matches the FAPI 2.0 recommendation. Modern NTP-synced systems
 /// should not drift beyond this. Tighter tolerance reduces replay attack windows.
 pub const STANDARD_CLOCK_SKEW_SECONDS: i64 = 10;
-
-/// Validate that a client's registration is compatible with FAPI 2.0.
-///
-/// FAPI 2.0 Section 5.2.2 requires:
-/// - Confidential client (not public/SPA/native)
-/// - `private_key_jwt` authentication method
-/// - JWKS or JWKS URI configured
-///
-/// Non-FAPI clients pass validation unconditionally.
-///
-/// # Errors
-///
-/// Returns `ServiceError::OAuth` with `invalid_client` if the client
-/// does not meet FAPI 2.0 registration requirements.
-pub fn validate_fapi_client_registration(client: &OAuthClient) -> ServiceResult<()> {
-    if !client.is_fapi() {
-        return Ok(());
-    }
-
-    // FAPI 2.0 Section 5.2.2: Confidential clients only
-    if !client.application_type.requires_secret() {
-        return Err(ServiceError::oauth(
-            OAuthErrorCode::InvalidClient,
-            "FAPI 2.0 requires confidential clients",
-        ));
-    }
-
-    // FAPI 2.0 Section 5.2.2: Must use private_key_jwt or mTLS auth
-    let is_valid_fapi_auth = matches!(
-        client.token_endpoint_auth_method,
-        TokenEndpointAuthMethod::PrivateKeyJwt
-            | TokenEndpointAuthMethod::TlsClientAuth
-            | TokenEndpointAuthMethod::SelfSignedTlsClientAuth
-    );
-    if !is_valid_fapi_auth {
-        return Err(ServiceError::oauth(
-            OAuthErrorCode::InvalidClient,
-            "FAPI 2.0 requires private_key_jwt or mTLS authentication",
-        ));
-    }
-
-    // FAPI 2.0: Must have JWKS configured for private_key_jwt
-    // (not required for tls_client_auth which uses certificate identity)
-    if client.token_endpoint_auth_method == TokenEndpointAuthMethod::PrivateKeyJwt
-        && client.jwks.is_none()
-        && client.jwks_uri.is_none()
-    {
-        return Err(ServiceError::oauth(
-            OAuthErrorCode::InvalidClient,
-            "FAPI 2.0 requires JWKS or JWKS URI for private_key_jwt",
-        ));
-    }
-
-    Ok(())
-}
 
 /// Validate FAPI 2.0 constraints on an authorization request.
 ///
@@ -364,59 +303,6 @@ mod tests {
     }
 
     // =========================================================================
-    // Client Registration Tests
-    // =========================================================================
-
-    #[test]
-    fn test_validate_fapi_client_registration_valid() {
-        let client = fapi_client();
-        assert!(validate_fapi_client_registration(&client).is_ok());
-    }
-
-    #[test]
-    fn test_validate_fapi_client_registration_rejects_public_client() {
-        let mut client = fapi_client();
-        client.application_type = OAuthClientType::Spa;
-        assert!(validate_fapi_client_registration(&client).is_err());
-    }
-
-    #[test]
-    fn test_validate_fapi_client_registration_rejects_native_client() {
-        let mut client = fapi_client();
-        client.application_type = OAuthClientType::Native;
-        assert!(validate_fapi_client_registration(&client).is_err());
-    }
-
-    #[test]
-    fn test_validate_fapi_client_registration_rejects_client_secret() {
-        let mut client = fapi_client();
-        client.token_endpoint_auth_method = TokenEndpointAuthMethod::ClientSecretBasic;
-        assert!(validate_fapi_client_registration(&client).is_err());
-    }
-
-    #[test]
-    fn test_validate_fapi_client_registration_rejects_no_jwks() {
-        let mut client = fapi_client();
-        client.jwks = None;
-        client.jwks_uri = None;
-        assert!(validate_fapi_client_registration(&client).is_err());
-    }
-
-    #[test]
-    fn test_validate_fapi_client_registration_accepts_jwks_uri() {
-        let mut client = fapi_client();
-        client.jwks = None;
-        client.jwks_uri = Some("https://example.com/.well-known/jwks.json".to_string());
-        assert!(validate_fapi_client_registration(&client).is_ok());
-    }
-
-    #[test]
-    fn test_validate_fapi_client_registration_skips_non_fapi() {
-        let client = standard_client();
-        assert!(validate_fapi_client_registration(&client).is_ok());
-    }
-
-    // =========================================================================
     // Authorization Request Tests
     // =========================================================================
 
@@ -565,19 +451,6 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_fapi_client_registration_accepts_tls_client_auth() {
-        // A FAPI client registered with TlsClientAuth (no JWKS required) must pass.
-        let mut client = fapi_client();
-        client.token_endpoint_auth_method = TokenEndpointAuthMethod::TlsClientAuth;
-        client.jwks = None;
-        client.jwks_uri = None;
-        assert!(
-            validate_fapi_client_registration(&client).is_ok(),
-            "TlsClientAuth FAPI client without JWKS must be valid (cert identity used instead)"
-        );
-    }
-
-    #[test]
     fn test_validate_fapi_client_auth_method_rejects_client_secret_basic() {
         let client = fapi_client();
         assert!(
@@ -673,13 +546,6 @@ mod tests {
         let standard = STANDARD_CLOCK_SKEW_SECONDS;
         assert_eq!(fapi, standard);
         assert_eq!(fapi, 10);
-    }
-
-    #[test]
-    fn test_fapi_reject_clock_skew_is_beyond_accept() {
-        let reject = FAPI_CLOCK_SKEW_REJECT_SECONDS;
-        let accept = FAPI_CLOCK_SKEW_ACCEPT_SECONDS;
-        assert!(reject > accept);
     }
 
     #[test]
