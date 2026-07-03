@@ -22,20 +22,6 @@ const MAX_DEPTH: usize = 5;
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AuthorizationDetail(serde_json::Value);
 
-impl AuthorizationDetail {
-    /// Extract the `type` field from this authorization detail.
-    ///
-    /// Safe to call unconditionally: the constructor guarantees that `type`
-    /// exists and is a non-empty string.
-    #[must_use]
-    pub fn type_name(&self) -> &str {
-        self.0
-            .get("type")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("")
-    }
-}
-
 /// RFC 9396 Section 2: Array of authorization detail objects.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AuthorizationDetails(Vec<AuthorizationDetail>);
@@ -235,7 +221,6 @@ mod tests {
         let raw = r#"[{"type":"payment_initiation","amount":100}]"#;
         let details = AuthorizationDetails::parse(raw).unwrap();
         assert_eq!(details.0.len(), 1);
-        assert_eq!(details.0[0].type_name(), "payment_initiation");
     }
 
     #[test]
@@ -243,8 +228,6 @@ mod tests {
         let raw = r#"[{"type":"a"},{"type":"b","extra":true}]"#;
         let details = AuthorizationDetails::parse(raw).unwrap();
         assert_eq!(details.0.len(), 2);
-        assert_eq!(details.0[0].type_name(), "a");
-        assert_eq!(details.0[1].type_name(), "b");
     }
 
     #[test]
@@ -321,13 +304,6 @@ mod tests {
         // 5 levels: obj -> a:obj -> b:obj -> c:obj -> d:obj -> e:str
         let raw = r#"[{"type":"t","a":{"b":{"c":{"d":"ok"}}}}]"#;
         assert!(AuthorizationDetails::parse(raw).is_ok());
-    }
-
-    #[test]
-    fn test_type_name_accessor() {
-        let raw = r#"[{"type":"my_type","data":1}]"#;
-        let details = AuthorizationDetails::parse(raw).unwrap();
-        assert_eq!(details.0[0].type_name(), "my_type");
     }
 
     #[test]
