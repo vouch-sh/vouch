@@ -15,24 +15,6 @@ pub trait Clock: Send + Sync {
     fn now(&self) -> Timestamp;
 }
 
-/// System clock that uses the real system time.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct SystemClock;
-
-impl Clock for SystemClock {
-    fn now(&self) -> Timestamp {
-        Timestamp::now()
-    }
-}
-
-impl SystemClock {
-    /// Create a new system clock.
-    #[must_use]
-    pub fn new() -> Self {
-        Self
-    }
-}
-
 /// Test clock that can be set to any time and advanced manually.
 ///
 /// This is useful for testing time-dependent behavior like session expiration.
@@ -126,17 +108,6 @@ impl std::fmt::Debug for TestClock {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_system_clock_returns_current_time() {
-        let clock = SystemClock::new();
-        let before = Timestamp::now();
-        let time = clock.now();
-        let after = Timestamp::now();
-
-        assert!(time >= before);
-        assert!(time <= after);
-    }
 
     #[test]
     fn test_test_clock_returns_set_time() {
