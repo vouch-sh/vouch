@@ -25,18 +25,6 @@ impl IntegrationMockDevice {
         }
     }
 
-    /// Get the underlying mock device.
-    #[must_use]
-    pub fn device(&self) -> &MockFidoDevice {
-        &self.inner
-    }
-
-    /// Get the public key in COSE format.
-    #[must_use]
-    pub fn public_key_cose(&self) -> Vec<u8> {
-        self.inner.public_key_cose()
-    }
-
     /// Get the credential ID.
     #[must_use]
     pub fn credential_id(&self) -> Vec<u8> {
