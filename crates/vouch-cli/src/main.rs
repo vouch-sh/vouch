@@ -748,15 +748,15 @@ async fn run() -> Result<()> {
                 region,
                 discover,
             } => {
-                commands::setup::aws::run(
-                    profile.as_deref(),
-                    role.as_deref(),
-                    management_role.as_deref(),
-                    identity_center_application.as_deref(),
-                    region.as_deref(),
+                commands::setup::aws::run(commands::setup::aws::SetupAwsArgs {
+                    profile: profile.as_deref(),
+                    role_arn: role.as_deref(),
+                    management_role: management_role.as_deref(),
+                    identity_center_application: identity_center_application.as_deref(),
+                    region: region.as_deref(),
                     discover,
                     server,
-                )
+                })
                 .await
             }
             SetupCommands::Ssh { hosts } => {

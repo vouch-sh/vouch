@@ -152,13 +152,23 @@ async fn get_sts_console_creds(server: &str, args: ConsoleArgs) -> Result<Consol
         }
     };
 
+    // Validate/resolve --via the same way `vouch credential aws` does, so an
+    // unconfigured management role fails fast with a Vouch error instead of an
+    // opaque AWS AccessDenied at the STS call.
+    let vouch_config = crate::config::Config::load()?;
+    let management_role = crate::commands::credential::aws::resolve_management_role_for(
+        &vouch_config,
+        &role_arn,
+        args.via.as_deref(),
+    )?;
+
     let agent_source = crate::commands::credential::aws::detect_agent_source();
     let result = crate::commands::credential::aws::exchange_for_sts_credentials(
         crate::commands::credential::aws::StsRequest {
             server,
             role_arn: &role_arn,
             region: &region,
-            management_role: args.via.as_deref(),
+            management_role: management_role.as_deref(),
             agent_source: agent_source.as_deref(),
         },
     )
