@@ -36,6 +36,7 @@
 //! - [`protected_resource`] - Protected Resource Metadata (RFC 9728)
 //! - [`authorization`] - Authorization code issuance and validation
 //! - [`token`] - Token endpoint logic (auth code, device code grants)
+//! - [`grant_type`] - OAuth `grant_type` wire values (single source of truth)
 //! - [`client_credentials`] - Client credentials grant (RFC 6749 Section 4.4)
 //! - [`exchange`] - Token exchange (RFC 8693)
 //! - [`jwt_bearer`] - JWT client authentication and bearer grants (RFC 7523)
@@ -59,6 +60,7 @@ pub mod dpop;
 pub mod exchange;
 pub mod fapi;
 pub mod fido2_grant;
+pub(crate) mod grant_type;
 pub mod introspection;
 pub mod jar;
 pub mod jarm;

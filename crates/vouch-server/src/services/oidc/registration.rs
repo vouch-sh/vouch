@@ -2111,6 +2111,19 @@ mod tests {
         );
     }
 
+    /// Every grant the token endpoint dispatches must also be registrable.
+    /// `ALLOWED_GRANT_TYPES` is a deliberate superset (it adds `refresh_token`),
+    /// so this guards one direction: no dispatchable grant is unregistrable.
+    #[test]
+    fn every_dispatched_grant_is_registrable() {
+        for grant in crate::services::oidc::grant_type::OAuthGrantType::supported_wire_values() {
+            assert!(
+                ALLOWED_GRANT_TYPES.contains(&grant),
+                "token-endpoint grant {grant} must also be an allowed registration grant"
+            );
+        }
+    }
+
     #[test]
     fn test_allowed_response_types_includes_code() {
         assert!(

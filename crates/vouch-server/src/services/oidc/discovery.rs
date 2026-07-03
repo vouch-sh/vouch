@@ -11,6 +11,7 @@ use crate::db::{JwsAlgorithm, TokenEndpointAuthMethod};
 use crate::services::ServiceError;
 use crate::services::auth::ACR_AAL3;
 use crate::services::oidc::OAuthScope;
+use crate::services::oidc::grant_type::OAuthGrantType;
 use serde::Serialize;
 use std::sync::Arc;
 
@@ -216,13 +217,10 @@ pub fn build_discovery_document(state: &Arc<AppState>) -> OidcDiscoveryDocument 
             "jwt".to_string(),
             "query.jwt".to_string(),
         ],
-        grant_types_supported: vec![
-            "authorization_code".to_string(),
-            "client_credentials".to_string(),
-            "urn:ietf:params:oauth:grant-type:device_code".to_string(),
-            "urn:ietf:params:oauth:grant-type:token-exchange".to_string(),
-            "urn:ietf:params:oauth:grant-type:fido2-assertion".to_string(),
-        ],
+        grant_types_supported: OAuthGrantType::supported_wire_values()
+            .into_iter()
+            .map(String::from)
+            .collect(),
         subject_types_supported: vec!["public".to_string()],
         id_token_signing_alg_values_supported: if state.oidc_rsa_key.is_some() {
             vec![JwsAlgorithm::Rs256, JwsAlgorithm::Es256]
