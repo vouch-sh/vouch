@@ -23,6 +23,8 @@ pub(crate) mod ssm;
 pub(crate) enum SetupCommands {
     /// Configure AWS CLI/SDK to use Vouch credentials.
     ///
+    /// Run with no flags for a guided, interactive setup — or use flags directly:
+    ///
     /// Three patterns:
     ///
     ///   Single account: `--role <full-arn>`. Writes a profile; no org stored.
@@ -42,12 +44,8 @@ pub(crate) enum SetupCommands {
         /// AWS profile name for the generated profile.
         #[arg(long, help = tr!("arg-setup-aws-profile-help"))]
         profile: Option<String>,
-        /// Target role ARN. Required for single-account setup; optional with --discover.
-        #[arg(
-            long,
-            required_unless_present_any = ["management_role", "discover"],
-            help = tr!("arg-setup-aws-role-help"),
-        )]
+        /// Target role ARN. Omit all flags to launch the interactive wizard.
+        #[arg(long, help = tr!("arg-setup-aws-role-help"))]
         role: Option<String>,
         /// Management role ARN — the OIDC-trusted anchor for multi-account and
         /// Identity Center access. Stored in vouch config as an organization entry.
