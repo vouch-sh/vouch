@@ -13,7 +13,9 @@ servers:
       expose: "3000"
 
 proxy:
-  host: dev.vouch.sh
+  hosts:
+    - dev.vouch.sh
+    - vouch.dev.vouch.sh
   ssl: false
   app_port: 3000
   healthcheck:
