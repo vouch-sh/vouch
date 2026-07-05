@@ -84,6 +84,10 @@ fn claim_error_message(e: &SubdomainClaimError) -> String {
         SubdomainClaimError::RecentlyReleased => {
             Tr::new("admin-subdomain-error-recently-released").to_string()
         }
+        SubdomainClaimError::OccConflict => {
+            tracing::error!("subdomain claim retry budget exhausted");
+            Tr::new("admin-subdomain-error-internal").to_string()
+        }
         SubdomainClaimError::Other(e) => {
             tracing::error!("subdomain claim failed: {e}");
             Tr::new("admin-subdomain-error-internal").to_string()

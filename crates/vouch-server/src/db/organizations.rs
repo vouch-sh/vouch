@@ -1112,7 +1112,8 @@ pub fn ineligible_subdomain_candidates(
     labels
 }
 
-/// Errors from [`claim_subdomain`] that map to distinct API responses.
+/// Errors from [`claim_subdomain`] and [`release_subdomain`] that map to
+/// distinct API responses.
 #[derive(Debug, thiserror::Error)]
 pub enum SubdomainClaimError {
     /// The label failed syntactic validation or is reserved.
@@ -1130,9 +1131,31 @@ pub enum SubdomainClaimError {
     /// Another organization released the label within the reuse cooldown.
     #[error("subdomain was recently released by another organization and cannot be claimed yet")]
     RecentlyReleased,
+    /// The org doc or claim slot lost an OCC version race. Retried by
+    /// `with_dsql_retry!`; reaches callers only when the retry budget is
+    /// exhausted.
+    #[error("subdomain change conflicted with a concurrent operation; please retry")]
+    OccConflict,
     /// Database or concurrency failure.
     #[error(transparent)]
     Other(#[from] anyhow::Error),
+}
+
+impl super::pool::RetryableError for SubdomainClaimError {
+    /// OCC version races and transient DB aborts (DSQL OC000/OC001, Postgres
+    /// serialization failures, SQLite BUSY/LOCKED) re-run the transaction;
+    /// business rejections are terminal.
+    fn is_retryable(&self) -> bool {
+        match self {
+            Self::OccConflict => true,
+            Self::Other(e) => super::pool::is_retryable_db_error(e),
+            Self::InvalidLabel(_)
+            | Self::NotEligible
+            | Self::AlreadyClaimed(_)
+            | Self::Conflict
+            | Self::RecentlyReleased => false,
+        }
+    }
 }
 
 /// Deterministic document ID for the claim slot of a subdomain label.
@@ -1165,6 +1188,12 @@ fn deterministic_subdomain_claim_id(label: &str) -> String {
 /// cannot provide this: `document_indexes` is only unique per document,
 /// and two orgs updating their own docs never conflict with each other.
 ///
+/// The transaction is wrapped in `with_dsql_retry!`: OCC version races on
+/// the org doc or claim slot re-run it from a fresh read, so a loser of a
+/// benign race (e.g. a concurrent domain change bumping the org doc)
+/// converges instead of surfacing an error. Business rejections propagate
+/// immediately.
+///
 /// Returns the normalized label on success.
 pub async fn claim_subdomain(
     store: &DocumentStore,
@@ -1174,89 +1203,92 @@ pub async fn claim_subdomain(
     let label = validate_subdomain_label(label)
         .map_err(|e| SubdomainClaimError::InvalidLabel(e.to_string()))?;
 
-    let mut tx = store.begin().await?;
+    crate::with_dsql_retry!(async {
+        let mut tx = store.begin().await?;
 
-    let org_doc = tx
-        .get::<OrganizationDoc>(org_id)
-        .await?
-        .ok_or_else(|| SubdomainClaimError::Other(anyhow::anyhow!("organization not found")))?;
-    let version = org_doc.version;
-    let mut data = org_doc.data;
+        let org_doc = tx
+            .get::<OrganizationDoc>(org_id)
+            .await?
+            .ok_or_else(|| SubdomainClaimError::Other(anyhow::anyhow!("organization not found")))?;
+        let version = org_doc.version;
+        let mut data = org_doc.data;
 
-    if let Some(existing) = &data.subdomain {
-        if *existing == label {
-            tx.commit().await?;
-            return Ok(label);
-        }
-        return Err(SubdomainClaimError::AlreadyClaimed(existing.clone()));
-    }
-
-    if !eligible_subdomain_labels(&data.domain, &data.additional_domains).contains(&label) {
-        return Err(SubdomainClaimError::NotEligible);
-    }
-
-    // Take the claim slot. Every branch either writes the slot row or
-    // rejects, so concurrent claimants serialize on it.
-    let claim_id = deterministic_subdomain_claim_id(&label);
-    let slot = SubdomainClaimDoc {
-        label: label.clone(),
-        org_id: org_id.to_string(),
-        released_at: None,
-    };
-    match tx.get::<SubdomainClaimDoc>(&claim_id).await? {
-        None => {
-            if let Err(e) = tx.insert_with_id(&claim_id, &slot).await {
-                if super::pool::is_unique_violation(&e) {
-                    return Err(SubdomainClaimError::Conflict);
-                }
-                return Err(SubdomainClaimError::Other(e));
+        if let Some(existing) = &data.subdomain {
+            if *existing == label {
+                tx.commit().await?;
+                return Ok(label.clone());
             }
+            return Err(SubdomainClaimError::AlreadyClaimed(existing.clone()));
         }
-        Some(existing_slot) => {
-            let slot_version = existing_slot.version;
-            let holder = existing_slot.data;
-            match holder.released_at {
-                None => {
-                    if holder.org_id != org_id {
+
+        if !eligible_subdomain_labels(&data.domain, &data.additional_domains).contains(&label) {
+            return Err(SubdomainClaimError::NotEligible);
+        }
+
+        // Take the claim slot. Every branch either writes the slot row or
+        // rejects, so concurrent claimants serialize on it.
+        let claim_id = deterministic_subdomain_claim_id(&label);
+        let slot = SubdomainClaimDoc {
+            label: label.clone(),
+            org_id: org_id.to_string(),
+            released_at: None,
+        };
+        match tx.get::<SubdomainClaimDoc>(&claim_id).await? {
+            None => {
+                if let Err(e) = tx.insert_with_id(&claim_id, &slot).await {
+                    if super::pool::is_unique_violation(&e) {
                         return Err(SubdomainClaimError::Conflict);
                     }
-                    // Slot already ours but the org doc lost the mirror
-                    // (interrupted claim) — fall through and repair it.
+                    return Err(SubdomainClaimError::Other(e));
                 }
-                Some(released_at) => {
-                    let in_cooldown = Timestamp::now().duration_since(released_at).as_secs()
-                        < SUBDOMAIN_REUSE_COOLDOWN_SECS;
-                    if holder.org_id != org_id && in_cooldown {
-                        return Err(SubdomainClaimError::RecentlyReleased);
+            }
+            Some(existing_slot) => {
+                let slot_version = existing_slot.version;
+                let holder = existing_slot.data;
+                match holder.released_at {
+                    None => {
+                        if holder.org_id != org_id {
+                            return Err(SubdomainClaimError::Conflict);
+                        }
+                        // Slot already ours but the org doc lost the mirror
+                        // (interrupted claim) — fall through and repair it.
                     }
-                    // Take over the released slot; the version CAS makes a
-                    // concurrent takeover or racing release lose cleanly.
-                    if !tx
-                        .compare_and_update(&claim_id, slot_version, &slot)
-                        .await?
-                    {
-                        return Err(SubdomainClaimError::Conflict);
+                    Some(released_at) => {
+                        let in_cooldown = Timestamp::now().duration_since(released_at).as_secs()
+                            < SUBDOMAIN_REUSE_COOLDOWN_SECS;
+                        if holder.org_id != org_id && in_cooldown {
+                            return Err(SubdomainClaimError::RecentlyReleased);
+                        }
+                        // Take over the released slot; the version CAS makes a
+                        // concurrent takeover or racing release lose the race
+                        // and re-run against the fresh slot state, which then
+                        // yields the precise terminal outcome (Conflict or
+                        // RecentlyReleased).
+                        if !tx
+                            .compare_and_update(&claim_id, slot_version, &slot)
+                            .await?
+                        {
+                            return Err(SubdomainClaimError::OccConflict);
+                        }
                     }
                 }
             }
         }
-    }
 
-    data.subdomain = Some(label.clone());
-    if !tx.compare_and_update(org_id, version, &data).await? {
-        return Err(SubdomainClaimError::Other(anyhow::anyhow!(
-            "organization was modified concurrently; please retry"
-        )));
-    }
-
-    if let Err(e) = tx.commit().await {
-        if super::pool::is_unique_violation(&e) {
-            return Err(SubdomainClaimError::Conflict);
+        data.subdomain = Some(label.clone());
+        if !tx.compare_and_update(org_id, version, &data).await? {
+            return Err(SubdomainClaimError::OccConflict);
         }
-        return Err(SubdomainClaimError::Other(e));
-    }
 
-    Ok(label)
+        if let Err(e) = tx.commit().await {
+            if super::pool::is_unique_violation(&e) {
+                return Err(SubdomainClaimError::Conflict);
+            }
+            return Err(SubdomainClaimError::Other(e));
+        }
+
+        Ok(label.clone())
+    })
 }
 
 /// Release an organization's issuer subdomain.
@@ -1264,55 +1296,60 @@ pub async fn claim_subdomain(
 /// Marks the claim slot released (starting the cross-org reuse cooldown)
 /// and clears the org's `subdomain` mirror in one transaction. Dropping
 /// the field drops its index entry, so discovery for the host stops
-/// resolving once relying-party caches expire. Returns the released label,
-/// or `None` if the org had no subdomain.
+/// resolving once relying-party caches expire. The transaction is wrapped
+/// in `with_dsql_retry!` like [`claim_subdomain`]; OCC version races re-run
+/// it from a fresh read. Returns the released label, or `None` if the org
+/// had no subdomain.
 pub async fn release_subdomain(store: &DocumentStore, org_id: &str) -> Result<Option<String>> {
-    let mut tx = store.begin().await?;
+    let result: Result<Option<String>, SubdomainClaimError> = crate::with_dsql_retry!(async {
+        let mut tx = store.begin().await?;
 
-    let org_doc = tx
-        .get::<OrganizationDoc>(org_id)
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("organization not found"))?;
-    let version = org_doc.version;
-    let mut data = org_doc.data;
+        let org_doc = tx
+            .get::<OrganizationDoc>(org_id)
+            .await?
+            .ok_or_else(|| SubdomainClaimError::Other(anyhow::anyhow!("organization not found")))?;
+        let version = org_doc.version;
+        let mut data = org_doc.data;
 
-    let Some(label) = data.subdomain.take() else {
-        return Ok(None);
-    };
+        let Some(label) = data.subdomain.take() else {
+            return Ok(None);
+        };
 
-    if !tx.compare_and_update(org_id, version, &data).await? {
-        bail!("organization was modified concurrently; please retry");
-    }
+        if !tx.compare_and_update(org_id, version, &data).await? {
+            return Err(SubdomainClaimError::OccConflict);
+        }
 
-    let claim_id = deterministic_subdomain_claim_id(&label);
-    match tx.get::<SubdomainClaimDoc>(&claim_id).await? {
-        Some(slot) if slot.data.org_id == org_id && slot.data.released_at.is_none() => {
-            let released = SubdomainClaimDoc {
-                released_at: Some(Timestamp::now()),
-                ..slot.data
-            };
-            if !tx
-                .compare_and_update(&claim_id, slot.version, &released)
-                .await?
-            {
-                bail!("subdomain claim was modified concurrently; please retry");
+        let claim_id = deterministic_subdomain_claim_id(&label);
+        match tx.get::<SubdomainClaimDoc>(&claim_id).await? {
+            Some(slot) if slot.data.org_id == org_id && slot.data.released_at.is_none() => {
+                let released = SubdomainClaimDoc {
+                    released_at: Some(Timestamp::now()),
+                    ..slot.data
+                };
+                if !tx
+                    .compare_and_update(&claim_id, slot.version, &released)
+                    .await?
+                {
+                    return Err(SubdomainClaimError::OccConflict);
+                }
+            }
+            other => {
+                // The mirror said we held the label but the slot disagrees.
+                // Clearing the mirror is still correct; log for investigation.
+                tracing::warn!(
+                    org_id,
+                    label,
+                    slot_state = ?other.map(|s| (s.data.org_id, s.data.released_at)),
+                    "org subdomain mirror out of sync with claim slot during release"
+                );
             }
         }
-        other => {
-            // The mirror said we held the label but the slot disagrees.
-            // Clearing the mirror is still correct; log for investigation.
-            tracing::warn!(
-                org_id,
-                label,
-                slot_state = ?other.map(|s| (s.data.org_id, s.data.released_at)),
-                "org subdomain mirror out of sync with claim slot during release"
-            );
-        }
-    }
 
-    tx.commit().await?;
+        tx.commit().await?;
 
-    Ok(Some(label))
+        Ok(Some(label))
+    });
+    result.map_err(anyhow::Error::from)
 }
 
 /// True when the org's claimed subdomain has lost its verified-domain
@@ -2713,5 +2750,20 @@ mod tests {
             claim_subdomain(&store, &org.id, "www").await.unwrap_err(),
             SubdomainClaimError::InvalidLabel(_)
         ));
+    }
+
+    /// Only OCC version races retry; business rejections must propagate
+    /// immediately or `with_dsql_retry!` would loop on terminal outcomes.
+    #[test]
+    fn subdomain_claim_error_retryability() {
+        use crate::db::pool::RetryableError;
+
+        assert!(SubdomainClaimError::OccConflict.is_retryable());
+        assert!(!SubdomainClaimError::InvalidLabel("bad".into()).is_retryable());
+        assert!(!SubdomainClaimError::NotEligible.is_retryable());
+        assert!(!SubdomainClaimError::AlreadyClaimed("acme".into()).is_retryable());
+        assert!(!SubdomainClaimError::Conflict.is_retryable());
+        assert!(!SubdomainClaimError::RecentlyReleased.is_retryable());
+        assert!(!SubdomainClaimError::Other(anyhow::anyhow!("boom")).is_retryable());
     }
 }
