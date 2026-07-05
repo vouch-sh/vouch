@@ -15,8 +15,10 @@
 //! The AWS IAM role must be configured to trust the Vouch OIDC provider.
 //!
 //! When the organization has claimed an issuer subdomain (e.g. `acme` →
-//! `https://acme.us.vouch.sh`), the issuer host is unique to that org, so
-//! the provider ARN alone scopes trust — no `Condition` block is needed:
+//! `https://acme.us.vouch.sh`), that issuer host has its **own** signing keys,
+//! served only at its own JWKS. A token minted for another org is signed with a
+//! different key and will not verify against this issuer, so the provider ARN
+//! alone scopes trust — no `Condition` block is needed:
 //!
 //! ```json
 //! {
@@ -29,9 +31,20 @@
 //! }
 //! ```
 //!
+//! Two caveats:
+//!
+//! - **Releasing a subdomain does not revoke AWS-side trust.** Delete the
+//!   corresponding IAM OIDC identity provider when you release a label —
+//!   otherwise a later claimant of the same label gets fresh keys served at that
+//!   host and could mint tokens the role still accepts.
+//! - **Per-org keys require a KMS-backed deployment.** Without at-rest
+//!   encryption the issuer subdomain falls back to the shared signing key, so
+//!   the host is not a tenant boundary; there, scope the trust policy by
+//!   audience and the `vouch:Domain` session tag instead of the ARN alone.
+//!
 //! Without a claimed subdomain the issuer is the shared server base URL, and
 //! the trust policy must scope by audience (and typically `sub` or session
-//! tags) because every org shares the provider host:
+//! tags) because every org shares that provider host:
 //!
 //! ```json
 //! {

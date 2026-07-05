@@ -19,7 +19,8 @@ use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use vouch_server::db;
 use vouch_server::test_utils::{
-    HttpResponse, http_get_full, http_post_form_full, test_app_state_with_rsa_key,
+    HttpResponse, http_get_full, http_post_form_full, test_app_state_encrypted,
+    test_app_state_with_rsa_key,
 };
 use vouch_tests::TestHarness;
 
@@ -572,4 +573,120 @@ async fn aws_sso_token_uses_org_issuer_when_claimed() {
 
     assert_eq!(claims["iss"], "https://acme.test.example.com");
     assert_eq!(claims["aud"], "https://acme.test.example.com");
+}
+
+// ============================================================================
+// Per-org signing keys (require a store that encrypts at rest)
+// ============================================================================
+
+/// `kid` from a JWT's header.
+fn jwt_kid(token: &str) -> String {
+    let header = token.split('.').next().expect("JWT header segment");
+    let bytes = URL_SAFE_NO_PAD.decode(header).expect("base64url header");
+    let v: serde_json::Value = serde_json::from_slice(&bytes).expect("header JSON");
+    v["kid"].as_str().expect("kid claim").to_string()
+}
+
+/// All `kid`s in a JWKS response body.
+fn jwks_kids(body: &serde_json::Value) -> Vec<String> {
+    body["keys"]
+        .as_array()
+        .expect("keys array")
+        .iter()
+        .filter_map(|k| k["kid"].as_str().map(String::from))
+        .collect()
+}
+
+async fn org_jwks_kids(harness: &TestHarness, host: &str) -> Vec<String> {
+    let resp = http_get_full(&harness.router, "/oauth/jwks", &[("Host", host)]).await;
+    assert_eq!(resp.status, StatusCode::OK, "jwks body: {}", resp.body);
+    jwks_kids(&serde_json::from_str(&resp.body).expect("jwks JSON"))
+}
+
+/// The signing key is per-org: a token minted for one org is verifiable at that
+/// org's JWKS host and **absent** from another org's — the property that makes
+/// the issuer host a real tenant boundary.
+#[tokio::test]
+async fn aws_token_signed_with_isolated_per_org_key() {
+    let harness = TestHarness::from_state(test_app_state_encrypted().await);
+    let org_a = harness.create_org("acme.com").await.unwrap();
+    db::claim_subdomain(&harness.state.store, &org_a.id, "acme")
+        .await
+        .unwrap();
+    let org_b = harness.create_org("beta.com").await.unwrap();
+    db::claim_subdomain(&harness.state.store, &org_b.id, "beta")
+        .await
+        .unwrap();
+
+    let (_user, _auth_id, token) = harness
+        .create_authenticated_org_member("user@acme.com", &org_a.id)
+        .await
+        .unwrap();
+    let resp = harness
+        .get_authenticated("/v1/credentials/aws/token", &token)
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status,
+        200,
+        "body: {}",
+        resp.text().unwrap_or_default()
+    );
+    let body: serde_json::Value = resp.json().unwrap();
+    let kid = jwt_kid(body["id_token"].as_str().unwrap());
+
+    let kids_a = org_jwks_kids(&harness, "acme.test.example.com").await;
+    let kids_b = org_jwks_kids(&harness, "beta.test.example.com").await;
+
+    assert!(
+        kids_a.contains(&kid),
+        "acme's JWKS must contain the token's signing key: {kids_a:?}"
+    );
+    assert!(
+        !kids_b.contains(&kid),
+        "beta's JWKS must NOT contain acme's key (tenant isolation): {kids_b:?}"
+    );
+}
+
+/// Two orgs get cryptographically distinct key sets — the basis for cross-org
+/// reclaim safety (a new claimant of a released label serves different keys).
+#[tokio::test]
+async fn org_jwks_keys_differ_between_orgs() {
+    let harness = TestHarness::from_state(test_app_state_encrypted().await);
+    let org_a = harness.create_org("acme.com").await.unwrap();
+    db::claim_subdomain(&harness.state.store, &org_a.id, "acme")
+        .await
+        .unwrap();
+    let org_b = harness.create_org("beta.com").await.unwrap();
+    db::claim_subdomain(&harness.state.store, &org_b.id, "beta")
+        .await
+        .unwrap();
+
+    let kids_a = org_jwks_kids(&harness, "acme.test.example.com").await;
+    let kids_b = org_jwks_kids(&harness, "beta.test.example.com").await;
+
+    assert!(!kids_a.is_empty() && !kids_b.is_empty());
+    assert!(
+        kids_a.iter().all(|k| !kids_b.contains(k)),
+        "org key sets must be disjoint: a={kids_a:?} b={kids_b:?}"
+    );
+}
+
+/// Without at-rest encryption (dev plaintext store) no per-org key is created:
+/// the org host serves the *shared* key, matching the shared-issuer fallback.
+#[tokio::test]
+async fn dev_store_falls_back_to_shared_key() {
+    let harness = TestHarness::new().await; // default = PlaintextDocumentCrypto
+    let org = harness.create_org("acme.com").await.unwrap();
+    db::claim_subdomain(&harness.state.store, &org.id, "acme")
+        .await
+        .unwrap();
+
+    let org_kids = org_jwks_kids(&harness, "acme.test.example.com").await;
+    let primary_kids = org_jwks_kids(&harness, "test.example.com").await;
+
+    assert_eq!(
+        org_kids, primary_kids,
+        "dev fallback: org host must serve the shared platform keys"
+    );
 }

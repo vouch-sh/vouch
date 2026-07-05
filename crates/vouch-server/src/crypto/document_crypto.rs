@@ -49,6 +49,15 @@ pub trait DocumentCrypto: Send + Sync + std::fmt::Debug {
     /// In production: `base64url(HMAC-SHA256(hmac_key, value))`.
     /// In dev: returns `value` as-is.
     fn hmac_index(&self, value: &str) -> String;
+
+    /// Whether documents are actually encrypted at rest.
+    ///
+    /// `true` for real (KMS-rooted) encryption, `false` for the development
+    /// plaintext mode. Callers that persist private key material (per-org
+    /// issuer signing keys) gate on this so a key is never stored in plaintext.
+    fn is_encrypted(&self) -> bool {
+        true
+    }
 }
 
 // ============================================================================
@@ -78,6 +87,10 @@ impl DocumentCrypto for PlaintextDocumentCrypto {
 
     fn hmac_index(&self, value: &str) -> String {
         value.to_string()
+    }
+
+    fn is_encrypted(&self) -> bool {
+        false
     }
 }
 
@@ -128,6 +141,21 @@ impl HpkeDocumentCrypto {
 
     fn hpke_suite() -> &'static rustls::crypto::aws_lc_rs::hpke::HpkeAwsLcRs<32, 48> {
         rustls::crypto::aws_lc_rs::hpke::DH_KEM_P384_HKDF_SHA384_AES_256
+    }
+
+    /// Build an instance with a freshly generated key, for tests needing real
+    /// at-rest encryption (`is_encrypted() == true`).
+    #[cfg(any(test, feature = "test-utils"))]
+    #[expect(clippy::expect_used, reason = "test-only key generation")]
+    #[must_use]
+    pub(crate) fn generate_for_test() -> Self {
+        use rustls::crypto::hpke::Hpke;
+
+        let (public_key, private_key) = Self::hpke_suite()
+            .generate_key_pair()
+            .expect("generate HPKE test key pair");
+        Self::new(public_key, private_key.secret_bytes().to_vec().into())
+            .expect("build HPKE test crypto")
     }
 }
 

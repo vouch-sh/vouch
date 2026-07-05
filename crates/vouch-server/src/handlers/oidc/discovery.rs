@@ -28,9 +28,10 @@ const OIDC_CACHE_CONTROL: (axum::http::header::HeaderName, &str) =
 /// well-known URL derived from the Issuer Identifier.
 ///
 /// On an org issuer-subdomain host (`{label}.{primary_host}`) this serves the
-/// minimal WIF document for the claiming org's issuer — and 404s for
-/// unclaimed labels, so an AWS IAM OIDC provider cannot be created for a
-/// label no org owns. Primary-host requests are byte-identical to before.
+/// minimal federation discovery document for the claiming org's issuer — and
+/// 404s for unclaimed labels, so a relying party's OIDC provider cannot be
+/// created for a label no org owns. Primary-host requests are byte-identical
+/// to before.
 pub(crate) async fn discovery(
     State(state): State<Arc<AppState>>,
     OriginalUri(uri): OriginalUri,
@@ -46,7 +47,7 @@ pub(crate) async fn discovery(
         .into_response()
 }
 
-/// Serve the WIF discovery document for a claimed org subdomain.
+/// Serve the minimal federation discovery document for a claimed org subdomain.
 ///
 /// Unclaimed labels 404 without a cache header, so a fresh claim becomes
 /// visible immediately rather than after the 1-hour metadata cache expires.
@@ -76,16 +77,41 @@ async fn org_discovery(state: &Arc<AppState>, label: &str) -> Response {
 /// RFC 7517 Section 5: Returns the JWK Set containing the public keys used to
 /// verify token signatures.
 ///
-/// Served unchanged on org issuer-subdomain hosts: the signing keys are
-/// shared across all issuer hosts, so the content is identical, and serving
-/// it for unclaimed labels is harmless (public keys, no issuer assertion).
+/// On an org issuer-subdomain host this serves **that org's** keys (which sign
+/// its OIDC federation tokens), so the issuer host is a real cryptographic
+/// boundary — a token for one org does not verify against another org's JWKS.
+/// Unclaimed labels 404 (like discovery). Primary-host requests are unchanged.
 pub(crate) async fn jwks(
     State(state): State<Arc<AppState>>,
-) -> Result<impl IntoResponse, StatusCode> {
-    svc::build_jwks(&state)
-        .map(|jwks| ([OIDC_CACHE_CONTROL], Json(jwks)))
-        .map_err(|e| {
+    OriginalUri(uri): OriginalUri,
+    headers: HeaderMap,
+) -> Response {
+    if let Some(label) = org_host::org_label_from_request(&headers, &uri, &state.config()) {
+        return org_jwks(&state, &label).await;
+    }
+    match svc::build_jwks(&state) {
+        Ok(jwks) => ([OIDC_CACHE_CONTROL], Json(jwks)).into_response(),
+        Err(e) => {
             tracing::error!("JWKS generation failed: {}", e);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
+/// Serve the JWK Set for a claimed org issuer-subdomain host.
+async fn org_jwks(state: &Arc<AppState>, label: &str) -> Response {
+    match db::find_org_by_subdomain(&state.store, label).await {
+        Ok(Some(org)) => match crate::services::oidc::org_jwks(state, &org).await {
+            Ok(jwks) => ([OIDC_CACHE_CONTROL], Json(jwks)).into_response(),
+            Err(e) => {
+                tracing::error!("org JWKS generation failed for '{label}': {e}");
+                StatusCode::INTERNAL_SERVER_ERROR.into_response()
+            }
+        },
+        Ok(None) => StatusCode::NOT_FOUND.into_response(),
+        Err(e) => {
+            tracing::error!("org subdomain lookup failed for '{label}': {e}");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
 }

@@ -309,6 +309,15 @@ impl DocumentStore {
         &self.pool
     }
 
+    /// Whether documents are encrypted at rest (vs. the dev plaintext mode).
+    ///
+    /// Per-org issuer signing keys are only created when this is `true`, so a
+    /// private key is never persisted in plaintext.
+    #[must_use]
+    pub fn is_encrypted(&self) -> bool {
+        self.crypto.is_encrypted()
+    }
+
     /// Access the crypto implementation.
     #[must_use]
     pub fn crypto(&self) -> &Arc<dyn DocumentCrypto> {

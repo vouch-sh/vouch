@@ -483,21 +483,39 @@ async fn issue_id_token(
     ctx: IdTokenContext<'_>,
 ) -> ServiceResult<TokenExchangeResult> {
     let config = state.config();
-    let audience = ctx.audience.unwrap_or(&config.base_url);
+
+    // Resolve the caller's org so the exchanged token uses the org's issuer and
+    // its own signing key when a subdomain is claimed — giving every OIDC
+    // federation consumer (GCP/Azure workload identity, Kubernetes, Vault, any
+    // RP) the same per-tenant isolation as the AWS path.
+    let user = db::get_user_by_id(&state.store, ctx.user_id)
+        .await
+        .map_err(|e| ServiceError::Internal(format!("load user for token exchange: {e}")))?;
+    let org = match user.and_then(|u| u.org_id) {
+        Some(org_id) => db::get_organization(&state.store, &org_id)
+            .await
+            .map_err(|e| ServiceError::Internal(format!("load org for token exchange: {e}")))?,
+        None => None,
+    };
+    let issuer = super::org_keys::org_issuer_or_base(&config, org.as_ref())?;
+    let audience = ctx.audience.unwrap_or(&issuer);
     let expires_in = ctx.expires_in.min(DEFAULT_ID_TOKEN_EXPIRES_SECS);
 
     // `hardware_aaguid` and `hd` are session-time snapshots — they reflect the
     // authenticator/org state at session creation and survive later rotations
     // of the user's keys or organization membership.
-    let claims = OidcIdTokenClaimsBuilder::for_audience(&config.base_url, ctx.email, audience)
+    let claims = OidcIdTokenClaimsBuilder::for_audience(&issuer, ctx.email, audience)
         .hardware_aaguid(ctx.hardware_aaguid.map(String::from))
         .hd(ctx.org_domain.map(String::from))
         .valid_for_seconds(expires_in)
         .build()
         .map_err(|e| ServiceError::Internal(format!("Failed to build ID token claims: {e}")))?;
 
-    let id_token = state
-        .oidc_key
+    let org_keys = super::org_keys::resolve_org_keys(state, org.as_ref())
+        .await
+        .map_err(|e| ServiceError::Internal(format!("Failed to resolve org signing key: {e}")))?;
+    let signing_key = org_keys.as_deref().map_or(&state.oidc_key, |k| &k.es256);
+    let id_token = signing_key
         .sign_jwt(&claims)
         .await
         .map_err(|e| ServiceError::Internal(format!("Failed to sign ID token: {e}")))?;

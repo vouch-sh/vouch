@@ -5,6 +5,7 @@ use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 
 use crate::db::document_type::{DocumentType, IndexEntry};
+use crate::db::documents::oauth::JwsAlgorithm;
 
 /// An organization (tenant).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -60,6 +61,79 @@ impl DocumentType for SubdomainClaimDoc {
     fn index_entries(&self) -> Vec<IndexEntry> {
         // Looked up exclusively by deterministic document ID.
         Vec::new()
+    }
+}
+
+/// Lifecycle state of a per-org issuer signing key (operational, not
+/// RFC-defined). `Active` signs new tokens; `Next` is pre-published for a
+/// rotation overlap; `Retiring` no longer signs but stays in the JWKS until
+/// outstanding tokens expire.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SigningKeyState {
+    Active,
+    Next,
+    Retiring,
+}
+
+impl SigningKeyState {
+    /// Stable lowercase string form (used in the deterministic slot ID).
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Next => "next",
+            Self::Retiring => "retiring",
+        }
+    }
+}
+
+/// A per-organization OIDC issuer signing key.
+///
+/// When an org claims an issuer subdomain, its OIDC federation tokens (AWS STS
+/// and Identity Center, GCP/Azure workload identity, and any RFC 8693
+/// token-exchange consumer) are signed with these keys and served only at the
+/// org's own JWKS — making the issuer host a real cryptographic tenant
+/// boundary. `alg` is the RFC 7518 JWS algorithm (ES256 or RS256).
+///
+/// One key per row so ES256 and RS256 rotate independently. `Active`/`Next`
+/// keys live at a **deterministic slot ID** (`deterministic_org_key_id`) so a
+/// retry or concurrent claim collides on the primary key instead of creating a
+/// duplicate — the same idempotency the subdomain claim slot relies on. `kid`
+/// (RFC 7517) is a field (hash of the random public key), never the document
+/// ID. The private key is `Zeroizing` in memory and sealed at rest by the
+/// document store; the feature only creates keys when that store actually
+/// encrypts (`DocumentStore::is_encrypted`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OrgSigningKeyDoc {
+    /// Owning organization (indexed, so the org's key set is one query).
+    pub org_id: String,
+    /// RFC 7518 JWS algorithm. Only `Es256`/`Rs256` are produced here.
+    pub alg: JwsAlgorithm,
+    pub state: SigningKeyState,
+    /// JWK key ID (RFC 7517 §4.5), published in the org JWKS.
+    pub kid: String,
+    /// Base64 (standard) PKCS#8 DER of the private key.
+    pub private_pkcs8_der_b64: String,
+    /// Set only on `Retiring` keys — when the key leaves the JWKS and the row
+    /// is reaped by the cleanup task.
+    #[serde(default)]
+    pub not_after: Option<Timestamp>,
+}
+
+impl DocumentType for OrgSigningKeyDoc {
+    const DOC_TYPE: &'static str = "org_signing_key";
+
+    fn index_entries(&self) -> Vec<IndexEntry> {
+        vec![IndexEntry {
+            field: "org_id",
+            value: self.org_id.clone(),
+        }]
+    }
+
+    fn expires_at(&self) -> Option<Timestamp> {
+        // Only retiring keys auto-expire; active/next persist until rotated.
+        self.not_after
     }
 }
 

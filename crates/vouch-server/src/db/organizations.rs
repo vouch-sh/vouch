@@ -2,8 +2,10 @@
 //! Organization database operations.
 
 use super::document_type::Document;
+use super::documents::oauth::JwsAlgorithm;
 use super::documents::organization::{
-    AdditionalDomain, AdditionalDomainState, OrganizationDoc, SubdomainClaimDoc,
+    AdditionalDomain, AdditionalDomainState, OrgSigningKeyDoc, OrganizationDoc, SigningKeyState,
+    SubdomainClaimDoc,
 };
 use super::store::DocumentStore;
 use anyhow::{Result, bail};
@@ -1081,38 +1083,63 @@ pub fn validate_subdomain_label(input: &str) -> Result<String, SubdomainLabelErr
     Ok(lower)
 }
 
-/// Compute the subdomain labels an organization is eligible to claim.
+/// Apex labels of the org's primary domain and every *verified* additional
+/// domain, in encounter order (may contain duplicates).
 ///
-/// A label is eligible when it is the first label of the org's primary
-/// domain or of a *verified* additional domain (verified `acme.com` →
-/// eligible `acme`). Labels that fail [`validate_subdomain_label`] (e.g.
-/// reserved names) are silently dropped; the result is deduplicated in
-/// encounter order.
-#[must_use]
-pub fn eligible_subdomain_labels(
+/// Each label is the leftmost label of the domain's registrable apex, not its
+/// raw leftmost label, so a subdomain of an unrelated registrable domain
+/// cannot yield someone else's brand: `acme.evil.com` → apex `evil.com` →
+/// `evil` (never `acme`), while `acme.co.uk` → apex `acme.co.uk` → `acme` and
+/// `mail.acme.com` → apex `acme.com` → `acme`. Domains with no registrable
+/// apex per the Public Suffix List contribute nothing. Inputs are assumed
+/// already normalized (ASCII/punycode, lowercase) by [`normalize_domain`].
+///
+/// [`eligible_subdomain_labels`] and [`ineligible_subdomain_candidates`]
+/// partition this list by [`validate_subdomain_label`].
+fn verified_domain_apex_labels(
     primary_domain: &str,
     additional_domains: &[AdditionalDomain],
 ) -> Vec<String> {
-    fn push_first_label(labels: &mut Vec<String>, domain: &str) {
-        if let Some(first) = domain.split('.').next()
-            && let Ok(label) = validate_subdomain_label(first)
-            && !labels.contains(&label)
-        {
-            labels.push(label);
-        }
+    fn apex_label(domain: &str) -> Option<String> {
+        let apex = psl::domain_str(domain)?;
+        let first = apex.split('.').next()?.trim().to_ascii_lowercase();
+        (!first.is_empty()).then_some(first)
     }
 
     let mut labels = Vec::new();
-    push_first_label(&mut labels, primary_domain);
+    labels.extend(apex_label(primary_domain));
     for ad in additional_domains {
         if matches!(ad.state, AdditionalDomainState::Verified { .. }) {
-            push_first_label(&mut labels, &ad.domain);
+            labels.extend(apex_label(&ad.domain));
         }
     }
     labels
 }
 
-/// First labels of the org's verified domains that can NOT be claimed as
+/// Compute the subdomain labels an organization is eligible to claim.
+///
+/// A label is eligible when it is the apex label (see
+/// [`verified_domain_apex_labels`]) of the org's primary domain or of a
+/// *verified* additional domain (verified `acme.com` → eligible `acme`).
+/// Labels that fail [`validate_subdomain_label`] (e.g. reserved names) are
+/// silently dropped; the result is deduplicated in encounter order.
+#[must_use]
+pub fn eligible_subdomain_labels(
+    primary_domain: &str,
+    additional_domains: &[AdditionalDomain],
+) -> Vec<String> {
+    let mut labels = Vec::new();
+    for candidate in verified_domain_apex_labels(primary_domain, additional_domains) {
+        if let Ok(label) = validate_subdomain_label(&candidate)
+            && !labels.contains(&label)
+        {
+            labels.push(label);
+        }
+    }
+    labels
+}
+
+/// Apex labels of the org's verified domains that can NOT be claimed as
 /// issuer subdomains (reserved or otherwise invalid), deduped in encounter
 /// order.
 ///
@@ -1125,23 +1152,10 @@ pub fn ineligible_subdomain_candidates(
     primary_domain: &str,
     additional_domains: &[AdditionalDomain],
 ) -> Vec<String> {
-    fn push_rejected_first_label(labels: &mut Vec<String>, domain: &str) {
-        if let Some(first) = domain.split('.').next() {
-            let lower = first.trim().to_ascii_lowercase();
-            if !lower.is_empty()
-                && validate_subdomain_label(&lower).is_err()
-                && !labels.contains(&lower)
-            {
-                labels.push(lower);
-            }
-        }
-    }
-
     let mut labels = Vec::new();
-    push_rejected_first_label(&mut labels, primary_domain);
-    for ad in additional_domains {
-        if matches!(ad.state, AdditionalDomainState::Verified { .. }) {
-            push_rejected_first_label(&mut labels, &ad.domain);
+    for candidate in verified_domain_apex_labels(primary_domain, additional_domains) {
+        if validate_subdomain_label(&candidate).is_err() && !labels.contains(&candidate) {
+            labels.push(candidate);
         }
     }
     labels
@@ -1205,6 +1219,72 @@ fn deterministic_subdomain_claim_id(label: &str) -> String {
     ctx.update(b"subdomain_claim\0");
     ctx.update(label.as_bytes());
     hex::encode(ctx.finish().as_ref())
+}
+
+/// Deterministic document ID for an org's issuer signing-key slot.
+///
+/// Keyed on `(org_id, alg, state)` so the `Active`/`Next` key per algorithm is
+/// a single slot: a `with_dsql_retry!` re-run of a claim, or two concurrent
+/// claims, collide on the primary key via `insert_with_id` instead of creating
+/// a duplicate key. `kid` (a hash of the random public key) is a field, never
+/// the ID — using it would make the row random-keyed and reintroduce that
+/// duplication. Same idempotency pattern as [`deterministic_subdomain_claim_id`].
+pub fn deterministic_org_key_id(org_id: &str, alg: JwsAlgorithm, state: SigningKeyState) -> String {
+    use aws_lc_rs::digest::{self, SHA256};
+
+    let mut ctx = digest::Context::new(&SHA256);
+    ctx.update(b"org_signing_key\0");
+    ctx.update(org_id.as_bytes());
+    ctx.update(b"\0");
+    ctx.update(alg.as_str().as_bytes());
+    ctx.update(b"\0");
+    ctx.update(state.as_str().as_bytes());
+    hex::encode(ctx.finish().as_ref())
+}
+
+/// Insert a WIF signing key at its deterministic slot, idempotently.
+///
+/// Returns `true` if this call created the row, `false` if the slot already
+/// held a key (a concurrent claim or retry won the race) — the caller then
+/// loads the existing key. Never overwrites an existing key.
+///
+/// # Errors
+/// Returns an error on any database failure other than the slot already existing.
+pub async fn try_insert_org_signing_key(
+    store: &DocumentStore,
+    doc: &OrgSigningKeyDoc,
+) -> Result<bool> {
+    let id = deterministic_org_key_id(&doc.org_id, doc.alg, doc.state);
+    match store.insert_with_id(&id, doc).await {
+        Ok(_) => Ok(true),
+        Err(e) if super::pool::is_unique_violation(&e) => Ok(false),
+        Err(e) => Err(e),
+    }
+}
+
+/// Load a single WIF signing key by its deterministic slot.
+///
+/// # Errors
+/// Returns an error if the database read fails.
+pub async fn get_org_signing_key(
+    store: &DocumentStore,
+    org_id: &str,
+    alg: JwsAlgorithm,
+    state: SigningKeyState,
+) -> Result<Option<Document<OrgSigningKeyDoc>>> {
+    let id = deterministic_org_key_id(org_id, alg, state);
+    store.get::<OrgSigningKeyDoc>(&id).await
+}
+
+/// List all WIF signing keys for an organization (for the org JWKS).
+///
+/// # Errors
+/// Returns an error if the indexed lookup fails.
+pub async fn list_org_signing_keys(
+    store: &DocumentStore,
+    org_id: &str,
+) -> Result<Vec<Document<OrgSigningKeyDoc>>> {
+    store.find_all::<OrgSigningKeyDoc>("org_id", org_id).await
 }
 
 /// Claim an issuer subdomain label for an organization.
@@ -2444,6 +2524,33 @@ mod tests {
         );
     }
 
+    #[test]
+    fn eligible_label_derives_from_registrable_apex() {
+        // Verifying a subdomain of an unrelated registrable domain must not
+        // grant that subdomain's leftmost label as a claimable brand.
+        assert_eq!(eligible_subdomain_labels("acme.evil.com", &[]), ["evil"]);
+        assert!(
+            !eligible_subdomain_labels("acme.evil.com", &[]).contains(&"acme".to_string()),
+            "a subdomain of evil.com must not yield the brand label 'acme'"
+        );
+        // Multi-label public suffixes resolve to the true apex label.
+        assert_eq!(eligible_subdomain_labels("acme.co.uk", &[]), ["acme"]);
+        // A subdomain of the org's own apex still yields the apex label.
+        assert_eq!(eligible_subdomain_labels("mail.acme.com", &[]), ["acme"]);
+        // A plain apex is unchanged.
+        assert_eq!(eligible_subdomain_labels("acme.com", &[]), ["acme"]);
+    }
+
+    #[test]
+    fn ineligible_candidate_uses_apex_label() {
+        // vouch.sh apex → "vouch" is reserved → surfaced so the empty
+        // eligible list is explained rather than implying no verified domain.
+        assert_eq!(ineligible_subdomain_candidates("vouch.sh", &[]), ["vouch"]);
+        // A subdomain of an unrelated domain resolves to a valid apex label
+        // ("evil"), so it is eligible, not an ineligible candidate.
+        assert!(ineligible_subdomain_candidates("admin.evil.com", &[]).is_empty());
+    }
+
     #[tokio::test]
     async fn claim_subdomain_happy_path_and_lookup() {
         let store = fresh_store().await;
@@ -2799,5 +2906,47 @@ mod tests {
         assert!(!SubdomainClaimError::Conflict.is_retryable());
         assert!(!SubdomainClaimError::RecentlyReleased.is_retryable());
         assert!(!SubdomainClaimError::Other(anyhow::anyhow!("boom")).is_retryable());
+    }
+
+    #[test]
+    fn org_key_id_is_deterministic_and_distinct() {
+        let base = deterministic_org_key_id("org1", JwsAlgorithm::Es256, SigningKeyState::Active);
+        // Stable for the same inputs (idempotent creation depends on this).
+        assert_eq!(
+            base,
+            deterministic_org_key_id("org1", JwsAlgorithm::Es256, SigningKeyState::Active)
+        );
+        // Distinct across org, algorithm, and state.
+        assert_ne!(
+            base,
+            deterministic_org_key_id("org2", JwsAlgorithm::Es256, SigningKeyState::Active)
+        );
+        assert_ne!(
+            base,
+            deterministic_org_key_id("org1", JwsAlgorithm::Rs256, SigningKeyState::Active)
+        );
+        assert_ne!(
+            base,
+            deterministic_org_key_id("org1", JwsAlgorithm::Es256, SigningKeyState::Next)
+        );
+    }
+
+    #[tokio::test]
+    async fn org_key_insert_is_idempotent_on_the_slot() {
+        let store = fresh_store().await;
+        let doc = OrgSigningKeyDoc {
+            org_id: "org1".to_string(),
+            alg: JwsAlgorithm::Es256,
+            state: SigningKeyState::Active,
+            kid: "kid-1".to_string(),
+            private_pkcs8_der_b64: "AAAA".to_string(),
+            not_after: None,
+        };
+        // A retry or concurrent claim re-runs the insert; the deterministic slot
+        // makes the second one a no-op instead of a duplicate row.
+        assert!(try_insert_org_signing_key(&store, &doc).await.unwrap());
+        assert!(!try_insert_org_signing_key(&store, &doc).await.unwrap());
+        let all = list_org_signing_keys(&store, "org1").await.unwrap();
+        assert_eq!(all.len(), 1, "only one key row despite two inserts");
     }
 }
