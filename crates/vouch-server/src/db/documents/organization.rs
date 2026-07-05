@@ -23,26 +23,44 @@ pub struct OrganizationDoc {
     /// workload identity federation (e.g. `acme` → `https://acme.us.vouch.sh`).
     ///
     /// Must correspond to the first label of one of the org's verified
-    /// domains. Indexed for host→org lookup when serving discovery.
+    /// domains. Indexed for host→org lookup when serving discovery. The
+    /// authoritative uniqueness record is the [`SubdomainClaimDoc`] slot;
+    /// this field is the org-side mirror written in the same transaction.
     #[serde(default)]
     pub subdomain: Option<String>,
-    /// Subdomain labels previously claimed and then released by this org.
-    ///
-    /// Kept as tombstones so another organization cannot immediately
-    /// re-claim a label and mint tokens under an issuer host that relying
-    /// parties may still trust (the JWKS is shared across issuer hosts).
-    #[serde(default)]
-    pub released_subdomains: Vec<ReleasedSubdomain>,
 }
 
-/// A subdomain label previously claimed and then released by an organization.
+/// The claim slot for an issuer-subdomain label.
+///
+/// Stored under a **deterministic document ID** derived from the label, so
+/// the `documents` primary key is what makes cross-org claims collide:
+/// concurrent claimants either hit a unique violation on insert or a
+/// version conflict on `compare_and_update` — an indexed lookup alone
+/// cannot enforce cross-row uniqueness (the index only unique-constrains
+/// per document). Same pattern as `deterministic_org_id` in enrollment.
+///
+/// The slot survives release (`released_at = Some`) and doubles as the
+/// reuse-cooldown tombstone: a different org taking over a released slot
+/// must `compare_and_update` the same row, so cooldown checks are atomic
+/// with the takeover.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ReleasedSubdomain {
-    /// The released label (normalized lowercase).
+pub struct SubdomainClaimDoc {
+    /// The claimed label (normalized lowercase).
     pub label: String,
-    /// When the label was released; cross-org re-claims are blocked until
-    /// the reuse cooldown has elapsed.
-    pub released_at: Timestamp,
+    /// The organization currently or most recently holding the label.
+    pub org_id: String,
+    /// `None` while the claim is active; `Some(release time)` after the
+    /// holder released it (starts the cross-org reuse cooldown).
+    pub released_at: Option<Timestamp>,
+}
+
+impl DocumentType for SubdomainClaimDoc {
+    const DOC_TYPE: &'static str = "subdomain_claim";
+
+    fn index_entries(&self) -> Vec<IndexEntry> {
+        // Looked up exclusively by deterministic document ID.
+        Vec::new()
+    }
 }
 
 /// Lifecycle state of an [`AdditionalDomain`].
@@ -103,11 +121,7 @@ impl DocumentType for OrganizationDoc {
     const DOC_TYPE: &'static str = "organization";
 
     fn index_entries(&self) -> Vec<IndexEntry> {
-        let cap = self
-            .additional_domains
-            .len()
-            .saturating_add(self.released_subdomains.len())
-            .saturating_add(2);
+        let cap = self.additional_domains.len().saturating_add(2);
         let mut entries = Vec::with_capacity(cap);
         entries.push(IndexEntry {
             field: "domain",
@@ -125,16 +139,6 @@ impl DocumentType for OrganizationDoc {
             entries.push(IndexEntry {
                 field: "subdomain",
                 value: label.clone(),
-            });
-        }
-        // Tombstones are indexed so the claim transaction can check the
-        // reuse cooldown with an indexed lookup INSIDE the same transaction
-        // that enforces uniqueness — a non-transactional scan would race a
-        // concurrent release and allow the cooldown to be skipped.
-        for r in &self.released_subdomains {
-            entries.push(IndexEntry {
-                field: "released_subdomain",
-                value: r.label.clone(),
             });
         }
         entries

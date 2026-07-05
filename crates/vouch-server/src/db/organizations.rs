@@ -3,7 +3,7 @@
 
 use super::document_type::Document;
 use super::documents::organization::{
-    AdditionalDomain, AdditionalDomainState, OrganizationDoc, ReleasedSubdomain,
+    AdditionalDomain, AdditionalDomainState, OrganizationDoc, SubdomainClaimDoc,
 };
 use super::store::DocumentStore;
 use anyhow::{Result, bail};
@@ -68,7 +68,6 @@ pub async fn create_organization(
         created_by_user_id: created_by_user_id.map(String::from),
         additional_domains: Vec::new(),
         subdomain: None,
-        released_subdomains: Vec::new(),
     };
     let result = store.insert(&doc).await?;
     Ok(Organization::from(result))
@@ -1052,17 +1051,35 @@ pub enum SubdomainClaimError {
     Other(#[from] anyhow::Error),
 }
 
+/// Deterministic document ID for the claim slot of a subdomain label.
+///
+/// Same construction as `deterministic_org_id` in enrollment: the shared
+/// primary key is what makes concurrent cross-org claims collide (unique
+/// violation on insert, or version conflict on takeover).
+fn deterministic_subdomain_claim_id(label: &str) -> String {
+    use aws_lc_rs::digest::{self, SHA256};
+
+    let mut ctx = digest::Context::new(&SHA256);
+    ctx.update(b"subdomain_claim\0");
+    ctx.update(label.as_bytes());
+    hex::encode(ctx.finish().as_ref())
+}
+
 /// Claim an issuer subdomain label for an organization.
 ///
 /// The label must be eligible (first label of a verified domain), globally
-/// unique across orgs, and not tombstoned by another org's recent release.
-/// Re-claiming the org's own current label is idempotent. Uniqueness and
-/// the reuse cooldown are enforced with the same OCC shape as
-/// [`add_additional_domain`]: the indexed `find_one`/`find_all` checks and
-/// the `compare_and_update` version bump run inside one transaction, so
-/// concurrent claimants collide on the org doc's row on every backend
-/// (including DSQL) and a concurrent release cannot slip a label past the
-/// cooldown check.
+/// unique across orgs, and not within another org's release cooldown.
+/// Re-claiming the org's own current label is idempotent.
+///
+/// Uniqueness and the cooldown are enforced by the [`SubdomainClaimDoc`]
+/// slot stored under a deterministic ID: a fresh claim inserts the slot
+/// (concurrent claimants hit the primary-key unique violation), and taking
+/// over a released slot goes through `compare_and_update` on the slot's
+/// version (concurrent takeovers or a racing release collide there). Both
+/// happen in the same transaction as the org-doc update, so the slot and
+/// the org's `subdomain` mirror move together. An indexed lookup alone
+/// cannot provide this: `document_indexes` is only unique per document,
+/// and two orgs updating their own docs never conflict with each other.
 ///
 /// Returns the normalized label on success.
 pub async fn claim_subdomain(
@@ -1094,63 +1111,81 @@ pub async fn claim_subdomain(
         return Err(SubdomainClaimError::NotEligible);
     }
 
-    // Cross-org uniqueness: claimed labels are indexed, so this is the
-    // authoritative check, inside the transaction.
-    if let Some(other) = tx.find_one::<OrganizationDoc>("subdomain", &label).await?
-        && other.id != org_id
-    {
-        return Err(SubdomainClaimError::Conflict);
+    // Take the claim slot. Every branch either writes the slot row or
+    // rejects, so concurrent claimants serialize on it.
+    let claim_id = deterministic_subdomain_claim_id(&label);
+    let slot = SubdomainClaimDoc {
+        label: label.clone(),
+        org_id: org_id.to_string(),
+        released_at: None,
+    };
+    match tx.get::<SubdomainClaimDoc>(&claim_id).await? {
+        None => {
+            if let Err(e) = tx.insert_with_id(&claim_id, &slot).await {
+                if super::pool::is_unique_violation(&e) {
+                    return Err(SubdomainClaimError::Conflict);
+                }
+                return Err(SubdomainClaimError::Other(e));
+            }
+        }
+        Some(existing_slot) => {
+            let slot_version = existing_slot.version;
+            let holder = existing_slot.data;
+            match holder.released_at {
+                None => {
+                    if holder.org_id != org_id {
+                        return Err(SubdomainClaimError::Conflict);
+                    }
+                    // Slot already ours but the org doc lost the mirror
+                    // (interrupted claim) — fall through and repair it.
+                }
+                Some(released_at) => {
+                    let in_cooldown = Timestamp::now().duration_since(released_at).as_secs()
+                        < SUBDOMAIN_REUSE_COOLDOWN_SECS;
+                    if holder.org_id != org_id && in_cooldown {
+                        return Err(SubdomainClaimError::RecentlyReleased);
+                    }
+                    // Take over the released slot; the version CAS makes a
+                    // concurrent takeover or racing release lose cleanly.
+                    if !tx
+                        .compare_and_update(&claim_id, slot_version, &slot)
+                        .await?
+                    {
+                        return Err(SubdomainClaimError::Conflict);
+                    }
+                }
+            }
+        }
     }
 
-    // Reuse-cooldown check, also inside the transaction: tombstones are
-    // indexed (`released_subdomain`), so this runs adjacent to the commit
-    // rather than as a pre-transaction scan a concurrent release could
-    // race past. `find_all` because expired tombstones from earlier
-    // holders may coexist with a fresh one on another doc.
-    let now = Timestamp::now();
-    for holder in tx
-        .find_all::<OrganizationDoc>("released_subdomain", &label)
-        .await?
-    {
-        if holder.id == org_id {
-            continue;
-        }
-        let recently_released = holder.data.released_subdomains.iter().any(|r| {
-            r.label == label
-                && now.duration_since(r.released_at).as_secs() < SUBDOMAIN_REUSE_COOLDOWN_SECS
-        });
-        if recently_released {
-            return Err(SubdomainClaimError::RecentlyReleased);
-        }
-    }
-
-    // Re-claiming a label this org itself released clears its tombstone;
-    // expired tombstones are pruned opportunistically on the same write.
-    data.released_subdomains.retain(|r| {
-        r.label != label
-            && now.duration_since(r.released_at).as_secs() < SUBDOMAIN_REUSE_COOLDOWN_SECS
-    });
     data.subdomain = Some(label.clone());
-
     if !tx.compare_and_update(org_id, version, &data).await? {
         return Err(SubdomainClaimError::Other(anyhow::anyhow!(
             "organization was modified concurrently; please retry"
         )));
     }
-    tx.commit().await?;
+
+    if let Err(e) = tx.commit().await {
+        if super::pool::is_unique_violation(&e) {
+            return Err(SubdomainClaimError::Conflict);
+        }
+        return Err(SubdomainClaimError::Other(e));
+    }
 
     Ok(label)
 }
 
 /// Release an organization's issuer subdomain.
 ///
-/// The label is moved into the org's release tombstones, which blocks
-/// cross-org re-claims for [`SUBDOMAIN_REUSE_COOLDOWN_SECS`]. Dropping the
-/// field also drops its index entry, so discovery for the host stops
+/// Marks the claim slot released (starting the cross-org reuse cooldown)
+/// and clears the org's `subdomain` mirror in one transaction. Dropping
+/// the field drops its index entry, so discovery for the host stops
 /// resolving once relying-party caches expire. Returns the released label,
 /// or `None` if the org had no subdomain.
 pub async fn release_subdomain(store: &DocumentStore, org_id: &str) -> Result<Option<String>> {
-    let org_doc = store
+    let mut tx = store.begin().await?;
+
+    let org_doc = tx
         .get::<OrganizationDoc>(org_id)
         .await?
         .ok_or_else(|| anyhow::anyhow!("organization not found"))?;
@@ -1161,17 +1196,37 @@ pub async fn release_subdomain(store: &DocumentStore, org_id: &str) -> Result<Op
         return Ok(None);
     };
 
-    let now = Timestamp::now();
-    data.released_subdomains
-        .retain(|r| now.duration_since(r.released_at).as_secs() < SUBDOMAIN_REUSE_COOLDOWN_SECS);
-    data.released_subdomains.push(ReleasedSubdomain {
-        label: label.clone(),
-        released_at: now,
-    });
-
-    if !store.compare_and_update(org_id, version, &data).await? {
+    if !tx.compare_and_update(org_id, version, &data).await? {
         bail!("organization was modified concurrently; please retry");
     }
+
+    let claim_id = deterministic_subdomain_claim_id(&label);
+    match tx.get::<SubdomainClaimDoc>(&claim_id).await? {
+        Some(slot) if slot.data.org_id == org_id && slot.data.released_at.is_none() => {
+            let released = SubdomainClaimDoc {
+                released_at: Some(Timestamp::now()),
+                ..slot.data
+            };
+            if !tx
+                .compare_and_update(&claim_id, slot.version, &released)
+                .await?
+            {
+                bail!("subdomain claim was modified concurrently; please retry");
+            }
+        }
+        other => {
+            // The mirror said we held the label but the slot disagrees.
+            // Clearing the mirror is still correct; log for investigation.
+            tracing::warn!(
+                org_id,
+                label,
+                slot_state = ?other.map(|s| (s.data.org_id, s.data.released_at)),
+                "org subdomain mirror out of sync with claim slot during release"
+            );
+        }
+    }
+
+    tx.commit().await?;
 
     Ok(Some(label))
 }
@@ -1934,7 +1989,6 @@ mod tests {
                 },
             ],
             subdomain: None,
-            released_subdomains: Vec::new(),
         };
 
         let drop_candidates: std::collections::HashMap<String, bool> = vec![
@@ -2285,18 +2339,53 @@ mod tests {
             "{err}"
         );
 
-        // Same-org re-claim is always allowed and clears the tombstone.
+        // Same-org re-claim is always allowed and reactivates the slot.
         let label = claim_subdomain(&store, &first.id, "acme").await.unwrap();
         assert_eq!(label, "acme");
-        let doc = store
-            .get::<OrganizationDoc>(&first.id)
+        let slot = store
+            .get::<SubdomainClaimDoc>(&deterministic_subdomain_claim_id("acme"))
             .await
             .unwrap()
             .unwrap();
+        assert_eq!(slot.data.org_id, first.id);
         assert!(
-            doc.data.released_subdomains.is_empty(),
-            "own re-claim must clear the tombstone"
+            slot.data.released_at.is_none(),
+            "own re-claim must reactivate the claim slot"
         );
+    }
+
+    #[tokio::test]
+    async fn released_label_claimable_by_other_org_after_cooldown() {
+        let store = fresh_store().await;
+        let claimant = create_organization(&store, "acme.io", None, None)
+            .await
+            .unwrap();
+
+        // Seed a slot released by another org longer ago than the cooldown.
+        let expired_release = Timestamp::now()
+            .checked_sub(jiff::Span::new().seconds(SUBDOMAIN_REUSE_COOLDOWN_SECS + 60))
+            .unwrap();
+        store
+            .insert_with_id(
+                &deterministic_subdomain_claim_id("acme"),
+                &SubdomainClaimDoc {
+                    label: "acme".to_string(),
+                    org_id: "some-other-org".to_string(),
+                    released_at: Some(expired_release),
+                },
+            )
+            .await
+            .unwrap();
+
+        let label = claim_subdomain(&store, &claimant.id, "acme").await.unwrap();
+        assert_eq!(label, "acme");
+        let slot = store
+            .get::<SubdomainClaimDoc>(&deterministic_subdomain_claim_id("acme"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(slot.data.org_id, claimant.id, "slot must transfer holders");
+        assert!(slot.data.released_at.is_none());
     }
 
     #[tokio::test]

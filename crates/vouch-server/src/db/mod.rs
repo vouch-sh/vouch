@@ -73,7 +73,9 @@ pub use authenticators::{
 };
 
 // Re-export organization types and functions
-pub use documents::organization::{AdditionalDomain, UNVERIFY_FAILURE_THRESHOLD};
+pub use documents::organization::{
+    AdditionalDomain, SubdomainClaimDoc, UNVERIFY_FAILURE_THRESHOLD,
+};
 pub use organizations::{
     AddedDomain, DomainRemovalSummary, MAX_ADDITIONAL_DOMAINS, Organization,
     RESERVED_SUBDOMAIN_LABELS, RecheckEffect, RecheckOutcome, SUBDOMAIN_REUSE_COOLDOWN_SECS,

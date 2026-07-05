@@ -3776,7 +3776,6 @@ async fn test_enroll_promotes_admin_for_org_without_one() {
         created_by_user_id: None,
         additional_domains: Vec::new(),
         subdomain: None,
-        released_subdomains: Vec::new(),
     };
     store.insert(&seed_doc).await.expect("seed org row");
 
