@@ -349,6 +349,7 @@ pub(crate) async fn admin_remove_domain(
                 "admin_user_id": admin.id,
                 "revoked_user_session_count": revoked,
                 "revocation_errored": errored,
+                "released_subdomain": summary.released_subdomain,
             });
             if let Err(e) = state
                 .audit
@@ -370,7 +371,7 @@ pub(crate) async fn admin_remove_domain(
                 revocation_errored = errored,
                 "Removed additional domain"
             );
-            let msg = if errored {
+            let mut msg = if errored {
                 format!(
                     "Removed {normalized}, but session revocation for matching users failed; check server logs and revoke manually."
                 )
@@ -385,6 +386,12 @@ pub(crate) async fn admin_remove_domain(
                     "Removed {normalized}. Revoked sessions for {revoked} users; org membership is unchanged."
                 )
             };
+            if let Some(label) = &summary.released_subdomain {
+                msg.push_str(&format!(
+                    " The issuer subdomain '{label}' was released because this domain backed \
+                     it; delete any AWS IAM OIDC identity providers for that issuer host."
+                ));
+            }
             Ok(redirect_ok(jar, msg))
         }
         Ok(None) => Ok(redirect_error(

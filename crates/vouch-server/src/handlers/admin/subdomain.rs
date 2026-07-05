@@ -14,6 +14,7 @@ use crate::handlers::admin::flash;
 use crate::handlers::browser_login::validate_origin;
 use crate::handlers::session::{AuthContext, extract_org_admin, get_resource_auth_context};
 use crate::impl_template_response;
+use crate::infra::i18n::Tr;
 use crate::services::error::ServiceError;
 use askama::Template;
 use axum::extract::{OriginalUri, State};
@@ -57,30 +58,31 @@ fn redirect_ok(jar: CookieJar, msg: impl Into<String>) -> Response {
     (flash::set_ok(jar, msg), Redirect::to(REDIRECT_BASE)).into_response()
 }
 
+/// Render a claim failure as a localized flash message.
+///
+/// The `InvalidLabel` reason from the db layer is an untranslated
+/// diagnostic; it is interpolated as an argument so the surrounding
+/// sentence still localizes.
 fn claim_error_message(e: &SubdomainClaimError) -> String {
     match e {
-        SubdomainClaimError::InvalidLabel(msg) => msg.clone(),
+        SubdomainClaimError::InvalidLabel(msg) => Tr::new("admin-subdomain-error-invalid")
+            .arg("reason", msg.as_str())
+            .to_string(),
         SubdomainClaimError::NotEligible => {
-            "This subdomain is not available to your organization. A subdomain must match the \
-             first part of one of your verified domains — for example, verifying acme.com lets \
-             you claim acme."
+            Tr::new("admin-subdomain-error-not-eligible").to_string()
+        }
+        SubdomainClaimError::AlreadyClaimed(existing) => {
+            Tr::new("admin-subdomain-error-already-claimed")
+                .arg("existing", existing.as_str())
                 .to_string()
         }
-        SubdomainClaimError::AlreadyClaimed(existing) => format!(
-            "This organization already has the issuer subdomain '{existing}'; release it before \
-             claiming another."
-        ),
-        SubdomainClaimError::Conflict => {
-            "This subdomain is already claimed by another organization.".to_string()
-        }
+        SubdomainClaimError::Conflict => Tr::new("admin-subdomain-error-conflict").to_string(),
         SubdomainClaimError::RecentlyReleased => {
-            "This subdomain was recently released by another organization and cannot be claimed \
-             yet."
-                .to_string()
+            Tr::new("admin-subdomain-error-recently-released").to_string()
         }
         SubdomainClaimError::Other(e) => {
             tracing::error!("subdomain claim failed: {e}");
-            "Internal error while claiming the subdomain; please try again.".to_string()
+            Tr::new("admin-subdomain-error-internal").to_string()
         }
     }
 }
@@ -196,8 +198,13 @@ pub(crate) async fn admin_claim_subdomain(
     Ok(redirect_ok(
         jar,
         match issuer {
-            Some(iss) => format!("Claimed issuer subdomain '{label}'. Your issuer URL is {iss}."),
-            None => format!("Claimed issuer subdomain '{label}'."),
+            Some(iss) => Tr::new("admin-subdomain-flash-claimed")
+                .arg("label", label.as_str())
+                .arg("issuer", iss.as_str())
+                .to_string(),
+            None => Tr::new("admin-subdomain-flash-claimed-plain")
+                .arg("label", label.as_str())
+                .to_string(),
         },
     ))
 }
@@ -219,14 +226,14 @@ pub(crate) async fn admin_release_subdomain(
         Ok(None) => {
             return Ok(redirect_error(
                 jar,
-                "This organization has no issuer subdomain to release.",
+                Tr::new("admin-subdomain-error-nothing-to-release").to_string(),
             ));
         }
         Err(e) => {
             tracing::error!(error = %e, org_id = %org_id, "Subdomain release failed");
             return Ok(redirect_error(
                 jar,
-                "Internal error while releasing the subdomain; please try again.",
+                Tr::new("admin-subdomain-error-internal").to_string(),
             ));
         }
     };
@@ -258,10 +265,8 @@ pub(crate) async fn admin_release_subdomain(
 
     Ok(redirect_ok(
         jar,
-        format!(
-            "Released issuer subdomain '{released}'. Delete any AWS IAM OIDC identity providers \
-             for the released issuer host; the label may eventually be claimed by another \
-             organization."
-        ),
+        Tr::new("admin-subdomain-flash-released")
+            .arg("label", released.as_str())
+            .to_string(),
     ))
 }

@@ -409,6 +409,10 @@ pub struct DomainRemovalSummary {
     /// aborted. The count above may be incomplete. The underlying error is
     /// logged via `tracing::warn` for operator follow-up.
     pub revocation_errored: bool,
+    /// Issuer subdomain that was automatically released because the removed
+    /// domain was the last verified domain backing it. `None` when no
+    /// subdomain was claimed or it remains eligible via another domain.
+    pub released_subdomain: Option<String>,
 }
 
 /// Remove an additional domain from an organization.
@@ -429,7 +433,9 @@ pub async fn remove_additional_domain(
 ) -> Result<Option<DomainRemovalSummary>> {
     let normalized = normalize_domain(domain)?;
 
-    let org_doc = store
+    let mut tx = store.begin().await?;
+
+    let org_doc = tx
         .get::<OrganizationDoc>(org_id)
         .await?
         .ok_or_else(|| anyhow::anyhow!("organization not found"))?;
@@ -442,9 +448,14 @@ pub async fn remove_additional_domain(
         return Ok(None);
     }
 
-    if !store.compare_and_update(org_id, version, &data).await? {
+    // Removing a verified domain may take the claimed issuer subdomain's
+    // backing with it; the subdomain must not outlive domain ownership.
+    let released_subdomain = release_subdomain_if_ineligible(&mut tx, org_id, &mut data).await?;
+
+    if !tx.compare_and_update(org_id, version, &data).await? {
         bail!("organization was modified concurrently; please retry");
     }
+    tx.commit().await?;
 
     // Revoke sessions for org users whose email's domain matches the removed
     // entry. Done OUTSIDE the org-doc transaction: per-user session deletes
@@ -466,6 +477,7 @@ pub async fn remove_additional_domain(
     Ok(Some(DomainRemovalSummary {
         revoked_user_count,
         revocation_errored,
+        released_subdomain,
     }))
 }
 
@@ -698,12 +710,16 @@ pub enum RecheckOutcome {
 
 /// Result of [`record_recheck_result`] — whether the entry was flipped to
 /// unverified after this attempt.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RecheckEffect {
     /// Counters updated, entry still verified.
     StillVerified,
     /// Consecutive-failure threshold reached; entry flipped to unverified.
-    FlippedToUnverified,
+    FlippedToUnverified {
+        /// Issuer subdomain that was automatically released because the
+        /// flipped domain was the last verified domain backing it.
+        released_subdomain: Option<String>,
+    },
     /// Entry was no longer present (removed or already unverified externally).
     NotFound,
 }
@@ -768,7 +784,9 @@ pub async fn record_recheck_result(
 ) -> Result<RecheckEffect> {
     let normalized = normalize_domain(domain)?;
 
-    let Some(org_doc) = store.get::<OrganizationDoc>(org_id).await? else {
+    let mut tx = store.begin().await?;
+
+    let Some(org_doc) = tx.get::<OrganizationDoc>(org_id).await? else {
         return Ok(RecheckEffect::NotFound);
     };
     let version = org_doc.version;
@@ -789,7 +807,7 @@ pub async fn record_recheck_result(
 
     let now = Timestamp::now();
 
-    let effect = match outcome {
+    let mut effect = match outcome {
         RecheckOutcome::Success => {
             entry.consecutive_failures = 0;
             entry.state = AdditionalDomainState::Verified {
@@ -808,7 +826,9 @@ pub async fn record_recheck_result(
                     verified_at,
                     last_checked_at: now,
                 };
-                RecheckEffect::FlippedToUnverified
+                RecheckEffect::FlippedToUnverified {
+                    released_subdomain: None,
+                }
             } else {
                 entry.state = AdditionalDomainState::Verified {
                     verified_at,
@@ -819,7 +839,16 @@ pub async fn record_recheck_result(
         }
     };
 
-    if !store.compare_and_update(org_id, version, &data).await? {
+    // Losing verification may take the claimed issuer subdomain's backing
+    // with it; the subdomain must not outlive verified domain ownership.
+    if let RecheckEffect::FlippedToUnverified {
+        released_subdomain, ..
+    } = &mut effect
+    {
+        *released_subdomain = release_subdomain_if_ineligible(&mut tx, org_id, &mut data).await?;
+    }
+
+    if !tx.compare_and_update(org_id, version, &data).await? {
         // Lost a race against another writer (admin re-verify, concurrent
         // cleanup tick, or remove). The DB state reflects the winning
         // writer's change, not ours — so the in-memory `effect` value is
@@ -828,6 +857,7 @@ pub async fn record_recheck_result(
         // any actual flip is fired by whichever writer's update succeeded.
         return Ok(RecheckEffect::StillVerified);
     }
+    tx.commit().await?;
     Ok(effect)
 }
 
@@ -1228,6 +1258,59 @@ pub async fn release_subdomain(store: &DocumentStore, org_id: &str) -> Result<Op
 
     tx.commit().await?;
 
+    Ok(Some(label))
+}
+
+/// Inside `tx`, auto-release the org's issuer subdomain if it is no longer
+/// backed by a verified domain.
+///
+/// Call after mutating `data`'s domain set and before the org-doc
+/// `compare_and_update`: the mirror clear and the slot release then commit
+/// atomically with the domain change. The released slot starts the normal
+/// reuse cooldown. Returns the released label, if any.
+async fn release_subdomain_if_ineligible(
+    tx: &mut super::store::StoreTransaction<'_>,
+    org_id: &str,
+    data: &mut OrganizationDoc,
+) -> Result<Option<String>> {
+    let Some(label) = data.subdomain.clone() else {
+        return Ok(None);
+    };
+    if eligible_subdomain_labels(&data.domain, &data.additional_domains).contains(&label) {
+        return Ok(None);
+    }
+
+    data.subdomain = None;
+
+    let claim_id = deterministic_subdomain_claim_id(&label);
+    match tx.get::<SubdomainClaimDoc>(&claim_id).await? {
+        Some(slot) if slot.data.org_id == org_id && slot.data.released_at.is_none() => {
+            let released = SubdomainClaimDoc {
+                released_at: Some(Timestamp::now()),
+                ..slot.data
+            };
+            if !tx
+                .compare_and_update(&claim_id, slot.version, &released)
+                .await?
+            {
+                bail!("subdomain claim was modified concurrently; please retry");
+            }
+        }
+        other => {
+            tracing::warn!(
+                org_id,
+                label,
+                slot_state = ?other.map(|s| (s.data.org_id, s.data.released_at)),
+                "org subdomain mirror out of sync with claim slot during auto-release"
+            );
+        }
+    }
+
+    tracing::warn!(
+        org_id,
+        label,
+        "auto-released issuer subdomain: no verified domain backs it anymore"
+    );
     Ok(Some(label))
 }
 
@@ -1696,7 +1779,12 @@ mod tests {
                     .await
                     .unwrap();
         }
-        assert_eq!(last_effect, RecheckEffect::FlippedToUnverified);
+        assert_eq!(
+            last_effect,
+            RecheckEffect::FlippedToUnverified {
+                released_subdomain: None
+            }
+        );
 
         let list = list_additional_domains(&store, &org.id).await.unwrap();
         assert!(
@@ -2352,6 +2440,110 @@ mod tests {
             slot.data.released_at.is_none(),
             "own re-claim must reactivate the claim slot"
         );
+    }
+
+    #[tokio::test]
+    async fn removing_backing_domain_auto_releases_subdomain() {
+        let store = fresh_store().await;
+        let org = create_organization(&store, "acme.com", None, None)
+            .await
+            .unwrap();
+        add_additional_domain(&store, &org.id, "widgets.io", "u1", "u1@example.com")
+            .await
+            .unwrap();
+        mark_additional_domain_verified(&store, &org.id, "widgets.io")
+            .await
+            .unwrap();
+        claim_subdomain(&store, &org.id, "widgets").await.unwrap();
+
+        let summary = remove_additional_domain(&store, &org.id, "widgets.io")
+            .await
+            .unwrap()
+            .expect("domain removed");
+        assert_eq!(summary.released_subdomain.as_deref(), Some("widgets"));
+
+        let refreshed = get_organization(&store, &org.id).await.unwrap().unwrap();
+        assert!(refreshed.subdomain.is_none(), "mirror must be cleared");
+        let slot = store
+            .get::<SubdomainClaimDoc>(&deterministic_subdomain_claim_id("widgets"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            slot.data.released_at.is_some(),
+            "slot must be released, starting the reuse cooldown"
+        );
+        // Discovery lookup must stop resolving.
+        assert!(
+            find_org_by_subdomain(&store, "widgets")
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn removing_domain_keeps_subdomain_backed_by_another_domain() {
+        let store = fresh_store().await;
+        // Primary acme.com and verified acme.io both yield "acme"; removing
+        // one verified backer must not release the label.
+        let org = create_organization(&store, "acme.com", None, None)
+            .await
+            .unwrap();
+        add_additional_domain(&store, &org.id, "acme.io", "u1", "u1@example.com")
+            .await
+            .unwrap();
+        mark_additional_domain_verified(&store, &org.id, "acme.io")
+            .await
+            .unwrap();
+        claim_subdomain(&store, &org.id, "acme").await.unwrap();
+
+        let summary = remove_additional_domain(&store, &org.id, "acme.io")
+            .await
+            .unwrap()
+            .expect("domain removed");
+        assert!(summary.released_subdomain.is_none());
+
+        let refreshed = get_organization(&store, &org.id).await.unwrap().unwrap();
+        assert_eq!(refreshed.subdomain.as_deref(), Some("acme"));
+    }
+
+    #[tokio::test]
+    async fn unverify_flip_auto_releases_subdomain() {
+        let store = fresh_store().await;
+        let org = create_organization(&store, "acme.com", None, None)
+            .await
+            .unwrap();
+        add_additional_domain(&store, &org.id, "widgets.io", "u1", "u1@example.com")
+            .await
+            .unwrap();
+        mark_additional_domain_verified(&store, &org.id, "widgets.io")
+            .await
+            .unwrap();
+        claim_subdomain(&store, &org.id, "widgets").await.unwrap();
+
+        let mut last_effect = RecheckEffect::StillVerified;
+        for _ in 0..crate::db::UNVERIFY_FAILURE_THRESHOLD {
+            last_effect =
+                record_recheck_result(&store, &org.id, "widgets.io", RecheckOutcome::Failure)
+                    .await
+                    .unwrap();
+        }
+        assert_eq!(
+            last_effect,
+            RecheckEffect::FlippedToUnverified {
+                released_subdomain: Some("widgets".to_string())
+            }
+        );
+
+        let refreshed = get_organization(&store, &org.id).await.unwrap().unwrap();
+        assert!(refreshed.subdomain.is_none(), "mirror must be cleared");
+        let slot = store
+            .get::<SubdomainClaimDoc>(&deterministic_subdomain_claim_id("widgets"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(slot.data.released_at.is_some(), "slot must be released");
     }
 
     #[tokio::test]

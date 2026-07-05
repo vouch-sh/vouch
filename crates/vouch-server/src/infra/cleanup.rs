@@ -407,7 +407,7 @@ async fn recheck_one(store: &DocumentStore, audit: &AuditStore, rec: db::Verifie
     };
 
     match db::record_recheck_result(store, &rec.org_id, &rec.domain, outcome).await {
-        Ok(db::RecheckEffect::FlippedToUnverified) => {
+        Ok(db::RecheckEffect::FlippedToUnverified { released_subdomain }) => {
             tracing::warn!(
                 domain = %rec.domain,
                 org_id = %rec.org_id,
@@ -424,6 +424,23 @@ async fn recheck_one(store: &DocumentStore, audit: &AuditStore, rec: db::Verifie
                 .await
             {
                 tracing::warn!(error = %e, "failed to write org_domain_unverified audit event");
+            }
+            if let Some(label) = released_subdomain {
+                let data = serde_json::json!({
+                    "action": "release_subdomain",
+                    "label": label,
+                    "org_id": rec.org_id,
+                    "reason": "backing_domain_unverified",
+                });
+                if let Err(e) = audit
+                    .insert_event("org_subdomain_released", None, None, &data.to_string())
+                    .await
+                {
+                    tracing::warn!(
+                        error = %e,
+                        "failed to write org_subdomain_released audit event"
+                    );
+                }
             }
         }
         Ok(_) => {}

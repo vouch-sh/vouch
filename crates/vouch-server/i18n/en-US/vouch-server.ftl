@@ -583,6 +583,19 @@ admin-subdomain-empty = No subdomains are available to claim yet. Subdomains com
 admin-subdomain-release = Release
 admin-subdomain-release-confirm = Release this subdomain? AWS federation tokens revert to the shared issuer immediately, and after 30 days the label may be claimed by another organization. Delete any AWS IAM OIDC identity providers for this issuer host.
 admin-subdomain-warning = Tokens issued for AWS federation use this issuer as soon as a subdomain is claimed or released — coordinate changes with your AWS IAM OIDC provider and role trust configuration. Released subdomains cannot be claimed by another organization for 30 days.
+# Flash messages set by the POST handlers (rendered in the poster's locale).
+# `$reason` in the invalid message is an untranslated diagnostic from label
+# validation, interpolated so the surrounding sentence still localizes.
+admin-subdomain-flash-claimed = Claimed issuer subdomain '{ $label }'. Your issuer URL is { $issuer }.
+admin-subdomain-flash-claimed-plain = Claimed issuer subdomain '{ $label }'.
+admin-subdomain-flash-released = Released issuer subdomain '{ $label }'. Delete any AWS IAM OIDC identity providers for the released issuer host; the subdomain may eventually be claimed by another organization.
+admin-subdomain-error-invalid = That subdomain is not valid: { $reason }
+admin-subdomain-error-not-eligible = This subdomain is not available to your organization. A subdomain must match the first part of one of your verified domains — for example, verifying acme.com lets you claim acme.
+admin-subdomain-error-already-claimed = This organization already has the issuer subdomain '{ $existing }'; release it before claiming another.
+admin-subdomain-error-conflict = This subdomain is already claimed by another organization.
+admin-subdomain-error-recently-released = This subdomain was recently released by another organization and cannot be claimed yet.
+admin-subdomain-error-internal = Something went wrong while updating the subdomain; please try again.
+admin-subdomain-error-nothing-to-release = This organization has no issuer subdomain to release.
 
 ## Admin device posture policies (admin/policies.html)
 admin-policies-page-title = { -product } - Device Posture Policies
