@@ -37,6 +37,10 @@ pub(crate) struct AdminSubdomainTemplate {
     pub discovery_url: Option<String>,
     /// Labels this org may claim, derived from its verified domains.
     pub eligible_labels: Vec<String>,
+    /// First labels of verified domains that are reserved or invalid and
+    /// therefore not claimable — shown so an empty eligible list doesn't
+    /// read as "no verified domains".
+    pub ineligible_candidates: Vec<String>,
     pub flash_message: Option<String>,
     pub flash_success: Option<String>,
 }
@@ -136,6 +140,10 @@ pub(crate) async fn admin_subdomain_page(
     let body = AdminSubdomainTemplate {
         auth,
         eligible_labels: db::eligible_subdomain_labels(&org.domain, &org.additional_domains),
+        ineligible_candidates: db::ineligible_subdomain_candidates(
+            &org.domain,
+            &org.additional_domains,
+        ),
         subdomain: org.subdomain,
         issuer,
         discovery_url,

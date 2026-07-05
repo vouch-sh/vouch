@@ -287,6 +287,31 @@ async fn subdomain_page_gates_by_auth_and_role() {
 }
 
 #[tokio::test]
+async fn subdomain_page_explains_reserved_only_candidates() {
+    let harness = TestHarness::new().await;
+    // Primary domain vouch.sh yields only the reserved candidate 'vouch',
+    // so the page must explain the reservation rather than claim the org
+    // has no verified domains.
+    let (_user, _org, _auth_id, token) = harness
+        .create_authenticated_org_admin("admin@vouch.sh", "vouch.sh")
+        .await
+        .unwrap();
+    let cookie = cookie_header(&token);
+
+    let resp = http_get_full(&harness.router, "/admin/subdomain", &[("Cookie", &cookie)]).await;
+    assert_eq!(resp.status, StatusCode::OK);
+    assert!(
+        resp.body.contains("reserved for platform use"),
+        "page should explain that the candidate subdomain is reserved; body len={}",
+        resp.body.len()
+    );
+    assert!(
+        resp.body.contains("vouch"),
+        "page should name the reserved candidate"
+    );
+}
+
+#[tokio::test]
 async fn subdomain_ui_claim_release_flow() {
     let harness = TestHarness::new().await;
     let (_user, _org, _auth_id, token) = harness

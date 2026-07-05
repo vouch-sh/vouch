@@ -79,7 +79,12 @@
             <h2 class="text-sm font-semibold text-gray-300 mb-3">{{ self.tr("admin-subdomain-claim") }}</h2>
             {% if eligible_labels.is_empty() %}
             <p class="text-sm text-gray-400">
+                {% if ineligible_candidates.is_empty() %}
                 {{ self.tr("admin-subdomain-empty") }}
+                {% else %}
+                {% let joined = ineligible_candidates.join(", ") %}
+                {{ self.tr("admin-subdomain-empty-reserved").arg("labels", joined.as_str()).arg("count", ineligible_candidates.len()) }}
+                {% endif %}
                 <a href="/admin/domains" class="text-vouch-accent hover:text-vouch-accent-hover">{{ self.tr("admin-nav-domains") }}</a>.
             </p>
             {% else %}

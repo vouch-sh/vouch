@@ -433,9 +433,7 @@ pub async fn remove_additional_domain(
 ) -> Result<Option<DomainRemovalSummary>> {
     let normalized = normalize_domain(domain)?;
 
-    let mut tx = store.begin().await?;
-
-    let org_doc = tx
+    let org_doc = store
         .get::<OrganizationDoc>(org_id)
         .await?
         .ok_or_else(|| anyhow::anyhow!("organization not found"))?;
@@ -450,12 +448,24 @@ pub async fn remove_additional_domain(
 
     // Removing a verified domain may take the claimed issuer subdomain's
     // backing with it; the subdomain must not outlive domain ownership.
-    let released_subdomain = release_subdomain_if_ineligible(&mut tx, org_id, &mut data).await?;
-
-    if !tx.compare_and_update(org_id, version, &data).await? {
-        bail!("organization was modified concurrently; please retry");
-    }
-    tx.commit().await?;
+    // A transaction is opened ONLY when a release will actually happen:
+    // the claim slot and the mirror must move together, but the common
+    // no-subdomain path stays a plain CAS (a read-then-write transaction
+    // can deadlock concurrent writers on SQLite's deferred locking).
+    let released_subdomain = if subdomain_release_pending(&data) {
+        let mut tx = store.begin().await?;
+        let released = release_subdomain_if_ineligible(&mut tx, org_id, &mut data).await?;
+        if !tx.compare_and_update(org_id, version, &data).await? {
+            bail!("organization was modified concurrently; please retry");
+        }
+        tx.commit().await?;
+        released
+    } else {
+        if !store.compare_and_update(org_id, version, &data).await? {
+            bail!("organization was modified concurrently; please retry");
+        }
+        None
+    };
 
     // Revoke sessions for org users whose email's domain matches the removed
     // entry. Done OUTSIDE the org-doc transaction: per-user session deletes
@@ -784,9 +794,7 @@ pub async fn record_recheck_result(
 ) -> Result<RecheckEffect> {
     let normalized = normalize_domain(domain)?;
 
-    let mut tx = store.begin().await?;
-
-    let Some(org_doc) = tx.get::<OrganizationDoc>(org_id).await? else {
+    let Some(org_doc) = store.get::<OrganizationDoc>(org_id).await? else {
         return Ok(RecheckEffect::NotFound);
     };
     let version = org_doc.version;
@@ -841,14 +849,26 @@ pub async fn record_recheck_result(
 
     // Losing verification may take the claimed issuer subdomain's backing
     // with it; the subdomain must not outlive verified domain ownership.
-    if let RecheckEffect::FlippedToUnverified {
-        released_subdomain, ..
-    } = &mut effect
-    {
-        *released_subdomain = release_subdomain_if_ineligible(&mut tx, org_id, &mut data).await?;
-    }
+    // As in `remove_additional_domain`, a transaction is opened ONLY when
+    // a release will actually happen — the common recheck path stays a
+    // plain CAS so concurrent rechecks can't deadlock on SQLite.
+    let flipped = matches!(effect, RecheckEffect::FlippedToUnverified { .. });
+    let updated = if flipped && subdomain_release_pending(&data) {
+        let mut tx = store.begin().await?;
+        let released = release_subdomain_if_ineligible(&mut tx, org_id, &mut data).await?;
+        let ok = tx.compare_and_update(org_id, version, &data).await?;
+        if ok {
+            tx.commit().await?;
+            if let RecheckEffect::FlippedToUnverified { released_subdomain } = &mut effect {
+                *released_subdomain = released;
+            }
+        }
+        ok
+    } else {
+        store.compare_and_update(org_id, version, &data).await?
+    };
 
-    if !tx.compare_and_update(org_id, version, &data).await? {
+    if !updated {
         // Lost a race against another writer (admin re-verify, concurrent
         // cleanup tick, or remove). The DB state reflects the winning
         // writer's change, not ours — so the in-memory `effect` value is
@@ -857,7 +877,6 @@ pub async fn record_recheck_result(
         // any actual flip is fired by whichever writer's update succeeded.
         return Ok(RecheckEffect::StillVerified);
     }
-    tx.commit().await?;
     Ok(effect)
 }
 
@@ -1053,6 +1072,41 @@ pub fn eligible_subdomain_labels(
     for ad in additional_domains {
         if matches!(ad.state, AdditionalDomainState::Verified { .. }) {
             push_first_label(&mut labels, &ad.domain);
+        }
+    }
+    labels
+}
+
+/// First labels of the org's verified domains that can NOT be claimed as
+/// issuer subdomains (reserved or otherwise invalid), deduped in encounter
+/// order.
+///
+/// Complements [`eligible_subdomain_labels`], which silently drops these:
+/// the admin UI uses this to explain an empty eligible list for an org that
+/// does have verified domains (e.g. primary `vouch.sh` → `vouch` is
+/// reserved) instead of implying no domain is verified.
+#[must_use]
+pub fn ineligible_subdomain_candidates(
+    primary_domain: &str,
+    additional_domains: &[AdditionalDomain],
+) -> Vec<String> {
+    fn push_rejected_first_label(labels: &mut Vec<String>, domain: &str) {
+        if let Some(first) = domain.split('.').next() {
+            let lower = first.trim().to_ascii_lowercase();
+            if !lower.is_empty()
+                && validate_subdomain_label(&lower).is_err()
+                && !labels.contains(&lower)
+            {
+                labels.push(lower);
+            }
+        }
+    }
+
+    let mut labels = Vec::new();
+    push_rejected_first_label(&mut labels, primary_domain);
+    for ad in additional_domains {
+        if matches!(ad.state, AdditionalDomainState::Verified { .. }) {
+            push_rejected_first_label(&mut labels, &ad.domain);
         }
     }
     labels
@@ -1259,6 +1313,15 @@ pub async fn release_subdomain(store: &DocumentStore, org_id: &str) -> Result<Op
     tx.commit().await?;
 
     Ok(Some(label))
+}
+
+/// True when the org's claimed subdomain has lost its verified-domain
+/// backing and must be released. Used to decide whether a mutation needs
+/// the transactional slot-release path or a plain CAS suffices.
+fn subdomain_release_pending(data: &OrganizationDoc) -> bool {
+    data.subdomain.as_ref().is_some_and(|label| {
+        !eligible_subdomain_labels(&data.domain, &data.additional_domains).contains(label)
+    })
 }
 
 /// Inside `tx`, auto-release the org's issuer subdomain if it is no longer
@@ -2440,6 +2503,34 @@ mod tests {
             slot.data.released_at.is_none(),
             "own re-claim must reactivate the claim slot"
         );
+    }
+
+    #[test]
+    fn ineligible_candidates_surfaces_reserved_first_labels() {
+        // Primary vouch.sh → 'vouch' is reserved; verified acme.io → 'acme'
+        // is eligible and must NOT appear in the ineligible list.
+        let additional = vec![AdditionalDomain {
+            domain: "acme.io".to_string(),
+            verification_token: "t".to_string(),
+            added_at: Timestamp::now(),
+            added_by_user_id: "u1".to_string(),
+            added_by_email: "u@acme.io".to_string(),
+            consecutive_failures: 0,
+            state: AdditionalDomainState::Verified {
+                verified_at: Timestamp::now(),
+                last_checked_at: None,
+            },
+        }];
+        assert_eq!(
+            ineligible_subdomain_candidates("vouch.sh", &additional),
+            vec!["vouch".to_string()]
+        );
+        assert_eq!(
+            eligible_subdomain_labels("vouch.sh", &additional),
+            vec!["acme".to_string()]
+        );
+        // Unverified domains never contribute candidates in either list.
+        assert!(ineligible_subdomain_candidates("acme.com", &[]).is_empty());
     }
 
     #[tokio::test]

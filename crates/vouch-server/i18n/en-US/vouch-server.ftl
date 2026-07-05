@@ -580,6 +580,12 @@ admin-subdomain-claim = Claim Subdomain
 admin-subdomain-label-select = Subdomain (based on your verified email domains)
 admin-subdomain-claim-help = Claiming activates OIDC discovery on the subdomain and switches this organization's AWS federation tokens to the new issuer. Update your AWS IAM OIDC providers and role trust policies afterwards.
 admin-subdomain-empty = No subdomains are available to claim yet. Subdomains come from your verified email domains — verifying acme.com lets you claim acme. Add and verify a domain under
+# Shown when the org HAS verified domains but every candidate subdomain is
+# reserved or invalid (e.g. primary domain vouch.sh → 'vouch' is reserved).
+admin-subdomain-empty-reserved = No subdomains are available to claim: { $count ->
+        [one] the subdomain { $labels } from your verified domains is reserved for platform use and cannot be claimed
+       *[other] the subdomains { $labels } from your verified domains are reserved for platform use and cannot be claimed
+    }. To use an issuer subdomain, add and verify another domain under
 admin-subdomain-release = Release
 admin-subdomain-release-confirm = Release this subdomain? AWS federation tokens revert to the shared issuer immediately, and after 30 days the label may be claimed by another organization. Delete any AWS IAM OIDC identity providers for this issuer host.
 admin-subdomain-warning = Tokens issued for AWS federation use this issuer as soon as a subdomain is claimed or released — coordinate changes with your AWS IAM OIDC provider and role trust configuration. Released subdomains cannot be claimed by another organization for 30 days.
