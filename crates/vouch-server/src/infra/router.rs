@@ -179,6 +179,14 @@ pub fn build_app(state: Arc<AppState>, config: &config::ServerConfig) -> anyhow:
     // merged-router level rather than only inside `build_ui_routes`. Adding
     // a new language is then just dropping an `i18n/<tag>/vouch-server.ftl` catalog.
     .layer(axum::middleware::from_fn(crate::infra::i18n::i18n_layer))
+    // Gate org issuer-subdomain hosts (`{label}.{primary_host}`) to the
+    // WIF-only surface: discovery, JWKS, health. Primary-host requests and
+    // NLB health checks (IP / NLB-DNS Host values) never match the shape,
+    // so this layer is inert for all existing traffic.
+    .layer(axum::middleware::from_fn_with_state(
+        Arc::clone(&state),
+        crate::infra::org_host::org_host_gate,
+    ))
     .layer(axum::middleware::from_fn(metrics_middleware))
     // Global request timeout: 30 seconds.
     .layer(TimeoutLayer::with_status_code(
@@ -328,6 +336,13 @@ fn build_general_limited_routes(
         .route(
             "/api/v1/org/scim-tokens/{id}",
             delete(handlers::admin::delete_scim_token),
+        )
+        // Org issuer-subdomain management (per-org OIDC issuer for AWS WIF)
+        .route(
+            "/api/v1/org/subdomain",
+            get(handlers::admin::get_org_subdomain)
+                .put(handlers::admin::claim_org_subdomain)
+                .delete(handlers::admin::release_org_subdomain),
         )
         // CEL validation API (used by admin UI CEL playground)
         .route(

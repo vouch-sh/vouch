@@ -2,7 +2,9 @@
 //! Organization database operations.
 
 use super::document_type::Document;
-use super::documents::organization::{AdditionalDomain, AdditionalDomainState, OrganizationDoc};
+use super::documents::organization::{
+    AdditionalDomain, AdditionalDomainState, OrganizationDoc, ReleasedSubdomain,
+};
 use super::store::DocumentStore;
 use anyhow::{Result, bail};
 use aws_lc_rs::rand as aws_rand;
@@ -33,6 +35,7 @@ pub struct Organization {
     pub created_at: Timestamp,
     pub created_by_user_id: Option<String>,
     pub additional_domains: Vec<AdditionalDomain>,
+    pub subdomain: Option<String>,
 }
 
 impl From<Document<OrganizationDoc>> for Organization {
@@ -44,6 +47,7 @@ impl From<Document<OrganizationDoc>> for Organization {
             created_at: doc.created_at,
             created_by_user_id: doc.data.created_by_user_id,
             additional_domains: doc.data.additional_domains,
+            subdomain: doc.data.subdomain,
         }
     }
 }
@@ -63,6 +67,8 @@ pub async fn create_organization(
         name: name.map(String::from),
         created_by_user_id: created_by_user_id.map(String::from),
         additional_domains: Vec::new(),
+        subdomain: None,
+        released_subdomains: Vec::new(),
     };
     let result = store.insert(&doc).await?;
     Ok(Organization::from(result))
@@ -867,6 +873,344 @@ async fn find_conflicting_claim_in_other_org(
     }
 }
 
+// ============================================================================
+// Issuer subdomains (per-org OIDC issuer hosts for AWS federation)
+// ============================================================================
+
+/// Cooldown before a released subdomain label may be claimed by a *different*
+/// organization (30 days).
+///
+/// The JWKS is shared across all issuer hosts, so a re-claimed label would
+/// mint tokens that verify under an issuer host the previous org's AWS
+/// accounts may still trust. Same-org re-claims are always allowed.
+pub const SUBDOMAIN_REUSE_COOLDOWN_SECS: i64 = 2_592_000; // 30 days
+
+/// Labels that must never be claimable as org issuer subdomains.
+///
+/// Grouped by rationale:
+/// - current/future vouch service hosts and regional prefixes
+///   (`us.vouch.sh`, `mtls`, `docs`, ...)
+/// - protocol-magic or infrastructure names whose resolution or semantics
+///   are special (`www`, `mail`, `ns*`, `autodiscover`, `wpad`, ...)
+/// - names that would read as vouch-operated endpoints in a customer's
+///   IAM trust-policy ARN (`admin`, `oauth`, `login`, `sso`, ...)
+pub const RESERVED_SUBDOMAIN_LABELS: &[&str] = &[
+    // vouch service hosts / regional prefixes
+    "us",
+    "eu",
+    "ap",
+    "jp",
+    "vouch",
+    "dev",
+    "docs",
+    "www",
+    "mtls",
+    "api",
+    "app",
+    "status",
+    "health",
+    "metrics",
+    "enroll",
+    "device",
+    "conformance", // auth-adjacent names
+    "admin",
+    "oauth",
+    "auth",
+    "login",
+    "logout",
+    "sso",
+    "id",
+    "idp",
+    "scim",
+    "token",
+    "jwks",
+    "openid",
+    "wellknown",
+    "well-known",
+    "metadata",
+    "saml",
+    "oidc",
+    // protocol-magic / infrastructure names
+    "mail",
+    "smtp",
+    "imap",
+    "pop",
+    "mx",
+    "ns",
+    "ns1",
+    "ns2",
+    "ftp",
+    "cdn",
+    "static",
+    "assets",
+    "autodiscover",
+    "autoconfig",
+    "wpad",
+    "localhost",
+    "local",
+    "internal",
+    "test",
+    "staging",
+    "stage",
+    "prod",
+    "production",
+    "root",
+    "github",
+    "wildcard",
+];
+
+/// Validate the syntactic shape of an issuer subdomain label.
+///
+/// Returns the normalized lowercase form on success. Enforces RFC 1035
+/// LDH-label rules (1–63 chars, alphanumeric plus interior hyphens), requires
+/// at least one letter (an all-numeric label could read as an IP octet), and
+/// rejects entries on [`RESERVED_SUBDOMAIN_LABELS`].
+pub fn validate_subdomain_label(input: &str) -> Result<String> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        bail!("subdomain label must not be empty");
+    }
+    if !trimmed.is_ascii() {
+        bail!("subdomain label must be ASCII (use punycode for internationalized labels)");
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    if lower.len() > 63 {
+        bail!("subdomain label exceeds 63 characters");
+    }
+    if lower.contains('.') {
+        bail!("subdomain label must be a single DNS label without dots");
+    }
+    if lower.starts_with('-') || lower.ends_with('-') {
+        bail!("subdomain label must not start or end with a hyphen");
+    }
+    if !lower
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+    {
+        bail!("subdomain label contains invalid characters");
+    }
+    if !lower.bytes().any(|b| b.is_ascii_alphabetic()) {
+        bail!("subdomain label must contain at least one letter");
+    }
+    if RESERVED_SUBDOMAIN_LABELS.contains(&lower.as_str()) {
+        bail!("subdomain label '{lower}' is reserved");
+    }
+    Ok(lower)
+}
+
+/// Compute the subdomain labels an organization is eligible to claim.
+///
+/// A label is eligible when it is the first label of the org's primary
+/// domain or of a *verified* additional domain (verified `acme.com` →
+/// eligible `acme`). Labels that fail [`validate_subdomain_label`] (e.g.
+/// reserved names) are silently dropped; the result is deduplicated in
+/// encounter order.
+#[must_use]
+pub fn eligible_subdomain_labels(
+    primary_domain: &str,
+    additional_domains: &[AdditionalDomain],
+) -> Vec<String> {
+    fn push_first_label(labels: &mut Vec<String>, domain: &str) {
+        if let Some(first) = domain.split('.').next()
+            && let Ok(label) = validate_subdomain_label(first)
+            && !labels.contains(&label)
+        {
+            labels.push(label);
+        }
+    }
+
+    let mut labels = Vec::new();
+    push_first_label(&mut labels, primary_domain);
+    for ad in additional_domains {
+        if matches!(ad.state, AdditionalDomainState::Verified { .. }) {
+            push_first_label(&mut labels, &ad.domain);
+        }
+    }
+    labels
+}
+
+/// Errors from [`claim_subdomain`] that map to distinct API responses.
+#[derive(Debug, thiserror::Error)]
+pub enum SubdomainClaimError {
+    /// The label failed syntactic validation or is reserved.
+    #[error("{0}")]
+    InvalidLabel(String),
+    /// The label does not match any of the org's verified domains.
+    #[error("label does not match the first label of any verified domain of this organization")]
+    NotEligible,
+    /// The org already holds a different label; it must be released first.
+    #[error("organization already has subdomain '{0}'; release it before claiming another")]
+    AlreadyClaimed(String),
+    /// Another organization currently holds the label.
+    #[error("subdomain is already claimed by another organization")]
+    Conflict,
+    /// Another organization released the label within the reuse cooldown.
+    #[error("subdomain was recently released by another organization and cannot be claimed yet")]
+    RecentlyReleased,
+    /// Database or concurrency failure.
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
+}
+
+/// Claim an issuer subdomain label for an organization.
+///
+/// The label must be eligible (first label of a verified domain), globally
+/// unique across orgs, and not tombstoned by another org's recent release.
+/// Re-claiming the org's own current label is idempotent. Uniqueness is
+/// enforced with the same OCC shape as [`add_additional_domain`]: the
+/// indexed `find_one` conflict check and the `compare_and_update` version
+/// bump run inside one transaction, so concurrent claimants collide on the
+/// org doc's row on every backend (including DSQL).
+///
+/// Returns the normalized label on success.
+pub async fn claim_subdomain(
+    store: &DocumentStore,
+    org_id: &str,
+    label: &str,
+) -> Result<String, SubdomainClaimError> {
+    let label = validate_subdomain_label(label)
+        .map_err(|e| SubdomainClaimError::InvalidLabel(e.to_string()))?;
+
+    // Tombstone courtesy check (non-transactional). Tombstones are not
+    // indexed, so we page through org docs — same pattern and caveats as the
+    // pending-claim scan in `add_additional_domain`: a true race is possible
+    // but the window is small and the failure mode is a rejected claim, not
+    // a broken invariant.
+    if find_recent_release_in_other_org(store, org_id, &label).await? {
+        return Err(SubdomainClaimError::RecentlyReleased);
+    }
+
+    let mut tx = store.begin().await?;
+
+    let org_doc = tx
+        .get::<OrganizationDoc>(org_id)
+        .await?
+        .ok_or_else(|| SubdomainClaimError::Other(anyhow::anyhow!("organization not found")))?;
+    let version = org_doc.version;
+    let mut data = org_doc.data;
+
+    if let Some(existing) = &data.subdomain {
+        if *existing == label {
+            tx.commit().await?;
+            return Ok(label);
+        }
+        return Err(SubdomainClaimError::AlreadyClaimed(existing.clone()));
+    }
+
+    if !eligible_subdomain_labels(&data.domain, &data.additional_domains).contains(&label) {
+        return Err(SubdomainClaimError::NotEligible);
+    }
+
+    // Cross-org uniqueness: claimed labels are indexed, so this is the
+    // authoritative check, inside the transaction.
+    if let Some(other) = tx.find_one::<OrganizationDoc>("subdomain", &label).await?
+        && other.id != org_id
+    {
+        return Err(SubdomainClaimError::Conflict);
+    }
+
+    // Re-claiming a label this org itself released clears its tombstone;
+    // expired tombstones are pruned opportunistically on the same write.
+    let now = Timestamp::now();
+    data.released_subdomains.retain(|r| {
+        r.label != label
+            && now.duration_since(r.released_at).as_secs() < SUBDOMAIN_REUSE_COOLDOWN_SECS
+    });
+    data.subdomain = Some(label.clone());
+
+    if !tx.compare_and_update(org_id, version, &data).await? {
+        return Err(SubdomainClaimError::Other(anyhow::anyhow!(
+            "organization was modified concurrently; please retry"
+        )));
+    }
+    tx.commit().await?;
+
+    Ok(label)
+}
+
+/// Release an organization's issuer subdomain.
+///
+/// The label is moved into the org's release tombstones, which blocks
+/// cross-org re-claims for [`SUBDOMAIN_REUSE_COOLDOWN_SECS`]. Dropping the
+/// field also drops its index entry, so discovery for the host stops
+/// resolving once relying-party caches expire. Returns the released label,
+/// or `None` if the org had no subdomain.
+pub async fn release_subdomain(store: &DocumentStore, org_id: &str) -> Result<Option<String>> {
+    let org_doc = store
+        .get::<OrganizationDoc>(org_id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("organization not found"))?;
+    let version = org_doc.version;
+    let mut data = org_doc.data;
+
+    let Some(label) = data.subdomain.take() else {
+        return Ok(None);
+    };
+
+    let now = Timestamp::now();
+    data.released_subdomains
+        .retain(|r| now.duration_since(r.released_at).as_secs() < SUBDOMAIN_REUSE_COOLDOWN_SECS);
+    data.released_subdomains.push(ReleasedSubdomain {
+        label: label.clone(),
+        released_at: now,
+    });
+
+    if !store.compare_and_update(org_id, version, &data).await? {
+        bail!("organization was modified concurrently; please retry");
+    }
+
+    Ok(Some(label))
+}
+
+/// Look up the organization that has claimed `label` as its issuer
+/// subdomain, if any. Backed by the `subdomain` document index.
+pub async fn find_org_by_subdomain(
+    store: &DocumentStore,
+    label: &str,
+) -> Result<Option<Organization>> {
+    let doc = store
+        .find_one::<OrganizationDoc>("subdomain", label)
+        .await?;
+    Ok(doc.map(Organization::from))
+}
+
+/// Scan org docs for a release tombstone another org holds on `label`
+/// within the reuse cooldown. Tombstones are not indexed, so this pages
+/// through org documents like [`find_conflicting_claim_in_other_org`].
+async fn find_recent_release_in_other_org(
+    store: &DocumentStore,
+    own_org_id: &str,
+    label: &str,
+) -> Result<bool> {
+    let now = Timestamp::now();
+    let mut cursor: Option<String> = None;
+    loop {
+        let (page, has_more) = store
+            .list_all_paginated::<OrganizationDoc>(cursor.as_deref(), ORG_SCAN_PAGE_SIZE)
+            .await?;
+        if page.is_empty() {
+            return Ok(false);
+        }
+        let next_cursor = page.last().map(|d| d.id.clone());
+        for org in &page {
+            if org.id == own_org_id {
+                continue;
+            }
+            for r in &org.data.released_subdomains {
+                if r.label == label
+                    && now.duration_since(r.released_at).as_secs() < SUBDOMAIN_REUSE_COOLDOWN_SECS
+                {
+                    return Ok(true);
+                }
+            }
+        }
+        if !has_more {
+            return Ok(false);
+        }
+        cursor = next_cursor;
+    }
+}
+
 #[cfg(test)]
 #[expect(
     clippy::unwrap_used,
@@ -1612,6 +1956,8 @@ mod tests {
                     state: AdditionalDomainState::Pending,
                 },
             ],
+            subdomain: None,
+            released_subdomains: Vec::new(),
         };
 
         let drop_candidates: std::collections::HashMap<String, bool> = vec![
@@ -1764,5 +2110,260 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(matched_after.data.org_id, Some(org.id.clone()));
+    }
+
+    // ========================================================================
+    // Issuer subdomains
+    // ========================================================================
+
+    #[test]
+    fn validate_subdomain_label_normalizes_and_accepts() {
+        assert_eq!(validate_subdomain_label("Acme").unwrap(), "acme");
+        assert_eq!(validate_subdomain_label("  a-1  ").unwrap(), "a-1");
+        assert_eq!(validate_subdomain_label("x").unwrap(), "x");
+        // Punycode labels are allowed — eligibility already requires a
+        // verified (punycode) domain.
+        assert_eq!(
+            validate_subdomain_label("xn--acme-cua").unwrap(),
+            "xn--acme-cua"
+        );
+    }
+
+    #[test]
+    fn validate_subdomain_label_rejects_invalid() {
+        assert!(validate_subdomain_label("").is_err());
+        assert!(validate_subdomain_label("   ").is_err());
+        assert!(validate_subdomain_label("a.b").is_err());
+        assert!(validate_subdomain_label("-acme").is_err());
+        assert!(validate_subdomain_label("acme-").is_err());
+        assert!(validate_subdomain_label("ac me").is_err());
+        assert!(validate_subdomain_label("under_score").is_err());
+        assert!(validate_subdomain_label("уникод").is_err());
+        assert!(validate_subdomain_label(&"a".repeat(64)).is_err());
+        // All-numeric labels could read as IP octets.
+        assert!(validate_subdomain_label("12345").is_err());
+    }
+
+    #[test]
+    fn validate_subdomain_label_rejects_reserved() {
+        for label in ["www", "us", "mtls", "oauth", "admin", "WWW"] {
+            assert!(
+                validate_subdomain_label(label).is_err(),
+                "'{label}' must be reserved"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn eligible_labels_from_primary_and_verified_only() {
+        let store = fresh_store().await;
+        let org = create_organization(&store, "acme.com", None, None)
+            .await
+            .unwrap();
+        // Pending additional domain must NOT contribute a label.
+        add_additional_domain(&store, &org.id, "pending.io", "u1", "u1@acme.com")
+            .await
+            .unwrap();
+        // Verified additional domain contributes its first label.
+        add_additional_domain(&store, &org.id, "widgets.co.uk", "u1", "u1@acme.com")
+            .await
+            .unwrap();
+        mark_additional_domain_verified(&store, &org.id, "widgets.co.uk")
+            .await
+            .unwrap();
+
+        let org = get_organization(&store, &org.id).await.unwrap().unwrap();
+        let labels = eligible_subdomain_labels(&org.domain, &org.additional_domains);
+        assert_eq!(labels, vec!["acme".to_string(), "widgets".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn eligible_labels_drops_reserved_first_label() {
+        let store = fresh_store().await;
+        // "mail" is a reserved subdomain label, so an org whose primary
+        // domain is mail.io has no eligible labels.
+        let org = create_organization(&store, "mail.io", None, None)
+            .await
+            .unwrap();
+        let labels = eligible_subdomain_labels(&org.domain, &org.additional_domains);
+        assert!(
+            labels.is_empty(),
+            "reserved first label must not be eligible: {labels:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn claim_subdomain_happy_path_and_lookup() {
+        let store = fresh_store().await;
+        let org = create_organization(&store, "acme.com", None, None)
+            .await
+            .unwrap();
+
+        let label = claim_subdomain(&store, &org.id, "ACME").await.unwrap();
+        assert_eq!(label, "acme");
+
+        let found = find_org_by_subdomain(&store, "acme").await.unwrap();
+        assert_eq!(found.map(|o| o.id), Some(org.id.clone()));
+
+        // Idempotent re-claim of the same label.
+        let again = claim_subdomain(&store, &org.id, "acme").await.unwrap();
+        assert_eq!(again, "acme");
+    }
+
+    #[tokio::test]
+    async fn claim_subdomain_rejects_ineligible_label() {
+        let store = fresh_store().await;
+        let org = create_organization(&store, "acme.com", None, None)
+            .await
+            .unwrap();
+        let err = claim_subdomain(&store, &org.id, "widgets")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, SubdomainClaimError::NotEligible), "{err}");
+    }
+
+    #[tokio::test]
+    async fn claim_subdomain_rejects_cross_org_conflict() {
+        let store = fresh_store().await;
+        // Two orgs whose domains share the first label "acme".
+        let first = create_organization(&store, "acme.com", None, None)
+            .await
+            .unwrap();
+        let second = create_organization(&store, "acme.io", None, None)
+            .await
+            .unwrap();
+
+        claim_subdomain(&store, &first.id, "acme").await.unwrap();
+        let err = claim_subdomain(&store, &second.id, "acme")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, SubdomainClaimError::Conflict), "{err}");
+    }
+
+    #[tokio::test]
+    async fn claim_subdomain_rejects_second_label_without_release() {
+        let store = fresh_store().await;
+        let org = create_organization(&store, "acme.com", None, None)
+            .await
+            .unwrap();
+        add_additional_domain(&store, &org.id, "widgets.io", "u1", "u1@acme.com")
+            .await
+            .unwrap();
+        mark_additional_domain_verified(&store, &org.id, "widgets.io")
+            .await
+            .unwrap();
+
+        claim_subdomain(&store, &org.id, "acme").await.unwrap();
+        let err = claim_subdomain(&store, &org.id, "widgets")
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, SubdomainClaimError::AlreadyClaimed(ref l) if l == "acme"),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn release_subdomain_drops_index_and_tombstones() {
+        let store = fresh_store().await;
+        let org = create_organization(&store, "acme.com", None, None)
+            .await
+            .unwrap();
+        claim_subdomain(&store, &org.id, "acme").await.unwrap();
+
+        let released = release_subdomain(&store, &org.id).await.unwrap();
+        assert_eq!(released, Some("acme".to_string()));
+
+        // Index entry gone → host lookup stops resolving.
+        assert!(
+            find_org_by_subdomain(&store, "acme")
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        // Releasing again is a no-op.
+        assert_eq!(release_subdomain(&store, &org.id).await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn released_label_blocked_for_other_org_but_not_own() {
+        let store = fresh_store().await;
+        let first = create_organization(&store, "acme.com", None, None)
+            .await
+            .unwrap();
+        let second = create_organization(&store, "acme.io", None, None)
+            .await
+            .unwrap();
+
+        claim_subdomain(&store, &first.id, "acme").await.unwrap();
+        release_subdomain(&store, &first.id).await.unwrap();
+
+        // Cross-org re-claim is tombstoned for the cooldown window.
+        let err = claim_subdomain(&store, &second.id, "acme")
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, SubdomainClaimError::RecentlyReleased),
+            "{err}"
+        );
+
+        // Same-org re-claim is always allowed and clears the tombstone.
+        let label = claim_subdomain(&store, &first.id, "acme").await.unwrap();
+        assert_eq!(label, "acme");
+        let doc = store
+            .get::<OrganizationDoc>(&first.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            doc.data.released_subdomains.is_empty(),
+            "own re-claim must clear the tombstone"
+        );
+    }
+
+    #[tokio::test]
+    async fn tombstone_scan_walks_multiple_pages() {
+        let store = fresh_store().await;
+        // ORG_SCAN_PAGE_SIZE is 3 in tests: create enough orgs that the
+        // releasing org lands beyond the first page.
+        for i in 0..7 {
+            create_organization(&store, &format!("filler{i}.com"), None, None)
+                .await
+                .unwrap();
+        }
+        let releaser = create_organization(&store, "acme.com", None, None)
+            .await
+            .unwrap();
+        let claimant = create_organization(&store, "acme.io", None, None)
+            .await
+            .unwrap();
+
+        claim_subdomain(&store, &releaser.id, "acme").await.unwrap();
+        release_subdomain(&store, &releaser.id).await.unwrap();
+
+        let err = claim_subdomain(&store, &claimant.id, "acme")
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, SubdomainClaimError::RecentlyReleased),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn claim_subdomain_rejects_invalid_and_reserved_labels() {
+        let store = fresh_store().await;
+        let org = create_organization(&store, "acme.com", None, None)
+            .await
+            .unwrap();
+        assert!(matches!(
+            claim_subdomain(&store, &org.id, "a.b").await.unwrap_err(),
+            SubdomainClaimError::InvalidLabel(_)
+        ));
+        assert!(matches!(
+            claim_subdomain(&store, &org.id, "www").await.unwrap_err(),
+            SubdomainClaimError::InvalidLabel(_)
+        ));
     }
 }

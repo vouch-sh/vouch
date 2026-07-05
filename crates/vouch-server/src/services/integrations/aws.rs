@@ -12,7 +12,26 @@
 //!
 //! # AWS Configuration
 //!
-//! The AWS IAM role must be configured to trust the Vouch OIDC provider:
+//! The AWS IAM role must be configured to trust the Vouch OIDC provider.
+//!
+//! When the organization has claimed an issuer subdomain (e.g. `acme` →
+//! `https://acme.us.vouch.sh`), the issuer host is unique to that org, so
+//! the provider ARN alone scopes trust — no `Condition` block is needed:
+//!
+//! ```json
+//! {
+//!   "Version": "2012-10-17",
+//!   "Statement": [{
+//!     "Effect": "Allow",
+//!     "Principal": {"Federated": "arn:aws:iam::ACCOUNT:oidc-provider/acme.us.vouch.sh"},
+//!     "Action": "sts:AssumeRoleWithWebIdentity"
+//!   }]
+//! }
+//! ```
+//!
+//! Without a claimed subdomain the issuer is the shared server base URL, and
+//! the trust policy must scope by audience (and typically `sub` or session
+//! tags) because every org shares the provider host:
 //!
 //! ```json
 //! {
@@ -108,7 +127,8 @@ fn build_aws_session_tags(
 /// - `hd`: Google Workspace hosted domain (for domain-based access control)
 ///
 /// # Arguments
-/// * `base_url` - Server base URL (issuer)
+/// * `issuer` - Issuer URL (`iss` and `aud`): the org's claimed issuer
+///   subdomain when one exists, otherwise the server base URL
 /// * `session_hours` - Session duration in hours
 /// * `oidc_key` - OIDC signing key
 /// * `user_email` - The authenticated user's email (resolved with a DB fallback,
@@ -116,7 +136,7 @@ fn build_aws_session_tags(
 /// * `token` - The validated resource token; supplies the session-snapshot
 ///   `hardware_aaguid`, `org_domain` (`hd`), and `dpop_source` federation claims
 pub(crate) async fn issue_aws_token(
-    base_url: &str,
+    issuer: &str,
     session_hours: u64,
     oidc_key: &OidcSigningKey,
     user_email: &str,
@@ -133,7 +153,7 @@ pub(crate) async fn issue_aws_token(
 
     // Build OIDC claims
     // For AWS, the audience is the issuer URL (AWS matches against the OIDC provider)
-    let id_claims = OidcIdTokenClaimsBuilder::for_aws(base_url, user_email)
+    let id_claims = OidcIdTokenClaimsBuilder::for_aws(issuer, user_email)
         .hardware_aaguid(token.hardware_aaguid.clone())
         .hd(token.org_domain.clone())
         .aws_tags(aws_tags)
@@ -170,13 +190,15 @@ pub(crate) async fn issue_aws_token(
 /// matches the Vouch OIDC discovery document and its public key is published in
 /// the JWKS, so Identity Center can verify the signature.
 ///
-/// The `aud` claim is set to the issuer (server base URL), matching the STS
-/// token ([`issue_aws_token`]); the customer-managed application's Aud claim
+/// The `aud` claim is set to the issuer, matching the STS token
+/// ([`issue_aws_token`]); the customer-managed application's Aud claim
 /// must be configured to that same URL. This path therefore differs from
 /// [`issue_aws_token`] only by signing algorithm.
 ///
 /// # Arguments
-/// * `base_url` - Server base URL (issuer and `aud`; must match the registered TTI)
+/// * `issuer` - Issuer URL (`iss` and `aud`; must match the registered TTI):
+///   the org's claimed issuer subdomain when one exists, otherwise the
+///   server base URL
 /// * `session_hours` - Session duration in hours
 /// * `oidc_rsa_key` - OIDC RSA (RS256) signing key
 /// * `user_email` - Authenticated user's email (maps to the Identity Store user;
@@ -185,7 +207,7 @@ pub(crate) async fn issue_aws_token(
 /// * `token` - The validated resource token; supplies the session-snapshot
 ///   `hardware_aaguid`, `org_domain` (`hd`), and `dpop_source` federation claims
 pub(crate) async fn issue_sso_jwt(
-    base_url: &str,
+    issuer: &str,
     session_hours: u64,
     oidc_rsa_key: &OidcRsaSigningKey,
     user_email: &str,
@@ -201,8 +223,8 @@ pub(crate) async fn issue_sso_jwt(
         token.dpop_source.as_deref(),
     );
 
-    // aud = issuer (server base URL), same as the STS token.
-    let id_claims = OidcIdTokenClaimsBuilder::for_aws(base_url, user_email)
+    // aud = issuer, same as the STS token.
+    let id_claims = OidcIdTokenClaimsBuilder::for_aws(issuer, user_email)
         .hardware_aaguid(token.hardware_aaguid.clone())
         .hd(token.org_domain.clone())
         .aws_tags(aws_tags)
@@ -552,6 +574,27 @@ mod tests {
                 "'{expected}' must be in transitive_tag_keys"
             );
         }
+    }
+
+    /// A per-org issuer subdomain flows through to both `iss` and `aud`.
+    #[tokio::test]
+    async fn test_org_issuer_sets_iss_and_aud() {
+        let key = OidcSigningKey::generate().expect("Failed to generate OIDC key");
+        let org_issuer = "https://acme.us.vouch.sh";
+
+        let result = issue_aws_token(
+            org_issuer,
+            SESSION_HOURS,
+            &key,
+            USER_EMAIL,
+            &test_token(Some(TEST_AAGUID.to_string()), None, None),
+        )
+        .await
+        .expect("issue_aws_token should succeed");
+
+        let claims = decode_jwt_payload(&result.id_token);
+        assert_eq!(claims["iss"], org_issuer, "iss must be the org issuer");
+        assert_eq!(claims["aud"], org_issuer, "aud must equal the org issuer");
     }
 
     /// `expires_in` matches `session_hours * 3600`.

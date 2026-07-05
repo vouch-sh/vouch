@@ -19,6 +19,30 @@ pub struct OrganizationDoc {
     /// document but are not indexed.
     #[serde(default)]
     pub additional_domains: Vec<AdditionalDomain>,
+    /// Subdomain label claimed as this org's OIDC issuer host for AWS
+    /// workload identity federation (e.g. `acme` → `https://acme.us.vouch.sh`).
+    ///
+    /// Must correspond to the first label of one of the org's verified
+    /// domains. Indexed for host→org lookup when serving discovery.
+    #[serde(default)]
+    pub subdomain: Option<String>,
+    /// Subdomain labels previously claimed and then released by this org.
+    ///
+    /// Kept as tombstones so another organization cannot immediately
+    /// re-claim a label and mint tokens under an issuer host that relying
+    /// parties may still trust (the JWKS is shared across issuer hosts).
+    #[serde(default)]
+    pub released_subdomains: Vec<ReleasedSubdomain>,
+}
+
+/// A subdomain label previously claimed and then released by an organization.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReleasedSubdomain {
+    /// The released label (normalized lowercase).
+    pub label: String,
+    /// When the label was released; cross-org re-claims are blocked until
+    /// the reuse cooldown has elapsed.
+    pub released_at: Timestamp,
 }
 
 /// Lifecycle state of an [`AdditionalDomain`].
@@ -79,7 +103,7 @@ impl DocumentType for OrganizationDoc {
     const DOC_TYPE: &'static str = "organization";
 
     fn index_entries(&self) -> Vec<IndexEntry> {
-        let cap = self.additional_domains.len().saturating_add(1);
+        let cap = self.additional_domains.len().saturating_add(2);
         let mut entries = Vec::with_capacity(cap);
         entries.push(IndexEntry {
             field: "domain",
@@ -92,6 +116,12 @@ impl DocumentType for OrganizationDoc {
                     value: ad.domain.clone(),
                 });
             }
+        }
+        if let Some(label) = &self.subdomain {
+            entries.push(IndexEntry {
+                field: "subdomain",
+                value: label.clone(),
+            });
         }
         entries
     }

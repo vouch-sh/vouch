@@ -329,7 +329,7 @@ async fn authorize_aws_token_request(
     method: &Method,
     path: &str,
     client_cert: &OptionalClientCert,
-) -> Result<(ValidatedResourceToken, String), ServiceError> {
+) -> Result<AwsIssuanceContext, ServiceError> {
     let token = extract_resource_token(
         state,
         headers,
@@ -373,7 +373,48 @@ async fn authorize_aws_token_request(
     }
 
     let user_email = token.email.clone().unwrap_or_else(|| user.email.clone());
-    Ok((token, user_email))
+
+    // Resolve the issuer for this user's AWS tokens: the org's claimed
+    // issuer subdomain when one exists, otherwise the shared base URL.
+    // Built from the stored label + configured base_url — never from the
+    // request Host header.
+    let config = state.config();
+    let mut issuer = config.base_url.clone();
+    if let Some(org_id) = user.org_id.as_deref() {
+        let org = db::get_organization(&state.store, org_id)
+            .await
+            .map_err(|e| {
+                tracing::error!("Failed to load organization {org_id}: {e}");
+                ServiceError::api(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "db_error",
+                    "Internal database error",
+                )
+            })?;
+        if let Some(label) = org.and_then(|o| o.subdomain) {
+            match config.org_issuer(&label) {
+                Some(org_issuer) => issuer = org_issuer,
+                None => {
+                    tracing::error!("could not build org issuer for label '{label}' from base_url");
+                }
+            }
+        }
+    }
+
+    Ok(AwsIssuanceContext {
+        token,
+        user_email,
+        issuer,
+    })
+}
+
+/// Authorization result for the AWS token endpoints: the validated resource
+/// token, the resolved user email, and the issuer (`iss`/`aud`) the token
+/// must be minted under — per-org when the org claimed a subdomain.
+struct AwsIssuanceContext {
+    token: ValidatedResourceToken,
+    user_email: String,
+    issuer: String,
 }
 
 /// Map an [`AwsError`] to a `ServiceError`.
@@ -416,18 +457,18 @@ pub(crate) async fn get_aws_token(
     State(state): State<Arc<AppState>>,
     client_cert: OptionalClientCert,
 ) -> Result<Json<AwsTokenResponse>, ServiceError> {
-    let (token, user_email) =
+    let ctx =
         authorize_aws_token_request(&state, &headers, &jar, &method, uri.path(), &client_cert)
             .await?;
 
     // Issue AWS token using the session-time snapshot of aaguid and org domain.
     let config = state.config();
     let result = issue_aws_token(
-        &config.base_url,
+        &ctx.issuer,
         config.session_hours,
         &state.oidc_key,
-        &user_email,
-        &token,
+        &ctx.user_email,
+        &ctx.token,
     )
     .await
     .map_err(map_aws_error)?;
@@ -459,7 +500,7 @@ pub(crate) async fn get_aws_sso_token(
     State(state): State<Arc<AppState>>,
     client_cert: OptionalClientCert,
 ) -> Result<Json<AwsTokenResponse>, ServiceError> {
-    let (token, user_email) =
+    let ctx =
         authorize_aws_token_request(&state, &headers, &jar, &method, uri.path(), &client_cert)
             .await?;
 
@@ -474,11 +515,11 @@ pub(crate) async fn get_aws_sso_token(
 
     let config = state.config();
     let result = issue_sso_jwt(
-        &config.base_url,
+        &ctx.issuer,
         config.session_hours,
         rsa_key,
-        &user_email,
-        &token,
+        &ctx.user_email,
+        &ctx.token,
     )
     .await
     .map_err(map_aws_error)?;

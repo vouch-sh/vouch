@@ -75,12 +75,14 @@ pub use authenticators::{
 // Re-export organization types and functions
 pub use documents::organization::{AdditionalDomain, UNVERIFY_FAILURE_THRESHOLD};
 pub use organizations::{
-    AddedDomain, DomainRemovalSummary, MAX_ADDITIONAL_DOMAINS, Organization, RecheckEffect,
-    RecheckOutcome, StaleDomainRemoval, VerifiedDomainRecord, add_additional_domain,
-    cleanup_stale_additional_domains, get_organization, get_organization_domain,
-    get_verification_token, list_additional_domains, list_all_verified_additional_domains,
-    mark_additional_domain_verified, normalize_domain, record_recheck_result,
-    remove_additional_domain, unicode_form,
+    AddedDomain, DomainRemovalSummary, MAX_ADDITIONAL_DOMAINS, Organization,
+    RESERVED_SUBDOMAIN_LABELS, RecheckEffect, RecheckOutcome, SUBDOMAIN_REUSE_COOLDOWN_SECS,
+    StaleDomainRemoval, SubdomainClaimError, VerifiedDomainRecord, add_additional_domain,
+    claim_subdomain, cleanup_stale_additional_domains, eligible_subdomain_labels,
+    find_org_by_subdomain, get_organization, get_organization_domain, get_verification_token,
+    list_additional_domains, list_all_verified_additional_domains, mark_additional_domain_verified,
+    normalize_domain, record_recheck_result, release_subdomain, remove_additional_domain,
+    unicode_form, validate_subdomain_label,
 };
 
 // Re-export organization test helpers (only available in tests)

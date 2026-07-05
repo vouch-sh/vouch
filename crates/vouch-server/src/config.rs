@@ -688,6 +688,32 @@ fn derive_base_url(base_url: Option<String>, rp_id: &str, listen_addr: &str) -> 
 }
 
 impl ServerConfig {
+    /// Host of `base_url` (e.g. `us.vouch.sh`), or `None` if `base_url` does
+    /// not parse as a URL with a hostname.
+    #[must_use]
+    pub fn primary_host(&self) -> Option<String> {
+        url::Url::parse(&self.base_url)
+            .ok()
+            .and_then(|u| u.host_str().map(str::to_ascii_lowercase))
+    }
+
+    /// Per-org OIDC issuer for a claimed subdomain label: `base_url` with the
+    /// host replaced by `{label}.{host}`, preserving scheme and port (so
+    /// loopback dev yields `http://acme.localhost:3000`).
+    ///
+    /// The issuer is always built from the stored label plus the configured
+    /// `base_url` — never from a request `Host` header. Returns `None` if
+    /// `base_url` cannot be parsed or re-assembled.
+    #[must_use]
+    pub fn org_issuer(&self, label: &str) -> Option<String> {
+        let mut url = url::Url::parse(&self.base_url).ok()?;
+        let host = url.host_str()?.to_ascii_lowercase();
+        url.set_host(Some(&format!("{label}.{host}"))).ok()?;
+        Some(url.to_string().trim_end_matches('/').to_string())
+    }
+}
+
+impl ServerConfig {
     /// Create configuration from parsed command-line arguments.
     pub fn from_args(args: Args) -> Result<Self> {
         // Note: Validation of rp_id and jwt_secret is deferred to validate()
@@ -1030,6 +1056,36 @@ mod tests {
             email_attribute: None,
             domain_attribute: None,
         }
+    }
+
+    #[test]
+    fn test_org_issuer_preserves_scheme_and_port() {
+        let mut config = test_config();
+        config.base_url = "http://localhost:3000".to_string();
+        assert_eq!(config.primary_host().as_deref(), Some("localhost"));
+        assert_eq!(
+            config.org_issuer("acme").as_deref(),
+            Some("http://acme.localhost:3000")
+        );
+    }
+
+    #[test]
+    fn test_org_issuer_production_shape() {
+        let mut config = test_config();
+        config.base_url = "https://us.vouch.sh".to_string();
+        assert_eq!(config.primary_host().as_deref(), Some("us.vouch.sh"));
+        assert_eq!(
+            config.org_issuer("acme").as_deref(),
+            Some("https://acme.us.vouch.sh")
+        );
+    }
+
+    #[test]
+    fn test_org_issuer_unparseable_base_url() {
+        let mut config = test_config();
+        config.base_url = "not a url".to_string();
+        assert!(config.primary_host().is_none());
+        assert!(config.org_issuer("acme").is_none());
     }
 
     #[test]
