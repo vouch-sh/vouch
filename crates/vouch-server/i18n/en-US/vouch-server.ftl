@@ -567,6 +567,9 @@ admin-domains-dns-type = Type:
 admin-domains-dns-value = Value:
 admin-domains-copy-token-title = Copy verification token
 admin-domains-warning = Adding a domain claims it for this organization. Anyone with a verified email in a claimed domain who signs in will be attached as a member. Only verified domains participate in login matching; pending entries do not.
+# Appended to the remove-domain flash when the removal also auto-released
+# the org's issuer subdomain (rendered in the poster's locale).
+admin-domains-subdomain-auto-released = The issuer subdomain '{ $label }' was released because this domain backed it; delete any AWS IAM OIDC identity providers for that issuer host.
 
 ## Admin issuer subdomain (admin/subdomain.html)
 admin-subdomain-page-title = { -product } - Issuer Subdomain

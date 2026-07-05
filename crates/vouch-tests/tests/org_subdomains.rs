@@ -18,7 +18,9 @@ use axum::http::StatusCode;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use vouch_server::db;
-use vouch_server::test_utils::{HttpResponse, http_get_full, http_post_form_full};
+use vouch_server::test_utils::{
+    HttpResponse, http_get_full, http_post_form_full, test_app_state_with_rsa_key,
+};
 use vouch_tests::TestHarness;
 
 const DISCOVERY_PATH: &str = "/.well-known/openid-configuration";
@@ -541,4 +543,33 @@ async fn aws_token_uses_base_url_without_claim() {
 
     assert_eq!(claims["iss"], "https://test.example.com");
     assert_eq!(claims["aud"], "https://test.example.com");
+}
+
+#[tokio::test]
+async fn aws_sso_token_uses_org_issuer_when_claimed() {
+    let harness = TestHarness::from_state(test_app_state_with_rsa_key().await);
+    let org = harness.create_org("acme.com").await.unwrap();
+    db::claim_subdomain(&harness.state.store, &org.id, "acme")
+        .await
+        .unwrap();
+    let (_user, _auth_id, token) = harness
+        .create_authenticated_org_member("user@acme.com", &org.id)
+        .await
+        .unwrap();
+
+    let resp = harness
+        .get_authenticated("/v1/credentials/aws/sso/token", &token)
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status,
+        200,
+        "body: {}",
+        resp.text().unwrap_or_default()
+    );
+    let body: serde_json::Value = resp.json().unwrap();
+    let claims = decode_jwt_payload(body["id_token"].as_str().unwrap());
+
+    assert_eq!(claims["iss"], "https://acme.test.example.com");
+    assert_eq!(claims["aud"], "https://acme.test.example.com");
 }

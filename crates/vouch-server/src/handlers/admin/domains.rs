@@ -13,6 +13,7 @@ use crate::handlers::browser_login::validate_origin;
 use crate::handlers::session::{AuthContext, extract_org_admin, get_resource_auth_context};
 use crate::impl_template_response;
 use crate::infra::dns;
+use crate::infra::i18n::Tr;
 use crate::services::error::ServiceError;
 use askama::Template;
 use axum::extract::{OriginalUri, Path, State};
@@ -387,10 +388,12 @@ pub(crate) async fn admin_remove_domain(
                 )
             };
             if let Some(label) = &summary.released_subdomain {
-                msg.push_str(&format!(
-                    " The issuer subdomain '{label}' was released because this domain backed \
-                     it; delete any AWS IAM OIDC identity providers for that issuer host."
-                ));
+                msg.push(' ');
+                msg.push_str(
+                    &Tr::new("admin-domains-subdomain-auto-released")
+                        .arg("label", label.as_str())
+                        .to_string(),
+                );
             }
             Ok(redirect_ok(jar, msg))
         }

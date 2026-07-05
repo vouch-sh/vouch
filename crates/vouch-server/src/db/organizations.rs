@@ -1336,14 +1336,13 @@ async fn release_subdomain_if_ineligible(
     org_id: &str,
     data: &mut OrganizationDoc,
 ) -> Result<Option<String>> {
-    let Some(label) = data.subdomain.clone() else {
+    let Some(label) = data.subdomain.take() else {
         return Ok(None);
     };
     if eligible_subdomain_labels(&data.domain, &data.additional_domains).contains(&label) {
+        data.subdomain = Some(label);
         return Ok(None);
     }
-
-    data.subdomain = None;
 
     let claim_id = deterministic_subdomain_claim_id(&label);
     match tx.get::<SubdomainClaimDoc>(&claim_id).await? {
