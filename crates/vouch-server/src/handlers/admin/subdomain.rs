@@ -9,7 +9,7 @@
 
 use crate::AppState;
 use crate::db;
-use crate::db::SubdomainClaimError;
+use crate::db::{SubdomainClaimError, SubdomainLabelError};
 use crate::handlers::admin::flash;
 use crate::handlers::browser_login::validate_origin;
 use crate::handlers::session::{AuthContext, extract_org_admin, get_resource_auth_context};
@@ -63,15 +63,36 @@ fn redirect_ok(jar: CookieJar, msg: impl Into<String>) -> Response {
 }
 
 /// Render a claim failure as a localized flash message.
-///
-/// The `InvalidLabel` reason from the db layer is an untranslated
-/// diagnostic; it is interpolated as an argument so the surrounding
-/// sentence still localizes.
 fn claim_error_message(e: &SubdomainClaimError) -> String {
     match e {
-        SubdomainClaimError::InvalidLabel(msg) => Tr::new("admin-subdomain-error-invalid")
-            .arg("reason", msg.as_str())
-            .to_string(),
+        SubdomainClaimError::InvalidLabel(reason) => match reason {
+            SubdomainLabelError::Empty => {
+                Tr::new("admin-subdomain-error-invalid-empty").to_string()
+            }
+            SubdomainLabelError::NotAscii => {
+                Tr::new("admin-subdomain-error-invalid-ascii").to_string()
+            }
+            SubdomainLabelError::TooLong => {
+                Tr::new("admin-subdomain-error-invalid-length").to_string()
+            }
+            SubdomainLabelError::ContainsDot => {
+                Tr::new("admin-subdomain-error-invalid-dot").to_string()
+            }
+            SubdomainLabelError::HyphenEdge => {
+                Tr::new("admin-subdomain-error-invalid-hyphen").to_string()
+            }
+            SubdomainLabelError::InvalidChar => {
+                Tr::new("admin-subdomain-error-invalid-charset").to_string()
+            }
+            SubdomainLabelError::NoLetter => {
+                Tr::new("admin-subdomain-error-invalid-letter").to_string()
+            }
+            SubdomainLabelError::Reserved(label) => {
+                Tr::new("admin-subdomain-error-invalid-reserved")
+                    .arg("label", label.as_str())
+                    .to_string()
+            }
+        },
         SubdomainClaimError::NotEligible => {
             Tr::new("admin-subdomain-error-not-eligible").to_string()
         }

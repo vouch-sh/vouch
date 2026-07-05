@@ -1007,41 +1007,76 @@ pub const RESERVED_SUBDOMAIN_LABELS: &[&str] = &[
     "wildcard",
 ];
 
+/// Why a candidate label failed [`validate_subdomain_label`].
+///
+/// The `Display` texts are log/diagnostic strings; the admin UI maps each
+/// variant to a localized Fluent message instead of rendering them.
+#[derive(Debug, thiserror::Error)]
+pub enum SubdomainLabelError {
+    /// Empty or whitespace-only input.
+    #[error("subdomain must not be empty")]
+    Empty,
+    /// Contains non-ASCII characters (IDN labels must be punycode).
+    #[error("subdomain must be ASCII (use punycode for internationalized names)")]
+    NotAscii,
+    /// Longer than the RFC 1035 63-character label limit.
+    #[error("subdomain exceeds 63 characters")]
+    TooLong,
+    /// Contains a dot (would be a multi-label host).
+    #[error("subdomain must not contain dots")]
+    ContainsDot,
+    /// Leading or trailing hyphen.
+    #[error("subdomain must not start or end with a hyphen")]
+    HyphenEdge,
+    /// Characters outside letters, digits, and hyphens.
+    #[error("subdomain may only contain letters, digits, and hyphens")]
+    InvalidChar,
+    /// All-numeric label (could read as an IP octet).
+    #[error("subdomain must contain at least one letter")]
+    NoLetter,
+    /// On [`RESERVED_SUBDOMAIN_LABELS`].
+    #[error("subdomain '{0}' is reserved")]
+    Reserved(String),
+}
+
 /// Validate the syntactic shape of an issuer subdomain label.
 ///
 /// Returns the normalized lowercase form on success. Enforces RFC 1035
 /// LDH-label rules (1–63 chars, alphanumeric plus interior hyphens), requires
 /// at least one letter (an all-numeric label could read as an IP octet), and
 /// rejects entries on [`RESERVED_SUBDOMAIN_LABELS`].
-pub fn validate_subdomain_label(input: &str) -> Result<String> {
+///
+/// # Errors
+/// Returns the [`SubdomainLabelError`] variant for the violated rule.
+pub fn validate_subdomain_label(input: &str) -> Result<String, SubdomainLabelError> {
     let trimmed = input.trim();
     if trimmed.is_empty() {
-        bail!("subdomain must not be empty");
+        return Err(SubdomainLabelError::Empty);
     }
     if !trimmed.is_ascii() {
-        bail!("subdomain must be ASCII (use punycode for internationalized names)");
+        return Err(SubdomainLabelError::NotAscii);
     }
     let lower = trimmed.to_ascii_lowercase();
     if lower.len() > 63 {
-        bail!("subdomain exceeds 63 characters");
+        return Err(SubdomainLabelError::TooLong);
     }
     if lower.contains('.') {
-        bail!("subdomain must not contain dots");
+        return Err(SubdomainLabelError::ContainsDot);
     }
     if lower.starts_with('-') || lower.ends_with('-') {
-        bail!("subdomain must not start or end with a hyphen");
+        return Err(SubdomainLabelError::HyphenEdge);
     }
     if !lower
         .bytes()
         .all(|b| b.is_ascii_alphanumeric() || b == b'-')
     {
-        bail!("subdomain may only contain letters, digits, and hyphens");
+        return Err(SubdomainLabelError::InvalidChar);
     }
     if !lower.bytes().any(|b| b.is_ascii_alphabetic()) {
-        bail!("subdomain must contain at least one letter");
+        return Err(SubdomainLabelError::NoLetter);
     }
     if RESERVED_SUBDOMAIN_LABELS.contains(&lower.as_str()) {
-        bail!("subdomain '{lower}' is reserved");
+        return Err(SubdomainLabelError::Reserved(lower));
     }
     Ok(lower)
 }
@@ -1118,7 +1153,7 @@ pub fn ineligible_subdomain_candidates(
 pub enum SubdomainClaimError {
     /// The label failed syntactic validation or is reserved.
     #[error("{0}")]
-    InvalidLabel(String),
+    InvalidLabel(#[from] SubdomainLabelError),
     /// The label does not match any of the org's verified domains.
     #[error("label does not match the first label of any verified domain of this organization")]
     NotEligible,
@@ -1200,8 +1235,7 @@ pub async fn claim_subdomain(
     org_id: &str,
     label: &str,
 ) -> Result<String, SubdomainClaimError> {
-    let label = validate_subdomain_label(label)
-        .map_err(|e| SubdomainClaimError::InvalidLabel(e.to_string()))?;
+    let label = validate_subdomain_label(label)?;
 
     crate::with_dsql_retry!(async {
         let mut tx = store.begin().await?;
@@ -2759,7 +2793,7 @@ mod tests {
         use crate::db::pool::RetryableError;
 
         assert!(SubdomainClaimError::OccConflict.is_retryable());
-        assert!(!SubdomainClaimError::InvalidLabel("bad".into()).is_retryable());
+        assert!(!SubdomainClaimError::InvalidLabel(SubdomainLabelError::NoLetter).is_retryable());
         assert!(!SubdomainClaimError::NotEligible.is_retryable());
         assert!(!SubdomainClaimError::AlreadyClaimed("acme".into()).is_retryable());
         assert!(!SubdomainClaimError::Conflict.is_retryable());

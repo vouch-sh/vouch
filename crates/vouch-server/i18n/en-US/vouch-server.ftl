@@ -593,12 +593,18 @@ admin-subdomain-release = Release
 admin-subdomain-release-confirm = Release this subdomain? AWS federation tokens revert to the shared issuer immediately, and after 30 days the label may be claimed by another organization. Delete any AWS IAM OIDC identity providers for this issuer host.
 admin-subdomain-warning = Tokens issued for AWS federation use this issuer as soon as a subdomain is claimed or released — coordinate changes with your AWS IAM OIDC provider and role trust configuration. Released subdomains cannot be claimed by another organization for 30 days.
 # Flash messages set by the POST handlers (rendered in the poster's locale).
-# `$reason` in the invalid message is an untranslated diagnostic from label
-# validation, interpolated so the surrounding sentence still localizes.
 admin-subdomain-flash-claimed = Claimed issuer subdomain '{ $label }'. Your issuer URL is { $issuer }.
 admin-subdomain-flash-claimed-plain = Claimed issuer subdomain '{ $label }'.
 admin-subdomain-flash-released = Released issuer subdomain '{ $label }'. Delete any AWS IAM OIDC identity providers for the released issuer host; the subdomain may eventually be claimed by another organization.
-admin-subdomain-error-invalid = That subdomain is not valid: { $reason }
+# One message per label-validation rule (SubdomainLabelError variant).
+admin-subdomain-error-invalid-empty = The subdomain must not be empty.
+admin-subdomain-error-invalid-ascii = The subdomain must be ASCII; enter internationalized names in punycode.
+admin-subdomain-error-invalid-length = The subdomain must be 63 characters or fewer.
+admin-subdomain-error-invalid-dot = The subdomain must not contain dots.
+admin-subdomain-error-invalid-hyphen = The subdomain must not start or end with a hyphen.
+admin-subdomain-error-invalid-charset = The subdomain may only contain letters, digits, and hyphens.
+admin-subdomain-error-invalid-letter = The subdomain must contain at least one letter.
+admin-subdomain-error-invalid-reserved = The subdomain '{ $label }' is reserved for platform use.
 admin-subdomain-error-not-eligible = This subdomain is not available to your organization. A subdomain must match the first part of one of your verified domains — for example, verifying acme.com lets you claim acme.
 admin-subdomain-error-already-claimed = This organization already has the issuer subdomain '{ $existing }'; release it before claiming another.
 admin-subdomain-error-conflict = This subdomain is already claimed by another organization.
