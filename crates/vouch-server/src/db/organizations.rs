@@ -967,32 +967,32 @@ pub const RESERVED_SUBDOMAIN_LABELS: &[&str] = &[
 pub fn validate_subdomain_label(input: &str) -> Result<String> {
     let trimmed = input.trim();
     if trimmed.is_empty() {
-        bail!("subdomain label must not be empty");
+        bail!("subdomain must not be empty");
     }
     if !trimmed.is_ascii() {
-        bail!("subdomain label must be ASCII (use punycode for internationalized labels)");
+        bail!("subdomain must be ASCII (use punycode for internationalized names)");
     }
     let lower = trimmed.to_ascii_lowercase();
     if lower.len() > 63 {
-        bail!("subdomain label exceeds 63 characters");
+        bail!("subdomain exceeds 63 characters");
     }
     if lower.contains('.') {
-        bail!("subdomain label must be a single DNS label without dots");
+        bail!("subdomain must not contain dots");
     }
     if lower.starts_with('-') || lower.ends_with('-') {
-        bail!("subdomain label must not start or end with a hyphen");
+        bail!("subdomain must not start or end with a hyphen");
     }
     if !lower
         .bytes()
         .all(|b| b.is_ascii_alphanumeric() || b == b'-')
     {
-        bail!("subdomain label contains invalid characters");
+        bail!("subdomain may only contain letters, digits, and hyphens");
     }
     if !lower.bytes().any(|b| b.is_ascii_alphabetic()) {
-        bail!("subdomain label must contain at least one letter");
+        bail!("subdomain must contain at least one letter");
     }
     if RESERVED_SUBDOMAIN_LABELS.contains(&lower.as_str()) {
-        bail!("subdomain label '{lower}' is reserved");
+        bail!("subdomain '{lower}' is reserved");
     }
     Ok(lower)
 }

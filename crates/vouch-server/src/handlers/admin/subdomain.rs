@@ -61,7 +61,9 @@ fn claim_error_message(e: &SubdomainClaimError) -> String {
     match e {
         SubdomainClaimError::InvalidLabel(msg) => msg.clone(),
         SubdomainClaimError::NotEligible => {
-            "The label must match the first label of one of the organization's verified domains."
+            "This subdomain is not available to your organization. A subdomain must match the \
+             first part of one of your verified domains — for example, verifying acme.com lets \
+             you claim acme."
                 .to_string()
         }
         SubdomainClaimError::AlreadyClaimed(existing) => format!(

@@ -711,9 +711,7 @@ impl ServerConfig {
         url.set_host(Some(&format!("{label}.{host}"))).ok()?;
         Some(url.to_string().trim_end_matches('/').to_string())
     }
-}
 
-impl ServerConfig {
     /// Create configuration from parsed command-line arguments.
     pub fn from_args(args: Args) -> Result<Self> {
         // Note: Validation of rp_id and jwt_secret is deferred to validate()

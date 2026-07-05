@@ -80,7 +80,7 @@
             {% if eligible_labels.is_empty() %}
             <p class="text-sm text-gray-400">
                 {{ self.tr("admin-subdomain-empty") }}
-                <a href="/admin/domains" class="text-vouch-accent hover:text-vouch-accent-hover">{{ self.tr("admin-nav-domains") }}</a>
+                <a href="/admin/domains" class="text-vouch-accent hover:text-vouch-accent-hover">{{ self.tr("admin-nav-domains") }}</a>.
             </p>
             {% else %}
             <form method="POST" action="/admin/subdomain" class="flex items-end gap-3">
