@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
-//! Org issuer-subdomain management — JSON API.
+//! Org issuer-subdomain management — admin UI handlers.
 //!
 //! Lets an org admin claim a subdomain of the primary host as the org's
 //! OIDC issuer for AWS workload identity federation
@@ -10,153 +10,173 @@
 use crate::AppState;
 use crate::db;
 use crate::db::SubdomainClaimError;
+use crate::handlers::admin::flash;
+use crate::handlers::browser_login::validate_origin;
+use crate::handlers::session::{AuthContext, extract_org_admin, get_resource_auth_context};
+use crate::impl_template_response;
 use crate::services::error::ServiceError;
-use axum::Json;
+use askama::Template;
 use axum::extract::{OriginalUri, State};
-use axum::http::{HeaderMap, Method, StatusCode};
+use axum::http::{HeaderMap, Method};
+use axum::response::{IntoResponse, Redirect, Response};
 use axum_extra::extract::cookie::CookieJar;
 use serde::Deserialize;
 use std::sync::Arc;
 
-use crate::handlers::session::extract_org_admin;
-
-/// Response describing the org's issuer-subdomain state.
-#[derive(Debug, serde::Serialize)]
-pub(crate) struct OrgSubdomainResponse {
+/// Issuer subdomain page template.
+#[derive(Template)]
+#[template(path = "admin/subdomain.html")]
+pub(crate) struct AdminSubdomainTemplate {
+    pub auth: AuthContext,
     /// The claimed label, if any (e.g. `acme`).
     pub subdomain: Option<String>,
-    /// The resulting issuer URL, if a label is claimed
-    /// (e.g. `https://acme.us.vouch.sh`).
+    /// The issuer URL for the claimed label (e.g. `https://acme.us.vouch.sh`).
     pub issuer: Option<String>,
-    /// Labels this org is currently eligible to claim, derived from its
-    /// verified domains.
+    /// The discovery URL AWS IAM consumes for the claimed label.
+    pub discovery_url: Option<String>,
+    /// Labels this org may claim, derived from its verified domains.
     pub eligible_labels: Vec<String>,
+    pub flash_message: Option<String>,
+    pub flash_success: Option<String>,
 }
 
-/// Request to claim an issuer subdomain.
+impl_template_response!(AdminSubdomainTemplate);
+
 #[derive(Debug, Deserialize)]
-pub(crate) struct ClaimSubdomainRequest {
+pub(crate) struct ClaimSubdomainForm {
     pub label: String,
 }
 
-/// Response after releasing an issuer subdomain.
-#[derive(Debug, serde::Serialize)]
-pub(crate) struct ReleaseSubdomainResponse {
-    pub released: String,
-    /// Operator follow-up: IAM OIDC providers for the released issuer host
-    /// should be deleted, since the label may eventually be claimed by
-    /// another organization.
-    pub warning: String,
+const REDIRECT_BASE: &str = "/admin/subdomain";
+
+fn redirect_error(jar: CookieJar, msg: impl Into<String>) -> Response {
+    (flash::set_err(jar, msg), Redirect::to(REDIRECT_BASE)).into_response()
 }
 
-fn map_claim_error(e: SubdomainClaimError) -> ServiceError {
+fn redirect_ok(jar: CookieJar, msg: impl Into<String>) -> Response {
+    (flash::set_ok(jar, msg), Redirect::to(REDIRECT_BASE)).into_response()
+}
+
+fn claim_error_message(e: &SubdomainClaimError) -> String {
     match e {
-        SubdomainClaimError::InvalidLabel(msg) => {
-            ServiceError::api(StatusCode::BAD_REQUEST, "invalid_label", msg)
+        SubdomainClaimError::InvalidLabel(msg) => msg.clone(),
+        SubdomainClaimError::NotEligible => {
+            "The label must match the first label of one of the organization's verified domains."
+                .to_string()
         }
-        SubdomainClaimError::NotEligible => ServiceError::api(
-            StatusCode::BAD_REQUEST,
-            "label_not_eligible",
-            "Label must match the first label of one of the organization's verified domains",
+        SubdomainClaimError::AlreadyClaimed(existing) => format!(
+            "This organization already has the issuer subdomain '{existing}'; release it before \
+             claiming another."
         ),
-        SubdomainClaimError::AlreadyClaimed(existing) => ServiceError::api(
-            StatusCode::CONFLICT,
-            "subdomain_already_claimed",
-            format!("Organization already has subdomain '{existing}'; release it first"),
-        ),
-        SubdomainClaimError::Conflict => ServiceError::api(
-            StatusCode::CONFLICT,
-            "subdomain_conflict",
-            "Subdomain is already claimed by another organization",
-        ),
-        SubdomainClaimError::RecentlyReleased => ServiceError::api(
-            StatusCode::CONFLICT,
-            "subdomain_recently_released",
-            "Subdomain was recently released by another organization and cannot be claimed yet",
-        ),
+        SubdomainClaimError::Conflict => {
+            "This subdomain is already claimed by another organization.".to_string()
+        }
+        SubdomainClaimError::RecentlyReleased => {
+            "This subdomain was recently released by another organization and cannot be claimed \
+             yet."
+                .to_string()
+        }
         SubdomainClaimError::Other(e) => {
             tracing::error!("subdomain claim failed: {e}");
-            ServiceError::api(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "db_error",
-                "Internal database error",
-            )
+            "Internal error while claiming the subdomain; please try again.".to_string()
         }
     }
 }
 
-/// Get the org's issuer-subdomain state.
-/// GET /api/v1/org/subdomain
-pub(crate) async fn get_org_subdomain(
-    method: Method,
-    uri: OriginalUri,
+/// GET /admin/subdomain — show the org's issuer-subdomain state.
+pub(crate) async fn admin_subdomain_page(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
     jar: CookieJar,
-) -> Result<Json<OrgSubdomainResponse>, ServiceError> {
-    let (_user, org_id) =
-        extract_org_admin(&state, &headers, &jar, method.as_str(), uri.path(), None).await?;
+) -> Response {
+    let auth = get_resource_auth_context(&state, &jar).await;
+    if !auth.authenticated {
+        return Redirect::to("/enroll/start").into_response();
+    }
+    if !auth.is_org_admin {
+        return Redirect::to("/integrations").into_response();
+    }
 
-    let org = db::get_organization(&state.store, &org_id)
-        .await?
-        .ok_or_else(|| {
-            ServiceError::api(StatusCode::NOT_FOUND, "not_found", "Organization not found")
-        })?;
+    let Some(user_id) = auth.user_id.clone() else {
+        return Redirect::to("/enroll/start").into_response();
+    };
+
+    let org_id = match db::get_user_by_id(&state.store, &user_id).await {
+        Ok(Some(user)) => match user.org_id {
+            Some(id) => id,
+            None => return Redirect::to("/integrations").into_response(),
+        },
+        _ => return Redirect::to("/integrations").into_response(),
+    };
+
+    let org = match db::get_organization(&state.store, &org_id).await {
+        Ok(Some(o)) => o,
+        Ok(None) => return Redirect::to("/integrations").into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, org_id, "failed to load organization");
+            return axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
 
     let config = state.config();
     let issuer = org
         .subdomain
         .as_deref()
         .and_then(|label| config.org_issuer(label));
+    let discovery_url = issuer
+        .as_deref()
+        .map(|iss| format!("{iss}/.well-known/openid-configuration"));
 
-    Ok(Json(OrgSubdomainResponse {
+    let messages = flash::read(&jar);
+    let jar = flash::clear(jar);
+
+    let body = AdminSubdomainTemplate {
+        auth,
         eligible_labels: db::eligible_subdomain_labels(&org.domain, &org.additional_domains),
         subdomain: org.subdomain,
         issuer,
-    }))
+        discovery_url,
+        flash_message: messages.err,
+        flash_success: messages.ok,
+    };
+    (jar, body).into_response()
 }
 
-/// Claim an issuer subdomain for the org.
-/// PUT /api/v1/org/subdomain
-pub(crate) async fn claim_org_subdomain(
+/// POST /admin/subdomain — claim an issuer subdomain for the org.
+pub(crate) async fn admin_claim_subdomain(
     method: Method,
     uri: OriginalUri,
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     jar: CookieJar,
-    Json(req): Json<ClaimSubdomainRequest>,
-) -> Result<Json<OrgSubdomainResponse>, ServiceError> {
-    // Validate the label shape before auth to fail fast on bad requests.
-    if let Err(e) = db::validate_subdomain_label(&req.label) {
-        return Err(ServiceError::api(
-            StatusCode::BAD_REQUEST,
-            "invalid_label",
-            e.to_string(),
-        ));
-    }
-
-    let (user, org_id) =
+    axum::Form(form): axum::Form<ClaimSubdomainForm>,
+) -> Result<Response, ServiceError> {
+    validate_origin(&headers, &state.config().base_url)?;
+    let (admin, org_id) =
         extract_org_admin(&state, &headers, &jar, method.as_str(), uri.path(), None).await?;
 
-    let label = db::claim_subdomain(&state.store, &org_id, &req.label)
-        .await
-        .map_err(map_claim_error)?;
+    let label = match db::claim_subdomain(&state.store, &org_id, &form.label).await {
+        Ok(label) => label,
+        Err(e) => {
+            let msg = claim_error_message(&e);
+            tracing::info!(error = %e, org_id = %org_id, "Subdomain claim rejected");
+            return Ok(redirect_error(jar, msg));
+        }
+    };
 
-    let config = state.config();
-    let issuer = config.org_issuer(&label);
+    let issuer = state.config().org_issuer(&label);
 
     let data = serde_json::json!({
         "action": "claim_subdomain",
         "label": label,
         "issuer": issuer,
-        "admin_user_id": user.id,
+        "admin_user_id": admin.id,
     });
     if let Err(e) = state
         .audit
         .insert_event(
             "org_subdomain_claimed",
-            Some(&user.id),
-            Some(&user.email),
+            Some(&admin.id),
+            Some(&admin.email),
             &data.to_string(),
         )
         .await
@@ -164,53 +184,62 @@ pub(crate) async fn claim_org_subdomain(
         tracing::warn!(error = %e, "failed to write org_subdomain_claimed audit event");
     }
 
-    tracing::info!("Org {org_id} claimed issuer subdomain '{label}'");
+    tracing::info!(
+        admin_email = %admin.email,
+        org_id = %org_id,
+        label = %label,
+        "Claimed issuer subdomain"
+    );
 
-    let org = db::get_organization(&state.store, &org_id).await?;
-    let eligible_labels = org
-        .map(|o| db::eligible_subdomain_labels(&o.domain, &o.additional_domains))
-        .unwrap_or_default();
-
-    Ok(Json(OrgSubdomainResponse {
-        subdomain: Some(label),
-        issuer,
-        eligible_labels,
-    }))
+    Ok(redirect_ok(
+        jar,
+        match issuer {
+            Some(iss) => format!("Claimed issuer subdomain '{label}'. Your issuer URL is {iss}."),
+            None => format!("Claimed issuer subdomain '{label}'."),
+        },
+    ))
 }
 
-/// Release the org's issuer subdomain.
-/// DELETE /api/v1/org/subdomain
-pub(crate) async fn release_org_subdomain(
+/// POST /admin/subdomain/release — release the org's issuer subdomain.
+pub(crate) async fn admin_release_subdomain(
     method: Method,
     uri: OriginalUri,
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     jar: CookieJar,
-) -> Result<Json<ReleaseSubdomainResponse>, ServiceError> {
-    let (user, org_id) =
+) -> Result<Response, ServiceError> {
+    validate_origin(&headers, &state.config().base_url)?;
+    let (admin, org_id) =
         extract_org_admin(&state, &headers, &jar, method.as_str(), uri.path(), None).await?;
 
-    let released = db::release_subdomain(&state.store, &org_id)
-        .await?
-        .ok_or_else(|| {
-            ServiceError::api(
-                StatusCode::NOT_FOUND,
-                "not_found",
-                "Organization has no issuer subdomain",
-            )
-        })?;
+    let released = match db::release_subdomain(&state.store, &org_id).await {
+        Ok(Some(label)) => label,
+        Ok(None) => {
+            return Ok(redirect_error(
+                jar,
+                "This organization has no issuer subdomain to release.",
+            ));
+        }
+        Err(e) => {
+            tracing::error!(error = %e, org_id = %org_id, "Subdomain release failed");
+            return Ok(redirect_error(
+                jar,
+                "Internal error while releasing the subdomain; please try again.",
+            ));
+        }
+    };
 
     let data = serde_json::json!({
         "action": "release_subdomain",
         "label": released,
-        "admin_user_id": user.id,
+        "admin_user_id": admin.id,
     });
     if let Err(e) = state
         .audit
         .insert_event(
             "org_subdomain_released",
-            Some(&user.id),
-            Some(&user.email),
+            Some(&admin.id),
+            Some(&admin.email),
             &data.to_string(),
         )
         .await
@@ -218,13 +247,19 @@ pub(crate) async fn release_org_subdomain(
         tracing::warn!(error = %e, "failed to write org_subdomain_released audit event");
     }
 
-    tracing::info!("Org {org_id} released issuer subdomain '{released}'");
+    tracing::info!(
+        admin_email = %admin.email,
+        org_id = %org_id,
+        label = %released,
+        "Released issuer subdomain"
+    );
 
-    Ok(Json(ReleaseSubdomainResponse {
-        warning: format!(
-            "Delete any AWS IAM OIDC identity providers for the released issuer host \
-             '{released}'; the label may eventually be claimed by another organization."
+    Ok(redirect_ok(
+        jar,
+        format!(
+            "Released issuer subdomain '{released}'. Delete any AWS IAM OIDC identity providers \
+             for the released issuer host; the label may eventually be claimed by another \
+             organization."
         ),
-        released,
-    }))
+    ))
 }

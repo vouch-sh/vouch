@@ -1,0 +1,112 @@
+{% extends "base.html" %}
+{% import "macros/auth.html" as auth_macros %}
+
+{% block title %}{{ self.tr("admin-subdomain-page-title") }}{% endblock %}
+
+{% block header_right %}
+{{ auth_macros::header_auth(auth, self) }}
+{% endblock %}
+
+{% block content %}
+<div class="flex-1 p-5">
+    <div class="max-w-5xl mx-auto">
+        <div class="mb-6 flex items-center justify-between">
+            <div>
+                <h1 class="text-2xl font-bold text-gray-200 mb-1">{{ self.tr("admin-nav-subdomain") }}</h1>
+                <p class="text-gray-400 text-sm">{{ self.tr("admin-subdomain-subtitle") }}</p>
+            </div>
+            <nav class="flex gap-3 text-sm">
+                <a href="/admin" class="text-gray-400 hover:text-gray-200">{{ self.tr("admin-nav-members") }}</a>
+                <a href="/admin/audit" class="text-gray-400 hover:text-gray-200">{{ self.tr("admin-nav-audit") }}</a>
+                <a href="/admin/policies" class="text-gray-400 hover:text-gray-200">{{ self.tr("admin-nav-policies") }}</a>
+                <a href="/admin/scim-tokens" class="text-gray-400 hover:text-gray-200">{{ self.tr("admin-nav-scim") }}</a>
+                <a href="/admin/domains" class="text-gray-400 hover:text-gray-200">{{ self.tr("admin-nav-domains") }}</a>
+                <a href="/admin/subdomain" class="text-vouch-accent hover:text-vouch-accent-hover font-medium">{{ self.tr("admin-nav-subdomain") }}</a>
+            </nav>
+        </div>
+
+        {% if let Some(msg) = flash_message %}
+        <div class="mb-4 px-4 py-3 rounded bg-red-900/30 border border-red-800 text-red-300 text-sm">
+            {{ msg }}
+        </div>
+        {% endif %}
+
+        {% if let Some(msg) = flash_success %}
+        <div class="mb-4 px-4 py-3 rounded bg-green-900/30 border border-green-800 text-green-300 text-sm">
+            {{ msg }}
+        </div>
+        {% endif %}
+
+        {% if let Some(label) = subdomain %}
+        <div class="bg-vouch-surface border border-vouch-border rounded-lg p-4">
+            <div class="flex items-start justify-between gap-4">
+                <div class="min-w-0">
+                    <h2 class="text-sm font-semibold text-gray-300 mb-3">{{ self.tr("admin-subdomain-current-label") }}</h2>
+                    <p class="text-gray-200 font-mono text-lg mb-4">{{ label }}</p>
+                    {% if let Some(iss) = issuer %}
+                    <div class="text-xs text-gray-400 mb-1">{{ self.tr("admin-subdomain-issuer-label") }}</div>
+                    <div class="flex items-start gap-2 font-mono text-sm text-gray-200 bg-gray-950 px-3 py-2 rounded border border-gray-800 break-all mb-3">
+                        <span>{{ iss }}</span>
+                        <button type="button" data-copy-text="{{ iss }}" class="shrink-0 text-gray-500 hover:text-gray-200 transition-colors" title="{{ self.tr("admin-subdomain-copy-title") }}">
+                            <svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"/>
+                            </svg>
+                            <span class="sr-only">{{ self.tr("common-copy") }}</span>
+                        </button>
+                    </div>
+                    {% endif %}
+                    {% if let Some(disco) = discovery_url %}
+                    <div class="text-xs text-gray-400 mb-1">{{ self.tr("admin-subdomain-discovery-label") }}</div>
+                    <div class="flex items-start gap-2 font-mono text-sm text-gray-200 bg-gray-950 px-3 py-2 rounded border border-gray-800 break-all">
+                        <span>{{ disco }}</span>
+                        <button type="button" data-copy-text="{{ disco }}" class="shrink-0 text-gray-500 hover:text-gray-200 transition-colors" title="{{ self.tr("admin-subdomain-copy-title") }}">
+                            <svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"/>
+                            </svg>
+                            <span class="sr-only">{{ self.tr("common-copy") }}</span>
+                        </button>
+                    </div>
+                    <p class="mt-3 text-xs text-gray-500">{{ self.tr("admin-subdomain-provider-hint") }}</p>
+                    {% endif %}
+                </div>
+                <form method="POST" action="/admin/subdomain/release" data-confirm-message="{{ self.tr("admin-subdomain-release-confirm") }}">
+                    <button type="submit" class="px-3 py-1.5 text-xs rounded bg-red-900/40 text-red-400 hover:bg-red-900/60 whitespace-nowrap">{{ self.tr("admin-subdomain-release") }}</button>
+                </form>
+            </div>
+        </div>
+        {% else %}
+        <div class="bg-vouch-surface border border-vouch-border rounded-lg p-4">
+            <h2 class="text-sm font-semibold text-gray-300 mb-3">{{ self.tr("admin-subdomain-claim") }}</h2>
+            {% if eligible_labels.is_empty() %}
+            <p class="text-sm text-gray-400">
+                {{ self.tr("admin-subdomain-empty") }}
+                <a href="/admin/domains" class="text-vouch-accent hover:text-vouch-accent-hover">{{ self.tr("admin-nav-domains") }}</a>
+            </p>
+            {% else %}
+            <form method="POST" action="/admin/subdomain" class="flex items-end gap-3">
+                <div class="flex-1">
+                    <label for="label" class="block text-xs text-gray-400 mb-1">{{ self.tr("admin-subdomain-label-select") }}</label>
+                    <select id="label" name="label" required class="w-full px-3 py-2 rounded bg-gray-800 border border-gray-700 text-gray-200 text-sm focus:outline-none focus:border-vouch-accent">
+                        {% for l in eligible_labels %}
+                        <option value="{{ l }}">{{ l }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+                <button type="submit" class="px-4 py-2 text-sm rounded bg-vouch-accent text-white hover:bg-vouch-accent-hover">{{ self.tr("admin-subdomain-claim") }}</button>
+            </form>
+            <p class="mt-3 text-xs text-gray-500">{{ self.tr("admin-subdomain-claim-help") }}</p>
+            {% endif %}
+        </div>
+        {% endif %}
+
+        <div class="mt-4 px-4 py-3 rounded bg-yellow-900/20 border border-yellow-900/40 text-yellow-400/80 text-xs">
+            {{ self.tr("admin-subdomain-warning") }}
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/js/common.js"></script>
+<script src="/static/js/admin.js"></script>
+{% endblock %}

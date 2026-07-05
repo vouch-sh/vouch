@@ -479,6 +479,7 @@ admin-nav-audit = Audit Log
 admin-nav-policies = Policies
 admin-nav-scim = SCIM Tokens
 admin-nav-domains = Email Domains
+admin-nav-subdomain = Issuer Subdomain
 admin-next-page = Next page
 
 ## Admin members (admin/members.html)
@@ -566,6 +567,22 @@ admin-domains-dns-type = Type:
 admin-domains-dns-value = Value:
 admin-domains-copy-token-title = Copy verification token
 admin-domains-warning = Adding a domain claims it for this organization. Anyone with a verified email in a claimed domain who signs in will be attached as a member. Only verified domains participate in login matching; pending entries do not.
+
+## Admin issuer subdomain (admin/subdomain.html)
+admin-subdomain-page-title = { -product } - Issuer Subdomain
+admin-subdomain-subtitle = Give this organization its own OIDC issuer host for AWS workload identity federation.
+admin-subdomain-current-label = Claimed subdomain
+admin-subdomain-issuer-label = Issuer URL
+admin-subdomain-discovery-label = Discovery URL
+admin-subdomain-copy-title = Copy URL
+admin-subdomain-provider-hint = Create your AWS IAM OIDC identity provider with the issuer URL above; role trust can then be scoped to the provider ARN alone.
+admin-subdomain-claim = Claim Subdomain
+admin-subdomain-label-select = Subdomain (derived from your verified domains)
+admin-subdomain-claim-help = Claiming activates OIDC discovery on the subdomain and switches this organization's AWS federation tokens to the new issuer. Update your AWS IAM OIDC providers and role trust policies afterwards.
+admin-subdomain-empty = No eligible subdomains. Labels come from the first label of your verified email domains — add and verify one under
+admin-subdomain-release = Release
+admin-subdomain-release-confirm = Release this subdomain? AWS federation tokens revert to the shared issuer immediately, and after 30 days the label may be claimed by another organization. Delete any AWS IAM OIDC identity providers for this issuer host.
+admin-subdomain-warning = Tokens issued for AWS federation use this issuer as soon as a subdomain is claimed or released — coordinate changes with your AWS IAM OIDC provider and role trust configuration. Released subdomains cannot be claimed by another organization for 30 days.
 
 ## Admin device posture policies (admin/policies.html)
 admin-policies-page-title = { -product } - Device Posture Policies

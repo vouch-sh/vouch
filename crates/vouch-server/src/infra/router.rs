@@ -337,13 +337,6 @@ fn build_general_limited_routes(
             "/api/v1/org/scim-tokens/{id}",
             delete(handlers::admin::delete_scim_token),
         )
-        // Org issuer-subdomain management (per-org OIDC issuer for AWS WIF)
-        .route(
-            "/api/v1/org/subdomain",
-            get(handlers::admin::get_org_subdomain)
-                .put(handlers::admin::claim_org_subdomain)
-                .delete(handlers::admin::release_org_subdomain),
-        )
         // CEL validation API (used by admin UI CEL playground)
         .route(
             "/api/v1/org/policies/validate",
@@ -703,6 +696,15 @@ fn build_admin_routes(config: &config::ServerConfig) -> anyhow::Result<Router<Ar
         .route(
             "/admin/domains/{domain}/remove",
             post(handlers::admin::admin_remove_domain),
+        )
+        // Issuer subdomain management UI (per-org OIDC issuer for AWS WIF)
+        .route(
+            "/admin/subdomain",
+            get(handlers::admin::admin_subdomain_page).post(handlers::admin::admin_claim_subdomain),
+        )
+        .route(
+            "/admin/subdomain/release",
+            post(handlers::admin::admin_release_subdomain),
         )
         .layer(maybe_rate_limit!(
             rate_limit::build_general_rate_limiter,
