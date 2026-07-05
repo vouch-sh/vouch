@@ -1056,11 +1056,13 @@ pub enum SubdomainClaimError {
 ///
 /// The label must be eligible (first label of a verified domain), globally
 /// unique across orgs, and not tombstoned by another org's recent release.
-/// Re-claiming the org's own current label is idempotent. Uniqueness is
-/// enforced with the same OCC shape as [`add_additional_domain`]: the
-/// indexed `find_one` conflict check and the `compare_and_update` version
-/// bump run inside one transaction, so concurrent claimants collide on the
-/// org doc's row on every backend (including DSQL).
+/// Re-claiming the org's own current label is idempotent. Uniqueness and
+/// the reuse cooldown are enforced with the same OCC shape as
+/// [`add_additional_domain`]: the indexed `find_one`/`find_all` checks and
+/// the `compare_and_update` version bump run inside one transaction, so
+/// concurrent claimants collide on the org doc's row on every backend
+/// (including DSQL) and a concurrent release cannot slip a label past the
+/// cooldown check.
 ///
 /// Returns the normalized label on success.
 pub async fn claim_subdomain(
@@ -1070,15 +1072,6 @@ pub async fn claim_subdomain(
 ) -> Result<String, SubdomainClaimError> {
     let label = validate_subdomain_label(label)
         .map_err(|e| SubdomainClaimError::InvalidLabel(e.to_string()))?;
-
-    // Tombstone courtesy check (non-transactional). Tombstones are not
-    // indexed, so we page through org docs — same pattern and caveats as the
-    // pending-claim scan in `add_additional_domain`: a true race is possible
-    // but the window is small and the failure mode is a rejected claim, not
-    // a broken invariant.
-    if find_recent_release_in_other_org(store, org_id, &label).await? {
-        return Err(SubdomainClaimError::RecentlyReleased);
-    }
 
     let mut tx = store.begin().await?;
 
@@ -1109,9 +1102,30 @@ pub async fn claim_subdomain(
         return Err(SubdomainClaimError::Conflict);
     }
 
+    // Reuse-cooldown check, also inside the transaction: tombstones are
+    // indexed (`released_subdomain`), so this runs adjacent to the commit
+    // rather than as a pre-transaction scan a concurrent release could
+    // race past. `find_all` because expired tombstones from earlier
+    // holders may coexist with a fresh one on another doc.
+    let now = Timestamp::now();
+    for holder in tx
+        .find_all::<OrganizationDoc>("released_subdomain", &label)
+        .await?
+    {
+        if holder.id == org_id {
+            continue;
+        }
+        let recently_released = holder.data.released_subdomains.iter().any(|r| {
+            r.label == label
+                && now.duration_since(r.released_at).as_secs() < SUBDOMAIN_REUSE_COOLDOWN_SECS
+        });
+        if recently_released {
+            return Err(SubdomainClaimError::RecentlyReleased);
+        }
+    }
+
     // Re-claiming a label this org itself released clears its tombstone;
     // expired tombstones are pruned opportunistically on the same write.
-    let now = Timestamp::now();
     data.released_subdomains.retain(|r| {
         r.label != label
             && now.duration_since(r.released_at).as_secs() < SUBDOMAIN_REUSE_COOLDOWN_SECS
@@ -1172,43 +1186,6 @@ pub async fn find_org_by_subdomain(
         .find_one::<OrganizationDoc>("subdomain", label)
         .await?;
     Ok(doc.map(Organization::from))
-}
-
-/// Scan org docs for a release tombstone another org holds on `label`
-/// within the reuse cooldown. Tombstones are not indexed, so this pages
-/// through org documents like [`find_conflicting_claim_in_other_org`].
-async fn find_recent_release_in_other_org(
-    store: &DocumentStore,
-    own_org_id: &str,
-    label: &str,
-) -> Result<bool> {
-    let now = Timestamp::now();
-    let mut cursor: Option<String> = None;
-    loop {
-        let (page, has_more) = store
-            .list_all_paginated::<OrganizationDoc>(cursor.as_deref(), ORG_SCAN_PAGE_SIZE)
-            .await?;
-        if page.is_empty() {
-            return Ok(false);
-        }
-        let next_cursor = page.last().map(|d| d.id.clone());
-        for org in &page {
-            if org.id == own_org_id {
-                continue;
-            }
-            for r in &org.data.released_subdomains {
-                if r.label == label
-                    && now.duration_since(r.released_at).as_secs() < SUBDOMAIN_REUSE_COOLDOWN_SECS
-                {
-                    return Ok(true);
-                }
-            }
-        }
-        if !has_more {
-            return Ok(false);
-        }
-        cursor = next_cursor;
-    }
 }
 
 #[cfg(test)]
@@ -2323,10 +2300,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tombstone_scan_walks_multiple_pages() {
+    async fn tombstone_check_finds_releaser_among_many_orgs() {
         let store = fresh_store().await;
-        // ORG_SCAN_PAGE_SIZE is 3 in tests: create enough orgs that the
-        // releasing org lands beyond the first page.
+        // The cooldown check is an indexed in-transaction lookup; filler
+        // orgs verify it finds the releasing org regardless of table size.
         for i in 0..7 {
             create_organization(&store, &format!("filler{i}.com"), None, None)
                 .await

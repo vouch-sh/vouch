@@ -103,7 +103,11 @@ impl DocumentType for OrganizationDoc {
     const DOC_TYPE: &'static str = "organization";
 
     fn index_entries(&self) -> Vec<IndexEntry> {
-        let cap = self.additional_domains.len().saturating_add(2);
+        let cap = self
+            .additional_domains
+            .len()
+            .saturating_add(self.released_subdomains.len())
+            .saturating_add(2);
         let mut entries = Vec::with_capacity(cap);
         entries.push(IndexEntry {
             field: "domain",
@@ -121,6 +125,16 @@ impl DocumentType for OrganizationDoc {
             entries.push(IndexEntry {
                 field: "subdomain",
                 value: label.clone(),
+            });
+        }
+        // Tombstones are indexed so the claim transaction can check the
+        // reuse cooldown with an indexed lookup INSIDE the same transaction
+        // that enforces uniqueness — a non-transactional scan would race a
+        // concurrent release and allow the cooldown to be skipped.
+        for r in &self.released_subdomains {
+            entries.push(IndexEntry {
+                field: "released_subdomain",
+                value: r.label.clone(),
             });
         }
         entries

@@ -392,12 +392,18 @@ async fn authorize_aws_token_request(
                 )
             })?;
         if let Some(label) = org.and_then(|o| o.subdomain) {
-            match config.org_issuer(&label) {
-                Some(org_issuer) => issuer = org_issuer,
-                None => {
-                    tracing::error!("could not build org issuer for label '{label}' from base_url");
-                }
-            }
+            // Fail closed: an org that claimed an issuer subdomain must
+            // never receive tokens minted under the shared issuer — they
+            // would not match the org's discovery document or the IAM
+            // OIDC provider the customer configured.
+            issuer = config.org_issuer(&label).ok_or_else(|| {
+                tracing::error!("could not build org issuer for label '{label}' from base_url");
+                ServiceError::api(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "issuer_error",
+                    "Failed to construct the organization issuer",
+                )
+            })?;
         }
     }
 
