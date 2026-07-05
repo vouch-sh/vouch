@@ -2223,6 +2223,11 @@ mod tests {
         fn hmac_index(&self, value: &str) -> String {
             format!("hashed:{value}")
         }
+
+        fn is_encrypted(&self) -> bool {
+            // Simulates HPKE mode (opaque hashed indexes) without encrypting.
+            false
+        }
     }
 
     #[test]

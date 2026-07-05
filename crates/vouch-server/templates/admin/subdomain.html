@@ -74,6 +74,11 @@
                 </form>
             </div>
         </div>
+        {% else if !store_encrypted %}
+        <div class="bg-vouch-surface border border-vouch-border rounded-lg p-4">
+            <h2 class="text-sm font-semibold text-gray-300 mb-3">{{ self.tr("admin-subdomain-claim") }}</h2>
+            <p class="text-sm text-gray-400">{{ self.tr("admin-subdomain-error-requires-encryption") }}</p>
+        </div>
         {% else %}
         <div class="bg-vouch-surface border border-vouch-border rounded-lg p-4">
             <h2 class="text-sm font-semibold text-gray-300 mb-3">{{ self.tr("admin-subdomain-claim") }}</h2>

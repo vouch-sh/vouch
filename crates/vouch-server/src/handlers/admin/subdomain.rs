@@ -3,9 +3,11 @@
 //!
 //! Lets an org admin claim a subdomain of the primary host as the org's
 //! OIDC issuer for AWS workload identity federation
-//! (`acme` → `https://acme.us.vouch.sh`). The label must match the first
-//! label of one of the org's verified domains; see
-//! [`crate::db::claim_subdomain`] for the invariants.
+//! (`acme-com` → `https://acme-com.us.vouch.sh`). The label is derived from
+//! the registrable apex of one of the org's verified domains; see
+//! [`crate::db::claim_subdomain`] for the invariants. Claiming requires a
+//! document store that encrypts at rest (per-org signing keys are never
+//! persisted in plaintext).
 
 use crate::AppState;
 use crate::db;
@@ -29,18 +31,22 @@ use std::sync::Arc;
 #[template(path = "admin/subdomain.html")]
 pub(crate) struct AdminSubdomainTemplate {
     pub auth: AuthContext,
-    /// The claimed label, if any (e.g. `acme`).
+    /// The claimed label, if any (e.g. `acme-com`).
     pub subdomain: Option<String>,
-    /// The issuer URL for the claimed label (e.g. `https://acme.us.vouch.sh`).
+    /// The issuer URL for the claimed label (e.g. `https://acme-com.us.vouch.sh`).
     pub issuer: Option<String>,
     /// The discovery URL AWS IAM consumes for the claimed label.
     pub discovery_url: Option<String>,
     /// Labels this org may claim, derived from its verified domains.
     pub eligible_labels: Vec<String>,
-    /// First labels of verified domains that are reserved or invalid and
-    /// therefore not claimable — shown so an empty eligible list doesn't
-    /// read as "no verified domains".
+    /// Apex-derived labels of verified domains that are not claimable (e.g.
+    /// longer than a DNS label allows) — shown so an empty eligible list
+    /// doesn't read as "no verified domains".
     pub ineligible_candidates: Vec<String>,
+    /// Whether the document store encrypts at rest. When it doesn't, the
+    /// claim form is replaced by an explanation — per-org signing keys are
+    /// never persisted in plaintext, so subdomains can't be claimed.
+    pub store_encrypted: bool,
     pub flash_message: Option<String>,
     pub flash_success: Option<String>,
 }
@@ -172,6 +178,7 @@ pub(crate) async fn admin_subdomain_page(
         subdomain: org.subdomain,
         issuer,
         discovery_url,
+        store_encrypted: state.store.is_encrypted(),
         flash_message: messages.err,
         flash_success: messages.ok,
     };
@@ -190,6 +197,16 @@ pub(crate) async fn admin_claim_subdomain(
     validate_origin(&headers, &state.config().base_url)?;
     let (admin, org_id) =
         extract_org_admin(&state, &headers, &jar, method.as_str(), uri.path(), None).await?;
+
+    // Per-org signing keys are never persisted in plaintext, and the startup
+    // guard refuses to boot an unencrypted server with claims — reject here
+    // so a claim can't create that state at runtime.
+    if !state.store.is_encrypted() {
+        return Ok(redirect_error(
+            jar,
+            Tr::new("admin-subdomain-error-requires-encryption").to_string(),
+        ));
+    }
 
     let label = match db::claim_subdomain(&state.store, &org_id, &form.label).await {
         Ok(label) => label,

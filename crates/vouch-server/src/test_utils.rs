@@ -169,6 +169,7 @@ pub async fn test_app_state_with_idps(
         github_app: None,
         http_client: reqwest::Client::new(),
         session_cache: crate::db::SessionCache::new(10_000, 30),
+        org_keys_cache: Default::default(),
         idps,
     })
 }
@@ -216,6 +217,7 @@ pub async fn test_app_state_with_rsa_key() -> Arc<AppState> {
         github_app: None,
         http_client: reqwest::Client::new(),
         session_cache: crate::db::SessionCache::new(10_000, 30),
+        org_keys_cache: Default::default(),
         idps: Vec::new(),
     })
 }
@@ -264,6 +266,7 @@ pub async fn test_app_state_encrypted() -> Arc<AppState> {
         github_app: None,
         http_client: reqwest::Client::new(),
         session_cache: crate::db::SessionCache::new(10_000, 30),
+        org_keys_cache: Default::default(),
         idps: Vec::new(),
     })
 }

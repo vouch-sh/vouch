@@ -22,11 +22,14 @@
 //! callers fall back to the common key — a private key is never persisted in
 //! the clear, and there is no config flag threaded through call sites.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
+use secrecy::ExposeSecret;
 use zeroize::Zeroizing;
 
 use axum::http::StatusCode;
@@ -34,7 +37,7 @@ use axum::http::StatusCode;
 use crate::AppState;
 use crate::config::ServerConfig;
 use crate::db::documents::oauth::JwsAlgorithm;
-use crate::db::documents::organization::{OrgSigningKeyDoc, SigningKeyState};
+use crate::db::documents::organization::OrgSigningKeyDoc;
 use crate::db::store::DocumentStore;
 use crate::db::{self, Organization};
 use crate::services::error::ServiceError;
@@ -77,11 +80,50 @@ pub struct OrgKeys {
     pub rs256: OidcRsaSigningKey,
 }
 
+/// How long a resolved key set may be served from [`OrgKeysCache`].
+const ORG_KEYS_CACHE_TTL: Duration = Duration::from_secs(60);
+
+/// Cache of resolved per-org key sets, keyed by org ID.
+///
+/// Key material is immutable once created (rotation is not implemented), so
+/// the TTL bounds memory held for deleted orgs rather than staleness of the
+/// keys themselves. [`resolve_org_keys`] consults it only after the caller's
+/// *fresh* org doc shows a claimed subdomain, so a released subdomain stops
+/// resolving immediately without cache invalidation.
+#[derive(Default)]
+pub struct OrgKeysCache {
+    entries: Mutex<HashMap<String, (Instant, Arc<OrgKeys>)>>,
+}
+
+impl OrgKeysCache {
+    /// Fresh cached key set for `org_id`, if present.
+    fn get(&self, org_id: &str) -> Option<Arc<OrgKeys>> {
+        let Ok(map) = self.entries.lock() else {
+            return None;
+        };
+        map.get(org_id)
+            .filter(|(inserted_at, _)| inserted_at.elapsed() < ORG_KEYS_CACHE_TTL)
+            .map(|(_, keys)| Arc::clone(keys))
+    }
+
+    /// Cache `keys`, pruning expired entries so deleted orgs don't accumulate.
+    fn insert(&self, org_id: &str, keys: Arc<OrgKeys>) {
+        let Ok(mut map) = self.entries.lock() else {
+            return;
+        };
+        map.retain(|_, (inserted_at, _)| inserted_at.elapsed() < ORG_KEYS_CACHE_TTL);
+        map.insert(org_id.to_string(), (Instant::now(), keys));
+    }
+}
+
 /// Resolve an org's own signing key set, creating it on first use.
 ///
 /// Returns `None` when the org has no claimed subdomain, or when the document
-/// store doesn't encrypt at rest (dev) — the caller then falls back to the
-/// common platform key. Held in an `Arc` so a request keeps the set cheaply.
+/// store doesn't encrypt at rest — the caller then falls back to the common
+/// platform key (the startup guard makes that combination unreachable on a
+/// running server; this check is the invariant's backstop). Resolutions are
+/// served from a per-org cache for [`ORG_KEYS_CACHE_TTL`], so the token hot
+/// paths don't re-read and unseal key rows on every request.
 ///
 /// # Errors
 /// Returns an error if key creation or loading fails.
@@ -93,6 +135,9 @@ pub async fn resolve_org_keys(
     if org.subdomain.is_none() || !state.store.is_encrypted() {
         return Ok(None);
     }
+    if let Some(keys) = state.org_keys_cache.get(&org.id) {
+        return Ok(Some(keys));
+    }
     let store = &state.store;
     ensure_key::<OidcSigningKey>(store, &org.id).await?;
     ensure_key::<OidcRsaSigningKey>(store, &org.id).await?;
@@ -102,7 +147,9 @@ pub async fn resolve_org_keys(
     ) else {
         return Ok(None);
     };
-    Ok(Some(Arc::new(OrgKeys { es256, rs256 })))
+    let keys = Arc::new(OrgKeys { es256, rs256 });
+    state.org_keys_cache.insert(&org.id, Arc::clone(&keys));
+    Ok(Some(keys))
 }
 
 /// Build the JWKS served on `org`'s issuer-subdomain host: the org's own keys,
@@ -166,13 +213,13 @@ impl OrgIssuerKey for OidcRsaSigningKey {
     }
 }
 
-/// Create the org's `Active` key for algorithm `K` if it doesn't exist.
+/// Create the org's key for algorithm `K` if it doesn't exist.
 ///
 /// Idempotent: the deterministic slot makes a concurrent creation or retry
 /// collide on the primary key rather than insert a duplicate. Keygen runs on
 /// the blocking pool (RSA-3072 takes ~200ms).
 async fn ensure_key<K: OrgIssuerKey>(store: &DocumentStore, org_id: &str) -> Result<()> {
-    if db::get_org_signing_key(store, org_id, K::ALG, SigningKeyState::Active)
+    if db::get_org_signing_key(store, org_id, K::ALG)
         .await?
         .is_some()
     {
@@ -184,23 +231,22 @@ async fn ensure_key<K: OrgIssuerKey>(store: &DocumentStore, org_id: &str) -> Res
     let doc = OrgSigningKeyDoc {
         org_id: org_id.to_string(),
         alg: K::ALG,
-        state: SigningKeyState::Active,
         kid: K::from_der(&der)?.kid(),
-        private_pkcs8_der_b64: STANDARD.encode(&der),
-        not_after: None,
+        private_pkcs8_der_b64: STANDARD.encode(&der).into(),
     };
     db::try_insert_org_signing_key(store, &doc).await?;
     Ok(())
 }
 
 async fn load_key<K: OrgIssuerKey>(store: &DocumentStore, org_id: &str) -> Result<Option<K>> {
-    let Some(doc) = db::get_org_signing_key(store, org_id, K::ALG, SigningKeyState::Active).await?
-    else {
+    let Some(doc) = db::get_org_signing_key(store, org_id, K::ALG).await? else {
         return Ok(None);
     };
-    let der = STANDARD
-        .decode(&doc.data.private_pkcs8_der_b64)
-        .context("decode org signing key DER")?;
+    let der = Zeroizing::new(
+        STANDARD
+            .decode(doc.data.private_pkcs8_der_b64.expose_secret())
+            .context("decode org signing key DER")?,
+    );
     Ok(Some(K::from_der(&der)?))
 }
 

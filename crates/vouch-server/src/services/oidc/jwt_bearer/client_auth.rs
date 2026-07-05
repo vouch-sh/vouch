@@ -457,6 +457,7 @@ mod tests {
             github_app: None,
             http_client: reqwest::Client::new(),
             session_cache: db::SessionCache::new(10_000, 30),
+            org_keys_cache: Default::default(),
             idps: Vec::new(),
         })
     }

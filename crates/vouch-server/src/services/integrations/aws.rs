@@ -14,18 +14,19 @@
 //!
 //! The AWS IAM role must be configured to trust the Vouch OIDC provider.
 //!
-//! When the organization has claimed an issuer subdomain (e.g. `acme` →
-//! `https://acme.us.vouch.sh`), that issuer host has its **own** signing keys,
-//! served only at its own JWKS. A token minted for another org is signed with a
-//! different key and will not verify against this issuer, so the provider ARN
-//! alone scopes trust — no `Condition` block is needed:
+//! When the organization has claimed an issuer subdomain (e.g. `acme-com` →
+//! `https://acme-com.us.vouch.sh`, derived from its verified `acme.com`), that
+//! issuer host has its **own** signing keys, served only at its own JWKS. A
+//! token minted for another org is signed with a different key and will not
+//! verify against this issuer, so the provider ARN alone scopes trust — no
+//! `Condition` block is needed:
 //!
 //! ```json
 //! {
 //!   "Version": "2012-10-17",
 //!   "Statement": [{
 //!     "Effect": "Allow",
-//!     "Principal": {"Federated": "arn:aws:iam::ACCOUNT:oidc-provider/acme.us.vouch.sh"},
+//!     "Principal": {"Federated": "arn:aws:iam::ACCOUNT:oidc-provider/acme-com.us.vouch.sh"},
 //!     "Action": "sts:AssumeRoleWithWebIdentity"
 //!   }]
 //! }

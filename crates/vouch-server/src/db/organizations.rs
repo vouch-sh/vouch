@@ -4,8 +4,7 @@
 use super::document_type::Document;
 use super::documents::oauth::JwsAlgorithm;
 use super::documents::organization::{
-    AdditionalDomain, AdditionalDomainState, OrgSigningKeyDoc, OrganizationDoc, SigningKeyState,
-    SubdomainClaimDoc,
+    AdditionalDomain, AdditionalDomainState, OrgSigningKeyDoc, OrganizationDoc, SubdomainClaimDoc,
 };
 use super::store::DocumentStore;
 use anyhow::{Result, bail};
@@ -930,9 +929,11 @@ async fn find_conflicting_claim_in_other_org(
 /// Cooldown before a released subdomain label may be claimed by a *different*
 /// organization (30 days).
 ///
-/// The JWKS is shared across all issuer hosts, so a re-claimed label would
-/// mint tokens that verify under an issuer host the previous org's AWS
-/// accounts may still trust. Same-org re-claims are always allowed.
+/// A re-claimant gets its own fresh signing keys, but relying parties fetch
+/// the JWKS live from the issuer host: an AWS IAM OIDC provider the previous
+/// holder never deleted would accept the new claimant's tokens. The cooldown
+/// buys the previous holder time to remove that AWS-side trust (and lets RP
+/// metadata caches expire). Same-org re-claims are always allowed.
 pub const SUBDOMAIN_REUSE_COOLDOWN_SECS: i64 = 2_592_000; // 30 days
 
 /// Labels that must never be claimable as org issuer subdomains.
@@ -1083,45 +1084,53 @@ pub fn validate_subdomain_label(input: &str) -> Result<String, SubdomainLabelErr
     Ok(lower)
 }
 
-/// Apex labels of the org's primary domain and every *verified* additional
-/// domain, in encounter order (may contain duplicates).
+/// `(apex, label)` candidates from the org's primary domain and every
+/// *verified* additional domain, in encounter order (may contain duplicates).
 ///
-/// Each label is the leftmost label of the domain's registrable apex, not its
-/// raw leftmost label, so a subdomain of an unrelated registrable domain
-/// cannot yield someone else's brand: `acme.evil.com` → apex `evil.com` →
-/// `evil` (never `acme`), while `acme.co.uk` → apex `acme.co.uk` → `acme` and
-/// `mail.acme.com` → apex `acme.com` → `acme`. Domains with no registrable
-/// apex per the Public Suffix List contribute nothing. Inputs are assumed
-/// already normalized (ASCII/punycode, lowercase) by [`normalize_domain`].
+/// The label is the domain's **full registrable apex** with dots collapsed
+/// to hyphens, so it is unique per apex and encodes the TLD: `acme.com` →
+/// `acme-com`, `acme.io` → `acme-io`, `acme.co.uk` → `acme-co-uk`, and
+/// `mail.acme.com` → apex `acme.com` → `acme-com`. Distinct real-world
+/// entities (`acme.com` vs `acme.io`) therefore never contend for one label,
+/// and deriving from the apex (never the raw leftmost label) means a
+/// subdomain of an unrelated registrable domain cannot yield someone else's
+/// brand: `acme.evil.com` → apex `evil.com` → `evil-com`. Domains with no
+/// registrable apex per the Public Suffix List contribute nothing. Inputs
+/// are assumed already normalized (ASCII/punycode, lowercase) by
+/// [`normalize_domain`].
 ///
 /// [`eligible_subdomain_labels`] and [`ineligible_subdomain_candidates`]
-/// partition this list by [`validate_subdomain_label`].
-fn verified_domain_apex_labels(
+/// partition the labels by [`validate_subdomain_label`];
+/// [`backing_apex_for_label`] recovers the apex behind an eligible label.
+fn verified_apex_label_pairs(
     primary_domain: &str,
     additional_domains: &[AdditionalDomain],
-) -> Vec<String> {
-    fn apex_label(domain: &str) -> Option<String> {
-        let apex = psl::domain_str(domain)?;
-        let first = apex.split('.').next()?.trim().to_ascii_lowercase();
-        (!first.is_empty()).then_some(first)
+) -> Vec<(String, String)> {
+    fn apex_pair(domain: &str) -> Option<(String, String)> {
+        let apex = psl::domain_str(domain)?.trim().to_ascii_lowercase();
+        if apex.is_empty() {
+            return None;
+        }
+        let label = apex.replace('.', "-");
+        Some((apex, label))
     }
 
-    let mut labels = Vec::new();
-    labels.extend(apex_label(primary_domain));
+    let mut pairs = Vec::new();
+    pairs.extend(apex_pair(primary_domain));
     for ad in additional_domains {
         if matches!(ad.state, AdditionalDomainState::Verified { .. }) {
-            labels.extend(apex_label(&ad.domain));
+            pairs.extend(apex_pair(&ad.domain));
         }
     }
-    labels
+    pairs
 }
 
 /// Compute the subdomain labels an organization is eligible to claim.
 ///
-/// A label is eligible when it is the apex label (see
-/// [`verified_domain_apex_labels`]) of the org's primary domain or of a
-/// *verified* additional domain (verified `acme.com` → eligible `acme`).
-/// Labels that fail [`validate_subdomain_label`] (e.g. reserved names) are
+/// A label is the full registrable apex of the org's primary domain or of a
+/// *verified* additional domain, with dots collapsed to hyphens (verified
+/// `acme.com` → eligible `acme-com`). Labels that fail
+/// [`validate_subdomain_label`] (e.g. longer than a DNS label allows) are
 /// silently dropped; the result is deduplicated in encounter order.
 #[must_use]
 pub fn eligible_subdomain_labels(
@@ -1129,7 +1138,7 @@ pub fn eligible_subdomain_labels(
     additional_domains: &[AdditionalDomain],
 ) -> Vec<String> {
     let mut labels = Vec::new();
-    for candidate in verified_domain_apex_labels(primary_domain, additional_domains) {
+    for (_, candidate) in verified_apex_label_pairs(primary_domain, additional_domains) {
         if let Ok(label) = validate_subdomain_label(&candidate)
             && !labels.contains(&label)
         {
@@ -1139,26 +1148,40 @@ pub fn eligible_subdomain_labels(
     labels
 }
 
-/// Apex labels of the org's verified domains that can NOT be claimed as
-/// issuer subdomains (reserved or otherwise invalid), deduped in encounter
-/// order.
+/// Apex-derived labels of the org's verified domains that can NOT be claimed
+/// as issuer subdomains (e.g. longer than the 63-character DNS label limit),
+/// deduped in encounter order.
 ///
 /// Complements [`eligible_subdomain_labels`], which silently drops these:
 /// the admin UI uses this to explain an empty eligible list for an org that
-/// does have verified domains (e.g. primary `vouch.sh` → `vouch` is
-/// reserved) instead of implying no domain is verified.
+/// does have verified domains instead of implying no domain is verified.
 #[must_use]
 pub fn ineligible_subdomain_candidates(
     primary_domain: &str,
     additional_domains: &[AdditionalDomain],
 ) -> Vec<String> {
     let mut labels = Vec::new();
-    for candidate in verified_domain_apex_labels(primary_domain, additional_domains) {
+    for (_, candidate) in verified_apex_label_pairs(primary_domain, additional_domains) {
         if validate_subdomain_label(&candidate).is_err() && !labels.contains(&candidate) {
             labels.push(candidate);
         }
     }
     labels
+}
+
+/// The verified registrable apex behind an eligible `label`, or `None` when
+/// no verified domain of the org derives it.
+///
+/// The claim slot records this apex so a released label can only be taken
+/// over by an org that verified ownership of the same domain.
+fn backing_apex_for_label(
+    primary_domain: &str,
+    additional_domains: &[AdditionalDomain],
+    label: &str,
+) -> Option<String> {
+    verified_apex_label_pairs(primary_domain, additional_domains)
+        .into_iter()
+        .find_map(|(apex, candidate)| (candidate == label).then_some(apex))
 }
 
 /// Errors from [`claim_subdomain`] and [`release_subdomain`] that map to
@@ -1169,7 +1192,7 @@ pub enum SubdomainClaimError {
     #[error("{0}")]
     InvalidLabel(#[from] SubdomainLabelError),
     /// The label does not match any of the org's verified domains.
-    #[error("label does not match the first label of any verified domain of this organization")]
+    #[error("label is not derived from any verified domain of this organization")]
     NotEligible,
     /// The org already holds a different label; it must be released first.
     #[error("organization already has subdomain '{0}'; release it before claiming another")]
@@ -1223,13 +1246,13 @@ fn deterministic_subdomain_claim_id(label: &str) -> String {
 
 /// Deterministic document ID for an org's issuer signing-key slot.
 ///
-/// Keyed on `(org_id, alg, state)` so the `Active`/`Next` key per algorithm is
-/// a single slot: a `with_dsql_retry!` re-run of a claim, or two concurrent
-/// claims, collide on the primary key via `insert_with_id` instead of creating
-/// a duplicate key. `kid` (a hash of the random public key) is a field, never
-/// the ID — using it would make the row random-keyed and reintroduce that
-/// duplication. Same idempotency pattern as [`deterministic_subdomain_claim_id`].
-pub fn deterministic_org_key_id(org_id: &str, alg: JwsAlgorithm, state: SigningKeyState) -> String {
+/// Keyed on `(org_id, alg)` so the key per algorithm is a single slot: a
+/// `with_dsql_retry!` re-run of a claim, or two concurrent claims, collide on
+/// the primary key via `insert_with_id` instead of creating a duplicate key.
+/// `kid` (a hash of the random public key) is a field, never the ID — using
+/// it would make the row random-keyed and reintroduce that duplication. Same
+/// idempotency pattern as [`deterministic_subdomain_claim_id`].
+pub fn deterministic_org_key_id(org_id: &str, alg: JwsAlgorithm) -> String {
     use aws_lc_rs::digest::{self, SHA256};
 
     let mut ctx = digest::Context::new(&SHA256);
@@ -1237,8 +1260,6 @@ pub fn deterministic_org_key_id(org_id: &str, alg: JwsAlgorithm, state: SigningK
     ctx.update(org_id.as_bytes());
     ctx.update(b"\0");
     ctx.update(alg.as_str().as_bytes());
-    ctx.update(b"\0");
-    ctx.update(state.as_str().as_bytes());
     hex::encode(ctx.finish().as_ref())
 }
 
@@ -1254,7 +1275,7 @@ pub async fn try_insert_org_signing_key(
     store: &DocumentStore,
     doc: &OrgSigningKeyDoc,
 ) -> Result<bool> {
-    let id = deterministic_org_key_id(&doc.org_id, doc.alg, doc.state);
+    let id = deterministic_org_key_id(&doc.org_id, doc.alg);
     match store.insert_with_id(&id, doc).await {
         Ok(_) => Ok(true),
         Err(e) if super::pool::is_unique_violation(&e) => Ok(false),
@@ -1270,28 +1291,19 @@ pub async fn get_org_signing_key(
     store: &DocumentStore,
     org_id: &str,
     alg: JwsAlgorithm,
-    state: SigningKeyState,
 ) -> Result<Option<Document<OrgSigningKeyDoc>>> {
-    let id = deterministic_org_key_id(org_id, alg, state);
+    let id = deterministic_org_key_id(org_id, alg);
     store.get::<OrgSigningKeyDoc>(&id).await
-}
-
-/// List all WIF signing keys for an organization (for the org JWKS).
-///
-/// # Errors
-/// Returns an error if the indexed lookup fails.
-pub async fn list_org_signing_keys(
-    store: &DocumentStore,
-    org_id: &str,
-) -> Result<Vec<Document<OrgSigningKeyDoc>>> {
-    store.find_all::<OrgSigningKeyDoc>("org_id", org_id).await
 }
 
 /// Claim an issuer subdomain label for an organization.
 ///
-/// The label must be eligible (first label of a verified domain), globally
-/// unique across orgs, and not within another org's release cooldown.
-/// Re-claiming the org's own current label is idempotent.
+/// The label must be eligible (derived from the registrable apex of a
+/// verified domain), globally unique across orgs, and not within another
+/// org's release cooldown. A released label can be taken over by a
+/// *different* org only when that org's claim is backed by the same apex —
+/// i.e. it verified ownership of the domain itself. Re-claiming the org's
+/// own current label is idempotent.
 ///
 /// Uniqueness and the cooldown are enforced by the [`SubdomainClaimDoc`]
 /// slot stored under a deterministic ID: a fresh claim inserts the slot
@@ -1335,9 +1347,10 @@ pub async fn claim_subdomain(
             return Err(SubdomainClaimError::AlreadyClaimed(existing.clone()));
         }
 
-        if !eligible_subdomain_labels(&data.domain, &data.additional_domains).contains(&label) {
+        let Some(apex) = backing_apex_for_label(&data.domain, &data.additional_domains, &label)
+        else {
             return Err(SubdomainClaimError::NotEligible);
-        }
+        };
 
         // Take the claim slot. Every branch either writes the slot row or
         // rejects, so concurrent claimants serialize on it.
@@ -1345,6 +1358,7 @@ pub async fn claim_subdomain(
         let slot = SubdomainClaimDoc {
             label: label.clone(),
             org_id: org_id.to_string(),
+            apex: apex.clone(),
             released_at: None,
         };
         match tx.get::<SubdomainClaimDoc>(&claim_id).await? {
@@ -1370,8 +1384,18 @@ pub async fn claim_subdomain(
                     Some(released_at) => {
                         let in_cooldown = Timestamp::now().duration_since(released_at).as_secs()
                             < SUBDOMAIN_REUSE_COOLDOWN_SECS;
-                        if holder.org_id != org_id && in_cooldown {
-                            return Err(SubdomainClaimError::RecentlyReleased);
+                        if holder.org_id != org_id {
+                            if in_cooldown {
+                                return Err(SubdomainClaimError::RecentlyReleased);
+                            }
+                            // Label ↔ apex is 1:1 by construction, but two
+                            // distinct apexes can hyphen-collapse to one label
+                            // (acme.com.br vs acme-com.br). A cross-org
+                            // takeover must be backed by the same verified
+                            // apex — owning the domain is the trust anchor.
+                            if holder.apex != apex {
+                                return Err(SubdomainClaimError::Conflict);
+                            }
                         }
                         // Take over the released slot; the version CAS makes a
                         // concurrent takeover or racing release lose the race
@@ -1537,6 +1561,30 @@ pub async fn find_org_by_subdomain(
         .find_one::<OrganizationDoc>("subdomain", label)
         .await?;
     Ok(doc.map(Organization::from))
+}
+
+/// True when any organization currently claims an issuer subdomain.
+///
+/// Startup guard for unencrypted deployments: pages through org documents
+/// (active claims are not separately indexed) and short-circuits on the
+/// first claim. Runs once at boot, so the O(orgs) walk is acceptable.
+pub async fn any_subdomain_claimed(store: &DocumentStore) -> Result<bool> {
+    let mut cursor: Option<String> = None;
+    loop {
+        let (page, has_more) = store
+            .list_all_paginated::<OrganizationDoc>(cursor.as_deref(), ORG_SCAN_PAGE_SIZE)
+            .await?;
+        if page.is_empty() {
+            return Ok(false);
+        }
+        if page.iter().any(|org| org.data.subdomain.is_some()) {
+            return Ok(true);
+        }
+        if !has_more {
+            return Ok(false);
+        }
+        cursor = page.last().map(|d| d.id.clone());
+    }
 }
 
 #[cfg(test)]
@@ -2506,48 +2554,60 @@ mod tests {
 
         let org = get_organization(&store, &org.id).await.unwrap().unwrap();
         let labels = eligible_subdomain_labels(&org.domain, &org.additional_domains);
-        assert_eq!(labels, vec!["acme".to_string(), "widgets".to_string()]);
+        assert_eq!(
+            labels,
+            vec!["acme-com".to_string(), "widgets-co-uk".to_string()]
+        );
     }
 
-    #[tokio::test]
-    async fn eligible_labels_drops_reserved_first_label() {
-        let store = fresh_store().await;
-        // "mail" is a reserved subdomain label, so an org whose primary
-        // domain is mail.io has no eligible labels.
-        let org = create_organization(&store, "mail.io", None, None)
-            .await
-            .unwrap();
-        let labels = eligible_subdomain_labels(&org.domain, &org.additional_domains);
-        assert!(
-            labels.is_empty(),
-            "reserved first label must not be eligible: {labels:?}"
-        );
+    #[test]
+    fn apex_labels_cannot_collide_with_reserved_words() {
+        // Every apex has at least two DNS labels, so derived labels always
+        // contain a hyphen and can never equal the hyphen-free reserved
+        // words — domains that previously collided are now claimable.
+        assert_eq!(eligible_subdomain_labels("mail.io", &[]), ["mail-io"]);
+        assert_eq!(eligible_subdomain_labels("vouch.sh", &[]), ["vouch-sh"]);
+        assert!(ineligible_subdomain_candidates("vouch.sh", &[]).is_empty());
     }
 
     #[test]
     fn eligible_label_derives_from_registrable_apex() {
         // Verifying a subdomain of an unrelated registrable domain must not
-        // grant that subdomain's leftmost label as a claimable brand.
-        assert_eq!(eligible_subdomain_labels("acme.evil.com", &[]), ["evil"]);
-        assert!(
-            !eligible_subdomain_labels("acme.evil.com", &[]).contains(&"acme".to_string()),
-            "a subdomain of evil.com must not yield the brand label 'acme'"
+        // grant a label derived from that subdomain's brand.
+        assert_eq!(
+            eligible_subdomain_labels("acme.evil.com", &[]),
+            ["evil-com"]
         );
-        // Multi-label public suffixes resolve to the true apex label.
-        assert_eq!(eligible_subdomain_labels("acme.co.uk", &[]), ["acme"]);
+        // Multi-label public suffixes resolve to the true apex.
+        assert_eq!(eligible_subdomain_labels("acme.co.uk", &[]), ["acme-co-uk"]);
         // A subdomain of the org's own apex still yields the apex label.
-        assert_eq!(eligible_subdomain_labels("mail.acme.com", &[]), ["acme"]);
-        // A plain apex is unchanged.
-        assert_eq!(eligible_subdomain_labels("acme.com", &[]), ["acme"]);
+        assert_eq!(
+            eligible_subdomain_labels("mail.acme.com", &[]),
+            ["acme-com"]
+        );
+        // A plain apex maps 1:1 onto its hyphenated form.
+        assert_eq!(eligible_subdomain_labels("acme.com", &[]), ["acme-com"]);
+        // Different TLDs of the same brand yield distinct labels — two
+        // real-world entities never contend for one issuer host.
+        assert_ne!(
+            eligible_subdomain_labels("acme.com", &[]),
+            eligible_subdomain_labels("acme.io", &[])
+        );
     }
 
     #[test]
-    fn ineligible_candidate_uses_apex_label() {
-        // vouch.sh apex → "vouch" is reserved → surfaced so the empty
-        // eligible list is explained rather than implying no verified domain.
-        assert_eq!(ineligible_subdomain_candidates("vouch.sh", &[]), ["vouch"]);
+    fn ineligible_candidate_surfaces_overlong_apex() {
+        // An apex whose hyphenated form exceeds the 63-character DNS label
+        // limit is surfaced so the empty eligible list is explained rather
+        // than implying no verified domain.
+        let long_domain = format!("{}.com", "a".repeat(60));
+        assert!(eligible_subdomain_labels(&long_domain, &[]).is_empty());
+        assert_eq!(
+            ineligible_subdomain_candidates(&long_domain, &[]),
+            [format!("{}-com", "a".repeat(60))]
+        );
         // A subdomain of an unrelated domain resolves to a valid apex label
-        // ("evil"), so it is eligible, not an ineligible candidate.
+        // ("evil-com"), so it is eligible, not an ineligible candidate.
         assert!(ineligible_subdomain_candidates("admin.evil.com", &[]).is_empty());
     }
 
@@ -2558,15 +2618,23 @@ mod tests {
             .await
             .unwrap();
 
-        let label = claim_subdomain(&store, &org.id, "ACME").await.unwrap();
-        assert_eq!(label, "acme");
+        let label = claim_subdomain(&store, &org.id, "ACME-COM").await.unwrap();
+        assert_eq!(label, "acme-com");
 
-        let found = find_org_by_subdomain(&store, "acme").await.unwrap();
+        let found = find_org_by_subdomain(&store, "acme-com").await.unwrap();
         assert_eq!(found.map(|o| o.id), Some(org.id.clone()));
 
+        // The slot records the backing apex for takeover checks.
+        let slot = store
+            .get::<SubdomainClaimDoc>(&deterministic_subdomain_claim_id("acme-com"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(slot.data.apex, "acme.com");
+
         // Idempotent re-claim of the same label.
-        let again = claim_subdomain(&store, &org.id, "acme").await.unwrap();
-        assert_eq!(again, "acme");
+        let again = claim_subdomain(&store, &org.id, "acme-com").await.unwrap();
+        assert_eq!(again, "acme-com");
     }
 
     #[tokio::test]
@@ -2575,25 +2643,37 @@ mod tests {
         let org = create_organization(&store, "acme.com", None, None)
             .await
             .unwrap();
-        let err = claim_subdomain(&store, &org.id, "widgets")
+        let err = claim_subdomain(&store, &org.id, "widgets-io")
             .await
             .unwrap_err();
+        assert!(matches!(err, SubdomainClaimError::NotEligible), "{err}");
+        // The bare brand label (pre-apex derivation scheme) is not eligible.
+        let err = claim_subdomain(&store, &org.id, "acme").await.unwrap_err();
         assert!(matches!(err, SubdomainClaimError::NotEligible), "{err}");
     }
 
     #[tokio::test]
     async fn claim_subdomain_rejects_cross_org_conflict() {
         let store = fresh_store().await;
-        // Two orgs whose domains share the first label "acme".
+        // Two orgs backed by the same apex: one owns acme.com outright, the
+        // other verified a subdomain of it — both derive "acme-com".
         let first = create_organization(&store, "acme.com", None, None)
             .await
             .unwrap();
-        let second = create_organization(&store, "acme.io", None, None)
+        let second = create_organization(&store, "widgets.io", None, None)
+            .await
+            .unwrap();
+        add_additional_domain(&store, &second.id, "mail.acme.com", "u1", "u1@widgets.io")
+            .await
+            .unwrap();
+        mark_additional_domain_verified(&store, &second.id, "mail.acme.com")
             .await
             .unwrap();
 
-        claim_subdomain(&store, &first.id, "acme").await.unwrap();
-        let err = claim_subdomain(&store, &second.id, "acme")
+        claim_subdomain(&store, &first.id, "acme-com")
+            .await
+            .unwrap();
+        let err = claim_subdomain(&store, &second.id, "acme-com")
             .await
             .unwrap_err();
         assert!(matches!(err, SubdomainClaimError::Conflict), "{err}");
@@ -2612,12 +2692,12 @@ mod tests {
             .await
             .unwrap();
 
-        claim_subdomain(&store, &org.id, "acme").await.unwrap();
-        let err = claim_subdomain(&store, &org.id, "widgets")
+        claim_subdomain(&store, &org.id, "acme-com").await.unwrap();
+        let err = claim_subdomain(&store, &org.id, "widgets-io")
             .await
             .unwrap_err();
         assert!(
-            matches!(err, SubdomainClaimError::AlreadyClaimed(ref l) if l == "acme"),
+            matches!(err, SubdomainClaimError::AlreadyClaimed(ref l) if l == "acme-com"),
             "{err}"
         );
     }
@@ -2628,14 +2708,14 @@ mod tests {
         let org = create_organization(&store, "acme.com", None, None)
             .await
             .unwrap();
-        claim_subdomain(&store, &org.id, "acme").await.unwrap();
+        claim_subdomain(&store, &org.id, "acme-com").await.unwrap();
 
         let released = release_subdomain(&store, &org.id).await.unwrap();
-        assert_eq!(released, Some("acme".to_string()));
+        assert_eq!(released, Some("acme-com".to_string()));
 
         // Index entry gone → host lookup stops resolving.
         assert!(
-            find_org_by_subdomain(&store, "acme")
+            find_org_by_subdomain(&store, "acme-com")
                 .await
                 .unwrap()
                 .is_none()
@@ -2651,15 +2731,25 @@ mod tests {
         let first = create_organization(&store, "acme.com", None, None)
             .await
             .unwrap();
-        let second = create_organization(&store, "acme.io", None, None)
+        // The second org derives the same label from a verified subdomain of
+        // the same apex, so it is eligible to attempt the takeover.
+        let second = create_organization(&store, "widgets.io", None, None)
+            .await
+            .unwrap();
+        add_additional_domain(&store, &second.id, "mail.acme.com", "u1", "u1@widgets.io")
+            .await
+            .unwrap();
+        mark_additional_domain_verified(&store, &second.id, "mail.acme.com")
             .await
             .unwrap();
 
-        claim_subdomain(&store, &first.id, "acme").await.unwrap();
+        claim_subdomain(&store, &first.id, "acme-com")
+            .await
+            .unwrap();
         release_subdomain(&store, &first.id).await.unwrap();
 
         // Cross-org re-claim is tombstoned for the cooldown window.
-        let err = claim_subdomain(&store, &second.id, "acme")
+        let err = claim_subdomain(&store, &second.id, "acme-com")
             .await
             .unwrap_err();
         assert!(
@@ -2668,10 +2758,12 @@ mod tests {
         );
 
         // Same-org re-claim is always allowed and reactivates the slot.
-        let label = claim_subdomain(&store, &first.id, "acme").await.unwrap();
-        assert_eq!(label, "acme");
+        let label = claim_subdomain(&store, &first.id, "acme-com")
+            .await
+            .unwrap();
+        assert_eq!(label, "acme-com");
         let slot = store
-            .get::<SubdomainClaimDoc>(&deterministic_subdomain_claim_id("acme"))
+            .get::<SubdomainClaimDoc>(&deterministic_subdomain_claim_id("acme-com"))
             .await
             .unwrap()
             .unwrap();
@@ -2680,34 +2772,6 @@ mod tests {
             slot.data.released_at.is_none(),
             "own re-claim must reactivate the claim slot"
         );
-    }
-
-    #[test]
-    fn ineligible_candidates_surfaces_reserved_first_labels() {
-        // Primary vouch.sh → 'vouch' is reserved; verified acme.io → 'acme'
-        // is eligible and must NOT appear in the ineligible list.
-        let additional = vec![AdditionalDomain {
-            domain: "acme.io".to_string(),
-            verification_token: "t".to_string(),
-            added_at: Timestamp::now(),
-            added_by_user_id: "u1".to_string(),
-            added_by_email: "u@acme.io".to_string(),
-            consecutive_failures: 0,
-            state: AdditionalDomainState::Verified {
-                verified_at: Timestamp::now(),
-                last_checked_at: None,
-            },
-        }];
-        assert_eq!(
-            ineligible_subdomain_candidates("vouch.sh", &additional),
-            vec!["vouch".to_string()]
-        );
-        assert_eq!(
-            eligible_subdomain_labels("vouch.sh", &additional),
-            vec!["acme".to_string()]
-        );
-        // Unverified domains never contribute candidates in either list.
-        assert!(ineligible_subdomain_candidates("acme.com", &[]).is_empty());
     }
 
     #[tokio::test]
@@ -2722,18 +2786,20 @@ mod tests {
         mark_additional_domain_verified(&store, &org.id, "widgets.io")
             .await
             .unwrap();
-        claim_subdomain(&store, &org.id, "widgets").await.unwrap();
+        claim_subdomain(&store, &org.id, "widgets-io")
+            .await
+            .unwrap();
 
         let summary = remove_additional_domain(&store, &org.id, "widgets.io")
             .await
             .unwrap()
             .expect("domain removed");
-        assert_eq!(summary.released_subdomain.as_deref(), Some("widgets"));
+        assert_eq!(summary.released_subdomain.as_deref(), Some("widgets-io"));
 
         let refreshed = get_organization(&store, &org.id).await.unwrap().unwrap();
         assert!(refreshed.subdomain.is_none(), "mirror must be cleared");
         let slot = store
-            .get::<SubdomainClaimDoc>(&deterministic_subdomain_claim_id("widgets"))
+            .get::<SubdomainClaimDoc>(&deterministic_subdomain_claim_id("widgets-io"))
             .await
             .unwrap()
             .unwrap();
@@ -2743,7 +2809,7 @@ mod tests {
         );
         // Discovery lookup must stop resolving.
         assert!(
-            find_org_by_subdomain(&store, "widgets")
+            find_org_by_subdomain(&store, "widgets-io")
                 .await
                 .unwrap()
                 .is_none()
@@ -2753,27 +2819,27 @@ mod tests {
     #[tokio::test]
     async fn removing_domain_keeps_subdomain_backed_by_another_domain() {
         let store = fresh_store().await;
-        // Primary acme.com and verified acme.io both yield "acme"; removing
-        // one verified backer must not release the label.
+        // Primary acme.com and verified mail.acme.com share the apex, so
+        // both back "acme-com"; removing one backer must not release it.
         let org = create_organization(&store, "acme.com", None, None)
             .await
             .unwrap();
-        add_additional_domain(&store, &org.id, "acme.io", "u1", "u1@example.com")
+        add_additional_domain(&store, &org.id, "mail.acme.com", "u1", "u1@example.com")
             .await
             .unwrap();
-        mark_additional_domain_verified(&store, &org.id, "acme.io")
+        mark_additional_domain_verified(&store, &org.id, "mail.acme.com")
             .await
             .unwrap();
-        claim_subdomain(&store, &org.id, "acme").await.unwrap();
+        claim_subdomain(&store, &org.id, "acme-com").await.unwrap();
 
-        let summary = remove_additional_domain(&store, &org.id, "acme.io")
+        let summary = remove_additional_domain(&store, &org.id, "mail.acme.com")
             .await
             .unwrap()
             .expect("domain removed");
         assert!(summary.released_subdomain.is_none());
 
         let refreshed = get_organization(&store, &org.id).await.unwrap().unwrap();
-        assert_eq!(refreshed.subdomain.as_deref(), Some("acme"));
+        assert_eq!(refreshed.subdomain.as_deref(), Some("acme-com"));
     }
 
     #[tokio::test]
@@ -2788,7 +2854,9 @@ mod tests {
         mark_additional_domain_verified(&store, &org.id, "widgets.io")
             .await
             .unwrap();
-        claim_subdomain(&store, &org.id, "widgets").await.unwrap();
+        claim_subdomain(&store, &org.id, "widgets-io")
+            .await
+            .unwrap();
 
         let mut last_effect = RecheckEffect::StillVerified;
         for _ in 0..crate::db::UNVERIFY_FAILURE_THRESHOLD {
@@ -2800,14 +2868,14 @@ mod tests {
         assert_eq!(
             last_effect,
             RecheckEffect::FlippedToUnverified {
-                released_subdomain: Some("widgets".to_string())
+                released_subdomain: Some("widgets-io".to_string())
             }
         );
 
         let refreshed = get_organization(&store, &org.id).await.unwrap().unwrap();
         assert!(refreshed.subdomain.is_none(), "mirror must be cleared");
         let slot = store
-            .get::<SubdomainClaimDoc>(&deterministic_subdomain_claim_id("widgets"))
+            .get::<SubdomainClaimDoc>(&deterministic_subdomain_claim_id("widgets-io"))
             .await
             .unwrap()
             .unwrap();
@@ -2815,37 +2883,75 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn released_label_claimable_by_other_org_after_cooldown() {
+    async fn released_label_claimable_by_same_apex_org_after_cooldown() {
         let store = fresh_store().await;
-        let claimant = create_organization(&store, "acme.io", None, None)
+        let claimant = create_organization(&store, "acme.com", None, None)
             .await
             .unwrap();
 
-        // Seed a slot released by another org longer ago than the cooldown.
+        // Seed a slot released by another org longer ago than the cooldown,
+        // backed by the same apex the claimant has verified.
         let expired_release = Timestamp::now()
             .checked_sub(jiff::Span::new().seconds(SUBDOMAIN_REUSE_COOLDOWN_SECS + 60))
             .unwrap();
         store
             .insert_with_id(
-                &deterministic_subdomain_claim_id("acme"),
+                &deterministic_subdomain_claim_id("acme-com"),
                 &SubdomainClaimDoc {
-                    label: "acme".to_string(),
+                    label: "acme-com".to_string(),
                     org_id: "some-other-org".to_string(),
+                    apex: "acme.com".to_string(),
                     released_at: Some(expired_release),
                 },
             )
             .await
             .unwrap();
 
-        let label = claim_subdomain(&store, &claimant.id, "acme").await.unwrap();
-        assert_eq!(label, "acme");
+        let label = claim_subdomain(&store, &claimant.id, "acme-com")
+            .await
+            .unwrap();
+        assert_eq!(label, "acme-com");
         let slot = store
-            .get::<SubdomainClaimDoc>(&deterministic_subdomain_claim_id("acme"))
+            .get::<SubdomainClaimDoc>(&deterministic_subdomain_claim_id("acme-com"))
             .await
             .unwrap()
             .unwrap();
         assert_eq!(slot.data.org_id, claimant.id, "slot must transfer holders");
         assert!(slot.data.released_at.is_none());
+    }
+
+    #[tokio::test]
+    async fn released_label_never_moves_across_apexes() {
+        let store = fresh_store().await;
+        // acme.com.br (com.br is a public suffix) and acme-com.br are
+        // distinct apexes that hyphen-collapse to the same label
+        // "acme-com-br". A takeover across that boundary must be refused
+        // even after the cooldown — the claimant does not own the domain the
+        // label was minted for.
+        let claimant = create_organization(&store, "acme-com.br", None, None)
+            .await
+            .unwrap();
+
+        let expired_release = Timestamp::now()
+            .checked_sub(jiff::Span::new().seconds(SUBDOMAIN_REUSE_COOLDOWN_SECS + 60))
+            .unwrap();
+        store
+            .insert_with_id(
+                &deterministic_subdomain_claim_id("acme-com-br"),
+                &SubdomainClaimDoc {
+                    label: "acme-com-br".to_string(),
+                    org_id: "some-other-org".to_string(),
+                    apex: "acme.com.br".to_string(),
+                    released_at: Some(expired_release),
+                },
+            )
+            .await
+            .unwrap();
+
+        let err = claim_subdomain(&store, &claimant.id, "acme-com-br")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, SubdomainClaimError::Conflict), "{err}");
     }
 
     #[tokio::test]
@@ -2861,14 +2967,22 @@ mod tests {
         let releaser = create_organization(&store, "acme.com", None, None)
             .await
             .unwrap();
-        let claimant = create_organization(&store, "acme.io", None, None)
+        let claimant = create_organization(&store, "widgets.io", None, None)
+            .await
+            .unwrap();
+        add_additional_domain(&store, &claimant.id, "mail.acme.com", "u1", "u1@widgets.io")
+            .await
+            .unwrap();
+        mark_additional_domain_verified(&store, &claimant.id, "mail.acme.com")
             .await
             .unwrap();
 
-        claim_subdomain(&store, &releaser.id, "acme").await.unwrap();
+        claim_subdomain(&store, &releaser.id, "acme-com")
+            .await
+            .unwrap();
         release_subdomain(&store, &releaser.id).await.unwrap();
 
-        let err = claim_subdomain(&store, &claimant.id, "acme")
+        let err = claim_subdomain(&store, &claimant.id, "acme-com")
             .await
             .unwrap_err();
         assert!(
@@ -2910,25 +3024,12 @@ mod tests {
 
     #[test]
     fn org_key_id_is_deterministic_and_distinct() {
-        let base = deterministic_org_key_id("org1", JwsAlgorithm::Es256, SigningKeyState::Active);
+        let base = deterministic_org_key_id("org1", JwsAlgorithm::Es256);
         // Stable for the same inputs (idempotent creation depends on this).
-        assert_eq!(
-            base,
-            deterministic_org_key_id("org1", JwsAlgorithm::Es256, SigningKeyState::Active)
-        );
-        // Distinct across org, algorithm, and state.
-        assert_ne!(
-            base,
-            deterministic_org_key_id("org2", JwsAlgorithm::Es256, SigningKeyState::Active)
-        );
-        assert_ne!(
-            base,
-            deterministic_org_key_id("org1", JwsAlgorithm::Rs256, SigningKeyState::Active)
-        );
-        assert_ne!(
-            base,
-            deterministic_org_key_id("org1", JwsAlgorithm::Es256, SigningKeyState::Next)
-        );
+        assert_eq!(base, deterministic_org_key_id("org1", JwsAlgorithm::Es256));
+        // Distinct across org and algorithm.
+        assert_ne!(base, deterministic_org_key_id("org2", JwsAlgorithm::Es256));
+        assert_ne!(base, deterministic_org_key_id("org1", JwsAlgorithm::Rs256));
     }
 
     #[tokio::test]
@@ -2937,16 +3038,39 @@ mod tests {
         let doc = OrgSigningKeyDoc {
             org_id: "org1".to_string(),
             alg: JwsAlgorithm::Es256,
-            state: SigningKeyState::Active,
             kid: "kid-1".to_string(),
-            private_pkcs8_der_b64: "AAAA".to_string(),
-            not_after: None,
+            private_pkcs8_der_b64: "AAAA".to_string().into(),
         };
         // A retry or concurrent claim re-runs the insert; the deterministic slot
         // makes the second one a no-op instead of a duplicate row.
         assert!(try_insert_org_signing_key(&store, &doc).await.unwrap());
         assert!(!try_insert_org_signing_key(&store, &doc).await.unwrap());
-        let all = list_org_signing_keys(&store, "org1").await.unwrap();
+        let all = store
+            .find_all::<OrgSigningKeyDoc>("org_id", "org1")
+            .await
+            .unwrap();
         assert_eq!(all.len(), 1, "only one key row despite two inserts");
+    }
+
+    #[tokio::test]
+    async fn any_subdomain_claimed_walks_org_pages() {
+        let store = fresh_store().await;
+        // More orgs than one scan page, claimer created last so the walk
+        // must page past the fillers to find it.
+        for i in 0..7 {
+            create_organization(&store, &format!("filler{i}.com"), None, None)
+                .await
+                .unwrap();
+        }
+        assert!(!any_subdomain_claimed(&store).await.unwrap());
+
+        let org = create_organization(&store, "acme.com", None, None)
+            .await
+            .unwrap();
+        claim_subdomain(&store, &org.id, "acme-com").await.unwrap();
+        assert!(any_subdomain_claimed(&store).await.unwrap());
+
+        release_subdomain(&store, &org.id).await.unwrap();
+        assert!(!any_subdomain_claimed(&store).await.unwrap());
     }
 }

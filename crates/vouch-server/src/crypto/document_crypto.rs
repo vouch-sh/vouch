@@ -54,10 +54,10 @@ pub trait DocumentCrypto: Send + Sync + std::fmt::Debug {
     ///
     /// `true` for real (KMS-rooted) encryption, `false` for the development
     /// plaintext mode. Callers that persist private key material (per-org
-    /// issuer signing keys) gate on this so a key is never stored in plaintext.
-    fn is_encrypted(&self) -> bool {
-        true
-    }
+    /// issuer signing keys) gate on this so a key is never stored in
+    /// plaintext. Deliberately no default: every implementation must state
+    /// its answer, so a new impl can't silently inherit the unsafe one.
+    fn is_encrypted(&self) -> bool;
 }
 
 // ============================================================================
@@ -198,6 +198,10 @@ impl DocumentCrypto for HpkeDocumentCrypto {
         let key = aws_lc_rs::hmac::Key::new(aws_lc_rs::hmac::HMAC_SHA256, &self.hmac_key);
         let tag = aws_lc_rs::hmac::sign(&key, value.as_bytes());
         URL_SAFE_NO_PAD.encode(tag.as_ref())
+    }
+
+    fn is_encrypted(&self) -> bool {
+        true
     }
 }
 

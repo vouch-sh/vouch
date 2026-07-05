@@ -22,6 +22,12 @@ use std::sync::Arc;
 const OIDC_CACHE_CONTROL: (axum::http::header::HeaderName, &str) =
     (axum::http::header::CACHE_CONTROL, "public, max-age=3600");
 
+/// Discovery and JWKS bodies differ per issuer host (per-org keys), so any
+/// shared cache in front of the server must key on the Host header — a
+/// Host-normalizing cache would otherwise serve one org's keys at another
+/// org's issuer.
+const OIDC_VARY_HOST: (axum::http::header::HeaderName, &str) = (axum::http::header::VARY, "Host");
+
 /// GET /.well-known/openid-configuration
 ///
 /// OIDC Discovery 1.0 Section 4: The OpenID Provider Metadata is published at a
@@ -41,7 +47,7 @@ pub(crate) async fn discovery(
         return org_discovery(&state, &label).await;
     }
     (
-        [OIDC_CACHE_CONTROL],
+        [OIDC_CACHE_CONTROL, OIDC_VARY_HOST],
         Json(svc::build_discovery_document(&state)),
     )
         .into_response()
@@ -59,7 +65,7 @@ async fn org_discovery(state: &Arc<AppState>, label: &str) -> Response {
                 return StatusCode::INTERNAL_SERVER_ERROR.into_response();
             };
             (
-                [OIDC_CACHE_CONTROL],
+                [OIDC_CACHE_CONTROL, OIDC_VARY_HOST],
                 Json(svc::build_wif_discovery_document(state, &issuer)),
             )
                 .into_response()
@@ -90,7 +96,7 @@ pub(crate) async fn jwks(
         return org_jwks(&state, &label).await;
     }
     match svc::build_jwks(&state) {
-        Ok(jwks) => ([OIDC_CACHE_CONTROL], Json(jwks)).into_response(),
+        Ok(jwks) => ([OIDC_CACHE_CONTROL, OIDC_VARY_HOST], Json(jwks)).into_response(),
         Err(e) => {
             tracing::error!("JWKS generation failed: {}", e);
             StatusCode::INTERNAL_SERVER_ERROR.into_response()
@@ -102,7 +108,7 @@ pub(crate) async fn jwks(
 async fn org_jwks(state: &Arc<AppState>, label: &str) -> Response {
     match db::find_org_by_subdomain(&state.store, label).await {
         Ok(Some(org)) => match crate::services::oidc::org_jwks(state, &org).await {
-            Ok(jwks) => ([OIDC_CACHE_CONTROL], Json(jwks)).into_response(),
+            Ok(jwks) => ([OIDC_CACHE_CONTROL, OIDC_VARY_HOST], Json(jwks)).into_response(),
             Err(e) => {
                 tracing::error!("org JWKS generation failed for '{label}': {e}");
                 StatusCode::INTERNAL_SERVER_ERROR.into_response()

@@ -356,14 +356,16 @@ fn build_mtls_aliases(state: &Arc<AppState>, base_url: &str) -> Option<MtlsEndpo
 pub struct WifDiscoveryDocument {
     /// Issuer Identifier: `https://{label}.{primary_host}`.
     pub issuer: String,
-    /// JWKS URL on the same host; content is identical across issuer hosts.
+    /// JWKS URL on the same host; serves the org's own keys (the shared
+    /// platform keys only in the dev plaintext fallback).
     pub jwks_uri: String,
     /// Spec-required floor; no authorization endpoint exists on org hosts.
     pub response_types_supported: Vec<String>,
     /// Spec-required floor.
     pub subject_types_supported: Vec<String>,
-    /// Algorithms actually used for AWS tokens: ES256 always, RS256 when an
-    /// RSA key is configured (Identity Center trusted token issuer).
+    /// Algorithms the keys behind this issuer's JWKS actually sign with:
+    /// per-org key sets always hold ES256 + RS256; the plaintext-store
+    /// fallback advertises what the platform keys support.
     pub id_token_signing_alg_values_supported: Vec<JwsAlgorithm>,
     /// Claims present in the AWS tokens.
     pub claims_supported: Vec<String>,
@@ -380,7 +382,12 @@ pub fn build_wif_discovery_document(state: &Arc<AppState>, issuer: &str) -> WifD
         jwks_uri: format!("{issuer}/oauth/jwks"),
         response_types_supported: vec!["id_token".to_string()],
         subject_types_supported: vec!["public".to_string()],
-        id_token_signing_alg_values_supported: if state.oidc_rsa_key.is_some() {
+        // This document is only served for claimed org subdomains. With an
+        // encrypted store the org's own key set (always ES256 + RS256) backs
+        // the JWKS; otherwise the shared platform keys do.
+        id_token_signing_alg_values_supported: if state.store.is_encrypted()
+            || state.oidc_rsa_key.is_some()
+        {
             vec![JwsAlgorithm::Rs256, JwsAlgorithm::Es256]
         } else {
             vec![JwsAlgorithm::Es256]

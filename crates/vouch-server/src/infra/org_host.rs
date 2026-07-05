@@ -2,9 +2,10 @@
 //! Org issuer-subdomain host detection and route gating.
 //!
 //! Organizations can claim a subdomain of the primary host as their OIDC
-//! issuer for AWS workload identity federation (`acme.us.vouch.sh`). Those
-//! hosts serve only what AWS IAM fetches when creating an OIDC identity
-//! provider — the discovery document and the JWKS — plus health checks.
+//! issuer for AWS workload identity federation (`acme-com.us.vouch.sh`,
+//! derived from the verified apex `acme.com`). Those hosts serve only what
+//! AWS IAM fetches when creating an OIDC identity provider — the discovery
+//! document and the JWKS — plus health checks.
 //! Every other route 404s on org hosts so cookies, WebAuthn origins, and
 //! FAPI flows remain anchored to the primary host.
 //!
@@ -69,9 +70,8 @@ pub(crate) fn org_label_from_request(
 /// Middleware gating org-subdomain hosts to the WIF-only surface.
 ///
 /// DB-free: only the host *shape* is checked here. Whether the label is
-/// actually claimed is decided by the discovery handler; the JWKS content is
-/// identical for every issuer host, so serving it for unclaimed labels is
-/// harmless (public keys, no issuer assertion).
+/// actually claimed — and which org's keys the JWKS serves — is decided by
+/// the discovery/JWKS handlers, which 404 unclaimed labels.
 pub(crate) async fn org_host_gate(
     State(state): State<Arc<AppState>>,
     request: Request,
