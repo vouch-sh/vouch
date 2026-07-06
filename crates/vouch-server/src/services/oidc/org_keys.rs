@@ -53,6 +53,16 @@ use super::keys::{Jwk, OidcRsaSigningKey, OidcSigningKey};
 /// relying party's OIDC provider config. A subdomain that can't be turned into
 /// an issuer URL is an error, not a silent downgrade.
 ///
+/// Issuer selection is gated on whether a subdomain is *claimed*, not on
+/// at-rest encryption — unlike [`resolve_org_keys`], which yields a per-org
+/// signing key only under encryption. These stay consistent because claiming
+/// requires an encrypted store (enforced at the claim handler and the startup
+/// guard) and `is_encrypted()` is fixed for the life of the process: a claimed
+/// subdomain therefore implies per-org keys exist, so the org issuer is always
+/// backed by an org-specific key. The one exception — org issuer served under
+/// the shared key — requires an out-of-band DB write on a plaintext deployment;
+/// [`resolve_org_keys`]'s encryption check is the fail-safe backstop for it.
+///
 /// # Errors
 /// Returns `ServiceError` if a claimed label can't be built into an issuer URL.
 pub fn org_issuer_or_base(
