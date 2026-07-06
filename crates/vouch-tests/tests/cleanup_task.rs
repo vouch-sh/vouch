@@ -33,8 +33,6 @@ async fn run_cleanup_on_empty_store_is_a_noop() {
     cleanup::run_cleanup(
         &harness.state.store,
         &harness.state.audit,
-        &harness.state.org_keys_cache,
-        harness.state.config().session_hours,
         AUTH_EVENTS_DAYS,
         OAUTH_EVENTS_DAYS,
     )
@@ -96,8 +94,6 @@ async fn run_cleanup_removes_expired_sessions_and_keeps_fresh_ones() {
     cleanup::run_cleanup(
         &harness.state.store,
         &harness.state.audit,
-        &harness.state.org_keys_cache,
-        harness.state.config().session_hours,
         AUTH_EVENTS_DAYS,
         OAUTH_EVENTS_DAYS,
     )
@@ -145,13 +141,5 @@ async fn run_cleanup_tolerates_zero_retention_for_audit_events() {
 
     // Retention = 0 means anything older than `now - 0 days` is eligible.
     // The cutoff math must not overflow and run_cleanup must complete.
-    cleanup::run_cleanup(
-        &harness.state.store,
-        &harness.state.audit,
-        &harness.state.org_keys_cache,
-        harness.state.config().session_hours,
-        0,
-        0,
-    )
-    .await;
+    cleanup::run_cleanup(&harness.state.store, &harness.state.audit, 0, 0).await;
 }

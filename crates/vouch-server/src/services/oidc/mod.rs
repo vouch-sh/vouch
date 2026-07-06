@@ -86,9 +86,11 @@ pub use exchange::{TokenExchangeParams, TokenExchangeResult};
 pub use introspection::{IntrospectionResult, RevocationResult};
 pub use keys::{EcJwk, Jwk, OidcRsaSigningKey, OidcSigningKey, RsaJwk};
 pub use org_keys::{
-    OrgKeySetSnapshot, OrgKeys, OrgKeysCache, emergency_rotate_org_keys, org_issuer_or_base,
-    org_jwks, process_pending_org_key_transitions, resolve_org_keys, stage_org_key_rotation,
+    Operator, OrgKeySetSnapshot, OrgKeys, OrgKeysCache, RevokeOutcome, RotateOutcome,
+    emergency_rotate_org_keys, org_issuer_or_base, org_jwks, resolve_org_keys,
+    revoke_org_previous_keys, rotate_org_keys,
 };
+pub(crate) use org_keys::{OrgKeyPanel, org_key_panel};
 pub use protected_resource::{
     PROTECTED_RESOURCE_PREFIXES, ProtectedResourceMetadata, SIGNED_METADATA_TYP,
     SubPathClassification, WELL_KNOWN_SUFFIX, build_protected_resource_metadata, classify_sub_path,

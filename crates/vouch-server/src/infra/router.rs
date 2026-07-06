@@ -711,6 +711,10 @@ fn build_admin_routes(config: &config::ServerConfig) -> anyhow::Result<Router<Ar
             post(handlers::admin::admin_rotate_keys),
         )
         .route(
+            "/admin/subdomain/revoke",
+            post(handlers::admin::admin_revoke_keys),
+        )
+        .route(
             "/admin/subdomain/emergency-rotate",
             post(handlers::admin::admin_emergency_rotate_keys),
         )

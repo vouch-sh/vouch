@@ -16,7 +16,6 @@ use crate::db;
 use crate::db::audit::AuditStore;
 use crate::db::store::DocumentStore;
 use crate::infra::dns;
-use crate::services::oidc::{OrgKeysCache, process_pending_org_key_transitions};
 use aws_lc_rs::rand as aws_rand;
 use jiff::{Span, Timestamp};
 use tokio::task::JoinHandle;
@@ -108,8 +107,6 @@ fn random_jitter(max_jitter_secs: u64) -> std::time::Duration {
 pub fn start_cleanup_task(
     store: DocumentStore,
     audit: AuditStore,
-    org_keys_cache: OrgKeysCache,
-    session_hours: u64,
     interval_minutes: u64,
     auth_events_retention_days: i64,
     oauth_events_retention_days: i64,
@@ -140,8 +137,6 @@ pub fn start_cleanup_task(
             run_cleanup(
                 &store,
                 &audit,
-                &org_keys_cache,
-                session_hours,
                 auth_events_retention_days,
                 oauth_events_retention_days,
             )
@@ -165,8 +160,6 @@ pub fn start_cleanup_task(
 pub async fn run_cleanup(
     store: &DocumentStore,
     audit: &AuditStore,
-    org_keys_cache: &OrgKeysCache,
-    session_hours: u64,
     auth_events_retention_days: i64,
     oauth_events_retention_days: i64,
 ) {
@@ -278,13 +271,6 @@ pub async fn run_cleanup(
     // Garbage-collect pending and auto-unverified additional domains.
     if let Err(e) = gc_stale_additional_domains(store, audit, now).await {
         tracing::warn!(error = %e, "Additional-domain GC pass failed");
-    }
-
-    // Process pending org issuer key-rotation transitions (activate + reap).
-    if let Err(e) =
-        process_pending_org_key_transitions(store, audit, org_keys_cache, session_hours).await
-    {
-        tracing::warn!(error = %e, "Org issuer key rotation pass failed");
     }
 
     tracing::debug!("Background cleanup tasks complete");

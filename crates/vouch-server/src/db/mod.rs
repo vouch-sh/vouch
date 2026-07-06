@@ -83,13 +83,11 @@ pub use organizations::{
     RecheckEffect, RecheckOutcome, SUBDOMAIN_REUSE_COOLDOWN_SECS, StaleDomainRemoval,
     SubdomainClaimError, SubdomainLabelError, VerifiedDomainRecord, add_additional_domain,
     any_subdomain_claimed, claim_subdomain, cleanup_stale_additional_domains,
-    deterministic_org_key_id, deterministic_org_key_next_id, deterministic_org_key_previous_id,
-    eligible_subdomain_labels, find_org_by_subdomain, get_org_signing_key,
-    get_org_signing_key_next, get_org_signing_key_previous, get_organization,
-    get_organization_domain, get_verification_token, ineligible_subdomain_candidates,
-    list_additional_domains, list_all_verified_additional_domains, list_org_signing_keys,
-    mark_additional_domain_verified, normalize_domain, record_recheck_result, release_subdomain,
-    remove_additional_domain, try_insert_org_signing_key, try_insert_org_signing_key_next,
+    deterministic_org_key_id, eligible_subdomain_labels, find_org_by_subdomain,
+    get_org_signing_key, get_organization, get_organization_domain, get_verification_token,
+    ineligible_subdomain_candidates, list_additional_domains, list_all_verified_additional_domains,
+    list_org_signing_keys, mark_additional_domain_verified, normalize_domain,
+    record_recheck_result, release_subdomain, remove_additional_domain, try_insert_org_signing_key,
     unicode_form, validate_subdomain_label,
 };
 

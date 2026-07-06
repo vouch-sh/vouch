@@ -82,61 +82,36 @@ fn serialize_secret_string<S: serde::Serializer>(
     serializer.serialize_str(value.expose_secret())
 }
 
-/// Lifecycle state of a per-org issuer signing key.
+/// State of a per-org issuer signing key (Auth0-style rotation).
 ///
-/// A key begins `Active` (the live signing key). When rotation is staged a
-/// successor is written as `Pending`; after `PUBLISH_AHEAD_HOURS` the cleanup
-/// loop activates it (the predecessor moves to `Retiring`). When the retirement
-/// window elapses the `Retiring` key is reaped. Emergency rotation skips the
-/// staged path: the predecessor is deleted outright and a new `Active` key is
-/// inserted immediately.
+/// A key set always holds a `Current` signer and a `Next` successor: the
+/// successor is created together with the first key and re-staged immediately
+/// after every rotation, so relying-party JWKS caches are always pre-warmed
+/// with the key that will sign next. An operator-triggered rotate promotes
+/// `Next` to `Current` and demotes the old signer to `Previous`, which stays
+/// published (verify-only) until the operator explicitly revokes it. Nothing
+/// transitions on a timer.
 ///
-/// The three-state machine maps to three deterministic document slots per
-/// `(org_id, alg)`:
-/// - current slot → `Active` (existing deterministic ID; backward-compatible)
-/// - next slot    → `Pending` (new, with `"_next"` suffix in hash input)
-/// - previous slot → `Retiring` (new, with `"_prev"` suffix in hash input)
-///
-/// `#[serde(default)]` ensures existing rows without a `state` field
-/// deserialize as `Active`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(tag = "state", rename_all = "snake_case")]
+/// The state doubles as the storage location: each state has its own
+/// deterministic document ID per `(org_id, alg)` (see
+/// [`crate::db::deterministic_org_key_id`]), so retries and concurrent
+/// writers collide on the primary key instead of duplicating keys. `Current`
+/// keeps the original pre-rotation hash prefix, and `#[serde(default)]`
+/// deserializes rows without a `state` field as `Current` — existing rows
+/// need no migration.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
 pub enum SigningKeyState {
     /// The key currently used to sign tokens for this org and algorithm.
-    Active,
-    /// A staged successor waiting for `PUBLISH_AHEAD_HOURS` to elapse before
-    /// the cleanup loop switches signing to it.
-    Pending {
-        /// When the cleanup loop may activate this key and retire the current one.
-        activate_at: Timestamp,
-    },
-    /// A predecessor that is still valid for token verification but no longer
-    /// used for signing. Reaped when `not_after` elapses.
-    Retiring {
-        /// After this timestamp the key may be safely deleted; all tokens it
-        /// signed have expired or been superseded.
-        not_after: Timestamp,
-    },
-}
-
-impl SigningKeyState {
-    /// Returns the timestamp after which this key may be safely deleted, if any.
-    ///
-    /// Only `Retiring` keys have a deadline; `Active` and `Pending` keys do not
-    /// expire automatically. Used to populate the `ExpiresAt` document column on
-    /// insert. Reaping is performed explicitly by `reap_org_retired_key` in the
-    /// cleanup loop, which also emits the `org_issuer_key_reaped` audit event and
-    /// invalidates the cache.
-    pub fn expires_at(&self) -> Option<Timestamp> {
-        match self {
-            Self::Retiring { not_after } => Some(*not_after),
-            _ => None,
-        }
-    }
-}
-
-fn default_signing_key_state() -> SigningKeyState {
-    SigningKeyState::Active
+    #[default]
+    Current,
+    /// The pre-staged successor, published in the JWKS so relying-party caches
+    /// warm up before it ever signs. `OrgSigningKeyDoc::staged_at` records
+    /// when its publish window started.
+    Next,
+    /// A demoted predecessor that still verifies outstanding tokens but no
+    /// longer signs. `OrgSigningKeyDoc::demoted_at` feeds the revoke gate.
+    Previous,
 }
 
 /// A per-organization OIDC issuer signing key.
@@ -147,11 +122,11 @@ fn default_signing_key_state() -> SigningKeyState {
 /// org's own JWKS — making the issuer host a real cryptographic tenant
 /// boundary. `alg` is the RFC 7518 JWS algorithm (ES256 or RS256).
 ///
-/// One key per row, at a **deterministic slot ID** (current/next/previous per
-/// `(org_id, alg)`) so retries and concurrent operations collide on the primary
-/// key instead of creating duplicates. `kid` (RFC 7517) is a field (hash of the
-/// random public key), never the document ID. See [`SigningKeyState`] for the
-/// rotation lifecycle.
+/// One key per row, at a **deterministic document ID** derived from
+/// `(org_id, alg, state)` so retries and concurrent operations collide on the
+/// primary key instead of creating duplicates. `kid` (RFC 7517) is a field
+/// (hash of the random public key), never the document ID. See
+/// [`SigningKeyState`] for the rotation lifecycle.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OrgSigningKeyDoc {
     /// Owning organization (indexed, so the org's key set is one query).
@@ -166,18 +141,23 @@ pub struct OrgSigningKeyDoc {
     /// when `DocumentStore::is_encrypted`).
     #[serde(serialize_with = "serialize_secret_string")]
     pub private_pkcs8_der_b64: SecretString,
-    /// Rotation lifecycle state. Defaults to `Active` so existing rows without
-    /// this field deserialize correctly.
-    #[serde(default = "default_signing_key_state")]
+    /// Rotation state; also selects the document's deterministic ID. Defaults
+    /// to `Current` so existing rows without this field deserialize correctly.
+    #[serde(default)]
     pub state: SigningKeyState,
+    /// When a `Next` key's publish window started. `None` for other states.
+    #[serde(default)]
+    pub staged_at: Option<Timestamp>,
+    /// When a `Previous` key stopped signing. `None` for other states.
+    #[serde(default)]
+    pub demoted_at: Option<Timestamp>,
 }
 
 impl DocumentType for OrgSigningKeyDoc {
     const DOC_TYPE: &'static str = "org_signing_key";
 
-    fn expires_at(&self) -> Option<Timestamp> {
-        self.state.expires_at()
-    }
+    // No `expires_at` override: signing keys are never reaped by the generic
+    // expiry cleanup. A `Previous` key lives until an operator revokes it.
 
     fn index_entries(&self) -> Vec<IndexEntry> {
         vec![IndexEntry {

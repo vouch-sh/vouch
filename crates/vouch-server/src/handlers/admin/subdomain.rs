@@ -11,6 +11,7 @@
 
 use crate::AppState;
 use crate::db;
+use crate::db::SigningKeyState;
 use crate::db::{SubdomainClaimError, SubdomainLabelError};
 use crate::handlers::admin::flash;
 use crate::handlers::browser_login::validate_origin;
@@ -18,7 +19,10 @@ use crate::handlers::session::{AuthContext, extract_org_admin, get_resource_auth
 use crate::impl_template_response;
 use crate::infra::i18n::Tr;
 use crate::services::error::ServiceError;
-use crate::services::oidc::{emergency_rotate_org_keys, stage_org_key_rotation};
+use crate::services::oidc::{
+    Operator, OrgKeyPanel, RevokeOutcome, RotateOutcome, emergency_rotate_org_keys, org_key_panel,
+    revoke_org_previous_keys, rotate_org_keys,
+};
 use askama::Template;
 use axum::extract::{OriginalUri, State};
 use axum::http::{HeaderMap, Method};
@@ -48,8 +52,69 @@ pub(crate) struct AdminSubdomainTemplate {
     /// claim form is replaced by an explanation — per-org signing keys are
     /// never persisted in plaintext, so subdomains can't be claimed.
     pub store_encrypted: bool,
+    /// Signing-key rows for the key panel (empty when no subdomain is claimed
+    /// or the keys have not been created yet).
+    pub signing_keys: Vec<SigningKeyRow>,
+    /// Localized reason the Rotate button is disabled; `None` = enabled.
+    pub rotate_blocked: Option<String>,
+    /// Localized reason the Revoke button is disabled; `None` = enabled.
+    pub revoke_blocked: Option<String>,
+    /// Whether any Previous key exists (controls the Revoke button's presence).
+    pub has_previous: bool,
     pub flash_message: Option<String>,
     pub flash_success: Option<String>,
+}
+
+/// One row of the signing-key panel.
+pub(crate) struct SigningKeyRow {
+    pub alg: String,
+    /// Localized display label for the key's state.
+    pub state_label: String,
+    pub kid: String,
+    /// When the key entered its state (staged/demoted); `None` for Current.
+    pub since: Option<String>,
+}
+
+/// Localized display label for a key state.
+fn state_label(state: SigningKeyState) -> String {
+    match state {
+        SigningKeyState::Current => Tr::new("admin-subdomain-key-state-current").to_string(),
+        SigningKeyState::Next => Tr::new("admin-subdomain-key-state-next").to_string(),
+        SigningKeyState::Previous => Tr::new("admin-subdomain-key-state-previous").to_string(),
+    }
+}
+
+/// Localized reason a rotate is (or would be) rejected; `None` when allowed.
+fn rotate_blocked_message(outcome: &RotateOutcome) -> Option<String> {
+    match outcome {
+        RotateOutcome::Rotated { .. } => None,
+        RotateOutcome::NextNotReady { ready_at } => Some(
+            Tr::new("admin-subdomain-flash-rotate-not-ready")
+                .arg("ready", ready_at.to_string().as_str())
+                .to_string(),
+        ),
+        RotateOutcome::PreviousUnrevoked => {
+            Some(Tr::new("admin-subdomain-flash-rotate-previous-unrevoked").to_string())
+        }
+        RotateOutcome::NotBootstrapped => {
+            Some(Tr::new("admin-subdomain-flash-rotate-not-bootstrapped").to_string())
+        }
+    }
+}
+
+/// Localized reason a revoke is (or would be) rejected; `None` when allowed.
+fn revoke_blocked_message(outcome: &RevokeOutcome) -> Option<String> {
+    match outcome {
+        RevokeOutcome::Revoked { .. } => None,
+        RevokeOutcome::NotReady { ready_at } => Some(
+            Tr::new("admin-subdomain-flash-revoke-not-ready")
+                .arg("ready", ready_at.to_string().as_str())
+                .to_string(),
+        ),
+        RevokeOutcome::NothingToRevoke => {
+            Some(Tr::new("admin-subdomain-flash-nothing-to-revoke").to_string())
+        }
+    }
 }
 
 impl_template_response!(AdminSubdomainTemplate);
@@ -169,6 +234,40 @@ pub(crate) async fn admin_subdomain_page(
     let messages = flash::read(&jar);
     let jar = flash::clear(jar);
 
+    // The signing-key panel only applies to a claimed subdomain on an
+    // encrypted store (per-org keys are never created otherwise).
+    let panel = if org.subdomain.is_some() && state.store.is_encrypted() {
+        match org_key_panel(&state, &org_id).await {
+            Ok(panel) => Some(panel),
+            Err(e) => {
+                tracing::error!(error = %e, org_id, "failed to build signing-key panel");
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let (signing_keys, rotate_blocked, revoke_blocked, has_previous) = match panel {
+        Some(OrgKeyPanel {
+            rows,
+            rotate_blocked,
+            revoke_blocked,
+        }) => (
+            rows.into_iter()
+                .map(|row| SigningKeyRow {
+                    alg: row.alg.as_str().to_string(),
+                    state_label: state_label(row.state),
+                    kid: row.kid,
+                    since: row.since.map(|ts| ts.to_string()),
+                })
+                .collect(),
+            rotate_blocked.as_ref().and_then(rotate_blocked_message),
+            revoke_blocked.as_ref().and_then(revoke_blocked_message),
+            rotate_blocked == Some(RotateOutcome::PreviousUnrevoked),
+        ),
+        None => (Vec::new(), None, None, false),
+    };
+
     let body = AdminSubdomainTemplate {
         auth,
         eligible_labels: db::eligible_subdomain_labels(&org.domain, &org.additional_domains),
@@ -180,6 +279,10 @@ pub(crate) async fn admin_subdomain_page(
         issuer,
         discovery_url,
         store_encrypted: state.store.is_encrypted(),
+        signing_keys,
+        rotate_blocked,
+        revoke_blocked,
+        has_previous,
         flash_message: messages.err,
         flash_success: messages.ok,
     };
@@ -322,13 +425,63 @@ pub(crate) async fn admin_release_subdomain(
     ))
 }
 
-/// POST /admin/subdomain/rotate — stage a graceful signing-key rotation.
+/// Request context shared by the key-management POST handlers.
+struct ActionParts<'a> {
+    method: &'a Method,
+    uri: &'a OriginalUri,
+    headers: &'a HeaderMap,
+}
+
+/// Shared guard for the key-management POST handlers: valid origin, an
+/// org-admin session with an org, and a claimed subdomain. On a guard failure
+/// the caller returns the ready-made redirect.
+async fn subdomain_action_guard(
+    state: &Arc<AppState>,
+    parts: &ActionParts<'_>,
+    jar: &CookieJar,
+) -> Result<Result<(db::User, String), Response>, ServiceError> {
+    validate_origin(parts.headers, &state.config().base_url)?;
+    let (admin, org_id) = extract_org_admin(
+        state,
+        parts.headers,
+        jar,
+        parts.method.as_str(),
+        parts.uri.path(),
+        None,
+    )
+    .await?;
+
+    if org_id.is_empty() {
+        // No org association is an auth/session problem, not a subdomain one.
+        return Ok(Err(redirect_error(
+            jar.clone(),
+            Tr::new("admin-subdomain-error-internal").to_string(),
+        )));
+    }
+    let org = match db::get_organization(&state.store, &org_id).await {
+        Ok(Some(o)) => o,
+        Ok(None) | Err(_) => {
+            return Ok(Err(redirect_error(
+                jar.clone(),
+                Tr::new("admin-subdomain-error-internal").to_string(),
+            )));
+        }
+    };
+    if org.subdomain.is_none() {
+        return Ok(Err(redirect_error(
+            jar.clone(),
+            Tr::new("admin-subdomain-error-no-subdomain").to_string(),
+        )));
+    }
+    Ok(Ok((admin, org_id)))
+}
+
+/// POST /admin/subdomain/rotate — switch signing to the pre-staged Next keys.
 ///
-/// Generates ES256 and RS256 successors with
-/// `activate_at = now + PUBLISH_AHEAD_HOURS (24h)`, writes them to the
-/// next-slot, and publishes them in the org JWKS immediately. The cleanup loop
-/// activates the new keys after 24h and retires the old keys after
-/// `max(session_hours, 8h) + 2h`.
+/// Promotes Next to Current for both algorithms, demotes the old signers to
+/// Previous (published, verify-only, awaiting an explicit revoke), and stages
+/// fresh Next keys. Rejected while the Next keys' publish window is still
+/// warming relying-party caches, and while Previous keys remain unrevoked.
 pub(crate) async fn admin_rotate_keys(
     method: Method,
     uri: OriginalUri,
@@ -336,99 +489,106 @@ pub(crate) async fn admin_rotate_keys(
     headers: HeaderMap,
     jar: CookieJar,
 ) -> Result<Response, ServiceError> {
-    validate_origin(&headers, &state.config().base_url)?;
-    let (admin, org_id) =
-        extract_org_admin(&state, &headers, &jar, method.as_str(), uri.path(), None).await?;
+    let parts = ActionParts {
+        method: &method,
+        uri: &uri,
+        headers: &headers,
+    };
+    let (admin, org_id) = match subdomain_action_guard(&state, &parts, &jar).await? {
+        Ok(v) => v,
+        Err(response) => return Ok(response),
+    };
 
-    if org_id.is_empty() {
-        // Empty org_id means the session has no org association — an auth/session
-        // issue, not a subdomain-state issue. Use the generic internal-error key so
-        // the message isn't misleading (L3 i18n refinement).
-        return Ok(redirect_error(
-            jar,
-            Tr::new("admin-subdomain-error-internal").to_string(),
-        ));
-    }
-
-    // Guard: rotating keys for an org with no claimed subdomain would write
-    // orphan Pending docs that can never activate (I4 / L3).
-    let org = match db::get_organization(&state.store, &org_id).await {
-        Ok(Some(o)) => o,
-        Ok(None) | Err(_) => {
-            return Ok(redirect_error(
+    let operator = Operator {
+        user_id: Some(&admin.id),
+        email: Some(&admin.email),
+    };
+    match rotate_org_keys(&state, &org_id, operator).await {
+        Ok(RotateOutcome::Rotated { .. }) => {
+            tracing::info!(
+                admin_email = %admin.email,
+                org_id = %org_id,
+                "Rotated org issuer keys"
+            );
+            Ok(redirect_ok(
+                jar,
+                Tr::new("admin-subdomain-flash-rotated").to_string(),
+            ))
+        }
+        Ok(blocked) => {
+            // The service emits no audit event for a rejected rotate.
+            let message = rotate_blocked_message(&blocked)
+                .unwrap_or_else(|| Tr::new("admin-subdomain-error-internal").to_string());
+            Ok(redirect_error(jar, message))
+        }
+        Err(e) => {
+            tracing::error!(error = %e, org_id, "Org issuer key rotation failed");
+            Ok(redirect_error(
                 jar,
                 Tr::new("admin-subdomain-error-internal").to_string(),
-            ));
+            ))
         }
-    };
-    if org.subdomain.is_none() {
-        return Ok(redirect_error(
-            jar,
-            Tr::new("admin-subdomain-error-no-subdomain").to_string(),
-        ));
-    }
-
-    let newly_staged =
-        match stage_org_key_rotation(&state.store, &org_id, &state.org_keys_cache).await {
-            Ok(staged) => staged,
-            Err(e) => {
-                tracing::error!(error = %e, org_id, "Org issuer key rotation staging failed");
-                return Ok(redirect_error(
-                    jar,
-                    Tr::new("admin-subdomain-error-internal").to_string(),
-                ));
-            }
-        };
-
-    if newly_staged {
-        // Only emit the audit event when keys were actually staged (C6).
-        let data = serde_json::json!({
-            "action": "stage_org_key_rotation",
-            "org_id": org_id,
-            "admin_user_id": admin.id,
-        });
-        if let Err(e) = state
-            .audit
-            .insert_event(
-                "org_issuer_key_rotation_staged",
-                Some(&admin.id),
-                Some(&admin.email),
-                &data.to_string(),
-            )
-            .await
-        {
-            tracing::warn!(error = %e, "failed to write org_issuer_key_rotation_staged audit event");
-        }
-        tracing::info!(
-            admin_email = %admin.email,
-            org_id = %org_id,
-            "Staged org issuer key rotation"
-        );
-        Ok(redirect_ok(
-            jar,
-            Tr::new("admin-subdomain-flash-rotation-staged").to_string(),
-        ))
-    } else {
-        // Both next-slots were already occupied — rotation was already in progress.
-        tracing::info!(
-            admin_email = %admin.email,
-            org_id = %org_id,
-            "Org issuer key rotation already in progress; no-op"
-        );
-        Ok(redirect_ok(
-            jar,
-            Tr::new("admin-subdomain-flash-rotation-already-staged").to_string(),
-        ))
     }
 }
 
-/// POST /admin/subdomain/emergency-rotate — emergency signing-key rotation.
+/// POST /admin/subdomain/revoke — delete the Previous signing keys.
 ///
-/// Immediately replaces both ES256 and RS256 keys. Outstanding tokens signed by
-/// the old keys will fail verification until relying parties refetch the JWKS
-/// (cross-instance ≤ 60s, downstream ≤ 1h). Use only when a key compromise is
-/// suspected. Intended for compromised key material — outstanding token breakage
-/// is accepted.
+/// Allowed once the token-drain window since the demoting rotate has elapsed,
+/// so no outstanding token loses its verification key.
+pub(crate) async fn admin_revoke_keys(
+    method: Method,
+    uri: OriginalUri,
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    jar: CookieJar,
+) -> Result<Response, ServiceError> {
+    let parts = ActionParts {
+        method: &method,
+        uri: &uri,
+        headers: &headers,
+    };
+    let (admin, org_id) = match subdomain_action_guard(&state, &parts, &jar).await? {
+        Ok(v) => v,
+        Err(response) => return Ok(response),
+    };
+
+    let operator = Operator {
+        user_id: Some(&admin.id),
+        email: Some(&admin.email),
+    };
+    match revoke_org_previous_keys(&state, &org_id, operator).await {
+        Ok(RevokeOutcome::Revoked { .. }) => {
+            tracing::info!(
+                admin_email = %admin.email,
+                org_id = %org_id,
+                "Revoked previous org issuer keys"
+            );
+            Ok(redirect_ok(
+                jar,
+                Tr::new("admin-subdomain-flash-revoked").to_string(),
+            ))
+        }
+        Ok(blocked) => {
+            let message = revoke_blocked_message(&blocked)
+                .unwrap_or_else(|| Tr::new("admin-subdomain-error-internal").to_string());
+            Ok(redirect_error(jar, message))
+        }
+        Err(e) => {
+            tracing::error!(error = %e, org_id, "Org issuer key revoke failed");
+            Ok(redirect_error(
+                jar,
+                Tr::new("admin-subdomain-error-internal").to_string(),
+            ))
+        }
+    }
+}
+
+/// POST /admin/subdomain/emergency-rotate — replace the whole key set now.
+///
+/// Compromise recovery: fresh Current and Next keys for both algorithms, the
+/// Previous keys deleted. Outstanding tokens signed by the old keys stop
+/// verifying — deliberate, since keeping a compromised key verifiable would
+/// keep attacker-forged tokens verifiable too.
 pub(crate) async fn admin_emergency_rotate_keys(
     method: Method,
     uri: OriginalUri,
@@ -436,47 +596,46 @@ pub(crate) async fn admin_emergency_rotate_keys(
     headers: HeaderMap,
     jar: CookieJar,
 ) -> Result<Response, ServiceError> {
-    validate_origin(&headers, &state.config().base_url)?;
-    let (admin, org_id) =
-        extract_org_admin(&state, &headers, &jar, method.as_str(), uri.path(), None).await?;
+    let parts = ActionParts {
+        method: &method,
+        uri: &uri,
+        headers: &headers,
+    };
+    let (admin, org_id) = match subdomain_action_guard(&state, &parts, &jar).await? {
+        Ok(v) => v,
+        Err(response) => return Ok(response),
+    };
 
-    if org_id.is_empty() {
-        // Empty org_id is an auth/session issue — use the generic internal-error
-        // key rather than the misleading no-subdomain message (L3 i18n refinement).
-        return Ok(redirect_error(
-            jar,
-            Tr::new("admin-subdomain-error-internal").to_string(),
-        ));
-    }
-
-    // Guard: emergency rotation for an org with no claimed subdomain has no
-    // Active key to replace; fail early with a clear message (I4 / L3).
-    let org = match db::get_organization(&state.store, &org_id).await {
-        Ok(Some(o)) => o,
-        Ok(None) | Err(_) => {
+    let operator = Operator {
+        user_id: Some(&admin.id),
+        email: Some(&admin.email),
+    };
+    // A claimed subdomain whose keys were never created has nothing to
+    // replace; say so instead of reporting an internal error.
+    match db::get_org_signing_key(
+        &state.store,
+        &org_id,
+        db::JwsAlgorithm::Es256,
+        SigningKeyState::Current,
+    )
+    .await
+    {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            return Ok(redirect_error(
+                jar,
+                Tr::new("admin-subdomain-flash-rotate-not-bootstrapped").to_string(),
+            ));
+        }
+        Err(e) => {
+            tracing::error!(error = %e, org_id, "failed to load current signing key");
             return Ok(redirect_error(
                 jar,
                 Tr::new("admin-subdomain-error-internal").to_string(),
             ));
         }
-    };
-    if org.subdomain.is_none() {
-        return Ok(redirect_error(
-            jar,
-            Tr::new("admin-subdomain-error-no-subdomain").to_string(),
-        ));
     }
-
-    if let Err(e) = emergency_rotate_org_keys(
-        &state.store,
-        &org_id,
-        &state.audit,
-        &state.org_keys_cache,
-        Some(&admin.id),
-        Some(&admin.email),
-    )
-    .await
-    {
+    if let Err(e) = emergency_rotate_org_keys(&state, &org_id, operator).await {
         tracing::error!(error = %e, org_id, "Emergency org issuer key rotation failed");
         return Ok(redirect_error(
             jar,
@@ -484,15 +643,12 @@ pub(crate) async fn admin_emergency_rotate_keys(
         ));
     }
 
-    // Per-alg audit events with operator identity are emitted by
-    // emergency_rotate_org_keys; no separate handler-level event needed (C1).
-
+    // Per-alg audit events with operator identity are emitted by the service.
     tracing::warn!(
         admin_email = %admin.email,
         org_id = %org_id,
         "Emergency org issuer key rotation completed"
     );
-
     Ok(redirect_ok(
         jar,
         Tr::new("admin-subdomain-flash-emergency-rotation-done").to_string(),

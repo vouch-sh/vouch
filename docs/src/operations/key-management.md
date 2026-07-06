@@ -217,47 +217,69 @@ Per-org keys are only created when all three conditions are met:
 - The organization has a claimed subdomain.
 - A credential-issuance request arrives for that org (lazy first-use creation).
 
-### Graceful Rotation
+### Key Lifecycle
 
-Graceful rotation is a zero-downtime two-phase process:
+Each algorithm's key set always contains two keys, and sometimes three:
 
-**Phase 1 — Stage:** The "Rotate Signing Keys" button generates successor keys and publishes them
-immediately in the org JWKS. Both the current (Active) and successor (Pending) keys appear in the
-JWKS. No token breakage occurs because signing continues with the Active key during the 24-hour
-publish window.
+| State | Role | Published in JWKS | Signs tokens |
+|-------|------|-------------------|--------------|
+| **Current** | The signer | yes | yes |
+| **Next** | Pre-staged successor | yes | no |
+| **Previous** | Demoted signer awaiting revocation | yes | no |
 
-**Phase 2 — Activate:** Approximately 24 hours after staging, the scheduled cleanup task promotes
-the successor key to Active and demotes the old key to Retiring. Signing switches to the new key.
-The old key remains in the JWKS for the duration of the retirement window (session lifetime + 1
-hour + a safety margin) so outstanding tokens signed by the old key remain verifiable.
+The Next key is created together with the first key and re-staged automatically whenever a
+rotation consumes it, so relying-party JWKS caches always hold the key that will sign next —
+long before it ever signs. Nothing in the lifecycle runs on a timer: both rotation steps are
+explicit operator actions on the **Admin → Subdomain** page.
 
-**Phase 3 — Reap:** After the retirement window elapses, the cleanup task removes the old Retiring
-key from the JWKS entirely.
+### Rotating Keys
 
-The full cycle takes roughly 24 hours (publish window) plus the retirement window (~9 hours for an
-8-hour session lifetime). No operator action is required after clicking "Rotate Signing Keys" —
-the cleanup task handles activation and reaping automatically.
+**Step 1 — Rotate.** The "Rotate Signing Keys" button switches signing to the pre-staged Next
+keys for both algorithms in one transaction. The old signers become Previous keys: still
+published, still verifying outstanding tokens, no longer signing. Fresh Next keys are staged in
+the same transaction.
 
-> **Operator note:** Reducing `VOUCH_SESSION_HOURS` immediately before a rotation can
-> under-cover tokens minted under the old key (the retirement window is derived from the current
-> session lifetime). If you need to shorten session lifetimes, do so well before or after a
-> rotation, not immediately before one.
+The rotate is rejected in two situations:
+
+- **The Next keys are younger than 24 hours.** Relying parties (AWS IAM in particular) cache the
+  org JWKS on their own schedule; signing with a key their cache has not seen fails federation
+  until they refetch. Because the Next key is normally staged months earlier (at first use or by
+  the previous rotation), this gate only bites on back-to-back rotations.
+- **Previous keys from an earlier rotation are still published.** Revoke them first — the key
+  set keeps at most one retired generation per algorithm.
+
+**Step 2 — Revoke.** The "Revoke Old Keys" button deletes the Previous keys and removes them
+from the JWKS. It is rejected until `max(session lifetime, 8 hours) + 2 hours` have passed since
+the rotate, because until then tokens signed by the old keys may still be live — deleting the
+keys would log those sessions out. After the window, revocation affects nobody.
+
+A Previous key that is never revoked stays visible on the admin page indefinitely (it can
+verify, but never sign). Nothing deletes it automatically; revoking promptly after the drain
+window keeps the published key set minimal.
+
+> **Operator note:** Reducing `VOUCH_SESSION_HOURS` between a rotate and its revoke can shorten
+> the revoke gate below what tokens issued under the old lifetime need. Revoke first, then
+> shorten session lifetimes.
 
 ### Emergency Rotation
 
-The "Emergency Rotate" button immediately replaces both the ES256 and RS256 keys in a single
-atomic operation. Use this only when key compromise is suspected.
+The "Emergency Rotate" button replaces the **entire key set** — fresh Current and Next keys for
+both algorithms, Previous keys deleted — in one atomic operation. Use it only when key
+compromise is suspected: on an encrypted deployment all private keys are sealed by the same
+document key, so a compromise of one is treated as a compromise of all.
 
 **Consequences:**
 
-- Both keys are replaced immediately; any in-flight staged rotation is cancelled.
+- Every key that existed before the emergency is removed from the JWKS immediately.
 - Outstanding tokens signed by the old keys will fail verification until relying parties
-  refetch the JWKS. Cross-instance propagation takes up to 60 seconds (cache TTL); downstream
-  relying parties that respect the `Cache-Control: public, max-age=3600` response header may
-  take up to 1 hour to pick up the new keys.
+  refetch the JWKS. Cross-instance propagation takes up to 60 seconds (signing cache TTL);
+  downstream relying parties that respect the `Cache-Control: public, max-age=3600` response
+  header may take up to 1 hour to pick up the new keys.
 - AWS STS `AssumeRoleWithWebIdentity` and IAM Identity Center `CreateTokenWithIAM` calls that
-  carry a token signed by the old key will fail until the session expires or the user
-  re-authenticates with `vouch login`.
+  carry a token signed by an old key will fail until the user re-authenticates with
+  `vouch login`.
+- The fresh Next keys start a new 24-hour publish window, so a graceful rotate is unavailable
+  for a day afterwards.
 
 **Runbook:**
 
@@ -270,12 +292,16 @@ atomic operation. Use this only when key compromise is suspected.
 
 ### JWKS Caching and the 24-Hour Publish Window
 
-The 24-hour publish window before activation is a deliberate product decision (S2). AWS IAM and
+The 24-hour minimum age before a Next key may sign is a deliberate product decision. AWS IAM and
 IAM Identity Center cache JWKS responses for an undocumented internal period that is believed to
-exceed the advertised 1-hour `Cache-Control` max-age. Publishing the successor key 24 hours before
-activation ensures relying parties have ample time to cache the new `kid` before Vouch starts
-signing with it. Changing this window requires verifying the behaviour of all federated relying
-parties.
+exceed the advertised 1-hour `Cache-Control` max-age. Keeping the successor published for at
+least 24 hours before it signs ensures relying parties have ample time to cache the new `kid`.
+Changing this window requires verifying the behaviour of all federated relying parties.
+
+Releasing a subdomain deletes the Next and Previous keys (the publish window is meaningless
+while the issuer host is unclaimed) but keeps the Current key, so a same-org reclaim resumes
+with the same signer. The first use after a reclaim stages a fresh Next key, which restarts its
+24-hour window.
 
 ## TLS Certificate
 
