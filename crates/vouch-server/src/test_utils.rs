@@ -21,7 +21,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tower::ServiceExt;
 
-use crate::crypto::document_crypto::PlaintextDocumentCrypto;
+use crate::crypto::document_crypto::{HpkeDocumentCrypto, PlaintextDocumentCrypto};
 use crate::db::audit::AuditStore;
 use crate::db::store::DocumentStore;
 use crate::db::{CreateOAuthClientParams, JwsAlgorithm, Pool, RegistrationSource};
@@ -169,6 +169,7 @@ pub async fn test_app_state_with_idps(
         github_app: None,
         http_client: reqwest::Client::new(),
         session_cache: crate::db::SessionCache::new(10_000, 30),
+        org_keys_cache: Default::default(),
         idps,
     })
 }
@@ -216,6 +217,56 @@ pub async fn test_app_state_with_rsa_key() -> Arc<AppState> {
         github_app: None,
         http_client: reqwest::Client::new(),
         session_cache: crate::db::SessionCache::new(10_000, 30),
+        org_keys_cache: Default::default(),
+        idps: Vec::new(),
+    })
+}
+
+/// Create a test AppState whose document store **encrypts at rest** (HPKE).
+///
+/// `is_encrypted()` is `true`, so per-org issuer signing keys are created and
+/// exercised — unlike the default `PlaintextDocumentCrypto` state, where the
+/// feature falls back to the shared key. Includes a shared RSA key so the
+/// non-per-org RS256 fallback also works.
+pub async fn test_app_state_encrypted() -> Arc<AppState> {
+    use crate::services::oidc::OidcRsaSigningKey;
+
+    let pool = test_db().await;
+    let config = test_config();
+
+    let rp_origin = url::Url::parse(&config.base_url).expect("Invalid RP origin");
+    let webauthn = webauthn_rs::WebauthnBuilder::new(&config.rp_id, &rp_origin)
+        .expect("Failed to create WebauthnBuilder")
+        .rp_name(&config.rp_name)
+        .build()
+        .expect("Failed to build Webauthn");
+
+    let oidc_key = OidcSigningKey::generate().expect("Failed to generate test OIDC key");
+    let oidc_rsa_key = OidcRsaSigningKey::generate().expect("Failed to generate test RSA key");
+
+    let crypto: Arc<dyn crate::crypto::document_crypto::DocumentCrypto> =
+        Arc::new(HpkeDocumentCrypto::generate_for_test());
+    let store = DocumentStore::new(pool.clone(), crypto.clone());
+    let audit = AuditStore::new(pool.clone(), crypto);
+
+    register_test_httpsig_client(&store, &config.base_url).await;
+
+    Arc::new(AppState {
+        db: pool,
+        store,
+        audit,
+        config: Arc::new(ArcSwap::from_pointee(config)),
+        webauthn,
+        ssh_ca: None,
+        oidc_key,
+        oidc_rsa_key: Some(oidc_rsa_key),
+        state_signer: crate::crypto::jwt::StateTokenSigner::local(
+            b"test_jwt_secret_must_be_at_least_32_characters_long".to_vec(),
+        ),
+        github_app: None,
+        http_client: reqwest::Client::new(),
+        session_cache: crate::db::SessionCache::new(10_000, 30),
+        org_keys_cache: Default::default(),
         idps: Vec::new(),
     })
 }

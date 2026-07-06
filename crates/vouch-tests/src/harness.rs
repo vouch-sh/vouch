@@ -34,7 +34,15 @@ pub struct TestHarness {
 impl TestHarness {
     /// Create a new test harness with default configuration.
     pub async fn new() -> Self {
-        let state = test_utils::test_app_state().await;
+        Self::from_state(test_utils::test_app_state().await)
+    }
+
+    /// Create a test harness over a pre-built `AppState`.
+    ///
+    /// Use with the `test_utils::test_app_state_*` variants when a test needs
+    /// non-default state, e.g. `test_app_state_with_rsa_key()` for RS256
+    /// endpoints.
+    pub fn from_state(state: Arc<AppState>) -> Self {
         let config = state.config();
         let router = vouch_server::infra::router::build_app(state.clone(), &config)
             .expect("Failed to build test app router");

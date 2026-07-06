@@ -560,8 +560,20 @@ async fn build_app_state(
             config.session_cache_max_capacity,
             config.session_cache_ttl_secs,
         ),
+        org_keys_cache: Default::default(),
         idps,
     });
+
+    // Per-org issuer signing keys exist only when the document store encrypts
+    // at rest. Refuse to start an unencrypted server that has claimed issuer
+    // subdomains: it would advertise per-org issuer hosts as a tenant boundary
+    // while signing everything with the shared platform key.
+    if !state.store.is_encrypted() && crate::db::any_subdomain_claimed(&state.store).await? {
+        anyhow::bail!(
+            "issuer subdomains are claimed but document encryption is not configured; \
+             configure the KMS document key or release all issuer subdomains before starting"
+        );
+    }
 
     Ok(state)
 }

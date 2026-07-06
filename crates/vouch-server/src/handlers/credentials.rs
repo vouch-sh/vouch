@@ -6,6 +6,7 @@ use crate::db::{self, GitHubCredentialAuditData};
 use crate::services::error::ServiceError;
 use crate::services::integrations::aws::{AwsError, issue_aws_token, issue_sso_jwt};
 use crate::services::integrations::github::{GitHubInstallationId, minimal_git_permissions};
+use crate::services::oidc;
 use axum::extract::OriginalUri;
 use axum::http::Method;
 use axum::{Json, extract::State, http::HeaderMap, http::StatusCode};
@@ -329,7 +330,7 @@ async fn authorize_aws_token_request(
     method: &Method,
     path: &str,
     client_cert: &OptionalClientCert,
-) -> Result<(ValidatedResourceToken, String), ServiceError> {
+) -> Result<AwsIssuanceContext, ServiceError> {
     let token = extract_resource_token(
         state,
         headers,
@@ -373,7 +374,57 @@ async fn authorize_aws_token_request(
     }
 
     let user_email = token.email.clone().unwrap_or_else(|| user.email.clone());
-    Ok((token, user_email))
+
+    // Resolve the issuer for this user's AWS tokens: the org's claimed
+    // issuer subdomain when one exists, otherwise the shared base URL.
+    // Built from the stored label + configured base_url — never from the
+    // request Host header.
+    let config = state.config();
+    let mut org = None;
+    if let Some(org_id) = user.org_id.as_deref() {
+        org = db::get_organization(&state.store, org_id)
+            .await
+            .map_err(|e| {
+                tracing::error!("Failed to load organization {org_id}: {e}");
+                ServiceError::api(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "db_error",
+                    "Internal database error",
+                )
+            })?;
+    }
+    // Fail closed: an org that claimed a subdomain must never receive tokens
+    // minted under the shared issuer — they would not match the org's discovery
+    // document or the relying party's OIDC provider config.
+    let issuer = oidc::org_issuer_or_base(&config, org.as_ref())?;
+
+    Ok(AwsIssuanceContext {
+        token,
+        user_email,
+        issuer,
+        org,
+    })
+}
+
+/// Authorization result for the AWS token endpoints: the validated resource
+/// token, the resolved user email, the issuer (`iss`/`aud`) the token must be
+/// minted under, and the caller's organization (for per-org signing-key
+/// resolution) — both per-org when the org claimed a subdomain.
+struct AwsIssuanceContext {
+    token: ValidatedResourceToken,
+    user_email: String,
+    issuer: String,
+    org: Option<db::Organization>,
+}
+
+/// Map a per-org signing-key resolution failure to a 500.
+fn map_signing_key_error(e: anyhow::Error) -> ServiceError {
+    tracing::error!("Failed to resolve org signing key: {e}");
+    ServiceError::api(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "signing_key_error",
+        "Failed to resolve the signing key",
+    )
 }
 
 /// Map an [`AwsError`] to a `ServiceError`.
@@ -416,18 +467,24 @@ pub(crate) async fn get_aws_token(
     State(state): State<Arc<AppState>>,
     client_cert: OptionalClientCert,
 ) -> Result<Json<AwsTokenResponse>, ServiceError> {
-    let (token, user_email) =
+    let ctx =
         authorize_aws_token_request(&state, &headers, &jar, &method, uri.path(), &client_cert)
             .await?;
 
     // Issue AWS token using the session-time snapshot of aaguid and org domain.
+    // Sign with the org's own ES256 key when it has a claimed subdomain, so the
+    // token verifies against the org-host JWKS; otherwise the common key.
     let config = state.config();
+    let org_keys = oidc::resolve_org_keys(&state, ctx.org.as_ref())
+        .await
+        .map_err(map_signing_key_error)?;
+    let es_key = org_keys.as_deref().map_or(&state.oidc_key, |k| &k.es256);
     let result = issue_aws_token(
-        &config.base_url,
+        &ctx.issuer,
         config.session_hours,
-        &state.oidc_key,
-        &user_email,
-        &token,
+        es_key,
+        &ctx.user_email,
+        &ctx.token,
     )
     .await
     .map_err(map_aws_error)?;
@@ -459,26 +516,36 @@ pub(crate) async fn get_aws_sso_token(
     State(state): State<Arc<AppState>>,
     client_cert: OptionalClientCert,
 ) -> Result<Json<AwsTokenResponse>, ServiceError> {
-    let (token, user_email) =
+    let ctx =
         authorize_aws_token_request(&state, &headers, &jar, &method, uri.path(), &client_cert)
             .await?;
 
-    let rsa_key = state.oidc_rsa_key.as_ref().ok_or_else(|| {
-        tracing::error!("Identity Center token requested but no OIDC RSA key configured");
-        ServiceError::api(
-            StatusCode::NOT_IMPLEMENTED,
-            "rsa_key_unavailable",
-            "RS256 signing key is not configured on this server",
-        )
-    })?;
+    // Sign with the org's own RS256 key when it has a claimed subdomain, so the
+    // token verifies against the org-host JWKS; otherwise the common RSA key
+    // (which may be absent — Identity Center then isn't available).
+    let org_keys = oidc::resolve_org_keys(&state, ctx.org.as_ref())
+        .await
+        .map_err(map_signing_key_error)?;
+    let rsa_key = org_keys
+        .as_deref()
+        .map(|k| &k.rs256)
+        .or(state.oidc_rsa_key.as_ref())
+        .ok_or_else(|| {
+            tracing::error!("Identity Center token requested but no OIDC RSA key configured");
+            ServiceError::api(
+                StatusCode::NOT_IMPLEMENTED,
+                "rsa_key_unavailable",
+                "RS256 signing key is not configured on this server",
+            )
+        })?;
 
     let config = state.config();
     let result = issue_sso_jwt(
-        &config.base_url,
+        &ctx.issuer,
         config.session_hours,
         rsa_key,
-        &user_email,
-        &token,
+        &ctx.user_email,
+        &ctx.token,
     )
     .await
     .map_err(map_aws_error)?;

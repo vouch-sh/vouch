@@ -103,6 +103,7 @@ pub async fn enroll_user_with_org(
                     name: None,
                     created_by_user_id: None,
                     additional_domains: Vec::new(),
+                    subdomain: None,
                 };
                 match store.insert_with_id(&id, &doc).await {
                     Ok(result) => (Some(result.id), true),

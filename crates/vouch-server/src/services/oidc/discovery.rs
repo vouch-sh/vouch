@@ -343,6 +343,66 @@ fn build_mtls_aliases(state: &Arc<AppState>, base_url: &str) -> Option<MtlsEndpo
     })
 }
 
+/// Minimal OIDC discovery document served on org issuer-subdomain hosts.
+///
+/// Org subdomains exist solely as per-org trust anchors for AWS workload
+/// identity federation: AWS IAM reads only `issuer` and `jwks_uri` when an
+/// OIDC identity provider is created. The remaining fields are the
+/// REQUIRED-by-spec floor (OIDC Discovery 1.0 Section 3). Deliberately not
+/// the full FAPI document — advertising primary-host endpoints under an
+/// org issuer would be spec-ambiguous, and none of those endpoints are
+/// served on org hosts anyway.
+#[derive(Debug, Serialize)]
+pub struct WifDiscoveryDocument {
+    /// Issuer Identifier: `https://{label}.{primary_host}`.
+    pub issuer: String,
+    /// JWKS URL on the same host; serves the org's own keys (the shared
+    /// platform keys only in the dev plaintext fallback).
+    pub jwks_uri: String,
+    /// Spec-required floor; no authorization endpoint exists on org hosts.
+    pub response_types_supported: Vec<String>,
+    /// Spec-required floor.
+    pub subject_types_supported: Vec<String>,
+    /// Algorithms the keys behind this issuer's JWKS actually sign with:
+    /// per-org key sets always hold ES256 + RS256; the plaintext-store
+    /// fallback advertises what the platform keys support.
+    pub id_token_signing_alg_values_supported: Vec<JwsAlgorithm>,
+    /// Claims present in the AWS tokens.
+    pub claims_supported: Vec<String>,
+}
+
+/// Build the WIF-only discovery document for an org issuer host.
+///
+/// `issuer` must come from [`crate::config::ServerConfig::org_issuer`] (stored
+/// label + configured base URL) — never from the request `Host` header.
+#[must_use]
+pub fn build_wif_discovery_document(state: &Arc<AppState>, issuer: &str) -> WifDiscoveryDocument {
+    WifDiscoveryDocument {
+        issuer: issuer.to_string(),
+        jwks_uri: format!("{issuer}/oauth/jwks"),
+        response_types_supported: vec!["id_token".to_string()],
+        subject_types_supported: vec!["public".to_string()],
+        // This document is only served for claimed org subdomains. With an
+        // encrypted store the org's own key set (always ES256 + RS256) backs
+        // the JWKS; otherwise the shared platform keys do.
+        id_token_signing_alg_values_supported: if state.store.is_encrypted()
+            || state.oidc_rsa_key.is_some()
+        {
+            vec![JwsAlgorithm::Rs256, JwsAlgorithm::Es256]
+        } else {
+            vec![JwsAlgorithm::Es256]
+        },
+        claims_supported: vec![
+            "sub".to_string(),
+            "iss".to_string(),
+            "aud".to_string(),
+            "exp".to_string(),
+            "iat".to_string(),
+            "email".to_string(),
+        ],
+    }
+}
+
 /// Build the JSON Web Key Set for token verification.
 ///
 /// # Arguments

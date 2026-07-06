@@ -2,9 +2,11 @@
 //! Organization document type.
 
 use jiff::Timestamp;
+use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 
 use crate::db::document_type::{DocumentType, IndexEntry};
+use crate::db::documents::oauth::JwsAlgorithm;
 
 /// An organization (tenant).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -19,6 +21,107 @@ pub struct OrganizationDoc {
     /// document but are not indexed.
     #[serde(default)]
     pub additional_domains: Vec<AdditionalDomain>,
+    /// Subdomain label claimed as this org's OIDC issuer host for AWS
+    /// workload identity federation (e.g. `acme-com` →
+    /// `https://acme-com.us.vouch.sh`).
+    ///
+    /// Derived from the full registrable apex of one of the org's verified
+    /// domains (`acme.com` → `acme-com`). Indexed for host→org lookup when
+    /// serving discovery. The authoritative uniqueness record is the
+    /// [`SubdomainClaimDoc`] slot; this field is the org-side mirror written
+    /// in the same transaction.
+    #[serde(default)]
+    pub subdomain: Option<String>,
+}
+
+/// The claim slot for an issuer-subdomain label.
+///
+/// Stored under a **deterministic document ID** derived from the label, so
+/// the `documents` primary key is what makes cross-org claims collide:
+/// concurrent claimants either hit a unique violation on insert or a
+/// version conflict on `compare_and_update` — an indexed lookup alone
+/// cannot enforce cross-row uniqueness (the index only unique-constrains
+/// per document). Same pattern as `deterministic_org_id` in enrollment.
+///
+/// The slot survives release (`released_at = Some`) and doubles as the
+/// reuse-cooldown tombstone: a different org taking over a released slot
+/// must `compare_and_update` the same row, so cooldown and apex checks are
+/// atomic with the takeover.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubdomainClaimDoc {
+    /// The claimed label (normalized lowercase).
+    pub label: String,
+    /// The organization currently or most recently holding the label.
+    pub org_id: String,
+    /// The verified registrable apex the label was derived from
+    /// (`acme-com` ← `acme.com`). A *different* org taking over a released
+    /// slot must be backed by this same apex — i.e. must have verified
+    /// ownership of the domain itself — closing the rare case where two
+    /// distinct apexes hyphen-collapse to the same label.
+    pub apex: String,
+    /// `None` while the claim is active; `Some(release time)` after the
+    /// holder released it (starts the cross-org reuse cooldown).
+    pub released_at: Option<Timestamp>,
+}
+
+impl DocumentType for SubdomainClaimDoc {
+    const DOC_TYPE: &'static str = "subdomain_claim";
+
+    fn index_entries(&self) -> Vec<IndexEntry> {
+        // Looked up exclusively by deterministic document ID.
+        Vec::new()
+    }
+}
+
+/// Serialize a [`SecretString`] field by exposing it. Only for fields whose
+/// document is sealed at rest by the store.
+fn serialize_secret_string<S: serde::Serializer>(
+    value: &SecretString,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    serializer.serialize_str(value.expose_secret())
+}
+
+/// A per-organization OIDC issuer signing key.
+///
+/// When an org claims an issuer subdomain, its OIDC federation tokens (AWS STS
+/// and Identity Center, GCP/Azure workload identity, and any RFC 8693
+/// token-exchange consumer) are signed with these keys and served only at the
+/// org's own JWKS — making the issuer host a real cryptographic tenant
+/// boundary. `alg` is the RFC 7518 JWS algorithm (ES256 or RS256).
+///
+/// One key per row, at a **deterministic slot ID** (`deterministic_org_key_id`,
+/// keyed on org + algorithm) so a retry or concurrent claim collides on the
+/// primary key instead of creating a duplicate — the same idempotency the
+/// subdomain claim slot relies on. `kid` (RFC 7517) is a field (hash of the
+/// random public key), never the document ID. Rotation is not implemented; a
+/// future rotation can stage a replacement key in its own slot and swap this
+/// one via `compare_and_update` without changing the slot derivation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OrgSigningKeyDoc {
+    /// Owning organization (indexed, so the org's key set is one query).
+    pub org_id: String,
+    /// RFC 7518 JWS algorithm. Only `Es256`/`Rs256` are produced here.
+    pub alg: JwsAlgorithm,
+    /// JWK key ID (RFC 7517 §4.5), published in the org JWKS.
+    pub kid: String,
+    /// Base64 (standard) PKCS#8 DER of the private key. `SecretString` keeps
+    /// it out of `Debug` output and zeroizes the buffer on drop; at rest the
+    /// document store seals the whole document (keys are only ever created
+    /// when `DocumentStore::is_encrypted`).
+    #[serde(serialize_with = "serialize_secret_string")]
+    pub private_pkcs8_der_b64: SecretString,
+}
+
+impl DocumentType for OrgSigningKeyDoc {
+    const DOC_TYPE: &'static str = "org_signing_key";
+
+    fn index_entries(&self) -> Vec<IndexEntry> {
+        vec![IndexEntry {
+            field: "org_id",
+            value: self.org_id.clone(),
+        }]
+    }
 }
 
 /// Lifecycle state of an [`AdditionalDomain`].
@@ -79,7 +182,7 @@ impl DocumentType for OrganizationDoc {
     const DOC_TYPE: &'static str = "organization";
 
     fn index_entries(&self) -> Vec<IndexEntry> {
-        let cap = self.additional_domains.len().saturating_add(1);
+        let cap = self.additional_domains.len().saturating_add(2);
         let mut entries = Vec::with_capacity(cap);
         entries.push(IndexEntry {
             field: "domain",
@@ -92,6 +195,12 @@ impl DocumentType for OrganizationDoc {
                     value: ad.domain.clone(),
                 });
             }
+        }
+        if let Some(label) = &self.subdomain {
+            entries.push(IndexEntry {
+                field: "subdomain",
+                value: label.clone(),
+            });
         }
         entries
     }

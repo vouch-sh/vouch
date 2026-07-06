@@ -67,6 +67,7 @@ pub mod jarm;
 pub mod jwt_bearer;
 pub mod keys;
 pub(crate) mod mtls;
+pub mod org_keys;
 pub mod protected_resource;
 pub mod registration;
 pub mod resource;
@@ -84,6 +85,7 @@ pub use dpop::{DpopError, ValidatedDpopProof};
 pub use exchange::{TokenExchangeParams, TokenExchangeResult};
 pub use introspection::{IntrospectionResult, RevocationResult};
 pub use keys::{EcJwk, Jwk, OidcRsaSigningKey, OidcSigningKey, RsaJwk};
+pub use org_keys::{OrgKeys, OrgKeysCache, org_issuer_or_base, org_jwks, resolve_org_keys};
 pub use protected_resource::{
     PROTECTED_RESOURCE_PREFIXES, ProtectedResourceMetadata, SIGNED_METADATA_TYP,
     SubPathClassification, WELL_KNOWN_SUFFIX, build_protected_resource_metadata, classify_sub_path,

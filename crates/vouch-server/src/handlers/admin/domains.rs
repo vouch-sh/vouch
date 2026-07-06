@@ -13,6 +13,7 @@ use crate::handlers::browser_login::validate_origin;
 use crate::handlers::session::{AuthContext, extract_org_admin, get_resource_auth_context};
 use crate::impl_template_response;
 use crate::infra::dns;
+use crate::infra::i18n::Tr;
 use crate::services::error::ServiceError;
 use askama::Template;
 use axum::extract::{OriginalUri, Path, State};
@@ -349,6 +350,7 @@ pub(crate) async fn admin_remove_domain(
                 "admin_user_id": admin.id,
                 "revoked_user_session_count": revoked,
                 "revocation_errored": errored,
+                "released_subdomain": summary.released_subdomain,
             });
             if let Err(e) = state
                 .audit
@@ -370,7 +372,7 @@ pub(crate) async fn admin_remove_domain(
                 revocation_errored = errored,
                 "Removed additional domain"
             );
-            let msg = if errored {
+            let mut msg = if errored {
                 format!(
                     "Removed {normalized}, but session revocation for matching users failed; check server logs and revoke manually."
                 )
@@ -385,6 +387,14 @@ pub(crate) async fn admin_remove_domain(
                     "Removed {normalized}. Revoked sessions for {revoked} users; org membership is unchanged."
                 )
             };
+            if let Some(label) = &summary.released_subdomain {
+                msg.push(' ');
+                msg.push_str(
+                    &Tr::new("admin-domains-subdomain-auto-released")
+                        .arg("label", label.as_str())
+                        .to_string(),
+                );
+            }
             Ok(redirect_ok(jar, msg))
         }
         Ok(None) => Ok(redirect_error(

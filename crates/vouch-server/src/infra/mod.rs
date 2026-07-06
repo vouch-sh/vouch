@@ -14,6 +14,7 @@ pub mod i18n;
 pub mod kms_arn;
 pub mod metrics;
 pub(crate) mod mtls_listener;
+pub(crate) mod org_host;
 pub mod rate_limit;
 pub mod request_id;
 pub mod resource_metadata;

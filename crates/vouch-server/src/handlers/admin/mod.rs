@@ -11,12 +11,14 @@ pub(crate) mod flash;
 mod members;
 mod policies;
 mod scim_tokens;
+mod subdomain;
 
 pub(crate) use audit::*;
 pub(crate) use domains::*;
 pub(crate) use members::*;
 pub(crate) use policies::*;
 pub(crate) use scim_tokens::*;
+pub(crate) use subdomain::*;
 
 use crate::AppState;
 use crate::db;

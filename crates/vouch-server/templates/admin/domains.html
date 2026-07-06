@@ -10,18 +10,19 @@
 {% block content %}
 <div class="flex-1 p-5">
     <div class="max-w-5xl mx-auto">
-        <div class="mb-6 flex items-center justify-between">
-            <div>
-                <h1 class="text-2xl font-bold text-gray-200 mb-1">{{ self.tr("admin-nav-domains") }}</h1>
-                <p class="text-gray-400 text-sm">{{ self.tr("admin-domains-subtitle") }}</p>
+        <div class="mb-6">
+            <div class="flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
+                <h1 class="text-2xl font-bold text-gray-200">{{ self.tr("admin-nav-domains") }}</h1>
+                <nav class="flex flex-wrap gap-3 text-sm whitespace-nowrap">
+                    <a href="/admin" class="text-gray-400 hover:text-gray-200">{{ self.tr("admin-nav-members") }}</a>
+                    <a href="/admin/audit" class="text-gray-400 hover:text-gray-200">{{ self.tr("admin-nav-audit") }}</a>
+                    <a href="/admin/policies" class="text-gray-400 hover:text-gray-200">{{ self.tr("admin-nav-policies") }}</a>
+                    <a href="/admin/scim-tokens" class="text-gray-400 hover:text-gray-200">{{ self.tr("admin-nav-scim") }}</a>
+                    <a href="/admin/domains" class="text-vouch-accent hover:text-vouch-accent-hover font-medium">{{ self.tr("admin-nav-domains") }}</a>
+                    <a href="/admin/subdomain" class="text-gray-400 hover:text-gray-200">{{ self.tr("admin-nav-subdomain") }}</a>
+                </nav>
             </div>
-            <nav class="flex gap-3 text-sm">
-                <a href="/admin" class="text-gray-400 hover:text-gray-200">{{ self.tr("admin-nav-members") }}</a>
-                <a href="/admin/audit" class="text-gray-400 hover:text-gray-200">{{ self.tr("admin-nav-audit") }}</a>
-                <a href="/admin/policies" class="text-gray-400 hover:text-gray-200">{{ self.tr("admin-nav-policies") }}</a>
-                <a href="/admin/scim-tokens" class="text-gray-400 hover:text-gray-200">{{ self.tr("admin-nav-scim") }}</a>
-                <a href="/admin/domains" class="text-vouch-accent hover:text-vouch-accent-hover font-medium">{{ self.tr("admin-nav-domains") }}</a>
-            </nav>
+            <p class="text-gray-400 text-sm mt-1">{{ self.tr("admin-domains-subtitle") }}</p>
         </div>
 
         {% if let Some(msg) = flash_message %}

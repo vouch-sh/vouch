@@ -479,6 +479,7 @@ admin-nav-audit = Audit Log
 admin-nav-policies = Policies
 admin-nav-scim = SCIM Tokens
 admin-nav-domains = Email Domains
+admin-nav-subdomain = Issuer Subdomain
 admin-next-page = Next page
 
 ## Admin members (admin/members.html)
@@ -566,6 +567,51 @@ admin-domains-dns-type = Type:
 admin-domains-dns-value = Value:
 admin-domains-copy-token-title = Copy verification token
 admin-domains-warning = Adding a domain claims it for this organization. Anyone with a verified email in a claimed domain who signs in will be attached as a member. Only verified domains participate in login matching; pending entries do not.
+# Appended to the remove-domain flash when the removal also auto-released
+# the org's issuer subdomain (rendered in the poster's locale).
+admin-domains-subdomain-auto-released = The issuer subdomain '{ $label }' was released because this domain backed it; delete any AWS IAM OIDC identity providers for that issuer host.
+
+## Admin issuer subdomain (admin/subdomain.html)
+admin-subdomain-page-title = { -product } - Issuer Subdomain
+admin-subdomain-subtitle = Give this organization its own OIDC issuer host for AWS workload identity federation.
+admin-subdomain-current-label = Claimed subdomain
+admin-subdomain-issuer-label = Issuer URL
+admin-subdomain-discovery-label = Discovery URL
+admin-subdomain-copy-title = Copy URL
+admin-subdomain-provider-hint = Create your AWS IAM OIDC identity provider with the issuer URL above; this issuer has its own signing keys, so role trust can be scoped to the provider ARN alone. If you later release this subdomain, delete the corresponding IAM OIDC provider.
+admin-subdomain-claim = Claim Subdomain
+admin-subdomain-label-select = Subdomain (based on your verified email domains)
+admin-subdomain-claim-help = Claiming activates OIDC discovery on the subdomain and switches this organization's AWS federation tokens to the new issuer. Update your AWS IAM OIDC providers and role trust policies afterwards.
+admin-subdomain-empty = No subdomains are available to claim yet. Subdomains come from your verified email domains — verifying acme.com lets you claim acme-com. Add and verify a domain under
+# Shown when the org HAS verified domains but every candidate subdomain is
+# unusable (e.g. an apex label longer than DNS allows).
+admin-subdomain-empty-reserved = No subdomains are available to claim: { $count ->
+        [one] the subdomain { $labels } from your verified domains cannot be used as an issuer subdomain
+       *[other] the subdomains { $labels } from your verified domains cannot be used as issuer subdomains
+    }. To use an issuer subdomain, add and verify another domain under
+admin-subdomain-release = Release
+admin-subdomain-release-confirm = Release this subdomain? AWS federation tokens revert to the shared issuer immediately, and after 30 days the label may be claimed by another organization. Delete any AWS IAM OIDC identity providers for this issuer host.
+admin-subdomain-warning = Tokens issued for AWS federation use this issuer as soon as a subdomain is claimed or released — coordinate changes with your AWS IAM OIDC provider and role trust configuration. Released subdomains cannot be claimed by another organization for 30 days.
+# Flash messages set by the POST handlers (rendered in the poster's locale).
+admin-subdomain-flash-claimed = Claimed issuer subdomain '{ $label }'. Your issuer URL is { $issuer }.
+admin-subdomain-flash-claimed-plain = Claimed issuer subdomain '{ $label }'.
+admin-subdomain-flash-released = Released issuer subdomain '{ $label }'. Delete any AWS IAM OIDC identity providers for the released issuer host; the subdomain may eventually be claimed by another organization.
+# One message per label-validation rule (SubdomainLabelError variant).
+admin-subdomain-error-invalid-empty = The subdomain must not be empty.
+admin-subdomain-error-invalid-ascii = The subdomain must be ASCII; enter internationalized names in punycode.
+admin-subdomain-error-invalid-length = The subdomain must be 63 characters or fewer.
+admin-subdomain-error-invalid-dot = The subdomain must not contain dots.
+admin-subdomain-error-invalid-hyphen = The subdomain must not start or end with a hyphen.
+admin-subdomain-error-invalid-charset = The subdomain may only contain letters, digits, and hyphens.
+admin-subdomain-error-invalid-letter = The subdomain must contain at least one letter.
+admin-subdomain-error-invalid-reserved = The subdomain '{ $label }' is reserved for platform use.
+admin-subdomain-error-not-eligible = This subdomain is not available to your organization. A subdomain is derived from one of your verified domains — for example, verifying acme.com lets you claim acme-com.
+admin-subdomain-error-already-claimed = This organization already has the issuer subdomain '{ $existing }'; release it before claiming another.
+admin-subdomain-error-conflict = This subdomain is already claimed by another organization.
+admin-subdomain-error-recently-released = This subdomain was recently released by another organization and cannot be claimed yet.
+admin-subdomain-error-internal = Something went wrong while updating the subdomain; please try again.
+admin-subdomain-error-nothing-to-release = This organization has no issuer subdomain to release.
+admin-subdomain-error-requires-encryption = Issuer subdomains are not available on this server because document storage is not encrypted. Per-organization signing keys are only created on deployments with encrypted storage.
 
 ## Admin device posture policies (admin/policies.html)
 admin-policies-page-title = { -product } - Device Posture Policies

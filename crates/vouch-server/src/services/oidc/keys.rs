@@ -113,20 +113,34 @@ impl OidcSigningKey {
             }
         });
 
+        Self::from_pkcs8_der(&der_bytes)
+    }
+
+    /// Generate a fresh P-256 key pair and return its PKCS#8 DER.
+    ///
+    /// Used to mint per-org issuer signing keys for storage; pair with
+    /// [`from_pkcs8_der`](Self::from_pkcs8_der) to rebuild the signer.
+    pub fn generate_pkcs8_der() -> Result<Zeroizing<Vec<u8>>> {
+        let rng = SystemRandom::new();
+        let pkcs8_bytes = EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, &rng)
+            .map_err(|e| anyhow::anyhow!("Failed to generate ECDSA key: {e}"))?;
+        Ok(Zeroizing::new(pkcs8_bytes.as_ref().to_vec()))
+    }
+
+    /// Build a local signer from a PKCS#8 DER private key.
+    pub fn from_pkcs8_der(der: &[u8]) -> Result<Self> {
+        let der_bytes = Zeroizing::new(der.to_vec());
         let key_pair = EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, &der_bytes)
             .map_err(|e| anyhow::anyhow!("Failed to parse ECDSA key from PKCS#8 DER: {e}"))?;
 
-        // Generate key ID from public key
+        // Generate key ID from public key (unique per key pair).
         let pub_key_bytes = key_pair.public_key().as_ref();
         let key_id = format!(
             "vouch-oidc-{}",
             hex::encode(pub_key_bytes.get(..8).unwrap_or(pub_key_bytes))
         );
 
-        // Cache the decoding key at construction time
         let decoding_key = build_decoding_key_from_pair(&key_pair)?;
-
-        tracing::info!("Loaded OIDC signing key from PEM: {}", key_id);
 
         Ok(Self::Local {
             key_pair,
@@ -562,6 +576,25 @@ impl OidcRsaSigningKey {
             }
         });
 
+        Self::from_pkcs8_der(&der_bytes)
+    }
+
+    /// Generate a fresh RSA-3072 key pair and return its PKCS#8 DER.
+    ///
+    /// RSA-3072 generation takes ~200ms; call from `spawn_blocking` in async
+    /// contexts. Pair with [`from_pkcs8_der`](Self::from_pkcs8_der) to rebuild.
+    pub fn generate_pkcs8_der() -> Result<Zeroizing<Vec<u8>>> {
+        let key_pair = RsaKeyPair::generate(KeySize::Rsa3072)
+            .map_err(|e| anyhow::anyhow!("Failed to generate RSA-3072 key: {e}"))?;
+        let pkcs8_der = key_pair
+            .as_der()
+            .map_err(|e| anyhow::anyhow!("Failed to serialize RSA key to PKCS#8 DER: {e}"))?;
+        Ok(Zeroizing::new(pkcs8_der.as_ref().to_vec()))
+    }
+
+    /// Build a local signer from a PKCS#8 DER private key (RSA ≥ 3072 bits).
+    pub fn from_pkcs8_der(der: &[u8]) -> Result<Self> {
+        let der_bytes = Zeroizing::new(der.to_vec());
         let key_pair = RsaKeyPair::from_pkcs8(&der_bytes)
             .map_err(|e| anyhow::anyhow!("Failed to parse RSA key from PKCS#8 DER: {e}"))?;
 
@@ -574,11 +607,10 @@ impl OidcRsaSigningKey {
         let (n_bytes, e_bytes) =
             parse_spki_rsa(&spki_der).context("Failed to extract RSA components from SPKI")?;
 
-        // Enforce minimum RSA-3072 key size.
-        // generate() uses KeySize::Rsa3072, and KMS validates KeySpec::Rsa3072,
-        // but from_pem() accepts any PKCS#8 RSA key — reject undersized keys.
-        // Use bit-counting (not byte length) to handle edge cases where
-        // strip_leading_zeros may remove DER sign-padding bytes.
+        // Enforce minimum RSA-3072 key size. generate_pkcs8_der() uses
+        // KeySize::Rsa3072 and KMS validates KeySpec::Rsa3072, but this
+        // accepts any PKCS#8 RSA key — reject undersized ones. Bit-counting
+        // (not byte length) handles DER sign-padding edge cases.
         let key_bits = n_bytes
             .len()
             .saturating_mul(8)
@@ -595,9 +627,7 @@ impl OidcRsaSigningKey {
             &URL_SAFE_NO_PAD.encode(&n_bytes),
             &URL_SAFE_NO_PAD.encode(&e_bytes),
         )
-        .map_err(|e| anyhow::anyhow!("Failed to build RSA decoding key from PEM: {e}"))?;
-
-        tracing::info!("Loaded OIDC RSA signing key from PEM: {}", key_id);
+        .map_err(|e| anyhow::anyhow!("Failed to build RSA decoding key: {e}"))?;
 
         Ok(Self::Local {
             key_pair,
