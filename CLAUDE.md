@@ -45,7 +45,7 @@ Beyond ssh/aws/eks, credential helpers and setup commands cover many more integr
 The server has two distinct route groups sharing `AppState`:
 
 - **API routes** (`/v1/`, `/oauth/`, `/scim/`, `/api/v1/`) — JSON responses, JWT Bearer auth. Includes OIDC endpoints, credential issuance, SCIM provisioning, GitHub webhooks, and admin APIs.
-- **UI routes** (`/`, `/login`, `/enroll/*`, `/docs/*`, `/applications/*`) — HTML via Askama templates, cookie-based sessions. Static assets embedded via `rust-embed`.
+- **UI routes** (`/`, `/login`, `/enroll/*`, `/docs/*`, `/applications/*`, `/admin/*`) — HTML via Askama templates, cookie-based sessions. Static assets embedded via `rust-embed`.
 
 When TLS is configured, a separate HTTP→HTTPS redirect router runs on port 80 (308 redirects, except `/health`).
 
