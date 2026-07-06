@@ -570,6 +570,27 @@ admin-domains-warning = Adding a domain claims it for this organization. Anyone 
 # Appended to the remove-domain flash when the removal also auto-released
 # the org's issuer subdomain (rendered in the poster's locale).
 admin-domains-subdomain-auto-released = The issuer subdomain '{ $label }' was released because this domain backed it; delete any AWS IAM OIDC identity providers for that issuer host.
+# Flash messages and error strings used by domain management POST handlers.
+admin-domains-flash-add-pending = Added { $domain } as pending. Publish the TXT record shown below, then click Verify.
+admin-domains-flash-verified = Verified domain { $domain }.
+admin-domains-flash-removed = { $revoked ->
+    [0] Removed { $domain }. No matching users had active sessions to revoke.
+    [one] Removed { $domain }. Revoked sessions for 1 user; org membership is unchanged.
+   *[other] Removed { $domain }. Revoked sessions for { $revoked } users; org membership is unchanged.
+}
+admin-domains-flash-removed-revoke-error = Removed { $domain }, but session revocation for matching users failed; check server logs and revoke manually.
+admin-domains-error-not-found = Domain not found on this organization.
+admin-domains-error-not-pending = This domain is not pending verification on this organization.
+admin-domains-error-dns-lookup = DNS lookup failed. Check that the TXT record is published and try again.
+admin-domains-error-txt-not-found = TXT record not found or token does not match. DNS changes may take a few minutes to propagate.
+admin-domains-error-verified-by-other-org = Another organization verified this domain first. Remove the pending entry from this organization and contact support if you believe this is in error.
+admin-domains-error-max-domains = This organization has reached the maximum number of additional domains.
+admin-domains-error-primary-domain = This is already your organization's primary domain.
+admin-domains-error-already-attached = This domain is already attached to your organization.
+admin-domains-error-claimed-by-other-org = This domain is already claimed by another organization.
+admin-domains-error-pending-other-org = This domain has a pending verification claim on another organization.
+admin-domains-error-held-other-org = This domain is held by another organization; it must be removed or expire before your organization can claim it.
+admin-domains-error-internal = Something went wrong; please try again.
 
 ## Admin issuer subdomain (admin/subdomain.html)
 admin-subdomain-page-title = { -product } - Issuer Subdomain

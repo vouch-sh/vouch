@@ -77,10 +77,10 @@ pub use documents::organization::{
     AdditionalDomain, OrgSigningKeyDoc, SubdomainClaimDoc, UNVERIFY_FAILURE_THRESHOLD,
 };
 pub use organizations::{
-    AddedDomain, DomainRemovalSummary, MAX_ADDITIONAL_DOMAINS, Organization,
-    RESERVED_SUBDOMAIN_LABELS, RecheckEffect, RecheckOutcome, SUBDOMAIN_REUSE_COOLDOWN_SECS,
-    StaleDomainRemoval, SubdomainClaimError, SubdomainLabelError, VerifiedDomainRecord,
-    add_additional_domain, any_subdomain_claimed, claim_subdomain,
+    AddDomainError, AddedDomain, DomainRemovalSummary, MAX_ADDITIONAL_DOMAINS, MarkVerifiedError,
+    Organization, RESERVED_SUBDOMAIN_LABELS, RecheckEffect, RecheckOutcome,
+    SUBDOMAIN_REUSE_COOLDOWN_SECS, StaleDomainRemoval, SubdomainClaimError, SubdomainLabelError,
+    VerifiedDomainRecord, add_additional_domain, any_subdomain_claimed, claim_subdomain,
     cleanup_stale_additional_domains, deterministic_org_key_id, eligible_subdomain_labels,
     find_org_by_subdomain, get_org_signing_key, get_organization, get_organization_domain,
     get_verification_token, ineligible_subdomain_candidates, list_additional_domains,

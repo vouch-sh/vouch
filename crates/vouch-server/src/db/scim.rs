@@ -458,27 +458,29 @@ pub async fn create_scim_user(
     external_id: Option<&str>,
     active: bool,
 ) -> Result<ScimUserRecord> {
-    let mut tx = store.begin().await?;
+    crate::with_dsql_retry!(async {
+        let mut tx = store.begin().await?;
 
-    if tx.find_one::<UserDoc>("email", email).await?.is_some() {
-        anyhow::bail!("UNIQUE constraint failed: user with email already exists");
-    }
+        if tx.find_one::<UserDoc>("email", email).await?.is_some() {
+            anyhow::bail!("UNIQUE constraint failed: user with email already exists");
+        }
 
-    let doc = UserDoc {
-        email: email.to_string(),
-        name: name.map(String::from),
-        org_id: org_id.map(String::from),
-        is_org_admin: false,
-        active,
-        external_id: external_id.map(String::from),
-        github_id: None,
-        github_login: None,
-        github_refresh_token: None,
-    };
-    let result = tx.insert(&doc).await?;
+        let doc = UserDoc {
+            email: email.to_string(),
+            name: name.map(String::from),
+            org_id: org_id.map(String::from),
+            is_org_admin: false,
+            active,
+            external_id: external_id.map(String::from),
+            github_id: None,
+            github_login: None,
+            github_refresh_token: None,
+        };
+        let result = tx.insert(&doc).await?;
 
-    tx.commit().await?;
-    Ok(ScimUserRecord::from(result))
+        tx.commit().await?;
+        Ok(ScimUserRecord::from(result))
+    })
 }
 
 /// Update a user via SCIM, scoped to the caller's org.
@@ -885,21 +887,23 @@ pub async fn update_scim_group(
 /// different org. Otherwise deletes memberships and the group within
 /// a single transaction.
 pub async fn delete_scim_group(store: &DocumentStore, id: &str, org_id: &str) -> Result<bool> {
-    let mut tx = store.begin().await?;
+    crate::with_dsql_retry!(async {
+        let mut tx = store.begin().await?;
 
-    let Some(doc) = tx.get::<ScimGroupDoc>(id).await? else {
-        return Ok(false);
-    };
-    if doc.data.org_id != org_id {
-        return Ok(false);
-    }
+        let Some(doc) = tx.get::<ScimGroupDoc>(id).await? else {
+            return Ok(false);
+        };
+        if doc.data.org_id != org_id {
+            return Ok(false);
+        }
 
-    tx.delete_by_index::<ScimGroupMemberDoc>("group_id", id)
-        .await?;
-    tx.delete(id).await?;
+        tx.delete_by_index::<ScimGroupMemberDoc>("group_id", id)
+            .await?;
+        tx.delete(id).await?;
 
-    tx.commit().await?;
-    Ok(true)
+        tx.commit().await?;
+        Ok(true)
+    })
 }
 
 /// Add a member to a SCIM group, scoped to the caller's org.
@@ -1014,19 +1018,21 @@ pub async fn replace_scim_group_members(
         return Ok(false);
     }
 
-    let mut tx = store.begin().await?;
+    crate::with_dsql_retry!(async {
+        let mut tx = store.begin().await?;
 
-    tx.delete_by_index::<ScimGroupMemberDoc>("group_id", group_id)
-        .await?;
+        tx.delete_by_index::<ScimGroupMemberDoc>("group_id", group_id)
+            .await?;
 
-    for user_id in user_ids {
-        let doc = ScimGroupMemberDoc {
-            group_id: group_id.to_string(),
-            user_id: user_id.clone(),
-        };
-        tx.insert(&doc).await?;
-    }
+        for user_id in user_ids {
+            let doc = ScimGroupMemberDoc {
+                group_id: group_id.to_string(),
+                user_id: user_id.clone(),
+            };
+            tx.insert(&doc).await?;
+        }
 
-    tx.commit().await?;
-    Ok(true)
+        tx.commit().await?;
+        Ok(true)
+    })
 }

@@ -131,44 +131,46 @@ pub async fn delete_user(store: &DocumentStore, user_id: &str) -> Result<bool> {
     use super::documents::oauth::TokenExchangeDoc;
     use super::documents::session::SessionDoc;
 
-    let mut tx = store.begin().await?;
+    crate::with_dsql_retry!(async {
+        let mut tx = store.begin().await?;
 
-    // 1. Delete sessions
-    tx.delete_by_index::<SessionDoc>("user_id", user_id).await?;
+        // 1. Delete sessions
+        tx.delete_by_index::<SessionDoc>("user_id", user_id).await?;
 
-    // 2. Delete enrollment sessions
-    tx.delete_by_index::<EnrollmentSessionDoc>("user_id", user_id)
+        // 2. Delete enrollment sessions
+        tx.delete_by_index::<EnrollmentSessionDoc>("user_id", user_id)
+            .await?;
+
+        // 3. Cascade-delete each authenticator (clears device_auth references,
+        //    removes the authenticator doc). The helper also issues a session
+        //    delete-by-index per authenticator; that is redundant here because
+        //    step 1 already removed all the user's sessions, but the duplicate
+        //    no-op delete is cheap and keeps the cascade logic in one place.
+        let authenticators = tx.find_all::<AuthenticatorDoc>("user_id", user_id).await?;
+        for auth in &authenticators {
+            super::authenticators::delete_authenticator_in_tx(&mut tx, &auth.id).await?;
+        }
+
+        // 4. Delete SSH issued certificate records
+        tx.delete_by_index::<SshIssuedCertDoc>("user_id", user_id)
+            .await?;
+
+        // 5. Delete token exchanges
+        tx.delete_by_index::<TokenExchangeDoc>("subject_user_id", user_id)
+            .await?;
+
+        // 6. Unlink OAuth clients (set user_id to None)
+        tx.update_by_index::<OAuthClientDoc, _>("user_id", user_id, |d| {
+            d.user_id = None;
+        })
         .await?;
 
-    // 3. Cascade-delete each authenticator (clears device_auth references,
-    //    removes the authenticator doc). The helper also issues a session
-    //    delete-by-index per authenticator; that is redundant here because
-    //    step 1 already removed all the user's sessions, but the duplicate
-    //    no-op delete is cheap and keeps the cascade logic in one place.
-    let authenticators = tx.find_all::<AuthenticatorDoc>("user_id", user_id).await?;
-    for auth in &authenticators {
-        super::authenticators::delete_authenticator_in_tx(&mut tx, &auth.id).await?;
-    }
+        // 7. Delete the user
+        tx.delete(user_id).await?;
 
-    // 4. Delete SSH issued certificate records
-    tx.delete_by_index::<SshIssuedCertDoc>("user_id", user_id)
-        .await?;
-
-    // 5. Delete token exchanges
-    tx.delete_by_index::<TokenExchangeDoc>("subject_user_id", user_id)
-        .await?;
-
-    // 6. Unlink OAuth clients (set user_id to None)
-    tx.update_by_index::<OAuthClientDoc, _>("user_id", user_id, |d| {
-        d.user_id = None;
+        tx.commit().await?;
+        Ok(true)
     })
-    .await?;
-
-    // 7. Delete the user
-    tx.delete(user_id).await?;
-
-    tx.commit().await?;
-    Ok(true)
 }
 
 /// Get users in an organization with cursor-based pagination.
