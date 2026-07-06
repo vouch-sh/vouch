@@ -251,6 +251,43 @@ pub(crate) async fn admin_add_domain(
                 db::AddDomainError::HeldByOtherOrg => {
                     Tr::new("admin-domains-error-held-other-org").to_string()
                 }
+                db::AddDomainError::InvalidDomain(v) => match v {
+                    db::DomainValidationError::Empty => {
+                        Tr::new("admin-domains-invalid-empty").to_string()
+                    }
+                    db::DomainValidationError::NotAscii => {
+                        Tr::new("admin-domains-invalid-ascii").to_string()
+                    }
+                    db::DomainValidationError::IpAddress => {
+                        Tr::new("admin-domains-invalid-ip").to_string()
+                    }
+                    db::DomainValidationError::TooLong => {
+                        Tr::new("admin-domains-invalid-too-long").to_string()
+                    }
+                    db::DomainValidationError::NoDot => {
+                        Tr::new("admin-domains-invalid-no-dot").to_string()
+                    }
+                    db::DomainValidationError::LeadingOrTrailingDot => {
+                        Tr::new("admin-domains-invalid-dot-edge").to_string()
+                    }
+                    db::DomainValidationError::EmptyLabel => {
+                        Tr::new("admin-domains-invalid-empty-label").to_string()
+                    }
+                    db::DomainValidationError::LabelTooLong => {
+                        Tr::new("admin-domains-invalid-label-too-long").to_string()
+                    }
+                    db::DomainValidationError::LabelHyphenEdge => {
+                        Tr::new("admin-domains-invalid-label-hyphen-edge").to_string()
+                    }
+                    db::DomainValidationError::LabelInvalidChar => {
+                        Tr::new("admin-domains-invalid-label-chars").to_string()
+                    }
+                    db::DomainValidationError::ReservedTld(tld) => {
+                        Tr::new("admin-domains-invalid-reserved-tld")
+                            .arg("tld", tld.as_str())
+                            .to_string()
+                    }
+                },
                 db::AddDomainError::OccConflict | db::AddDomainError::Other(_) => {
                     tracing::error!(
                         error = %e,

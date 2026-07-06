@@ -591,6 +591,17 @@ admin-domains-error-claimed-by-other-org = This domain is already claimed by ano
 admin-domains-error-pending-other-org = This domain has a pending verification claim on another organization.
 admin-domains-error-held-other-org = This domain is held by another organization; it must be removed or expire before your organization can claim it.
 admin-domains-error-internal = Something went wrong; please try again.
+admin-domains-invalid-empty = Enter a domain name, for example example.com.
+admin-domains-invalid-ascii = Domain must be ASCII. For internationalized domains, enter the punycode form (for example xn--acme-cua.com).
+admin-domains-invalid-ip = Enter a hostname like example.com, not an IP address.
+admin-domains-invalid-too-long = Domain must be 253 characters or fewer.
+admin-domains-invalid-no-dot = Enter a domain with at least one dot, for example example.com.
+admin-domains-invalid-dot-edge = Domain must not start or end with a dot.
+admin-domains-invalid-empty-label = Domain must not contain consecutive dots.
+admin-domains-invalid-label-too-long = Each label in the domain must be 63 characters or fewer.
+admin-domains-invalid-label-hyphen-edge = Domain labels must not start or end with a hyphen.
+admin-domains-invalid-label-chars = Domain labels may only contain letters, digits, and hyphens.
+admin-domains-invalid-reserved-tld = '.{ $tld }' is a reserved top-level label and cannot be used.
 
 ## Admin issuer subdomain (admin/subdomain.html)
 admin-subdomain-page-title = { -product } - Issuer Subdomain
