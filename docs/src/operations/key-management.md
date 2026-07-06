@@ -200,6 +200,83 @@ The `document_key` field in S3 config contains:
 
 At startup, the server decrypts the private key via `kms:Decrypt` and holds the key material in memory for the lifetime of the process.
 
+## Per-Org Issuer Signing Keys (ES256 + RS256)
+
+When an organization claims a custom subdomain on an encrypted deployment, Vouch generates a
+dedicated ES256 and RS256 signing key pair for that org's OIDC issuer. AWS federation tokens,
+Identity Center tokens, and all RFC 8693 token-exchange assertions for that org are signed with
+these keys and served at the org's own JWKS endpoint
+(`https://<org-subdomain>.auth.example.com/oauth/jwks`).
+
+This makes each subdomain a real cryptographic tenant boundary: a token issued for org A cannot
+be verified against org B's JWKS.
+
+Per-org keys are only created when all three conditions are met:
+
+- The deployment has document encryption enabled (a KMS-backed document key in the S3 config).
+- The organization has a claimed subdomain.
+- A credential-issuance request arrives for that org (lazy first-use creation).
+
+### Graceful Rotation
+
+Graceful rotation is a zero-downtime two-phase process:
+
+**Phase 1 — Stage:** The "Rotate Signing Keys" button generates successor keys and publishes them
+immediately in the org JWKS. Both the current (Active) and successor (Pending) keys appear in the
+JWKS. No token breakage occurs because signing continues with the Active key during the 24-hour
+publish window.
+
+**Phase 2 — Activate:** Approximately 24 hours after staging, the scheduled cleanup task promotes
+the successor key to Active and demotes the old key to Retiring. Signing switches to the new key.
+The old key remains in the JWKS for the duration of the retirement window (session lifetime + 1
+hour + a safety margin) so outstanding tokens signed by the old key remain verifiable.
+
+**Phase 3 — Reap:** After the retirement window elapses, the cleanup task removes the old Retiring
+key from the JWKS entirely.
+
+The full cycle takes roughly 24 hours (publish window) plus the retirement window (~9 hours for an
+8-hour session lifetime). No operator action is required after clicking "Rotate Signing Keys" —
+the cleanup task handles activation and reaping automatically.
+
+> **Operator note:** Reducing `VOUCH_SESSION_HOURS` immediately before a rotation can
+> under-cover tokens minted under the old key (the retirement window is derived from the current
+> session lifetime). If you need to shorten session lifetimes, do so well before or after a
+> rotation, not immediately before one.
+
+### Emergency Rotation
+
+The "Emergency Rotate" button immediately replaces both the ES256 and RS256 keys in a single
+atomic operation. Use this only when key compromise is suspected.
+
+**Consequences:**
+
+- Both keys are replaced immediately; any in-flight staged rotation is cancelled.
+- Outstanding tokens signed by the old keys will fail verification until relying parties
+  refetch the JWKS. Cross-instance propagation takes up to 60 seconds (cache TTL); downstream
+  relying parties that respect the `Cache-Control: public, max-age=3600` response header may
+  take up to 1 hour to pick up the new keys.
+- AWS STS `AssumeRoleWithWebIdentity` and IAM Identity Center `CreateTokenWithIAM` calls that
+  carry a token signed by the old key will fail until the session expires or the user
+  re-authenticates with `vouch login`.
+
+**Runbook:**
+
+1. Navigate to **Admin → Subdomain** for the affected org.
+2. Click **Emergency Rotate** and confirm.
+3. Instruct affected users to run `vouch login` to obtain a new token signed by the replacement
+   key.
+4. If the org is federated with AWS IAM, existing STS sessions will expire naturally (up to
+   session lifetime) or can be revoked via the IAM console.
+
+### JWKS Caching and the 24-Hour Publish Window
+
+The 24-hour publish window before activation is a deliberate product decision (S2). AWS IAM and
+IAM Identity Center cache JWKS responses for an undocumented internal period that is believed to
+exceed the advertised 1-hour `Cache-Control` max-age. Publishing the successor key 24 hours before
+activation ensures relying parties have ample time to cache the new `kid` before Vouch starts
+signing with it. Changing this window requires verifying the behaviour of all federated relying
+parties.
+
 ## TLS Certificate
 
 See [TLS Configuration](../deployment/tls.md) for details on TLS certificate management and hot-reload.

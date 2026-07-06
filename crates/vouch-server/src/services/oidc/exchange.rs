@@ -514,7 +514,9 @@ async fn issue_id_token(
     let org_keys = super::org_keys::resolve_org_keys(state, org.as_ref())
         .await
         .map_err(|e| ServiceError::Internal(format!("Failed to resolve org signing key: {e}")))?;
-    let signing_key = org_keys.as_deref().map_or(&state.oidc_key, |k| &k.es256);
+    let signing_key = org_keys
+        .as_deref()
+        .map_or(&state.oidc_key, |k| &k.signers.es256);
     let id_token = signing_key
         .sign_jwt(&claims)
         .await

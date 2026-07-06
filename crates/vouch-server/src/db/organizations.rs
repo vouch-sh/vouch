@@ -6,7 +6,7 @@ use super::documents::oauth::JwsAlgorithm;
 use super::documents::organization::{
     AdditionalDomain, AdditionalDomainState, OrgSigningKeyDoc, OrganizationDoc, SubdomainClaimDoc,
 };
-use super::store::DocumentStore;
+use super::store::{DocumentStore, StoreTransaction};
 use anyhow::{Result, bail};
 use aws_lc_rs::rand as aws_rand;
 use jiff::Timestamp;
@@ -1480,6 +1480,32 @@ pub async fn try_insert_org_signing_key(
     }
 }
 
+/// Deterministic document ID for the *next* (Pending staged successor) signing-key slot.
+///
+/// Each `(org_id, alg)` pair has at most one next-slot key at any time.
+/// Using a distinct hash prefix from [`deterministic_org_key_id`] keeps current
+/// and next slots in separate documents, so reads and writes are independent.
+pub fn deterministic_org_key_next_id(org_id: &str, alg: JwsAlgorithm) -> String {
+    use aws_lc_rs::digest::{self, SHA256};
+    let mut ctx = digest::Context::new(&SHA256);
+    ctx.update(b"org_signing_key_next\0");
+    ctx.update(org_id.as_bytes());
+    ctx.update(b"\0");
+    ctx.update(alg.as_str().as_bytes());
+    hex::encode(ctx.finish().as_ref())
+}
+
+/// Deterministic document ID for the *previous* (Retiring predecessor) signing-key slot.
+pub fn deterministic_org_key_previous_id(org_id: &str, alg: JwsAlgorithm) -> String {
+    use aws_lc_rs::digest::{self, SHA256};
+    let mut ctx = digest::Context::new(&SHA256);
+    ctx.update(b"org_signing_key_prev\0");
+    ctx.update(org_id.as_bytes());
+    ctx.update(b"\0");
+    ctx.update(alg.as_str().as_bytes());
+    hex::encode(ctx.finish().as_ref())
+}
+
 /// Load a single WIF signing key by its deterministic slot.
 ///
 /// # Errors
@@ -1491,6 +1517,93 @@ pub async fn get_org_signing_key(
 ) -> Result<Option<Document<OrgSigningKeyDoc>>> {
     let id = deterministic_org_key_id(org_id, alg);
     store.get::<OrgSigningKeyDoc>(&id).await
+}
+
+/// Load the pending (next-slot) key for an `(org_id, alg)` pair, if any.
+///
+/// # Errors
+/// Returns an error if the database read fails.
+pub async fn get_org_signing_key_next(
+    store: &DocumentStore,
+    org_id: &str,
+    alg: JwsAlgorithm,
+) -> Result<Option<Document<OrgSigningKeyDoc>>> {
+    let id = deterministic_org_key_next_id(org_id, alg);
+    store.get::<OrgSigningKeyDoc>(&id).await
+}
+
+/// Load the retiring (previous-slot) key for an `(org_id, alg)` pair, if any.
+///
+/// # Errors
+/// Returns an error if the database read fails.
+pub async fn get_org_signing_key_previous(
+    store: &DocumentStore,
+    org_id: &str,
+    alg: JwsAlgorithm,
+) -> Result<Option<Document<OrgSigningKeyDoc>>> {
+    let id = deterministic_org_key_previous_id(org_id, alg);
+    store.get::<OrgSigningKeyDoc>(&id).await
+}
+
+/// Insert a key into the *next* slot, idempotently.
+///
+/// Returns `true` if inserted, `false` if a concurrent stage beat this call.
+///
+/// # Errors
+/// Returns an error on any database failure other than a unique violation.
+pub async fn try_insert_org_signing_key_next(
+    store: &DocumentStore,
+    doc: &OrgSigningKeyDoc,
+) -> Result<bool> {
+    let id = deterministic_org_key_next_id(&doc.org_id, doc.alg);
+    match store.insert_with_id(&id, doc).await {
+        Ok(_) => Ok(true),
+        Err(e) if super::pool::is_unique_violation(&e) => Ok(false),
+        Err(e) => Err(e),
+    }
+}
+
+/// Delete the in-flight rotation slots (next and previous) for both ES256 and
+/// RS256 within the given transaction.
+///
+/// Called by [`release_subdomain`] and [`release_ineligible_subdomain`] to
+/// cancel any in-progress rotation when a subdomain is released: after release
+/// the org keeps only its current `Active` key so a future reclaim cannot
+/// activate a stale `Pending` whose `kid` relying parties may have dropped
+/// during the 404 window.
+///
+/// Deletion is best-effort per slot: a missing slot is silently skipped so the
+/// function is safe to call even when no rotation is in progress.
+///
+/// # Errors
+/// Returns the first database error that isn't a missing-document no-op.
+pub(crate) async fn cancel_org_rotation_in_tx(
+    tx: &mut StoreTransaction<'_>,
+    org_id: &str,
+) -> Result<()> {
+    for alg in [JwsAlgorithm::Es256, JwsAlgorithm::Rs256] {
+        tx.delete(&deterministic_org_key_next_id(org_id, alg))
+            .await?;
+        tx.delete(&deterministic_org_key_previous_id(org_id, alg))
+            .await?;
+    }
+    Ok(())
+}
+
+/// List all signing key documents for an organization, across all algorithms
+/// and rotation states.
+///
+/// Used by [`crate::services::oidc::resolve_org_keys`] to build a unified cache
+/// snapshot that covers Active, Pending, and Retiring keys — the single DB call
+/// that backs both signing and the org JWKS endpoint.
+///
+/// # Errors
+/// Returns an error if the database read fails.
+pub async fn list_org_signing_keys(
+    store: &DocumentStore,
+    org_id: &str,
+) -> Result<Vec<Document<OrgSigningKeyDoc>>> {
+    store.find_all::<OrgSigningKeyDoc>("org_id", org_id).await
 }
 
 /// Claim an issuer subdomain label for an organization.
@@ -1630,13 +1743,19 @@ pub async fn claim_subdomain(
 
 /// Release an organization's issuer subdomain.
 ///
-/// Marks the claim slot released (starting the cross-org reuse cooldown)
-/// and clears the org's `subdomain` mirror in one transaction. Dropping
-/// the field drops its index entry, so discovery for the host stops
-/// resolving once relying-party caches expire. The transaction is wrapped
-/// in `with_dsql_retry!` like [`claim_subdomain`]; OCC version races re-run
-/// it from a fresh read. Returns the released label, or `None` if the org
-/// had no subdomain.
+/// Marks the claim slot released (starting the cross-org reuse cooldown),
+/// clears the org's `subdomain` mirror, and **cancels any in-progress rotation**
+/// (deletes next and previous signing-key slots for both algorithms) — all in one
+/// transaction. Dropping the subdomain field drops its index entry, so discovery
+/// for the host stops resolving once relying-party caches expire.
+///
+/// The transaction is wrapped in `with_dsql_retry!` like [`claim_subdomain`]; OCC
+/// version races re-run it from a fresh read. Returns the released label, or `None`
+/// if the org had no subdomain.
+///
+/// Releasing is already disruptive (discovery returns 404 during the cooldown), so
+/// dropping a Retiring key's still-valid tokens on release is acceptable: the caller
+/// should communicate the disruption to end users.
 pub async fn release_subdomain(store: &DocumentStore, org_id: &str) -> Result<Option<String>> {
     let result: Result<Option<String>, SubdomainClaimError> = crate::with_dsql_retry!(async {
         let mut tx = store.begin().await?;
@@ -1682,6 +1801,13 @@ pub async fn release_subdomain(store: &DocumentStore, org_id: &str) -> Result<Op
             }
         }
 
+        // Cancel any in-flight rotation: delete next and previous slots for both
+        // algs atomically with the subdomain release. Idempotent — missing slots
+        // are silently skipped.
+        cancel_org_rotation_in_tx(&mut tx, org_id)
+            .await
+            .map_err(SubdomainClaimError::Other)?;
+
         tx.commit().await?;
 
         Ok(Some(label))
@@ -1703,15 +1829,19 @@ fn subdomain_to_release(data: &OrganizationDoc) -> Option<String> {
 }
 
 /// Inside `tx`, auto-release the org's issuer subdomain `label` (already known
-/// ineligible via [`subdomain_to_release`]): clear the org-doc mirror and
-/// tombstone the claim slot.
+/// ineligible via [`subdomain_to_release`]): clear the org-doc mirror, tombstone
+/// the claim slot, and cancel any in-progress rotation.
 ///
 /// Call after mutating `data`'s domain set and before the org-doc
-/// `compare_and_update`: the mirror clear and the slot release then commit
-/// atomically with the domain change. The released slot starts the normal
-/// reuse cooldown.
+/// `compare_and_update`: the mirror clear, the slot release, and the rotation
+/// cancel then commit atomically with the domain change. The released slot starts
+/// the normal reuse cooldown.
+///
+/// Cancelling rotation on auto-release is safe: auto-release already signals
+/// disruption (discovery 404s), so dropping a Retiring key's still-valid tokens
+/// is acceptable.
 async fn release_ineligible_subdomain(
-    tx: &mut super::store::StoreTransaction<'_>,
+    tx: &mut StoreTransaction<'_>,
     org_id: &str,
     data: &mut OrganizationDoc,
     label: &str,
@@ -1741,6 +1871,9 @@ async fn release_ineligible_subdomain(
             );
         }
     }
+
+    // Cancel in-flight rotation, same as the operator-triggered release path.
+    cancel_org_rotation_in_tx(tx, org_id).await?;
 
     tracing::warn!(
         org_id,
@@ -1796,6 +1929,7 @@ pub async fn any_subdomain_claimed(store: &DocumentStore) -> Result<bool> {
 mod tests {
     use super::*;
     use crate::crypto::document_crypto::PlaintextDocumentCrypto;
+    use crate::db::documents::organization::SigningKeyState;
     use crate::test_utils::test_db;
     use std::sync::Arc;
 
@@ -3332,6 +3466,77 @@ mod tests {
         assert_ne!(base, deterministic_org_key_id("org1", JwsAlgorithm::Rs256));
     }
 
+    #[test]
+    fn org_key_slot_ids_are_distinct() {
+        // Current, next, and previous slot IDs must not collide for any (org, alg).
+        let current = deterministic_org_key_id("org1", JwsAlgorithm::Es256);
+        let next = deterministic_org_key_next_id("org1", JwsAlgorithm::Es256);
+        let prev = deterministic_org_key_previous_id("org1", JwsAlgorithm::Es256);
+        assert_ne!(current, next);
+        assert_ne!(current, prev);
+        assert_ne!(next, prev);
+        // Also distinct across algs within the same role.
+        assert_ne!(
+            deterministic_org_key_next_id("org1", JwsAlgorithm::Es256),
+            deterministic_org_key_next_id("org1", JwsAlgorithm::Rs256)
+        );
+        // Stable: deterministic for same inputs.
+        assert_eq!(
+            next,
+            deterministic_org_key_next_id("org1", JwsAlgorithm::Es256)
+        );
+    }
+
+    #[tokio::test]
+    async fn release_subdomain_cancels_rotation_slots() {
+        let store = fresh_store().await;
+        let org = create_organization(&store, "acme.com", None, None)
+            .await
+            .unwrap();
+
+        // Simulate a staged rotation by inserting next-slot docs manually.
+        for alg in [JwsAlgorithm::Es256, JwsAlgorithm::Rs256] {
+            let doc = OrgSigningKeyDoc {
+                org_id: org.id.clone(),
+                alg,
+                kid: format!("pending-{alg}"),
+                private_pkcs8_der_b64: "AAAA".to_string().into(),
+                state: SigningKeyState::Pending {
+                    activate_at: jiff::Timestamp::now(),
+                },
+            };
+            try_insert_org_signing_key_next(&store, &doc).await.unwrap();
+        }
+
+        // Verify slots exist.
+        assert!(
+            get_org_signing_key_next(&store, &org.id, JwsAlgorithm::Es256)
+                .await
+                .unwrap()
+                .is_some()
+        );
+
+        // Claim then release a subdomain — release must cancel the rotation.
+        claim_subdomain(&store, &org.id, "acme-com").await.unwrap();
+        release_subdomain(&store, &org.id).await.unwrap();
+
+        // Both next slots must be gone.
+        assert!(
+            get_org_signing_key_next(&store, &org.id, JwsAlgorithm::Es256)
+                .await
+                .unwrap()
+                .is_none(),
+            "ES256 next slot must be deleted on release"
+        );
+        assert!(
+            get_org_signing_key_next(&store, &org.id, JwsAlgorithm::Rs256)
+                .await
+                .unwrap()
+                .is_none(),
+            "RS256 next slot must be deleted on release"
+        );
+    }
+
     #[tokio::test]
     async fn org_key_insert_is_idempotent_on_the_slot() {
         let store = fresh_store().await;
@@ -3340,6 +3545,7 @@ mod tests {
             alg: JwsAlgorithm::Es256,
             kid: "kid-1".to_string(),
             private_pkcs8_der_b64: "AAAA".to_string().into(),
+            state: SigningKeyState::Active,
         };
         // A retry or concurrent claim re-runs the insert; the deterministic slot
         // makes the second one a no-op instead of a duplicate row.

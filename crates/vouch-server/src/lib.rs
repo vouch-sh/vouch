@@ -88,7 +88,7 @@ pub struct AppState {
     /// Session lookup cache (30s TTL).
     pub session_cache: db::SessionCache,
     /// Per-org issuer signing key cache (60s TTL).
-    pub(crate) org_keys_cache: services::oidc::OrgKeysCache,
+    pub org_keys_cache: services::oidc::OrgKeysCache,
     /// Configured upstream identity providers (OIDC and/or SAML), in the order
     /// operators listed them in `VOUCH_IDPS` (or the S3 `idps` array). Order
     /// controls login page button order; `id` is the lookup key at callback time.

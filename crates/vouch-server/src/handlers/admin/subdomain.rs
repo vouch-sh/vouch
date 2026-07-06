@@ -18,6 +18,7 @@ use crate::handlers::session::{AuthContext, extract_org_admin, get_resource_auth
 use crate::impl_template_response;
 use crate::infra::i18n::Tr;
 use crate::services::error::ServiceError;
+use crate::services::oidc::{emergency_rotate_org_keys, stage_org_key_rotation};
 use askama::Template;
 use axum::extract::{OriginalUri, State};
 use axum::http::{HeaderMap, Method};
@@ -318,5 +319,182 @@ pub(crate) async fn admin_release_subdomain(
         Tr::new("admin-subdomain-flash-released")
             .arg("label", released.as_str())
             .to_string(),
+    ))
+}
+
+/// POST /admin/subdomain/rotate — stage a graceful signing-key rotation.
+///
+/// Generates ES256 and RS256 successors with
+/// `activate_at = now + PUBLISH_AHEAD_HOURS (24h)`, writes them to the
+/// next-slot, and publishes them in the org JWKS immediately. The cleanup loop
+/// activates the new keys after 24h and retires the old keys after
+/// `max(session_hours, 8h) + 2h`.
+pub(crate) async fn admin_rotate_keys(
+    method: Method,
+    uri: OriginalUri,
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    jar: CookieJar,
+) -> Result<Response, ServiceError> {
+    validate_origin(&headers, &state.config().base_url)?;
+    let (admin, org_id) =
+        extract_org_admin(&state, &headers, &jar, method.as_str(), uri.path(), None).await?;
+
+    if org_id.is_empty() {
+        // Empty org_id means the session has no org association — an auth/session
+        // issue, not a subdomain-state issue. Use the generic internal-error key so
+        // the message isn't misleading (L3 i18n refinement).
+        return Ok(redirect_error(
+            jar,
+            Tr::new("admin-subdomain-error-internal").to_string(),
+        ));
+    }
+
+    // Guard: rotating keys for an org with no claimed subdomain would write
+    // orphan Pending docs that can never activate (I4 / L3).
+    let org = match db::get_organization(&state.store, &org_id).await {
+        Ok(Some(o)) => o,
+        Ok(None) | Err(_) => {
+            return Ok(redirect_error(
+                jar,
+                Tr::new("admin-subdomain-error-internal").to_string(),
+            ));
+        }
+    };
+    if org.subdomain.is_none() {
+        return Ok(redirect_error(
+            jar,
+            Tr::new("admin-subdomain-error-no-subdomain").to_string(),
+        ));
+    }
+
+    let newly_staged =
+        match stage_org_key_rotation(&state.store, &org_id, &state.org_keys_cache).await {
+            Ok(staged) => staged,
+            Err(e) => {
+                tracing::error!(error = %e, org_id, "Org issuer key rotation staging failed");
+                return Ok(redirect_error(
+                    jar,
+                    Tr::new("admin-subdomain-error-internal").to_string(),
+                ));
+            }
+        };
+
+    if newly_staged {
+        // Only emit the audit event when keys were actually staged (C6).
+        let data = serde_json::json!({
+            "action": "stage_org_key_rotation",
+            "org_id": org_id,
+            "admin_user_id": admin.id,
+        });
+        if let Err(e) = state
+            .audit
+            .insert_event(
+                "org_issuer_key_rotation_staged",
+                Some(&admin.id),
+                Some(&admin.email),
+                &data.to_string(),
+            )
+            .await
+        {
+            tracing::warn!(error = %e, "failed to write org_issuer_key_rotation_staged audit event");
+        }
+        tracing::info!(
+            admin_email = %admin.email,
+            org_id = %org_id,
+            "Staged org issuer key rotation"
+        );
+        Ok(redirect_ok(
+            jar,
+            Tr::new("admin-subdomain-flash-rotation-staged").to_string(),
+        ))
+    } else {
+        // Both next-slots were already occupied — rotation was already in progress.
+        tracing::info!(
+            admin_email = %admin.email,
+            org_id = %org_id,
+            "Org issuer key rotation already in progress; no-op"
+        );
+        Ok(redirect_ok(
+            jar,
+            Tr::new("admin-subdomain-flash-rotation-already-staged").to_string(),
+        ))
+    }
+}
+
+/// POST /admin/subdomain/emergency-rotate — emergency signing-key rotation.
+///
+/// Immediately replaces both ES256 and RS256 keys. Outstanding tokens signed by
+/// the old keys will fail verification until relying parties refetch the JWKS
+/// (cross-instance ≤ 60s, downstream ≤ 1h). Use only when a key compromise is
+/// suspected. Intended for compromised key material — outstanding token breakage
+/// is accepted.
+pub(crate) async fn admin_emergency_rotate_keys(
+    method: Method,
+    uri: OriginalUri,
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    jar: CookieJar,
+) -> Result<Response, ServiceError> {
+    validate_origin(&headers, &state.config().base_url)?;
+    let (admin, org_id) =
+        extract_org_admin(&state, &headers, &jar, method.as_str(), uri.path(), None).await?;
+
+    if org_id.is_empty() {
+        // Empty org_id is an auth/session issue — use the generic internal-error
+        // key rather than the misleading no-subdomain message (L3 i18n refinement).
+        return Ok(redirect_error(
+            jar,
+            Tr::new("admin-subdomain-error-internal").to_string(),
+        ));
+    }
+
+    // Guard: emergency rotation for an org with no claimed subdomain has no
+    // Active key to replace; fail early with a clear message (I4 / L3).
+    let org = match db::get_organization(&state.store, &org_id).await {
+        Ok(Some(o)) => o,
+        Ok(None) | Err(_) => {
+            return Ok(redirect_error(
+                jar,
+                Tr::new("admin-subdomain-error-internal").to_string(),
+            ));
+        }
+    };
+    if org.subdomain.is_none() {
+        return Ok(redirect_error(
+            jar,
+            Tr::new("admin-subdomain-error-no-subdomain").to_string(),
+        ));
+    }
+
+    if let Err(e) = emergency_rotate_org_keys(
+        &state.store,
+        &org_id,
+        &state.audit,
+        &state.org_keys_cache,
+        Some(&admin.id),
+        Some(&admin.email),
+    )
+    .await
+    {
+        tracing::error!(error = %e, org_id, "Emergency org issuer key rotation failed");
+        return Ok(redirect_error(
+            jar,
+            Tr::new("admin-subdomain-error-internal").to_string(),
+        ));
+    }
+
+    // Per-alg audit events with operator identity are emitted by
+    // emergency_rotate_org_keys; no separate handler-level event needed (C1).
+
+    tracing::warn!(
+        admin_email = %admin.email,
+        org_id = %org_id,
+        "Emergency org issuer key rotation completed"
+    );
+
+    Ok(redirect_ok(
+        jar,
+        Tr::new("admin-subdomain-flash-emergency-rotation-done").to_string(),
     ))
 }

@@ -108,6 +108,8 @@ pub async fn initialize(args: config::Args) -> Result<ServerComponents> {
         Some(cleanup::start_cleanup_task(
             state.store.clone(),
             state.audit.clone(),
+            state.org_keys_cache.clone(),
+            config.session_hours,
             config.cleanup_interval_minutes,
             config.auth_events_retention_days,
             config.oauth_events_retention_days,

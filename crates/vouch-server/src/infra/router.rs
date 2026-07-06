@@ -706,6 +706,14 @@ fn build_admin_routes(config: &config::ServerConfig) -> anyhow::Result<Router<Ar
             "/admin/subdomain/release",
             post(handlers::admin::admin_release_subdomain),
         )
+        .route(
+            "/admin/subdomain/rotate",
+            post(handlers::admin::admin_rotate_keys),
+        )
+        .route(
+            "/admin/subdomain/emergency-rotate",
+            post(handlers::admin::admin_emergency_rotate_keys),
+        )
         .layer(maybe_rate_limit!(
             rate_limit::build_general_rate_limiter,
             config

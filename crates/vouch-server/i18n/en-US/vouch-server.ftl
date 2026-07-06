@@ -644,6 +644,16 @@ admin-subdomain-error-recently-released = This subdomain was recently released b
 admin-subdomain-error-internal = Something went wrong while updating the subdomain; please try again.
 admin-subdomain-error-nothing-to-release = This organization has no issuer subdomain to release.
 admin-subdomain-error-requires-encryption = Issuer subdomains are not available on this server because document storage is not encrypted. Per-organization signing keys are only created on deployments with encrypted storage.
+admin-subdomain-error-no-subdomain = This organization does not have an issuer subdomain; claim one before rotating keys.
+# Key rotation actions and confirmations.
+admin-subdomain-rotate = Rotate Signing Keys
+admin-subdomain-rotate-confirm = Stage a signing-key rotation? New keys will be published now and activated after 24 hours. The old keys remain valid until all outstanding tokens expire.
+admin-subdomain-flash-rotation-staged = Signing-key rotation staged. New keys are published in the JWKS and will activate in 24 hours.
+admin-subdomain-flash-rotation-already-staged = Signing-key rotation is already in progress. No changes were made.
+admin-subdomain-emergency-rotate = Emergency Rotate
+admin-subdomain-emergency-rotate-confirm = Immediately replace both signing keys? Tokens signed by the old keys will fail verification until relying parties refresh their JWKS cache (up to 1 hour). Use only when key compromise is suspected.
+admin-subdomain-emergency-rotate-warning = Warning: outstanding AWS federation tokens will be invalidated immediately.
+admin-subdomain-flash-emergency-rotation-done = Emergency key rotation complete. Both signing keys have been replaced. Update any relying parties that cache the JWKS.
 
 ## Admin device posture policies (admin/policies.html)
 admin-policies-page-title = { -product } - Device Posture Policies
