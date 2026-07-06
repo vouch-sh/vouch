@@ -127,81 +127,83 @@ pub async fn enroll_user_with_org(
         (None, false)
     };
 
-    let mut tx = store.begin().await?;
+    crate::with_dsql_retry!(async {
+        let mut tx = store.begin().await?;
 
-    // Step 2: Determine admin status
-    let is_org_admin = if org_needs_admin {
-        if let Some(ref oid) = org_id {
-            let count = tx.count::<UserDoc>("org_id", oid).await?;
-            count == 0
+        // Step 2: Determine admin status
+        let is_org_admin = if org_needs_admin {
+            if let Some(ref oid) = org_id {
+                let count = tx.count::<UserDoc>("org_id", oid).await?;
+                count == 0
+            } else {
+                false
+            }
         } else {
             false
-        }
-    } else {
-        false
-    };
+        };
 
-    // Step 3: Get or create user
-    let existing_user = tx.find_one::<UserDoc>("email", email).await?;
+        // Step 3: Get or create user
+        let existing_user = tx.find_one::<UserDoc>("email", email).await?;
 
-    let user = match existing_user {
-        Some(doc) => EnrolledUser {
-            id: doc.id,
-            email: doc.data.email,
-            name: doc.data.name,
-            org_id: doc.data.org_id,
-            is_org_admin: doc.data.is_org_admin,
-        },
-        None => {
-            let doc = UserDoc {
-                email: email.to_string(),
-                name: name.map(String::from),
-                org_id: org_id.clone(),
-                is_org_admin,
-                active: true,
-                external_id: None,
-                github_id: None,
-                github_login: None,
-                github_refresh_token: None,
-            };
-            let result = tx.insert(&doc).await?;
-            EnrolledUser {
-                id: result.id,
-                email: result.data.email,
-                name: result.data.name,
-                org_id: result.data.org_id,
-                is_org_admin: result.data.is_org_admin,
+        let user = match existing_user {
+            Some(doc) => EnrolledUser {
+                id: doc.id,
+                email: doc.data.email,
+                name: doc.data.name,
+                org_id: doc.data.org_id,
+                is_org_admin: doc.data.is_org_admin,
+            },
+            None => {
+                let doc = UserDoc {
+                    email: email.to_string(),
+                    name: name.map(String::from),
+                    org_id: org_id.clone(),
+                    is_org_admin,
+                    active: true,
+                    external_id: None,
+                    github_id: None,
+                    github_login: None,
+                    github_refresh_token: None,
+                };
+                let result = tx.insert(&doc).await?;
+                EnrolledUser {
+                    id: result.id,
+                    email: result.data.email,
+                    name: result.data.name,
+                    org_id: result.data.org_id,
+                    is_org_admin: result.data.is_org_admin,
+                }
+            }
+        };
+
+        // Step 4: Ensure org has an admin. Uses compare_and_update so that
+        // only one concurrent enrollee wins the admin slot. On re-run after a
+        // crash, this also repairs a missing created_by_user_id.
+        if let Some(ref oid) = org_id
+            && let Some(org_doc) = tx.get::<OrganizationDoc>(oid).await?
+            && org_doc.data.created_by_user_id.is_none()
+        {
+            let mut data = org_doc.data;
+            data.created_by_user_id = Some(user.id.clone());
+            // Optimistic lock: if another enrollment already set the admin,
+            // compare_and_update returns false (version mismatch) and we
+            // harmlessly skip — the first enrollee wins the admin role.
+            let won = tx.compare_and_update(oid, org_doc.version, &data).await?;
+            if !won {
+                tracing::debug!(
+                    org_id = %oid,
+                    "Lost race to set org admin during enrollment — another enrollee won"
+                );
             }
         }
-    };
 
-    // Step 4: Ensure org has an admin. Uses compare_and_update so that
-    // only one concurrent enrollee wins the admin slot. On re-run after a
-    // crash, this also repairs a missing created_by_user_id.
-    if let Some(ref oid) = org_id
-        && let Some(org_doc) = tx.get::<OrganizationDoc>(oid).await?
-        && org_doc.data.created_by_user_id.is_none()
-    {
-        let mut data = org_doc.data;
-        data.created_by_user_id = Some(user.id.clone());
-        // Optimistic lock: if another enrollment already set the admin,
-        // compare_and_update returns false (version mismatch) and we
-        // harmlessly skip — the first enrollee wins the admin role.
-        let won = tx.compare_and_update(oid, org_doc.version, &data).await?;
-        if !won {
-            tracing::debug!(
-                org_id = %oid,
-                "Lost race to set org admin during enrollment — another enrollee won"
-            );
-        }
-    }
+        tx.commit().await?;
 
-    tx.commit().await?;
-
-    Ok(EnrollmentResult {
-        user,
-        org_id,
-        is_org_admin,
+        Ok(EnrollmentResult {
+            user,
+            org_id: org_id.clone(),
+            is_org_admin,
+        })
     })
 }
 

@@ -226,16 +226,83 @@ pub(crate) async fn admin_add_domain(
             );
             Ok(redirect_ok(
                 jar,
-                format!(
-                    "Added {} as pending. Publish the TXT record shown below, then click Verify.",
-                    added.domain
-                ),
+                Tr::new("admin-domains-flash-add-pending")
+                    .arg("domain", added.domain.as_str())
+                    .to_string(),
             ))
         }
         Err(e) => {
-            let msg = e.to_string();
-            tracing::info!(error = %msg, org_id = %org_id, "Add additional domain rejected");
-            Ok(redirect_error(jar, msg))
+            let flash = match &e {
+                db::AddDomainError::MaxDomains => {
+                    Tr::new("admin-domains-error-max-domains").to_string()
+                }
+                db::AddDomainError::PrimaryDomain => {
+                    Tr::new("admin-domains-error-primary-domain").to_string()
+                }
+                db::AddDomainError::AlreadyAttached => {
+                    Tr::new("admin-domains-error-already-attached").to_string()
+                }
+                db::AddDomainError::ClaimedByOtherOrg => {
+                    Tr::new("admin-domains-error-claimed-by-other-org").to_string()
+                }
+                db::AddDomainError::PendingOtherOrg => {
+                    Tr::new("admin-domains-error-pending-other-org").to_string()
+                }
+                db::AddDomainError::HeldByOtherOrg => {
+                    Tr::new("admin-domains-error-held-other-org").to_string()
+                }
+                db::AddDomainError::InvalidDomain(v) => match v {
+                    db::DomainValidationError::Empty => {
+                        Tr::new("admin-domains-invalid-empty").to_string()
+                    }
+                    db::DomainValidationError::NotAscii => {
+                        Tr::new("admin-domains-invalid-ascii").to_string()
+                    }
+                    db::DomainValidationError::IpAddress => {
+                        Tr::new("admin-domains-invalid-ip").to_string()
+                    }
+                    db::DomainValidationError::TooLong => {
+                        Tr::new("admin-domains-invalid-too-long").to_string()
+                    }
+                    db::DomainValidationError::NoDot => {
+                        Tr::new("admin-domains-invalid-no-dot").to_string()
+                    }
+                    db::DomainValidationError::LeadingOrTrailingDot => {
+                        Tr::new("admin-domains-invalid-dot-edge").to_string()
+                    }
+                    db::DomainValidationError::EmptyLabel => {
+                        Tr::new("admin-domains-invalid-empty-label").to_string()
+                    }
+                    db::DomainValidationError::LabelTooLong => {
+                        Tr::new("admin-domains-invalid-label-too-long").to_string()
+                    }
+                    db::DomainValidationError::LabelHyphenEdge => {
+                        Tr::new("admin-domains-invalid-label-hyphen-edge").to_string()
+                    }
+                    db::DomainValidationError::LabelInvalidChar => {
+                        Tr::new("admin-domains-invalid-label-chars").to_string()
+                    }
+                    db::DomainValidationError::ReservedTld(tld) => {
+                        Tr::new("admin-domains-invalid-reserved-tld")
+                            .arg("tld", tld.as_str())
+                            .to_string()
+                    }
+                },
+                db::AddDomainError::OccConflict | db::AddDomainError::Other(_) => {
+                    tracing::error!(
+                        error = %e,
+                        org_id = %org_id,
+                        domain = %form.domain,
+                        "add_additional_domain failed"
+                    );
+                    return Ok(redirect_error(
+                        jar,
+                        Tr::new("admin-domains-error-internal").to_string(),
+                    ));
+                }
+            };
+            tracing::info!(error = %e, org_id = %org_id, "Add additional domain rejected");
+            Ok(redirect_error(jar, flash))
         }
     }
 }
@@ -255,7 +322,13 @@ pub(crate) async fn admin_verify_domain(
 
     let normalized = match db::normalize_domain(&domain) {
         Ok(d) => d,
-        Err(e) => return Ok(redirect_error(jar, e.to_string())),
+        Err(e) => {
+            tracing::error!(error = %e, domain = %domain, "domain normalization failed in verify");
+            return Ok(redirect_error(
+                jar,
+                Tr::new("admin-domains-error-internal").to_string(),
+            ));
+        }
     };
 
     let token = match db::get_verification_token(&state.store, &org_id, &normalized).await? {
@@ -263,7 +336,7 @@ pub(crate) async fn admin_verify_domain(
         None => {
             return Ok(redirect_error(
                 jar,
-                "Domain is not pending verification on this org.",
+                Tr::new("admin-domains-error-not-pending").to_string(),
             ));
         }
     };
@@ -278,7 +351,7 @@ pub(crate) async fn admin_verify_domain(
             );
             return Ok(redirect_error(
                 jar,
-                "DNS lookup failed. Check that the TXT record is published and try again.",
+                Tr::new("admin-domains-error-dns-lookup").to_string(),
             ));
         }
     };
@@ -286,7 +359,7 @@ pub(crate) async fn admin_verify_domain(
     if !txt_ok {
         return Ok(redirect_error(
             jar,
-            "TXT record not found or token does not match. DNS changes may take a few minutes to propagate.",
+            Tr::new("admin-domains-error-txt-not-found").to_string(),
         ));
     }
 
@@ -316,9 +389,29 @@ pub(crate) async fn admin_verify_domain(
                 domain = %normalized,
                 "Verified additional domain"
             );
-            Ok(redirect_ok(jar, format!("Verified domain {normalized}")))
+            Ok(redirect_ok(
+                jar,
+                Tr::new("admin-domains-flash-verified")
+                    .arg("domain", normalized.as_str())
+                    .to_string(),
+            ))
         }
-        Err(e) => Ok(redirect_error(jar, e.to_string())),
+        Err(db::MarkVerifiedError::ClaimedByOtherOrg) => Ok(redirect_error(
+            jar,
+            Tr::new("admin-domains-error-verified-by-other-org").to_string(),
+        )),
+        Err(e) => {
+            tracing::error!(
+                error = %e,
+                org_id = %org_id,
+                domain = %normalized,
+                "mark_additional_domain_verified failed"
+            );
+            Ok(redirect_error(
+                jar,
+                Tr::new("admin-domains-error-internal").to_string(),
+            ))
+        }
     }
 }
 
@@ -337,7 +430,13 @@ pub(crate) async fn admin_remove_domain(
 
     let normalized = match db::normalize_domain(&domain) {
         Ok(d) => d,
-        Err(e) => return Ok(redirect_error(jar, e.to_string())),
+        Err(e) => {
+            tracing::error!(error = %e, domain = %domain, "domain normalization failed in remove");
+            return Ok(redirect_error(
+                jar,
+                Tr::new("admin-domains-error-internal").to_string(),
+            ));
+        }
     };
 
     match db::remove_additional_domain(&state.store, &org_id, &normalized).await {
@@ -372,35 +471,41 @@ pub(crate) async fn admin_remove_domain(
                 revocation_errored = errored,
                 "Removed additional domain"
             );
-            let mut msg = if errored {
+            let base = if errored {
+                Tr::new("admin-domains-flash-removed-revoke-error")
+                    .arg("domain", normalized.as_str())
+                    .to_string()
+            } else {
+                Tr::new("admin-domains-flash-removed")
+                    .arg("domain", normalized.as_str())
+                    .arg("revoked", i64::try_from(revoked).unwrap_or(i64::MAX))
+                    .to_string()
+            };
+            let msg = if let Some(label) = &summary.released_subdomain {
                 format!(
-                    "Removed {normalized}, but session revocation for matching users failed; check server logs and revoke manually."
-                )
-            } else if revoked == 0 {
-                format!("Removed {normalized}. No matching users had active sessions to revoke.")
-            } else if revoked == 1 {
-                format!(
-                    "Removed {normalized}. Revoked sessions for 1 user; their org membership is unchanged."
+                    "{base} {}",
+                    Tr::new("admin-domains-subdomain-auto-released").arg("label", label.as_str())
                 )
             } else {
-                format!(
-                    "Removed {normalized}. Revoked sessions for {revoked} users; org membership is unchanged."
-                )
+                base
             };
-            if let Some(label) = &summary.released_subdomain {
-                msg.push(' ');
-                msg.push_str(
-                    &Tr::new("admin-domains-subdomain-auto-released")
-                        .arg("label", label.as_str())
-                        .to_string(),
-                );
-            }
             Ok(redirect_ok(jar, msg))
         }
         Ok(None) => Ok(redirect_error(
             jar,
-            "Domain not found on this organization.",
+            Tr::new("admin-domains-error-not-found").to_string(),
         )),
-        Err(e) => Ok(redirect_error(jar, e.to_string())),
+        Err(e) => {
+            tracing::error!(
+                error = %e,
+                org_id = %org_id,
+                domain = %normalized,
+                "remove_additional_domain failed"
+            );
+            Ok(redirect_error(
+                jar,
+                Tr::new("admin-domains-error-internal").to_string(),
+            ))
+        }
     }
 }

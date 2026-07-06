@@ -246,23 +246,25 @@ pub async fn revoke_all_ssh_certificates_for_user(
         return Ok(0);
     }
 
-    let now = Timestamp::now();
-    let mut tx = store.begin().await?;
-    let mut count: u64 = 0;
-    for cert in &issued {
-        let doc = SshRevokedCertDoc {
-            serial: cert.serial.clone(),
-            user_id: user_id.to_string(),
-            reason: reason.map(String::from),
-            revoked_at: now,
-            expires_at: cert.expires_at,
-            revoked_by: revoked_by.map(String::from),
-        };
-        tx.insert(&doc).await?;
-        count = count.saturating_add(1);
-    }
-    tx.commit().await?;
-    Ok(count)
+    crate::with_dsql_retry!(async {
+        let now = Timestamp::now();
+        let mut tx = store.begin().await?;
+        let mut count: u64 = 0;
+        for cert in &issued {
+            let doc = SshRevokedCertDoc {
+                serial: cert.serial.clone(),
+                user_id: user_id.to_string(),
+                reason: reason.map(String::from),
+                revoked_at: now,
+                expires_at: cert.expires_at,
+                revoked_by: revoked_by.map(String::from),
+            };
+            tx.insert(&doc).await?;
+            count = count.saturating_add(1);
+        }
+        tx.commit().await?;
+        Ok(count)
+    })
 }
 
 /// Delete expired SSH certificate revocations.
