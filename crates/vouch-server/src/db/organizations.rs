@@ -1378,8 +1378,10 @@ pub async fn claim_subdomain(
                         if holder.org_id != org_id {
                             return Err(SubdomainClaimError::Conflict);
                         }
-                        // Slot already ours but the org doc lost the mirror
-                        // (interrupted claim) — fall through and repair it.
+                        // Defensive: slot already ours but the org doc does
+                        // not reflect it. The claim transaction writes both
+                        // atomically, so this only arises from out-of-band
+                        // intervention — fall through and repair the mirror.
                     }
                     Some(released_at) => {
                         let in_cooldown = Timestamp::now().duration_since(released_at).as_secs()
@@ -2544,7 +2546,7 @@ mod tests {
         add_additional_domain(&store, &org.id, "pending.io", "u1", "u1@acme.com")
             .await
             .unwrap();
-        // Verified additional domain contributes its first label.
+        // Verified additional domain contributes its apex-derived label.
         add_additional_domain(&store, &org.id, "widgets.co.uk", "u1", "u1@acme.com")
             .await
             .unwrap();

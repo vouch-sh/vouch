@@ -81,7 +81,7 @@ pub struct OrgKeys {
 }
 
 /// How long a resolved key set may be served from [`OrgKeysCache`].
-const ORG_KEYS_CACHE_TTL: Duration = Duration::from_secs(60);
+const ORG_KEYS_CACHE_TTL: Duration = Duration::from_mins(1);
 
 /// Cache of resolved per-org key sets, keyed by org ID.
 ///

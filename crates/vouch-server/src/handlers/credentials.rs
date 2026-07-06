@@ -417,7 +417,6 @@ struct AwsIssuanceContext {
     org: Option<db::Organization>,
 }
 
-/// Map an [`AwsError`] to a `ServiceError`.
 /// Map a per-org signing-key resolution failure to a 500.
 fn map_signing_key_error(e: anyhow::Error) -> ServiceError {
     tracing::error!("Failed to resolve org signing key: {e}");
@@ -428,6 +427,7 @@ fn map_signing_key_error(e: anyhow::Error) -> ServiceError {
     )
 }
 
+/// Map an [`AwsError`] to a `ServiceError`.
 fn map_aws_error(e: AwsError) -> ServiceError {
     match e {
         AwsError::ClaimsBuild(ref err) => {
