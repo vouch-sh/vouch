@@ -453,14 +453,14 @@ pub async fn remove_additional_domain(
     // the claim slot and the mirror must move together, but the common
     // no-subdomain path stays a plain CAS (a read-then-write transaction
     // can deadlock concurrent writers on SQLite's deferred locking).
-    let released_subdomain = if subdomain_release_pending(&data) {
+    let released_subdomain = if let Some(label) = subdomain_to_release(&data) {
         let mut tx = store.begin().await?;
-        let released = release_subdomain_if_ineligible(&mut tx, org_id, &mut data).await?;
+        release_ineligible_subdomain(&mut tx, org_id, &mut data, &label).await?;
         if !tx.compare_and_update(org_id, version, &data).await? {
             bail!("organization was modified concurrently; please retry");
         }
         tx.commit().await?;
-        released
+        Some(label)
     } else {
         if !store.compare_and_update(org_id, version, &data).await? {
             bail!("organization was modified concurrently; please retry");
@@ -854,14 +854,19 @@ pub async fn record_recheck_result(
     // a release will actually happen — the common recheck path stays a
     // plain CAS so concurrent rechecks can't deadlock on SQLite.
     let flipped = matches!(effect, RecheckEffect::FlippedToUnverified { .. });
-    let updated = if flipped && subdomain_release_pending(&data) {
+    let to_release = if flipped {
+        subdomain_to_release(&data)
+    } else {
+        None
+    };
+    let updated = if let Some(label) = to_release {
         let mut tx = store.begin().await?;
-        let released = release_subdomain_if_ineligible(&mut tx, org_id, &mut data).await?;
+        release_ineligible_subdomain(&mut tx, org_id, &mut data, &label).await?;
         let ok = tx.compare_and_update(org_id, version, &data).await?;
         if ok {
             tx.commit().await?;
             if let RecheckEffect::FlippedToUnverified { released_subdomain } = &mut effect {
-                *released_subdomain = released;
+                *released_subdomain = Some(label);
             }
         }
         ok
@@ -1492,36 +1497,36 @@ pub async fn release_subdomain(store: &DocumentStore, org_id: &str) -> Result<Op
     result.map_err(anyhow::Error::from)
 }
 
-/// True when the org's claimed subdomain has lost its verified-domain
-/// backing and must be released. Used to decide whether a mutation needs
-/// the transactional slot-release path or a plain CAS suffices.
-fn subdomain_release_pending(data: &OrganizationDoc) -> bool {
-    data.subdomain.as_ref().is_some_and(|label| {
-        !eligible_subdomain_labels(&data.domain, &data.additional_domains).contains(label)
-    })
+/// The org's claimed subdomain label that has lost its verified-domain
+/// backing and must be released, or `None` when the claim (if any) is still
+/// backed. Callers use `Some` both to decide the transactional slot-release
+/// path is needed (vs. a plain CAS) and as the label to release, so
+/// eligibility is computed once per mutation.
+fn subdomain_to_release(data: &OrganizationDoc) -> Option<String> {
+    let label = data.subdomain.as_ref()?;
+    if eligible_subdomain_labels(&data.domain, &data.additional_domains).contains(label) {
+        return None;
+    }
+    Some(label.clone())
 }
 
-/// Inside `tx`, auto-release the org's issuer subdomain if it is no longer
-/// backed by a verified domain.
+/// Inside `tx`, auto-release the org's issuer subdomain `label` (already known
+/// ineligible via [`subdomain_to_release`]): clear the org-doc mirror and
+/// tombstone the claim slot.
 ///
 /// Call after mutating `data`'s domain set and before the org-doc
 /// `compare_and_update`: the mirror clear and the slot release then commit
 /// atomically with the domain change. The released slot starts the normal
-/// reuse cooldown. Returns the released label, if any.
-async fn release_subdomain_if_ineligible(
+/// reuse cooldown.
+async fn release_ineligible_subdomain(
     tx: &mut super::store::StoreTransaction<'_>,
     org_id: &str,
     data: &mut OrganizationDoc,
-) -> Result<Option<String>> {
-    let Some(label) = data.subdomain.take() else {
-        return Ok(None);
-    };
-    if eligible_subdomain_labels(&data.domain, &data.additional_domains).contains(&label) {
-        data.subdomain = Some(label);
-        return Ok(None);
-    }
+    label: &str,
+) -> Result<()> {
+    data.subdomain = None;
 
-    let claim_id = deterministic_subdomain_claim_id(&label);
+    let claim_id = deterministic_subdomain_claim_id(label);
     match tx.get::<SubdomainClaimDoc>(&claim_id).await? {
         Some(slot) if slot.data.org_id == org_id && slot.data.released_at.is_none() => {
             let released = SubdomainClaimDoc {
@@ -1550,7 +1555,7 @@ async fn release_subdomain_if_ineligible(
         label,
         "auto-released issuer subdomain: no verified domain backs it anymore"
     );
-    Ok(Some(label))
+    Ok(())
 }
 
 /// Look up the organization that has claimed `label` as its issuer
