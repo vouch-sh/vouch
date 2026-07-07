@@ -20,8 +20,8 @@ use crate::impl_template_response;
 use crate::infra::i18n::Tr;
 use crate::services::error::ServiceError;
 use crate::services::oidc::{
-    Operator, OrgKeyPanel, RevokeOutcome, RotateOutcome, emergency_rotate_org_keys, org_key_panel,
-    revoke_org_previous_keys, rotate_org_keys,
+    EmergencyOutcome, Operator, OrgKeyPanel, RevokeOutcome, RotateOutcome,
+    emergency_rotate_org_keys, org_key_panel, revoke_org_previous_keys, rotate_org_keys,
 };
 use askama::Template;
 use axum::extract::{OriginalUri, State};
@@ -98,6 +98,9 @@ fn rotate_blocked_message(outcome: &RotateOutcome) -> Option<String> {
         }
         RotateOutcome::NotBootstrapped => {
             Some(Tr::new("admin-subdomain-flash-rotate-not-bootstrapped").to_string())
+        }
+        RotateOutcome::SubdomainReleased => {
+            Some(Tr::new("admin-subdomain-error-no-subdomain").to_string())
         }
     }
 }
@@ -647,22 +650,30 @@ pub(crate) async fn admin_emergency_rotate_keys(
             ));
         }
     }
-    if let Err(e) = emergency_rotate_org_keys(&state, &org_id, operator).await {
-        tracing::error!(error = %e, org_id, "Emergency org issuer key rotation failed");
-        return Ok(redirect_error(
+    match emergency_rotate_org_keys(&state, &org_id, operator).await {
+        Ok(EmergencyOutcome::Rotated) => {
+            // Per-alg audit events with operator identity are emitted by the
+            // service.
+            tracing::warn!(
+                admin_email = %admin.email,
+                org_id = %org_id,
+                "Emergency org issuer key rotation completed"
+            );
+            Ok(redirect_ok(
+                jar,
+                Tr::new("admin-subdomain-flash-emergency-rotation-done").to_string(),
+            ))
+        }
+        Ok(EmergencyOutcome::SubdomainReleased) => Ok(redirect_error(
             jar,
-            Tr::new("admin-subdomain-error-internal").to_string(),
-        ));
+            Tr::new("admin-subdomain-error-no-subdomain").to_string(),
+        )),
+        Err(e) => {
+            tracing::error!(error = %e, org_id, "Emergency org issuer key rotation failed");
+            Ok(redirect_error(
+                jar,
+                Tr::new("admin-subdomain-error-internal").to_string(),
+            ))
+        }
     }
-
-    // Per-alg audit events with operator identity are emitted by the service.
-    tracing::warn!(
-        admin_email = %admin.email,
-        org_id = %org_id,
-        "Emergency org issuer key rotation completed"
-    );
-    Ok(redirect_ok(
-        jar,
-        Tr::new("admin-subdomain-flash-emergency-rotation-done").to_string(),
-    ))
 }

@@ -76,7 +76,7 @@ use crate::config::ServerConfig;
 use crate::db::audit::AuditStore;
 use crate::db::document_type::Document;
 use crate::db::documents::oauth::JwsAlgorithm;
-use crate::db::documents::organization::{OrgSigningKeyDoc, SigningKeyState};
+use crate::db::documents::organization::{OrgSigningKeyDoc, OrganizationDoc, SigningKeyState};
 use crate::db::store::{DocumentStore, StoreTransaction};
 use crate::db::{self, Organization};
 use crate::services::error::ServiceError;
@@ -548,6 +548,18 @@ pub enum RotateOutcome {
     /// The org has no signing keys yet (they are created on first use of the
     /// discovery/JWKS or token endpoints).
     NotBootstrapped,
+    /// The org's subdomain was released (possibly while this rotate was in
+    /// flight); nothing may rotate until it is claimed again.
+    SubdomainReleased,
+}
+
+/// Result of an emergency rotation attempt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EmergencyOutcome {
+    /// The entire key set was replaced.
+    Rotated,
+    /// The org's subdomain was released; there is no key set to replace.
+    SubdomainReleased,
 }
 
 /// Result of an operator revoke attempt for an organization's Previous keys.
@@ -676,6 +688,33 @@ async fn precheck_rotate_and_heal(
     Ok(latest_ready.map(|ready_at| RotateOutcome::NextNotReady { ready_at }))
 }
 
+/// Verify inside the transaction that the org still holds its subdomain,
+/// and bump the org document's version so a concurrent release — which also
+/// writes the org document in the transaction that deletes the rotation keys
+/// — must collide with this transaction on every backend instead of
+/// interleaving with the key writes.
+///
+/// Returns `false` when the subdomain is gone (or the org vanished); the
+/// caller rejects cleanly and the transaction rolls back with no writes.
+async fn guard_subdomain_claimed_in_tx(
+    tx: &mut StoreTransaction<'_>,
+    org_id: &str,
+) -> Result<bool, OrgRotationError> {
+    let Some(org_doc) = tx.get::<OrganizationDoc>(org_id).await? else {
+        return Ok(false);
+    };
+    if org_doc.data.subdomain.is_none() {
+        return Ok(false);
+    }
+    if !tx
+        .compare_and_update(org_id, org_doc.version, &org_doc.data)
+        .await?
+    {
+        return Err(OrgRotationError::OccConflict);
+    }
+    Ok(true)
+}
+
 /// One algorithm's step inside the rotate transaction.
 enum AlgRotation {
     Rotated(RotatedKids),
@@ -788,6 +827,15 @@ pub async fn rotate_org_keys(
     operator: Operator<'_>,
 ) -> Result<RotateOutcome> {
     let store = &state.store;
+    // Check the subdomain before the heal so a released org cannot have a
+    // fresh Next key resurrected by the pre-check. Advisory only — the
+    // transaction below re-checks under the org-document anchor.
+    let claimed = db::get_organization(store, org_id)
+        .await?
+        .is_some_and(|org| org.subdomain.is_some());
+    if !claimed {
+        return Ok(RotateOutcome::SubdomainReleased);
+    }
     if let Some(blocked) = precheck_rotate_and_heal(store, org_id).await? {
         return Ok(blocked);
     }
@@ -800,6 +848,10 @@ pub async fn rotate_org_keys(
     let result: Result<RotateOutcome, OrgRotationError> = crate::with_dsql_retry!(async {
         let mut tx = store.begin().await?;
         let now = Timestamp::now();
+
+        if !guard_subdomain_claimed_in_tx(&mut tx, org_id).await? {
+            return Ok(RotateOutcome::SubdomainReleased);
+        }
 
         let es256 =
             match rotate_one_alg_in_tx(&mut tx, org_id, JwsAlgorithm::Es256, &fresh_es256, now)
@@ -1159,8 +1211,16 @@ pub async fn emergency_rotate_org_keys(
     state: &AppState,
     org_id: &str,
     operator: Operator<'_>,
-) -> Result<()> {
+) -> Result<EmergencyOutcome> {
     let store = &state.store;
+    // Advisory pre-check; the transaction re-checks under the org-document
+    // anchor. Skips four wasted keygens when the org is already released.
+    let claimed = db::get_organization(store, org_id)
+        .await?
+        .is_some_and(|org| org.subdomain.is_some());
+    if !claimed {
+        return Ok(EmergencyOutcome::SubdomainReleased);
+    }
 
     // Generate all four replacements outside the retry loop.
     let es256 = EmergencyKeyPair {
@@ -1210,7 +1270,7 @@ pub async fn emergency_rotate_org_keys(
     }
 
     tracing::warn!(org_id, "emergency org issuer key rotation completed");
-    Ok(())
+    Ok(EmergencyOutcome::Rotated)
 }
 
 #[cfg(test)]
@@ -1226,14 +1286,14 @@ mod tests {
     use jiff::{Span, Timestamp};
 
     use super::{
-        Operator, PUBLISH_AHEAD_HOURS, RETIREMENT_FLOOR_HOURS, RETIREMENT_MARGIN_HOURS,
-        RevokeOutcome, RotateOutcome, emergency_rotate_org_keys, org_issuer_or_base,
-        revoke_org_previous_keys, rotate_org_keys, state_priority,
+        EmergencyOutcome, Operator, PUBLISH_AHEAD_HOURS, RETIREMENT_FLOOR_HOURS,
+        RETIREMENT_MARGIN_HOURS, RevokeOutcome, RotateOutcome, emergency_rotate_org_keys,
+        org_issuer_or_base, revoke_org_previous_keys, rotate_org_keys, state_priority,
     };
     use crate::db::documents::organization::SigningKeyState;
     use crate::db::{
         JwsAlgorithm, OrgSigningKeyDoc, Organization, claim_subdomain, deterministic_org_key_id,
-        get_org_signing_key,
+        get_org_signing_key, release_subdomain,
     };
     use crate::services::oidc::{Jwk, resolve_org_keys};
     use crate::test_utils::{create_test_org, test_app_state_encrypted, test_config};
@@ -1835,6 +1895,90 @@ mod tests {
         .await;
         let panel = super::org_key_panel(&state, &org_id).await.unwrap();
         assert_eq!(panel.revoke_blocked, None);
+    }
+
+    #[tokio::test]
+    async fn rotate_rejects_a_released_subdomain_without_writes() {
+        let (state, org_id, org) = setup().await;
+        resolve_org_keys(&state, Some(&org)).await.unwrap();
+        backdate(
+            &state,
+            &org_id,
+            JwsAlgorithm::Es256,
+            SigningKeyState::Next,
+            25,
+        )
+        .await;
+        backdate(
+            &state,
+            &org_id,
+            JwsAlgorithm::Rs256,
+            SigningKeyState::Next,
+            25,
+        )
+        .await;
+        release_subdomain(&state.store, &org_id).await.unwrap();
+
+        let outcome = rotate_org_keys(&state, &org_id, NO_OPERATOR).await.unwrap();
+        assert_eq!(outcome, RotateOutcome::SubdomainReleased);
+
+        // Release deleted the Next keys; the rejected rotate must not have
+        // resurrected them, demoted anything, or touched the signer.
+        for alg in [JwsAlgorithm::Es256, JwsAlgorithm::Rs256] {
+            assert!(
+                get_org_signing_key(&state.store, &org_id, alg, SigningKeyState::Next)
+                    .await
+                    .unwrap()
+                    .is_none(),
+                "{alg:?}: rejected rotate must not resurrect a Next key"
+            );
+            assert!(
+                get_org_signing_key(&state.store, &org_id, alg, SigningKeyState::Previous)
+                    .await
+                    .unwrap()
+                    .is_none(),
+                "{alg:?}: rejected rotate must not demote the signer"
+            );
+            assert!(
+                get_org_signing_key(&state.store, &org_id, alg, SigningKeyState::Current)
+                    .await
+                    .unwrap()
+                    .is_some(),
+                "{alg:?}: the signer survives release"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn emergency_rejects_a_released_subdomain() {
+        let (state, org_id, org) = setup().await;
+        resolve_org_keys(&state, Some(&org)).await.unwrap();
+        let before = get_org_signing_key(
+            &state.store,
+            &org_id,
+            JwsAlgorithm::Es256,
+            SigningKeyState::Current,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        release_subdomain(&state.store, &org_id).await.unwrap();
+
+        let outcome = emergency_rotate_org_keys(&state, &org_id, NO_OPERATOR)
+            .await
+            .unwrap();
+        assert_eq!(outcome, EmergencyOutcome::SubdomainReleased);
+
+        let after = get_org_signing_key(
+            &state.store,
+            &org_id,
+            JwsAlgorithm::Es256,
+            SigningKeyState::Current,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(after.data.kid, before.data.kid, "signer must be untouched");
     }
 
     #[tokio::test]
