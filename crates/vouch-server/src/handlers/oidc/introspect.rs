@@ -6,8 +6,8 @@
 //! - RFC 7662 - OAuth 2.0 Token Introspection
 
 use crate::AppState;
-use crate::handlers::extractors::ClientInfo;
-use crate::services::error::ServiceError;
+use crate::db::ClientInfo;
+use crate::error::ServiceError;
 use crate::services::oidc::introspection::{
     introspect_token as svc_introspect, revoke_token as svc_revoke, sign_introspection_jwt,
 };

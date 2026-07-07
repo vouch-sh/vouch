@@ -79,10 +79,10 @@ use crate::db::documents::oauth::JwsAlgorithm;
 use crate::db::documents::organization::{OrgSigningKeyDoc, OrganizationDoc, SigningKeyState};
 use crate::db::store::{DocumentStore, StoreTransaction};
 use crate::db::{self, Organization};
-use crate::services::error::ServiceError;
+use crate::error::ServiceError;
 
 use super::discovery::{JwksResponse, build_jwks};
-use super::keys::{Jwk, OidcRsaSigningKey, OidcSigningKey};
+use crate::crypto::keys::{Jwk, OidcRsaSigningKey, OidcSigningKey};
 
 /// Hours a Next key must have been published in the JWKS before an operator
 /// rotate may promote it to the signer.
@@ -1302,12 +1302,13 @@ mod tests {
         RETIREMENT_MARGIN_HOURS, RevokeOutcome, RotateOutcome, emergency_rotate_org_keys,
         org_issuer_or_base, revoke_org_previous_keys, rotate_org_keys, state_priority,
     };
+    use crate::crypto::keys::Jwk;
     use crate::db::documents::organization::SigningKeyState;
     use crate::db::{
         JwsAlgorithm, OrgSigningKeyDoc, Organization, claim_subdomain, deterministic_org_key_id,
         get_org_signing_key, release_subdomain,
     };
-    use crate::services::oidc::{Jwk, resolve_org_keys};
+    use crate::services::oidc::resolve_org_keys;
     use crate::test_utils::{create_test_org, test_app_state_encrypted, test_config};
 
     /// No operator identity — service-level tests don't exercise audit trails.

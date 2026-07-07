@@ -12,12 +12,12 @@ use super::scope::{OAuthScope, ScopeSet};
 use crate::AppState;
 use crate::crypto::hash_token;
 use crate::db::{self, Authenticator, OAuthClient, Session, User};
+use crate::error::{OAuthErrorCode, ServiceError, ServiceResult};
 use crate::redact_email;
 use crate::services::auth::{
     AuthMethod, ClientAuthProof, CreateOAuthTokenParams, GrantProof, TokenIssuanceProof,
     create_oauth_access_token, decode_token,
 };
-use crate::services::{OAuthErrorCode, ServiceError, ServiceResult};
 use aws_lc_rs::digest::{self, SHA256};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;

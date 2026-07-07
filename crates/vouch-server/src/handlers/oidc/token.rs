@@ -7,8 +7,9 @@ use super::client_auth::{
 };
 use crate::AppState;
 use crate::db::JwtAssertionJtiClaim;
+use crate::error::OAuthErrorResponse;
+use crate::error::{OAuthErrorCode, ServiceError};
 use crate::services::auth::{ClientAuthProof, GrantProof, TokenIssuanceProof};
-use crate::services::error::OAuthErrorResponse;
 use crate::services::oidc::{
     ScopeSet,
     client_credentials::exchange_client_credentials,
@@ -17,7 +18,6 @@ use crate::services::oidc::{
     jwt_bearer::client_auth::{PendingJti, authenticate_client_jwt},
     token::{AuthCodeExchangeParams, exchange_authorization_code, validate_dpop_if_present},
 };
-use crate::services::{OAuthErrorCode, ServiceError};
 use axum::{
     Json,
     extract::State,
@@ -218,7 +218,7 @@ const MAX_ASSERTION_LEN: usize = 8192;
 /// - `urn:ietf:params:oauth:grant-type:token-exchange` grant (RFC 8693 Section 2.1)
 pub(crate) async fn token(
     State(state): State<Arc<AppState>>,
-    client_info: crate::handlers::extractors::ClientInfo,
+    client_info: crate::db::ClientInfo,
     client_cert: crate::handlers::extractors::OptionalClientCert,
     headers: HeaderMap,
     axum::Form(params): axum::Form<TokenRequest>,
@@ -702,7 +702,7 @@ async fn handle_authorization_code_grant(
 /// Issues an access token with `hardware_verified: false` and no ID token.
 async fn handle_client_credentials_grant(
     State(state): State<Arc<AppState>>,
-    client_info: crate::handlers::extractors::ClientInfo,
+    client_info: crate::db::ClientInfo,
     client_cert: crate::handlers::extractors::OptionalClientCert,
     headers: HeaderMap,
     params: TokenRequest,
@@ -1032,7 +1032,7 @@ impl ClientAuthFields for TokenRequest {
 /// in the `assertion` parameter. Optionally requires DPoP for FAPI clients.
 async fn handle_fido2_assertion_grant(
     State(state): State<Arc<AppState>>,
-    client_info: crate::handlers::extractors::ClientInfo,
+    client_info: crate::db::ClientInfo,
     client_cert: crate::handlers::extractors::OptionalClientCert,
     headers: HeaderMap,
     params: TokenRequest,

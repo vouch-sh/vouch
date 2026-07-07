@@ -3,7 +3,7 @@
 
 use crate::AppState;
 use crate::db::{self, GitHubCredentialAuditData};
-use crate::services::error::ServiceError;
+use crate::error::ServiceError;
 use crate::services::integrations::aws::{AwsError, issue_aws_token, issue_sso_jwt};
 use crate::services::integrations::github::{GitHubInstallationId, minimal_git_permissions};
 use crate::services::oidc;
@@ -19,11 +19,11 @@ use vouch_common::{
     SshCaPublicKeyResponse, SshCertificateRequest, SshCertificateResponse,
 };
 
-use super::extractors::{ClientInfo, OptionalClientCert};
-use super::session::{
-    ValidatedResourceToken, extract_resource_token, extract_resource_token_with_email,
-};
+use super::extractors::OptionalClientCert;
+use super::session::{extract_resource_token, extract_resource_token_with_email};
+use crate::db::ClientInfo;
 use crate::redact_email;
+use crate::services::auth::ValidatedResourceToken;
 
 /// Issue an SSH certificate for the authenticated user.
 ///

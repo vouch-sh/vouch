@@ -17,6 +17,7 @@ pub(crate) mod attestation;
 pub mod config;
 pub mod crypto;
 pub mod db;
+pub(crate) mod error;
 pub mod filters;
 pub(crate) mod geo;
 pub(crate) mod handlers;
@@ -76,9 +77,9 @@ pub struct AppState {
     /// SSH Certificate Authority (optional, None if disabled).
     pub(crate) ssh_ca: Option<crypto::ssh_ca::SshCa>,
     /// ES256 OIDC signing key (always present, used for access tokens).
-    pub(crate) oidc_key: services::oidc::OidcSigningKey,
+    pub(crate) oidc_key: crypto::keys::OidcSigningKey,
     /// OIDC RSA signing key for RS256 ID token signing (optional).
-    pub(crate) oidc_rsa_key: Option<services::oidc::OidcRsaSigningKey>,
+    pub(crate) oidc_rsa_key: Option<crypto::keys::OidcRsaSigningKey>,
     /// State token signer (Local HS256 or KMS HMAC-SHA256).
     pub(crate) state_signer: crypto::jwt::StateTokenSigner,
     /// GitHub App for credential issuance (optional, None if not configured).
@@ -183,7 +184,7 @@ mod redirect_tests {
     )]
 
     use super::*;
-    use crate::services::oidc::OidcSigningKey;
+    use crate::crypto::keys::OidcSigningKey;
     use axum::body::Body;
     use axum::http::Request;
     use secrecy::SecretString;

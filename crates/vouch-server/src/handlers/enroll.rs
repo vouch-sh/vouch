@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Enrollment handlers for browser-based device authorization flow.
 
-use super::extractors::ClientInfo;
 use crate::AppState;
+use crate::db::ClientInfo;
 use crate::db::{self, AuthEventParams, AuthEventType};
 use crate::impl_template_response;
 // This file's flows are heavily branched into error/redirect paths constructed
@@ -33,12 +33,12 @@ use super::{
     create_session_cookie, extract_session_from_cookie, generate_random_bytes, hash_token,
     validate_registration_attestation,
 };
+use crate::error::ServiceError;
 use crate::redact_email;
 use crate::services::auth::{
     ClientAuthProof, CreateOAuthTokenParams, GrantProof, TokenIssuanceProof,
     create_oauth_access_token,
 };
-use crate::services::error::ServiceError;
 use crate::services::idp::IdentityResult;
 use crate::services::keys as key_svc;
 use crate::services::oidc::ScopeSet;

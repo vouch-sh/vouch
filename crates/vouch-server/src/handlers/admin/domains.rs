@@ -7,6 +7,7 @@
 
 use crate::AppState;
 use crate::db;
+use crate::error::ServiceError;
 use crate::filters;
 use crate::handlers::admin::flash;
 use crate::handlers::browser_login::validate_origin;
@@ -14,7 +15,6 @@ use crate::handlers::session::{AuthContext, extract_org_admin, get_resource_auth
 use crate::impl_template_response;
 use crate::infra::dns;
 use crate::infra::i18n::Tr;
-use crate::services::error::ServiceError;
 use askama::Template;
 use axum::extract::{OriginalUri, Path, State};
 use axum::http::{HeaderMap, Method};

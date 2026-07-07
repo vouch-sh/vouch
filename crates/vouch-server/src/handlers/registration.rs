@@ -2,7 +2,7 @@
 //! WebAuthn registration attestation validation.
 
 use crate::attestation::{extract_aaguid_from_attestation, validate_hardware_attestation};
-use crate::services::error::ServiceError;
+use crate::error::ServiceError;
 use axum::http::StatusCode;
 
 /// Result of validating a registration attestation.

@@ -4,9 +4,9 @@
 use super::client_auth::{ClientAuthFields, complete_client_auth, extract_client_auth};
 use crate::AppState;
 use crate::db::{self, CreateParParams, PAR_EXPIRES_IN};
-use crate::services::ServiceError;
+use crate::error::OAuthErrorResponse;
+use crate::error::ServiceError;
 use crate::services::auth::{ClientAuthProof, ParCreationProof};
-use crate::services::error::OAuthErrorResponse;
 use crate::services::oidc::DpopError;
 use crate::services::oidc::authorization::{
     AuthorizeRequestParams, Prompt, require_pkce_for_client, validate_authorize_request,
@@ -166,7 +166,7 @@ pub(crate) async fn par(
         && let Err(e) = validate_request_object_header(request_jwt)
     {
         let description = match &e {
-            crate::services::ServiceError::OAuth { description, .. } => description.clone(),
+            crate::error::ServiceError::OAuth { description, .. } => description.clone(),
             _ => e.to_string(),
         };
         return par_error_response(

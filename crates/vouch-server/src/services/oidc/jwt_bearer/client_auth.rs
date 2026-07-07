@@ -344,8 +344,8 @@ mod tests {
     use super::*;
     use crate::config::ServerConfig;
     use crate::crypto;
+    use crate::crypto::keys::OidcSigningKey;
     use crate::db::{self, Pool};
-    use crate::services::oidc::OidcSigningKey;
     use arc_swap::ArcSwap;
     use secrecy::SecretString;
     use std::sync::Arc;

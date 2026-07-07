@@ -5,7 +5,7 @@
 //! a JSON array of typed objects that allows clients to express fine-grained
 //! authorization requirements beyond simple scopes.
 
-use crate::services::{OAuthErrorCode, ServiceError, ServiceResult};
+use crate::error::{OAuthErrorCode, ServiceError, ServiceResult};
 use serde::{Deserialize, Serialize};
 
 /// Maximum allowed size of the raw `authorization_details` JSON string (bytes).

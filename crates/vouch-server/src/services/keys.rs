@@ -9,7 +9,7 @@ use crate::db::documents::authenticator::AuthenticatorDoc;
 use crate::db::documents::session::SessionDoc;
 use crate::db::documents::user::UserDoc;
 use crate::db::{self, store::DocumentStore};
-use crate::services::error::ServiceError;
+use crate::error::ServiceError;
 use jiff::Timestamp;
 use vouch_common::{KeyInfo, lookup_device_model};
 

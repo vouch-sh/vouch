@@ -7,6 +7,7 @@
 use crate::AppState;
 use crate::crypto::hash_token;
 use crate::db;
+use crate::error::{OAuthErrorCode, ServiceError, ServiceResult};
 use crate::redact_email;
 use crate::services::auth::{
     ActorClaim, CreateOAuthTokenParams, MAX_DELEGATION_DEPTH, TokenIssuanceProof,
@@ -15,7 +16,6 @@ use crate::services::auth::{
 use crate::services::oidc::ScopeSet;
 use crate::services::oidc::authorization_details::AuthorizationDetails;
 use crate::services::oidc::claims::OidcIdTokenClaimsBuilder;
-use crate::services::{OAuthErrorCode, ServiceError, ServiceResult};
 use jiff::Timestamp;
 use secrecy::ExposeSecret;
 use std::sync::Arc;

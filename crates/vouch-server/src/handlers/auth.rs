@@ -3,7 +3,7 @@
 
 use crate::AppState;
 use crate::db;
-use crate::services::error::ServiceError;
+use crate::error::ServiceError;
 use axum::{
     Json,
     body::Body,
@@ -16,8 +16,8 @@ use jiff::Timestamp;
 use std::sync::Arc;
 use vouch_common::SessionStatus;
 
-use super::extractors::ClientInfo;
 use super::{clear_session_cookie, hash_token};
+use crate::db::ClientInfo;
 
 /// Get current session status.
 ///

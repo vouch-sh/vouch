@@ -4,7 +4,8 @@
 use crate::AppState;
 use crate::crypto::hash_token;
 use crate::db;
-use crate::services::error::ServiceError;
+use crate::error::ServiceError;
+use crate::services::auth::ValidatedResourceToken;
 use axum::http::StatusCode;
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 use subtle::ConstantTimeEq;
@@ -50,41 +51,6 @@ impl AuthContext {
 // ============================================================================
 // OAuth Resource Token Extraction (FAPI 2.0)
 // ============================================================================
-
-/// Validated OAuth resource token information.
-#[derive(Debug)]
-#[allow(dead_code, reason = "fields populated for diagnostic / future use")]
-pub(crate) struct ValidatedResourceToken {
-    /// User ID (`sub` claim from the access token).
-    pub sub: String,
-    /// User email (from `email` claim if present, or DB lookup).
-    pub email: Option<String>,
-    /// OAuth client_id from the access token.
-    pub client_id: String,
-    /// Granted OAuth scope.
-    pub scope: Option<crate::services::oidc::ScopeSet>,
-    /// Authenticator ID from the server-side session record (not in JWT).
-    ///
-    /// Presence merely means a key is registered to the user — it does
-    /// **not** prove the current session was hardware-verified. For that,
-    /// gate on [`Self::hardware_verified`] instead.
-    pub authenticator_id: Option<String>,
-    /// FIDO2 hardware-verification claim from the access token. `true`
-    /// only when the session was minted via the FIDO2 grant; `false` for
-    /// bootstrap/enrollment sessions. Used to gate credential issuance
-    /// that asserts hardware verification downstream (e.g. AWS WIF).
-    pub hardware_verified: bool,
-    /// Authentication time (`auth_time` claim).
-    pub auth_time: Option<i64>,
-    /// SHA-256 hash of the access token (for DB lookups/revocation).
-    pub token_hash: String,
-    /// AI coding agent identifier from DPoP proof custom claim (e.g., "claude-code").
-    pub dpop_source: Option<String>,
-    /// AAGUID snapshot from the session record (federation claim).
-    pub hardware_aaguid: Option<String>,
-    /// Organization domain snapshot from the session record (`hd` claim).
-    pub org_domain: Option<String>,
-}
 
 /// Extract and validate an OAuth access token from the request.
 ///
@@ -777,7 +743,7 @@ mod tests {
         assert!(
             matches!(
                 &err,
-                crate::services::error::ServiceError::Api { status, .. }
+                crate::error::ServiceError::Api { status, .. }
                 if *status == StatusCode::UNAUTHORIZED
             ),
             "Expected 401, got: {err:?}"

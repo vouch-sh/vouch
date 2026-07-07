@@ -25,7 +25,7 @@
 
 use crate::AppState;
 use crate::db;
-use crate::handlers::extractors::ClientInfo;
+use crate::db::ClientInfo;
 use crate::handlers::{clear_session_cookie, hash_token};
 use crate::impl_template_response;
 use crate::infra::i18n::{negotiate_ui_locales, sync_scope_locale};

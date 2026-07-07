@@ -64,14 +64,10 @@
 
 use crate::AppState;
 use crate::db::JwsAlgorithm;
-use crate::services::ServiceError;
+use crate::error::ServiceError;
 use crate::services::oidc::OAuthScope;
 use serde::Serialize;
 use std::sync::Arc;
-
-/// Well-known URL suffix for the Protected Resource Metadata document
-/// (RFC 9728 §3.1).
-pub const WELL_KNOWN_SUFFIX: &str = "/.well-known/oauth-protected-resource";
 
 /// JWT `typ` header for signed Protected Resource Metadata.
 ///

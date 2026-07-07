@@ -8,7 +8,7 @@
 
 use crate::db;
 use crate::db::store::DocumentStore;
-use crate::services::{OAuthErrorCode, ServiceError, ServiceResult};
+use crate::error::{OAuthErrorCode, ServiceError, ServiceResult};
 use cel::{Context, ExecutionError, FunctionContext, Program, Value};
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock};

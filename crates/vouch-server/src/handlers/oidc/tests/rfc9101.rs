@@ -876,7 +876,7 @@ async fn test_rfc9101_invalid_request_object_error_code_returned() {
 #[tokio::test]
 async fn test_rfc9101_invalid_request_object_http_status_is_400() {
     // When returning as JSON (PAR endpoint), the HTTP status should be 400.
-    use crate::services::error::OAuthErrorCode;
+    use crate::error::OAuthErrorCode;
     assert_eq!(
         OAuthErrorCode::InvalidRequestObject.status_code(),
         StatusCode::BAD_REQUEST,

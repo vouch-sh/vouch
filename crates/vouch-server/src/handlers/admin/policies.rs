@@ -3,9 +3,9 @@
 
 use crate::AppState;
 use crate::db;
+use crate::error::ServiceError;
 use crate::handlers::admin::flash;
 use crate::impl_template_response;
-use crate::services::error::ServiceError;
 use crate::services::posture;
 use askama::Template;
 use aws_lc_rs::digest::{self, SHA256};

@@ -19,10 +19,11 @@
 //! - Single-use challenges
 //! - Session binding to authenticator
 
-use super::extractors::ClientInfo;
 use crate::AppState;
 use crate::crypto::generate_challenge;
+use crate::db::ClientInfo;
 use crate::db::{self, AuthEventParams, AuthEventType};
+use crate::error::ServiceError;
 use crate::handlers::session::{create_session_cookie, get_auth_context};
 use crate::impl_template_response;
 use crate::redact_email;
@@ -30,7 +31,6 @@ use crate::services::auth::{
     ClientAuthProof, CreateOAuthTokenParams, GrantProof, TokenIssuanceProof,
     create_oauth_access_token,
 };
-use crate::services::error::ServiceError;
 use crate::services::oidc::ScopeSet;
 use askama::Template;
 use axum::{
@@ -605,10 +605,10 @@ pub(crate) async fn browser_login_complete(
     .await
     .map_err(|e| {
         let reason = match &e {
-            crate::services::ServiceError::NotFound(entity) => {
+            crate::error::ServiceError::NotFound(entity) => {
                 format!("{entity}_not_found")
             }
-            crate::services::ServiceError::Forbidden(_) => "user_mismatch".to_string(),
+            crate::error::ServiceError::Forbidden(_) => "user_mismatch".to_string(),
             _ => "lookup_error".to_string(),
         };
         log_failure(&user_id.to_string(), None, &reason);

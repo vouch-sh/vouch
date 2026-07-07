@@ -7,14 +7,15 @@
 //! - RFC 8705 Section 3 - mTLS certificate-bound access tokens at resource endpoints
 
 use crate::AppState;
+use crate::crypto::keys::OidcSigningKey;
 use crate::db::{self, JwsAlgorithm};
+use crate::error::OAuthErrorCode;
+use crate::error::OAuthErrorResponse;
 use crate::handlers::extractors::OptionalClientCert;
-use crate::services::OAuthErrorCode;
 use crate::services::auth::decode_token;
-use crate::services::error::OAuthErrorResponse;
 use crate::services::oidc::dpop;
 use crate::services::oidc::token::validate_session_token;
-use crate::services::oidc::{DpopError, OAuthScope, OidcSigningKey};
+use crate::services::oidc::{DpopError, OAuthScope};
 use axum::{
     Json,
     body::Bytes,

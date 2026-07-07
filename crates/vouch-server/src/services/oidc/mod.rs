@@ -65,7 +65,6 @@ pub mod introspection;
 pub mod jar;
 pub mod jarm;
 pub mod jwt_bearer;
-pub mod keys;
 pub(crate) mod mtls;
 pub mod org_keys;
 pub mod protected_resource;
@@ -84,7 +83,6 @@ pub use discovery::{OidcDiscoveryDocument, build_discovery_document, build_jwks}
 pub use dpop::{DpopError, ValidatedDpopProof};
 pub use exchange::{TokenExchangeParams, TokenExchangeResult};
 pub use introspection::{IntrospectionResult, RevocationResult};
-pub use keys::{EcJwk, Jwk, OidcRsaSigningKey, OidcSigningKey, RsaJwk};
 pub use org_keys::{
     EmergencyOutcome, Operator, OrgKeySetSnapshot, OrgKeys, OrgKeysCache, RevokeOutcome,
     RotateOutcome, emergency_rotate_org_keys, org_issuer_or_base, org_jwks, resolve_org_keys,
@@ -93,7 +91,7 @@ pub use org_keys::{
 pub(crate) use org_keys::{OrgKeyPanel, org_key_panel};
 pub use protected_resource::{
     PROTECTED_RESOURCE_PREFIXES, ProtectedResourceMetadata, SIGNED_METADATA_TYP,
-    SubPathClassification, WELL_KNOWN_SUFFIX, build_protected_resource_metadata, classify_sub_path,
+    SubPathClassification, build_protected_resource_metadata, classify_sub_path,
 };
 pub use registration::{
     RegistrationRequest, RegistrationResponse, read_client_configuration, register_client,
