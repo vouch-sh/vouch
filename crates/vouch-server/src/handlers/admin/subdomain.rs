@@ -321,6 +321,13 @@ pub(crate) async fn admin_claim_subdomain(
         }
     };
 
+    // A reclaim within the cache TTL must not serve a snapshot from before
+    // the release (auto-release paths run in the db layer and cannot reach
+    // this cache; a stale snapshot only becomes servable once a claim makes
+    // the subdomain resolvable again — so invalidating here closes every
+    // release path at once).
+    state.org_keys_cache.invalidate(&org_id);
+
     let issuer = state.config().org_issuer(&label);
 
     let data = serde_json::json!({
