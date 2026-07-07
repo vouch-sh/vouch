@@ -376,7 +376,12 @@ pub(crate) async fn admin_release_subdomain(
         extract_org_admin(&state, &headers, &jar, method.as_str(), uri.path(), None).await?;
 
     let released = match db::release_subdomain(&state.store, &org_id).await {
-        Ok(Some(label)) => label,
+        Ok(Some(label)) => {
+            // Release cancelled any in-flight rotation keys; drop the cached
+            // snapshot so the JWKS reflects that immediately.
+            state.org_keys_cache.invalidate(&org_id);
+            label
+        }
         Ok(None) => {
             return Ok(redirect_error(
                 jar,

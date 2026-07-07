@@ -468,6 +468,20 @@ async fn release_cancels_rotation_state_and_reclaim_restages_fresh() {
         }
     }
 
+    // While released, a resolve returns nothing and purges the cached
+    // snapshot, so the reclaim below cannot see pre-release keys.
+    let released_org = db::get_organization(&state.store, &org.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        resolve_org_keys(&state, Some(&released_org))
+            .await
+            .unwrap()
+            .is_none(),
+        "a released org resolves to no per-org keys"
+    );
+
     // Same-org reclaim: the Current key carries over (same org, same trust),
     // and the first use restages a fresh Next with a fresh publish window.
     db::claim_subdomain(&state.store, &org.id, "acme-com")
@@ -477,7 +491,6 @@ async fn release_cancels_rotation_state_and_reclaim_restages_fresh() {
         .await
         .unwrap()
         .unwrap();
-    state.org_keys_cache.invalidate(&org.id);
     let snap = resolve_org_keys(&state, Some(&org)).await.unwrap().unwrap();
     assert_eq!(
         snap.signers.es256.key_id(),

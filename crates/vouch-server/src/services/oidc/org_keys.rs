@@ -248,7 +248,15 @@ pub async fn resolve_org_keys(
     org: Option<&Organization>,
 ) -> Result<Option<Arc<OrgKeySetSnapshot>>> {
     let Some(org) = org else { return Ok(None) };
-    if org.subdomain.is_none() || !state.store.is_encrypted() {
+    if org.subdomain.is_none() {
+        // Self-heal: release cancels rotation keys in the DB, but the release
+        // paths live in the db layer and cannot reach this cache. Purging on
+        // the first resolve for a released org keeps a quick reclaim from
+        // resurrecting a pre-release snapshot.
+        state.org_keys_cache.invalidate(&org.id);
+        return Ok(None);
+    }
+    if !state.store.is_encrypted() {
         return Ok(None);
     }
     if let Some(snap) = state.org_keys_cache.get(&org.id) {
