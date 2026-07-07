@@ -390,7 +390,8 @@ async fn assume_role_via_management_chain(
     input: ChainInputs<'_>,
 ) -> Result<crate::integrations::aws::sts::StsCredentials> {
     use crate::integrations::aws::sts::{
-        WebIdentityRequest, assume_role, assume_role_with_web_identity, parse_role_arn,
+        AssumeRoleRequest, WebIdentityRequest, assume_role, assume_role_with_web_identity,
+        parse_role_arn,
     };
 
     let mgmt_arn = parse_role_arn(input.mgmt_role_arn)?;
@@ -409,15 +410,18 @@ async fn assume_role_via_management_chain(
     .await
     .context("failed to assume management role")?;
 
-    assume_role(
-        input.http_client,
-        input.role_arn,
-        input.session,
-        input.region,
-        &mgmt_credentials,
-        input.policies.session_policy_names,
-        None,
-    )
+    assume_role(AssumeRoleRequest {
+        http_client: input.http_client,
+        role_arn: input.role_arn,
+        role_session_name: input.session,
+        region: input.region,
+        source_creds: &mgmt_credentials,
+        session_policy_names: input.policies.session_policy_names,
+        session_policy: None,
+        // Plumbed but not yet fed: populating it requires a CreateTokenWithIAM
+        // call on this path, which is deferred (#623).
+        identity_context: None,
+    })
     .await
     .context("failed to assume target role via chaining")
 }
@@ -669,15 +673,18 @@ pub(crate) async fn obtain_identity_center_token(
     .context("failed to assume management role for IdC exchange")?;
 
     // Step 2: exchange the same RS256 token (the TTI assertion) for an IdC
-    // access token.
-    crate::integrations::aws::identity_center::create_token_with_iam(
+    // access token. The identity context in the exchange is not needed on
+    // this path — GetRoleCredentials mints permission-set credentials with
+    // the identity context already embedded.
+    let exchange = crate::integrations::aws::identity_center::create_token_with_iam(
         http_client,
         &idc.region,
         &idc.application_arn,
         id_token,
         &caller_creds,
     )
-    .await
+    .await?;
+    Ok(exchange.access_token)
 }
 
 /// Get cached Identity Center credentials, fetching fresh ones if needed.
