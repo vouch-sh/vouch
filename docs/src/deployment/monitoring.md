@@ -59,6 +59,9 @@ All authentication and credential issuance events are logged to the database. Ke
 | `session_revoked` | Session explicitly revoked |
 | `key_registered` | Additional hardware key registered |
 | `key_removed` | Hardware key removed |
+| `org_issuer_key_rotated` | Per-org issuer signing keys rotated (one event per algorithm) |
+| `org_issuer_key_revoked` | Per-org previous signing keys revoked (one event per algorithm) |
+| `org_issuer_key_emergency_rotation` | Emergency rotation of per-org issuer keys (one event per algorithm) |
 | `scim_provision` | User provisioned via SCIM |
 | `scim_deprovision` | User de-provisioned via SCIM |
 

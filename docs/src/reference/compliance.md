@@ -36,7 +36,7 @@ This page maps Vouch features to common compliance frameworks. Vouch's hardware-
 | CC6.2 | Authentication mechanisms | Multi-factor: hardware key + PIN + physical presence |
 | CC6.3 | Authorization and access management | Short-lived credentials scoped to specific services (SSH, AWS, GitHub); role-based AWS access via OIDC federation |
 | CC6.6 | Restriction of system access | Credential expiration (8 hours) limits access window; no persistent credentials |
-| CC6.7 | Management of credentials | Automated credential lifecycle; no manual key rotation needed; credentials expire automatically |
+| CC6.7 | Management of credentials | Automated credential lifecycle for user credentials (SSH certificates, AWS tokens); per-org issuer signing keys rotated via admin UI |
 | CC6.8 | Prevention of unauthorized access | Hardware-bound keys cannot be copied, phished, or replayed; DPoP prevents token theft |
 | CC7.1 | Detection of unauthorized access | Authentication event logging; FIDO2 attestation recorded for each session |
 | CC7.2 | Monitoring of system components | Audit trail of all credential issuance; configurable event retention |
