@@ -5,7 +5,7 @@
 //! (RFC 6749 Section 3.2) and the PAR endpoint (RFC 9126 Section 2).
 
 use crate::AppState;
-use crate::services::error::OAuthErrorResponse;
+use crate::error::OAuthErrorResponse;
 use crate::services::oidc::{
     jwt_bearer::client_auth::{PendingJti, authenticate_client_jwt},
     token::{AuthenticatedClient, ClientCredentials, authenticate_client},

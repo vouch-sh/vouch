@@ -3,8 +3,8 @@
 
 use crate::AppState;
 use crate::db;
+use crate::error::ServiceError;
 use crate::impl_template_response;
-use crate::services::error::ServiceError;
 use askama::Template;
 use axum::extract::OriginalUri;
 use axum::extract::{Query, State};

@@ -10,7 +10,7 @@ use super::documents::oauth::{
     RegistrationSource, TokenEndpointAuthMethod,
 };
 use super::store::DocumentStore;
-use crate::services::error::ServiceError;
+use crate::error::ServiceError;
 use anyhow::Result;
 use axum::http::StatusCode;
 use jiff::Timestamp;

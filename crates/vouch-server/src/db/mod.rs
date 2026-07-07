@@ -113,7 +113,9 @@ pub(crate) use device_auth::get_device_auth_by_id;
 pub use audit::{AuditEvent, AuditEventFilter};
 
 // Re-export config and auth event types and functions
-pub use config::{AuthEventParams, AuthEventType, delete_old_auth_events, spawn_audit_event};
+pub use config::{
+    AuthEventParams, AuthEventType, ClientInfo, delete_old_auth_events, spawn_audit_event,
+};
 
 // Re-export SCIM types and functions
 pub use scim::{

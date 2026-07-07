@@ -10,8 +10,8 @@
 //! - GET /github/success - Success page after connection
 
 use crate::db;
+use crate::error::ServiceError;
 use crate::handlers::session::AuthContext;
-use crate::services::error::ServiceError;
 use crate::services::integrations::github::{
     ConnectInstallationParams, GitHubError, GitHubService, LinkAccountParams,
     ReconnectInstallationParams, installations::validate_org_admin, webhooks::WebhookEvent,
@@ -475,7 +475,7 @@ async fn validate_callback_session(
     jar: &CookieJar,
     token: &GitHubStateToken,
     flow_label: &'static str,
-) -> Result<crate::handlers::session::ValidatedResourceToken, Response> {
+) -> Result<crate::services::auth::ValidatedResourceToken, Response> {
     let session = match crate::handlers::session::extract_session_from_cookie(state, jar).await {
         Ok(s) => s,
         Err(_) => {

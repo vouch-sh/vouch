@@ -27,7 +27,7 @@ use std::net::IpAddr;
 
 use url::Host;
 
-use crate::services::{OAuthErrorCode, ServiceError, ServiceResult};
+use crate::error::{OAuthErrorCode, ServiceError, ServiceResult};
 
 /// Returns `true` for IP addresses that must never be the target of a
 /// server-side fetch of a client-controlled URL: loopback, RFC 1918 private,

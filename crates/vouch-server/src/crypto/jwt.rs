@@ -11,8 +11,7 @@
 //! the `typ` header (RFC 7515 Section 4.1.9), preventing cross-type token
 //! substitution attacks.
 
-use crate::services::auth::{AccessTokenClaims, DecodedToken};
-use crate::services::oidc::OidcSigningKey;
+use crate::crypto::keys::OidcSigningKey;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, Validation};
@@ -336,7 +335,7 @@ async fn kms_decode<T: DeserializeOwned>(
 
 /// Context for token validation, bundling the OIDC signing key and issuer info.
 ///
-/// Avoids parameter proliferation on [`decode_token`].
+/// Avoids parameter proliferation on [`decode_es256_token`].
 pub(crate) struct TokenValidationContext<'a> {
     /// ES256 OIDC signing key.
     pub(crate) oidc_key: &'a OidcSigningKey,
@@ -366,7 +365,7 @@ impl<'a> TokenValidationContext<'a> {
     }
 }
 
-/// Decode a JWT as an RFC 9068 ES256 access token.
+/// Decode and verify an ES256 JWT carrying an `at+jwt` typ header (RFC 9068).
 ///
 /// Prevents algorithm confusion attacks by pinning the decode path
 /// to ES256 via explicit `Validation`. Validates `typ` header
@@ -375,8 +374,15 @@ impl<'a> TokenValidationContext<'a> {
 /// For access tokens, audience validation is contextual — callers MUST
 /// validate `aud` against their expected audience (RFC 8725 Section 3.9).
 ///
+/// This is the verification mechanism only; the access-token claims schema
+/// `C` is owned by the caller (`services::auth::AccessTokenClaims` for the
+/// OAuth access-token path).
+///
 /// Returns `None` for invalid, expired, or unsupported tokens.
-pub(crate) fn decode_token(token: &str, ctx: &TokenValidationContext<'_>) -> Option<DecodedToken> {
+pub(crate) fn decode_es256_token<C: DeserializeOwned>(
+    token: &str,
+    ctx: &TokenValidationContext<'_>,
+) -> Option<C> {
     // Peek at the header to determine the algorithm
     let header = jsonwebtoken::decode_header(token).ok()?;
 
@@ -399,8 +405,7 @@ pub(crate) fn decode_token(token: &str, ctx: &TokenValidationContext<'_>) -> Opt
             // RFC 8725 §3.8: Validate issuer
             validation.set_issuer(&[ctx.expected_issuer]);
 
-            let token_data =
-                jsonwebtoken::decode::<AccessTokenClaims>(token, decoding_key, &validation).ok()?;
+            let token_data = jsonwebtoken::decode::<C>(token, decoding_key, &validation).ok()?;
 
             // RFC 9068 Section 2.1: Verify typ is "at+jwt" to prevent
             // ID tokens from being accepted as access tokens (same signing key).
@@ -408,7 +413,7 @@ pub(crate) fn decode_token(token: &str, ctx: &TokenValidationContext<'_>) -> Opt
                 return None;
             }
 
-            Some(DecodedToken::AccessToken(token_data.claims))
+            Some(token_data.claims)
         }
         // Reject all other algorithms (including "none" and HS256) to prevent attacks
         _ => None,
@@ -463,14 +468,13 @@ pub(crate) fn decode_state_token<T: DeserializeOwned>(
 
 #[cfg(test)]
 #[expect(
-    clippy::unwrap_used,
     clippy::expect_used,
     reason = "test code: panic on assertion failure is acceptable"
 )]
 mod tests {
     use super::*;
+    use crate::crypto::keys::OidcSigningKey;
     use crate::services::auth::AccessTokenClaims;
-    use crate::services::oidc::OidcSigningKey;
     use crate::test_utils::{
         TEST_ISSUER, TEST_JWT_SECRET, make_test_access_token, make_test_oidc_key,
     };
@@ -485,15 +489,11 @@ mod tests {
         let ctx = make_ctx(&key);
         let token = make_test_access_token(&key).await;
 
-        let decoded = decode_token(&token, &ctx);
-        assert!(decoded.is_some());
-        match decoded.unwrap() {
-            DecodedToken::AccessToken(c) => {
-                assert_eq!(c.sub, "user-123");
-                assert_eq!(c.client_id, "client-abc");
-                assert_eq!(c.email.as_deref(), Some("test@example.com"));
-            }
-        }
+        let c = decode_es256_token::<AccessTokenClaims>(&token, &ctx)
+            .expect("ES256 at+jwt must decode");
+        assert_eq!(c.sub, "user-123");
+        assert_eq!(c.client_id, "client-abc");
+        assert_eq!(c.email.as_deref(), Some("test@example.com"));
     }
 
     #[tokio::test]
@@ -523,7 +523,7 @@ mod tests {
 
         // Sign as ID token (typ: "JWT", no "at+jwt")
         let token = key.sign_jwt(&claims).await.expect("sign");
-        let decoded = decode_token(&token, &ctx);
+        let decoded = decode_es256_token::<AccessTokenClaims>(&token, &ctx);
         assert!(decoded.is_none(), "ID token should be rejected");
     }
 
@@ -531,9 +531,9 @@ mod tests {
     fn test_decode_token_rejects_garbage() {
         let key = make_test_oidc_key();
         let ctx = make_ctx(&key);
-        assert!(decode_token("not.a.jwt", &ctx).is_none());
-        assert!(decode_token("", &ctx).is_none());
-        assert!(decode_token("abc123", &ctx).is_none());
+        assert!(decode_es256_token::<AccessTokenClaims>("not.a.jwt", &ctx).is_none());
+        assert!(decode_es256_token::<AccessTokenClaims>("", &ctx).is_none());
+        assert!(decode_es256_token::<AccessTokenClaims>("abc123", &ctx).is_none());
     }
 
     #[tokio::test]
@@ -562,7 +562,7 @@ mod tests {
         };
 
         let token = key.sign_access_token_jwt(&claims).await.expect("sign");
-        let decoded = decode_token(&token, &ctx);
+        let decoded = decode_es256_token::<AccessTokenClaims>(&token, &ctx);
         assert!(decoded.is_none(), "Expired token should be rejected");
     }
 
@@ -573,7 +573,7 @@ mod tests {
 
         // Use a different expected issuer
         let ctx = TokenValidationContext::new(&key, "https://wrong-issuer.com");
-        let decoded = decode_token(&token, &ctx);
+        let decoded = decode_es256_token::<AccessTokenClaims>(&token, &ctx);
         assert!(
             decoded.is_none(),
             "Token with wrong issuer should be rejected"
@@ -633,7 +633,7 @@ mod tests {
 
         let token = key.sign_access_token_jwt(&claims).await.expect("sign");
         let ctx = make_ctx(&key);
-        let decoded = decode_token(&token, &ctx);
+        let decoded = decode_es256_token::<AccessTokenClaims>(&token, &ctx);
         assert!(
             decoded.is_none(),
             "Access token with wrong issuer should be rejected"
@@ -843,7 +843,7 @@ mod tests {
         );
     }
 
-    /// Regression for B3: `decode_token` must reject access tokens a few seconds
+    /// Regression: `decode_es256_token` must reject access tokens a few seconds
     /// past `exp` with zero leeway (no 60s grace).
     #[tokio::test]
     async fn test_access_token_recently_expired_rejected_no_leeway() {
@@ -871,7 +871,7 @@ mod tests {
         };
 
         let token = key.sign_access_token_jwt(&claims).await.expect("sign");
-        let decoded = decode_token(&token, &ctx);
+        let decoded = decode_es256_token::<AccessTokenClaims>(&token, &ctx);
         assert!(
             decoded.is_none(),
             "Recently expired access token must be rejected with zero leeway"
@@ -879,8 +879,8 @@ mod tests {
     }
 
     #[test]
-    fn test_hs256_tokens_rejected_by_decode_token() {
-        // HS256 tokens (legacy session tokens) must be rejected by decode_token
+    fn test_hs256_tokens_rejected_by_decode_es256_token() {
+        // HS256 tokens (legacy session tokens) must be rejected by decode_es256_token
         use jsonwebtoken::{EncodingKey, encode};
 
         let key = make_test_oidc_key();
@@ -905,7 +905,7 @@ mod tests {
         )
         .expect("encode");
 
-        let decoded = decode_token(&token, &ctx);
+        let decoded = decode_es256_token::<AccessTokenClaims>(&token, &ctx);
         assert!(decoded.is_none(), "HS256 tokens must be rejected");
     }
 }

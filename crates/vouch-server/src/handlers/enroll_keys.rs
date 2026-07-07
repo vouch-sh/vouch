@@ -5,7 +5,7 @@
 //! Authentication is via the session cookie containing an OAuth access token.
 
 use crate::AppState;
-use crate::services::error::ServiceError;
+use crate::error::ServiceError;
 use crate::services::keys as key_svc;
 use axum::{
     Form, Json,

@@ -26,10 +26,11 @@ use std::sync::Arc;
 
 use jiff::{Span, Timestamp};
 use proptest::prelude::*;
+use vouch_server::crypto::keys::Jwk;
 use vouch_server::db::{AuditEventFilter, JwsAlgorithm, SigningKeyState};
 use vouch_server::services::oidc::{
-    Jwk, Operator, RevokeOutcome, RotateOutcome, emergency_rotate_org_keys, org_jwks,
-    resolve_org_keys, revoke_org_previous_keys, rotate_org_keys,
+    Operator, RevokeOutcome, RotateOutcome, emergency_rotate_org_keys, org_jwks, resolve_org_keys,
+    revoke_org_previous_keys, rotate_org_keys,
 };
 use vouch_server::{db, test_utils};
 

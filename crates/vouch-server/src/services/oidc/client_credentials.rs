@@ -10,11 +10,11 @@
 
 use crate::AppState;
 use crate::db::{OAuthClient, SessionPurpose};
+use crate::error::{OAuthErrorCode, ServiceError, ServiceResult};
 use crate::services::auth::{
     CreateOAuthTokenParams, TokenIssuanceProof, create_oauth_access_token,
 };
 use crate::services::oidc::ScopeSet;
-use crate::services::{OAuthErrorCode, ServiceError, ServiceResult};
 use secrecy::ExposeSecret;
 use std::sync::Arc;
 

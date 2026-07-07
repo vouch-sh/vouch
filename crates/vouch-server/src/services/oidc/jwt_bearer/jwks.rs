@@ -7,7 +7,7 @@
 use super::validate::JwtAssertionHeader;
 use crate::db::documents::jwks_cache::{JWKS_STALE_MAX_AGE_SECONDS, JwksCacheDoc};
 use crate::db::{self, store::DocumentStore};
-use crate::services::{OAuthErrorCode, ServiceError, ServiceResult};
+use crate::error::{OAuthErrorCode, ServiceError, ServiceResult};
 use serde::Deserialize;
 
 /// Maximum JWKS response size (256KB).

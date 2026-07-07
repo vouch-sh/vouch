@@ -3,9 +3,9 @@
 
 use crate::AppState;
 use crate::db;
+use crate::error::ServiceError;
 use crate::handlers::admin::flash;
 use crate::impl_template_response;
-use crate::services::error::ServiceError;
 use askama::Template;
 use axum::Json;
 use axum::extract::{OriginalUri, State};

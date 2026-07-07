@@ -241,7 +241,7 @@ async fn run_security_pipeline(
     // PKCE: required for public clients and Native/SPA types (RFC 9700).
     if let Err(e) = require_pkce_for_client(validated, &resolved.client) {
         let description = match &e {
-            crate::services::ServiceError::OAuth { description, .. } => description.clone(),
+            crate::error::ServiceError::OAuth { description, .. } => description.clone(),
             _ => e.to_string(),
         };
         return Err(resolved
@@ -257,7 +257,7 @@ async fn run_security_pipeline(
         )
     {
         let description = match &e {
-            crate::services::ServiceError::OAuth { description, .. } => description.clone(),
+            crate::error::ServiceError::OAuth { description, .. } => description.clone(),
             _ => e.to_string(),
         };
         return Err(resolved
@@ -548,7 +548,7 @@ async fn handle_direct_request(
         Ok(v) => v,
         Err(e) => {
             let (error_code, description) = match &e {
-                crate::services::ServiceError::OAuth { code, description } => {
+                crate::error::ServiceError::OAuth { code, description } => {
                     (code.as_str(), description.clone())
                 }
                 _ => ("server_error", e.to_string()),
@@ -614,7 +614,7 @@ async fn handle_jar_request(
         Ok(params) => params,
         Err(e) => {
             let description = match &e {
-                crate::services::ServiceError::OAuth { description, .. } => description.clone(),
+                crate::error::ServiceError::OAuth { description, .. } => description.clone(),
                 _ => e.to_string(),
             };
             return AuthorizeDeniedTemplate {
@@ -647,7 +647,7 @@ async fn handle_jar_request(
         Ok(v) => v,
         Err(e) => {
             let (error_code, description) = match &e {
-                crate::services::ServiceError::OAuth { code, description } => {
+                crate::error::ServiceError::OAuth { code, description } => {
                     (code.as_str(), description.clone())
                 }
                 _ => ("server_error", e.to_string()),
@@ -811,7 +811,7 @@ async fn handle_par_request(
         Ok(v) => v,
         Err(e) => {
             let (error_code, description) = match &e {
-                crate::services::ServiceError::OAuth { code, description } => {
+                crate::error::ServiceError::OAuth { code, description } => {
                     (code.as_str(), description.clone())
                 }
                 _ => ("server_error", e.to_string()),
@@ -871,7 +871,7 @@ async fn handle_request_uri_fetch(
         Ok(v) => v,
         Err(e) => {
             let (error_code, description) = match &e {
-                crate::services::ServiceError::OAuth { code, description } => {
+                crate::error::ServiceError::OAuth { code, description } => {
                     (code.as_str(), description.clone())
                 }
                 _ => ("server_error", e.to_string()),
@@ -922,7 +922,7 @@ async fn fetch_and_resolve_request_uri(
         crate::services::oidc::fapi::validate_fapi_authorization_request(&oauth_client, false)
     {
         let description = match &e {
-            crate::services::ServiceError::OAuth { description, .. } => description.clone(),
+            crate::error::ServiceError::OAuth { description, .. } => description.clone(),
             _ => e.to_string(),
         };
         return Err(AuthorizeDeniedTemplate {
@@ -953,7 +953,7 @@ async fn fetch_and_resolve_request_uri(
             Ok(jwt) => jwt,
             Err(e) => {
                 let description = match &e {
-                    crate::services::ServiceError::OAuth { description, .. } => description.clone(),
+                    crate::error::ServiceError::OAuth { description, .. } => description.clone(),
                     _ => e.to_string(),
                 };
                 return Err(AuthorizeDeniedTemplate {
@@ -976,7 +976,7 @@ async fn fetch_and_resolve_request_uri(
             Ok(params) => params,
             Err(e) => {
                 let (error_code, description) = match &e {
-                    crate::services::ServiceError::OAuth { code, description } => {
+                    crate::error::ServiceError::OAuth { code, description } => {
                         (code.as_str(), description.clone())
                     }
                     _ => ("invalid_request_object", e.to_string()),
@@ -1109,7 +1109,7 @@ async fn complete_pending_auth(
     // Check client access for the authenticated user.
     if let Err(e) = check_client_access(&resolved.client, user) {
         let error_message = match e {
-            crate::services::ServiceError::OAuth { description, .. } => description,
+            crate::error::ServiceError::OAuth { description, .. } => description,
             _ => "You don't have access to this application".to_string(),
         };
         return AuthorizeDeniedTemplate {
@@ -1427,7 +1427,7 @@ async fn authorize_authenticated_user(
     // Step 1: Check client access.
     if let Err(e) = check_client_access(oauth_client, user) {
         let error_message = match e {
-            crate::services::ServiceError::OAuth { description, .. } => description,
+            crate::error::ServiceError::OAuth { description, .. } => description,
             _ => "You don't have access to this application".to_string(),
         };
         return AuthorizeDeniedTemplate {

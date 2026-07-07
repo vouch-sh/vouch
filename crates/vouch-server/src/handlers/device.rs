@@ -19,8 +19,8 @@ use vouch_common::{
     DeviceCodeRequest, DeviceCodeResponse, DeviceTokenRequest, DeviceTokenResponse, OAuthError,
 };
 
+use crate::error::{OAuthErrorCode, ServiceError};
 use crate::redact_email;
-use crate::services::error::{OAuthErrorCode, ServiceError};
 
 /// Characters used for user code generation (no ambiguous characters).
 const USER_CODE_ALPHABET: &[u8] = b"BCDFGHJKLMNPQRSTVWXZ";

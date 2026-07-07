@@ -63,11 +63,10 @@
 //! }
 //! ```
 
-use crate::handlers::session::ValidatedResourceToken;
+use crate::crypto::keys::{OidcRsaSigningKey, OidcSigningKey};
 use crate::redact_email;
-use crate::services::oidc::{
-    AwsSessionTags, OidcIdTokenClaimsBuilder, OidcRsaSigningKey, OidcSigningKey,
-};
+use crate::services::auth::ValidatedResourceToken;
+use crate::services::oidc::{AwsSessionTags, OidcIdTokenClaimsBuilder};
 
 /// Error types for AWS integration operations.
 #[derive(Debug, thiserror::Error)]
@@ -272,7 +271,7 @@ pub(crate) async fn issue_sso_jwt(
 )]
 mod tests {
     use super::*;
-    use crate::services::oidc::{OidcRsaSigningKey, OidcSigningKey};
+    use crate::crypto::keys::{OidcRsaSigningKey, OidcSigningKey};
     use base64::Engine;
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
