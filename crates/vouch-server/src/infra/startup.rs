@@ -447,6 +447,15 @@ async fn build_app_state(
         })
         .await
         .map_err(|e| anyhow::anyhow!("RSA key generation task panicked: {e}"))??;
+
+        if config.oidc_rsa_signing_key.is_none() {
+            tracing::warn!(
+                "Using ephemeral OIDC RSA signing key -- AWS credential tokens \
+                 (and RS256 ID tokens) will fail verification after a restart \
+                 and across multiple instances. Set VOUCH_OIDC_RSA_SIGNING_KEY \
+                 or VOUCH_OIDC_RSA_SIGNING_KMS_KEY_ID to persist."
+            );
+        }
         tracing::info!("OIDC RSA signing key initialized: {}", key.key_id());
         Some(key)
     };

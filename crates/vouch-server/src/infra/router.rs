@@ -293,10 +293,6 @@ fn build_credential_routes(
             get(handlers::credentials::get_aws_token),
         )
         .route(
-            "/v1/credentials/aws/sso/token",
-            get(handlers::credentials::get_aws_sso_token),
-        )
-        .route(
             "/v1/credentials/github/token",
             post(handlers::credentials::get_github_token),
         )

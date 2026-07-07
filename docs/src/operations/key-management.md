@@ -101,7 +101,7 @@ When rotating the OIDC signing key:
 
 ## OIDC RSA Signing Key (RS256)
 
-Used to sign ID tokens with RS256 algorithm per [OIDC Core Section 3.1.3.7](https://openid.net/specs/openid-connect-core-1_0.html#IDToken) and AWS IAM Identity Center trusted-token-issuer tokens. RS256 is the default `id_token_signed_response_alg` in the OIDC specification and must be supported for conformance. Clients can select RS256 via OAuth 2.0 Dynamic Client Registration (`id_token_signed_response_alg` field). AWS's trusted-token-issuer contract also requires RS256 — the Identity Center endpoint (`/v1/credentials/aws/sso/token`) issues RS256-signed tokens for `sso-oidc:CreateTokenWithIAM`, distinct from the ES256 `AssumeRoleWithWebIdentity` token (`/v1/credentials/aws/token`).
+Used to sign ID tokens with RS256 algorithm per [OIDC Core Section 3.1.3.7](https://openid.net/specs/openid-connect-core-1_0.html#IDToken) and all AWS credential tokens. RS256 is the default `id_token_signed_response_alg` in the OIDC specification and must be supported for conformance. Clients can select RS256 via OAuth 2.0 Dynamic Client Registration (`id_token_signed_response_alg` field). The AWS token endpoint (`/v1/credentials/aws/token`) issues one RS256-signed token that serves both STS `AssumeRoleWithWebIdentity` and, as the `sso-oidc:CreateTokenWithIAM` assertion, the IAM Identity Center trusted-token-issuer contract (which rejects ES256).
 
 Access tokens are always signed with ES256 (the OIDC Signing Key above).
 
@@ -123,7 +123,7 @@ VOUCH_OIDC_RSA_SIGNING_KEY="$(base64 -i oidc_rsa_key.pem | tr -d '\n')"
 VOUCH_OIDC_RSA_SIGNING_KMS_KEY_ID=mrk-rsa1234abcd5678
 ```
 
-If neither is set, an ephemeral RSA-3072 key is generated on startup. This means RS256 ID tokens cannot be verified after a server restart unless the same key is provided. A warning is logged when an ephemeral key is generated.
+If neither is set, an ephemeral RSA-3072 key is generated on startup. This means RS256 ID tokens and AWS credential tokens cannot be verified after a server restart, and verification fails across multiple instances (each generates its own key). Any deployment using the AWS integration needs a durable key. A warning is logged when an ephemeral key is generated.
 
 When using KMS, the key must be:
 - Key spec: `RSA_3072`

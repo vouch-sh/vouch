@@ -63,7 +63,7 @@
 //! }
 //! ```
 
-use crate::crypto::keys::{OidcRsaSigningKey, OidcSigningKey};
+use crate::crypto::keys::OidcRsaSigningKey;
 use crate::redact_email;
 use crate::services::auth::ValidatedResourceToken;
 use crate::services::oidc::{AwsSessionTags, OidcIdTokenClaimsBuilder};
@@ -129,10 +129,15 @@ fn build_aws_session_tags(
     }
 }
 
-/// Issue an OIDC ID token for AWS STS.
+/// Issue an OIDC ID token for AWS.
 ///
-/// The token can be used with `AssumeRoleWithWebIdentity` to get temporary
-/// AWS credentials. The token includes:
+/// The token serves two AWS consumers: STS `AssumeRoleWithWebIdentity` (for
+/// temporary credentials) and IAM Identity Center `sso-oidc:CreateTokenWithIAM`
+/// (as the `jwt-bearer` assertion for trusted identity propagation). It is
+/// signed with **RS256** because the Identity Center trusted-token-issuer
+/// contract rejects ES256, while STS accepts both. The token's `iss` matches
+/// the Vouch OIDC discovery document and its public key is published in the
+/// JWKS, so both consumers can verify the signature. The token includes:
 /// - `sub`: User email
 /// - `aud`: Vouch issuer URL (AWS matches against the OIDC provider)
 /// - `iss`: Vouch issuer URL
@@ -143,7 +148,7 @@ fn build_aws_session_tags(
 /// * `issuer` - Issuer URL (`iss` and `aud`): the org's claimed issuer
 ///   subdomain when one exists, otherwise the server base URL
 /// * `session_hours` - Session duration in hours
-/// * `oidc_key` - OIDC signing key
+/// * `oidc_rsa_key` - OIDC RSA (RS256) signing key
 /// * `user_email` - The authenticated user's email (resolved with a DB fallback,
 ///   so it is passed explicitly rather than read from the token)
 /// * `token` - The validated resource token; supplies the session-snapshot
@@ -151,7 +156,7 @@ fn build_aws_session_tags(
 pub(crate) async fn issue_aws_token(
     issuer: &str,
     session_hours: u64,
-    oidc_key: &OidcSigningKey,
+    oidc_rsa_key: &OidcRsaSigningKey,
     user_email: &str,
     token: &ValidatedResourceToken,
 ) -> AwsResult<AwsTokenResult> {
@@ -174,88 +179,14 @@ pub(crate) async fn issue_aws_token(
         .build()
         .map_err(|e| AwsError::ClaimsBuild(e.to_string()))?;
 
-    // Sign the token with ES256
-    let id_token = oidc_key
-        .sign_jwt(&id_claims)
-        .await
-        .map_err(|e| AwsError::TokenSign(e.to_string()))?;
-
-    tracing::info!("Issued AWS OIDC token for {}", redact_email(user_email));
-
-    Ok(AwsTokenResult {
-        id_token,
-        expires_in,
-    })
-}
-
-/// Issue an **RS256**-signed OIDC ID token for AWS IAM Identity Center trusted
-/// identity propagation.
-///
-/// This token is the subject (`assertion`) for the IAM Identity Center
-/// `sso-oidc:CreateTokenWithIAM` call (`jwt-bearer` grant), which exchanges it
-/// for an Identity Center token. That token then drives the SSO Portal
-/// (`ListAccounts`/`ListAccountRoles`/`GetRoleCredentials`) to reach every
-/// account+permission-set the user is assigned to — without role chaining.
-///
-/// AWS's trusted-token-issuer contract **requires RS256** (the
-/// `AssumeRoleWithWebIdentity` path uses ES256 via [`issue_aws_token`]; this
-/// path is distinct and signs with [`OidcRsaSigningKey`]). The token's `iss`
-/// matches the Vouch OIDC discovery document and its public key is published in
-/// the JWKS, so Identity Center can verify the signature.
-///
-/// The `aud` claim is set to the issuer, matching the STS token
-/// ([`issue_aws_token`]); the customer-managed application's Aud claim
-/// must be configured to that same URL. This path therefore differs from
-/// [`issue_aws_token`] only by signing algorithm.
-///
-/// # Arguments
-/// * `issuer` - Issuer URL (`iss` and `aud`; must match the registered TTI):
-///   the org's claimed issuer subdomain when one exists, otherwise the
-///   server base URL
-/// * `session_hours` - Session duration in hours
-/// * `oidc_rsa_key` - OIDC RSA (RS256) signing key
-/// * `user_email` - Authenticated user's email (maps to the Identity Store user;
-///   resolved with a DB fallback, so it is passed explicitly rather than read
-///   from the token)
-/// * `token` - The validated resource token; supplies the session-snapshot
-///   `hardware_aaguid`, `org_domain` (`hd`), and `dpop_source` federation claims
-pub(crate) async fn issue_sso_jwt(
-    issuer: &str,
-    session_hours: u64,
-    oidc_rsa_key: &OidcRsaSigningKey,
-    user_email: &str,
-    token: &ValidatedResourceToken,
-) -> AwsResult<AwsTokenResult> {
-    let expires_in = session_hours.saturating_mul(3600);
-
-    // Reuse the same AWS session tags as the web-identity path for consistent
-    // ABAC/CloudTrail attribution.
-    let aws_tags = build_aws_session_tags(
-        user_email,
-        token.org_domain.as_deref(),
-        token.dpop_source.as_deref(),
-    );
-
-    // aud = issuer, same as the STS token.
-    let id_claims = OidcIdTokenClaimsBuilder::for_aws(issuer, user_email)
-        .hardware_aaguid(token.hardware_aaguid.clone())
-        .hd(token.org_domain.clone())
-        .aws_tags(aws_tags)
-        .valid_for_seconds(expires_in)
-        .build()
-        .map_err(|e| AwsError::ClaimsBuild(e.to_string()))?;
-
     // Sign with RS256 — required by the AWS IAM Identity Center trusted token
-    // issuer contract.
+    // issuer contract; STS accepts it for AssumeRoleWithWebIdentity as well.
     let id_token = oidc_rsa_key
         .sign_jwt(&id_claims)
         .await
         .map_err(|e| AwsError::TokenSign(e.to_string()))?;
 
-    tracing::info!(
-        "Issued AWS Identity Center JWT (RS256) for {}",
-        redact_email(user_email)
-    );
+    tracing::info!("Issued AWS OIDC token for {}", redact_email(user_email));
 
     Ok(AwsTokenResult {
         id_token,
@@ -271,9 +202,16 @@ pub(crate) async fn issue_sso_jwt(
 )]
 mod tests {
     use super::*;
-    use crate::crypto::keys::{OidcRsaSigningKey, OidcSigningKey};
+    use crate::crypto::keys::OidcRsaSigningKey;
     use base64::Engine;
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+
+    /// Shared RSA-3072 signing key — generated once because RSA key
+    /// generation is slow enough to dominate per-test runtime.
+    fn test_rsa_key() -> &'static OidcRsaSigningKey {
+        static KEY: std::sync::OnceLock<OidcRsaSigningKey> = std::sync::OnceLock::new();
+        KEY.get_or_init(|| OidcRsaSigningKey::generate().expect("Failed to generate RSA key"))
+    }
 
     /// Decode a JWT payload (middle part) into a `serde_json::Value` without
     /// signature verification. Used only in tests to inspect claims.
@@ -325,76 +263,38 @@ mod tests {
         }
     }
 
-    /// The Identity Center JWT must be signed with RS256 (AWS TTI requirement),
-    /// unlike the ES256 `AssumeRoleWithWebIdentity` token.
+    /// The AWS token must be signed with RS256: the IAM Identity Center
+    /// trusted-token-issuer contract rejects ES256, and STS accepts RS256
+    /// for `AssumeRoleWithWebIdentity`.
     #[tokio::test]
-    async fn test_sso_jwt_is_rs256_signed() {
-        let rsa_key = OidcRsaSigningKey::generate().expect("Failed to generate RSA key");
-
-        let result = issue_sso_jwt(
+    async fn test_aws_token_is_rs256_signed() {
+        let result = issue_aws_token(
             BASE_URL,
             SESSION_HOURS,
-            &rsa_key,
+            test_rsa_key(),
             USER_EMAIL,
             &test_token(Some(TEST_AAGUID.to_string()), None, None),
         )
         .await
-        .expect("issue_sso_jwt should succeed");
+        .expect("issue_aws_token should succeed");
 
         let header = decode_jwt_header(&result.id_token);
-        assert_eq!(header["alg"], "RS256", "Identity Center JWT must use RS256");
-    }
-
-    /// The JWT carries `iss` = issuer, `aud` = issuer (server base URL), `sub` =
-    /// the user email, and the same AWS session tags as the web-identity path.
-    #[tokio::test]
-    async fn test_sso_jwt_claims_and_tags() {
-        let rsa_key = OidcRsaSigningKey::generate().expect("Failed to generate RSA key");
-
-        let result = issue_sso_jwt(
-            BASE_URL,
-            SESSION_HOURS,
-            &rsa_key,
-            USER_EMAIL,
-            &test_token(
-                None,
-                Some("example.com".to_string()),
-                Some("claude-code".to_string()),
-            ),
-        )
-        .await
-        .expect("issue_sso_jwt should succeed");
+        assert_eq!(header["alg"], "RS256", "AWS token must use RS256");
 
         let claims = decode_jwt_payload(&result.id_token);
         assert_eq!(claims["iss"], BASE_URL, "iss must match the issuer URL");
         assert_eq!(claims["aud"], BASE_URL, "aud must be the issuer URL");
         assert_eq!(claims["sub"], USER_EMAIL, "sub must be the user email");
-
-        let principal_tags = &claims["https://aws.amazon.com/tags"]["principal_tags"];
-        assert_eq!(
-            principal_tags["vouch:Email"],
-            serde_json::json!([USER_EMAIL])
-        );
-        assert_eq!(
-            principal_tags["vouch:Domain"],
-            serde_json::json!(["example.com"])
-        );
-        assert_eq!(
-            principal_tags["vouch:Agent"],
-            serde_json::json!(["claude-code"])
-        );
     }
 
     /// Default tags present: `vouch:Email` is always included; `vouch:AccessType`
     /// and `vouch:Agent` must NOT be present when `source` is `None`.
     #[tokio::test]
     async fn test_default_tags_present_without_source() {
-        let key = OidcSigningKey::generate().expect("Failed to generate OIDC key");
-
         let result = issue_aws_token(
             BASE_URL,
             SESSION_HOURS,
-            &key,
+            test_rsa_key(),
             USER_EMAIL,
             &test_token(Some(TEST_AAGUID.to_string()), None, None),
         )
@@ -424,12 +324,10 @@ mod tests {
     /// Domain tag: when `hd` is `Some`, `vouch:Domain` must be included.
     #[tokio::test]
     async fn test_domain_tag_included_when_hd_present() {
-        let key = OidcSigningKey::generate().expect("Failed to generate OIDC key");
-
         let result = issue_aws_token(
             BASE_URL,
             SESSION_HOURS,
-            &key,
+            test_rsa_key(),
             USER_EMAIL,
             &test_token(
                 Some(TEST_AAGUID.to_string()),
@@ -460,12 +358,10 @@ mod tests {
     /// and `vouch:Agent=<source>` must appear in `principal_tags`.
     #[tokio::test]
     async fn test_agent_tags_added_when_source_present() {
-        let key = OidcSigningKey::generate().expect("Failed to generate OIDC key");
-
         let result = issue_aws_token(
             BASE_URL,
             SESSION_HOURS,
-            &key,
+            test_rsa_key(),
             USER_EMAIL,
             &test_token(
                 Some(TEST_AAGUID.to_string()),
@@ -501,12 +397,10 @@ mod tests {
     /// `vouch:AccessType` nor `vouch:Agent` may appear.
     #[tokio::test]
     async fn test_agent_tags_absent_without_source() {
-        let key = OidcSigningKey::generate().expect("Failed to generate OIDC key");
-
         let result = issue_aws_token(
             BASE_URL,
             SESSION_HOURS,
-            &key,
+            test_rsa_key(),
             USER_EMAIL,
             &test_token(
                 Some(TEST_AAGUID.to_string()),
@@ -535,12 +429,10 @@ mod tests {
     /// present in `principal_tags`.
     #[tokio::test]
     async fn test_all_tags_are_transitive() {
-        let key = OidcSigningKey::generate().expect("Failed to generate OIDC key");
-
         let result = issue_aws_token(
             BASE_URL,
             SESSION_HOURS,
-            &key,
+            test_rsa_key(),
             USER_EMAIL,
             &test_token(
                 Some(TEST_AAGUID.to_string()),
@@ -592,13 +484,12 @@ mod tests {
     /// A per-org issuer subdomain flows through to both `iss` and `aud`.
     #[tokio::test]
     async fn test_org_issuer_sets_iss_and_aud() {
-        let key = OidcSigningKey::generate().expect("Failed to generate OIDC key");
         let org_issuer = "https://acme.us.vouch.sh";
 
         let result = issue_aws_token(
             org_issuer,
             SESSION_HOURS,
-            &key,
+            test_rsa_key(),
             USER_EMAIL,
             &test_token(Some(TEST_AAGUID.to_string()), None, None),
         )
@@ -613,12 +504,10 @@ mod tests {
     /// `expires_in` matches `session_hours * 3600`.
     #[tokio::test]
     async fn test_expires_in_matches_session_hours() {
-        let key = OidcSigningKey::generate().expect("Failed to generate OIDC key");
-
         let result = issue_aws_token(
             BASE_URL,
             4, // 4 hours
-            &key,
+            test_rsa_key(),
             USER_EMAIL,
             &test_token(Some(TEST_AAGUID.to_string()), None, None),
         )
@@ -635,12 +524,10 @@ mod tests {
     /// AAGUID claim is present in the issued token when supplied.
     #[tokio::test]
     async fn test_hardware_aaguid_claim_is_emitted() {
-        let key = OidcSigningKey::generate().expect("Failed to generate OIDC key");
-
         let result = issue_aws_token(
             BASE_URL,
             SESSION_HOURS,
-            &key,
+            test_rsa_key(),
             USER_EMAIL,
             &test_token(Some(TEST_AAGUID.to_string()), None, None),
         )

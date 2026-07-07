@@ -4,7 +4,7 @@
 use crate::AppState;
 use crate::db::{self, GitHubCredentialAuditData};
 use crate::error::ServiceError;
-use crate::services::integrations::aws::{AwsError, issue_aws_token, issue_sso_jwt};
+use crate::services::integrations::aws::{AwsError, issue_aws_token};
 use crate::services::integrations::github::{GitHubInstallationId, minimal_git_permissions};
 use crate::services::oidc;
 use axum::extract::OriginalUri;
@@ -449,12 +449,16 @@ fn map_aws_error(e: AwsError) -> ServiceError {
     }
 }
 
-/// Get an OIDC ID token for AWS STS AssumeRoleWithWebIdentity.
+/// Get an OIDC ID token for AWS.
 ///
 /// GET /v1/credentials/aws/token
 ///
-/// Returns an **ES256** OIDC ID token that can be used with AWS STS to assume a
-/// role. The AWS IAM role must be configured to trust the Vouch OIDC provider.
+/// Returns an **RS256** OIDC ID token that serves both AWS consumers: STS
+/// `AssumeRoleWithWebIdentity` (the IAM role must trust the Vouch OIDC
+/// provider) and IAM Identity Center `sso-oidc:CreateTokenWithIAM`, where it
+/// is the `jwt-bearer` assertion (the trusted-token-issuer contract requires
+/// RS256; the customer-managed application's Aud claim must be the Vouch
+/// issuer URL).
 ///
 /// When the DPoP proof includes a `source` custom claim (e.g., "claude-code"),
 /// the issued token includes AI-specific session tags (`vouch:AccessType=AI`,
@@ -472,59 +476,9 @@ pub(crate) async fn get_aws_token(
             .await?;
 
     // Issue AWS token using the session-time snapshot of aaguid and org domain.
-    // Sign with the org's own ES256 key when it has a claimed subdomain, so the
-    // token verifies against the org-host JWKS; otherwise the common key.
-    let config = state.config();
-    let org_keys = oidc::resolve_org_keys(&state, ctx.org.as_ref())
-        .await
-        .map_err(map_signing_key_error)?;
-    let es_key = org_keys
-        .as_deref()
-        .map_or(&state.oidc_key, |k| &k.signers.es256);
-    let result = issue_aws_token(
-        &ctx.issuer,
-        config.session_hours,
-        es_key,
-        &ctx.user_email,
-        &ctx.token,
-    )
-    .await
-    .map_err(map_aws_error)?;
-
-    crate::infra::metrics::record_credential_issuance("aws");
-
-    Ok(Json(AwsTokenResponse {
-        id_token: result.id_token,
-        expires_in: result.expires_in,
-    }))
-}
-
-/// Get an RS256 OIDC ID token for AWS IAM Identity Center trusted identity
-/// propagation.
-///
-/// GET /v1/credentials/aws/sso/token
-///
-/// The token is the subject (`assertion`) for `sso-oidc:CreateTokenWithIAM`
-/// (`jwt-bearer` grant). This is a distinct endpoint from the ES256
-/// `AssumeRoleWithWebIdentity` token because AWS's trusted-token-issuer contract
-/// requires RS256. The token's `aud` is the Vouch issuer (server base URL); the
-/// customer-managed application's Aud claim must be set to that same URL. The
-/// same hardware-verification gate and AWS session tags apply.
-pub(crate) async fn get_aws_sso_token(
-    method: Method,
-    uri: OriginalUri,
-    headers: HeaderMap,
-    jar: CookieJar,
-    State(state): State<Arc<AppState>>,
-    client_cert: OptionalClientCert,
-) -> Result<Json<AwsTokenResponse>, ServiceError> {
-    let ctx =
-        authorize_aws_token_request(&state, &headers, &jar, &method, uri.path(), &client_cert)
-            .await?;
-
     // Sign with the org's own RS256 key when it has a claimed subdomain, so the
     // token verifies against the org-host JWKS; otherwise the common RSA key
-    // (which may be absent — Identity Center then isn't available).
+    // (always initialized at startup; the error branch is defensive).
     let org_keys = oidc::resolve_org_keys(&state, ctx.org.as_ref())
         .await
         .map_err(map_signing_key_error)?;
@@ -533,7 +487,7 @@ pub(crate) async fn get_aws_sso_token(
         .map(|k| &k.signers.rs256)
         .or(state.oidc_rsa_key.as_ref())
         .ok_or_else(|| {
-            tracing::error!("Identity Center token requested but no OIDC RSA key configured");
+            tracing::error!("AWS token requested but no OIDC RSA key configured");
             ServiceError::api(
                 StatusCode::NOT_IMPLEMENTED,
                 "rsa_key_unavailable",
@@ -542,7 +496,7 @@ pub(crate) async fn get_aws_sso_token(
         })?;
 
     let config = state.config();
-    let result = issue_sso_jwt(
+    let result = issue_aws_token(
         &ctx.issuer,
         config.session_hours,
         rsa_key,
@@ -552,7 +506,7 @@ pub(crate) async fn get_aws_sso_token(
     .await
     .map_err(map_aws_error)?;
 
-    crate::infra::metrics::record_credential_issuance("aws_sso");
+    crate::infra::metrics::record_credential_issuance("aws");
 
     Ok(Json(AwsTokenResponse {
         id_token: result.id_token,
@@ -1185,7 +1139,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_aws_token_returns_token_for_valid_session() {
-        let (app, state) = test_app().await;
+        use base64::Engine;
+
+        let state = test_app_state_with_rsa_key().await;
+        let config = state.config();
+        let app = crate::infra::router::build_app(state.clone(), &config).expect("build app");
 
         let user = create_test_user(&state.store, "user@example.com").await;
         let auth_id = create_test_authenticator(&state.store, &user.id).await;
@@ -1200,42 +1158,40 @@ mod tests {
 
         assert_eq!(status, StatusCode::OK);
         let resp: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
-        assert!(resp["id_token"].is_string());
         assert!(resp["expires_in"].is_number());
-    }
-
-    /// The dedicated Identity Center endpoint issues an RS256 token (AWS trusted
-    /// token issuer contract) for a hardware-verified session.
-    #[tokio::test]
-    async fn test_aws_sso_token_returns_rs256_for_valid_session() {
-        use base64::Engine;
-
-        let state = test_app_state_with_rsa_key().await;
-        let config = state.config();
-        let app = crate::infra::router::build_app(state.clone(), &config).expect("build app");
-
-        let user = create_test_user(&state.store, "sso@example.com").await;
-        let auth_id = create_test_authenticator(&state.store, &user.id).await;
-        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
-
-        let (status, body) = http_get(
-            &app,
-            "/v1/credentials/aws/sso/token",
-            &[("Authorization", &format!("Bearer {token}"))],
-        )
-        .await;
-
-        assert_eq!(status, StatusCode::OK);
-        let resp: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
         let id_token = resp["id_token"].as_str().expect("id_token string");
 
-        // The header `alg` must be RS256 (vs ES256 for the web-identity endpoint).
+        // RS256, so the one token serves both AssumeRoleWithWebIdentity and
+        // the Identity Center CreateTokenWithIAM assertion.
         let header_b64 = id_token.split('.').next().expect("jwt header");
         let header_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .decode(header_b64)
             .expect("base64url header");
         let header: serde_json::Value = serde_json::from_slice(&header_bytes).expect("header JSON");
         assert_eq!(header["alg"], "RS256");
+    }
+
+    /// Without an RSA key in AppState the handler fails closed with 501.
+    /// Startup always initializes the key, so this exercises the defensive
+    /// branch rather than a reachable production state.
+    #[tokio::test]
+    async fn test_aws_token_without_rsa_key_returns_501() {
+        let (app, state) = test_app().await;
+
+        let user = create_test_user(&state.store, "norsa@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+
+        let (status, body) = http_get(
+            &app,
+            "/v1/credentials/aws/token",
+            &[("Authorization", &format!("Bearer {token}"))],
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::NOT_IMPLEMENTED);
+        let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+        assert_eq!(error["code"], "rsa_key_unavailable");
     }
 
     /// Regression for #451: a non-hardware-verified bootstrap session
@@ -1294,7 +1250,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_aws_token_returns_token_for_org_user() {
-        let (app, state) = test_app().await;
+        let state = test_app_state_with_rsa_key().await;
+        let config = state.config();
+        let app = crate::infra::router::build_app(state.clone(), &config).expect("build app");
 
         let org = create_test_org(&state.store, "example.com").await;
         let user =

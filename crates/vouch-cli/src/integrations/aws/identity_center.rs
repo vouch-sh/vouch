@@ -37,9 +37,9 @@ struct CreateTokenResponse {
 /// `sso-oidc:CreateTokenWithIAM` (`jwt-bearer` grant).
 ///
 /// `application_arn` is the customer-managed application's ARN (the `clientId`).
-/// `assertion_jwt` is the RS256 token from
-/// `GET /v1/credentials/aws/sso/token`. `caller_creds` are the
-/// SigV4 caller credentials (the management role, assumed via web identity,
+/// `assertion_jwt` is the RS256 token from `GET /v1/credentials/aws/token` —
+/// the same token used for the management-role `AssumeRoleWithWebIdentity`.
+/// `caller_creds` are the SigV4 caller credentials (the management role,
 /// which must hold `sso-oauth:CreateTokenWithIAM`).
 pub(crate) async fn create_token_with_iam(
     http_client: &reqwest::Client,
