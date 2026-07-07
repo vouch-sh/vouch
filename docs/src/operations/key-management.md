@@ -200,6 +200,109 @@ The `document_key` field in S3 config contains:
 
 At startup, the server decrypts the private key via `kms:Decrypt` and holds the key material in memory for the lifetime of the process.
 
+## Per-Org Issuer Signing Keys (ES256 + RS256)
+
+When an organization claims a custom subdomain on an encrypted deployment, Vouch generates a
+dedicated ES256 and RS256 signing key pair for that org's OIDC issuer. AWS federation tokens,
+Identity Center tokens, and all RFC 8693 token-exchange assertions for that org are signed with
+these keys and served at the org's own JWKS endpoint
+(`https://<org-subdomain>.auth.example.com/oauth/jwks`).
+
+This makes each subdomain a real cryptographic tenant boundary: a token issued for org A cannot
+be verified against org B's JWKS.
+
+Per-org keys are only created when all three conditions are met:
+
+- The deployment has document encryption enabled (a KMS-backed document key in the S3 config).
+- The organization has a claimed subdomain.
+- A credential-issuance request arrives for that org (lazy first-use creation).
+
+### Key Lifecycle
+
+Each algorithm's key set always contains two keys, and sometimes three:
+
+| State | Role | Published in JWKS | Signs tokens |
+|-------|------|-------------------|--------------|
+| **Current** | The signer | yes | yes |
+| **Next** | Pre-staged successor | yes | no |
+| **Previous** | Demoted signer awaiting revocation | yes | no |
+
+The Next key is created together with the first key and re-staged automatically whenever a
+rotation consumes it, so relying-party JWKS caches always hold the key that will sign next —
+long before it ever signs. Nothing in the lifecycle runs on a timer: both rotation steps are
+explicit operator actions on the **Admin → Subdomain** page.
+
+### Rotating Keys
+
+**Step 1 — Rotate.** The "Rotate Signing Keys" button switches signing to the pre-staged Next
+keys for both algorithms in one transaction. The old signers become Previous keys: still
+published, still verifying outstanding tokens, no longer signing. Fresh Next keys are staged in
+the same transaction.
+
+The rotate is rejected in two situations:
+
+- **The Next keys are younger than 24 hours.** Relying parties (AWS IAM in particular) cache the
+  org JWKS on their own schedule; signing with a key their cache has not seen fails federation
+  until they refetch. Because the Next key is normally staged months earlier (at first use or by
+  the previous rotation), this gate only bites on back-to-back rotations.
+- **Previous keys from an earlier rotation are still published.** Revoke them first — the key
+  set keeps at most one retired generation per algorithm.
+
+**Step 2 — Revoke.** The "Revoke Old Keys" button deletes the Previous keys and removes them
+from the JWKS. It is rejected until `max(session lifetime, 8 hours) + 2 hours` have passed since
+the rotate, because until then tokens signed by the old keys may still be live — deleting the
+keys would log those sessions out. After the window, revocation affects nobody.
+
+A Previous key that is never revoked stays visible on the admin page indefinitely (it can
+verify, but never sign). Nothing deletes it automatically; revoking promptly after the drain
+window keeps the published key set minimal.
+
+> **Operator note:** Reducing `VOUCH_SESSION_HOURS` between a rotate and its revoke can shorten
+> the revoke gate below what tokens issued under the old lifetime need. Revoke first, then
+> shorten session lifetimes.
+
+### Emergency Rotation
+
+The "Emergency Rotate" button replaces the **entire key set** — fresh Current and Next keys for
+both algorithms, Previous keys deleted — in one atomic operation. Use it only when key
+compromise is suspected: on an encrypted deployment all private keys are sealed by the same
+document key, so a compromise of one is treated as a compromise of all.
+
+**Consequences:**
+
+- Every key that existed before the emergency is removed from the JWKS immediately.
+- Outstanding tokens signed by the old keys will fail verification until relying parties
+  refetch the JWKS. Cross-instance propagation takes up to 60 seconds (signing cache TTL);
+  downstream relying parties that respect the `Cache-Control: public, max-age=3600` response
+  header may take up to 1 hour to pick up the new keys.
+- AWS STS `AssumeRoleWithWebIdentity` and IAM Identity Center `CreateTokenWithIAM` calls that
+  carry a token signed by an old key will fail until the user re-authenticates with
+  `vouch login`.
+- The fresh Next keys start a new 24-hour publish window, so a graceful rotate is unavailable
+  for a day afterwards.
+
+**Runbook:**
+
+1. Navigate to **Admin → Subdomain** for the affected org.
+2. Click **Emergency Rotate** and confirm.
+3. Instruct affected users to run `vouch login` to obtain a new token signed by the replacement
+   key.
+4. If the org is federated with AWS IAM, existing STS sessions will expire naturally (up to
+   session lifetime) or can be revoked via the IAM console.
+
+### JWKS Caching and the 24-Hour Publish Window
+
+The 24-hour minimum age before a Next key may sign is a deliberate product decision. AWS IAM and
+IAM Identity Center cache JWKS responses for an undocumented internal period that is believed to
+exceed the advertised 1-hour `Cache-Control` max-age. Keeping the successor published for at
+least 24 hours before it signs ensures relying parties have ample time to cache the new `kid`.
+Changing this window requires verifying the behaviour of all federated relying parties.
+
+Releasing a subdomain deletes the Next and Previous keys (the publish window is meaningless
+while the issuer host is unclaimed) but keeps the Current key, so a same-org reclaim resumes
+with the same signer. The first use after a reclaim stages a fresh Next key, which restarts its
+24-hour window.
+
 ## TLS Certificate
 
 See [TLS Configuration](../deployment/tls.md) for details on TLS certificate management and hot-reload.

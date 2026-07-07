@@ -82,6 +82,38 @@ fn serialize_secret_string<S: serde::Serializer>(
     serializer.serialize_str(value.expose_secret())
 }
 
+/// State of a per-org issuer signing key (Auth0-style rotation).
+///
+/// A key set always holds a `Current` signer and a `Next` successor: the
+/// successor is created together with the first key and re-staged immediately
+/// after every rotation, so relying-party JWKS caches are always pre-warmed
+/// with the key that will sign next. An operator-triggered rotate promotes
+/// `Next` to `Current` and demotes the old signer to `Previous`, which stays
+/// published (verify-only) until the operator explicitly revokes it. Nothing
+/// transitions on a timer.
+///
+/// The state doubles as the storage location: each state has its own
+/// deterministic document ID per `(org_id, alg)` (see
+/// [`crate::db::deterministic_org_key_id`]), so retries and concurrent
+/// writers collide on the primary key instead of duplicating keys. `Current`
+/// keeps the original pre-rotation hash prefix, and `#[serde(default)]`
+/// deserializes rows without a `state` field as `Current` — existing rows
+/// need no migration.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SigningKeyState {
+    /// The key currently used to sign tokens for this org and algorithm.
+    #[default]
+    Current,
+    /// The pre-staged successor, published in the JWKS so relying-party caches
+    /// warm up before it ever signs. `OrgSigningKeyDoc::staged_at` records
+    /// when its publish window started.
+    Next,
+    /// A demoted predecessor that still verifies outstanding tokens but no
+    /// longer signs. `OrgSigningKeyDoc::demoted_at` feeds the revoke gate.
+    Previous,
+}
+
 /// A per-organization OIDC issuer signing key.
 ///
 /// When an org claims an issuer subdomain, its OIDC federation tokens (AWS STS
@@ -90,13 +122,11 @@ fn serialize_secret_string<S: serde::Serializer>(
 /// org's own JWKS — making the issuer host a real cryptographic tenant
 /// boundary. `alg` is the RFC 7518 JWS algorithm (ES256 or RS256).
 ///
-/// One key per row, at a **deterministic slot ID** (`deterministic_org_key_id`,
-/// keyed on org + algorithm) so a retry or concurrent claim collides on the
-/// primary key instead of creating a duplicate — the same idempotency the
-/// subdomain claim slot relies on. `kid` (RFC 7517) is a field (hash of the
-/// random public key), never the document ID. Rotation is not implemented; a
-/// future rotation can stage a replacement key in its own slot and swap this
-/// one via `compare_and_update` without changing the slot derivation.
+/// One key per row, at a **deterministic document ID** derived from
+/// `(org_id, alg, state)` so retries and concurrent operations collide on the
+/// primary key instead of creating duplicates. `kid` (RFC 7517) is a field
+/// (hash of the random public key), never the document ID. See
+/// [`SigningKeyState`] for the rotation lifecycle.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OrgSigningKeyDoc {
     /// Owning organization (indexed, so the org's key set is one query).
@@ -111,10 +141,23 @@ pub struct OrgSigningKeyDoc {
     /// when `DocumentStore::is_encrypted`).
     #[serde(serialize_with = "serialize_secret_string")]
     pub private_pkcs8_der_b64: SecretString,
+    /// Rotation state; also selects the document's deterministic ID. Defaults
+    /// to `Current` so existing rows without this field deserialize correctly.
+    #[serde(default)]
+    pub state: SigningKeyState,
+    /// When a `Next` key's publish window started. `None` for other states.
+    #[serde(default)]
+    pub staged_at: Option<Timestamp>,
+    /// When a `Previous` key stopped signing. `None` for other states.
+    #[serde(default)]
+    pub demoted_at: Option<Timestamp>,
 }
 
 impl DocumentType for OrgSigningKeyDoc {
     const DOC_TYPE: &'static str = "org_signing_key";
+
+    // No `expires_at` override: signing keys are never reaped by the generic
+    // expiry cleanup. A `Previous` key lives until an operator revokes it.
 
     fn index_entries(&self) -> Vec<IndexEntry> {
         vec![IndexEntry {

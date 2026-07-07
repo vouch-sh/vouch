@@ -478,7 +478,9 @@ pub(crate) async fn get_aws_token(
     let org_keys = oidc::resolve_org_keys(&state, ctx.org.as_ref())
         .await
         .map_err(map_signing_key_error)?;
-    let es_key = org_keys.as_deref().map_or(&state.oidc_key, |k| &k.es256);
+    let es_key = org_keys
+        .as_deref()
+        .map_or(&state.oidc_key, |k| &k.signers.es256);
     let result = issue_aws_token(
         &ctx.issuer,
         config.session_hours,
@@ -528,7 +530,7 @@ pub(crate) async fn get_aws_sso_token(
         .map_err(map_signing_key_error)?;
     let rsa_key = org_keys
         .as_deref()
-        .map(|k| &k.rs256)
+        .map(|k| &k.signers.rs256)
         .or(state.oidc_rsa_key.as_ref())
         .ok_or_else(|| {
             tracing::error!("Identity Center token requested but no OIDC RSA key configured");
