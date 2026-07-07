@@ -51,7 +51,7 @@ When TLS is configured, a separate HTTP→HTTPS redirect router runs on port 80 
 
 **AppState** holds: `Pool` (db), `ArcSwap<ServerConfig>` (lock-free config reload), `Webauthn`, optional `SshCa`, optional `GitHubApp`, `DpopState`, and `OidcSigningKey`.
 
-**Services layer** (`crates/vouch-server/src/services/`): Business logic called by handlers — `oidc/` (authorization, token issuance, DPoP, discovery, JWKS, token exchange), `integrations/` (AWS, GitHub App/OAuth/webhooks), `auth.rs` (WebAuthn verification).
+**Services layer** (`crates/vouch-server/src/services/`): Business logic called by handlers — `oidc/` (authorization, token issuance, DPoP, discovery, JWKS, token exchange, per-org issuer keys + operator rotation), `integrations/` (AWS, GitHub App/OAuth/webhooks), `auth.rs` (WebAuthn verification).
 
 **Layer boundaries** (enforced by `crates/vouch-server/tests/arch_boundaries.rs`): the contract is direction-only. Handlers may call both services and db — calling db directly is legal and common; services may call db, infra primitives (ssrf, dns, metrics, csp), and crypto; db and infra may call only crypto; crypto imports no other layer. Lower layers never import upward. A type shared across layers lives in the lowest layer that consumes it, or in a crate-root shared module (`config.rs`, `geo.rs`, …). Deliberate deviations (e.g. `infra/router.rs` mounting handler routes) are listed with reasons in the test's `EXCEPTIONS` table; the stale-exception check means the list can only shrink.
 
@@ -318,7 +318,7 @@ Before implementing a feature:
 1. Does this require new dependencies? Can we avoid them?
 2. Does this touch sensitive data? Use appropriate wrappers.
 3. Is this in scope for MVP?
-4. Does this change the security model? Document in `docs/src/security/model.md`.
+4. Does this change the security model? Document security implications appropriately.
 
 ## External Resources
 

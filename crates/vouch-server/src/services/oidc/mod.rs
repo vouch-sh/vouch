@@ -31,7 +31,6 @@
 //! ## Module Organization
 //!
 //! - [`fapi`] - FAPI 2.0 Security Profile validation
-//! - [`keys`] - ES256 signing key management and JWK export
 //! - [`discovery`] - OIDC Discovery document and JWKS generation
 //! - [`protected_resource`] - Protected Resource Metadata (RFC 9728)
 //! - [`authorization`] - Authorization code issuance and validation
@@ -41,7 +40,7 @@
 //! - [`exchange`] - Token exchange (RFC 8693)
 //! - [`jwt_bearer`] - JWT client authentication and bearer grants (RFC 7523)
 //! - [`jar`] - JWT-Secured Authorization Request validation (RFC 9101)
-//! - [`amr`] - Authentication method references (RFC 8176)
+//! - [`jarm`] - JWT-Secured Authorization Response Mode
 //! - [`authorization_details`] - Rich authorization requests (RFC 9396)
 //! - [`claims`] - OIDC token claims for cloud identity federation
 //! - [`dpop`] - DPoP proof validation (RFC 9449)
@@ -50,6 +49,8 @@
 //! - [`registration`] - Dynamic client registration (RFC 7591/7592)
 //! - [`resource`] - Resource indicators (RFC 8707)
 //! - [`scope`] - OAuth 2.0 scope types (RFC 6749 Section 3.3)
+//! - [`org_keys`] - Per-organization issuer signing keys and operator rotation
+//! - [`mtls`] - mTLS client authentication (crate-local)
 
 pub mod authorization;
 pub mod authorization_details;
