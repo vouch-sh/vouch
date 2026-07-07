@@ -153,32 +153,48 @@ pub(crate) async fn assume_role_with_web_identity(
     parse_sts_xml_response(&body)
 }
 
+/// Parameters for the SigV4 `AssumeRole` call (role chaining).
+pub(crate) struct AssumeRoleRequest<'a> {
+    pub http_client: &'a reqwest::Client,
+    pub role_arn: &'a str,
+    pub role_session_name: &'a str,
+    pub region: &'a str,
+    /// Credentials from the prior `AssumeRoleWithWebIdentity` hop.
+    pub source_creds: &'a StsCredentials,
+    /// Optional AWS managed policy names to attach as session policies
+    /// (see [`WebIdentityRequest::session_policy_names`]).
+    pub session_policy_names: &'a [&'a str],
+    /// Optional inline session policy
+    /// (see [`WebIdentityRequest::session_policy`]).
+    pub session_policy: Option<&'a serde_json::Value>,
+    /// Optional Identity Center identity context
+    /// (`awsAdditionalDetails.identityContext` from `CreateTokenWithIAM`),
+    /// attached as `ProvidedContexts` so the resulting role session is
+    /// identity-enhanced (`onBehalfOf` in CloudTrail, TIP user-based
+    /// authorization). Only SigV4 `AssumeRole` accepts it —
+    /// `AssumeRoleWithWebIdentity` does not (#623).
+    pub identity_context: Option<&'a str>,
+}
+
 /// Call AWS STS `AssumeRole` using SigV4-signed form POST.
 ///
 /// Used for role chaining: assumes a target role using credentials
 /// from a prior `AssumeRoleWithWebIdentity` call.
-pub(crate) async fn assume_role(
-    http_client: &reqwest::Client,
-    role_arn: &str,
-    role_session_name: &str,
-    region: &str,
-    source_creds: &StsCredentials,
-    session_policy_names: &[&str],
-    session_policy: Option<&serde_json::Value>,
-) -> Result<StsCredentials> {
+pub(crate) async fn assume_role(req: AssumeRoleRequest<'_>) -> Result<StsCredentials> {
     use crate::integrations::aws::sigv4::sign_and_send_form_post;
     use vouch_common::aws::Partition;
 
-    let partition = Partition::from_region(region);
+    let partition = Partition::from_region(req.region);
     let domain_suffix = partition.dns_suffix();
-    let endpoint = format!("https://sts.{region}.{domain_suffix}/");
+    let endpoint = format!("https://sts.{}.{domain_suffix}/", req.region);
 
     // Bind owned values to variables first — sign_and_send_form_post takes &[(&str, &str)]
     // so all values must outlive the params slice. This pattern mirrors redshift.rs.
     let duration_str = "3600".to_string();
 
     // Build managed policy ARNs with partition-appropriate prefixes.
-    let policy_arns: Vec<String> = session_policy_names
+    let policy_arns: Vec<String> = req
+        .session_policy_names
         .iter()
         .map(|name| format!("arn:{}:iam::aws:policy/{}", partition.as_str(), name))
         .collect();
@@ -186,8 +202,8 @@ pub(crate) async fn assume_role(
     let mut params: Vec<(&str, &str)> = vec![
         ("Action", "AssumeRole"),
         ("Version", "2011-06-15"),
-        ("RoleArn", role_arn),
-        ("RoleSessionName", role_session_name),
+        ("RoleArn", req.role_arn),
+        ("RoleSessionName", req.role_session_name),
         ("DurationSeconds", &duration_str),
     ];
 
@@ -201,16 +217,31 @@ pub(crate) async fn assume_role(
 
     // Attach inline session policy if provided.
     let policy_json;
-    if let Some(policy) = session_policy {
+    if let Some(policy) = req.session_policy {
         policy_json = serde_json::to_string(policy)
             .map_err(|e| anyhow::anyhow!("failed to serialize session policy: {e}"))?;
         params.push(("Policy", &policy_json));
     }
 
-    let body =
-        sign_and_send_form_post(http_client, &endpoint, "sts", region, source_creds, &params)
-            .await
-            .context("failed to call AWS STS AssumeRole")?;
+    // Attach the Identity Center identity context, if provided.
+    if let Some(context) = req.identity_context {
+        params.push((
+            "ProvidedContexts.member.1.ProviderArn",
+            "arn:aws:iam::aws:contextProvider/IdentityCenter",
+        ));
+        params.push(("ProvidedContexts.member.1.ContextAssertion", context));
+    }
+
+    let body = sign_and_send_form_post(
+        req.http_client,
+        &endpoint,
+        "sts",
+        req.region,
+        req.source_creds,
+        &params,
+    )
+    .await
+    .context("failed to call AWS STS AssumeRole")?;
 
     parse_sts_xml_response(&body)
 }
