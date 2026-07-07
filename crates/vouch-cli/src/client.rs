@@ -231,7 +231,7 @@ impl<H: HttpClient> VouchClient<H> {
             Ok(s) => s,
             Err(e) => {
                 tracing::warn!("HTTP signature signer creation failed: {e}");
-                eprintln!("Warning: HTTP signature creation failed ({e}).");
+                crate::tr_eprintln!("httpsig-warn-create-failed", error = e.to_string());
                 return Vec::new();
             }
         };
@@ -255,7 +255,7 @@ impl<H: HttpClient> VouchClient<H> {
             Ok(r) => r,
             Err(e) => {
                 tracing::warn!("HTTP signature request build failed: {e}");
-                eprintln!("Warning: HTTP signature creation failed ({e}).");
+                crate::tr_eprintln!("httpsig-warn-create-failed", error = e.to_string());
                 return Vec::new();
             }
         };
@@ -269,7 +269,7 @@ impl<H: HttpClient> VouchClient<H> {
             )
         {
             tracing::warn!("Content-Digest computation failed: {e}");
-            eprintln!("Warning: HTTP signature creation failed ({e}).");
+            crate::tr_eprintln!("httpsig-warn-create-failed", error = e.to_string());
             return Vec::new();
         }
 
@@ -301,7 +301,7 @@ impl<H: HttpClient> VouchClient<H> {
 
         if let Err(e) = sig_builder.sign_request(&mut req, &signer) {
             tracing::warn!("HTTP message signing failed: {e}");
-            eprintln!("Warning: HTTP signature creation failed ({e}).");
+            crate::tr_eprintln!("httpsig-warn-create-failed", error = e.to_string());
             return Vec::new();
         }
 

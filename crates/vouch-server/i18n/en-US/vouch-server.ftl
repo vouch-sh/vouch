@@ -756,3 +756,9 @@ logout-confirm-cancel = Cancel
 logout-done-title = { -product } - Signed Out
 logout-done-heading = You have been signed out.
 logout-done-body = Your session has ended. Close this tab or return to the application.
+
+## Redirect interstitials (form_post_response.html, saml_post_form.html)
+redirect-title = Redirecting...
+redirect-continue = Continue
+redirect-form-post-noscript = Submitting authorization response. If you are not redirected, click the button below.
+redirect-saml-noscript = Redirecting to identity provider. If you are not redirected, click the button below.

@@ -40,10 +40,9 @@ pub(crate) const RATE_LIMITED: u8 = 8;
 /// use crate::exit_code::CliError;
 /// Err(CliError::NotAuthenticated { reason: "...".into() })?
 /// ```
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug)]
 pub(crate) enum CliError {
     /// User is not authenticated — session missing or expired.
-    #[error("{reason}")]
     NotAuthenticated {
         /// Context-specific message explaining why authentication failed.
         reason: String,
@@ -54,42 +53,68 @@ pub(crate) enum CliError {
         dead_code,
         reason = "variant for future error categorisation; lint fires inconsistently across compilation targets"
     )]
-    #[error("{0}")]
     HardwareNotFound(String),
 
     /// Network or server connectivity failure.
-    #[error("{0}")]
     NetworkError(String),
 
     /// Server denied the request (403).
-    #[error("permission denied — {0}")]
     PermissionDenied(String),
 
     /// Configuration is missing or invalid.
-    #[error("{0}")]
     ConfigError(String),
 
     /// RFC 9470: Step-up authentication required.
     ///
     /// Server returned `insufficient_user_authentication` in `WWW-Authenticate`.
     /// The CLI should re-authenticate and retry the request.
-    #[error(
-        "step-up authentication required — run 'vouch login' to re-authenticate with your YubiKey"
-    )]
     StepUpRequired {
         /// Requested ACR values from the challenge.
+        #[allow(
+            dead_code,
+            reason = "carried for future step-up handling; Display omits it"
+        )]
         acr_values: Option<String>,
         /// Maximum authentication age in seconds.
+        #[allow(
+            dead_code,
+            reason = "carried for future step-up handling; Display omits it"
+        )]
         max_age: Option<u64>,
     },
 
     /// Server returned 429 Too Many Requests.
-    #[error("rate limited by server — wait a moment and retry")]
     RateLimited {
         /// Seconds to wait before retrying (from `Retry-After` header).
+        #[allow(
+            dead_code,
+            reason = "carried for future retry backoff; Display omits it"
+        )]
         retry_after: Option<u64>,
     },
 }
+
+impl std::fmt::Display for CliError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotAuthenticated { reason } => f.write_str(reason),
+            Self::HardwareNotFound(msg) | Self::NetworkError(msg) | Self::ConfigError(msg) => {
+                f.write_str(msg)
+            }
+            Self::PermissionDenied(detail) => {
+                write!(
+                    f,
+                    "{}",
+                    crate::tr_args!("err-permission-denied", detail = detail.as_str())
+                )
+            }
+            Self::StepUpRequired { .. } => write!(f, "{}", crate::tr!("err-step-up-required")),
+            Self::RateLimited { .. } => write!(f, "{}", crate::tr!("err-rate-limited")),
+        }
+    }
+}
+
+impl std::error::Error for CliError {}
 
 /// Classify an `anyhow::Error` into an appropriate exit code.
 ///
@@ -347,6 +372,26 @@ mod tests {
         }
         .into();
         assert_eq!(code_value(classify(&err)), RATE_LIMITED);
+    }
+
+    #[test]
+    fn translated_error_display_resolves_from_catalog() {
+        assert_eq!(
+            CliError::PermissionDenied("no access".to_string()).to_string(),
+            "permission denied — no access"
+        );
+        assert_eq!(
+            CliError::StepUpRequired {
+                acr_values: None,
+                max_age: None,
+            }
+            .to_string(),
+            "step-up authentication required — run 'vouch login' to re-authenticate with your YubiKey"
+        );
+        assert_eq!(
+            CliError::RateLimited { retry_after: None }.to_string(),
+            "rate limited by server — wait a moment and retry"
+        );
     }
 
     #[test]
