@@ -23,8 +23,9 @@ Follow the [Conventional Commits 1.0.0 specification](https://www.conventionalco
 3. Description uses imperative, present tense, no trailing period, ≤72 chars.
 4. Body and footers are separated from the description by a blank line.
 5. `fix` → **PATCH**, `feat` → **MINOR**, `BREAKING CHANGE` → **MAJOR**.
-6. End commit messages with the trailer (per this repo's convention):
-   `Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>`
+6. End Claude-authored commit messages with a co-author trailer naming the
+   model that actually did the work — never a hardcoded older model. Example:
+   `Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>`
 
 ### Allowed Types
 

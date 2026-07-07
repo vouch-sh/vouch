@@ -18,7 +18,7 @@ Branch names mirror the Conventional Commit type of the work (see `commits-and-i
 
 - **Never push directly to `main`.** All changes land via feature branch + PR.
 - For each new issue, use `/rust-agents:solve-issue <number>` to create a branch and start development.
-- Parallel agents work in their own worktree (`wt switch <branch>`), never the main checkout.
+- One writer at a time in the main checkout. Agents editing **in parallel** must each use their own worktree (`wt switch <branch>`). Before reassigning in-flight work in the main checkout, stand the old agent down and snapshot the diff first (see `development-discipline.md`).
 - PRs are squash-merged; the PR title becomes the Conventional Commit subject (e.g. `feat(cli): pre-fill device code (#566)`).
 
 ## Before Creating a PR
@@ -44,4 +44,5 @@ Project-specific gates:
 - **No-panic policy** — clippy denies `unwrap`/`expect`/`panic`/`[]` indexing/`as` casts outside the `vouch-tests` crate. `make lint` must be clean.
 - **Live-test credential/serialization paths** that unit tests can't catch — OIDC token issuance, FIDO2 assertion verification, RFC 9421 signing, DB migrations across SQLite/Postgres/DSQL.
 - **i18n parity** — adding UI strings requires matching Fluent catalog entries; the completeness tests fail otherwise.
-- Update `docs/` (mdBook) when behavior or environment variables change. There is **no `CHANGELOG.md`** in this repo — do not add one.
+- **No internal review labels** in code, comments, or test names — sweep changed files with `rg -n '\b([A-Z]{1,4}[0-9]{1,2}|GAP[0-9]+)\b'` before committing (CLAUDE.md "What NOT to Do" #11).
+- Update `docs/` (mdBook) when server behavior or environment variables change. `docs/` is **internal system-administrator documentation** — how to run and operate the Vouch server — not public-facing or end-user documentation; write it for the operator, not the customer. There is **no `CHANGELOG.md`** in this repo — do not add one.

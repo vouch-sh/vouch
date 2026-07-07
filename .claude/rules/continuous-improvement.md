@@ -36,7 +36,7 @@ Workspace crates: `vouch-cli`, `vouch-agent`, `vouch-server`, `vouch-common`, `v
 
 Logical subsystems to track in `coverage-status.md`:
 
-- **OIDC provider** — authorization, token issuance, DPoP, discovery, JWKS, token exchange (`services/oidc/`)
+- **OIDC provider** — authorization, token issuance, DPoP, discovery, JWKS, token exchange, per-org issuer keys + operator rotation (`services/oidc/`)
 - **FIDO2 / WebAuthn** — challenge → CTAP2 getAssertion → verification (`crypto/webauthn_verify.rs`, `services/auth.rs`)
 - **SSH CA** — Ed25519 certificate signing (`crypto/ssh_ca.rs`)
 - **Credential helpers** — ssh, aws, eks, k8s, github, docker, cargo, rds, redshift, ssm, WIF (`vouch-cli/src/commands/credential/`)
