@@ -77,16 +77,15 @@ use crate::error::ServiceError;
 
 use crate::crypto::keys::{Jwk, OidcRsaSigningKey, OidcSigningKey};
 
-mod panel;
 mod resolve;
 mod rotation;
 
-pub(crate) use panel::{OrgKeyPanel, org_key_panel};
 pub use resolve::{OrgKeysCache, org_jwks, resolve_org_keys};
 pub use rotation::{
     EmergencyOutcome, Operator, RevokeOutcome, RotateOutcome, emergency_rotate_org_keys,
     revoke_org_previous_keys, rotate_org_keys,
 };
+pub(crate) use rotation::{OrgKeyPanel, org_key_panel};
 
 /// The issuer an org's federation tokens must use: its claimed subdomain
 /// issuer, or the shared base URL when it has no subdomain.
@@ -489,8 +488,4 @@ mod tests {
             deterministic_org_key_id("org-b", JwsAlgorithm::Es256, SigningKeyState::Current),
         );
     }
-
-    // -----------------------------------------------------------------------
-    // Async tests against an encrypted store
-    // -----------------------------------------------------------------------
 }
