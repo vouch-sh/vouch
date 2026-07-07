@@ -41,7 +41,6 @@ const V1_ROUTES: &[(&str, &str, bool)] = &[
     ("POST", "/v1/keys/register/complete", true),
     ("POST", "/v1/credentials/ssh", true),
     ("GET", "/v1/credentials/aws/token", true),
-    ("GET", "/v1/credentials/aws/sso/token", true),
     ("POST", "/v1/credentials/github/token", true),
     ("GET", "/v1/auth/status", false),
     ("GET", "/v1/credentials/ssh/ca", false),
@@ -173,7 +172,7 @@ async fn test_accept_signature_is_sfv_dictionary_on_unsigned() {
     let accept_sig_val = accept_sig
         .expect("accept-signature header must be present on unsigned request to protected route");
 
-    // Must parse as a Dictionary — not a bare inner list (critic C1).
+    // Must parse as a Dictionary — not a bare inner list.
     let dict = parse_dictionary(&accept_sig_val).unwrap_or_else(|e| {
         panic!("Accept-Signature is not a valid SFV Dictionary: {e}\nvalue: {accept_sig_val}")
     });

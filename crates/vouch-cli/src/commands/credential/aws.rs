@@ -621,9 +621,9 @@ pub(crate) fn resolve_identity_center<'a>(
 /// credentials cannot be downscoped — so caller credentials are always full
 /// (no `ReadOnlyAccess` policy, no DPoP source tag).
 ///
-/// 1. Assume the management role via `AssumeRoleWithWebIdentity` (full creds).
-/// 2. Fetch an RS256 JWT from `GET /v1/credentials/aws/sso/token`.
-/// 3. Exchange it for an IdC access token via `CreateTokenWithIAM`.
+/// 1. Fetch the RS256 AWS token and assume the management role via
+///    `AssumeRoleWithWebIdentity` (full creds).
+/// 2. Exchange the same token for an IdC access token via `CreateTokenWithIAM`.
 pub(crate) async fn obtain_identity_center_token(
     http_client: &reqwest::Client,
     server: &str,
@@ -668,20 +668,13 @@ pub(crate) async fn obtain_identity_center_token(
     .await
     .context("failed to assume management role for IdC exchange")?;
 
-    // Step 2: fetch the RS256 JWT (the TTI assertion). Reuse `client` — the
-    // first `get_authenticated` call doesn't consume it, so there's no need
-    // for a second VouchClient::new (which would waste an IPC + keychain round-trip).
-    let rs256_token: OidcTokenResponse = client
-        .get_authenticated("/v1/credentials/aws/sso/token")
-        .await
-        .context("failed to get RS256 IdC token from Vouch server")?;
-
-    // Step 3: exchange for IdC access token.
+    // Step 2: exchange the same RS256 token (the TTI assertion) for an IdC
+    // access token.
     crate::integrations::aws::identity_center::create_token_with_iam(
         http_client,
         &idc.region,
         &idc.application_arn,
-        rs256_token.id_token.expose_secret(),
+        id_token,
         &caller_creds,
     )
     .await
