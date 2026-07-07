@@ -7,8 +7,9 @@
 //! transactions on the owning `OrganizationDoc`; removing or un-verifying a
 //! domain fires the parent module's subdomain auto-release hook.
 
+use super::ORG_SCAN_PAGE_SIZE;
+use super::issuer::{release_ineligible_subdomain, subdomain_to_release};
 use super::validation::{DomainValidationError, normalize_domain};
-use super::{ORG_SCAN_PAGE_SIZE, release_ineligible_subdomain, subdomain_to_release};
 use crate::db::documents::organization::{
     AdditionalDomain, AdditionalDomainState, OrganizationDoc,
 };
