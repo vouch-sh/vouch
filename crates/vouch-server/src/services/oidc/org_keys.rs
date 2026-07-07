@@ -648,11 +648,10 @@ fn revoke_ready_at(demoted_at: Timestamp, session_hours: u64) -> Result<Timestam
 /// a missing Next key (rows created before rotation existed) by staging one,
 /// outside any transaction — safe because the staged insert is idempotent.
 /// The rotate transaction re-checks every gate authoritatively.
-async fn precheck_rotate_and_heal(
-    store: &DocumentStore,
-    org_id: &str,
-) -> Result<Option<RotateOutcome>> {
+async fn precheck_rotate_and_heal(state: &AppState, org_id: &str) -> Result<Option<RotateOutcome>> {
+    let store = &state.store;
     let now = Timestamp::now();
+    let mut healed = false;
     let mut latest_ready: Option<Timestamp> = None;
     for alg in [JwsAlgorithm::Es256, JwsAlgorithm::Rs256] {
         if db::get_org_signing_key(store, org_id, alg, SigningKeyState::Previous)
@@ -678,12 +677,18 @@ async fn precheck_rotate_and_heal(
                 }
                 None => {
                     ensure_key(store, org_id, alg, SigningKeyState::Next).await?;
+                    healed = true;
                     publish_ready_at(now)?
                 }
             };
         if ready_at > now && latest_ready.is_none_or(|cur| ready_at > cur) {
             latest_ready = Some(ready_at);
         }
+    }
+    if healed {
+        // The heal wrote new Next keys; drop the cached snapshot so the JWKS
+        // publishes them immediately instead of after the cache TTL.
+        state.org_keys_cache.invalidate(org_id);
     }
     Ok(latest_ready.map(|ready_at| RotateOutcome::NextNotReady { ready_at }))
 }
@@ -836,7 +841,7 @@ pub async fn rotate_org_keys(
     if !claimed {
         return Ok(RotateOutcome::SubdomainReleased);
     }
-    if let Some(blocked) = precheck_rotate_and_heal(store, org_id).await? {
+    if let Some(blocked) = precheck_rotate_and_heal(state, org_id).await? {
         return Ok(blocked);
     }
 
@@ -1233,18 +1238,25 @@ pub async fn emergency_rotate_org_keys(
     };
 
     // One transaction across both algorithms: a partial emergency (one alg
-    // rotated, the other still compromised) must be impossible.
-    let result: Result<(String, String), OrgRotationError> = crate::with_dsql_retry!(async {
-        let mut tx = store.begin().await?;
-        let now = Timestamp::now();
-        let old_es256 =
-            emergency_one_alg_in_tx(&mut tx, org_id, JwsAlgorithm::Es256, &es256, now).await?;
-        let old_rs256 =
-            emergency_one_alg_in_tx(&mut tx, org_id, JwsAlgorithm::Rs256, &rs256, now).await?;
-        tx.commit().await.map_err(OrgRotationError::Other)?;
-        Ok((old_es256, old_rs256))
-    });
-    let (old_es256_kid, old_rs256_kid) = result.map_err(anyhow::Error::from)?;
+    // rotated, the other still compromised) must be impossible. The guard
+    // serializes against a concurrent release the same way rotate does.
+    let result: Result<Option<(String, String)>, OrgRotationError> =
+        crate::with_dsql_retry!(async {
+            let mut tx = store.begin().await?;
+            let now = Timestamp::now();
+            if !guard_subdomain_claimed_in_tx(&mut tx, org_id).await? {
+                return Ok(None);
+            }
+            let old_es256 =
+                emergency_one_alg_in_tx(&mut tx, org_id, JwsAlgorithm::Es256, &es256, now).await?;
+            let old_rs256 =
+                emergency_one_alg_in_tx(&mut tx, org_id, JwsAlgorithm::Rs256, &rs256, now).await?;
+            tx.commit().await.map_err(OrgRotationError::Other)?;
+            Ok(Some((old_es256, old_rs256)))
+        });
+    let Some((old_es256_kid, old_rs256_kid)) = result.map_err(anyhow::Error::from)? else {
+        return Ok(EmergencyOutcome::SubdomainReleased);
+    };
 
     state.org_keys_cache.invalidate(org_id);
 
