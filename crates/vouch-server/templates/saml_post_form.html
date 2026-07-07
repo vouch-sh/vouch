@@ -1,15 +1,15 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="{{ self.lang() }}" dir="{{ self.dir() }}">
 <head>
   <meta charset="utf-8">
-  <title>Redirecting...</title>
+  <title>{{ self.tr("redirect-title") }}</title>
 </head>
 <body>
-  <noscript><p>Redirecting to identity provider. If you are not redirected, click the button below.</p></noscript>
+  <noscript><p>{{ self.tr("redirect-saml-noscript") }}</p></noscript>
   <form method="post" action="{{ action_url }}">
     <input type="hidden" name="SAMLRequest" value="{{ saml_request }}">
     <input type="hidden" name="RelayState" value="{{ relay_state }}">
-    <noscript><button type="submit">Continue</button></noscript>
+    <noscript><button type="submit">{{ self.tr("redirect-continue") }}</button></noscript>
   </form>
   <script src="/static/js/saml-autosubmit.js" defer></script>
 </body>

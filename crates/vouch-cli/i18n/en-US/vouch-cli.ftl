@@ -107,6 +107,8 @@ httpsig-err-key-unavailable =
     Hardware-backed signing key unavailable for { $path }: this request must be
     signed (RFC 9421). Run { -cmd } enroll (or unlock your keychain) and try again
 
+httpsig-warn-create-failed = Warning: HTTP signature creation failed ({ $error }).
+
 ## FIDO2 / CTAP2 user-facing errors
 
 fido2-err-credential-excluded = This { -yubikey } is already registered for this service.
@@ -1446,3 +1448,40 @@ setup-ca-err-fetch-token = failed to get CodeArtifact token
 setup-kc-err-read = failed to read kubeconfig: { $path }
 setup-kc-err-parse = failed to parse kubeconfig: { $path }
 setup-kc-err-serialize = failed to serialize kubeconfig
+
+## Helper binary installation (utils.rs)
+utils-created-directory = Created directory: { $path }
+utils-created-symlink = Created symlink: { $link } -> { $target }
+utils-created-file = Created: { $path }
+utils-path-note = Note: { $path } is not in your PATH.
+utils-path-profile-hint = Add it to your shell profile:
+utils-path-windows-hint = Add it to your system PATH environment variable.
+
+## Integration status lines (vouch status)
+integration-docker-helper-not-installed = credential helper not installed
+integration-docker-no-registries = no registries configured
+
+## Top-level error reporting (main.rs, exit_code.rs)
+cli-error-prefix = Error: { $error }
+err-permission-denied = permission denied — { $detail }
+err-step-up-required = step-up authentication required — run '{ -cmd } login' to re-authenticate with your YubiKey
+err-rate-limited = rate limited by server — wait a moment and retry
+
+## Server URL validation errors (server_url.rs)
+server-url-err-empty = server URL is empty
+server-url-err-invalid = invalid server URL: { $detail }
+server-url-err-insecure-http =
+    Server URL uses plain HTTP ({ $url }).
+    Credentials would be sent in plaintext.
+
+    Use an https:// URL, or set --allow-insecure / VOUCH_ALLOW_INSECURE=1 for development.
+
+## FAPI client-key errors (fapi/error.rs)
+fapi-err-key-generation = failed to generate ES256 keypair: { $error }
+fapi-err-key-load = failed to load key from disk: { $error }
+fapi-err-key-save = failed to save key to disk: { $error }
+fapi-err-invalid-key-format = invalid key format: { $error }
+fapi-err-jwt-signing = failed to sign JWT: { $error }
+fapi-err-serialization = serialization error: { $error }
+fapi-err-thumbprint = failed to compute JWK thumbprint: { $error }
+fapi-err-keychain = keychain access error: { $error }

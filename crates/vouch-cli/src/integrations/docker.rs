@@ -42,14 +42,14 @@ fn check_docker_status(status: &DockerSetupStatus) -> IntegrationState {
 
     if !status.symlink_exists {
         return IntegrationState::Partial {
-            message: "credential helper not installed".to_string(),
+            message: crate::tr!("integration-docker-helper-not-installed"),
             setup_hint: Some("vouch setup docker --configure".to_string()),
         };
     }
 
     if status.configured_registries.is_empty() {
         return IntegrationState::Partial {
-            message: "no registries configured".to_string(),
+            message: crate::tr!("integration-docker-no-registries"),
             setup_hint: Some("vouch setup docker --configure <registry>".to_string()),
         };
     }

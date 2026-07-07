@@ -76,7 +76,10 @@ pub(crate) fn create_symlink_with_fallback(
     {
         fs::create_dir_all(parent)
             .with_context(|| format!("failed to create directory {}", parent.display()))?;
-        println!("Created directory: {}", parent.display());
+        crate::tr_println!(
+            "utils-created-directory",
+            path = parent.display().to_string()
+        );
     }
 
     #[cfg(unix)]
@@ -107,10 +110,10 @@ pub(crate) fn create_symlink_with_fallback(
         std::os::unix::fs::symlink(vouch_path, symlink_path)
             .with_context(|| format!("failed to create symlink at {}", symlink_path.display()))?;
 
-        println!(
-            "Created symlink: {} -> {}",
-            symlink_path.display(),
-            vouch_path.display()
+        crate::tr_println!(
+            "utils-created-symlink",
+            link = symlink_path.display().to_string(),
+            target = vouch_path.display().to_string()
         );
 
         // Check if the symlink directory is in PATH
@@ -119,8 +122,8 @@ pub(crate) fn create_symlink_with_fallback(
             && !std::env::split_paths(&path_var).any(|p| p == parent)
         {
             println!();
-            println!("Note: {} is not in your PATH.", parent.display());
-            println!("Add it to your shell profile:");
+            crate::tr_println!("utils-path-note", path = parent.display().to_string());
+            crate::tr_println!("utils-path-profile-hint");
             println!("  export PATH=\"$PATH:{}\"", parent.display());
         }
     }
@@ -137,15 +140,15 @@ pub(crate) fn create_symlink_with_fallback(
         vouch_common::fs::atomic_write(&bat_path, windows_batch_content.as_bytes())
             .with_context(|| format!("failed to create {}", bat_path.display()))?;
 
-        println!("Created: {}", bat_path.display());
+        crate::tr_println!("utils-created-file", path = bat_path.display().to_string());
 
         if let Some(parent) = bat_path.parent() {
             if let Ok(path_var) = std::env::var("PATH")
                 && !std::env::split_paths(&path_var).any(|p| p == parent)
             {
                 println!();
-                println!("Note: {} is not in your PATH.", parent.display());
-                println!("Add it to your system PATH environment variable.");
+                crate::tr_println!("utils-path-note", path = parent.display().to_string());
+                crate::tr_println!("utils-path-windows-hint");
             }
         }
     }

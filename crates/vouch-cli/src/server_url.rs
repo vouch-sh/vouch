@@ -77,24 +77,41 @@ impl AsRef<str> for ServerUrl {
 }
 
 /// Errors from [`ServerUrl::parse`].
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug)]
 pub(crate) enum ServerUrlError {
     /// The URL string was empty.
-    #[error("server URL is empty")]
     Empty,
 
     /// The URL could not be parsed.
-    #[error("invalid server URL: {0}")]
     Invalid(String),
 
     /// The URL uses HTTP for a non-loopback host.
-    #[error(
-        "Server URL uses plain HTTP ({0}).\n\
-         Credentials would be sent in plaintext.\n\n\
-         Use an https:// URL, or set --allow-insecure / VOUCH_ALLOW_INSECURE=1 for development."
-    )]
     InsecureHttp(String),
 }
+
+impl std::fmt::Display for ServerUrlError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Empty => write!(f, "{}", crate::tr!("server-url-err-empty")),
+            Self::Invalid(detail) => {
+                write!(
+                    f,
+                    "{}",
+                    crate::tr_args!("server-url-err-invalid", detail = detail.as_str())
+                )
+            }
+            Self::InsecureHttp(url) => {
+                write!(
+                    f,
+                    "{}",
+                    crate::tr_args!("server-url-err-insecure-http", url = url.as_str())
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for ServerUrlError {}
 
 #[cfg(test)]
 #[expect(
@@ -136,6 +153,32 @@ mod tests {
             result.unwrap_err(),
             ServerUrlError::InsecureHttp(_)
         ));
+    }
+
+    #[test]
+    fn error_display_resolves_from_catalog() {
+        assert_eq!(ServerUrlError::Empty.to_string(), "server URL is empty");
+        assert_eq!(
+            ServerUrlError::Invalid("bad".to_string()).to_string(),
+            "invalid server URL: bad"
+        );
+        let msg = ServerUrlError::InsecureHttp("http://x".to_string()).to_string();
+        assert!(
+            msg.contains("Server URL uses plain HTTP (http://x)."),
+            "{msg}"
+        );
+        assert!(
+            msg.contains("Credentials would be sent in plaintext."),
+            "{msg}"
+        );
+        assert!(
+            msg.contains("--allow-insecure / VOUCH_ALLOW_INSECURE=1"),
+            "{msg}"
+        );
+        assert!(
+            msg.contains("plaintext.\n\nUse an https://"),
+            "blank line between paragraphs must survive Fluent round-trip: {msg:?}"
+        );
     }
 
     #[test]

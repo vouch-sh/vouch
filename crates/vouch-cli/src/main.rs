@@ -15,7 +15,7 @@ use tracing_subscriber::EnvFilter;
 // `vouch` binary (e.g. `fido2/unix.rs`, which is compiled into both the lib
 // and the bin) can reference them as `crate::tr!` regardless of compilation
 // context.
-use vouch_cli::{tr, tr_args, tr_eprintln, tr_println};
+pub(crate) use vouch_cli::{tr, tr_args, tr_eprintln, tr_println};
 
 mod client;
 mod commands;
@@ -462,7 +462,7 @@ async fn main() -> ExitCode {
     match run().await {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
-            eprintln!("Error: {err:#}");
+            vouch_cli::tr_eprintln!("cli-error-prefix", error = format!("{err:#}"));
             exit_code::classify(&err)
         }
     }
