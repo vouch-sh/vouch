@@ -4732,7 +4732,7 @@ async fn test_concurrent_secret_add_never_exceeds_two() {
     for h in handles {
         match h.await.expect("task must not panic") {
             Ok(_) => ok_count = ok_count.saturating_add(1),
-            Err(crate::services::error::ServiceError::Api { ref code, .. })
+            Err(crate::error::ServiceError::Api { ref code, .. })
                 if code == "max_secrets_reached" =>
             {
                 max_reached_count = max_reached_count.saturating_add(1);
@@ -4799,9 +4799,9 @@ async fn test_concurrent_secret_revoke_never_drops_below_one() {
         // ServiceError::Api { code: "not_found" }, so there is no Api "not_found" arm.
         match result {
             Ok(()) => {}
-            Err(crate::services::error::ServiceError::Api { ref code, .. })
+            Err(crate::error::ServiceError::Api { ref code, .. })
                 if code == "last_secret" || code == "conflict" => {}
-            Err(crate::services::error::ServiceError::NotFound(_)) => {}
+            Err(crate::error::ServiceError::NotFound(_)) => {}
             Err(e) => panic!("unexpected error from concurrent revoke: {e}"),
         }
     }
@@ -4857,7 +4857,7 @@ async fn test_revoke_then_add_back_to_two() {
     assert!(
         matches!(
             cap_result,
-            Err(crate::services::error::ServiceError::Api { ref code, .. }) if code == "max_secrets_reached"
+            Err(crate::error::ServiceError::Api { ref code, .. }) if code == "max_secrets_reached"
         ),
         "third add must fail with max_secrets_reached; got: {cap_result:?}"
     );
@@ -4902,7 +4902,7 @@ async fn test_revoke_last_secret_rejected() {
     assert!(
         matches!(
             result,
-            Err(crate::services::error::ServiceError::Api { ref code, .. }) if code == "last_secret"
+            Err(crate::error::ServiceError::Api { ref code, .. }) if code == "last_secret"
         ),
         "revoking the last secret must fail with last_secret; got: {result:?}"
     );

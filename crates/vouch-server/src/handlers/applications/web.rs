@@ -632,7 +632,7 @@ pub(crate) async fn add_secret_form(
         match db::create_oauth_client_secret(&state.store, &app_id, &secret_hash, None, None).await
         {
             Ok(r) => r,
-            Err(crate::services::error::ServiceError::Api { ref code, .. })
+            Err(crate::error::ServiceError::Api { ref code, .. })
                 if code == "max_secrets_reached" =>
             {
                 return error_page(
@@ -731,7 +731,7 @@ pub(crate) async fn delete_secret_form(
     // specific message rather than the generic delete-failed page.
     if let Err(e) = db::revoke_oauth_client_secret(&state.store, &secret_id, &app_id).await {
         let msg = match &e {
-            crate::services::error::ServiceError::Api { code, .. } if code == "last_secret" => {
+            crate::error::ServiceError::Api { code, .. } if code == "last_secret" => {
                 Tr::new("apps-error-secret-last-active")
             }
             _ => {

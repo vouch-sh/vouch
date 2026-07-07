@@ -8,7 +8,7 @@
 
 use crate::AppState;
 use crate::db::{JwsAlgorithm, TokenEndpointAuthMethod};
-use crate::services::ServiceError;
+use crate::error::ServiceError;
 use crate::services::auth::ACR_AAL3;
 use crate::services::oidc::OAuthScope;
 use crate::services::oidc::grant_type::OAuthGrantType;
@@ -167,7 +167,7 @@ pub struct MtlsEndpointAliases {
 #[derive(Debug, Serialize)]
 pub struct JwksResponse {
     /// RFC 7517 Section 5.1: The "keys" parameter is an array of JWK values.
-    pub keys: Vec<super::keys::Jwk>,
+    pub keys: Vec<crate::crypto::keys::Jwk>,
 }
 
 /// Build the OIDC discovery document for this server.
@@ -420,16 +420,16 @@ pub fn build_jwks(state: &Arc<AppState>) -> Result<JwksResponse, ServiceError> {
 
     // RSA key first (primary for ID tokens per OIDC Core Section 3.1.3.7)
     if let Some(rsa_key) = &state.oidc_rsa_key {
-        keys.push(super::keys::Jwk::Rsa(rsa_key.public_key_jwk().map_err(
-            |e| {
+        keys.push(crate::crypto::keys::Jwk::Rsa(
+            rsa_key.public_key_jwk().map_err(|e| {
                 tracing::error!("Failed to get OIDC RSA public key JWK: {}", e);
                 ServiceError::Internal("Failed to export OIDC RSA public key".to_string())
-            },
-        )?));
+            })?,
+        ));
     }
 
     // EC key (always present, used for access tokens)
-    keys.push(super::keys::Jwk::Ec(
+    keys.push(crate::crypto::keys::Jwk::Ec(
         state.oidc_key.public_key_jwk().map_err(|e| {
             tracing::error!("Failed to get OIDC public key JWK: {}", e);
             ServiceError::Internal("Failed to export OIDC public key".to_string())

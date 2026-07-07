@@ -7,12 +7,13 @@
 
 use crate::AppState;
 use crate::crypto::hash_token;
+use crate::crypto::keys::OidcSigningKey;
 use crate::db;
+use crate::error::ServiceError;
+use crate::error::ServiceResult;
 use crate::redact_email;
-use crate::services::ServiceError;
-use crate::services::ServiceResult;
 use crate::services::auth::{DecodedToken, decode_token};
-use crate::services::oidc::{OidcSigningKey, ScopeSet};
+use crate::services::oidc::ScopeSet;
 use serde::Serialize;
 use std::sync::Arc;
 
@@ -230,7 +231,7 @@ pub async fn revoke_token(
     state: &Arc<AppState>,
     token: &str,
     _token_type_hint: Option<&str>,
-    client_info: crate::handlers::extractors::ClientInfo,
+    client_info: crate::db::ClientInfo,
     caller_client_id: &str,
 ) -> RevocationResult {
     // Try to decode to get email for audit logging

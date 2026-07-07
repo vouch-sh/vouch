@@ -29,11 +29,11 @@ use super::validate::{
     CreateAppInput, UpdateAppInput, validate_create_application, validate_update_fapi,
     validate_update_format,
 };
+use crate::error::ServiceError;
 use crate::handlers::extractors::OptionalClientCert;
 use crate::handlers::hash_token;
 use crate::handlers::session::extract_resource_token;
 use crate::handlers::{ValidPath, ValidUuid};
-use crate::services::error::ServiceError;
 
 /// List user's applications (API).
 /// GET /api/v1/applications

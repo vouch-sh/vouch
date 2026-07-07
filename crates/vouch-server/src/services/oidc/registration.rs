@@ -23,7 +23,7 @@ use crate::db::{
     self, CreateOAuthClientParams, FapiProfile, JwsAlgorithm, OAuthClient, OAuthClientType,
     OAuthEventType, RegistrationSource, TokenEndpointAuthMethod, UpdateClientRegistrationParams,
 };
-use crate::services::error::{OAuthErrorCode, ServiceError};
+use crate::error::{OAuthErrorCode, ServiceError};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde::{Deserialize, Serialize};

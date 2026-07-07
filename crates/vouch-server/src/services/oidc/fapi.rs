@@ -7,7 +7,7 @@
 //! Reference: <https://openid.net/specs/fapi-security-profile-2_0-final.html>
 
 use crate::db::{OAuthClient, TokenEndpointAuthMethod};
-use crate::services::{OAuthErrorCode, ServiceError, ServiceResult};
+use crate::error::{OAuthErrorCode, ServiceError, ServiceResult};
 
 /// FAPI 2.0 authorization code lifetime in seconds (shorter than standard).
 pub const FAPI_AUTH_CODE_LIFETIME_SECONDS: i64 = 60;

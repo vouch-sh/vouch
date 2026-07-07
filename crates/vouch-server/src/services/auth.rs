@@ -17,9 +17,10 @@
 
 use crate::AppState;
 use crate::crypto::hash_token;
+use crate::crypto::keys::OidcSigningKey;
 use crate::crypto::webauthn_verify;
 use crate::db::{self, Authenticator, SessionPurpose, User};
-use crate::services::oidc::{CnfClaim, OidcSigningKey, ScopeSet};
+use crate::services::oidc::{CnfClaim, ScopeSet};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use jiff::{Span, Timestamp};
@@ -28,7 +29,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt;
 use uuid::Uuid;
 
-use super::{OAuthErrorCode, ServiceError, ServiceResult};
+use crate::error::{OAuthErrorCode, ServiceError, ServiceResult};
 
 // ============================================================================
 // Authentication Method References (RFC 8176)
@@ -498,12 +499,12 @@ impl NoClientAuth {
     /// the caller must produce a real verification witness instead.
     pub(crate) fn for_public_client(
         client: &crate::db::OAuthClient,
-    ) -> Result<Self, crate::services::ServiceError> {
+    ) -> Result<Self, crate::error::ServiceError> {
         if client.token_endpoint_auth_method == crate::db::TokenEndpointAuthMethod::None {
             Ok(Self { _private: () })
         } else {
-            Err(crate::services::ServiceError::oauth(
-                crate::services::OAuthErrorCode::InvalidClient,
+            Err(crate::error::ServiceError::oauth(
+                crate::error::OAuthErrorCode::InvalidClient,
                 "client authentication required",
             ))
         }
@@ -828,10 +829,52 @@ impl DecodedToken {
     }
 }
 
+/// Validated OAuth resource token information.
+///
+/// Produced by the HTTP-side extractors in `handlers::session`
+/// (`extract_resource_token` and friends) after ES256 `at+jwt` decoding,
+/// session lookup, and DPoP validation; consumed by handlers and by
+/// integrations that read the federation snapshot (e.g. AWS WIF).
+#[derive(Debug)]
+#[allow(dead_code, reason = "fields populated for diagnostic / future use")]
+pub(crate) struct ValidatedResourceToken {
+    /// User ID (`sub` claim from the access token).
+    pub sub: String,
+    /// User email (from `email` claim if present, or DB lookup).
+    pub email: Option<String>,
+    /// OAuth client_id from the access token.
+    pub client_id: String,
+    /// Granted OAuth scope.
+    pub scope: Option<crate::services::oidc::ScopeSet>,
+    /// Authenticator ID from the server-side session record (not in JWT).
+    ///
+    /// Presence merely means a key is registered to the user — it does
+    /// **not** prove the current session was hardware-verified. For that,
+    /// gate on [`Self::hardware_verified`] instead.
+    pub authenticator_id: Option<String>,
+    /// FIDO2 hardware-verification claim from the access token. `true`
+    /// only when the session was minted via the FIDO2 grant; `false` for
+    /// bootstrap/enrollment sessions. Used to gate credential issuance
+    /// that asserts hardware verification downstream (e.g. AWS WIF).
+    pub hardware_verified: bool,
+    /// Authentication time (`auth_time` claim).
+    pub auth_time: Option<i64>,
+    /// SHA-256 hash of the access token (for DB lookups/revocation).
+    pub token_hash: String,
+    /// AI coding agent identifier from DPoP proof custom claim (e.g., "claude-code").
+    pub dpop_source: Option<String>,
+    /// AAGUID snapshot from the session record (federation claim).
+    pub hardware_aaguid: Option<String>,
+    /// Organization domain snapshot from the session record (`hd` claim).
+    pub org_domain: Option<String>,
+}
+
 /// Decode a JWT as an RFC 9068 ES256 access token.
 ///
-/// This is a convenience wrapper around [`crate::crypto::jwt::decode_token`] that
-/// constructs a [`TokenValidationContext`] from individual parameters.
+/// This is a convenience wrapper around
+/// [`crate::crypto::jwt::decode_es256_token`] that constructs a
+/// [`TokenValidationContext`] and instantiates the [`AccessTokenClaims`]
+/// schema.
 ///
 /// Validates `typ`, `iss`, and optionally `aud` per RFC 8725.
 /// Pass `expected_audience` for endpoints that require audience binding (e.g., userinfo).
@@ -844,7 +887,8 @@ pub(crate) fn decode_token(
     expected_issuer: &str,
 ) -> Option<DecodedToken> {
     let ctx = crate::crypto::jwt::TokenValidationContext::new(oidc_key, expected_issuer);
-    crate::crypto::jwt::decode_token(token, &ctx)
+    let claims: AccessTokenClaims = crate::crypto::jwt::decode_es256_token(token, &ctx)?;
+    Some(DecodedToken::AccessToken(claims))
 }
 
 #[cfg(test)]

@@ -14,9 +14,8 @@
 //!   or JWKS routes.
 
 use super::helpers::*;
-use crate::services::oidc::protected_resource::{
-    PROTECTED_RESOURCE_PREFIXES, SIGNED_METADATA_TYP, WELL_KNOWN_SUFFIX,
-};
+use crate::infra::resource_metadata::WELL_KNOWN_SUFFIX;
+use crate::services::oidc::protected_resource::{PROTECTED_RESOURCE_PREFIXES, SIGNED_METADATA_TYP};
 use aws_lc_rs::signature::{ECDSA_P256_SHA256_FIXED, UnparsedPublicKey};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 

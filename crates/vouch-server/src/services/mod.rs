@@ -45,7 +45,6 @@
 //! responses (OAuth, SCIM, or standard HTTP errors).
 
 pub(crate) mod auth;
-pub(crate) mod error;
 pub(crate) mod idp;
 pub(crate) mod integrations;
 pub(crate) mod keys;
@@ -54,5 +53,3 @@ pub(crate) mod posture;
 
 // Protocol modules will be added here as they are implemented:
 // pub mod scim;
-
-pub(crate) use error::{OAuthErrorCode, ServiceError, ServiceResult};

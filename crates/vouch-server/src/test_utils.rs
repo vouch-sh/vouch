@@ -29,7 +29,7 @@ use crate::infra::router::build_app;
 
 use crate::AppState;
 use crate::config::{IdpConfig, OidcProviderConfig, ServerConfig};
-use crate::services::oidc::OidcSigningKey;
+use crate::crypto::keys::OidcSigningKey;
 
 /// Create an in-memory SQLite database with migrations for testing.
 pub async fn test_db() -> Pool {
@@ -180,7 +180,7 @@ pub async fn test_app_state_with_idps(
 /// Mirrors `test_app_state_with_idps` but sets `oidc_rsa_key` to a freshly
 /// generated RSA-3072 key pair.
 pub async fn test_app_state_with_rsa_key() -> Arc<AppState> {
-    use crate::services::oidc::OidcRsaSigningKey;
+    use crate::crypto::keys::OidcRsaSigningKey;
 
     let pool = test_db().await;
     let config = test_config();
@@ -229,7 +229,7 @@ pub async fn test_app_state_with_rsa_key() -> Arc<AppState> {
 /// feature falls back to the shared key. Includes a shared RSA key so the
 /// non-per-org RS256 fallback also works.
 pub async fn test_app_state_encrypted() -> Arc<AppState> {
-    use crate::services::oidc::OidcRsaSigningKey;
+    use crate::crypto::keys::OidcRsaSigningKey;
 
     let pool = test_db().await;
     let config = test_config();

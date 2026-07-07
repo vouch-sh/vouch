@@ -1005,7 +1005,7 @@ async fn test_discovery_tls_client_auth_in_auth_methods_with_tls() {
         .build()
         .expect("Webauthn");
 
-    let oidc_key = crate::services::oidc::OidcSigningKey::generate().expect("oidc key");
+    let oidc_key = crate::crypto::keys::OidcSigningKey::generate().expect("oidc key");
 
     let crypto: Arc<dyn crate::crypto::document_crypto::DocumentCrypto> =
         Arc::new(crate::crypto::document_crypto::PlaintextDocumentCrypto);

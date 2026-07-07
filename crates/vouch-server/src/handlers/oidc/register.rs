@@ -60,8 +60,8 @@ pub(crate) async fn register(
             Ok(token) => Some(token.sub),
             Err(_) => {
                 // If a Bearer token was provided but is invalid, reject it
-                return crate::services::ServiceError::oauth(
-                    crate::services::OAuthErrorCode::InvalidClient,
+                return crate::error::ServiceError::oauth(
+                    crate::error::OAuthErrorCode::InvalidClient,
                     "Invalid Bearer token",
                 )
                 .into_oauth_response()

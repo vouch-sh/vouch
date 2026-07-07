@@ -3,8 +3,8 @@
 
 use crate::AppState;
 use crate::db::{self};
+use crate::error::ServiceError;
 use crate::redact_email;
-use crate::services::error::ServiceError;
 use crate::services::keys as key_svc;
 use axum::extract::OriginalUri;
 use axum::http::Method;

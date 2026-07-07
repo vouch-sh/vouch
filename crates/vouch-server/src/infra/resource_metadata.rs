@@ -35,6 +35,10 @@ use std::sync::Arc;
 /// Name of the `WWW-Authenticate` parameter defined by RFC 9728 §5.2.
 const RESOURCE_METADATA_PARAM: &str = "resource_metadata";
 
+/// Well-known URL suffix for the Protected Resource Metadata document
+/// (RFC 9728 §3.1).
+pub const WELL_KNOWN_SUFFIX: &str = "/.well-known/oauth-protected-resource";
+
 /// Axum `from_fn_with_state` layer: append `resource_metadata` to
 /// 401 `WWW-Authenticate` headers.
 ///
@@ -49,11 +53,7 @@ pub async fn layer(State(state): State<Arc<AppState>>, req: Request, next: Next)
 
     // Snapshot configuration exactly once for this response.
     let base_url = state.config().base_url.clone();
-    let metadata_url = format!(
-        "{}{}",
-        base_url.trim_end_matches('/'),
-        crate::services::oidc::protected_resource::WELL_KNOWN_SUFFIX,
-    );
+    let metadata_url = format!("{}{}", base_url.trim_end_matches('/'), WELL_KNOWN_SUFFIX,);
 
     append_resource_metadata(resp.headers_mut(), &metadata_url);
     resp

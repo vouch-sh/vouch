@@ -22,7 +22,7 @@ pub(crate) use subdomain::*;
 
 use crate::AppState;
 use crate::db;
-use crate::services::error::ServiceError;
+use crate::error::ServiceError;
 use aws_lc_rs::digest::{self, SHA256};
 use aws_lc_rs::rand as aws_rand;
 use axum::http::StatusCode;

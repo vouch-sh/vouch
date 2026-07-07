@@ -16,6 +16,7 @@
 use crate::AppState;
 use crate::crypto::jwt::JwtType;
 use crate::db::{self, AuthEventParams, AuthEventType};
+use crate::error::{OAuthErrorCode, ServiceError, ServiceResult};
 use crate::services::auth::{
     AuthenticatorLookupParams, ClientAuthProof, CreateOAuthTokenParams, GrantProof,
     LoginAssertionParams, TokenIssuanceProof, create_oauth_access_token,
@@ -24,7 +25,6 @@ use crate::services::auth::{
 use crate::services::oidc::authorization_details::AuthorizationDetails;
 use crate::services::oidc::token::AuthenticatedClient;
 use crate::services::oidc::{ScopeSet, ValidatedDpopProof};
-use crate::services::{OAuthErrorCode, ServiceError, ServiceResult};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use secrecy::ExposeSecret;
@@ -73,7 +73,7 @@ pub struct Fido2AssertionParams<'a> {
     /// RFC 9396: Raw authorization_details JSON string.
     pub authorization_details: Option<&'a str>,
     /// Client metadata extracted from HTTP headers.
-    pub client_info: crate::handlers::extractors::ClientInfo,
+    pub client_info: crate::db::ClientInfo,
     /// RFC 8705 Section 3: mTLS certificate thumbprint for token binding.
     /// Only set when the client has `tls_client_certificate_bound_access_tokens = true`.
     pub mtls_cert_thumbprint: Option<&'a str>,

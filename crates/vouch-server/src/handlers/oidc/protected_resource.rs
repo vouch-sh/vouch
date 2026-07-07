@@ -14,7 +14,7 @@
 //! against an allowlist; unknown sub-paths return 404.
 
 use crate::AppState;
-use crate::services::ServiceError;
+use crate::error::ServiceError;
 use crate::services::oidc::protected_resource as svc;
 use axum::{
     Json,

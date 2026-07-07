@@ -4,7 +4,7 @@
 //! Provides shared validation logic used by both JWT client authentication
 //! (Section 2.2) and JWT authorization grants (Section 2.1).
 
-use crate::services::{OAuthErrorCode, ServiceError, ServiceResult};
+use crate::error::{OAuthErrorCode, ServiceError, ServiceResult};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use jiff::Timestamp;

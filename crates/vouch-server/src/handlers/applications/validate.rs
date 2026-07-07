@@ -9,7 +9,7 @@
 use axum::http::StatusCode;
 
 use crate::db::{OAuthClient, OAuthClientType};
-use crate::services::error::ServiceError;
+use crate::error::ServiceError;
 use crate::services::oidc::ResourceUri;
 
 use super::{validate_post_logout_redirect_uris, validate_redirect_uris};

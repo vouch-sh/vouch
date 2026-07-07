@@ -85,57 +85,12 @@ const EXCEPTIONS: &[Exception] = &[
         target: "services",
         reason: "CSP form-action origins are derived from configured IdPs",
     },
-    // Known inversions: shared types living above their lowest consumer.
-    // Each entry is deleted when the type moves down to where it belongs.
-    Exception {
-        file: "crypto/jwt.rs",
-        target: "services",
-        reason: "AccessTokenClaims/DecodedToken/OidcSigningKey belong in crypto",
-    },
-    Exception {
-        file: "db/oauth.rs",
-        target: "services",
-        reason: "ServiceError belongs in a crate-root error module",
-    },
-    Exception {
-        file: "infra/ssrf.rs",
-        target: "services",
-        reason: "ServiceError belongs in a crate-root error module",
-    },
     Exception {
         file: "db/par.rs",
         target: "services",
-        reason: "ParCreationProof belongs in db/par.rs, its lowest consumer",
-    },
-    Exception {
-        file: "db/config.rs",
-        target: "handlers",
-        reason: "ClientInfo belongs in db/config.rs, its lowest consumer",
-    },
-    Exception {
-        file: "services/oidc/fido2_grant.rs",
-        target: "handlers",
-        reason: "ClientInfo belongs in db/config.rs, its lowest consumer",
-    },
-    Exception {
-        file: "services/oidc/introspection.rs",
-        target: "handlers",
-        reason: "ClientInfo belongs in db/config.rs, its lowest consumer",
-    },
-    Exception {
-        file: "services/integrations/aws.rs",
-        target: "handlers",
-        reason: "ValidatedResourceToken belongs in services, not handlers",
-    },
-    Exception {
-        file: "infra/rate_limit.rs",
-        target: "handlers",
-        reason: "resolve_client_ip belongs in infra, not handlers",
-    },
-    Exception {
-        file: "infra/resource_metadata.rs",
-        target: "services",
-        reason: "RFC 9728 well-known suffix const belongs at its lowest consumer",
+        reason: "PAR chokepoint takes ParCreationProof, a witness only \
+                 constructible from services client-auth verification — the \
+                 upward type reference is what makes the db write unforgeable",
     },
 ];
 

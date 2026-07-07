@@ -71,10 +71,32 @@ pub struct AuthEventParams {
     pub client_id: Option<String>,
 }
 
+/// Client information extracted from the request.
+///
+/// `client_ip` comes from the TCP socket (`ConnectInfo<SocketAddr>`), not from
+/// proxy headers. This prevents IP spoofing via `X-Forwarded-For` when the
+/// server is exposed directly without a trusted reverse proxy. The axum
+/// extractor and header-parsing impls live in `handlers::extractors`.
+#[derive(Debug, Clone, Default)]
+pub struct ClientInfo {
+    /// Client IP address from the TCP peer socket.
+    pub client_ip: Option<IpAddr>,
+    /// User-Agent header.
+    pub user_agent: Option<String>,
+    /// Client hostname (from `Vouch-Client-Hostname` header).
+    pub client_hostname: Option<String>,
+    /// Client OS (from `Vouch-Client-OS` header).
+    pub client_os: Option<String>,
+    /// Client CPU architecture (from `Vouch-Client-Arch` header).
+    pub client_arch: Option<String>,
+    /// Client version (from `Vouch-Client-Version` header).
+    pub client_version: Option<String>,
+}
+
 impl AuthEventParams {
     /// Populate all client metadata fields from a `ClientInfo` extractor.
     #[must_use]
-    pub fn with_client_info(mut self, info: crate::handlers::extractors::ClientInfo) -> Self {
+    pub fn with_client_info(mut self, info: ClientInfo) -> Self {
         self.client_ip = info.client_ip;
         self.user_agent = info.user_agent;
         self.client_hostname = info.client_hostname;
@@ -158,7 +180,6 @@ pub async fn delete_old_auth_events(audit: &AuditStore, before: jiff::Timestamp)
 )]
 mod tests {
     use super::*;
-    use crate::handlers::extractors::ClientInfo;
     use crate::test_utils::test_app_state;
     use jiff::SignedDuration;
 

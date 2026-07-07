@@ -663,7 +663,7 @@ mod tests {
     /// `jsonwebtoken::jwk::JwkSet` deserializer. The EC key coordinates
     /// (x, y) and kid are taken directly from the signing key so that
     /// the JWKS matches the signature on JWTs the same key produces.
-    fn make_ec_jwks_json(signing_key: &crate::services::oidc::OidcSigningKey) -> String {
+    fn make_ec_jwks_json(signing_key: &crate::crypto::keys::OidcSigningKey) -> String {
         let jwk = signing_key
             .public_key_jwk()
             .expect("public_key_jwk should succeed");
@@ -688,7 +688,7 @@ mod tests {
     /// and `iat`; the caller also sets `email`, `email_verified`, `nonce`, and
     /// `hd` as required by `verify_id_token`.
     async fn sign_test_jwt(
-        key: &crate::services::oidc::OidcSigningKey,
+        key: &crate::crypto::keys::OidcSigningKey,
         claims: serde_json::Value,
     ) -> String {
         key.sign_jwt(&claims)
@@ -697,10 +697,7 @@ mod tests {
     }
 
     /// Mount a JWKS endpoint on the mock server and return the signing key.
-    async fn mount_jwks(
-        server: &wiremock::MockServer,
-        key: &crate::services::oidc::OidcSigningKey,
-    ) {
+    async fn mount_jwks(server: &wiremock::MockServer, key: &crate::crypto::keys::OidcSigningKey) {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, ResponseTemplate};
 
@@ -1179,7 +1176,7 @@ mod tests {
         let client_id = "test-client";
         let nonce = "test-nonce-abc";
 
-        let key = crate::services::oidc::OidcSigningKey::generate().unwrap();
+        let key = crate::crypto::keys::OidcSigningKey::generate().unwrap();
         mount_jwks(&server, &key).await;
 
         let mut claims = base_claims(&issuer, client_id);
@@ -1208,7 +1205,7 @@ mod tests {
         let issuer = server.uri();
         let client_id = "test-client";
 
-        let key = crate::services::oidc::OidcSigningKey::generate().unwrap();
+        let key = crate::crypto::keys::OidcSigningKey::generate().unwrap();
         mount_jwks(&server, &key).await;
 
         let mut claims = base_claims(&issuer, client_id);
@@ -1238,7 +1235,7 @@ mod tests {
         let issuer = server.uri();
         let client_id = "test-client";
 
-        let key = crate::services::oidc::OidcSigningKey::generate().unwrap();
+        let key = crate::crypto::keys::OidcSigningKey::generate().unwrap();
         mount_jwks(&server, &key).await;
 
         // No nonce claim in the token
@@ -1267,7 +1264,7 @@ mod tests {
         let issuer = server.uri();
         let client_id = "test-client";
 
-        let key = crate::services::oidc::OidcSigningKey::generate().unwrap();
+        let key = crate::crypto::keys::OidcSigningKey::generate().unwrap();
         mount_jwks(&server, &key).await;
 
         // No nonce in token; empty expected_nonce signals device-code flow
@@ -1294,7 +1291,7 @@ mod tests {
         let client_id = "test-client";
         let nonce = "test-nonce";
 
-        let key = crate::services::oidc::OidcSigningKey::generate().unwrap();
+        let key = crate::crypto::keys::OidcSigningKey::generate().unwrap();
         mount_jwks(&server, &key).await;
 
         let mut claims = base_claims(&issuer, client_id);
@@ -1327,7 +1324,7 @@ mod tests {
         let client_id = "test-client";
         let nonce = "test-nonce";
 
-        let key = crate::services::oidc::OidcSigningKey::generate().unwrap();
+        let key = crate::crypto::keys::OidcSigningKey::generate().unwrap();
         mount_jwks(&server, &key).await;
 
         let mut claims = base_claims(google_issuer, client_id);
@@ -1360,7 +1357,7 @@ mod tests {
         let client_id = "test-client";
         let nonce = "test-nonce";
 
-        let key = crate::services::oidc::OidcSigningKey::generate().unwrap();
+        let key = crate::crypto::keys::OidcSigningKey::generate().unwrap();
         mount_jwks(&server, &key).await;
 
         let mut claims = base_claims(&issuer, client_id);
@@ -1396,7 +1393,7 @@ mod tests {
         let client_id = "test-client";
         let nonce = "test-nonce";
 
-        let key = crate::services::oidc::OidcSigningKey::generate().unwrap();
+        let key = crate::crypto::keys::OidcSigningKey::generate().unwrap();
         mount_jwks(&server, &key).await;
 
         let mut claims = base_claims(google_issuer, client_id);
@@ -1430,7 +1427,7 @@ mod tests {
         let client_id = "test-client";
         let nonce = "test-nonce";
 
-        let key = crate::services::oidc::OidcSigningKey::generate().unwrap();
+        let key = crate::crypto::keys::OidcSigningKey::generate().unwrap();
         mount_jwks(&server, &key).await;
 
         let mut claims = base_claims(&issuer, client_id);
@@ -1462,7 +1459,7 @@ mod tests {
         let client_id = "test-client";
         let nonce = "test-nonce";
 
-        let key = crate::services::oidc::OidcSigningKey::generate().unwrap();
+        let key = crate::crypto::keys::OidcSigningKey::generate().unwrap();
         mount_jwks(&server, &key).await;
 
         let mut claims = base_claims(google_issuer, client_id);
@@ -1501,7 +1498,7 @@ mod tests {
         let client_id = "test-client";
         let nonce = "test-nonce";
 
-        let key = crate::services::oidc::OidcSigningKey::generate().unwrap();
+        let key = crate::crypto::keys::OidcSigningKey::generate().unwrap();
         mount_jwks(&server, &key).await;
 
         let mut claims = base_claims(&entra_issuer, client_id);
@@ -1536,7 +1533,7 @@ mod tests {
         let client_id = "test-client";
         let nonce = "test-nonce";
 
-        let key = crate::services::oidc::OidcSigningKey::generate().unwrap();
+        let key = crate::crypto::keys::OidcSigningKey::generate().unwrap();
         mount_jwks(&server, &key).await;
 
         let mut claims = base_claims(&entra_issuer, client_id);
@@ -1583,7 +1580,7 @@ mod tests {
         let client_id = "test-client";
         let nonce = "test-nonce";
 
-        let key = crate::services::oidc::OidcSigningKey::generate().unwrap();
+        let key = crate::crypto::keys::OidcSigningKey::generate().unwrap();
         mount_jwks(&server, &key).await;
 
         // Token claims use the per-tenant issuer (as Entra actually issues them)
@@ -1621,7 +1618,7 @@ mod tests {
         let client_id = "test-client";
         let nonce = "test-nonce";
 
-        let key = crate::services::oidc::OidcSigningKey::generate().unwrap();
+        let key = crate::crypto::keys::OidcSigningKey::generate().unwrap();
         mount_jwks(&server, &key).await;
 
         let mut claims = base_claims(&token_iss, client_id);
@@ -1660,7 +1657,7 @@ mod tests {
         let client_id = "test-client";
         let nonce = "test-nonce";
 
-        let key = crate::services::oidc::OidcSigningKey::generate().unwrap();
+        let key = crate::crypto::keys::OidcSigningKey::generate().unwrap();
         mount_jwks(&server, &key).await;
 
         let mut claims = base_claims(&token_iss, client_id);
@@ -1718,7 +1715,7 @@ mod tests {
         let client_id = "test-client";
         let nonce = "test-nonce";
 
-        let key = crate::services::oidc::OidcSigningKey::generate().unwrap();
+        let key = crate::crypto::keys::OidcSigningKey::generate().unwrap();
         mount_jwks(&server, &key).await;
 
         let mut claims = base_claims(&token_iss, client_id);
@@ -1756,7 +1753,7 @@ mod tests {
         let client_id = "test-client";
         let nonce = "test-nonce";
 
-        let key = crate::services::oidc::OidcSigningKey::generate().unwrap();
+        let key = crate::crypto::keys::OidcSigningKey::generate().unwrap();
         mount_jwks(&server, &key).await;
 
         let mut claims = base_claims(&token_iss, client_id);
@@ -1799,7 +1796,7 @@ mod tests {
         let client_id = "test-client";
         let nonce = "test-nonce";
 
-        let key = crate::services::oidc::OidcSigningKey::generate().unwrap();
+        let key = crate::crypto::keys::OidcSigningKey::generate().unwrap();
         mount_jwks(&server, &key).await;
 
         let mut claims = base_claims(&token_iss, client_id);
@@ -1840,7 +1837,7 @@ mod tests {
         let client_id = "test-client";
         let nonce = "test-nonce";
 
-        let key = crate::services::oidc::OidcSigningKey::generate().unwrap();
+        let key = crate::crypto::keys::OidcSigningKey::generate().unwrap();
         mount_jwks(&server, &key).await;
 
         let mut claims = base_claims(&issuer, client_id);
