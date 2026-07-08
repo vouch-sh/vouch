@@ -179,6 +179,6 @@ The Vouch CLI resolves its user-facing language once at startup. Resolution chec
 
 If none of the above resolve, the CLI falls through to the operating system's default locale via [`sys-locale`](https://crates.io/crates/sys-locale). When that is also unavailable (e.g., a minimal container with no locale configured), the CLI falls back to `en-US`. POSIX-style locale strings (`en_US.UTF-8`, `ca_ES@valencia`) are normalized by stripping the `.<codeset>` and `@<modifier>` suffixes and replacing `_` with `-`.
 
-Machine-readable output (`vouch status --json`, `vouch status --shell`, `vouch env`, credential helpers) is **never** affected by the locale — those payloads are consumed by other tools and remain stable across locales. Only human-facing prompts, success/failure messages, and `--help` text honor the negotiated locale.
+Machine-readable output (`vouch status --json`, `vouch status --shell`, `vouch env`, credential helpers) is **never** affected by the locale — those payloads are consumed by other tools and remain stable across locales. Only human-facing prompts, success/failure messages, error messages, and `--help` text honor the negotiated locale.
 
 This release ships `en-US` only; the catalog scaffolding lets translations land in isolated PRs without changing the CLI surface.
