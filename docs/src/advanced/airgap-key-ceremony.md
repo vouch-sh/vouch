@@ -81,7 +81,7 @@ export VOUCH_OIDC_SIGNING_KEY="$(base64 -i oidc_signing_key.pem | tr -d '\n')"
 
 ## OIDC RSA Signing Key Generation (RSA-3072)
 
-The OIDC RSA signing key signs ID tokens with RS256 algorithm per [OIDC Core Section 3.1.3.7](https://openid.net/specs/openid-connect-core-1_0.html#IDToken). This is optional but recommended for OIDC specification conformance. If not provided, an ephemeral key is generated on each server restart.
+The OIDC RSA signing key signs ID tokens with RS256 algorithm per [OIDC Core Section 3.1.3.7](https://openid.net/specs/openid-connect-core-1_0.html#IDToken) and all AWS credential tokens (`/v1/credentials/aws/token`, serving both STS `AssumeRoleWithWebIdentity` and IAM Identity Center `CreateTokenWithIAM`). Any deployment using the AWS integration must provide a durable key — without one, an ephemeral RSA-3072 key is generated on each server restart, and AWS token verification breaks after restarts and across multiple instances.
 
 ```bash
 # Generate RSA-3072 private key in PKCS#8 format
