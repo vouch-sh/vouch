@@ -1519,6 +1519,80 @@ mod tests {
         );
     }
 
+    /// A domain that flips to Verified between cleanup's read and its
+    /// compare-and-update must not be removed — and must not be *reported* as
+    /// removed: the per-attempt removal list is rewritten on every OCC retry
+    /// so only the committed attempt's removals reach the audit trail. Uses
+    /// the modify test seam to force the flip inside the OCC window.
+    #[tokio::test]
+    async fn cleanup_reports_only_committed_attempt_removals() {
+        use crate::db::documents::organization::OrganizationDoc;
+        use std::sync::Arc;
+
+        let store = fresh_store().await;
+        let org = create_organization(&store, "acme.com", None, None)
+            .await
+            .unwrap();
+
+        // Insert a stale Pending entry eligible for removal.
+        let stale_added = jiff::Timestamp::now()
+            .checked_sub(jiff::Span::new().hours(30 * 24))
+            .unwrap();
+        let mut doc = store
+            .get::<OrganizationDoc>(&org.id)
+            .await
+            .unwrap()
+            .unwrap();
+        doc.data.additional_domains.push(AdditionalDomain {
+            domain: "flips-late.example.com".to_string(),
+            verification_token: "tok".to_string(),
+            added_at: stale_added,
+            added_by_user_id: "u1".to_string(),
+            added_by_email: "u1@example.com".to_string(),
+            consecutive_failures: 0,
+            state: AdditionalDomainState::Pending,
+        });
+        store.update(&org.id, &doc.data).await.unwrap();
+
+        // Hook: verify the domain inside the OCC window, forcing a retry
+        // whose fresh read sees a Verified entry that must be kept.
+        let writer = store.clone();
+        let hook_org_id = org.id.clone();
+        let mut hooked = store.clone();
+        hooked.set_modify_test_hook(Arc::new(move |_doc_id: &str, attempt: u32| {
+            let writer = writer.clone();
+            let hook_org_id = hook_org_id.clone();
+            Box::pin(async move {
+                if attempt != 0 {
+                    return;
+                }
+                mark_additional_domain_verified(&writer, &hook_org_id, "flips-late.example.com")
+                    .await
+                    .unwrap();
+            })
+        }));
+
+        let removed = cleanup_stale_additional_domains(
+            &hooked,
+            jiff::Timestamp::now(),
+            jiff::Span::new().hours(7 * 24),
+            jiff::Span::new().hours(14 * 24),
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            removed.is_empty(),
+            "a domain verified mid-cleanup must not be reported as removed: {removed:?}"
+        );
+        let list = list_additional_domains(&store, &org.id).await.unwrap();
+        assert_eq!(list.len(), 1, "the verified domain must survive cleanup");
+        assert!(
+            matches!(list[0].state, AdditionalDomainState::Verified { .. }),
+            "the entry must still be verified"
+        );
+    }
+
     /// Regression for issue #380. `cleanup_stale_additional_domains` computes
     /// its removal candidate set from a [`list_all_paginated`] snapshot, but
     /// the actual delete happens later inside [`DocumentStore::modify`]. If

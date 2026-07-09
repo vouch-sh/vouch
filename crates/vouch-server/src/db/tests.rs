@@ -4125,6 +4125,52 @@ async fn test_update_github_installation_repos_delta_concurrent_deltas_both_land
     );
 }
 
+/// Deterministic companion to the concurrent-delta test above (whose
+/// `tokio::join!` contention depends on scheduling): the modify test seam
+/// applies a second delta inside the OCC window, guaranteeing the retry path
+/// runs and asserting the retried merge re-reads the fresh repo list.
+#[tokio::test]
+async fn test_update_github_installation_repos_delta_occ_retry_merges_fresh_state() {
+    let (store, _audit) = test_db().await;
+    create_test_github_installation(&store, 20_004, "org-delta-seam").await;
+    let seeded = update_github_installation_repos(&store, 20_004, &["seed".to_string()])
+        .await
+        .expect("seed repos");
+    assert!(seeded, "seeding must find the installation");
+
+    let writer = store.clone();
+    let mut hooked = store.clone();
+    hooked.set_modify_test_hook(Arc::new(move |_doc_id: &str, attempt: u32| {
+        let writer = writer.clone();
+        Box::pin(async move {
+            if attempt != 0 {
+                return;
+            }
+            let bravo = vec!["bravo".to_string()];
+            let found = update_github_installation_repos_delta(&writer, 20_004, &bravo, &[])
+                .await
+                .expect("hook delta must not error");
+            assert!(found, "hook delta must find the installation");
+        })
+    }));
+
+    let alpha = vec!["alpha".to_string()];
+    let found = update_github_installation_repos_delta(&hooked, 20_004, &alpha, &[])
+        .await
+        .expect("delta must not error");
+    assert!(found, "delta must find the installation");
+
+    let after = get_github_installation_by_installation_id(&store, 20_004)
+        .await
+        .expect("lookup after deltas")
+        .expect("installation must still exist");
+    assert_eq!(
+        after.repositories.as_deref(),
+        Some(&["alpha".to_string(), "bravo".to_string(), "seed".to_string()][..]),
+        "the delta applied inside the OCC window must survive the retried merge"
+    );
+}
+
 /// If an installation is deleted between the index-resolve and the `modify` call
 /// (race with an uninstall webhook), `modify` returns `Ok(false)` rather than
 /// updating a stale document.
@@ -4839,6 +4885,169 @@ async fn test_update_authenticator_counter_high_concurrency_no_lost_update() {
     assert_eq!(
         auth.counter, target,
         "counter must equal the max value applied in the concurrent burst"
+    );
+}
+
+/// Deterministic companion to the #545 burst test above (whose contention
+/// depends on scheduling): a higher counter written inside the OCC window via
+/// the modify test seam must win over the in-flight lower value — the retry
+/// re-reads the fresh counter and `max()` keeps it. A blind write would
+/// regress the counter to 50.
+#[tokio::test]
+async fn test_update_authenticator_counter_concurrent_higher_value_wins() {
+    use crate::db::documents::authenticator::AuthenticatorDoc;
+
+    let (store, _audit) = test_db().await;
+    let (user_id, _) = upsert_user(&store, "counter-seam@example.com", None)
+        .await
+        .expect("upsert user");
+    let auth_id = create_authenticator(
+        &store,
+        &CreateAuthenticatorParams {
+            user_id: &user_id,
+            user_email: "counter-seam@example.com",
+            name: "Counter Seam Key",
+            credential_id: b"cred-counter-seam",
+            public_key: &[0u8; 32],
+            aaguid: None,
+            user_handle: None,
+            attestation_verified: false,
+        },
+    )
+    .await
+    .expect("create authenticator");
+
+    let writer = store.clone();
+    let mut hooked = store.clone();
+    hooked.set_modify_test_hook(Arc::new(move |doc_id: &str, attempt: u32| {
+        let writer = writer.clone();
+        let doc_id = doc_id.to_string();
+        Box::pin(async move {
+            if attempt != 0 {
+                return;
+            }
+            let doc = writer
+                .get::<AuthenticatorDoc>(&doc_id)
+                .await
+                .expect("hook get")
+                .expect("hook doc must exist");
+            let mut data = doc.data;
+            data.counter = 100;
+            writer.update(&doc_id, &data).await.expect("hook update");
+        })
+    }));
+
+    update_authenticator_counter(&hooked, &auth_id, 50)
+        .await
+        .expect("counter update must not error");
+
+    let auth = get_authenticator_by_id(&store, &auth_id)
+        .await
+        .expect("get authenticator")
+        .expect("authenticator must exist");
+    assert_eq!(
+        auth.counter, 100,
+        "the concurrent higher counter must survive the retried max()"
+    );
+}
+
+/// The concurrent suspend/unsuspend test cannot distinguish OCC from a blind
+/// write (its own comment says so — both bump the version). This
+/// deterministic variant proves the re-read: a sibling-field write
+/// (repositories) landing inside the OCC window must survive the suspend
+/// that retries over it.
+#[tokio::test]
+async fn test_suspend_github_installation_preserves_concurrent_sibling_write() {
+    use crate::db::documents::github::GitHubInstallationDoc;
+
+    let (store, _audit) = test_db().await;
+    let doc_id = create_test_github_installation(&store, 20_005, "org-sibling-preserve").await;
+
+    let writer = store.clone();
+    let mut hooked = store.clone();
+    hooked.set_modify_test_hook(Arc::new(move |_doc_id: &str, attempt: u32| {
+        let writer = writer.clone();
+        Box::pin(async move {
+            if attempt != 0 {
+                return;
+            }
+            let found =
+                update_github_installation_repos(&writer, 20_005, &["hook/repo".to_string()])
+                    .await
+                    .expect("hook repos update must not error");
+            assert!(found, "hook must find the installation");
+        })
+    }));
+
+    let found = suspend_github_installation(&hooked, 20_005)
+        .await
+        .expect("suspend must not error");
+    assert!(found, "suspend must find the installation");
+
+    let after = store
+        .get::<GitHubInstallationDoc>(&doc_id)
+        .await
+        .expect("get after")
+        .expect("must exist");
+    assert!(after.data.suspended_at.is_some(), "suspend must land");
+    assert_eq!(
+        after.data.repositories.as_deref(),
+        Some(&["hook/repo".to_string()][..]),
+        "the concurrent repositories write must not be clobbered by the suspend"
+    );
+}
+
+/// Deterministic companion to the #537 sequential test above: an admin
+/// demotion landing inside the OCC window (not merely before the call) must
+/// survive `update_user_github_identity`'s retry — the doc comment on that
+/// function promises exactly this.
+#[tokio::test]
+async fn test_update_user_github_identity_preserves_concurrent_admin_change() {
+    let (store, _audit) = test_db().await;
+    let (user_id, _) = upsert_user_with_org(
+        &store,
+        "seam-race@example.com",
+        Some("Seam Race User"),
+        Some("org-seam-race"),
+        true, // starts as admin
+    )
+    .await
+    .expect("upsert admin user");
+
+    let writer = store.clone();
+    let demote_user_id = user_id.clone();
+    let mut hooked = store.clone();
+    hooked.set_modify_test_hook(Arc::new(move |_doc_id: &str, attempt: u32| {
+        let writer = writer.clone();
+        let demote_user_id = demote_user_id.clone();
+        Box::pin(async move {
+            if attempt != 0 {
+                return;
+            }
+            let found = update_user_admin_status(&writer, &demote_user_id, false)
+                .await
+                .expect("hook demotion must not error");
+            assert!(found, "hook must find the user");
+        })
+    }));
+
+    update_user_github_identity(&hooked, &user_id, 42, "gh-user", None)
+        .await
+        .expect("github identity update must not error");
+
+    let user = get_user_by_id(&store, &user_id)
+        .await
+        .expect("get user")
+        .expect("user must exist");
+    assert!(
+        !user.is_org_admin,
+        "the demotion inside the OCC window must survive the identity update"
+    );
+    assert_eq!(user.github_id, Some(42), "github_id must be set");
+    assert_eq!(
+        user.github_login.as_deref(),
+        Some("gh-user"),
+        "github_login must be set"
     );
 }
 
