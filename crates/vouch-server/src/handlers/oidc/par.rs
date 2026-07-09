@@ -165,14 +165,10 @@ pub(crate) async fn par(
     if let Some(ref request_jwt) = params.request
         && let Err(e) = validate_request_object_header(request_jwt)
     {
-        let description = match &e {
-            crate::error::ServiceError::OAuth { description, .. } => description.clone(),
-            _ => e.to_string(),
-        };
         return par_error_response(
             StatusCode::BAD_REQUEST,
             "invalid_request_object",
-            &description,
+            &e.oauth_description(),
         );
     }
 
@@ -243,11 +239,11 @@ pub(crate) async fn par(
         &authenticated_client.client,
         authenticated_client.client.token_endpoint_auth_method,
     ) {
-        let desc = match &e {
-            ServiceError::OAuth { description, .. } => description.clone(),
-            _ => e.to_string(),
-        };
-        return par_error_response(StatusCode::UNAUTHORIZED, "invalid_client", &desc);
+        return par_error_response(
+            StatusCode::UNAUTHORIZED,
+            "invalid_client",
+            &e.oauth_description(),
+        );
     }
 
     // RFC 9101: Enforce require_signed_request_object for this client.
@@ -407,11 +403,11 @@ pub(crate) async fn par(
 
     // RFC 9700: PKCE required for public clients and Native/SPA types.
     if let Err(e) = require_pkce_for_client(&validated, &authenticated_client.client) {
-        let description = match &e {
-            ServiceError::OAuth { description, .. } => description.clone(),
-            _ => e.to_string(),
-        };
-        return par_error_response(StatusCode::BAD_REQUEST, "invalid_request", &description);
+        return par_error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            &e.oauth_description(),
+        );
     }
 
     // Validate redirect_uri against registered URIs

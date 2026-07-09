@@ -349,10 +349,7 @@ pub async fn validate_request_object(
     {
         return Err(ServiceError::oauth(
             OAuthErrorCode::InvalidRequestObject,
-            match &e {
-                ServiceError::OAuth { description, .. } => description.clone(),
-                _ => e.to_string(),
-            },
+            e.oauth_description(),
         ));
     }
 

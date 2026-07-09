@@ -251,6 +251,16 @@ impl ServiceError {
         }
     }
 
+    /// Returns the OAuth-facing description if this is an `OAuth` variant,
+    /// otherwise falls back to the error's `Display` output.
+    #[must_use]
+    pub(crate) fn oauth_description(&self) -> String {
+        match self {
+            Self::OAuth { description, .. } => description.clone(),
+            other => other.to_string(),
+        }
+    }
+
     /// Create a structured API error with a specific status code, error code,
     /// and message.
     ///
@@ -454,6 +464,19 @@ mod tests {
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(json.error, "invalid_grant");
         assert_eq!(json.error_description, Some("Token expired".to_string()));
+    }
+
+    #[test]
+    fn test_oauth_description_returns_description_for_oauth_variant() {
+        let err = ServiceError::oauth(OAuthErrorCode::InvalidRequest, "boom");
+        assert_eq!(err.oauth_description(), "boom");
+    }
+
+    #[test]
+    fn test_oauth_description_falls_back_to_display_for_other_variant() {
+        let err = ServiceError::Internal("x".to_string());
+        assert_eq!(err.oauth_description(), "internal error: x");
+        assert_eq!(err.oauth_description(), err.to_string());
     }
 
     #[test]

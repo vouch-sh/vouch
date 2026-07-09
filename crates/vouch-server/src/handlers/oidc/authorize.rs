@@ -240,12 +240,13 @@ async fn run_security_pipeline(
 ) -> Result<(), Response> {
     // PKCE: required for public clients and Native/SPA types (RFC 9700).
     if let Err(e) = require_pkce_for_client(validated, &resolved.client) {
-        let description = match &e {
-            crate::error::ServiceError::OAuth { description, .. } => description.clone(),
-            _ => e.to_string(),
-        };
         return Err(resolved
-            .error_redirect(state, "invalid_request", &description, validated.state())
+            .error_redirect(
+                state,
+                "invalid_request",
+                &e.oauth_description(),
+                validated.state(),
+            )
             .await);
     }
 
@@ -256,12 +257,13 @@ async fn run_security_pipeline(
             false,
         )
     {
-        let description = match &e {
-            crate::error::ServiceError::OAuth { description, .. } => description.clone(),
-            _ => e.to_string(),
-        };
         return Err(resolved
-            .error_redirect(state, "invalid_request", &description, validated.state())
+            .error_redirect(
+                state,
+                "invalid_request",
+                &e.oauth_description(),
+                validated.state(),
+            )
             .await);
     }
 
@@ -613,13 +615,9 @@ async fn handle_jar_request(
     {
         Ok(params) => params,
         Err(e) => {
-            let description = match &e {
-                crate::error::ServiceError::OAuth { description, .. } => description.clone(),
-                _ => e.to_string(),
-            };
             return AuthorizeDeniedTemplate {
                 client_name: oauth_client.name,
-                error_message: format!("Invalid Request Object: {description}"),
+                error_message: format!("Invalid Request Object: {}", e.oauth_description()),
             }
             .into_response();
         }
@@ -921,13 +919,9 @@ async fn fetch_and_resolve_request_uri(
     if let Err(e) =
         crate::services::oidc::fapi::validate_fapi_authorization_request(&oauth_client, false)
     {
-        let description = match &e {
-            crate::error::ServiceError::OAuth { description, .. } => description.clone(),
-            _ => e.to_string(),
-        };
         return Err(AuthorizeDeniedTemplate {
             client_name: oauth_client.name,
-            error_message: format!("Invalid request: {description}"),
+            error_message: format!("Invalid request: {}", e.oauth_description()),
         }
         .into_response());
     }
@@ -948,21 +942,18 @@ async fn fetch_and_resolve_request_uri(
     // Loopback request_uri destinations are permitted only in local development
     // (no TLS configured); private/link-local targets stay blocked.
     let allow_loopback = !state.config().tls_configured();
-    let fetched_jwt =
-        match fetch_request_object(request_uri, allow_loopback, &state.http_client).await {
-            Ok(jwt) => jwt,
-            Err(e) => {
-                let description = match &e {
-                    crate::error::ServiceError::OAuth { description, .. } => description.clone(),
-                    _ => e.to_string(),
-                };
-                return Err(AuthorizeDeniedTemplate {
-                    client_name: oauth_client.name,
-                    error_message: format!("Failed to fetch Request Object: {description}"),
-                }
-                .into_response());
+    let fetched_jwt = match fetch_request_object(request_uri, allow_loopback, &state.http_client)
+        .await
+    {
+        Ok(jwt) => jwt,
+        Err(e) => {
+            return Err(AuthorizeDeniedTemplate {
+                client_name: oauth_client.name,
+                error_message: format!("Failed to fetch Request Object: {}", e.oauth_description()),
             }
-        };
+            .into_response());
+        }
+    };
 
     // Step 5: validate the JWT.
     let query_hints = QueryParamHints {
