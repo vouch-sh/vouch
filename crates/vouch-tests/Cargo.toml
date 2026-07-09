@@ -41,4 +41,3 @@ vouch-server = { path = "../vouch-server", features = ["test-utils"] }
 
 [dev-dependencies]
 proptest = { workspace = true, features = ["std"] }
-tempfile = { workspace = true }

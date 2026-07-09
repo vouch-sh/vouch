@@ -55,7 +55,6 @@ jsonwebtoken = { workspace = true, features = ["aws_lc_rs"] }
 maxminddb = { workspace = true }
 metrics = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
-mime_guess = { workspace = true }
 mimalloc = { workspace = true, features = ["secure"] }
 opentelemetry = { workspace = true, features = ["trace"] }
 opentelemetry-otlp = { workspace = true, features = ["trace", "grpc-tonic", "tls-aws-lc"] }
@@ -66,15 +65,16 @@ reqwest = { workspace = true, features = ["json", "rustls", "form"] }
 roxmltree = { workspace = true }
 rust-embed = { workspace = true, features = ["axum-ex", "compression", "deterministic-timestamps", "mime-guess"] }
 rustls = { workspace = true, features = ["aws-lc-rs", "std", "prefer-post-quantum", "tls12"] }
-rustls-pki-types = { workspace = true, features = ["alloc"] }
 sea-query = { workspace = true, features = ["backend-sqlite", "backend-postgres", "derive"] }
 sea-query-sqlx = { workspace = true, features = ["sqlx-sqlite", "sqlx-postgres", "runtime-tokio"] }
 secrecy = { workspace = true, features = ["serde"] }
 serde = { workspace = true, features = ["std", "derive"] }
 serde_json = { workspace = true, features = ["std"] }
 serde_urlencoded = { workspace = true }
-sha2 = { workspace = true, features = ["oid"] }
 signature = { workspace = true }
+# Direct dep only to enable sha2/oid: x509-cert's CertificateBuilder requires
+# `Sha256: AssociatedOid` for ES256 certificate signing.
+sha2 = { workspace = true, features = ["oid"] }
 spki = { workspace = true, features = ["std"] }
 sqlx = { workspace = true, features = ["runtime-tokio", "migrate", "derive", "macros", "sqlite", "postgres", "tls-rustls-aws-lc-rs"] }
 ssh-key = { workspace = true, features = ["std", "ed25519", "encryption", "rand_core", "getrandom"] }
