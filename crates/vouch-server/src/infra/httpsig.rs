@@ -10,6 +10,7 @@ use std::sync::Arc;
 
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use p256::elliptic_curve::sec1::ToEncodedPoint;
 
 use vouch_httpsig::algorithm::VerifyingAlgorithm;
 use vouch_httpsig::algorithm::ecdsa_p256::EcdsaP256Verifier;
@@ -117,34 +118,25 @@ fn extract_client_id(headers: &http::HeaderMap, _state: &AppState) -> Option<Str
 
 /// Convert a P-256 EC JWK to a 65-byte uncompressed SEC1 public key.
 ///
-/// Returns `None` if the JWK is not a valid P-256 key.
+/// Returns `None` if the JWK is not a valid P-256 key or the coordinates
+/// are not a point on the curve.
 fn jwk_to_p256_public_key(jwk: &serde_json::Value) -> Option<Vec<u8>> {
-    let kty = jwk.get("kty")?.as_str()?;
-    let crv = jwk.get("crv")?.as_str()?;
-    if kty != "EC" || crv != "P-256" {
-        return None;
-    }
-
-    let x_bytes = URL_SAFE_NO_PAD.decode(jwk.get("x")?.as_str()?).ok()?;
-    let y_bytes = URL_SAFE_NO_PAD.decode(jwk.get("y")?.as_str()?).ok()?;
-
-    // P-256 coordinates are 32 bytes each
-    if x_bytes.len() != 32 || y_bytes.len() != 32 {
-        return None;
-    }
-
-    // Uncompressed SEC1 point: 0x04 || x || y
-    let mut point = Vec::with_capacity(65);
-    point.push(0x04);
-    point.extend_from_slice(&x_bytes);
-    point.extend_from_slice(&y_bytes);
-    Some(point)
+    // JwkEcKey rejects unknown members (kid, use, alg), so hand it only the
+    // EC members of the JWKS entry.
+    let ec_members = serde_json::json!({
+        "kty": jwk.get("kty")?,
+        "crv": jwk.get("crv")?,
+        "x": jwk.get("x")?,
+        "y": jwk.get("y")?,
+    });
+    let ec_jwk: p256::elliptic_curve::JwkEcKey = serde_json::from_value(ec_members).ok()?;
+    let public_key = ec_jwk.to_public_key::<p256::NistP256>().ok()?;
+    Some(public_key.to_encoded_point(false).as_bytes().to_vec())
 }
 
 #[cfg(test)]
 #[expect(
     clippy::unwrap_used,
-    clippy::indexing_slicing,
     reason = "test code: panic on assertion failure is acceptable"
 )]
 mod tests {
@@ -152,8 +144,12 @@ mod tests {
 
     #[test]
     fn test_jwk_to_p256_public_key_valid() {
-        let x = URL_SAFE_NO_PAD.encode([1u8; 32]);
-        let y = URL_SAFE_NO_PAD.encode([2u8; 32]);
+        let point = p256::SecretKey::from_slice(&[7u8; 32])
+            .unwrap()
+            .public_key()
+            .to_encoded_point(false);
+        let x = URL_SAFE_NO_PAD.encode(point.x().unwrap());
+        let y = URL_SAFE_NO_PAD.encode(point.y().unwrap());
         let jwk = serde_json::json!({
             "kty": "EC",
             "crv": "P-256",
@@ -163,10 +159,18 @@ mod tests {
         });
 
         let key = jwk_to_p256_public_key(&jwk).unwrap();
-        assert_eq!(key.len(), 65);
-        assert_eq!(key[0], 0x04);
-        assert_eq!(&key[1..33], &[1u8; 32]);
-        assert_eq!(&key[33..65], &[2u8; 32]);
+        assert_eq!(key, point.as_bytes());
+    }
+
+    #[test]
+    fn test_jwk_to_p256_public_key_rejects_off_curve_point() {
+        let jwk = serde_json::json!({
+            "kty": "EC",
+            "crv": "P-256",
+            "x": URL_SAFE_NO_PAD.encode([1u8; 32]),
+            "y": URL_SAFE_NO_PAD.encode([2u8; 32]),
+        });
+        assert!(jwk_to_p256_public_key(&jwk).is_none());
     }
 
     #[test]

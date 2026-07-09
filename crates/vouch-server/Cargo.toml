@@ -36,7 +36,7 @@ axum-server = { workspace = true, features = ["tls-rustls"] }
 base64 = { workspace = true, features = ["std"] }
 cel = { workspace = true }
 ciborium = { workspace = true }
-clap = { workspace = true, features = ["std", "derive", "env", "help", "usage", "error-context"] }
+clap = { workspace = true, features = ["std", "derive", "env", "help", "usage", "error-context", "suggestions", "color"] }
 const-oid = { workspace = true }
 der = { workspace = true, features = ["std", "oid"] }
 dotenvy = { workspace = true }
@@ -60,11 +60,11 @@ mimalloc = { workspace = true, features = ["secure"] }
 opentelemetry = { workspace = true, features = ["trace"] }
 opentelemetry-otlp = { workspace = true, features = ["trace", "grpc-tonic", "tls-aws-lc"] }
 opentelemetry_sdk = { workspace = true, features = ["rt-tokio", "trace"] }
-p256 = { workspace = true, features = ["alloc", "ecdsa", "pkcs8", "pem"] }
+p256 = { workspace = true, features = ["alloc", "ecdsa", "jwk", "pkcs8", "pem"] }
 psl = { workspace = true, features = ["helpers"] }
 reqwest = { workspace = true, features = ["json", "rustls", "form"] }
 roxmltree = { workspace = true }
-rust-embed = { workspace = true, features = ["axum-ex", "deterministic-timestamps", "mime-guess"] }
+rust-embed = { workspace = true, features = ["axum-ex", "compression", "deterministic-timestamps", "mime-guess"] }
 rustls = { workspace = true, features = ["aws-lc-rs", "std", "prefer-post-quantum", "tls12"] }
 rustls-pki-types = { workspace = true, features = ["alloc"] }
 sea-query = { workspace = true, features = ["backend-sqlite", "backend-postgres", "derive"] }
