@@ -27,9 +27,15 @@ Both `VOUCH_TLS_CERT` and `VOUCH_TLS_KEY` must be set together. If only one is p
 
 ### TLS Properties
 
-- **Protocol**: TLS 1.3 only
+- **Protocol**: TLS 1.3 and TLS 1.2
 - **Implementation**: rustls (no OpenSSL)
-- **Ciphers**: AEAD only (AES-GCM, ChaCha20-Poly1305)
+- **Ciphers**: BCP 195 (RFC 9325) suites only — TLS 1.3 AEAD suites, and ECDHE+AEAD suites for TLS 1.2 (AES-GCM, ChaCha20-Poly1305)
+
+### Post-Quantum Key Exchange
+
+Both TLS listeners (HTTPS and mTLS) and all outbound TLS clients (CLI, agent, and server-to-IdP/AWS connections) prefer the **X25519MLKEM768** hybrid post-quantum key-exchange group. When the peer supports it — modern browsers, Cloudflare, and AWS endpoints do — the TLS session keys are protected against "harvest now, decrypt later" attacks. Peers without ML-KEM support negotiate classical X25519 or P-256 as usual; no configuration is required on either side.
+
+See [Post-Quantum Cryptography](../operations/post-quantum.md) for Vouch's overall PQC posture.
 
 ## Certificate Hot-Reload
 

@@ -14,6 +14,8 @@ Vouch uses several cryptographic keys. This page covers their lifecycle and rota
 | TLS Certificate | EC/RSA | HTTPS transport | Env var or S3 config |
 | Client Key (per-CLI) | P-256 EC (ES256) | FAPI 2.0 client auth, DPoP proofs | OS keychain (macOS Keychain, Linux Secret Service, Windows Credential Manager), file fallback |
 
+All of these keys use classical (pre-quantum) algorithms. For why that is currently the right choice for each of them, and what Vouch already does about quantum resistance, see [Post-Quantum Cryptography](post-quantum.md).
+
 ## SSH CA Key
 
 The SSH CA key signs all SSH user certificates. Every host that trusts Vouch certificates must have the corresponding public key in `TrustedUserCAKeys`.
