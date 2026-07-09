@@ -185,7 +185,7 @@ Used for HPKE (Hybrid Public Key Encryption) of sensitive documents stored along
 vouch-server generate-document-key --kms-key-id mrk-<your-kms-key-id>
 ```
 
-This generates a P-384 EC key pair, encrypts the private key with the specified KMS key, and outputs the `document_key` JSON block to add to your S3 config.
+This generates a P-384 EC key pair, encrypts the private key with the specified KMS key, and outputs the `document_key` JSON block to add to your S3 config. `--algorithm p384` is the default and currently the only supported algorithm; the flag exists so post-quantum algorithms can be added later without changing the command or config shape.
 
 ### Configuration
 
@@ -195,12 +195,40 @@ The `document_key` field in S3 config contains:
 {
   "document_key": {
     "kms_key_id": "mrk-<your-kms-key-id>",
-    "encrypted_private_key": "<base64-encoded KMS ciphertext>"
+    "encrypted_private_key": "<base64-encoded KMS ciphertext>",
+    "algorithm": "p384"
   }
 }
 ```
 
+`algorithm` is optional and defaults to `p384`, so configs provisioned before the field existed keep working unchanged.
+
 At startup, the server decrypts the private key via `kms:Decrypt` and holds the key material in memory for the lifetime of the process.
+
+### Cipher-suite tagging and the post-quantum path
+
+Every document row records the HPKE cipher suite it was sealed with: the stored
+encapsulated key is prefixed `hpke:<kem_id>:<kdf_id>:<aead_id>:` using the RFC 9180
+codepoints (`hpke:0011:0002:0002:` for the current DHKEM(P-384) + HKDF-SHA384 +
+AES-256-GCM suite). Rows written before tagging existed are plain base64 and are read
+as that same P-384 suite. Rows sealed under different suites can therefore coexist in
+one database, which is what makes a future key-encapsulation migration — e.g. to the
+ML-KEM hybrid suites from draft-ietf-hpke-pq — an operational rotation rather than a
+breaking format change.
+
+There is no document-key rotation mechanism today. When post-quantum suites become
+available in the underlying libraries (rustls / aws-lc-rs), the expected migration is:
+
+1. Provision a new `document_key` with the new algorithm (one new
+   `generate-document-key --algorithm` value).
+2. Run a dual-key read period: the server decrypts old rows with the old private key
+   (selected by each row's suite tag) while sealing new writes under the new suite.
+3. Re-encrypt existing rows opportunistically on write, plus an offline sweep for the
+   remainder; then retire the old key.
+
+Steps 2–3 are not implemented yet — only the storage format and configuration
+groundwork exist. Do not remove the old key from KMS until every row carries the new
+suite tag.
 
 ## Per-Org Issuer Signing Keys (ES256 + RS256)
 

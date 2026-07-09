@@ -33,6 +33,7 @@ use tokio::task::JoinHandle;
 use rustls::crypto::hpke::{HpkePrivateKey, HpkePublicKey};
 
 use crate::config::{IdpConfig, OidcProviderConfig, SamlProviderConfig, ServerConfig};
+use crate::crypto::document_crypto::{HpkeSuiteId, SUITE_DHKEM_P384_SHA384_AES256};
 use crate::crypto::tpm_decrypt;
 use crate::infra::kms_arn::KmsArnResolver;
 
@@ -90,17 +91,45 @@ impl std::fmt::Debug for S3AcmeConfig {
     }
 }
 
+/// Key algorithm of the document encryption key.
+///
+/// Selects the KMS `DataKeyPairSpec` at generation time, the key-material
+/// parser at startup, and the HPKE suite used for new writes. An absent
+/// field means P-384 — every config provisioned before this field existed.
+/// Future post-quantum algorithms (draft-ietf-hpke-pq ML-KEM hybrids) become
+/// new variants here once rustls/aws-lc-rs expose the corresponding suites.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize, clap::ValueEnum)]
+#[serde(rename_all = "lowercase")]
+pub enum DocumentKeyAlgorithm {
+    /// NIST P-384 → DHKEM(P-384) + HKDF-SHA384 + AES-256-GCM.
+    #[default]
+    P384,
+}
+
+impl DocumentKeyAlgorithm {
+    /// The HPKE suite this key algorithm seals with.
+    #[must_use]
+    pub fn hpke_suite_id(self) -> HpkeSuiteId {
+        match self {
+            Self::P384 => SUITE_DHKEM_P384_SHA384_AES256,
+        }
+    }
+}
+
 /// Document encryption key configuration from S3.
 ///
-/// When present in the S3 config, the server uses the P-384 private key
+/// When present in the S3 config, the server uses the private key
 /// (decrypted from KMS at startup) for HPKE document encryption.
 /// Provisioned by the `generate-document-key` subcommand.
 #[derive(Clone, Deserialize, Serialize)]
 pub struct S3DocumentKeyConfig {
     /// KMS key ID that protects the encrypted private key.
     pub kms_key_id: String,
-    /// Base64-encoded KMS ciphertext blob (encrypted P-384 private key DER).
+    /// Base64-encoded KMS ciphertext blob (encrypted private key DER).
     pub encrypted_private_key: String,
+    /// Key algorithm; defaults to P-384 for configs that predate the field.
+    #[serde(default)]
+    pub algorithm: DocumentKeyAlgorithm,
 }
 
 impl std::fmt::Debug for S3DocumentKeyConfig {
@@ -108,23 +137,27 @@ impl std::fmt::Debug for S3DocumentKeyConfig {
         f.debug_struct("S3DocumentKeyConfig")
             .field("kms_key_id", &self.kms_key_id)
             .field("encrypted_private_key", &"[REDACTED]")
+            .field("algorithm", &self.algorithm)
             .finish()
     }
 }
 
-/// Decrypted P-384 HPKE key pair for document encryption.
+/// Decrypted HPKE key pair for document encryption.
 ///
 /// Recovered from `S3DocumentKeyConfig` by decrypting the private key via KMS.
 pub struct DocumentKeyMaterial {
-    /// P-384 public key (uncompressed point, 97 bytes).
+    /// HPKE suite the key pair belongs to (from the config's `algorithm`).
+    pub suite_id: HpkeSuiteId,
+    /// Public key (for P-384: uncompressed point, 97 bytes).
     pub public_key: HpkePublicKey,
-    /// P-384 private key (scalar, 48 bytes). Zeroizes on drop.
+    /// Private key (for P-384: scalar, 48 bytes). Zeroizes on drop.
     pub private_key: HpkePrivateKey,
 }
 
 impl std::fmt::Debug for DocumentKeyMaterial {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DocumentKeyMaterial")
+            .field("suite_id", &format_args!("{}", self.suite_id))
             .field(
                 "public_key",
                 &format_args!("[{} bytes]", self.public_key.0.len()),
@@ -483,10 +516,11 @@ async fn fetch_s3_raw(client: &S3Client, source: &S3ConfigSource) -> Result<(Vec
     Ok((body.into_bytes().to_vec(), etag))
 }
 
-/// Decrypt a `document_key` config entry to recover the P-384 HPKE key pair.
+/// Decrypt a `document_key` config entry to recover the HPKE key pair.
 ///
 /// Calls `kms:Decrypt` (uses NitroTPM attestation when available) to decrypt
-/// the private key ciphertext, then derives the HPKE key pair from the DER.
+/// the private key ciphertext, then derives the HPKE key pair from the DER
+/// according to the config's `algorithm`.
 ///
 /// `key_arn` is the already-resolved KMS key identifier (full ARN when
 /// `kms_account_id` is configured, otherwise the raw value from S3 config).
@@ -508,13 +542,17 @@ async fn decrypt_document_key(
             .await
             .context("KMS Decrypt for document_key failed")?;
 
-    let (public_key, private_key) =
-        crate::crypto::document_crypto::p384_hpke_keys_from_private_key_der(&plaintext)
-            .context("Failed to extract P-384 HPKE keys from document_key DER")?;
+    let (public_key, private_key) = match doc_key.algorithm {
+        DocumentKeyAlgorithm::P384 => {
+            crate::crypto::document_crypto::p384_hpke_keys_from_private_key_der(&plaintext)
+                .context("Failed to extract P-384 HPKE keys from document_key DER")?
+        }
+    };
 
     tracing::info!("Document encryption key decrypted via KMS");
 
     Ok(DocumentKeyMaterial {
+        suite_id: doc_key.algorithm.hpke_suite_id(),
         public_key,
         private_key,
     })
@@ -1176,6 +1214,28 @@ mod tests {
         let dk = config.document_key.unwrap();
         assert_eq!(dk.kms_key_id, "mrk-doc-key-123");
         assert_eq!(dk.encrypted_private_key, "YmFzZTY0Y2lwaGVydGV4dA==");
+        // Configs provisioned before the algorithm field existed default to P-384.
+        assert_eq!(dk.algorithm, DocumentKeyAlgorithm::P384);
+    }
+
+    #[test]
+    fn test_s3_config_deserialization_with_explicit_document_key_algorithm() {
+        let json = r#"{
+            "version": 1,
+            "document_key": {
+                "kms_key_id": "mrk-doc-key-123",
+                "encrypted_private_key": "YmFzZTY0Y2lwaGVydGV4dA==",
+                "algorithm": "p384"
+            }
+        }"#;
+
+        let config: S3Config = serde_json::from_str(json).expect("Failed to parse");
+        let dk = config.document_key.unwrap();
+        assert_eq!(dk.algorithm, DocumentKeyAlgorithm::P384);
+        assert_eq!(
+            dk.algorithm.hpke_suite_id(),
+            crate::crypto::document_crypto::SUITE_DHKEM_P384_SHA384_AES256
+        );
     }
 
     #[test]
@@ -1265,6 +1325,7 @@ mod tests {
         let dk = S3DocumentKeyConfig {
             kms_key_id: "mrk-test-123".to_string(),
             encrypted_private_key: "c2VjcmV0LWNpcGhlcnRleHQ=".to_string(),
+            algorithm: DocumentKeyAlgorithm::P384,
         };
         let debug = format!("{dk:?}");
         assert!(

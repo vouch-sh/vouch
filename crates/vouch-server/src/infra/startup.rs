@@ -538,9 +538,14 @@ async fn build_app_state(
     // back to PlaintextDocumentCrypto for development.
     let crypto: std::sync::Arc<dyn crate::crypto::document_crypto::DocumentCrypto> =
         if let Some(keys) = doc_keys {
-            tracing::info!("Document encryption initialized (KMS HPKE): P-384 key pair");
+            tracing::info!(
+                "Document encryption initialized (KMS HPKE): {} ({})",
+                keys.suite_id.label(),
+                keys.suite_id
+            );
             std::sync::Arc::new(
                 crate::crypto::document_crypto::HpkeDocumentCrypto::new(
+                    keys.suite_id,
                     keys.public_key,
                     keys.private_key,
                 )

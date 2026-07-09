@@ -1,11 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
-//! Generate a P-384 document encryption key pair via KMS.
+//! Generate a document encryption key pair via KMS.
 //!
-//! Uses `kms:GenerateDataKeyPairWithoutPlaintext` with `ECC_NIST_P384` to
-//! produce a key pair where the private key is returned only in encrypted form.
-//! The plaintext private key never leaves KMS — the server decrypts it at
-//! startup via `kms:Decrypt`. The output is a JSON object suitable for
-//! embedding as the `document_key` field in an S3 config.
+//! Uses `kms:GenerateDataKeyPairWithoutPlaintext` to produce a key pair where
+//! the private key is returned only in encrypted form. The plaintext private
+//! key never leaves KMS — the server decrypts it at startup via `kms:Decrypt`.
+//! The output is a JSON object suitable for embedding as the `document_key`
+//! field in an S3 config.
+//!
+//! P-384 is the only supported algorithm today; the `--algorithm` flag exists
+//! so post-quantum algorithms (draft-ietf-hpke-pq) can be added without
+//! changing the command's interface or output shape.
 //!
 //! ## Usage
 //!
@@ -20,7 +24,9 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use clap::Args;
 
-/// Generate a P-384 document encryption key pair via KMS
+use crate::infra::s3_config::DocumentKeyAlgorithm;
+
+/// Generate a document encryption key pair via KMS
 /// (without plaintext private key).
 #[derive(Args)]
 pub struct GenerateDocumentKeyArgs {
@@ -28,6 +34,10 @@ pub struct GenerateDocumentKeyArgs {
     /// `GenerateDataKeyPairWithoutPlaintext`.
     #[arg(long)]
     pub kms_key_id: String,
+
+    /// Key algorithm for the generated key pair.
+    #[arg(long, value_enum, default_value = "p384")]
+    pub algorithm: DocumentKeyAlgorithm,
 
     /// AWS region override.
     #[arg(long, env = "AWS_REGION")]
@@ -44,16 +54,20 @@ pub async fn run(args: GenerateDocumentKeyArgs) -> Result<()> {
     let sdk_config = config_loader.load().await;
     let kms_client = aws_sdk_kms::Client::new(&sdk_config);
 
-    // 2. Generate a P-384 data key pair via KMS
+    // 2. Generate a data key pair via KMS
+    let key_pair_spec = match args.algorithm {
+        DocumentKeyAlgorithm::P384 => aws_sdk_kms::types::DataKeyPairSpec::EccNistP384,
+    };
     tracing::info!(
-        "Generating P-384 data key pair via KMS (key: {})",
+        "Generating {:?} data key pair via KMS (key: {})",
+        args.algorithm,
         args.kms_key_id
     );
 
     let response = kms_client
         .generate_data_key_pair_without_plaintext()
         .key_id(&args.kms_key_id)
-        .key_pair_spec(aws_sdk_kms::types::DataKeyPairSpec::EccNistP384)
+        .key_pair_spec(key_pair_spec)
         .send()
         .await
         .context("KMS GenerateDataKeyPairWithoutPlaintext failed")?;
@@ -69,11 +83,13 @@ pub async fn run(args: GenerateDocumentKeyArgs) -> Result<()> {
         .context("KMS response missing private_key_ciphertext_blob")?;
 
     // 5. Output JSON
-    // `kms_key_id` + `encrypted_private_key` map to S3DocumentKeyConfig fields.
+    // `kms_key_id` + `encrypted_private_key` + `algorithm` map to
+    // S3DocumentKeyConfig fields.
     // `public_key` is informational for operators (not consumed by the server).
     let output = serde_json::json!({
         "kms_key_id": args.kms_key_id,
         "encrypted_private_key": BASE64.encode(encrypted_private_key_blob.as_ref()),
+        "algorithm": args.algorithm,
         "public_key": BASE64.encode(public_key_der_blob.as_ref()),
     });
 
