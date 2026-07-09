@@ -101,26 +101,12 @@ pub(super) fn sign_data(private_key: &PrivateKey, data: &[u8]) -> Result<Vec<u8>
 
     let (alg_name, sig_bytes) = match private_key.key_data() {
         ssh_key::private::KeypairData::Ed25519(keypair) => {
-            // Get the signing key bytes and create a signature
-            let signing_key_bytes = Zeroizing::new(keypair.private.to_bytes());
-            let public_key_bytes = keypair.public.0;
-
-            // ed25519-dalek's SigningKey::from_keypair_bytes() expects
-            // the NaCl format: seed (32 bytes) || public_key (32 bytes)
-            let mut full_key = Zeroizing::new([0u8; 64]);
-            full_key
-                .get_mut(..32)
-                .ok_or_else(|| AgentError::Protocol("key buffer too small".to_string()))?
-                .copy_from_slice(&*signing_key_bytes);
-            full_key
-                .get_mut(32..)
-                .ok_or_else(|| AgentError::Protocol("key buffer too small".to_string()))?
-                .copy_from_slice(&public_key_bytes);
-
-            // Use ed25519 signing
             use ed25519_dalek::{Signer, SigningKey};
-            let signing_key = SigningKey::from_keypair_bytes(&full_key)
-                .map_err(|e| AgentError::Protocol(format!("invalid ed25519 key: {e}")))?;
+
+            // The public half is derived from the seed, so the keypair's
+            // stored public key is not consulted here.
+            let seed = Zeroizing::new(keypair.private.to_bytes());
+            let signing_key = SigningKey::from_bytes(&seed);
             let signature = signing_key.sign(data);
 
             ("ssh-ed25519", signature.to_bytes().to_vec())
@@ -172,5 +158,29 @@ mod tests {
         assert_eq!(&response[1..5], &[0, 0, 0, 4]);
         // Signature data
         assert_eq!(&response[5..9], &[0x01, 0x02, 0x03, 0x04]);
+    }
+
+    #[test]
+    fn test_sign_data_ed25519_verifies_under_stored_public_key() {
+        use ssh_key::private::{Ed25519Keypair, KeypairData};
+
+        let keypair = Ed25519Keypair::from_seed(&[7u8; 32]);
+        let public_key_bytes = keypair.public.0;
+        let private_key = PrivateKey::new(KeypairData::Ed25519(keypair), "test").unwrap();
+
+        let data = b"ssh agent signing round trip";
+        let blob = sign_data(&private_key, data).unwrap();
+
+        // SSH wire format: string algorithm (11 bytes) + string signature (64 bytes)
+        assert_eq!(blob.len(), 83);
+        assert_eq!(&blob[..4], &11u32.to_be_bytes());
+        assert_eq!(&blob[4..15], b"ssh-ed25519");
+        assert_eq!(&blob[15..19], &64u32.to_be_bytes());
+        let signature: [u8; 64] = blob[19..].try_into().unwrap();
+
+        let verifying_key = ed25519_dalek::VerifyingKey::from_bytes(&public_key_bytes).unwrap();
+        verifying_key
+            .verify_strict(data, &ed25519_dalek::Signature::from_bytes(&signature))
+            .unwrap();
     }
 }

@@ -1677,6 +1677,7 @@ dependencies = [
  "rand_core 0.10.1",
  "rustc_version",
  "subtle",
+ "zeroize",
 ]
 
 [[package]]
@@ -2021,6 +2022,7 @@ dependencies = [
  "sha2 0.11.0",
  "signature 3.0.0",
  "subtle",
+ "zeroize",
 ]
 
 [[package]]
