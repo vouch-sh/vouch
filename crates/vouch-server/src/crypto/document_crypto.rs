@@ -9,11 +9,20 @@
 //!
 //! - [`PlaintextDocumentCrypto`] — Development. Identity functions: `seal()` returns plaintext
 //!   JSON, `hmac_index()` returns plaintext values.
+//!
+//! ## Cipher-suite agility
+//!
+//! Every encapsulated key written since suite tagging landed is self-describing:
+//! `hpke:<kem_id>:<kdf_id>:<aead_id>:<base64>` with the RFC 9180 codepoints in
+//! four-digit lowercase hex. Untagged values (plain base64) predate tagging and
+//! are read as [`LEGACY_SUITE`]. This lets rows sealed under different suites
+//! coexist in one database, so a future KEM migration (e.g. the ML-KEM hybrids
+//! from draft-ietf-hpke-pq) is a key rotation, not a format break.
 
 use anyhow::{Context, Result, bail};
 use base64::Engine;
 use base64::engine::general_purpose::{STANDARD as BASE64, URL_SAFE_NO_PAD};
-use rustls::crypto::hpke::{HpkePrivateKey, HpkePublicKey};
+use rustls::crypto::hpke::{Hpke, HpkePrivateKey, HpkePublicKey};
 use zeroize::Zeroizing;
 
 /// Encrypted document payload for storage.
@@ -95,17 +104,160 @@ impl DocumentCrypto for PlaintextDocumentCrypto {
 }
 
 // ============================================================================
+// Cipher-Suite Identity
+// ============================================================================
+
+/// RFC 9180 cipher-suite identifier: KEM, KDF, and AEAD codepoints.
+///
+/// Persisted with every ciphertext (as a prefix on the encapsulated key) so
+/// the suite a row was sealed under is recorded on the row itself rather than
+/// implied by the compiled binary. New codepoints — such as the ML-KEM and
+/// hybrid KEMs registered by draft-ietf-hpke-pq — only need an arm in
+/// [`suite_for`] and key material; the storage format already carries them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HpkeSuiteId {
+    /// RFC 9180 KEM codepoint (e.g. `0x0011` = DHKEM(P-384, HKDF-SHA384)).
+    pub kem_id: u16,
+    /// RFC 9180 KDF codepoint (e.g. `0x0002` = HKDF-SHA384).
+    pub kdf_id: u16,
+    /// RFC 9180 AEAD codepoint (e.g. `0x0002` = AES-256-GCM).
+    pub aead_id: u16,
+}
+
+/// DHKEM(P-384, HKDF-SHA384) + HKDF-SHA384 + AES-256-GCM.
+pub(crate) const SUITE_DHKEM_P384_SHA384_AES256: HpkeSuiteId = HpkeSuiteId {
+    kem_id: 0x0011,
+    kdf_id: 0x0002,
+    aead_id: 0x0002,
+};
+
+/// Suite assumed for untagged (plain base64) encapsulated keys, which were
+/// written before suite tagging existed. Fixed forever — do not repoint this
+/// at a new suite, or pre-tagging rows become undecryptable.
+pub(crate) const LEGACY_SUITE: HpkeSuiteId = SUITE_DHKEM_P384_SHA384_AES256;
+
+impl HpkeSuiteId {
+    /// Human-readable name for logs and operator output.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        if self == SUITE_DHKEM_P384_SHA384_AES256 {
+            "DHKEM(P-384)+HKDF-SHA384+AES-256-GCM"
+        } else {
+            "unknown"
+        }
+    }
+}
+
+impl std::fmt::Display for HpkeSuiteId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "kem=0x{:04x} kdf=0x{:04x} aead=0x{:04x}",
+            self.kem_id, self.kdf_id, self.aead_id
+        )
+    }
+}
+
+/// Resolve a suite ID to its HPKE implementation.
+///
+/// The single place that maps codepoints to code. Adding a suite (e.g. an
+/// ML-KEM hybrid from draft-ietf-hpke-pq once rustls/aws-lc-rs expose it)
+/// means adding one arm here plus the matching key-material handling.
+///
+/// # Errors
+///
+/// Returns an error naming the codepoints if the suite is not supported by
+/// this build — e.g. a row written by a newer server.
+fn suite_for(id: HpkeSuiteId) -> Result<&'static dyn Hpke> {
+    if id == SUITE_DHKEM_P384_SHA384_AES256 {
+        return Ok(rustls::crypto::aws_lc_rs::hpke::DH_KEM_P384_HKDF_SHA384_AES_256);
+    }
+    bail!("unsupported HPKE suite ({id}); this server may be too old to read this document")
+}
+
+/// Tag prefix marking a self-describing encapsulated key.
+///
+/// Safe discriminator: standard base64 never contains `:`, so an untagged
+/// (legacy) value can never be mistaken for a tagged one.
+const SUITE_TAG_PREFIX: &str = "hpke:";
+
+/// Encode an encapsulated key with its suite tag:
+/// `hpke:<kem_id>:<kdf_id>:<aead_id>:<base64>` (codepoints as four-digit
+/// lowercase hex).
+fn encode_encapped_key(suite: HpkeSuiteId, enc: &[u8]) -> String {
+    format!(
+        "{SUITE_TAG_PREFIX}{:04x}:{:04x}:{:04x}:{}",
+        suite.kem_id,
+        suite.kdf_id,
+        suite.aead_id,
+        BASE64.encode(enc)
+    )
+}
+
+/// Decode a stored encapsulated key into its suite ID and raw bytes.
+///
+/// Tagged values carry their own suite; untagged values are read as
+/// [`LEGACY_SUITE`].
+///
+/// # Errors
+///
+/// Returns an error on a malformed tag or invalid base64.
+fn decode_encapped_key(value: &str) -> Result<(HpkeSuiteId, Vec<u8>)> {
+    let Some(rest) = value.strip_prefix(SUITE_TAG_PREFIX) else {
+        let bytes = BASE64
+            .decode(value)
+            .context("invalid base64 in encapped_key")?;
+        return Ok((LEGACY_SUITE, bytes));
+    };
+
+    let mut parts = rest.splitn(4, ':');
+    let kem_id = parse_codepoint(parts.next(), "kem_id")?;
+    let kdf_id = parse_codepoint(parts.next(), "kdf_id")?;
+    let aead_id = parse_codepoint(parts.next(), "aead_id")?;
+    let encoded = parts
+        .next()
+        .context("encapped_key suite tag is missing the key material")?;
+    let bytes = BASE64
+        .decode(encoded)
+        .context("invalid base64 in encapped_key")?;
+
+    Ok((
+        HpkeSuiteId {
+            kem_id,
+            kdf_id,
+            aead_id,
+        },
+        bytes,
+    ))
+}
+
+/// Parse one four-digit lowercase-hex codepoint field of a suite tag.
+fn parse_codepoint(part: Option<&str>, what: &str) -> Result<u16> {
+    let text = part.with_context(|| format!("encapped_key suite tag is missing {what}"))?;
+    if text.len() != 4 {
+        bail!("encapped_key suite tag has malformed {what} (expected 4 hex digits)");
+    }
+    u16::from_str_radix(text, 16)
+        .with_context(|| format!("encapped_key suite tag has malformed {what}"))
+}
+
+// ============================================================================
 // HPKE Implementation (Production)
 // ============================================================================
 
-/// Production crypto using HPKE (RFC 9180) with DHKEM(P-384) + HKDF-SHA384 +
-/// AES-256-GCM.
+/// Production crypto using HPKE (RFC 9180). The write suite is configured at
+/// construction (currently always DHKEM(P-384) + HKDF-SHA384 + AES-256-GCM);
+/// reads resolve each row's suite from its tag.
 ///
 /// The public key is used for `seal()` (no KMS call needed). The private key
 /// is used for `open()` (decrypted from KMS on startup). The HMAC key is
 /// derived from the public key via HKDF so that writers can compute index
 /// values without access to the private key.
 pub(crate) struct HpkeDocumentCrypto {
+    /// Suite used for new writes; also the suite the key pair belongs to.
+    suite_id: HpkeSuiteId,
+    /// Resolved implementation of `suite_id`, cached for `seal()`.
+    suite: &'static dyn Hpke,
     public_key: HpkePublicKey,
     private_key: HpkePrivateKey,
     hmac_key: Zeroizing<Vec<u8>>,
@@ -114,6 +266,7 @@ pub(crate) struct HpkeDocumentCrypto {
 impl std::fmt::Debug for HpkeDocumentCrypto {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("HpkeDocumentCrypto")
+            .field("suite_id", &format_args!("{}", self.suite_id))
             .field(
                 "public_key",
                 &format_args!("[{} bytes]", self.public_key.0.len()),
@@ -125,22 +278,27 @@ impl std::fmt::Debug for HpkeDocumentCrypto {
 }
 
 impl HpkeDocumentCrypto {
-    /// Create a new HPKE document crypto instance.
+    /// Create a new HPKE document crypto instance whose key pair belongs to
+    /// `suite_id`.
     ///
     /// # Errors
     ///
-    /// Returns an error if the HMAC key derivation fails.
-    pub(crate) fn new(public_key: HpkePublicKey, private_key: HpkePrivateKey) -> Result<Self> {
+    /// Returns an error if the suite is unsupported or the HMAC key
+    /// derivation fails.
+    pub(crate) fn new(
+        suite_id: HpkeSuiteId,
+        public_key: HpkePublicKey,
+        private_key: HpkePrivateKey,
+    ) -> Result<Self> {
+        let suite = suite_for(suite_id)?;
         let hmac_key = derive_hmac_key(&public_key.0)?;
         Ok(Self {
+            suite_id,
+            suite,
             public_key,
             private_key,
             hmac_key: Zeroizing::new(hmac_key),
         })
-    }
-
-    fn hpke_suite() -> &'static rustls::crypto::aws_lc_rs::hpke::HpkeAwsLcRs<32, 48> {
-        rustls::crypto::aws_lc_rs::hpke::DH_KEM_P384_HKDF_SHA384_AES_256
     }
 
     /// Build an instance with a freshly generated key, for tests needing real
@@ -149,47 +307,50 @@ impl HpkeDocumentCrypto {
     #[expect(clippy::expect_used, reason = "test-only key generation")]
     #[must_use]
     pub(crate) fn generate_for_test() -> Self {
-        use rustls::crypto::hpke::Hpke;
-
-        let (public_key, private_key) = Self::hpke_suite()
+        let (public_key, private_key) = suite_for(SUITE_DHKEM_P384_SHA384_AES256)
+            .expect("default HPKE suite is always supported")
             .generate_key_pair()
             .expect("generate HPKE test key pair");
-        Self::new(public_key, private_key.secret_bytes().to_vec().into())
-            .expect("build HPKE test crypto")
+        Self::new(
+            SUITE_DHKEM_P384_SHA384_AES256,
+            public_key,
+            private_key.secret_bytes().to_vec().into(),
+        )
+        .expect("build HPKE test crypto")
     }
 }
 
 impl DocumentCrypto for HpkeDocumentCrypto {
     fn seal(&self, info: &[u8], aad: &[u8], plaintext: &[u8]) -> Result<EncryptedDocument> {
-        use rustls::crypto::hpke::Hpke;
-
-        let (enc, ciphertext) = Self::hpke_suite()
+        let (enc, ciphertext) = self
+            .suite
             .seal(info, aad, plaintext, &self.public_key)
             .map_err(|e| anyhow::anyhow!("HPKE seal failed: {e}"))?;
 
         Ok(EncryptedDocument {
-            encapped_key: Some(BASE64.encode(&enc.0)),
+            encapped_key: Some(encode_encapped_key(self.suite_id, &enc.0)),
             data: BASE64.encode(&ciphertext),
         })
     }
 
     fn open(&self, info: &[u8], aad: &[u8], doc: &EncryptedDocument) -> Result<Vec<u8>> {
-        use rustls::crypto::hpke::Hpke;
-
-        let enc_bytes = doc
+        let enc_value = doc
             .encapped_key
             .as_ref()
             .context("encrypted document missing encapped_key")?;
-        let enc_decoded = BASE64
-            .decode(enc_bytes)
-            .context("invalid base64 in encapped_key")?;
+        let (row_suite_id, enc_decoded) = decode_encapped_key(enc_value)?;
+        let suite = if row_suite_id == self.suite_id {
+            self.suite
+        } else {
+            suite_for(row_suite_id)?
+        };
         let enc = rustls::crypto::hpke::EncapsulatedSecret(enc_decoded);
 
         let ciphertext = BASE64
             .decode(&doc.data)
             .context("invalid base64 in ciphertext")?;
 
-        Self::hpke_suite()
+        suite
             .open(&enc, info, aad, &ciphertext, &self.private_key)
             .map_err(|e| anyhow::anyhow!("HPKE open failed: {e}"))
     }
@@ -432,7 +593,8 @@ mod tests {
         assert_eq!(priv_key.secret_bytes().len(), 48);
 
         // Verify the extracted keys work for HPKE
-        let crypto = HpkeDocumentCrypto::new(pub_key, priv_key).unwrap();
+        let crypto =
+            HpkeDocumentCrypto::new(SUITE_DHKEM_P384_SHA384_AES256, pub_key, priv_key).unwrap();
         let sealed = crypto.seal(b"test", b"aad", b"hello").unwrap();
         let opened = crypto.open(b"test", b"aad", &sealed).unwrap();
         assert_eq!(opened, b"hello");
@@ -501,11 +663,99 @@ mod tests {
         );
     }
 
-    fn make_test_crypto() -> HpkeDocumentCrypto {
-        use rustls::crypto::hpke::Hpke;
+    #[test]
+    fn seal_emits_suite_tagged_encapped_key() {
+        let crypto = make_test_crypto();
+        let sealed = crypto.seal(b"user", b"doc-123", b"payload").unwrap();
+        let encapped = sealed.encapped_key.unwrap();
+        assert!(
+            encapped.starts_with("hpke:0011:0002:0002:"),
+            "expected suite-tagged encapped_key, got: {encapped}"
+        );
+    }
 
-        let suite = &rustls::crypto::aws_lc_rs::hpke::DH_KEM_P384_HKDF_SHA384_AES_256;
-        let (pub_key, priv_key) = suite.generate_key_pair().unwrap();
-        HpkeDocumentCrypto::new(pub_key, priv_key.secret_bytes().to_vec().into()).unwrap()
+    #[test]
+    fn open_accepts_legacy_untagged_encapped_key() {
+        // Rows written before suite tagging stored the encapped key as plain
+        // base64. Stripping the tag from a fresh seal reproduces that format
+        // exactly; it must decrypt via the LEGACY_SUITE fallback.
+        let crypto = make_test_crypto();
+        let plaintext = b"legacy row";
+        let sealed = crypto.seal(b"user", b"doc-123", plaintext).unwrap();
+
+        let tagged = sealed.encapped_key.unwrap();
+        let bare_base64 = tagged.rsplit(':').next().unwrap().to_string();
+        assert!(!bare_base64.contains(':'));
+        let legacy = EncryptedDocument {
+            encapped_key: Some(bare_base64),
+            data: sealed.data,
+        };
+
+        let opened = crypto.open(b"user", b"doc-123", &legacy).unwrap();
+        assert_eq!(opened, plaintext);
+    }
+
+    #[test]
+    fn open_rejects_unknown_suite_tag() {
+        let crypto = make_test_crypto();
+        let sealed = crypto.seal(b"user", b"doc-123", b"payload").unwrap();
+        let tagged = sealed.encapped_key.unwrap();
+
+        // Re-tag with ML-KEM-768 (0x0041, draft-ietf-hpke-pq), which this
+        // build does not support.
+        let bare_base64 = tagged.rsplit(':').next().unwrap();
+        let foreign = EncryptedDocument {
+            encapped_key: Some(format!("hpke:0041:0002:0002:{bare_base64}")),
+            data: sealed.data.clone(),
+        };
+
+        let err = crypto.open(b"user", b"doc-123", &foreign).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("unsupported HPKE suite") && msg.contains("0x0041"),
+            "expected unsupported-suite error naming the codepoint, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn open_rejects_malformed_suite_tag() {
+        let crypto = make_test_crypto();
+        let sealed = crypto.seal(b"user", b"doc-123", b"payload").unwrap();
+
+        for bad in [
+            "hpke:11:0002:0002:AAAA",   // codepoint not 4 digits
+            "hpke:zzzz:0002:0002:AAAA", // codepoint not hex
+            "hpke:0011:0002:0002",      // key material missing
+            "hpke:0011:0002",           // fields missing
+        ] {
+            let doc = EncryptedDocument {
+                encapped_key: Some(bad.to_string()),
+                data: sealed.data.clone(),
+            };
+            let err = crypto.open(b"user", b"doc-123", &doc).unwrap_err();
+            let msg = format!("{err:#}");
+            assert!(
+                msg.contains("suite tag"),
+                "expected suite-tag error for {bad:?}, got: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn encode_decode_encapped_key_roundtrip() {
+        let suite = HpkeSuiteId {
+            kem_id: 0x0051, // MLKEM1024-P384 (draft-ietf-hpke-pq)
+            kdf_id: 0x0011, // SHAKE256
+            aead_id: 0x0002,
+        };
+        let bytes = vec![0u8, 1, 2, 255];
+        let encoded = encode_encapped_key(suite, &bytes);
+        let (decoded_suite, decoded_bytes) = decode_encapped_key(&encoded).unwrap();
+        assert_eq!(decoded_suite, suite);
+        assert_eq!(decoded_bytes, bytes);
+    }
+
+    fn make_test_crypto() -> HpkeDocumentCrypto {
+        HpkeDocumentCrypto::generate_for_test()
     }
 }

@@ -76,7 +76,8 @@ The S3 configuration file is a JSON document with the following schema:
   "jwt_hmac_kms_key_id": "mrk-5678abcd1234efgh",
   "document_key": {
     "kms_key_id": "mrk-<key-id>",
-    "encrypted_private_key": "<base64-encoded KMS ciphertext>"
+    "encrypted_private_key": "<base64-encoded KMS ciphertext>",
+    "algorithm": "p384"
   },
   "dpop": {
     "max_age_seconds": 300
@@ -139,7 +140,7 @@ The S3 configuration file is a JSON document with the following schema:
 | `oidc_rsa_signing_key` | string | OIDC RSA signing key (base64-encoded PEM, RSA-3072). Signs ID tokens with RS256. |
 | `oidc_rsa_signing_kms_key_id` | string | AWS KMS key ID for OIDC RSA signing (RSA-3072). Overrides `oidc_rsa_signing_key`. |
 | `jwt_hmac_kms_key_id` | string | AWS KMS key ID for HMAC state token signing. Overrides `jwt_secret`. |
-| `document_key` | object | P-384 document encryption key. Contains `kms_key_id` and `encrypted_private_key`. |
+| `document_key` | object | Document encryption key. Contains `kms_key_id`, `encrypted_private_key`, and optional `algorithm` (default `"p384"`, currently the only value). |
 | `dpop.max_age_seconds` | integer | Maximum age of DPoP proofs in seconds. |
 | `cors_origins` | array of strings | CORS allowed origins. |
 | `github.app_id` | integer | GitHub App ID. |
