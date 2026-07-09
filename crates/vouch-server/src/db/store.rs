@@ -294,13 +294,41 @@ fn index_value_condition_aliased(
 pub struct DocumentStore {
     pool: Pool,
     crypto: Arc<dyn DocumentCrypto>,
+    /// See [`ModifyTestHook`]. Compiled out of non-test builds.
+    #[cfg(test)]
+    modify_test_hook: Option<ModifyTestHook>,
 }
+
+/// Boxed future returned by a [`ModifyTestHook`].
+#[cfg(test)]
+pub(crate) type ModifyHookFuture =
+    std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>;
+
+/// Test-only hook invoked inside [`DocumentStore::modify`] between the
+/// internal read and the compare-and-update, receiving `(doc_id, attempt)`.
+///
+/// Lets tests deterministically interleave a concurrent write into the OCC
+/// window (forcing a version-conflict retry) without relying on
+/// task-scheduling races.
+#[cfg(test)]
+pub(crate) type ModifyTestHook = Arc<dyn Fn(&str, u32) -> ModifyHookFuture + Send + Sync>;
 
 impl DocumentStore {
     /// Create a new document store.
     #[must_use]
     pub fn new(pool: Pool, crypto: Arc<dyn DocumentCrypto>) -> Self {
-        Self { pool, crypto }
+        Self {
+            pool,
+            crypto,
+            #[cfg(test)]
+            modify_test_hook: None,
+        }
+    }
+
+    /// Install a hook that runs inside `modify` between the read and the CAS.
+    #[cfg(test)]
+    pub(crate) fn set_modify_test_hook(&mut self, hook: ModifyTestHook) {
+        self.modify_test_hook = Some(hook);
     }
 
     /// Access the underlying pool (for migrations and raw queries).
@@ -716,6 +744,10 @@ impl DocumentStore {
             let Some(doc) = self.get::<T>(id).await? else {
                 return Ok(false);
             };
+            #[cfg(test)]
+            if let Some(hook) = &self.modify_test_hook {
+                hook(id, attempt).await;
+            }
             let version = doc.version;
             let mut data = doc.data;
             modifier(&mut data);
