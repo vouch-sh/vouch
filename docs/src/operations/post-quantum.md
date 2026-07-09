@@ -36,7 +36,7 @@ One **encryption** surface is classical and is the known harvest-now-decrypt-lat
 
 | Surface | Algorithm | Status |
 |---------|-----------|--------|
-| Document encryption at rest (S3 config documents) | HPKE with DHKEM(P-384) + AES-256-GCM | Roadmap item: move to a hybrid ML-KEM HPKE suite (X-Wing) once it is standardized, with a versioned envelope and re-encryption of existing documents. Exposure requires an attacker to first obtain the encrypted documents; the KMS-sealed private key and S3 access controls remain the primary defense. |
+| Document encryption at rest (S3 config documents) | HPKE with DHKEM(P-384) + AES-256-GCM | Roadmap item: move to a hybrid ML-KEM HPKE suite (X-Wing) once it is standardized and supported in rustls/aws-lc-rs. The storage format (suite-tagged encapsulated keys) already supports multiple algorithms coexisting; migration is an operational rotation. Exposure requires an attacker to first obtain the encrypted documents; the KMS-sealed private key and S3 access controls remain the primary defense. |
 
 ## Watch List
 

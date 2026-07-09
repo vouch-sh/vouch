@@ -210,7 +210,7 @@ async fn load_s3_config(
     };
 
     // Fetch initial config - fail fast if unreachable.
-    // If the config has a document_key, the P-384 private key is decrypted
+    // If the config has a document_key, the private key is decrypted
     // via KMS (with NitroTPM attestation when available).
     let (s3_cfg, etag, doc_keys) =
         s3_config::fetch_s3_config(&s3_client, &source, Some(&kms_client), use_attestation)
