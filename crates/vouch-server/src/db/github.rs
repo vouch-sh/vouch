@@ -222,43 +222,36 @@ pub async fn update_github_installation_repos(
 /// Update repositories for a GitHub installation by
 /// adding/removing repos (used by webhook handler).
 ///
-/// # Concurrency note
-///
-/// The read-compute-write sequence here is NOT atomic end-to-end. The initial
-/// read (`get_github_installation_by_installation_id`) and the delta merge
-/// (`for repo in added …`) happen outside the `modify` closure inside
-/// `update_github_installation_repos`, so two concurrent delta webhooks for the
-/// same installation can each read stale repo lists and silently lose the other's
-/// additions/removals. Given that GitHub delivers webhook events sequentially
-/// per installation (low real-world contention), this is deferred rather than
-/// fixed here. If contention becomes a concern the merge logic must move inside
-/// a single `store.modify` closure so it re-reads and re-merges on each OCC retry.
+/// The delta merge runs inside the `store.modify` closure, so every
+/// optimistic-concurrency retry re-reads the current repo list and re-applies
+/// the delta to fresh state: two concurrent delta webhooks for the same
+/// installation both land. The merge is idempotent (adds are deduplicated,
+/// removals filter by name, the result is sorted). If the installation is
+/// deleted between index-resolve and modify, returns `Ok(false)`.
 pub async fn update_github_installation_repos_delta(
     store: &DocumentStore,
     installation_id: i64,
     added: &[String],
     removed: &[String],
 ) -> Result<bool> {
-    let installation = get_github_installation_by_installation_id(store, installation_id).await?;
-
-    let Some(installation) = installation else {
+    let Some(doc_id) = resolve_installation_doc_id(store, installation_id).await? else {
         return Ok(false);
     };
-
-    let mut repos: Vec<String> = installation.repositories.unwrap_or_default();
-
-    // Apply delta
-    for repo in added {
-        if !repos.contains(repo) {
-            repos.push(repo.clone());
-        }
-    }
-    repos.retain(|r| !removed.contains(r));
-
-    // Sort for consistency
-    repos.sort();
-
-    update_github_installation_repos(store, installation_id, &repos).await
+    // Owned copies for the `Fn` closure (may run once per OCC retry).
+    let added_owned = added.to_vec();
+    let removed_owned = removed.to_vec();
+    store
+        .modify::<GitHubInstallationDoc, _>(&doc_id, |data| {
+            let repos = data.repositories.get_or_insert_default();
+            for repo in &added_owned {
+                if !repos.contains(repo) {
+                    repos.push(repo.clone());
+                }
+            }
+            repos.retain(|r| !removed_owned.contains(r));
+            repos.sort();
+        })
+        .await
 }
 
 // ============================================================================

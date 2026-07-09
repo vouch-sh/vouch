@@ -294,13 +294,41 @@ fn index_value_condition_aliased(
 pub struct DocumentStore {
     pool: Pool,
     crypto: Arc<dyn DocumentCrypto>,
+    /// See [`ModifyTestHook`]. Compiled out of non-test builds.
+    #[cfg(test)]
+    modify_test_hook: Option<ModifyTestHook>,
 }
+
+/// Boxed future returned by a [`ModifyTestHook`].
+#[cfg(test)]
+pub(crate) type ModifyHookFuture =
+    std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>;
+
+/// Test-only hook invoked inside [`DocumentStore::modify`] between the
+/// internal read and the compare-and-update, receiving `(doc_id, attempt)`.
+///
+/// Lets tests deterministically interleave a concurrent write into the OCC
+/// window (forcing a version-conflict retry) without relying on
+/// task-scheduling races.
+#[cfg(test)]
+pub(crate) type ModifyTestHook = Arc<dyn Fn(&str, u32) -> ModifyHookFuture + Send + Sync>;
 
 impl DocumentStore {
     /// Create a new document store.
     #[must_use]
     pub fn new(pool: Pool, crypto: Arc<dyn DocumentCrypto>) -> Self {
-        Self { pool, crypto }
+        Self {
+            pool,
+            crypto,
+            #[cfg(test)]
+            modify_test_hook: None,
+        }
+    }
+
+    /// Install a hook that runs inside `modify` between the read and the CAS.
+    #[cfg(test)]
+    pub(crate) fn set_modify_test_hook(&mut self, hook: ModifyTestHook) {
+        self.modify_test_hook = Some(hook);
     }
 
     /// Access the underlying pool (for migrations and raw queries).
@@ -716,6 +744,10 @@ impl DocumentStore {
             let Some(doc) = self.get::<T>(id).await? else {
                 return Ok(false);
             };
+            #[cfg(test)]
+            if let Some(hook) = &self.modify_test_hook {
+                hook(id, attempt).await;
+            }
             let version = doc.version;
             let mut data = doc.data;
             modifier(&mut data);
@@ -2185,6 +2217,83 @@ mod tests {
 
         let fetched = store.get::<TestDoc>(&inserted.id).await.unwrap().unwrap();
         assert_eq!(fetched.data.value, 15);
+    }
+
+    /// A conflicting write on every attempt must exhaust the retry budget and
+    /// surface the version-conflict error rather than spinning or reporting
+    /// success. Uses the modify test seam to conflict deterministically.
+    #[tokio::test]
+    async fn modify_version_conflict_on_every_attempt_exhausts_retries() {
+        let mut store = test_store().await;
+        let doc = TestDoc {
+            name: "conflict-me".to_string(),
+            value: 1,
+        };
+        let inserted = store.insert(&doc).await.unwrap();
+        let doc_id = inserted.id.clone();
+
+        let writer = store.clone();
+        store.set_modify_test_hook(Arc::new(move |id: &str, _attempt: u32| {
+            let writer = writer.clone();
+            let id = id.to_string();
+            Box::pin(async move {
+                // Conflict on every attempt: any write bumps the version, so
+                // the in-flight compare_and_update always loses.
+                let current = writer.get::<TestDoc>(&id).await.unwrap().unwrap();
+                writer.update(&id, &current.data).await.unwrap();
+            })
+        }));
+
+        let err = store
+            .modify::<TestDoc, _>(&doc_id, |d| {
+                d.value += 1;
+            })
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("version conflict after retries"),
+            "exhausted retries must surface the version-conflict error, got: {err}"
+        );
+    }
+
+    /// A document deleted between `modify`'s read and its compare-and-update
+    /// is gone on the retry's re-read: `modify` must return `Ok(false)` rather
+    /// than erroring or resurrecting the document. The existing
+    /// deleted-between-resolve-and-modify coverage only deletes before the
+    /// first read; this exercises deletion mid-loop.
+    #[tokio::test]
+    async fn modify_doc_deleted_mid_loop_returns_false() {
+        let mut store = test_store().await;
+        let doc = TestDoc {
+            name: "delete-me".to_string(),
+            value: 1,
+        };
+        let inserted = store.insert(&doc).await.unwrap();
+        let doc_id = inserted.id.clone();
+
+        let writer = store.clone();
+        store.set_modify_test_hook(Arc::new(move |id: &str, attempt: u32| {
+            let writer = writer.clone();
+            let id = id.to_string();
+            Box::pin(async move {
+                if attempt != 0 {
+                    return;
+                }
+                writer.delete(&id).await.unwrap();
+            })
+        }));
+
+        let found = store
+            .modify::<TestDoc, _>(&doc_id, |d| {
+                d.value += 1;
+            })
+            .await
+            .unwrap();
+        assert!(!found, "doc deleted mid-loop must yield Ok(false)");
+        assert!(
+            store.get::<TestDoc>(&doc_id).await.unwrap().is_none(),
+            "the deletion must not be undone by the failed modify"
+        );
     }
 
     // ========================================================================
