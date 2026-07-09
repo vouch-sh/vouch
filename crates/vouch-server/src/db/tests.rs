@@ -155,7 +155,7 @@ async fn test_session_lifecycle() {
     assert!(!session_id.is_empty());
 
     // Get session
-    let session = get_session_by_token_hash(&store, token_hash)
+    let session = get_session_by_token_hash(&store, token_hash, jiff::Timestamp::now())
         .await
         .expect("Failed to get session")
         .expect("Session should exist");
@@ -170,11 +170,66 @@ async fn test_session_lifecycle() {
     assert!(deleted);
 
     // Session should no longer exist
-    let session = get_session_by_token_hash(&store, token_hash)
+    let session = get_session_by_token_hash(&store, token_hash, jiff::Timestamp::now())
         .await
         .expect("Failed to get session");
 
     assert!(session.is_none());
+}
+
+/// Deterministic expiry boundary (issue #661): a session is valid the
+/// instant before `expires_at` and gone the instant at/after it, using fixed
+/// timestamps instead of a real-clock wait.
+#[tokio::test]
+async fn test_session_expiry_boundary() {
+    let (store, _audit) = test_db().await;
+
+    let (user_id, _) = upsert_user(&store, "expiry-boundary@example.com", None)
+        .await
+        .expect("Failed to create user");
+
+    let expires_at: jiff::Timestamp = "2030-01-01T00:00:00Z".parse().unwrap();
+    let token_hash = "expiry_boundary_token";
+    create_session(
+        &store,
+        &CreateSessionParams {
+            user_id: &user_id,
+            user_email: "expiry-boundary@example.com",
+            token_hash,
+            authenticator_id: None,
+            expires_at,
+            session_type: SessionPurpose::OAuthAccessToken,
+            authorization_details: None,
+            hardware_aaguid: None,
+            org_domain: None,
+        },
+    )
+    .await
+    .expect("Failed to create session");
+
+    // One second before expiry: still valid (`expires_at > now`).
+    let just_before = expires_at
+        .checked_sub(jiff::Span::new().seconds(1))
+        .unwrap();
+    let session = get_session_by_token_hash(&store, token_hash, just_before)
+        .await
+        .expect("query should succeed");
+    assert!(session.is_some(), "session must be valid 1s before expiry");
+
+    // Exactly at expiry: no longer valid (`expires_at > now` is strict).
+    let session = get_session_by_token_hash(&store, token_hash, expires_at)
+        .await
+        .expect("query should succeed");
+    assert!(session.is_none(), "session must be expired at expires_at");
+
+    // One second after expiry: still no longer valid.
+    let just_after = expires_at
+        .checked_add(jiff::Span::new().seconds(1))
+        .unwrap();
+    let session = get_session_by_token_hash(&store, token_hash, just_after)
+        .await
+        .expect("query should succeed");
+    assert!(session.is_none(), "session must be expired 1s after expiry");
 }
 
 // ========================================================================
@@ -1362,7 +1417,7 @@ async fn test_scim_session_invalidation_on_deactivation() {
     .expect("Failed to create session");
 
     // Verify session exists
-    let session = get_session_by_token_hash(&store, "scim_token_hash")
+    let session = get_session_by_token_hash(&store, "scim_token_hash", jiff::Timestamp::now())
         .await
         .expect("Failed to get session");
     assert!(session.is_some());
@@ -1374,7 +1429,7 @@ async fn test_scim_session_invalidation_on_deactivation() {
     assert_eq!(deleted, 1);
 
     // Verify session deleted
-    let session = get_session_by_token_hash(&store, "scim_token_hash")
+    let session = get_session_by_token_hash(&store, "scim_token_hash", jiff::Timestamp::now())
         .await
         .expect("Failed to get session");
     assert!(session.is_none());
@@ -1723,7 +1778,7 @@ async fn test_user_cascade_delete() {
             .is_some()
     );
     assert!(
-        get_session_by_token_hash(&store, "cascade_token")
+        get_session_by_token_hash(&store, "cascade_token", jiff::Timestamp::now())
             .await
             .unwrap()
             .is_some()
@@ -1742,7 +1797,7 @@ async fn test_user_cascade_delete() {
             .is_none()
     );
     assert!(
-        get_session_by_token_hash(&store, "cascade_token")
+        get_session_by_token_hash(&store, "cascade_token", jiff::Timestamp::now())
             .await
             .unwrap()
             .is_none()

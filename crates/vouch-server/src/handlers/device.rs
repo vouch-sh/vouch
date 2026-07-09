@@ -1065,9 +1065,10 @@ mod tests {
             use aws_lc_rs::digest::{self, SHA256};
             URL_SAFE_NO_PAD.encode(digest::digest(&SHA256, token.as_bytes()).as_ref())
         };
-        let session = crate::db::get_session_by_token_hash(&state.store, &token_hash)
-            .await
-            .expect("session lookup");
+        let session =
+            crate::db::get_session_by_token_hash(&state.store, &token_hash, Timestamp::now())
+                .await
+                .expect("session lookup");
         assert!(session.is_some(), "Session should exist before replay");
 
         // Replay — triggers revocation
@@ -1075,9 +1076,10 @@ mod tests {
         assert_eq!(status, StatusCode::BAD_REQUEST);
 
         // Session should now be revoked
-        let session = crate::db::get_session_by_token_hash(&state.store, &token_hash)
-            .await
-            .expect("session lookup");
+        let session =
+            crate::db::get_session_by_token_hash(&state.store, &token_hash, Timestamp::now())
+                .await
+                .expect("session lookup");
         assert!(session.is_none(), "Session should be revoked after replay");
     }
 
