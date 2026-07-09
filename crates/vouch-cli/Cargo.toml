@@ -43,6 +43,10 @@ roxmltree = { workspace = true, features = ["std"] }
 rpassword = { workspace = true }
 rust-embed = { workspace = true }
 rust-ini = { workspace = true }
+# Direct dependency only to enable prefer-post-quantum: reqwest builds its rustls
+# ClientConfig from the default provider, and this feature makes X25519MLKEM768 the
+# preferred key-exchange group for all outbound TLS.
+rustls = { workspace = true, features = ["aws-lc-rs", "std", "prefer-post-quantum", "tls12"] }
 secrecy = { workspace = true, features = ["serde"] }
 sys-locale = { workspace = true }
 serde = { workspace = true, features = ["std", "derive"] }

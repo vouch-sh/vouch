@@ -26,6 +26,7 @@
 
 - [Session Management](operations/sessions.md)
 - [Key Management](operations/key-management.md)
+- [Post-Quantum Cryptography](operations/post-quantum.md)
 - [SCIM Provisioning](operations/scim.md)
 - [S3 Configuration Storage](operations/s3-configuration.md)
 - [Backup and Recovery](operations/backup-recovery.md)
