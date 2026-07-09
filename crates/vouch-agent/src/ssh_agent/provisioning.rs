@@ -72,7 +72,7 @@ async fn try_load_from_disk(
     let session = agent.get_session().await?;
 
     // Check for default key and cert files on disk
-    let home = dirs::home_dir()?;
+    let home = std::env::home_dir()?;
     let ssh_dir = home.join(".ssh");
     let key_path = ssh_dir.join(DEFAULT_KEY_NAME);
     let cert_path = ssh_dir.join(format!("{DEFAULT_KEY_NAME}-cert.pub"));

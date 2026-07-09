@@ -170,7 +170,6 @@ linux-keyutils-keyring-store = { version = "=1.0.0", default-features = false }
 maxminddb = { version = "=0.29.0", default-features = false }
 metrics = { version = "=0.24.6", default-features = false }
 metrics-exporter-prometheus = { version = "=0.18.3", default-features = false }
-mime_guess = { version = "=2.0.5", default-features = false }
 mimalloc = { version = "=0.1.52", default-features = false }
 open = { version = "=5.3.6", default-features = false }
 opentelemetry = { version = "=0.32.0", default-features = false }
@@ -185,7 +184,6 @@ rpassword = { version = "=7.5.4", default-features = false }
 rust-embed = { version = "=8.12.0", default-features = false }
 rust-ini = { version = "=0.21.3", default-features = false }
 rustls = { version = "=0.23.41", default-features = false }
-rustls-pki-types = { version = "=1.15.0", default-features = false }
 sea-query = { version = "=1.0.1", default-features = false }
 sea-query-sqlx = { version = "=0.9.1", default-features = false }
 sha2 = { version = "=0.10.9", default-features = false }
