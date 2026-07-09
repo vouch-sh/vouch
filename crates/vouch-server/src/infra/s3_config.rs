@@ -424,7 +424,7 @@ pub struct S3Config {
     pub device_poll_interval_seconds: Option<u64>,
 
     // Document encryption key
-    /// P-384 document encryption key (provisioned by `generate-document-key`).
+    /// Document encryption key (provisioned by `generate-document-key`).
     pub document_key: Option<S3DocumentKeyConfig>,
 }
 
