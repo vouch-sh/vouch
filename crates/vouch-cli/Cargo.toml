@@ -24,11 +24,11 @@ path = "src/main.rs"
 anyhow = { workspace = true, features = ["std"] }
 base64 = { workspace = true, features = ["std"] }
 ciborium = { workspace = true }
-clap = { workspace = true, features = ["std", "derive", "env", "help", "usage", "error-context"] }
+clap = { workspace = true, features = ["std", "derive", "env", "help", "usage", "error-context", "suggestions", "color"] }
 clap_complete = { workspace = true }
 dirs = { workspace = true }
 gethostname = { workspace = true }
-ed25519-dalek = { workspace = true, features = ["std"] }
+ed25519-dalek = { workspace = true }
 hex = { workspace = true, features = ["std"] }
 i18n-embed = { workspace = true, features = ["fluent-system", "rust-embed"] }
 i18n-embed-fl = { workspace = true }

@@ -386,31 +386,16 @@ async fn sign_jwt_with_kms<T: Serialize>(
 }
 
 /// Extract the base64url-encoded x and y coordinates from a P-256 public key.
-///
-/// P-256 uncompressed public keys are 65 bytes: `0x04 || x (32) || y (32)`.
 fn extract_ec_coordinates(key_pair: &EcdsaKeyPair) -> Result<(String, String)> {
-    let pub_key_bytes = key_pair.public_key().as_ref();
-
-    if pub_key_bytes.len() != 65 {
-        bail!(
-            "Invalid P-256 public key length: expected 65, got {}",
-            pub_key_bytes.len()
-        );
-    }
-    if pub_key_bytes.first() != Some(&0x04) {
-        bail!("Invalid P-256 public key format: expected uncompressed point (0x04)");
-    }
-
-    let x = pub_key_bytes
-        .get(1..33)
-        .map(|b| URL_SAFE_NO_PAD.encode(b))
-        .ok_or_else(|| anyhow::anyhow!("Failed to extract x coordinate"))?;
-    let y = pub_key_bytes
-        .get(33..65)
-        .map(|b| URL_SAFE_NO_PAD.encode(b))
-        .ok_or_else(|| anyhow::anyhow!("Failed to extract y coordinate"))?;
-
-    Ok((x, y))
+    let point = p256::EncodedPoint::from_bytes(key_pair.public_key().as_ref())
+        .map_err(|e| anyhow::anyhow!("Invalid P-256 public key encoding: {e}"))?;
+    let x = point
+        .x()
+        .ok_or_else(|| anyhow::anyhow!("P-256 public key has no x coordinate"))?;
+    let y = point
+        .y()
+        .ok_or_else(|| anyhow::anyhow!("P-256 public key is not an uncompressed point"))?;
+    Ok((URL_SAFE_NO_PAD.encode(x), URL_SAFE_NO_PAD.encode(y)))
 }
 
 /// Build a `DecodingKey` from an ECDSA key pair's public key.

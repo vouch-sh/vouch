@@ -129,12 +129,12 @@ anyhow = { version = "=1.0.103", default-features = false }
 apple-native-keyring-store = { version = "=1.0.0", default-features = false }
 arc-swap = { version = "=1.9.2", default-features = false }
 askama = { version = "=0.16.0", default-features = false }
-aws-config = { version = "=1.8.18", default-features = false }
+aws-config = { version = "=1.9.0", default-features = false }
 aws-lc-rs = { version = "=1.17.1", default-features = false }
-aws-sdk-dsql = { version = "=1.60.0", default-features = false }
-aws-sdk-kms = { version = "=1.111.0", default-features = false }
-aws-sdk-s3 = { version = "=1.137.0", default-features = false }
-aws-smithy-types = { version = "=1.5.0", default-features = false }
+aws-sdk-dsql = { version = "=1.61.0", default-features = false }
+aws-sdk-kms = { version = "=1.112.0", default-features = false }
+aws-sdk-s3 = { version = "=1.138.0", default-features = false }
+aws-smithy-types = { version = "=1.6.1", default-features = false }
 axum = { version = "=0.8.9", default-features = false }
 axum-extra = { version = "=0.12.6", default-features = false }
 axum-server = { version = "=0.8.0", default-features = false }
@@ -148,7 +148,7 @@ ctap-hid-fido2 = { version = "=3.5.11", default-features = false }
 der = { version = "=0.7.10", default-features = false }
 dirs = { version = "=6.0.0", default-features = false }
 dotenvy = { version = "=0.15.7", default-features = false }
-ed25519-dalek = { version = "=2.2.0", default-features = false }
+ed25519-dalek = { version = "=3.0.0", default-features = false, features = ["zeroize"] }
 flate2 = { version = "=1.1.9", default-features = false }
 gethostname = { version = "=1.1.0", default-features = false }
 governor = { version = "=0.10.4", default-features = false }
@@ -162,7 +162,7 @@ i18n-embed = { version = "=0.16.0", default-features = false }
 i18n-embed-fl = { version = "=0.10.0", default-features = false }
 idna = { version = "=1.1.0", default-features = false }
 inquire = { version = "=0.9.4", default-features = false }
-jiff = { version = "=0.2.31", default-features = false }
+jiff = { version = "=0.2.32", default-features = false }
 jsonwebtoken = { version = "=10.4.0", default-features = false }
 keyring-core = { version = "=1.0.0", default-features = false }
 libc = { version = "=0.2.186", default-features = false }
@@ -178,11 +178,11 @@ opentelemetry_sdk = { version = "=0.32.1", default-features = false }
 opentelemetry-otlp = { version = "=0.32.0", default-features = false }
 p256 = { version = "=0.13.2", default-features = false }
 proptest = { version = "=1.11.0", default-features = false }
-psl = { version = "=2.1.216", default-features = false }
+psl = { version = "=2.1.218", default-features = false }
 reqwest = { version = "=0.13.4", default-features = false }
 roxmltree = { version = "=0.21.1", default-features = false }
 rpassword = { version = "=7.5.4", default-features = false }
-rust-embed = { version = "=8.11.0", default-features = false }
+rust-embed = { version = "=8.12.0", default-features = false }
 rust-ini = { version = "=0.21.3", default-features = false }
 rustls = { version = "=0.23.41", default-features = false }
 rustls-pki-types = { version = "=1.15.0", default-features = false }
