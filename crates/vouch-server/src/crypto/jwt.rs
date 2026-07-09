@@ -181,7 +181,8 @@ impl StateTokenSigner {
                 decode_state_token(token, jwt_type, secret).map_err(StateTokenError::Jwt)
             }
             Self::Kms { kms_client, key_id } => {
-                kms_decode(kms_client, key_id, token, jwt_type).await
+                let now = jiff::Timestamp::now().as_second();
+                kms_decode(kms_client, key_id, token, jwt_type, now).await
             }
         }
     }
@@ -240,11 +241,16 @@ async fn kms_encode<T: Serialize>(
 }
 
 /// KMS: verify a JWT using `VerifyMac`, then validate typ + exp.
+///
+/// `now` is stamped once by the caller (`StateTokenSigner::decode_state_token`)
+/// rather than read here, so tests can exercise the `exp` boundary with a
+/// fixed timestamp instead of a real-clock wait.
 async fn kms_decode<T: DeserializeOwned>(
     kms_client: &aws_sdk_kms::Client,
     key_id: &str,
     token: &str,
     jwt_type: JwtType,
+    now: i64,
 ) -> Result<T, StateTokenError> {
     // Split into header.payload.signature
     let parts: Vec<&str> = token.splitn(3, '.').collect();
@@ -320,13 +326,22 @@ async fn kms_decode<T: DeserializeOwned>(
         .get("exp")
         .and_then(|v| v.as_i64())
         .ok_or_else(|| StateTokenError::Validation("Missing exp claim".to_string()))?;
-    let now = jiff::Timestamp::now().as_second();
-    if now > exp {
-        return Err(StateTokenError::Validation("Token has expired".to_string()));
-    }
+    check_state_token_not_expired(now, exp)?;
 
     serde_json::from_slice(&payload_bytes)
         .map_err(|e| StateTokenError::Validation(format!("Failed to deserialize claims: {e}")))
+}
+
+/// Check a KMS-backed state token's `exp` claim against `now`.
+///
+/// Split out from [`kms_decode`] so the boundary condition (`now > exp`) is
+/// unit-testable without a real KMS client — the surrounding function makes
+/// live `GenerateMac`/`VerifyMac` calls that cannot run in a unit test.
+fn check_state_token_not_expired(now: i64, exp: i64) -> Result<(), StateTokenError> {
+    if now > exp {
+        return Err(StateTokenError::Validation("Token has expired".to_string()));
+    }
+    Ok(())
 }
 
 // ============================================================================
@@ -841,6 +856,21 @@ mod tests {
             result.is_err(),
             "Expired state token must be rejected with zero leeway"
         );
+    }
+
+    /// `exp == now` is exactly at the KMS state-token boundary and must be
+    /// accepted — the check is the strict `now > exp`, not `>=`.
+    #[test]
+    fn test_check_state_token_not_expired_boundary_accepted() {
+        let now = 1_700_000_000;
+        assert!(check_state_token_not_expired(now, now).is_ok());
+    }
+
+    /// `exp == now - 1` is one second past the boundary and must be rejected.
+    #[test]
+    fn test_check_state_token_not_expired_boundary_rejected() {
+        let now = 1_700_000_000;
+        assert!(check_state_token_not_expired(now, now - 1).is_err());
     }
 
     /// Regression: `decode_es256_token` must reject access tokens a few seconds

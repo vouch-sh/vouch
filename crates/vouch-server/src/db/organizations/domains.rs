@@ -1775,14 +1775,14 @@ mod tests {
         );
 
         assert!(
-            get_session_by_token_hash(&store, "hash-alice")
+            get_session_by_token_hash(&store, "hash-alice", jiff::Timestamp::now())
                 .await
                 .unwrap()
                 .is_none(),
             "matching user's session must be revoked"
         );
         assert!(
-            get_session_by_token_hash(&store, "hash-bob")
+            get_session_by_token_hash(&store, "hash-bob", jiff::Timestamp::now())
                 .await
                 .unwrap()
                 .is_some(),

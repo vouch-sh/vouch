@@ -8,7 +8,6 @@ use std::sync::Arc;
 
 use anyhow::Result;
 
-use crate::clock::TestClock;
 use vouch_cli::{HttpClient, TestHttpClient};
 use vouch_server::{AppState, db, test_utils};
 
@@ -17,7 +16,6 @@ use vouch_server::{AppState, db, test_utils};
 /// This harness provides:
 /// - In-memory SQLite database with migrations
 /// - Test HTTP client that calls the router directly
-/// - Controllable test clock for time-dependent tests
 /// - Helper methods for creating test users and sessions
 pub struct TestHarness {
     /// Server application state.
@@ -27,8 +25,6 @@ pub struct TestHarness {
     /// Raw axum router for tests that need full response headers
     /// (e.g. Location, Set-Cookie) which `TestHttpClient` strips.
     pub router: axum::Router,
-    /// Controllable test clock.
-    pub clock: Arc<TestClock>,
 }
 
 impl TestHarness {
@@ -47,13 +43,11 @@ impl TestHarness {
         let router = vouch_server::infra::router::build_app(state.clone(), &config)
             .expect("Failed to build test app router");
         let http_client = TestHttpClient::new(router.clone());
-        let clock = Arc::new(TestClock::default());
 
         Self {
             state,
             http_client,
             router,
-            clock,
         }
     }
 
@@ -296,16 +290,6 @@ impl TestHarness {
                 extra,
             )
             .await
-    }
-
-    /// Advance the test clock by a number of hours.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if time advancement fails.
-    pub fn advance_clock_hours(&self, hours: i64) -> Result<()> {
-        self.clock.advance_hours(hours)?;
-        Ok(())
     }
 
     /// Make an authenticated DELETE request.

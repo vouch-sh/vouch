@@ -103,9 +103,10 @@ async fn run_cleanup_removes_expired_sessions_and_keeps_fresh_ones() {
     // both calls should return None for the expired one and Some for the
     // fresh one. We additionally confirm the fresh one is still there to
     // prove cleanup didn't sweep too aggressively.
-    let fresh = db::get_session_by_token_hash(&harness.state.store, TOKEN_HASH_FRESH)
-        .await
-        .expect("query fresh");
+    let fresh =
+        db::get_session_by_token_hash(&harness.state.store, TOKEN_HASH_FRESH, Timestamp::now())
+            .await
+            .expect("query fresh");
     assert!(fresh.is_some(), "fresh session must survive cleanup");
 
     // For the expired one we want to assert the row is truly gone (not just

@@ -354,16 +354,37 @@ fn parse_and_verify_dpop_proof(proof: &str) -> Result<(DpopHeader, DpopClaims), 
     Ok((header, token_data.claims))
 }
 
+/// Parameters for [`validate_dpop_claims`].
+///
+/// Bundled per the project's 5-positional-parameter limit — `now` pushed the
+/// prior 6-parameter list over the line, and is a natural grouping point
+/// since it is the one field every caller stamps identically.
+#[derive(Clone, Copy)]
+pub struct DpopClaimsValidation<'a> {
+    /// Current time (seconds since epoch), stamped once by the caller at the
+    /// entry point (`Timestamp::now().as_second()` in production; a fixed
+    /// value in tests for deterministic boundary checks).
+    pub now: i64,
+    pub expected_method: &'a str,
+    pub accepted_uris: &'a [String],
+    pub max_age_seconds: i64,
+    pub expected_nonce: Option<&'a str>,
+    pub expected_ath: Option<&'a str>,
+}
+
 /// Validate DPoP proof claims (without signature verification).
 pub fn validate_dpop_claims(
     claims: &DpopClaims,
-    expected_method: &str,
-    accepted_uris: &[String],
-    max_age_seconds: i64,
-    expected_nonce: Option<&str>,
-    expected_ath: Option<&str>,
+    params: &DpopClaimsValidation<'_>,
 ) -> Result<(), DpopError> {
-    let now = Timestamp::now().as_second();
+    let DpopClaimsValidation {
+        now,
+        expected_method,
+        accepted_uris,
+        max_age_seconds,
+        expected_nonce,
+        expected_ath,
+    } = *params;
 
     // Check method
     if claims.htm.to_uppercase() != expected_method.to_uppercase() {
@@ -529,11 +550,14 @@ async fn validate_dpop_common(
     // database nonce validation happens below.
     validate_dpop_claims(
         &claims,
-        expected_method,
-        accepted_uris,
-        config_max_age,
-        None,
-        expected_ath,
+        &DpopClaimsValidation {
+            now: Timestamp::now().as_second(),
+            expected_method,
+            accepted_uris,
+            max_age_seconds: config_max_age,
+            expected_nonce: None,
+            expected_ath,
+        },
     )?;
 
     // Atomically consume the nonce via the database. A successful return
@@ -716,16 +740,29 @@ mod tests {
         jiff::Timestamp::now().as_second()
     }
 
+    /// Build a validation-params struct with sensible defaults, overriding
+    /// only the fields a given test cares about.
+    fn validation_params(now: i64, max_age_seconds: i64) -> DpopClaimsValidation<'static> {
+        DpopClaimsValidation {
+            now,
+            expected_method: "POST",
+            accepted_uris: &[],
+            max_age_seconds,
+            expected_nonce: None,
+            expected_ath: None,
+        }
+    }
+
     #[test]
     fn test_validate_dpop_claims_method_mismatch() {
         let claims = make_claims("GET", "https://example.com/token", now());
+        let uris = ["https://example.com/token".to_string()];
         let result = validate_dpop_claims(
             &claims,
-            "POST",
-            &["https://example.com/token".into()],
-            60,
-            None,
-            None,
+            &DpopClaimsValidation {
+                accepted_uris: &uris,
+                ..validation_params(now(), 60)
+            },
         );
         assert!(matches!(result, Err(DpopError::MethodMismatch)));
     }
@@ -733,13 +770,13 @@ mod tests {
     #[test]
     fn test_validate_dpop_claims_uri_mismatch() {
         let claims = make_claims("POST", "https://other.com/token", now());
+        let uris = ["https://example.com/token".to_string()];
         let result = validate_dpop_claims(
             &claims,
-            "POST",
-            &["https://example.com/token".into()],
-            60,
-            None,
-            None,
+            &DpopClaimsValidation {
+                accepted_uris: &uris,
+                ..validation_params(now(), 60)
+            },
         );
         assert!(matches!(result, Err(DpopError::UriMismatch)));
     }
@@ -748,13 +785,13 @@ mod tests {
     fn test_validate_dpop_claims_expired() {
         // iat older than max_age_seconds
         let claims = make_claims("POST", "https://example.com/token", now() - 120);
+        let uris = ["https://example.com/token".to_string()];
         let result = validate_dpop_claims(
             &claims,
-            "POST",
-            &["https://example.com/token".into()],
-            60,
-            None,
-            None,
+            &DpopClaimsValidation {
+                accepted_uris: &uris,
+                ..validation_params(now(), 60)
+            },
         );
         assert!(matches!(result, Err(DpopError::Expired)));
     }
@@ -763,13 +800,13 @@ mod tests {
     fn test_validate_dpop_claims_future_iat() {
         // iat more than 60 seconds in the future (age < -60)
         let claims = make_claims("POST", "https://example.com/token", now() + 120);
+        let uris = ["https://example.com/token".to_string()];
         let result = validate_dpop_claims(
             &claims,
-            "POST",
-            &["https://example.com/token".into()],
-            300,
-            None,
-            None,
+            &DpopClaimsValidation {
+                accepted_uris: &uris,
+                ..validation_params(now(), 300)
+            },
         );
         assert!(matches!(result, Err(DpopError::Expired)));
     }
@@ -779,13 +816,14 @@ mod tests {
         let mut claims = make_claims("POST", "https://example.com/token", now());
         claims.ath = Some("wrong_hash_value_here_xxxxxxxxxxxxxxxxxxxxxxx".to_string());
         let correct_ath = compute_access_token_hash("my-access-token");
+        let uris = ["https://example.com/token".to_string()];
         let result = validate_dpop_claims(
             &claims,
-            "POST",
-            &["https://example.com/token".into()],
-            60,
-            None,
-            Some(&correct_ath),
+            &DpopClaimsValidation {
+                accepted_uris: &uris,
+                expected_ath: Some(&correct_ath),
+                ..validation_params(now(), 60)
+            },
         );
         assert!(matches!(result, Err(DpopError::TokenHashMismatch)));
     }
@@ -796,13 +834,14 @@ mod tests {
         let ath = compute_access_token_hash(access_token);
         let mut claims = make_claims("POST", "https://example.com/token", now());
         claims.ath = Some(ath.clone());
+        let uris = ["https://example.com/token".to_string()];
         let result = validate_dpop_claims(
             &claims,
-            "POST",
-            &["https://example.com/token".into()],
-            60,
-            None,
-            Some(&ath),
+            &DpopClaimsValidation {
+                accepted_uris: &uris,
+                expected_ath: Some(&ath),
+                ..validation_params(now(), 60)
+            },
         );
         assert!(result.is_ok());
     }
@@ -810,15 +849,105 @@ mod tests {
     #[test]
     fn test_validate_dpop_claims_valid_no_ath() {
         let claims = make_claims("POST", "https://example.com/token", now());
+        let uris = ["https://example.com/token".to_string()];
         let result = validate_dpop_claims(
             &claims,
-            "POST",
-            &["https://example.com/token".into()],
-            60,
-            None,
-            None,
+            &DpopClaimsValidation {
+                accepted_uris: &uris,
+                ..validation_params(now(), 60)
+            },
         );
         assert!(result.is_ok());
+    }
+
+    // ========================================================================
+    // Deterministic boundary tests (issue #661) — fixed `now`/`iat` pairs
+    // instead of real-clock waits, exercising the exact skew and max-age
+    // edges.
+    // ========================================================================
+
+    /// `iat = now + 60` is exactly at the future-skew allowance and must be
+    /// accepted (`age == -60`, not `< -60`).
+    #[test]
+    fn test_validate_dpop_claims_skew_boundary_accepted() {
+        let fixed_now = 1_700_000_000;
+        let claims = make_claims("POST", "https://example.com/token", fixed_now + 60);
+        let uris = ["https://example.com/token".to_string()];
+        let result = validate_dpop_claims(
+            &claims,
+            &DpopClaimsValidation {
+                accepted_uris: &uris,
+                ..validation_params(fixed_now, 300)
+            },
+        );
+        assert!(
+            result.is_ok(),
+            "iat = now + 60 must be accepted: {result:?}"
+        );
+    }
+
+    /// `iat = now + 61` is one second past the future-skew allowance and
+    /// must be rejected (`age == -61 < -60`).
+    #[test]
+    fn test_validate_dpop_claims_skew_boundary_rejected() {
+        let fixed_now = 1_700_000_000;
+        let claims = make_claims("POST", "https://example.com/token", fixed_now + 61);
+        let uris = ["https://example.com/token".to_string()];
+        let result = validate_dpop_claims(
+            &claims,
+            &DpopClaimsValidation {
+                accepted_uris: &uris,
+                ..validation_params(fixed_now, 300)
+            },
+        );
+        assert!(matches!(result, Err(DpopError::Expired)));
+    }
+
+    /// `age == max_age_seconds` is exactly at the proof-age boundary and
+    /// must be accepted (`age > max_age_seconds` is strict).
+    #[test]
+    fn test_validate_dpop_claims_max_age_boundary_accepted() {
+        let fixed_now = 1_700_000_000;
+        let max_age_seconds = 60;
+        let claims = make_claims(
+            "POST",
+            "https://example.com/token",
+            fixed_now - max_age_seconds,
+        );
+        let uris = ["https://example.com/token".to_string()];
+        let result = validate_dpop_claims(
+            &claims,
+            &DpopClaimsValidation {
+                accepted_uris: &uris,
+                ..validation_params(fixed_now, max_age_seconds)
+            },
+        );
+        assert!(
+            result.is_ok(),
+            "age == max_age_seconds must be accepted: {result:?}"
+        );
+    }
+
+    /// `age == max_age_seconds + 1` is one second past the proof-age
+    /// boundary and must be rejected.
+    #[test]
+    fn test_validate_dpop_claims_max_age_boundary_rejected() {
+        let fixed_now = 1_700_000_000;
+        let max_age_seconds = 60;
+        let claims = make_claims(
+            "POST",
+            "https://example.com/token",
+            fixed_now - (max_age_seconds + 1),
+        );
+        let uris = ["https://example.com/token".to_string()];
+        let result = validate_dpop_claims(
+            &claims,
+            &DpopClaimsValidation {
+                accepted_uris: &uris,
+                ..validation_params(fixed_now, max_age_seconds)
+            },
+        );
+        assert!(matches!(result, Err(DpopError::Expired)));
     }
 
     // ========================================================================

@@ -90,15 +90,17 @@ pub async fn create_session(
 
 /// Get a session by token hash.
 ///
-/// Only returns sessions that have not yet expired.
+/// Only returns sessions that have not yet expired. `now` is stamped once by
+/// the caller so the expiry comparison can be exercised deterministically in
+/// tests.
 pub async fn get_session_by_token_hash(
     store: &DocumentStore,
     token_hash: &str,
+    now: Timestamp,
 ) -> Result<Option<Session>> {
     let doc = store
         .find_one::<SessionDoc>("token_hash", token_hash)
         .await?;
-    let now = Timestamp::now();
     match doc {
         Some(d) if d.data.expires_at > now => Ok(Some(Session::from(d))),
         _ => Ok(None),
@@ -212,7 +214,7 @@ impl SessionCache {
         // Snapshot generation before the async DB fetch so we can
         // detect invalidations that occurred during the await.
         let gen_before = self.generation.load(Ordering::SeqCst);
-        let result = get_session_by_token_hash(store, token_hash).await?;
+        let result = get_session_by_token_hash(store, token_hash, Timestamp::now()).await?;
         self.insert_if_valid(token_hash.to_string(), result.clone(), gen_before);
         Ok(result)
     }
