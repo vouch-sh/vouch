@@ -4085,6 +4085,46 @@ async fn test_github_installation_concurrent_suspend_unsuspend_no_lost_update() 
     );
 }
 
+/// Two concurrent delta updates with disjoint adds must both land: the merge
+/// runs inside the `modify` closure, so an OCC retry re-reads fresh state and
+/// re-applies the delta instead of losing the other webhook's update.
+#[tokio::test]
+async fn test_update_github_installation_repos_delta_concurrent_deltas_both_land() {
+    let (store, _audit) = test_db().await;
+    create_test_github_installation(&store, 20_002, "org-concurrent-delta").await;
+    let seeded = update_github_installation_repos(&store, 20_002, &["seed".to_string()])
+        .await
+        .expect("seed repos");
+    assert!(seeded, "seeding must find the installation");
+
+    let store_a = store.clone();
+    let store_b = store.clone();
+    let add_a = vec!["alpha".to_string()];
+    let add_b = vec!["bravo".to_string()];
+    let (a, b) = tokio::join!(
+        update_github_installation_repos_delta(&store_a, 20_002, &add_a, &[]),
+        update_github_installation_repos_delta(&store_b, 20_002, &add_b, &[]),
+    );
+    assert!(
+        a.expect("delta a must not error"),
+        "delta a must find the installation"
+    );
+    assert!(
+        b.expect("delta b must not error"),
+        "delta b must find the installation"
+    );
+
+    let after = get_github_installation_by_installation_id(&store, 20_002)
+        .await
+        .expect("lookup after concurrent deltas")
+        .expect("installation must still exist");
+    assert_eq!(
+        after.repositories.as_deref(),
+        Some(&["alpha".to_string(), "bravo".to_string(), "seed".to_string()][..]),
+        "both concurrent deltas must land (no lost update)"
+    );
+}
+
 /// If an installation is deleted between the index-resolve and the `modify` call
 /// (race with an uninstall webhook), `modify` returns `Ok(false)` rather than
 /// updating a stale document.
