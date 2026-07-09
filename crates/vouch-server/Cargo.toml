@@ -40,7 +40,7 @@ clap = { workspace = true, features = ["std", "derive", "env", "help", "usage", 
 const-oid = { workspace = true }
 der = { workspace = true, features = ["std", "oid"] }
 dotenvy = { workspace = true }
-ed25519-dalek = { workspace = true, features = ["std"] }
+ed25519-dalek = { workspace = true }
 flate2 = { workspace = true, features = ["rust_backend"] }
 governor = { workspace = true, features = ["std"] }
 headers = { workspace = true }

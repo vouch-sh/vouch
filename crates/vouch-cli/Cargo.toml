@@ -28,7 +28,7 @@ clap = { workspace = true, features = ["std", "derive", "env", "help", "usage", 
 clap_complete = { workspace = true }
 dirs = { workspace = true }
 gethostname = { workspace = true }
-ed25519-dalek = { workspace = true, features = ["std"] }
+ed25519-dalek = { workspace = true }
 hex = { workspace = true, features = ["std"] }
 i18n-embed = { workspace = true, features = ["fluent-system", "rust-embed"] }
 i18n-embed-fl = { workspace = true }
