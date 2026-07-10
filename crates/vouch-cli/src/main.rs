@@ -457,8 +457,27 @@ use commands::credential::CredentialCommands;
 use commands::keys::KeysCommands;
 use commands::setup::SetupCommands;
 
+/// Stack reserve for the thread that runs the CLI. Building the clap command
+/// tree in an unoptimized build needs more than the 1 MiB Windows reserves
+/// for the process main thread (Unix reserves 8 MiB), so all work runs on a
+/// spawned thread with an explicit 8 MiB stack.
+const MAIN_THREAD_STACK_SIZE: usize = 8 * 1024 * 1024;
+
+fn main() -> ExitCode {
+    match std::thread::Builder::new()
+        .name("vouch-main".to_string())
+        .stack_size(MAIN_THREAD_STACK_SIZE)
+        .spawn(tokio_main)
+    {
+        Ok(handle) => handle.join().unwrap_or(ExitCode::FAILURE),
+        // Could not spawn a thread: fall back to the main thread, which has
+        // enough stack everywhere except Windows debug builds.
+        Err(_) => tokio_main(),
+    }
+}
+
 #[tokio::main]
-async fn main() -> ExitCode {
+async fn tokio_main() -> ExitCode {
     match run().await {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
@@ -543,6 +562,15 @@ async fn run() -> Result<()> {
     // pre-scan honors `--lang` from argv since clap hasn't parsed it yet.
     let preferred = vouch_cli::i18n::preresolve_lang_from_argv_and_env();
     vouch_cli::i18n::init(preferred)?;
+
+    // On Windows, a bare `vouch` prints help and exits 0: the winget
+    // validation pipeline runs the portable exe with no arguments and flags
+    // any nonzero exit code in its report. Unix keeps clap's conventional
+    // usage-error exit code 2 for a missing subcommand.
+    if cfg!(windows) && std::env::args_os().len() == 1 {
+        Cli::command().print_long_help()?;
+        return Ok(());
+    }
 
     let cli = Cli::parse();
 
