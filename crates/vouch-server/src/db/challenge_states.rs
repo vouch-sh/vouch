@@ -73,9 +73,7 @@ pub async fn try_consume_challenge_state(
     expires_at: Timestamp,
 ) -> std::result::Result<ChallengeStateClaim, ClaimError> {
     let id = deterministic_challenge_state_id(state_jwt);
-    let doc = ChallengeStateDoc {
-        expires_at,
-    };
+    let doc = ChallengeStateDoc { expires_at };
 
     match store.insert_with_id(&id, &doc).await {
         Ok(_) => Ok(ChallengeStateClaim { _private: () }),
