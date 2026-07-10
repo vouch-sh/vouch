@@ -53,4 +53,36 @@ VOUCH_CLEANUP_INTERVAL=15
 - **Time-limited** — Sessions cannot be renewed; a new login is required after expiry
 - **DPoP-bound** — Access tokens are bound to the client's DPoP key; token theft without the key is useless
 - **Non-transferable** — Sessions are bound to the client that created them
+- **Audience-restricted** — Tokens narrowed to a specific resource are rejected at every other resource (see below)
 - **Audited** — Every session creation and usage is logged
+
+## Audience Enforcement (RFC 8707 Resource Indicators)
+
+Access tokens carry an `aud` (audience) claim per RFC 9068. By default the
+audience equals the requesting `client_id` and the token is valid at every
+Vouch resource endpoint — this covers all standard flows (`vouch login`,
+browser sessions, device flow, client credentials).
+
+A client may instead narrow a token to a specific resource, either with the
+RFC 8707 `resource` parameter at the authorization endpoint or with the
+`audience`/`resource` parameters at token exchange (RFC 8693). Vouch's
+resource endpoints (`/v1/credentials/*`, `/v1/keys`, `/api/v1/*`, RFC 7592
+client management) enforce that narrowing: a narrowed token is accepted only
+when its audience names this deployment (same scheme, host, and port as the
+configured base URL) and its path covers the request at a path-segment
+boundary. An audience of the deployment root (the base URL itself) covers
+every endpoint; `{base_url}/v1/keys` covers `/v1/keys` and everything below
+it, but nothing else. Requests failing the check receive `401 invalid_token`
+with the standard `WWW-Authenticate` challenge, and the rejection is logged
+with the client ID, audience, and request path.
+
+Per their RFCs, the authorization-server endpoints remain audience-agnostic:
+`/oauth/userinfo` accepts tokens from any client, `/oauth/introspect` and
+`/oauth/revoke` answer about any token the server issued, and token exchange
+accepts narrowed subject tokens (re-scoping them is its purpose).
+
+Clients registered without `resource_uris` may request any `resource` value
+at issuance. This is safe under enforcement: a token narrowed to an external
+resource server is *less* usable at Vouch, not more — it can only be spent at
+the external service it names. Registering `resource_uris` additionally
+restricts which values a client may request at all.

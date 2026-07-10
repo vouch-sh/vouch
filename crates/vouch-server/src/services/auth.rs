@@ -844,6 +844,11 @@ pub(crate) struct ValidatedResourceToken {
     pub email: Option<String>,
     /// OAuth client_id from the access token.
     pub client_id: String,
+    /// Audience (`aud` claim) from the access token. Equals `client_id`
+    /// for un-narrowed tokens; a resource URI for tokens narrowed via
+    /// RFC 8707 `resource` or RFC 8693 `audience`. Audience coverage has
+    /// already been enforced by `extract_resource_token`.
+    pub aud: String,
     /// Granted OAuth scope.
     pub scope: Option<crate::services::oidc::ScopeSet>,
     /// Authenticator ID from the server-side session record (not in JWT).
