@@ -23,11 +23,9 @@ mod encoding_tests;
 
 pub use encoding::{Base64Url, ConvertEncoding, Encoded, Encoding, Raw};
 pub use fido2_types::{
-    AttestationObject, AttestationObjectData, AuthData, AuthenticatorDataMarker,
-    Base64UrlChallenge, Base64UrlCredentialId, Challenge, ChallengeData, ClientDataJson,
-    ClientDataJsonData, CoseKey, CoseKeyData, CredentialId, CredentialIdData, RawAttestationObject,
-    RawAuthData, RawChallenge, RawClientDataJson, RawCoseKey, RawCredentialId, RawSignature,
-    RawUserHandle, Signature, SignatureData, UserHandle, UserHandleData,
+    AttestationObject, AttestationObjectData, AuthData, AuthenticatorDataMarker, Challenge,
+    ChallengeData, ClientDataJson, ClientDataJsonData, CoseKey, CoseKeyData, CredentialId,
+    CredentialIdData, Signature, SignatureData, UserHandle, UserHandleData,
 };
 
 pub use aaguid::{

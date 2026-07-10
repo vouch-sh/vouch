@@ -33,7 +33,7 @@
 //! let challenge_b64: Challenge<Base64Url> = challenge.to_base64url();
 //! ```
 
-use crate::encoding::{Base64Url, Encoded, Raw};
+use crate::encoding::Encoded;
 
 // ============================================================================
 // Semantic Markers (Zero-sized types)
@@ -124,40 +124,6 @@ pub type UserHandle<E> = Encoded<UserHandleData, E>;
 pub type AttestationObject<E> = Encoded<AttestationObjectData, E>;
 
 // ============================================================================
-// Convenience Type Aliases for Common Cases
-// ============================================================================
-
-/// Raw challenge bytes.
-pub type RawChallenge = Challenge<Raw>;
-
-/// Raw credential ID bytes.
-pub type RawCredentialId = CredentialId<Raw>;
-
-/// Raw COSE key bytes.
-pub type RawCoseKey = CoseKey<Raw>;
-
-/// Raw authenticator data bytes.
-pub type RawAuthData = AuthData<Raw>;
-
-/// Raw client data JSON bytes.
-pub type RawClientDataJson = ClientDataJson<Raw>;
-
-/// Raw signature bytes.
-pub type RawSignature = Signature<Raw>;
-
-/// Raw user handle bytes.
-pub type RawUserHandle = UserHandle<Raw>;
-
-/// Raw attestation object bytes.
-pub type RawAttestationObject = AttestationObject<Raw>;
-
-/// Base64url-encoded challenge (for browser APIs).
-pub type Base64UrlChallenge = Challenge<Base64Url>;
-
-/// Base64url-encoded credential ID (for browser APIs).
-pub type Base64UrlCredentialId = CredentialId<Base64Url>;
-
-// ============================================================================
 // Tests
 // ============================================================================
 
@@ -168,7 +134,7 @@ pub type Base64UrlCredentialId = CredentialId<Base64Url>;
 )]
 mod tests {
     use super::*;
-    use crate::encoding::ConvertEncoding;
+    use crate::encoding::{Base64Url, ConvertEncoding, Raw};
 
     #[test]
     fn test_challenge_creation() {
@@ -190,31 +156,23 @@ mod tests {
     }
 
     #[test]
-    fn test_type_aliases() {
-        // Verify type aliases work as expected
-        let _: RawChallenge = RawChallenge::from_raw(vec![1, 2, 3]);
-        let _: RawCredentialId = RawCredentialId::from_raw(vec![4, 5, 6]);
-        let _: RawCoseKey = RawCoseKey::from_raw(vec![7, 8, 9]);
-    }
-
-    #[test]
     fn test_serde_round_trip() {
-        let original: RawChallenge = RawChallenge::from_raw(vec![1, 2, 3]);
+        let original: Challenge<Raw> = Challenge::from_raw(vec![1, 2, 3]);
         let json = serde_json::to_string(&original).unwrap();
-        let decoded: RawChallenge = serde_json::from_str(&json).unwrap();
+        let decoded: Challenge<Raw> = serde_json::from_str(&json).unwrap();
         assert_eq!(original.as_bytes(), decoded.as_bytes());
     }
 
     #[test]
     fn test_from_vec() {
         let data = vec![1u8, 2, 3];
-        let challenge: RawChallenge = data.into();
+        let challenge: Challenge<Raw> = data.into();
         assert_eq!(challenge.as_bytes(), &[1, 2, 3]);
     }
 
     #[test]
     fn test_into_vec() {
-        let challenge: RawChallenge = RawChallenge::from_raw(vec![1, 2, 3]);
+        let challenge: Challenge<Raw> = Challenge::from_raw(vec![1, 2, 3]);
         let data: Vec<u8> = challenge.into();
         assert_eq!(data, vec![1, 2, 3]);
     }
