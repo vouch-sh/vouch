@@ -876,9 +876,7 @@ pub(crate) struct ValidatedResourceToken {
 /// [`TokenValidationContext`] and instantiates the [`AccessTokenClaims`]
 /// schema.
 ///
-/// Validates `typ`, `iss`, and optionally `aud` per RFC 8725.
-/// Pass `expected_audience` for endpoints that require audience binding (e.g., userinfo).
-/// Pass `None` for endpoints that accept tokens for any audience (introspection, revocation).
+/// Validates `typ` and `iss` per RFC 8725.
 ///
 /// Returns `None` for invalid, expired, or unsupported tokens.
 pub(crate) fn decode_token(

@@ -356,13 +356,6 @@ pub(crate) struct TokenValidationContext<'a> {
     pub(crate) oidc_key: &'a OidcSigningKey,
     /// Expected issuer (base_url).
     pub(crate) expected_issuer: &'a str,
-    /// Optional expected audience for access tokens.
-    ///
-    /// When `Some`, the `aud` claim of ES256 access tokens is validated
-    /// against this value (RFC 8725 Section 3.9). When `None`, audience
-    /// validation is skipped (for introspection/revocation endpoints that
-    /// accept tokens for any audience).
-    pub(crate) expected_audience: Option<&'a str>,
 }
 
 impl<'a> TokenValidationContext<'a> {
@@ -375,7 +368,6 @@ impl<'a> TokenValidationContext<'a> {
         Self {
             oidc_key,
             expected_issuer,
-            expected_audience: None,
         }
     }
 }
@@ -410,13 +402,7 @@ pub(crate) fn decode_es256_token<C: DeserializeOwned>(
             // the same clock (DPoP-bound, short-lived). A 60s grace window
             // would let replayed tokens slip through during single-use cleanup.
             validation.leeway = 0;
-            // Validate audience when caller specifies one (RFC 8725 §3.9)
-            if let Some(aud) = ctx.expected_audience {
-                validation.set_audience(&[aud]);
-                validation.validate_aud = true;
-            } else {
-                validation.validate_aud = false;
-            }
+            validation.validate_aud = false;
             // RFC 8725 §3.8: Validate issuer
             validation.set_issuer(&[ctx.expected_issuer]);
 
