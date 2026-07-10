@@ -64,8 +64,9 @@ pub(crate) enum SetupCommands {
         region: Option<String>,
         /// Enumerate accounts and permission-sets via Identity Center and write
         /// one profile per assignment. Requires IdC config from this run or
-        /// previously stored with `vouch setup aws`.
-        #[arg(long, help = tr!("arg-setup-aws-discover-help"))]
+        /// previously stored with `vouch setup aws`. Discovery never uses a
+        /// target role, so combining with --role is rejected at parse time.
+        #[arg(long, conflicts_with = "role", help = tr!("arg-setup-aws-discover-help"))]
         discover: bool,
     },
     /// Configure SSH to use Vouch certificates.
@@ -238,4 +239,52 @@ pub(crate) enum SetupCommands {
         #[arg(long, help = tr!("arg-setup-codeartifact-profile-help"))]
         profile: Option<String>,
     },
+}
+
+#[cfg(test)]
+#[expect(
+    clippy::expect_used,
+    reason = "test code: panic on assertion failure is acceptable"
+)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[derive(Parser)]
+    struct TestCli {
+        #[command(subcommand)]
+        cmd: SetupCommands,
+    }
+
+    /// `--discover` ignores any target role (`run` returns into discovery
+    /// before `--role` is read), so the combination must be rejected at
+    /// parse time instead of silently dropping the flag (#672).
+    #[test]
+    fn setup_aws_rejects_role_with_discover() {
+        let err = TestCli::try_parse_from([
+            "vouch",
+            "aws",
+            "--role",
+            "arn:aws:iam::123456789012:role/dev",
+            "--discover",
+        ])
+        .err()
+        .expect("--role with --discover must fail to parse");
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    /// `--discover` alone (IdC config already stored) must keep parsing.
+    #[test]
+    fn setup_aws_allows_discover_alone() {
+        let cli = TestCli::try_parse_from(["vouch", "aws", "--discover"])
+            .expect("--discover alone must parse");
+        assert!(matches!(
+            cli.cmd,
+            SetupCommands::Aws {
+                discover: true,
+                role: None,
+                ..
+            }
+        ));
+    }
 }
