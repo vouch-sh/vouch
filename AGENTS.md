@@ -2,7 +2,7 @@
 
 See `CLAUDE.md` for full project overview, architecture, code conventions, and commands.
 
-## Cursor Cloud specific instructions
+## Cloud environment instructions (Cursor Cloud, Claude Code remote)
 
 ### System dependencies
 
@@ -15,9 +15,15 @@ export AWS_LC_FIPS_SYS_CXX=clang++
 
 These are already configured in `~/.bashrc` on the Cloud VM.
 
+On Claude Code sessions, `.claude/hooks/session-setup.sh` runs at session start and installs the system packages, rustup, the TailwindCSS CLI, and `prek` when missing (each step skips silently if the network policy blocks its download).
+
 ### TailwindCSS
 
-The server UI requires the **standalone** TailwindCSS v4 CLI binary (not npm). It is installed at `/usr/local/bin/tailwindcss`. Run `make css-build` before starting the server or building the project.
+The server UI requires the **standalone** TailwindCSS v4 CLI binary (not npm). It is installed at `/usr/local/bin/tailwindcss`. Run `make css-build` before starting the server or building the project. (On Claude Code remote containers, where GitHub release downloads may be blocked, the session hook falls back to installing the same CLI from the npm registry — this does not add a node toolchain to the project.)
+
+### Disk space (Claude Code remote containers)
+
+Writable disk is a fixed per-session allowance, and a full `--all-features` build of this workspace is large. The session hook disables incremental compilation in these containers (`~/.cargo/config.toml`), which roughly halves `target/` (~14 GB vs ~30 GB per full build cycle). On "no space left on device", delete `target/` subdirectories you no longer need — deletes still succeed while writes fail.
 
 ### Running the server locally
 
