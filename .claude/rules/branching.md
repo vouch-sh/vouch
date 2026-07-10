@@ -26,7 +26,7 @@ Branch names mirror the Conventional Commit type of the work (see `commits-and-i
 Run the project gates from the workspace root (all are `make` targets):
 
 ```bash
-make fmt        # cargo +nightly fmt — ALWAYS run before pushing; never a follow-up commit
+make fmt        # cargo fmt --all — ALWAYS run before pushing; never a follow-up commit
 make lint       # cargo clippy --all-targets --all-features -- -D warnings (zero warnings)
 make test       # unit tests (--all-features; covers feature-gated middleware/tests)
 prek run        # git hooks (formatting, lint, secrets)
