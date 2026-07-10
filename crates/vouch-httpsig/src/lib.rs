@@ -10,8 +10,6 @@
 //! - `ecdsa-p256-sha256` — ECDSA with P-256 and SHA-256 (DER-encoded signatures)
 //! - `ed25519` — Ed25519 (raw 64-byte signatures)
 //! - `hmac-sha256` — HMAC with SHA-256
-//! - `rsa-pss-sha512` — RSASSA-PSS with SHA-512
-//! - `rsa-v1_5-sha256` — RSASSA-PKCS1-v1.5 with SHA-256
 
 pub mod algorithm;
 pub mod component;

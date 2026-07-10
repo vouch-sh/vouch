@@ -4,8 +4,6 @@
 pub mod ecdsa_p256;
 pub mod ed25519;
 pub mod hmac_sha256;
-pub mod rsa_pss_sha512;
-pub mod rsa_v15_sha256;
 
 use crate::error::HttpSigError;
 
