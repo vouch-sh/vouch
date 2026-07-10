@@ -1062,36 +1062,6 @@ mod tests {
         .unwrap()
     }
 
-    /// Create a minimal valid ES256 COSE key
-    #[expect(dead_code, reason = "reserved for serde DTO conformance / future use")]
-    fn make_es256_cose_key(x: &[u8], y: &[u8]) -> Vec<u8> {
-        let mut buf = Vec::new();
-        let key = ciborium::Value::Map(vec![
-            (
-                ciborium::Value::Integer(1.into()), // kty = EC2
-                ciborium::Value::Integer(2.into()),
-            ),
-            (
-                ciborium::Value::Integer(3.into()), // alg = ES256 (-7)
-                ciborium::Value::Integer((-7).into()),
-            ),
-            (
-                ciborium::Value::Integer((-1).into()), // crv = P-256 (1)
-                ciborium::Value::Integer(1.into()),
-            ),
-            (
-                ciborium::Value::Integer((-2).into()), // x
-                ciborium::Value::Bytes(x.to_vec()),
-            ),
-            (
-                ciborium::Value::Integer((-3).into()), // y
-                ciborium::Value::Bytes(y.to_vec()),
-            ),
-        ]);
-        ciborium::into_writer(&key, &mut buf).unwrap();
-        buf
-    }
-
     /// Create a minimal valid EdDSA COSE key
     fn make_eddsa_cose_key(x: &[u8]) -> Vec<u8> {
         let mut buf = Vec::new();
@@ -1111,32 +1081,6 @@ mod tests {
             (
                 ciborium::Value::Integer((-2).into()), // x (public key)
                 ciborium::Value::Bytes(x.to_vec()),
-            ),
-        ]);
-        ciborium::into_writer(&key, &mut buf).unwrap();
-        buf
-    }
-
-    /// Create a minimal valid RS256 COSE key
-    #[expect(dead_code, reason = "reserved for serde DTO conformance / future use")]
-    fn make_rs256_cose_key(n: &[u8], e: &[u8]) -> Vec<u8> {
-        let mut buf = Vec::new();
-        let key = ciborium::Value::Map(vec![
-            (
-                ciborium::Value::Integer(1.into()), // kty = RSA
-                ciborium::Value::Integer(3.into()),
-            ),
-            (
-                ciborium::Value::Integer(3.into()), // alg = RS256 (-257)
-                ciborium::Value::Integer((-257).into()),
-            ),
-            (
-                ciborium::Value::Integer((-1).into()), // n (modulus)
-                ciborium::Value::Bytes(n.to_vec()),
-            ),
-            (
-                ciborium::Value::Integer((-2).into()), // e (exponent)
-                ciborium::Value::Bytes(e.to_vec()),
             ),
         ]);
         ciborium::into_writer(&key, &mut buf).unwrap();
