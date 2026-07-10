@@ -4,9 +4,6 @@
 //! This crate provides the Vouch CLI for hardware-backed identity,
 //! along with reusable components for testing.
 
-pub(crate) mod install_path;
-pub(crate) mod utils;
-
 pub mod fapi;
 pub mod fido2;
 pub mod http;
