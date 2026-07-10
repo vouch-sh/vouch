@@ -72,6 +72,21 @@ impl crate::db::pool::RetryableError for OrgCasError {
     }
 }
 
+/// Slot CAS conflicts from the subdomain auto-release hook must stay
+/// retryable through the org-doc retry loop; everything else is terminal
+/// (unwrapping `Other` keeps any retryable DB error code visible to
+/// `is_retryable_db_error`).
+impl From<super::issuer::SubdomainClaimError> for OrgCasError {
+    fn from(e: super::issuer::SubdomainClaimError) -> Self {
+        use super::issuer::SubdomainClaimError;
+        match e {
+            SubdomainClaimError::OccConflict => Self::OccConflict,
+            SubdomainClaimError::Other(inner) => Self::Other(inner),
+            other => Self::Other(anyhow::Error::new(other)),
+        }
+    }
+}
+
 /// Errors returned by [`add_additional_domain`].
 ///
 /// Business-rejection variants are terminal (not retried); `OccConflict` and
@@ -1806,6 +1821,21 @@ mod tests {
 
         assert!(OrgCasError::OccConflict.is_retryable());
         assert!(!OrgCasError::Other(anyhow::anyhow!("domain is already attached")).is_retryable());
+    }
+
+    /// A slot CAS loss inside the subdomain auto-release hook must convert to
+    /// the retryable `OccConflict` so `with_dsql_retry!` re-runs the org-doc
+    /// transaction; other claim errors stay terminal (#671).
+    #[test]
+    fn subdomain_claim_error_maps_to_org_cas_retryability() {
+        use crate::db::organizations::issuer::SubdomainClaimError;
+        use crate::db::pool::RetryableError;
+
+        assert!(OrgCasError::from(SubdomainClaimError::OccConflict).is_retryable());
+        assert!(
+            !OrgCasError::from(SubdomainClaimError::Other(anyhow::anyhow!("boom"))).is_retryable()
+        );
+        assert!(!OrgCasError::from(SubdomainClaimError::NotEligible).is_retryable());
     }
 
     /// All business-rejection variants of `AddDomainError` are terminal; only

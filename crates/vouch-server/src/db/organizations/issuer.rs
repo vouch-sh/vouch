@@ -19,7 +19,7 @@ use crate::db::documents::organization::{
     OrgSigningKeyDoc, OrganizationDoc, SigningKeyState, SubdomainClaimDoc,
 };
 use crate::db::store::{DocumentStore, StoreTransaction};
-use anyhow::{Result, bail};
+use anyhow::Result;
 use jiff::Timestamp;
 
 // ============================================================================
@@ -430,12 +430,17 @@ pub(super) fn subdomain_to_release(data: &OrganizationDoc) -> Option<String> {
 /// Cancelling rotation on auto-release is safe: auto-release already signals
 /// disruption (discovery 404s), so dropping a Previous key's still-valid tokens
 /// is acceptable.
+///
+/// # Errors
+/// Returns [`SubdomainClaimError::OccConflict`] when the claim slot loses its
+/// CAS race — callers run inside `with_dsql_retry!`, which re-runs the whole
+/// transaction from a fresh read. Other failures are terminal.
 pub(super) async fn release_ineligible_subdomain(
     tx: &mut StoreTransaction<'_>,
     org_id: &str,
     data: &mut OrganizationDoc,
     label: &str,
-) -> Result<()> {
+) -> Result<(), SubdomainClaimError> {
     data.subdomain = None;
 
     let claim_id = deterministic_subdomain_claim_id(label);
@@ -449,7 +454,7 @@ pub(super) async fn release_ineligible_subdomain(
                 .compare_and_update(&claim_id, slot.version, &released)
                 .await?
             {
-                bail!("subdomain claim was modified concurrently; please retry");
+                return Err(SubdomainClaimError::OccConflict);
             }
         }
         other => {

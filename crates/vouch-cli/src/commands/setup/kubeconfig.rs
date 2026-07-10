@@ -124,10 +124,22 @@ pub(crate) fn load_kubeconfig(path: &std::path::Path) -> Result<Kubeconfig> {
     let content = std::fs::read_to_string(path).with_context(|| {
         vouch_cli::tr_args!("setup-kc-err-read", path = path.display().to_string())
     })?;
-    let config: Kubeconfig = serde_saphyr::from_str(&content).with_context(|| {
+    let config: Kubeconfig = parse_kubeconfig(&content).with_context(|| {
         vouch_cli::tr_args!("setup-kc-err-parse", path = path.display().to_string())
     })?;
     Ok(config)
+}
+
+/// Parse kubeconfig YAML with YAML 1.2 boolean rules.
+///
+/// Only `true`/`false` are booleans; YAML 1.1 spellings (`no`, `yes`, `on`,
+/// `off`, ...) stay strings. Fields we don't model land in `#[serde(flatten)]`
+/// `serde_json::Value` catch-alls and are written back verbatim by
+/// [`save_kubeconfig`], so without strict booleans another user's unquoted
+/// `token: no` would round-trip as `token: false` and break their kubectl auth.
+fn parse_kubeconfig(content: &str) -> Result<Kubeconfig, serde_saphyr::Error> {
+    let options = serde_saphyr::options! { strict_booleans: true };
+    serde_saphyr::from_str_with_options(content, options)
 }
 
 /// Save kubeconfig to file.
@@ -333,5 +345,55 @@ users:
         assert_eq!(other2["token"], "super-secret-token");
         assert_eq!(other2["client-certificate-data"], "LS0tLS1DRVJU");
         assert_eq!(other2["username"], "admin");
+    }
+
+    /// Unquoted auth values that are YAML 1.1 reserved words (`no`, `yes`,
+    /// `on`, `off`) in *other* users' entries must stay strings across a
+    /// load -> save -> load round-trip. With default YAML 1.1 typing,
+    /// `token: no` parses as `Bool(false)` and `save_kubeconfig` would
+    /// persist `token: false`, breaking that user's kubectl auth (#670).
+    #[test]
+    fn test_yaml11_boolean_like_tokens_survive_roundtrip() {
+        let yaml = r#"
+apiVersion: v1
+kind: Config
+clusters: []
+contexts: []
+users:
+- name: legacy-user
+  user:
+    token: no
+    username: yes
+    password: on
+    client-key-data: off
+"#;
+
+        let config: Kubeconfig = parse_kubeconfig(yaml).expect("should parse");
+        let other = &config.users[0].user.other;
+        for (field, want) in [
+            ("token", "no"),
+            ("username", "yes"),
+            ("password", "on"),
+            ("client-key-data", "off"),
+        ] {
+            let value = other.get(field).expect(field);
+            assert!(value.is_string(), "{field}: got {value:?}, want a string");
+            assert_eq!(value, want, "{field}");
+        }
+
+        // Serialize and re-parse: the serializer quotes ambiguous scalars, so
+        // the values survive another strict parse unchanged.
+        let serialized = serde_saphyr::to_string(&config).expect("should serialize");
+        let reparsed: Kubeconfig = parse_kubeconfig(&serialized).expect("should re-parse");
+        let other2 = &reparsed.users[0].user.other;
+        assert_eq!(other2["token"], "no");
+        assert_eq!(other2["username"], "yes");
+        assert_eq!(other2["password"], "on");
+        assert_eq!(other2["client-key-data"], "off");
+
+        // Real booleans are still booleans under YAML 1.2 rules.
+        let bool_yaml = "users:\n- name: u\n  user:\n    some-flag: true\n";
+        let parsed: Kubeconfig = parse_kubeconfig(bool_yaml).expect("should parse");
+        assert_eq!(parsed.users[0].user.other["some-flag"], true);
     }
 }
