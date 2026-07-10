@@ -80,8 +80,6 @@ pub struct Document<T> {
     pub created_at: Timestamp,
     /// Last-update timestamp.
     pub updated_at: Timestamp,
-    /// Optional expiration timestamp.
-    pub expires_at: Option<Timestamp>,
     /// Optimistic concurrency version. Incremented on every update.
     pub version: i32,
     /// Lightweight last-used timestamp (column-level, no encrypt/decrypt).
