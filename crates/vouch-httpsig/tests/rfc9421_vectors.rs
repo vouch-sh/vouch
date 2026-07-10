@@ -14,8 +14,8 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 
 use vouch_httpsig::component::ComponentIdentifier;
-use vouch_httpsig::signature_base::build_request_base;
-use vouch_httpsig::signature_base::build_response_base;
+use vouch_httpsig::signature_base::build_request_base_with_params_str;
+use vouch_httpsig::signature_base::build_response_base_with_params_str;
 use vouch_httpsig::signature_params::SignatureParams;
 
 // ---------------------------------------------------------------------------
@@ -99,7 +99,7 @@ fn test_b21_minimal_signature_base() {
         tag: None,
     };
 
-    let base = build_request_base(&req, &params).unwrap();
+    let base = build_request_base_with_params_str(&req, &params, &params.serialize()).unwrap();
     let base_str = std::str::from_utf8(&base).unwrap();
 
     let expected = "\"@signature-params\": ();created=1618884473\
@@ -127,7 +127,7 @@ fn test_b22_selective_components_signature_base() {
         tag: Some("header-example".into()),
     };
 
-    let base = build_request_base(&req, &params).unwrap();
+    let base = build_request_base_with_params_str(&req, &params, &params.serialize()).unwrap();
     let base_str = std::str::from_utf8(&base).unwrap();
 
     // Verify individual lines
@@ -168,7 +168,7 @@ fn test_b23_full_coverage_signature_base() {
         tag: None,
     };
 
-    let base = build_request_base(&req, &params).unwrap();
+    let base = build_request_base_with_params_str(&req, &params, &params.serialize()).unwrap();
     let base_str = std::str::from_utf8(&base).unwrap();
 
     let lines: Vec<&str> = base_str.split('\n').collect();
@@ -206,7 +206,9 @@ fn test_b24_response_signature_base() {
         tag: None,
     };
 
-    let base = build_response_base::<&[u8], ()>(&resp, None, &params).unwrap();
+    let base =
+        build_response_base_with_params_str::<&[u8], ()>(&resp, None, &params, &params.serialize())
+            .unwrap();
     let base_str = std::str::from_utf8(&base).unwrap();
 
     let lines: Vec<&str> = base_str.split('\n').collect();
@@ -239,7 +241,9 @@ fn test_b24_verify_ecdsa_signature() {
         tag: None,
     };
 
-    let base = build_response_base::<&[u8], ()>(&resp, None, &params).unwrap();
+    let base =
+        build_response_base_with_params_str::<&[u8], ()>(&resp, None, &params, &params.serialize())
+            .unwrap();
 
     // Parse the public key from PEM (SPKI format)
     let pem_body = ECC_P256_PUBLIC_KEY_PEM
@@ -303,7 +307,7 @@ fn test_b25_hmac_signature_base() {
         tag: None,
     };
 
-    let base = build_request_base(&req, &params).unwrap();
+    let base = build_request_base_with_params_str(&req, &params, &params.serialize()).unwrap();
     let base_str = std::str::from_utf8(&base).unwrap();
 
     // Exact expected signature base from RFC
@@ -334,7 +338,7 @@ fn test_b25_hmac_verify_signature() {
         tag: None,
     };
 
-    let base = build_request_base(&req, &params).unwrap();
+    let base = build_request_base_with_params_str(&req, &params, &params.serialize()).unwrap();
 
     let secret = STANDARD.decode(HMAC_SHARED_SECRET_B64).unwrap();
     let key =
@@ -380,7 +384,7 @@ fn test_b26_ed25519_signature_base() {
         tag: None,
     };
 
-    let base = build_request_base(&req, &params).unwrap();
+    let base = build_request_base_with_params_str(&req, &params, &params.serialize()).unwrap();
     let base_str = std::str::from_utf8(&base).unwrap();
 
     let expected = "\
@@ -417,7 +421,7 @@ fn test_b26_ed25519_verify_signature() {
         tag: None,
     };
 
-    let base = build_request_base(&req, &params).unwrap();
+    let base = build_request_base_with_params_str(&req, &params, &params.serialize()).unwrap();
 
     // Decode the Ed25519 private key from PEM (PKCS#8)
     let pem_body = ED25519_PRIVATE_KEY_PEM
@@ -493,7 +497,7 @@ fn test_b4_transform_signature_base() {
         tag: None,
     };
 
-    let base = build_request_base(&req, &params).unwrap();
+    let base = build_request_base_with_params_str(&req, &params, &params.serialize()).unwrap();
     let base_str = std::str::from_utf8(&base).unwrap();
 
     let expected = "\
@@ -534,7 +538,7 @@ fn test_b4_transform_verify_ed25519_signature() {
         tag: None,
     };
 
-    let base = build_request_base(&req, &params).unwrap();
+    let base = build_request_base_with_params_str(&req, &params, &params.serialize()).unwrap();
 
     // Verify the RFC's Ed25519 signature
     let pub_pem_body = ED25519_PUBLIC_KEY_PEM
@@ -583,7 +587,7 @@ fn test_b4_transform_modified_method_fails() {
         tag: None,
     };
 
-    let base = build_request_base(&req, &params).unwrap();
+    let base = build_request_base_with_params_str(&req, &params, &params.serialize()).unwrap();
 
     let pub_pem_body = ED25519_PUBLIC_KEY_PEM
         .lines()

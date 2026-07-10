@@ -8,20 +8,6 @@
 use crate::error::HttpSigError;
 use crate::signature_params::SignatureParams;
 
-/// Build the signature base for an HTTP request.
-///
-/// # Errors
-///
-/// Returns [`HttpSigError::MissingComponent`] if a required component cannot
-/// be resolved from the request.
-pub fn build_request_base<T>(
-    req: &http::Request<T>,
-    params: &SignatureParams,
-) -> Result<Vec<u8>, HttpSigError> {
-    let params_str = params.serialize();
-    build_request_base_with_params_str(req, params, &params_str)
-}
-
 /// Build the signature base using a pre-serialized params string.
 ///
 /// This avoids double-serialization when the caller needs the params string
@@ -46,23 +32,6 @@ pub fn build_request_base_with_params_str<T>(
     base.extend_from_slice(params_str.as_bytes());
 
     Ok(base)
-}
-
-/// Build the signature base for an HTTP response.
-///
-/// An optional related request may be provided for components with the `;req` flag.
-///
-/// # Errors
-///
-/// Returns [`HttpSigError::MissingComponent`] if a required component cannot
-/// be resolved from the response (or the related request when `;req` is set).
-pub fn build_response_base<T, U>(
-    resp: &http::Response<T>,
-    req: Option<&http::Request<U>>,
-    params: &SignatureParams,
-) -> Result<Vec<u8>, HttpSigError> {
-    let params_str = params.serialize();
-    build_response_base_with_params_str(resp, req, params, &params_str)
 }
 
 /// Build the response signature base using a pre-serialized params string.
@@ -132,7 +101,7 @@ mod tests {
             tag: None,
         };
 
-        let base = build_request_base(&req, &params).unwrap();
+        let base = build_request_base_with_params_str(&req, &params, &params.serialize()).unwrap();
         let base_str = std::str::from_utf8(&base).unwrap();
 
         // Verify individual lines
@@ -160,7 +129,7 @@ mod tests {
             tag: None,
         };
 
-        let base = build_request_base(&req, &params).unwrap();
+        let base = build_request_base_with_params_str(&req, &params, &params.serialize()).unwrap();
         let base_str = std::str::from_utf8(&base).unwrap();
         let lines: Vec<&str> = base_str.split('\n').collect();
 
@@ -196,7 +165,13 @@ mod tests {
             tag: None,
         };
 
-        let base = build_response_base::<(), ()>(&resp, None, &params).unwrap();
+        let base = build_response_base_with_params_str::<(), ()>(
+            &resp,
+            None,
+            &params,
+            &params.serialize(),
+        )
+        .unwrap();
         let base_str = std::str::from_utf8(&base).unwrap();
         assert!(base_str.starts_with("\"@status\": 200\n"));
         assert!(base_str.contains("\"content-type\": application/json\n"));
@@ -215,7 +190,7 @@ mod tests {
             tag: None,
         };
 
-        let base = build_request_base(&req, &params).unwrap();
+        let base = build_request_base_with_params_str(&req, &params, &params.serialize()).unwrap();
         let base_str = std::str::from_utf8(&base).unwrap();
         assert!(base_str.starts_with("\"@signature-params\": "));
     }
@@ -233,7 +208,7 @@ mod tests {
             tag: None,
         };
 
-        let base = build_request_base(&req, &params).unwrap();
+        let base = build_request_base_with_params_str(&req, &params, &params.serialize()).unwrap();
         let base_str = std::str::from_utf8(&base).unwrap();
         assert!(base_str.contains("\"@path\": /path\n"));
         assert!(base_str.contains("\"@query\": ?param=value\n"));
@@ -252,7 +227,7 @@ mod tests {
             tag: None,
         };
 
-        let result = build_request_base(&req, &params);
+        let result = build_request_base_with_params_str(&req, &params, &params.serialize());
         assert!(result.is_err());
     }
 }
