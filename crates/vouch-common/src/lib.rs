@@ -31,8 +31,8 @@ pub use fido2_types::{
 };
 
 pub use aaguid::{
-    AaguidPolicy, extract_aaguid_from_auth_data, extract_public_key_from_attestation,
-    extract_public_key_from_auth_data, is_fips, is_yubikey_5, lookup_device_model,
+    AaguidPolicy, extract_aaguid_from_auth_data, extract_public_key_from_auth_data, is_fips,
+    is_yubikey_5, lookup_device_model,
 };
 pub use api::{
     AwsTokenResponse, BrowserLoginCompleteRequest, BrowserLoginCompleteResponse,

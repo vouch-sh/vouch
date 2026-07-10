@@ -12,7 +12,6 @@ workspace = true
 [dependencies]
 anyhow = { workspace = true, features = ["std"] }
 base64 = { workspace = true, features = ["std"] }
-ciborium = { workspace = true }
 dirs = { workspace = true }
 hex = { workspace = true, features = ["std"] }
 hickory-resolver = { workspace = true, features = ["dnssec-aws-lc-rs", "https-aws-lc-rs", "tokio", "webpki-roots"] }

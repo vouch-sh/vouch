@@ -418,11 +418,10 @@ proptest! {
     /// Public key extraction from auth data should never panic
     #[test]
     fn prop_public_key_extraction_no_panic(data: Vec<u8>) {
-        use vouch_common::aaguid::{extract_public_key_from_auth_data, extract_public_key_from_attestation};
+        use vouch_common::aaguid::extract_public_key_from_auth_data;
 
         // Should not panic
         let _ = extract_public_key_from_auth_data(&data);
-        let _ = extract_public_key_from_attestation(&data);
     }
 
     // =========================================================================

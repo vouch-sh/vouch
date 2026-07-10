@@ -34,5 +34,4 @@ fuzz_target!(|data: &[u8]| {
     // Also try raw auth data extraction directly
     let _ = vouch_common::aaguid::extract_aaguid_from_auth_data(data);
     let _ = vouch_common::aaguid::extract_public_key_from_auth_data(data);
-    let _ = vouch_common::aaguid::extract_public_key_from_attestation(data);
 });
