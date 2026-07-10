@@ -858,22 +858,6 @@ impl OAuthEventType {
         Self::ClientRegistered,
     ];
 
-    #[must_use]
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::TokenIssued => "token_issued",
-            Self::TokenRefreshed => "token_refreshed",
-            Self::TokenRevoked => "token_revoked",
-            Self::AuthSuccess => "auth_success",
-            Self::AuthFailure => "auth_failure",
-            Self::ClientRegistered => "client_registered",
-            Self::ClientUpdated => "client_updated",
-            Self::ClientDeleted => "client_deleted",
-            Self::SecretAdded => "secret_added",
-            Self::SecretRevoked => "secret_revoked",
-        }
-    }
-
     /// Audit event type stored in `audit_events.event_type`.
     #[must_use]
     pub fn audit_event_type(&self) -> &'static str {
