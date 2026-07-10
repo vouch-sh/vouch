@@ -457,8 +457,27 @@ use commands::credential::CredentialCommands;
 use commands::keys::KeysCommands;
 use commands::setup::SetupCommands;
 
+/// Stack reserve for the thread that runs the CLI. Building the clap command
+/// tree in an unoptimized build needs more than the 1 MiB Windows reserves
+/// for the process main thread (Unix reserves 8 MiB), so all work runs on a
+/// spawned thread with an explicit 8 MiB stack.
+const MAIN_THREAD_STACK_SIZE: usize = 8 * 1024 * 1024;
+
+fn main() -> ExitCode {
+    match std::thread::Builder::new()
+        .name("vouch-main".to_string())
+        .stack_size(MAIN_THREAD_STACK_SIZE)
+        .spawn(tokio_main)
+    {
+        Ok(handle) => handle.join().unwrap_or(ExitCode::FAILURE),
+        // Could not spawn a thread: fall back to the main thread, which has
+        // enough stack everywhere except Windows debug builds.
+        Err(_) => tokio_main(),
+    }
+}
+
 #[tokio::main]
-async fn main() -> ExitCode {
+async fn tokio_main() -> ExitCode {
     match run().await {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
