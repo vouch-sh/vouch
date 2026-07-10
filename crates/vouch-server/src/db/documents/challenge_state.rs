@@ -12,15 +12,8 @@ use crate::db::document_type::{DocumentType, IndexEntry};
 /// when the assertion is exchanged at the token endpoint.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct ChallengeStateDoc {
-    /// Deterministic document ID derived from the state JWT
-    /// (see `deterministic_challenge_state_id` in `db/challenge_states.rs`).
-    /// Mirrors the row's `documents.id` PRIMARY KEY for self-describing
-    /// payloads; the PK is what enforces single-use semantics.
-    pub doc_id: String,
     /// Expiration time (matches the JWT's 5-minute lifetime).
     pub expires_at: Timestamp,
-    /// When this challenge was consumed (None = not yet consumed).
-    pub consumed_at: Option<Timestamp>,
 }
 
 impl DocumentType for ChallengeStateDoc {
