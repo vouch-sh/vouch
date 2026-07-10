@@ -279,22 +279,6 @@ impl MockFidoDevice {
         }
     }
 
-    /// Create a mock device with a specific seed for reproducible tests.
-    #[must_use]
-    pub fn with_seed(seed: &[u8; 32]) -> Self {
-        use ed25519_dalek::SigningKey;
-
-        let signing_key = SigningKey::from_bytes(seed);
-        let credential_id = sha256(seed);
-
-        Self {
-            signing_key,
-            credential_id,
-            user_id: Vec::new(),
-            counter: std::sync::atomic::AtomicU32::new(0),
-        }
-    }
-
     /// Get the public key in COSE format (for server storage).
     #[must_use]
     pub fn public_key_cose(&self) -> Vec<u8> {
