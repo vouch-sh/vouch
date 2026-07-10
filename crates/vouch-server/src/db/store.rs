@@ -123,7 +123,6 @@ struct RawDocumentRow {
     schema_version: i32,
     encapped_key: Option<String>,
     data: String,
-    expires_at: Option<String>,
     created_at: String,
     updated_at: String,
     version: i32,
@@ -222,11 +221,6 @@ fn raw_to_document<T: DocumentType>(
         .updated_at
         .parse()
         .context("failed to parse updated_at timestamp")?;
-    let expires_at = row
-        .expires_at
-        .map(|s| s.parse::<Timestamp>())
-        .transpose()
-        .context("failed to parse expires_at timestamp")?;
     let last_used_at = row
         .last_used_at
         .map(|s| s.parse::<Timestamp>())
@@ -238,7 +232,6 @@ fn raw_to_document<T: DocumentType>(
         data: typed_data,
         created_at,
         updated_at,
-        expires_at,
         version: row.version,
         last_used_at,
     })
@@ -1247,18 +1240,12 @@ impl StoreTransaction<'_> {
             crate::tx_execute!(self.tx, idx_stmt)?;
         }
 
-        let expires_at = expires_str
-            .map(|s| s.parse::<Timestamp>())
-            .transpose()
-            .context("failed to parse expires_at timestamp")?;
-
         Ok(Document {
             id: id.to_string(),
             data: serde_json::from_slice(&json)
                 .context("failed to deserialize inserted document")?,
             created_at: now,
             updated_at: now,
-            expires_at,
             version: 1,
             last_used_at: None,
         })
