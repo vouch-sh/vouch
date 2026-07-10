@@ -69,7 +69,11 @@ if [ -d /root/.ccr ]; then
   # --all-features cycle) and has little value in a container that starts cold,
   # while the session's disk allowance is fixed.
   cargo_config="$HOME/.cargo/config.toml"
-  if ! grep -qs 'incremental' "$cargo_config"; then
+  if grep -qsE '^[[:space:]]*incremental[[:space:]]*=' "$cargo_config"; then
+    # Flip any existing setting in place; appending a second [build] table
+    # would be invalid TOML.
+    sed -i -E 's/^([[:space:]]*incremental[[:space:]]*=[[:space:]]*).*/\1false/' "$cargo_config"
+  else
     mkdir -p "$HOME/.cargo"
     printf '\n[build]\nincremental = false\n' >>"$cargo_config"
   fi
@@ -100,6 +104,12 @@ exec ssh-keygen "$@"
 EOF
     chmod 755 "$shim"
     git config --global gpg.ssh.program "$shim"
+    # The provisioned value may live in repo-local .git/config, which overrides
+    # the global write above; if the effective value still isn't the shim, set
+    # it in the local scope too (.git/config is never committed).
+    if [ "$(git config --get gpg.ssh.program 2>/dev/null)" != "$shim" ]; then
+      git config --local gpg.ssh.program "$shim"
+    fi
   fi
 fi
 
