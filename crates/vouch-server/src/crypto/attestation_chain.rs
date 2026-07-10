@@ -358,19 +358,6 @@ mod tests {
     }
 
     #[test]
-    fn test_aaguid_mismatch() {
-        // We can't easily construct a valid chain for this test,
-        // but we can unit-test the cross-check logic:
-        // If cert AAGUID and authData AAGUID differ, it should error.
-        let cert_aaguid = Some("cb69481e-8ff7-4039-93ec-0a2729a154a8".to_string());
-        let auth_data_aaguid = Some("00000000-0000-0000-0000-000000000000");
-
-        if let (Some(c), Some(ad)) = (&cert_aaguid, auth_data_aaguid) {
-            assert!(!c.eq_ignore_ascii_case(ad), "AAGUIDs should not match");
-        }
-    }
-
-    #[test]
     fn test_format_aaguid() {
         let bytes = [
             0xcb, 0x69, 0x48, 0x1e, 0x8f, 0xf7, 0x40, 0x39, 0x93, 0xec, 0x0a, 0x27, 0x29, 0xa1,
