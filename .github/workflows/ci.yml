@@ -106,7 +106,7 @@ jobs:
           echo "AWS_LC_FIPS_SYS_CC=${{ matrix.fips-cc }}" >> "$GITHUB_ENV"
           echo "AWS_LC_FIPS_SYS_CXX=${{ matrix.fips-cxx }}" >> "$GITHUB_ENV"
       - name: Run tests
-        run: cargo test --locked ${{ matrix.cargo-args }} # zizmor: ignore[template-injection] — static matrix value
+        run: cargo test --locked --all-features ${{ matrix.cargo-args }} # zizmor: ignore[template-injection] — static matrix value
 
   build:
     name: Build (${{ matrix.name }})
