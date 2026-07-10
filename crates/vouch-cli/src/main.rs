@@ -544,6 +544,15 @@ async fn run() -> Result<()> {
     let preferred = vouch_cli::i18n::preresolve_lang_from_argv_and_env();
     vouch_cli::i18n::init(preferred)?;
 
+    // On Windows, a bare `vouch` prints help and exits 0: the winget
+    // validation pipeline runs the portable exe with no arguments and flags
+    // any nonzero exit code in its report. Unix keeps clap's conventional
+    // usage-error exit code 2 for a missing subcommand.
+    if cfg!(windows) && std::env::args_os().len() == 1 {
+        Cli::command().print_long_help()?;
+        return Ok(());
+    }
+
     let cli = Cli::parse();
 
     style::init(cli.color);

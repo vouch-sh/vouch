@@ -16,6 +16,9 @@ test-utils = ["ed25519-dalek/rand_core", "axum", "tower"]
 [lib]
 path = "src/lib.rs"
 
+[build-dependencies]
+winresource = { workspace = true }
+
 [[bin]]
 name = "vouch"
 path = "src/main.rs"
