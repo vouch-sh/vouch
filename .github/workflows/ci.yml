@@ -14,6 +14,9 @@ permissions: {}
 
 env:
   CARGO_TERM_COLOR: always
+  # Deny rustc warnings on plain `cargo build`/`cargo test` (new in cargo 1.97)
+  # without invalidating the build cache, unlike RUSTFLAGS="-D warnings".
+  CARGO_BUILD_WARNINGS: deny
 
 jobs:
   fmt:

@@ -115,6 +115,10 @@ pub(crate) async fn run(server: &str, hosts: Option<&str>) -> Result<()> {
 ///
 /// Deliberately narrow: a stray mention of the path in a comment or unrelated
 /// directive does not match, so it cannot trigger a spurious rewrite.
+///
+/// All production callers are behind `#[cfg(unix)]`; compiled for tests on
+/// every platform so the string logic stays covered.
+#[cfg(any(unix, test))]
 fn is_stale_identity_agent_line(line: &str) -> bool {
     let trimmed = line.trim_start();
     trimmed.starts_with("IdentityAgent") && trimmed.contains(".vouch/ssh-agent.sock")

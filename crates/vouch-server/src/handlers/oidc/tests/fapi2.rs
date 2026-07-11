@@ -552,7 +552,7 @@ async fn test_fapi2_authorize_rejects_without_par() {
             || body.contains("invalid_request")
             || body.contains("PAR"),
         "FAPI client without PAR must not succeed, got {status}: first 200 chars: {}",
-        &body.chars().take(200).collect::<String>()
+        body.chars().take(200).collect::<String>()
     );
 }
 

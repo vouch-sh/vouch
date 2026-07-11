@@ -52,7 +52,7 @@ The data model is document-oriented by design:
 
 ## Toolchain
 
-- Rust 1.96.1, edition 2024 (pinned in `rust-toolchain.toml`)
+- Rust 1.97.0, edition 2024 (pinned in `rust-toolchain.toml`)
 - Max line width: 100 chars (`.rustfmt.toml`)
 - Release profile: `lto = true`, `codegen-units = 1`, `opt-level = "z"`, `panic = "abort"`, `strip = true`
 

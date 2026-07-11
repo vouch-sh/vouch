@@ -175,16 +175,15 @@ fn verify_id_token_hint(state: &AppState, hint: &str) -> Option<IdTokenHintClaim
 
     let claims = if let Ok(token_data) = es256_result {
         token_data.claims
-    } else if let Some(rsa_key) = state.oidc_rsa_key.as_ref() {
+    } else {
         // Fall back to RS256 if an RSA key is configured.
+        let rsa_key = state.oidc_rsa_key.as_ref()?;
         let rs256_validation = hint_validation(jsonwebtoken::Algorithm::RS256);
         match jsonwebtoken::decode::<IdTokenClaims>(hint, rsa_key.decoding_key(), &rs256_validation)
         {
             Ok(token_data) => token_data.claims,
             Err(_) => return None,
         }
-    } else {
-        return None;
     };
 
     // Manually verify iss — must match this server's base_url.
