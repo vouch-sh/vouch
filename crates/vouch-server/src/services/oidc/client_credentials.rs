@@ -67,7 +67,7 @@ pub(crate) async fn exchange_client_credentials(
     });
 
     // Flatten empty scope to None
-    let scope = scope.and_then(|s| if s.is_empty() { None } else { Some(s) });
+    let scope = scope.filter(|s| !s.is_empty());
 
     // Issue access token with client_id as the subject (RFC 9068 Section 2.2)
     let session_result = create_oauth_access_token(

@@ -8,7 +8,7 @@
 # are recompiled when source changes — dependencies are cached as long as
 # Cargo.toml/Cargo.lock stay the same.
 
-FROM rust:1.96.1-alpine AS base
+FROM rust:1.97.0-alpine AS base
 RUN apk add --no-cache musl-dev pkgconfig cmake make go clang linux-headers \
     openssl-dev openssl-libs-static perl eudev-dev
 ENV AWS_LC_FIPS_SYS_CC=clang

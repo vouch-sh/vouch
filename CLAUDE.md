@@ -102,7 +102,7 @@ make bake-all              # musl binaries via Docker Bake (also bake-cli, bake-
 
 **Running the server locally:** at least one upstream IdP must be configured via `VOUCH_IDPS` / `VOUCH_IDP_<SLUG>_*` (the server refuses to start without one), plus `VOUCH_RP_ID`, `VOUCH_JWT_SECRET`, and `VOUCH_DATABASE_URL`. See `AGENTS.md` for a minimum viable command and `docs/src/reference/environment-variables.md` for the full reference.
 
-**Toolchain:** Rust 1.96.1, edition 2024 (pinned in `rust-toolchain.toml`). Max line width 100 chars (`.rustfmt.toml`). Release profile uses `lto = true`, `codegen-units = 1`, `opt-level = "z"`, `panic = "abort"`, `strip = true`.
+**Toolchain:** Rust 1.97.0, edition 2024 (pinned in `rust-toolchain.toml`). Max line width 100 chars (`.rustfmt.toml`). Release profile uses `lto = true`, `codegen-units = 1`, `opt-level = "z"`, `panic = "abort"`, `strip = true`.
 
 ## Code Conventions
 
