@@ -380,6 +380,12 @@ impl<'a> TokenValidationContext<'a> {
 ///
 /// For access tokens, audience validation is contextual — callers MUST
 /// validate `aud` against their expected audience (RFC 8725 Section 3.9).
+/// For Vouch's own resource endpoints this is enforced by
+/// `handlers::session::extract_resource_token`, which rejects
+/// resource-narrowed tokens (`aud != client_id`) whose audience does not
+/// cover the deployment and request path. Authorization-server consumers
+/// (userinfo, introspection, revocation, token exchange) are deliberately
+/// audience-agnostic per their RFCs.
 ///
 /// This is the verification mechanism only; the access-token claims schema
 /// `C` is owned by the caller (`services::auth::AccessTokenClaims` for the

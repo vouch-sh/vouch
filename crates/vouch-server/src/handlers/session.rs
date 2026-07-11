@@ -59,12 +59,18 @@ impl AuthContext {
 /// 2. `Authorization: Bearer <token>` — standard Bearer token
 /// 3. `__Host-vouch_session` cookie — browser sessions
 ///
-/// Validates the token as ES256 `at+jwt` (RFC 9068), verifies session
-/// existence in DB, and validates DPoP proof if the token is sender-constrained.
+/// Validates the token as ES256 `at+jwt` (RFC 9068), enforces audience
+/// coverage for resource-narrowed tokens (RFC 8707 / RFC 8725 §3.9 — a
+/// token whose `aud` differs from its `client_id` is accepted only when
+/// the audience covers this deployment and request path; see
+/// [`crate::services::oidc::resource::audience_covers_resource`]), verifies
+/// session existence in DB, and validates DPoP proof if the token is
+/// sender-constrained.
 ///
 /// `method` and `uri` are the actual HTTP method and path of the request,
-/// used for DPoP proof validation. Pass empty strings for cookie-only paths
-/// where DPoP validation is skipped.
+/// used for DPoP proof validation and audience coverage. Pass empty strings
+/// for cookie-only paths where DPoP validation is skipped (an empty `uri`
+/// means only deployment-root audiences pass the coverage check).
 pub(crate) async fn extract_resource_token(
     state: &AppState,
     headers: &axum::http::HeaderMap,
@@ -91,6 +97,9 @@ pub(crate) async fn extract_resource_token(
         })?;
 
     let crate::services::auth::DecodedToken::AccessToken(access_claims) = decoded;
+
+    // 2b. Audience coverage for resource-narrowed tokens.
+    enforce_audience_coverage(&access_claims, &config.base_url, uri)?;
 
     // 3. Verify session exists in DB via token_hash
     let token_hash = hash_token(&token);
@@ -231,6 +240,7 @@ pub(crate) async fn extract_resource_token(
         sub: access_claims.sub,
         email: access_claims.email,
         client_id: access_claims.client_id,
+        aud: access_claims.aud,
         scope: access_claims.scope,
         authenticator_id: session.authenticator_id,
         hardware_verified: access_claims.hardware_verified,
@@ -240,6 +250,42 @@ pub(crate) async fn extract_resource_token(
         hardware_aaguid: session.hardware_aaguid,
         org_domain: session.org_domain,
     })
+}
+
+/// Reject a resource-narrowed access token whose audience does not cover
+/// the requested resource (RFC 8725 §3.9 / RFC 8707).
+///
+/// Tokens with the default audience (`aud == client_id`, i.e. never
+/// resource-narrowed) are deployment-wide and always pass. Narrowed tokens
+/// pass only when
+/// [`crate::services::oidc::resource::audience_covers_resource`] accepts
+/// the audience for this deployment and request path.
+fn enforce_audience_coverage(
+    access_claims: &crate::services::auth::AccessTokenClaims,
+    base_url: &str,
+    uri: &str,
+) -> Result<(), ServiceError> {
+    if access_claims.aud == access_claims.client_id
+        || crate::services::oidc::resource::audience_covers_resource(
+            &access_claims.aud,
+            base_url,
+            uri,
+        )
+    {
+        return Ok(());
+    }
+
+    tracing::warn!(
+        client_id = %access_claims.client_id,
+        aud = %access_claims.aud,
+        path = %uri,
+        "rejected access token: audience does not cover resource"
+    );
+    Err(ServiceError::api(
+        StatusCode::UNAUTHORIZED,
+        "invalid_token",
+        "Access token audience does not cover this resource",
+    ))
 }
 
 /// Extract resource token and also fetch the user email from DB.

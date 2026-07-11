@@ -861,6 +861,66 @@ pub async fn create_test_session(
     result.token.expose_secret().to_string()
 }
 
+/// Create a test session whose access token is narrowed to an explicit
+/// audience (RFC 8707 resource / RFC 8693 audience).
+///
+/// Mirrors [`create_test_session`] but passes `audience: Some(..)`, so the
+/// minted token has `aud != client_id` and exercises the audience-coverage
+/// enforcement in `extract_resource_token` without driving the full
+/// authorization-code flow. `client_id` is explicit so tests can bind the
+/// token to a registered OAuth client (e.g. for the introspection
+/// cross-client check); pass `&state.config().base_url` to mirror
+/// [`create_test_session`].
+pub async fn create_test_session_with_audience(
+    state: &AppState,
+    user_id: &str,
+    email: &str,
+    auth_id: &str,
+    client_id: &str,
+    audience: &str,
+) -> String {
+    use crate::services::auth::{
+        ClientAuthProof, CreateOAuthTokenParams, GrantProof, TokenIssuanceProof,
+        create_oauth_access_token,
+    };
+    use crate::services::oidc::ScopeSet;
+    use secrecy::ExposeSecret;
+
+    let (hardware_aaguid, org_domain) =
+        resolve_session_snapshot(state, user_id, Some(auth_id)).await;
+
+    let result = create_oauth_access_token(
+        state,
+        CreateOAuthTokenParams {
+            user_id,
+            email,
+            authenticator_id: Some(auth_id),
+            client_id,
+            scope: Some(ScopeSet::all()),
+            dpop_jkt: None,
+            mtls_cert_thumbprint: None,
+            act: None,
+            audience: Some(audience),
+            auth_time: Some(jiff::Timestamp::now().as_second()),
+            hardware_verification: crate::services::auth::HardwareVerification::Verified,
+            session_purpose: crate::db::SessionPurpose::OAuthAccessToken,
+            authorization_details: None,
+            hardware_aaguid: hardware_aaguid.as_deref(),
+            org_domain: org_domain.as_deref(),
+        },
+        TokenIssuanceProof {
+            grant: GrantProof::TestingOnly,
+            client_auth: ClientAuthProof::NoAuth(
+                crate::services::auth::NoClientAuth::internal_endpoint(),
+            ),
+        },
+    )
+    .await
+    .expect("Failed to create audience-narrowed test session");
+
+    result.token.expose_secret().to_string()
+}
+
 /// Create a test session backed by a non-hardware-verified access token.
 ///
 /// Mirrors the enrollment-bootstrap shape in `handlers/enroll.rs`: a real

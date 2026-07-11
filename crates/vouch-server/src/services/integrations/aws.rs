@@ -252,6 +252,7 @@ mod tests {
             sub: "user-id".to_string(),
             email: None,
             client_id: "test-client".to_string(),
+            aud: "test-client".to_string(),
             scope: None,
             authenticator_id: None,
             hardware_verified: true,

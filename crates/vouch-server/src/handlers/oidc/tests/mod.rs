@@ -12,6 +12,7 @@
 
 mod helpers;
 
+mod aud_enforcement;
 mod auth_flows;
 mod e2e;
 mod fapi2;
