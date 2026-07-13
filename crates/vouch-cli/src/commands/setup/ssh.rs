@@ -135,12 +135,11 @@ fn configure_ssh_config(hosts: Option<&str>) -> Result<()> {
     let key_path = default_key_path()?;
     let cert_path = PathBuf::from(format!("{}-cert.pub", key_path.display()));
     // The SSH agent socket is Unix-only: vouch-agent exposes a Unix domain socket
-    // for SSH agent forwarding, which has no equivalent on other platforms. We
-    // resolve it lazily, only on the paths that actually need it, and propagate
-    // the error rather than falling back to a stale literal (the legacy
-    // ~/.vouch/ssh-agent.sock no longer exists after the XDG migration). Resolving
-    // eagerly would make an already-configured host fail just because the socket
-    // can't be resolved. On non-Unix no IdentityAgent directive is emitted at all.
+    // for SSH agent forwarding, which has no equivalent on other platforms. Resolve
+    // it lazily, only on the paths that actually need it, and propagate the error
+    // rather than writing a fallback literal — resolving eagerly would make an
+    // already-configured host fail just because the socket can't be resolved.
+    // On non-Unix no IdentityAgent directive is emitted at all.
     #[cfg(unix)]
     let resolve_agent_socket = || -> Result<String> {
         vouch_agent::ssh_agent_socket_path()
@@ -160,15 +159,12 @@ fn configure_ssh_config(hosts: Option<&str>) -> Result<()> {
         String::new()
     };
 
-    // Normalize a stale IdentityAgent left over from the legacy ~/.vouch layout.
-    // Older versions wrote the agent socket under ~/.vouch/ssh-agent.sock; the
-    // socket now lives in the XDG runtime directory. Only an actual
-    // `IdentityAgent ...~/.vouch/ssh-agent.sock` line is rewritten (not a stray
-    // mention in a comment), and we fall through to the normal setup path
-    // afterwards rather than returning early — so a first run that also needs
-    // the IdentityFile/CertificateFile block still gets it.
-    // The SSH agent is Unix-only; on other platforms there is no IdentityAgent
-    // to rewrite and no agent socket to advertise.
+    // Rewrite a stale `IdentityAgent ...~/.vouch/ssh-agent.sock` line (the
+    // pre-XDG socket location) to the current XDG runtime path. Only an actual
+    // directive is rewritten (not a stray mention in a comment), and we fall
+    // through to the normal setup path afterwards rather than returning early —
+    // so a first run that also needs the IdentityFile/CertificateFile block
+    // still gets it. Unix-only; elsewhere there is no IdentityAgent to rewrite.
     #[cfg(unix)]
     let existing = {
         let has_stale_identity_agent = existing.lines().any(is_stale_identity_agent_line);

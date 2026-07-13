@@ -60,9 +60,9 @@ fn detect_filevault(posture: &mut DevicePosture) {
 
 /// Detect screen lock configuration.
 ///
-/// Uses `sysadminctl -screenLock status` which works on all modern macOS
-/// versions. The legacy `com.apple.screensaver askForPassword` defaults
-/// key no longer exists on macOS 15+.
+/// Uses `sysadminctl -screenLock status`, which works on all modern macOS
+/// versions (the `com.apple.screensaver askForPassword` defaults key is
+/// absent on macOS 15+, so it is not consulted).
 ///
 /// Note: `sysadminctl` writes to stderr (via NSLog), not stdout.
 ///
