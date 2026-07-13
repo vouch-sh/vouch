@@ -466,9 +466,10 @@ const MAX_ROLE_ARN_LEN: usize = 2048;
 
 /// Validate a requested pin as a plausible IAM role ARN.
 ///
-/// Rejecting malformed ARNs here (400) beats minting a token AWS would
-/// later refuse with an opaque STS-side `InvalidIdentityToken` error. The
-/// CLI validates the ARN before calling, so only broken clients hit this.
+/// Rejecting malformed ARNs here (400) beats minting a token that can
+/// never match its own roles claim and only fails later, opaquely, at the
+/// STS exchange. The CLI validates the ARN before calling, so only broken
+/// clients hit this.
 fn validate_pinned_role(role_arn: &str) -> Result<(), ServiceError> {
     let is_role = role_arn.len() <= MAX_ROLE_ARN_LEN
         && vouch_common::aws::Arn::parse(role_arn).is_ok_and(|arn| arn.is_iam_role());

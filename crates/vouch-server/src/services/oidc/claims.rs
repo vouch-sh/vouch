@@ -87,19 +87,23 @@ pub struct OidcIdTokenClaims {
     pub aws_tags: Option<AwsSessionTags>,
     /// AWS role ARNs this token is authorized to assume (role pinning).
     ///
-    /// When present, AWS STS rejects `AssumeRoleWithWebIdentity` for any
-    /// role whose ARN is not an exact match of an entry in this claim —
-    /// enforcement happens at the STS layer, before the role's trust
-    /// policy is evaluated. Trust policies can additionally require the
-    /// claim with the `sts:RoleAuthorizedByIdp` condition key.
+    /// When present, AWS STS only allows `AssumeRoleWithWebIdentity` for
+    /// a role listed in this claim. Trust policies can require the claim
+    /// via the Bool condition key `sts:RoleAuthorizedByIdp`, defined in
+    /// the AWS Service Authorization Reference for STS as "Filters access
+    /// based on whether the identity provider authorized the role via the
+    /// roles claim in the OIDC token":
+    /// <https://docs.aws.amazon.com/service-authorization/latest/reference/list_sts.html>
     ///
-    /// Serialized as an array of ARN strings (STS accepts a bare string
-    /// too, but the array form is forward-compatible with pinning more
-    /// than one role). Exact-match only — no wildcards or role names.
+    /// Serialized as an array of full role ARNs. Matching is reported to
+    /// be by exact ARN — no wildcards or bare role names (third-party
+    /// testing; not yet in the `AssumeRoleWithWebIdentity` API reference):
+    /// <https://awsteele.com/blog/2026/07/13/oidc-tokens-can-restrict-which-aws-roles-they-assume.html>
     ///
     /// Only set for AWS STS tokens when the client requests pinning;
-    /// never set for Kubernetes/WIF tokens or the Identity Center path
-    /// (`CreateTokenWithIAM` does not define semantics for this claim).
+    /// never set for Kubernetes/WIF tokens or the Identity Center
+    /// assertion (AWS does not document how `CreateTokenWithIAM` treats
+    /// this claim, so Vouch omits it there).
     #[serde(
         rename = "https://aws.amazon.com/roles",
         skip_serializing_if = "Option::is_none"

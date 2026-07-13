@@ -67,12 +67,14 @@
 //!
 //! The CLI requests tokens pinned to the role it is about to assume
 //! (`?role_arn=` on `/v1/credentials/aws/token`), which Vouch embeds as the
-//! `https://aws.amazon.com/roles` claim. STS then rejects
-//! `AssumeRoleWithWebIdentity` for any role not listed in the claim (exact
-//! ARN match, checked before the trust policy is evaluated), so a leaked
-//! token cannot be exchanged outside the role it was minted for.
+//! `https://aws.amazon.com/roles` claim, so a leaked token cannot be
+//! exchanged for a role it was not minted for.
 //!
-//! Trust policies can require the claim, rejecting unpinned tokens:
+//! The [AWS Service Authorization Reference for STS] defines the Bool
+//! condition key `sts:RoleAuthorizedByIdp` on `AssumeRoleWithWebIdentity`
+//! (and only that action): "Filters access based on whether the identity
+//! provider authorized the role via the roles claim in the OIDC token".
+//! A web-identity trust statement can use it to require a pinned token:
 //!
 //! ```json
 //! "Condition": {
@@ -80,16 +82,31 @@
 //! }
 //! ```
 //!
-//! Two caveats before enforcing it:
+//! The claim's matching behavior — exact role ARN, string or array value,
+//! no wildcards or bare role names, rejection with `InvalidIdentityToken`
+//! when the target role is absent — is not yet described in the
+//! `AssumeRoleWithWebIdentity` API reference; it is based on third-party
+//! testing ([awsteele.com, 2026-07-13]).
+//!
+//! Caveats before requiring the condition key:
 //!
 //! - **Older CLIs do not request pinning.** Their tokens carry no roles
 //!   claim and fail the condition; roll the CLI out first.
-//! - **Do not set it on a management role that is also used by the
+//! - **Only use it on web-identity trust statements.** The key is defined
+//!   for `AssumeRoleWithWebIdentity` only; a role assumed by SigV4
+//!   `sts:AssumeRole` (e.g. the second hop of a management-role chain) has
+//!   no OIDC token in the request, so a Bool-`true` condition there can
+//!   never match.
+//! - **Do not require it on a management role that is also used by the
 //!   Identity Center path** (`vouch credential aws --account/--permission-set`,
 //!   `vouch setup aws --discover`). That path deliberately requests an
-//!   unpinned token because the same token is also the `jwt-bearer`
-//!   assertion for `sso-oidc:CreateTokenWithIAM`, which does not define
-//!   semantics for the roles claim.
+//!   unpinned token: the same token doubles as the `jwt-bearer` assertion
+//!   for `sso-oidc:CreateTokenWithIAM`, and AWS does not document how that
+//!   operation treats the roles claim, so Vouch omits it there. An unpinned
+//!   token fails the condition.
+//!
+//! [AWS Service Authorization Reference for STS]: https://docs.aws.amazon.com/service-authorization/latest/reference/list_sts.html
+//! [awsteele.com, 2026-07-13]: https://awsteele.com/blog/2026/07/13/oidc-tokens-can-restrict-which-aws-roles-they-assume.html
 
 use crate::crypto::keys::OidcRsaSigningKey;
 use crate::redact_email;

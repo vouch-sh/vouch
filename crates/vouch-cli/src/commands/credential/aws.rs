@@ -693,8 +693,8 @@ pub(crate) async fn obtain_identity_center_token(
 
     // Deliberately unpinned (no `?role_arn=`): this one token is used both to
     // assume the management role AND as the jwt-bearer assertion for
-    // CreateTokenWithIAM, and the roles-claim semantics are undefined for the
-    // latter. Trust policies on IdC management roles must therefore not
+    // CreateTokenWithIAM, and AWS does not document how the latter treats the
+    // roles claim. Trust policies on IdC management roles must therefore not
     // require `sts:RoleAuthorizedByIdp`.
     let client = VouchClient::new(server).await?;
     let token_response: OidcTokenResponse = client
