@@ -22,10 +22,9 @@ impl DocumentType for ChallengeStateDoc {
     fn index_entries(&self) -> Vec<IndexEntry> {
         // No secondary indexes: the document ID is a deterministic SHA-256
         // hash of the state JWT (see `deterministic_challenge_state_id` in
-        // `db/challenge_states.rs`). All replay-prevention lookups go through
-        // the PRIMARY KEY on `documents.id`; the former secondary index on
-        // `state_hash` was only needed by the now-removed `find_one(...)`
-        // call. New rows no longer write to `document_indexes` for this type.
+        // `db/challenge_states.rs`), so all replay-prevention lookups go
+        // through the PRIMARY KEY on `documents.id`. Rows of this type write
+        // nothing to `document_indexes`.
         vec![]
     }
 

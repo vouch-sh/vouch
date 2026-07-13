@@ -399,7 +399,8 @@ pub async fn delete_oauth_client(store: &DocumentStore, id: &str) -> Result<u64>
     tx.delete_by_index::<OAuthClientSecretDoc>("oauth_client_id", id)
         .await?;
 
-    // Delete JWKS cache (was embedded in OAuthClientDoc pre-refactor; must stay atomic)
+    // Delete the client's JWKS cache in the same transaction so it can never
+    // outlive the client
     tx.delete(&super::jwks_cache::cache_id(id)).await?;
 
     // Delete the client

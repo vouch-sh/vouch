@@ -78,9 +78,8 @@ async fn test_userinfo_returns_sub_claim() {
 async fn test_userinfo_no_email_when_scope_is_none() {
     // Regression for #390: an access token with `scope: None` (produced by
     // token exchange when the requested scope set has an empty intersection
-    // with the available scopes) was previously interpreted by userinfo as
-    // "full access" via a backward-compat fallback, returning the user's
-    // email without the email scope. Must now return only `sub`.
+    // with the available scopes) must not be interpreted by userinfo as
+    // "full access" — it must return only `sub`, never the user's email.
     use crate::services::auth::{
         ClientAuthProof, CreateOAuthTokenParams, GrantProof, HardwareVerification, NoClientAuth,
         TokenIssuanceProof, create_oauth_access_token,

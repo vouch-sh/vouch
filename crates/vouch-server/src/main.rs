@@ -41,8 +41,8 @@ enum Commands {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Install the aws-lc-rs crypto provider for rustls before any TLS usage.
-    // Required by rustls 0.23+ which no longer auto-selects a provider.
+    // Install the aws-lc-rs crypto provider for rustls before any TLS usage;
+    // rustls requires an explicitly installed CryptoProvider.
     rustls::crypto::aws_lc_rs::default_provider()
         .install_default()
         .map_err(|_| anyhow::anyhow!("failed to install rustls CryptoProvider"))?;

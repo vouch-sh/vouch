@@ -108,13 +108,11 @@ tokio::task_local! {
 /// Askama just works) and resolves against the request-scoped task-local —
 /// falling back to en-US outside any request scope.
 ///
-/// Why a single builder instead of six methods (`tr` / `tr1` / `tr1_num` /
-/// `tr2` / `tr_attr` / `tr_attr1`): Askama can only call methods on `self`
-/// in `{{ … }}` expressions, so the historical method-per-arity API had to
-/// fan out. A method that returns a builder collapses every shape (no-arg,
-/// one arg, many args, with or without attribute, string or numeric value)
-/// into one call site shape, and `arg<V: Into<FluentValue<'_>>>` engages
-/// CLDR plural rules automatically when the value is numeric.
+/// Askama can only call methods on `self` in `{{ … }}` expressions, so a
+/// chainable builder is the one shape that covers every call form (no-arg,
+/// N args, with or without attribute) without a method per arity.
+/// `arg<V: Into<FluentValue<'_>>>` engages CLDR plural rules automatically
+/// when the value is numeric.
 pub struct Tr<'a> {
     id: &'a str,
     attr: Option<&'a str>,

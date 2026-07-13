@@ -1404,9 +1404,8 @@ async fn test_rfc9126_par_already_consumed_returns_error_not_login() {
 async fn test_rfc9126_par_accepts_non_fapi_private_key_jwt_without_jti() {
     // RFC 7523 §3: `jti` is OPTIONAL. A non-FAPI `private_key_jwt` client
     // that submits a valid assertion without a `jti` claim MUST be
-    // authenticated successfully. Regression test for PR #409 cursor-bot
-    // finding 3299722437 — the proof-resolution previously conflated
-    // "JTI committed" with "JWT auth happened" and rejected this client.
+    // authenticated successfully — a committed JTI is not the proof that
+    // JWT client auth happened (regression test for PR #409).
     let (app, state) = test_app().await;
 
     let user = create_test_user(&state.store, "par-no-jti@example.com").await;
@@ -1513,12 +1512,10 @@ async fn test_rfc9126_par_jti_replay_returns_invalid_client() {
 // ========================================================================
 // RFC 8705 §2 / FAPI 2.0 §5.2.2 — mTLS Client Authentication at PAR
 //
-// Regressions for the gap that conformance caught: PAR previously never
-// validated the TLS client certificate for clients registered with
-// tls_client_auth, so mTLS-registered clients were either silently
-// accepted by client_id alone (pre-refactor, fail-open) or rejected at
-// the for_public_client chokepoint (post-refactor, 401). The fix adds
-// the same mTLS dispatch the token endpoint has.
+// PAR must apply the same mTLS dispatch as the token endpoint: a client
+// registered with tls_client_auth must present a valid TLS client
+// certificate — never authenticated by client_id alone (fail-open), and
+// never rejected outright at the for_public_client chokepoint.
 // ========================================================================
 
 /// Register an OAuth client with `tls_client_auth` bound to the given subject DN.

@@ -352,9 +352,9 @@ async fn test_rfc7644_patch_user_deactivate() {
 
 #[tokio::test]
 async fn test_patch_user_active_string_rejected() {
-    // Regression: PATCH with `"active": "false"` (string, not bool) previously
-    // coerced to `true` via `as_bool().unwrap_or(true)`, silently reactivating
-    // deactivated users. Must return 400 invalidValue per RFC 7643 §2.2.
+    // PATCH with `"active": "false"` (string, not bool) must return 400
+    // invalidValue per RFC 7643 §2.2 — it must never be coerced to a
+    // boolean, which could silently reactivate deactivated users.
     let (app, state) = test_app().await;
 
     let token = create_test_scim_token(&state.store, "test-patch-string", "test-org").await;

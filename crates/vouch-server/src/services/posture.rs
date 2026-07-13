@@ -866,9 +866,9 @@ mod tests {
         assert!(evaluate_cel("posture.os == \"\"", &ctx));
     }
 
-    /// Regression for #544: macOS 15.x (marketing version) must pass OsRecency.
-    /// Previously the threshold used Darwin kernel version 25.0.0 instead of the
-    /// marketing version reported by `sw_vers -productVersion`.
+    /// Regression for #544: macOS 15.x must pass OsRecency — the threshold
+    /// compares the marketing version reported by `sw_vers -productVersion`,
+    /// not the Darwin kernel version.
     #[test]
     fn test_os_recency_macos_15_passes() {
         let mut posture = sample_posture();

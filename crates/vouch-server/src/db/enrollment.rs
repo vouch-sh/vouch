@@ -70,21 +70,19 @@ pub async fn enroll_user_with_org(
 ) -> Result<EnrollmentResult> {
     // Step 1: Get or create organization (if domain provided).
     //
-    // Runs OUTSIDE the user-creation transaction so that the unique-violation
-    // recovery path doesn't abort the transaction. The deterministic ID
-    // guarantees that two concurrent enrollees for the same domain race on
-    // the documents primary key, and exactly one INSERT wins.
+    // Runs OUTSIDE the user-creation transaction so the unique-violation
+    // recovery path doesn't abort it. The deterministic ID makes concurrent
+    // enrollees for the same domain race on the documents primary key, and
+    // exactly one INSERT wins.
     //
-    // Lookup order:
-    //   1. By deterministic ID — the fast path for new orgs.
-    //   2. By domain index — required for orgs created before this code
-    //      existed (random UUIDs); without this fallback the new code
-    //      would create a duplicate alongside the legacy row.
+    // Lookup falls back from deterministic ID to the domain index: rows with
+    // random-UUID IDs (created before deterministic IDs) are only findable by
+    // domain, and skipping the fallback would insert a duplicate org.
     //
     // If user creation later fails, the organization row may persist with
-    // `created_by_user_id = None`. That is a benign intermediate state: the
-    // next enrollee for the same domain will reuse the row and Step 4 below
-    // will set them as admin via `compare_and_update`.
+    // `created_by_user_id = None`. That is benign: the next enrollee for the
+    // domain reuses the row and Step 4 sets them as admin via
+    // `compare_and_update`.
     let (org_id, org_needs_admin) = if let Some(domain) = domain {
         let id = deterministic_org_id(domain);
         let existing = match store.get::<OrganizationDoc>(&id).await? {

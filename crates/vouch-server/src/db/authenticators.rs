@@ -61,8 +61,8 @@ impl TryFrom<Document<AuthenticatorDoc>> for Authenticator {
 
 /// Result of looking up an authenticator with its owning user.
 ///
-/// Replaces the old `AuthenticatorWithUser` JOIN type. Now uses
-/// denormalized `user_email` from `AuthenticatorDoc`.
+/// Built from the denormalized `user_email` on `AuthenticatorDoc`,
+/// so no JOIN is needed.
 #[derive(Debug)]
 pub struct AuthenticatorWithUser {
     pub authenticator: Authenticator,

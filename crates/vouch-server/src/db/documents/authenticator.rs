@@ -7,8 +7,8 @@ use crate::db::document_type::{DocumentType, IndexEntry};
 
 /// A registered FIDO2 authenticator (YubiKey).
 ///
-/// Denormalized: includes `user_email` to eliminate the JOIN
-/// previously done by `get_authenticator_with_user_by_credential_id`.
+/// Denormalized: includes `user_email` so credential-ID lookups
+/// resolve the owning user without a JOIN.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthenticatorDoc {
     pub user_id: String,

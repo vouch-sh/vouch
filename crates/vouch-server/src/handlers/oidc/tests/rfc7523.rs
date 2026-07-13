@@ -803,12 +803,12 @@ async fn test_non_fapi_client_accepts_token_endpoint_audience() {
 // ========================================================================
 // RFC 7523 §3 — `jti` is OPTIONAL for non-FAPI clients
 //
-// Regression tests for PR #409 cursor-bot finding 3299919906. Previously
-// the proof-resolution in each grant handler conflated "JTI committed"
-// with "JWT auth happened" — a non-FAPI client legitimately omitting
-// `jti` was authenticated by `authenticate_client_jwt` but then rejected
-// by the downstream proof construction (fell through to NoClientAuth /
-// "Client authentication required").
+// Regression tests for PR #409: a committed JTI must not be treated as
+// the proof that JWT client auth happened. A non-FAPI client that
+// legitimately omits `jti` is authenticated by `authenticate_client_jwt`,
+// and the downstream proof construction in each grant handler must honor
+// that instead of falling through to NoClientAuth ("Client
+// authentication required").
 // ========================================================================
 
 #[tokio::test]

@@ -1045,7 +1045,7 @@ async fn test_rfc8693_id_token_uses_session_aaguid_after_rotation() {
     let client = create_test_oauth_client(&state.store, &user.id).await;
     let auth_header = client.basic_auth_header();
 
-    // Simulate the post-refactor invariant: the session-time snapshot survives
+    // The invariant: the session-time snapshot survives
     // even when the original authenticator is no longer present. (We bypass
     // `delete_authenticator` because it cascades and removes the session
     // along with the key — the snapshot is what makes the issued claim

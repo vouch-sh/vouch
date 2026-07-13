@@ -1180,9 +1180,9 @@ pub async fn update_client_configuration(
         mutable_request.post_logout_redirect_uris.as_deref(),
     )?;
 
-    // Validate contacts and URI fields (same rules as initial registration via
-    // register_client). Previously absent from the update path — RFC 7592
-    // clients could smuggle an invalid logo_uri or non-@ contact on PUT.
+    // Validate contacts and URI fields with the same rules as initial
+    // registration (`register_client`), so an RFC 7592 PUT cannot smuggle an
+    // invalid logo_uri or a non-@ contact past registration-time validation.
     validate_contacts_and_uris(&mutable_request)?;
 
     // Rotate the registration access token per RFC 7592 Section 2.2
