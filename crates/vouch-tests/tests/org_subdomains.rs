@@ -606,6 +606,42 @@ async fn aws_token_uses_base_url_without_claim() {
     assert_eq!(claims["aud"], "https://test.example.com");
 }
 
+/// End-to-end through the merged router: `?role_arn=` (percent-encoded, as
+/// the CLI sends it) pins the token via the `https://aws.amazon.com/roles`
+/// claim, while the rest of the claim set is unchanged.
+#[tokio::test]
+async fn aws_token_pins_role_from_query_param() {
+    let harness = TestHarness::from_state(test_app_state_with_rsa_key().await);
+    let org = harness.create_org("acme.com").await.unwrap();
+    let (_user, _auth_id, token) = harness
+        .create_authenticated_org_member("user@acme.com", &org.id)
+        .await
+        .unwrap();
+
+    let resp = harness
+        .get_authenticated(
+            "/v1/credentials/aws/token?role_arn=arn%3Aaws%3Aiam%3A%3A111122223333%3Arole%2FExample",
+            &token,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status,
+        200,
+        "body: {}",
+        resp.text().unwrap_or_default()
+    );
+    let body: serde_json::Value = resp.json().unwrap();
+    let claims = decode_jwt_payload(body["id_token"].as_str().unwrap());
+
+    assert_eq!(
+        claims["https://aws.amazon.com/roles"],
+        serde_json::json!(["arn:aws:iam::111122223333:role/Example"])
+    );
+    assert_eq!(claims["iss"], "https://test.example.com");
+    assert_eq!(claims["sub"], "user@acme.com");
+}
+
 // ============================================================================
 // Per-org signing keys (require a store that encrypts at rest)
 // ============================================================================

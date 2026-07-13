@@ -289,15 +289,17 @@ pub(crate) async fn exchange_for_sts_credentials(req: StsRequest<'_>) -> Result<
     // credentials minted in the wrong context (issue #398).
     let policies = agent_session_policies(agent_source);
 
+    let (chain_role, pin_role) = select_chain_and_pin(role_arn, mgmt);
+
     let (http_client, id_token_secret, session) =
-        fetch_aws_oidc_token(server, agent_source).await?;
+        fetch_aws_oidc_token(server, agent_source, Some(pin_role)).await?;
     let id_token = id_token_secret.expose_secret();
 
     // Session tags travel inside the JWT (server-side `https://aws.amazon.com/tags`
     // claim); AWS extracts them during AssumeRoleWithWebIdentity and logs them as
     // principalTags, so they must NOT also be passed as STS API parameters.
 
-    if let Some(mgmt_role_arn) = mgmt.filter(|m| *m != role_arn) {
+    if let Some(mgmt_role_arn) = chain_role {
         // Chain through the management role, then assume the target role.
         let credentials = assume_role_via_management_chain(ChainInputs {
             http_client: &http_client,
@@ -342,11 +344,15 @@ pub(crate) async fn exchange_for_sts_credentials(req: StsRequest<'_>) -> Result<
 /// role-session name from its `sub` claim.
 ///
 /// When `agent_source` is set, the DPoP source claim is attached so the server
-/// embeds the AI-agent session tags. Returns the HTTP client used for the
-/// subsequent STS calls, the ID token, and the session name.
+/// embeds the AI-agent session tags. When `pin_role` is set, the server pins
+/// the token to that role via the `https://aws.amazon.com/roles` claim and
+/// STS rejects it for any other role — pass the exact ARN the subsequent
+/// `AssumeRoleWithWebIdentity` call will use. Returns the HTTP client used
+/// for the subsequent STS calls, the ID token, and the session name.
 async fn fetch_aws_oidc_token(
     server: &str,
     agent_source: Option<&str>,
+    pin_role: Option<&str>,
 ) -> Result<(reqwest::Client, SecretString, String)> {
     let mut client = VouchClient::new(server).await?;
 
@@ -357,8 +363,9 @@ async fn fetch_aws_oidc_token(
         client.set_dpop_source(source);
     }
 
+    let path = aws_token_path(pin_role)?;
     let token_response: OidcTokenResponse = client
-        .get_authenticated("/v1/credentials/aws/token")
+        .get_authenticated(&path)
         .await
         .context("failed to get OIDC token from Vouch server")?;
 
@@ -370,6 +377,39 @@ async fn fetch_aws_oidc_token(
         .context("server returned invalid OIDC token")?;
 
     Ok((http_client, token_response.id_token, session))
+}
+
+/// Decide role chaining and token pinning in one place, before the token is
+/// fetched.
+///
+/// Returns `(chain_role, pin_role)`: `chain_role` is the management role to
+/// hop through when it is configured and differs from the target, and
+/// `pin_role` is the exact role the `AssumeRoleWithWebIdentity` call will
+/// use — the management role when chaining, the target role otherwise. The
+/// OIDC token must be pinned to `pin_role`; the second SigV4 `AssumeRole`
+/// hop of a chain is not constrained by the roles claim.
+fn select_chain_and_pin<'a>(
+    role_arn: &'a str,
+    mgmt: Option<&'a str>,
+) -> (Option<&'a str>, &'a str) {
+    let chain_role = mgmt.filter(|m| *m != role_arn);
+    (chain_role, chain_role.unwrap_or(role_arn))
+}
+
+/// Build the AWS token endpoint path, appending `?role_arn=` when pinning.
+///
+/// The ARN is percent-encoded (it contains `:` and `/`); the HTTP message
+/// signature covers `@query`, so the pin is tamperproof in transit.
+fn aws_token_path(pin_role: Option<&str>) -> Result<String> {
+    const TOKEN_PATH: &str = "/v1/credentials/aws/token";
+    match pin_role {
+        Some(role) => {
+            let query = serde_urlencoded::to_string([("role_arn", role)])
+                .context("failed to encode role_arn query parameter")?;
+            Ok(format!("{TOKEN_PATH}?{query}"))
+        }
+        None => Ok(TOKEN_PATH.to_string()),
+    }
 }
 
 /// Borrowed inputs to the two-hop management-role chain.
@@ -625,8 +665,8 @@ pub(crate) fn resolve_identity_center<'a>(
 /// credentials cannot be downscoped — so caller credentials are always full
 /// (no `ReadOnlyAccess` policy, no DPoP source tag).
 ///
-/// 1. Fetch the RS256 AWS token and assume the management role via
-///    `AssumeRoleWithWebIdentity` (full creds).
+/// 1. Fetch the RS256 AWS token pinned to the management role and assume
+///    that role via `AssumeRoleWithWebIdentity` (full creds).
 /// 2. Exchange the same token for an IdC access token via `CreateTokenWithIAM`.
 pub(crate) async fn obtain_identity_center_token(
     http_client: &reqwest::Client,
@@ -651,9 +691,17 @@ pub(crate) async fn obtain_identity_center_token(
     let mgmt_arn = crate::integrations::aws::sts::parse_role_arn(management_role)?;
     let domain_suffix = mgmt_arn.partition.dns_suffix();
 
+    // Pinned to the management role — the role this token's
+    // AssumeRoleWithWebIdentity hop assumes, so IdC management roles can
+    // require `sts:RoleAuthorizedByIdp` like any other web-identity role.
+    // The same token is also the jwt-bearer assertion for CreateTokenWithIAM;
+    // AWS does not document how that operation treats the roles claim, but it
+    // already accepts this token carrying the other AWS-namespaced claims it
+    // does not consume (tags, source_identity) — observed behavior is that
+    // unrecognized claims are ignored.
     let client = VouchClient::new(server).await?;
     let token_response: OidcTokenResponse = client
-        .get_authenticated("/v1/credentials/aws/token")
+        .get_authenticated(&aws_token_path(Some(management_role))?)
         .await
         .context("failed to get OIDC token for management role")?;
     let id_token = token_response.id_token.expose_secret();
@@ -925,6 +973,49 @@ mod tests {
 
         // Must have exactly 5 fields — no extra fields allowed
         assert_eq!(json.as_object().unwrap().len(), 5);
+    }
+
+    /// Direct flow: no management role means no chaining and the pin is the
+    /// target role itself.
+    #[test]
+    fn test_select_chain_and_pin_direct() {
+        let target = "arn:aws:iam::111122223333:role/Target";
+        assert_eq!(select_chain_and_pin(target, None), (None, target));
+    }
+
+    /// Chained flow: the pin must be the management role — the role actually
+    /// passed to AssumeRoleWithWebIdentity.
+    #[test]
+    fn test_select_chain_and_pin_chained() {
+        let target = "arn:aws:iam::111122223333:role/Target";
+        let mgmt = "arn:aws:iam::444455556666:role/Management";
+        assert_eq!(select_chain_and_pin(target, Some(mgmt)), (Some(mgmt), mgmt));
+    }
+
+    /// Management role equal to the target collapses to the direct flow,
+    /// pinned to the target.
+    #[test]
+    fn test_select_chain_and_pin_mgmt_equals_target() {
+        let target = "arn:aws:iam::111122223333:role/Target";
+        assert_eq!(select_chain_and_pin(target, Some(target)), (None, target));
+    }
+
+    /// The role ARN is percent-encoded in the query string (`:` and `/`
+    /// are reserved characters).
+    #[test]
+    fn test_aws_token_path_encodes_role_arn() {
+        let path = aws_token_path(Some("arn:aws:iam::111122223333:role/Example")).unwrap();
+        assert_eq!(
+            path,
+            "/v1/credentials/aws/token?role_arn=arn%3Aaws%3Aiam%3A%3A111122223333%3Arole%2FExample"
+        );
+    }
+
+    /// No pin requested → bare path, identical to the pre-pinning request
+    /// shape (backwards compatible with older servers).
+    #[test]
+    fn test_aws_token_path_without_pin() {
+        assert_eq!(aws_token_path(None).unwrap(), "/v1/credentials/aws/token");
     }
 
     #[test]

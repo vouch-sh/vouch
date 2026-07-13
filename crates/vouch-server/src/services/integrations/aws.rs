@@ -62,6 +62,54 @@
 //!   }]
 //! }
 //! ```
+//!
+//! # Requiring role pinning
+//!
+//! The CLI requests tokens pinned to the role it is about to assume
+//! (`?role_arn=` on `/v1/credentials/aws/token`), which Vouch embeds as the
+//! `https://aws.amazon.com/roles` claim, so a leaked token cannot be
+//! exchanged for a role it was not minted for.
+//!
+//! The [AWS Service Authorization Reference for STS] defines the Bool
+//! condition key `sts:RoleAuthorizedByIdp` on `AssumeRoleWithWebIdentity`
+//! (and only that action): "Filters access based on whether the identity
+//! provider authorized the role via the roles claim in the OIDC token".
+//! A web-identity trust statement can use it to require a pinned token:
+//!
+//! ```json
+//! "Condition": {
+//!   "Bool": {"sts:RoleAuthorizedByIdp": "true"}
+//! }
+//! ```
+//!
+//! The claim's matching behavior — exact role ARN, string or array value,
+//! no wildcards or bare role names, rejection with `InvalidIdentityToken`
+//! when the target role is absent — is not yet described in the
+//! `AssumeRoleWithWebIdentity` API reference; it is based on third-party
+//! testing ([awsteele.com, 2026-07-13]).
+//!
+//! Caveats before requiring the condition key:
+//!
+//! - **Older CLIs do not request pinning.** Their tokens carry no roles
+//!   claim and fail the condition; roll the CLI out first.
+//! - **Only use it on web-identity trust statements.** The key is defined
+//!   for `AssumeRoleWithWebIdentity` only; a role assumed by SigV4
+//!   `sts:AssumeRole` (e.g. the second hop of a management-role chain) has
+//!   no OIDC token in the request, so a Bool-`true` condition there can
+//!   never match.
+//!
+//! The Identity Center path (`vouch credential aws --account/--permission-set`,
+//! `vouch setup aws --discover`) pins its token to the management role — the
+//! role its `AssumeRoleWithWebIdentity` hop assumes — so IdC management roles
+//! can require the condition key like any other web-identity role. The same
+//! token doubles as the `jwt-bearer` assertion for
+//! `sso-oidc:CreateTokenWithIAM`; AWS does not document how that operation
+//! treats the roles claim, but it already accepts this token carrying the
+//! other AWS-namespaced claims it does not consume (`tags`,
+//! `source_identity`) — observed behavior, not a documented contract.
+//!
+//! [AWS Service Authorization Reference for STS]: https://docs.aws.amazon.com/service-authorization/latest/reference/list_sts.html
+//! [awsteele.com, 2026-07-13]: https://awsteele.com/blog/2026/07/13/oidc-tokens-can-restrict-which-aws-roles-they-assume.html
 
 use crate::crypto::keys::OidcRsaSigningKey;
 use crate::redact_email;
@@ -153,12 +201,16 @@ fn build_aws_session_tags(
 ///   so it is passed explicitly rather than read from the token)
 /// * `token` - The validated resource token; supplies the session-snapshot
 ///   `hardware_aaguid`, `org_domain` (`hd`), and `dpop_source` federation claims
+/// * `pinned_role` - Role ARN to pin the token to via the
+///   `https://aws.amazon.com/roles` claim; `None` omits the claim (STS then
+///   accepts the token for any role trusting this issuer)
 pub(crate) async fn issue_aws_token(
     issuer: &str,
     session_hours: u64,
     oidc_rsa_key: &OidcRsaSigningKey,
     user_email: &str,
     token: &ValidatedResourceToken,
+    pinned_role: Option<&str>,
 ) -> AwsResult<AwsTokenResult> {
     // Token validity matches session duration
     let expires_in = session_hours.saturating_mul(3600);
@@ -175,6 +227,7 @@ pub(crate) async fn issue_aws_token(
         .hardware_aaguid(token.hardware_aaguid.clone())
         .hd(token.org_domain.clone())
         .aws_tags(aws_tags)
+        .aws_role(pinned_role)
         .valid_for_seconds(expires_in)
         .build()
         .map_err(|e| AwsError::ClaimsBuild(e.to_string()))?;
@@ -186,7 +239,14 @@ pub(crate) async fn issue_aws_token(
         .await
         .map_err(|e| AwsError::TokenSign(e.to_string()))?;
 
-    tracing::info!("Issued AWS OIDC token for {}", redact_email(user_email));
+    match pinned_role {
+        Some(role) => tracing::info!(
+            pinned_role_arn = %role,
+            "Issued AWS OIDC token for {} pinned to role",
+            redact_email(user_email)
+        ),
+        None => tracing::info!("Issued AWS OIDC token for {}", redact_email(user_email)),
+    }
 
     Ok(AwsTokenResult {
         id_token,
@@ -275,6 +335,7 @@ mod tests {
             test_rsa_key(),
             USER_EMAIL,
             &test_token(Some(TEST_AAGUID.to_string()), None, None),
+            None,
         )
         .await
         .expect("issue_aws_token should succeed");
@@ -298,6 +359,7 @@ mod tests {
             test_rsa_key(),
             USER_EMAIL,
             &test_token(Some(TEST_AAGUID.to_string()), None, None),
+            None,
         )
         .await
         .expect("issue_aws_token should succeed");
@@ -335,6 +397,7 @@ mod tests {
                 Some("example.com".to_string()),
                 None,
             ),
+            None,
         )
         .await
         .expect("issue_aws_token should succeed");
@@ -369,6 +432,7 @@ mod tests {
                 None,
                 Some("claude-code".to_string()),
             ),
+            None,
         )
         .await
         .expect("issue_aws_token should succeed");
@@ -408,6 +472,7 @@ mod tests {
                 Some("example.com".to_string()),
                 None,
             ),
+            None,
         )
         .await
         .expect("issue_aws_token should succeed");
@@ -440,6 +505,7 @@ mod tests {
                 Some("example.com".to_string()),
                 Some("cursor".to_string()),
             ),
+            None,
         )
         .await
         .expect("issue_aws_token should succeed");
@@ -493,6 +559,7 @@ mod tests {
             test_rsa_key(),
             USER_EMAIL,
             &test_token(Some(TEST_AAGUID.to_string()), None, None),
+            None,
         )
         .await
         .expect("issue_aws_token should succeed");
@@ -511,6 +578,7 @@ mod tests {
             test_rsa_key(),
             USER_EMAIL,
             &test_token(Some(TEST_AAGUID.to_string()), None, None),
+            None,
         )
         .await
         .expect("issue_aws_token should succeed");
@@ -519,6 +587,52 @@ mod tests {
             result.expires_in,
             4 * 3600,
             "expires_in must be session_hours * 3600"
+        );
+    }
+
+    /// A requested pin appears as a single-element array in the
+    /// `https://aws.amazon.com/roles` claim.
+    #[tokio::test]
+    async fn test_pinned_role_emitted_in_roles_claim() {
+        let role = "arn:aws:iam::123456789012:role/ExampleRole";
+        let result = issue_aws_token(
+            BASE_URL,
+            SESSION_HOURS,
+            test_rsa_key(),
+            USER_EMAIL,
+            &test_token(Some(TEST_AAGUID.to_string()), None, None),
+            Some(role),
+        )
+        .await
+        .expect("issue_aws_token should succeed");
+
+        let claims = decode_jwt_payload(&result.id_token);
+        assert_eq!(
+            claims["https://aws.amazon.com/roles"],
+            serde_json::json!([role]),
+            "roles claim must be a single-element array with the pinned ARN"
+        );
+    }
+
+    /// Without a requested pin the roles claim is absent, preserving the
+    /// pre-pinning token shape for older CLIs.
+    #[tokio::test]
+    async fn test_roles_claim_absent_without_pin() {
+        let result = issue_aws_token(
+            BASE_URL,
+            SESSION_HOURS,
+            test_rsa_key(),
+            USER_EMAIL,
+            &test_token(Some(TEST_AAGUID.to_string()), None, None),
+            None,
+        )
+        .await
+        .expect("issue_aws_token should succeed");
+
+        let claims = decode_jwt_payload(&result.id_token);
+        assert!(
+            claims.get("https://aws.amazon.com/roles").is_none(),
+            "roles claim must be absent when no pin is requested"
         );
     }
 
@@ -531,6 +645,7 @@ mod tests {
             test_rsa_key(),
             USER_EMAIL,
             &test_token(Some(TEST_AAGUID.to_string()), None, None),
+            None,
         )
         .await
         .expect("issue_aws_token should succeed");
