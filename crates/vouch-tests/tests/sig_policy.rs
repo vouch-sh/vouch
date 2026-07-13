@@ -498,7 +498,7 @@ fn test_router_v1_literals_all_in_route_table() {
 
 /// Assert that `~/.vouch/ssh-agent.sock` does not appear in any CLI source file.
 ///
-/// The legacy path was used before the XDG migration.  Finding it again would
+/// This pre-XDG-migration path must never reappear — finding it would
 /// indicate a regression.
 #[test]
 fn test_no_legacy_ssh_agent_socket_in_cli() {

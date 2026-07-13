@@ -616,8 +616,8 @@ mod tests {
 
     #[test]
     fn test_wire_format_unchanged() {
-        // Verify the JSON format is backward-compatible with the old
-        // String-based fields.
+        // Lock the JSON wire format: the enum-based fields must serialize to
+        // the exact strings consumers parse.
         let posture = DevicePosture {
             detail_type: PostureTypeTag,
             posture_version: 1,
