@@ -3763,19 +3763,16 @@ async fn test_record_recheck_result_concurrent() {
 }
 
 // Regression for #389: two enrollments for the same domain must converge
-// on a single organization. Pre-fix, `enroll_user_with_org` used
-// `find_one(domain) + insert` with random UUIDs, so the second enrollee
-// either found the first's row (sequential) or — under contention —
-// both inserts succeeded with different IDs (the bug; the issue reports
-// 14/15 distinct orgs in a Postgres reproduction).
+// on a single organization. `enroll_user_with_org` derives a deterministic
+// org ID from the domain, so concurrent enrollees collide on the same
+// primary key instead of inserting distinct orgs.
 //
-// The fix derives a deterministic org ID from the domain. This test
-// exercises the "second enrollee converges on first's org" property
-// sequentially because multi-step transactions on SQLite WAL deadlock
-// under real `tokio::join!` contention; the under-contention property
-// is guaranteed by `store.insert_with_id`'s atomic primary-key behavior
-// (covered by `test_dpop_jti_concurrent_insert_rejects_duplicates`)
-// combined with our deterministic ID.
+// This test exercises the "second enrollee converges on first's org"
+// property sequentially because multi-step transactions on SQLite WAL
+// deadlock under real `tokio::join!` contention; the under-contention
+// property is guaranteed by `store.insert_with_id`'s atomic primary-key
+// behavior (covered by `test_dpop_jti_concurrent_insert_rejects_duplicates`)
+// combined with the deterministic ID.
 #[tokio::test]
 async fn test_enroll_user_with_org_same_domain_converges_on_one_org() {
     use crate::db::documents::organization::OrganizationDoc;
@@ -3810,11 +3807,9 @@ async fn test_enroll_user_with_org_same_domain_converges_on_one_org() {
     assert!(!bob.is_org_admin, "second enrollee must not be admin");
 }
 
-// Verifies the second enrollee adopts an un-admined org and gets
-// promoted to admin. Pre-fix code with random UUIDs would skip the
-// org INSERT (because `find_one(domain)` finds the seeded row) but
-// fail to detect that a previously-orphaned org should adopt a new
-// admin — this exercises the Step 4 `compare_and_update` repair path.
+// Enrolling into an existing org that has no admin must promote the
+// enrollee to admin — this exercises the `compare_and_update` repair
+// path in `enroll_user_with_org`.
 #[tokio::test]
 async fn test_enroll_promotes_admin_for_org_without_one() {
     use crate::db::documents::organization::OrganizationDoc;
@@ -4804,16 +4799,10 @@ async fn test_update_github_installation_repos_not_found_returns_false() {
 /// #537 — A concurrent `update_user_github_identity` must NOT revert a
 /// demotion performed by a concurrent `update_user_admin_status`.
 ///
-/// Simulates the race by:
-/// 1. Creating an admin user.
-/// 2. Reading the user doc snapshot (simulating what the GitHub-identity
-///    path would have read before `modify` was introduced).
-/// 3. Demoting via `update_user_admin_status` (now uses `modify`).
-/// 4. Applying `update_user_github_identity` (now uses `modify`).
-///
-/// With `modify`, step 4 re-reads the doc *after* step 3's write, so the
-/// demotion is preserved. The old blind `store.update` would have written
-/// back the pre-demotion snapshot, silently re-promoting the user.
+/// Both paths go through `store.modify`, which re-reads the document at
+/// write time, so a GitHub-identity update applied after a demotion must
+/// preserve `is_org_admin = false` rather than writing back a stale
+/// pre-demotion snapshot.
 #[tokio::test]
 async fn test_user_update_lost_update_race() {
     let (store, _audit) = test_db().await;
@@ -4834,9 +4823,8 @@ async fn test_user_update_lost_update_race() {
         .await
         .expect("admin status update");
 
-    // Now update the GitHub identity. With the old blind-write approach this
-    // would have re-read before the demotion and written back is_org_admin=true.
-    // With `modify` it re-reads the post-demotion doc, so is_org_admin stays false.
+    // Update the GitHub identity. `modify` re-reads the post-demotion doc,
+    // so is_org_admin must stay false.
     update_user_github_identity(&store, &user_id, 42, "gh-user", Some("refresh-tok"))
         .await
         .expect("github identity update");
@@ -5416,7 +5404,7 @@ async fn test_revoke_last_secret_rejected() {
 /// Revoking an expired-but-unrevoked secret must succeed while another valid
 /// secret remains: the floor counts *other* active secrets, not the target.
 /// Without excluding the target, the expired row drops `active_count` to 1 and
-/// the revoke is wrongly rejected with `last_secret` (PR #557 review finding).
+/// the revoke is wrongly rejected with `last_secret` (#557).
 #[tokio::test]
 async fn test_revoke_expired_secret_allowed_when_valid_remains() {
     let (store, _audit) = test_db().await;

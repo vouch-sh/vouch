@@ -330,10 +330,10 @@ pub(crate) async fn token(
 }
 
 /// Commit an optional pending JTI and translate failures to a response-ready
-/// `Response`. Used by token-issuance handlers to share the per-grant log +
-/// error-mapping pattern that previously lived inline at every call site.
+/// `Response`. Shared by the token-issuance handlers so per-grant logging and
+/// error mapping stay consistent across grants.
 ///
-/// The MUST-run-before-grant-state-persistence invariant (issue #391) is now
+/// The MUST-run-before-grant-state-persistence invariant (issue #391) is
 /// enforced by the type system: the returned `Option<JwtAssertionJtiClaim>` is
 /// the only path to building a `ClientAuthProof::PrivateKeyJwt`, which is the
 /// only path to a `TokenIssuanceProof` carrying that client-auth method.

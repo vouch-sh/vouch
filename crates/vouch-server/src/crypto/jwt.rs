@@ -610,7 +610,7 @@ mod tests {
     fn test_jwt_type_unknown_returns_none() {
         assert_eq!(JwtType::from_header_str("unknown"), None);
         assert_eq!(JwtType::from_header_str(""), None);
-        // Legacy session type is no longer supported
+        // The retired session type must not parse
         assert_eq!(JwtType::from_header_str("vouch-session+jwt"), None);
     }
 
@@ -830,11 +830,12 @@ mod tests {
         assert_eq!(format!("{validation}"), "bad");
     }
 
-    /// Regression for #536 / B3: `decode_state_token` must reject tokens that
+    /// Regression for #536: `decode_state_token` must reject tokens that
     /// are a few seconds past `exp` with zero leeway (no 60s grace).
     #[test]
     fn test_state_token_recently_expired_rejected_no_leeway() {
-        // exp in the very recent past — previously accepted within the 60s default leeway
+        // exp in the very recent past — must be rejected despite falling
+        // within jsonwebtoken's 60s default leeway
         let state = TestState {
             data: "replay-attempt".to_string(),
             iat: 0,

@@ -1299,8 +1299,7 @@ mod tests {
     }
 
     /// Regression for #541: wildcard CORS origin must be rejected at startup
-    /// because UI routes use credentialed cookie sessions, and `*` + credentials
-    /// is forbidden by CORS spec and causes tower-http to panic at router build.
+    /// (rationale on the check in `validate`).
     #[test]
     fn test_validate_rejects_wildcard_cors_origin() {
         let mut config = test_config();

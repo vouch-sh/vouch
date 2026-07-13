@@ -646,8 +646,8 @@ async fn test_rfc7662_introspect_private_key_jwt_invalid_assertion_rejected() {
 #[tokio::test]
 async fn test_rfc7662_valid_token_is_active_unknown_token_is_inactive() {
     // Baseline: valid token → active=true; unknown token → active=false.
-    // This exercises the Ok(Some) and Ok(None) branches that were previously
-    // indistinguishable from Err(_) (issue #540).
+    // This exercises the Ok(Some) and Ok(None) branches, which must stay
+    // distinguishable from Err(_) (issue #540).
     let (app, state) = test_app().await;
 
     let user = create_test_user(&state.store, "introspect-active-540@example.com").await;

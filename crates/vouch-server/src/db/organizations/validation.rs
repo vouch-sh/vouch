@@ -581,7 +581,7 @@ mod tests {
     fn apex_labels_cannot_collide_with_reserved_words() {
         // Every apex has at least two DNS labels, so derived labels always
         // contain a hyphen and can never equal the hyphen-free reserved
-        // words — domains that previously collided are now claimable.
+        // words — every apex-derived label must be claimable.
         assert_eq!(eligible_subdomain_labels("mail.io", &[]), ["mail-io"]);
         assert_eq!(eligible_subdomain_labels("vouch.sh", &[]), ["vouch-sh"]);
         assert!(ineligible_subdomain_candidates("vouch.sh", &[]).is_empty());

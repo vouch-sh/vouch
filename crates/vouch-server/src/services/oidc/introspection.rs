@@ -139,8 +139,8 @@ pub struct RevocationResult {
 
 /// Introspect a token (RFC 7662).
 ///
-/// Accepts ES256 RFC 9068 access tokens. Legacy HS256 session tokens
-/// are no longer supported and return `{"active": false}`.
+/// Accepts ES256 RFC 9068 access tokens. HS256 session tokens are not
+/// supported and return `{"active": false}`.
 ///
 /// # Arguments
 /// * `state` - Application state

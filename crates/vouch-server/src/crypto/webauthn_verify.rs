@@ -1719,10 +1719,10 @@ mod tests {
 
     #[test]
     fn test_counter_regression_to_zero_rejected() {
-        // A credential that previously reported a nonzero counter must never
-        // regress to zero: that is unambiguous evidence of a cloned or forged
-        // authenticator (WebAuthn L2 §6.1.1). Regression test for the
-        // clone-detection bypass where `counter == 0` skipped the check.
+        // A credential that has reported a nonzero counter must never regress
+        // to zero: that is unambiguous evidence of a cloned or forged
+        // authenticator (WebAuthn L2 §6.1.1). Clone detection must run even
+        // when the asserted counter is 0 — a zero value is not exempt.
         let verifier = TestCoseVerifier::always_succeed();
         let rp_id = "example.com";
         let auth_data = make_auth_data(rp_id, 0x05, 0); // counter regressed to 0
@@ -2067,8 +2067,9 @@ mod tests {
 
     #[test]
     fn test_client_data_localhost_in_path_not_matched() {
-        // Regression test: an origin like https://evil.com/localhost must NOT
-        // be treated as loopback (the old contains() approach was vulnerable)
+        // An origin like https://evil.com/localhost must NOT be treated as
+        // loopback — only the origin's host component may match, never a
+        // substring elsewhere in the URL.
         let verifier = TestCoseVerifier::always_succeed();
         let rp_id = "localhost";
         let auth_data = make_auth_data(rp_id, 0x05, 1);

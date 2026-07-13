@@ -415,12 +415,10 @@ impl From<sqlx::postgres::PgQueryResult> for QueryResult {
 /// Trait for errors that signal a transient conflict worth retrying.
 ///
 /// Implemented for `anyhow::Error` (delegates to `is_retryable_db_error`) and for
-/// `ServiceError` (only the dedicated `OccConflict` variant is retryable).  The
-/// `with_dsql_retry!` macro calls `e.is_retryable()` instead of the old
-/// `is_retryable_db_error(&e)` so that OCC version-bump conflicts from
-/// `compare_and_update` are retried through the same bounded loop as DSQL
-/// network-level serialization failures, without any change to the ~11 existing
-/// non-transactional call sites (their error type is still `anyhow::Error`).
+/// `ServiceError` (only the dedicated `OccConflict` variant is retryable). The
+/// `with_dsql_retry!` macro calls `e.is_retryable()`, so OCC version-bump
+/// conflicts from `compare_and_update` and DSQL network-level serialization
+/// failures are retried through the same bounded loop.
 pub(crate) trait RetryableError {
     fn is_retryable(&self) -> bool;
 }
@@ -437,9 +435,9 @@ impl RetryableError for anyhow::Error {
 /// so the operation is fully retried from scratch. Non-retryable
 /// errors and successes pass through immediately.
 ///
-/// The error type returned by `$body` must implement [`RetryableError`].
-/// For `anyhow::Error` this is equivalent to the old `is_retryable_db_error`
-/// check.  For `ServiceError`, only the `OccConflict` variant retries.
+/// The error type returned by `$body` must implement [`RetryableError`]:
+/// `anyhow::Error` retries on transient DSQL errors (`is_retryable_db_error`);
+/// `ServiceError` retries only on the `OccConflict` variant.
 ///
 /// Usage: `with_dsql_retry!(async { ... }).await`
 #[macro_export]
@@ -1005,10 +1003,9 @@ mod tests {
         assert!(!is_retryable_code("not-a-code"));
     }
 
-    /// Regression for #454: Postgres SQLSTATEs that happen to share a low
-    /// byte with `5`/`6` after `& 0xFF` masking were misclassified as
-    /// retryable. Dropping the mask in favor of explicit enumeration
-    /// eliminates the collision class.
+    /// Regression for #454: retryable SQLSTATEs must be matched by explicit
+    /// enumeration — Postgres codes that merely share a masked low byte with
+    /// a retryable code must not be classified as retryable.
     ///
     /// - `22021 & 0xFF = 5` (would have collided with `SQLITE_BUSY`)
     /// - `22022 & 0xFF = 6` (would have collided with `SQLITE_LOCKED`)
