@@ -108,9 +108,9 @@ fn collect_term_refs(line: &str, out: &mut std::collections::HashSet<String>) {
 /// reference resolves to a term **defined in the same catalog**. Fluent
 /// has no cross-file term import, so a message that references a term
 /// missing from its own catalog renders the placeable unresolved (e.g.
-/// "vouch: failed to get {-github} token: ..." instead of "GitHub").
-/// Caught in PR #492 review — the CLI added a message using `{ -github }`
-/// while `-github` was only defined in the server catalog.
+/// "vouch: failed to get {-github} token: ..." instead of "GitHub", as when
+/// a CLI message uses `{ -github }` while `-github` is defined only in
+/// the server catalog; see PR #492).
 #[test]
 fn every_term_reference_has_a_definition() {
     let catalogs = [
