@@ -100,10 +100,12 @@ pub struct OidcIdTokenClaims {
     /// testing; not yet in the `AssumeRoleWithWebIdentity` API reference):
     /// <https://awsteele.com/blog/2026/07/13/oidc-tokens-can-restrict-which-aws-roles-they-assume.html>
     ///
-    /// Only set for AWS STS tokens when the client requests pinning;
-    /// never set for Kubernetes/WIF tokens or the Identity Center
-    /// assertion (AWS does not document how `CreateTokenWithIAM` treats
-    /// this claim, so Vouch omits it there).
+    /// Only set for AWS tokens when the client requests pinning; never
+    /// set for Kubernetes/WIF tokens. The Identity Center token is pinned
+    /// to the management role its `AssumeRoleWithWebIdentity` hop assumes;
+    /// `CreateTokenWithIAM` also receives it and, in observed behavior
+    /// (undocumented), ignores the claim as it does the other
+    /// AWS-namespaced claims it does not consume.
     #[serde(
         rename = "https://aws.amazon.com/roles",
         skip_serializing_if = "Option::is_none"

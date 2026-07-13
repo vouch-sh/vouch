@@ -454,8 +454,7 @@ fn map_aws_error(e: AwsError) -> ServiceError {
 pub(crate) struct AwsTokenParams {
     /// IAM role ARN to pin the token to via the
     /// `https://aws.amazon.com/roles` claim. Optional: absent means an
-    /// unpinned token (required for the Identity Center path and issued
-    /// to CLIs that predate pinning).
+    /// unpinned token (issued to CLIs that predate pinning).
     role_arn: Option<String>,
 }
 
@@ -497,8 +496,10 @@ fn validate_pinned_role(role_arn: &str) -> Result<(), ServiceError> {
 ///
 /// When `?role_arn=` is present, the token is pinned to that role via the
 /// `https://aws.amazon.com/roles` claim — STS refuses to let it assume any
-/// other role. STS callers should always pin; the Identity Center path must
-/// not (see `services::integrations::aws` module docs).
+/// other role. Every CLI path pins to the role its `AssumeRoleWithWebIdentity`
+/// call assumes, including the Identity Center management-role hop (see the
+/// `services::integrations::aws` module docs for the `CreateTokenWithIAM`
+/// note).
 ///
 /// When the DPoP proof includes a `source` custom claim (e.g., "claude-code"),
 /// the issued token includes AI-specific session tags (`vouch:AccessType=AI`,

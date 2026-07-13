@@ -665,8 +665,8 @@ pub(crate) fn resolve_identity_center<'a>(
 /// credentials cannot be downscoped — so caller credentials are always full
 /// (no `ReadOnlyAccess` policy, no DPoP source tag).
 ///
-/// 1. Fetch the RS256 AWS token and assume the management role via
-///    `AssumeRoleWithWebIdentity` (full creds).
+/// 1. Fetch the RS256 AWS token pinned to the management role and assume
+///    that role via `AssumeRoleWithWebIdentity` (full creds).
 /// 2. Exchange the same token for an IdC access token via `CreateTokenWithIAM`.
 pub(crate) async fn obtain_identity_center_token(
     http_client: &reqwest::Client,
@@ -691,14 +691,17 @@ pub(crate) async fn obtain_identity_center_token(
     let mgmt_arn = crate::integrations::aws::sts::parse_role_arn(management_role)?;
     let domain_suffix = mgmt_arn.partition.dns_suffix();
 
-    // Deliberately unpinned (no `?role_arn=`): this one token is used both to
-    // assume the management role AND as the jwt-bearer assertion for
-    // CreateTokenWithIAM, and AWS does not document how the latter treats the
-    // roles claim. Trust policies on IdC management roles must therefore not
-    // require `sts:RoleAuthorizedByIdp`.
+    // Pinned to the management role — the role this token's
+    // AssumeRoleWithWebIdentity hop assumes, so IdC management roles can
+    // require `sts:RoleAuthorizedByIdp` like any other web-identity role.
+    // The same token is also the jwt-bearer assertion for CreateTokenWithIAM;
+    // AWS does not document how that operation treats the roles claim, but it
+    // already accepts this token carrying the other AWS-namespaced claims it
+    // does not consume (tags, source_identity) — observed behavior is that
+    // unrecognized claims are ignored.
     let client = VouchClient::new(server).await?;
     let token_response: OidcTokenResponse = client
-        .get_authenticated("/v1/credentials/aws/token")
+        .get_authenticated(&aws_token_path(Some(management_role))?)
         .await
         .context("failed to get OIDC token for management role")?;
     let id_token = token_response.id_token.expose_secret();

@@ -97,13 +97,16 @@
 //!   `sts:AssumeRole` (e.g. the second hop of a management-role chain) has
 //!   no OIDC token in the request, so a Bool-`true` condition there can
 //!   never match.
-//! - **Do not require it on a management role that is also used by the
-//!   Identity Center path** (`vouch credential aws --account/--permission-set`,
-//!   `vouch setup aws --discover`). That path deliberately requests an
-//!   unpinned token: the same token doubles as the `jwt-bearer` assertion
-//!   for `sso-oidc:CreateTokenWithIAM`, and AWS does not document how that
-//!   operation treats the roles claim, so Vouch omits it there. An unpinned
-//!   token fails the condition.
+//!
+//! The Identity Center path (`vouch credential aws --account/--permission-set`,
+//! `vouch setup aws --discover`) pins its token to the management role — the
+//! role its `AssumeRoleWithWebIdentity` hop assumes — so IdC management roles
+//! can require the condition key like any other web-identity role. The same
+//! token doubles as the `jwt-bearer` assertion for
+//! `sso-oidc:CreateTokenWithIAM`; AWS does not document how that operation
+//! treats the roles claim, but it already accepts this token carrying the
+//! other AWS-namespaced claims it does not consume (`tags`,
+//! `source_identity`) — observed behavior, not a documented contract.
 //!
 //! [AWS Service Authorization Reference for STS]: https://docs.aws.amazon.com/service-authorization/latest/reference/list_sts.html
 //! [awsteele.com, 2026-07-13]: https://awsteele.com/blog/2026/07/13/oidc-tokens-can-restrict-which-aws-roles-they-assume.html
@@ -200,8 +203,7 @@ fn build_aws_session_tags(
 ///   `hardware_aaguid`, `org_domain` (`hd`), and `dpop_source` federation claims
 /// * `pinned_role` - Role ARN to pin the token to via the
 ///   `https://aws.amazon.com/roles` claim; `None` omits the claim (STS then
-///   accepts the token for any role trusting this issuer). Must stay `None`
-///   for Identity Center consumers — see the module docs.
+///   accepts the token for any role trusting this issuer)
 pub(crate) async fn issue_aws_token(
     issuer: &str,
     session_hours: u64,
@@ -613,7 +615,7 @@ mod tests {
     }
 
     /// Without a requested pin the roles claim is absent, preserving the
-    /// pre-pinning token shape for older CLIs and the Identity Center path.
+    /// pre-pinning token shape for older CLIs.
     #[tokio::test]
     async fn test_roles_claim_absent_without_pin() {
         let result = issue_aws_token(
