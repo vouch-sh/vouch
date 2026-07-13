@@ -85,6 +85,26 @@ pub struct OidcIdTokenClaims {
         skip_serializing_if = "Option::is_none"
     )]
     pub aws_tags: Option<AwsSessionTags>,
+    /// AWS role ARNs this token is authorized to assume (role pinning).
+    ///
+    /// When present, AWS STS rejects `AssumeRoleWithWebIdentity` for any
+    /// role whose ARN is not an exact match of an entry in this claim —
+    /// enforcement happens at the STS layer, before the role's trust
+    /// policy is evaluated. Trust policies can additionally require the
+    /// claim with the `sts:RoleAuthorizedByIdp` condition key.
+    ///
+    /// Serialized as an array of ARN strings (STS accepts a bare string
+    /// too, but the array form is forward-compatible with pinning more
+    /// than one role). Exact-match only — no wildcards or role names.
+    ///
+    /// Only set for AWS STS tokens when the client requests pinning;
+    /// never set for Kubernetes/WIF tokens or the Identity Center path
+    /// (`CreateTokenWithIAM` does not define semantics for this claim).
+    #[serde(
+        rename = "https://aws.amazon.com/roles",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub aws_roles: Option<Vec<String>>,
 }
 
 /// AWS session tags claim structure (nested format).
@@ -117,6 +137,7 @@ pub struct OidcIdTokenClaimsBuilder {
     hd: Option<String>,
     source_identity: Option<String>,
     aws_tags: Option<AwsSessionTags>,
+    aws_roles: Option<Vec<String>>,
     valid_for_seconds: u64,
 }
 
@@ -133,6 +154,7 @@ impl OidcIdTokenClaimsBuilder {
             hd: None,
             source_identity: None,
             aws_tags: None,
+            aws_roles: None,
             valid_for_seconds: 28800, // 8 hours default
         }
     }
@@ -237,6 +259,18 @@ impl OidcIdTokenClaimsBuilder {
         self
     }
 
+    /// Pin the token to a single AWS role ARN (`https://aws.amazon.com/roles`).
+    ///
+    /// When set, AWS STS rejects `AssumeRoleWithWebIdentity` for any other
+    /// role, so a leaked token cannot be exchanged outside the intended role.
+    /// Takes an `Option` (mirroring [`hd`](Self::hd)) so callers can chain it
+    /// unconditionally; `None` leaves the claim absent.
+    #[must_use]
+    pub fn aws_role(mut self, role_arn: Option<&str>) -> Self {
+        self.aws_roles = role_arn.map(|arn| vec![arn.to_string()]);
+        self
+    }
+
     /// Set the token validity period in seconds.
     #[must_use]
     pub fn valid_for_seconds(mut self, seconds: u64) -> Self {
@@ -279,6 +313,7 @@ impl OidcIdTokenClaimsBuilder {
             hd: self.hd,
             source_identity: self.source_identity,
             aws_tags: self.aws_tags,
+            aws_roles: self.aws_roles,
         })
     }
 }
@@ -499,6 +534,36 @@ mod tests {
         assert!(
             json.get("https://aws.amazon.com/tags").is_none(),
             "aws tags claim should be absent when not set"
+        );
+    }
+
+    #[test]
+    fn test_aws_role_serialized_as_single_element_array() {
+        let claims =
+            OidcIdTokenClaimsBuilder::for_aws("https://vouch.example.com", "user@example.com")
+                .aws_role(Some("arn:aws:iam::123456789012:role/MyRole"))
+                .build()
+                .unwrap();
+
+        let json = serde_json::to_value(&claims).unwrap();
+        assert_eq!(
+            json["https://aws.amazon.com/roles"],
+            serde_json::json!(["arn:aws:iam::123456789012:role/MyRole"])
+        );
+    }
+
+    #[test]
+    fn test_aws_roles_omitted_when_none() {
+        let claims =
+            OidcIdTokenClaimsBuilder::for_aws("https://vouch.example.com", "user@example.com")
+                .aws_role(None)
+                .build()
+                .unwrap();
+
+        let json = serde_json::to_value(&claims).unwrap();
+        assert!(
+            json.get("https://aws.amazon.com/roles").is_none(),
+            "aws roles claim should be absent when no pin is requested"
         );
     }
 }

@@ -7,12 +7,12 @@ use crate::error::ServiceError;
 use crate::services::integrations::aws::{AwsError, issue_aws_token};
 use crate::services::integrations::github::{GitHubInstallationId, minimal_git_permissions};
 use crate::services::oidc;
-use axum::extract::OriginalUri;
+use axum::extract::{OriginalUri, Query};
 use axum::http::Method;
 use axum::{Json, extract::State, http::HeaderMap, http::StatusCode};
 use axum_extra::extract::cookie::CookieJar;
 use jiff::Timestamp;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use vouch_common::{
     AwsTokenResponse, GitHubStatusResponse, GitHubTokenRequest, GitHubTokenResponse,
@@ -449,6 +449,40 @@ fn map_aws_error(e: AwsError) -> ServiceError {
     }
 }
 
+/// Query parameters for `GET /v1/credentials/aws/token`.
+#[derive(Debug, Deserialize)]
+pub(crate) struct AwsTokenParams {
+    /// IAM role ARN to pin the token to via the
+    /// `https://aws.amazon.com/roles` claim. Optional: absent means an
+    /// unpinned token (required for the Identity Center path and issued
+    /// to CLIs that predate pinning).
+    role_arn: Option<String>,
+}
+
+/// Maximum accepted length for the `role_arn` query parameter. IAM role
+/// ARNs max out well below this; the cap bounds what we parse and echo
+/// into logs and tokens.
+const MAX_ROLE_ARN_LEN: usize = 2048;
+
+/// Validate a requested pin as a plausible IAM role ARN.
+///
+/// Rejecting malformed ARNs here (400) beats minting a token AWS would
+/// later refuse with an opaque STS-side `InvalidIdentityToken` error. The
+/// CLI validates the ARN before calling, so only broken clients hit this.
+fn validate_pinned_role(role_arn: &str) -> Result<(), ServiceError> {
+    let is_role = role_arn.len() <= MAX_ROLE_ARN_LEN
+        && vouch_common::aws::Arn::parse(role_arn).is_ok_and(|arn| arn.is_iam_role());
+    if is_role {
+        Ok(())
+    } else {
+        Err(ServiceError::api(
+            StatusCode::BAD_REQUEST,
+            "invalid_role_arn",
+            "role_arn must be an IAM role ARN (arn:<partition>:iam::<account>:role/<name>)",
+        ))
+    }
+}
+
 /// Get an OIDC ID token for AWS.
 ///
 /// GET /v1/credentials/aws/token
@@ -460,6 +494,11 @@ fn map_aws_error(e: AwsError) -> ServiceError {
 /// RS256; the customer-managed application's Aud claim must be the Vouch
 /// issuer URL).
 ///
+/// When `?role_arn=` is present, the token is pinned to that role via the
+/// `https://aws.amazon.com/roles` claim — STS refuses to let it assume any
+/// other role. STS callers should always pin; the Identity Center path must
+/// not (see `services::integrations::aws` module docs).
+///
 /// When the DPoP proof includes a `source` custom claim (e.g., "claude-code"),
 /// the issued token includes AI-specific session tags (`vouch:AccessType=AI`,
 /// `vouch:Agent=<agent>`) for CloudTrail differentiation and IAM condition keys.
@@ -469,8 +508,14 @@ pub(crate) async fn get_aws_token(
     headers: HeaderMap,
     jar: CookieJar,
     State(state): State<Arc<AppState>>,
+    Query(params): Query<AwsTokenParams>,
     client_cert: OptionalClientCert,
 ) -> Result<Json<AwsTokenResponse>, ServiceError> {
+    let pinned_role = params.role_arn.as_deref();
+    if let Some(role_arn) = pinned_role {
+        validate_pinned_role(role_arn)?;
+    }
+
     let ctx =
         authorize_aws_token_request(&state, &headers, &jar, &method, uri.path(), &client_cert)
             .await?;
@@ -502,6 +547,7 @@ pub(crate) async fn get_aws_token(
         rsa_key,
         &ctx.user_email,
         &ctx.token,
+        pinned_role,
     )
     .await
     .map_err(map_aws_error)?;
@@ -1271,6 +1317,116 @@ mod tests {
         let resp: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
         assert!(resp["id_token"].is_string());
         assert!(resp["expires_in"].is_number());
+    }
+
+    /// Decode a JWT payload (middle part) without signature verification.
+    fn decode_jwt_payload(token: &str) -> serde_json::Value {
+        use base64::Engine;
+        let payload_b64 = token.split('.').nth(1).expect("jwt payload");
+        let payload_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(payload_b64)
+            .expect("base64url payload");
+        serde_json::from_slice(&payload_bytes).expect("payload JSON")
+    }
+
+    /// `?role_arn=` pins the token: the ARN must appear as a single-element
+    /// array in the `https://aws.amazon.com/roles` claim.
+    #[tokio::test]
+    async fn test_aws_token_pins_role_from_query() {
+        let state = test_app_state_with_rsa_key().await;
+        let config = state.config();
+        let app = crate::infra::router::build_app(state.clone(), &config).expect("build app");
+
+        let user = create_test_user(&state.store, "pinned@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+
+        let (status, body) = http_get(
+            &app,
+            "/v1/credentials/aws/token?role_arn=arn%3Aaws%3Aiam%3A%3A111122223333%3Arole%2FExample",
+            &[("Authorization", &format!("Bearer {token}"))],
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        let resp: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+        let claims = decode_jwt_payload(resp["id_token"].as_str().expect("id_token string"));
+        assert_eq!(
+            claims["https://aws.amazon.com/roles"],
+            serde_json::json!(["arn:aws:iam::111122223333:role/Example"]),
+        );
+    }
+
+    /// Without `?role_arn=` the roles claim is absent — the pre-pinning
+    /// token shape older CLIs and the Identity Center path rely on.
+    #[tokio::test]
+    async fn test_aws_token_without_query_omits_roles_claim() {
+        let state = test_app_state_with_rsa_key().await;
+        let config = state.config();
+        let app = crate::infra::router::build_app(state.clone(), &config).expect("build app");
+
+        let user = create_test_user(&state.store, "unpinned@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+
+        let (status, body) = http_get(
+            &app,
+            "/v1/credentials/aws/token",
+            &[("Authorization", &format!("Bearer {token}"))],
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        let resp: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+        let claims = decode_jwt_payload(resp["id_token"].as_str().expect("id_token string"));
+        assert!(
+            claims.get("https://aws.amazon.com/roles").is_none(),
+            "roles claim must be absent without a pin request"
+        );
+    }
+
+    /// A `role_arn` that does not parse as an ARN is rejected with 400
+    /// before any token is minted.
+    #[tokio::test]
+    async fn test_aws_token_rejects_malformed_role_arn() {
+        let (app, state) = test_app().await;
+
+        let user = create_test_user(&state.store, "badarn@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+
+        let (status, body) = http_get(
+            &app,
+            "/v1/credentials/aws/token?role_arn=not-an-arn",
+            &[("Authorization", &format!("Bearer {token}"))],
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+        assert_eq!(error["code"], "invalid_role_arn");
+    }
+
+    /// A syntactically valid ARN that is not an IAM role (e.g. an IAM user)
+    /// is rejected — the claim only makes sense for roles.
+    #[tokio::test]
+    async fn test_aws_token_rejects_non_role_arn() {
+        let (app, state) = test_app().await;
+
+        let user = create_test_user(&state.store, "userarn@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+
+        let (status, body) = http_get(
+            &app,
+            "/v1/credentials/aws/token?role_arn=arn%3Aaws%3Aiam%3A%3A111122223333%3Auser%2FBob",
+            &[("Authorization", &format!("Bearer {token}"))],
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+        assert_eq!(error["code"], "invalid_role_arn");
     }
 
     // ========================================================================
