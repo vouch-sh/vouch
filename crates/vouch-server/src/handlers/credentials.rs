@@ -458,9 +458,8 @@ pub(crate) struct AwsTokenParams {
     role_arn: Option<String>,
 }
 
-/// Maximum accepted length for the `role_arn` query parameter. IAM role
-/// ARNs max out well below this; the cap bounds what we parse and echo
-/// into logs and tokens.
+/// Maximum length of a role ARN, per the documented constraint on `RoleArn`
+/// in STS `AssumeRoleWithWebIdentity` (and `Role.Arn` in the IAM API).
 const MAX_ROLE_ARN_LEN: usize = 2048;
 
 /// Validate a requested pin as a plausible IAM role ARN.
@@ -1429,6 +1428,19 @@ mod tests {
         assert_eq!(status, StatusCode::BAD_REQUEST);
         let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
         assert_eq!(error["code"], "invalid_role_arn");
+    }
+
+    /// An ARN at exactly the length cap passes; one byte over fails.
+    #[test]
+    fn test_validate_pinned_role_length_boundary() {
+        let prefix = "arn:aws-us-gov:iam::123456789012:role/";
+        let filler = "a".repeat(super::MAX_ROLE_ARN_LEN.saturating_sub(prefix.len()));
+        let at_cap = format!("{prefix}{filler}");
+        assert_eq!(at_cap.len(), super::MAX_ROLE_ARN_LEN);
+        assert!(super::validate_pinned_role(&at_cap).is_ok());
+
+        let over_cap = format!("{at_cap}a");
+        assert!(super::validate_pinned_role(&over_cap).is_err());
     }
 
     // ========================================================================
