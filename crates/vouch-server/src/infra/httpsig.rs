@@ -59,17 +59,23 @@ impl KeyResolver for OAuthClientKeyResolver {
                 .ok()
                 .flatten()?;
 
-            let jwks_cache = crate::db::get_jwks_cache(&self.state.store, &client.id)
-                .await
-                .map_err(|e| {
-                    tracing::warn!("JWKS cache lookup failed for HTTP signature verification: {e}");
-                })
-                .ok()
-                .flatten();
-            let jwks_value = client
-                .jwks
-                .as_ref()
-                .or_else(|| jwks_cache.as_ref().map(|c| &c.value))?;
+            // Only clients registered with `jwks_uri` (no inline JWKS) need the
+            // cached fetch — skip the extra DB round trip for the common inline case.
+            let cached;
+            let jwks_value = if let Some(jwks) = client.jwks.as_ref() {
+                jwks
+            } else {
+                cached = crate::db::get_jwks_cache(&self.state.store, &client.id)
+                    .await
+                    .map_err(|e| {
+                        tracing::warn!(
+                            "JWKS cache lookup failed for HTTP signature verification: {e}"
+                        );
+                    })
+                    .ok()
+                    .flatten()?;
+                &cached.value
+            };
             let keys = jwks_value.get("keys")?.as_array()?;
 
             for jwk in keys {
