@@ -20,7 +20,7 @@ use std::collections::BTreeSet;
 use vouch_server::db::AuditEventKind;
 
 /// Backticked tokens in table rows that are not event types.
-const NON_EVENT_TOKENS: &[&str] = &["data", "role_arn", "vouch register"];
+const NON_EVENT_TOKENS: &[&str] = &["authenticator_id", "data", "role_arn", "vouch register"];
 
 fn audit_events_section() -> String {
     let path = concat!(

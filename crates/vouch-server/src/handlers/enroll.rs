@@ -30,7 +30,7 @@ use vouch_common::{BrowserRegisterCompleteRequest, BrowserRegisterStartResponse}
 
 use super::session::AuthContext;
 use super::{
-    create_session_cookie, extract_session_from_cookie, generate_random_bytes, hash_token,
+    create_session_cookie, extract_session_from_cookie, hash_token,
     validate_registration_attestation,
 };
 use crate::error::ServiceError;
@@ -383,7 +383,7 @@ pub(crate) async fn device_verify_submit(
     if let Err(e) = db::create_oidc_state(
         &state.store,
         &auth_request.state_key,
-        &request.id,
+        Some(&request.id),
         &auth_request.nonce,
         &auth_request.code_verifier,
         state_expires,
@@ -425,6 +425,7 @@ pub(crate) async fn device_verify_submit(
 )]
 pub(crate) async fn oidc_callback(
     State(state): State<Arc<AppState>>,
+    client_info: ClientInfo,
     Query(params): Query<OidcCallbackParams>,
 ) -> Response {
     // Check for error response
@@ -610,7 +611,14 @@ pub(crate) async fn oidc_callback(
         }
     };
 
-    complete_enrollment_after_identity(&state, &stored_state, identity, oidc_state_claim).await
+    complete_enrollment_after_identity(
+        &state,
+        &stored_state,
+        identity,
+        oidc_state_claim,
+        client_info,
+    )
+    .await
 }
 
 #[expect(
@@ -622,6 +630,7 @@ pub(crate) async fn complete_enrollment_after_identity(
     stored_state: &db::OidcState,
     identity: IdentityResult,
     oidc_state_claim: db::OidcStateClaim,
+    client_info: ClientInfo,
 ) -> Response {
     // Check domain restriction.
     // For Google consumers (no `hd` claim), `identity.domain` is `None`,
@@ -765,17 +774,15 @@ pub(crate) async fn complete_enrollment_after_identity(
     let token = session_result.token;
     let token_hash = hash_token(token.expose_secret());
 
-    // Handle CLI-initiated device auth flow
-    let is_cli_flow = !stored_state.device_auth_id.is_empty()
-        && !stored_state.device_auth_id.starts_with("DIRECT-");
-
-    if is_cli_flow {
+    // Handle CLI-initiated device auth flow. Direct browser sign-ins carry
+    // no device_auth_id in the OIDC state (see direct_enroll_start).
+    if let Some(device_auth_id) = stored_state.device_auth_id.as_deref() {
         if let Some(ref auth_id) = authenticator_id {
             // User already has a registered key — authorize the device auth
             // immediately so the CLI stops polling.
             if let Err(e) = db::authorize_device_auth(
                 &state.store,
-                &stored_state.device_auth_id,
+                device_auth_id,
                 &user.id,
                 &identity.email,
                 auth_id,
@@ -789,6 +796,7 @@ pub(crate) async fn complete_enrollment_after_identity(
                     event_type: db::AuthEventType::DeviceAuthApproved,
                     authenticator_id: Some(auth_id.clone()),
                     success: true,
+                    client: client_info,
                     ..Default::default()
                 };
                 db::spawn_audit_event(&state.audit, event, Some(identity.email.clone()));
@@ -801,7 +809,7 @@ pub(crate) async fn complete_enrollment_after_identity(
                 &user.id,
                 &identity.email,
                 &token_hash,
-                Some(&stored_state.device_auth_id),
+                Some(device_auth_id),
                 expires,
             )
             .await
@@ -809,6 +817,19 @@ pub(crate) async fn complete_enrollment_after_identity(
                 tracing::warn!("Failed to create enrollment session for CLI: {}", e);
             }
         }
+    } else if authenticator_id.is_some() {
+        // Returning user signing in directly via the website (upstream IdP,
+        // no CLI). No FIDO2 assertion happened, so authenticator_id stays
+        // empty — distinguishing this from passkey logins. Fresh enrollees
+        // are covered by the Enrollment event in browser_register_complete.
+        let event = db::AuthEventParams {
+            user_id: user.id.clone(),
+            event_type: db::AuthEventType::LoginSuccess,
+            success: true,
+            client: client_info,
+            ..Default::default()
+        };
+        db::spawn_audit_event(&state.audit, event, Some(identity.email.clone()));
     }
 
     // No explicit state delete here — `try_consume_oidc_state` already
@@ -1574,10 +1595,6 @@ pub(crate) async fn browser_register_complete(
 // Direct Enrollment (Browser-only, no CLI)
 // ============================================================================
 
-/// Prefix for direct enrollment user codes (no CLI device authorization).
-/// The full user_code will be `DIRECT-{random}` to ensure uniqueness.
-const DIRECT_ENROLL_PREFIX: &str = "DIRECT-";
-
 /// Query parameters for direct enrollment start.
 #[derive(Deserialize)]
 pub(crate) struct DirectEnrollQuery {
@@ -1615,53 +1632,6 @@ pub(crate) async fn direct_enroll_start(
     }
 
     let now = Timestamp::now();
-
-    // Create a "virtual" device auth request for direct enrollment
-    // This allows us to reuse the existing OIDC callback flow
-    let expires_at = now.checked_add(Span::new().minutes(10)).unwrap_or(now);
-
-    // Generate unique codes for this direct enrollment attempt
-    // user_code needs to be unique per the database constraint
-    let (suffix_bytes, hash_bytes) = match (generate_random_bytes(8), generate_random_bytes(16)) {
-        (Ok(s), Ok(h)) => (s, h),
-        _ => {
-            return ErrorTemplate {
-                title: "Error".to_string(),
-                message: "Failed to generate secure random codes".to_string(),
-                back_url: None,
-            }
-            .into_response();
-        }
-    };
-    let unique_suffix = URL_SAFE_NO_PAD.encode(suffix_bytes);
-    let user_code = format!("{}{}", DIRECT_ENROLL_PREFIX, unique_suffix);
-    let device_code_hash = format!(
-        "{}{}",
-        DIRECT_ENROLL_PREFIX,
-        URL_SAFE_NO_PAD.encode(hash_bytes)
-    );
-
-    let device_auth_id = match db::create_device_auth_request(
-        &state.store,
-        &device_code_hash,
-        &user_code,
-        None,
-        expires_at,
-        5,
-    )
-    .await
-    {
-        Ok(id) => id,
-        Err(e) => {
-            tracing::error!("Failed to create direct enrollment request: {}", e);
-            return ErrorTemplate {
-                title: "Error".to_string(),
-                message: "Failed to start enrollment. Please try again.".to_string(),
-                back_url: Some("/".to_string()),
-            }
-            .into_response();
-        }
-    };
 
     // Initiate upstream IdP authentication.
     // If a provider slug was specified, require it to exist — do not fall
@@ -1715,10 +1685,13 @@ pub(crate) async fn direct_enroll_start(
 
     let state_expires = now.checked_add(Span::new().minutes(10)).unwrap_or(now);
 
+    // Direct browser sign-in: no CLI device authorization involved, so the
+    // state row carries no device_auth_id — the marker
+    // complete_enrollment_after_identity uses to skip the CLI flow.
     if let Err(e) = db::create_oidc_state(
         &state.store,
         &auth_request.state_key,
-        &device_auth_id,
+        None,
         &auth_request.nonce,
         &auth_request.code_verifier,
         state_expires,
@@ -1797,12 +1770,15 @@ fn is_valid_user_code_format(code: &str) -> bool {
 mod tests {
     #![expect(
         clippy::expect_used,
+        clippy::indexing_slicing,
         clippy::arithmetic_side_effects,
         reason = "test code: panic on assertion failure is acceptable"
     )]
 
     use super::*;
-    use crate::test_utils::{http_post_json, test_app};
+    use crate::test_utils::{
+        create_test_authenticator, create_test_user, http_post_json, test_app, test_app_state,
+    };
     use axum::http::StatusCode;
     use base64::Engine;
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -2061,7 +2037,7 @@ mod tests {
         crate::db::create_oidc_state(
             &state.store,
             oidc_state_value,
-            &device_auth_id,
+            Some(&device_auth_id),
             "test-nonce",
             "",
             expires_at,
@@ -2093,6 +2069,214 @@ mod tests {
         assert!(
             body.contains("Invalid or expired state"),
             "expected 'Invalid or expired state' in body, got: {body}"
+        );
+    }
+
+    // ── complete_enrollment_after_identity audit events ─────────────────
+
+    /// Seed an OIDC state row and atomically consume it, yielding the
+    /// (state, claim) pair `complete_enrollment_after_identity` requires.
+    async fn seed_and_consume_oidc_state(
+        state: &AppState,
+        state_value: &str,
+        device_auth_id: Option<&str>,
+    ) -> (crate::db::OidcState, crate::db::OidcStateClaim) {
+        let expires_at: jiff::Timestamp = "2099-12-31T23:59:59Z".parse().expect("valid timestamp");
+        crate::db::create_oidc_state(
+            &state.store,
+            state_value,
+            device_auth_id,
+            "test-nonce",
+            "",
+            expires_at,
+            "",
+        )
+        .await
+        .expect("create_oidc_state");
+        crate::db::try_consume_oidc_state(&state.store, state_value)
+            .await
+            .expect("consume oidc state")
+    }
+
+    /// Poll the audit store for events of `event_type` for the user. Audit
+    /// writes are spawned on a detached task, so the first read can race
+    /// the write; retry briefly before returning whatever was found.
+    async fn wait_for_audit_events(
+        state: &AppState,
+        event_type: &str,
+        user_id: &str,
+    ) -> Vec<crate::db::AuditEvent> {
+        let mut events = Vec::new();
+        for _ in 0..40 {
+            events = state
+                .audit
+                .query_events(&crate::db::AuditEventFilter {
+                    event_types: Some(vec![event_type.to_string()]),
+                    user_id: Some(user_id.to_string()),
+                    ..Default::default()
+                })
+                .await
+                .expect("query audit events");
+            if !events.is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        events
+    }
+
+    #[tokio::test]
+    async fn test_direct_web_signin_returning_user_logs_login_success_with_ip() {
+        // Direct browser sign-in (empty device_auth_id) by a user who
+        // already has a passkey: emits login_success carrying the client IP
+        // and no authenticator_id (no FIDO2 assertion happened), and must
+        // NOT be recorded as a CLI device-auth approval.
+        let state = test_app_state().await;
+        let user = create_test_user(&state.store, "returning@example.com").await;
+        create_test_authenticator(&state.store, &user.id).await;
+
+        let (stored, claim) = seed_and_consume_oidc_state(&state, "direct-web-state", None).await;
+
+        let client_info = ClientInfo {
+            client_ip: Some("203.0.113.7".parse().expect("valid IP")),
+            ..Default::default()
+        };
+        let identity = IdentityResult {
+            email: "returning@example.com".to_string(),
+            domain: Some("example.com".to_string()),
+        };
+
+        let resp =
+            complete_enrollment_after_identity(&state, &stored, identity, claim, client_info).await;
+        assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+
+        let events = wait_for_audit_events(&state, "login_success", &user.id).await;
+        assert_eq!(events.len(), 1, "one direct sign-in -> one login_success");
+        let event = events.first().expect("login_success event");
+        let data: serde_json::Value = serde_json::from_str(&event.data).expect("event data JSON");
+        assert_eq!(data["client_ip"], "203.0.113.7");
+        assert!(
+            data["authenticator_id"].is_null(),
+            "no FIDO2 assertion happened, got: {data}"
+        );
+
+        let approvals = state
+            .audit
+            .query_events(&crate::db::AuditEventFilter {
+                event_types: Some(vec!["device_auth_approved".to_string()]),
+                ..Default::default()
+            })
+            .await
+            .expect("query audit events");
+        assert!(
+            approvals.is_empty(),
+            "direct sign-in must not emit device_auth_approved"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_cli_device_auth_immediate_approval_records_client_ip() {
+        // CLI-initiated flow (real device_auth_id) by a user who already has
+        // a passkey: the immediate approval authorizes the device auth and
+        // the device_auth_approved event carries the client IP.
+        let state = test_app_state().await;
+        let user = create_test_user(&state.store, "cli-returning@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+
+        let expires_at: jiff::Timestamp = "2099-12-31T23:59:59Z".parse().expect("valid timestamp");
+        let device_auth_id = crate::db::create_device_auth_request(
+            &state.store,
+            "cli-flow-device-hash",
+            "CLFW-CDGH",
+            None,
+            expires_at,
+            5,
+        )
+        .await
+        .expect("create_device_auth_request");
+
+        let (stored, claim) =
+            seed_and_consume_oidc_state(&state, "cli-flow-state", Some(&device_auth_id)).await;
+
+        let client_info = ClientInfo {
+            client_ip: Some("198.51.100.9".parse().expect("valid IP")),
+            ..Default::default()
+        };
+        let identity = IdentityResult {
+            email: "cli-returning@example.com".to_string(),
+            domain: Some("example.com".to_string()),
+        };
+
+        let resp =
+            complete_enrollment_after_identity(&state, &stored, identity, claim, client_info).await;
+        assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+
+        let events = wait_for_audit_events(&state, "device_auth_approved", &user.id).await;
+        assert_eq!(
+            events.len(),
+            1,
+            "immediate approval -> one device_auth_approved"
+        );
+        let event = events.first().expect("device_auth_approved event");
+        let data: serde_json::Value = serde_json::from_str(&event.data).expect("event data JSON");
+        assert_eq!(data["client_ip"], "198.51.100.9");
+        assert_eq!(data["authenticator_id"], auth_id.as_str());
+
+        let device_auth = crate::db::get_device_auth_by_user_code(&state.store, "CLFW-CDGH")
+            .await
+            .expect("get device auth")
+            .expect("device auth exists");
+        assert_eq!(device_auth.status, crate::db::DeviceAuthStatus::Authorized);
+
+        let logins = state
+            .audit
+            .query_events(&crate::db::AuditEventFilter {
+                event_types: Some(vec!["login_success".to_string()]),
+                ..Default::default()
+            })
+            .await
+            .expect("query audit events");
+        assert!(
+            logins.is_empty(),
+            "a CLI approval is not additionally recorded as a website login"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_direct_web_enrollment_new_user_emits_no_login_event() {
+        // Direct browser sign-in by a brand-new user (no passkey yet):
+        // nothing is audited at the IdP stage — the Enrollment event in
+        // browser_register_complete covers them after key registration.
+        let state = test_app_state().await;
+        let (stored, claim) =
+            seed_and_consume_oidc_state(&state, "direct-new-user-state", None).await;
+
+        let identity = IdentityResult {
+            email: "fresh@example.com".to_string(),
+            domain: Some("example.com".to_string()),
+        };
+        let resp = complete_enrollment_after_identity(
+            &state,
+            &stored,
+            identity,
+            claim,
+            ClientInfo::default(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+
+        // Audit writes are spawned; give the runtime a moment before
+        // asserting absence.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let events = state
+            .audit
+            .query_events(&crate::db::AuditEventFilter::default())
+            .await
+            .expect("query audit events");
+        assert!(
+            events.is_empty(),
+            "fresh enrollee sign-in emits no audit events yet, got {}",
+            events.len()
         );
     }
 
