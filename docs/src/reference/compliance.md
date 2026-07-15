@@ -25,7 +25,7 @@ This page maps Vouch features to common compliance frameworks. Vouch's hardware-
 | AC-11 | Device Lock | Sessions expire after configurable duration (default 8 hours); re-authentication required |
 | AC-12 | Session Termination | Explicit logout (`vouch logout`) and automatic session expiration |
 | SC-12 | Cryptographic Key Establishment and Management | Ed25519 SSH CA key; ES256 OIDC signing key; support for HSM and split-custody key storage |
-| SC-13 | Cryptographic Protection | FIDO2/CTAP2 with hardware-backed cryptography; TLS for transport; JWT signing for tokens; FIPS 140-3 validated cryptography (aws-lc-rs FIPS module embedded in server binaries on Linux; OS FIPS mode enabled in the attestable AMI) |
+| SC-13 | Cryptographic Protection | FIDO2/CTAP2 with hardware-backed cryptography; TLS for transport; JWT signing for tokens; FIPS 140-3 cryptography (validated aws-lc-rs FIPS module embedded in server binaries on Linux; OS FIPS mode enabled in the attestable AMI — the kernel 6.18 modularized crypto module's CMVP validation is in process, expected 2027) |
 | SC-23 | Session Authenticity | DPoP (RFC 9449) sender-constrained tokens; FAPI 2.0 client authentication |
 
 ## SOC 2
@@ -56,7 +56,7 @@ This page maps Vouch features to common compliance frameworks. Vouch's hardware-
 | Access Control (AC) | AC-12 | Sessions auto-expire; explicit logout available |
 | Audit and Accountability (AU) | AU-2, AU-3 | All authentication and credential issuance events logged with identity, timestamp, and method |
 | Audit and Accountability (AU) | AU-8 | Time-bound certificates; NTP/GPS time sync supported for air-gapped deployments |
-| System and Communications Protection (SC) | SC-12, SC-13 | Hardware-backed cryptography; Ed25519 CA; ES256 OIDC signing; TLS transport encryption; FIPS 140-3: aws-lc-rs FIPS module in server binaries, OS crypto-policy FIPS + kernel `fips=1` in the attestable AMI |
+| System and Communications Protection (SC) | SC-12, SC-13 | Hardware-backed cryptography; Ed25519 CA; ES256 OIDC signing; TLS transport encryption; FIPS 140-3: validated aws-lc-rs FIPS module in server binaries; OS crypto-policy FIPS + kernel `fips=1` in the attestable AMI (kernel crypto module validation in process) |
 | System and Communications Protection (SC) | SC-23 | FAPI 2.0 with DPoP sender-constrained tokens; private_key_jwt client authentication |
 | Configuration Management (CM) | CM-2 | Server configured via environment variables with S3 centralized config support |
 | Contingency Planning (CP) | CP-9 | Database backup/restore procedures; CA key recovery with split custody |
