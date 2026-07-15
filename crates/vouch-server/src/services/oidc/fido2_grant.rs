@@ -262,9 +262,9 @@ pub(crate) async fn exchange_fido2_assertion(
             authenticator_id: Some(authenticator.id.clone()),
             success: false,
             failure_reason: Some(e.to_string()),
+            client: failure_client_info,
             ..AuthEventParams::default()
-        }
-        .with_client_info(failure_client_info);
+        };
         db::spawn_audit_event(&state.audit, failure_event, Some(user.email.clone()));
         ServiceError::oauth(OAuthErrorCode::InvalidGrant, "Authentication failed")
     })?;
@@ -293,9 +293,9 @@ pub(crate) async fn exchange_fido2_assertion(
         event_type: AuthEventType::LoginSuccess,
         authenticator_id: Some(authenticator.id.clone()),
         success: true,
+        client: params.client_info,
         ..AuthEventParams::default()
-    }
-    .with_client_info(params.client_info);
+    };
     db::spawn_audit_event(&state.audit, auth_event_params, Some(user.email.clone()));
 
     // 9. Validate authorization_details if provided (RFC 9396)

@@ -1448,9 +1448,9 @@ pub(crate) async fn browser_register_complete(
             event_type: db::AuthEventType::DeviceAuthApproved,
             authenticator_id: Some(authenticator_id.clone()),
             success: true,
+            client: client_info.clone(),
             ..Default::default()
-        }
-        .with_client_info(client_info.clone());
+        };
         db::spawn_audit_event(&state.audit, event, Some(reg_state.user_email.clone()));
     }
 
@@ -1460,9 +1460,9 @@ pub(crate) async fn browser_register_complete(
         event_type: AuthEventType::Enrollment,
         authenticator_id: Some(authenticator_id.clone()),
         success: true,
+        client: client_info,
         ..AuthEventParams::default()
-    }
-    .with_client_info(client_info);
+    };
     db::spawn_audit_event(
         &state.audit,
         auth_event_params,

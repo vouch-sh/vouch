@@ -871,6 +871,10 @@ impl OAuthEventType {
 }
 
 /// Record an OAuth usage event via the audit store.
+///
+/// Best-effort: audit writes must never fail the OAuth operation that
+/// already succeeded, so failures are logged and swallowed here instead of
+/// at every call site.
 pub async fn record_oauth_event(
     audit: &AuditStore,
     oauth_client_id: &str,
@@ -879,22 +883,32 @@ pub async fn record_oauth_event(
     ip_address: Option<std::net::IpAddr>,
     user_agent: Option<&str>,
     details: Option<&str>,
-) -> Result<String> {
-    let geo = ip_address.and_then(crate::geo::lookup);
+) {
+    let (country_code, asn, org_name) = crate::geo::audit_fields(ip_address);
     let data = OAuthUsageData {
         oauth_client_id: oauth_client_id.to_string(),
         details: details.map(String::from),
         client_ip: ip_address.map(|ip| ip.to_string()),
         user_agent: user_agent.map(String::from),
-        country_code: geo.as_ref().map(|g| g.country_code.clone()),
-        asn: geo.as_ref().and_then(|g| g.asn),
-        org_name: geo.as_ref().and_then(|g| g.org_name.clone()),
+        country_code,
+        asn,
+        org_name,
     };
-    let data_json = serde_json::to_string(&data)?;
-
-    audit
-        .insert_event(event_type.kind(), user_id, None, &data_json)
-        .await
+    let result = match serde_json::to_string(&data) {
+        Ok(data_json) => {
+            audit
+                .insert_event(event_type.kind(), user_id, None, &data_json)
+                .await
+        }
+        Err(e) => Err(e.into()),
+    };
+    if let Err(e) = result {
+        tracing::warn!(
+            error = %e,
+            event_type = event_type.kind().as_str(),
+            "failed to record OAuth event"
+        );
+    }
 }
 
 /// OAuth usage statistics.
@@ -1679,8 +1693,7 @@ mod tests {
                 None,
                 Some("coverage test"),
             )
-            .await
-            .expect("insert oauth usage event");
+            .await;
         }
 
         let before = jiff::Timestamp::now()

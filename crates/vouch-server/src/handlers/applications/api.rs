@@ -685,7 +685,7 @@ pub(crate) async fn add_secret_api(
     )
     .await?;
 
-    if let Err(e) = db::record_oauth_event(
+    db::record_oauth_event(
         &state.audit,
         &app_id,
         OAuthEventType::SecretAdded,
@@ -694,10 +694,7 @@ pub(crate) async fn add_secret_api(
         None,
         Some("Secret added"),
     )
-    .await
-    {
-        tracing::warn!("Failed to record OAuth event: {e}");
-    }
+    .await;
 
     tracing::info!("Added secret for OAuth application: {}", client.client_id);
 
@@ -884,7 +881,7 @@ pub(crate) async fn delete_secret_api(
     // count above remains as a fast-path for the common non-concurrent case.
     db::revoke_oauth_client_secret(&state.store, &secret_id, &app_id).await?;
 
-    if let Err(e) = db::record_oauth_event(
+    db::record_oauth_event(
         &state.audit,
         &app_id,
         OAuthEventType::SecretRevoked,
@@ -893,10 +890,7 @@ pub(crate) async fn delete_secret_api(
         None,
         Some("Secret revoked"),
     )
-    .await
-    {
-        tracing::warn!("Failed to record OAuth event: {e}");
-    }
+    .await;
 
     tracing::info!(
         "Revoked secret {} for OAuth application: {}",
@@ -991,7 +985,7 @@ pub(crate) async fn revoke_tokens_api(
     state.session_cache.invalidate_for_user(&client.client_id);
 
     // Log the event
-    if let Err(e) = db::record_oauth_event(
+    db::record_oauth_event(
         &state.audit,
         &app_id,
         OAuthEventType::TokenRevoked,
@@ -1000,10 +994,7 @@ pub(crate) async fn revoke_tokens_api(
         None,
         Some("All tokens revoked"),
     )
-    .await
-    {
-        tracing::warn!("Failed to record OAuth event: {e}");
-    }
+    .await;
 
     tracing::info!(
         "Revoked all tokens for OAuth application: {}",

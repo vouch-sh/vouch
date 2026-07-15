@@ -53,12 +53,10 @@ pub struct AuthEventParams {
     #[serde(skip)]
     pub event_type: AuthEventType,
     pub authenticator_id: Option<String>,
-    pub client_ip: Option<IpAddr>,
-    pub user_agent: Option<String>,
-    pub client_hostname: Option<String>,
-    pub client_os: Option<String>,
-    pub client_arch: Option<String>,
-    pub client_version: Option<String>,
+    /// Caller transport metadata, flattened so the stored JSON keeps the
+    /// same flat `client_ip`/`user_agent`/`client_*` keys as before.
+    #[serde(flatten)]
+    pub client: ClientInfo,
     pub success: bool,
     pub failure_reason: Option<String>,
     /// OAuth client ID of the RP that initiated logout, when applicable.
@@ -74,7 +72,7 @@ pub struct AuthEventParams {
 /// proxy headers. This prevents IP spoofing via `X-Forwarded-For` when the
 /// server is exposed directly without a trusted reverse proxy. The axum
 /// extractor and header-parsing impls live in `handlers::extractors`.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ClientInfo {
     /// Client IP address from the TCP peer socket.
     pub client_ip: Option<IpAddr>,
@@ -88,20 +86,6 @@ pub struct ClientInfo {
     pub client_arch: Option<String>,
     /// Client version (from `Vouch-Client-Version` header).
     pub client_version: Option<String>,
-}
-
-impl AuthEventParams {
-    /// Populate all client metadata fields from a `ClientInfo` extractor.
-    #[must_use]
-    pub fn with_client_info(mut self, info: ClientInfo) -> Self {
-        self.client_ip = info.client_ip;
-        self.user_agent = info.user_agent;
-        self.client_hostname = info.client_hostname;
-        self.client_os = info.client_os;
-        self.client_arch = info.client_arch;
-        self.client_version = info.client_version;
-        self
-    }
 }
 
 /// Insert a new authentication event via the audit store.
@@ -118,7 +102,7 @@ pub(super) async fn insert_auth_event(
         .map_err(|e| anyhow::anyhow!("Failed to serialize auth event: {e}"))?;
     if let (Some(obj), Some(geo)) = (
         value.as_object_mut(),
-        params.client_ip.and_then(crate::geo::lookup),
+        params.client.client_ip.and_then(crate::geo::lookup),
     ) {
         obj.insert(
             "country_code".to_string(),
@@ -167,68 +151,41 @@ mod tests {
     use jiff::SignedDuration;
 
     #[test]
-    fn test_with_client_info_populates_all_fields() {
+    fn test_client_info_serializes_flat() {
+        // The flattened ClientInfo must keep the same flat JSON keys the
+        // pre-flatten struct wrote, so stored rows stay shape-compatible.
         let params = AuthEventParams {
             user_id: "u1".into(),
             event_type: AuthEventType::LoginSuccess,
             success: true,
+            client: ClientInfo {
+                client_ip: Some("1.2.3.4".parse().unwrap()),
+                user_agent: Some("vouch-cli/1.0".into()),
+                client_hostname: Some("host.local".into()),
+                client_os: Some("macos".into()),
+                client_arch: Some("aarch64".into()),
+                client_version: Some("1.0.0".into()),
+            },
             ..AuthEventParams::default()
-        }
-        .with_client_info(ClientInfo {
-            client_ip: Some("1.2.3.4".parse().unwrap()),
-            user_agent: Some("vouch-cli/1.0".into()),
-            client_hostname: Some("host.local".into()),
-            client_os: Some("macos".into()),
-            client_arch: Some("aarch64".into()),
-            client_version: Some("1.0.0".into()),
-        });
-
-        assert_eq!(params.client_ip, Some("1.2.3.4".parse::<IpAddr>().unwrap()));
-        assert_eq!(params.user_agent.as_deref(), Some("vouch-cli/1.0"));
-        assert_eq!(params.client_hostname.as_deref(), Some("host.local"));
-        assert_eq!(params.client_os.as_deref(), Some("macos"));
-        assert_eq!(params.client_arch.as_deref(), Some("aarch64"));
-        assert_eq!(params.client_version.as_deref(), Some("1.0.0"));
-    }
-
-    #[test]
-    fn test_with_client_info_preserves_non_client_fields() {
-        let params = AuthEventParams {
-            user_id: "u1".into(),
-            event_type: AuthEventType::LoginFailed,
-            authenticator_id: Some("auth-abc".into()),
-            success: false,
-            failure_reason: Some("bad pin".into()),
-            ..AuthEventParams::default()
-        }
-        .with_client_info(ClientInfo::default());
-
-        assert_eq!(params.user_id, "u1");
-        assert_eq!(params.event_type, AuthEventType::LoginFailed);
-        assert_eq!(params.authenticator_id.as_deref(), Some("auth-abc"));
-        assert!(!params.success);
-        assert_eq!(params.failure_reason.as_deref(), Some("bad pin"));
-    }
-
-    #[test]
-    fn test_with_client_info_none_clears_existing_fields() {
-        let params = AuthEventParams {
-            client_ip: Some("10.0.0.1".parse().unwrap()),
-            user_agent: Some("old-ua".into()),
-            client_hostname: Some("old-host".into()),
-            client_os: Some("old-os".into()),
-            client_arch: Some("old-arch".into()),
-            client_version: Some("old-ver".into()),
-            ..AuthEventParams::default()
-        }
-        .with_client_info(ClientInfo::default());
-
-        assert_eq!(params.client_ip, None);
-        assert_eq!(params.user_agent, None);
-        assert_eq!(params.client_hostname, None);
-        assert_eq!(params.client_os, None);
-        assert_eq!(params.client_arch, None);
-        assert_eq!(params.client_version, None);
+        };
+        let value = serde_json::to_value(&params).unwrap();
+        assert!(value.get("client").is_none(), "no nested client object");
+        assert_eq!(
+            value.get("client_ip").and_then(|v| v.as_str()),
+            Some("1.2.3.4")
+        );
+        assert_eq!(
+            value.get("user_agent").and_then(|v| v.as_str()),
+            Some("vouch-cli/1.0")
+        );
+        assert_eq!(
+            value.get("client_hostname").and_then(|v| v.as_str()),
+            Some("host.local")
+        );
+        assert_eq!(
+            value.get("client_version").and_then(|v| v.as_str()),
+            Some("1.0.0")
+        );
     }
 
     #[test]

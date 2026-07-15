@@ -14,7 +14,7 @@
 
 use std::collections::HashMap;
 
-use vouch_server::db::{self, GitHubCredentialAuditData};
+use vouch_server::db;
 use vouch_tests::TestHarness;
 
 fn perm(map: &[(&str, &str)]) -> HashMap<String, String> {
@@ -386,25 +386,38 @@ async fn linked_installation_ids_spans_orgs() {
 // ============================================================================
 
 #[tokio::test]
-async fn log_github_credential_event_persists_audit_row() {
+async fn github_credential_event_persists_audit_row() {
     let harness = TestHarness::new().await;
-    let data = GitHubCredentialAuditData {
-        event_type: "ssh_credential_issued".to_string(),
-        org_id: Some("test-org".to_string()),
-        installation_id: Some(7),
-        success: true,
-        ..Default::default()
-    };
+    harness
+        .state
+        .audit
+        .log_credential_event(
+            "user-123",
+            "user@example.com",
+            db::CredentialAuditEnvelope {
+                event_type: "token_issued".to_string(),
+                org_id: Some("test-org".to_string()),
+                success: true,
+                ..Default::default()
+            },
+            &db::GitHubCredentialDetails {
+                installation_id: Some(7),
+                ..Default::default()
+            },
+        )
+        .await;
 
-    let event_id = db::log_github_credential_event(
-        &harness.state.audit,
-        "user-123",
-        "user@example.com",
-        data,
-        None,
-    )
-    .await
-    .expect("log event");
-
-    assert!(!event_id.is_empty(), "audit insert should return an id");
+    let events = harness
+        .state
+        .audit
+        .query_events(&db::AuditEventFilter {
+            event_types: Some(vec!["github_credential".to_string()]),
+            ..Default::default()
+        })
+        .await
+        .expect("query audit events");
+    assert_eq!(events.len(), 1);
+    let data: serde_json::Value = serde_json::from_str(&events[0].data).expect("parse data");
+    assert_eq!(data["installation_id"], 7);
+    assert_eq!(data["org_id"], "test-org");
 }

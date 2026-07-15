@@ -17,7 +17,6 @@
 pub(crate) mod audit;
 mod authenticators;
 mod authorization_codes;
-mod aws;
 mod challenge_states;
 pub(crate) mod claim;
 mod config;
@@ -126,10 +125,10 @@ pub use scim::{
     update_scim_token_last_used, update_scim_user,
 };
 
-// Re-export OAuth enum types from the document layer (single source of truth)
+// Re-export credential audit payload types (envelope + per-kind details)
 pub use documents::audit::{
-    AwsCredentialAuditData, GitHubCredentialAuditData, SshCredentialAuditData,
-    TokenExchangeAuditData,
+    AwsCredentialDetails, CredentialAuditDetails, CredentialAuditEnvelope, GitHubCredentialDetails,
+    SshCredentialDetails, TokenExchangeDetails,
 };
 pub use documents::oauth::{
     AccessScope, FapiProfile, JwsAlgorithm, OAuthClientType, RegistrationSource, ResponseMode,
@@ -173,21 +172,16 @@ pub use credentials::{
     delete_expired_ssh_revocations, delete_old_token_exchanges,
     get_enrollment_session_by_token_hash, get_issued_ssh_certificates_for_user,
     get_revoked_ssh_certificates, insert_token_exchange, is_ssh_certificate_revoked,
-    log_ssh_credential_event, log_token_exchange_event, record_ssh_certificate_issuance,
-    revoke_all_ssh_certificates_for_user,
+    record_ssh_certificate_issuance, revoke_all_ssh_certificates_for_user,
 };
-
-// Re-export AWS credential audit functions
-pub use aws::log_aws_credential_event;
 
 // Re-export GitHub types and functions
 pub use github::{
     CreateGitHubInstallationParams, GitHubInstallation, create_github_installation,
     delete_github_installation_by_installation_id, get_all_linked_installation_ids,
     get_github_installation_by_installation_id, get_github_installation_by_org_and_account,
-    get_github_installations_by_org, log_github_credential_event, suspend_github_installation,
-    unsuspend_github_installation, update_github_installation_repos,
-    update_github_installation_repos_delta,
+    get_github_installations_by_org, suspend_github_installation, unsuspend_github_installation,
+    update_github_installation_repos, update_github_installation_repos_delta,
 };
 
 // Re-export PAR types and functions (RFC 9126)

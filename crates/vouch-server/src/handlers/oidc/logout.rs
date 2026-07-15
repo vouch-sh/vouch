@@ -458,9 +458,9 @@ async fn clear_user_session(
                         event_type: db::AuthEventType::Logout,
                         success: true,
                         client_id: rp_client_id.map(str::to_string),
+                        client: client_info,
                         ..Default::default()
-                    }
-                    .with_client_info(client_info);
+                    };
                     db::spawn_audit_event(&state.audit, params, Some(session.user_email));
                 }
             }

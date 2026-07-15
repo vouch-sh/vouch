@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
-//! Round-trip tests for the AWS credential audit-log helpers
-//! (`crates/vouch-server/src/db/aws.rs`).
+//! Round-trip tests for AWS credential audit events
+//! (`AuditStore::log_credential_event` with [`AwsCredentialDetails`]).
 
 #![allow(
     clippy::unwrap_used,
@@ -8,7 +8,7 @@
     reason = "test code: panic on assertion failure is acceptable"
 )]
 
-use vouch_server::db::{self, AuditEventFilter, AwsCredentialAuditData};
+use vouch_server::db::{self, AuditEventFilter, AwsCredentialDetails, CredentialAuditEnvelope};
 use vouch_tests::TestHarness;
 
 async fn query_aws_events(harness: &TestHarness) -> Vec<db::AuditEvent> {
@@ -24,27 +24,27 @@ async fn query_aws_events(harness: &TestHarness) -> Vec<db::AuditEvent> {
 }
 
 #[tokio::test]
-async fn log_aws_credential_event_persists_pinned_role() {
+async fn aws_credential_event_persists_pinned_role() {
     let harness = TestHarness::new().await;
-    let data = AwsCredentialAuditData {
-        event_type: "token_issued".to_string(),
-        org_id: Some("test-org".to_string()),
-        role_arn: Some("arn:aws:iam::111122223333:role/Example".to_string()),
-        agent: Some("claude-code".to_string()),
-        success: true,
-        ..Default::default()
-    };
-
-    let event_id = db::log_aws_credential_event(
-        &harness.state.audit,
-        "user-123",
-        "user@example.com",
-        data,
-        None,
-    )
-    .await
-    .expect("log event");
-    assert!(!event_id.is_empty(), "audit insert should return an id");
+    harness
+        .state
+        .audit
+        .log_credential_event(
+            "user-123",
+            "user@example.com",
+            CredentialAuditEnvelope {
+                event_type: "token_issued".to_string(),
+                org_id: Some("test-org".to_string()),
+                agent: Some("claude-code".to_string()),
+                success: true,
+                ..Default::default()
+            },
+            &AwsCredentialDetails {
+                role_arn: Some("arn:aws:iam::111122223333:role/Example".to_string()),
+                token_expires_at: None,
+            },
+        )
+        .await;
 
     let events = query_aws_events(&harness).await;
     assert_eq!(events.len(), 1);
@@ -64,23 +64,22 @@ async fn log_aws_credential_event_persists_pinned_role() {
 }
 
 #[tokio::test]
-async fn log_aws_credential_event_unpinned_has_null_role() {
+async fn aws_credential_event_unpinned_has_null_role() {
     let harness = TestHarness::new().await;
-    let data = AwsCredentialAuditData {
-        event_type: "token_issued".to_string(),
-        success: true,
-        ..Default::default()
-    };
-
-    db::log_aws_credential_event(
-        &harness.state.audit,
-        "user-123",
-        "user@example.com",
-        data,
-        None,
-    )
-    .await
-    .expect("log event");
+    harness
+        .state
+        .audit
+        .log_credential_event(
+            "user-123",
+            "user@example.com",
+            CredentialAuditEnvelope {
+                event_type: "token_issued".to_string(),
+                success: true,
+                ..Default::default()
+            },
+            &AwsCredentialDetails::default(),
+        )
+        .await;
 
     let events = query_aws_events(&harness).await;
     assert_eq!(events.len(), 1);
@@ -94,20 +93,20 @@ async fn log_aws_credential_event_unpinned_has_null_role() {
 #[tokio::test]
 async fn retention_sweep_removes_aws_credential_events() {
     let harness = TestHarness::new().await;
-    let data = AwsCredentialAuditData {
-        event_type: "token_issued".to_string(),
-        success: true,
-        ..Default::default()
-    };
-    db::log_aws_credential_event(
-        &harness.state.audit,
-        "user-123",
-        "user@example.com",
-        data,
-        None,
-    )
-    .await
-    .expect("log event");
+    harness
+        .state
+        .audit
+        .log_credential_event(
+            "user-123",
+            "user@example.com",
+            CredentialAuditEnvelope {
+                event_type: "token_issued".to_string(),
+                success: true,
+                ..Default::default()
+            },
+            &AwsCredentialDetails::default(),
+        )
+        .await;
 
     let cutoff = jiff::Timestamp::now()
         .checked_add(jiff::Span::new().hours(1))

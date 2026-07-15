@@ -2,9 +2,7 @@
 //! Credential-related database operations (SSH revocation, enrollment,
 //! token exchange, cloud integrations).
 
-use super::audit::{AuditEventKind, AuditStore};
 use super::document_type::{Document, DocumentType};
-use super::documents::audit::{SshCredentialAuditData, TokenExchangeAuditData};
 use super::documents::credential::{EnrollmentSessionDoc, SshIssuedCertDoc, SshRevokedCertDoc};
 use super::documents::oauth::TokenExchangeDoc;
 use super::store::DocumentStore;
@@ -47,46 +45,6 @@ pub async fn insert_token_exchange(
 /// Delete expired token exchange records.
 pub async fn delete_old_token_exchanges(store: &DocumentStore) -> Result<u64> {
     store.delete_expired(TokenExchangeDoc::DOC_TYPE).await
-}
-
-/// Log a token exchange event (audit log).
-pub async fn log_token_exchange_event(
-    audit: &AuditStore,
-    user_id: &str,
-    user_email: &str,
-    data: &TokenExchangeAuditData,
-) -> Result<String> {
-    let data_json = serde_json::to_string(data)?;
-    audit
-        .insert_event(
-            AuditEventKind::TokenExchange,
-            Some(user_id),
-            Some(user_email),
-            &data_json,
-        )
-        .await
-}
-
-/// Log an SSH certificate issuance event (audit log).
-pub async fn log_ssh_credential_event(
-    audit: &AuditStore,
-    user_id: &str,
-    user_email: &str,
-    mut data: SshCredentialAuditData,
-    ip: Option<std::net::IpAddr>,
-) -> Result<String> {
-    data.client_ip = ip.map(|a| a.to_string());
-    (data.country_code, data.asn, data.org_name) = crate::geo::audit_fields(ip);
-    let data_json = serde_json::to_string(&data)?;
-
-    audit
-        .insert_event(
-            AuditEventKind::SshCredential,
-            Some(user_id),
-            Some(user_email),
-            &data_json,
-        )
-        .await
 }
 
 // ============================================================

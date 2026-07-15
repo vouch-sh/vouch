@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
-//! Round-trip tests for the SSH certificate and RFC 8693 token exchange
-//! audit-log helpers (`crates/vouch-server/src/db/credentials.rs`).
+//! Round-trip tests for SSH certificate and RFC 8693 token exchange audit
+//! events (`AuditStore::log_credential_event` with the per-kind details).
 
 #![allow(
     clippy::unwrap_used,
@@ -8,7 +8,9 @@
     reason = "test code: panic on assertion failure is acceptable"
 )]
 
-use vouch_server::db::{self, AuditEventFilter, SshCredentialAuditData, TokenExchangeAuditData};
+use vouch_server::db::{
+    self, AuditEventFilter, CredentialAuditEnvelope, SshCredentialDetails, TokenExchangeDetails,
+};
 use vouch_tests::TestHarness;
 
 async fn query_events(harness: &TestHarness, event_type: &str) -> Vec<db::AuditEvent> {
@@ -24,27 +26,27 @@ async fn query_events(harness: &TestHarness, event_type: &str) -> Vec<db::AuditE
 }
 
 #[tokio::test]
-async fn log_ssh_credential_event_persists_serial_and_principals() {
+async fn ssh_credential_event_persists_serial_and_principals() {
     let harness = TestHarness::new().await;
-    let data = SshCredentialAuditData {
-        event_type: "certificate_issued".to_string(),
-        serial: 42,
-        principals: vec!["dev".to_string()],
-        agent: Some("claude-code".to_string()),
-        success: true,
-        ..Default::default()
-    };
-
-    let event_id = db::log_ssh_credential_event(
-        &harness.state.audit,
-        "user-123",
-        "user@example.com",
-        data,
-        None,
-    )
-    .await
-    .expect("log event");
-    assert!(!event_id.is_empty(), "audit insert should return an id");
+    harness
+        .state
+        .audit
+        .log_credential_event(
+            "user-123",
+            "user@example.com",
+            CredentialAuditEnvelope {
+                event_type: "certificate_issued".to_string(),
+                agent: Some("claude-code".to_string()),
+                success: true,
+                ..Default::default()
+            },
+            &SshCredentialDetails {
+                serial: 42,
+                principals: vec!["dev".to_string()],
+                cert_expires_at: None,
+            },
+        )
+        .await;
 
     let events = query_events(&harness, "ssh_credential").await;
     assert_eq!(events.len(), 1);
@@ -57,24 +59,26 @@ async fn log_ssh_credential_event_persists_serial_and_principals() {
     assert_eq!(data["event_type"], "certificate_issued");
     assert_eq!(data["serial"], 42);
     assert_eq!(data["principals"], serde_json::json!(["dev"]));
+    assert_eq!(data["agent"], "claude-code");
 }
 
 #[tokio::test]
 async fn retention_sweep_removes_ssh_credential_events() {
     let harness = TestHarness::new().await;
-    db::log_ssh_credential_event(
-        &harness.state.audit,
-        "user-123",
-        "user@example.com",
-        SshCredentialAuditData {
-            event_type: "certificate_issued".to_string(),
-            success: true,
-            ..Default::default()
-        },
-        None,
-    )
-    .await
-    .expect("log event");
+    harness
+        .state
+        .audit
+        .log_credential_event(
+            "user-123",
+            "user@example.com",
+            CredentialAuditEnvelope {
+                event_type: "certificate_issued".to_string(),
+                success: true,
+                ..Default::default()
+            },
+            &SshCredentialDetails::default(),
+        )
+        .await;
 
     let cutoff = jiff::Timestamp::now()
         .checked_add(jiff::Span::new().hours(1))
@@ -90,21 +94,28 @@ async fn retention_sweep_removes_ssh_credential_events() {
 }
 
 #[tokio::test]
-async fn log_token_exchange_event_persists_audience_and_scope() {
+async fn token_exchange_event_persists_audience_and_scope() {
     let harness = TestHarness::new().await;
-    let data = TokenExchangeAuditData {
-        event_type: "token_issued".to_string(),
-        client_id: "cli-client".to_string(),
-        audience: Some("https://api.anthropic.com".to_string()),
-        scope: Some("openid".to_string()),
-        issued_token_type: "access_token".to_string(),
-        token_expires_at: Some("2026-07-14T00:00:00Z".to_string()),
-        success: true,
-    };
-
-    db::log_token_exchange_event(&harness.state.audit, "user-123", "user@example.com", &data)
-        .await
-        .expect("log event");
+    harness
+        .state
+        .audit
+        .log_credential_event(
+            "user-123",
+            "user@example.com",
+            CredentialAuditEnvelope {
+                event_type: "token_issued".to_string(),
+                success: true,
+                ..Default::default()
+            },
+            &TokenExchangeDetails {
+                client_id: "cli-client".to_string(),
+                audience: Some("https://api.anthropic.com".to_string()),
+                scope: Some("openid".to_string()),
+                issued_token_type: "access_token".to_string(),
+                token_expires_at: Some("2026-07-14T00:00:00Z".to_string()),
+            },
+        )
+        .await;
 
     let events = query_events(&harness, "token_exchange").await;
     assert_eq!(events.len(), 1);
@@ -118,20 +129,24 @@ async fn log_token_exchange_event_persists_audience_and_scope() {
 #[tokio::test]
 async fn retention_sweep_removes_token_exchange_events() {
     let harness = TestHarness::new().await;
-    db::log_token_exchange_event(
-        &harness.state.audit,
-        "user-123",
-        "user@example.com",
-        &TokenExchangeAuditData {
-            event_type: "token_issued".to_string(),
-            client_id: "cli-client".to_string(),
-            issued_token_type: "access_token".to_string(),
-            success: true,
-            ..Default::default()
-        },
-    )
-    .await
-    .expect("log event");
+    harness
+        .state
+        .audit
+        .log_credential_event(
+            "user-123",
+            "user@example.com",
+            CredentialAuditEnvelope {
+                event_type: "token_issued".to_string(),
+                success: true,
+                ..Default::default()
+            },
+            &TokenExchangeDetails {
+                client_id: "cli-client".to_string(),
+                issued_token_type: "access_token".to_string(),
+                ..Default::default()
+            },
+        )
+        .await;
 
     let cutoff = jiff::Timestamp::now()
         .checked_add(jiff::Span::new().hours(1))

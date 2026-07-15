@@ -1215,8 +1215,7 @@ async fn test_oauth_usage_recording() {
         None,
         None,
     )
-    .await
-    .expect("Failed to record event");
+    .await;
     record_oauth_event(
         &audit,
         &client.id,
@@ -1226,8 +1225,7 @@ async fn test_oauth_usage_recording() {
         None,
         None,
     )
-    .await
-    .expect("Failed to record event");
+    .await;
     record_oauth_event(
         &audit,
         &client.id,
@@ -1237,8 +1235,7 @@ async fn test_oauth_usage_recording() {
         None,
         None,
     )
-    .await
-    .expect("Failed to record event");
+    .await;
 
     let stats = get_oauth_usage_stats(&audit, &client.id, None)
         .await
@@ -1481,8 +1478,11 @@ async fn test_auth_event_logging() {
             user_id: user_id.clone(),
             event_type: AuthEventType::LoginSuccess,
             authenticator_id: Some("auth-123".to_string()),
-            client_ip: Some("192.168.1.1".parse().unwrap()),
-            user_agent: Some("Mozilla/5.0".to_string()),
+            client: ClientInfo {
+                client_ip: Some("192.168.1.1".parse().unwrap()),
+                user_agent: Some("Mozilla/5.0".to_string()),
+                ..Default::default()
+            },
             success: true,
             ..Default::default()
         },
@@ -1499,7 +1499,10 @@ async fn test_auth_event_logging() {
         &AuthEventParams {
             user_id: user_id.clone(),
             event_type: AuthEventType::LoginFailed,
-            client_ip: Some("192.168.1.1".parse().unwrap()),
+            client: ClientInfo {
+                client_ip: Some("192.168.1.1".parse().unwrap()),
+                ..Default::default()
+            },
             success: false,
             failure_reason: Some("Invalid credential".to_string()),
             ..Default::default()
@@ -1984,8 +1987,7 @@ async fn test_oauth_client_cascade_delete() {
         None,
         None,
     )
-    .await
-    .expect("Failed to record event");
+    .await;
 
     // Delete client
     delete_oauth_client(&store, &client.id)

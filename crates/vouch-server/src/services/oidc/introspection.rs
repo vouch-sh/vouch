@@ -301,9 +301,9 @@ pub async fn revoke_token(
                 user_id: user_id.clone(),
                 event_type: db::AuthEventType::Logout,
                 success: true,
+                client: client_info,
                 ..Default::default()
-            }
-            .with_client_info(client_info);
+            };
             db::spawn_audit_event(&state.audit, params, email.clone());
         }
 

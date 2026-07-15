@@ -3,9 +3,7 @@
 
 use std::collections::HashMap;
 
-use super::audit::{AuditEventKind, AuditStore};
 use super::document_type::Document;
-use super::documents::audit::GitHubCredentialAuditData;
 use super::documents::github::GitHubInstallationDoc;
 use super::store::DocumentStore;
 use anyhow::Result;
@@ -251,32 +249,6 @@ pub async fn update_github_installation_repos_delta(
             repos.retain(|r| !removed_owned.contains(r));
             repos.sort();
         })
-        .await
-}
-
-// ============================================================================
-// GitHub Credential Events (Audit Log)
-// ============================================================================
-
-/// Log a GitHub credential event (audit log).
-pub async fn log_github_credential_event(
-    audit: &AuditStore,
-    user_id: &str,
-    user_email: &str,
-    mut data: GitHubCredentialAuditData,
-    ip: Option<std::net::IpAddr>,
-) -> Result<String> {
-    data.client_ip = ip.map(|a| a.to_string());
-    (data.country_code, data.asn, data.org_name) = crate::geo::audit_fields(ip);
-    let data_json = serde_json::to_string(&data)?;
-
-    audit
-        .insert_event(
-            AuditEventKind::GitHubCredential,
-            Some(user_id),
-            Some(user_email),
-            &data_json,
-        )
         .await
 }
 

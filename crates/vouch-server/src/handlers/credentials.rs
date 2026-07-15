@@ -2,7 +2,10 @@
 //! Credential issuance handlers (SSH certificates, AWS tokens, GitHub tokens, etc.).
 
 use crate::AppState;
-use crate::db::{self, AwsCredentialAuditData, GitHubCredentialAuditData, SshCredentialAuditData};
+use crate::db::{
+    self, AwsCredentialDetails, CredentialAuditEnvelope, GitHubCredentialDetails,
+    SshCredentialDetails,
+};
 use crate::error::ServiceError;
 use crate::services::integrations::aws::{AwsError, issue_aws_token};
 use crate::services::integrations::github::{GitHubInstallationId, minimal_git_permissions};
@@ -169,30 +172,28 @@ pub(crate) async fn issue_ssh_certificate(
     })?;
 
     // Record issuance as a queryable audit event alongside the
-    // revocation-tracking row. Best-effort: audit failure must not fail
-    // issuance (the revocation record above is the load-bearing write).
-    if let Err(e) = db::log_ssh_credential_event(
-        &state.audit,
-        &token.sub,
-        &user_email,
-        SshCredentialAuditData {
-            event_type: "certificate_issued".to_string(),
-            org_id: user.org_id.clone(),
-            authenticator_id: token.authenticator_id.clone(),
-            serial: signed.serial,
-            principals: signed.principals.clone(),
-            agent: token.dpop_source.clone(),
-            cert_expires_at: Some(cert_expires_at.to_string()),
-            success: true,
-            user_agent: client_info.user_agent.clone(),
-            ..Default::default()
-        },
-        client_info.client_ip,
-    )
-    .await
-    {
-        tracing::warn!("Failed to log SSH credential event: {e}");
-    }
+    // revocation-tracking row (which stays the load-bearing write).
+    state
+        .audit
+        .log_credential_event(
+            &token.sub,
+            &user_email,
+            CredentialAuditEnvelope {
+                event_type: "certificate_issued".to_string(),
+                org_id: user.org_id.clone(),
+                authenticator_id: token.authenticator_id.clone(),
+                agent: token.dpop_source.clone(),
+                success: true,
+                ..Default::default()
+            }
+            .with_client(client_info.client_ip, client_info.user_agent.clone()),
+            &SshCredentialDetails {
+                serial: signed.serial,
+                principals: signed.principals.clone(),
+                cert_expires_at: Some(cert_expires_at.to_string()),
+            },
+        )
+        .await;
 
     crate::infra::metrics::record_credential_issuance("ssh");
 
@@ -591,7 +592,7 @@ pub(crate) async fn get_aws_token(
 
     // Record issuance — including the role ARN the token is pinned to — as a
     // queryable audit event, so operators can see which role each OIDC token
-    // was created for. Best-effort: audit failure must not fail issuance.
+    // was created for.
     let token_expires_at = i64::try_from(result.expires_in)
         .ok()
         .and_then(|secs| {
@@ -600,27 +601,26 @@ pub(crate) async fn get_aws_token(
                 .ok()
         })
         .map(|t| t.to_string());
-    if let Err(e) = db::log_aws_credential_event(
-        &state.audit,
-        &ctx.token.sub,
-        &ctx.user_email,
-        AwsCredentialAuditData {
-            event_type: "token_issued".to_string(),
-            org_id: ctx.org.as_ref().map(|o| o.id.clone()),
-            authenticator_id: ctx.token.authenticator_id.clone(),
-            role_arn: pinned_role.map(str::to_string),
-            agent: ctx.token.dpop_source.clone(),
-            token_expires_at,
-            success: true,
-            user_agent: client_info.user_agent.clone(),
-            ..Default::default()
-        },
-        client_info.client_ip,
-    )
-    .await
-    {
-        tracing::warn!("Failed to log AWS credential event: {e}");
-    }
+    state
+        .audit
+        .log_credential_event(
+            &ctx.token.sub,
+            &ctx.user_email,
+            CredentialAuditEnvelope {
+                event_type: "token_issued".to_string(),
+                org_id: ctx.org.as_ref().map(|o| o.id.clone()),
+                authenticator_id: ctx.token.authenticator_id.clone(),
+                agent: ctx.token.dpop_source.clone(),
+                success: true,
+                ..Default::default()
+            }
+            .with_client(client_info.client_ip, client_info.user_agent.clone()),
+            &AwsCredentialDetails {
+                role_arn: pinned_role.map(str::to_string),
+                token_expires_at,
+            },
+        )
+        .await;
 
     crate::infra::metrics::record_credential_issuance("aws");
 
@@ -921,28 +921,28 @@ pub(crate) async fn get_github_token(
         .unsigned_abs();
 
     // Log audit event
-    if let Err(e) = db::log_github_credential_event(
-        &state.audit,
-        &user.id,
-        &user.email,
-        GitHubCredentialAuditData {
-            event_type: "token_issued".to_string(),
-            org_id: Some(org_id.to_string()),
-            installation_id: Some(installation.installation_id),
-            authenticator_id: token.authenticator_id.clone(),
-            repositories: request.repositories.clone(),
-            permissions: Some(gh_token.permissions.clone()),
-            token_expires_at: Some(gh_token.expires_at.clone()),
-            success: true,
-            user_agent: client_info.user_agent,
-            ..Default::default()
-        },
-        client_info.client_ip,
-    )
-    .await
-    {
-        tracing::warn!("Failed to log GitHub credential event: {e}");
-    }
+    state
+        .audit
+        .log_credential_event(
+            &user.id,
+            &user.email,
+            CredentialAuditEnvelope {
+                event_type: "token_issued".to_string(),
+                org_id: Some(org_id.to_string()),
+                authenticator_id: token.authenticator_id.clone(),
+                success: true,
+                ..Default::default()
+            }
+            .with_client(client_info.client_ip, client_info.user_agent),
+            &GitHubCredentialDetails {
+                installation_id: Some(installation.installation_id),
+                repositories: request.repositories.clone(),
+                permissions: Some(gh_token.permissions.clone()),
+                token_expires_at: Some(gh_token.expires_at.clone()),
+                ..Default::default()
+            },
+        )
+        .await;
 
     crate::infra::metrics::record_credential_issuance("github");
 

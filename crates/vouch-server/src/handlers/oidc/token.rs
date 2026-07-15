@@ -808,7 +808,7 @@ async fn handle_client_credentials_grant(
     {
         Ok(result) => {
             // Record audit event
-            if let Err(e) = crate::db::record_oauth_event(
+            crate::db::record_oauth_event(
                 &state.audit,
                 &authenticated_client.client.id,
                 crate::db::OAuthEventType::TokenIssued,
@@ -817,10 +817,7 @@ async fn handle_client_credentials_grant(
                 client_info.user_agent.as_deref(),
                 Some("grant_type=client_credentials"),
             )
-            .await
-            {
-                tracing::warn!("Failed to record OAuth event: {e}");
-            }
+            .await;
 
             token_success_response(TokenResponse {
                 access_token: result.access_token,

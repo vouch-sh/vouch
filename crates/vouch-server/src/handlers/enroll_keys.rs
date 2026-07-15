@@ -109,9 +109,9 @@ pub(crate) async fn delete_key(
         event_type: db::AuthEventType::KeyRemoved,
         authenticator_id: Some(key_id.clone()),
         success: true,
+        client: client_info,
         ..Default::default()
-    }
-    .with_client_info(client_info);
+    };
     db::spawn_audit_event(&state.audit, event, token.email.clone());
 
     Ok(Json(DeleteKeyResponse {

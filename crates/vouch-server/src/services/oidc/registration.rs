@@ -583,7 +583,7 @@ pub async fn register_client(
 
     // 17. Record audit event
     let base_url = &state.config().base_url;
-    if let Err(e) = db::record_oauth_event(
+    db::record_oauth_event(
         &state.audit,
         &client.id,
         OAuthEventType::ClientRegistered,
@@ -592,10 +592,7 @@ pub async fn register_client(
         None,
         Some("RFC 7591 dynamic registration"),
     )
-    .await
-    {
-        tracing::warn!("Failed to record client registration event: {e}");
-    }
+    .await;
 
     // Derive client_id_issued_at from created_at
     let client_id_issued_at = client.created_at.as_second();
@@ -1098,7 +1095,7 @@ pub async fn delete_client_configuration(
             ServiceError::Internal("Failed to delete client".to_string())
         })?;
 
-    if let Err(e) = db::record_oauth_event(
+    db::record_oauth_event(
         &state.audit,
         &client.id,
         OAuthEventType::ClientDeleted,
@@ -1107,10 +1104,7 @@ pub async fn delete_client_configuration(
         None,
         Some("RFC 7592 client configuration DELETE"),
     )
-    .await
-    {
-        tracing::warn!("Failed to record client deletion event: {e}");
-    }
+    .await;
 
     tracing::info!(
         "Dynamic client deleted: client_id={}, user={}",
@@ -1213,7 +1207,7 @@ pub async fn update_client_configuration(
         ServiceError::Internal("Failed to update client".to_string())
     })?;
 
-    if let Err(e) = db::record_oauth_event(
+    db::record_oauth_event(
         &state.audit,
         &client.id,
         OAuthEventType::ClientUpdated,
@@ -1222,10 +1216,7 @@ pub async fn update_client_configuration(
         None,
         Some("RFC 7592 client configuration PUT"),
     )
-    .await
-    {
-        tracing::warn!("Failed to record client update event: {e}");
-    }
+    .await;
 
     tracing::info!(
         "Dynamic client updated: client_id={}, user={}",

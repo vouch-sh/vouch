@@ -11,6 +11,9 @@ use anyhow::{Context, Result};
 use jiff::Timestamp;
 use sea_query::{Expr, ExprTrait, Iden, Order, Query};
 
+use serde::Serialize;
+
+use super::documents::audit::{CredentialAuditDetails, CredentialAuditEnvelope};
 use super::pool::Pool;
 use crate::crypto::document_crypto::DocumentCrypto;
 
@@ -266,6 +269,47 @@ impl AuditStore {
         crate::db_execute!(&self.pool, stmt)?;
 
         Ok(id)
+    }
+
+    /// Log a credential-issuance audit event: the shared envelope flattened
+    /// with the kind-specific details, written under the details' registry
+    /// kind ([`CredentialAuditDetails::KIND`]).
+    ///
+    /// Best-effort: audit writes must never fail the credential operation
+    /// that already succeeded, so failures are logged and swallowed here
+    /// instead of at every call site.
+    pub async fn log_credential_event<D: CredentialAuditDetails>(
+        &self,
+        user_id: &str,
+        user_email: &str,
+        envelope: CredentialAuditEnvelope,
+        details: &D,
+    ) {
+        #[derive(serde::Serialize)]
+        struct Payload<'a, D: Serialize> {
+            #[serde(flatten)]
+            envelope: &'a CredentialAuditEnvelope,
+            #[serde(flatten)]
+            details: &'a D,
+        }
+
+        let result = match serde_json::to_string(&Payload {
+            envelope: &envelope,
+            details,
+        }) {
+            Ok(data_json) => {
+                self.insert_event(D::KIND, Some(user_id), Some(user_email), &data_json)
+                    .await
+            }
+            Err(e) => Err(e.into()),
+        };
+        if let Err(e) = result {
+            tracing::warn!(
+                error = %e,
+                event_type = D::KIND.as_str(),
+                "failed to write credential audit event"
+            );
+        }
     }
 
     /// Query audit events with optional filters.

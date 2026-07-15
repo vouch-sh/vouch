@@ -399,7 +399,7 @@ pub(crate) async fn device_token(
                     Ok(Some(c)) => c.id,
                     _ => client_id.clone(),
                 };
-            if let Err(e) = db::record_oauth_event(
+            db::record_oauth_event(
                 &state.audit,
                 &audit_client_id,
                 db::OAuthEventType::TokenIssued,
@@ -408,10 +408,7 @@ pub(crate) async fn device_token(
                 client_info.user_agent.as_deref(),
                 Some("grant_type=device_code"),
             )
-            .await
-            {
-                tracing::warn!("Failed to record OAuth event: {e}");
-            }
+            .await;
 
             tracing::info!(
                 "Device authorization complete for: {}",

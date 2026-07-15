@@ -418,8 +418,8 @@ pub(crate) async fn exchange_authorization_code(
     .await?;
 
     // Record usage event for registered clients
-    if let Some(auth_client) = authenticated_client
-        && let Err(e) = db::record_oauth_event(
+    if let Some(auth_client) = authenticated_client {
+        db::record_oauth_event(
             &state.audit,
             &auth_client.client.id,
             db::OAuthEventType::TokenIssued,
@@ -432,9 +432,7 @@ pub(crate) async fn exchange_authorization_code(
                 .map(|p| format!("dpop_jkt={}", p.jkt))
                 .as_deref(),
         )
-        .await
-    {
-        tracing::warn!("Failed to record OAuth event: {e}");
+        .await;
     }
 
     // RFC 9449 Section 5: Token type is "DPoP" if proof was provided, otherwise "Bearer"

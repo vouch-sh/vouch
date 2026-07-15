@@ -651,7 +651,7 @@ pub(crate) async fn add_secret_form(
             }
         };
 
-    if let Err(e) = db::record_oauth_event(
+    db::record_oauth_event(
         &state.audit,
         &app_id,
         db::OAuthEventType::SecretAdded,
@@ -660,10 +660,7 @@ pub(crate) async fn add_secret_form(
         None,
         Some("Secret added"),
     )
-    .await
-    {
-        tracing::warn!("Failed to record OAuth event: {e}");
-    }
+    .await;
 
     tracing::info!("Added secret for OAuth application: {}", client.client_id);
 
@@ -760,7 +757,7 @@ pub(crate) async fn delete_secret_form(
         );
     }
 
-    if let Err(e) = db::record_oauth_event(
+    db::record_oauth_event(
         &state.audit,
         &app_id,
         db::OAuthEventType::SecretRevoked,
@@ -769,10 +766,7 @@ pub(crate) async fn delete_secret_form(
         None,
         Some("Secret revoked"),
     )
-    .await
-    {
-        tracing::warn!("Failed to record OAuth event: {e}");
-    }
+    .await;
 
     tracing::info!(
         "Revoked secret {} for OAuth application: {}",
