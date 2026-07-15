@@ -2,7 +2,7 @@
 //! Credential issuance handlers (SSH certificates, AWS tokens, GitHub tokens, etc.).
 
 use crate::AppState;
-use crate::db::{self, GitHubCredentialAuditData};
+use crate::db::{self, AwsCredentialAuditData, GitHubCredentialAuditData, SshCredentialAuditData};
 use crate::error::ServiceError;
 use crate::services::integrations::aws::{AwsError, issue_aws_token};
 use crate::services::integrations::github::{GitHubInstallationId, minimal_git_permissions};
@@ -31,6 +31,10 @@ use crate::services::auth::ValidatedResourceToken;
 ///
 /// Requires Bearer token authentication. Signs the provided SSH public key
 /// as a user certificate with principals extracted from the user's email.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "axum handler signature: extractors are positional parameters"
+)]
 pub(crate) async fn issue_ssh_certificate(
     method: Method,
     uri: OriginalUri,
@@ -38,6 +42,7 @@ pub(crate) async fn issue_ssh_certificate(
     jar: CookieJar,
     State(state): State<Arc<AppState>>,
     client_cert: OptionalClientCert,
+    client_info: ClientInfo,
     Json(request): Json<SshCertificateRequest>,
 ) -> Result<Json<SshCertificateResponse>, ServiceError> {
     // Check config before auth — zero-cost in-memory check avoids DB queries
@@ -162,6 +167,32 @@ pub(crate) async fn issue_ssh_certificate(
             "Failed to record certificate issuance",
         )
     })?;
+
+    // Record issuance as a queryable audit event alongside the
+    // revocation-tracking row. Best-effort: audit failure must not fail
+    // issuance (the revocation record above is the load-bearing write).
+    if let Err(e) = db::log_ssh_credential_event(
+        &state.audit,
+        &token.sub,
+        &user_email,
+        SshCredentialAuditData {
+            event_type: "certificate_issued".to_string(),
+            org_id: user.org_id.clone(),
+            authenticator_id: token.authenticator_id.clone(),
+            serial: signed.serial,
+            principals: signed.principals.clone(),
+            agent: token.dpop_source.clone(),
+            cert_expires_at: Some(cert_expires_at.to_string()),
+            success: true,
+            user_agent: client_info.user_agent.clone(),
+            ..Default::default()
+        },
+        client_info.client_ip,
+    )
+    .await
+    {
+        tracing::warn!("Failed to log SSH credential event: {e}");
+    }
 
     crate::infra::metrics::record_credential_issuance("ssh");
 
@@ -503,6 +534,10 @@ fn validate_pinned_role(role_arn: &str) -> Result<(), ServiceError> {
 /// When the DPoP proof includes a `source` custom claim (e.g., "claude-code"),
 /// the issued token includes AI-specific session tags (`vouch:AccessType=AI`,
 /// `vouch:Agent=<agent>`) for CloudTrail differentiation and IAM condition keys.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "axum handler signature: extractors are positional parameters"
+)]
 pub(crate) async fn get_aws_token(
     method: Method,
     uri: OriginalUri,
@@ -511,6 +546,7 @@ pub(crate) async fn get_aws_token(
     State(state): State<Arc<AppState>>,
     Query(params): Query<AwsTokenParams>,
     client_cert: OptionalClientCert,
+    client_info: ClientInfo,
 ) -> Result<Json<AwsTokenResponse>, ServiceError> {
     let pinned_role = params.role_arn.as_deref();
     if let Some(role_arn) = pinned_role {
@@ -552,6 +588,39 @@ pub(crate) async fn get_aws_token(
     )
     .await
     .map_err(map_aws_error)?;
+
+    // Record issuance — including the role ARN the token is pinned to — as a
+    // queryable audit event, so operators can see which role each OIDC token
+    // was created for. Best-effort: audit failure must not fail issuance.
+    let token_expires_at = i64::try_from(result.expires_in)
+        .ok()
+        .and_then(|secs| {
+            Timestamp::now()
+                .checked_add(jiff::Span::new().seconds(secs))
+                .ok()
+        })
+        .map(|t| t.to_string());
+    if let Err(e) = db::log_aws_credential_event(
+        &state.audit,
+        &ctx.token.sub,
+        &ctx.user_email,
+        AwsCredentialAuditData {
+            event_type: "token_issued".to_string(),
+            org_id: ctx.org.as_ref().map(|o| o.id.clone()),
+            authenticator_id: ctx.token.authenticator_id.clone(),
+            role_arn: pinned_role.map(str::to_string),
+            agent: ctx.token.dpop_source.clone(),
+            token_expires_at,
+            success: true,
+            user_agent: client_info.user_agent.clone(),
+            ..Default::default()
+        },
+        client_info.client_ip,
+    )
+    .await
+    {
+        tracing::warn!("Failed to log AWS credential event: {e}");
+    }
 
     crate::infra::metrics::record_credential_issuance("aws");
 

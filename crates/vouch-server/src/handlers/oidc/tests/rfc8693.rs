@@ -129,6 +129,25 @@ async fn test_token_exchange_successful() {
         response.get("expires_in").is_some(),
         "Should return expires_in"
     );
+
+    // The exchange writes a token_exchange audit event for the subject user.
+    let events = state
+        .audit
+        .query_events(&crate::db::AuditEventFilter {
+            event_types: Some(vec!["token_exchange".to_string()]),
+            ..Default::default()
+        })
+        .await
+        .expect("query audit events");
+    assert_eq!(events.len(), 1, "one exchange -> one audit event");
+    assert_eq!(events[0].user_id.as_deref(), Some(user.id.as_str()));
+    let data: serde_json::Value = serde_json::from_str(&events[0].data).expect("event data JSON");
+    assert_eq!(data["event_type"], "token_issued");
+    assert_eq!(data["client_id"], client.client_id);
+    assert_eq!(
+        data["issued_token_type"],
+        "urn:ietf:params:oauth:token-type:access_token"
+    );
 }
 
 #[tokio::test]
@@ -776,6 +795,23 @@ async fn test_rfc8693_id_token_request_returns_clean_id_token() {
     assert!(
         claims["jti"].as_str().is_some_and(|j| !j.is_empty()),
         "ID token must carry a jti for replay prevention"
+    );
+
+    // The ID-token exchange writes a token_exchange audit event too.
+    let events = state
+        .audit
+        .query_events(&crate::db::AuditEventFilter {
+            event_types: Some(vec!["token_exchange".to_string()]),
+            ..Default::default()
+        })
+        .await
+        .expect("query audit events");
+    assert_eq!(events.len(), 1, "one exchange -> one audit event");
+    let data: serde_json::Value = serde_json::from_str(&events[0].data).expect("event data JSON");
+    assert_eq!(data["issued_token_type"], ID_TOKEN_TYPE);
+    assert!(
+        data["scope"].is_null(),
+        "ID tokens do not carry OAuth scope"
     );
 }
 

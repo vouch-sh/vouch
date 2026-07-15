@@ -326,6 +326,7 @@ pub(crate) async fn exchange_token(
                 expires_in,
                 hardware_aaguid: subject_session.hardware_aaguid.as_deref(),
                 org_domain: subject_session.org_domain.as_deref(),
+                client_id: params.client_id,
             },
         )
         .await;
@@ -430,6 +431,24 @@ pub(crate) async fn exchange_token(
     {
         tracing::warn!("Failed to log token exchange: {e}");
     }
+    if let Err(e) = db::log_token_exchange_event(
+        &state.audit,
+        &subject_session.user_id,
+        subject_email,
+        &db::TokenExchangeAuditData {
+            event_type: "token_issued".to_string(),
+            client_id: params.client_id.to_string(),
+            audience: params.audience.map(String::from),
+            scope: scope_string.clone(),
+            issued_token_type: token_types::ACCESS_TOKEN.to_string(),
+            token_expires_at: Some(expires_at.to_string()),
+            success: true,
+        },
+    )
+    .await
+    {
+        tracing::warn!("Failed to log token exchange audit event: {e}");
+    }
 
     tracing::info!(
         "Token exchanged for user {} (audience: {:?})",
@@ -470,6 +489,8 @@ struct IdTokenContext<'a> {
     hardware_aaguid: Option<&'a str>,
     /// Organization domain snapshot from the subject session (`hd` claim).
     org_domain: Option<&'a str>,
+    /// OAuth client performing the exchange, for the audit event.
+    client_id: &'a str,
 }
 
 /// Mint a clean OIDC ID token (ES256) for an RFC 8693 exchange where the
@@ -553,6 +574,24 @@ async fn issue_id_token(
     .await
     {
         tracing::warn!("Failed to log ID token exchange: {e}");
+    }
+    if let Err(e) = db::log_token_exchange_event(
+        &state.audit,
+        ctx.user_id,
+        ctx.email,
+        &db::TokenExchangeAuditData {
+            event_type: "token_issued".to_string(),
+            client_id: ctx.client_id.to_string(),
+            audience: ctx.audience.map(String::from),
+            scope: None,
+            issued_token_type: token_types::ID_TOKEN.to_string(),
+            token_expires_at: Some(expires_at.to_string()),
+            success: true,
+        },
+    )
+    .await
+    {
+        tracing::warn!("Failed to log ID token exchange audit event: {e}");
     }
 
     crate::infra::metrics::record_credential_issuance("oidc");

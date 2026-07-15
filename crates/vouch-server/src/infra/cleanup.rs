@@ -5,10 +5,7 @@
 //! - Expired sessions
 //! - Expired device authorization requests
 //! - Expired OIDC states
-//! - Old authentication events
-//! - Old OAuth usage events
-//! - Old GitHub credential events
-//! - Old SCIM audit logs
+//! - Old audit events (retention per `AuditEventKind` registry class)
 //! - Old token exchange records
 //! - DPoP nonces and JTI cache
 
@@ -200,31 +197,16 @@ pub async fn run_cleanup(
         "expired enrollment sessions"
     );
 
-    // Clean up old audit events with retention cutoffs (AuditStore)
-    if let Some(cutoff) = retention_cutoff(now, auth_events_retention_days) {
-        cleanup_and_log!(db::delete_old_auth_events(audit, cutoff), "old auth events");
-    }
-
-    if let Some(cutoff) = retention_cutoff(now, oauth_events_retention_days) {
-        cleanup_and_log!(
-            db::delete_old_oauth_usage_events(audit, cutoff),
-            "old OAuth usage events"
-        );
-    }
-
-    if let Some(cutoff) = retention_cutoff(now, oauth_events_retention_days) {
-        cleanup_and_log!(
-            db::delete_old_github_credential_events(audit, cutoff),
-            "old GitHub credential events"
-        );
-    }
-
-    if let Some(cutoff) = retention_cutoff(now, auth_events_retention_days) {
-        cleanup_and_log!(
-            db::delete_old_scim_audit_logs(audit, cutoff),
-            "old SCIM audit logs"
-        );
-    }
+    // Clean up old audit events. Retention per event kind comes from the
+    // AuditEventKind registry — a new kind cannot be added without declaring
+    // its retention class.
+    cleanup_and_log!(
+        audit.delete_expired_events(
+            retention_cutoff(now, auth_events_retention_days),
+            retention_cutoff(now, oauth_events_retention_days),
+        ),
+        "expired audit events"
+    );
 
     // Clean up old token exchanges (DocumentStore)
     cleanup_and_log!(
@@ -311,7 +293,12 @@ async fn gc_stale_additional_domains(
             "reason": reason,
         });
         if let Err(e) = audit
-            .insert_event("org_domain_expired", None, None, &data.to_string())
+            .insert_event(
+                db::AuditEventKind::OrgDomainExpired,
+                None,
+                None,
+                &data.to_string(),
+            )
             .await
         {
             tracing::warn!(error = %e, "failed to write org_domain_expired audit event");
@@ -420,7 +407,12 @@ async fn recheck_one(store: &DocumentStore, audit: &AuditStore, rec: db::Verifie
                 "reason": "consecutive_dns_recheck_failures",
             });
             if let Err(e) = audit
-                .insert_event("org_domain_unverified", None, None, &data.to_string())
+                .insert_event(
+                    db::AuditEventKind::OrgDomainUnverified,
+                    None,
+                    None,
+                    &data.to_string(),
+                )
                 .await
             {
                 tracing::warn!(error = %e, "failed to write org_domain_unverified audit event");
@@ -433,7 +425,12 @@ async fn recheck_one(store: &DocumentStore, audit: &AuditStore, rec: db::Verifie
                     "reason": "backing_domain_unverified",
                 });
                 if let Err(e) = audit
-                    .insert_event("org_subdomain_released", None, None, &data.to_string())
+                    .insert_event(
+                        db::AuditEventKind::OrgSubdomainReleased,
+                        None,
+                        None,
+                        &data.to_string(),
+                    )
                     .await
                 {
                     tracing::warn!(

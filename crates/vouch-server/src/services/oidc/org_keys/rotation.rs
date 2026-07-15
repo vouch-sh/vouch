@@ -141,20 +141,15 @@ pub struct Operator<'a> {
 /// must not abort a key operation that already committed.
 async fn audit_best_effort(
     audit: &AuditStore,
-    event_type: &str,
+    kind: db::AuditEventKind,
     operator: Operator<'_>,
     data: &serde_json::Value,
 ) {
     if let Err(e) = audit
-        .insert_event(
-            event_type,
-            operator.user_id,
-            operator.email,
-            &data.to_string(),
-        )
+        .insert_event(kind, operator.user_id, operator.email, &data.to_string())
         .await
     {
-        tracing::warn!(error = %e, event_type, "failed to write audit event");
+        tracing::warn!(error = %e, event_type = kind.as_str(), "failed to write audit event");
     }
 }
 
@@ -432,7 +427,7 @@ pub async fn rotate_org_keys(
         for (alg, kids) in [(JwsAlgorithm::Es256, es256), (JwsAlgorithm::Rs256, rs256)] {
             audit_best_effort(
                 &state.audit,
-                "org_issuer_key_rotated",
+                db::AuditEventKind::OrgIssuerKeyRotated,
                 operator,
                 &serde_json::json!({
                     "action": "rotate_org_issuer_key",
@@ -544,7 +539,7 @@ pub async fn revoke_org_previous_keys(
             let Some(kid) = kid else { continue };
             audit_best_effort(
                 &state.audit,
-                "org_issuer_key_revoked",
+                db::AuditEventKind::OrgIssuerKeyRevoked,
                 operator,
                 &serde_json::json!({
                     "action": "revoke_org_issuer_key",
@@ -693,7 +688,7 @@ pub async fn emergency_rotate_org_keys(
     ] {
         audit_best_effort(
             &state.audit,
-            "org_issuer_key_emergency_rotation",
+            db::AuditEventKind::OrgIssuerKeyEmergencyRotation,
             operator,
             &serde_json::json!({
                 "action": "emergency_rotate_org_issuer_key",

@@ -31,6 +31,111 @@ enum AuditEvents {
 }
 
 // ============================================================================
+// Event Kind Registry
+// ============================================================================
+
+/// Retention class for an audit event type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Retention {
+    /// Governed by `VOUCH_AUTH_EVENTS_RETENTION_DAYS`.
+    AuthEvents,
+    /// Governed by `VOUCH_OAUTH_EVENTS_RETENTION_DAYS`.
+    OAuthEvents,
+    /// Never deleted by the cleanup task — a deliberate choice for
+    /// administrative and organization-lifecycle records, not a default.
+    Keep,
+}
+
+/// Defines [`AuditEventKind`] with its wire string and retention class in one
+/// place, so a variant cannot exist without both.
+macro_rules! audit_event_kinds {
+    ($($(#[$attr:meta])* $variant:ident => $name:literal, $retention:ident;)+) => {
+        /// Every audit event type the server writes.
+        ///
+        /// This is the single registry: [`AuditStore::insert_event`] only
+        /// accepts these kinds, the cleanup task derives retention from
+        /// [`Self::retention`], and `tests/audit_event_docs.rs` fails when a
+        /// variant is missing from the operator documentation
+        /// (`docs/src/deployment/monitoring.md`).
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        pub enum AuditEventKind {
+            $($(#[$attr])* $variant,)+
+        }
+
+        impl AuditEventKind {
+            /// Every variant, for retention sweeps and completeness tests.
+            pub const ALL: &'static [Self] = &[$(Self::$variant,)+];
+
+            /// The `event_type` string stored in `audit_events`.
+            #[must_use]
+            pub fn as_str(self) -> &'static str {
+                match self { $(Self::$variant => $name,)+ }
+            }
+
+            /// Which retention class governs this event.
+            #[must_use]
+            pub fn retention(self) -> Retention {
+                match self { $(Self::$variant => Retention::$retention,)+ }
+            }
+        }
+    };
+}
+
+audit_event_kinds! {
+    // Authentication and key lifecycle
+    LoginSuccess => "login_success", AuthEvents;
+    LoginFailed => "login_failed", AuthEvents;
+    Enrollment => "enrollment", AuthEvents;
+    Logout => "logout", AuthEvents;
+    KeyRegistered => "key_registered", AuthEvents;
+    KeyRemoved => "key_removed", AuthEvents;
+    DeviceAuthApproved => "device_auth_approved", AuthEvents;
+    KeyRegistrationReplay => "key_registration_replay", AuthEvents;
+    // SCIM provisioning operations
+    ScimOperation => "scim_operation", AuthEvents;
+    // Credential issuance
+    SshCredential => "ssh_credential", OAuthEvents;
+    AwsCredential => "aws_credential", OAuthEvents;
+    GitHubCredential => "github_credential", OAuthEvents;
+    TokenExchange => "token_exchange", OAuthEvents;
+    // OAuth client usage (high volume) and lifecycle (kept)
+    OauthTokenIssued => "oauth_token_issued", OAuthEvents;
+    OauthTokenRevoked => "oauth_token_revoked", OAuthEvents;
+    OauthClientRegistered => "oauth_client_registered", OAuthEvents;
+    OauthClientUpdated => "oauth_client_updated", Keep;
+    OauthClientDeleted => "oauth_client_deleted", Keep;
+    OauthSecretAdded => "oauth_secret_added", Keep;
+    OauthSecretRevoked => "oauth_secret_revoked", Keep;
+    // Administrative member actions
+    AdminPromote => "admin_promote", Keep;
+    AdminDemote => "admin_demote", Keep;
+    AdminDeactivate => "admin_deactivate", Keep;
+    AdminActivate => "admin_activate", Keep;
+    AdminRevokeCredentials => "admin_revoke_credentials", Keep;
+    AdminRemoveUser => "admin_remove_user", Keep;
+    // Posture policies
+    AdminPolicyToggle => "admin_policy_toggle", Keep;
+    AdminPolicyCreate => "admin_policy_create", Keep;
+    AdminPolicyUpdate => "admin_policy_update", Keep;
+    AdminPolicyDelete => "admin_policy_delete", Keep;
+    // SCIM token lifecycle
+    AdminCreateScimToken => "admin_create_scim_token", Keep;
+    AdminDeleteScimToken => "admin_delete_scim_token", Keep;
+    AdminRevokeScimToken => "admin_revoke_scim_token", Keep;
+    // Organization domains, subdomains, and issuer keys
+    OrgDomainAdded => "org_domain_added", Keep;
+    OrgDomainVerified => "org_domain_verified", Keep;
+    OrgDomainRemoved => "org_domain_removed", Keep;
+    OrgDomainExpired => "org_domain_expired", Keep;
+    OrgDomainUnverified => "org_domain_unverified", Keep;
+    OrgSubdomainClaimed => "org_subdomain_claimed", Keep;
+    OrgSubdomainReleased => "org_subdomain_released", Keep;
+    OrgIssuerKeyRotated => "org_issuer_key_rotated", Keep;
+    OrgIssuerKeyRevoked => "org_issuer_key_revoked", Keep;
+    OrgIssuerKeyEmergencyRotation => "org_issuer_key_emergency_rotation", Keep;
+}
+
+// ============================================================================
 // Raw Row Types (for sqlx FromRow)
 // ============================================================================
 
@@ -55,7 +160,8 @@ struct RawAuditRow {
 pub struct AuditEvent {
     /// UUID v7 event ID.
     pub id: String,
-    /// Event type (e.g., "auth_login", "scim_operation").
+    /// Event type (e.g., "login_success", "scim_operation") — the
+    /// [`AuditEventKind::as_str`] value the event was written with.
     pub event_type: String,
     /// User ID (nullable for system events).
     pub user_id: Option<String>,
@@ -120,11 +226,12 @@ impl AuditStore {
     /// Returns an error if the database write fails.
     pub async fn insert_event(
         &self,
-        event_type: &str,
+        kind: AuditEventKind,
         user_id: Option<&str>,
         email: Option<&str>,
         data_json: &str,
     ) -> Result<String> {
+        let event_type = kind.as_str();
         let id = uuid::Uuid::now_v7().to_string();
         let now = jiff::Timestamp::now().to_string();
 
@@ -250,22 +357,49 @@ impl AuditStore {
         Ok((events, has_more))
     }
 
-    /// Delete old events of a given type before a timestamp.
+    /// Delete old events of a given kind before a timestamp.
     ///
     /// Returns the number of events deleted.
     ///
     /// # Errors
     ///
     /// Returns an error if the delete fails.
-    pub async fn delete_old_events(&self, event_type: &str, before: &str) -> Result<u64> {
+    pub async fn delete_old_events(&self, kind: AuditEventKind, before: &str) -> Result<u64> {
         let stmt = Query::delete()
             .from_table(AuditEvents::Table)
-            .and_where(Expr::col(AuditEvents::EventType).eq(event_type))
+            .and_where(Expr::col(AuditEvents::EventType).eq(kind.as_str()))
             .and_where(Expr::col(AuditEvents::CreatedAt).lt(before))
             .to_owned();
 
         let result = crate::db_execute!(&self.pool, stmt)?;
         Ok(result.rows_affected())
+    }
+
+    /// Delete expired events for every registered kind per its retention
+    /// class. A `None` cutoff means that retention knob is disabled;
+    /// [`Retention::Keep`] kinds are never deleted.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a delete fails.
+    pub async fn delete_expired_events(
+        &self,
+        auth_cutoff: Option<Timestamp>,
+        oauth_cutoff: Option<Timestamp>,
+    ) -> Result<u64> {
+        let mut total: u64 = 0;
+        for kind in AuditEventKind::ALL {
+            let cutoff = match kind.retention() {
+                Retention::AuthEvents => auth_cutoff,
+                Retention::OAuthEvents => oauth_cutoff,
+                Retention::Keep => None,
+            };
+            if let Some(cutoff) = cutoff {
+                let deleted = self.delete_old_events(*kind, &cutoff.to_string()).await?;
+                total = total.saturating_add(deleted);
+            }
+        }
+        Ok(total)
     }
 }
 
@@ -354,7 +488,7 @@ mod tests {
 
         let id = audit
             .insert_event(
-                "auth_login",
+                AuditEventKind::LoginSuccess,
                 Some("user-123"),
                 Some("alice@example.com"),
                 r#"{"success":true}"#,
@@ -365,13 +499,13 @@ mod tests {
 
         let events = audit
             .query_events(&AuditEventFilter {
-                event_types: Some(vec!["auth_login".to_string()]),
+                event_types: Some(vec!["login_success".to_string()]),
                 ..AuditEventFilter::default()
             })
             .await
             .unwrap();
         assert_eq!(events.len(), 1);
-        assert_eq!(events[0].event_type, "auth_login");
+        assert_eq!(events[0].event_type, "login_success");
         assert_eq!(events[0].user_id.as_deref(), Some("user-123"));
         assert_eq!(events[0].email_domain.as_deref(), Some("example.com"));
     }
@@ -381,11 +515,21 @@ mod tests {
         let audit = test_audit().await;
 
         audit
-            .insert_event("auth_login", Some("user-1"), Some("bob@test.com"), "{}")
+            .insert_event(
+                AuditEventKind::LoginSuccess,
+                Some("user-1"),
+                Some("bob@test.com"),
+                "{}",
+            )
             .await
             .unwrap();
         audit
-            .insert_event("auth_login", Some("user-2"), Some("carol@test.com"), "{}")
+            .insert_event(
+                AuditEventKind::LoginSuccess,
+                Some("user-2"),
+                Some("carol@test.com"),
+                "{}",
+            )
             .await
             .unwrap();
 
@@ -405,13 +549,13 @@ mod tests {
         let audit = test_audit().await;
 
         audit
-            .insert_event("auth_login", None, None, "{}")
+            .insert_event(AuditEventKind::LoginSuccess, None, None, "{}")
             .await
             .unwrap();
 
         // Delete events before far future should delete everything
         let deleted = audit
-            .delete_old_events("auth_login", "2099-01-01T00:00:00Z")
+            .delete_old_events(AuditEventKind::LoginSuccess, "2099-01-01T00:00:00Z")
             .await
             .unwrap();
         assert_eq!(deleted, 1);
@@ -428,11 +572,11 @@ mod tests {
         let audit = test_audit().await;
 
         audit
-            .insert_event("auth_login", Some("user-a"), None, "{}")
+            .insert_event(AuditEventKind::LoginSuccess, Some("user-a"), None, "{}")
             .await
             .unwrap();
         audit
-            .insert_event("auth_login", Some("user-b"), None, "{}")
+            .insert_event(AuditEventKind::LoginSuccess, Some("user-b"), None, "{}")
             .await
             .unwrap();
 
@@ -452,7 +596,7 @@ mod tests {
 
         for _ in 0..5 {
             audit
-                .insert_event("auth_login", None, None, "{}")
+                .insert_event(AuditEventKind::LoginSuccess, None, None, "{}")
                 .await
                 .unwrap();
         }

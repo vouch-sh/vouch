@@ -318,7 +318,9 @@ pub(crate) async fn token(
             handle_client_credentials_grant(State(state), client_info, client_cert, headers, params)
                 .await
         }
-        OAuthGrantType::DeviceCode => handle_device_code_grant(State(state), params).await,
+        OAuthGrantType::DeviceCode => {
+            handle_device_code_grant(State(state), client_info, params).await
+        }
         OAuthGrantType::TokenExchange => {
             handle_token_exchange_grant(State(state), client_cert, headers, params).await
         }
@@ -837,13 +839,14 @@ async fn handle_client_credentials_grant(
 /// Handle device code grant.
 async fn handle_device_code_grant(
     State(state): State<Arc<AppState>>,
+    client_info: crate::db::ClientInfo,
     params: TokenRequest,
 ) -> Response {
     let device_req = vouch_common::DeviceTokenRequest {
         grant_type: params.grant_type,
         device_code: params.device_code.unwrap_or_default(),
     };
-    match super::super::device::device_token(State(state), Json(device_req)).await {
+    match super::super::device::device_token(State(state), client_info, Json(device_req)).await {
         Ok(resp) => resp.into_response(),
         Err((status, json)) => (status, json).into_response(),
     }

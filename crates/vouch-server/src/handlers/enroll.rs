@@ -783,6 +783,15 @@ pub(crate) async fn complete_enrollment_after_identity(
             .await
             {
                 tracing::warn!("Failed to authorize device auth: {}", e);
+            } else {
+                let event = db::AuthEventParams {
+                    user_id: user.id.clone(),
+                    event_type: db::AuthEventType::DeviceAuthApproved,
+                    authenticator_id: Some(auth_id.clone()),
+                    success: true,
+                    ..Default::default()
+                };
+                db::spawn_audit_event(&state.audit, event, Some(identity.email.clone()));
             }
         } else {
             // No key yet — store the device_auth_id in an enrollment session
@@ -1192,7 +1201,7 @@ pub(crate) async fn browser_register_complete(
             if let Err(e) = state
                 .audit
                 .insert_event(
-                    "key_registration_replay",
+                    db::AuditEventKind::KeyRegistrationReplay,
                     Some(&reg_state.user_id.to_string()),
                     Some(&reg_state.user_email),
                     &audit_data.to_string(),
@@ -1433,6 +1442,16 @@ pub(crate) async fn browser_register_complete(
                 e
             );
         })?;
+
+        let event = db::AuthEventParams {
+            user_id: reg_state.user_id.to_string(),
+            event_type: db::AuthEventType::DeviceAuthApproved,
+            authenticator_id: Some(authenticator_id.clone()),
+            success: true,
+            ..Default::default()
+        }
+        .with_client_info(client_info.clone());
+        db::spawn_audit_event(&state.audit, event, Some(reg_state.user_email.clone()));
     }
 
     // Log enrollment event (fire-and-forget)

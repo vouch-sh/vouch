@@ -1510,6 +1510,69 @@ async fn test_auth_event_logging() {
     .expect("Failed to insert auth event");
 }
 
+#[tokio::test]
+async fn test_key_and_device_auth_events_round_trip_and_expire() {
+    let (store, audit) = test_db().await;
+
+    let (user_id, _) = upsert_user(&store, "key-events@example.com", None)
+        .await
+        .expect("Failed to create user");
+
+    // Insert one event per key/device-auth lifecycle variant.
+    let variants = [
+        AuthEventType::KeyRegistered,
+        AuthEventType::KeyRemoved,
+        AuthEventType::DeviceAuthApproved,
+    ];
+    for event_type in variants {
+        config::insert_auth_event(
+            &audit,
+            &AuthEventParams {
+                user_id: user_id.clone(),
+                event_type,
+                authenticator_id: Some("auth-123".to_string()),
+                success: true,
+                ..Default::default()
+            },
+            Some("key-events@example.com"),
+        )
+        .await
+        .expect("Failed to insert auth event");
+    }
+
+    // Each variant is queryable under its expected event_type string.
+    for expected in ["key_registered", "key_removed", "device_auth_approved"] {
+        let events = audit
+            .query_events(&AuditEventFilter {
+                event_types: Some(vec![expected.to_string()]),
+                ..AuditEventFilter::default()
+            })
+            .await
+            .expect("query events");
+        assert_eq!(events.len(), 1, "expected one {expected} event");
+        assert_eq!(
+            events[0].email_domain.as_deref(),
+            Some("example.com"),
+            "email must be masked to domain-only"
+        );
+    }
+
+    // Retention must cover the new variants: the sweep derives coverage from
+    // each variant's registry kind, so this fails if a kind loses its
+    // AuthEvents retention class.
+    let cutoff = jiff::Timestamp::now()
+        .checked_add(jiff::Span::new().hours(1))
+        .unwrap();
+    let deleted = audit
+        .delete_expired_events(Some(cutoff), None)
+        .await
+        .expect("delete old auth events");
+    assert!(
+        deleted >= 3,
+        "expected the 3 lifecycle events to be deleted, got {deleted}"
+    );
+}
+
 // ========================================================================
 // Authenticator Tests
 // ========================================================================

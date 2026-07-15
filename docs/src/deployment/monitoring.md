@@ -47,33 +47,72 @@ RUST_LOG=vouch_server=debug,tower_http=info
 
 ## Audit Events
 
-All authentication and credential issuance events are logged to the database. Key events:
+Authentication, credential issuance, and administrative events are written to the
+`audit_events` table and browsable at `/admin/audit`. Emails are masked to
+domain-only, with an HMAC column for correlation.
+
+### Authentication and key lifecycle
 
 | Event Type | Description |
 |------------|-------------|
-| `enrollment_complete` | User enrolled a new hardware key |
 | `login_success` | User authenticated with FIDO2 |
-| `login_failure` | Failed authentication attempt |
-| `credential_issued` | SSH certificate or other credential issued |
-| `session_created` | New session established |
-| `session_revoked` | Session explicitly revoked |
-| `key_registered` | Additional hardware key registered |
+| `login_failed` | Failed authentication attempt |
+| `enrollment` | User enrolled their first hardware key |
+| `logout` | User logged out (including RFC 7009 token revocation) |
+| `key_registered` | Additional hardware key registered (`vouch register`) |
 | `key_removed` | Hardware key removed |
+| `device_auth_approved` | Browser approved a CLI device-authorization request |
+| `key_registration_replay` | Replayed key-registration link rejected (possible attack) |
+
+### Credential issuance
+
+| Event Type | Description |
+|------------|-------------|
+| `ssh_credential` | SSH certificate issued; `data` includes the serial, principals, requesting agent, and expiry |
+| `aws_credential` | AWS OIDC token issued; `data` includes the pinned IAM `role_arn` (the `https://aws.amazon.com/roles` claim), the requesting agent, and token expiry |
+| `github_credential` | GitHub installation token issued or installation connected; `data` includes repositories and permissions |
+| `token_exchange` | RFC 8693 token exchange (workload identity federation); `data` includes the client, audience, scope, and issued token type |
+
+### OAuth clients
+
+| Event Type | Description |
+|------------|-------------|
+| `oauth_token_issued` | Token issued at `/oauth/token` (`data.details` carries the grant type) |
+| `oauth_token_revoked` | All tokens for an application revoked |
+| `oauth_client_registered` | OAuth client registered (RFC 7591 or applications UI) |
+| `oauth_client_updated` | OAuth client configuration updated |
+| `oauth_client_deleted` | OAuth client deleted |
+| `oauth_secret_added` | Client secret added |
+| `oauth_secret_revoked` | Client secret revoked |
+
+### Administration and organization
+
+| Event Type | Description |
+|------------|-------------|
+| `admin_promote` / `admin_demote` | Org-admin role granted / removed |
+| `admin_activate` / `admin_deactivate` | User account reactivated / deactivated |
+| `admin_revoke_credentials` | Admin revoked a member's keys, sessions, and certificates |
+| `admin_remove_user` | Admin removed a member from the organization |
+| `admin_policy_create` / `admin_policy_update` / `admin_policy_delete` / `admin_policy_toggle` | Posture policy changes |
+| `admin_create_scim_token` / `admin_delete_scim_token` / `admin_revoke_scim_token` | SCIM token lifecycle |
+| `scim_operation` | SCIM provisioning operation (`data` carries operation and resource type) |
+| `org_domain_added` / `org_domain_verified` / `org_domain_removed` / `org_domain_expired` / `org_domain_unverified` | Additional-domain lifecycle |
+| `org_subdomain_claimed` / `org_subdomain_released` | Issuer subdomain lifecycle |
 | `org_issuer_key_rotated` | Per-org issuer signing keys rotated (one event per algorithm) |
 | `org_issuer_key_revoked` | Per-org previous signing keys revoked (one event per algorithm) |
 | `org_issuer_key_emergency_rotation` | Emergency rotation of per-org issuer keys (one event per algorithm) |
-| `scim_provision` | User provisioned via SCIM |
-| `scim_deprovision` | User de-provisioned via SCIM |
 
 ## Retention
 
 Configure retention periods for audit events:
 
 ```bash
-# Auth events (login, enrollment) — default 90 days
+# Auth events (login, enrollment, logout, key/device-auth lifecycle)
+# — default 90 days
 VOUCH_AUTH_EVENTS_RETENTION_DAYS=730
 
-# OAuth usage events — default 90 days
+# OAuth usage and credential-issuance events (oauth_*, aws_credential,
+# github_credential, ssh_credential, token_exchange) — default 90 days
 VOUCH_OAUTH_EVENTS_RETENTION_DAYS=90
 ```
 

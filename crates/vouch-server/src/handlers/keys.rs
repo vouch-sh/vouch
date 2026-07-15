@@ -187,6 +187,7 @@ pub(crate) async fn register_start(
 /// (WebAuthn Level 2 Section 7.1, Step 4-22).
 pub(crate) async fn register_complete(
     State(state): State<Arc<AppState>>,
+    client_info: db::ClientInfo,
     Json(req): Json<RegisterCompleteRequest>,
 ) -> Result<Json<RegisterCompleteResponse>, ServiceError> {
     tracing::info!("Registration complete");
@@ -226,7 +227,7 @@ pub(crate) async fn register_complete(
             if let Err(e) = state
                 .audit
                 .insert_event(
-                    "key_registration_replay",
+                    db::AuditEventKind::KeyRegistrationReplay,
                     Some(&reg_state.user_id.to_string()),
                     Some(&reg_state.user_name),
                     &audit_data.to_string(),
@@ -326,6 +327,16 @@ pub(crate) async fn register_complete(
 
     tracing::info!("Registered new authenticator: {}", device_id);
 
+    let event = db::AuthEventParams {
+        user_id: reg_state.user_id.to_string(),
+        event_type: db::AuthEventType::KeyRegistered,
+        authenticator_id: Some(device_id.clone()),
+        success: true,
+        ..Default::default()
+    }
+    .with_client_info(client_info);
+    db::spawn_audit_event(&state.audit, event, Some(reg_state.user_name.clone()));
+
     Ok(Json(RegisterCompleteResponse {
         device_id: Uuid::parse_str(&device_id).map_err(|e| {
             ServiceError::api(
@@ -416,6 +427,10 @@ pub(crate) async fn rename_key(
 }
 
 /// Delete a registered key.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "axum handler signature: extractors are positional parameters"
+)]
 pub(crate) async fn delete_key(
     method: Method,
     uri: OriginalUri,
@@ -423,6 +438,7 @@ pub(crate) async fn delete_key(
     jar: CookieJar,
     State(state): State<Arc<AppState>>,
     client_cert: OptionalClientCert,
+    client_info: db::ClientInfo,
     Path(key_id): Path<String>,
 ) -> Result<Json<DeleteKeyResponse>, ServiceError> {
     // Pure validation first — reject malformed key IDs before DB access
@@ -458,6 +474,16 @@ pub(crate) async fn delete_key(
 
     // Invalidate session cache for this user — authenticator deletion cascades to their sessions
     state.session_cache.invalidate_for_user(&token.sub);
+
+    let event = db::AuthEventParams {
+        user_id: token.sub.clone(),
+        event_type: db::AuthEventType::KeyRemoved,
+        authenticator_id: Some(key_id.clone()),
+        success: true,
+        ..Default::default()
+    }
+    .with_client_info(client_info);
+    db::spawn_audit_event(&state.audit, event, token.email.clone());
 
     Ok(Json(DeleteKeyResponse {
         message: format!("Key '{}' has been deleted", key_name),

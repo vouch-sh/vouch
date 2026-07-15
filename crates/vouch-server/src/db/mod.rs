@@ -17,6 +17,7 @@
 pub(crate) mod audit;
 mod authenticators;
 mod authorization_codes;
+mod aws;
 mod challenge_states;
 pub(crate) mod claim;
 mod config;
@@ -110,25 +111,26 @@ pub(crate) use device_auth::{DeviceCodeClaim, OidcStateClaim};
 pub(crate) use device_auth::get_device_auth_by_id;
 
 // Re-export audit event types (used by integration tests and the handlers)
-pub use audit::{AuditEvent, AuditEventFilter};
+pub use audit::{AuditEvent, AuditEventFilter, AuditEventKind, Retention};
 
 // Re-export config and auth event types and functions
-pub use config::{
-    AuthEventParams, AuthEventType, ClientInfo, delete_old_auth_events, spawn_audit_event,
-};
+pub use config::{AuthEventParams, AuthEventType, ClientInfo, spawn_audit_event};
 
 // Re-export SCIM types and functions
 pub use scim::{
     ScimFilterError, ScimGroupRecord, ScimScope, ScimScopeSet, ScimToken, ScimUserRecord,
     add_scim_group_member, create_scim_group, create_scim_token, create_scim_user,
-    delete_old_scim_audit_logs, delete_scim_group, delete_scim_token, get_scim_group,
-    get_scim_group_members, get_scim_token_by_hash, get_scim_user, insert_scim_audit,
-    list_scim_groups, list_scim_tokens, list_scim_users, remove_scim_group_member,
-    replace_scim_group_members, update_scim_group, update_scim_token_last_used, update_scim_user,
+    delete_scim_group, delete_scim_token, get_scim_group, get_scim_group_members,
+    get_scim_token_by_hash, get_scim_user, insert_scim_audit, list_scim_groups, list_scim_tokens,
+    list_scim_users, remove_scim_group_member, replace_scim_group_members, update_scim_group,
+    update_scim_token_last_used, update_scim_user,
 };
 
 // Re-export OAuth enum types from the document layer (single source of truth)
-pub use documents::audit::GitHubCredentialAuditData;
+pub use documents::audit::{
+    AwsCredentialAuditData, GitHubCredentialAuditData, SshCredentialAuditData,
+    TokenExchangeAuditData,
+};
 pub use documents::oauth::{
     AccessScope, FapiProfile, JwsAlgorithm, OAuthClientType, RegistrationSource, ResponseMode,
     TokenEndpointAuthMethod,
@@ -140,12 +142,12 @@ pub use oauth::{
     CreateOAuthClientParams, MAX_ACTIVE_SECRETS, MAX_POST_LOGOUT_REDIRECT_URIS, OAuthClient,
     OAuthClientSecret, OAuthEventType, OAuthUsageStats, UpdateClientRegistrationParams,
     UpdateOAuthClientParams, create_oauth_client, create_oauth_client_secret,
-    delete_expired_jwt_assertion_jtis, delete_oauth_client, delete_old_oauth_usage_events,
-    get_oauth_client_by_client_id, get_oauth_client_by_id, get_oauth_client_secret_by_id,
-    get_oauth_client_secrets, get_oauth_clients_for_user, get_oauth_secret_by_hash,
-    get_oauth_usage_stats, is_valid_post_logout_redirect_uri_str, record_oauth_event,
-    revoke_all_oauth_client_secrets, revoke_oauth_client_secret, store_jwt_assertion_jti,
-    update_oauth_client, update_oauth_client_last_used, update_oauth_client_registration,
+    delete_expired_jwt_assertion_jtis, delete_oauth_client, get_oauth_client_by_client_id,
+    get_oauth_client_by_id, get_oauth_client_secret_by_id, get_oauth_client_secrets,
+    get_oauth_clients_for_user, get_oauth_secret_by_hash, get_oauth_usage_stats,
+    is_valid_post_logout_redirect_uri_str, record_oauth_event, revoke_all_oauth_client_secrets,
+    revoke_oauth_client_secret, store_jwt_assertion_jti, update_oauth_client,
+    update_oauth_client_last_used, update_oauth_client_registration,
     validate_oauth_client_credentials,
 };
 
@@ -171,17 +173,21 @@ pub use credentials::{
     delete_expired_ssh_revocations, delete_old_token_exchanges,
     get_enrollment_session_by_token_hash, get_issued_ssh_certificates_for_user,
     get_revoked_ssh_certificates, insert_token_exchange, is_ssh_certificate_revoked,
-    record_ssh_certificate_issuance, revoke_all_ssh_certificates_for_user,
+    log_ssh_credential_event, log_token_exchange_event, record_ssh_certificate_issuance,
+    revoke_all_ssh_certificates_for_user,
 };
+
+// Re-export AWS credential audit functions
+pub use aws::log_aws_credential_event;
 
 // Re-export GitHub types and functions
 pub use github::{
     CreateGitHubInstallationParams, GitHubInstallation, create_github_installation,
-    delete_github_installation_by_installation_id, delete_old_github_credential_events,
-    get_all_linked_installation_ids, get_github_installation_by_installation_id,
-    get_github_installation_by_org_and_account, get_github_installations_by_org,
-    log_github_credential_event, suspend_github_installation, unsuspend_github_installation,
-    update_github_installation_repos, update_github_installation_repos_delta,
+    delete_github_installation_by_installation_id, get_all_linked_installation_ids,
+    get_github_installation_by_installation_id, get_github_installation_by_org_and_account,
+    get_github_installations_by_org, log_github_credential_event, suspend_github_installation,
+    unsuspend_github_installation, update_github_installation_repos,
+    update_github_installation_repos_delta,
 };
 
 // Re-export PAR types and functions (RFC 9126)

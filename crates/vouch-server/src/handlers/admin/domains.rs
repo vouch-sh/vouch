@@ -209,7 +209,7 @@ pub(crate) async fn admin_add_domain(
             if let Err(e) = state
                 .audit
                 .insert_event(
-                    "org_domain_added",
+                    db::AuditEventKind::OrgDomainAdded,
                     Some(&admin.id),
                     Some(&admin.email),
                     &data.to_string(),
@@ -374,7 +374,7 @@ pub(crate) async fn admin_verify_domain(
             if let Err(e) = state
                 .audit
                 .insert_event(
-                    "org_domain_verified",
+                    db::AuditEventKind::OrgDomainVerified,
                     Some(&admin.id),
                     Some(&admin.email),
                     &data.to_string(),
@@ -454,7 +454,7 @@ pub(crate) async fn admin_remove_domain(
             if let Err(e) = state
                 .audit
                 .insert_event(
-                    "org_domain_removed",
+                    db::AuditEventKind::OrgDomainRemoved,
                     Some(&admin.id),
                     Some(&admin.email),
                     &data.to_string(),

@@ -6,7 +6,7 @@
 
 use std::net::IpAddr;
 
-use super::audit::AuditStore;
+use super::audit::{AuditEventKind, AuditStore};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
@@ -14,37 +14,34 @@ use serde::{Deserialize, Serialize};
 // Authentication Events
 // ============================================================================
 
-/// Authentication event types.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
+/// Authentication event types — the registry kinds whose audit payload is
+/// [`AuthEventParams`]. The stored `event_type` string comes from
+/// [`Self::kind`]; this enum carries no string knowledge of its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AuthEventType {
     #[default]
-    #[serde(rename = "login_success")]
     LoginSuccess,
-    #[serde(rename = "login_failed")]
     LoginFailed,
-    #[serde(rename = "enrollment")]
     Enrollment,
-    #[serde(rename = "logout")]
     Logout,
+    KeyRegistered,
+    KeyRemoved,
+    DeviceAuthApproved,
 }
 
 impl AuthEventType {
-    /// All authentication event variants used for retention cleanup.
-    pub const ALL: [Self; 4] = [
-        Self::LoginSuccess,
-        Self::LoginFailed,
-        Self::Enrollment,
-        Self::Logout,
-    ];
-
-    /// Return the string representation.
+    /// The registry kind this auth event maps to (drives the stored
+    /// `event_type` string and retention).
     #[must_use]
-    pub fn as_str(&self) -> &'static str {
+    pub fn kind(&self) -> AuditEventKind {
         match self {
-            Self::LoginSuccess => "login_success",
-            Self::LoginFailed => "login_failed",
-            Self::Enrollment => "enrollment",
-            Self::Logout => "logout",
+            Self::LoginSuccess => AuditEventKind::LoginSuccess,
+            Self::LoginFailed => AuditEventKind::LoginFailed,
+            Self::Enrollment => AuditEventKind::Enrollment,
+            Self::Logout => AuditEventKind::Logout,
+            Self::KeyRegistered => AuditEventKind::KeyRegistered,
+            Self::KeyRemoved => AuditEventKind::KeyRemoved,
+            Self::DeviceAuthApproved => AuditEventKind::DeviceAuthApproved,
         }
     }
 }
@@ -137,7 +134,7 @@ pub(super) async fn insert_auth_event(
     let data_json = value.to_string();
     audit
         .insert_event(
-            params.event_type.as_str(),
+            params.event_type.kind(),
             Some(&params.user_id),
             email,
             &data_json,
@@ -157,20 +154,6 @@ pub fn spawn_audit_event(audit: &AuditStore, params: AuthEventParams, email: Opt
             tracing::warn!(error = %e, event_type = ?params.event_type, "failed to record audit event");
         }
     });
-}
-
-/// Delete authentication events older than the specified timestamp.
-pub async fn delete_old_auth_events(audit: &AuditStore, before: jiff::Timestamp) -> Result<u64> {
-    let before_str = before.to_string();
-    // Delete all auth event types.
-    let mut total: u64 = 0;
-    for event_type in AuthEventType::ALL {
-        let deleted = audit
-            .delete_old_events(event_type.as_str(), &before_str)
-            .await?;
-        total = total.saturating_add(deleted);
-    }
-    Ok(total)
 }
 
 #[cfg(test)]
@@ -282,9 +265,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_delete_old_auth_events_covers_all_auth_event_variants() -> anyhow::Result<()> {
+    async fn test_retention_sweep_covers_all_auth_event_variants() -> anyhow::Result<()> {
         let state = test_app_state().await;
-        let variants = AuthEventType::ALL;
+        let variants = [
+            AuthEventType::LoginSuccess,
+            AuthEventType::LoginFailed,
+            AuthEventType::Enrollment,
+            AuthEventType::Logout,
+            AuthEventType::KeyRegistered,
+            AuthEventType::KeyRemoved,
+            AuthEventType::DeviceAuthApproved,
+        ];
 
         for (idx, event_type) in variants.iter().copied().enumerate() {
             let params = AuthEventParams {
@@ -302,7 +293,12 @@ mod tests {
             .checked_add(SignedDuration::from_mins(5))
             .map_err(|e| anyhow::anyhow!("valid timestamp arithmetic failed: {e}"))?;
 
-        let deleted = delete_old_auth_events(&state.audit, before).await?;
+        // Every auth event variant must be swept by the auth-events cutoff —
+        // this fails if a variant's registry kind lost its AuthEvents class.
+        let deleted = state
+            .audit
+            .delete_expired_events(Some(before), None)
+            .await?;
         if deleted != variants.len() as u64 {
             return Err(anyhow::anyhow!(
                 "auth cleanup must cover all AuthEventType variants: deleted={deleted}, expected={}",

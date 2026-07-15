@@ -176,6 +176,7 @@ pub(crate) async fn device_code(
 )]
 pub(crate) async fn device_token(
     State(state): State<Arc<AppState>>,
+    client_info: db::ClientInfo,
     Json(req): Json<DeviceTokenRequest>,
 ) -> Result<Json<DeviceTokenResponse>, (StatusCode, Json<OAuthError>)> {
     // Validate grant type
@@ -387,6 +388,30 @@ pub(crate) async fn device_token(
 
             let token = session_result.token;
             let expires_in = session_result.expires_in;
+
+            // Record issuance like the other token-endpoint grants; the
+            // device-code grant otherwise leaves no oauth_token_issued trail.
+            // Usage stats correlate on the client's doc id, so resolve it for
+            // registered clients; the built-in CLI flow (base_url fallback)
+            // keeps the raw identifier.
+            let audit_client_id =
+                match db::get_oauth_client_by_client_id(&state.store, &client_id).await {
+                    Ok(Some(c)) => c.id,
+                    _ => client_id.clone(),
+                };
+            if let Err(e) = db::record_oauth_event(
+                &state.audit,
+                &audit_client_id,
+                db::OAuthEventType::TokenIssued,
+                Some(&user_id),
+                client_info.client_ip,
+                client_info.user_agent.as_deref(),
+                Some("grant_type=device_code"),
+            )
+            .await
+            {
+                tracing::warn!("Failed to record OAuth event: {e}");
+            }
 
             tracing::info!(
                 "Device authorization complete for: {}",
@@ -757,6 +782,21 @@ mod tests {
         assert!(resp.get("token_type").is_some(), "Should return token_type");
         assert_eq!(resp["token_type"], "Bearer");
         assert!(resp.get("expires_in").is_some(), "Should return expires_in");
+
+        // The device-code grant records an oauth_token_issued audit event.
+        let events = state
+            .audit
+            .query_events(&crate::db::AuditEventFilter {
+                event_types: Some(vec!["oauth_token_issued".to_string()]),
+                ..Default::default()
+            })
+            .await
+            .expect("query audit events");
+        assert_eq!(events.len(), 1, "one issuance -> one audit event");
+        assert_eq!(events[0].user_id.as_deref(), Some(user.id.as_str()));
+        let data: serde_json::Value =
+            serde_json::from_str(&events[0].data).expect("event data JSON");
+        assert_eq!(data["details"], "grant_type=device_code");
     }
 
     // ========================================================================
