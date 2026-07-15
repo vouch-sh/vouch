@@ -4529,9 +4529,9 @@ dependencies = [
 
 [[package]]
 name = "psl"
-version = "2.1.218"
+version = "2.1.219"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f558d33d882cb296fb65dbe0246b98b90e761fbe00c552701d2030eb5bbce63a"
+checksum = "c29b88c3f8002851c2571f798b898d257cec88d40246523af0afc7e6b30b3640"
 dependencies = [
  "psl-types",
 ]
@@ -5456,15 +5456,15 @@ dependencies = [
 
 [[package]]
 name = "simd-adler32"
-version = "0.3.9"
+version = "0.3.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "703d5c7ef118737c72f1af64ad2f6f8c5e1921f818cdcb97b8fe6fc69bf66214"
+checksum = "3a219298ac11a56ea9a6d2120044824d6f01aeb034955e7af7bc16858527deea"
 
 [[package]]
 name = "simd_cesu8"
-version = "1.1.1"
+version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "94f90157bb87cddf702797c5dadfa0be7d266cdf49e22da2fcaa32eff75b2c33"
+checksum = "11031e251abf8611c80f460e19dbdeb54a66db918e49c65a7065b46ac7aec520"
 dependencies = [
  "rustc_version",
  "simdutf8",
@@ -5812,9 +5812,9 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 
 [[package]]
 name = "syn"
-version = "2.0.118"
+version = "2.0.119"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1b9ae57f904213ebb649ce6895b8a66c66f0203b9319718f69a5612a065b1422"
+checksum = "872831b642d1a07999a962a351ed35b955ea2cfc8f3862091e2a240a84f17297"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -6105,9 +6105,9 @@ dependencies = [
 
 [[package]]
 name = "toml_edit"
-version = "0.25.12+spec-1.1.0"
+version = "0.25.13+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d2153edc6955a6c354fad8f5efd38b6a8769bdccf9fe50f8e1329f81b0baa5d7"
+checksum = "6975367e4d2ef766d86af01ffad14b622fecc8d4357a998fbc4deb6e9bacaf9b"
 dependencies = [
  "indexmap",
  "toml_datetime",
@@ -6127,9 +6127,9 @@ dependencies = [
 
 [[package]]
 name = "toml_writer"
-version = "1.1.1+spec-1.1.0"
+version = "1.1.2+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "756daf9b1013ebe47a8776667b466417e2d4c5679d441c26230efd9ef78692db"
+checksum = "7d56353a2a665ad0f41a421187180aab746c8c325620617ad883a99a1cbe66d2"
 
 [[package]]
 name = "tonic"
@@ -6565,7 +6565,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "vouch-agent"
-version = "2026.7.2"
+version = "2026.7.3"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -6596,7 +6596,7 @@ dependencies = [
 
 [[package]]
 name = "vouch-cli"
-version = "2026.7.2"
+version = "2026.7.3"
 dependencies = [
  "anyhow",
  "apple-native-keyring-store",
@@ -6658,7 +6658,7 @@ dependencies = [
 
 [[package]]
 name = "vouch-common"
-version = "2026.7.2"
+version = "2026.7.3"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -6679,7 +6679,7 @@ dependencies = [
 
 [[package]]
 name = "vouch-httpsig"
-version = "2026.7.2"
+version = "2026.7.3"
 dependencies = [
  "aws-lc-rs",
  "axum",
@@ -6695,7 +6695,7 @@ dependencies = [
 
 [[package]]
 name = "vouch-i18n"
-version = "2026.7.2"
+version = "2026.7.3"
 dependencies = [
  "anyhow",
  "fluent-bundle",
@@ -6707,7 +6707,7 @@ dependencies = [
 
 [[package]]
 name = "vouch-server"
-version = "2026.7.2"
+version = "2026.7.3"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -6793,7 +6793,7 @@ dependencies = [
 
 [[package]]
 name = "vouch-tests"
-version = "2026.7.2"
+version = "2026.7.3"
 dependencies = [
  "anyhow",
  "aws-lc-rs",
@@ -7022,9 +7022,9 @@ dependencies = [
 
 [[package]]
 name = "which"
-version = "8.0.4"
+version = "8.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "48d7cd18d4acb58fb3cdfe9ea54e6cd96a4e7d4cc45c56338b236e82dad47248"
+checksum = "8f3ef584124b911bcc3875c2f1472e80f24361ceb789bd1c62b3e9a3df9ff43c"
 dependencies = [
  "libc",
 ]
