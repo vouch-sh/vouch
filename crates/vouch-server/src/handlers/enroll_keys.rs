@@ -5,6 +5,7 @@
 //! Authentication is via the session cookie containing an OAuth access token.
 
 use crate::AppState;
+use crate::db;
 use crate::error::ServiceError;
 use crate::services::keys as key_svc;
 use axum::{
@@ -83,6 +84,7 @@ pub(crate) async fn rename_key_form(
 pub(crate) async fn delete_key(
     State(state): State<Arc<AppState>>,
     jar: CookieJar,
+    client_info: db::ClientInfo,
     Path(key_id): Path<String>,
 ) -> Result<Json<DeleteKeyResponse>, ServiceError> {
     let token = extract_session_from_cookie(&state, &jar).await?;
@@ -101,6 +103,16 @@ pub(crate) async fn delete_key(
 
     // Invalidate session cache — authenticator deletion cascades to sessions
     state.session_cache.invalidate_for_user(&token.sub);
+
+    let event = db::AuthEventParams {
+        user_id: token.sub.clone(),
+        event_type: db::AuthEventType::KeyRemoved,
+        authenticator_id: Some(key_id.clone()),
+        success: true,
+        client: client_info,
+        ..Default::default()
+    };
+    db::spawn_audit_event(&state.audit, event, token.email.clone());
 
     Ok(Json(DeleteKeyResponse {
         message: format!("Key '{}' has been deleted", key_name),

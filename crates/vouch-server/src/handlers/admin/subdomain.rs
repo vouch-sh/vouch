@@ -342,7 +342,7 @@ pub(crate) async fn admin_claim_subdomain(
     if let Err(e) = state
         .audit
         .insert_event(
-            "org_subdomain_claimed",
+            db::AuditEventKind::OrgSubdomainClaimed,
             Some(&admin.id),
             Some(&admin.email),
             &data.to_string(),
@@ -415,7 +415,7 @@ pub(crate) async fn admin_release_subdomain(
     if let Err(e) = state
         .audit
         .insert_event(
-            "org_subdomain_released",
+            db::AuditEventKind::OrgSubdomainReleased,
             Some(&admin.id),
             Some(&admin.email),
             &data.to_string(),

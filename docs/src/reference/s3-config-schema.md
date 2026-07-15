@@ -151,7 +151,7 @@ The S3 configuration file is a JSON document with the following schema:
 | `github.client_secret` | string | GitHub App OAuth client secret. |
 | `cleanup_interval_minutes` | integer | Background cleanup task interval in minutes. |
 | `auth_events_retention_days` | integer | Retention period for authentication events in days. |
-| `oauth_events_retention_days` | integer | Retention period for OAuth usage events in days. |
+| `oauth_events_retention_days` | integer | Retention period for OAuth usage and credential-issuance (`aws_credential`, `github_credential`, `ssh_credential`, `token_exchange`) events in days. |
 | `resource_name` | string | Human-readable name of this protected resource (RFC 9728). Defaults to `"Vouch"`. |
 | `resource_documentation` | string | URL of developer documentation for this protected resource (RFC 9728). Defaults to `"https://vouch.sh/docs/"`. |
 | `resource_policy_uri` | string | URL of the resource's data-use policy (RFC 9728). Defaults to `"https://vouch.sh/privacy/"`. |

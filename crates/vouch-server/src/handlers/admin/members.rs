@@ -158,7 +158,7 @@ pub(crate) async fn promote_member(
     if let Err(e) = state
         .audit
         .insert_event(
-            "admin_promote",
+            db::AuditEventKind::AdminPromote,
             Some(&admin.id),
             Some(&target.email),
             &data.to_string(),
@@ -218,7 +218,7 @@ pub(crate) async fn demote_member(
     if let Err(e) = state
         .audit
         .insert_event(
-            "admin_demote",
+            db::AuditEventKind::AdminDemote,
             Some(&admin.id),
             Some(&target.email),
             &data.to_string(),
@@ -298,7 +298,7 @@ pub(crate) async fn deactivate_member(
     if let Err(e) = state
         .audit
         .insert_event(
-            "admin_deactivate",
+            db::AuditEventKind::AdminDeactivate,
             Some(&admin.id),
             Some(&target.email),
             &data.to_string(),
@@ -345,7 +345,7 @@ pub(crate) async fn activate_member(
     if let Err(e) = state
         .audit
         .insert_event(
-            "admin_activate",
+            db::AuditEventKind::AdminActivate,
             Some(&admin.id),
             Some(&target.email),
             &data.to_string(),
@@ -428,7 +428,7 @@ pub(crate) async fn revoke_member_credentials(
     if let Err(e) = state
         .audit
         .insert_event(
-            "admin_revoke_credentials",
+            db::AuditEventKind::AdminRevokeCredentials,
             Some(&admin.id),
             Some(&target.email),
             &data.to_string(),
@@ -510,7 +510,7 @@ pub(crate) async fn remove_member(
     if let Err(e) = state
         .audit
         .insert_event(
-            "admin_remove_user",
+            db::AuditEventKind::AdminRemoveUser,
             Some(&admin.id),
             Some(&target_email),
             &data.to_string(),

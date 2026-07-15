@@ -587,9 +587,9 @@ pub(crate) async fn browser_login_complete(
             authenticator_id: authenticator_id.map(String::from),
             success: false,
             failure_reason: Some(reason.to_string()),
+            client: client_info.clone(),
             ..AuthEventParams::default()
-        }
-        .with_client_info(client_info.clone());
+        };
         db::spawn_audit_event(&state.audit, params, None);
     };
 
@@ -729,9 +729,9 @@ pub(crate) async fn browser_login_complete(
         event_type: AuthEventType::LoginSuccess,
         authenticator_id: Some(authenticator.id.clone()),
         success: true,
+        client: client_info,
         ..AuthEventParams::default()
-    }
-    .with_client_info(client_info);
+    };
     db::spawn_audit_event(&state.audit, auth_event_params, None);
 
     crate::infra::metrics::record_auth_event("browser_login_success");

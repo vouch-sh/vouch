@@ -35,6 +35,17 @@ pub(crate) struct GeoLocation {
     pub org_name: Option<String>,
 }
 
+/// Geo fields for audit payloads, in `(country_code, asn, org_name)` order.
+///
+/// Shared by the audit log functions so each one doesn't repeat the
+/// `Option`-unwrapping of [`lookup`].
+pub(crate) fn audit_fields(ip: Option<IpAddr>) -> (Option<String>, Option<u32>, Option<String>) {
+    match ip.and_then(lookup) {
+        Some(geo) => (Some(geo.country_code), geo.asn, geo.org_name),
+        None => (None, None, None),
+    }
+}
+
 /// Look up country code and ASN for an IP address.
 ///
 /// Returns `None` for private, loopback, or unresolvable addresses,

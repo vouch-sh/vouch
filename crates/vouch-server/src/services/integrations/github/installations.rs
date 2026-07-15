@@ -13,7 +13,7 @@ use super::{
     GitHubError, GitHubInstallationId, GitHubResult, GitHubService,
     list_user_accessible_installations,
 };
-use crate::db::{self, GitHubCredentialAuditData, User};
+use crate::db::{self, User};
 
 // ============================================================================
 // Installation Connection Types
@@ -299,24 +299,23 @@ impl GitHubService<'_> {
         installation_id: u64,
         permissions: Option<&HashMap<String, String>>,
     ) {
-        if let Err(e) = db::log_github_credential_event(
-            self.audit,
-            &user.id,
-            &user.email,
-            GitHubCredentialAuditData {
-                event_type: event_type.to_string(),
-                org_id: Some(org_id.to_string()),
-                installation_id: Some(installation_id.cast_signed()),
-                permissions: permissions.cloned(),
-                success: true,
-                ..Default::default()
-            },
-            None,
-        )
-        .await
-        {
-            tracing::warn!("Failed to log GitHub credential event: {e}");
-        }
+        self.audit
+            .log_credential_event(
+                &user.id,
+                &user.email,
+                db::CredentialAuditEnvelope {
+                    event_type: event_type.to_string(),
+                    org_id: Some(org_id.to_string()),
+                    success: true,
+                    ..Default::default()
+                },
+                &db::GitHubCredentialDetails {
+                    installation_id: Some(installation_id.cast_signed()),
+                    permissions: permissions.cloned(),
+                    ..Default::default()
+                },
+            )
+            .await;
     }
 }
 

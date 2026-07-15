@@ -138,7 +138,7 @@ pub(crate) async fn create_scim_token(
     if let Err(e) = state
         .audit
         .insert_event(
-            "admin_create_scim_token",
+            db::AuditEventKind::AdminCreateScimToken,
             Some(&user.id),
             Some(&user.email),
             &data.to_string(),
@@ -217,7 +217,7 @@ pub(crate) async fn delete_scim_token(
     if let Err(e) = state
         .audit
         .insert_event(
-            "admin_delete_scim_token",
+            db::AuditEventKind::AdminDeleteScimToken,
             Some(&user.id),
             Some(&user.email),
             &data.to_string(),
@@ -404,7 +404,7 @@ pub(crate) async fn admin_create_scim_token(
     if let Err(e) = state
         .audit
         .insert_event(
-            "admin_create_scim_token",
+            db::AuditEventKind::AdminCreateScimToken,
             Some(&admin.id),
             Some(&admin.email),
             &data.to_string(),
@@ -474,7 +474,7 @@ pub(crate) async fn admin_revoke_scim_token(
     if let Err(e) = state
         .audit
         .insert_event(
-            "admin_revoke_scim_token",
+            db::AuditEventKind::AdminRevokeScimToken,
             Some(&admin.id),
             Some(&admin.email),
             &data.to_string(),

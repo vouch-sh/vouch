@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 //! OAuth Client Application database operations.
 
-use super::audit::{AuditEventFilter, AuditStore};
+use super::audit::{AuditEventFilter, AuditEventKind, AuditStore};
 use super::document_type::{Document, DocumentType};
 use super::documents::audit::OAuthUsageData;
 use super::documents::jwt_assertion_jti::JwtAssertionJtiDoc;
@@ -833,14 +833,12 @@ pub async fn revoke_oauth_client_secret(
 // OAuth Usage Events (now via AuditStore)
 // ============================================================================
 
-/// OAuth usage event types.
+/// OAuth usage event types — the registry kinds whose audit payload is
+/// [`OAuthUsageData`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OAuthEventType {
     TokenIssued,
-    TokenRefreshed,
     TokenRevoked,
-    AuthSuccess,
-    AuthFailure,
     ClientRegistered,
     ClientUpdated,
     ClientDeleted,
@@ -849,35 +847,34 @@ pub enum OAuthEventType {
 }
 
 impl OAuthEventType {
-    /// Event variants included in usage stats and retention cleanup.
-    pub const USAGE_EVENTS: [Self; 6] = [
+    /// Event variants included in per-client usage stats.
+    pub const USAGE_EVENTS: [Self; 3] = [
         Self::TokenIssued,
-        Self::TokenRefreshed,
         Self::TokenRevoked,
-        Self::AuthSuccess,
-        Self::AuthFailure,
         Self::ClientRegistered,
     ];
 
-    /// Audit event type stored in `audit_events.event_type`.
+    /// The registry kind this OAuth event maps to (drives the stored
+    /// `event_type` string and retention).
     #[must_use]
-    pub fn audit_event_type(&self) -> &'static str {
+    pub fn kind(&self) -> AuditEventKind {
         match self {
-            Self::TokenIssued => "oauth_token_issued",
-            Self::TokenRefreshed => "oauth_token_refreshed",
-            Self::TokenRevoked => "oauth_token_revoked",
-            Self::AuthSuccess => "oauth_auth_success",
-            Self::AuthFailure => "oauth_auth_failure",
-            Self::ClientRegistered => "oauth_client_registered",
-            Self::ClientUpdated => "oauth_client_updated",
-            Self::ClientDeleted => "oauth_client_deleted",
-            Self::SecretAdded => "oauth_secret_added",
-            Self::SecretRevoked => "oauth_secret_revoked",
+            Self::TokenIssued => AuditEventKind::OauthTokenIssued,
+            Self::TokenRevoked => AuditEventKind::OauthTokenRevoked,
+            Self::ClientRegistered => AuditEventKind::OauthClientRegistered,
+            Self::ClientUpdated => AuditEventKind::OauthClientUpdated,
+            Self::ClientDeleted => AuditEventKind::OauthClientDeleted,
+            Self::SecretAdded => AuditEventKind::OauthSecretAdded,
+            Self::SecretRevoked => AuditEventKind::OauthSecretRevoked,
         }
     }
 }
 
 /// Record an OAuth usage event via the audit store.
+///
+/// Best-effort: audit writes must never fail the OAuth operation that
+/// already succeeded, so failures are logged and swallowed here instead of
+/// at every call site.
 pub async fn record_oauth_event(
     audit: &AuditStore,
     oauth_client_id: &str,
@@ -886,22 +883,32 @@ pub async fn record_oauth_event(
     ip_address: Option<std::net::IpAddr>,
     user_agent: Option<&str>,
     details: Option<&str>,
-) -> Result<String> {
-    let geo = ip_address.and_then(crate::geo::lookup);
+) {
+    let (country_code, asn, org_name) = crate::geo::audit_fields(ip_address);
     let data = OAuthUsageData {
         oauth_client_id: oauth_client_id.to_string(),
         details: details.map(String::from),
         client_ip: ip_address.map(|ip| ip.to_string()),
         user_agent: user_agent.map(String::from),
-        country_code: geo.as_ref().map(|g| g.country_code.clone()),
-        asn: geo.as_ref().and_then(|g| g.asn),
-        org_name: geo.as_ref().and_then(|g| g.org_name.clone()),
+        country_code,
+        asn,
+        org_name,
     };
-    let data_json = serde_json::to_string(&data)?;
-
-    audit
-        .insert_event(event_type.audit_event_type(), user_id, None, &data_json)
-        .await
+    let result = match serde_json::to_string(&data) {
+        Ok(data_json) => {
+            audit
+                .insert_event(event_type.kind(), user_id, None, &data_json)
+                .await
+        }
+        Err(e) => Err(e.into()),
+    };
+    if let Err(e) = result {
+        tracing::warn!(
+            error = %e,
+            event_type = event_type.kind().as_str(),
+            "failed to record OAuth event"
+        );
+    }
 }
 
 /// OAuth usage statistics.
@@ -923,7 +930,7 @@ pub async fn get_oauth_usage_stats(
     let mut stats: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
 
     for event_type in OAuthEventType::USAGE_EVENTS {
-        let audit_event_type = event_type.audit_event_type();
+        let audit_event_type = event_type.kind().as_str();
         let filter = AuditEventFilter {
             event_types: Some(vec![audit_event_type.to_string()]),
             since: since.map(String::from),
@@ -945,19 +952,6 @@ pub async fn get_oauth_usage_stats(
         .into_iter()
         .map(|(event_type, count)| OAuthUsageStats { event_type, count })
         .collect())
-}
-
-/// Delete old usage events (for retention policy).
-pub async fn delete_old_oauth_usage_events(audit: &AuditStore, before: Timestamp) -> Result<u64> {
-    let before_str = before.to_string();
-    let mut total: u64 = 0;
-    for event_type in OAuthEventType::USAGE_EVENTS {
-        let deleted = audit
-            .delete_old_events(event_type.audit_event_type(), &before_str)
-            .await?;
-        total = total.saturating_add(deleted);
-    }
-    Ok(total)
 }
 
 /// Test-only helpers for modifying OAuth clients.
@@ -1684,7 +1678,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_delete_old_oauth_usage_events_covers_usage_event_variants() {
+    async fn test_retention_sweep_covers_usage_event_variants() {
         let store = test_store().await;
         let audit = AuditStore::new(store.pool().clone(), store.crypto().clone());
         let usage_variants = OAuthEventType::USAGE_EVENTS;
@@ -1699,15 +1693,17 @@ mod tests {
                 None,
                 Some("coverage test"),
             )
-            .await
-            .expect("insert oauth usage event");
+            .await;
         }
 
         let before = jiff::Timestamp::now()
             .checked_add(jiff::SignedDuration::from_mins(5))
             .expect("valid timestamp arithmetic");
 
-        let deleted = delete_old_oauth_usage_events(&audit, before)
+        // Usage events must be swept by the OAuth-events cutoff — this fails
+        // if a usage variant's registry kind lost its OAuthEvents class.
+        let deleted = audit
+            .delete_expired_events(None, Some(before))
             .await
             .expect("delete old oauth usage events");
         assert_eq!(
@@ -1719,7 +1715,7 @@ mod tests {
         for event_type in usage_variants {
             let persisted = audit
                 .query_events(&AuditEventFilter {
-                    event_types: Some(vec![event_type.audit_event_type().to_string()]),
+                    event_types: Some(vec![event_type.kind().as_str().to_string()]),
                     ..AuditEventFilter::default()
                 })
                 .await
@@ -1727,7 +1723,7 @@ mod tests {
             assert!(
                 persisted.is_empty(),
                 "event type {} should be deleted by retention cleanup",
-                event_type.audit_event_type()
+                event_type.kind().as_str()
             );
         }
     }

@@ -126,13 +126,13 @@ async fn run_cleanup_removes_expired_sessions_and_keeps_fresh_ones() {
 async fn run_cleanup_tolerates_zero_retention_for_audit_events() {
     let harness = TestHarness::new().await;
 
-    // Seed a single audit event so the path that calls delete_old_auth_events
-    // has something to evaluate against the cutoff.
+    // Seed a single audit event so the retention sweep has something to
+    // evaluate against the cutoff.
     harness
         .state
         .audit
         .insert_event(
-            "auth_event",
+            db::AuditEventKind::LoginSuccess,
             Some("user-1"),
             Some("user-1@example.com"),
             "{}",

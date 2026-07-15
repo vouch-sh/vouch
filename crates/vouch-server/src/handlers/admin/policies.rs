@@ -206,7 +206,7 @@ pub(crate) async fn toggle_preconfigured_policy(
     if let Err(e) = state
         .audit
         .insert_event(
-            "admin_policy_toggle",
+            db::AuditEventKind::AdminPolicyToggle,
             Some(&admin.id),
             Some(&slug),
             &data.to_string(),
@@ -318,7 +318,7 @@ pub(crate) async fn create_custom_policy(
     if let Err(e) = state
         .audit
         .insert_event(
-            "admin_policy_create",
+            db::AuditEventKind::AdminPolicyCreate,
             Some(&admin.id),
             Some(&policy.name),
             &data.to_string(),
@@ -408,7 +408,7 @@ pub(crate) async fn update_custom_policy(
     if let Err(e) = state
         .audit
         .insert_event(
-            "admin_policy_update",
+            db::AuditEventKind::AdminPolicyUpdate,
             Some(&admin.id),
             Some(&form.name),
             &data.to_string(),
@@ -457,7 +457,7 @@ pub(crate) async fn delete_custom_policy(
     if let Err(e) = state
         .audit
         .insert_event(
-            "admin_policy_delete",
+            db::AuditEventKind::AdminPolicyDelete,
             Some(&admin.id),
             Some(&*id),
             &data.to_string(),
@@ -560,7 +560,7 @@ pub(crate) async fn toggle_custom_policy(
     if let Err(e) = state
         .audit
         .insert_event(
-            "admin_policy_toggle",
+            db::AuditEventKind::AdminPolicyToggle,
             Some(&admin.id),
             Some(&policy.name),
             &data.to_string(),

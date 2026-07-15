@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 //! SCIM 2.0 (RFC 7643/7644) database operations.
 
-use super::audit::AuditStore;
+use super::audit::{AuditEventKind, AuditStore};
 use super::document_type::Document;
 use super::documents::audit::ScimAuditData;
 use super::documents::scim::{ScimGroupDoc, ScimGroupMemberDoc, ScimTokenDoc};
@@ -255,14 +255,8 @@ pub async fn insert_scim_audit(
     };
     let data_json = serde_json::to_string(&data)?;
     audit
-        .insert_event("scim_operation", None, None, &data_json)
+        .insert_event(AuditEventKind::ScimOperation, None, None, &data_json)
         .await
-}
-
-/// Delete SCIM audit log entries older than the given timestamp.
-pub async fn delete_old_scim_audit_logs(audit: &AuditStore, before: Timestamp) -> Result<u64> {
-    let before_str = before.to_string();
-    audit.delete_old_events("scim_operation", &before_str).await
 }
 
 // ============================================================================

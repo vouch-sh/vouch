@@ -651,6 +651,17 @@ pub(crate) async fn add_secret_form(
             }
         };
 
+    db::record_oauth_event(
+        &state.audit,
+        &app_id,
+        db::OAuthEventType::SecretAdded,
+        auth.user_id.as_deref(),
+        None,
+        None,
+        Some("Secret added"),
+    )
+    .await;
+
     tracing::info!("Added secret for OAuth application: {}", client.client_id);
 
     SecretAddedTemplate {
@@ -745,6 +756,17 @@ pub(crate) async fn delete_secret_form(
             format!("/applications/{app_id}"),
         );
     }
+
+    db::record_oauth_event(
+        &state.audit,
+        &app_id,
+        db::OAuthEventType::SecretRevoked,
+        Some(user_id),
+        None,
+        None,
+        Some("Secret revoked"),
+    )
+    .await;
 
     tracing::info!(
         "Revoked secret {} for OAuth application: {}",

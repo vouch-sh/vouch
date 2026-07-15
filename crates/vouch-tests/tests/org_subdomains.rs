@@ -604,6 +604,26 @@ async fn aws_token_uses_base_url_without_claim() {
 
     assert_eq!(claims["iss"], "https://test.example.com");
     assert_eq!(claims["aud"], "https://test.example.com");
+
+    // Unpinned issuance still writes an audit event, with a null role_arn.
+    let events = aws_audit_events(&harness).await;
+    assert_eq!(events.len(), 1, "one issuance -> one audit event");
+    let data: serde_json::Value = serde_json::from_str(&events[0].data).unwrap();
+    assert_eq!(data["event_type"], "token_issued");
+    assert!(data["role_arn"].is_null());
+}
+
+/// Audit events of type `aws_credential`.
+async fn aws_audit_events(harness: &TestHarness) -> Vec<db::AuditEvent> {
+    harness
+        .state
+        .audit
+        .query_events(&db::AuditEventFilter {
+            event_types: Some(vec!["aws_credential".to_string()]),
+            ..db::AuditEventFilter::default()
+        })
+        .await
+        .unwrap()
 }
 
 /// End-to-end through the merged router: `?role_arn=` (percent-encoded, as
@@ -640,6 +660,14 @@ async fn aws_token_pins_role_from_query_param() {
     );
     assert_eq!(claims["iss"], "https://test.example.com");
     assert_eq!(claims["sub"], "user@acme.com");
+
+    // The pinned role ARN lands in the aws_credential audit event.
+    let events = aws_audit_events(&harness).await;
+    assert_eq!(events.len(), 1, "one issuance -> one audit event");
+    assert_eq!(events[0].email_domain.as_deref(), Some("acme.com"));
+    let data: serde_json::Value = serde_json::from_str(&events[0].data).unwrap();
+    assert_eq!(data["event_type"], "token_issued");
+    assert_eq!(data["role_arn"], "arn:aws:iam::111122223333:role/Example");
 }
 
 // ============================================================================

@@ -3,9 +3,7 @@
 
 use std::collections::HashMap;
 
-use super::audit::AuditStore;
 use super::document_type::Document;
-use super::documents::audit::GitHubCredentialAuditData;
 use super::documents::github::GitHubInstallationDoc;
 use super::store::DocumentStore;
 use anyhow::Result;
@@ -251,46 +249,6 @@ pub async fn update_github_installation_repos_delta(
             repos.retain(|r| !removed_owned.contains(r));
             repos.sort();
         })
-        .await
-}
-
-// ============================================================================
-// GitHub Credential Events (Audit Log)
-// ============================================================================
-
-/// Log a GitHub credential event (audit log).
-pub async fn log_github_credential_event(
-    audit: &AuditStore,
-    user_id: &str,
-    user_email: &str,
-    mut data: GitHubCredentialAuditData,
-    ip: Option<std::net::IpAddr>,
-) -> Result<String> {
-    data.client_ip = ip.map(|a| a.to_string());
-    let geo = ip.and_then(crate::geo::lookup);
-    data.country_code = geo.as_ref().map(|g| g.country_code.clone());
-    data.asn = geo.as_ref().and_then(|g| g.asn);
-    data.org_name = geo.as_ref().and_then(|g| g.org_name.clone());
-    let data_json = serde_json::to_string(&data)?;
-
-    audit
-        .insert_event(
-            "github_credential",
-            Some(user_id),
-            Some(user_email),
-            &data_json,
-        )
-        .await
-}
-
-/// Delete old GitHub credential events (retention).
-pub async fn delete_old_github_credential_events(
-    audit: &AuditStore,
-    before: Timestamp,
-) -> Result<u64> {
-    let before_str = before.to_string();
-    audit
-        .delete_old_events("github_credential", &before_str)
         .await
 }
 

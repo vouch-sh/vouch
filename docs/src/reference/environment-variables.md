@@ -97,7 +97,7 @@ The previous flat single-IdP variables — `VOUCH_OIDC_ISSUER`, `VOUCH_OIDC_CLIE
 |----------|----------|---------|-------------|
 | `VOUCH_CLEANUP_INTERVAL` | No | `15` | Background cleanup task interval in minutes. Set to `0` to disable automatic cleanup. |
 | `VOUCH_AUTH_EVENTS_RETENTION_DAYS` | No | `90` | Retention period for authentication events in days. Events older than this are purged during cleanup. |
-| `VOUCH_OAUTH_EVENTS_RETENTION_DAYS` | No | `90` | Retention period for OAuth usage events in days. Events older than this are purged during cleanup. |
+| `VOUCH_OAUTH_EVENTS_RETENTION_DAYS` | No | `90` | Retention period for OAuth usage and credential-issuance (`aws_credential`, `github_credential`, `ssh_credential`, `token_exchange`) events in days. Events older than this are purged during cleanup. |
 
 ## CORS
 
