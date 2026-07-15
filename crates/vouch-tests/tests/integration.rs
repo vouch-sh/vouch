@@ -2736,6 +2736,87 @@ mod httpsig {
     }
 
     #[tokio::test]
+    async fn test_httpsig_jwks_cache_fallback_verifies() {
+        // A client registered without inline JWKS (the jwks_uri flow) resolves
+        // its signing key from the JWKS cache row instead.
+        use vouch_server::test_utils::{TestClientSpec, TestJwks, create_test_client};
+
+        let harness = TestHarness::new().await;
+        let key = ClientKey::generate().unwrap();
+
+        let user = harness
+            .create_user("httpsig-cache@example.com")
+            .await
+            .unwrap();
+        let auth_id = harness.create_authenticator(&user.id).await.unwrap();
+
+        let public_jwk = key.public_jwk().unwrap();
+        let jwks = serde_json::json!({ "keys": [public_jwk] });
+
+        let client = create_test_client(
+            &harness.state.store,
+            &user.id,
+            TestClientSpec {
+                name: "Test FAPI Client".to_string(),
+                application_type: vouch_server::db::OAuthClientType::Native,
+                redirect_uris: vec![],
+                token_endpoint_auth_method: Some(
+                    vouch_server::db::TokenEndpointAuthMethod::PrivateKeyJwt,
+                ),
+                jwks: TestJwks::None,
+                dpop_bound_access_tokens: true,
+                id_token_signed_response_alg: vouch_server::db::JwsAlgorithm::Es256,
+                with_secret: false,
+                ..Default::default()
+            },
+        )
+        .await;
+
+        vouch_server::db::upsert_jwks_cache(&harness.state.store, &client.app_id, &jwks)
+            .await
+            .unwrap();
+
+        let token = harness
+            .create_session_for_client(
+                &user.id,
+                "httpsig-cache@example.com",
+                &auth_id,
+                &client.client_id,
+            )
+            .await
+            .unwrap();
+
+        let url = harness.url("/v1/keys");
+        let auth_header = format!("Bearer {token}");
+        let sig_headers = sign_get_request(&url, &auth_header, &key);
+
+        let extra_refs: Vec<(&str, &str)> = sig_headers
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+
+        let response = harness
+            .http_client
+            .request(
+                "GET",
+                &url,
+                None,
+                None,
+                Some(&auth_header),
+                Some(&extra_refs),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response.status,
+            200,
+            "signature resolved via JWKS cache should verify: {}",
+            response.text().unwrap_or_default()
+        );
+    }
+
+    #[tokio::test]
     async fn test_httpsig_unsigned_request_rejected_on_v1_keys() {
         // A signature-required /v1/* endpoint rejects an unsigned request.
         let harness = TestHarness::new().await;
