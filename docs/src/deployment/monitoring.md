@@ -55,7 +55,7 @@ domain-only, with an HMAC column for correlation.
 
 | Event Type | Description |
 |------------|-------------|
-| `login_success` | User authenticated with FIDO2 |
+| `login_success` | User authenticated — FIDO2 passkey login, or a returning user signing in on the website via the upstream IdP (the latter has no `authenticator_id`) |
 | `login_failed` | Failed authentication attempt |
 | `enrollment` | User enrolled their first hardware key |
 | `logout` | User logged out (including RFC 7009 token revocation) |

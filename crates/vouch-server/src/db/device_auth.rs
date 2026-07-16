@@ -53,7 +53,9 @@ impl From<Document<DeviceAuthRequestDoc>> for DeviceAuthRequest {
 pub struct OidcState {
     pub id: String,
     pub state: String,
-    pub device_auth_id: String,
+    /// ID of the CLI-initiated device authorization this flow approves.
+    /// `None` for direct browser sign-ins.
+    pub device_auth_id: Option<String>,
     pub nonce: String,
     /// PKCE code_verifier (RFC 7636).
     pub code_verifier: String,
@@ -62,12 +64,19 @@ pub struct OidcState {
     pub provider_id: String,
 }
 
+/// The stored document keeps `device_auth_id` as a plain string — empty
+/// meaning "no CLI device authorization" — so rows stay readable by older
+/// servers during a rolling deploy; the API surface exposes the real shape.
+fn stored_device_auth_id(stored: String) -> Option<String> {
+    (!stored.is_empty()).then_some(stored)
+}
+
 impl From<Document<OidcStateDoc>> for OidcState {
     fn from(doc: Document<OidcStateDoc>) -> Self {
         Self {
             id: doc.id,
             state: doc.data.state,
-            device_auth_id: doc.data.device_auth_id,
+            device_auth_id: stored_device_auth_id(doc.data.device_auth_id),
             nonce: doc.data.nonce,
             code_verifier: doc.data.code_verifier,
             expires_at: doc.data.expires_at,
@@ -362,10 +371,13 @@ pub async fn delete_expired_device_auth_requests(store: &DocumentStore, _now: &s
 // ============================================================================
 
 /// Create a new OIDC state.
+///
+/// `device_auth_id` is the CLI-initiated device authorization this flow
+/// will approve; pass `None` for direct browser sign-ins.
 pub async fn create_oidc_state(
     store: &DocumentStore,
     state: &str,
-    device_auth_id: &str,
+    device_auth_id: Option<&str>,
     nonce: &str,
     code_verifier: &str,
     expires_at: Timestamp,
@@ -373,7 +385,7 @@ pub async fn create_oidc_state(
 ) -> Result<String> {
     let doc = OidcStateDoc {
         state: state.to_string(),
-        device_auth_id: device_auth_id.to_string(),
+        device_auth_id: device_auth_id.unwrap_or_default().to_string(),
         nonce: nonce.to_string(),
         code_verifier: code_verifier.to_string(),
         expires_at,
@@ -433,7 +445,7 @@ pub async fn try_consume_oidc_state(
             OidcState {
                 id: doc.id,
                 state: data.state,
-                device_auth_id: data.device_auth_id,
+                device_auth_id: stored_device_auth_id(data.device_auth_id),
                 nonce: data.nonce,
                 code_verifier: data.code_verifier,
                 expires_at: data.expires_at,

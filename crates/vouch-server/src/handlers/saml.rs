@@ -17,7 +17,7 @@ use axum::{
 use serde::Deserialize;
 
 use crate::AppState;
-use crate::db;
+use crate::db::{self, ClientInfo};
 use crate::handlers::enroll::{ErrorTemplate, complete_enrollment_after_identity};
 use crate::services::idp::IdentityResult;
 
@@ -72,6 +72,7 @@ pub(crate) async fn metadata(State(state): State<Arc<AppState>>) -> impl IntoRes
 /// enrollment flow identically to `oidc_callback()`.
 pub(crate) async fn acs(
     State(state): State<Arc<AppState>>,
+    client_info: ClientInfo,
     Form(form): Form<SamlAcsForm>,
 ) -> Response {
     // Step 1: RelayState is required — it's our CSRF/state token.
@@ -173,7 +174,14 @@ pub(crate) async fn acs(
         domain: assertion.domain,
     };
 
-    complete_enrollment_after_identity(&state, &stored_state, identity, oidc_state_claim).await
+    complete_enrollment_after_identity(
+        &state,
+        &stored_state,
+        identity,
+        oidc_state_claim,
+        client_info,
+    )
+    .await
 }
 
 // ============================================================================

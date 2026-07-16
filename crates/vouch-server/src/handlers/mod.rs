@@ -25,7 +25,7 @@ pub(crate) mod scim;
 pub(crate) mod session;
 
 // Re-export commonly used utilities from focused modules
-pub(crate) use crate::crypto::{generate_challenge, generate_random_bytes, hash_token};
+pub(crate) use crate::crypto::{generate_challenge, hash_token};
 pub(crate) use registration::validate_registration_attestation;
 pub(crate) use session::{
     clear_session_cookie, create_session_cookie, extract_session_from_cookie,

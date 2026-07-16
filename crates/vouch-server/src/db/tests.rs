@@ -752,9 +752,17 @@ async fn test_oidc_state_lifecycle() {
     let nonce = "nonce_67890";
     let expires_at: jiff::Timestamp = "2099-12-31T23:59:59Z".parse().unwrap();
 
-    let id = create_oidc_state(&store, state, &device_auth_id, nonce, "", expires_at, "")
-        .await
-        .expect("Failed to create OIDC state");
+    let id = create_oidc_state(
+        &store,
+        state,
+        Some(&device_auth_id),
+        nonce,
+        "",
+        expires_at,
+        "",
+    )
+    .await
+    .expect("Failed to create OIDC state");
     assert!(!id.is_empty());
 
     // Get OIDC state
@@ -764,7 +772,10 @@ async fn test_oidc_state_lifecycle() {
         .expect("Should exist");
 
     assert_eq!(oidc_state.state, state);
-    assert_eq!(oidc_state.device_auth_id, device_auth_id);
+    assert_eq!(
+        oidc_state.device_auth_id.as_deref(),
+        Some(device_auth_id.as_str())
+    );
     assert_eq!(oidc_state.nonce, nonce);
 }
 
@@ -3291,7 +3302,7 @@ async fn seed_oidc_state(
     create_oidc_state(
         store,
         state_value,
-        &device_auth_id,
+        Some(&device_auth_id),
         "nonce-value",
         "",
         expires_at,
@@ -3314,7 +3325,10 @@ async fn test_oidc_state_consume_happy_path() {
         .expect("first consume must succeed");
 
     assert_eq!(data.state, "happy-state");
-    assert_eq!(data.device_auth_id, device_auth_id);
+    assert_eq!(
+        data.device_auth_id.as_deref(),
+        Some(device_auth_id.as_str())
+    );
     assert_eq!(data.nonce, "nonce-value");
 }
 
