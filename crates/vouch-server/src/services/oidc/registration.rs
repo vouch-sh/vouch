@@ -1145,12 +1145,26 @@ pub async fn update_client_configuration(
     // Build updated registration metadata (cosmetic fields)
     let registration_metadata = mutable_request.registration_metadata();
 
-    // Validate JWKS and jwks_uri (same rules as initial registration):
-    // mutually exclusive, valid structure, HTTPS URI.
+    // Validate JWKS and jwks_uri field format: mutually exclusive, valid
+    // structure, HTTPS URI.
     validate_jwks_fields(
         mutable_request.jwks.as_ref(),
         mutable_request.jwks_uri.as_deref(),
     )?;
+
+    // PUT is a full replacement, so re-check the auth-method/JWKS
+    // relationship enforced at initial registration against the client's
+    // (immutable) registered auth method. Without this, a private_key_jwt
+    // client could clear its JWKS and end up unable to authenticate.
+    if client.token_endpoint_auth_method == TokenEndpointAuthMethod::PrivateKeyJwt
+        && mutable_request.jwks.is_none()
+        && mutable_request.jwks_uri.is_none()
+    {
+        return Err(ServiceError::oauth(
+            OAuthErrorCode::InvalidClientMetadata,
+            "private_key_jwt requires jwks or jwks_uri",
+        ));
+    }
 
     // Validate userinfo_signed_response_alg (same rules as initial registration).
     // The client's FAPI profile is immutable post-registration (RFC 7592), so we

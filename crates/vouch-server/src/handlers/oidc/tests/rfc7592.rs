@@ -848,3 +848,90 @@ async fn test_rfc7592_put_post_logout_redirect_uris_invalid_rejected() {
         "Error code must be invalid_client_metadata: {json}"
     );
 }
+
+/// PUT is a full replacement, so omitting `jwks`/`jwks_uri` clears them.
+/// For a `private_key_jwt` client that would leave it unable to
+/// authenticate, so the auth-method/JWKS consistency rule from initial
+/// registration must also be enforced on update (#719).
+#[tokio::test]
+async fn test_rfc7592_put_cannot_clear_jwks_for_private_key_jwt_client() {
+    let (app, _state) = test_app().await;
+
+    let jwks = serde_json::json!({
+        "keys": [{
+            "kty": "EC",
+            "crv": "P-256",
+            "x": "f83OJ3D2xF1Bg8vub9tLe1gHMzV76e8Tus9uPHvRVEU",
+            "y": "x_FEzRu9m36HLN_tue659LNpXW6pCyStikYjKIWI5a0",
+            "use": "sig",
+            "alg": "ES256"
+        }]
+    });
+    let body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "token_endpoint_auth_method": "private_key_jwt",
+        "jwks": jwks,
+        "client_name": "PKJ App"
+    });
+    let (status, body) = http_post_json(&app, "/oauth/register", &body.to_string(), &[]).await;
+    assert_eq!(status, StatusCode::CREATED, "registration failed: {body}");
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let client_id = json["client_id"].as_str().expect("client_id").to_string();
+    let token = json["registration_access_token"]
+        .as_str()
+        .expect("registration_access_token")
+        .to_string();
+
+    // PUT without jwks/jwks_uri must be rejected, not clear the keys.
+    let update_body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "client_name": "PKJ App v2"
+    });
+    let (status, body) = http_request(
+        &app,
+        "PUT",
+        &format!("/oauth/register/{client_id}"),
+        Some(update_body.to_string()),
+        &[
+            ("Authorization", &format!("Bearer {token}")),
+            ("Content-Type", "application/json"),
+        ],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "PUT clearing JWKS for a private_key_jwt client must fail: {body}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(json["error"], "invalid_client_metadata", "{json}");
+
+    // PUT that keeps a JWKS still succeeds (with the original token — the
+    // rejected PUT must not have rotated it).
+    let update_body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "jwks": serde_json::json!({
+            "keys": [{
+                "kty": "EC",
+                "crv": "P-256",
+                "x": "f83OJ3D2xF1Bg8vub9tLe1gHMzV76e8Tus9uPHvRVEU",
+                "y": "x_FEzRu9m36HLN_tue659LNpXW6pCyStikYjKIWI5a0",
+                "use": "sig",
+                "alg": "ES256"
+            }]
+        }),
+        "client_name": "PKJ App v2"
+    });
+    let (status, body) = http_request(
+        &app,
+        "PUT",
+        &format!("/oauth/register/{client_id}"),
+        Some(update_body.to_string()),
+        &[
+            ("Authorization", &format!("Bearer {token}")),
+            ("Content-Type", "application/json"),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "PUT keeping JWKS must succeed: {body}");
+}
