@@ -99,6 +99,35 @@ impl KeyResolver for OAuthClientKeyResolver {
             .await
             .ok()
     }
+
+    /// Validate and consume a signature nonce against the shared nonce store.
+    ///
+    /// HTTP signature nonces deliberately share the DPoP nonce store and
+    /// issuance path (`generate_dpop_nonce`): both are opaque random
+    /// single-use values with the same validity window, and the atomic
+    /// delete-if-not-expired gives single-use semantics on every backend.
+    fn validate_nonce(
+        &self,
+        nonce: &str,
+    ) -> impl std::future::Future<Output = vouch_httpsig::middleware::NonceValidation> + Send + '_
+    {
+        use vouch_httpsig::middleware::NonceValidation;
+
+        // Own the nonce: the returned future may only borrow `self`.
+        let nonce = nonce.to_string();
+        async move {
+            match crate::db::validate_and_consume_dpop_nonce(&self.state.store, &nonce).await {
+                Ok(()) => NonceValidation::Valid,
+                Err(
+                    crate::db::ClaimError::AlreadyConsumed | crate::db::ClaimError::InvalidInput(_),
+                ) => NonceValidation::Invalid,
+                Err(crate::db::ClaimError::Database(msg)) => {
+                    tracing::error!("signature nonce validation DB failure: {msg}");
+                    NonceValidation::Error
+                }
+            }
+        }
+    }
 }
 
 /// Extract `client_id` from the access token in the `Authorization` header.
@@ -220,5 +249,33 @@ mod tests {
             "y": URL_SAFE_NO_PAD.encode([2u8; 32]),
         });
         assert!(jwk_to_p256_public_key(&jwk).is_none());
+    }
+
+    /// A server-issued nonce validates once and is then consumed (#718):
+    /// the second presentation is Invalid, and a random string never
+    /// issued is Invalid too.
+    #[tokio::test]
+    async fn test_validate_nonce_single_use() {
+        use vouch_httpsig::middleware::{KeyResolver, NonceValidation};
+
+        let state = crate::test_utils::test_app_state().await;
+        let resolver = OAuthClientKeyResolver::new(state.clone());
+
+        let nonce = resolver.generate_nonce().await.expect("issue nonce");
+        assert_eq!(
+            resolver.validate_nonce(&nonce).await,
+            NonceValidation::Valid,
+            "first use of a fresh nonce must be accepted"
+        );
+        assert_eq!(
+            resolver.validate_nonce(&nonce).await,
+            NonceValidation::Invalid,
+            "a consumed nonce must be rejected"
+        );
+        assert_eq!(
+            resolver.validate_nonce("never-issued-nonce").await,
+            NonceValidation::Invalid,
+            "an unknown nonce must be rejected"
+        );
     }
 }
