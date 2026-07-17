@@ -3982,6 +3982,48 @@ async fn test_enroll_promotes_admin_for_org_without_one() {
     );
 }
 
+// A retrying CAS loser must re-derive its admin decision from fresh state:
+// with the winner's user row committed and the org's created_by_user_id
+// still unset (the state a loser observes when it re-runs after aborting
+// on the org-row conflict), the second enrollee must come out non-admin.
+#[tokio::test]
+async fn test_enroll_second_user_after_winner_commit_is_not_admin() {
+    use crate::db::documents::organization::OrganizationDoc;
+    use crate::db::enroll_user_with_org;
+
+    let (store, _audit) = test_db().await;
+    let domain = "retry-loser.example";
+
+    let winner = enroll_user_with_org(&store, "winner@retry-loser.example", None, Some(domain))
+        .await
+        .expect("winner enrollment");
+    assert!(winner.is_org_admin);
+
+    // Simulate the winner having committed its user row but NOT yet the org
+    // admin slot (crash between the two would leave this state; a retrying
+    // loser sees it after aborting on the org-row conflict).
+    let org_id = winner.org_id.expect("org id");
+    let org = store
+        .get::<OrganizationDoc>(&org_id)
+        .await
+        .expect("get org")
+        .expect("org exists");
+    let mut data = org.data;
+    data.created_by_user_id = None;
+    store
+        .update(&org_id, &data)
+        .await
+        .expect("clear admin slot");
+
+    let loser = enroll_user_with_org(&store, "loser@retry-loser.example", None, Some(domain))
+        .await
+        .expect("second enrollment");
+    assert!(
+        !loser.is_org_admin,
+        "an enrollee joining an org that already has users must not become admin"
+    );
+}
+
 // ========================================================================
 // OCC read-modify-write conversions: blind get+update → store.modify()
 // ========================================================================
