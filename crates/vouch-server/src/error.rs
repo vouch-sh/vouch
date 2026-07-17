@@ -276,6 +276,21 @@ impl ServiceError {
         }
     }
 
+    /// Classify a database error from a transactional operation.
+    ///
+    /// Writer contention (Postgres serialization failure, Aurora DSQL
+    /// OC000/OC001, SQLite BUSY/LOCKED) becomes [`Self::OccConflict`] so the
+    /// enclosing `with_dsql_retry!` re-runs the transaction; anything else
+    /// becomes [`Self::Internal`] and propagates as a 500.
+    pub(crate) fn from_db_contention(err: anyhow::Error, msg: &'static str) -> Self {
+        tracing::error!("{msg}: {err}");
+        if crate::db::pool::is_retryable_db_error(&err) {
+            Self::OccConflict
+        } else {
+            Self::Internal(msg.to_string())
+        }
+    }
+
     /// Convert to an OAuth error response.
     pub fn into_oauth_response(self) -> (StatusCode, Json<OAuthErrorResponse>) {
         match self {
@@ -477,6 +492,24 @@ mod tests {
         let err = ServiceError::Internal("x".to_string());
         assert_eq!(err.oauth_description(), "internal error: x");
         assert_eq!(err.oauth_description(), err.to_string());
+    }
+
+    /// `OccConflict` is the only retryable `ServiceError`. Every
+    /// `with_dsql_retry!` loop over `ServiceError` depends on this
+    /// contract — if it regresses, transactional writes silently stop
+    /// retrying transient OCC conflicts.
+    #[test]
+    fn occ_conflict_is_the_only_retryable_service_error() {
+        use crate::db::pool::RetryableError;
+
+        assert!(ServiceError::OccConflict.is_retryable());
+        assert!(!ServiceError::Internal("boom".to_string()).is_retryable());
+        assert!(!ServiceError::Conflict("duplicate".to_string()).is_retryable());
+        // Business-logic 409s must propagate immediately, never retry.
+        assert!(
+            !ServiceError::api(StatusCode::CONFLICT, "max_secrets_reached", "cap hit")
+                .is_retryable()
+        );
     }
 
     #[test]

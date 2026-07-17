@@ -220,24 +220,11 @@ pub(crate) async fn delete_key(
         ));
     }
 
-    // Map a DB error from any tx operation into either an OccConflict (if it
-    // signals contention with a concurrent writer — Postgres serialization
-    // failure, Aurora DSQL OC000/OC001, SQLite BUSY/LOCKED) or a generic 500.
-    // OccConflict is retried by with_dsql_retry!; the 500 path propagates.
-    let map_db_err = |e: anyhow::Error, msg: &'static str| -> ServiceError {
-        tracing::error!("{msg}: {e}");
-        if crate::db::pool::is_retryable_db_error(&e) {
-            ServiceError::OccConflict
-        } else {
-            ServiceError::Internal(msg.to_string())
-        }
-    };
-
     let result = crate::with_dsql_retry!(async {
         let mut tx = store
             .begin()
             .await
-            .map_err(|e| map_db_err(e, "Failed to start transaction"))?;
+            .map_err(|e| ServiceError::from_db_contention(e, "Failed to start transaction"))?;
 
         // Load the User doc with its version. The version is bumped at the end of
         // the transaction so that two concurrent deletes against the same user
@@ -247,14 +234,14 @@ pub(crate) async fn delete_key(
         let user_doc = tx
             .get::<UserDoc>(user_id)
             .await
-            .map_err(|e| map_db_err(e, "Failed to load user"))?
+            .map_err(|e| ServiceError::from_db_contention(e, "Failed to load user"))?
             .ok_or(ServiceError::NotFound("User"))?;
 
         // Load the authenticator and verify ownership within the transaction.
         let auth_doc = tx
             .get::<AuthenticatorDoc>(key_id)
             .await
-            .map_err(|e| map_db_err(e, "Failed to retrieve key"))?
+            .map_err(|e| ServiceError::from_db_contention(e, "Failed to retrieve key"))?
             .ok_or(ServiceError::NotFound("Key"))?;
 
         if auth_doc.data.user_id != user_id {
@@ -273,7 +260,7 @@ pub(crate) async fn delete_key(
         let count_before = tx
             .count::<AuthenticatorDoc>("user_id", user_id)
             .await
-            .map_err(|e| map_db_err(e, "Failed to check key count"))?;
+            .map_err(|e| ServiceError::from_db_contention(e, "Failed to check key count"))?;
         if count_before <= 1 {
             return Err(ServiceError::api(
                 axum::http::StatusCode::BAD_REQUEST,
@@ -287,12 +274,12 @@ pub(crate) async fn delete_key(
         let sessions_revoked = tx
             .count::<SessionDoc>("authenticator_id", key_id)
             .await
-            .map_err(|e| map_db_err(e, "Failed to count sessions"))?;
+            .map_err(|e| ServiceError::from_db_contention(e, "Failed to count sessions"))?;
 
         // Cascade-delete the authenticator (device_auth refs, sessions, doc).
         db::delete_authenticator_in_tx(&mut tx, key_id)
             .await
-            .map_err(|e| map_db_err(e, "Failed to delete key"))?;
+            .map_err(|e| ServiceError::from_db_contention(e, "Failed to delete key"))?;
 
         // Post-delete invariant. Under PostgreSQL READ COMMITTED both concurrent
         // transactions would still see count_after == 1 (each observes the other's
@@ -301,7 +288,7 @@ pub(crate) async fn delete_key(
         let count_after = tx
             .count::<AuthenticatorDoc>("user_id", user_id)
             .await
-            .map_err(|e| map_db_err(e, "Failed to verify key count"))?;
+            .map_err(|e| ServiceError::from_db_contention(e, "Failed to verify key count"))?;
         if count_after < 1 {
             return Err(ServiceError::api(
                 axum::http::StatusCode::BAD_REQUEST,
@@ -314,7 +301,7 @@ pub(crate) async fn delete_key(
         let ok = tx
             .compare_and_update::<UserDoc>(user_id, user_doc.version, &user_doc.data)
             .await
-            .map_err(|e| map_db_err(e, "Failed to version-bump user doc"))?;
+            .map_err(|e| ServiceError::from_db_contention(e, "Failed to version-bump user doc"))?;
         if !ok {
             // OCC conflict — another writer beat us to the User doc.  Signal
             // with_dsql_retry! to re-run the entire block.
@@ -323,7 +310,7 @@ pub(crate) async fn delete_key(
 
         tx.commit()
             .await
-            .map_err(|e| map_db_err(e, "Failed to commit key deletion"))?;
+            .map_err(|e| ServiceError::from_db_contention(e, "Failed to commit key deletion"))?;
 
         let sessions = u64::try_from(sessions_revoked).unwrap_or_default();
         tracing::info!("Deleted key {key_id} for user {user_id}, revoked {sessions} sessions");
