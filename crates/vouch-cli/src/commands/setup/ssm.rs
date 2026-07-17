@@ -89,6 +89,27 @@ fn build_ssh_config_block(host_pattern: &str, profile_name: &str, region_name: &
     )
 }
 
+/// Extract the host pattern from the `Host` line inside the Vouch SSM block.
+///
+/// Scans only lines at or after `SSM_MARKER`, so `Host` entries the user
+/// keeps elsewhere in their SSH config are never picked up.
+fn ssm_block_host_pattern(content: &str) -> Option<&str> {
+    let mut marker_seen = false;
+    for line in content.lines() {
+        if line.contains(SSM_MARKER) {
+            marker_seen = true;
+            continue;
+        }
+        if marker_seen && let Some(rest) = line.strip_prefix("Host ") {
+            let trimmed = rest.trim();
+            if !trimmed.is_empty() && trimmed != "*" {
+                return Some(trimmed);
+            }
+        }
+    }
+    None
+}
+
 /// Remove an existing SSM config block from the SSH config content.
 ///
 /// Finds the block starting with `SSM_MARKER` and removes everything up to
@@ -198,16 +219,9 @@ pub(crate) async fn run(
                     tr_println!("setup-ssm-existing-region", indent = "  ", value = r);
                 }
             }
-            // Show host pattern from the Host line
-            for line in existing.lines() {
-                if let Some(rest) = line.strip_prefix("Host ") {
-                    let trimmed = rest.trim();
-                    // Only show the host line that follows our marker
-                    if !trimmed.is_empty() && trimmed != "*" {
-                        tr_println!("setup-ssm-existing-hosts", indent = "  ", value = trimmed);
-                        break;
-                    }
-                }
+            // Show the host pattern from the Host line inside our block
+            if let Some(hosts) = ssm_block_host_pattern(&existing) {
+                tr_println!("setup-ssm-existing-hosts", indent = "  ", value = hosts);
             }
 
             println!();
@@ -352,6 +366,31 @@ mod tests {
     #[test]
     fn test_validate_shell_safe_rejects_empty() {
         assert!(validate_shell_safe("", "--profile").is_err());
+    }
+
+    // ---- ssm_block_host_pattern tests ----
+
+    #[test]
+    fn test_host_pattern_skips_blocks_before_marker() {
+        let existing = format!(
+            "Host bastion\n    HostName bastion.example.com\n\
+             \nHost *\n    ServerAliveInterval 60\n\
+             \n{SSM_MARKER}\n# Added by: vouch setup ssm\n\
+             Host i-* mi-*\n    ProxyCommand sh -c \"aws ssm start-session ...\"\n"
+        );
+        assert_eq!(ssm_block_host_pattern(&existing), Some("i-* mi-*"));
+    }
+
+    #[test]
+    fn test_host_pattern_without_marker_returns_none() {
+        let existing = "Host bastion\n    HostName bastion.example.com\n";
+        assert_eq!(ssm_block_host_pattern(existing), None);
+    }
+
+    #[test]
+    fn test_host_pattern_marker_only_block() {
+        let existing = format!("{SSM_MARKER}\n# Added by: vouch setup ssm\n");
+        assert_eq!(ssm_block_host_pattern(&existing), None);
     }
 
     // ---- strip_ssm_block tests ----
