@@ -160,6 +160,43 @@ pub(crate) fn save_kubeconfig(path: &std::path::Path, config: &Kubeconfig) -> Re
     Ok(())
 }
 
+/// An empty catch-all value for a freshly constructed entry.
+pub(crate) fn empty_other() -> serde_json::Value {
+    serde_json::Value::Object(serde_json::Map::new())
+}
+
+/// Return the `other` catch-all of the existing cluster named `name`, or an
+/// empty object if there is none. Used so an upsert preserves unmodeled
+/// fields (e.g. `insecure-skip-tls-verify`, `proxy-url`) the user added to
+/// the entry vouch manages, matching the round-trip preservation of #707.
+pub(crate) fn existing_cluster_other(config: &Kubeconfig, name: &str) -> serde_json::Value {
+    config
+        .clusters
+        .iter()
+        .find(|c| c.name == name)
+        .map_or_else(empty_other, |c| c.cluster.other.clone())
+}
+
+/// Return the `other` catch-all of the existing context named `name`, or an
+/// empty object if there is none (e.g. `extensions`).
+pub(crate) fn existing_context_other(config: &Kubeconfig, name: &str) -> serde_json::Value {
+    config
+        .contexts
+        .iter()
+        .find(|c| c.name == name)
+        .map_or_else(empty_other, |c| c.context.other.clone())
+}
+
+/// Return the `other` catch-all of the existing user named `name`, or an
+/// empty object if there is none.
+pub(crate) fn existing_user_other(config: &Kubeconfig, name: &str) -> serde_json::Value {
+    config
+        .users
+        .iter()
+        .find(|u| u.name == name)
+        .map_or_else(empty_other, |u| u.user.other.clone())
+}
+
 #[cfg(test)]
 #[expect(
     clippy::expect_used,
@@ -447,6 +484,53 @@ users: []
         assert_eq!(
             context_other2["extensions"][0]["extension"]["directory"],
             "/home/user/project"
+        );
+    }
+
+    /// Upserting a managed cluster/context/user entry must carry over its
+    /// preserved `other` fields rather than replacing them with an empty
+    /// map — otherwise re-running setup drops extras the flatten catch-all
+    /// preserved on load (#707 upsert path).
+    #[test]
+    fn test_existing_other_helpers_preserve_extras_on_upsert() {
+        let yaml = r#"
+apiVersion: v1
+kind: Config
+clusters:
+- name: my-cluster
+  cluster:
+    server: https://k8s.example.com:6443
+    insecure-skip-tls-verify: true
+contexts:
+- name: my-cluster-vouch
+  context:
+    cluster: my-cluster
+    user: vouch-k8s-my-cluster
+    extensions:
+    - name: ext
+users:
+- name: vouch-k8s-my-cluster
+  user:
+    token: keep-me
+"#;
+        let config: Kubeconfig = parse_kubeconfig(yaml).expect("should parse");
+
+        let cluster_other = existing_cluster_other(&config, "my-cluster");
+        assert_eq!(cluster_other["insecure-skip-tls-verify"], true);
+        let context_other = existing_context_other(&config, "my-cluster-vouch");
+        assert_eq!(context_other["extensions"][0]["name"], "ext");
+        let user_other = existing_user_other(&config, "vouch-k8s-my-cluster");
+        assert_eq!(user_other["token"], "keep-me");
+
+        // Absent entries yield an empty object, not a panic.
+        assert!(
+            existing_cluster_other(&config, "nope")
+                .as_object()
+                .is_some()
+        );
+        assert_eq!(
+            existing_cluster_other(&config, "nope"),
+            serde_json::Value::Object(serde_json::Map::new())
         );
     }
 }

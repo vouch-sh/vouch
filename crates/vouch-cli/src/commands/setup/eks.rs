@@ -14,7 +14,8 @@ use crate::integrations::aws::sigv4::sign_and_send_rest;
 
 use super::kubeconfig::{
     ExecConfig, KubeconfigCluster, KubeconfigClusterData, KubeconfigContext, KubeconfigContextData,
-    KubeconfigUser, KubeconfigUserData, default_kubeconfig_path, load_kubeconfig, save_kubeconfig,
+    KubeconfigUser, KubeconfigUserData, default_kubeconfig_path, existing_cluster_other,
+    existing_context_other, existing_user_other, load_kubeconfig, save_kubeconfig,
 };
 
 // ============================================================================
@@ -155,7 +156,8 @@ pub(crate) async fn run(
     // Load existing kubeconfig
     let mut config = load_kubeconfig(&kubeconfig_path)?;
 
-    // Upsert cluster
+    // Upsert cluster, preserving any unmodeled fields on an existing entry.
+    let cluster_other = existing_cluster_other(&config, cluster_name);
     config.clusters.retain(|c| c.name != cluster_name);
     config.clusters.push(KubeconfigCluster {
         name: cluster_name.to_string(),
@@ -166,11 +168,12 @@ pub(crate) async fn run(
             } else {
                 Some(ca_data)
             },
-            other: serde_json::Value::Object(serde_json::Map::new()),
+            other: cluster_other,
         },
     });
 
     // Upsert user with vouch credential eks exec config
+    let user_other = existing_user_other(&config, &user_name);
     config.users.retain(|u| u.name != user_name);
     config.users.push(KubeconfigUser {
         name: user_name.clone(),
@@ -182,11 +185,12 @@ pub(crate) async fn run(
                 env: None,
                 interactive_mode: Some("Never".to_string()),
             }),
-            other: serde_json::Value::Object(serde_json::Map::new()),
+            other: user_other,
         },
     });
 
     // Upsert context
+    let context_other = existing_context_other(&config, &context_name);
     config.contexts.retain(|c| c.name != context_name);
     config.contexts.push(KubeconfigContext {
         name: context_name.clone(),
@@ -194,7 +198,7 @@ pub(crate) async fn run(
             cluster: cluster_name.to_string(),
             namespace: None,
             user: user_name.clone(),
-            other: serde_json::Value::Object(serde_json::Map::new()),
+            other: context_other,
         },
     });
 
