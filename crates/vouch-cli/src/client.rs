@@ -125,14 +125,6 @@ impl VouchClient<ReqwestClient> {
 }
 
 impl<H: HttpClient> VouchClient<H> {
-    /// Set an explicit authentication token.
-    ///
-    /// Used when the caller has already resolved the token (e.g., from
-    /// `resolve_session()`) and wants to avoid resolving it again.
-    pub(crate) fn set_token(&mut self, token: SecretString) {
-        self.token = Some(token);
-    }
-
     /// Set the FAPI client key for DPoP proof generation.
     ///
     /// Used when the caller already has the key in memory (e.g., from
@@ -761,7 +753,7 @@ mod tests {
     #[test]
     fn test_set_token_makes_token_available() {
         let mut client = VouchClient::unauthenticated("https://example.com").unwrap();
-        client.set_token(SecretString::from("test-token".to_string()));
+        client.token = Some(SecretString::from("test-token".to_string()));
         assert!(client.token().is_ok());
     }
 
@@ -955,7 +947,7 @@ mod tests {
     #[test]
     fn test_build_auth_without_fapi_key_returns_bearer() {
         let mut client = VouchClient::unauthenticated("https://example.com").unwrap();
-        client.set_token(SecretString::from("my-token".to_string()));
+        client.token = Some(SecretString::from("my-token".to_string()));
         // No fapi_key set → always Bearer
         let (auth, proof) = client
             .build_auth("GET", "https://example.com/v1/keys")
@@ -969,7 +961,7 @@ mod tests {
         use vouch_cli::fapi::ClientKey;
 
         let mut client = VouchClient::unauthenticated("https://example.com").unwrap();
-        client.set_token(SecretString::from("my-dpop-token".to_string()));
+        client.token = Some(SecretString::from("my-dpop-token".to_string()));
         client.fapi_key = Some(ClientKey::generate().unwrap());
 
         let (auth, proof) = client
@@ -995,7 +987,7 @@ mod tests {
         use vouch_cli::fapi::ClientKey;
 
         let mut client = VouchClient::unauthenticated("https://example.com").unwrap();
-        client.set_token(SecretString::from("access-token-abc".to_string()));
+        client.token = Some(SecretString::from("access-token-abc".to_string()));
         client.fapi_key = Some(ClientKey::generate().unwrap());
 
         let (_, proof) = client

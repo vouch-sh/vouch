@@ -337,11 +337,12 @@ async fn test_rfc9728_tls_binding_mirrors_discovery_when_mtls_configured() {
         "default test harness has no TLS"
     );
 
-    // Flip TLS on by injecting a placeholder cert path. Vouch only
-    // checks `tls_cert.is_some()` for advertising mTLS support
-    // (services/oidc/discovery.rs:294 + protected_resource.rs).
+    // Flip TLS on by injecting placeholder cert and key. Advertising mTLS
+    // requires full TLS configuration (`tls_configured()`, cert AND key) —
+    // a partial config never starts the mTLS listener.
     let mut new_config = (**state.config()).clone();
     new_config.tls_cert = Some("/tmp/fake-cert.pem".to_string());
+    new_config.tls_key = Some(secrecy::SecretString::from("/tmp/fake-key.pem".to_string()));
     state.config.store(Arc::new(new_config));
 
     let (status, rs_body) = http_get(&app, WELL_KNOWN_SUFFIX, &[]).await;

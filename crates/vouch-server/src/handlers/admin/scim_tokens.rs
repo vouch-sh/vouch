@@ -105,10 +105,11 @@ pub(crate) async fn create_scim_token(
     let (user, org_id) =
         extract_org_admin(&state, &headers, &jar, method.as_str(), uri.path(), None).await?;
 
-    // Enforce 2-token limit
-    let existing = db::list_scim_tokens(&state.store, Some(&org_id)).await?;
+    // Enforce 2-token limit (expired tokens cannot authenticate and do
+    // not count toward the limit)
+    let active = db::count_active_scim_tokens(&state.store, &org_id).await?;
 
-    if existing.len() >= MAX_SCIM_TOKENS {
+    if active >= MAX_SCIM_TOKENS {
         return Err(ServiceError::api(
             StatusCode::CONFLICT,
             "token_limit_reached",
@@ -365,10 +366,11 @@ pub(crate) async fn admin_create_scim_token(
     let (admin, org_id) =
         extract_org_admin(&state, &headers, &jar, method.as_str(), uri.path(), None).await?;
 
-    // Enforce 2-token limit
-    let existing = db::list_scim_tokens(&state.store, Some(&org_id)).await?;
+    // Enforce 2-token limit (expired tokens cannot authenticate and do
+    // not count toward the limit)
+    let active = db::count_active_scim_tokens(&state.store, &org_id).await?;
 
-    if existing.len() >= MAX_SCIM_TOKENS {
+    if active >= MAX_SCIM_TOKENS {
         return Ok(redirect_error(
             jar,
             "Maximum of 2 SCIM tokens. Revoke one before creating another.",

@@ -155,6 +155,39 @@ pub trait KeyResolver: Send + Sync + 'static {
     fn generate_nonce(&self) -> impl std::future::Future<Output = Option<String>> + Send + '_ {
         async { None }
     }
+
+    /// Validate (and atomically consume) a client-supplied signature nonce.
+    ///
+    /// Called only when a verified signature carries a `nonce` parameter —
+    /// nonce enforcement is opportunistic (enforce-when-present): a client's
+    /// first request has no nonce yet, so requests without one pass through
+    /// and rely on the timestamp window alone. Validation runs after
+    /// signature, coverage, and body-digest checks so only a fully valid
+    /// request (or a byte-perfect replay of one) can consume a nonce —
+    /// first presentation wins, the replay is rejected.
+    ///
+    /// The default accepts without checking, for resolvers that do not
+    /// issue nonces (their clients never send the parameter).
+    fn validate_nonce(
+        &self,
+        _nonce: &str,
+    ) -> impl std::future::Future<Output = NonceValidation> + Send + '_ {
+        async { NonceValidation::Valid }
+    }
+}
+
+/// Outcome of validating a client-supplied signature nonce.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NonceValidation {
+    /// Nonce accepted (or the resolver does not enforce nonces).
+    Valid,
+    /// Nonce unknown, expired, or already consumed — the request is
+    /// rejected; the response carries a fresh `Signature-Nonce` so the
+    /// client can recover on its next request.
+    Invalid,
+    /// Backend failure while checking — server fault (5xx), never
+    /// reported as a client authentication failure.
+    Error,
 }
 
 /// Default maximum signature age in seconds (5 minutes).
@@ -181,6 +214,48 @@ pub const DEFAULT_MAX_AGE: i64 = 300;
 /// 6. Emits `Accept-Signature` (RFC 9421 §5.1) on unsigned / under-covered 401s
 ///    so clients know exactly what to sign next time
 ///
+/// Validate and consume a verified signature's nonce, if it carries one.
+///
+/// Returns `Some(response)` when the request must be rejected (unknown or
+/// already-consumed nonce → 401 with a fresh `Signature-Nonce`; backend
+/// failure → 500), or `None` when there is no nonce or it was accepted.
+async fn enforce_nonce<R: KeyResolver>(
+    resolver: &R,
+    params: &SignatureParams,
+    label: &str,
+    keyid: &str,
+) -> Option<Response> {
+    let nonce = params.nonce.as_deref()?;
+    match resolver.validate_nonce(nonce).await {
+        NonceValidation::Valid => None,
+        NonceValidation::Invalid => {
+            tracing::debug!(
+                label = %label,
+                keyid = %keyid,
+                "HTTP signature nonce invalid or already consumed"
+            );
+            let mut resp = (StatusCode::UNAUTHORIZED, SIG_VERIFY_FAILED).into_response();
+            // Recovery hint: a stale or consumed nonce is fixed by signing the
+            // next request with a fresh one (mirrors DPoP's use_dpop_nonce
+            // flow). No Accept-Signature — this is not a coverage problem.
+            if let Some(fresh) = resolver.generate_nonce().await
+                && let Ok(value) = http::HeaderValue::from_str(&fresh)
+            {
+                resp.headers_mut().insert("signature-nonce", value);
+            }
+            Some(resp)
+        }
+        NonceValidation::Error => {
+            tracing::error!(
+                label = %label,
+                keyid = %keyid,
+                "HTTP signature nonce validation backend failure"
+            );
+            Some((StatusCode::INTERNAL_SERVER_ERROR, "internal error").into_response())
+        }
+    }
+}
+
 /// Used on endpoints where every request must be signed, e.g. the `/v1/*`
 /// CLI↔server channel under FAPI 2.0 Message Signing. Returns 401 with a
 /// generic message on any verification failure.
@@ -337,6 +412,11 @@ pub async fn require_signature<R: KeyResolver>(
                 }
                 return resp;
             }
+            // Validate and consume the server-issued nonce when the signature
+            // carries one (enforce-when-present; see KeyResolver::validate_nonce).
+            if let Some(resp) = enforce_nonce(resolver.as_ref(), &params, &label, &keyid).await {
+                return resp;
+            }
             parts.extensions.insert(VerifiedSignature {
                 label: label.clone(),
                 params,
@@ -429,17 +509,33 @@ mod tests {
     /// In-memory key resolver for testing.
     struct InMemoryKeyResolver {
         keys: std::collections::HashMap<String, Arc<dyn VerifyingAlgorithm>>,
+        /// When `Some`, the resolver enforces nonces: a validated nonce is
+        /// removed from the set (single-use), and `generate_nonce` mints a
+        /// fresh entry.
+        nonces: Option<std::sync::Mutex<std::collections::HashSet<String>>>,
+        /// Force `validate_nonce` to report a backend error.
+        nonce_backend_error: bool,
     }
 
     impl InMemoryKeyResolver {
         fn new() -> Self {
             Self {
                 keys: std::collections::HashMap::new(),
+                nonces: None,
+                nonce_backend_error: false,
             }
         }
 
         fn insert(&mut self, key_id: String, verifier: Arc<dyn VerifyingAlgorithm>) {
             self.keys.insert(key_id, verifier);
+        }
+
+        /// Enable nonce enforcement and pre-seed a set of issuable nonces.
+        fn with_nonces(mut self, seed: &[&str]) -> Self {
+            self.nonces = Some(std::sync::Mutex::new(
+                seed.iter().map(|s| (*s).to_string()).collect(),
+            ));
+            self
         }
     }
 
@@ -452,6 +548,40 @@ mod tests {
         {
             let result = self.keys.get(keyid).cloned();
             async move { result }
+        }
+
+        fn generate_nonce(&self) -> impl std::future::Future<Output = Option<String>> + Send + '_ {
+            let issued = self.nonces.as_ref().map(|set| {
+                let nonce = format!("nonce-{}", set.lock().map_or(0, |s| s.len()));
+                if let Ok(mut s) = set.lock() {
+                    s.insert(nonce.clone());
+                }
+                nonce
+            });
+            async move { issued }
+        }
+
+        fn validate_nonce(
+            &self,
+            nonce: &str,
+        ) -> impl std::future::Future<Output = NonceValidation> + Send + '_ {
+            let outcome = if self.nonce_backend_error {
+                NonceValidation::Error
+            } else {
+                match &self.nonces {
+                    // No enforcement: accept unconditionally (default behavior).
+                    None => NonceValidation::Valid,
+                    Some(set) => {
+                        let consumed = set.lock().is_ok_and(|mut s| s.remove(nonce));
+                        if consumed {
+                            NonceValidation::Valid
+                        } else {
+                            NonceValidation::Invalid
+                        }
+                    }
+                }
+            };
+            async move { outcome }
         }
     }
 
@@ -797,5 +927,121 @@ mod tests {
             response.headers().get("accept-signature").is_none(),
             "DigestMismatch (tampered body) must NOT advertise Accept-Signature"
         );
+    }
+
+    /// Build a signed GET request against `/v1/test`, optionally with a nonce.
+    fn signed_get(signer: &EcdsaP256Signer, nonce: Option<&str>) -> Request<axum::body::Body> {
+        let mut req = Request::builder()
+            .method("GET")
+            .uri("http://example.com/v1/test")
+            .body(axum::body::Body::empty())
+            .unwrap();
+
+        let mut builder = SignatureBuilder::new("sig1").method().path().created_now();
+        if let Some(n) = nonce {
+            builder = builder.nonce(n);
+        }
+        builder.sign_request(&mut req, signer).unwrap();
+
+        let (mut parts, body) = req.into_parts();
+        parts.uri = "/v1/test".parse().unwrap();
+        Request::from_parts(parts, body)
+    }
+
+    fn resolver_with_key_and_nonces(
+        signer: &EcdsaP256Signer,
+        seed: &[&str],
+    ) -> Arc<InMemoryKeyResolver> {
+        let mut resolver = InMemoryKeyResolver::new().with_nonces(seed);
+        resolver.insert("test-key".to_string(), Arc::new(signer.verifier()));
+        Arc::new(resolver)
+    }
+
+    /// Enforce-when-present: a nonce-enforcing resolver still accepts a
+    /// signed request that carries no nonce (the client's first request).
+    #[tokio::test]
+    async fn test_nonce_absent_is_accepted() {
+        let signer = EcdsaP256Signer::generate("test-key").unwrap();
+        let resolver = resolver_with_key_and_nonces(&signer, &[]);
+        let router = build_test_router(resolver);
+
+        let response = <Router as tower::ServiceExt<Request<axum::body::Body>>>::oneshot(
+            router,
+            signed_get(&signer, None),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    /// A known nonce is accepted once, then a byte-identical replay is
+    /// rejected (single-use), and the rejection carries a fresh nonce.
+    #[tokio::test]
+    async fn test_nonce_valid_then_replay_rejected() {
+        let signer = EcdsaP256Signer::generate("test-key").unwrap();
+        let resolver = resolver_with_key_and_nonces(&signer, &["known-nonce"]);
+        let router = build_test_router(resolver);
+
+        let req = signed_get(&signer, Some("known-nonce"));
+        // Capture the signed headers so the replay is byte-identical.
+        let (parts, _) = req.into_parts();
+        let replay = Request::from_parts(parts.clone(), axum::body::Body::empty());
+        let first = Request::from_parts(parts, axum::body::Body::empty());
+
+        let response = <Router as tower::ServiceExt<Request<axum::body::Body>>>::oneshot(
+            router.clone(),
+            first,
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response =
+            <Router as tower::ServiceExt<Request<axum::body::Body>>>::oneshot(router, replay)
+                .await
+                .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::UNAUTHORIZED,
+            "replaying a consumed nonce must be rejected"
+        );
+        assert!(
+            response.headers().get("signature-nonce").is_some(),
+            "a rejected nonce must offer a fresh one for recovery"
+        );
+    }
+
+    /// A nonce the server never issued is rejected.
+    #[tokio::test]
+    async fn test_nonce_unknown_rejected() {
+        let signer = EcdsaP256Signer::generate("test-key").unwrap();
+        let resolver = resolver_with_key_and_nonces(&signer, &["known-nonce"]);
+        let router = build_test_router(resolver);
+
+        let response = <Router as tower::ServiceExt<Request<axum::body::Body>>>::oneshot(
+            router,
+            signed_get(&signer, Some("never-issued")),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    /// A backend failure while checking a nonce is a 500, never a 401.
+    #[tokio::test]
+    async fn test_nonce_backend_error_is_500() {
+        let signer = EcdsaP256Signer::generate("test-key").unwrap();
+        let mut resolver = InMemoryKeyResolver::new().with_nonces(&["known-nonce"]);
+        resolver.nonce_backend_error = true;
+        resolver.insert("test-key".to_string(), Arc::new(signer.verifier()));
+        let router = build_test_router(Arc::new(resolver));
+
+        let response = <Router as tower::ServiceExt<Request<axum::body::Body>>>::oneshot(
+            router,
+            signed_get(&signer, Some("known-nonce")),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
     }
 }

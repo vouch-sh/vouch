@@ -54,13 +54,11 @@ pub(crate) async fn interactive(server: &str) -> Result<()> {
             return Ok(());
         }
 
-        // Build display options
-        let options: Vec<String> = response.keys.iter().map(format_key_for_display).collect();
-        let exit_label = tr!("keys-action-exit");
-
-        // Add quit option
-        let mut menu_options = options.clone();
-        menu_options.push(exit_label.clone());
+        // Build display options; the exit entry is the last index
+        let mut menu_options: Vec<String> =
+            response.keys.iter().map(format_key_for_display).collect();
+        let exit_idx = menu_options.len();
+        menu_options.push(tr!("keys-action-exit"));
 
         // Print prompt on its own line
         println!();
@@ -74,23 +72,22 @@ pub(crate) async fn interactive(server: &str) -> Result<()> {
 
         let nav_help = tr!("keys-help-navigation");
         // Show interactive menu (disable filtering to prevent accidental key presses)
+        // raw_prompt returns the selected index: display labels are not
+        // guaranteed unique (same model + same creation minute), so mapping
+        // the label back to a key could act on the wrong one.
         let selection = Select::new("\n", menu_options)
             .with_render_config(render_config)
             .with_help_message(&nav_help)
             .without_filtering()
-            .prompt();
+            .raw_prompt();
 
         match selection {
             Ok(selected) => {
-                if selected == exit_label {
+                if selected.index == exit_idx {
                     return Ok(());
                 }
 
-                // Find the selected key
-                let selected_idx = options.iter().position(|o| o == &selected);
-                if let Some(idx) = selected_idx
-                    && let Some(key) = response.keys.get(idx)
-                {
+                if let Some(key) = response.keys.get(selected.index) {
                     // Show action menu for selected key
                     if !handle_key_action(server, &client, key).await? {
                         return Ok(());
@@ -397,4 +394,40 @@ fn format_timestamp(timestamp: &jiff::Timestamp) -> String {
         return s.chars().take(16).collect();
     }
     s
+}
+
+#[cfg(test)]
+#[expect(
+    clippy::unwrap_used,
+    reason = "test code: panic on assertion failure is acceptable"
+)]
+mod tests {
+    use super::*;
+
+    /// Two distinct keys with the same device model registered in the same
+    /// minute render identically, so the interactive menu must select by
+    /// index, never by matching the display label.
+    #[test]
+    fn test_duplicate_display_labels_for_distinct_keys() {
+        let created: jiff::Timestamp = "2026-07-17T10:15:03Z".parse().unwrap();
+        let same_minute: jiff::Timestamp = "2026-07-17T10:15:41Z".parse().unwrap();
+        let make = |id: &str, at: jiff::Timestamp| KeyInfo {
+            id: id.to_string(),
+            name: format!("{id}-name"),
+            created_at: at,
+            is_current_session: false,
+            device_model: Some("YubiKey 5 NFC".to_string()),
+            aaguid: None,
+        };
+        let a = make("key-a", created);
+        let b = make("key-b", same_minute);
+        assert_ne!(a.id, b.id);
+        assert_eq!(format_key_for_display(&a), format_key_for_display(&b));
+    }
+
+    #[test]
+    fn test_format_timestamp_truncates_to_minute() {
+        let ts: jiff::Timestamp = "2026-07-17T10:15:03Z".parse().unwrap();
+        assert_eq!(format_timestamp(&ts), "2026-07-17T10:15");
+    }
 }

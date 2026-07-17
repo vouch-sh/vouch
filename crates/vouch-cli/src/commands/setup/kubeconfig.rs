@@ -46,6 +46,8 @@ pub(crate) struct KubeconfigClusterData {
         rename = "certificate-authority-data"
     )]
     pub certificate_authority_data: Option<String>,
+    #[serde(flatten)]
+    pub other: serde_json::Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -60,6 +62,8 @@ pub(crate) struct KubeconfigContextData {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub namespace: Option<String>,
     pub user: String,
+    #[serde(flatten)]
+    pub other: serde_json::Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -133,10 +137,12 @@ pub(crate) fn load_kubeconfig(path: &std::path::Path) -> Result<Kubeconfig> {
 /// Parse kubeconfig YAML with YAML 1.2 boolean rules.
 ///
 /// Only `true`/`false` are booleans; YAML 1.1 spellings (`no`, `yes`, `on`,
-/// `off`, ...) stay strings. Fields we don't model land in `#[serde(flatten)]`
-/// `serde_json::Value` catch-alls and are written back verbatim by
-/// [`save_kubeconfig`], so without strict booleans another user's unquoted
-/// `token: no` would round-trip as `token: false` and break their kubectl auth.
+/// `off`, ...) stay strings. Fields we don't model inside cluster, context,
+/// and user entries land in `#[serde(flatten)]` `serde_json::Value`
+/// catch-alls (and `preferences` is kept as a raw `Value`), so they are
+/// written back verbatim by [`save_kubeconfig`]. Without strict booleans
+/// another user's unquoted `token: no` would round-trip as `token: false`
+/// and break their kubectl auth.
 fn parse_kubeconfig(content: &str) -> Result<Kubeconfig, serde_saphyr::Error> {
     let options = serde_saphyr::options! { strict_booleans: true };
     serde_saphyr::from_str_with_options(content, options)
@@ -152,6 +158,43 @@ pub(crate) fn save_kubeconfig(path: &std::path::Path, config: &Kubeconfig) -> Re
         .with_context(|| vouch_cli::tr!("setup-kc-err-serialize"))?;
     write_secure_file(path, &content)?;
     Ok(())
+}
+
+/// An empty catch-all value for a freshly constructed entry.
+pub(crate) fn empty_other() -> serde_json::Value {
+    serde_json::Value::Object(serde_json::Map::new())
+}
+
+/// Return the `other` catch-all of the existing cluster named `name`, or an
+/// empty object if there is none. Used so an upsert preserves unmodeled
+/// fields (e.g. `insecure-skip-tls-verify`, `proxy-url`) the user added to
+/// the entry vouch manages, matching the round-trip preservation of #707.
+pub(crate) fn existing_cluster_other(config: &Kubeconfig, name: &str) -> serde_json::Value {
+    config
+        .clusters
+        .iter()
+        .find(|c| c.name == name)
+        .map_or_else(empty_other, |c| c.cluster.other.clone())
+}
+
+/// Return the `other` catch-all of the existing context named `name`, or an
+/// empty object if there is none (e.g. `extensions`).
+pub(crate) fn existing_context_other(config: &Kubeconfig, name: &str) -> serde_json::Value {
+    config
+        .contexts
+        .iter()
+        .find(|c| c.name == name)
+        .map_or_else(empty_other, |c| c.context.other.clone())
+}
+
+/// Return the `other` catch-all of the existing user named `name`, or an
+/// empty object if there is none.
+pub(crate) fn existing_user_other(config: &Kubeconfig, name: &str) -> serde_json::Value {
+    config
+        .users
+        .iter()
+        .find(|u| u.name == name)
+        .map_or_else(empty_other, |u| u.user.other.clone())
 }
 
 #[cfg(test)]
@@ -266,6 +309,7 @@ users: []
                 cluster: "my-cluster".to_string(),
                 namespace: None,
                 user: "vouch-k8s-my-cluster".to_string(),
+                other: serde_json::Value::Object(serde_json::Map::new()),
             },
         };
 
@@ -283,6 +327,7 @@ users: []
             cluster: KubeconfigClusterData {
                 server: "https://k8s.prod.example.com:6443".to_string(),
                 certificate_authority_data: Some("LS0tLS1CRUdJTi...".to_string()),
+                other: serde_json::Value::Object(serde_json::Map::new()),
             },
         };
 
@@ -298,6 +343,7 @@ users: []
             cluster: KubeconfigClusterData {
                 server: "https://k8s.dev.example.com:6443".to_string(),
                 certificate_authority_data: None,
+                other: serde_json::Value::Object(serde_json::Map::new()),
             },
         };
 
@@ -395,5 +441,96 @@ users:
         let bool_yaml = "users:\n- name: u\n  user:\n    some-flag: true\n";
         let parsed: Kubeconfig = parse_kubeconfig(bool_yaml).expect("should parse");
         assert_eq!(parsed.users[0].user.other["some-flag"], true);
+    }
+
+    /// Unmodeled fields inside cluster and context entries must survive a
+    /// load -> save -> load round-trip, same as user entries (#707).
+    #[test]
+    fn test_flatten_preserves_arbitrary_cluster_and_context_fields() {
+        let yaml = r#"
+apiVersion: v1
+kind: Config
+clusters:
+- name: legacy
+  cluster:
+    server: https://k8s.legacy.example.com:6443
+    insecure-skip-tls-verify: true
+    proxy-url: http://proxy.example.com:3128
+contexts:
+- name: legacy-ctx
+  context:
+    cluster: legacy
+    user: legacy-user
+    extensions:
+    - name: workspace
+      extension:
+        directory: /home/user/project
+users: []
+"#;
+
+        let config: Kubeconfig = parse_kubeconfig(yaml).expect("should parse");
+        let cluster_other = &config.clusters[0].cluster.other;
+        assert_eq!(cluster_other["insecure-skip-tls-verify"], true);
+        assert_eq!(cluster_other["proxy-url"], "http://proxy.example.com:3128");
+        let context_other = &config.contexts[0].context.other;
+        assert_eq!(context_other["extensions"][0]["name"], "workspace");
+
+        let serialized = serde_saphyr::to_string(&config).expect("should serialize");
+        let reparsed: Kubeconfig = parse_kubeconfig(&serialized).expect("should re-parse");
+        let cluster_other2 = &reparsed.clusters[0].cluster.other;
+        assert_eq!(cluster_other2["insecure-skip-tls-verify"], true);
+        assert_eq!(cluster_other2["proxy-url"], "http://proxy.example.com:3128");
+        let context_other2 = &reparsed.contexts[0].context.other;
+        assert_eq!(
+            context_other2["extensions"][0]["extension"]["directory"],
+            "/home/user/project"
+        );
+    }
+
+    /// Upserting a managed cluster/context/user entry must carry over its
+    /// preserved `other` fields rather than replacing them with an empty
+    /// map — otherwise re-running setup drops extras the flatten catch-all
+    /// preserved on load (#707 upsert path).
+    #[test]
+    fn test_existing_other_helpers_preserve_extras_on_upsert() {
+        let yaml = r#"
+apiVersion: v1
+kind: Config
+clusters:
+- name: my-cluster
+  cluster:
+    server: https://k8s.example.com:6443
+    insecure-skip-tls-verify: true
+contexts:
+- name: my-cluster-vouch
+  context:
+    cluster: my-cluster
+    user: vouch-k8s-my-cluster
+    extensions:
+    - name: ext
+users:
+- name: vouch-k8s-my-cluster
+  user:
+    token: keep-me
+"#;
+        let config: Kubeconfig = parse_kubeconfig(yaml).expect("should parse");
+
+        let cluster_other = existing_cluster_other(&config, "my-cluster");
+        assert_eq!(cluster_other["insecure-skip-tls-verify"], true);
+        let context_other = existing_context_other(&config, "my-cluster-vouch");
+        assert_eq!(context_other["extensions"][0]["name"], "ext");
+        let user_other = existing_user_other(&config, "vouch-k8s-my-cluster");
+        assert_eq!(user_other["token"], "keep-me");
+
+        // Absent entries yield an empty object, not a panic.
+        assert!(
+            existing_cluster_other(&config, "nope")
+                .as_object()
+                .is_some()
+        );
+        assert_eq!(
+            existing_cluster_other(&config, "nope"),
+            serde_json::Value::Object(serde_json::Map::new())
+        );
     }
 }

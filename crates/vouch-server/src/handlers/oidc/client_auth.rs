@@ -53,6 +53,16 @@ pub(crate) trait ClientAuthFields {
     fn client_assertion_type(&self) -> Option<&str>;
 }
 
+/// Strip the `Basic ` auth-scheme prefix, matching case-insensitively.
+///
+/// RFC 9110 Section 11.1 and RFC 7617 Section 2 require the auth-scheme
+/// token to be matched case-insensitively, so `basic` and `BASIC` are as
+/// valid as `Basic`.
+fn strip_basic_scheme(header: &str) -> Option<&str> {
+    let (scheme, rest) = header.split_once(' ')?;
+    scheme.eq_ignore_ascii_case("Basic").then_some(rest)
+}
+
 /// Extract client credentials from Authorization header or request body.
 ///
 /// Supports both `client_secret_basic` (RFC 6749 Section 2.3.1) and
@@ -66,7 +76,7 @@ pub(crate) fn extract_client_credentials(
     if let Some(auth_header) = headers
         .get(header::AUTHORIZATION)
         .and_then(|h| h.to_str().ok())
-        .and_then(|h| h.strip_prefix("Basic "))
+        .and_then(strip_basic_scheme)
         && let Ok(decoded) = base64::engine::general_purpose::STANDARD
             .decode(auth_header.trim())
             .or_else(|_| URL_SAFE_NO_PAD.decode(auth_header.trim()))
@@ -106,7 +116,7 @@ pub(crate) fn extract_client_auth<T: ClientAuthFields>(
     let has_basic = headers
         .get(header::AUTHORIZATION)
         .and_then(|h| h.to_str().ok())
-        .is_some_and(|h| h.starts_with("Basic "));
+        .is_some_and(|h| strip_basic_scheme(h).is_some());
 
     let has_client_secret = params.client_secret().is_some();
     let has_client_assertion = params.client_assertion().is_some();
@@ -242,4 +252,117 @@ fn oauth_error_response(error: &str, description: &str) -> Response {
         }),
     )
         .into_response()
+}
+
+/// Derive the authentication method ACTUALLY used on this request from the
+/// verification witnesses, as opposed to the registered
+/// `token_endpoint_auth_method` (which the presented credentials do not have
+/// to match — e.g. a stale client secret on a client since migrated to
+/// `private_key_jwt`).
+///
+/// * `jwt_auth` — a `client_assertion` was verified (RFC 7523).
+/// * `secret_auth` — a `client_secret` (Basic or body) was verified.
+/// * `mtls_auth` — a TLS client certificate was verified (RFC 8705). mTLS
+///   verification only runs for clients registered with a TLS method, so
+///   `registered` names the exact variant in that case.
+///
+/// A verified secret is reported as the registered secret variant when the
+/// client is registered with one (error-message fidelity); Basic vs Post is
+/// not distinguishable from the witness, and both are equally rejected for
+/// FAPI clients.
+pub(crate) fn actual_auth_method(
+    registered: crate::db::TokenEndpointAuthMethod,
+    jwt_auth: bool,
+    secret_auth: bool,
+    mtls_auth: bool,
+) -> crate::db::TokenEndpointAuthMethod {
+    use crate::db::TokenEndpointAuthMethod;
+    if jwt_auth {
+        TokenEndpointAuthMethod::PrivateKeyJwt
+    } else if secret_auth {
+        match registered {
+            m @ (TokenEndpointAuthMethod::ClientSecretBasic
+            | TokenEndpointAuthMethod::ClientSecretPost) => m,
+            _ => TokenEndpointAuthMethod::ClientSecretBasic,
+        }
+    } else if mtls_auth {
+        registered
+    } else {
+        TokenEndpointAuthMethod::None
+    }
+}
+
+#[cfg(test)]
+#[expect(
+    clippy::expect_used,
+    reason = "test code: panic on assertion failure is acceptable"
+)]
+mod tests {
+    use super::*;
+    use base64::Engine;
+
+    fn basic_header(scheme: &str) -> HeaderMap {
+        let creds = base64::engine::general_purpose::STANDARD.encode("client-1:s3cret");
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            format!("{scheme} {creds}").parse().expect("valid header"),
+        );
+        headers
+    }
+
+    /// RFC 9110 Section 11.1 / RFC 7617 Section 2: the auth-scheme token is
+    /// case-insensitive, so `basic` and `BASIC` must work like `Basic`.
+    #[test]
+    fn test_extract_client_credentials_scheme_case_insensitive() {
+        for scheme in ["Basic", "basic", "BASIC", "bAsIc"] {
+            let headers = basic_header(scheme);
+            let creds = extract_client_credentials(&headers, None, None);
+            assert!(creds.is_some(), "{scheme} scheme must be accepted");
+            let creds = creds.expect("checked above");
+            assert_eq!(creds.client_id, "client-1", "{scheme}");
+            assert!(creds.client_secret.is_some(), "{scheme}");
+        }
+    }
+
+    #[test]
+    fn test_strip_basic_scheme_rejects_other_schemes() {
+        assert!(strip_basic_scheme("Bearer abc").is_none());
+        assert!(strip_basic_scheme("Basicabc").is_none());
+        assert!(strip_basic_scheme("Basic creds").is_some());
+    }
+
+    /// The witness-derived method must reflect what the request actually
+    /// authenticated with, regardless of the registered method (#706).
+    #[test]
+    fn test_actual_auth_method_from_witnesses() {
+        use crate::db::TokenEndpointAuthMethod as M;
+
+        // A verified JWT assertion is private_key_jwt no matter what is registered.
+        assert_eq!(
+            actual_auth_method(M::ClientSecretBasic, true, false, false),
+            M::PrivateKeyJwt
+        );
+        // A verified secret on a private_key_jwt-registered client is a
+        // secret method, NOT the registered method.
+        assert_eq!(
+            actual_auth_method(M::PrivateKeyJwt, false, true, false),
+            M::ClientSecretBasic
+        );
+        // A verified secret on a secret-registered client keeps the variant.
+        assert_eq!(
+            actual_auth_method(M::ClientSecretPost, false, true, false),
+            M::ClientSecretPost
+        );
+        // mTLS verification only runs when a TLS method is registered.
+        assert_eq!(
+            actual_auth_method(M::SelfSignedTlsClientAuth, false, false, true),
+            M::SelfSignedTlsClientAuth
+        );
+        // No witness at all is the public-client "none" method.
+        assert_eq!(
+            actual_auth_method(M::PrivateKeyJwt, false, false, false),
+            M::None
+        );
+    }
 }

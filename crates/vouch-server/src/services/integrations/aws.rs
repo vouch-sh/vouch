@@ -132,12 +132,21 @@ pub(crate) enum AwsError {
 pub(crate) type AwsResult<T> = Result<T, AwsError>;
 
 /// Result of issuing an AWS OIDC token.
-#[derive(Debug)]
 pub(crate) struct AwsTokenResult {
     /// The signed OIDC ID token.
     pub id_token: String,
     /// Token validity in seconds.
     pub expires_in: u64,
+}
+
+// Custom Debug that redacts id_token to prevent accidental log exposure.
+impl std::fmt::Debug for AwsTokenResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AwsTokenResult")
+            .field("id_token", &"[REDACTED]")
+            .field("expires_in", &self.expires_in)
+            .finish()
+    }
 }
 
 /// Build the AWS session tags embedded in the `https://aws.amazon.com/tags`
@@ -263,6 +272,19 @@ pub(crate) async fn issue_aws_token(
 mod tests {
     use super::*;
     use crate::crypto::keys::OidcRsaSigningKey;
+
+    /// The signed OIDC ID token is a bearer credential for AWS STS and
+    /// must never appear in `{:?}` output.
+    #[test]
+    fn test_aws_token_result_debug_redacts_id_token() {
+        let result = AwsTokenResult {
+            id_token: "eyJhbGciOiJSUzI1NiJ9.secret-token".to_string(),
+            expires_in: 28_800,
+        };
+        let debug = format!("{result:?}");
+        assert!(debug.contains("[REDACTED]"), "{debug}");
+        assert!(!debug.contains("secret-token"), "{debug}");
+    }
     use base64::Engine;
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 

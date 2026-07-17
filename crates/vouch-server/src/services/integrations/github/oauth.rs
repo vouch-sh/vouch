@@ -116,21 +116,31 @@ impl GitHubService<'_> {
                 .await
                 .map_err(|e| GitHubError::GitHubApi(format!("{e:#}")))?;
 
-        // Update the refresh token if a new one was issued
-        if let Some(new_refresh_token) = &token_response.refresh_token
-            && let Ok(Some(user)) = db::get_user_by_id(self.store, user_id).await
-            && let (Some(github_id), Some(github_login)) = (user.github_id, &user.github_login)
-        {
-            // Best-effort refresh-token rotation; user session stays valid even if
-            // this DB write fails — the next refresh will retry.
-            let _updated = db::update_user_github_identity(
+        // Persist the rotated refresh token. GitHub rotates refresh tokens:
+        // the old token is invalidated by the refresh above, so losing the
+        // new one here would permanently break the integration (the "next
+        // refresh" would present the already-invalidated token). Propagate
+        // failures so they surface instead of silently discarding the only
+        // copy of the new token.
+        if let Some(new_refresh_token) = &token_response.refresh_token {
+            let user = db::get_user_by_id(self.store, user_id)
+                .await
+                .map_err(GitHubError::Database)?
+                .ok_or(GitHubError::UserNotFound)?;
+
+            let (Some(github_id), Some(github_login)) = (user.github_id, &user.github_login) else {
+                return Err(GitHubError::GitHubAccountNotLinked);
+            };
+
+            db::update_user_github_identity(
                 self.store,
                 user_id,
                 github_id,
                 github_login,
                 Some(new_refresh_token),
             )
-            .await;
+            .await
+            .map_err(GitHubError::Database)?;
         }
 
         Ok(Some(token_response.access_token))

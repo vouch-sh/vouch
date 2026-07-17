@@ -135,10 +135,17 @@ pub(crate) async fn get_token(
     domain_owner: &str,
     region: &str,
 ) -> Result<CodeArtifactToken> {
-    let cache_key = format!("codeartifact:{domain}:{domain_owner}:{region}");
+    // Detect the agent context BEFORE the cache lookup and fold it into the
+    // cache key so agent and non-agent invocations never share a cached
+    // entry — an agent must not receive a token minted without the
+    // ReadOnlyAccess session policy / `vouch:AccessType=ai` tags
+    // (issues #398, #426).
+    let agent_source = crate::commands::credential::aws::detect_agent_source();
+    let cache_key = build_cache_key(domain, domain_owner, region, agent_source.as_deref());
 
+    let agent = agent_source;
     let data = cache::get_or_fetch(&cache_key, "CodeArtifact token", || async {
-        let token = fetch_token(server, domain, domain_owner, region).await?;
+        let token = fetch_token(server, domain, domain_owner, region, agent.as_deref()).await?;
         let expires_at = jiff::Timestamp::from_second(token.expiration)
             .map_or_else(|_| cache::default_expiry(), |ts| ts.to_string());
         let data = serde_json::json!({
@@ -164,12 +171,23 @@ pub(crate) async fn get_token(
     })
 }
 
+/// Build the cache key for CodeArtifact tokens.
+///
+/// The agent source is folded into the key so that agent and non-agent
+/// invocations never share a cached entry (same pattern as the STS, EKS,
+/// RDS, and Redshift credential caches).
+fn build_cache_key(domain: &str, domain_owner: &str, region: &str, agent: Option<&str>) -> String {
+    let suffix = agent.map_or(String::new(), |src| format!(":agent:{src}"));
+    format!("codeartifact:{domain}:{domain_owner}:{region}{suffix}")
+}
+
 /// Fetch a fresh CodeArtifact token (no caching).
 async fn fetch_token(
     server: &str,
     domain: &str,
     domain_owner: &str,
     region: &str,
+    agent_source: Option<&str>,
 ) -> Result<CodeArtifactToken> {
     let role_arn = get_local_aws_role().ok_or_else(|| {
         anyhow::anyhow!(
@@ -178,13 +196,12 @@ async fn fetch_token(
         )
     })?;
 
-    let agent_source = crate::commands::credential::aws::detect_agent_source();
     let result = exchange_for_sts_credentials(StsRequest {
         server,
         role_arn: &role_arn,
         region,
         management_role: None,
-        agent_source: agent_source.as_deref(),
+        agent_source,
     })
     .await?;
 
@@ -208,6 +225,28 @@ async fn fetch_token(
     reason = "test code: panic on assertion failure is acceptable"
 )]
 mod tests {
+    use super::build_cache_key;
+
+    /// Agent and non-agent invocations must never share a cached token:
+    /// the agent-restricted STS exchange (ReadOnlyAccess session policy)
+    /// would otherwise be bypassed by a full-access cached entry (#716).
+    #[test]
+    fn test_cache_key_includes_agent_source() {
+        let plain = build_cache_key("my-domain", "123456789012", "us-east-1", None);
+        let agent = build_cache_key(
+            "my-domain",
+            "123456789012",
+            "us-east-1",
+            Some("claude-code"),
+        );
+        assert_eq!(plain, "codeartifact:my-domain:123456789012:us-east-1");
+        assert_eq!(
+            agent,
+            "codeartifact:my-domain:123456789012:us-east-1:agent:claude-code"
+        );
+        assert_ne!(plain, agent);
+    }
+
     /// Verify the CodeArtifact cache JSON round-trips correctly.
     ///
     /// The `get_token` function serializes with `json!()` and then extracts

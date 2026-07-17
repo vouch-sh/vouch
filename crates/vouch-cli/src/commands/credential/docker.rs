@@ -335,8 +335,7 @@ fn base64_decode(input: &str) -> Result<Vec<u8>> {
 
 /// Get credentials for GitHub Container Registry.
 async fn get_ghcr_credential(server: &str, token: &SecretString) -> Result<DockerCredential> {
-    let mut client = VouchClient::unauthenticated(server)?;
-    client.set_token(token.clone());
+    let client = VouchClient::with_token(server, token.clone())?;
 
     // Request token from server (no specific owner/repo for GHCR)
     let request = GitHubTokenRequest::default();

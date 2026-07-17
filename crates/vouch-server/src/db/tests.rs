@@ -1801,6 +1801,62 @@ async fn test_scim_token_management() {
     assert!(token.is_none());
 }
 
+/// Expired SCIM tokens cannot authenticate, so they must not count
+/// toward the per-org creation limit, and cleanup must purge them (#715).
+#[tokio::test]
+async fn test_expired_scim_tokens_excluded_from_active_count() {
+    let (store, _audit) = test_db().await;
+
+    let org = create_organization(&store, "test.com", Some("Test Org"), None)
+        .await
+        .expect("Failed to create org");
+    let org_id = &org.id;
+
+    let past = jiff::Timestamp::now() - jiff::Span::new().hours(1);
+    let future = jiff::Timestamp::now() + jiff::Span::new().hours(1);
+
+    // Two expired tokens and one active token
+    for (hash, expiry) in [
+        ("expired-1", Some(past)),
+        ("expired-2", Some(past)),
+        ("active-1", Some(future)),
+    ] {
+        create_scim_token(&store, hash, None, expiry, Some(org_id), None)
+            .await
+            .expect("Failed to create SCIM token");
+    }
+
+    // list returns everything; the active count excludes the expired pair
+    let all = list_scim_tokens(&store, Some(org_id))
+        .await
+        .expect("Failed to list tokens");
+    assert_eq!(all.len(), 3);
+
+    let active = count_active_scim_tokens(&store, org_id)
+        .await
+        .expect("Failed to count active tokens");
+    assert_eq!(active, 1);
+
+    // Tokens without an expiration are always active
+    create_scim_token(&store, "no-expiry", None, None, Some(org_id), None)
+        .await
+        .expect("Failed to create SCIM token");
+    let active = count_active_scim_tokens(&store, org_id)
+        .await
+        .expect("Failed to count active tokens");
+    assert_eq!(active, 2);
+
+    // Cleanup purges only the expired tokens
+    let deleted = delete_expired_scim_tokens(&store)
+        .await
+        .expect("Failed to delete expired tokens");
+    assert_eq!(deleted, 2);
+    let remaining = list_scim_tokens(&store, Some(org_id))
+        .await
+        .expect("Failed to list tokens");
+    assert_eq!(remaining.len(), 2);
+}
+
 // ========================================================================
 // Cascade Delete Tests
 // ========================================================================
@@ -3923,6 +3979,48 @@ async fn test_enroll_promotes_admin_for_org_without_one() {
     assert_eq!(
         org_count, 1,
         "no duplicate org may be created when one already exists"
+    );
+}
+
+// A retrying CAS loser must re-derive its admin decision from fresh state:
+// with the winner's user row committed and the org's created_by_user_id
+// still unset (the state a loser observes when it re-runs after aborting
+// on the org-row conflict), the second enrollee must come out non-admin.
+#[tokio::test]
+async fn test_enroll_second_user_after_winner_commit_is_not_admin() {
+    use crate::db::documents::organization::OrganizationDoc;
+    use crate::db::enroll_user_with_org;
+
+    let (store, _audit) = test_db().await;
+    let domain = "retry-loser.example";
+
+    let winner = enroll_user_with_org(&store, "winner@retry-loser.example", None, Some(domain))
+        .await
+        .expect("winner enrollment");
+    assert!(winner.is_org_admin);
+
+    // Simulate the winner having committed its user row but NOT yet the org
+    // admin slot (crash between the two would leave this state; a retrying
+    // loser sees it after aborting on the org-row conflict).
+    let org_id = winner.org_id.expect("org id");
+    let org = store
+        .get::<OrganizationDoc>(&org_id)
+        .await
+        .expect("get org")
+        .expect("org exists");
+    let mut data = org.data;
+    data.created_by_user_id = None;
+    store
+        .update(&org_id, &data)
+        .await
+        .expect("clear admin slot");
+
+    let loser = enroll_user_with_org(&store, "loser@retry-loser.example", None, Some(domain))
+        .await
+        .expect("second enrollment");
+    assert!(
+        !loser.is_org_admin,
+        "an enrollee joining an org that already has users must not become admin"
     );
 }
 

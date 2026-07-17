@@ -245,6 +245,10 @@ pub async fn run_cleanup(
     // Clean up expired JWKS cache entries (standalone cache docs)
     cleanup_and_log!(db::delete_expired_jwks_caches(store), "expired JWKS caches");
 
+    // Clean up expired SCIM tokens (they cannot authenticate and would
+    // otherwise accumulate against the per-org token limit)
+    cleanup_and_log!(db::delete_expired_scim_tokens(store), "expired SCIM tokens");
+
     // Re-verify organization additional domains.
     if let Err(e) = recheck_additional_domains(store, audit, now).await {
         tracing::warn!(error = %e, "Additional-domain re-verification pass failed");

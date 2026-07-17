@@ -40,7 +40,7 @@
 //! and spaces between tags) is treated as text content and preserved in canonical
 //! output, which is correct per the c14n spec.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Exclusive XML Canonicalization (exc-c14n) of a subtree.
 ///
@@ -65,21 +65,22 @@ pub(crate) fn exclusive_c14n(node: roxmltree::Node<'_, '_>, inclusive_prefixes: 
         return String::new();
     }
     let mut output = String::with_capacity(512);
-    let rendered_ns: BTreeSet<(String, String)> = BTreeSet::new();
+    let rendered_ns: BTreeMap<String, String> = BTreeMap::new();
     canonicalize_node(node, &mut output, inclusive_prefixes, &rendered_ns);
     output
 }
 
 /// Recursively canonicalize an element node and its children.
 ///
-/// `rendered_ns` tracks `(prefix, uri)` pairs already emitted by ancestor
-/// elements. The check uses the EXACT `(prefix, uri)` pair -- if a prefix is
-/// re-declared with a different URI by a descendant, it must be re-emitted.
+/// `rendered_ns` is the spec's `ns_rendered` dictionary: for every prefix it
+/// holds the binding most recently emitted by an ancestor (inserts replace,
+/// per exc-c14n section 3.1). If a prefix is re-declared with a different URI
+/// by a descendant, its entry is overwritten and the declaration re-emitted.
 fn canonicalize_node(
     node: roxmltree::Node<'_, '_>,
     output: &mut String,
     inclusive_prefixes: &[&str],
-    rendered_ns: &BTreeSet<(String, String)>,
+    rendered_ns: &BTreeMap<String, String>,
 ) {
     if !node.is_element() {
         return;
@@ -113,17 +114,14 @@ fn canonicalize_node(
             output.push_str(uri);
             output.push('"');
         }
-        new_rendered_ns.insert((prefix.clone(), uri.clone()));
+        new_rendered_ns.insert(prefix.clone(), uri.clone());
     }
 
     // Step 3: Handle default namespace undeclaration.
     // If this element has no namespace (or the default NS is now empty), check
     // if an ancestor rendered a default namespace that must be undeclared.
     let elem_default_ns = node.default_namespace().unwrap_or("");
-    let ancestor_default_ns = rendered_ns
-        .iter()
-        .find(|(p, _)| p.is_empty())
-        .map_or("", |(_, u)| u.as_str());
+    let ancestor_default_ns = rendered_ns.get("").map_or("", String::as_str);
 
     // Undeclare if: element has no default NS but ancestor rendered one,
     // AND we haven't already emitted xmlns="" (which would happen if this
@@ -131,7 +129,7 @@ fn canonicalize_node(
     let already_emitted_default = sorted_ns.iter().any(|(p, _)| p.is_empty());
     if !already_emitted_default && elem_default_ns.is_empty() && !ancestor_default_ns.is_empty() {
         output.push_str(" xmlns=\"\"");
-        new_rendered_ns.insert((String::new(), String::new()));
+        new_rendered_ns.insert(String::new(), String::new());
     }
 
     // Step 5-6: Collect and sort attributes.
@@ -198,12 +196,13 @@ fn canonicalize_node(
 ///    attributes (but NOT the implicit `xml:` prefix).
 /// 2. Add namespaces for InclusiveNamespaces prefixes that are in scope
 ///    (declared on this element or ancestors), silently skipping out-of-scope ones.
-/// 3. Exclude pairs already rendered by an ancestor (exact `(prefix, uri)` match).
+/// 3. Exclude pairs whose prefix's CURRENT ancestor binding already equals
+///    the same URI (dictionary lookup, so a rebinding is always re-emitted).
 /// 4. Never emit the `xml:` namespace declaration.
 fn collect_namespaces(
     node: roxmltree::Node<'_, '_>,
     inclusive_prefixes: &[&str],
-    rendered_ns: &BTreeSet<(String, String)>,
+    rendered_ns: &BTreeMap<String, String>,
 ) -> BTreeSet<(String, String)> {
     let mut result: BTreeSet<(String, String)> = BTreeSet::new();
 
@@ -249,11 +248,12 @@ fn collect_namespaces(
         // If the prefix is not in scope, silently skip it (per C4 fix).
     }
 
-    // Exclude pairs already rendered by an ancestor (exact (prefix, uri) match).
-    // C2 fix: check the EXACT (prefix, uri) pair, not just prefix.
+    // Exclude pairs whose prefix's current ancestor binding is the same URI.
+    // The dictionary lookup (not exact-pair membership) matters: once a prefix
+    // has been re-bound, an older historical binding must be re-emitted.
     result
         .into_iter()
-        .filter(|pair| !rendered_ns.contains(pair))
+        .filter(|(prefix, uri)| rendered_ns.get(prefix) != Some(uri))
         .collect()
 }
 
@@ -584,6 +584,56 @@ mod tests {
         assert_eq!(
             result,
             r#"<root xmlns="urn:default"><child>text</child></root>"#
+        );
+    }
+
+    /// Regression for the ns_rendered dictionary semantics (exc-c14n
+    /// section 3.1): after a declare -> undeclare -> redeclare chain, the
+    /// deepest element must still get its `xmlns=""` undeclaration. With the
+    /// old set-based tracking, the historical `("", "")` entry from the
+    /// undeclare level was returned by the default-namespace lookup
+    /// (lexicographically smallest), so the final `xmlns=""` was skipped.
+    #[test]
+    fn default_namespace_undeclaration_after_redeclaration() {
+        let result = c14n(
+            r#"<root xmlns="urn:a"><child xmlns=""><grandchild xmlns="urn:b"><leaf xmlns="">text</leaf></grandchild></child></root>"#,
+            "root",
+            &[],
+        );
+        assert_eq!(
+            result,
+            r#"<root xmlns="urn:a"><child xmlns=""><grandchild xmlns="urn:b"><leaf xmlns="">text</leaf></grandchild></child></root>"#
+        );
+    }
+
+    /// A redeclared default namespace on a middle element must still be
+    /// undeclared on a child with no namespace (three-level variant).
+    #[test]
+    fn default_namespace_undeclared_after_middle_redeclaration() {
+        let result = c14n(
+            r#"<root><child2 xmlns="urn:b"><child3 xmlns="">text</child3></child2></root>"#,
+            "root",
+            &[],
+        );
+        assert_eq!(
+            result,
+            r#"<root><child2 xmlns="urn:b"><child3 xmlns="">text</child3></child2></root>"#
+        );
+    }
+
+    /// A prefix re-bound to a different URI by a descendant must be
+    /// re-emitted even if the original (prefix, uri) pair was rendered by
+    /// an outer ancestor (dictionary lookup, not exact-pair membership).
+    #[test]
+    fn prefix_rebinding_re_emits_original_uri() {
+        let result = c14n(
+            r#"<a:root xmlns:a="urn:1"><a:mid xmlns:a="urn:2"><a:leaf xmlns:a="urn:1">text</a:leaf></a:mid></a:root>"#,
+            "root",
+            &[],
+        );
+        assert_eq!(
+            result,
+            r#"<a:root xmlns:a="urn:1"><a:mid xmlns:a="urn:2"><a:leaf xmlns:a="urn:1">text</a:leaf></a:mid></a:root>"#
         );
     }
 

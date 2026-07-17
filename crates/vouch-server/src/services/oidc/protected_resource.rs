@@ -331,7 +331,7 @@ pub async fn build_protected_resource_metadata(
         resource_policy_uri: config.resource_policy_uri.clone(),
         resource_tos_uri: config.resource_tos_uri.clone(),
 
-        tls_client_certificate_bound_access_tokens: config.tls_cert.is_some(),
+        tls_client_certificate_bound_access_tokens: config.tls_configured(),
         authorization_details_types_supported: None,
         dpop_signing_alg_values_supported,
         dpop_bound_access_tokens_required: true,

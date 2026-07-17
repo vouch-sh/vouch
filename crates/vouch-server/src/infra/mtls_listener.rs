@@ -75,6 +75,13 @@ impl AsyncWrite for MtlsStream {
     }
 }
 
+/// Shared handle to the mTLS listener's rustls config.
+///
+/// The listener snapshots this on every accept (`load_full`), so storing a
+/// rebuilt config makes new handshakes pick up rotated certificates without
+/// restarting the listener.
+pub(crate) type MtlsConfigSwap = Arc<ArcSwap<rustls::ServerConfig>>;
+
 /// Custom listener for mTLS: TLS with client certificate verification.
 ///
 /// Bound to a separate port from the main HTTPS listener. Client
@@ -82,7 +89,7 @@ impl AsyncWrite for MtlsStream {
 /// trusting our Client Certificate CA.
 pub(crate) struct MtlsListener {
     tcp: TcpListener,
-    tls_config: Arc<ArcSwap<rustls::ServerConfig>>,
+    tls_config: MtlsConfigSwap,
 }
 
 impl MtlsListener {
@@ -92,7 +99,7 @@ impl MtlsListener {
     /// * `tcp` - Bound TCP listener
     /// * `tls_config` - Rustls config with client cert verifier (wrapped
     ///   in `ArcSwap` for hot reload)
-    pub(crate) fn new(tcp: TcpListener, tls_config: Arc<ArcSwap<rustls::ServerConfig>>) -> Self {
+    pub(crate) fn new(tcp: TcpListener, tls_config: MtlsConfigSwap) -> Self {
         Self { tcp, tls_config }
     }
 }
@@ -191,6 +198,24 @@ pub(crate) fn build_mtls_server_config(
     config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
 
     Ok(Arc::new(config))
+}
+
+/// Rebuild the mTLS server config from PEM cert/key and store it into the
+/// listener's [`MtlsConfigSwap`].
+///
+/// Called from the SIGHUP handler and the S3 config polling task so the
+/// mTLS listener picks up rotated certificates alongside the main HTTPS
+/// listener. On error the swap is left unchanged (existing connections and
+/// new handshakes keep the previous certificates).
+pub(crate) fn reload_mtls_from_config(
+    mtls_config: &MtlsConfigSwap,
+    cert: &str,
+    key: &secrecy::SecretString,
+) -> anyhow::Result<()> {
+    let (certs, key_der) = super::tls::parse_cert_and_key_pem(cert, key)?;
+    let new_config = build_mtls_server_config(certs, key_der)?;
+    mtls_config.store(new_config);
+    Ok(())
 }
 
 /// Client certificate verifier that accepts any certificate.
@@ -355,6 +380,60 @@ mod tests {
             result.is_ok(),
             "valid server cert must succeed, got: {:?}",
             result.err()
+        );
+    }
+
+    /// Wrap DER bytes in a PEM envelope.
+    fn der_to_pem(label: &str, der: &[u8]) -> String {
+        use base64::Engine;
+        let b64 = base64::engine::general_purpose::STANDARD.encode(der);
+        let wrapped: Vec<String> = b64
+            .as_bytes()
+            .chunks(64)
+            .map(|c| String::from_utf8_lossy(c).into_owned())
+            .collect();
+        format!(
+            "-----BEGIN {label}-----\n{}\n-----END {label}-----\n",
+            wrapped.join("\n")
+        )
+    }
+
+    /// A successful reload must store a NEW config into the swap so the
+    /// next handshake picks up the rotated certificate (#710).
+    #[test]
+    fn test_reload_mtls_from_config_swaps_config() {
+        let (cert_der, pkcs8_der) = make_self_signed_server_cert();
+        let server_cert = rustls::pki_types::CertificateDer::from(cert_der.clone());
+        let server_key = rustls::pki_types::PrivateKeyDer::Pkcs8(pkcs8_der.clone().into());
+        let initial = build_mtls_server_config(vec![server_cert], server_key).expect("config");
+        let swap: MtlsConfigSwap = Arc::new(ArcSwap::from(initial.clone()));
+
+        let cert_pem = der_to_pem("CERTIFICATE", &cert_der);
+        let key_pem = der_to_pem("PRIVATE KEY", &pkcs8_der);
+        let key_secret = secrecy::SecretString::from(key_pem);
+
+        reload_mtls_from_config(&swap, &cert_pem, &key_secret).expect("reload");
+        assert!(
+            !Arc::ptr_eq(&swap.load_full(), &initial),
+            "reload must store a fresh config"
+        );
+    }
+
+    /// A failed reload must leave the previous config in place.
+    #[test]
+    fn test_reload_mtls_from_config_failure_keeps_old_config() {
+        let (cert_der, pkcs8_der) = make_self_signed_server_cert();
+        let server_cert = rustls::pki_types::CertificateDer::from(cert_der);
+        let server_key = rustls::pki_types::PrivateKeyDer::Pkcs8(pkcs8_der.into());
+        let initial = build_mtls_server_config(vec![server_cert], server_key).expect("config");
+        let swap: MtlsConfigSwap = Arc::new(ArcSwap::from(initial.clone()));
+
+        let key_secret = secrecy::SecretString::from("not a key".to_string());
+        let result = reload_mtls_from_config(&swap, "not a certificate", &key_secret);
+        assert!(result.is_err(), "garbage PEM must fail");
+        assert!(
+            Arc::ptr_eq(&swap.load_full(), &initial),
+            "failed reload must not touch the swap"
         );
     }
 }

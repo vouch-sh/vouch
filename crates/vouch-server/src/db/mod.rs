@@ -118,10 +118,11 @@ pub use config::{AuthEventParams, AuthEventType, ClientInfo, spawn_audit_event};
 // Re-export SCIM types and functions
 pub use scim::{
     ScimFilterError, ScimGroupRecord, ScimScope, ScimScopeSet, ScimToken, ScimUserRecord,
-    add_scim_group_member, create_scim_group, create_scim_token, create_scim_user,
-    delete_scim_group, delete_scim_token, get_scim_group, get_scim_group_members,
-    get_scim_token_by_hash, get_scim_user, insert_scim_audit, list_scim_groups, list_scim_tokens,
-    list_scim_users, remove_scim_group_member, replace_scim_group_members, update_scim_group,
+    add_scim_group_member, count_active_scim_tokens, create_scim_group, create_scim_token,
+    create_scim_user, delete_expired_scim_tokens, delete_scim_group, delete_scim_token,
+    get_scim_group, get_scim_group_members, get_scim_token_by_hash, get_scim_user,
+    insert_scim_audit, list_scim_groups, list_scim_tokens, list_scim_users,
+    remove_scim_group_member, replace_scim_group_members, update_scim_group,
     update_scim_token_last_used, update_scim_user,
 };
 

@@ -2,7 +2,7 @@
 //! SCIM 2.0 (RFC 7643/7644) database operations.
 
 use super::audit::{AuditEventKind, AuditStore};
-use super::document_type::Document;
+use super::document_type::{Document, DocumentType};
 use super::documents::audit::ScimAuditData;
 use super::documents::scim::{ScimGroupDoc, ScimGroupMemberDoc, ScimTokenDoc};
 use super::documents::user::UserDoc;
@@ -231,6 +231,25 @@ pub async fn list_scim_tokens(
         store.list_all::<ScimTokenDoc>().await?
     };
     Ok(docs.into_iter().map(ScimToken::from).collect())
+}
+
+/// Count an organization's SCIM tokens that can still authenticate.
+///
+/// Expired tokens are excluded: authentication already treats them as
+/// non-existent ([`get_scim_token_by_hash`]), so they must not count
+/// toward the per-org creation limit either.
+pub async fn count_active_scim_tokens(store: &DocumentStore, org_id: &str) -> Result<usize> {
+    let docs = store.find_all::<ScimTokenDoc>("org_id", org_id).await?;
+    let now = Timestamp::now();
+    Ok(docs
+        .into_iter()
+        .filter(|doc| doc.data.expires_at.is_none_or(|exp| exp > now))
+        .count())
+}
+
+/// Delete expired SCIM tokens. Returns count deleted.
+pub async fn delete_expired_scim_tokens(store: &DocumentStore) -> Result<u64> {
+    store.delete_expired(ScimTokenDoc::DOC_TYPE).await
 }
 
 // ============================================================================
