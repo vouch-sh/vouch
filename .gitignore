@@ -76,7 +76,6 @@ ssh_ca_key*
 # mdBook build output
 docs/book/
 .claude/settings.local.json
-.claude/skills
 .claude/worktrees
 .claude/plans/
 .mcp.json
