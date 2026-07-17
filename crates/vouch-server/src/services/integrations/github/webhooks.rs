@@ -130,15 +130,6 @@ impl From<&str> for WebhookEvent {
     }
 }
 
-/// Result of processing a webhook.
-#[derive(Debug)]
-pub(crate) enum WebhookResult {
-    /// Event was processed successfully.
-    Processed,
-    /// Event type is not handled (ignored).
-    Ignored,
-}
-
 // ============================================================================
 // Webhook Processing Implementation
 // ============================================================================
@@ -176,19 +167,19 @@ impl GitHubService<'_> {
         &self,
         event_type: WebhookEvent,
         body: &[u8],
-    ) -> GitHubResult<WebhookResult> {
+    ) -> GitHubResult<()> {
         match event_type {
             WebhookEvent::Installation => {
                 self.handle_installation_event(body).await?;
-                Ok(WebhookResult::Processed)
+                Ok(())
             }
             WebhookEvent::InstallationRepositories => {
                 self.handle_installation_repositories_event(body).await?;
-                Ok(WebhookResult::Processed)
+                Ok(())
             }
             WebhookEvent::Unknown => {
                 tracing::debug!("Ignoring unknown webhook event type");
-                Ok(WebhookResult::Ignored)
+                Ok(())
             }
         }
     }
