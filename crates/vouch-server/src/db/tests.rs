@@ -1801,6 +1801,62 @@ async fn test_scim_token_management() {
     assert!(token.is_none());
 }
 
+/// Expired SCIM tokens cannot authenticate, so they must not count
+/// toward the per-org creation limit, and cleanup must purge them (#715).
+#[tokio::test]
+async fn test_expired_scim_tokens_excluded_from_active_count() {
+    let (store, _audit) = test_db().await;
+
+    let org = create_organization(&store, "test.com", Some("Test Org"), None)
+        .await
+        .expect("Failed to create org");
+    let org_id = &org.id;
+
+    let past = jiff::Timestamp::now() - jiff::Span::new().hours(1);
+    let future = jiff::Timestamp::now() + jiff::Span::new().hours(1);
+
+    // Two expired tokens and one active token
+    for (hash, expiry) in [
+        ("expired-1", Some(past)),
+        ("expired-2", Some(past)),
+        ("active-1", Some(future)),
+    ] {
+        create_scim_token(&store, hash, None, expiry, Some(org_id), None)
+            .await
+            .expect("Failed to create SCIM token");
+    }
+
+    // list returns everything; the active count excludes the expired pair
+    let all = list_scim_tokens(&store, Some(org_id))
+        .await
+        .expect("Failed to list tokens");
+    assert_eq!(all.len(), 3);
+
+    let active = count_active_scim_tokens(&store, org_id)
+        .await
+        .expect("Failed to count active tokens");
+    assert_eq!(active, 1);
+
+    // Tokens without an expiration are always active
+    create_scim_token(&store, "no-expiry", None, None, Some(org_id), None)
+        .await
+        .expect("Failed to create SCIM token");
+    let active = count_active_scim_tokens(&store, org_id)
+        .await
+        .expect("Failed to count active tokens");
+    assert_eq!(active, 2);
+
+    // Cleanup purges only the expired tokens
+    let deleted = delete_expired_scim_tokens(&store)
+        .await
+        .expect("Failed to delete expired tokens");
+    assert_eq!(deleted, 2);
+    let remaining = list_scim_tokens(&store, Some(org_id))
+        .await
+        .expect("Failed to list tokens");
+    assert_eq!(remaining.len(), 2);
+}
+
 // ========================================================================
 // Cascade Delete Tests
 // ========================================================================
