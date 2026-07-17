@@ -47,12 +47,6 @@ pub(crate) struct SamlAssertion {
     pub email: String,
     /// Domain extracted from email or configured domain attribute.
     pub domain: Option<String>,
-    /// Display name extracted from configured name attribute, if available.
-    #[expect(dead_code, reason = "reserved for serde DTO conformance / future use")]
-    pub name: Option<String>,
-    /// Session expiry time from `<AuthnStatement SessionNotOnOrAfter>`.
-    #[expect(dead_code, reason = "reserved for serde DTO conformance / future use")]
-    pub session_not_on_or_after: Option<Timestamp>,
 }
 
 /// SAML 2.0 bearer subject confirmation method URI.
@@ -284,24 +278,13 @@ pub(crate) fn validate_saml_response(
     // Step 12: Validate SubjectConfirmationData (Profiles 4.1.4.3)
     validate_subject_confirmation(assertion, expected_request_id, &provider.acs_url, now)?;
 
-    // Step 10: Extract session expiry
-    let session_not_on_or_after = extract_session_not_on_or_after(assertion);
-
-    // Step 11: Extract email
+    // Step 10: Extract email
     let email = extract_email(assertion, provider.email_attribute.as_deref())?;
 
-    // Step 12: Extract domain
+    // Step 11: Extract domain
     let domain = extract_domain(assertion, provider.domain_attribute.as_deref(), &email);
 
-    // Step 13: Extract display name (best-effort)
-    let name = extract_display_name(assertion);
-
-    Ok(SamlAssertion {
-        email,
-        domain,
-        name,
-        session_not_on_or_after,
-    })
+    Ok(SamlAssertion { email, domain })
 }
 
 // ============================================================================
@@ -583,31 +566,6 @@ fn extract_domain(
 
     // Derive from email address
     email.split('@').nth(1).map(str::to_ascii_lowercase)
-}
-
-/// Extract display name from common SAML attributes.
-fn extract_display_name(assertion: roxmltree::Node<'_, '_>) -> Option<String> {
-    // Try common display name attribute names
-    for attr_name in &[
-        "displayName",
-        "urn:oid:2.16.840.1.113730.3.1.241",
-        "http://schemas.microsoft.com/identity/claims/displayname",
-        "name",
-    ] {
-        if let Some(value) = find_saml_attribute(assertion, attr_name) {
-            return Some(value);
-        }
-    }
-    None
-}
-
-/// Extract `AuthnStatement SessionNotOnOrAfter` timestamp.
-fn extract_session_not_on_or_after(assertion: roxmltree::Node<'_, '_>) -> Option<Timestamp> {
-    assertion
-        .children()
-        .find(|n| n.has_tag_name((NS_SAML, "AuthnStatement")))
-        .and_then(|n| n.attribute("SessionNotOnOrAfter"))
-        .and_then(|s| parse_saml_timestamp(s).ok())
 }
 
 /// Find the value of a SAML attribute by name.
