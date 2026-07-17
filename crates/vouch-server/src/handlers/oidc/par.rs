@@ -235,9 +235,19 @@ pub(crate) async fn par(
     //
     // FAPI 2.0 Section 5.2.2 requires `private_key_jwt`. Client secrets and
     // public-client ("none") authentication are rejected for FAPI clients.
+    // The method is derived from the verification witnesses — what this
+    // request actually authenticated with — not the registered
+    // token_endpoint_auth_method, so a stale secret on a client since
+    // migrated to a FAPI method cannot pass the gate.
+    let actual_method = super::client_auth::actual_auth_method(
+        authenticated_client.client.token_endpoint_auth_method,
+        jwt_auth.is_some(),
+        secret_verification.is_some(),
+        mtls_verification.is_some(),
+    );
     if let Err(e) = crate::services::oidc::fapi::validate_fapi_client_auth_method(
         &authenticated_client.client,
-        authenticated_client.client.token_endpoint_auth_method,
+        actual_method,
     ) {
         return par_error_response(
             StatusCode::UNAUTHORIZED,

@@ -613,6 +613,67 @@ async fn test_fapi2_par_accepts_private_key_jwt() {
     );
 }
 
+/// FAPI 2.0 Section 5.2.2: the auth-method gate must judge the method the
+/// request ACTUALLY authenticated with, not the registered one. A stale
+/// client secret on a client registered as private_key_jwt must be
+/// rejected at PAR (#706).
+#[tokio::test]
+async fn test_fapi2_par_rejects_client_secret_for_private_key_jwt_client() {
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "fapi2-par-stale-secret@example.com").await;
+    let (client, _pkcs8_bytes) = create_fapi_test_client(&state.store, &user.id).await;
+
+    // Authenticate with the (stale) client secret instead of a JWT assertion.
+    let body = format!(
+        "client_id={}\
+         &client_secret={}\
+         &redirect_uri={}\
+         &response_type=code\
+         &scope=openid",
+        client.client_id,
+        urlencoding::encode(&client.client_secret),
+        urlencoding::encode("https://example.com/callback"),
+    );
+
+    let (status, response_body) = http_post_form(&app, "/oauth/par", &body, &[]).await;
+
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "FAPI client authenticating with a secret must be rejected at PAR: {response_body}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&response_body).expect("Valid JSON");
+    assert_eq!(json["error"], "invalid_client", "{json}");
+}
+
+/// FAPI clients presenting only a client_id (public-client arm, no
+/// credential at all) must also fail the actual-method gate at PAR.
+#[tokio::test]
+async fn test_fapi2_par_rejects_client_id_only_for_private_key_jwt_client() {
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "fapi2-par-id-only@example.com").await;
+    let (client, _pkcs8_bytes) = create_fapi_test_client(&state.store, &user.id).await;
+
+    let body = format!(
+        "client_id={}\
+         &redirect_uri={}\
+         &response_type=code\
+         &scope=openid",
+        client.client_id,
+        urlencoding::encode("https://example.com/callback"),
+    );
+
+    let (status, response_body) = http_post_form(&app, "/oauth/par", &body, &[]).await;
+
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "FAPI client with no credential must be rejected at PAR: {response_body}"
+    );
+}
+
 #[tokio::test]
 async fn test_fapi2_token_rejects_without_dpop() {
     // FAPI 2.0 Section 5.2.2: Sender-constrained tokens are required.

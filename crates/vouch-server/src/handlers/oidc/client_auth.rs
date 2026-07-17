@@ -254,6 +254,44 @@ fn oauth_error_response(error: &str, description: &str) -> Response {
         .into_response()
 }
 
+/// Derive the authentication method ACTUALLY used on this request from the
+/// verification witnesses, as opposed to the registered
+/// `token_endpoint_auth_method` (which the presented credentials do not have
+/// to match — e.g. a stale client secret on a client since migrated to
+/// `private_key_jwt`).
+///
+/// * `jwt_auth` — a `client_assertion` was verified (RFC 7523).
+/// * `secret_auth` — a `client_secret` (Basic or body) was verified.
+/// * `mtls_auth` — a TLS client certificate was verified (RFC 8705). mTLS
+///   verification only runs for clients registered with a TLS method, so
+///   `registered` names the exact variant in that case.
+///
+/// A verified secret is reported as the registered secret variant when the
+/// client is registered with one (error-message fidelity); Basic vs Post is
+/// not distinguishable from the witness, and both are equally rejected for
+/// FAPI clients.
+pub(crate) fn actual_auth_method(
+    registered: crate::db::TokenEndpointAuthMethod,
+    jwt_auth: bool,
+    secret_auth: bool,
+    mtls_auth: bool,
+) -> crate::db::TokenEndpointAuthMethod {
+    use crate::db::TokenEndpointAuthMethod;
+    if jwt_auth {
+        TokenEndpointAuthMethod::PrivateKeyJwt
+    } else if secret_auth {
+        match registered {
+            m @ (TokenEndpointAuthMethod::ClientSecretBasic
+            | TokenEndpointAuthMethod::ClientSecretPost) => m,
+            _ => TokenEndpointAuthMethod::ClientSecretBasic,
+        }
+    } else if mtls_auth {
+        registered
+    } else {
+        TokenEndpointAuthMethod::None
+    }
+}
+
 #[cfg(test)]
 #[expect(
     clippy::expect_used,
@@ -291,5 +329,39 @@ mod tests {
         assert!(strip_basic_scheme("Bearer abc").is_none());
         assert!(strip_basic_scheme("Basicabc").is_none());
         assert!(strip_basic_scheme("Basic creds").is_some());
+    }
+
+    /// The witness-derived method must reflect what the request actually
+    /// authenticated with, regardless of the registered method (#706).
+    #[test]
+    fn test_actual_auth_method_from_witnesses() {
+        use crate::db::TokenEndpointAuthMethod as M;
+
+        // A verified JWT assertion is private_key_jwt no matter what is registered.
+        assert_eq!(
+            actual_auth_method(M::ClientSecretBasic, true, false, false),
+            M::PrivateKeyJwt
+        );
+        // A verified secret on a private_key_jwt-registered client is a
+        // secret method, NOT the registered method.
+        assert_eq!(
+            actual_auth_method(M::PrivateKeyJwt, false, true, false),
+            M::ClientSecretBasic
+        );
+        // A verified secret on a secret-registered client keeps the variant.
+        assert_eq!(
+            actual_auth_method(M::ClientSecretPost, false, true, false),
+            M::ClientSecretPost
+        );
+        // mTLS verification only runs when a TLS method is registered.
+        assert_eq!(
+            actual_auth_method(M::SelfSignedTlsClientAuth, false, false, true),
+            M::SelfSignedTlsClientAuth
+        );
+        // No witness at all is the public-client "none" method.
+        assert_eq!(
+            actual_auth_method(M::PrivateKeyJwt, false, false, false),
+            M::None
+        );
     }
 }
