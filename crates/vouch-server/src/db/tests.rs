@@ -3972,6 +3972,16 @@ async fn test_enroll_promotes_admin_for_org_without_one() {
         user.is_org_admin,
         "an org with no admin must promote the next enrollee"
     );
+
+    // The promotion must be persisted on the user doc, not just reported in
+    // the return value — authorization reads `UserDoc.is_org_admin`.
+    let persisted = store
+        .find_one::<crate::db::documents::user::UserDoc>("email", "rescuer@orphaned-org.example")
+        .await
+        .expect("find enrolled user")
+        .expect("enrolled user exists");
+    assert!(persisted.data.is_org_admin);
+
     let org_count = store
         .count::<OrganizationDoc>("domain", domain)
         .await

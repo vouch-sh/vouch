@@ -29,17 +29,6 @@ fn deterministic_org_id(domain: &str) -> String {
     hex::encode(ctx.finish().as_ref())
 }
 
-/// Result of enrolling a user with their organization.
-#[derive(Debug)]
-pub struct EnrollmentResult {
-    /// The user record (created or existing).
-    pub user: EnrolledUser,
-    /// The organization ID if the user belongs to one.
-    pub org_id: Option<String>,
-    /// Whether this user is the organization admin.
-    pub is_org_admin: bool,
-}
-
 /// User record from enrollment.
 #[derive(Debug)]
 pub struct EnrolledUser {
@@ -123,7 +112,7 @@ pub async fn enroll_user_with_org(
     email: &str,
     name: Option<&str>,
     domain: Option<&str>,
-) -> Result<EnrollmentResult> {
+) -> Result<EnrolledUser> {
     let org_id = match domain {
         Some(domain) => Some(get_or_create_org(store, domain).await?),
         None => None,
@@ -249,11 +238,7 @@ pub async fn enroll_user_with_org(
             .await
             .map_err(|e| map_db_err(e, "Failed to commit enrollment transaction"))?;
 
-        Ok::<_, ServiceError>(EnrollmentResult {
-            user,
-            org_id: org_id.clone(),
-            is_org_admin,
-        })
+        Ok::<_, ServiceError>(user)
     })?;
 
     Ok(result)
