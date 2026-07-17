@@ -188,8 +188,9 @@ pub fn build_discovery_document(state: &Arc<AppState>) -> OidcDiscoveryDocument 
             TokenEndpointAuthMethod::ClientSecretPost,
             TokenEndpointAuthMethod::PrivateKeyJwt,
         ];
-        // mTLS client auth methods are available whenever TLS is configured.
-        if state.config().tls_cert.is_some() {
+        // mTLS client auth methods are available whenever TLS is fully
+        // configured (cert AND key) — the mTLS listener only starts then.
+        if state.config().tls_configured() {
             methods.push(TokenEndpointAuthMethod::TlsClientAuth);
             methods.push(TokenEndpointAuthMethod::SelfSignedTlsClientAuth);
         }
@@ -292,8 +293,8 @@ pub fn build_discovery_document(state: &Arc<AppState>) -> OidcDiscoveryDocument 
         }),
         // RFC 9396 §11.3: Server accepts any authorization detail type (opaque)
         authorization_details_types_supported: None,
-        // RFC 8705: advertise mTLS support when TLS is configured.
-        tls_client_certificate_bound_access_tokens: state.config().tls_cert.is_some(),
+        // RFC 8705: advertise mTLS support when TLS is fully configured.
+        tls_client_certificate_bound_access_tokens: state.config().tls_configured(),
         mtls_endpoint_aliases: build_mtls_aliases(state, base_url),
         // RFC 9701: ES256 is the only supported introspection signing algorithm.
         introspection_signing_alg_values_supported: Some(vec![JwsAlgorithm::Es256]),
@@ -315,8 +316,11 @@ pub fn build_discovery_document(state: &Arc<AppState>) -> OidcDiscoveryDocument 
 fn build_mtls_aliases(state: &Arc<AppState>, base_url: &str) -> Option<MtlsEndpointAliases> {
     let config = state.config();
 
-    // Only advertise mTLS aliases when TLS is active on this server.
-    config.tls_cert.as_ref()?;
+    // Only advertise mTLS aliases when TLS is active on this server
+    // (cert AND key — a partial config never starts the mTLS listener).
+    if !config.tls_configured() {
+        return None;
+    }
 
     // Derive mTLS base URL by replacing the port with mtls_port.
     let mtls_base = if let Ok(mut url) = url::Url::parse(base_url) {

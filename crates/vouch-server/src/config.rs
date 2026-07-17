@@ -926,6 +926,17 @@ impl ServerConfig {
             }
         }
 
+        // Reject partial TLS configuration. With only one of cert/key set the
+        // server silently runs plain HTTP (serving and discovery both require
+        // tls_configured()), which is never what the operator intended.
+        if self.tls_cert.is_some() != self.tls_key.is_some() {
+            anyhow::bail!(
+                "Partial TLS configuration: set both VOUCH_TLS_CERT and \
+                 VOUCH_TLS_KEY (or tls.cert and tls.key in the S3 config), \
+                 or neither."
+            );
+        }
+
         // Retention windows are subtracted from `now` to form a deletion cutoff;
         // a negative value yields a future cutoff, which matches every row and
         // wipes the entire audit log. Reject at startup so an operator typo or
@@ -1105,6 +1116,29 @@ mod tests {
         // Mutual exclusivity removed — both kinds can coexist in the same idps list.
         let mut config = test_config();
         config.idps.push(IdpConfig::Saml(saml_provider_for_tests()));
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_rejects_partial_tls_config() {
+        let mut config = test_config();
+        config.tls_cert = Some("cert-pem".to_string());
+        config.tls_key = None;
+        let err = config.validate().unwrap_err();
+        assert!(
+            err.to_string().contains("Partial TLS configuration"),
+            "expected partial-TLS error, got: {err}"
+        );
+
+        let mut config = test_config();
+        config.tls_cert = None;
+        config.tls_key = Some(secrecy::SecretString::from("key-pem".to_string()));
+        assert!(config.validate().is_err());
+
+        // Both set (or neither) is fine.
+        let mut config = test_config();
+        config.tls_cert = Some("cert-pem".to_string());
+        config.tls_key = Some(secrecy::SecretString::from("key-pem".to_string()));
         assert!(config.validate().is_ok());
     }
 

@@ -981,6 +981,36 @@ async fn test_discovery_mtls_aliases_absent_without_tls() {
     );
 }
 
+/// A partial TLS config (cert without key) never starts the TLS or mTLS
+/// listeners, so discovery must not advertise mTLS either — otherwise
+/// clients registering with tls_client_auth are locked out (#708).
+#[tokio::test]
+async fn test_discovery_mtls_absent_with_partial_tls_config() {
+    let (app, state) = test_app().await;
+
+    let mut new_config = (**state.config()).clone();
+    new_config.tls_cert = Some("/tmp/fake-cert.pem".to_string());
+    new_config.tls_key = None;
+    state.config.store(std::sync::Arc::new(new_config));
+
+    let (status, body) = http_get(&app, "/.well-known/openid-configuration", &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    let doc: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
+
+    assert!(
+        doc.get("mtls_endpoint_aliases").is_none(),
+        "mtls_endpoint_aliases must be absent with cert-only TLS config"
+    );
+    assert_eq!(doc["tls_client_certificate_bound_access_tokens"], false);
+    let methods = doc["token_endpoint_auth_methods_supported"]
+        .as_array()
+        .expect("auth methods array");
+    assert!(
+        !methods.iter().any(|m| m == "tls_client_auth"),
+        "tls_client_auth must not be advertised with cert-only TLS config"
+    );
+}
+
 #[tokio::test]
 async fn test_discovery_tls_client_auth_in_auth_methods_with_tls() {
     // When TLS is configured, token_endpoint_auth_methods_supported must include
@@ -995,8 +1025,10 @@ async fn test_discovery_tls_client_auth_in_auth_methods_with_tls() {
 
     let pool = test_db().await;
     let mut config = test_config();
-    // Set a placeholder TLS cert to enable mTLS discovery advertisement.
+    // Set placeholder TLS cert and key to enable mTLS discovery
+    // advertisement (requires full TLS configuration).
     config.tls_cert = Some("placeholder-cert".to_string());
+    config.tls_key = Some(secrecy::SecretString::from("placeholder-key".to_string()));
 
     let rp_origin = url::Url::parse(&config.base_url).expect("base_url");
     let webauthn = webauthn_rs::WebauthnBuilder::new(&config.rp_id, &rp_origin)
