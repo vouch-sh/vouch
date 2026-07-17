@@ -158,6 +158,7 @@ jobs:
         env:
           REGISTRY_IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
         run: |
+          # shellcheck disable=SC2046  # intentional word splitting: -t flags and image@digest args
           docker buildx imagetools create $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
             $(printf "${REGISTRY_IMAGE}@sha256:%s " *)
 
@@ -243,7 +244,9 @@ jobs:
 
       - name: Setup Rust cache
         if: runner.os != 'Linux'
-        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        # Restore-only (save-if:false) and non-Linux; a tag build reads only
+        # main/tag-scoped caches, so there is no cross-ref poisoning vector.
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1 # zizmor: ignore[cache-poisoning]
         with:
           prefix-key: "v2"
           shared-key: "release-${{ matrix.target }}"
@@ -259,7 +262,9 @@ jobs:
       - name: Cache cargo binaries
         if: runner.os != 'Linux'
         id: cache-cargo-bin
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        # Caches a version-pinned cargo-cyclonedx binary (non-Linux only); the
+        # key pins the exact version and a tag build reads only main/tag caches.
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 # zizmor: ignore[cache-poisoning]
         with:
           path: |
             ~/.cargo/bin/cargo-cyclonedx
@@ -457,7 +462,9 @@ jobs:
           done
           # Fallback to first SBOM found if no vouch-cli specific one
           if [[ -z "${MAIN_SBOM}" ]]; then
-            MAIN_SBOM=$(ls vouch-v${VERSION}-${TARGET}-*cdx.json 2>/dev/null | head -1)
+            for cdx in "vouch-v${VERSION}-${TARGET}"-*cdx.json; do
+              [[ -e "${cdx}" ]] && { MAIN_SBOM="${cdx}"; break; }
+            done
           fi
           echo "main_sbom=${MAIN_SBOM}" >> "$GITHUB_OUTPUT"
 
@@ -534,14 +541,14 @@ jobs:
           case "$ARCH" in
             x86_64)
               BINARY="tailwindcss-linux-x64"
-              CHECKSUM="5036c4fb4328e0bcdbb6065c70d8ac9452e0d4c947113a788a8f94fd390425c1"
+              CHECKSUM="dc61b3ac6b8c9ca874c0cc4c57b2409791a64c5540404ca5f5367360babc313a"
               ;;
             aarch64)
               BINARY="tailwindcss-linux-arm64"
-              CHECKSUM="394ddccc2402cfa3abd97dfba56f3587781a3d6e6ce66e65ceada14beb7664b8"
+              CHECKSUM="55fd0b241214eff3de1e8ee4f22796662f2d2e7a49bcfca7477cfd0bac398195"
               ;;
           esac
-          curl -sLO "https://github.com/tailwindlabs/tailwindcss/releases/download/v4.3.2/${BINARY}"
+          curl -sLO "https://github.com/tailwindlabs/tailwindcss/releases/download/v4.3.3/${BINARY}"
           echo "${CHECKSUM}  ${BINARY}" | sha256sum -c -
           chmod +x "${BINARY}"
           cd crates/vouch-server && "../../${BINARY}" -i styles/input.css -o static/css/output.css --minify
@@ -590,7 +597,9 @@ jobs:
             fi
           done
           if [[ -z "${MAIN_SBOM}" ]]; then
-            MAIN_SBOM=$(ls vouch-v${VERSION}-${TARGET}-*cdx.json 2>/dev/null | head -1)
+            for cdx in "vouch-v${VERSION}-${TARGET}"-*cdx.json; do
+              [[ -e "${cdx}" ]] && { MAIN_SBOM="${cdx}"; break; }
+            done
           fi
           echo "main_sbom=${MAIN_SBOM}" >> "$GITHUB_OUTPUT"
 
@@ -724,7 +733,7 @@ jobs:
           ARCH: ${{ matrix.nfpm_arch }}
         run: |
           echo "Signing with key ID: ${GPG_KEY_ID}"
-          echo "Key file exists: $(test -f ${GPG_KEY_FILE} && echo yes || echo no)"
+          echo "Key file exists: $(test -f "${GPG_KEY_FILE}" && echo yes || echo no)"
           nfpm package --config ../packaging/nfpm.yaml --packager rpm
           # Verify signature
           rpm -qpi vouch-*.rpm | grep -i signature || echo "WARNING: Package not signed!"
@@ -886,41 +895,43 @@ jobs:
           AGENT_MATCH: ${{ env.AGENT_MATCH }}
         run: |
           TARGET="x86_64-unknown-linux-musl"
+          PUBLISHED_HASH=$(awk '{print $1}' "original/vouch-v${VERSION}-${TARGET}.tar.gz.sha256")
+          REBUILD_HASH=$(awk '{print $1}' "rebuild/vouch-v${VERSION}-${TARGET}.tar.gz.sha256")
 
-          echo "## Reproducibility Verification" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "Rebuilt Linux x86_64 binaries from the same commit and compared hashes." >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### Archive Verification" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| Artifact | Published Hash | Rebuilt Hash | Status |" >> $GITHUB_STEP_SUMMARY
-          echo "|----------|----------------|--------------|--------|" >> $GITHUB_STEP_SUMMARY
+          {
+            echo "## Reproducibility Verification"
+            echo ""
+            echo "Rebuilt Linux x86_64 binaries from the same commit and compared hashes."
+            echo ""
+            echo "### Archive Verification"
+            echo ""
+            echo "| Artifact | Published Hash | Rebuilt Hash | Status |"
+            echo "|----------|----------------|--------------|--------|"
 
-          PUBLISHED_HASH=$(cat "original/vouch-v${VERSION}-${TARGET}.tar.gz.sha256" | awk '{print $1}')
-          REBUILD_HASH=$(cat "rebuild/vouch-v${VERSION}-${TARGET}.tar.gz.sha256" | awk '{print $1}')
-          if [ "${PUBLISHED_HASH}" = "${REBUILD_HASH}" ]; then
-            echo "| \`vouch-v${VERSION}-${TARGET}.tar.gz\` | \`${PUBLISHED_HASH:0:16}...\` | \`${REBUILD_HASH:0:16}...\` | ✅ Match |" >> $GITHUB_STEP_SUMMARY
-          else
-            echo "| \`vouch-v${VERSION}-${TARGET}.tar.gz\` | \`${PUBLISHED_HASH:0:16}...\` | \`${REBUILD_HASH:0:16}...\` | ⚠️ Differs |" >> $GITHUB_STEP_SUMMARY
-          fi
+            if [ "${PUBLISHED_HASH}" = "${REBUILD_HASH}" ]; then
+              echo "| \`vouch-v${VERSION}-${TARGET}.tar.gz\` | \`${PUBLISHED_HASH:0:16}...\` | \`${REBUILD_HASH:0:16}...\` | ✅ Match |"
+            else
+              echo "| \`vouch-v${VERSION}-${TARGET}.tar.gz\` | \`${PUBLISHED_HASH:0:16}...\` | \`${REBUILD_HASH:0:16}...\` | ⚠️ Differs |"
+            fi
 
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### Binary Verification" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| Binary | Status |" >> $GITHUB_STEP_SUMMARY
-          echo "|--------|--------|" >> $GITHUB_STEP_SUMMARY
+            echo ""
+            echo "### Binary Verification"
+            echo ""
+            echo "| Binary | Status |"
+            echo "|--------|--------|"
 
-          if [ "${VOUCH_MATCH}" = "true" ]; then
-            echo "| vouch | ✅ Reproducible |" >> $GITHUB_STEP_SUMMARY
-          else
-            echo "| vouch | ⚠️ Differs |" >> $GITHUB_STEP_SUMMARY
-          fi
+            if [ "${VOUCH_MATCH}" = "true" ]; then
+              echo "| vouch | ✅ Reproducible |"
+            else
+              echo "| vouch | ⚠️ Differs |"
+            fi
 
-          if [ "${AGENT_MATCH}" = "true" ]; then
-            echo "| vouch-agent | ✅ Reproducible |" >> $GITHUB_STEP_SUMMARY
-          else
-            echo "| vouch-agent | ⚠️ Differs |" >> $GITHUB_STEP_SUMMARY
-          fi
+            if [ "${AGENT_MATCH}" = "true" ]; then
+              echo "| vouch-agent | ✅ Reproducible |"
+            else
+              echo "| vouch-agent | ⚠️ Differs |"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
 
   conformance:
     name: Trigger Conformance Tests
@@ -1050,10 +1061,12 @@ jobs:
       - name: Generate consolidated SHA256SUMS
         run: |
           cd artifacts
-          sha256sum *.tar.gz *.zip *.deb *.rpm 2>/dev/null > SHA256SUMS.txt || true
+          sha256sum -- *.tar.gz *.zip *.deb *.rpm 2>/dev/null > SHA256SUMS.txt || true
 
       - name: Upload release artifacts
-        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
+        # Pinned action handles draft creation and multi-glob asset upload;
+        # kept intentionally over a hand-rolled gh release script step.
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2 # zizmor: ignore[superfluous-actions]
         with:
           tag_name: ${{ github.event.inputs.tag || github.ref_name }}
           draft: true
@@ -1164,6 +1177,7 @@ jobs:
         # or LF) and append a trailing CRLF if missing — the prior yq step
         # can drop the trailing newline, which line-mode perl wouldn't add back.
         run: |
+          # shellcheck disable=SC2016  # $1 is a Perl backreference, not a shell variable
           find ./winget-manifests -name '*.yaml' -print0 \
             | xargs -0 perl -i -0pe 's/\r\n|\r|\n/\r\n/g; s/([^\n])\z/$1\r\n/'
           if grep -RPlz '(?<!\r)\n' ./winget-manifests; then
@@ -1404,7 +1418,9 @@ jobs:
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
 
       - name: Generate release notes
-        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
+        # Pinned action handles GitHub auto-generated release notes plus the
+        # custom body; kept intentionally over a hand-rolled gh release step.
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2 # zizmor: ignore[superfluous-actions]
         with:
           tag_name: ${{ steps.version.outputs.tag }}
           draft: false
