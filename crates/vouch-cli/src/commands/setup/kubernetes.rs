@@ -79,6 +79,7 @@ pub(crate) async fn run(
         cluster: KubeconfigClusterData {
             server: k8s_server.to_string(),
             certificate_authority_data: ca_data,
+            other: serde_json::Value::Object(serde_json::Map::new()),
         },
     });
 
@@ -106,6 +107,7 @@ pub(crate) async fn run(
             cluster: cluster.to_string(),
             namespace: None,
             user: user_name.clone(),
+            other: serde_json::Value::Object(serde_json::Map::new()),
         },
     });
 
