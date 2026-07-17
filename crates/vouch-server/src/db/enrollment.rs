@@ -118,128 +118,117 @@ pub async fn enroll_user_with_org(
         None => None,
     };
 
-    // Map a DB error from any tx operation into either an OccConflict (if it
-    // signals writer contention) or a generic 500. OccConflict is retried by
-    // with_dsql_retry!; the Internal path propagates.
-    let map_db_err = |e: anyhow::Error, msg: &'static str| -> ServiceError {
-        tracing::error!("{msg}: {e}");
-        if crate::db::pool::is_retryable_db_error(&e) {
-            ServiceError::OccConflict
-        } else {
-            ServiceError::Internal(msg.to_string())
-        }
-    };
+    let result =
+        crate::with_dsql_retry!(async {
+            let mut tx = store.begin().await.map_err(|e| {
+                ServiceError::from_db_contention(e, "Failed to begin enrollment transaction")
+            })?;
 
-    let result = crate::with_dsql_retry!(async {
-        let mut tx = store
-            .begin()
-            .await
-            .map_err(|e| map_db_err(e, "Failed to begin enrollment transaction"))?;
+            // One in-transaction snapshot of the org row: the admin-count
+            // predicate, the CAS guard (id + version), and the CAS payload all
+            // derive from it.
+            let org = match &org_id {
+                Some(oid) => tx.get::<OrganizationDoc>(oid).await.map_err(|e| {
+                    ServiceError::from_db_contention(e, "Failed to load organization")
+                })?,
+                None => None,
+            };
+            // Carried forward only while the admin slot is open; encodes
+            // "admin slot open ⇒ org exists" in the type.
+            let claimable_org = org.filter(|o| o.data.created_by_user_id.is_none());
 
-        // One in-transaction snapshot of the org row: the admin-count
-        // predicate, the CAS guard (id + version), and the CAS payload all
-        // derive from it.
-        let org = match &org_id {
-            Some(oid) => tx
-                .get::<OrganizationDoc>(oid)
-                .await
-                .map_err(|e| map_db_err(e, "Failed to load organization"))?,
-            None => None,
-        };
-        // Carried forward only while the admin slot is open; encodes
-        // "admin slot open ⇒ org exists" in the type.
-        let claimable_org = org.filter(|o| o.data.created_by_user_id.is_none());
+            let is_org_admin = match &claimable_org {
+                Some(org_doc) => {
+                    let count = tx
+                        .count::<UserDoc>("org_id", &org_doc.id)
+                        .await
+                        .map_err(|e| {
+                            ServiceError::from_db_contention(e, "Failed to count org users")
+                        })?;
+                    count == 0
+                }
+                None => false,
+            };
 
-        let is_org_admin = match &claimable_org {
-            Some(org_doc) => {
-                let count = tx
-                    .count::<UserDoc>("org_id", &org_doc.id)
+            // Get or create user
+            let existing_user = tx.find_one::<UserDoc>("email", email).await.map_err(|e| {
+                ServiceError::from_db_contention(e, "Failed to look up user by email")
+            })?;
+
+            let user = match existing_user {
+                Some(doc) => EnrolledUser {
+                    id: doc.id,
+                    email: doc.data.email,
+                    name: doc.data.name,
+                    org_id: doc.data.org_id,
+                    is_org_admin: doc.data.is_org_admin,
+                },
+                None => {
+                    let doc = UserDoc {
+                        email: email.to_string(),
+                        name: name.map(String::from),
+                        org_id: org_id.clone(),
+                        is_org_admin,
+                        active: true,
+                        external_id: None,
+                        github_id: None,
+                        github_login: None,
+                        github_refresh_token: None,
+                    };
+                    let result = tx.insert(&doc).await.map_err(|e| {
+                        ServiceError::from_db_contention(e, "Failed to insert user")
+                    })?;
+                    EnrolledUser {
+                        id: result.id,
+                        email: result.data.email,
+                        name: result.data.name,
+                        org_id: result.data.org_id,
+                        is_org_admin: result.data.is_org_admin,
+                    }
+                }
+            };
+
+            // Claim (or repair) the org admin slot. Winning this CAS is a
+            // REQUIREMENT for committing a user row that claims
+            // `is_org_admin = true`: the count above is a predicate read that
+            // concurrent transactions do not conflict on (write skew under READ
+            // COMMITTED), so two first-enrollees can both compute
+            // `is_org_admin = true` — the org-row version is the one write both
+            // must collide on. A claiming loser aborts so `with_dsql_retry!`
+            // re-runs the transaction; the retry re-reads fresh state (the
+            // winner's user row and admin slot are now visible) and commits a
+            // non-admin user. A non-claiming loser merely raced the
+            // opportunistic `created_by_user_id` repair and proceeds.
+            if let Some(org_doc) = claimable_org {
+                let mut data = org_doc.data;
+                data.created_by_user_id = Some(user.id.clone());
+                let won = tx
+                    .compare_and_update(&org_doc.id, org_doc.version, &data)
                     .await
-                    .map_err(|e| map_db_err(e, "Failed to count org users"))?;
-                count == 0
-            }
-            None => false,
-        };
-
-        // Get or create user
-        let existing_user = tx
-            .find_one::<UserDoc>("email", email)
-            .await
-            .map_err(|e| map_db_err(e, "Failed to look up user by email"))?;
-
-        let user = match existing_user {
-            Some(doc) => EnrolledUser {
-                id: doc.id,
-                email: doc.data.email,
-                name: doc.data.name,
-                org_id: doc.data.org_id,
-                is_org_admin: doc.data.is_org_admin,
-            },
-            None => {
-                let doc = UserDoc {
-                    email: email.to_string(),
-                    name: name.map(String::from),
-                    org_id: org_id.clone(),
-                    is_org_admin,
-                    active: true,
-                    external_id: None,
-                    github_id: None,
-                    github_login: None,
-                    github_refresh_token: None,
-                };
-                let result = tx
-                    .insert(&doc)
-                    .await
-                    .map_err(|e| map_db_err(e, "Failed to insert user"))?;
-                EnrolledUser {
-                    id: result.id,
-                    email: result.data.email,
-                    name: result.data.name,
-                    org_id: result.data.org_id,
-                    is_org_admin: result.data.is_org_admin,
+                    .map_err(|e| {
+                        ServiceError::from_db_contention(e, "Failed to update organization admin")
+                    })?;
+                if !won && is_org_admin {
+                    tracing::debug!(
+                        org_id = %org_doc.id,
+                        "Lost race to claim org admin during enrollment — retrying as non-admin"
+                    );
+                    return Err(ServiceError::OccConflict);
+                }
+                if !won {
+                    tracing::debug!(
+                        org_id = %org_doc.id,
+                        "Lost race to repair org admin during enrollment — another enrollee won"
+                    );
                 }
             }
-        };
 
-        // Claim (or repair) the org admin slot. Winning this CAS is a
-        // REQUIREMENT for committing a user row that claims
-        // `is_org_admin = true`: the count above is a predicate read that
-        // concurrent transactions do not conflict on (write skew under READ
-        // COMMITTED), so two first-enrollees can both compute
-        // `is_org_admin = true` — the org-row version is the one write both
-        // must collide on. A claiming loser aborts so `with_dsql_retry!`
-        // re-runs the transaction; the retry re-reads fresh state (the
-        // winner's user row and admin slot are now visible) and commits a
-        // non-admin user. A non-claiming loser merely raced the
-        // opportunistic `created_by_user_id` repair and proceeds.
-        if let Some(org_doc) = claimable_org {
-            let mut data = org_doc.data;
-            data.created_by_user_id = Some(user.id.clone());
-            let won = tx
-                .compare_and_update(&org_doc.id, org_doc.version, &data)
-                .await
-                .map_err(|e| map_db_err(e, "Failed to update organization admin"))?;
-            if !won && is_org_admin {
-                tracing::debug!(
-                    org_id = %org_doc.id,
-                    "Lost race to claim org admin during enrollment — retrying as non-admin"
-                );
-                return Err(ServiceError::OccConflict);
-            }
-            if !won {
-                tracing::debug!(
-                    org_id = %org_doc.id,
-                    "Lost race to repair org admin during enrollment — another enrollee won"
-                );
-            }
-        }
+            tx.commit().await.map_err(|e| {
+                ServiceError::from_db_contention(e, "Failed to commit enrollment transaction")
+            })?;
 
-        tx.commit()
-            .await
-            .map_err(|e| map_db_err(e, "Failed to commit enrollment transaction"))?;
-
-        Ok::<_, ServiceError>(user)
-    })?;
+            Ok::<_, ServiceError>(user)
+        })?;
 
     Ok(result)
 }

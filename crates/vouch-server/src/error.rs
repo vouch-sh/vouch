@@ -276,6 +276,21 @@ impl ServiceError {
         }
     }
 
+    /// Classify a database error from a transactional operation.
+    ///
+    /// Writer contention (Postgres serialization failure, Aurora DSQL
+    /// OC000/OC001, SQLite BUSY/LOCKED) becomes [`Self::OccConflict`] so the
+    /// enclosing `with_dsql_retry!` re-runs the transaction; anything else
+    /// becomes [`Self::Internal`] and propagates as a 500.
+    pub(crate) fn from_db_contention(err: anyhow::Error, msg: &'static str) -> Self {
+        tracing::error!("{msg}: {err}");
+        if crate::db::pool::is_retryable_db_error(&err) {
+            Self::OccConflict
+        } else {
+            Self::Internal(msg.to_string())
+        }
+    }
+
     /// Convert to an OAuth error response.
     pub fn into_oauth_response(self) -> (StatusCode, Json<OAuthErrorResponse>) {
         match self {
