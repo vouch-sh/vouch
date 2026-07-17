@@ -171,6 +171,18 @@ pub(crate) fn parse_server_cert_and_key(
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("TLS private key not configured"))?;
 
+    parse_cert_and_key_pem(cert_pem, key_secret)
+}
+
+/// Parse a certificate chain and private key from (possibly base64-wrapped)
+/// PEM strings. Shared by mTLS listener startup and certificate hot reload.
+pub(crate) fn parse_cert_and_key_pem(
+    cert_pem: &str,
+    key_secret: &SecretString,
+) -> Result<(
+    Vec<rustls::pki_types::CertificateDer<'static>>,
+    rustls::pki_types::PrivateKeyDer<'static>,
+)> {
     let cert_bytes = crate::crypto::pem::decode_base64_pem(cert_pem)
         .context("Failed to decode TLS certificate")?
         .into_bytes();

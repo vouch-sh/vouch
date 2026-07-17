@@ -88,6 +88,7 @@ fn start_s3_polling(
     state: &Arc<AppState>,
     s3_parts: S3ConfigParts,
     tls_config: Option<axum_server::tls_rustls::RustlsConfig>,
+    mtls_config: Option<super::mtls_listener::MtlsConfigSwap>,
 ) -> Option<JoinHandle<()>> {
     let (Some(client), Some(source), Some(etag)) = s3_parts else {
         return None;
@@ -101,6 +102,7 @@ fn start_s3_polling(
         source,
         state.config.clone(),
         tls_config,
+        mtls_config,
         etag,
     ))
 }
@@ -141,27 +143,34 @@ async fn serve_tls(
         shutdown_token_for_signal.cancel();
     });
 
-    // Start S3 config polling task if configured (with TLS config for hot reload)
-    let s3_poll_handle = start_s3_polling(state, s3_parts, Some(tls_config.clone()));
-
-    spawn_sighup_cert_reload(tls_config.clone(), state.config.clone());
-
-    // Start mTLS listener whenever TLS is configured (mTLS port always has a value).
+    // Start mTLS listener whenever TLS is configured (mTLS port always has a
+    // value). Started before the S3 polling task and SIGHUP handler so both
+    // can be handed the listener's config swap for certificate hot reload.
     let mtls_port = config.mtls_port;
     let mtls_addr: std::net::SocketAddr = format!("[::]:{mtls_port}")
         .parse()
         .context("Invalid mTLS listen address")?;
 
-    let mtls_handle: Option<JoinHandle<()>> =
+    let (mtls_handle, mtls_config_swap): (Option<JoinHandle<()>>, _) =
         match start_mtls_listener(config, mtls_addr, app.clone(), shutdown_token.clone()).await {
-            Ok(handle) => {
+            Ok((handle, swap)) => {
                 tracing::info!("mTLS listener started on port {}", mtls_port);
-                Some(handle)
+                (Some(handle), swap)
             }
             Err(e) => {
                 return Err(e.context("Failed to start mTLS listener"));
             }
         };
+
+    // Start S3 config polling task if configured (with TLS config for hot reload)
+    let s3_poll_handle = start_s3_polling(
+        state,
+        s3_parts,
+        Some(tls_config.clone()),
+        Some(mtls_config_swap.clone()),
+    );
+
+    spawn_sighup_cert_reload(tls_config.clone(), mtls_config_swap, state.config.clone());
 
     // Create handle for graceful shutdown of HTTPS server
     let handle = axum_server::Handle::new();
@@ -237,7 +246,7 @@ async fn serve_plain(
     s3_parts: S3ConfigParts,
 ) -> Result<Option<JoinHandle<()>>> {
     // Start S3 config polling task if configured (no TLS config to reload)
-    let s3_poll_handle = start_s3_polling(state, s3_parts, None);
+    let s3_poll_handle = start_s3_polling(state, s3_parts, None, None);
 
     let listener = tokio::net::TcpListener::bind(&config.listen_addr).await?;
     tracing::info!("Listening on http://{}", config.listen_addr);
@@ -263,6 +272,7 @@ async fn serve_plain(
 /// signal, not from the values captured at startup.
 fn spawn_sighup_cert_reload(
     tls_config: axum_server::tls_rustls::RustlsConfig,
+    mtls_config: super::mtls_listener::MtlsConfigSwap,
     config: Arc<arc_swap::ArcSwap<ServerConfig>>,
 ) {
     tokio::spawn(async move {
@@ -283,6 +293,16 @@ fn spawn_sighup_cert_reload(
                     match crate::infra::tls::reload_tls_from_config(&tls_config, cert, key) {
                         Ok(()) => tracing::info!("TLS certificates reloaded successfully"),
                         Err(e) => tracing::error!("Failed to reload TLS certificates: {e:#}"),
+                    }
+                    // Reload the mTLS listener independently: a failure here
+                    // must not undo the successful HTTPS reload above.
+                    match super::mtls_listener::reload_mtls_from_config(&mtls_config, cert, key) {
+                        Ok(()) => {
+                            tracing::info!("mTLS listener certificates reloaded successfully");
+                        }
+                        Err(e) => {
+                            tracing::error!("Failed to reload mTLS listener certificates: {e:#}");
+                        }
                     }
                 }
                 _ => tracing::warn!("TLS not configured, nothing to reload"),
@@ -326,7 +346,10 @@ async fn start_mtls_listener(
     addr: std::net::SocketAddr,
     app: Router,
     shutdown_token: CancellationToken,
-) -> anyhow::Result<tokio::task::JoinHandle<()>> {
+) -> anyhow::Result<(
+    tokio::task::JoinHandle<()>,
+    super::mtls_listener::MtlsConfigSwap,
+)> {
     use super::mtls_listener::{MtlsListener, PeerClientCert, build_mtls_server_config};
 
     // Parse server cert/key for the mTLS listener (same identity)
@@ -334,6 +357,7 @@ async fn start_mtls_listener(
 
     let mtls_config = build_mtls_server_config(certs, key)?;
     let mtls_config_swap = std::sync::Arc::new(arc_swap::ArcSwap::from(mtls_config));
+    let swap_for_reload = mtls_config_swap.clone();
 
     // Bind before spawning so the caller learns of port conflicts immediately.
     let tcp = tokio::net::TcpListener::bind(addr)
@@ -353,5 +377,5 @@ async fn start_mtls_listener(
         }
     });
 
-    Ok(handle)
+    Ok((handle, swap_for_reload))
 }

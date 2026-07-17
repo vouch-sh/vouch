@@ -638,6 +638,7 @@ pub fn start_s3_config_task(
     source: S3ConfigSource,
     config: Arc<ArcSwap<ServerConfig>>,
     tls_config: Option<RustlsConfig>,
+    mtls_config: Option<super::mtls_listener::MtlsConfigSwap>,
     initial_etag: String,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
@@ -662,7 +663,9 @@ pub fn start_s3_config_task(
                     // For runtime updates, only TLS can change.
                     match fetch_runtime_config(&s3_client, &source).await {
                         Ok((s3_cfg, etag)) => {
-                            if let Err(e) = apply_config_update(&config, &tls_config, s3_cfg).await
+                            if let Err(e) =
+                                apply_config_update(&config, &tls_config, &mtls_config, s3_cfg)
+                                    .await
                             {
                                 tracing::error!("Failed to apply config update: {e:#}");
                             } else {
@@ -707,6 +710,7 @@ async fn fetch_runtime_config(
 async fn apply_config_update(
     config: &Arc<ArcSwap<ServerConfig>>,
     tls_config: &Option<RustlsConfig>,
+    mtls_config: &Option<super::mtls_listener::MtlsConfigSwap>,
     s3_config: S3Config,
 ) -> Result<()> {
     // Load current config and clone it for modification
@@ -733,12 +737,20 @@ async fn apply_config_update(
 
     // Reload TLS if configured and changed
     if tls_changed
-        && let Some(tls) = tls_config
         && let (Some(cert), Some(key)) = (&new_config.tls_cert, &new_config.tls_key)
     {
-        tracing::info!("TLS config changed, reloading certificates");
-        super::tls::reload_tls_from_config(tls, cert, key)?;
-        tracing::info!("TLS certificates reloaded successfully");
+        if let Some(tls) = tls_config {
+            tracing::info!("TLS config changed, reloading certificates");
+            super::tls::reload_tls_from_config(tls, cert, key)?;
+            tracing::info!("TLS certificates reloaded successfully");
+        }
+        // Reload the mTLS listener independently: a failure here must not
+        // fail the HTTPS reload or the config swap below.
+        if let Some(mtls) = mtls_config
+            && let Err(e) = super::mtls_listener::reload_mtls_from_config(mtls, cert, key)
+        {
+            tracing::error!("Failed to reload mTLS listener config from S3: {e:#}");
+        }
     }
 
     // Atomically swap the config
@@ -1661,7 +1673,7 @@ mod tests {
             ..Default::default()
         };
 
-        apply_config_update(&arcswap, &None, s3)
+        apply_config_update(&arcswap, &None, &None, s3)
             .await
             .expect("apply update");
 
@@ -1684,12 +1696,105 @@ mod tests {
         // S3 config with no TLS section — apply must succeed and leave
         // the existing TLS material untouched.
         let s3 = S3Config::default();
-        apply_config_update(&arcswap, &None, s3)
+        apply_config_update(&arcswap, &None, &None, s3)
             .await
             .expect("apply update");
 
         let after = arcswap.load();
         assert_eq!(after.tls_cert.as_deref(), Some("existing-cert"));
         assert!(after.tls_key.is_some());
+    }
+
+    // Throwaway self-signed P-256 cert + PKCS#8 key (same fixture as
+    // infra/tls.rs tests), used to exercise the mTLS reload path.
+    const TEST_CERT_PEM: &str = "-----BEGIN CERTIFICATE-----\n\
+MIIBiDCCAS2gAwIBAgIUAzsi4KkqvGaw6UTFs4DrQEe2KWwwCgYIKoZIzj0EAwIw\n\
+GTEXMBUGA1UEAwwOdm91Y2gtdGxzLXRlc3QwHhcNMjYwNjEwMTYxMjM3WhcNMzYw\n\
+NjA3MTYxMjM3WjAZMRcwFQYDVQQDDA52b3VjaC10bHMtdGVzdDBZMBMGByqGSM49\n\
+AgEGCCqGSM49AwEHA0IABAOqxc9YgMgXu2BGQ3KOgFNtVxG7pdencd5TOnjrr6zJ\n\
+nPi66MVoVlQ9bi3ydlRJ1ce7HHOEui/G0U0aoDJtgVmjUzBRMB0GA1UdDgQWBBQW\n\
+yEA6dBvaxTzloNCzXuJLG5z9/DAfBgNVHSMEGDAWgBQWyEA6dBvaxTzloNCzXuJL\n\
+G5z9/DAPBgNVHRMBAf8EBTADAQH/MAoGCCqGSM49BAMCA0kAMEYCIQC9cwWPeNND\n\
+WFbJkO8dqEVE69Xzdj+NMgenQFOJsOW2yAIhAISz7zP/KDBC6jVhH7qJTR9E7Rnr\n\
+3wT8S2AL3BFHW6+2\n\
+-----END CERTIFICATE-----\n";
+
+    const TEST_KEY_PEM: &str = "-----BEGIN PRIVATE KEY-----\n\
+MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQghUolejGt3e2SfwZJ\n\
+BRRya1VbXh8fYhiJfLvrVBbs/lqhRANCAAQDqsXPWIDIF7tgRkNyjoBTbVcRu6XX\n\
+p3HeUzp466+syZz4uujFaFZUPW4t8nZUSdXHuxxzhLovxtFNGqAybYFZ\n\
+-----END PRIVATE KEY-----\n";
+
+    /// Build an initial mTLS config swap from the fixture cert/key.
+    fn fixture_mtls_swap() -> super::super::mtls_listener::MtlsConfigSwap {
+        let (certs, key) = crate::infra::tls::parse_cert_and_key_pem(
+            TEST_CERT_PEM,
+            &SecretString::from(TEST_KEY_PEM.to_string()),
+        )
+        .expect("parse fixture PEM");
+        let config = super::super::mtls_listener::build_mtls_server_config(certs, key)
+            .expect("build mTLS config");
+        Arc::new(arc_swap::ArcSwap::from(config))
+    }
+
+    /// An S3 TLS change must also rebuild and store the mTLS listener's
+    /// config so the mTLS port serves rotated certificates (#710).
+    #[tokio::test]
+    async fn apply_config_update_reloads_mtls_swap() {
+        let mut starting = crate::test_utils::test_config();
+        starting.tls_cert = None;
+        starting.tls_key = None;
+        let arcswap = Arc::new(ArcSwap::from_pointee(starting));
+
+        let mtls_swap = fixture_mtls_swap();
+        let initial = mtls_swap.load_full();
+
+        let s3 = S3Config {
+            tls: Some(S3TlsConfig {
+                cert: Some(TEST_CERT_PEM.to_string()),
+                key: Some(TEST_KEY_PEM.to_string()),
+            }),
+            ..Default::default()
+        };
+
+        apply_config_update(&arcswap, &None, &Some(mtls_swap.clone()), s3)
+            .await
+            .expect("apply update");
+
+        assert!(
+            !Arc::ptr_eq(&mtls_swap.load_full(), &initial),
+            "mTLS swap must hold a freshly built config after a TLS change"
+        );
+    }
+
+    /// A failing mTLS reload must not fail the config update itself.
+    #[tokio::test]
+    async fn apply_config_update_mtls_reload_failure_is_isolated() {
+        let mut starting = crate::test_utils::test_config();
+        starting.tls_cert = None;
+        starting.tls_key = None;
+        let arcswap = Arc::new(ArcSwap::from_pointee(starting));
+
+        let mtls_swap = fixture_mtls_swap();
+        let initial = mtls_swap.load_full();
+
+        let s3 = S3Config {
+            tls: Some(S3TlsConfig {
+                cert: Some("garbage-not-a-cert".to_string()),
+                key: Some("garbage-not-a-key".to_string()),
+            }),
+            ..Default::default()
+        };
+
+        apply_config_update(&arcswap, &None, &Some(mtls_swap.clone()), s3)
+            .await
+            .expect("config update must succeed despite mTLS reload failure");
+
+        let after = arcswap.load();
+        assert_eq!(after.tls_cert.as_deref(), Some("garbage-not-a-cert"));
+        assert!(
+            Arc::ptr_eq(&mtls_swap.load_full(), &initial),
+            "failed mTLS reload must leave the previous config in place"
+        );
     }
 }
