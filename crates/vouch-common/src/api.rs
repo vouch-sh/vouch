@@ -432,12 +432,22 @@ pub struct SshCaPublicKeyResponse {
 
 /// Cloud provider token response.
 /// Contains an OIDC ID token for use with cloud provider identity federation.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)]
 pub struct CloudTokenResponse {
     /// OIDC ID token for use with cloud provider identity federation.
     pub id_token: String,
     /// Token validity period in seconds.
     pub expires_in: u64,
+}
+
+// Custom Debug that redacts id_token to prevent accidental log exposure.
+impl std::fmt::Debug for CloudTokenResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CloudTokenResponse")
+            .field("id_token", &"[REDACTED]")
+            .field("expires_in", &self.expires_in)
+            .finish()
+    }
 }
 
 /// Response containing an OIDC ID token for AWS STS.
@@ -532,4 +542,23 @@ pub struct GitHubAccountStatus {
     /// Repository names when repository_selection is "selected".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repositories: Option<Vec<String>>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The OIDC ID token is a bearer credential for cloud identity
+    /// federation and must never appear in `{:?}` output.
+    #[test]
+    fn test_cloud_token_response_debug_redacts_id_token() {
+        let response = CloudTokenResponse {
+            id_token: "eyJhbGciOiJSUzI1NiJ9.secret-token".to_string(),
+            expires_in: 28_800,
+        };
+        let debug = format!("{response:?}");
+        assert!(debug.contains("[REDACTED]"), "{debug}");
+        assert!(!debug.contains("secret-token"), "{debug}");
+        assert!(debug.contains("28800"), "{debug}");
+    }
 }
