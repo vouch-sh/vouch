@@ -479,6 +479,24 @@ mod tests {
         assert_eq!(err.oauth_description(), err.to_string());
     }
 
+    /// `OccConflict` is the only retryable `ServiceError`. Every
+    /// `with_dsql_retry!` loop over `ServiceError` depends on this
+    /// contract — if it regresses, transactional writes silently stop
+    /// retrying transient OCC conflicts.
+    #[test]
+    fn occ_conflict_is_the_only_retryable_service_error() {
+        use crate::db::pool::RetryableError;
+
+        assert!(ServiceError::OccConflict.is_retryable());
+        assert!(!ServiceError::Internal("boom".to_string()).is_retryable());
+        assert!(!ServiceError::Conflict("duplicate".to_string()).is_retryable());
+        // Business-logic 409s must propagate immediately, never retry.
+        assert!(
+            !ServiceError::api(StatusCode::CONFLICT, "max_secrets_reached", "cap hit")
+                .is_retryable()
+        );
+    }
+
     #[test]
     fn test_service_error_api_factory() {
         let err = ServiceError::api(

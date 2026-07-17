@@ -50,80 +50,83 @@ pub struct EnrolledUser {
     pub is_org_admin: bool,
 }
 
+/// Get or create the organization row for `domain`, returning its ID.
+///
+/// Runs OUTSIDE the user-creation transaction so the unique-violation
+/// recovery path doesn't abort it. The deterministic ID makes concurrent
+/// enrollees for the same domain race on the documents primary key, and
+/// exactly one INSERT wins.
+///
+/// Lookup falls back from the deterministic ID to the domain index: rows
+/// with random-UUID IDs (created before deterministic IDs) are only
+/// findable by domain, and skipping the fallback would insert a duplicate
+/// org.
+///
+/// If user creation later fails, the organization row may persist with
+/// `created_by_user_id = None`. That is benign: the next enrollee for the
+/// domain reuses the row and the enrollment transaction claims the admin
+/// slot via `compare_and_update`.
+async fn get_or_create_org(store: &DocumentStore, domain: &str) -> Result<String> {
+    let id = deterministic_org_id(domain);
+    let existing = match store.get::<OrganizationDoc>(&id).await? {
+        Some(org) => Some(org),
+        None => store.find_one::<OrganizationDoc>("domain", domain).await?,
+    };
+    if let Some(org) = existing {
+        return Ok(org.id);
+    }
+
+    let doc = OrganizationDoc {
+        domain: domain.to_string(),
+        name: None,
+        created_by_user_id: None,
+        additional_domains: Vec::new(),
+        subdomain: None,
+    };
+    match store.insert_with_id(&id, &doc).await {
+        Ok(result) => Ok(result.id),
+        Err(e) if super::pool::is_unique_violation(&e) => {
+            // Concurrent enrollee inserted first — re-fetch.
+            let org = match store.get::<OrganizationDoc>(&id).await? {
+                Some(o) => o,
+                None => store
+                    .find_one::<OrganizationDoc>("domain", domain)
+                    .await?
+                    .context("organization vanished after unique violation")?,
+            };
+            Ok(org.id)
+        }
+        Err(e) => Err(e),
+    }
+}
+
 /// Enroll a user with their organization.
 ///
 /// This function:
-/// 1. Gets or creates the organization for the user's domain
-/// 2. Determines if the user should be an org admin (first user)
-/// 3. Creates or gets the user with the org association
-/// 4. Updates the org's `created_by_user_id` if first user
+/// 1. Gets or creates the organization for the user's domain, outside the
+///    user-creation transaction (see [`get_or_create_org`])
+/// 2. Inside a single retried transaction: reads one snapshot of the
+///    organization row, derives the admin decision from it (first user of
+///    an org whose admin slot is open), creates or gets the user, and
+///    claims the admin slot via `compare_and_update` against that
+///    snapshot's version
 ///
-/// Steps 2-4 run inside a single transaction. Step 1 runs outside the
-/// transaction so that a primary-key collision from a concurrent
-/// enrollment for the same domain can be recovered from without
-/// aborting the user-creation transaction (see the inline comment for
-/// the atomicity tradeoff).
+/// Deriving everything from one in-transaction snapshot means every
+/// interleaving with a concurrent enrollee is caught by the single
+/// version guard: a lost CAS while claiming admin aborts with
+/// [`ServiceError::OccConflict`] and `with_dsql_retry!` re-runs the
+/// transaction against fresh state. If the organization row was deleted
+/// after step 1, the snapshot is `None` and the user is enrolled without
+/// any admin claim.
 pub async fn enroll_user_with_org(
     store: &DocumentStore,
     email: &str,
     name: Option<&str>,
     domain: Option<&str>,
 ) -> Result<EnrollmentResult> {
-    // Step 1: Get or create organization (if domain provided).
-    //
-    // Runs OUTSIDE the user-creation transaction so the unique-violation
-    // recovery path doesn't abort it. The deterministic ID makes concurrent
-    // enrollees for the same domain race on the documents primary key, and
-    // exactly one INSERT wins.
-    //
-    // Lookup falls back from deterministic ID to the domain index: rows with
-    // random-UUID IDs (created before deterministic IDs) are only findable by
-    // domain, and skipping the fallback would insert a duplicate org.
-    //
-    // If user creation later fails, the organization row may persist with
-    // `created_by_user_id = None`. That is benign: the next enrollee for the
-    // domain reuses the row and Step 4 sets them as admin via
-    // `compare_and_update`.
-    let (org_id, org_needs_admin) = if let Some(domain) = domain {
-        let id = deterministic_org_id(domain);
-        let existing = match store.get::<OrganizationDoc>(&id).await? {
-            Some(org) => Some(org),
-            None => store.find_one::<OrganizationDoc>("domain", domain).await?,
-        };
-
-        match existing {
-            Some(org) => {
-                let needs_admin = org.data.created_by_user_id.is_none();
-                (Some(org.id), needs_admin)
-            }
-            None => {
-                let doc = OrganizationDoc {
-                    domain: domain.to_string(),
-                    name: None,
-                    created_by_user_id: None,
-                    additional_domains: Vec::new(),
-                    subdomain: None,
-                };
-                match store.insert_with_id(&id, &doc).await {
-                    Ok(result) => (Some(result.id), true),
-                    Err(e) if super::pool::is_unique_violation(&e) => {
-                        // Concurrent enrollee inserted first — re-fetch.
-                        let org = match store.get::<OrganizationDoc>(&id).await? {
-                            Some(o) => o,
-                            None => store
-                                .find_one::<OrganizationDoc>("domain", domain)
-                                .await?
-                                .context("organization vanished after unique violation")?,
-                        };
-                        let needs_admin = org.data.created_by_user_id.is_none();
-                        (Some(org.id), needs_admin)
-                    }
-                    Err(e) => return Err(e),
-                }
-            }
-        }
-    } else {
-        (None, false)
+    let org_id = match domain {
+        Some(domain) => Some(get_or_create_org(store, domain).await?),
+        None => None,
     };
 
     // Map a DB error from any tx operation into either an OccConflict (if it
@@ -144,22 +147,32 @@ pub async fn enroll_user_with_org(
             .await
             .map_err(|e| map_db_err(e, "Failed to begin enrollment transaction"))?;
 
-        // Step 2: Determine admin status
-        let is_org_admin = if org_needs_admin {
-            if let Some(ref oid) = org_id {
+        // One in-transaction snapshot of the org row: the admin-count
+        // predicate, the CAS guard (id + version), and the CAS payload all
+        // derive from it.
+        let org = match &org_id {
+            Some(oid) => tx
+                .get::<OrganizationDoc>(oid)
+                .await
+                .map_err(|e| map_db_err(e, "Failed to load organization"))?,
+            None => None,
+        };
+        // Carried forward only while the admin slot is open; encodes
+        // "admin slot open ⇒ org exists" in the type.
+        let claimable_org = org.filter(|o| o.data.created_by_user_id.is_none());
+
+        let is_org_admin = match &claimable_org {
+            Some(org_doc) => {
                 let count = tx
-                    .count::<UserDoc>("org_id", oid)
+                    .count::<UserDoc>("org_id", &org_doc.id)
                     .await
                     .map_err(|e| map_db_err(e, "Failed to count org users"))?;
                 count == 0
-            } else {
-                false
             }
-        } else {
-            false
+            None => false,
         };
 
-        // Step 3: Get or create user
+        // Get or create user
         let existing_user = tx
             .find_one::<UserDoc>("email", email)
             .await
@@ -199,28 +212,36 @@ pub async fn enroll_user_with_org(
             }
         };
 
-        // Step 4: Ensure org has an admin. Uses compare_and_update so that
-        // only one concurrent enrollee wins the admin slot. On re-run after a
-        // crash, this also repairs a missing created_by_user_id.
-        if let Some(ref oid) = org_id
-            && let Some(org_doc) = tx
-                .get::<OrganizationDoc>(oid)
+        // Claim (or repair) the org admin slot. Winning this CAS is a
+        // REQUIREMENT for committing a user row that claims
+        // `is_org_admin = true`: the count above is a predicate read that
+        // concurrent transactions do not conflict on (write skew under READ
+        // COMMITTED), so two first-enrollees can both compute
+        // `is_org_admin = true` — the org-row version is the one write both
+        // must collide on. A claiming loser aborts so `with_dsql_retry!`
+        // re-runs the transaction; the retry re-reads fresh state (the
+        // winner's user row and admin slot are now visible) and commits a
+        // non-admin user. A non-claiming loser merely raced the
+        // opportunistic `created_by_user_id` repair and proceeds.
+        if let Some(org_doc) = claimable_org {
+            let mut data = org_doc.data;
+            data.created_by_user_id = Some(user.id.clone());
+            let won = tx
+                .compare_and_update(&org_doc.id, org_doc.version, &data)
                 .await
-                .map_err(|e| map_db_err(e, "Failed to load organization"))?
-        {
-            if org_doc.data.created_by_user_id.is_none() {
-                let mut data = org_doc.data;
-                data.created_by_user_id = Some(user.id.clone());
-                let won = tx
-                    .compare_and_update(oid, org_doc.version, &data)
-                    .await
-                    .map_err(|e| map_db_err(e, "Failed to update organization admin"))?;
-                admin_cas_outcome(won, is_org_admin, oid)?;
-            } else if is_org_admin {
-                // Another enrollee committed the admin slot between Step 2's
-                // count and this read (READ COMMITTED lets each statement see
-                // newer commits). A stale admin claim must abort and retry.
-                admin_cas_outcome(false, true, oid)?;
+                .map_err(|e| map_db_err(e, "Failed to update organization admin"))?;
+            if !won && is_org_admin {
+                tracing::debug!(
+                    org_id = %org_doc.id,
+                    "Lost race to claim org admin during enrollment — retrying as non-admin"
+                );
+                return Err(ServiceError::OccConflict);
+            }
+            if !won {
+                tracing::debug!(
+                    org_id = %org_doc.id,
+                    "Lost race to repair org admin during enrollment — another enrollee won"
+                );
             }
         }
 
@@ -238,71 +259,9 @@ pub async fn enroll_user_with_org(
     Ok(result)
 }
 
-/// Decide the outcome of the Step-4 admin CAS on the organization row.
-///
-/// Winning the CAS is a REQUIREMENT for committing a user row that claims
-/// `is_org_admin = true`: the count-based admin decision in Step 2 is a
-/// predicate read that concurrent transactions do not conflict on (write
-/// skew under READ COMMITTED), so two first-enrollees can both compute
-/// `is_org_admin = true`. The org-row CAS is the one write both must
-/// collide on. A claiming loser aborts with `OccConflict` so
-/// `with_dsql_retry!` re-runs the transaction; the retry re-counts (the
-/// winner's user row is now visible), derives `is_org_admin = false`, and
-/// commits a non-admin user.
-///
-/// A non-claiming loser (this enrollee never computed admin status) merely
-/// raced the opportunistic `created_by_user_id` repair and proceeds.
-fn admin_cas_outcome(won: bool, claimed_admin: bool, org_id: &str) -> Result<(), ServiceError> {
-    if won || !claimed_admin {
-        if !won {
-            tracing::debug!(
-                org_id = %org_id,
-                "Lost race to repair org admin during enrollment — another enrollee won"
-            );
-        }
-        return Ok(());
-    }
-    tracing::debug!(
-        org_id = %org_id,
-        "Lost race to claim org admin during enrollment — retrying as non-admin"
-    );
-    Err(ServiceError::OccConflict)
-}
-
 #[cfg(test)]
-#[expect(
-    clippy::expect_used,
-    reason = "test code: panic on assertion failure is acceptable"
-)]
 mod tests {
-    use super::{admin_cas_outcome, deterministic_org_id};
-
-    /// Winning the CAS always commits, whether or not admin was claimed.
-    #[test]
-    fn admin_cas_outcome_winner_commits() {
-        assert!(admin_cas_outcome(true, true, "org-1").is_ok());
-        assert!(admin_cas_outcome(true, false, "org-1").is_ok());
-    }
-
-    /// A loser that claimed admin must abort with the one retryable error
-    /// so `with_dsql_retry!` re-runs the transaction and re-derives the
-    /// admin decision from fresh state.
-    #[test]
-    fn admin_cas_outcome_claiming_loser_is_retryable_conflict() {
-        use crate::db::pool::RetryableError;
-        use crate::error::ServiceError;
-
-        let err = admin_cas_outcome(false, true, "org-1").expect_err("must abort");
-        assert!(matches!(err, ServiceError::OccConflict));
-        assert!(err.is_retryable(), "OccConflict must be retryable");
-    }
-
-    /// A loser that never claimed admin only raced the opportunistic
-    /// `created_by_user_id` repair; committing is harmless.
-    #[test]
-    fn admin_cas_outcome_non_claiming_loser_commits() {
-        assert!(admin_cas_outcome(false, false, "org-1").is_ok());
-    }
+    use super::deterministic_org_id;
 
     #[test]
     fn deterministic_org_id_collides_on_equal_domains() {
