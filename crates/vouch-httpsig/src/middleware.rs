@@ -214,6 +214,48 @@ pub const DEFAULT_MAX_AGE: i64 = 300;
 /// 6. Emits `Accept-Signature` (RFC 9421 §5.1) on unsigned / under-covered 401s
 ///    so clients know exactly what to sign next time
 ///
+/// Validate and consume a verified signature's nonce, if it carries one.
+///
+/// Returns `Some(response)` when the request must be rejected (unknown or
+/// already-consumed nonce → 401 with a fresh `Signature-Nonce`; backend
+/// failure → 500), or `None` when there is no nonce or it was accepted.
+async fn enforce_nonce<R: KeyResolver>(
+    resolver: &R,
+    params: &SignatureParams,
+    label: &str,
+    keyid: &str,
+) -> Option<Response> {
+    let nonce = params.nonce.as_deref()?;
+    match resolver.validate_nonce(nonce).await {
+        NonceValidation::Valid => None,
+        NonceValidation::Invalid => {
+            tracing::debug!(
+                label = %label,
+                keyid = %keyid,
+                "HTTP signature nonce invalid or already consumed"
+            );
+            let mut resp = (StatusCode::UNAUTHORIZED, SIG_VERIFY_FAILED).into_response();
+            // Recovery hint: a stale or consumed nonce is fixed by signing the
+            // next request with a fresh one (mirrors DPoP's use_dpop_nonce
+            // flow). No Accept-Signature — this is not a coverage problem.
+            if let Some(fresh) = resolver.generate_nonce().await
+                && let Ok(value) = http::HeaderValue::from_str(&fresh)
+            {
+                resp.headers_mut().insert("signature-nonce", value);
+            }
+            Some(resp)
+        }
+        NonceValidation::Error => {
+            tracing::error!(
+                label = %label,
+                keyid = %keyid,
+                "HTTP signature nonce validation backend failure"
+            );
+            Some((StatusCode::INTERNAL_SERVER_ERROR, "internal error").into_response())
+        }
+    }
+}
+
 /// Used on endpoints where every request must be signed, e.g. the `/v1/*`
 /// CLI↔server channel under FAPI 2.0 Message Signing. Returns 401 with a
 /// generic message on any verification failure.
@@ -372,38 +414,8 @@ pub async fn require_signature<R: KeyResolver>(
             }
             // Validate and consume the server-issued nonce when the signature
             // carries one (enforce-when-present; see KeyResolver::validate_nonce).
-            if let Some(nonce) = params.nonce.as_deref() {
-                match resolver.validate_nonce(nonce).await {
-                    NonceValidation::Valid => {}
-                    NonceValidation::Invalid => {
-                        tracing::debug!(
-                            label = %label,
-                            keyid = %keyid,
-                            "HTTP signature nonce invalid or already consumed"
-                        );
-                        let mut resp =
-                            (StatusCode::UNAUTHORIZED, SIG_VERIFY_FAILED).into_response();
-                        // Recovery hint: a stale or consumed nonce is fixed by
-                        // signing the next request with a fresh one (mirrors
-                        // DPoP's use_dpop_nonce flow). No Accept-Signature —
-                        // this is not a coverage problem.
-                        if let Some(fresh) = resolver.generate_nonce().await
-                            && let Ok(value) = http::HeaderValue::from_str(&fresh)
-                        {
-                            resp.headers_mut().insert("signature-nonce", value);
-                        }
-                        return resp;
-                    }
-                    NonceValidation::Error => {
-                        tracing::error!(
-                            label = %label,
-                            keyid = %keyid,
-                            "HTTP signature nonce validation backend failure"
-                        );
-                        return (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
-                            .into_response();
-                    }
-                }
+            if let Some(resp) = enforce_nonce(resolver.as_ref(), &params, &label, &keyid).await {
+                return resp;
             }
             parts.extensions.insert(VerifiedSignature {
                 label: label.clone(),

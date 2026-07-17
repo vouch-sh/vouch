@@ -176,12 +176,7 @@ pub(crate) async fn get_token(
 /// The agent source is folded into the key so that agent and non-agent
 /// invocations never share a cached entry (same pattern as the STS, EKS,
 /// RDS, and Redshift credential caches).
-fn build_cache_key(
-    domain: &str,
-    domain_owner: &str,
-    region: &str,
-    agent: Option<&str>,
-) -> String {
+fn build_cache_key(domain: &str, domain_owner: &str, region: &str, agent: Option<&str>) -> String {
     let suffix = agent.map_or(String::new(), |src| format!(":agent:{src}"));
     format!("codeartifact:{domain}:{domain_owner}:{region}{suffix}")
 }
@@ -238,7 +233,12 @@ mod tests {
     #[test]
     fn test_cache_key_includes_agent_source() {
         let plain = build_cache_key("my-domain", "123456789012", "us-east-1", None);
-        let agent = build_cache_key("my-domain", "123456789012", "us-east-1", Some("claude-code"));
+        let agent = build_cache_key(
+            "my-domain",
+            "123456789012",
+            "us-east-1",
+            Some("claude-code"),
+        );
         assert_eq!(plain, "codeartifact:my-domain:123456789012:us-east-1");
         assert_eq!(
             agent,

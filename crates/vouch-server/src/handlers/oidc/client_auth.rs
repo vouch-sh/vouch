@@ -317,8 +317,9 @@ mod tests {
     fn test_extract_client_credentials_scheme_case_insensitive() {
         for scheme in ["Basic", "basic", "BASIC", "bAsIc"] {
             let headers = basic_header(scheme);
-            let creds = extract_client_credentials(&headers, None, None)
-                .unwrap_or_else(|| panic!("{scheme} scheme must be accepted"));
+            let creds = extract_client_credentials(&headers, None, None);
+            assert!(creds.is_some(), "{scheme} scheme must be accepted");
+            let creds = creds.expect("checked above");
             assert_eq!(creds.client_id, "client-1", "{scheme}");
             assert!(creds.client_secret.is_some(), "{scheme}");
         }

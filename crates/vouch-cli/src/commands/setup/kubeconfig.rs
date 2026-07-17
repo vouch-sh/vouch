@@ -442,10 +442,7 @@ users: []
         let reparsed: Kubeconfig = parse_kubeconfig(&serialized).expect("should re-parse");
         let cluster_other2 = &reparsed.clusters[0].cluster.other;
         assert_eq!(cluster_other2["insecure-skip-tls-verify"], true);
-        assert_eq!(
-            cluster_other2["proxy-url"],
-            "http://proxy.example.com:3128"
-        );
+        assert_eq!(cluster_other2["proxy-url"], "http://proxy.example.com:3128");
         let context_other2 = &reparsed.contexts[0].context.other;
         assert_eq!(
             context_other2["extensions"][0]["extension"]["directory"],

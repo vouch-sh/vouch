@@ -128,8 +128,7 @@ impl GitHubService<'_> {
                 .map_err(GitHubError::Database)?
                 .ok_or(GitHubError::UserNotFound)?;
 
-            let (Some(github_id), Some(github_login)) = (user.github_id, &user.github_login)
-            else {
+            let (Some(github_id), Some(github_login)) = (user.github_id, &user.github_login) else {
                 return Err(GitHubError::GitHubAccountNotLinked);
             };
 

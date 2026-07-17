@@ -172,6 +172,7 @@ fn jwk_to_p256_public_key(jwk: &serde_json::Value) -> Option<Vec<u8>> {
 #[cfg(test)]
 #[expect(
     clippy::unwrap_used,
+    clippy::expect_used,
     reason = "test code: panic on assertion failure is acceptable"
 )]
 mod tests {

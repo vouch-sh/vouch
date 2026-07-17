@@ -736,9 +736,7 @@ async fn apply_config_update(
             != old_tls_key;
 
     // Reload TLS if configured and changed
-    if tls_changed
-        && let (Some(cert), Some(key)) = (&new_config.tls_cert, &new_config.tls_key)
-    {
+    if tls_changed && let (Some(cert), Some(key)) = (&new_config.tls_cert, &new_config.tls_key) {
         if let Some(tls) = tls_config {
             tracing::info!("TLS config changed, reloading certificates");
             super::tls::reload_tls_from_config(tls, cert, key)?;

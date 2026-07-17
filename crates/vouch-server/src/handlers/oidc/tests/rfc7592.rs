@@ -933,5 +933,9 @@ async fn test_rfc7592_put_cannot_clear_jwks_for_private_key_jwt_client() {
         ],
     )
     .await;
-    assert_eq!(status, StatusCode::OK, "PUT keeping JWKS must succeed: {body}");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "PUT keeping JWKS must succeed: {body}"
+    );
 }
