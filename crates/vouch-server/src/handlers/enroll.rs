@@ -660,7 +660,7 @@ pub(crate) async fn complete_enrollment_after_identity(
     // Enroll user with organization in a single atomic transaction.
     // This ensures that if org creation succeeds but user creation fails,
     // the entire operation is rolled back to prevent orphaned state.
-    let enrollment = match db::enroll_user_with_org(
+    let user = match db::enroll_user_with_org(
         &state.store,
         &identity.email,
         None,
@@ -668,7 +668,7 @@ pub(crate) async fn complete_enrollment_after_identity(
     )
     .await
     {
-        Ok(e) => e,
+        Ok(user) => user,
         Err(e) => {
             tracing::error!("Failed to enroll user: {}", e);
             return ErrorTemplate {
@@ -679,8 +679,6 @@ pub(crate) async fn complete_enrollment_after_identity(
             .into_response();
         }
     };
-
-    let user = enrollment.user;
 
     // Create session for this user (using session cookie instead of enrollment cookie)
     let now = Timestamp::now();

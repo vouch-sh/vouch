@@ -215,7 +215,7 @@ pub use authorization_codes::{
 };
 
 // Re-export enrollment types and functions
-pub use enrollment::{EnrolledUser, EnrollmentResult, enroll_user_with_org};
+pub use enrollment::{EnrolledUser, enroll_user_with_org};
 
 // Re-export posture policy types and functions
 pub use posture_policies::{
