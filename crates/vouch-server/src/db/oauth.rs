@@ -510,22 +510,9 @@ pub async fn create_oauth_client_secret(
     let secret_hash = secret_hash.to_string();
     let description = description.map(String::from);
 
-    // Map a DB error from any tx operation into either an OccConflict (if it
-    // signals writer contention — Postgres serialization failure, Aurora DSQL
-    // OC000/OC001, SQLite BUSY/LOCKED) or a generic 500.
-    // OccConflict is retried by with_dsql_retry!; the 500 path propagates.
-    let map_db_err = |e: anyhow::Error, msg: &'static str| -> ServiceError {
-        tracing::error!("{msg}: {e}");
-        if crate::db::pool::is_retryable_db_error(&e) {
-            ServiceError::OccConflict
-        } else {
-            ServiceError::Internal(msg.to_string())
-        }
-    };
-
     crate::with_dsql_retry!(async {
         let mut tx = store.begin().await.map_err(|e| {
-            map_db_err(
+            ServiceError::from_db_contention(
                 e,
                 "Failed to begin transaction for create_oauth_client_secret",
             )
@@ -537,7 +524,12 @@ pub async fn create_oauth_client_secret(
         let client_doc = tx
             .get::<OAuthClientDoc>(&oauth_client_id)
             .await
-            .map_err(|e| map_db_err(e, "Failed to load OAuthClientDoc for secret create"))?
+            .map_err(|e| {
+                ServiceError::from_db_contention(
+                    e,
+                    "Failed to load OAuthClientDoc for secret create",
+                )
+            })?
             .ok_or(ServiceError::NotFound("OAuth client"))?;
 
         // Count currently-active secrets by filtering (not SQL COUNT) because
@@ -546,7 +538,9 @@ pub async fn create_oauth_client_secret(
         let all_secrets = tx
             .find_all::<OAuthClientSecretDoc>("oauth_client_id", &oauth_client_id)
             .await
-            .map_err(|e| map_db_err(e, "Failed to list secrets for secret create"))?;
+            .map_err(|e| {
+                ServiceError::from_db_contention(e, "Failed to list secrets for secret create")
+            })?;
 
         // Filter directly on the doc fields to avoid a needless From conversion.
         // Mirrors the `is_valid` predicate: not revoked, not expired.
@@ -585,7 +579,7 @@ pub async fn create_oauth_client_secret(
         let inserted = tx
             .insert(&new_secret_doc)
             .await
-            .map_err(|e| map_db_err(e, "Failed to insert secret"))?;
+            .map_err(|e| ServiceError::from_db_contention(e, "Failed to insert secret"))?;
 
         // Version-bump the client doc.  This is the OCC serialization point:
         // any concurrent secret-set mutation on this client will have bumped the
@@ -597,7 +591,12 @@ pub async fn create_oauth_client_secret(
                 &client_doc.data,
             )
             .await
-            .map_err(|e| map_db_err(e, "Failed to version-bump client for secret create"))?;
+            .map_err(|e| {
+                ServiceError::from_db_contention(
+                    e,
+                    "Failed to version-bump client for secret create",
+                )
+            })?;
 
         if !ok {
             // OCC conflict — another writer beat us to the client row.  Signal
@@ -605,9 +604,9 @@ pub async fn create_oauth_client_secret(
             return Err(ServiceError::OccConflict);
         }
 
-        tx.commit()
-            .await
-            .map_err(|e| map_db_err(e, "Failed to commit create_oauth_client_secret"))?;
+        tx.commit().await.map_err(|e| {
+            ServiceError::from_db_contention(e, "Failed to commit create_oauth_client_secret")
+        })?;
 
         Ok(OAuthClientSecret::from(inserted))
     })
@@ -710,22 +709,9 @@ pub async fn revoke_oauth_client_secret(
     let secret_id = secret_id.to_string();
     let oauth_client_id = oauth_client_id.to_string();
 
-    // Map a DB error from any tx operation into either an OccConflict (if it
-    // signals writer contention — Postgres serialization failure, Aurora DSQL
-    // OC000/OC001, SQLite BUSY/LOCKED) or a generic 500.
-    // OccConflict is retried by with_dsql_retry!; the 500 path propagates.
-    let map_db_err = |e: anyhow::Error, msg: &'static str| -> ServiceError {
-        tracing::error!("{msg}: {e}");
-        if crate::db::pool::is_retryable_db_error(&e) {
-            ServiceError::OccConflict
-        } else {
-            ServiceError::Internal(msg.to_string())
-        }
-    };
-
     crate::with_dsql_retry!(async {
         let mut tx = store.begin().await.map_err(|e| {
-            map_db_err(
+            ServiceError::from_db_contention(
                 e,
                 "Failed to begin transaction for revoke_oauth_client_secret",
             )
@@ -735,7 +721,7 @@ pub async fn revoke_oauth_client_secret(
         let secret_doc = tx
             .get::<OAuthClientSecretDoc>(&secret_id)
             .await
-            .map_err(|e| map_db_err(e, "Failed to load secret for revoke"))?
+            .map_err(|e| ServiceError::from_db_contention(e, "Failed to load secret for revoke"))?
             .ok_or(ServiceError::NotFound("Secret"))?;
 
         if secret_doc.data.oauth_client_id != oauth_client_id {
@@ -752,7 +738,9 @@ pub async fn revoke_oauth_client_secret(
         let client_doc = tx
             .get::<OAuthClientDoc>(&oauth_client_id)
             .await
-            .map_err(|e| map_db_err(e, "Failed to load OAuthClientDoc for revoke"))?
+            .map_err(|e| {
+                ServiceError::from_db_contention(e, "Failed to load OAuthClientDoc for revoke")
+            })?
             .ok_or(ServiceError::NotFound("OAuth client"))?;
 
         // Count active secrets (filter, not SQL COUNT — soft-deleted rows are retained).
@@ -760,7 +748,9 @@ pub async fn revoke_oauth_client_secret(
         let all_secrets = tx
             .find_all::<OAuthClientSecretDoc>("oauth_client_id", &oauth_client_id)
             .await
-            .map_err(|e| map_db_err(e, "Failed to list secrets for revoke"))?;
+            .map_err(|e| {
+                ServiceError::from_db_contention(e, "Failed to list secrets for revoke")
+            })?;
 
         // Count the *other* active secrets — exclude the target row itself, so a
         // revoke that leaves a valid secret behind is allowed even when the target
@@ -797,7 +787,7 @@ pub async fn revoke_oauth_client_secret(
         updated_data.revoked_at = Some(now);
         tx.update(&secret_id, &updated_data)
             .await
-            .map_err(|e| map_db_err(e, "Failed to soft-delete secret"))?;
+            .map_err(|e| ServiceError::from_db_contention(e, "Failed to soft-delete secret"))?;
 
         // Version-bump the client doc.  This is the OCC serialization point.
         let ok = tx
@@ -807,15 +797,17 @@ pub async fn revoke_oauth_client_secret(
                 &client_doc.data,
             )
             .await
-            .map_err(|e| map_db_err(e, "Failed to version-bump client for revoke"))?;
+            .map_err(|e| {
+                ServiceError::from_db_contention(e, "Failed to version-bump client for revoke")
+            })?;
 
         if !ok {
             return Err(ServiceError::OccConflict);
         }
 
-        tx.commit()
-            .await
-            .map_err(|e| map_db_err(e, "Failed to commit revoke_oauth_client_secret"))
+        tx.commit().await.map_err(|e| {
+            ServiceError::from_db_contention(e, "Failed to commit revoke_oauth_client_secret")
+        })
     })
     // `with_dsql_retry!` exhausts OccConflict after MAX_DSQL_RETRIES attempts.
     // Surface as 409 "conflict" (not 500) — mirrors the delete_key precedent.
