@@ -421,4 +421,53 @@ mod tests {
             "HS256 tokens must produce inactive=false introspection result"
         );
     }
+
+    /// Regression for #540: a store failure during the session lookup must
+    /// propagate as `ServiceError::Internal` (→ 500), not collapse into an
+    /// inactive result that hides the outage. Reverting the `?` on the session
+    /// lookup back to `_ => IntrospectionResult::inactive()` leaves the
+    /// happy-path and not-found tests green while this branch goes unguarded.
+    #[tokio::test]
+    async fn test_introspect_token_propagates_store_error_as_internal() {
+        use crate::services::auth::AccessTokenClaims;
+        use crate::test_utils::test_app_state;
+
+        let state = test_app_state().await;
+        let now = jiff::Timestamp::now().as_second();
+
+        // Valid RFC 9068 access token signed with the state's own key and
+        // issuer, so decode_token succeeds and execution reaches the DB-backed
+        // session lookup. The token is never stored, so the SessionCache misses
+        // and the lookup must hit the pool.
+        let claims = AccessTokenClaims {
+            iss: state.config().base_url.clone(),
+            sub: "user-123".to_string(),
+            aud: "client-abc".to_string(),
+            exp: now + 3600,
+            iat: now,
+            nbf: None,
+            jti: "jti-540".to_string(),
+            client_id: "client-abc".to_string(),
+            scope: None,
+            email: None,
+            email_verified: None,
+            hardware_verified: false,
+            cnf: None,
+            auth_time: None,
+            act: None,
+            amr: None,
+            acr: None,
+        };
+        let token = state.oidc_key.sign_access_token_jwt(&claims).await.unwrap();
+
+        // Close the pool so the next DB call returns Err (proven fault injector,
+        // mirroring the DB-error token test in handlers/oidc/tests).
+        state.db.close().await;
+
+        let result = introspect_token(&state, &token, None, None).await;
+        assert!(
+            matches!(result, Err(ServiceError::Internal(_))),
+            "store failure must surface as ServiceError::Internal, got: {result:?}"
+        );
+    }
 }
