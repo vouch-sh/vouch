@@ -232,8 +232,11 @@ fn detect_conflicting_helpers() {
     use vouch_cli::tr_println;
 
     for line in crate::git_config::get_regexp_global(r"credential.*codecommit.*helper") {
-        // Skip entries that already use vouch
-        if line.contains("vouch credential codecommit") {
+        // Skip entries that already use vouch. Match the bare binary name, not
+        // "vouch credential codecommit": git returns the value with the path's
+        // closing quote attached (`"…/vouch" credential codecommit`) and the
+        // binary is `vouch.exe` on Windows, so neither substring is adjacent.
+        if line.contains("vouch") {
             continue;
         }
         if line.contains("aws codecommit credential-helper")
