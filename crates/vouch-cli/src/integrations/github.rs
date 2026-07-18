@@ -151,17 +151,10 @@ fn check_git_credential_helper() -> (bool, Option<String>) {
     // Check common GitHub hosts
     for host in &["github.com", "ghe.com"] {
         let config_key = format!("credential.https://{}.helper", host);
-        let output = std::process::Command::new("git")
-            .args(["config", "--global", "--get", &config_key])
-            .output();
-
-        if let Ok(output) = output
-            && output.status.success()
+        if let Some(helper) = crate::git_config::get_global(&config_key)
+            && helper.contains("vouch")
         {
-            let helper = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if helper.contains("vouch") {
-                return (true, Some((*host).to_string()));
-            }
+            return (true, Some((*host).to_string()));
         }
     }
 

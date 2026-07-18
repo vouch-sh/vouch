@@ -4,7 +4,6 @@
 //! Configures Git to use Vouch for GitHub credentials.
 
 use anyhow::{Context, Result};
-use std::process::Command;
 use vouch_cli::{tr, tr_println};
 use vouch_common::GitHubStatusResponse;
 
@@ -80,7 +79,7 @@ pub(crate) async fn run(host: &str, configure: bool) -> Result<()> {
 
     if configure {
         // Check for existing helpers that might conflict
-        if let Some(existing) = detect_existing_helper(host)? {
+        if let Some(existing) = detect_existing_helper(host) {
             tr_println!(
                 "setup-github-existing-warning-block",
                 existing = existing.as_str()
@@ -89,12 +88,9 @@ pub(crate) async fn run(host: &str, configure: bool) -> Result<()> {
         }
 
         // Configure git
-        let status = Command::new("git")
-            .args(["config", "--global", &config_key, &helper_command])
-            .status()
-            .with_context(|| tr!("setup-github-err-run-config"))?;
-
-        if !status.success() {
+        if !crate::git_config::set_global(&config_key, &helper_command)
+            .with_context(|| tr!("setup-github-err-run-config"))?
+        {
             return Err(
                 crate::exit_code::CliError::ConfigError(tr!("setup-github-err-helper")).into(),
             );
@@ -148,20 +144,10 @@ fn print_status(status: &GitHubStatusResponse) {
 }
 
 /// Detect existing credential helpers for the given host.
-fn detect_existing_helper(host: &str) -> Result<Option<String>> {
+///
+/// Returns a non-vouch helper if one is already configured, so the caller can
+/// warn before overwriting it.
+fn detect_existing_helper(host: &str) -> Option<String> {
     let config_key = format!("credential.https://{}.helper", host);
-
-    let output = Command::new("git")
-        .args(["config", "--global", "--get", &config_key])
-        .output()
-        .context("failed to run git config")?;
-
-    if output.status.success() {
-        let helper = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if !helper.is_empty() && !helper.contains("vouch") {
-            return Ok(Some(helper));
-        }
-    }
-
-    Ok(None)
+    crate::git_config::get_global(&config_key).filter(|helper| !helper.contains("vouch"))
 }

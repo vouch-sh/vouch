@@ -13,7 +13,6 @@
 //! OIDC token → STS AssumeRoleWithWebIdentity → SigV4 signing for CodeCommit.
 
 use anyhow::{Context, Result};
-use std::process::Command;
 
 use crate::config::Config;
 use crate::install_path::resolve_install_path;
@@ -95,7 +94,7 @@ pub(crate) async fn run(
 
     if configure {
         // Check for conflicting credential helpers
-        detect_conflicting_helpers()?;
+        detect_conflicting_helpers();
 
         // 1. Create git-remote-codecommit symlink for codecommit:// URLs
         create_remote_helper_symlink(&vouch_path, &symlink_path)?;
@@ -105,12 +104,9 @@ pub(crate) async fn run(
             let config_key = format!("credential.{pattern}.helper");
             let use_http_path_key = format!("credential.{pattern}.useHttpPath");
 
-            let status = Command::new("git")
-                .args(["config", "--global", &config_key, &helper_command])
-                .status()
-                .with_context(|| tr!("setup-codecommit-err-run-config"))?;
-
-            if !status.success() {
+            if !crate::git_config::set_global(&config_key, &helper_command)
+                .with_context(|| tr!("setup-codecommit-err-run-config"))?
+            {
                 return Err(crate::exit_code::CliError::ConfigError(tr_args!(
                     "setup-codecommit-err-helper-pattern",
                     pattern = pattern,
@@ -119,12 +115,9 @@ pub(crate) async fn run(
             }
 
             // useHttpPath is critical — git must pass the full path (region + repo)
-            let status = Command::new("git")
-                .args(["config", "--global", &use_http_path_key, "true"])
-                .status()
-                .with_context(|| tr!("setup-codecommit-err-run-config"))?;
-
-            if !status.success() {
+            if !crate::git_config::set_global(&use_http_path_key, "true")
+                .with_context(|| tr!("setup-codecommit-err-run-config"))?
+            {
                 return Err(crate::exit_code::CliError::ConfigError(tr_args!(
                     "setup-codecommit-err-http-path",
                     pattern = pattern,
@@ -235,35 +228,20 @@ fn create_remote_helper_symlink(
 }
 
 /// Detect credential helpers that may conflict with Vouch.
-fn detect_conflicting_helpers() -> Result<()> {
-    use vouch_cli::{tr, tr_println};
+fn detect_conflicting_helpers() {
+    use vouch_cli::tr_println;
 
-    let output = Command::new("git")
-        .args([
-            "config",
-            "--global",
-            "--get-regexp",
-            r"credential.*codecommit.*helper",
-        ])
-        .output()
-        .with_context(|| tr!("setup-codecommit-err-run-config"))?;
-
-    if output.status.success() {
-        let existing = String::from_utf8_lossy(&output.stdout);
-        for line in existing.lines() {
-            // Skip entries that already use vouch
-            if line.contains("vouch credential codecommit") {
-                continue;
-            }
-            if line.contains("aws codecommit credential-helper")
-                || line.contains("git-remote-codecommit")
-            {
-                tr_println!("setup-codecommit-warn-existing-block", line = line);
-            }
+    for line in crate::git_config::get_regexp_global(r"credential.*codecommit.*helper") {
+        // Skip entries that already use vouch
+        if line.contains("vouch credential codecommit") {
+            continue;
+        }
+        if line.contains("aws codecommit credential-helper")
+            || line.contains("git-remote-codecommit")
+        {
+            tr_println!("setup-codecommit-warn-existing-block", line = line);
         }
     }
-
-    Ok(())
 }
 
 #[cfg(test)]
