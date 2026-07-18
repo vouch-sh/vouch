@@ -27,6 +27,7 @@ mod exit_code;
     reason = "items pub for lib.rs re-exports used by vouch-tests"
 )]
 mod fido2;
+mod git_config;
 mod install_path;
 mod integrations;
 mod server_url;
