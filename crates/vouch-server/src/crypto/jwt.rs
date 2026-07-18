@@ -830,16 +830,18 @@ mod tests {
         assert_eq!(format!("{validation}"), "bad");
     }
 
-    /// Regression for #536: `decode_state_token` must reject tokens that
-    /// are a few seconds past `exp` with zero leeway (no 60s grace).
+    /// Regression for #536: `decode_state_token` must reject tokens a few
+    /// seconds past `exp` with zero leeway. `exp` sits 5s in the past, inside
+    /// jsonwebtoken's default 60s leeway window, so reverting `leeway = 0` to
+    /// the default would *accept* this token and fail the test. A 1970 `exp`
+    /// cannot distinguish `leeway = 0` from the default — this one can.
     #[test]
     fn test_state_token_recently_expired_rejected_no_leeway() {
-        // exp in the very recent past — must be rejected despite falling
-        // within jsonwebtoken's 60s default leeway
+        let now = jiff::Timestamp::now().as_second();
         let state = TestState {
             data: "replay-attempt".to_string(),
-            iat: 0,
-            exp: 1, // 1970-01-01 — unambiguously expired
+            iat: now - 3600,
+            exp: now - 5, // inside the default 60s leeway window, but past exp
         };
         let token = encode_state_token(&state, JwtType::Fido2ChallengeState, TEST_JWT_SECRET)
             .expect("encode");
@@ -847,7 +849,7 @@ mod tests {
             decode_state_token(&token, JwtType::Fido2ChallengeState, TEST_JWT_SECRET);
         assert!(
             result.is_err(),
-            "Expired state token must be rejected with zero leeway"
+            "State token 5s past exp must be rejected with zero leeway"
         );
     }
 
@@ -866,19 +868,23 @@ mod tests {
         assert!(check_state_token_not_expired(now, now - 1).is_err());
     }
 
-    /// Regression: `decode_es256_token` must reject access tokens a few seconds
-    /// past `exp` with zero leeway (no 60s grace).
+    /// Regression for #536: `decode_es256_token` must reject access tokens a
+    /// few seconds past `exp` with zero leeway. `exp` sits 5s in the past,
+    /// inside jsonwebtoken's default 60s leeway window, so reverting
+    /// `leeway = 0` to the default would *accept* this token and fail the test.
+    /// A 1970 `exp` cannot distinguish `leeway = 0` from the default.
     #[tokio::test]
     async fn test_access_token_recently_expired_rejected_no_leeway() {
         let key = make_test_oidc_key();
         let ctx = make_ctx(&key);
 
+        let now = jiff::Timestamp::now().as_second();
         let claims = AccessTokenClaims {
             iss: TEST_ISSUER.to_string(),
             sub: "user-123".to_string(),
             aud: "client-abc".to_string(),
-            exp: 1, // 1970-01-01 — unambiguously expired
-            iat: 0,
+            exp: now - 5, // inside the default 60s leeway window, but past exp
+            iat: now - 3600,
             nbf: None,
             jti: "jti-1".to_string(),
             client_id: "client-abc".to_string(),
