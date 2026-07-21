@@ -2,25 +2,34 @@
 //! Server configuration.
 
 use anyhow::{Context, Result};
-use aws_config::{FrameworkMetadata, InvalidFrameworkMetadata};
+use aws_config::FrameworkMetadata;
 use clap::Parser;
 use ipnet::IpNet;
 use secrecy::{ExposeSecret, SecretString};
 use std::collections::HashMap;
 
-/// Framework metadata identifying vouch-server in the AWS SDK user agent.
+/// Build an AWS SDK config loader tagged with vouch-server framework metadata.
 ///
-/// Rendered as `lib/vouch-server/{version}` in the `x-amz-user-agent` header,
-/// so operators can attribute KMS and S3 API calls to Vouch in CloudTrail.
-/// Framework metadata is additive: it composes with any `sdk_ua_app_id` the
-/// operator configures instead of overriding it.
+/// The metadata renders as `lib/vouch-server/{version}` in the `x-amz-user-agent`
+/// header, so operators can attribute KMS and S3 API calls to Vouch in CloudTrail.
+/// It is additive: it composes with any `sdk_ua_app_id` the operator configures
+/// instead of overriding it. `region` overrides the default region provider chain
+/// (env / shared config / IMDS) only when `Some`.
 ///
 /// # Errors
 ///
-/// Returns `InvalidFrameworkMetadata` if the crate name or version contains
-/// characters outside the SDK's permitted user-agent charset.
-pub(crate) fn framework_metadata() -> Result<FrameworkMetadata, InvalidFrameworkMetadata> {
-    FrameworkMetadata::new("vouch-server", Some(env!("CARGO_PKG_VERSION")))
+/// Returns an error if the framework metadata cannot be constructed. This is
+/// unreachable for any valid build: the crate name and version are always within
+/// the SDK's permitted user-agent charset.
+pub(crate) fn aws_config_loader(region: Option<&str>) -> Result<aws_config::ConfigLoader> {
+    let metadata = FrameworkMetadata::new("vouch-server", Some(env!("CARGO_PKG_VERSION")))
+        .context("failed to build AWS SDK framework metadata")?;
+    let mut loader =
+        aws_config::defaults(aws_config::BehaviorVersion::latest()).framework_metadata(metadata);
+    if let Some(region) = region {
+        loader = loader.region(aws_config::Region::new(region.to_string()));
+    }
+    Ok(loader)
 }
 
 // ============================================================================
@@ -1081,11 +1090,6 @@ mod tests {
             email_attribute: None,
             domain_attribute: None,
         }
-    }
-
-    #[test]
-    fn crate_name_and_version_are_valid_user_agent_metadata() {
-        assert!(crate::config::framework_metadata().is_ok());
     }
 
     #[test]

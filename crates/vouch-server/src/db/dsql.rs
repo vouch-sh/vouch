@@ -29,20 +29,12 @@ use sqlx::postgres::PgSslMode;
 ///
 /// * `region` - Optional AWS region override. If not provided, the SDK will
 ///   attempt to determine the region from environment variables or config files.
-///
-/// # Errors
-///
-/// Returns an error if the vouch-server framework metadata for the SDK user
-/// agent cannot be constructed.
-pub(crate) async fn load_sdk_config(region: Option<&str>) -> Result<SdkConfig> {
-    let mut loader = aws_config::defaults(BehaviorVersion::latest()).framework_metadata(
-        crate::config::framework_metadata()
-            .context("failed to build AWS SDK framework metadata")?,
-    );
+pub(crate) async fn load_sdk_config(region: Option<&str>) -> SdkConfig {
+    let mut loader = aws_config::defaults(BehaviorVersion::latest());
     if let Some(r) = region {
         loader = loader.region(Region::new(r.to_string()));
     }
-    Ok(loader.load().await)
+    loader.load().await
 }
 
 /// Generate a DSQL authentication token using AWS credentials.

@@ -133,7 +133,7 @@ aws-config = { version = "=1.10.0", default-features = false }
 aws-lc-rs = { version = "=1.17.3", default-features = false }
 aws-sdk-dsql = { version = "=1.62.0", default-features = false }
 aws-sdk-kms = { version = "=1.113.0", default-features = false }
-aws-sdk-s3 = { version = "=1.138.1", default-features = false }
+aws-sdk-s3 = { version = "=1.139.0", default-features = false }
 aws-smithy-types = { version = "=1.6.1", default-features = false }
 axum = { version = "=0.8.9", default-features = false }
 axum-extra = { version = "=0.12.6", default-features = false }
