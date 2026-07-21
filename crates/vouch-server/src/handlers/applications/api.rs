@@ -204,14 +204,26 @@ pub(crate) async fn create_application_api(
         let secret = generate_client_secret();
         let secret_hash = hash_token(&secret);
 
-        db::create_oauth_client_secret(
+        if let Err(e) = db::create_oauth_client_secret(
             &state.store,
             &client.id,
             &secret_hash,
             Some("Initial secret"),
             None,
         )
-        .await?;
+        .await
+        {
+            tracing::error!("Failed to create client secret: {e}");
+            // Remove the just-created client so a failed registration does
+            // not leave a secretless confidential client behind (matches
+            // the web form path).
+            if let Err(cleanup_err) = db::delete_oauth_client(&state.store, &client.id).await {
+                tracing::warn!(
+                    "Failed to clean up OAuth client after secret creation failure: {cleanup_err}"
+                );
+            }
+            return Err(e);
+        }
 
         Some(secret)
     } else {
