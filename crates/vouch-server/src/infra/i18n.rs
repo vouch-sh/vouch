@@ -793,165 +793,164 @@ mod tests {
     /// `en-US` catalog. This is the runtime-resolution guard that mirrors the
     /// CLI/agent's compile-time `fl!` checks (Askama needs runtime-string
     /// ids, so a true compile-time check isn't available).
-    #[test]
-    #[expect(
-        clippy::too_many_lines,
-        reason = "single cohesive completeness check (FTL parsing + template + JS + Rust scans); \
-                  splitting would obscure the catalog-vs-references diff at the end"
-    )]
-    fn every_template_key_is_defined() {
-        use std::collections::HashSet;
-        use std::fs;
-        use std::path::{Path, PathBuf};
-
-        fn collect_ftl_ids(content: &str) -> HashSet<String> {
-            // Collect both top-level message ids (`my-msg = …`) and attribute
-            // refs (`my-msg.title`, indented under their owning message as
-            // `    .title = …`). Attribute references in templates use the
-            // `id.attr` form (e.g. `self.tr_attr("admin-members-demote",
-            // "title")`), so we register them as `my-msg.title` here.
-            let mut ids = HashSet::new();
-            let mut current_owner: Option<String> = None;
-            for line in content.lines() {
-                let trimmed = line.trim_start();
-                if trimmed.is_empty() || trimmed.starts_with('#') {
+    fn collect_ftl_ids(content: &str) -> std::collections::HashSet<String> {
+        // Collect both top-level message ids (`my-msg = …`) and attribute
+        // refs (`my-msg.title`, indented under their owning message as
+        // `    .title = …`). Attribute references in templates use the
+        // `id.attr` form (e.g. `self.tr_attr("admin-members-demote",
+        // "title")`), so we register them as `my-msg.title` here.
+        let mut ids = std::collections::HashSet::new();
+        let mut current_owner: Option<String> = None;
+        for line in content.lines() {
+            let trimmed = line.trim_start();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            let indented = trimmed.len() < line.len();
+            if indented {
+                // Attribute line: `    .attr-name = …`. Anything else
+                // indented (raw continuation, selector arm, etc.) is
+                // skipped — those don't introduce new ids.
+                if !trimmed.starts_with('.') {
                     continue;
                 }
-                let indented = trimmed.len() < line.len();
-                if indented {
-                    // Attribute line: `    .attr-name = …`. Anything else
-                    // indented (raw continuation, selector arm, etc.) is
-                    // skipped — those don't introduce new ids.
-                    if !trimmed.starts_with('.') {
-                        continue;
-                    }
-                    let Some((left, _)) = trimmed.split_once('=') else {
-                        continue;
-                    };
-                    let attr = left.trim().trim_start_matches('.');
-                    if attr.is_empty()
-                        || !attr
-                            .chars()
-                            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
-                    {
-                        continue;
-                    }
-                    if let Some(owner) = current_owner.as_deref() {
-                        ids.insert(format!("{owner}.{attr}"));
-                    }
-                    continue;
-                }
-                // Top-level line: `my-msg = …`. Reset attribute ownership.
-                let Some((left, _)) = line.split_once('=') else {
-                    current_owner = None;
+                let Some((left, _)) = trimmed.split_once('=') else {
                     continue;
                 };
-                let id = left.trim();
-                // Skip Fluent terms (`-foo = …`) — they're not callable from
-                // templates, only referenced from other messages via
-                // `{ -foo }`. Their syntax doesn't fit our kebab-case check
-                // either (leading `-`).
-                if id.starts_with('-') {
-                    current_owner = None;
-                    continue;
-                }
-                if !id.is_empty()
-                    && id
+                let attr = left.trim().trim_start_matches('.');
+                if attr.is_empty()
+                    || !attr
                         .chars()
                         .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
                 {
-                    ids.insert(id.to_owned());
-                    current_owner = Some(id.to_owned());
-                } else {
-                    current_owner = None;
-                }
-            }
-            ids
-        }
-
-        fn collect_keys_with_marker(text: &str, marker: &str, keys: &mut HashSet<String>) {
-            // Call sites have the shape `<marker>id")` or
-            // `<marker>id").attr("attr-name")` (plus optional `.arg(...)`
-            // chains that don't affect catalog identity). Capture the id,
-            // then peek at the immediately-following bytes for a
-            // `.attr("attr-name")` segment so attribute references are
-            // recorded as `id.attr` — matching what `collect_ftl_ids`
-            // produces.
-            //
-            // We filter to kebab-case ids (`looks_like_key`) so doc-comment
-            // placeholders like `Tr::new("id")` and the test/example
-            // strings in this very file don't pollute the `used` set.
-            for part in text.split(marker).skip(1) {
-                let Some(id) = part.split('"').next() else {
-                    continue;
-                };
-                if !looks_like_key(id) {
                     continue;
                 }
-                // The rest of the slice starts at the byte after the
-                // closing quote of the id. Look for an immediate
-                // `).attr("…")` to attach.
-                let rest_start = id.len() + 1; // +1 for the closing `"`
-                let rest = part.get(rest_start..).unwrap_or("");
-                let attr_marker = ").attr(\"";
-                if let Some(after) = rest.strip_prefix(attr_marker)
-                    && let Some(attr) = after.split('"').next()
-                    && !attr.is_empty()
-                {
-                    keys.insert(format!("{id}.{attr}"));
-                } else {
-                    keys.insert(id.to_owned());
+                if let Some(owner) = current_owner.as_deref() {
+                    ids.insert(format!("{owner}.{attr}"));
                 }
+                continue;
             }
-        }
-
-        fn collect_keys(text: &str, keys: &mut HashSet<String>) {
-            // Template call sites: `self.tr("id")` / `page.tr("id")` etc.
-            collect_keys_with_marker(text, ".tr(\"", keys);
-        }
-
-        fn collect_rust_tr_keys(text: &str, keys: &mut HashSet<String>) {
-            // Rust call sites: `Tr::new("id")`. Optional `.attr("…")` is
-            // picked up the same way as template `.tr().attr()` chains.
-            collect_keys_with_marker(text, "Tr::new(\"", keys);
-        }
-
-        // A translation key in our convention: kebab-case with at least one
-        // hyphen. Filters out incidental `t('...')` matches in JS such as
-        // `split('\n')` or `closest('.foo')`.
-        fn looks_like_key(s: &str) -> bool {
-            s.contains('-')
-                && s.starts_with(|c: char| c.is_ascii_lowercase())
-                && s.chars()
-                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
-        }
-
-        fn collect_js_keys(text: &str, keys: &mut HashSet<String>) {
-            for marker in ["t(\"", "t('"] {
-                let quote = if marker.ends_with('"') { '"' } else { '\'' };
-                for part in text.split(marker).skip(1) {
-                    if let Some(candidate) = part.split(quote).next()
-                        && looks_like_key(candidate)
-                    {
-                        keys.insert(candidate.to_owned());
-                    }
-                }
-            }
-        }
-
-        fn files_with_ext(dir: &Path, ext: &str, out: &mut Vec<PathBuf>) {
-            let Ok(entries) = fs::read_dir(dir) else {
-                return;
+            // Top-level line: `my-msg = …`. Reset attribute ownership.
+            let Some((left, _)) = line.split_once('=') else {
+                current_owner = None;
+                continue;
             };
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.is_dir() {
-                    files_with_ext(&path, ext, out);
-                } else if path.extension().is_some_and(|e| e == ext) {
-                    out.push(path);
+            let id = left.trim();
+            // Skip Fluent terms (`-foo = …`) — they're not callable from
+            // templates, only referenced from other messages via
+            // `{ -foo }`. Their syntax doesn't fit our kebab-case check
+            // either (leading `-`).
+            if id.starts_with('-') {
+                current_owner = None;
+                continue;
+            }
+            if !id.is_empty()
+                && id
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+            {
+                ids.insert(id.to_owned());
+                current_owner = Some(id.to_owned());
+            } else {
+                current_owner = None;
+            }
+        }
+        ids
+    }
+
+    fn collect_keys_with_marker(
+        text: &str,
+        marker: &str,
+        keys: &mut std::collections::HashSet<String>,
+    ) {
+        // Call sites have the shape `<marker>id")` or
+        // `<marker>id").attr("attr-name")` (plus optional `.arg(...)`
+        // chains that don't affect catalog identity). Capture the id,
+        // then peek at the immediately-following bytes for a
+        // `.attr("attr-name")` segment so attribute references are
+        // recorded as `id.attr` — matching what `collect_ftl_ids`
+        // produces.
+        //
+        // We filter to kebab-case ids (`looks_like_key`) so doc-comment
+        // placeholders like `Tr::new("id")` and the test/example
+        // strings in this very file don't pollute the `used` set.
+        for part in text.split(marker).skip(1) {
+            let Some(id) = part.split('"').next() else {
+                continue;
+            };
+            if !looks_like_key(id) {
+                continue;
+            }
+            // The rest of the slice starts at the byte after the
+            // closing quote of the id. Look for an immediate
+            // `).attr("…")` to attach.
+            let rest_start = id.len().saturating_add(1); // +1 for the closing `"`
+            let rest = part.get(rest_start..).unwrap_or("");
+            let attr_marker = ").attr(\"";
+            if let Some(after) = rest.strip_prefix(attr_marker)
+                && let Some(attr) = after.split('"').next()
+                && !attr.is_empty()
+            {
+                keys.insert(format!("{id}.{attr}"));
+            } else {
+                keys.insert(id.to_owned());
+            }
+        }
+    }
+
+    fn collect_keys(text: &str, keys: &mut std::collections::HashSet<String>) {
+        // Template call sites: `self.tr("id")` / `page.tr("id")` etc.
+        collect_keys_with_marker(text, ".tr(\"", keys);
+    }
+
+    fn collect_rust_tr_keys(text: &str, keys: &mut std::collections::HashSet<String>) {
+        // Rust call sites: `Tr::new("id")`. Optional `.attr("…")` is
+        // picked up the same way as template `.tr().attr()` chains.
+        collect_keys_with_marker(text, "Tr::new(\"", keys);
+    }
+
+    // A translation key in our convention: kebab-case with at least one
+    // hyphen. Filters out incidental `t('...')` matches in JS such as
+    // `split('\n')` or `closest('.foo')`.
+    fn looks_like_key(s: &str) -> bool {
+        s.contains('-')
+            && s.starts_with(|c: char| c.is_ascii_lowercase())
+            && s.chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+    }
+
+    fn collect_js_keys(text: &str, keys: &mut std::collections::HashSet<String>) {
+        for marker in ["t(\"", "t('"] {
+            let quote = if marker.ends_with('"') { '"' } else { '\'' };
+            for part in text.split(marker).skip(1) {
+                if let Some(candidate) = part.split(quote).next()
+                    && looks_like_key(candidate)
+                {
+                    keys.insert(candidate.to_owned());
                 }
             }
         }
+    }
+
+    fn files_with_ext(dir: &std::path::Path, ext: &str, out: &mut Vec<std::path::PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                files_with_ext(&path, ext, out);
+            } else if path.extension().is_some_and(|e| e == ext) {
+                out.push(path);
+            }
+        }
+    }
+
+    #[test]
+    fn every_template_key_is_defined() {
+        use std::collections::HashSet;
+        use std::fs;
+        use std::path::Path;
 
         let root = env!("CARGO_MANIFEST_DIR");
         let ftl = fs::read_to_string(format!("{root}/i18n/en-US/vouch-server.ftl")).unwrap();
