@@ -186,7 +186,11 @@ async fn load_s3_config(
     // Only override the region when VOUCH_S3_CONFIG_REGION is set; passing
     // Option::<Region>::None to `.region(...)` disables the default region
     // provider chain (env / shared config / IMDS) and breaks S3 requests.
-    let mut builder = aws_config::defaults(aws_config::BehaviorVersion::latest());
+    let mut builder = aws_config::defaults(aws_config::BehaviorVersion::latest())
+        .framework_metadata(
+            crate::config::framework_metadata()
+                .context("failed to build AWS SDK framework metadata")?,
+        );
     if let Some(region) = &config.s3_config_region {
         builder = builder.region(aws_config::Region::new(region.clone()));
     }
@@ -327,7 +331,11 @@ async fn build_app_state(
         || config.jwt_hmac_kms_key_id.is_some();
     let kms_client = if kms_needs && kms_client.is_none() {
         tracing::info!("Creating KMS client for signing key access");
-        let mut builder = aws_config::defaults(aws_config::BehaviorVersion::latest());
+        let mut builder = aws_config::defaults(aws_config::BehaviorVersion::latest())
+            .framework_metadata(
+                crate::config::framework_metadata()
+                    .context("failed to build AWS SDK framework metadata")?,
+            );
         if let Some(region) = &config.s3_config_region {
             builder = builder.region(aws_config::Region::new(region.clone()));
         }

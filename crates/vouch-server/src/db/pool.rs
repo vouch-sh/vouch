@@ -227,7 +227,7 @@ impl Pool {
         );
 
         // Load AWS SDK config (handles all credential sources)
-        let sdk_config = load_sdk_config(Some(&region)).await;
+        let sdk_config = load_sdk_config(Some(&region)).await?;
 
         // Generate initial authentication token (against the token hostname)
         let token =
@@ -725,7 +725,17 @@ fn spawn_token_refresh(pool: sqlx::PgPool, dsql: DsqlEndpoint, user: String, is_
                 }
                 _ = interval.tick() => {
                     // Reload AWS credentials (in case they've been rotated)
-                    let sdk_config = load_sdk_config(Some(&region)).await;
+                    let sdk_config = match load_sdk_config(Some(&region)).await {
+                        Ok(config) => config,
+                        Err(e) => {
+                            // Log warning but continue - existing connections still work
+                            tracing::warn!(
+                                error = %e,
+                                "failed to load AWS SDK config for DSQL token refresh"
+                            );
+                            continue;
+                        }
+                    };
 
                     match generate_dsql_token(
                         &sdk_config,

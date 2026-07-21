@@ -2,10 +2,26 @@
 //! Server configuration.
 
 use anyhow::{Context, Result};
+use aws_config::{FrameworkMetadata, InvalidFrameworkMetadata};
 use clap::Parser;
 use ipnet::IpNet;
 use secrecy::{ExposeSecret, SecretString};
 use std::collections::HashMap;
+
+/// Framework metadata identifying vouch-server in the AWS SDK user agent.
+///
+/// Rendered as `lib/vouch-server/{version}` in the `x-amz-user-agent` header,
+/// so operators can attribute KMS and S3 API calls to Vouch in CloudTrail.
+/// Framework metadata is additive: it composes with any `sdk_ua_app_id` the
+/// operator configures instead of overriding it.
+///
+/// # Errors
+///
+/// Returns `InvalidFrameworkMetadata` if the crate name or version contains
+/// characters outside the SDK's permitted user-agent charset.
+pub(crate) fn framework_metadata() -> Result<FrameworkMetadata, InvalidFrameworkMetadata> {
+    FrameworkMetadata::new("vouch-server", Some(env!("CARGO_PKG_VERSION")))
+}
 
 // ============================================================================
 // IdP Config (unified OIDC + SAML)
@@ -1065,6 +1081,11 @@ mod tests {
             email_attribute: None,
             domain_attribute: None,
         }
+    }
+
+    #[test]
+    fn crate_name_and_version_are_valid_user_agent_metadata() {
+        assert!(crate::config::framework_metadata().is_ok());
     }
 
     #[test]

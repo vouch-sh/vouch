@@ -47,7 +47,11 @@ pub struct GenerateDocumentKeyArgs {
 /// Run the generate-document-key subcommand.
 pub async fn run(args: GenerateDocumentKeyArgs) -> Result<()> {
     // 1. Build AWS SDK config and create KMS client
-    let mut config_loader = aws_config::defaults(aws_config::BehaviorVersion::latest());
+    let mut config_loader = aws_config::defaults(aws_config::BehaviorVersion::latest())
+        .framework_metadata(
+            crate::config::framework_metadata()
+                .context("failed to build AWS SDK framework metadata")?,
+        );
     if let Some(region) = &args.region {
         config_loader = config_loader.region(aws_config::Region::new(region.clone()));
     }
