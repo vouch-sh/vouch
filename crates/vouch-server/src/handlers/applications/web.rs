@@ -5,7 +5,7 @@
 //! self-service application management portal.
 
 use crate::AppState;
-use crate::db::{self, AccessScope, FapiProfile, TokenEndpointAuthMethod, UpdateOAuthClientParams};
+use crate::db::{self, AccessScope, UpdateOAuthClientParams};
 use axum::{
     Form,
     extract::{Path, State},
@@ -22,7 +22,8 @@ use super::types::{
 };
 use super::validate::{
     AppValidationError, CreateAppContext, CreateAppInput, UpdateAppInput, build_create_params,
-    validate_create_application, validate_update_fapi, validate_update_format,
+    compute_fapi_update_fields, validate_create_application, validate_update_fapi,
+    validate_update_format,
 };
 use super::{
     extract_auth_from_cookie, generate_client_secret, parse_redirect_uris, parse_resource_uris,
@@ -418,48 +419,12 @@ pub(crate) async fn update_application_form(
     if let Err(e) = validate_update_fapi(&validated, &client) {
         return validation_error_response(&e, format!("/applications/{}", app_id));
     }
-    let is_fapi = validated.is_fapi;
-    let jwks_value = validated.jwks;
-    let jwks_uri_trimmed = validated.jwks_uri;
 
-    // Compute FAPI-related values: merge form values with existing client values
-    let fapi_profile = if is_fapi {
-        FapiProfile::Fapi2Security
-    } else {
-        FapiProfile::None
-    };
-
-    let token_endpoint_auth_method = if is_fapi {
-        TokenEndpointAuthMethod::PrivateKeyJwt
-    } else if !is_fapi && client.is_fapi() {
-        // Transitioning from FAPI to Standard: reset to default
-        TokenEndpointAuthMethod::ClientSecretBasic
-    } else {
-        client.token_endpoint_auth_method
-    };
-
-    // Resolve final JWKS values: use form values if provided, otherwise keep existing
-    let effective_jwks = if jwks_value.is_some() {
-        jwks_value.as_ref()
-    } else if is_fapi {
-        client.jwks.as_ref()
-    } else {
-        None
-    };
-
-    let effective_jwks_uri = if jwks_uri_trimmed.is_some() {
-        jwks_uri_trimmed
-    } else if is_fapi {
-        client.jwks_uri.as_deref()
-    } else {
-        None
-    };
-
-    let dpop_bound = if is_fapi {
-        true
-    } else {
-        client.dpop_bound_access_tokens
-    };
+    // Merge FAPI-related fields against the existing client record. The
+    // form's security-profile radio group always submits fapi_profile, so
+    // an explicit non-FAPI value transitions the client back to standard
+    // auth — including resetting the DPoP binding, matching the JSON API.
+    let fapi = compute_fapi_update_fields(&validated, &client);
 
     // Update the application
     if let Err(e) = db::update_oauth_client(
@@ -472,11 +437,11 @@ pub(crate) async fn update_application_form(
             access_scope,
             org_id,
             resource_uris: &resource_uris,
-            token_endpoint_auth_method,
-            jwks: effective_jwks,
-            jwks_uri: effective_jwks_uri,
-            fapi_profile,
-            dpop_bound_access_tokens: dpop_bound,
+            token_endpoint_auth_method: fapi.token_endpoint_auth_method,
+            jwks: fapi.jwks,
+            jwks_uri: fapi.jwks_uri,
+            fapi_profile: fapi.fapi_profile,
+            dpop_bound_access_tokens: fapi.dpop_bound_access_tokens,
             post_logout_redirect_uris: validated.post_logout_redirect_uris.map(<[String]>::to_vec),
         },
     )
@@ -910,5 +875,59 @@ mod tests {
             vec!["https://example.com/callback".to_string()],
             "Empty redirect_uris must not overwrite existing uris in the database"
         );
+    }
+
+    #[tokio::test]
+    async fn test_web_update_form_fapi_exit_resets_dpop_binding() {
+        // Transitioning a FAPI client back to the standard profile via the
+        // web form must reset the DPoP binding and auth method, matching
+        // the JSON API's update semantics.
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "web-update-fapi-exit@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let session_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let client = create_test_client(
+            &state.store,
+            &user.id,
+            TestClientSpec {
+                token_endpoint_auth_method: Some(crate::db::TokenEndpointAuthMethod::PrivateKeyJwt),
+                jwks: TestJwks::Shared,
+                dpop_bound_access_tokens: true,
+                fapi_profile: Some(crate::db::FapiProfile::Fapi2Security),
+                with_secret: false,
+                ..Default::default()
+            },
+        )
+        .await;
+
+        // The security-profile radio group always submits; "" selects Standard.
+        let form_body =
+            "name=Test%20App&redirect_uris=https%3A%2F%2Fexample.com%2Fcallback&fapi_profile=";
+        let (status, body) = http_post_form(
+            &app,
+            &format!("/applications/{}", client.app_id),
+            form_body,
+            &[("Cookie", &format!("__Host-vouch_session={session_token}"))],
+        )
+        .await;
+        assert!(
+            status.is_redirection(),
+            "FAPI exit must succeed with a redirect, got {status}: {body}"
+        );
+
+        let record = crate::db::get_oauth_client_by_id(&state.store, &client.app_id)
+            .await
+            .expect("db query ok")
+            .expect("client must still exist");
+        assert_eq!(record.fapi_profile, crate::db::FapiProfile::None);
+        assert_eq!(
+            record.token_endpoint_auth_method,
+            crate::db::TokenEndpointAuthMethod::ClientSecretBasic
+        );
+        assert!(
+            !record.dpop_bound_access_tokens,
+            "leaving FAPI must clear the DPoP binding"
+        );
+        assert!(record.jwks.is_none(), "leaving FAPI must drop the JWKS");
     }
 }
