@@ -6,11 +6,12 @@
 
 use super::jwks::{find_matching_key_with_refresh_client, resolve_client_jwks};
 use super::validate::{
-    decode_claims_unverified, map_algorithm, parse_assertion_header, validate_jwt_assertion,
+    JwtAssertionClaims, JwtAssertionHeader, decode_claims_unverified, map_algorithm,
+    parse_assertion_header, validate_jwt_assertion,
 };
 use crate::AppState;
 use crate::db::claim::ClaimError;
-use crate::db::{self, JwtAssertionJtiClaim, TokenEndpointAuthMethod};
+use crate::db::{self, JwtAssertionJtiClaim, OAuthClient, TokenEndpointAuthMethod};
 use crate::services::oidc::token::{AuthenticatedClient, ClientAuthError};
 use jiff::{Timestamp, ToSpan};
 use std::sync::Arc;
@@ -127,10 +128,6 @@ impl PendingJti {
 ///   passed. Thread it forward to construct
 ///   [`crate::services::auth::ClientAuthProof::PrivateKeyJwt`] regardless of
 ///   whether the assertion carried a `jti`.
-#[expect(
-    clippy::too_many_lines,
-    reason = "single-pass RFC 7523 client assertion validation"
-)]
 pub async fn authenticate_client_jwt(
     state: &Arc<AppState>,
     client_assertion: &str,
@@ -148,30 +145,8 @@ pub async fn authenticate_client_jwt(
         ClientAuthError::InvalidCredentials
     })?;
 
-    // RFC 7523 Section 3: For client authentication, iss and sub MUST be the client_id
+    verify_assertion_subject(&unverified_claims, client_id_hint)?;
     let assertion_client_id = &unverified_claims.iss;
-
-    // If client_id was provided in the request body, it must match
-    if let Some(hint) = client_id_hint
-        && hint != assertion_client_id
-    {
-        tracing::warn!(
-            "client_id mismatch: body='{}' vs assertion iss='{}'",
-            hint,
-            assertion_client_id
-        );
-        return Err(ClientAuthError::InvalidCredentials);
-    }
-
-    // iss must equal sub for client authentication
-    if unverified_claims.iss != unverified_claims.sub {
-        tracing::warn!(
-            "JWT assertion iss ({}) != sub ({})",
-            unverified_claims.iss,
-            unverified_claims.sub
-        );
-        return Err(ClientAuthError::InvalidCredentials);
-    }
 
     // 3. Look up client
     let client = db::get_oauth_client_by_client_id(&state.store, assertion_client_id)
@@ -193,57 +168,8 @@ pub async fn authenticate_client_jwt(
         return Err(ClientAuthError::InvalidCredentials);
     }
 
-    // 5. Resolve client's JWKS (inline or from URI).
-    // Load cache once; pass to both resolver calls (pre-refresh timestamp matches prior behavior).
-    let jwks_cache = crate::db::get_jwks_cache(&state.store, &client.id)
-        .await
-        .map_err(|e| {
-            tracing::debug!(
-                "JWKS cache lookup failed for client {}: {e}",
-                client.client_id
-            );
-            ClientAuthError::InvalidCredentials
-        })?;
-
-    // Loopback JWKS destinations are permitted only in local development
-    // (no TLS configured), matching the WebAuthn `allow_localhost_origin`
-    // relaxation; private/link-local targets stay blocked.
-    let allow_loopback = !state.config().tls_configured();
-
-    let jwks = resolve_client_jwks(
-        &state.store,
-        &client.id,
-        client.jwks.as_ref(),
-        client.jwks_uri.as_deref(),
-        jwks_cache.as_ref(),
-        allow_loopback,
-        &state.http_client,
-    )
-    .await
-    .map_err(|e| {
-        tracing::debug!(
-            "JWKS resolution failed for client {}: {e}",
-            client.client_id
-        );
-        ClientAuthError::InvalidCredentials
-    })?;
-
-    // 6. Find matching key, with force-refresh on kid-miss for jwks_uri clients
-    let decoding_key = find_matching_key_with_refresh_client(
-        &state.store,
-        &client.id,
-        client.jwks_uri.as_deref(),
-        jwks_cache.as_ref(),
-        allow_loopback,
-        &state.http_client,
-        &jwks,
-        &header,
-    )
-    .await
-    .map_err(|e| {
-        tracing::debug!("No matching key found for client {}: {e}", client.client_id);
-        ClientAuthError::InvalidCredentials
-    })?;
+    // 5+6. Resolve the client's JWKS and select the verification key
+    let decoding_key = resolve_client_decoding_key(state, &client, &header).await?;
 
     // 7. Validate JWT assertion (signature + claims)
     let algorithm = map_algorithm(&header.alg).map_err(|_| ClientAuthError::InvalidCredentials)?;
@@ -332,6 +258,101 @@ pub async fn authenticate_client_jwt(
         pending_jti,
         JwtAuthSucceeded { _private: () },
     ))
+}
+
+/// RFC 7523 Section 3: For client authentication, `iss` and `sub` MUST both
+/// be the client_id, and a `client_id` provided in the request body must
+/// match the assertion's issuer.
+///
+/// # Errors
+/// Returns `InvalidCredentials` on any mismatch.
+fn verify_assertion_subject(
+    claims: &JwtAssertionClaims,
+    client_id_hint: Option<&str>,
+) -> Result<(), ClientAuthError> {
+    // If client_id was provided in the request body, it must match
+    if let Some(hint) = client_id_hint
+        && hint != claims.iss
+    {
+        tracing::warn!(
+            "client_id mismatch: body='{}' vs assertion iss='{}'",
+            hint,
+            claims.iss
+        );
+        return Err(ClientAuthError::InvalidCredentials);
+    }
+
+    // iss must equal sub for client authentication
+    if claims.iss != claims.sub {
+        tracing::warn!("JWT assertion iss ({}) != sub ({})", claims.iss, claims.sub);
+        return Err(ClientAuthError::InvalidCredentials);
+    }
+
+    Ok(())
+}
+
+/// Resolve the client's JWKS (inline or from `jwks_uri`) and select the
+/// verification key for the assertion header, force-refreshing the JWKS
+/// cache on a kid-miss for `jwks_uri` clients.
+///
+/// # Errors
+/// Returns `InvalidCredentials` when the JWKS cannot be resolved or no key
+/// matches the header.
+async fn resolve_client_decoding_key(
+    state: &Arc<AppState>,
+    client: &OAuthClient,
+    header: &JwtAssertionHeader,
+) -> Result<jsonwebtoken::DecodingKey, ClientAuthError> {
+    // Load cache once; pass to both resolver calls (pre-refresh timestamp matches prior behavior).
+    let jwks_cache = crate::db::get_jwks_cache(&state.store, &client.id)
+        .await
+        .map_err(|e| {
+            tracing::debug!(
+                "JWKS cache lookup failed for client {}: {e}",
+                client.client_id
+            );
+            ClientAuthError::InvalidCredentials
+        })?;
+
+    // Loopback JWKS destinations are permitted only in local development
+    // (no TLS configured), matching the WebAuthn `allow_localhost_origin`
+    // relaxation; private/link-local targets stay blocked.
+    let allow_loopback = !state.config().tls_configured();
+
+    let jwks = resolve_client_jwks(
+        &state.store,
+        &client.id,
+        client.jwks.as_ref(),
+        client.jwks_uri.as_deref(),
+        jwks_cache.as_ref(),
+        allow_loopback,
+        &state.http_client,
+    )
+    .await
+    .map_err(|e| {
+        tracing::debug!(
+            "JWKS resolution failed for client {}: {e}",
+            client.client_id
+        );
+        ClientAuthError::InvalidCredentials
+    })?;
+
+    // Find matching key, with force-refresh on kid-miss for jwks_uri clients
+    find_matching_key_with_refresh_client(
+        &state.store,
+        &client.id,
+        client.jwks_uri.as_deref(),
+        jwks_cache.as_ref(),
+        allow_loopback,
+        &state.http_client,
+        &jwks,
+        header,
+    )
+    .await
+    .map_err(|e| {
+        tracing::debug!("No matching key found for client {}: {e}", client.client_id);
+        ClientAuthError::InvalidCredentials
+    })
 }
 
 #[cfg(test)]
@@ -569,5 +590,115 @@ mod tests {
             matches!(result, Ok(Some(_))),
             "commit on retry must succeed when the first PendingJti was not committed: {result:?}"
         );
+    }
+
+    fn make_claims(iss: &str, sub: &str) -> JwtAssertionClaims {
+        JwtAssertionClaims {
+            iss: iss.to_string(),
+            sub: sub.to_string(),
+            aud: super::super::validate::JwtAudience::Single(
+                "https://test.example.com".to_string(),
+            ),
+            exp: i64::MAX,
+            iat: None,
+            nbf: None,
+            jti: None,
+        }
+    }
+
+    #[test]
+    fn test_verify_assertion_subject_accepts_matching_iss_sub_and_hint() {
+        let claims = make_claims("client-1", "client-1");
+        assert!(verify_assertion_subject(&claims, Some("client-1")).is_ok());
+        assert!(verify_assertion_subject(&claims, None).is_ok());
+    }
+
+    #[test]
+    fn test_verify_assertion_subject_rejects_hint_mismatch() {
+        let claims = make_claims("client-1", "client-1");
+        let result = verify_assertion_subject(&claims, Some("client-2"));
+        assert!(matches!(result, Err(ClientAuthError::InvalidCredentials)));
+    }
+
+    #[test]
+    fn test_verify_assertion_subject_rejects_iss_sub_mismatch() {
+        let claims = make_claims("client-1", "client-2");
+        let result = verify_assertion_subject(&claims, None);
+        assert!(matches!(result, Err(ClientAuthError::InvalidCredentials)));
+    }
+
+    /// Create a client whose inline JWKS is the shared test signing key and
+    /// return it with the key's `kid` (read back from the stored JWKS).
+    async fn make_client_with_jwks(state: &Arc<crate::AppState>) -> (OAuthClient, String) {
+        use crate::test_utils::{TestClientSpec, TestJwks, create_test_client, create_test_user};
+
+        let user = create_test_user(&state.store, "jwks-resolve@example.com").await;
+        let created = create_test_client(
+            &state.store,
+            &user.id,
+            TestClientSpec {
+                token_endpoint_auth_method: Some(TokenEndpointAuthMethod::PrivateKeyJwt),
+                jwks: TestJwks::Shared,
+                with_secret: false,
+                ..Default::default()
+            },
+        )
+        .await;
+        let client = db::get_oauth_client_by_id(&state.store, &created.app_id)
+            .await
+            .expect("db lookup")
+            .expect("client exists");
+        let kid = client
+            .jwks
+            .as_ref()
+            .and_then(|j| j.get("keys"))
+            .and_then(|k| k.get(0))
+            .and_then(|k| k.get("kid"))
+            .and_then(|k| k.as_str())
+            .expect("shared test JWKS has a kid")
+            .to_string();
+        (client, kid)
+    }
+
+    #[tokio::test]
+    async fn test_resolve_client_decoding_key_matches_kid() {
+        let state = make_state().await;
+        let (client, kid) = make_client_with_jwks(&state).await;
+
+        let header = JwtAssertionHeader {
+            alg: "ES256".to_string(),
+            kid: Some(kid),
+        };
+        let result = resolve_client_decoding_key(&state, &client, &header).await;
+        assert!(result.is_ok(), "matching kid must resolve a key");
+    }
+
+    #[tokio::test]
+    async fn test_resolve_client_decoding_key_falls_back_without_kid() {
+        let state = make_state().await;
+        let (client, _kid) = make_client_with_jwks(&state).await;
+
+        // No kid: single EC key in the JWKS matches the ES256 algorithm.
+        let header = JwtAssertionHeader {
+            alg: "ES256".to_string(),
+            kid: None,
+        };
+        let result = resolve_client_decoding_key(&state, &client, &header).await;
+        assert!(result.is_ok(), "single-key JWKS must match by key type");
+    }
+
+    #[tokio::test]
+    async fn test_resolve_client_decoding_key_rejects_unknown_kid() {
+        let state = make_state().await;
+        let (client, _kid) = make_client_with_jwks(&state).await;
+
+        // Inline-JWKS client (no jwks_uri): a kid miss cannot force-refresh
+        // and must fail closed.
+        let header = JwtAssertionHeader {
+            alg: "ES256".to_string(),
+            kid: Some("no-such-key".to_string()),
+        };
+        let result = resolve_client_decoding_key(&state, &client, &header).await;
+        assert!(matches!(result, Err(ClientAuthError::InvalidCredentials)));
     }
 }
