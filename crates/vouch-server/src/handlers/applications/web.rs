@@ -5,10 +5,7 @@
 //! self-service application management portal.
 
 use crate::AppState;
-use crate::db::{
-    self, AccessScope, CreateOAuthClientParams, FapiProfile, JwsAlgorithm, RegistrationSource,
-    TokenEndpointAuthMethod, UpdateOAuthClientParams,
-};
+use crate::db::{self, AccessScope, FapiProfile, TokenEndpointAuthMethod, UpdateOAuthClientParams};
 use axum::{
     Form,
     extract::{Path, State},
@@ -24,8 +21,8 @@ use super::types::{
     UpdateApplicationForm, UsageStat,
 };
 use super::validate::{
-    AppValidationError, CreateAppInput, UpdateAppInput, validate_create_application,
-    validate_update_fapi, validate_update_format,
+    AppValidationError, CreateAppContext, CreateAppInput, UpdateAppInput, build_create_params,
+    validate_create_application, validate_update_fapi, validate_update_format,
 };
 use super::{
     extract_auth_from_cookie, generate_client_secret, parse_redirect_uris, parse_resource_uris,
@@ -98,10 +95,6 @@ pub(crate) async fn create_application_page(
 
 /// Create a new application.
 /// POST /applications/new
-#[expect(
-    clippy::too_many_lines,
-    reason = "single-pass form creation: parse, validate, auth-check, create"
-)]
 pub(crate) async fn create_application_form(
     State(state): State<Arc<AppState>>,
     jar: CookieJar,
@@ -146,8 +139,6 @@ pub(crate) async fn create_application_form(
     let name = validated.name;
     let app_type = validated.app_type;
     let is_fapi = validated.is_fapi;
-    let jwks_value = validated.jwks;
-    let jwks_uri_trimmed = validated.jwks_uri;
 
     // Parse and validate access scope
     let access_scope = form.access_scope.parse::<AccessScope>().unwrap_or_default();
@@ -180,54 +171,18 @@ pub(crate) async fn create_application_form(
     // Create the application with FAPI settings included at creation time
     let (client, client_id) = match db::create_oauth_client(
         &state.store,
-        &CreateOAuthClientParams {
-            user_id: Some(user_id),
-            name,
-            description: form.description.as_deref(),
-            application_type: app_type,
-            redirect_uris: &redirect_uris,
-            access_scope,
-            org_id,
-            resource_uris: &resource_uris,
-            token_endpoint_auth_method: if is_fapi {
-                Some(TokenEndpointAuthMethod::PrivateKeyJwt)
-            } else {
-                None
+        &build_create_params(
+            &validated,
+            CreateAppContext {
+                user_id,
+                description: form.description.as_deref(),
+                redirect_uris: &redirect_uris,
+                resource_uris: &resource_uris,
+                post_logout_redirect_uris: post_logout_redirect_uris_input,
+                access_scope,
+                org_id,
             },
-            jwks: if is_fapi { jwks_value.as_ref() } else { None },
-            jwks_uri: if is_fapi { jwks_uri_trimmed } else { None },
-            fapi_profile: if is_fapi {
-                Some(FapiProfile::Fapi2Security)
-            } else {
-                None
-            },
-            dpop_bound_access_tokens: if is_fapi { Some(true) } else { None },
-            grant_types: None,
-            response_types: None,
-            software_id: None,
-            software_version: None,
-            registration_source: RegistrationSource::Manual,
-            registration_access_token_hash: None,
-            registration_metadata: None,
-            id_token_signed_response_alg: JwsAlgorithm::Rs256,
-            tls_client_auth_subject_dn: None,
-            tls_client_auth_san_dns: None,
-            tls_client_auth_san_uri: None,
-            tls_client_auth_san_ip: None,
-            tls_client_auth_san_email: None,
-            tls_client_certificate_bound_access_tokens: None,
-            authorization_signed_response_alg: None,
-            introspection_signed_response_alg: None,
-            request_object_signing_alg: None,
-            require_signed_request_object: None,
-            userinfo_signed_response_alg: None,
-            request_uris: None,
-            post_logout_redirect_uris: if post_logout_redirect_uris_raw.is_empty() {
-                None
-            } else {
-                Some(post_logout_redirect_uris_raw.clone())
-            },
-        },
+        ),
     )
     .await
     {

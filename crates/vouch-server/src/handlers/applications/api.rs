@@ -5,10 +5,7 @@
 //! application management.
 
 use crate::AppState;
-use crate::db::{
-    self, AccessScope, CreateOAuthClientParams, FapiProfile, JwsAlgorithm, OAuthEventType,
-    RegistrationSource, TokenEndpointAuthMethod, UpdateOAuthClientParams,
-};
+use crate::db::{self, AccessScope, OAuthEventType, UpdateOAuthClientParams};
 use axum::extract::OriginalUri;
 use axum::http::Method;
 use axum::{
@@ -26,7 +23,8 @@ use super::types::{
     UpdateApplicationRequest,
 };
 use super::validate::{
-    CreateAppInput, UpdateAppInput, validate_create_application, validate_update_fapi,
+    CreateAppContext, CreateAppInput, UpdateAppInput, build_create_params,
+    compute_fapi_update_fields, validate_create_application, validate_update_fapi,
     validate_update_format,
 };
 use crate::error::ServiceError;
@@ -72,12 +70,49 @@ pub(crate) async fn list_applications_api(
     Ok(Json(ListApplicationsResponse { applications }))
 }
 
+/// Load the requesting user and enforce account-status and access-scope rules.
+///
+/// The account must be active, and organization scope requires organization
+/// membership. Shared by the create and update handlers.
+async fn load_active_user_for_scope(
+    state: &AppState,
+    user_id: &str,
+    wants_org_scope: bool,
+) -> Result<db::User, ServiceError> {
+    let user = db::get_user_by_id(&state.store, user_id)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to get user: {e}");
+            ServiceError::api(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "db_error",
+                "Internal database error",
+            )
+        })?
+        .ok_or_else(|| ServiceError::api(StatusCode::NOT_FOUND, "not_found", "User not found"))?;
+
+    if !user.active {
+        return Err(ServiceError::api(
+            StatusCode::UNAUTHORIZED,
+            "unauthorized",
+            "User account is deactivated",
+        ));
+    }
+
+    // Validate: Organization scope requires user to have an org
+    if wants_org_scope && user.org_id.is_none() {
+        return Err(ServiceError::api(
+            StatusCode::BAD_REQUEST,
+            "invalid_access_scope",
+            "Organization scope requires organization membership",
+        ));
+    }
+
+    Ok(user)
+}
+
 /// Create a new application (API).
 /// POST /api/v1/applications
-#[expect(
-    clippy::too_many_lines,
-    reason = "single-pass RFC 7591 application creation: format-validate, auth, create"
-)]
 pub(crate) async fn create_application_api(
     method: Method,
     uri: OriginalUri,
@@ -105,8 +140,6 @@ pub(crate) async fn create_application_api(
     let name = validated.name;
     let app_type = validated.app_type;
     let is_fapi = validated.is_fapi;
-    let jwks_value = validated.jwks;
-    let jwks_uri_trimmed = validated.jwks_uri;
 
     // ── Authentication — validated input is good, now check credentials ──
     let token = extract_resource_token(
@@ -126,35 +159,12 @@ pub(crate) async fn create_application_api(
         .and_then(|s| s.parse::<AccessScope>().ok())
         .unwrap_or_default();
 
-    // Get user to check org membership
-    let user = db::get_user_by_id(&state.store, &token.sub)
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to get user: {e}");
-            ServiceError::api(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "db_error",
-                "Internal database error",
-            )
-        })?
-        .ok_or_else(|| ServiceError::api(StatusCode::NOT_FOUND, "not_found", "User not found"))?;
-
-    if !user.active {
-        return Err(ServiceError::api(
-            StatusCode::UNAUTHORIZED,
-            "unauthorized",
-            "User account is deactivated",
-        ));
-    }
-
-    // Validate: Organization scope requires user to have an org
-    if access_scope == AccessScope::Organization && user.org_id.is_none() {
-        return Err(ServiceError::api(
-            StatusCode::BAD_REQUEST,
-            "invalid_access_scope",
-            "Organization scope requires organization membership",
-        ));
-    }
+    let user = load_active_user_for_scope(
+        &state,
+        &token.sub,
+        access_scope == AccessScope::Organization,
+    )
+    .await?;
 
     // Set org_id only for organization-scoped apps
     let org_id = if access_scope == AccessScope::Organization {
@@ -166,54 +176,18 @@ pub(crate) async fn create_application_api(
     // Create the application with FAPI settings included at creation time
     let (client, client_id) = db::create_oauth_client(
         &state.store,
-        &CreateOAuthClientParams {
-            user_id: Some(&token.sub),
-            name,
-            description: req.description.as_deref(),
-            application_type: app_type,
-            redirect_uris: &req.redirect_uris,
-            access_scope,
-            org_id,
-            resource_uris,
-            token_endpoint_auth_method: if is_fapi {
-                Some(TokenEndpointAuthMethod::PrivateKeyJwt)
-            } else {
-                None
+        &build_create_params(
+            &validated,
+            CreateAppContext {
+                user_id: &token.sub,
+                description: req.description.as_deref(),
+                redirect_uris: &req.redirect_uris,
+                resource_uris,
+                post_logout_redirect_uris: post_logout_redirect_uris_raw,
+                access_scope,
+                org_id,
             },
-            jwks: if is_fapi { jwks_value.as_ref() } else { None },
-            jwks_uri: if is_fapi { jwks_uri_trimmed } else { None },
-            fapi_profile: if is_fapi {
-                Some(FapiProfile::Fapi2Security)
-            } else {
-                None
-            },
-            dpop_bound_access_tokens: if is_fapi { Some(true) } else { None },
-            grant_types: None,
-            response_types: None,
-            software_id: None,
-            software_version: None,
-            registration_source: RegistrationSource::Manual,
-            registration_access_token_hash: None,
-            registration_metadata: None,
-            id_token_signed_response_alg: JwsAlgorithm::Rs256,
-            tls_client_auth_subject_dn: None,
-            tls_client_auth_san_dns: None,
-            tls_client_auth_san_uri: None,
-            tls_client_auth_san_ip: None,
-            tls_client_auth_san_email: None,
-            tls_client_certificate_bound_access_tokens: None,
-            authorization_signed_response_alg: None,
-            introspection_signed_response_alg: None,
-            request_object_signing_alg: None,
-            require_signed_request_object: None,
-            userinfo_signed_response_alg: None,
-            request_uris: None,
-            post_logout_redirect_uris: req
-                .post_logout_redirect_uris
-                .as_ref()
-                .filter(|v| !v.is_empty())
-                .cloned(),
-        },
+        ),
     )
     .await
     .map_err(|e| {
@@ -318,10 +292,6 @@ pub(crate) async fn get_application_api(
     clippy::too_many_arguments,
     reason = "axum handler signature: extractors are positional parameters"
 )]
-#[expect(
-    clippy::too_many_lines,
-    reason = "linear merge of PATCH fields with the existing client record"
-)]
 pub(crate) async fn update_application_api(
     method: Method,
     uri: OriginalUri,
@@ -384,35 +354,12 @@ pub(crate) async fn update_application_api(
         .as_ref()
         .and_then(|s| s.parse::<AccessScope>().ok());
 
-    // Get user to check active status and org membership
-    let user = db::get_user_by_id(&state.store, &token.sub)
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to get user: {e}");
-            ServiceError::api(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "db_error",
-                "Internal database error",
-            )
-        })?
-        .ok_or_else(|| ServiceError::api(StatusCode::NOT_FOUND, "not_found", "User not found"))?;
-
-    if !user.active {
-        return Err(ServiceError::api(
-            StatusCode::UNAUTHORIZED,
-            "unauthorized",
-            "User account is deactivated",
-        ));
-    }
-
-    // Validate: Organization scope requires user to have an org
-    if access_scope == Some(AccessScope::Organization) && user.org_id.is_none() {
-        return Err(ServiceError::api(
-            StatusCode::BAD_REQUEST,
-            "invalid_access_scope",
-            "Organization scope requires organization membership",
-        ));
-    }
+    let user = load_active_user_for_scope(
+        &state,
+        &token.sub,
+        access_scope == Some(AccessScope::Organization),
+    )
+    .await?;
 
     // Set org_id only for organization-scoped apps
     let org_id = if access_scope == Some(AccessScope::Organization) {
@@ -448,52 +395,7 @@ pub(crate) async fn update_application_api(
 
     // FAPI rules that depend on the existing client record
     validate_update_fapi(&validated, &client)?;
-    let is_fapi = validated.is_fapi;
-    let jwks_value = validated.jwks;
-    let jwks_uri_trimmed = validated.jwks_uri;
-
-    // Compute FAPI-related values
-    let fapi_profile = if is_fapi {
-        FapiProfile::Fapi2Security
-    } else if req.fapi_profile.is_some() {
-        // Explicitly set to non-FAPI
-        FapiProfile::None
-    } else {
-        client.fapi_profile
-    };
-
-    let token_endpoint_auth_method = if is_fapi {
-        TokenEndpointAuthMethod::PrivateKeyJwt
-    } else if !is_fapi && req.fapi_profile.is_some() && client.is_fapi() {
-        // Transitioning from FAPI to Standard
-        TokenEndpointAuthMethod::ClientSecretBasic
-    } else {
-        client.token_endpoint_auth_method
-    };
-
-    let effective_jwks = if jwks_value.is_some() {
-        jwks_value.as_ref()
-    } else if fapi_profile == FapiProfile::Fapi2Security {
-        client.jwks.as_ref()
-    } else {
-        None
-    };
-
-    let effective_jwks_uri = if jwks_uri_trimmed.is_some() {
-        jwks_uri_trimmed
-    } else if fapi_profile == FapiProfile::Fapi2Security {
-        client.jwks_uri.as_deref()
-    } else {
-        None
-    };
-
-    let dpop_bound = if is_fapi {
-        true
-    } else if req.fapi_profile.is_some() {
-        false
-    } else {
-        client.dpop_bound_access_tokens
-    };
+    let fapi = compute_fapi_update_fields(&validated, &client);
 
     db::update_oauth_client(
         &state.store,
@@ -505,11 +407,11 @@ pub(crate) async fn update_application_api(
             access_scope,
             org_id,
             resource_uris: &resource_uris,
-            token_endpoint_auth_method,
-            jwks: effective_jwks,
-            jwks_uri: effective_jwks_uri,
-            fapi_profile,
-            dpop_bound_access_tokens: dpop_bound,
+            token_endpoint_auth_method: fapi.token_endpoint_auth_method,
+            jwks: fapi.jwks,
+            jwks_uri: fapi.jwks_uri,
+            fapi_profile: fapi.fapi_profile,
+            dpop_bound_access_tokens: fapi.dpop_bound_access_tokens,
             post_logout_redirect_uris: validated.post_logout_redirect_uris.map(<[String]>::to_vec),
         },
     )
