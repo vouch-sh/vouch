@@ -253,10 +253,6 @@ pub struct IdTokenClaims {
 ///
 /// # Errors
 /// Returns `ServiceError` for invalid requests.
-#[expect(
-    clippy::too_many_lines,
-    reason = "linear authorization-code exchange sequence"
-)]
 pub(crate) async fn exchange_authorization_code(
     state: &Arc<AppState>,
     params: AuthCodeExchangeParams<'_>,
@@ -273,63 +269,10 @@ pub(crate) async fn exchange_authorization_code(
     let code_hash = hash_token(params.code);
     let auth_code_claim = enforce_single_use_code(state, &code_hash, &auth_code).await?;
 
-    // Reject deactivated users before issuing tokens
-    let user = db::get_user_by_id(&state.store, &auth_code.user_id)
-        .await
-        .map_err(|e| ServiceError::Internal(e.to_string()))?
-        .ok_or(ServiceError::oauth(
-            OAuthErrorCode::InvalidGrant,
-            "User not found",
-        ))?;
-    if !user.active {
-        return Err(ServiceError::oauth(
-            OAuthErrorCode::InvalidGrant,
-            "User account is deactivated",
-        ));
-    }
+    let user = load_and_validate_grant_subject(state, &auth_code).await?;
 
-    // Reject tokens for revoked/deleted authenticators (GH#272)
-    let _authenticator = db::get_authenticator_by_id(&state.store, &auth_code.authenticator_id)
-        .await
-        .map_err(|e| ServiceError::Internal(e.to_string()))?
-        .ok_or(ServiceError::oauth(
-            OAuthErrorCode::InvalidGrant,
-            "Authenticator not found",
-        ))?;
-
-    // RFC 6749 Section 4.1.3: Verify the handler-authenticated client
-    // matches the authorization code's recorded client_id, and that PKCE
-    // (RFC 7636) is present when required for this client type. Client
-    // authentication itself (RFC 6749 §2.3 / RFC 7523 §2.2 / RFC 8705)
-    // ran at the handler before this function was called; here we only
-    // check consistency with the auth code.
     let authenticated_client = params.authenticated_client;
-    if let Some(client) = authenticated_client
-        && client.client.client_id != auth_code.client_id
-    {
-        tracing::warn!(
-            "Client ID mismatch: token request from {} but code was issued to {}",
-            client.client.client_id,
-            auth_code.client_id
-        );
-        return Err(ServiceError::oauth(
-            OAuthErrorCode::InvalidGrant,
-            "Client ID mismatch",
-        ));
-    }
-    if let Some(client) = authenticated_client {
-        let pkce_required = client.is_public || client.client.application_type.requires_pkce();
-        if pkce_required && auth_code.code_challenge.is_none() {
-            tracing::warn!(
-                "Client {} requires PKCE but no code_challenge was present",
-                client.client.client_id
-            );
-            return Err(ServiceError::oauth(
-                OAuthErrorCode::InvalidRequest,
-                "PKCE required for this client type",
-            ));
-        }
-    }
+    verify_client_matches_code(authenticated_client, &auth_code)?;
 
     // Validate redirect_uri, PKCE, DPoP binding, and ACR
     validate_code_bindings(
@@ -458,6 +401,86 @@ pub(crate) async fn exchange_authorization_code(
         scope: auth_code.scope,
         authorization_details: grants.authorization_details,
     })
+}
+
+/// Load the authorization code's subject and reject grants whose user is
+/// deactivated or whose authenticator has been revoked or deleted (GH#272).
+///
+/// # Errors
+/// Returns `invalid_grant` when the user or authenticator no longer
+/// qualifies for token issuance.
+async fn load_and_validate_grant_subject(
+    state: &Arc<AppState>,
+    auth_code: &AuthorizationCode,
+) -> ServiceResult<db::User> {
+    // Reject deactivated users before issuing tokens
+    let user = db::get_user_by_id(&state.store, &auth_code.user_id)
+        .await
+        .map_err(|e| ServiceError::Internal(e.to_string()))?
+        .ok_or(ServiceError::oauth(
+            OAuthErrorCode::InvalidGrant,
+            "User not found",
+        ))?;
+    if !user.active {
+        return Err(ServiceError::oauth(
+            OAuthErrorCode::InvalidGrant,
+            "User account is deactivated",
+        ));
+    }
+
+    // Reject tokens for revoked/deleted authenticators (GH#272)
+    db::get_authenticator_by_id(&state.store, &auth_code.authenticator_id)
+        .await
+        .map_err(|e| ServiceError::Internal(e.to_string()))?
+        .ok_or(ServiceError::oauth(
+            OAuthErrorCode::InvalidGrant,
+            "Authenticator not found",
+        ))?;
+
+    Ok(user)
+}
+
+/// RFC 6749 Section 4.1.3: Verify the handler-authenticated client matches
+/// the authorization code's recorded client_id, and that PKCE (RFC 7636) is
+/// present when required for this client type. Client authentication itself
+/// (RFC 6749 §2.3 / RFC 7523 §2.2 / RFC 8705) ran at the handler before
+/// `exchange_authorization_code` was called; this only checks consistency
+/// with the auth code.
+///
+/// # Errors
+/// Returns `invalid_grant` on client mismatch and `invalid_request` when a
+/// required PKCE challenge is absent.
+fn verify_client_matches_code(
+    authenticated_client: Option<&AuthenticatedClient>,
+    auth_code: &AuthorizationCode,
+) -> ServiceResult<()> {
+    if let Some(client) = authenticated_client
+        && client.client.client_id != auth_code.client_id
+    {
+        tracing::warn!(
+            "Client ID mismatch: token request from {} but code was issued to {}",
+            client.client.client_id,
+            auth_code.client_id
+        );
+        return Err(ServiceError::oauth(
+            OAuthErrorCode::InvalidGrant,
+            "Client ID mismatch",
+        ));
+    }
+    if let Some(client) = authenticated_client {
+        let pkce_required = client.is_public || client.client.application_type.requires_pkce();
+        if pkce_required && auth_code.code_challenge.is_none() {
+            tracing::warn!(
+                "Client {} requires PKCE but no code_challenge was present",
+                client.client.client_id
+            );
+            return Err(ServiceError::oauth(
+                OAuthErrorCode::InvalidRequest,
+                "PKCE required for this client type",
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Result of resolving authorization details and resource audience.
@@ -1727,5 +1750,135 @@ mod tests {
             matches!(result, Err(ClientAuthError::MtlsVerificationFailed(_))),
             "non-matching x5c must return MtlsVerificationFailed: {result:?}"
         );
+    }
+
+    // =========================================================================
+    // verify_client_matches_code
+    // =========================================================================
+
+    #[test]
+    fn test_verify_client_matches_code_no_client_ok() {
+        let auth_code = make_auth_code("");
+        assert!(verify_client_matches_code(None, &auth_code).is_ok());
+    }
+
+    #[test]
+    fn test_verify_client_matches_code_matching_confidential_client_ok() {
+        let client = AuthenticatedClient {
+            client: make_mtls_client(TokenEndpointAuthMethod::ClientSecretBasic, None),
+            is_public: false,
+        };
+        let auth_code = AuthorizationCode {
+            client_id: client.client.client_id.clone(),
+            ..make_auth_code("")
+        };
+        // Service client, not public: PKCE is not required.
+        assert!(verify_client_matches_code(Some(&client), &auth_code).is_ok());
+    }
+
+    #[test]
+    fn test_verify_client_matches_code_rejects_client_id_mismatch() {
+        let client = AuthenticatedClient {
+            client: make_mtls_client(TokenEndpointAuthMethod::ClientSecretBasic, None),
+            is_public: false,
+        };
+        // make_auth_code uses client_id "test", which differs from the client's.
+        let auth_code = make_auth_code("");
+        let result = verify_client_matches_code(Some(&client), &auth_code);
+        assert_oauth_error(result, OAuthErrorCode::InvalidGrant);
+    }
+
+    #[test]
+    fn test_verify_client_matches_code_public_client_requires_pkce() {
+        let client = AuthenticatedClient {
+            client: make_mtls_client(TokenEndpointAuthMethod::ClientSecretBasic, None),
+            is_public: true,
+        };
+        let auth_code = AuthorizationCode {
+            client_id: client.client.client_id.clone(),
+            ..make_auth_code("")
+        };
+        let result = verify_client_matches_code(Some(&client), &auth_code);
+        assert_oauth_error(result, OAuthErrorCode::InvalidRequest);
+    }
+
+    #[test]
+    fn test_verify_client_matches_code_public_client_with_pkce_ok() {
+        let client = AuthenticatedClient {
+            client: make_mtls_client(TokenEndpointAuthMethod::ClientSecretBasic, None),
+            is_public: true,
+        };
+        let auth_code = AuthorizationCode {
+            client_id: client.client.client_id.clone(),
+            code_challenge: Some("a-code-challenge".to_string()),
+            code_challenge_method: Some(CodeChallengeMethod::S256),
+            ..make_auth_code("")
+        };
+        assert!(verify_client_matches_code(Some(&client), &auth_code).is_ok());
+    }
+
+    // =========================================================================
+    // load_and_validate_grant_subject
+    // =========================================================================
+
+    use crate::test_utils::{create_test_authenticator, create_test_user, test_app_state};
+
+    #[tokio::test]
+    async fn test_grant_subject_active_user_ok() {
+        let state = test_app_state().await;
+        let user = create_test_user(&state.store, "grant-ok@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+
+        let auth_code = AuthorizationCode {
+            user_id: user.id.clone(),
+            authenticator_id: auth_id,
+            ..make_auth_code("")
+        };
+        let result = load_and_validate_grant_subject(&state, &auth_code).await;
+        let loaded = result.expect("active user with authenticator must pass");
+        assert_eq!(loaded.id, user.id);
+    }
+
+    #[tokio::test]
+    async fn test_grant_subject_rejects_unknown_user() {
+        let state = test_app_state().await;
+        let auth_code = AuthorizationCode {
+            user_id: "no-such-user".to_string(),
+            ..make_auth_code("")
+        };
+        let result = load_and_validate_grant_subject(&state, &auth_code).await;
+        assert_oauth_error(result, OAuthErrorCode::InvalidGrant);
+    }
+
+    #[tokio::test]
+    async fn test_grant_subject_rejects_deactivated_user() {
+        let state = test_app_state().await;
+        let user = create_test_user(&state.store, "grant-inactive@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        db::update_user_active_status(&state.store, &user.id, false)
+            .await
+            .expect("deactivate user");
+
+        let auth_code = AuthorizationCode {
+            user_id: user.id.clone(),
+            authenticator_id: auth_id,
+            ..make_auth_code("")
+        };
+        let result = load_and_validate_grant_subject(&state, &auth_code).await;
+        assert_oauth_error(result, OAuthErrorCode::InvalidGrant);
+    }
+
+    #[tokio::test]
+    async fn test_grant_subject_rejects_missing_authenticator() {
+        let state = test_app_state().await;
+        let user = create_test_user(&state.store, "grant-no-auth@example.com").await;
+
+        let auth_code = AuthorizationCode {
+            user_id: user.id.clone(),
+            authenticator_id: "revoked-and-deleted".to_string(),
+            ..make_auth_code("")
+        };
+        let result = load_and_validate_grant_subject(&state, &auth_code).await;
+        assert_oauth_error(result, OAuthErrorCode::InvalidGrant);
     }
 }
