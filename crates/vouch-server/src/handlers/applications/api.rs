@@ -2190,6 +2190,62 @@ mod tests {
         assert_eq!(json["code"], "invalid_redirect_uris", "body: {body}");
     }
 
+    // Regression for #743: a FAPI client authenticates with private_key_jwt and
+    // holds no client secret. Switching it to a standard profile set
+    // client_secret_basic without minting one, so every later token request
+    // failed with invalid_client. The update must be refused outright.
+    #[tokio::test]
+    async fn test_update_application_rejects_fapi_downgrade() {
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "fapi-downgrade@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let auth = bearer(&token);
+
+        let client = create_test_client(
+            &state.store,
+            &user.id,
+            TestClientSpec {
+                fapi_profile: Some(crate::db::FapiProfile::Fapi2Security),
+                token_endpoint_auth_method: Some(crate::db::TokenEndpointAuthMethod::PrivateKeyJwt),
+                jwks: TestJwks::Shared,
+                dpop_bound_access_tokens: true,
+                with_secret: false,
+                ..Default::default()
+            },
+        )
+        .await;
+
+        let (status, body) = http_request(
+            &app,
+            "PATCH",
+            &format!("/api/v1/applications/{}", client.app_id),
+            Some(r#"{"fapi_profile": "standard"}"#.to_string()),
+            &[
+                ("Content-Type", "application/json"),
+                ("Authorization", &auth),
+            ],
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+        let json: serde_json::Value = serde_json::from_str(&body).expect("valid json");
+        assert_eq!(json["code"], "fapi_downgrade_unsupported", "body: {body}");
+
+        // The rejection must leave the client untouched — in particular it must
+        // not be left on client_secret_basic with no secret.
+        let persisted = crate::db::get_oauth_client_by_id(&state.store, &client.app_id)
+            .await
+            .expect("db lookup")
+            .expect("client still exists");
+        assert!(persisted.is_fapi(), "client must remain FAPI");
+        assert_eq!(
+            persisted.token_endpoint_auth_method,
+            crate::db::TokenEndpointAuthMethod::PrivateKeyJwt,
+            "auth method must be unchanged"
+        );
+    }
+
     #[tokio::test]
     async fn test_update_application_should_reject_empty_name() {
         let (app, state) = test_app().await;

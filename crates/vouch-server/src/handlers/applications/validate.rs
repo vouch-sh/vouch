@@ -30,6 +30,7 @@ pub(super) enum AppValidationError {
     InvalidResourceUri { uri: String, detail: String },
     FapiRequiresConfidentialClient,
     FapiMissingJwks,
+    FapiDowngradeUnsupported,
     JwksNotJson,
     JwksMissingKeys,
     InvalidJwksUri,
@@ -46,6 +47,7 @@ impl AppValidationError {
             Self::InvalidResourceUri { .. } => "invalid_resource_uri",
             Self::FapiRequiresConfidentialClient => "invalid_fapi_profile",
             Self::FapiMissingJwks => "missing_jwks",
+            Self::FapiDowngradeUnsupported => "fapi_downgrade_unsupported",
             Self::JwksNotJson | Self::JwksMissingKeys => "invalid_jwks",
             Self::InvalidJwksUri => "invalid_jwks_uri",
         }
@@ -78,6 +80,11 @@ impl AppValidationError {
             }
             Self::FapiMissingJwks => {
                 "FAPI 2.0 requires jwks or jwks_uri for private_key_jwt authentication".to_string()
+            }
+            Self::FapiDowngradeUnsupported => {
+                "A FAPI 2.0 application cannot be changed to a standard profile. \
+                 Create a new standard application instead."
+                    .to_string()
             }
             Self::JwksNotJson => "JWKS must be valid JSON".to_string(),
             Self::JwksMissingKeys => {
@@ -275,6 +282,14 @@ pub(super) fn validate_update_fapi(
     }
 
     if !validated.is_fapi {
+        // A FAPI client authenticates with private_key_jwt and therefore has
+        // no client secret. Moving it to a standard profile would switch it to
+        // client_secret_basic without minting one, so every subsequent token
+        // request would fail with invalid_client and the application would be
+        // unusable with no way back. Refuse the transition instead.
+        if validated.fapi_profile_provided && client.is_fapi() {
+            return Err(AppValidationError::FapiDowngradeUnsupported);
+        }
         return Ok(());
     }
 
@@ -393,8 +408,9 @@ pub(super) struct FapiUpdateFields<'a> {
 ///
 /// An absent `fapi_profile` preserves the client's current profile, auth
 /// method, JWKS, and DPoP binding. A provided FAPI profile enforces
-/// `private_key_jwt` + DPoP; a provided non-FAPI value transitions the
-/// client back to standard `client_secret_basic` with no JWKS.
+/// `private_key_jwt` + DPoP. A provided non-FAPI value clears the profile,
+/// JWKS, and DPoP binding of a client that was not already FAPI; downgrading
+/// a FAPI client is rejected upstream by [`validate_update_fapi`].
 pub(super) fn compute_fapi_update_fields<'a>(
     validated: &'a ValidatedUpdateApp<'_>,
     client: &'a OAuthClient,
@@ -410,11 +426,10 @@ pub(super) fn compute_fapi_update_fields<'a>(
         client.fapi_profile
     };
 
+    // A FAPI→standard transition never reaches here: `validate_update_fapi`
+    // rejects it, because the client has no secret to fall back to.
     let token_endpoint_auth_method = if is_fapi {
         TokenEndpointAuthMethod::PrivateKeyJwt
-    } else if validated.fapi_profile_provided && client.is_fapi() {
-        // Transitioning from FAPI to Standard
-        TokenEndpointAuthMethod::ClientSecretBasic
     } else {
         client.token_endpoint_auth_method
     };
@@ -681,21 +696,42 @@ mod tests {
         assert!(fields.dpop_bound_access_tokens);
     }
 
+    // Regression for #743: a FAPI client has no client secret, so switching it
+    // to client_secret_basic left it unable to authenticate at all. The
+    // transition is refused rather than silently producing a broken client.
     #[tokio::test]
-    async fn fapi_update_explicit_non_fapi_transitions_to_standard() {
+    async fn fapi_update_explicit_non_fapi_is_rejected() {
         let state = test_app_state().await;
         let client = fapi_test_client(&state, "fapi-disable@example.com").await;
 
         let validated = update_input(Some("standard"));
-        let fields = compute_fapi_update_fields(&validated, &client);
+        let err =
+            validate_update_fapi(&validated, &client).expect_err("FAPI downgrade must be rejected");
 
+        assert_eq!(err.code(), "fapi_downgrade_unsupported");
+    }
+
+    // The guard must not fire for a client that was never FAPI: explicitly
+    // setting `standard` on a standard client stays a no-op update.
+    #[tokio::test]
+    async fn non_fapi_client_may_be_set_to_standard() {
+        let state = test_app_state().await;
+        let user = create_test_user(&state.store, "std-restate@example.com").await;
+        let created = create_test_client(&state.store, &user.id, TestClientSpec::default()).await;
+        let client = crate::db::get_oauth_client_by_id(&state.store, &created.app_id)
+            .await
+            .expect("db lookup")
+            .expect("client exists");
+
+        let validated = update_input(Some("standard"));
+        validate_update_fapi(&validated, &client).expect("standard -> standard is allowed");
+
+        let fields = compute_fapi_update_fields(&validated, &client);
         assert_eq!(fields.fapi_profile, FapiProfile::None);
         assert_eq!(
-            fields.token_endpoint_auth_method,
-            TokenEndpointAuthMethod::ClientSecretBasic
+            fields.token_endpoint_auth_method, client.token_endpoint_auth_method,
+            "a non-FAPI client keeps its existing auth method"
         );
-        assert!(fields.jwks.is_none(), "JWKS dropped on FAPI exit");
-        assert!(fields.jwks_uri.is_none());
         assert!(!fields.dpop_bound_access_tokens);
     }
 
