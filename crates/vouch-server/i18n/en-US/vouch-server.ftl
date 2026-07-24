@@ -259,7 +259,12 @@ login-cert-test-deny = Certification Test Deny
 
 ## Generic error page (error.html)
 error-page-title = { -product } - Error
+error-heading = Error
 error-back = Back
+
+## Enrollment failures (error.html, rendered from handlers/enroll.rs)
+enroll-error-device-auth-approve-failed = Failed to approve the sign-in request. Please run the command again.
+enroll-error-session-create-failed = Failed to start enrollment. Please run the command again.
 
 ## Enrollment success (success.html)
 success-page-title = { -product } - Success
