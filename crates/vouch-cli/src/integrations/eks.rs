@@ -2,7 +2,6 @@
 //! Amazon EKS integration status checking.
 
 use serde::Deserialize;
-use std::path::PathBuf;
 
 use super::{ConfiguredDetails, IntegrationCheck, IntegrationState};
 
@@ -89,21 +88,9 @@ impl IntegrationCheck for EksIntegration {
     }
 }
 
-/// Get the default kubeconfig path.
-fn default_kubeconfig_path() -> Option<PathBuf> {
-    if let Ok(kubeconfig) = std::env::var("KUBECONFIG")
-        && let Some(first_path) = kubeconfig.split(':').next()
-        && !first_path.is_empty()
-    {
-        return Some(PathBuf::from(first_path));
-    }
-
-    dirs::home_dir().map(|h| h.join(".kube").join("config"))
-}
-
 /// Find all kubeconfig contexts using `vouch credential eks`.
 fn find_vouch_eks_contexts() -> Vec<String> {
-    let kubeconfig_path = match default_kubeconfig_path() {
+    let kubeconfig_path = match crate::commands::setup::kubeconfig::default_kubeconfig_path().ok() {
         Some(p) if p.exists() => p,
         _ => return Vec::new(),
     };

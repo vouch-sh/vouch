@@ -521,15 +521,10 @@ fn check_ssh_config() -> CheckResult {
 
 /// Check EKS configuration for Vouch integration.
 fn check_eks_config() -> CheckResult {
-    let home = match dirs::home_dir() {
-        Some(h) => h,
-        None => return CheckResult::fail("eks", tr!("doctor-eks-no-home")),
+    let kubeconfig_path = match crate::commands::setup::kubeconfig::default_kubeconfig_path() {
+        Ok(p) => p,
+        Err(_) => return CheckResult::fail("eks", tr!("doctor-eks-no-home")),
     };
-
-    let kubeconfig_path = std::env::var("KUBECONFIG")
-        .ok()
-        .and_then(|k| k.split(':').next().map(std::path::PathBuf::from))
-        .unwrap_or_else(|| home.join(".kube").join("config"));
 
     if !kubeconfig_path.exists() {
         return CheckResult::pass("eks", tr!("doctor-eks-no-kubeconfig"));

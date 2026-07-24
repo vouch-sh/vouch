@@ -3,6 +3,7 @@
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use std::ffi::OsStr;
 use std::path::PathBuf;
 
 use crate::utils::ensure_secure_dir;
@@ -102,13 +103,30 @@ pub(crate) struct EnvVar {
 // Kubeconfig Helpers
 // ============================================================================
 
-/// Get the default kubeconfig path (~/.kube/config).
+/// Pick the effective kubeconfig path from a `KUBECONFIG` value.
+///
+/// `KUBECONFIG` holds a platform-separated list of paths (`:` on Unix, `;` on
+/// Windows), so it must be split with [`std::env::split_paths`] rather than a
+/// hardcoded separator — on Windows `:` is the drive separator and splitting on
+/// it truncates `D:\kube\config` to `D`. Returns the first non-empty entry, or
+/// `None` when the value is empty or contains only empty entries.
+///
+/// Split out from [`default_kubeconfig_path`] so it can be tested without
+/// mutating process environment variables.
+fn first_kubeconfig_entry(kubeconfig: &OsStr) -> Option<PathBuf> {
+    std::env::split_paths(kubeconfig).find(|p| !p.as_os_str().is_empty())
+}
+
+/// Get the default kubeconfig path.
+///
+/// Honors `KUBECONFIG` (first non-empty entry), falling back to
+/// `~/.kube/config` when it is unset or holds no usable entry.
 pub(crate) fn default_kubeconfig_path() -> Result<PathBuf> {
-    if let Ok(kubeconfig) = std::env::var("KUBECONFIG")
-        && let Some(first_path) = kubeconfig.split(':').next()
-        && !first_path.is_empty()
+    if let Some(path) = std::env::var_os("KUBECONFIG")
+        .as_deref()
+        .and_then(first_kubeconfig_entry)
     {
-        return Ok(PathBuf::from(first_path));
+        return Ok(path);
     }
 
     let home = dirs::home_dir().with_context(|| vouch_cli::tr!("setup-err-no-home"))?;
@@ -205,6 +223,55 @@ pub(crate) fn existing_user_other(config: &Kubeconfig, name: &str) -> serde_json
 )]
 mod tests {
     use super::*;
+
+    /// Join path entries with the platform list separator so these tests assert
+    /// the same behavior on Unix (`:`) and Windows (`;`).
+    fn join(entries: &[&str]) -> std::ffi::OsString {
+        std::env::join_paths(entries.iter().map(std::ffi::OsStr::new)).expect("join_paths failed")
+    }
+
+    #[test]
+    fn kubeconfig_entry_returns_first_of_many() {
+        let value = join(&["/first/config", "/second/config"]);
+        assert_eq!(
+            first_kubeconfig_entry(&value),
+            Some(PathBuf::from("/first/config"))
+        );
+    }
+
+    #[test]
+    fn kubeconfig_entry_preserves_single_path() {
+        assert_eq!(
+            first_kubeconfig_entry(std::ffi::OsStr::new("/only/config")),
+            Some(PathBuf::from("/only/config"))
+        );
+    }
+
+    #[test]
+    fn kubeconfig_entry_skips_leading_empty_entry() {
+        let value = join(&["", "/second/config"]);
+        assert_eq!(
+            first_kubeconfig_entry(&value),
+            Some(PathBuf::from("/second/config"))
+        );
+    }
+
+    #[test]
+    fn kubeconfig_entry_is_none_when_unusable() {
+        // Empty, and all-empty entries, both fall through to ~/.kube/config.
+        assert_eq!(first_kubeconfig_entry(std::ffi::OsStr::new("")), None);
+        assert_eq!(first_kubeconfig_entry(&join(&["", ""])), None);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn kubeconfig_entry_keeps_windows_drive_letter() {
+        // The bug this guards: splitting on ':' truncates `D:\...` to `D`.
+        assert_eq!(
+            first_kubeconfig_entry(std::ffi::OsStr::new(r"D:\kube\config")),
+            Some(PathBuf::from(r"D:\kube\config"))
+        );
+    }
 
     #[test]
     fn test_kubeconfig_parsing() {
