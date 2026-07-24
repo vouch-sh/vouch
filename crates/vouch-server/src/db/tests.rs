@@ -3992,6 +3992,67 @@ async fn test_enroll_promotes_admin_for_org_without_one() {
     );
 }
 
+// Regression for #742: a user who already belongs to one org must not claim
+// a different org's admin slot by enrolling through that org's domain. The
+// slot has to stay open for that org's own first enrollee.
+#[tokio::test]
+async fn test_enroll_cross_org_user_does_not_claim_admin_slot() {
+    use crate::db::documents::organization::OrganizationDoc;
+    use crate::db::enroll_user_with_org;
+
+    let (store, _audit) = test_db().await;
+    let domain_a = "org-a.example";
+    let domain_b = "org-b.example";
+
+    // Alice belongs to org A, and is its admin.
+    let alice = enroll_user_with_org(&store, "alice@org-a.example", None, Some(domain_a))
+        .await
+        .expect("alice enrollment");
+    let org_a = alice.org_id.clone().expect("org a id");
+    assert!(alice.is_org_admin, "alice is org A's first enrollee");
+
+    // Alice now enrolls through org B's domain. Her user row keeps org A, so
+    // she is not a member of B and must not take B's admin slot.
+    let alice_again = enroll_user_with_org(&store, "alice@org-a.example", None, Some(domain_b))
+        .await
+        .expect("alice cross-org enrollment");
+    assert_eq!(
+        alice_again.org_id,
+        Some(org_a),
+        "enrolling via another domain must not move an existing user's org"
+    );
+
+    let org_b_doc = store
+        .find_one::<OrganizationDoc>("domain", domain_b)
+        .await
+        .expect("find org b")
+        .expect("org b exists");
+    assert_eq!(
+        org_b_doc.data.created_by_user_id, None,
+        "a non-member must leave org B's admin slot unclaimed"
+    );
+
+    // ...and org B's own first enrollee still gets promoted.
+    let bob = enroll_user_with_org(&store, "bob@org-b.example", None, Some(domain_b))
+        .await
+        .expect("bob enrollment");
+    assert!(
+        bob.is_org_admin,
+        "org B's first genuine enrollee must still become admin"
+    );
+
+    let org_b_doc = store
+        .find_one::<OrganizationDoc>("domain", domain_b)
+        .await
+        .expect("find org b")
+        .expect("org b exists");
+    assert_eq!(
+        org_b_doc.data.created_by_user_id,
+        Some(bob.id),
+        "org B's admin slot must record its own first enrollee"
+    );
+}
+
 // A retrying CAS loser must re-derive its admin decision from fresh state:
 // with the winner's user row committed and the org's created_by_user_id
 // still unset (the state a loser observes when it re-runs after aborting

@@ -199,6 +199,17 @@ pub async fn enroll_user_with_org(
             // winner's user row and admin slot are now visible) and commits a
             // non-admin user. A non-claiming loser merely raced the
             // opportunistic `created_by_user_id` repair and proceeds.
+            // Only a member of this org may occupy its admin slot. An existing
+            // user keeps the `org_id` from their own row, so enrolling through
+            // a domain that resolves to some other org would otherwise write
+            // their id into that org's `created_by_user_id` — filling the slot
+            // with a non-member and leaving the org's first real enrollee
+            // permanently non-admin. A newly inserted user is always built with
+            // this same `org_id`, so the legitimate first-admin claim still
+            // passes.
+            let claimable_org =
+                claimable_org.filter(|org_doc| user.org_id.as_deref() == Some(org_doc.id.as_str()));
+
             if let Some(org_doc) = claimable_org {
                 let mut data = org_doc.data;
                 data.created_by_user_id = Some(user.id.clone());
