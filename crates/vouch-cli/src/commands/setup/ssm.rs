@@ -110,39 +110,73 @@ fn ssm_block_host_pattern(content: &str) -> Option<&str> {
     None
 }
 
+/// Is this line the start of a top-level `ssh_config` stanza?
+///
+/// Stanza keywords sit in column 0; anything indented belongs to the stanza
+/// above it. Matched case-insensitively, and `Host=x` is accepted alongside
+/// `Host x`, because failing to recognize a stanza start is what makes
+/// [`strip_ssm_block`] delete a user's entries.
+fn is_stanza_start(line: &str) -> bool {
+    if line.starts_with([' ', '\t']) {
+        return false;
+    }
+    let keyword = line.split([' ', '\t', '=']).next().unwrap_or("");
+    keyword.eq_ignore_ascii_case("Host") || keyword.eq_ignore_ascii_case("Match")
+}
+
 /// Remove an existing SSM config block from the SSH config content.
 ///
-/// Finds the block starting with `SSM_MARKER` and removes everything up to
-/// the next blank line or end of file.
+/// The block runs from `SSM_MARKER` to the next blank line, the next top-level
+/// stanza, or end of file — whichever comes first. Terminating on a stanza
+/// matters because the block is not required to be followed by a blank line;
+/// keying only on `"\n\n"` ran to end of file and deleted every entry the user
+/// kept after it.
+///
+/// The block emits its own column-0 `Host` line, so the first stanza start
+/// after the marker is part of the block; only the second one ends it.
+///
+/// Lines are reassembled with their original terminators, so content outside
+/// the block round-trips byte for byte.
 fn strip_ssm_block(content: &str) -> String {
-    let Some(start) = content.find(SSM_MARKER) else {
-        return content.to_string();
-    };
+    let mut result = String::with_capacity(content.len());
+    let mut in_block = false;
+    let mut block_seen = false;
+    let mut own_stanza_seen = false;
 
-    // Walk backwards from the marker to consume the leading newline
-    let block_start =
-        if start > 0 && content.as_bytes().get(start.saturating_sub(1)) == Some(&b'\n') {
-            start.saturating_sub(1)
+    for line in content.split_inclusive('\n') {
+        if !in_block {
+            if !block_seen && line.contains(SSM_MARKER) {
+                // The block is written with a blank separator line before the
+                // marker; drop it so removal doesn't leave a widening gap.
+                if result.ends_with("\n\n") {
+                    result.pop();
+                }
+                in_block = true;
+                block_seen = true;
+            } else {
+                result.push_str(line);
+            }
+            continue;
+        }
+
+        let trimmed = line.trim_end_matches(['\n', '\r']);
+        let ends_block = if trimmed.is_empty() {
+            true
+        } else if is_stanza_start(trimmed) {
+            // First stanza after the marker is the block's own `Host` line.
+            let is_own = !own_stanza_seen;
+            own_stanza_seen = true;
+            !is_own
         } else {
-            start
+            false
         };
 
-    // Split safely at ASCII boundaries (SSM_MARKER and newlines are ASCII)
-    let (before, from_marker) = content.split_at(block_start);
+        if ends_block {
+            in_block = false;
+            result.push_str(line);
+        }
+    }
 
-    // Find the end of the block in the remaining content: look for a blank
-    // line or treat everything as the block.
-    let marker_offset = start.saturating_sub(block_start);
-    let after_marker = from_marker.get(marker_offset..).unwrap_or("");
-    let block_rest_len = after_marker.find("\n\n").map_or(from_marker.len(), |pos| {
-        marker_offset.saturating_add(pos).saturating_add(1)
-    });
-
-    let after = from_marker.get(block_rest_len..).unwrap_or("");
-
-    let mut result = String::with_capacity(content.len());
-    result.push_str(before);
-    result.push_str(after);
     result
 }
 
@@ -426,5 +460,58 @@ mod tests {
         let content = "Host *\n    ServerAliveInterval 60\n";
         let result = strip_ssm_block(content);
         assert_eq!(result, content);
+    }
+
+    /// The regression for #741: without a blank line after the SSM block, the
+    /// old `find("\n\n")` fell through to end of file and deleted the rest of
+    /// the user's config.
+    #[test]
+    fn test_strip_ssm_block_keeps_adjacent_host_without_blank_line() {
+        let content = format!(
+            "Host *\n    ServerAliveInterval 60\n\
+             \n{SSM_MARKER}\n# Added by: vouch setup ssm\n\
+             Host i-* mi-*\n    ProxyCommand sh -c \"aws ssm start-session\"\n\
+             Host other\n    Port 22\n"
+        );
+        let result = strip_ssm_block(&content);
+
+        // The following entry survives in full.
+        assert!(result.contains("Host other"), "result: {result:?}");
+        assert!(result.contains("Port 22"), "result: {result:?}");
+        assert!(result.contains("ServerAliveInterval"), "result: {result:?}");
+
+        // ...and the block is gone in full. The block emits its own column-0
+        // `Host` line, so a scan that stops at the first stanza start would
+        // leave the ProxyCommand line orphaned under `Host *`.
+        assert!(!result.contains(SSM_MARKER), "result: {result:?}");
+        assert!(!result.contains("Added by"), "result: {result:?}");
+        assert!(!result.contains("i-* mi-*"), "result: {result:?}");
+        assert!(!result.contains("ProxyCommand"), "result: {result:?}");
+    }
+
+    #[test]
+    fn test_strip_ssm_block_stops_at_match_stanza() {
+        let content = format!(
+            "{SSM_MARKER}\n# Added by: vouch setup ssm\n\
+             Host i-* mi-*\n    ProxyCommand sh -c \"aws ssm start-session\"\n\
+             Match host bastion\n    User admin\n"
+        );
+        let result = strip_ssm_block(&content);
+        assert!(!result.contains("ProxyCommand"), "result: {result:?}");
+        assert_eq!(result, "Match host bastion\n    User admin\n");
+    }
+
+    /// Content outside the block must survive byte for byte, including the
+    /// absence of a trailing newline.
+    #[test]
+    fn test_strip_ssm_block_preserves_surrounding_bytes() {
+        let content = format!(
+            "Host a\n    Port 1\n\
+             \n{SSM_MARKER}\n# Added by: vouch setup ssm\n\
+             Host i-*\n    ProxyCommand sh -c \"x\"\n\
+             \nHost b\n    Port 2"
+        );
+        let result = strip_ssm_block(&content);
+        assert_eq!(result, "Host a\n    Port 1\n\nHost b\n    Port 2");
     }
 }
