@@ -17,7 +17,7 @@ use secrecy::ExposeSecret;
 use serde::Deserialize;
 use std::sync::Arc;
 
-use super::{MAX_SCIM_TOKENS, compute_token_expiry, generate_scim_token};
+use super::{compute_token_expiry, generate_scim_token};
 use crate::filters;
 use crate::handlers::browser_login::validate_origin;
 use crate::handlers::session::{AuthContext, extract_org_admin, get_resource_auth_context};
@@ -105,29 +105,17 @@ pub(crate) async fn create_scim_token(
     let (user, org_id) =
         extract_org_admin(&state, &headers, &jar, method.as_str(), uri.path(), None).await?;
 
-    // Enforce 2-token limit (expired tokens cannot authenticate and do
-    // not count toward the limit)
-    let active = db::count_active_scim_tokens(&state.store, &org_id).await?;
-
-    if active >= MAX_SCIM_TOKENS {
-        return Err(ServiceError::api(
-            StatusCode::CONFLICT,
-            "token_limit_reached",
-            "Maximum of 2 SCIM tokens per organization. Revoke one before creating another.",
-        ));
-    }
-
     let generated = generate_scim_token()?;
     let expires_at = Some(compute_token_expiry(req.expires_in_days)?);
 
-    // Store the token
+    // The 2-token limit is enforced inside the transaction: counting here and
+    // inserting afterwards lets two concurrent requests both pass the check.
     let token_id = db::create_scim_token(
         &state.store,
+        &org_id,
         &generated.hash,
         req.description.as_deref(),
         expires_at,
-        Some(&org_id),
-        None, // Default scope: full access
     )
     .await?;
 
@@ -366,17 +354,6 @@ pub(crate) async fn admin_create_scim_token(
     let (admin, org_id) =
         extract_org_admin(&state, &headers, &jar, method.as_str(), uri.path(), None).await?;
 
-    // Enforce 2-token limit (expired tokens cannot authenticate and do
-    // not count toward the limit)
-    let active = db::count_active_scim_tokens(&state.store, &org_id).await?;
-
-    if active >= MAX_SCIM_TOKENS {
-        return Ok(redirect_error(
-            jar,
-            "Maximum of 2 SCIM tokens. Revoke one before creating another.",
-        ));
-    }
-
     let generated = generate_scim_token()?;
     let expires_at = Some(compute_token_expiry(form.expires_in_days)?);
 
@@ -387,16 +364,25 @@ pub(crate) async fn admin_create_scim_token(
         .filter(|s| !s.is_empty())
         .map(String::from);
 
-    // Store the token
-    let token_id = db::create_scim_token(
+    // The 2-token limit is enforced inside the transaction: counting here and
+    // inserting afterwards lets two concurrent requests both pass the check.
+    let token_id = match db::create_scim_token(
         &state.store,
+        &org_id,
         &generated.hash,
         description.as_deref(),
         expires_at,
-        Some(&org_id),
-        None,
     )
-    .await?;
+    .await
+    {
+        Ok(id) => id,
+        // Hitting the cap is ordinary form input, not a server fault — keep the
+        // flash-message redirect rather than rendering an API error page.
+        Err(ServiceError::Api { code, message, .. }) if code == "token_limit_reached" => {
+            return Ok(redirect_error(jar, &message));
+        }
+        Err(e) => return Err(e),
+    };
 
     let data = serde_json::json!({
         "action": "create_scim_token",

@@ -1259,17 +1259,34 @@ pub async fn create_test_scim_token(
     // Hash for storage
     let token_hash = hex::encode(digest::digest(&SHA256, token.as_bytes()));
 
+    // Token creation enforces the per-org cap against the organization row, so
+    // the org must exist. Tests pass opaque ids like "test-org" rather than
+    // building an org first, so seed one on demand.
+    if store
+        .get::<crate::db::documents::organization::OrganizationDoc>(org_id)
+        .await
+        .expect("look up test org")
+        .is_none()
+    {
+        store
+            .insert_with_id(
+                org_id,
+                &crate::db::documents::organization::OrganizationDoc {
+                    domain: format!("{org_id}.example"),
+                    name: Some(org_id.to_string()),
+                    created_by_user_id: None,
+                    additional_domains: Vec::new(),
+                    subdomain: None,
+                },
+            )
+            .await
+            .expect("seed test org");
+    }
+
     // Store in database with org_id so authenticate_scim accepts it
-    crate::db::create_scim_token(
-        store,
-        &token_hash,
-        Some(description),
-        None,
-        Some(org_id),
-        None,
-    )
-    .await
-    .expect("Failed to create SCIM token");
+    crate::db::create_scim_token(store, org_id, &token_hash, Some(description), None)
+        .await
+        .expect("Failed to create SCIM token");
 
     token
 }
