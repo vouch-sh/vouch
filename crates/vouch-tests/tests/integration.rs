@@ -2738,7 +2738,9 @@ mod httpsig {
     #[tokio::test]
     async fn test_httpsig_jwks_cache_fallback_verifies() {
         // A client registered without inline JWKS (the jwks_uri flow) resolves
-        // its signing key from the JWKS cache row instead.
+        // its signing key from the JWKS cache row instead. The cache row is only
+        // ever populated by fetching jwks_uri, so the client must carry one —
+        // a cache row with no URI behind it can never be revalidated.
         use vouch_server::test_utils::{TestClientSpec, TestJwks, create_test_client};
 
         let harness = TestHarness::new().await;
@@ -2764,6 +2766,7 @@ mod httpsig {
                     vouch_server::db::TokenEndpointAuthMethod::PrivateKeyJwt,
                 ),
                 jwks: TestJwks::None,
+                jwks_uri: Some("https://client.example/jwks.json".to_string()),
                 dpop_bound_access_tokens: true,
                 id_token_signed_response_alg: vouch_server::db::JwsAlgorithm::Es256,
                 with_secret: false,

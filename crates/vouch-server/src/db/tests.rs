@@ -1729,16 +1729,9 @@ async fn test_scim_token_management() {
 
     // Create SCIM token with org
     let token_hash = "hashed_scim_token";
-    let token_id = create_scim_token(
-        &store,
-        token_hash,
-        Some("Admin token"),
-        None,
-        Some(org_id),
-        None,
-    )
-    .await
-    .expect("Failed to create SCIM token");
+    let token_id = create_scim_token(&store, org_id, token_hash, Some("Admin token"), None)
+        .await
+        .expect("Failed to create SCIM token");
 
     assert!(!token_id.is_empty());
 
@@ -1821,30 +1814,44 @@ async fn test_expired_scim_tokens_excluded_from_active_count() {
         ("expired-2", Some(past)),
         ("active-1", Some(future)),
     ] {
-        create_scim_token(&store, hash, None, expiry, Some(org_id), None)
+        create_scim_token(&store, org_id, hash, None, expiry)
             .await
             .expect("Failed to create SCIM token");
     }
 
-    // list returns everything; the active count excludes the expired pair
+    // list returns everything, expired rows included
     let all = list_scim_tokens(&store, Some(org_id))
         .await
         .expect("Failed to list tokens");
     assert_eq!(all.len(), 3);
 
-    let active = count_active_scim_tokens(&store, org_id)
-        .await
-        .expect("Failed to count active tokens");
-    assert_eq!(active, 1);
+    // An expired token cannot authenticate...
+    assert!(
+        get_scim_token_by_hash(&store, "expired-1")
+            .await
+            .expect("lookup expired token")
+            .is_none(),
+        "an expired token must not authenticate"
+    );
+    assert!(
+        get_scim_token_by_hash(&store, "active-1")
+            .await
+            .expect("lookup active token")
+            .is_some(),
+        "an unexpired token must authenticate"
+    );
 
-    // Tokens without an expiration are always active
-    create_scim_token(&store, "no-expiry", None, None, Some(org_id), None)
+    // ...so it must not consume a slot either. Only `active-1` counts against
+    // the cap of 2, leaving room for one more. A token with no expiration is
+    // always active, so the one after that is refused.
+    create_scim_token(&store, org_id, "no-expiry", None, None)
         .await
-        .expect("Failed to create SCIM token");
-    let active = count_active_scim_tokens(&store, org_id)
-        .await
-        .expect("Failed to count active tokens");
-    assert_eq!(active, 2);
+        .expect("a second active token must be allowed alongside 2 expired ones");
+
+    match create_scim_token(&store, org_id, "third-active", None, Some(future)).await {
+        Err(crate::error::ServiceError::Api { ref code, .. }) if code == "token_limit_reached" => {}
+        other => panic!("a third active token must hit the cap; got {other:?}"),
+    }
 
     // Cleanup purges only the expired tokens
     let deleted = delete_expired_scim_tokens(&store)
@@ -3992,6 +3999,67 @@ async fn test_enroll_promotes_admin_for_org_without_one() {
     );
 }
 
+// Regression for #742: a user who already belongs to one org must not claim
+// a different org's admin slot by enrolling through that org's domain. The
+// slot has to stay open for that org's own first enrollee.
+#[tokio::test]
+async fn test_enroll_cross_org_user_does_not_claim_admin_slot() {
+    use crate::db::documents::organization::OrganizationDoc;
+    use crate::db::enroll_user_with_org;
+
+    let (store, _audit) = test_db().await;
+    let domain_a = "org-a.example";
+    let domain_b = "org-b.example";
+
+    // Alice belongs to org A, and is its admin.
+    let alice = enroll_user_with_org(&store, "alice@org-a.example", None, Some(domain_a))
+        .await
+        .expect("alice enrollment");
+    let org_a = alice.org_id.clone().expect("org a id");
+    assert!(alice.is_org_admin, "alice is org A's first enrollee");
+
+    // Alice now enrolls through org B's domain. Her user row keeps org A, so
+    // she is not a member of B and must not take B's admin slot.
+    let alice_again = enroll_user_with_org(&store, "alice@org-a.example", None, Some(domain_b))
+        .await
+        .expect("alice cross-org enrollment");
+    assert_eq!(
+        alice_again.org_id,
+        Some(org_a),
+        "enrolling via another domain must not move an existing user's org"
+    );
+
+    let org_b_doc = store
+        .find_one::<OrganizationDoc>("domain", domain_b)
+        .await
+        .expect("find org b")
+        .expect("org b exists");
+    assert_eq!(
+        org_b_doc.data.created_by_user_id, None,
+        "a non-member must leave org B's admin slot unclaimed"
+    );
+
+    // ...and org B's own first enrollee still gets promoted.
+    let bob = enroll_user_with_org(&store, "bob@org-b.example", None, Some(domain_b))
+        .await
+        .expect("bob enrollment");
+    assert!(
+        bob.is_org_admin,
+        "org B's first genuine enrollee must still become admin"
+    );
+
+    let org_b_doc = store
+        .find_one::<OrganizationDoc>("domain", domain_b)
+        .await
+        .expect("find org b")
+        .expect("org b exists");
+    assert_eq!(
+        org_b_doc.data.created_by_user_id,
+        Some(bob.id),
+        "org B's admin slot must record its own first enrollee"
+    );
+}
+
 // A retrying CAS loser must re-derive its admin decision from fresh state:
 // with the winner's user row committed and the org's created_by_user_id
 // still unset (the state a loser observes when it re-runs after aborting
@@ -5431,6 +5499,62 @@ async fn test_concurrent_secret_add_never_exceeds_two() {
         .expect("list secrets");
     let active = secrets.iter().filter(|s| s.is_valid(&now)).count();
     assert_eq!(active, 2, "exactly 2 active secrets must exist");
+}
+
+/// Regression for #744: 4 concurrent SCIM token creates → exactly 2 `Ok`, rest
+/// `409 token_limit_reached`. Counting in the handler and inserting afterwards
+/// let every concurrent request pass the check; the count now happens inside the
+/// insert's transaction, with the organization document's version as the
+/// serialization point. Mirrors `test_concurrent_secret_add_never_exceeds_two`.
+///
+/// Scope note: this runs on SQLite, which serializes writers, so moving the
+/// count inside the transaction is by itself sufficient here — the test still
+/// passes if the `compare_and_update` version guard is removed. That guard
+/// exists for PostgreSQL and DSQL, where two transactions can read the same
+/// snapshot and neither conflicts on a predicate read. Proving it therefore
+/// requires a snapshot-isolated backend, not this test.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_concurrent_scim_token_create_never_exceeds_two() {
+    use crate::db::create_scim_token;
+
+    let (store, _audit) = test_db().await;
+    let org = create_organization(&store, "scim-cap.example", Some("Cap Org"), None)
+        .await
+        .expect("create org");
+
+    let handles: Vec<_> = (0_u8..4)
+        .map(|i| {
+            let store = store.clone();
+            let org_id = org.id.clone();
+            tokio::spawn(async move {
+                create_scim_token(&store, &org_id, &format!("scim_hash_{i}"), None, None).await
+            })
+        })
+        .collect();
+
+    let mut ok_count: usize = 0;
+    let mut limit_count: usize = 0;
+    for h in handles {
+        match h.await.expect("task must not panic") {
+            Ok(_) => ok_count = ok_count.saturating_add(1),
+            Err(crate::error::ServiceError::Api { ref code, .. })
+                if code == "token_limit_reached" =>
+            {
+                limit_count = limit_count.saturating_add(1);
+            }
+            Err(e) => panic!("unexpected error: {e}"),
+        }
+    }
+
+    assert_eq!(ok_count, 2, "exactly 2 creates must succeed");
+    assert_eq!(limit_count, 2, "exactly 2 creates must be rejected");
+
+    // Verify at the DB level — the cap must hold in storage, not just in the
+    // return values. None of these carry an expiry, so every stored row counts.
+    let stored = list_scim_tokens(&store, Some(&org.id))
+        .await
+        .expect("list tokens");
+    assert_eq!(stored.len(), 2, "exactly 2 SCIM tokens must be stored");
 }
 
 /// Seed 2 active secrets, 4 concurrent revokes → at least 1 active always remains.

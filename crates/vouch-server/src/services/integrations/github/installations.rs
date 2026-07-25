@@ -60,6 +60,77 @@ pub(crate) struct UnlinkedInstallation {
 // ============================================================================
 
 impl GitHubService<'_> {
+    /// Fetch and store the installation's repository list.
+    ///
+    /// The `installation.created` webhook carries this list, but it races the
+    /// OAuth callback that creates the installation row: when the webhook wins,
+    /// `update_github_installation_repos` finds no row, returns `Ok(false)`, and
+    /// the list is lost — later webhooks only carry deltas, so nothing restores
+    /// it. Fetching here makes the stored list independent of which arrives
+    /// first.
+    ///
+    /// Only meaningful for `repository_selection == "selected"`; an all-repos
+    /// installation is represented by a stored `None`.
+    ///
+    /// Failures are logged, not propagated: the installation itself is already
+    /// connected, and a later `installation_repositories` webhook can still fill
+    /// the list in.
+    async fn store_installation_repositories(
+        &self,
+        app: &crate::services::integrations::github::GitHubApp,
+        installation_id: u64,
+        repository_selection: &str,
+    ) {
+        if repository_selection != "selected" {
+            return;
+        }
+
+        // Network call, deliberately outside any DB retry closure.
+        let repos = match app
+            .list_installation_repositories(GitHubInstallationId(installation_id))
+            .await
+        {
+            Ok(repos) => repos,
+            Err(e) => {
+                tracing::warn!(
+                    installation_id,
+                    error = %e,
+                    "Failed to list installation repositories; repo list left unset"
+                );
+                return;
+            }
+        };
+
+        match db::update_github_installation_repos(
+            self.store,
+            installation_id.cast_signed(),
+            &repos,
+        )
+        .await
+        {
+            Ok(true) => {
+                tracing::info!(
+                    installation_id,
+                    count = repos.len(),
+                    "Stored selected repositories for installation"
+                );
+            }
+            Ok(false) => {
+                tracing::warn!(
+                    installation_id,
+                    "Installation row missing when storing repositories"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    installation_id,
+                    error = %e,
+                    "Failed to store installation repositories"
+                );
+            }
+        }
+    }
+
     /// Connect a new GitHub App installation to an organization.
     ///
     /// This is called after the user installs the GitHub App and is redirected
@@ -91,6 +162,13 @@ impl GitHubService<'_> {
         )
         .await
         .map_err(GitHubError::Database)?;
+
+        self.store_installation_repositories(
+            app,
+            params.installation_id,
+            &details.repository_selection,
+        )
+        .await;
 
         tracing::info!(
             "GitHub installation connected: {} -> org {}",
@@ -182,6 +260,13 @@ impl GitHubService<'_> {
         )
         .await
         .map_err(GitHubError::Database)?;
+
+        self.store_installation_repositories(
+            app,
+            params.installation_id,
+            &details.repository_selection,
+        )
+        .await;
 
         tracing::info!(
             "GitHub installation reconnected: {} -> org {} by user {}",

@@ -420,10 +420,10 @@ pub(crate) async fn update_application_form(
         return validation_error_response(&e, format!("/applications/{}", app_id));
     }
 
-    // Merge FAPI-related fields against the existing client record. The
-    // form's security-profile radio group always submits fapi_profile, so
-    // an explicit non-FAPI value transitions the client back to standard
-    // auth — including resetting the DPoP binding, matching the JSON API.
+    // Merge FAPI-related fields against the existing client record. The form's
+    // security-profile radio group always submits fapi_profile; selecting
+    // Standard for a client that is already FAPI is rejected above, so what
+    // reaches here either enables FAPI or leaves a non-FAPI client standard.
     let fapi = compute_fapi_update_fields(&validated, &client);
 
     // Update the application
@@ -878,10 +878,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_web_update_form_fapi_exit_resets_dpop_binding() {
-        // Transitioning a FAPI client back to the standard profile via the
-        // web form must reset the DPoP binding and auth method, matching
-        // the JSON API's update semantics.
+    async fn test_web_update_form_rejects_fapi_exit() {
+        // Regression for #743: selecting Standard for a FAPI client used to
+        // move it to client_secret_basic without minting a secret, leaving it
+        // unable to authenticate. The web form must refuse the transition and
+        // leave the client untouched, matching the JSON API.
         let (app, state) = test_app().await;
         let user = create_test_user(&state.store, "web-update-fapi-exit@example.com").await;
         let auth_id = create_test_authenticator(&state.store, &user.id).await;
@@ -911,23 +912,31 @@ mod tests {
         )
         .await;
         assert!(
-            status.is_redirection(),
-            "FAPI exit must succeed with a redirect, got {status}: {body}"
+            !status.is_redirection(),
+            "FAPI exit must not be applied, got {status}: {body}"
+        );
+        assert!(
+            body.contains("cannot be changed to a standard profile"),
+            "the error page must explain the refusal: {body}"
         );
 
+        // Every FAPI-sensitive field must survive the rejected update.
         let record = crate::db::get_oauth_client_by_id(&state.store, &client.app_id)
             .await
             .expect("db query ok")
             .expect("client must still exist");
-        assert_eq!(record.fapi_profile, crate::db::FapiProfile::None);
+        assert_eq!(record.fapi_profile, crate::db::FapiProfile::Fapi2Security);
         assert_eq!(
             record.token_endpoint_auth_method,
-            crate::db::TokenEndpointAuthMethod::ClientSecretBasic
+            crate::db::TokenEndpointAuthMethod::PrivateKeyJwt
         );
         assert!(
-            !record.dpop_bound_access_tokens,
-            "leaving FAPI must clear the DPoP binding"
+            record.dpop_bound_access_tokens,
+            "a rejected update must not clear the DPoP binding"
         );
-        assert!(record.jwks.is_none(), "leaving FAPI must drop the JWKS");
+        assert!(
+            record.jwks.is_some(),
+            "a rejected update must not drop the JWKS"
+        );
     }
 }

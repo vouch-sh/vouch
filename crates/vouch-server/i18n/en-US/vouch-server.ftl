@@ -259,7 +259,31 @@ login-cert-test-deny = Certification Test Deny
 
 ## Generic error page (error.html)
 error-page-title = { -product } - Error
+error-heading = Error
 error-back = Back
+
+## Enrollment failures (error.html, rendered from handlers/enroll.rs)
+enroll-error-device-auth-approve-failed = Failed to approve the sign-in request. Please run the command again.
+enroll-error-session-create-failed = Failed to start enrollment. Please run the command again.
+enroll-error-unknown-provider-title = Unknown Provider
+enroll-error-unknown-provider = Identity provider '{ $slug }' is not configured.
+enroll-error-not-configured-title = Not Configured
+enroll-error-idp-not-configured = Identity provider is not configured. Please contact your administrator.
+enroll-error-oidc-not-configured = OIDC not configured. If using SAML, responses should be sent to /saml/acs, not /oauth/callback.
+enroll-error-auth-start-failed = Failed to start authentication
+enroll-error-state-create-failed = Failed to create session state
+enroll-error-missing-code = Missing authorization code
+enroll-error-missing-state = Missing state parameter
+enroll-error-invalid-state = Invalid state parameter
+enroll-error-state-expired = Invalid or expired state
+enroll-error-state-verify-failed = Failed to verify state
+enroll-error-auth-complete-failed = Failed to complete authentication
+enroll-error-token-verify-failed = Failed to verify identity token
+enroll-error-domain-not-allowed-title = Domain Not Allowed
+enroll-error-domain-not-allowed = Only users from the following domains can enroll: { $domains }. Your email ({ $email }) is not from an allowed domain.
+enroll-error-user-create-failed = Failed to create user
+enroll-error-session-failed = Failed to create session
+enroll-error-enrollment-start-failed = Failed to start enrollment. Please try again.
 
 ## Enrollment success (success.html)
 success-page-title = { -product } - Success

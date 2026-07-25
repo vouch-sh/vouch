@@ -76,6 +76,12 @@ const EXCEPTIONS: &[Exception] = &[
         reason: "RFC 9421 key resolver reads OAuth client JWKS from storage",
     },
     Exception {
+        file: "infra/jwks.rs",
+        target: "db",
+        reason: "owns the JWKS cache freshness rule, so it reads and writes \
+                 the cache rows it decides are stale",
+    },
+    Exception {
         file: "infra/org_host.rs",
         target: "db",
         reason: "pure domain-label validation fn, no I/O",

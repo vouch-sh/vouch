@@ -391,23 +391,27 @@ pub async fn update_oauth_client(
 /// Delete an OAuth client permanently.
 ///
 /// Cascade deletes secrets and the client within a single transaction
-/// so no orphaned secrets remain on partial failure.
+/// so no orphaned secrets remain on partial failure. Each delete is
+/// idempotent, so the transaction is safe to retry on a transient
+/// serialization failure.
 pub async fn delete_oauth_client(store: &DocumentStore, id: &str) -> Result<u64> {
-    let mut tx = store.begin().await?;
+    crate::with_dsql_retry!(async {
+        let mut tx = store.begin().await?;
 
-    // Delete secrets
-    tx.delete_by_index::<OAuthClientSecretDoc>("oauth_client_id", id)
-        .await?;
+        // Delete secrets
+        tx.delete_by_index::<OAuthClientSecretDoc>("oauth_client_id", id)
+            .await?;
 
-    // Delete the client's JWKS cache in the same transaction so it can never
-    // outlive the client
-    tx.delete(&super::jwks_cache::cache_id(id)).await?;
+        // Delete the client's JWKS cache in the same transaction so it can never
+        // outlive the client
+        tx.delete(&super::jwks_cache::cache_id(id)).await?;
 
-    // Delete the client
-    tx.delete(id).await?;
+        // Delete the client
+        tx.delete(id).await?;
 
-    tx.commit().await?;
-    Ok(1)
+        tx.commit().await?;
+        Ok(1)
+    })
 }
 
 /// Update last used timestamp for an OAuth client.

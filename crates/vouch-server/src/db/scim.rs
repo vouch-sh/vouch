@@ -4,9 +4,11 @@
 use super::audit::{AuditEventKind, AuditStore};
 use super::document_type::{Document, DocumentType};
 use super::documents::audit::ScimAuditData;
+use super::documents::organization::OrganizationDoc;
 use super::documents::scim::{ScimGroupDoc, ScimGroupMemberDoc, ScimTokenDoc};
 use super::documents::user::UserDoc;
 use super::store::DocumentStore;
+use crate::error::ServiceError;
 use anyhow::Result;
 use jiff::Timestamp;
 
@@ -174,27 +176,118 @@ pub async fn update_scim_token_last_used(store: &DocumentStore, token_id: &str) 
     store.update_last_used_at(token_id).await
 }
 
-/// Create a new SCIM token.
+/// Maximum SCIM tokens an organization may hold at once (supports rotation).
+pub(crate) const MAX_SCIM_TOKENS: usize = 2;
+
+/// Create an organization's SCIM token, enforcing [`MAX_SCIM_TOKENS`] atomically.
+///
+/// The cap cannot be enforced by counting in the handler and then inserting:
+/// two concurrent requests both observe `active < MAX_SCIM_TOKENS` and both
+/// insert, leaving the organization over the limit. DSQL has no row locks, so
+/// the organization document's version is the serialization point — every
+/// creator must win a `compare_and_update` against it. Concurrent creators
+/// therefore collide on one row, and the loser re-runs against fresh state.
+///
+/// # Errors
+///
+/// - `ServiceError::NotFound` — organization does not exist.
+/// - `ServiceError::Api(409 "token_limit_reached")` — cap reached (terminal).
+/// - `ServiceError::Api(409 "conflict")` — OCC retry budget exhausted; caller may retry.
 pub async fn create_scim_token(
     store: &DocumentStore,
+    org_id: &str,
     token_hash: &str,
     description: Option<&str>,
     expires_at: Option<Timestamp>,
-    org_id: Option<&str>,
-    scope: Option<&ScimScopeSet>,
-) -> Result<String> {
-    let default_scope = ScimScopeSet::default();
-    let scope_val = scope.unwrap_or(&default_scope).as_db_string();
+) -> Result<String, ServiceError> {
+    // Owned copies so the async block, which re-runs on retry, can borrow them.
+    let org_id = org_id.to_string();
+    let token_hash = token_hash.to_string();
+    let description = description.map(String::from);
 
-    let doc = ScimTokenDoc {
-        token_hash: token_hash.to_string(),
-        org_id: org_id.map(String::from),
-        description: description.map(String::from),
-        expires_at,
-        scope: scope_val,
-    };
-    let result = store.insert(&doc).await?;
-    Ok(result.id)
+    crate::with_dsql_retry!(async {
+        let mut tx = store.begin().await.map_err(|e| {
+            ServiceError::from_db_contention(e, "Failed to begin transaction for SCIM token create")
+        })?;
+
+        let org_doc = tx
+            .get::<OrganizationDoc>(&org_id)
+            .await
+            .map_err(|e| {
+                ServiceError::from_db_contention(
+                    e,
+                    "Failed to load organization for SCIM token create",
+                )
+            })?
+            .ok_or(ServiceError::NotFound("organization"))?;
+
+        // Count by filtering rather than SQL COUNT: expired tokens are retained
+        // until cleanup runs but cannot authenticate, so they must not consume a
+        // slot. Matches the expiry rule in `get_scim_token_by_hash`.
+        let now = Timestamp::now();
+        let active = tx
+            .find_all::<ScimTokenDoc>("org_id", &org_id)
+            .await
+            .map_err(|e| {
+                ServiceError::from_db_contention(e, "Failed to list SCIM tokens for cap check")
+            })?
+            .iter()
+            .filter(|doc| doc.data.expires_at.is_none_or(|exp| exp > now))
+            .count();
+
+        if active >= MAX_SCIM_TOKENS {
+            // Terminal business error — retrying cannot help.
+            return Err(ServiceError::api(
+                axum::http::StatusCode::CONFLICT,
+                "token_limit_reached",
+                "Maximum of 2 SCIM tokens per organization. Revoke one before creating another.",
+            ));
+        }
+
+        let doc = ScimTokenDoc {
+            token_hash: token_hash.clone(),
+            org_id: Some(org_id.clone()),
+            description: description.clone(),
+            expires_at,
+            scope: ScimScopeSet::default().as_db_string(),
+        };
+        let inserted = tx
+            .insert(&doc)
+            .await
+            .map_err(|e| ServiceError::from_db_contention(e, "Failed to insert SCIM token"))?;
+
+        // Version-bump the organization. This is what makes the cap atomic: a
+        // concurrent creator that committed after our read changed the version,
+        // so this returns Ok(false) and the whole block re-runs with its token
+        // visible in the count.
+        let won = tx
+            .compare_and_update::<OrganizationDoc>(&org_id, org_doc.version, &org_doc.data)
+            .await
+            .map_err(|e| {
+                ServiceError::from_db_contention(
+                    e,
+                    "Failed to version-bump org for SCIM token create",
+                )
+            })?;
+
+        if !won {
+            return Err(ServiceError::OccConflict);
+        }
+
+        tx.commit().await.map_err(|e| {
+            ServiceError::from_db_contention(e, "Failed to commit SCIM token create")
+        })?;
+
+        Ok(inserted.id)
+    })
+    .map_err(|e| match e {
+        ServiceError::OccConflict => ServiceError::api(
+            axum::http::StatusCode::CONFLICT,
+            "conflict",
+            "SCIM token creation conflicted with a concurrent operation. Please retry.",
+        ),
+        other => other,
+    })
 }
 
 /// Delete a SCIM token, scoped to the given organization.
@@ -231,20 +324,6 @@ pub async fn list_scim_tokens(
         store.list_all::<ScimTokenDoc>().await?
     };
     Ok(docs.into_iter().map(ScimToken::from).collect())
-}
-
-/// Count an organization's SCIM tokens that can still authenticate.
-///
-/// Expired tokens are excluded: authentication already treats them as
-/// non-existent ([`get_scim_token_by_hash`]), so they must not count
-/// toward the per-org creation limit either.
-pub async fn count_active_scim_tokens(store: &DocumentStore, org_id: &str) -> Result<usize> {
-    let docs = store.find_all::<ScimTokenDoc>("org_id", org_id).await?;
-    let now = Timestamp::now();
-    Ok(docs
-        .into_iter()
-        .filter(|doc| doc.data.expires_at.is_none_or(|exp| exp > now))
-        .count())
 }
 
 /// Delete expired SCIM tokens. Returns count deleted.

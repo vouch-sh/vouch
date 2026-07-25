@@ -5,11 +5,7 @@ use crate::AppState;
 use crate::db::ClientInfo;
 use crate::db::{self, AuthEventParams, AuthEventType};
 use crate::impl_template_response;
-// This file's flows are heavily branched into error/redirect paths constructed
-// from helpers without easy access to the request-scoped `I18nContext`, so
-// every template here uses `PageContext::current()` (en-US). Upgrading any
-// individual handler to thread per-request locale is a localized change once
-// a second language ships.
+use crate::infra::i18n::Tr;
 use askama::Template;
 use axum::{
     Form, Json,
@@ -329,8 +325,10 @@ pub(crate) async fn device_verify_submit(
             Some(idp) => idp,
             None => {
                 return ErrorTemplate {
-                    title: "Unknown Provider".to_string(),
-                    message: format!("Identity provider '{slug}' is not configured."),
+                    title: Tr::new("enroll-error-unknown-provider-title").to_string(),
+                    message: Tr::new("enroll-error-unknown-provider")
+                        .arg("slug", slug)
+                        .to_string(),
                     back_url: Some("/device".to_string()),
                 }
                 .into_response();
@@ -350,10 +348,8 @@ pub(crate) async fn device_verify_submit(
                 Some(idp) => idp,
                 None => {
                     return ErrorTemplate {
-                        title: "Not Configured".to_string(),
-                        message: "Identity provider is not configured. \
-                                  Please contact your administrator."
-                            .to_string(),
+                        title: Tr::new("enroll-error-not-configured-title").to_string(),
+                        message: Tr::new("enroll-error-idp-not-configured").to_string(),
                         back_url: Some("/".to_string()),
                     }
                     .into_response();
@@ -370,8 +366,8 @@ pub(crate) async fn device_verify_submit(
         Err(e) => {
             tracing::error!("Failed to initiate auth: {e:#}");
             return ErrorTemplate {
-                title: "Error".to_string(),
-                message: "Failed to start authentication".to_string(),
+                title: Tr::new("error-heading").to_string(),
+                message: Tr::new("enroll-error-auth-start-failed").to_string(),
                 back_url: None,
             }
             .into_response();
@@ -393,8 +389,8 @@ pub(crate) async fn device_verify_submit(
     {
         tracing::error!("Failed to create auth state: {}", e);
         return ErrorTemplate {
-            title: "Error".to_string(),
-            message: "Failed to create session state".to_string(),
+            title: Tr::new("error-heading").to_string(),
+            message: Tr::new("enroll-error-state-create-failed").to_string(),
             back_url: None,
         }
         .into_response();
@@ -444,8 +440,8 @@ pub(crate) async fn oidc_callback(
     // Get authorization code and state
     let Some(code) = params.code else {
         return ErrorTemplate {
-            title: "Error".to_string(),
-            message: "Missing authorization code".to_string(),
+            title: Tr::new("error-heading").to_string(),
+            message: Tr::new("enroll-error-missing-code").to_string(),
             back_url: None,
         }
         .into_response();
@@ -453,8 +449,8 @@ pub(crate) async fn oidc_callback(
 
     let Some(oidc_state) = params.state else {
         return ErrorTemplate {
-            title: "Error".to_string(),
-            message: "Missing state parameter".to_string(),
+            title: Tr::new("error-heading").to_string(),
+            message: Tr::new("enroll-error-missing-state").to_string(),
             back_url: None,
         }
         .into_response();
@@ -464,8 +460,8 @@ pub(crate) async fn oidc_callback(
     // OIDC state is base64url-encoded 32 random bytes (43 chars).
     if oidc_state.len() > 128 {
         return ErrorTemplate {
-            title: "Error".to_string(),
-            message: "Invalid state parameter".to_string(),
+            title: Tr::new("error-heading").to_string(),
+            message: Tr::new("enroll-error-invalid-state").to_string(),
             back_url: None,
         }
         .into_response();
@@ -481,8 +477,8 @@ pub(crate) async fn oidc_callback(
             Ok(pair) => pair,
             Err(db::ClaimError::AlreadyConsumed) => {
                 return ErrorTemplate {
-                    title: "Error".to_string(),
-                    message: "Invalid or expired state".to_string(),
+                    title: Tr::new("error-heading").to_string(),
+                    message: Tr::new("enroll-error-state-expired").to_string(),
                     back_url: None,
                 }
                 .into_response();
@@ -490,8 +486,8 @@ pub(crate) async fn oidc_callback(
             Err(e) => {
                 tracing::error!("Failed to consume OIDC state: {e:#}");
                 return ErrorTemplate {
-                    title: "Error".to_string(),
-                    message: "Failed to verify state".to_string(),
+                    title: Tr::new("error-heading").to_string(),
+                    message: Tr::new("enroll-error-state-verify-failed").to_string(),
                     back_url: None,
                 }
                 .into_response();
@@ -517,10 +513,8 @@ pub(crate) async fn oidc_callback(
     };
     let Some(oidc_provider) = oidc_provider else {
         return ErrorTemplate {
-            title: "Error".to_string(),
-            message: "OIDC not configured. If using SAML, responses should be \
-                      sent to /saml/acs, not /oauth/callback."
-                .to_string(),
+            title: Tr::new("error-heading").to_string(),
+            message: Tr::new("enroll-error-oidc-not-configured").to_string(),
             back_url: None,
         }
         .into_response();
@@ -556,8 +550,8 @@ pub(crate) async fn oidc_callback(
         Err(e) => {
             tracing::error!("Failed to exchange code: {}", e);
             return ErrorTemplate {
-                title: "Error".to_string(),
-                message: "Failed to complete authentication".to_string(),
+                title: Tr::new("error-heading").to_string(),
+                message: Tr::new("enroll-error-auth-complete-failed").to_string(),
                 back_url: None,
             }
             .into_response();
@@ -568,8 +562,8 @@ pub(crate) async fn oidc_callback(
         let error_text = token_response.text().await.unwrap_or_default();
         tracing::error!("Token exchange failed: {}", error_text);
         return ErrorTemplate {
-            title: "Error".to_string(),
-            message: "Failed to complete authentication".to_string(),
+            title: Tr::new("error-heading").to_string(),
+            message: Tr::new("enroll-error-auth-complete-failed").to_string(),
             back_url: None,
         }
         .into_response();
@@ -580,8 +574,8 @@ pub(crate) async fn oidc_callback(
         Err(e) => {
             tracing::error!("Failed to parse token response: {}", e);
             return ErrorTemplate {
-                title: "Error".to_string(),
-                message: "Failed to complete authentication".to_string(),
+                title: Tr::new("error-heading").to_string(),
+                message: Tr::new("enroll-error-auth-complete-failed").to_string(),
                 back_url: None,
             }
             .into_response();
@@ -603,8 +597,8 @@ pub(crate) async fn oidc_callback(
         Err(e) => {
             tracing::error!("ID token verification failed: {e:#}");
             return ErrorTemplate {
-                title: "Error".to_string(),
-                message: "Failed to verify identity token".to_string(),
+                title: Tr::new("error-heading").to_string(),
+                message: Tr::new("enroll-error-token-verify-failed").to_string(),
                 back_url: None,
             }
             .into_response();
@@ -645,12 +639,11 @@ pub(crate) async fn complete_enrollment_after_identity(
         if !domains.iter().any(|d| d.eq_ignore_ascii_case(email_domain)) {
             let allowed_list = domains.join(", ");
             return ErrorTemplate {
-                title: "Domain Not Allowed".to_string(),
-                message: format!(
-                    "Only users from the following domains can enroll: {}. Your email ({}) is not from an allowed domain.",
-                    allowed_list,
-                    identity.email
-                ),
+                title: Tr::new("enroll-error-domain-not-allowed-title").to_string(),
+                message: Tr::new("enroll-error-domain-not-allowed")
+                    .arg("domains", allowed_list.as_str())
+                    .arg("email", identity.email.as_str())
+                    .to_string(),
                 back_url: None,
             }
             .into_response();
@@ -672,8 +665,8 @@ pub(crate) async fn complete_enrollment_after_identity(
         Err(e) => {
             tracing::error!("Failed to enroll user: {}", e);
             return ErrorTemplate {
-                title: "Error".to_string(),
-                message: "Failed to create user".to_string(),
+                title: Tr::new("error-heading").to_string(),
+                message: Tr::new("enroll-error-user-create-failed").to_string(),
                 back_url: None,
             }
             .into_response();
@@ -689,8 +682,8 @@ pub(crate) async fn complete_enrollment_after_identity(
         Err(e) => {
             tracing::error!("Failed to calculate session expiration: {}", e);
             return ErrorTemplate {
-                title: "Error".to_string(),
-                message: "Failed to create session".to_string(),
+                title: Tr::new("error-heading").to_string(),
+                message: Tr::new("enroll-error-session-failed").to_string(),
                 back_url: None,
             }
             .into_response();
@@ -715,8 +708,8 @@ pub(crate) async fn complete_enrollment_after_identity(
             Err(e) => {
                 tracing::error!("Failed to snapshot org domain: {}", e);
                 return ErrorTemplate {
-                    title: "Error".to_string(),
-                    message: "Failed to create session".to_string(),
+                    title: Tr::new("error-heading").to_string(),
+                    message: Tr::new("enroll-error-session-failed").to_string(),
                     back_url: None,
                 }
                 .into_response();
@@ -762,8 +755,8 @@ pub(crate) async fn complete_enrollment_after_identity(
         Err(e) => {
             tracing::error!("Failed to create session: {}", e);
             return ErrorTemplate {
-                title: "Error".to_string(),
-                message: "Failed to create session".to_string(),
+                title: Tr::new("error-heading").to_string(),
+                message: Tr::new("enroll-error-session-failed").to_string(),
                 back_url: None,
             }
             .into_response();
@@ -787,18 +780,28 @@ pub(crate) async fn complete_enrollment_after_identity(
             )
             .await
             {
-                tracing::warn!("Failed to authorize device auth: {}", e);
-            } else {
-                let event = db::AuthEventParams {
-                    user_id: user.id.clone(),
-                    event_type: db::AuthEventType::DeviceAuthApproved,
-                    authenticator_id: Some(auth_id.clone()),
-                    success: true,
-                    client: client_info,
-                    ..Default::default()
-                };
-                db::spawn_audit_event(&state.audit, event, Some(identity.email.clone()));
+                // Surface the failure instead of redirecting to the keys page
+                // as though sign-in succeeded: the device auth was never
+                // approved, so the waiting CLI would poll until it timed out
+                // with nothing on screen to explain why.
+                tracing::error!("Failed to authorize device auth: {}", e);
+                return ErrorTemplate {
+                    title: Tr::new("error-heading").to_string(),
+                    message: Tr::new("enroll-error-device-auth-approve-failed").to_string(),
+                    back_url: None,
+                }
+                .into_response();
             }
+
+            let event = db::AuthEventParams {
+                user_id: user.id.clone(),
+                event_type: db::AuthEventType::DeviceAuthApproved,
+                authenticator_id: Some(auth_id.clone()),
+                success: true,
+                client: client_info,
+                ..Default::default()
+            };
+            db::spawn_audit_event(&state.audit, event, Some(identity.email.clone()));
         } else {
             // No key yet — store the device_auth_id in an enrollment session
             // so browser_register_complete can authorize it after WebAuthn registration.
@@ -812,7 +815,17 @@ pub(crate) async fn complete_enrollment_after_identity(
             )
             .await
             {
-                tracing::warn!("Failed to create enrollment session for CLI: {}", e);
+                // Without this row browser_register_complete cannot authorize
+                // the device auth after WebAuthn registration, so continuing
+                // would walk the user through enrolling a key that could never
+                // release the waiting CLI.
+                tracing::error!("Failed to create enrollment session for CLI: {}", e);
+                return ErrorTemplate {
+                    title: Tr::new("error-heading").to_string(),
+                    message: Tr::new("enroll-error-session-create-failed").to_string(),
+                    back_url: None,
+                }
+                .into_response();
             }
         }
     } else if authenticator_id.is_some() {
@@ -1642,8 +1655,10 @@ pub(crate) async fn direct_enroll_start(
             Some(i) => Some(i),
             None => {
                 return ErrorTemplate {
-                    title: "Unknown Provider".to_string(),
-                    message: format!("Identity provider '{slug}' is not configured."),
+                    title: Tr::new("enroll-error-unknown-provider-title").to_string(),
+                    message: Tr::new("enroll-error-unknown-provider")
+                        .arg("slug", slug)
+                        .to_string(),
                     back_url: Some("/".to_string()),
                 }
                 .into_response();
@@ -1654,9 +1669,8 @@ pub(crate) async fn direct_enroll_start(
 
     let Some(idp) = chosen_idp else {
         return ErrorTemplate {
-            title: "Not Configured".to_string(),
-            message: "Identity provider is not configured. Please contact your administrator."
-                .to_string(),
+            title: Tr::new("enroll-error-not-configured-title").to_string(),
+            message: Tr::new("enroll-error-idp-not-configured").to_string(),
             back_url: Some("/".to_string()),
         }
         .into_response();
@@ -1672,8 +1686,8 @@ pub(crate) async fn direct_enroll_start(
                 provider_id
             );
             return ErrorTemplate {
-                title: "Error".to_string(),
-                message: "Failed to start enrollment. Please try again.".to_string(),
+                title: Tr::new("error-heading").to_string(),
+                message: Tr::new("enroll-error-enrollment-start-failed").to_string(),
                 back_url: Some("/".to_string()),
             }
             .into_response();
@@ -1699,8 +1713,8 @@ pub(crate) async fn direct_enroll_start(
     {
         tracing::error!("Failed to create auth state: {}", e);
         return ErrorTemplate {
-            title: "Error".to_string(),
-            message: "Failed to start enrollment. Please try again.".to_string(),
+            title: Tr::new("error-heading").to_string(),
+            message: Tr::new("enroll-error-enrollment-start-failed").to_string(),
             back_url: Some("/".to_string()),
         }
         .into_response();
@@ -2237,6 +2251,64 @@ mod tests {
         assert!(
             logins.is_empty(),
             "a CLI approval is not additionally recorded as a website login"
+        );
+    }
+
+    // Regression for #746: if the device auth cannot be authorized — the row
+    // expired and was reclaimed, or the callback was submitted twice — the
+    // failure was logged and the flow continued to the keys page as though
+    // sign-in had worked, leaving the CLI to poll until timeout. The user must
+    // get an error page instead.
+    #[tokio::test]
+    async fn test_cli_device_auth_failure_renders_error_instead_of_redirect() {
+        let state = test_app_state().await;
+        let user = create_test_user(&state.store, "cli-stale-da@example.com").await;
+        create_test_authenticator(&state.store, &user.id).await;
+
+        // A device_auth_id with no row behind it: authorize_device_auth bails.
+        let (stored, claim) = seed_and_consume_oidc_state(
+            &state,
+            "cli-stale-da-state",
+            Some("reclaimed-device-auth"),
+        )
+        .await;
+
+        let identity = IdentityResult {
+            email: "cli-stale-da@example.com".to_string(),
+            domain: Some("example.com".to_string()),
+        };
+
+        let resp = complete_enrollment_after_identity(
+            &state,
+            &stored,
+            identity,
+            claim,
+            ClientInfo::default(),
+        )
+        .await;
+
+        assert_ne!(
+            resp.status(),
+            StatusCode::SEE_OTHER,
+            "a failed device authorization must not redirect as though sign-in succeeded"
+        );
+        assert!(
+            resp.headers().get(header::SET_COOKIE).is_none(),
+            "no session cookie may be issued when the device auth was not approved"
+        );
+
+        // The device auth stays unapproved rather than being silently skipped.
+        let approvals = state
+            .audit
+            .query_events(&crate::db::AuditEventFilter {
+                event_types: Some(vec!["device_auth_approved".to_string()]),
+                ..Default::default()
+            })
+            .await
+            .expect("query audit events");
+        assert!(
+            approvals.is_empty(),
+            "no approval event may be recorded when authorization failed"
         );
     }
 

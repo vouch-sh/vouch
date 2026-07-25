@@ -1259,17 +1259,34 @@ pub async fn create_test_scim_token(
     // Hash for storage
     let token_hash = hex::encode(digest::digest(&SHA256, token.as_bytes()));
 
+    // Token creation enforces the per-org cap against the organization row, so
+    // the org must exist. Tests pass opaque ids like "test-org" rather than
+    // building an org first, so seed one on demand.
+    if store
+        .get::<crate::db::documents::organization::OrganizationDoc>(org_id)
+        .await
+        .expect("look up test org")
+        .is_none()
+    {
+        store
+            .insert_with_id(
+                org_id,
+                &crate::db::documents::organization::OrganizationDoc {
+                    domain: format!("{org_id}.example"),
+                    name: Some(org_id.to_string()),
+                    created_by_user_id: None,
+                    additional_domains: Vec::new(),
+                    subdomain: None,
+                },
+            )
+            .await
+            .expect("seed test org");
+    }
+
     // Store in database with org_id so authenticate_scim accepts it
-    crate::db::create_scim_token(
-        store,
-        &token_hash,
-        Some(description),
-        None,
-        Some(org_id),
-        None,
-    )
-    .await
-    .expect("Failed to create SCIM token");
+    crate::db::create_scim_token(store, org_id, &token_hash, Some(description), None)
+        .await
+        .expect("Failed to create SCIM token");
 
     token
 }
@@ -1322,6 +1339,10 @@ pub struct TestClientSpec {
     pub token_endpoint_auth_method: Option<crate::db::TokenEndpointAuthMethod>,
     /// JWKS to register with the client. Default: `TestJwks::None`.
     pub jwks: TestJwks,
+    /// Remote JWKS URI to register. Default: `None`. Required for clients whose
+    /// keys are resolved through the JWKS cache, which is only ever populated
+    /// by fetching this URI.
+    pub jwks_uri: Option<String>,
     /// Require DPoP-bound access tokens. Default: `false`.
     pub dpop_bound_access_tokens: bool,
     /// Allowed grant types override. Default: `None`.
@@ -1360,6 +1381,7 @@ impl Default for TestClientSpec {
             resource_uris: vec![],
             token_endpoint_auth_method: Option::None,
             jwks: TestJwks::None,
+            jwks_uri: Option::None,
             dpop_bound_access_tokens: false,
             grant_types: Option::None,
             fapi_profile: Option::None,
@@ -1429,7 +1451,7 @@ pub async fn create_test_client(
             resource_uris: &spec.resource_uris,
             token_endpoint_auth_method: spec.token_endpoint_auth_method,
             jwks: jwks_value.as_ref(),
-            jwks_uri: Option::None,
+            jwks_uri: spec.jwks_uri.as_deref(),
             fapi_profile: spec.fapi_profile,
             dpop_bound_access_tokens: if spec.dpop_bound_access_tokens {
                 Some(true)

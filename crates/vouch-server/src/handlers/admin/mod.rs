@@ -34,9 +34,6 @@ use serde::Deserialize;
 
 use super::session::extract_org_admin;
 
-/// Maximum number of SCIM tokens per org (supports key rotation).
-pub(crate) const MAX_SCIM_TOKENS: usize = 2;
-
 /// Query parameters for paginated pages.
 #[derive(Debug, Deserialize)]
 pub(crate) struct PaginationParams {
