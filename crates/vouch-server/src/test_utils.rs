@@ -1339,6 +1339,10 @@ pub struct TestClientSpec {
     pub token_endpoint_auth_method: Option<crate::db::TokenEndpointAuthMethod>,
     /// JWKS to register with the client. Default: `TestJwks::None`.
     pub jwks: TestJwks,
+    /// Remote JWKS URI to register. Default: `None`. Required for clients whose
+    /// keys are resolved through the JWKS cache, which is only ever populated
+    /// by fetching this URI.
+    pub jwks_uri: Option<String>,
     /// Require DPoP-bound access tokens. Default: `false`.
     pub dpop_bound_access_tokens: bool,
     /// Allowed grant types override. Default: `None`.
@@ -1377,6 +1381,7 @@ impl Default for TestClientSpec {
             resource_uris: vec![],
             token_endpoint_auth_method: Option::None,
             jwks: TestJwks::None,
+            jwks_uri: Option::None,
             dpop_bound_access_tokens: false,
             grant_types: Option::None,
             fapi_profile: Option::None,
@@ -1446,7 +1451,7 @@ pub async fn create_test_client(
             resource_uris: &spec.resource_uris,
             token_endpoint_auth_method: spec.token_endpoint_auth_method,
             jwks: jwks_value.as_ref(),
-            jwks_uri: Option::None,
+            jwks_uri: spec.jwks_uri.as_deref(),
             fapi_profile: spec.fapi_profile,
             dpop_bound_access_tokens: if spec.dpop_bound_access_tokens {
                 Some(true)

@@ -5,16 +5,10 @@
 //! with database-backed caching for multi-instance deployments.
 
 use super::validate::JwtAssertionHeader;
-use crate::db::documents::jwks_cache::{JWKS_STALE_MAX_AGE_SECONDS, JwksCacheDoc};
-use crate::db::{self, store::DocumentStore};
+use crate::db::documents::jwks_cache::JwksCacheDoc;
+use crate::db::store::DocumentStore;
 use crate::error::{OAuthErrorCode, ServiceError, ServiceResult};
 use serde::Deserialize;
-
-/// Maximum JWKS response size (256KB).
-const MAX_JWKS_RESPONSE_SIZE: usize = 256 * 1024;
-
-/// JWKS URI cache TTL in seconds (1 hour).
-const JWKS_CACHE_TTL_SECONDS: i64 = 3600;
 
 /// A JSON Web Key Set (RFC 7517 Section 5).
 #[derive(Debug, Deserialize)]
@@ -95,6 +89,9 @@ pub async fn resolve_client_jwks(
 }
 
 /// Fetch JWKS from a URI with caching.
+///
+/// Fetching, cache freshness, and stale-while-revalidate live in
+/// [`crate::infra::jwks`] so the RFC 9421 signature path applies the same rules.
 async fn resolve_jwks_uri(
     store: &DocumentStore,
     parent_id: &str,
@@ -103,125 +100,16 @@ async fn resolve_jwks_uri(
     allow_loopback: bool,
     http_client: &reqwest::Client,
 ) -> ServiceResult<JwkSet> {
-    // Check cache freshness
-    if let Some(cache) = cached
-        && cache.is_fresh(JWKS_CACHE_TTL_SECONDS)
-    {
-        return parse_jwks_value(&cache.value);
-    }
-
-    // Cache is stale or missing — attempt fetch
-    match fetch_and_parse_jwks(uri, allow_loopback, http_client).await {
-        Ok((jwks_value, jwks_set)) => {
-            if let Err(e) = db::upsert_jwks_cache(store, parent_id, &jwks_value).await {
-                tracing::warn!("Failed to update JWKS cache for {parent_id}: {e}");
-            }
-            Ok(jwks_set)
-        }
-        Err(e) => {
-            // Stale-while-revalidate: use stale cache on fetch failure (with max age cap)
-            if let Some(cache) = cached {
-                if cache.is_within_stale_window(JWKS_STALE_MAX_AGE_SECONDS) {
-                    tracing::warn!("JWKS fetch failed, using stale cache: {e}");
-                    return parse_jwks_value(&cache.value);
-                }
-                tracing::warn!(
-                    "JWKS fetch failed and stale cache too old ({}s)",
-                    cache.age_seconds()
-                );
-            }
-            Err(e)
-        }
-    }
-}
-
-/// Fetch JWKS from a remote URI.
-///
-/// Enforces HTTPS-only and response size cap.
-async fn fetch_jwks(
-    uri: &str,
-    allow_loopback: bool,
-    http_client: &reqwest::Client,
-) -> ServiceResult<String> {
-    // HTTPS-only
-    if !uri.starts_with("https://") {
-        return Err(ServiceError::oauth(
-            OAuthErrorCode::InvalidClient,
-            "JWKS URI must use HTTPS",
-        ));
-    }
-
-    // SSRF egress guard: a client-registered `jwks_uri` is fetched here while
-    // verifying a `private_key_jwt` assertion, and dynamic client registration
-    // is unauthenticated — refuse to dial private/link-local targets. Loopback
-    // is permitted only in local development (`allow_loopback`).
-    crate::infra::ssrf::assert_public_destination(
+    let value = crate::infra::jwks::resolve_cached_jwks(
+        store,
+        parent_id,
         uri,
+        cached,
         allow_loopback,
-        OAuthErrorCode::InvalidClient,
+        http_client,
     )
     .await?;
-
-    let response = http_client.get(uri).send().await.map_err(|e| {
-        tracing::warn!("Failed to fetch JWKS from {uri}: {e}");
-        ServiceError::oauth(
-            OAuthErrorCode::InvalidClient,
-            "Failed to fetch JWKS from URI",
-        )
-    })?;
-
-    if !response.status().is_success() {
-        return Err(ServiceError::oauth(
-            OAuthErrorCode::InvalidClient,
-            "JWKS URI request failed",
-        ));
-    }
-
-    // Check content length before reading body
-    if let Some(len) = response.content_length()
-        && len > MAX_JWKS_RESPONSE_SIZE as u64
-    {
-        return Err(ServiceError::oauth(
-            OAuthErrorCode::InvalidClient,
-            "JWKS response exceeds maximum size (256KB)",
-        ));
-    }
-
-    let body = response.bytes().await.map_err(|e| {
-        ServiceError::oauth(
-            OAuthErrorCode::InvalidClient,
-            format!("Failed to read JWKS response: {e}"),
-        )
-    })?;
-
-    if body.len() > MAX_JWKS_RESPONSE_SIZE {
-        return Err(ServiceError::oauth(
-            OAuthErrorCode::InvalidClient,
-            "JWKS response exceeds maximum size (256KB)",
-        ));
-    }
-
-    String::from_utf8(body.to_vec()).map_err(|_| {
-        ServiceError::oauth(
-            OAuthErrorCode::InvalidClient,
-            "JWKS response is not valid UTF-8",
-        )
-    })
-}
-
-/// Fetch JWKS from a URI and parse into both a `Value` (for caching) and a `JwkSet`.
-async fn fetch_and_parse_jwks(
-    uri: &str,
-    allow_loopback: bool,
-    http_client: &reqwest::Client,
-) -> ServiceResult<(serde_json::Value, JwkSet)> {
-    let jwks_json = fetch_jwks(uri, allow_loopback, http_client).await?;
-    let jwks_value: serde_json::Value = serde_json::from_str(&jwks_json).map_err(|e| {
-        tracing::debug!("Failed to parse JWKS as JSON value: {e}");
-        ServiceError::oauth(OAuthErrorCode::InvalidClient, "Invalid JWKS format")
-    })?;
-    let jwks_set = parse_jwks_value(&jwks_value)?;
-    Ok((jwks_value, jwks_set))
+    parse_jwks_value(&value)
 }
 
 /// Parse a JWKS JSON string.
@@ -346,13 +234,20 @@ pub async fn find_matching_key_with_refresh_client(
     }
 
     tracing::debug!("Key not found in JWKS cache for client {client_id}; force-refreshing");
-    match fetch_and_parse_jwks(uri, allow_loopback, http_client).await {
-        Ok((jwks_value, fresh_jwks)) => {
-            if let Err(e) = db::upsert_jwks_cache(store, client_id, &jwks_value).await {
-                tracing::warn!("Failed to update JWKS cache for client {client_id}: {e}");
+    // Deliberately the unconditional fetch, not `resolve_cached_jwks`: this path
+    // has already decided the cache is not to be trusted (the kid is missing
+    // from it), so the TTL and the stale fallback must both be bypassed. The
+    // 10-second rate limit above is what bounds the fetch rate here.
+    match crate::infra::jwks::fetch_and_cache(store, client_id, uri, allow_loopback, http_client)
+        .await
+    {
+        Ok(jwks_value) => match parse_jwks_value(&jwks_value) {
+            Ok(fresh_jwks) => find_matching_key(&fresh_jwks, header),
+            Err(e) => {
+                tracing::warn!("Force-refreshed JWKS for client {client_id} did not parse: {e}");
+                find_matching_key(jwks, header)
             }
-            find_matching_key(&fresh_jwks, header)
-        }
+        },
         Err(e) => {
             tracing::warn!("JWKS force-refresh failed for client {client_id}: {e}");
             find_matching_key(jwks, header)
@@ -902,49 +797,6 @@ mod tests {
         let key = ec_jwk_entry(None, None, None);
         let result = build_decoding_key_from_jwk(&key, "ES384");
         assert!(result.is_err());
-    }
-
-    // =======================================================================
-    // fetch_jwks HTTPS enforcement test
-    // =======================================================================
-
-    #[tokio::test]
-    async fn test_fetch_jwks_rejects_http_url() {
-        let client = reqwest::Client::new();
-        let result = fetch_jwks("http://example.com/jwks", false, &client).await;
-        let err = result.unwrap_err();
-        assert!(
-            matches!(&err, ServiceError::OAuth { code, .. } if *code == OAuthErrorCode::InvalidClient)
-        );
-        assert!(
-            matches!(&err, ServiceError::OAuth { description, .. } if description == "JWKS URI must use HTTPS")
-        );
-    }
-
-    #[tokio::test]
-    async fn test_fetch_jwks_rejects_ftp_url() {
-        let client = reqwest::Client::new();
-        let result = fetch_jwks("ftp://example.com/jwks", false, &client).await;
-        let err = result.unwrap_err();
-        assert!(
-            matches!(&err, ServiceError::OAuth { code, .. } if *code == OAuthErrorCode::InvalidClient)
-        );
-        assert!(
-            matches!(&err, ServiceError::OAuth { description, .. } if description == "JWKS URI must use HTTPS")
-        );
-    }
-
-    #[tokio::test]
-    async fn test_fetch_jwks_rejects_empty_uri() {
-        let client = reqwest::Client::new();
-        let result = fetch_jwks("", false, &client).await;
-        let err = result.unwrap_err();
-        assert!(
-            matches!(&err, ServiceError::OAuth { code, .. } if *code == OAuthErrorCode::InvalidClient)
-        );
-        assert!(
-            matches!(&err, ServiceError::OAuth { description, .. } if description == "JWKS URI must use HTTPS")
-        );
     }
 
     // ====================================================================

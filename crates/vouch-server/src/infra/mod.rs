@@ -11,6 +11,7 @@ pub mod dns;
 pub mod generate_document_key;
 pub mod httpsig;
 pub mod i18n;
+pub(crate) mod jwks;
 pub mod kms_arn;
 pub mod metrics;
 pub(crate) mod mtls_listener;
