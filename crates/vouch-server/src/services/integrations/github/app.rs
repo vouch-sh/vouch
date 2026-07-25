@@ -12,7 +12,7 @@ use anyhow::{Context, Result, bail};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use jsonwebtoken::{Algorithm, EncodingKey, Header};
-use secrecy::SecretString;
+use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use zeroize::Zeroizing;
@@ -378,6 +378,70 @@ impl GitHubApp {
         })
     }
 
+    /// List every repository an installation can access.
+    ///
+    /// Authenticates with an installation access token, which is what the
+    /// `/installation/repositories` endpoint requires. The token endpoint's own
+    /// `repositories` field is not a substitute: it only echoes back a scope the
+    /// request asked for, so an unscoped mint reports nothing even for an
+    /// installation limited to selected repositories.
+    ///
+    /// Returns bare repository names (no owner prefix), matching what
+    /// `db::update_github_installation_repos` stores.
+    pub async fn list_installation_repositories(
+        &self,
+        installation_id: GitHubInstallationId,
+    ) -> Result<Vec<String>> {
+        let token = self
+            .get_installation_token(installation_id, None, None)
+            .await?;
+
+        let mut all_repos = Vec::new();
+        let mut page: u32 = 1;
+
+        loop {
+            let response = self
+                .http_client
+                .get(format!(
+                    "https://api.github.com/installation/repositories?per_page=100&page={page}"
+                ))
+                .header(
+                    "Authorization",
+                    format!("Bearer {}", token.token.expose_secret()),
+                )
+                .header("Accept", "application/vnd.github+json")
+                .header("X-GitHub-Api-Version", "2022-11-28")
+                .send()
+                .await
+                .context("Failed to request installation repositories from GitHub")?;
+
+            if !response.status().is_success() {
+                let status = response.status();
+                let body = response.text().await.unwrap_or_default();
+                bail!(
+                    "GitHub API error ({}): {}",
+                    status,
+                    body.chars().take(200).collect::<String>()
+                );
+            }
+
+            let body: InstallationRepositoriesResponse = response
+                .json()
+                .await
+                .context("Failed to parse installation repositories response")?;
+
+            let count = body.repositories.len();
+            all_repos.extend(body.repositories.into_iter().map(|r| r.name));
+
+            if count < 100 {
+                break;
+            }
+            page = page.saturating_add(1);
+        }
+
+        Ok(all_repos)
+    }
+
     /// Get the App ID.
     #[must_use]
     pub fn app_id(&self) -> GitHubAppId {
@@ -406,6 +470,13 @@ pub(crate) fn minimal_git_permissions() -> HashMap<String, String> {
 // ============================================================================
 // User OAuth Token APIs
 // ============================================================================
+
+/// Response from GET /installation/repositories (paginated).
+#[derive(Debug, Deserialize)]
+struct InstallationRepositoriesResponse {
+    /// List of repositories the installation can access.
+    repositories: Vec<GitHubRepository>,
+}
 
 /// Response from GET /user/installations (paginated).
 #[derive(Debug, Deserialize)]
@@ -864,5 +935,37 @@ eyYRskrWOAtu0DuWJARLn74r5B4ze8s4DvUdPe781neRB1hMbXte6g==
             "iat→exp span must respect GitHub's 10-minute cap (got {})",
             exp - iat
         );
+    }
+
+    // Regression for #745: the repository list is read from
+    // GET /installation/repositories, whose entries carry a bare `name`
+    // alongside `full_name`. The stored list is bare names, so picking the
+    // wrong field would silently store "owner/repo" everywhere.
+    #[test]
+    fn installation_repositories_response_maps_to_bare_names() {
+        let body = serde_json::json!({
+            "total_count": 2,
+            "repositories": [
+                { "id": 1, "name": "api", "full_name": "acme/api" },
+                { "id": 2, "name": "web", "full_name": "acme/web" },
+            ]
+        });
+
+        let parsed: InstallationRepositoriesResponse =
+            serde_json::from_value(body).expect("parse installation repositories response");
+        let names: Vec<String> = parsed.repositories.into_iter().map(|r| r.name).collect();
+
+        assert_eq!(names, vec!["api".to_string(), "web".to_string()]);
+    }
+
+    // An installation scoped to all repositories reports an empty page here;
+    // the caller stores that as "no explicit selection" rather than an empty
+    // allow-list.
+    #[test]
+    fn installation_repositories_response_accepts_empty_page() {
+        let body = serde_json::json!({ "total_count": 0, "repositories": [] });
+        let parsed: InstallationRepositoriesResponse =
+            serde_json::from_value(body).expect("parse empty page");
+        assert!(parsed.repositories.is_empty());
     }
 }

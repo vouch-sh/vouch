@@ -213,18 +213,27 @@ impl GitHubService<'_> {
                         installation.account.login,
                         repo_names.len()
                     );
-                    if let Err(e) = db::update_github_installation_repos(
+                    match db::update_github_installation_repos(
                         self.store,
                         installation_id,
                         &repo_names,
                     )
                     .await
                     {
-                        tracing::error!(
+                        Ok(true) => {}
+                        // The OAuth callback has not created the row yet. It
+                        // fetches the repository list itself once it does, so
+                        // nothing is lost — but the race is worth seeing.
+                        Ok(false) => tracing::warn!(
+                            "Installation {} not yet stored; repo list from webhook \
+                             dropped, callback will fetch it",
+                            installation_id
+                        ),
+                        Err(e) => tracing::error!(
                             "Failed to update repos for installation {}: {}",
                             installation_id,
                             e
-                        );
+                        ),
                     }
                 }
             }
