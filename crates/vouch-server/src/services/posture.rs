@@ -406,9 +406,11 @@ fn execute_program(program: &Program, ctx: &Context<'_>) -> bool {
 
 /// Compile and evaluate a CEL expression against a posture context.
 ///
-/// Used for custom policies that are compiled on demand.
-/// Preconfigured policies should use `execute_program` with the cached
-/// `COMPILED_PRECONFIGURED` programs instead.
+/// Used wherever an expression is only available as a string: custom
+/// policies compiled on demand during enforcement, and admin-supplied
+/// expressions being tested against sample posture. Preconfigured
+/// policies skip this and call `execute_program` directly with the
+/// cached `COMPILED_PRECONFIGURED` programs.
 fn evaluate_cel(expression: &str, ctx: &Context<'_>) -> bool {
     let compile_result = std::panic::catch_unwind(|| Program::compile(expression));
     let program = match compile_result {
@@ -437,25 +439,8 @@ pub(crate) fn test_cel_expression(
     // Reuse validation (handles empty, panics, parse errors)
     validate_cel_expression(expression)?;
 
-    // Safe to compile again — validation passed, so this won't panic.
-    let program = Program::compile(expression).map_err(|e| {
-        ServiceError::api(
-            axum::http::StatusCode::BAD_REQUEST,
-            "invalid_cel_expression",
-            format!("Invalid CEL expression: {e}"),
-        )
-    })?;
-
     let ctx = build_cel_context(posture);
-
-    match program.execute(&ctx) {
-        Ok(Value::Bool(result)) => Ok(result),
-        Ok(_) => Ok(false),
-        Err(e) => {
-            tracing::warn!("CEL test evaluation error: {e}");
-            Ok(false)
-        }
-    }
+    Ok(evaluate_cel(expression, &ctx))
 }
 
 // ============================================================
