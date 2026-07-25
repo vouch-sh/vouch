@@ -59,7 +59,7 @@ async fn main() -> Result<()> {
         "serve" | "generate-document-key" | "help" | "--help" | "-h" => {
             let cli = Cli::parse();
             match cli.command {
-                Commands::Serve(args) => run_server(args).await,
+                Commands::Serve(args) => Box::pin(run_server(args)).await,
                 Commands::GenerateDocumentKey(args) => {
                     init_stderr_logging();
                     generate_document_key::run(args).await
@@ -69,7 +69,7 @@ async fn main() -> Result<()> {
         _ => {
             // Legacy mode: no subcommand, parse as direct server args
             let args = config::Args::parse();
-            run_server(args).await
+            Box::pin(run_server(args)).await
         }
     }
 }

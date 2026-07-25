@@ -6,7 +6,7 @@ members = ["crates/*"]
 version = "2026.7.3"
 edition = "2024"
 license = "Apache-2.0 OR MIT"
-rust-version = "1.97.0"
+rust-version = "1.97.1"
 repository = "https://github.com/vouch-sh/vouch"
 publish = false
 
@@ -129,19 +129,19 @@ anyhow = { version = "=1.0.104", default-features = false }
 apple-native-keyring-store = { version = "=1.0.1", default-features = false }
 arc-swap = { version = "=1.9.2", default-features = false }
 askama = { version = "=0.16.0", default-features = false }
-aws-config = { version = "=1.10.0", default-features = false }
+aws-config = { version = "=1.10.1", default-features = false }
 aws-lc-rs = { version = "=1.17.3", default-features = false }
-aws-sdk-dsql = { version = "=1.62.0", default-features = false }
-aws-sdk-kms = { version = "=1.113.0", default-features = false }
-aws-sdk-s3 = { version = "=1.139.0", default-features = false }
+aws-sdk-dsql = { version = "=1.63.0", default-features = false }
+aws-sdk-kms = { version = "=1.114.0", default-features = false }
+aws-sdk-s3 = { version = "=1.140.0", default-features = false }
 aws-smithy-types = { version = "=1.6.1", default-features = false }
 axum = { version = "=0.8.9", default-features = false }
 axum-extra = { version = "=0.12.6", default-features = false }
 axum-server = { version = "=0.8.0", default-features = false }
-base64 = { version = "=0.22.1", default-features = false }
+base64 = { version = "=0.23.0", default-features = false }
 cel = { version = "=0.14.0", default-features = false }
 ciborium = { version = "=0.2.2", default-features = false }
-clap = { version = "=4.6.3", default-features = false }
+clap = { version = "=4.6.4", default-features = false }
 clap_complete = { version = "=4.6.7", default-features = false }
 const-oid = { version = "=0.9.6", default-features = false }
 ctap-hid-fido2 = { version = "=3.5.12", default-features = false }
@@ -159,13 +159,13 @@ hickory-resolver = { version = "=0.26.1", default-features = false }
 http = { version = "=1.4.2", default-features = false }
 fluent-bundle = { version = "=0.16.0", default-features = false }
 i18n-embed = { version = "=0.16.0", default-features = false }
-i18n-embed-fl = { version = "=0.10.0", default-features = false }
+i18n-embed-fl = { version = "=0.10.1", default-features = false }
 idna = { version = "=1.1.0", default-features = false }
 inquire = { version = "=0.9.4", default-features = false }
 jiff = { version = "=0.2.34", default-features = false }
 jsonwebtoken = { version = "=10.4.0", default-features = false }
 keyring-core = { version = "=1.0.0", default-features = false }
-libc = { version = "=0.2.188", default-features = false }
+libc = { version = "=0.2.189", default-features = false }
 linux-keyutils-keyring-store = { version = "=1.0.0", default-features = false }
 maxminddb = { version = "=0.30.0", default-features = false }
 metrics = { version = "=0.24.6", default-features = false }
@@ -177,7 +177,7 @@ opentelemetry_sdk = { version = "=0.32.1", default-features = false }
 opentelemetry-otlp = { version = "=0.32.0", default-features = false }
 p256 = { version = "=0.13.2", default-features = false }
 proptest = { version = "=1.11.0", default-features = false }
-psl = { version = "=2.1.219", default-features = false }
+psl = { version = "=2.1.222", default-features = false }
 reqwest = { version = "=0.13.4", default-features = false }
 roxmltree = { version = "=0.21.1", default-features = false }
 rpassword = { version = "=7.5.4", default-features = false }
