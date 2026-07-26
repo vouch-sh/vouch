@@ -377,8 +377,11 @@ fn c14n_excluding_signature(
     // recurse into children (skipping sig_node), then close.
     //
     // The cleanest approach: serialize the signed_element to XML without the
-    // Signature subtree, then parse that and canonicalize it.
-    let xml_without_sig = serialize_without_signature(signed_element, sig_node);
+    // Signature subtree, then parse that and canonicalize it. The serialization
+    // copies namespace declarations down from ancestors so the fragment stands
+    // alone as a well-formed document.
+    let mut xml_without_sig = String::with_capacity(4096);
+    serialize_node_excl(&mut xml_without_sig, signed_element, sig_node.id());
 
     let doc = match roxmltree::Document::parse(&xml_without_sig) {
         Ok(d) => d,
@@ -394,20 +397,6 @@ fn c14n_excluding_signature(
     } else {
         String::new()
     }
-}
-
-/// Serialize an element subtree to XML string, excluding the given signature node.
-///
-/// Produces a well-formed XML fragment with all necessary namespace declarations
-/// copied from ancestors to make it a standalone document.
-fn serialize_without_signature(
-    element: roxmltree::Node<'_, '_>,
-    sig_node: roxmltree::Node<'_, '_>,
-) -> String {
-    let sig_id = sig_node.id();
-    let mut out = String::with_capacity(4096);
-    serialize_node_excl(&mut out, element, sig_id);
-    out
 }
 
 /// Recursively serialize a node, skipping the node with the given ID.

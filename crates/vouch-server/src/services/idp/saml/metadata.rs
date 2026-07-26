@@ -93,9 +93,13 @@ pub(crate) fn parse_idp_metadata(xml: &str) -> Result<IdpMetadata, MetadataError
     let doc =
         roxmltree::Document::parse(xml).map_err(|e| MetadataError::XmlParse(e.to_string()))?;
 
-    // Find EntityDescriptor -- handle both direct root and EntitiesDescriptor wrapper.
-    let entity_descriptor =
-        find_entity_descriptor(&doc).ok_or(MetadataError::MissingEntityDescriptor)?;
+    // Find EntityDescriptor -- descendants() handles both a direct root and the
+    // EntitiesDescriptor wrapper some federations use (ADFS, Shibboleth).
+    let entity_descriptor = doc
+        .root()
+        .descendants()
+        .find(|n| n.has_tag_name((NS_MD, "EntityDescriptor")))
+        .ok_or(MetadataError::MissingEntityDescriptor)?;
 
     // Extract entityID attribute.
     let entity_id = entity_descriptor
@@ -173,7 +177,8 @@ pub(crate) fn parse_idp_metadata(xml: &str) -> Result<IdpMetadata, MetadataError
         return Err(MetadataError::NoSsoEndpoint);
     }
 
-    // Warn if no signing certificates found (F1 fix).
+    // Metadata without signing certificates is accepted but unusable for
+    // response verification, so surface it rather than failing the parse.
     if signing_certificates.is_empty() {
         tracing::warn!(
             entity_id,
@@ -188,18 +193,6 @@ pub(crate) fn parse_idp_metadata(xml: &str) -> Result<IdpMetadata, MetadataError
         sso_redirect_url,
         signing_certificates,
     })
-}
-
-/// Find the first `EntityDescriptor` element in the document.
-///
-/// Handles both direct root `EntityDescriptor` and the `EntitiesDescriptor`
-/// wrapper used by some federation metadata (ADFS, Shibboleth federations).
-fn find_entity_descriptor<'a, 'input>(
-    doc: &'a roxmltree::Document<'input>,
-) -> Option<roxmltree::Node<'a, 'input>> {
-    doc.root()
-        .descendants()
-        .find(|n| n.has_tag_name((NS_MD, "EntityDescriptor")))
 }
 
 /// Generate SP metadata XML for the `/saml/metadata` endpoint.
@@ -608,7 +601,7 @@ mod tests {
         );
     }
 
-    /// F1: Empty signing_certificates should trigger a tracing::warn but not fail.
+    /// Empty signing_certificates should trigger a tracing::warn but not fail.
     #[test]
     fn empty_signing_certificates_is_accepted_with_warning() {
         // No KeyDescriptor elements -- metadata is valid but no certs.
