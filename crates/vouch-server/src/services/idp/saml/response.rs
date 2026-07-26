@@ -167,13 +167,16 @@ pub(crate) fn validate_saml_response(
     let signed_id =
         super::signature::verify_xml_signature(&doc, &provider.idp_metadata.signing_certificates)?;
 
-    // After verification, re-resolve signed element by ID (XSW mitigation)
-    let signed_element = find_element_by_id(&doc, &signed_id.0).ok_or_else(|| {
-        ResponseError::Other(format!(
-            "signed element '{}' not found after verification",
-            signed_id.0
-        ))
-    })?;
+    // After verification, re-resolve signed element by ID (XSW mitigation).
+    // Deliberately the same lookup verify_xml_signature used, so the element we
+    // consume is provably the element that was verified.
+    let signed_element =
+        super::signature::find_element_by_id(&doc, &signed_id.0).ok_or_else(|| {
+            ResponseError::Other(format!(
+                "signed element '{}' not found after verification",
+                signed_id.0
+            ))
+        })?;
 
     // Step 4: Require Destination matches ACS URL
     // SAML Bindings Section 3.5.5.2: Destination is REQUIRED for POST binding.
@@ -594,19 +597,6 @@ fn find_saml_attribute(assertion: roxmltree::Node<'_, '_>, attr_name: &str) -> O
         }
     }
     None
-}
-
-/// Find an element whose `ID` attribute matches the given value.
-fn find_element_by_id<'a, 'input>(
-    doc: &'a roxmltree::Document<'input>,
-    id: &str,
-) -> Option<roxmltree::Node<'a, 'input>> {
-    doc.root().descendants().find(|n| {
-        n.is_element()
-            && (n.attribute("ID") == Some(id)
-                || n.attribute("Id") == Some(id)
-                || n.attribute("id") == Some(id))
-    })
 }
 
 /// Parse a SAML timestamp string (ISO 8601 / RFC 3339) into a `jiff::Timestamp`.

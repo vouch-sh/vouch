@@ -49,19 +49,15 @@ impl RsaPrivateKeyDer {
     pub(crate) fn from_pem(pem_or_base64: &str) -> Result<Self> {
         let pem =
             crate::crypto::pem::decode_base64_pem(pem_or_base64).context("Invalid key format")?;
-        Self::parse_pem(&pem)
-    }
 
-    /// Parse a PEM-formatted PKCS#1 key.
-    fn parse_pem(content: &str) -> Result<Self> {
-        if !content.contains("RSA PRIVATE KEY") {
+        if !pem.contains("RSA PRIVATE KEY") {
             anyhow::bail!(
                 "Invalid key format: expected PKCS#1 PEM ('BEGIN RSA PRIVATE KEY'), \
                  not PKCS#8. GitHub App keys should be in PKCS#1 format."
             );
         }
 
-        let der_bytes = Self::pem_to_der(content)?;
+        let der_bytes = Self::pem_to_der(&pem)?;
         tracing::debug!("Parsed PKCS#1 RSA key: {} DER bytes", der_bytes.len());
         Ok(Self(Zeroizing::new(der_bytes)))
     }

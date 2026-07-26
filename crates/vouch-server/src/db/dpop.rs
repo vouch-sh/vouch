@@ -6,7 +6,6 @@ use super::document_type::DocumentType;
 use super::documents::dpop::{DpopJtiDoc, DpopNonceDoc};
 use super::store::DocumentStore;
 use anyhow::{Context, Result};
-use aws_lc_rs::rand as aws_rand;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use jiff::{Timestamp, ToSpan};
@@ -39,20 +38,13 @@ fn deterministic_dpop_nonce_id(nonce: &str) -> String {
     hex::encode(ctx.finish().as_ref())
 }
 
-/// Generate a random URL-safe string.
-fn generate_random_string(len: usize) -> Result<String> {
-    let mut bytes = vec![0u8; len];
-    aws_rand::fill(&mut bytes).map_err(|_| anyhow::anyhow!("RNG failure"))?;
-    Ok(URL_SAFE_NO_PAD.encode(&bytes))
-}
-
 /// Generate and store a DPoP nonce. Returns the nonce string.
 ///
 /// Stores the nonce under a deterministic document ID derived from the
 /// nonce itself, so [`validate_and_consume_dpop_nonce`] can perform an
 /// atomic primary-key DELETE without a find-then-delete TOCTOU window.
 pub async fn generate_dpop_nonce(store: &DocumentStore, validity_seconds: i64) -> Result<String> {
-    let nonce = generate_random_string(32)?;
+    let nonce = URL_SAFE_NO_PAD.encode(crate::crypto::generate_random_bytes(32)?);
     let now = Timestamp::now();
     let expires_at = now
         .checked_add(validity_seconds.seconds())

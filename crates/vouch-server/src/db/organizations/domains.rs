@@ -15,7 +15,6 @@ use crate::db::documents::organization::{
 };
 use crate::db::store::DocumentStore;
 use anyhow::Result;
-use aws_lc_rs::rand as aws_rand;
 use jiff::Timestamp;
 
 /// Maximum additional (non-primary) email domains per organization.
@@ -39,9 +38,7 @@ pub struct AddedDomain {
 
 /// Generate a fresh verification token suitable for use in a DNS TXT record.
 fn generate_verification_token() -> Result<String> {
-    let mut bytes = [0u8; 32];
-    aws_rand::fill(&mut bytes).map_err(|_| anyhow::anyhow!("RNG failure"))?;
-    Ok(hex::encode(bytes))
+    Ok(hex::encode(crate::crypto::generate_random_bytes(32)?))
 }
 
 /// Internal OCC-retry error for organization document CAS mutations.
