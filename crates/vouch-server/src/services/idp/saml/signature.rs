@@ -312,7 +312,13 @@ fn find_child_element<'a, 'input>(
 /// Find an element whose `ID` attribute (case-sensitive) matches the given value.
 ///
 /// Searches by common SAML ID attribute names: `ID`, `Id`, `id`.
-fn find_element_by_id<'a, 'input>(
+///
+/// This is the XML Signature Wrapping mitigation's identity function, so both
+/// halves of it must resolve identically: `verify_xml_signature` uses it to find
+/// the `Reference URI` target before verifying, and `response.rs` uses it again
+/// afterwards to re-resolve the element it consumes. Two copies that drift would
+/// silently turn that second lookup into a different element.
+pub(super) fn find_element_by_id<'a, 'input>(
     doc: &'a roxmltree::Document<'input>,
     id: &str,
 ) -> Option<roxmltree::Node<'a, 'input>> {
