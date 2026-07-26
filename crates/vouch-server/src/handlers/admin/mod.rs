@@ -24,7 +24,6 @@ use crate::AppState;
 use crate::db;
 use crate::error::ServiceError;
 use aws_lc_rs::digest::{self, SHA256};
-use aws_lc_rs::rand as aws_rand;
 use axum::http::StatusCode;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -50,8 +49,7 @@ pub(crate) struct GeneratedScimToken {
 
 /// Generate a random SCIM token and its hash for storage.
 pub(crate) fn generate_scim_token() -> Result<GeneratedScimToken, ServiceError> {
-    let mut token_bytes = [0u8; 32];
-    aws_rand::fill(&mut token_bytes).map_err(|_| {
+    let token_bytes = crate::crypto::generate_random_bytes(32).map_err(|_| {
         ServiceError::api(
             StatusCode::INTERNAL_SERVER_ERROR,
             "rng_error",

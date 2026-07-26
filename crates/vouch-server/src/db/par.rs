@@ -116,10 +116,7 @@ pub struct CreateParParams<'a> {
 ///
 /// Returns an error if the CSPRNG fails.
 fn generate_request_uri() -> Result<String> {
-    let mut buf = [0u8; 32];
-    aws_lc_rs::rand::fill(&mut buf)
-        .map_err(|_| anyhow::anyhow!("Failed to generate random bytes for request_uri"))?;
-    let encoded = URL_SAFE_NO_PAD.encode(buf);
+    let encoded = URL_SAFE_NO_PAD.encode(crate::crypto::generate_random_bytes(32)?);
     Ok(format!("urn:ietf:params:oauth:request_uri:{encoded}"))
 }
 
