@@ -159,16 +159,15 @@ the public scheme and host, and set `VOUCH_TRUSTED_PROXIES` to the nginx host's 
 An NLB with TCP listeners forwards bytes untouched, so Vouch terminates TLS itself and keeps its
 cipher policy, its hybrid post-quantum key exchange, and its mTLS listener. Prefer it to an
 Application Load Balancer, which is HTTP-aware and always terminates TLS: that gives up all three
-and breaks RFC 8705 certificate-bound tokens outright, because the client certificate never reaches
-Vouch.
+and breaks RFC 8705 certificate-bound tokens, because the client certificate never reaches Vouch.
 
 Use three TCP listeners, each forwarding to a **TCP** target group on the same port. A TLS target
-group would terminate at the load balancer and defeat the point.
+group would terminate TLS at the load balancer instead.
 
 | Listener | Target group | Carries |
 |----------|--------------|---------|
 | TCP 443 | TCP 443 | HTTPS |
-| TCP 80 | TCP 80 | Vouch's own 308 redirect to HTTPS, plus `/health` |
+| TCP 80 | TCP 80 | HTTP, which Vouch answers with a 308 to HTTPS |
 | TCP 8443 | TCP 8443 | mTLS, for certificate-bound tokens |
 
 NLB listeners have no redirect action of their own, which is why port 80 forwards to the instances
@@ -176,20 +175,20 @@ and Vouch issues the redirect itself. Omit the 8443 listener only if you do not 
 certificate-bound tokens.
 
 Health-check the 443 target group with protocol **HTTPS** and path **`/health/ready`**. The health
-check's `Host` header is the load balancer node's IP rather than your domain, which is fine — Vouch
-validates `Host` only on the port 80 redirect listener. Do not health-check port 80 instead: it
-serves `/health` but not `/health/ready`, so it reports a live process even when the database is
+check's `Host` header is the load balancer node's IP rather than your domain. That passes, because
+Vouch validates `Host` only on the port 80 redirect listener. Do not health-check port 80 instead:
+it serves `/health` but not `/health/ready`, so it reports a live process even when the database is
 unreachable.
 
 On the Vouch side, set `VOUCH_TLS_CERT` and `VOUCH_TLS_KEY`, set `VOUCH_BASE_URL` to the public
 HTTPS URL, and leave `VOUCH_TRUSTED_PROXIES` **unset**.
 
-**Client IP preservation is the setting that bites.** TCP passthrough has no `X-Forwarded-For`, so
-the TCP peer address is the only client identity Vouch ever sees, and `VOUCH_TRUSTED_PROXIES`
-cannot recover it. Preservation is on by default for **instance** targets, but **off by default for
-IP targets on TCP and TLS target groups**. Left off, every request appears to come from a load
-balancer node: all users share one rate-limit bucket and audit events attribute nothing to anyone.
-Set `preserve_client_ip.enabled` to `true` on IP target groups.
+TCP passthrough has no `X-Forwarded-For`, so the TCP peer address is the only client identity Vouch
+sees and `VOUCH_TRUSTED_PROXIES` cannot recover it. AWS enables client IP preservation by default
+for instance targets, but disables it for IP targets on TCP and TLS target groups. When it is off,
+every request appears to come from a load balancer node: all users share one rate-limit bucket and
+audit events record no real client address. Set `preserve_client_ip.enabled` to `true` on IP target
+groups.
 
 If cross-zone load balancing is disabled, register a target in **every** Availability Zone the load
 balancer has a node in. A zone whose node has no local target does not fail fast — it holds the
