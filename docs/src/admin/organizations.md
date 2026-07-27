@@ -21,13 +21,7 @@ cannot be managed through SCIM.
 
 ## The first enrollee becomes the administrator
 
-The first user to enroll from a domain is made that organization's administrator automatically, as
-part of the same transaction that creates their account. If several people enroll simultaneously,
-they race on a compare-and-swap against the organization record — exactly one wins and becomes
-administrator; the others enroll as ordinary members.
-
-There is no bootstrap token, no `VOUCH_ADMIN_EMAILS` setting, and no way to designate the first
-administrator ahead of time.
+The first user to enroll from a domain is made that organization's administrator automatically.
 
 > **Plan the first enrollment.** Whoever enrolls first from your domain holds the only
 > administrator account, and every subsequent administrator is promoted by an existing one. Enroll

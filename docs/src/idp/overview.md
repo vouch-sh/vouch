@@ -114,24 +114,6 @@ In production deployments using S3-backed configuration, IdPs live under the top
 
 Order in the `idps` array controls login-page button order.
 
-## Migration from legacy variables
-
-The previous flat single-IdP environment variables (`VOUCH_OIDC_ISSUER`, `VOUCH_OIDC_CLIENT_ID`, `VOUCH_OIDC_CLIENT_SECRET`, `VOUCH_OIDC_PROVIDERS`, `VOUCH_SAML_IDP_METADATA_URL`, `VOUCH_SAML_SP_ENTITY_ID`, `VOUCH_SAML_EMAIL_ATTRIBUTE`, `VOUCH_SAML_DOMAIN_ATTRIBUTE`) and the legacy S3 `oidc` / `saml` nested blocks are no longer read by the server. They are silently ignored if still present, but they configure nothing — only the unified `VOUCH_IDPS` / `idps[]` format below is honored. Update each legacy value to its replacement and remove the old one:
-
-| Legacy variable | Replacement |
-|---|---|
-| `VOUCH_OIDC_PROVIDERS=google,entra` | `VOUCH_IDPS=google,entra` |
-| `VOUCH_OIDC_<SLUG>_ISSUER` | `VOUCH_IDP_<SLUG>_ISSUER` (with `VOUCH_IDP_<SLUG>_TYPE=oidc`) |
-| `VOUCH_OIDC_<SLUG>_CLIENT_ID` | `VOUCH_IDP_<SLUG>_CLIENT_ID` |
-| `VOUCH_OIDC_<SLUG>_CLIENT_SECRET` | `VOUCH_IDP_<SLUG>_CLIENT_SECRET` |
-| `VOUCH_OIDC_ISSUER` (single-provider) | `VOUCH_IDPS=<slug>` + `VOUCH_IDP_<SLUG>_*` |
-| `VOUCH_SAML_IDP_METADATA_URL` | `VOUCH_IDP_<SLUG>_METADATA_URL` (with `VOUCH_IDP_<SLUG>_TYPE=saml`) |
-| `VOUCH_SAML_SP_ENTITY_ID` | `VOUCH_IDP_<SLUG>_SP_ENTITY_ID` |
-| `VOUCH_SAML_EMAIL_ATTRIBUTE` | `VOUCH_IDP_<SLUG>_EMAIL_ATTRIBUTE` |
-| `VOUCH_SAML_DOMAIN_ATTRIBUTE` | `VOUCH_IDP_<SLUG>_DOMAIN_ATTRIBUTE` |
-| S3 `{"oidc": {...}}` | S3 `{"idps": [{"id": "...", "type": "oidc", ...}]}` |
-| S3 `{"saml": {...}}` | S3 `{"idps": [{"id": "...", "type": "saml", ...}]}` |
-
 ## Claims and Attribute Mapping
 
 ### OIDC Claims
