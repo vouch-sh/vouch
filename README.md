@@ -259,7 +259,7 @@ Key sections:
 
 - [Getting Started](https://vouch.sh/docs/getting-started/) — Installation and first enrollment
 - [Integrations](https://vouch.sh/docs/ssh/) — SSH, AWS, EKS, Kubernetes, GitHub, Docker, and more
-- [Server Deployment](https://docs.vouch.sh/deployment/overview/) — Deploy and configure the Vouch server
+- [Server Deployment](https://docs.vouch.sh/getting-started/overview/) — Deploy and configure the Vouch server
 - [Architecture](https://vouch.sh/docs/architecture/) — System design and data flows
 - [Security Model](https://vouch.sh/docs/security/) — Security controls and incident response
 - [Threat Model](https://vouch.sh/docs/threat-model/) — STRIDE analysis and mitigations
