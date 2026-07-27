@@ -4,6 +4,7 @@
 
 | Component | Criticality | Recovery Impact |
 |-----------|-------------|-----------------|
+| **Document encryption KMS key** | **Unrecoverable** | On an encrypted deployment, every stored document — including the entire audit history — becomes permanently unreadable. There is no regeneration path. |
 | Database | Critical | Loss of user registrations, sessions, authenticator records |
 | SSH CA private key | Critical | Must re-distribute new CA public key to all hosts |
 | OIDC signing key (ES256) | High | Token verification fails until new key distributed |
@@ -11,6 +12,15 @@
 | JWT secret | High | All sessions invalidated on change |
 | TLS certificate & key | Medium | Service unavailable until replaced |
 | Server configuration | Medium | Can be reconstructed from documentation |
+
+> **The document encryption key is the one you cannot recover from.** Every other item on this list
+> can be regenerated at some cost: issue a new SSH CA and redistribute it, generate new signing
+> keys and make users log in again. Documents sealed by a deleted KMS customer master key are gone,
+> and that includes the audit history you would need to reconstruct anything.
+>
+> It also fails in a way you will not notice: the server refuses to start, long after the key was
+> scheduled for deletion. Enable KMS key deletion protection, and never delete a key that has ever
+> sealed documents — even one you believe is unused.
 
 ## Backup Strategy
 
@@ -51,6 +61,20 @@ Store key backups:
 - Encrypted at rest
 - In a separate location from the server
 - With restricted access (minimum two-person rule for production)
+
+### Document encryption key
+
+If your S3 configuration contains a `document_key` block, that block and the KMS key it names are
+part of your backup set:
+
+- **The KMS customer master key** cannot be exported. Protect it instead: enable deletion
+  protection, enable automatic key rotation only if you understand the implications for existing
+  ciphertext, and replicate it as a multi-region key if you run in more than one region.
+- **The `document_key` block** in the S3 configuration holds the KMS-encrypted private key. Back it
+  up with the rest of the configuration document; S3 versioning gives you this for free.
+
+Both are required. The block without the KMS key is undecryptable, and the KMS key without the
+block has nothing to decrypt.
 
 ## Recovery Procedures
 

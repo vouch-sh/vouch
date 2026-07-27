@@ -1,4 +1,4 @@
-# Session Management
+# Sessions and Tokens
 
 Vouch sessions are time-limited, DPoP-bound OAuth 2.0 access tokens (ES256 JWTs per RFC 9068) that prove recent hardware presence verification.
 
@@ -18,27 +18,17 @@ Default: 8 hours. Configurable via:
 VOUCH_SESSION_HOURS=8
 ```
 
-## Session Storage
+## Where sessions live
 
-Sessions are stored in multiple locations for different access patterns:
+Server-side, every session is a database record holding a **hash** of the token, never the token
+itself. The token exists in full only on the client.
 
-| Location | Purpose | Security |
-|----------|---------|----------|
-| `vouch-agent` memory | Primary access for CLI and credential helpers | In-process, zeroized on drop |
-| `~/.config/vouch/config.json` | Fallback when agent is not running | File permissions 0600 |
-| `~/.local/state/vouch/cookie.txt` | Netscape cookie file for `curl -b` usage | File permissions 0600 |
-| Server database | Server-side session record | Token hash stored, not plaintext |
+On the client, the access token is held in the `vouch-agent` process and, as a fallback, in files
+under the user's XDG directories. That is client-side territory and is documented with the CLI at
+[vouch.sh/docs](https://vouch.sh/docs/) — it is not something you configure or operate on the
+server.
 
-Vouch follows the [XDG Base Directory Specification](https://specifications.freedesktop.org/basedir-spec/latest/)
-and honors `XDG_CONFIG_HOME`, `XDG_STATE_HOME`, `XDG_DATA_HOME`, `XDG_CACHE_HOME`,
-and `XDG_RUNTIME_DIR` on all platforms (including macOS). The paths above show the
-defaults when those variables are unset. See
-[File Locations](../reference/file-locations.md) for the full map and the
-automatic migration from the legacy `~/.vouch/` directory.
-
-## Server-Side Session Management
-
-### Cleanup
+## Expiry and cleanup
 
 Expired sessions are cleaned up automatically by a background task:
 

@@ -8,10 +8,10 @@ The RPM and DEB packages include a systemd service unit:
 
 ```bash
 # RPM (RHEL/Fedora/Amazon Linux)
-rpm -ivh vouch-server-1.0.0-1.x86_64.rpm
+rpm -ivh vouch-server-<version>-1.x86_64.rpm
 
 # DEB (Debian/Ubuntu)
-dpkg -i vouch-server_1.0.0_amd64.deb
+dpkg -i vouch-server_<version>_amd64.deb
 ```
 
 The package installs:
@@ -40,7 +40,7 @@ VOUCH_TLS_CERT=<base64-encoded-certificate>
 VOUCH_TLS_KEY=<base64-encoded-private-key>
 ```
 
-See [Configuration Reference](configuration.md) for all options.
+See [Configuration Reference](../configuration/sources.md) for all options.
 
 ## Start the Service
 
@@ -113,8 +113,8 @@ If installing the binary manually:
 sudo cp /data/vouch.db /data/vouch.db.backup.$(date +%Y%m%d)
 
 # Upgrade package (migrations run automatically on next startup)
-sudo rpm -Uvh vouch-server-1.1.0-1.x86_64.rpm
-# or: sudo dpkg -i vouch-server_1.1.0_amd64.deb
+sudo rpm -Uvh vouch-server-<new-version>-1.x86_64.rpm
+# or: sudo dpkg -i vouch-server_<new-version>_amd64.deb
 
 # Restart
 sudo systemctl restart vouch-server

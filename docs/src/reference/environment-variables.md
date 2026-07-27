@@ -1,14 +1,20 @@
 # Environment Variables
 
-All Vouch server configuration is done via environment variables (prefixed with `VOUCH_`). These can also be passed as command-line arguments.
+Every server setting listed here is available three ways: as a `VOUCH_`-prefixed environment
+variable, as an equivalent `--kebab-case` command-line flag, and as a field in the
+[S3 configuration document](s3-config-schema.md). An explicit flag beats the environment variable;
+S3 configuration beats both. See [Configuration Sources](../configuration/sources.md).
+
+A few variables the server reads are not `VOUCH_`-prefixed — `RUST_LOG`, the `OTEL_*` and `AWS_*`
+families, and `DSQL_USER`. They are listed in their relevant sections below.
 
 ## Core Configuration
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `VOUCH_RP_ID` | Yes | `localhost` | Relying Party ID (domain, e.g., `vouch.sh`). Used as the WebAuthn RP ID. |
+| `VOUCH_RP_ID` | No | `localhost` | Relying Party ID (domain, e.g. `auth.example.com`). Used as the WebAuthn RP ID. The default only works for local development — set it for any real deployment, because WebAuthn credentials are bound to it and changing it later invalidates every enrolled authenticator. |
 | `VOUCH_RP_NAME` | No | `Vouch` | Relying Party display name shown in browser prompts and UI. |
-| `VOUCH_DATABASE_URL` | Yes | `sqlite:vouch.db?mode=rwc` | Database connection URL. Supports `sqlite:`, `postgres:`, and Aurora DSQL endpoints. |
+| `VOUCH_DATABASE_URL` | No | `sqlite:vouch.db?mode=rwc` | Database connection URL. Supports `sqlite:`, `postgres:`, and Aurora DSQL endpoints. The default creates a SQLite file in the process working directory — set it explicitly so the database does not land somewhere transient. |
 | `VOUCH_JWT_SECRET` | **Conditional** | _(empty)_ | JWT signing secret. **Must be at least 32 characters.** Must not consist of a single repeated character. Used to sign internal state tokens. Required unless `VOUCH_JWT_HMAC_KMS_KEY_ID` is set. |
 | `VOUCH_BASE_URL` | No | `https://{rp_id}` | Base URL for this server. Auto-derived from `VOUCH_RP_ID` if not set (`http://localhost:{port}` for local dev, `https://{rp_id}` for production). |
 | `VOUCH_ORG_NAME` | No | _(none)_ | Organization name for branding in the UI. Falls back to `VOUCH_RP_NAME` if not set. |
@@ -18,7 +24,10 @@ All Vouch server configuration is done via environment variables (prefixed with 
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `VOUCH_LISTEN_ADDR` | No | `[::]:3000` | Address and port to listen on. Ignored when TLS is configured (server listens on 443 instead). |
+| `VOUCH_LISTEN_ADDR` | No | `[::]:3000` | Address and port to listen on. **Ignored when TLS is configured** — the server then binds 443 and 80 unconditionally. |
+| `VOUCH_MTLS_PORT` | No | `8443` | Port for the mTLS listener used by RFC 8705 certificate-bound tokens. The listener starts automatically whenever TLS is configured; there is no flag to disable it, and a bind failure here is fatal. |
+| `VOUCH_TRUSTED_PROXIES` | No | _(empty)_ | Comma-separated CIDRs of trusted reverse proxies (e.g. `10.0.0.0/8`). When empty, `X-Forwarded-For` is ignored entirely and the TCP peer is treated as the client — which behind a load balancer means **every user shares one rate-limit bucket**. An invalid CIDR is a fatal startup error. See [Behind a Reverse Proxy](../configuration/reverse-proxy.md). |
+| `VOUCH_EXTRA_CA_CERTS` | No | _(none)_ | Path to a PEM bundle of additional certificate authorities for the server's outbound HTTPS client. Needed when your IdP, or another service the server calls, uses an internal CA. An unreadable file is a fatal startup error. |
 
 ## Upstream Identity Provider
 
@@ -61,13 +70,21 @@ The previous flat single-IdP variables — `VOUCH_OIDC_ISSUER`, `VOUCH_OIDC_CLIE
 | `VOUCH_SESSION_HOURS` | No | `8` | Session duration in hours. After this time, the user must re-authenticate. |
 | `VOUCH_DEVICE_CODE_EXPIRES` | No | `600` | Device code expiration in seconds. How long a device code remains valid during enrollment. |
 | `VOUCH_DEVICE_POLL_INTERVAL` | No | `5` | Device code polling interval in seconds. How frequently the CLI polls for device code completion. |
+| `VOUCH_SESSION_CACHE_MAX_CAPACITY` | No | `10000` | Maximum entries in the in-memory session lookup cache. |
+| `VOUCH_SESSION_CACHE_TTL_SECS` | No | `30` | How long a cached session lookup stays valid. Raising it reduces database reads; lowering it shortens the window in which a revoked session is still honored by an instance. |
 
 ## SSH CA
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `VOUCH_SSH_CA_KEY` | No | _(none)_ | SSH CA private key content (base64-encoded PEM format, Ed25519). If set, takes precedence over `VOUCH_SSH_CA_KEY_PATH`. |
-| `VOUCH_SSH_CA_KEY_PATH` | No | `./ssh_ca_key` | Path to SSH CA private key file (raw PEM, not base64). Set to empty string to disable SSH CA entirely. |
+| `VOUCH_SSH_CA_KEY` | No | _(none)_ | SSH CA private key content (Ed25519, OpenSSH format). Accepts either raw PEM or base64-encoded PEM — the server detects which by looking for the `-----BEGIN` header. If set, takes precedence over `VOUCH_SSH_CA_KEY_PATH`. |
+| `VOUCH_SSH_CA_KEY_PATH` | No | `./ssh_ca_key` | Path to SSH CA private key file (raw PEM). Set to an empty string to disable the SSH CA entirely. **If the file does not exist, the server generates a new Ed25519 CA key and writes it to this path** — see the warning below. |
+
+> **Warning**: because a missing `VOUCH_SSH_CA_KEY_PATH` file causes the server to generate a new
+> CA key, starting on a fresh or unmounted volume silently rotates your SSH CA. Every host's
+> `TrustedUserCAKeys` entry then stops matching and users cannot log in with newly issued
+> certificates. Either provision the key file before first start, or supply the key through
+> `VOUCH_SSH_CA_KEY` / `VOUCH_SSH_CA_KMS_KEY_ID`, which never auto-generate.
 
 ## OIDC Signing
 
@@ -155,6 +172,14 @@ These optional variables configure descriptive metadata published in the OAuth 2
 | `VOUCH_RESOURCE_POLICY_URI` | No | `https://vouch.sh/privacy/` | URL of the resource's data-use policy. |
 | `VOUCH_RESOURCE_TOS_URI` | No | `https://vouch.sh/terms/` | URL of the resource's terms of service. |
 
+> **Self-hosters should override the last three.** Their defaults point at Vouch's own site, so a
+> deployment that leaves them alone publishes Vouch's documentation, privacy policy, and terms as
+> its own in a document clients read to learn who operates the resource. Point them at your
+> organization's pages.
+>
+> The same applies to the `/privacy` and `/terms` UI routes, which are fixed redirects to
+> `vouch.sh`. Override those at your reverse proxy if you need your own.
+
 ## CLI Download URLs
 
 These optional variables configure download links displayed in the server UI.
@@ -165,20 +190,94 @@ These optional variables configure download links displayed in the server UI.
 | `VOUCH_CLI_DOWNLOAD_LINUX` | No | _(none)_ | CLI download URL for Linux, displayed in the server UI. |
 | `VOUCH_CLI_DOWNLOAD_WINDOWS` | No | _(none)_ | CLI download URL for Windows, displayed in the server UI. |
 
-## CLI Localization
-
-The Vouch CLI resolves its user-facing language once at startup. Resolution checks the following sources in order; the first that parses as a [BCP 47](https://www.rfc-editor.org/rfc/rfc5646) language tag wins.
+## Database Tuning
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `--lang <BCP-47>` | No | _(none)_ | Global CLI flag (highest priority). Example: `vouch --lang en-US enroll`. |
-| `VOUCH_LANG` | No | _(none)_ | Explicit CLI locale override. Example: `VOUCH_LANG=en-US`. |
-| `LC_ALL` | No | _(POSIX)_ | Standard POSIX locale variable; overrides every other `LC_*`. |
-| `LC_MESSAGES` | No | _(POSIX)_ | Standard POSIX locale variable for message translations. |
-| `LANG` | No | _(POSIX)_ | Standard POSIX locale variable used when `LC_*` are unset. |
+| `VOUCH_DB_MAX_CONNECTIONS` | No | `25` | Maximum size of the connection pool. Multiply by your instance count when sizing PostgreSQL's `max_connections`. |
+| `VOUCH_DB_MIN_CONNECTIONS` | No | `2` | Minimum idle connections kept open. |
+| `VOUCH_DB_IDLE_TIMEOUT_SECS` | No | `300` | How long an idle connection is kept before being closed. |
+| `VOUCH_DB_ACQUIRE_TIMEOUT_SECS` | No | `5` | How long a request waits for a free connection before failing. |
+| `DSQL_USER` | No | `admin` | **Not `VOUCH_`-prefixed.** Database username for Aurora DSQL when the connection URL carries none. |
 
-If none of the above resolve, the CLI falls through to the operating system's default locale via [`sys-locale`](https://crates.io/crates/sys-locale). When that is also unavailable (e.g., a minimal container with no locale configured), the CLI falls back to `en-US`. POSIX-style locale strings (`en_US.UTF-8`, `ca_ES@valencia`) are normalized by stripping the `.<codeset>` and `@<modifier>` suffixes and replacing `_` with `-`.
+## Authenticator Policy
 
-Machine-readable output (`vouch status --json`, `vouch status --shell`, `vouch env`, credential helpers) is **never** affected by the locale — those payloads are consumed by other tools and remain stable across locales. Only human-facing prompts, success/failure messages, error messages, and `--help` text honor the negotiated locale.
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `VOUCH_ALLOWED_AAGUIDS` | No | _(empty — any)_ | Which authenticator models may enroll. Accepts `fips-only`, `yubikey-5`, or a comma-separated list of AAGUID UUIDs. Empty means any hardware authenticator. A non-UUID entry in a list is a fatal startup error. |
+| `VOUCH_REQUIRE_ATTESTATION_CERT` | No | `false` | Reject self-attestation, requiring a full attestation certificate chain. Enable alongside `VOUCH_ALLOWED_AAGUIDS` if you rely on the model restriction, since self-attested AAGUIDs are unverified. |
 
-This release ships `en-US` only; the catalog scaffolding lets translations land in isolated PRs without changing the CLI surface.
+Regardless of these settings, software authenticators are always rejected: the `none` attestation
+format is refused, so only hardware-backed credentials can enroll. See
+[Security Hardening](../operations/security-hardening.md#authenticator-policy).
+
+## Observability
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `VOUCH_LOG_FORMAT` | No | `text` | Log output format: `text` or `json`. Any other value is a fatal startup error. |
+| `VOUCH_METRICS_BEARER_TOKEN` | No | _(none)_ | Bearer token protecting `GET /metrics`. **When unset, the metrics endpoint is not registered at all.** |
+| `RUST_LOG` | No | `info` | **Not `VOUCH_`-prefixed.** Standard `EnvFilter` directive, e.g. `info,vouch_server=debug`. |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | No | _(none)_ | **Not `VOUCH_`-prefixed.** OTLP/gRPC collector endpoint. When unset, span export is disabled entirely. When set but unreachable at startup, the server fails to start. |
+| `OTEL_SERVICE_NAME` | No | `vouch-server` | **Not `VOUCH_`-prefixed.** Service name attached to exported spans. |
+
+See [Monitoring and Metrics](../operations/monitoring.md).
+
+## AWS Environment
+
+These are read by the AWS SDK or by Vouch's AWS-specific resolution logic. None are
+`VOUCH_`-prefixed.
+
+| Variable | Used for |
+|----------|----------|
+| `AWS_REGION` / `AWS_DEFAULT_REGION` | Region for KMS and S3, and for resolving `dsql_endpoints` |
+| `AWS_AZ` | Availability zone, checked first when resolving `dsql_endpoints` |
+| `AWS_PARTITION` | Partition segment (`aws`, `aws-us-gov`) when building cross-account KMS ARNs |
+
+## Test Mode
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `VOUCH_CERTIFICATION_TEST_TOKEN` | No | _(none)_ | **Never set in production.** Enables OpenID conformance test mode: registers a login-bypass route, **disables all rate limiting**, and relaxes the requirement for an upstream IdP. The server logs a security warning at startup when it is set. |
+
+## Startup Validation
+
+The server refuses to start when any of the following holds. Each produces a message naming the
+offending variable.
+
+| Condition | Message |
+|-----------|---------|
+| `VOUCH_IDPS` empty or unset | `No upstream IdP configured. Set VOUCH_IDPS=<slug>[,<slug>...]` |
+| A slug fails `[a-z0-9-]{1,32}`, or leads/trails with a hyphen | Invalid provider slug |
+| Two IdPs share a slug | `Duplicate IdP slug '<id>'` |
+| A per-IdP variable is missing (`_TYPE`, or OIDC `_ISSUER`/`_CLIENT_ID`/`_CLIENT_SECRET`, or SAML `_METADATA_URL`) | Names the missing variable |
+| `VOUCH_IDP_<SLUG>_TYPE` is neither `oidc` nor `saml` | Invalid type |
+| An IdP's OIDC discovery or SAML metadata fetch fails | `Failed to configure IdP '<id>'` |
+| Only one of `VOUCH_TLS_CERT` / `VOUCH_TLS_KEY` is set | `Partial TLS configuration: set both ... or neither.` |
+| `VOUCH_JWT_SECRET` under 32 characters, and no KMS HMAC key | `VOUCH_JWT_SECRET must be at least 32 characters` |
+| `VOUCH_JWT_SECRET` is a single repeated character | `must not consist of a single repeated character` |
+| Either retention variable is negative | Negative retention rejected |
+| `VOUCH_CORS_ORIGINS` contains `*` | Wildcard is invalid with credentialed cookie sessions |
+| `VOUCH_ALLOWED_AAGUIDS` has a non-UUID entry | `Invalid VOUCH_ALLOWED_AAGUIDS` |
+| `VOUCH_LOG_FORMAT` is not `text` or `json` | `Invalid VOUCH_LOG_FORMAT` |
+| `VOUCH_TRUSTED_PROXIES` has a malformed CIDR | `Invalid CIDR in VOUCH_TRUSTED_PROXIES` |
+| `VOUCH_EXTRA_CA_CERTS` file is unreadable | Read failure |
+| `VOUCH_DATABASE_URL` scheme is not `sqlite:`/`postgres:`/`postgresql:` | Unsupported scheme |
+| A KMS key ID is set but the KMS client cannot be built | Names the key |
+| S3 configuration is enabled but the object cannot be fetched or parsed | `Failed to fetch S3 configuration` |
+| Issuer subdomains are claimed but document encryption is not configured | `issuer subdomains are claimed but document encryption is not configured` |
+| The mTLS listener cannot bind | `Failed to start mTLS listener` |
+
+A JWT secret with fewer than 8 distinct bytes produces a warning, not an error.
+
+See [Troubleshooting](../operations/troubleshooting.md#the-server-wont-start) for what to do about
+each.
+
+## Localization
+
+The server negotiates the response language per request from the `Accept-Language` header and the
+OIDC `ui_locales` parameter. There is no server-side environment variable for it, and no
+configuration is required.
+
+The `vouch` CLI resolves its own language separately, from `--lang`, `VOUCH_LANG`, and the standard
+POSIX locale variables. That is client-side; see [vouch.sh/docs](https://vouch.sh/docs/).

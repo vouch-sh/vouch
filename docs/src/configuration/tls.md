@@ -35,7 +35,18 @@ Both `VOUCH_TLS_CERT` and `VOUCH_TLS_KEY` must be set together. If only one is p
 
 Both TLS listeners (HTTPS and mTLS) and all outbound TLS clients (CLI, agent, and server-to-IdP/AWS connections) prefer the **X25519MLKEM768** hybrid post-quantum key-exchange group. When the peer supports it — modern browsers, Cloudflare, and AWS endpoints do — the TLS session keys are protected against "harvest now, decrypt later" attacks. Peers without ML-KEM support negotiate classical X25519 or P-256 as usual; no configuration is required on either side.
 
-See [Post-Quantum Cryptography](../operations/post-quantum.md) for Vouch's overall PQC posture.
+To confirm a connection actually negotiated it, from a client with OpenSSL 3.5 or later:
+
+```bash
+openssl s_client -connect auth.example.com:443 -groups X25519MLKEM768 </dev/null 2>/dev/null \
+  | grep -i 'negotiated group'
+```
+
+Browsers show the negotiated key-exchange group in their developer-tools security panel.
+
+For Vouch's overall post-quantum posture — which surfaces are still classical, why, and what is
+being tracked — see the security documentation at
+[vouch.sh/docs/security](https://vouch.sh/docs/security/).
 
 ## Certificate Hot-Reload
 
@@ -43,7 +54,7 @@ Vouch supports automatic TLS certificate reloading without dropping connections.
 
 ### Via S3 Configuration
 
-If using [S3 configuration storage](../operations/s3-configuration.md), update the `tls.cert` and `tls.key` fields in the S3 config file. The server detects changes via ETag polling and reloads automatically.
+If using [S3 configuration storage](sources.md), update the `tls.cert` and `tls.key` fields in the S3 config file. The server detects changes via ETag polling and reloads automatically.
 
 ### Via SIGHUP
 

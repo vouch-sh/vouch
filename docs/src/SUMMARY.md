@@ -2,37 +2,48 @@
 
 [Introduction](README.md)
 
-# Server Deployment
+# Getting Started
 
-- [Deployment Overview](deployment/overview.md)
-- [Configuration Reference](deployment/configuration.md)
-- [Database Setup](deployment/database.md)
-- [TLS Configuration](deployment/tls.md)
-- [Deployment Methods](deployment/methods.md)
-  - [Systemd (Bare Metal)](deployment/systemd.md)
-  - [Docker](deployment/docker.md)
-  - [Kubernetes (Helm)](deployment/kubernetes.md)
-- [Health Checks and Monitoring](deployment/monitoring.md)
+- [Quick Start](getting-started/quickstart.md)
+- [Deployment Overview](getting-started/overview.md)
 
-# Identity Provider Setup
+# Installation
 
-- [Identity Provider Overview](idp/overview.md)
-- [Google Workspace (OIDC)](idp/google-workspace.md)
-- [Microsoft Entra ID (OIDC)](idp/entra-id.md)
-- [Generic OIDC Provider](idp/generic-oidc.md)
-- [SAML 2.0](idp/saml.md)
+- [Systemd (RPM/DEB)](install/systemd.md)
+- [Docker](install/docker.md)
+- [Kubernetes (Helm)](install/kubernetes.md)
+
+# Configuration
+
+- [Configuration Sources](configuration/sources.md)
+- [Database](configuration/database.md)
+- [TLS, Ports, and mTLS](configuration/tls.md)
+- [Behind a Reverse Proxy](configuration/reverse-proxy.md)
+- [Identity Providers](idp/overview.md)
+  - [Google Workspace (OIDC)](idp/google-workspace.md)
+  - [Microsoft Entra ID (OIDC)](idp/entra-id.md)
+  - [Generic OIDC Provider](idp/generic-oidc.md)
+  - [SAML 2.0](idp/saml.md)
+- [Signing Keys](configuration/keys.md)
+
+# Administration
+
+- [Organizations and Administrators](admin/organizations.md)
+- [Posture Policies](admin/policies.md)
+- [Email Domains](admin/domains.md)
+- [SCIM Provisioning](admin/scim.md)
+- [Audit Events](admin/audit.md)
 
 # Operations
 
-- [Session Management](operations/sessions.md)
-- [Key Management](operations/key-management.md)
-- [Post-Quantum Cryptography](operations/post-quantum.md)
-- [SCIM Provisioning](operations/scim.md)
-- [S3 Configuration Storage](operations/s3-configuration.md)
+- [Monitoring and Metrics](operations/monitoring.md)
+- [Security Hardening](operations/security-hardening.md)
+- [Sessions and Tokens](operations/sessions.md)
+- [Running Multiple Instances](operations/high-availability.md)
 - [Backup and Recovery](operations/backup-recovery.md)
 - [Software Updates](operations/updates.md)
 - [Troubleshooting](operations/troubleshooting.md)
-- [Incident Response](operations/incident-response.md)
+- [Security Incident Runbook](operations/incident-runbook.md)
 
 # Advanced Topics
 
@@ -45,7 +56,5 @@
 # Reference
 
 - [Environment Variables](reference/environment-variables.md)
-- [File Locations (CLI & Agent)](reference/file-locations.md)
 - [S3 Configuration Schema](reference/s3-config-schema.md)
-- [Compliance Mapping](reference/compliance.md)
-- [AMI STIG Alignment](reference/ami-stig.md)
+- [Ports and Endpoints](reference/ports-and-endpoints.md)

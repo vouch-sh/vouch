@@ -8,8 +8,8 @@ This chapter covers deploying Vouch in environments with no internet connectivit
 
 | Capability | Where to read |
 |------------|----------------|
-| Server install (RPM/DEB, containers, Helm) | [Installation](airgap-installation.md), [Deployment Methods](../deployment/methods.md) |
-| Configuration, TLS, database, SSH CA | [Configuration Reference](../deployment/configuration.md) |
+| Server install (RPM/DEB, containers, Helm) | [Installation](airgap-installation.md), [Deployment Methods](../install/systemd.md) |
+| Configuration, TLS, database, SSH CA | [Configuration Reference](../configuration/sources.md) |
 | Internal OIDC or SAML IdP | [Identity Provider Overview](../idp/overview.md), [SAML 2.0](../idp/saml.md) |
 | Enrollment (YubiKey + browser on internal network) | [Installation](airgap-installation.md), [YubiKey Provisioning](airgap-yubikey.md) |
 | Key ceremony on a trusted workstation | [Key Ceremony](airgap-key-ceremony.md) |
@@ -18,7 +18,7 @@ This chapter covers deploying Vouch in environments with no internet connectivit
 
 Enrollment uses the standard `vouch enroll` device flow (browser opens the verification URL on your internal Vouch host) or browser-only `/enroll/start` on the server UI. There is no separate air-gap-only CLI mode.
 
-For general on-prem deployment (reachable IdP, standard updates), start with [Deployment Overview](../deployment/overview.md).
+For general on-prem deployment (reachable IdP, standard updates), start with [Deployment Overview](../getting-started/overview.md).
 
 ## Roadmap
 
