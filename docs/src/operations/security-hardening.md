@@ -174,7 +174,7 @@ warning in a production log, treat it as an incident: see the
 - [ ] Durable `VOUCH_OIDC_SIGNING_KEY` and `VOUCH_OIDC_RSA_SIGNING_KEY` — not the ephemeral defaults
 - [ ] SSH CA key provisioned explicitly, so it cannot be silently auto-generated
 - [ ] `VOUCH_ALLOWED_DOMAINS` set, so enrollment is not open to any domain
-- [ ] `VOUCH_TRUSTED_PROXIES` set if anything fronts the server
+- [ ] Client IP preserved if anything fronts the server — `VOUCH_TRUSTED_PROXIES` for a proxy that terminates TLS, or client IP preservation on a TCP-passthrough target group
 - [ ] `VOUCH_CERTIFICATION_TEST_TOKEN` **unset**
 - [ ] `VOUCH_METRICS_BEARER_TOKEN` set to a strong random value if metrics are scraped
 - [ ] `VOUCH_ALLOWED_AAGUIDS` / `VOUCH_REQUIRE_ATTESTATION_CERT` set if you have a hardware policy

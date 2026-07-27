@@ -159,7 +159,8 @@ You now have a working server. For production, the differences that matter most:
    ones, and provision the SSH CA key explicitly instead of letting it auto-generate.
 3. **[Database](../configuration/database.md)** — PostgreSQL if you will run more than one
    instance.
-4. **[Behind a Reverse Proxy](../configuration/reverse-proxy.md)** — set `VOUCH_TRUSTED_PROXIES`
-   if anything sits in front, or rate limiting will key on your load balancer.
+4. **[Behind a Reverse Proxy](../configuration/reverse-proxy.md)** — if anything sits in front,
+   either preserve the client IP (TCP passthrough) or set `VOUCH_TRUSTED_PROXIES` (TLS terminated
+   at the proxy), or rate limiting will key on your load balancer.
 5. **[Security Hardening](../operations/security-hardening.md)** — the pre-production checklist.
 6. **[Monitoring and Metrics](../operations/monitoring.md)** — probes, metrics, and log format.
