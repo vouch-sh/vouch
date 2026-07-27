@@ -57,7 +57,6 @@ impl EcdsaP256Signer {
     pub fn verifier(&self) -> EcdsaP256Verifier {
         EcdsaP256Verifier {
             public_key: self.key_pair.public_key().as_ref().to_vec(),
-            key_id: self.key_id.clone(),
         }
     }
 }
@@ -93,23 +92,15 @@ impl SigningAlgorithm for EcdsaP256Signer {
 #[derive(Debug, Clone)]
 pub struct EcdsaP256Verifier {
     public_key: Vec<u8>,
-    key_id: String,
 }
 
 impl EcdsaP256Verifier {
     /// Create a verifier from raw uncompressed SEC1 public key bytes (65 bytes).
     #[must_use]
-    pub fn new(public_key: &[u8], key_id: &str) -> Self {
+    pub fn new(public_key: &[u8]) -> Self {
         Self {
             public_key: public_key.to_vec(),
-            key_id: key_id.to_string(),
         }
-    }
-
-    /// Get the key ID.
-    #[must_use]
-    pub fn key_id(&self) -> &str {
-        &self.key_id
     }
 }
 
