@@ -109,6 +109,3 @@ VOUCH_ALLOWED_DOMAINS=example.com
 **Email not extracted from assertion**
 - Check the SAML assertion attributes using debug logging (`RUST_LOG=vouch_server=debug`)
 - Set `VOUCH_IDP_<SLUG>_EMAIL_ATTRIBUTE` to the exact attribute name used by your IdP
-
-**"Legacy identity-provider configuration detected"**
-- The flat `VOUCH_SAML_*` variables are no longer accepted. Migrate to the per-IdP `VOUCH_IDP_<SLUG>_*` format. See [Overview](overview.md#migration-from-legacy-variables) for the full mapping.

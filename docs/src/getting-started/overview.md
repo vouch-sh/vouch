@@ -22,8 +22,7 @@ Before deploying, ensure you have:
                        ▼
               ┌─────────────────┐
               │  Load Balancer  │
-              │  (TLS termination │
-              │   or passthrough) │
+              │ TCP passthrough │
               └────────┬────────┘
                        │
                        ▼

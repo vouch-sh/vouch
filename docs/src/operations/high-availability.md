@@ -78,8 +78,11 @@ Covered in [Behind a Reverse Proxy](../configuration/reverse-proxy.md). The two 
 for a multi-instance deployment specifically:
 
 - Health check **`/health/ready`**, not `/health`. An instance that lost its database connection
-  keeps passing `/health` and stays in rotation.
-- Set `VOUCH_TRUSTED_PROXIES`, or all rate limiting collapses onto the load balancer's IP.
+  keeps passing `/health` and stays in rotation. Behind a TCP-passthrough NLB this has to be an
+  HTTPS health check on port 443, because port 80 serves only `/health`.
+- Preserve the client IP, or all rate limiting collapses onto the load balancer's IP. With TCP
+  passthrough that means enabling client IP preservation on the target group; with a proxy that
+  terminates TLS it means setting `VOUCH_TRUSTED_PROXIES`.
 
 ## Graceful shutdown
 

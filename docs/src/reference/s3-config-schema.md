@@ -158,8 +158,3 @@ Only `tls.cert` and `tls.key` are applied while the server is running. Every oth
 document takes effect at startup only, and changes to them are ignored — silently — until the
 server restarts. See
 [Configuration Sources](../configuration/sources.md#hot-reloadable-vs-startup-only-fields).
-
-> **Legacy blocks silently ignored:** the previous top-level `oidc` and `saml` blocks (single-IdP
-> nested objects) are no longer read. They configure nothing; only entries inside the `idps` array
-> are honored. See [IdP Overview](../idp/overview.md#migration-from-legacy-variables) for the
-> field-by-field mapping.
