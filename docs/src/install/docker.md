@@ -114,13 +114,13 @@ For air-gapped environments, load the image from a saved archive:
 
 ```bash
 # On connected machine
-docker pull ghcr.io/vouch-sh/vouch:1.0.0
-docker save ghcr.io/vouch-sh/vouch:1.0.0 -o vouch-server-1.0.0.tar
+docker pull ghcr.io/vouch-sh/vouch:<version>
+docker save ghcr.io/vouch-sh/vouch:<version> -o vouch-server-<version>.tar
 
 # Transfer to air-gapped environment
 
 # Load image
-docker load < vouch-server-1.0.0.tar
+docker load < vouch-server-<version>.tar
 ```
 
 ## Upgrading

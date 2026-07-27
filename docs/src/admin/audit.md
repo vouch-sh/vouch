@@ -1,55 +1,16 @@
-# Health Checks and Monitoring
+# Audit Events
 
-## Health Endpoint
+Every authentication, credential issuance, and administrative action is recorded as an audit
+event. Events are stored in the `audit_events` table and browsable at `/admin/audit`.
 
-Vouch exposes a health check endpoint:
+Email addresses are masked to domain only, with an HMAC column alongside so you can correlate a
+user's activity without the log itself holding their address. Events are enriched with the country
+code, ASN, and network organization resolved from the client IP.
 
-```
-GET /health
-```
-
-Response:
-```json
-{"status": "healthy"}
-```
-
-This endpoint:
-- Returns HTTP 200 when the server is operational
-- Is accessible over HTTP (port 80) even when TLS is configured, for load balancer health checks
-- Does not require authentication
-
-## Monitoring Endpoints
-
-| Endpoint | Method | Auth Required | Description |
-|----------|--------|---------------|-------------|
-| `/health` | GET | No | Server health status |
-| `/.well-known/openid-configuration` | GET | No | OIDC discovery (verifies OIDC provider is functional) |
-| `/.well-known/oauth-protected-resource` | GET | No | OAuth 2.0 Protected Resource Metadata (RFC 9728) |
-| `/v1/credentials/ssh/ca` | GET | No | SSH CA public key (verifies SSH CA is loaded) |
-
-## Log Format
-
-Vouch uses structured logging via `tracing`. Set the log level with the `RUST_LOG` environment variable:
-
-```bash
-# Production (warnings and errors only)
-RUST_LOG=warn
-
-# Standard operation
-RUST_LOG=info
-
-# Debugging
-RUST_LOG=debug
-
-# Component-specific logging
-RUST_LOG=vouch_server=debug,tower_http=info
-```
+> The GeoIP databases are compiled into the server binary. They cannot be refreshed independently —
+> new geolocation data arrives with a new Vouch release.
 
 ## Audit Events
-
-Authentication, credential issuance, and administrative events are written to the
-`audit_events` table and browsable at `/admin/audit`. Emails are masked to
-domain-only, with an HMAC column for correlation.
 
 ### Authentication and key lifecycle
 
@@ -104,26 +65,52 @@ domain-only, with an HMAC column for correlation.
 
 ## Retention
 
-Configure retention periods for audit events:
+Events fall into three retention classes. The class is a property of the event type; it is not
+configurable.
+
+| Class | Governed by | Contains |
+|-------|-------------|----------|
+| Authentication | `VOUCH_AUTH_EVENTS_RETENTION_DAYS` (default 90) | Logins, enrollment, logout, key and device-auth lifecycle, SCIM operations |
+| OAuth and credentials | `VOUCH_OAUTH_EVENTS_RETENTION_DAYS` (default 90) | Credential issuance, token issue/revoke, client registration — the high-volume events |
+| **Kept forever** | *nothing — never deleted* | Every administrative action, OAuth client and secret lifecycle, and all organization domain, subdomain, and issuer-key events |
+
+The third class is the one to know about. Administrative and organization-lifecycle records are
+**never** purged by the cleanup task, regardless of how you set the two retention variables. That
+is deliberate: these are the records that answer "who granted this person admin, and when", and
+they are low-volume enough to keep indefinitely. Plan database growth accordingly, and if a
+regulation requires you to delete them, that is a manual database operation.
 
 ```bash
-# Auth events (login, enrollment, logout, key/device-auth lifecycle)
-# — default 90 days
+# Keep authentication events for two years, credential events for 90 days.
 VOUCH_AUTH_EVENTS_RETENTION_DAYS=730
-
-# OAuth usage and credential-issuance events (oauth_*, aws_credential,
-# github_credential, ssh_credential, token_exchange) — default 90 days
 VOUCH_OAUTH_EVENTS_RETENTION_DAYS=90
 ```
 
-Events older than the retention period are cleaned up automatically by the background cleanup task (controlled by `VOUCH_CLEANUP_INTERVAL`).
+Expired events are removed by the background cleanup task, which runs every
+`VOUCH_CLEANUP_INTERVAL` minutes (default 15). Setting the interval to `0` disables cleanup
+entirely, and events then accumulate without bound.
 
-## Alerting Recommendations
+> **Retention values must not be negative.** The server rejects a negative value at startup, because
+> a negative window produces a cutoff in the future — which would delete the entire audit log on the
+> first cleanup pass.
 
-| Condition | Alert Level | Description |
-|-----------|------------|-------------|
-| `/health` returns non-200 | Critical | Server is unhealthy |
-| Multiple failed login attempts | Warning | Possible brute force |
-| SSH CA key not loaded | Warning | SSH certificates won't be issued |
-| Database approaching capacity | Warning | SQLite file growth or PostgreSQL storage |
-| Session cleanup failing | Warning | Check cleanup interval and retention settings |
+## Browsing and exporting
+
+`/admin/audit` provides a paginated view scoped to your organization.
+
+There is no built-in export or syslog/SIEM streaming. To ship events off-box, query the
+`audit_events` table directly:
+
+```bash
+# SQLite
+sqlite3 /data/vouch.db \
+  "SELECT * FROM audit_events WHERE created_at > datetime('now', '-1 day');"
+
+# PostgreSQL
+psql "$VOUCH_DATABASE_URL" -c \
+  "SELECT * FROM audit_events WHERE created_at > now() - interval '1 day';"
+```
+
+Application logs are separate from audit events and go to stdout — see
+[Monitoring and Metrics](../operations/monitoring.md) for structured logging and the
+`x-fapi-interaction-id` correlation header.

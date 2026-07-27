@@ -1,31 +1,10 @@
 # S3 Configuration Schema
 
-For production deployments, Vouch supports loading configuration from an S3 object. This enables:
+The complete field reference for the S3 configuration document.
 
-- **Centralized management** — Single source of truth for multi-instance deployments
-- **Dynamic updates** — Configuration changes without server restart (for supported fields)
-- **TLS hot-reload** — Automatic certificate rotation without downtime
-- **Secrets management** — Leverage S3 server-side encryption and IAM for credential protection
-
-## Enabling S3 Configuration
-
-Set the following environment variables to enable S3-based configuration:
-
-```bash
-# Required: bucket name
-VOUCH_S3_CONFIG_BUCKET=my-bucket
-
-# Optional: object key (default: config/vouch-server.json)
-VOUCH_S3_CONFIG_KEY=config/vouch-server.json
-
-# Optional: AWS region (uses default credential chain region if not set)
-VOUCH_S3_CONFIG_REGION=us-west-2
-
-# Optional: polling interval in seconds (default: 60)
-VOUCH_S3_CONFIG_POLL_INTERVAL=60
-```
-
-When S3 configuration is enabled, it overrides environment variables. This allows for centralized configuration management with dynamic updates.
+For how S3 configuration fits with environment variables and command-line flags, how to enable
+it, the bucket requirements, and the polling behavior, see
+[Configuration Sources](../configuration/sources.md).
 
 ## JSON Schema
 
@@ -175,29 +154,12 @@ This ensures proper handling of newlines and special characters within JSON valu
 
 ## Hot-Reloadable vs Startup-Only Fields
 
-The server polls S3 at the configured interval and detects changes via ETag comparison. However, only certain fields support hot-reload without a server restart:
+Only `tls.cert` and `tls.key` are applied while the server is running. Every other field in this
+document takes effect at startup only, and changes to them are ignored — silently — until the
+server restarts. See
+[Configuration Sources](../configuration/sources.md#hot-reloadable-vs-startup-only-fields).
 
-| Field | Hot-Reloadable | Notes |
-|-------|----------------|-------|
-| `tls.cert`, `tls.key` | **Yes** | Automatic reload on change |
-| All other fields | **No** | Requires server restart |
-
-Non-hot-reloadable fields include: `jwt_secret`, `database_url`, `listen_addr`, `rp_id`, `rp_name`, `session_hours`, `cors_origins`, `allowed_domains`, `dpop.*`, `idps[]`, GitHub App settings, SSH CA key, OIDC signing keys, and all KMS key IDs.
-
-> **Legacy blocks silently ignored:** The previous top-level `oidc` and `saml` blocks (single-IdP nested objects) are no longer read by the server. They configure nothing; only entries inside the `idps` array are honored. See [IdP Overview](../idp/overview.md#migration-from-legacy-variables) for the field-by-field mapping.
-
-Changes to non-hot-reloadable fields in S3 are silently ignored. A server restart is required to apply them.
-
-## TLS Certificate Hot-Reload
-
-Vouch supports automatic TLS certificate reloading without dropping connections:
-
-1. **Via S3 polling** — Update `tls.cert` and `tls.key` in the S3 config; the server detects the change via ETag and reloads automatically.
-2. **Via SIGHUP** — Send `SIGHUP` to the server process to reload TLS certificates.
-
-```bash
-# Manual TLS certificate reload (Unix only)
-kill -SIGHUP $(pgrep vouch-server)
-```
-
-**Note:** SIGHUP only reloads TLS certificates. It does not reload any other configuration fields.
+> **Legacy blocks silently ignored:** the previous top-level `oidc` and `saml` blocks (single-IdP
+> nested objects) are no longer read. They configure nothing; only entries inside the `idps` array
+> are honored. See [IdP Overview](../idp/overview.md#migration-from-legacy-variables) for the
+> field-by-field mapping.

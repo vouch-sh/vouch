@@ -49,13 +49,13 @@ Before deploying, ensure you have:
 
 | Method | Best For | Guide |
 |--------|----------|-------|
-| [Systemd](systemd.md) | Bare metal, VMs, single-node | Production |
-| [Docker](docker.md) | Container-based deployments | Production |
-| [Kubernetes](kubernetes.md) | Multi-node, high availability | Production |
+| [Systemd](../install/systemd.md) | Bare metal, VMs, single-node | Production |
+| [Docker](../install/docker.md) | Container-based deployments | Production |
+| [Kubernetes](../install/kubernetes.md) | Multi-node, high availability | Production |
 
 ## Configuration
 
-All configuration is via environment variables. See the [Configuration Reference](configuration.md) for the full list.
+All configuration is via environment variables. See the [Configuration Reference](../configuration/sources.md) for the full list.
 
 The minimum configuration requires:
 
@@ -78,7 +78,7 @@ VOUCH_IDP_GOOGLE_CLIENT_ID=...
 VOUCH_IDP_GOOGLE_CLIENT_SECRET=...
 ```
 
-For AWS deployments, you can use KMS for all signing operations instead of managing local keys. See the [Configuration Reference](configuration.md) for KMS options.
+For AWS deployments, you can use KMS for all signing operations instead of managing local keys. See the [Configuration Reference](../configuration/sources.md) for KMS options.
 
 ## Sizing
 
@@ -97,7 +97,7 @@ The server is single-process, async (tokio). Per-session memory overhead is mini
 
 ## Next Steps
 
-1. [Database Setup](database.md) — Choose and configure your database
-2. [TLS Configuration](tls.md) — Set up HTTPS
-3. [Configuration Reference](configuration.md) — Full environment variable reference
+1. [Database Setup](../configuration/database.md) — Choose and configure your database
+2. [TLS Configuration](../configuration/tls.md) — Set up HTTPS
+3. [Configuration Reference](../configuration/sources.md) — Full environment variable reference
 4. [Identity Provider Setup](../idp/overview.md) — Connect your corporate IdP

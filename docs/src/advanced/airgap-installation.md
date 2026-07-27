@@ -11,23 +11,23 @@ On a connected machine, download the required packages from `packages.vouch.sh`:
 curl -fsSL https://packages.vouch.sh/gpg/vouch.asc | gpg --import
 
 # Download server RPM
-curl -LO https://packages.vouch.sh/rpm/x86_64/vouch-server-1.0.0-1.x86_64.rpm
+curl -LO https://packages.vouch.sh/rpm/x86_64/vouch-server-<version>-1.x86_64.rpm
 
 # Download CLI RPM (for each workstation architecture)
-curl -LO https://packages.vouch.sh/rpm/x86_64/vouch-1.0.0-1.x86_64.rpm
-curl -LO https://packages.vouch.sh/rpm/aarch64/vouch-1.0.0-1.aarch64.rpm
+curl -LO https://packages.vouch.sh/rpm/x86_64/vouch-<version>-1.x86_64.rpm
+curl -LO https://packages.vouch.sh/rpm/aarch64/vouch-<version>-1.aarch64.rpm
 
 # For Debian/Ubuntu workstations
-curl -LO https://packages.vouch.sh/apt/vouch_1.0.0_amd64.deb
-curl -LO https://packages.vouch.sh/apt/vouch_1.0.0_arm64.deb
+curl -LO https://packages.vouch.sh/apt/vouch_<version>_amd64.deb
+curl -LO https://packages.vouch.sh/apt/vouch_<version>_arm64.deb
 ```
 
 For container-based or Kubernetes deployments, also download:
 
 ```bash
 # Pull and save container image
-docker pull ghcr.io/vouch-sh/vouch:1.0.0
-docker save ghcr.io/vouch-sh/vouch:1.0.0 -o vouch-server-1.0.0.tar
+docker pull ghcr.io/vouch-sh/vouch:<version>
+docker save ghcr.io/vouch-sh/vouch:<version> -o vouch-server-<version>.tar
 
 # Download Helm chart (for Kubernetes)
 helm pull oci://ghcr.io/vouch-sh/charts/vouch-server --version 0.1.0
@@ -55,8 +55,8 @@ gpg --verify SHA256SUMS.sig SHA256SUMS
 sha256sum -c SHA256SUMS
 
 # Verify RPM signatures
-rpm -K vouch-server-1.0.0-1.x86_64.rpm
-rpm -K vouch-1.0.0-1.x86_64.rpm
+rpm -K vouch-server-<version>-1.x86_64.rpm
+rpm -K vouch-<version>-1.x86_64.rpm
 ```
 
 ## Step 3: Install Packages
@@ -65,24 +65,24 @@ rpm -K vouch-1.0.0-1.x86_64.rpm
 
 ```bash
 # Install server
-rpm -ivh vouch-server-1.0.0-1.x86_64.rpm
+rpm -ivh vouch-server-<version>-1.x86_64.rpm
 
 # Install CLI on workstations
-rpm -ivh vouch-1.0.0-1.x86_64.rpm
+rpm -ivh vouch-<version>-1.x86_64.rpm
 ```
 
 **DEB-based installation:**
 
 ```bash
 # Install CLI on Debian/Ubuntu workstations
-dpkg -i vouch_1.0.0_amd64.deb
+dpkg -i vouch_<version>_amd64.deb
 ```
 
 **Container-based installation:**
 
 ```bash
 # Load container image into local Docker registry
-docker load < vouch-server-1.0.0.tar
+docker load < vouch-server-<version>.tar
 
 # Verify image loaded
 docker images | grep vouch
@@ -232,10 +232,13 @@ VOUCH_DEVICE_POLL_INTERVAL=5
 # Allowed email domains for enrollment (comma-separated)
 VOUCH_ALLOWED_DOMAINS=internal,company.local
 
-# DPoP (Demonstrating Proof of Possession)
-VOUCH_DPOP_ENABLED=true
-VOUCH_DPOP_NONCE_REQUIRED=false
+# DPoP (Demonstrating Proof of Possession). DPoP is always enabled and cannot
+# be turned off; only the accepted proof age is configurable.
 VOUCH_DPOP_MAX_AGE=300
+
+# Extra CA bundle for outbound HTTPS, so the server trusts an internal PKI when
+# fetching the IdP's discovery document or SAML metadata.
+VOUCH_EXTRA_CA_CERTS=/etc/vouch/internal-ca.pem
 
 # -----------------------------------------------------------------------------
 # Audit and Retention
@@ -261,24 +264,18 @@ chmod 600 /etc/vouch/vouch.env
 
 ### Environment Variables Reference
 
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `VOUCH_JWT_SECRET` | **Yes** | - | Session signing (min 32 chars) |
-| `VOUCH_RP_ID` | **Yes** | `localhost` | Relying party domain |
-| `VOUCH_RP_NAME` | No | `Vouch` | Display name |
-| `VOUCH_DATABASE_URL` | **Yes** | `sqlite:vouch.db?mode=rwc` | Database connection |
-| `VOUCH_LISTEN_ADDR` | No | `0.0.0.0:3000` | Server bind address |
-| `VOUCH_BASE_URL` | No | `https://{rp_id}` | External URL |
-| `VOUCH_SESSION_HOURS` | No | `8` | Session duration |
-| `VOUCH_SSH_CA_KEY` | No | - | SSH CA key (base64-encoded PEM) |
-| `VOUCH_SSH_CA_KEY_PATH` | No | `./ssh_ca_key` | SSH CA key file path (raw PEM) |
-| `VOUCH_OIDC_SIGNING_KEY` | No | auto-generate | OIDC token signing key (base64-encoded PEM) |
-| `VOUCH_TLS_CERT` | No | - | TLS cert (base64-encoded PEM) |
-| `VOUCH_TLS_KEY` | No | - | TLS key (base64-encoded PEM) |
-| `VOUCH_ALLOWED_DOMAINS` | No | - | Allowed email domains |
-| `VOUCH_DPOP_ENABLED` | No | `true` | Enable DPoP support |
-| `VOUCH_CLEANUP_INTERVAL` | No | `15` | Cleanup interval (minutes) |
-| `VOUCH_AUTH_EVENTS_RETENTION_DAYS` | No | `90` | Auth event retention |
+See [Environment Variables](../reference/environment-variables.md) for the complete list with
+defaults, required-ness, and validation rules. Two settings matter more in an air-gapped
+enclave than anywhere else:
+
+- **`VOUCH_EXTRA_CA_CERTS`** — a PEM bundle of extra certificate authorities for the server's
+  outbound HTTPS client. An internal IdP almost always presents a certificate from a private
+  CA, and without this the discovery or metadata fetch fails at startup and the server refuses
+  to boot.
+- **`VOUCH_SSH_CA_KEY_PATH`** — if the file at this path does not exist, the server
+  **generates a new Ed25519 CA key and writes it there**. On a fresh volume that silently
+  rotates your SSH CA and every host's `TrustedUserCAKeys` entry stops matching. Provision the
+  key before first start, or set `VOUCH_SSH_CA_KEY` with the PEM contents.
 
 ## Step 7: Deploy Services
 
@@ -309,7 +306,7 @@ journalctl -u vouch-server -f
 # docker-compose.yml
 services:
   vouch-server:
-    image: ghcr.io/vouch-sh/vouch:1.0.0
+    image: ghcr.io/vouch-sh/vouch:<version>
     container_name: vouch-server
     restart: unless-stopped
     ports:
@@ -353,7 +350,7 @@ helm install vouch-server vouch-server-0.1.0.tgz \
   --namespace vouch \
   --create-namespace \
   --set image.repository=vouch-server \
-  --set image.tag=1.0.0 \
+  --set image.tag=<version> \
   --values my-values.yaml
 ```
 
@@ -366,20 +363,27 @@ Regardless of deployment method:
 ```bash
 # Verify health endpoint
 curl -k https://auth.internal/health
-# Expected: {"status":"healthy"}
+# Expected: ok
 
 # Verify SSH CA is loaded (if configured)
 curl -k https://auth.internal/v1/credentials/ssh/ca
-# Expected: ssh-ed25519 AAAA... vouch-ca@auth.internal
+# Expected: {"public_key":"ssh-ed25519 AAAA...","comment":"vouch-ca@auth.internal"}
 ```
 
 ## Step 8: Distribute CA Public Key
 
 The SSH CA public key must be trusted by all SSH servers in the air-gapped environment:
 
+The endpoint returns JSON, so extract the `public_key` field — writing the raw response into the
+file puts JSON where `sshd` expects a key, and every certificate login fails:
+
 ```bash
 # Fetch CA public key via API
-curl -k https://auth.internal/v1/credentials/ssh/ca > vouch-ca.pub
+curl -sk https://auth.internal/v1/credentials/ssh/ca | jq -r .public_key > vouch-ca.pub
+
+# Confirm it looks like a key, not JSON
+cat vouch-ca.pub
+# ssh-ed25519 AAAA...
 
 # Copy to all SSH servers
 scp vouch-ca.pub root@server:/etc/ssh/vouch-ca.pub
@@ -406,21 +410,24 @@ echo "john@company.internal" > /etc/ssh/auth_principals/john
 echo "john" >> /etc/ssh/auth_principals/john
 ```
 
-## Step 9: Configure CLI for Air-Gap
+## Step 9: Point Workstations at the Internal Server
 
-```bash
-# ~/.config/vouch/config.json
-{
-  "server_url": "https://auth.internal",
-  "ca_cert_path": "/etc/vouch/root-ca.crt"
-}
-```
+Each workstation needs the CLI pointed at the enclave's Vouch server, either per-invocation with
+`--server` or via the environment:
 
-Or via environment:
 ```bash
 export VOUCH_SERVER=https://auth.internal
-export VOUCH_CA_CERT=/etc/vouch/root-ca.crt
 ```
+
+The CLI has no option for supplying an extra CA bundle. If your Vouch server presents a
+certificate from an internal CA, that CA must be installed in the **workstation's operating
+system trust store** — the same requirement browsers have for the enrollment flow. Distribute it
+through the same channel you already use for internal PKI (MDM profile, `update-ca-trust`,
+`update-ca-certificates`).
+
+> This is the workstation side. For CLI configuration in general — installation, `vouch enroll`,
+> and the credential helpers — see the CLI documentation at
+> [vouch.sh/docs](https://vouch.sh/docs/).
 
 ## Step 10: Enroll Users
 

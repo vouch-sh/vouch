@@ -1,6 +1,6 @@
 //! Completeness test binding the audit event registry to the operator docs.
 //!
-//! The "Audit Events" section of `docs/src/deployment/monitoring.md` must
+//! The "Audit Events" section of `docs/src/admin/audit.md` must
 //! document every [`AuditEventKind`] the server can write, and must not
 //! document event types that don't exist (phantom docs — the state this
 //! table was found in before the registry existed). Checked both ways:
@@ -23,14 +23,11 @@ use vouch_server::db::AuditEventKind;
 const NON_EVENT_TOKENS: &[&str] = &["authenticator_id", "data", "role_arn", "vouch register"];
 
 fn audit_events_section() -> String {
-    let path = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../docs/src/deployment/monitoring.md"
-    );
-    let doc = std::fs::read_to_string(path).expect("read monitoring.md");
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/src/admin/audit.md");
+    let doc = std::fs::read_to_string(path).expect("read audit.md");
     let start = doc
         .find("## Audit Events")
-        .expect("monitoring.md must have an '## Audit Events' section");
+        .expect("audit.md must have an '## Audit Events' section");
     let rest = doc.get(start..).expect("section start is a char boundary");
     let end = rest
         .get("## Audit Events".len()..)
@@ -67,7 +64,7 @@ fn every_audit_event_kind_is_documented() {
     }
     assert!(
         missing.is_empty(),
-        "audit event kinds missing from docs/src/deployment/monitoring.md \
+        "audit event kinds missing from docs/src/admin/audit.md \
          'Audit Events' section: {missing:?}"
     );
 }
@@ -91,7 +88,7 @@ fn docs_do_not_list_phantom_event_types() {
     }
     assert!(
         phantom.is_empty(),
-        "docs/src/deployment/monitoring.md documents event types that no code \
+        "docs/src/admin/audit.md documents event types that no code \
          writes (remove them or register the kind): {phantom:?}"
     );
 }

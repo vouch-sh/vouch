@@ -109,8 +109,11 @@ persistence:
   mountPath: /data
 
 # Health check configuration
+# Liveness uses /health (static, always 200 while the process is up).
+# Readiness uses /health/ready (checks the database, 503 when it is unreachable).
 healthcheck:
   path: /health
+  readinessPath: /health/ready
   initialDelaySeconds: 5
   periodSeconds: 10
   timeoutSeconds: 3
@@ -175,4 +178,16 @@ helm upgrade vouch-server oci://ghcr.io/vouch-sh/charts/vouch-server \
 
 ## Health Checks
 
-The chart configures liveness and readiness probes against the `/health` endpoint.
+Vouch exposes two separate endpoints, and they are not interchangeable:
+
+| Probe | Endpoint | Behavior |
+|-------|----------|----------|
+| Liveness | `/health` | Returns `200` with the body `ok` whenever the process is running. It performs no dependency checks, so it only ever fails if the process is hung or dead — which is exactly what a liveness probe should test. |
+| Readiness | `/health/ready` | Runs `SELECT 1` against the database. Returns `200 {"status":"ready"}`, or `503 {"status":"not_ready","reason":"database"}` when the database is unreachable. |
+
+> **Important**: point the readiness probe at `/health/ready`, not `/health`. A pod whose
+> database connection has failed will keep passing a `/health` readiness probe and stay in the
+> Service's endpoint list, sending every request to an instance that cannot serve it.
+
+See [Monitoring and Metrics](../operations/monitoring.md) for the full endpoint list and the
+Prometheus metrics.

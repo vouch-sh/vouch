@@ -38,8 +38,7 @@ repos:
             crates/vouch-server/src/services/integrations/github/app\.rs|
             crates/vouch-server/src/infra/tls\.rs|
             crates/vouch-server/src/crypto/keys\.rs|
-            crates/vouch-server/src/crypto/pem\.rs|
-            docs/src/operations/key-management\.md
+            crates/vouch-server/src/crypto/pem\.rs
           )$
       - id: mixed-line-ending
         args: [--fix=lf]

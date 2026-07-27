@@ -7,28 +7,29 @@ Vouch supports SCIM 2.0 (RFC 7643/7644) for user provisioning and de-provisionin
 The admin API endpoints (`/api/v1/org/*`) require an authenticated Vouch session from a user with org admin privileges. The server accepts the access token via `Authorization: Bearer <token>`, `Authorization: DPoP <token>`, or the `vouch_session` cookie.
 
 **Prerequisites:**
-- Your user account must have the `is_org_admin` flag set in the database
-- You must be assigned to an organization (`org_id`)
+- You must belong to an organization and be an org administrator.
+
+You do not create either by hand. Organizations are created automatically the first time someone
+enrolls from a given email domain, and that first enrollee becomes the organization's
+administrator. Every administrator after that is promoted from the admin UI. See
+[Organizations and Administrators](organizations.md) for the full model.
 
 ### 1. Create a SCIM token
 
-Log in with `vouch login`, then create a SCIM token using the cookie file or token command:
+The simplest way is the admin UI: go to **`/admin/scim-tokens`**, create a token, and copy it.
+Choose an expiry between 1 and 365 days.
+
+To script it instead, call the API with an access token from an admin session:
 
 ```bash
-# Using cookie file (written automatically on login)
-curl -X POST https://auth.example.com/api/v1/org/scim-tokens \
-  -b ~/.local/state/vouch/cookie.txt \
-  -H "Content-Type: application/json" \
-  -d '{"description": "SCIM integration", "expires_in_days": 90}'
-
-# Or using the token command
 curl -X POST https://auth.example.com/api/v1/org/scim-tokens \
   -H "Authorization: Bearer $(vouch credential token)" \
   -H "Content-Type: application/json" \
   -d '{"description": "SCIM integration", "expires_in_days": 90}'
 ```
 
-The response includes a token prefixed `vouch_scim_...`. This token is shown once and cannot be retrieved again.
+Either way the token is prefixed `vouch_scim_` and is **shown once**. It is stored only as a
+SHA-256 hash, so it cannot be recovered — if you lose it, revoke it and create another.
 
 ### 2. Configure your IdP
 
@@ -38,15 +39,20 @@ Enter the following in your IdP's SCIM configuration:
 
 ### 3. Manage tokens
 
+List and revoke tokens at `/admin/scim-tokens`, or through the API:
+
 ```bash
 # List active SCIM tokens
-curl -b ~/.local/state/vouch/cookie.txt \
+curl -H "Authorization: Bearer $(vouch credential token)" \
   https://auth.example.com/api/v1/org/scim-tokens
 
 # Revoke a SCIM token
-curl -X DELETE -b ~/.local/state/vouch/cookie.txt \
+curl -X DELETE -H "Authorization: Bearer $(vouch credential token)" \
   https://auth.example.com/api/v1/org/scim-tokens/<token-id>
 ```
+
+Revocation takes effect immediately — tokens are checked against the database on every request.
+Expired tokens are removed by the background cleanup task.
 
 ## De-Provisioning Behavior
 
@@ -62,25 +68,6 @@ When a user is de-provisioned via SCIM (e.g., employee leaves the organization):
 
 **Key principle**: De-provisioning is immediate and complete. When someone leaves via SCIM, they lose all Vouch access instantly — no waiting for session expiration.
 
-```rust
-// SCIM de-provision handling (DELETE /scim/v2/Users/:id)
-async fn delete_user(user_id: &str) -> Result<()> {
-    // 1. Invalidate all active sessions immediately
-    db::delete_sessions_for_user(&db, user_id).await?;
-
-    // 2. Revoke all SSH certificates for this user
-    db::revoke_all_ssh_certificates_for_user(&db, user_id, Some("User deleted via SCIM"), Some("scim")).await?;
-
-    // 3. Delete user (cascades to authenticators)
-    db::delete_user(&db, user_id).await?;
-
-    // 4. Log audit event
-    db::insert_scim_audit(&db, "delete", "User", user_id, Some(&token_id), Some(&details)).await?;
-
-    Ok(())
-}
-```
-
 ## SCIM Endpoint Authentication
 
 SCIM endpoints require bearer token authentication:
@@ -88,15 +75,15 @@ SCIM endpoints require bearer token authentication:
 **Endpoint**: `POST /scim/v2/Users`, `DELETE /scim/v2/Users/:id`, etc.
 
 **Authentication**:
-- Bearer token in `Authorization` header
-- Token generated via the admin API (`POST /api/v1/org/scim-tokens`)
-- Tokens are long-lived but can be rotated/revoked
-- Separate token per IdP integration
+- Bearer token in the `Authorization` header
+- Token created in the admin UI or via `POST /api/v1/org/scim-tokens`
+- Expiry is operator-chosen at creation, between 1 and 365 days
+- Use a separate token per IdP integration, so one can be revoked without disturbing the others
 
 ```bash
 # Example SCIM request
-curl -X DELETE https://vouch.example.com/scim/v2/Users/usr_abc123 \
-  -H "Authorization: Bearer scim_token_xyz789" \
+curl -X DELETE https://auth.example.com/scim/v2/Users/usr_abc123 \
+  -H "Authorization: Bearer vouch_scim_..." \
   -H "Content-Type: application/scim+json"
 ```
 

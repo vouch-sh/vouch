@@ -59,7 +59,7 @@ macro_rules! audit_event_kinds {
         /// accepts these kinds, the cleanup task derives retention from
         /// [`Self::retention`], and `tests/audit_event_docs.rs` fails when a
         /// variant is missing from the operator documentation
-        /// (`docs/src/deployment/monitoring.md`).
+        /// (`docs/src/admin/audit.md`).
         #[derive(Debug, Clone, Copy, PartialEq, Eq)]
         pub enum AuditEventKind {
             $($(#[$attr])* $variant,)+

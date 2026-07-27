@@ -42,25 +42,25 @@ Vouch server configuration is done via environment variables (see [Configure Vou
 1. **Download updated packages** (connected environment)
 ```bash
 # Download latest packages from packages.vouch.sh
-curl -LO https://packages.vouch.sh/rpm/x86_64/vouch-server-1.1.0-1.x86_64.rpm
-curl -LO https://packages.vouch.sh/rpm/x86_64/vouch-1.1.0-1.x86_64.rpm
+curl -LO https://packages.vouch.sh/rpm/x86_64/vouch-server-<new-version>-1.x86_64.rpm
+curl -LO https://packages.vouch.sh/rpm/x86_64/vouch-<new-version>-1.x86_64.rpm
 
 # For container deployments
-docker pull ghcr.io/vouch-sh/vouch:1.1.0
-docker save ghcr.io/vouch-sh/vouch:1.1.0 -o vouch-server-1.1.0.tar
+docker pull ghcr.io/vouch-sh/vouch:<new-version>
+docker save ghcr.io/vouch-sh/vouch:<new-version> -o vouch-server-<new-version>.tar
 ```
 
 2. **Verify signatures** (connected environment)
 ```bash
-rpm -K vouch-server-1.1.0-1.x86_64.rpm
-rpm -K vouch-1.1.0-1.x86_64.rpm
+rpm -K vouch-server-<new-version>-1.x86_64.rpm
+rpm -K vouch-<new-version>-1.x86_64.rpm
 ```
 
 3. **Transfer via approved media** (sneakernet)
 
 4. **Verify again** (air-gapped environment)
 ```bash
-rpm -K vouch-server-1.1.0-1.x86_64.rpm
+rpm -K vouch-server-<new-version>-1.x86_64.rpm
 sha256sum -c SHA256SUMS
 ```
 
@@ -72,7 +72,7 @@ For RPM installations:
 cp /data/vouch.db /data/vouch.db.backup.$(date +%Y%m%d)
 
 # Upgrade package (migrations run automatically on next startup)
-rpm -Uvh vouch-server-1.1.0-1.x86_64.rpm
+rpm -Uvh vouch-server-<new-version>-1.x86_64.rpm
 
 # Restart service
 systemctl restart vouch-server
@@ -83,7 +83,7 @@ curl -k https://auth.internal/health
 
 For container deployments:
 ```bash
-docker load < vouch-server-1.1.0.tar
+docker load < vouch-server-<new-version>.tar
 # Update docker-compose.yml image tag, then:
 docker-compose up -d
 ```
@@ -96,7 +96,7 @@ For RPM installations:
 cp /data/vouch.db.backup.YYYYMMDD /data/vouch.db
 
 # Downgrade package
-rpm -Uvh --oldpackage vouch-server-1.0.0-1.x86_64.rpm
+rpm -Uvh --oldpackage vouch-server-<previous-version>-1.x86_64.rpm
 
 # Restart service
 systemctl restart vouch-server
