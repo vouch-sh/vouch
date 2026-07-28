@@ -257,10 +257,7 @@ fn test_b24_verify_ecdsa_signature() {
     assert_eq!(pub_key_bytes.len(), 65);
     assert_eq!(pub_key_bytes[0], 0x04);
 
-    let verifier = vouch_httpsig::algorithm::ecdsa_p256::EcdsaP256Verifier::new(
-        pub_key_bytes,
-        "test-key-ecc-p256",
-    );
+    let verifier = vouch_httpsig::algorithm::ecdsa_p256::EcdsaP256Verifier::new(pub_key_bytes);
 
     // RFC signature: sig-b24
     let sig_b64 =
