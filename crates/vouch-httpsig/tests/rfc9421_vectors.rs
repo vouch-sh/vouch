@@ -454,8 +454,7 @@ fn test_b26_ed25519_verify_signature() {
     let pub_key_bytes = &pub_spki_der[12..];
     assert_eq!(pub_key_bytes.len(), 32);
 
-    let verifier =
-        vouch_httpsig::algorithm::ed25519::Ed25519Verifier::new(pub_key_bytes, "test-key-ed25519");
+    let verifier = vouch_httpsig::algorithm::ed25519::Ed25519Verifier::new(pub_key_bytes);
 
     let expected_sig_bytes = STANDARD.decode(expected_sig).unwrap();
     vouch_httpsig::algorithm::VerifyingAlgorithm::verify(&verifier, &base, &expected_sig_bytes)
@@ -545,8 +544,7 @@ fn test_b4_transform_verify_ed25519_signature() {
     let pub_spki_der = STANDARD.decode(&pub_pem_body).unwrap();
     let pub_key_bytes = &pub_spki_der[12..];
 
-    let verifier =
-        vouch_httpsig::algorithm::ed25519::Ed25519Verifier::new(pub_key_bytes, "test-key-ed25519");
+    let verifier = vouch_httpsig::algorithm::ed25519::Ed25519Verifier::new(pub_key_bytes);
 
     let sig_b64 =
         "ZT1kooQsEHpZ0I1IjCqtQppOmIqlJPeo7DHR3SoMn0s5JZ1eRGS0A+vyYP9t/LXlh5QMFFQ6cpLt2m0pmj3NDA==";
@@ -593,8 +591,7 @@ fn test_b4_transform_modified_method_fails() {
     let pub_spki_der = STANDARD.decode(&pub_pem_body).unwrap();
     let pub_key_bytes = &pub_spki_der[12..];
 
-    let verifier =
-        vouch_httpsig::algorithm::ed25519::Ed25519Verifier::new(pub_key_bytes, "test-key-ed25519");
+    let verifier = vouch_httpsig::algorithm::ed25519::Ed25519Verifier::new(pub_key_bytes);
 
     let sig_b64 =
         "ZT1kooQsEHpZ0I1IjCqtQppOmIqlJPeo7DHR3SoMn0s5JZ1eRGS0A+vyYP9t/LXlh5QMFFQ6cpLt2m0pmj3NDA==";
