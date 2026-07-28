@@ -224,7 +224,7 @@ async fn delete_with_step_up(
                 tr_println!("keys-step-up-needed");
                 crate::commands::login::run(server, 30)
                     .await
-                    .context("step-up re-authentication failed")?;
+                    .context(tr!("err-step-up-re-authentication-failed"))?;
 
                 let fresh_client = VouchClient::new(server).await?;
                 Ok(fresh_client

@@ -9,6 +9,7 @@
 
 use anyhow::{Context, Result};
 use secrecy::{ExposeSecret, SecretString};
+use vouch_cli::tr;
 
 use crate::config::Config;
 
@@ -23,11 +24,10 @@ pub(crate) async fn run(server: &str) -> Result<()> {
 }
 
 pub(crate) async fn get_token(server: &str) -> Result<SecretString> {
-    let config = Config::load().context("failed to load Vouch config")?;
-    let fed = config
-        .ai()
-        .and_then(|ai| ai.openai.clone())
-        .context("OpenAI federation not configured — run 'vouch setup openai' first")?;
+    let config = Config::load().context(tr!("err-failed-load-vouch-config"))?;
+    let fed = config.ai().and_then(|ai| ai.openai.clone()).context(tr!(
+        "err-openai-federation-not-configured-run-vouch-setup-ope"
+    ))?;
     let endpoint = fed
         .token_endpoint
         .clone()
@@ -63,6 +63,6 @@ pub(crate) async fn get_token(server: &str) -> Result<SecretString> {
     let token = data
         .get("access_token")
         .and_then(serde_json::Value::as_str)
-        .context("cached OpenAI token is missing the access_token field")?;
+        .context(tr!("err-cached-openai-token-is-missing-access-token-field"))?;
     Ok(SecretString::from(token.to_string()))
 }

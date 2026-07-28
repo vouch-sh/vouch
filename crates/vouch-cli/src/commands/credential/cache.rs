@@ -86,7 +86,7 @@ where
         Err(e) if is_network_error(&e) => {
             // 3. Network error — fall back to cache
             if let Some(cached) = get(cache_key).await {
-                eprintln!("vouch: using cached {label} (server unreachable)");
+                vouch_cli::tr_eprintln!("credential-cache-using-cached", label = label);
                 Ok(cached)
             } else {
                 Err(e)

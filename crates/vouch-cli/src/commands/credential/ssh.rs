@@ -9,7 +9,7 @@ use ssh_key::{
     Algorithm, LineEnding, PrivateKey, PublicKey, certificate::Certificate, rand_core::OsRng,
 };
 use std::path::{Path, PathBuf};
-use vouch_cli::{tr_args, tr_println};
+use vouch_cli::{tr, tr_args, tr_println};
 use vouch_common::{SshCertificateRequest, SshCertificateResponse};
 
 use crate::client::VouchClient;
@@ -36,7 +36,7 @@ impl KeypairAction {
 
 /// Get the SSH directory path (~/.ssh).
 pub(crate) fn ssh_dir() -> Result<PathBuf> {
-    let home = dirs::home_dir().context("could not determine home directory")?;
+    let home = dirs::home_dir().context(tr!("err-could-not-determine-home-directory"))?;
     Ok(home.join(".ssh"))
 }
 
@@ -72,10 +72,12 @@ pub(crate) fn ensure_keypair(key_path: &Path) -> Result<KeypairAction> {
 
     if key_path.exists() && pub_path.exists() {
         // Load existing public key
-        let pub_key_str = std::fs::read_to_string(&pub_path)
-            .with_context(|| format!("failed to read {}", pub_path.display()))?;
-        let pub_key = PublicKey::from_openssh(&pub_key_str)
-            .map_err(|e| anyhow::anyhow!("failed to parse public key: {e}"))?;
+        let pub_key_str = std::fs::read_to_string(&pub_path).with_context(|| {
+            tr_args!("err-failed-read-2", value = pub_path.display().to_string())
+        })?;
+        let pub_key = PublicKey::from_openssh(&pub_key_str).map_err(|e| {
+            anyhow::anyhow!(tr_args!("err-failed-parse-public-key", e = e.to_string()))
+        })?;
         return Ok(KeypairAction::Loaded(pub_key));
     }
 
@@ -84,22 +86,28 @@ pub(crate) fn ensure_keypair(key_path: &Path) -> Result<KeypairAction> {
 
     // Generate new keypair
     let private_key = PrivateKey::random(&mut OsRng, Algorithm::Ed25519)
-        .map_err(|e| anyhow::anyhow!("failed to generate SSH key: {e}"))?;
+        .map_err(|e| anyhow::anyhow!(tr_args!("err-failed-generate-ssh-key", e = e.to_string())))?;
 
     // Save private key (atomic + secure permissions)
-    let private_key_str = private_key
-        .to_openssh(LineEnding::LF)
-        .map_err(|e| anyhow::anyhow!("failed to serialize private key: {e}"))?;
+    let private_key_str = private_key.to_openssh(LineEnding::LF).map_err(|e| {
+        anyhow::anyhow!(tr_args!(
+            "err-failed-serialize-private-key",
+            e = e.to_string()
+        ))
+    })?;
     vouch_common::fs::atomic_write_secure(key_path, private_key_str.as_bytes())
-        .with_context(|| format!("failed to write {}", key_path.display()))?;
+        .with_context(|| tr_args!("err-failed-write-5", value = key_path.display().to_string()))?;
 
     // Save public key (atomic)
     let public_key = private_key.public_key();
-    let pub_key_str = public_key
-        .to_openssh()
-        .map_err(|e| anyhow::anyhow!("failed to serialize public key: {e}"))?;
+    let pub_key_str = public_key.to_openssh().map_err(|e| {
+        anyhow::anyhow!(tr_args!(
+            "err-failed-serialize-public-key",
+            e = e.to_string()
+        ))
+    })?;
     vouch_common::fs::atomic_write(&pub_path, format!("{pub_key_str}\n").as_bytes())
-        .with_context(|| format!("failed to write {}", pub_path.display()))?;
+        .with_context(|| tr_args!("err-failed-write-5", value = pub_path.display().to_string()))?;
 
     Ok(KeypairAction::Generated(public_key.clone()))
 }
@@ -226,9 +234,9 @@ pub(crate) async fn provision_ssh_certificate(
         KeypairAction::Loaded(_) => ProvisionOutcome::Issued,
     };
     let public_key = action.public_key();
-    let pub_key_str = public_key
-        .to_openssh()
-        .map_err(|e| anyhow::anyhow!("failed to format public key: {e}"))?;
+    let pub_key_str = public_key.to_openssh().map_err(|e| {
+        anyhow::anyhow!(tr_args!("err-failed-format-public-key", e = e.to_string()))
+    })?;
 
     // Request certificate from server
     let mut client = VouchClient::new(server).await?;
@@ -242,12 +250,17 @@ pub(crate) async fn provision_ssh_certificate(
     let response: SshCertificateResponse = client
         .post_authenticated("/v1/credentials/ssh", &request)
         .await
-        .context("failed to get SSH certificate")?;
+        .context(tr!("err-failed-get-ssh-certificate"))?;
 
     // Save certificate (atomic)
     let cert_path = PathBuf::from(format!("{}-cert.pub", key_path.display()));
     vouch_common::fs::atomic_write(&cert_path, format!("{}\n", response.certificate).as_bytes())
-        .with_context(|| format!("failed to write {}", cert_path.display()))?;
+        .with_context(|| {
+            tr_args!(
+                "err-failed-write-5",
+                value = cert_path.display().to_string()
+            )
+        })?;
 
     Ok(SshProvisionResult {
         key_path,

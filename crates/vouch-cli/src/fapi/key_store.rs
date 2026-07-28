@@ -14,6 +14,7 @@
 
 use super::error::FapiError;
 use super::key::{ClientKey, ClientKeyFile};
+use crate::tr;
 
 /// Keyring service name for vouch credentials.
 const SERVICE: &str = "vouch";
@@ -175,11 +176,11 @@ pub fn load_or_create_client_key() -> anyhow::Result<ClientKey> {
         return Ok(key);
     }
 
-    let key_path =
-        vouch_common::paths::client_key_file().context("cannot determine data directory")?;
+    let key_path = vouch_common::paths::client_key_file()
+        .context(tr!("err-cannot-determine-data-directory"))?;
 
     // 2. Generate a new key.
-    let key = ClientKey::generate().context("failed to generate FAPI client key")?;
+    let key = ClientKey::generate().context(tr!("err-failed-generate-fapi-client-key"))?;
     tracing::debug!("Generated new FAPI client key: kid={}", key.kid());
 
     // Save to keychain first, verify it persisted, fall back to disk.
@@ -196,7 +197,7 @@ pub fn load_or_create_client_key() -> anyhow::Result<ClientKey> {
     // Keychain unavailable or unreliable — save to disk.
     tracing::debug!("Keychain unreliable, saving client key to disk");
     key.save(&key_path)
-        .context("failed to save FAPI client key to disk")?;
+        .context(tr!("err-failed-save-fapi-client-key-disk"))?;
     tracing::debug!("Saved new client key to disk");
 
     Ok(key)

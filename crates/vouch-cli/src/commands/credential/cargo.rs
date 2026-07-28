@@ -227,7 +227,7 @@ pub(crate) async fn run() -> Result<()> {
     // Read request from stdin
     let request_line = read_line()?;
     let request: CredentialRequest =
-        serde_json::from_str(&request_line).context("failed to parse credential request")?;
+        serde_json::from_str(&request_line).context(tr!("err-failed-parse-credential-request"))?;
 
     // Verify protocol version
     if request.v != PROTOCOL_VERSION {
@@ -305,14 +305,12 @@ async fn handle_get_codeartifact(registry: &codeartifact::CodeArtifactRegistry) 
     let server = resolved.server_url;
 
     // Use the shared CodeArtifact credential flow
-    let result = match super::codeartifact::get_token(
-        &server,
-        &registry.domain,
-        &registry.domain_owner,
-        &registry.region,
-    )
-    .await
-    {
+    let target = super::codeartifact::CodeArtifactTarget::new(
+        registry.domain.clone(),
+        registry.domain_owner.clone(),
+        registry.region.clone(),
+    );
+    let result = match super::codeartifact::get_token(&server, &target).await {
         Ok(r) => r,
         Err(e) => {
             return send_error(
@@ -361,7 +359,7 @@ fn handle_logout(registry: &RegistryInfo) -> Result<()> {
 
 /// Send a JSON message to stdout.
 fn send_message<T: Serialize>(message: &T) -> Result<()> {
-    let json = serde_json::to_string(message).context("failed to serialize message")?;
+    let json = serde_json::to_string(message).context(tr!("err-failed-serialize-message"))?;
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
     writeln!(out, "{json}")?;
@@ -385,7 +383,7 @@ fn read_line() -> Result<String> {
     stdin
         .lock()
         .read_line(&mut line)
-        .context("failed to read from stdin")?;
+        .context(tr!("err-failed-read-from-stdin"))?;
     Ok(line.trim().to_string())
 }
 

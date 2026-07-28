@@ -100,7 +100,7 @@ pub(crate) async fn run(server: &str, quiet: bool, json: bool) -> Result<()> {
         if !suppress {
             tr_println!("doctor-some-failed");
         }
-        bail!("doctor: one or more checks failed")
+        bail!(tr!("err-doctor-one-or-more-checks-failed"))
     }
 }
 

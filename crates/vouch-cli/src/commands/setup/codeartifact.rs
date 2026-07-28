@@ -9,12 +9,12 @@ use std::collections::BTreeMap;
 use anyhow::{Context, Result};
 use secrecy::ExposeSecret;
 
-use crate::commands::credential::codeartifact::resolve_codeartifact_params;
+use crate::commands::credential::codeartifact::CodeArtifactTarget;
 use crate::config::{CodeArtifactProfile, Config};
 use crate::install_path::resolve_install_path;
 use crate::integrations::aws::codeartifact::{CodeArtifactRegistry, parse_codeartifact_url};
-use crate::integrations::aws::get_local_aws_role;
 use crate::integrations::aws::sts::parse_role_arn;
+use crate::integrations::aws::{ProfileOverride, resolve_vouch_profile};
 use crate::integrations::cargo::CargoConfig;
 
 /// Supported package manager tools for CodeArtifact.
@@ -44,30 +44,26 @@ pub(crate) enum Tool {
 /// * `domain_owner` - AWS account ID that owns the domain (optional if profile configured)
 /// * `region` - AWS region (optional if profile configured)
 /// * `repository` - CodeArtifact repository name
-/// * `profile` - Named profile to use/save
+/// * `domain_profile` - Named domain profile to save the resolved domain under
 pub(crate) async fn run(
     server: &str,
     tool: Tool,
-    domain: Option<&str>,
-    domain_owner: Option<&str>,
-    region: Option<&str>,
+    resolved: &CodeArtifactTarget,
     repository: &str,
-    profile: Option<&str>,
+    domain_profile: Option<&str>,
 ) -> Result<()> {
-    let (domain, domain_owner, region) =
-        resolve_codeartifact_params(domain, domain_owner, region, profile)?;
-
     vouch_cli::tr_println!("setup-ca-header");
     println!();
 
-    // Save profile to config (using file lock for concurrent safety)
-    let profile_name = profile.unwrap_or("default");
+    // Save the domain profile to config (using file lock for concurrent safety)
+    let profile_name = domain_profile.unwrap_or("default");
     {
         let name = profile_name.to_string();
         let ca_profile = CodeArtifactProfile {
-            domain: domain.clone(),
-            domain_owner: domain_owner.clone(),
-            region: region.clone(),
+            domain: resolved.domain.clone(),
+            domain_owner: resolved.domain_owner.clone(),
+            region: resolved.region.clone(),
+            aws_profile: resolved.profile.clone(),
         };
         Config::modify(|config| {
             config.set_codeartifact_profile(&name, ca_profile);
@@ -77,32 +73,23 @@ pub(crate) async fn run(
     vouch_cli::tr_println!("setup-ca-saved-profile", name = profile_name);
     println!();
 
-    // Derive domain suffix from the AWS config's role ARN partition
-    // to support China, GovCloud, and other partitions.
-    let domain_suffix = get_local_aws_role()
-        .and_then(|role| {
-            parse_role_arn(&role)
-                .ok()
-                .map(|arn| arn.partition.dns_suffix())
-        })
-        .unwrap_or("amazonaws.com");
+    // Derive the domain suffix from the role ARN's partition so China and
+    // GovCloud get the right host. Propagate a resolution failure rather than
+    // defaulting: a silent fall back to amazonaws.com writes an unreachable
+    // registry URL into pip.conf / .cargo/config.toml and only fails later.
+    let anchor = resolve_vouch_profile(resolved.profile.as_deref(), ProfileOverride::Profile)?;
+    let domain_suffix =
+        parse_role_arn(&anchor.role_arn).map_or("amazonaws.com", |arn| arn.partition.dns_suffix());
 
-    let ca_host = format!("{domain}-{domain_owner}.d.codeartifact.{region}.{domain_suffix}");
+    let ca_host = format!(
+        "{}-{}.d.codeartifact.{}.{domain_suffix}",
+        resolved.domain, resolved.domain_owner, resolved.region
+    );
 
     match tool {
         Tool::Cargo => setup_cargo(&ca_host, repository),
         Tool::Pip => setup_pip(&ca_host, repository),
-        Tool::Npm => {
-            setup_npm(
-                server,
-                &domain,
-                &domain_owner,
-                &region,
-                &ca_host,
-                repository,
-            )
-            .await
-        }
+        Tool::Npm => setup_npm(server, resolved, &ca_host, repository).await,
         Tool::Pnpm => setup_pnpm(&ca_host, repository),
         Tool::Uv => setup_uv(&ca_host, repository),
     }
@@ -404,16 +391,13 @@ fn get_uv_config_dir() -> Result<std::path::PathBuf> {
 /// npm registry URL and bearer token.
 async fn setup_npm(
     server: &str,
-    domain: &str,
-    domain_owner: &str,
-    region: &str,
+    target: &CodeArtifactTarget,
     ca_host: &str,
     repository: &str,
 ) -> Result<()> {
-    let result =
-        crate::commands::credential::codeartifact::get_token(server, domain, domain_owner, region)
-            .await
-            .with_context(|| vouch_cli::tr!("setup-ca-err-fetch-token"))?;
+    let result = crate::commands::credential::codeartifact::get_token(server, target)
+        .await
+        .with_context(|| vouch_cli::tr!("setup-ca-err-fetch-token"))?;
 
     let registry_url = format!("https://{ca_host}/npm/{repository}/");
 
@@ -655,14 +639,12 @@ async fn try_refresh_npmrc(server: &str) -> Result<()> {
         if tokens.contains_key(&key) {
             continue;
         }
-        match crate::commands::credential::codeartifact::get_token(
-            server,
-            &registry.domain,
-            &registry.domain_owner,
-            &registry.region,
-        )
-        .await
-        {
+        let target = CodeArtifactTarget::new(
+            registry.domain.clone(),
+            registry.domain_owner.clone(),
+            registry.region.clone(),
+        );
+        match crate::commands::credential::codeartifact::get_token(server, &target).await {
             Ok(token) => {
                 tokens.insert(key, token.authorization_token);
             }

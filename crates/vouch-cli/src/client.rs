@@ -411,7 +411,7 @@ impl<H: HttpClient> VouchClient<H> {
                         .await
                 }
             }
-            .with_context(|| format!("failed to connect to {url}"))?;
+            .with_context(|| tr_args!("err-failed-connect", url = url.as_str()))?;
 
             // Capture server-issued nonce for the next request's HTTP signature
             if let Some(ref nonce) = response.sig_nonce
@@ -437,7 +437,8 @@ impl<H: HttpClient> VouchClient<H> {
         Req: Serialize,
         Resp: DeserializeOwned,
     {
-        let form = serde_urlencoded::to_string(body).context("failed to serialize form data")?;
+        let form =
+            serde_urlencoded::to_string(body).context(tr!("err-failed-serialize-form-data"))?;
         self.request_with_retry(
             "POST",
             path,
@@ -478,7 +479,7 @@ impl<H: HttpClient> VouchClient<H> {
         Req: Serialize,
         Resp: DeserializeOwned,
     {
-        let json = serde_json::to_vec(body).context("failed to serialize request")?;
+        let json = serde_json::to_vec(body).context(tr!("err-failed-serialize-request"))?;
         self.request_with_retry(
             "POST",
             path,
@@ -501,7 +502,7 @@ impl<H: HttpClient> VouchClient<H> {
         Req: Serialize,
         Resp: DeserializeOwned,
     {
-        let json = serde_json::to_vec(body).context("failed to serialize request")?;
+        let json = serde_json::to_vec(body).context(tr!("err-failed-serialize-request"))?;
         self.request_with_retry(
             "PATCH",
             path,

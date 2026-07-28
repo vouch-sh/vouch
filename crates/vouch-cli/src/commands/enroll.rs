@@ -475,7 +475,7 @@ async fn register_current_key(server: &str, token: SecretString) -> Result<()> {
             },
         )
         .await
-        .context("failed to start key registration")?;
+        .context(tr!("err-failed-start-key-registration"))?;
 
     // If the server already has credentials for this user (browser just
     // registered one), skip CLI registration — the browser-created
@@ -527,7 +527,7 @@ async fn register_current_key(server: &str, token: SecretString) -> Result<()> {
             },
         )
         .await
-        .context("failed to complete key registration")?;
+        .context(tr!("err-failed-complete-key-registration"))?;
 
     tr_println!(
         "enroll-key-registered",

@@ -7,6 +7,7 @@
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::path::PathBuf;
+use vouch_cli::tr;
 
 use crate::commands::credential::aws::{StsRequest, exchange_for_sts_credentials};
 use crate::integrations::aws;
@@ -87,7 +88,7 @@ async fn describe_cluster(
     })?;
 
     let parsed: DescribeClusterOutput = serde_json::from_str(&response_body)
-        .context("failed to parse EKS DescribeCluster response")?;
+        .context(tr!("err-failed-parse-eks-describecluster-response"))?;
 
     let ca_data = parsed
         .cluster
@@ -118,11 +119,12 @@ pub(crate) async fn run(
         PathBuf::from,
     );
 
-    // Auto-discover profile, region, and role
-    let profile_name = aws::resolve_profile(profile)?;
+    // Resolve profile, region, and role together so the kubeconfig records the
+    // role belonging to the profile the user named.
+    let vouch_profile = aws::resolve_vouch_profile(profile, aws::ProfileOverride::Profile)?;
+    let profile_name = vouch_profile.name;
+    let role_arn = vouch_profile.role_arn;
     let region_name = aws::resolve_region(region, &profile_name)?;
-    let role_arn = aws::get_local_aws_role()
-        .ok_or_else(|| anyhow::anyhow!(vouch_cli::tr!("setup-eks-err-aws-not-configured")))?;
 
     vouch_cli::tr_println!(
         "setup-eks-header-block",

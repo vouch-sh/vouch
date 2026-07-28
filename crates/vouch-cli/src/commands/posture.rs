@@ -24,8 +24,9 @@ pub(crate) fn run(format: OutputFormat) -> Result<()> {
     match format {
         OutputFormat::Text => print_text(&posture),
         OutputFormat::Json => {
-            let json = serde_json::to_string_pretty(&posture)
-                .map_err(|e| anyhow::anyhow!("failed to serialize posture: {e}"))?;
+            let json = serde_json::to_string_pretty(&posture).map_err(|e| {
+                anyhow::anyhow!(tr_args!("err-failed-serialize-posture", e = e.to_string()))
+            })?;
             // Machine-readable JSON output: stays English regardless of locale.
             println!("{json}");
         }

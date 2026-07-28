@@ -66,9 +66,13 @@ async fn check_docker_credential_invocation(argv0: &str) -> Result<bool> {
     if is_docker_credential_argv0(argv0) {
         let operation = std::env::args().nth(1).unwrap_or_default();
 
-        commands::credential::docker::run(&operation)
+        // The symlink carries no arguments; the profile comes from the anchor
+        // `vouch setup docker` recorded for the registry.
+        commands::credential::docker::run(&operation, None)
             .await
-            .map_err(|e| anyhow::anyhow!("docker-credential-vouch: {e}"))?;
+            .map_err(|e| {
+                anyhow::anyhow!(tr_args!("err-docker-credential-vouch", e = e.to_string()))
+            })?;
 
         return Ok(true);
     }
@@ -106,7 +110,9 @@ async fn check_git_remote_codecommit_invocation(argv0: &str) -> Result<bool> {
 
         commands::credential::codecommit::run_remote_helper(&remote_name, &url)
             .await
-            .map_err(|e| anyhow::anyhow!("git-remote-codecommit: {e}"))?;
+            .map_err(|e| {
+                anyhow::anyhow!(tr_args!("err-git-remote-codecommit", e = e.to_string()))
+            })?;
 
         return Ok(true);
     }
@@ -126,7 +132,7 @@ async fn check_keyring_invocation(argv0: &str) -> Result<bool> {
 
         commands::credential::pip::run(&operation, service_url.as_deref(), username.as_deref())
             .await
-            .map_err(|e| anyhow::anyhow!("keyring: {e}"))?;
+            .map_err(|e| anyhow::anyhow!(tr_args!("err-keyring", e = e.to_string())))?;
 
         return Ok(true);
     }
@@ -150,22 +156,24 @@ async fn check_pnpm_tokenhelper_invocation(argv0: &str) -> Result<bool> {
         let domain = flag("--domain");
         let domain_owner = flag("--domain-owner");
         let region = flag("--region");
+        let domain_profile = flag("--domain-profile");
         let profile = flag("--profile");
 
         // Resolve session to get server URL
-        let session = crate::session::resolve_session()
-            .await
-            .map_err(|e| anyhow::anyhow!("vouch-pnpm-tokenhelper: {e}"))?;
+        let session = crate::session::resolve_session().await.map_err(|e| {
+            anyhow::anyhow!(tr_args!("err-vouch-pnpm-tokenhelper", e = e.to_string()))
+        })?;
 
         commands::credential::codeartifact::run(
             &session.server_url,
             domain.map(String::as_str),
             domain_owner.map(String::as_str),
             region.map(String::as_str),
+            domain_profile.map(String::as_str),
             profile.map(String::as_str),
         )
         .await
-        .map_err(|e| anyhow::anyhow!("vouch-pnpm-tokenhelper: {e}"))?;
+        .map_err(|e| anyhow::anyhow!(tr_args!("err-vouch-pnpm-tokenhelper", e = e.to_string())))?;
 
         return Ok(true);
     }
@@ -210,16 +218,16 @@ struct Cli {
 /// Shared CodeArtifact CLI arguments for exec/env commands.
 #[derive(clap::Args)]
 struct CodeArtifactArgs {
-    /// CodeArtifact domain name (required for --type codeartifact unless profile is set).
+    /// CodeArtifact domain name (required for --type codeartifact unless --codeartifact-profile is set).
     #[arg(long)]
     codeartifact_domain: Option<String>,
-    /// AWS account ID that owns the CodeArtifact domain (required for --type codeartifact unless profile is set).
+    /// AWS account ID that owns the CodeArtifact domain (required for --type codeartifact unless --codeartifact-profile is set).
     #[arg(long)]
     codeartifact_domain_owner: Option<String>,
-    /// AWS region for CodeArtifact (required for --type codeartifact unless profile is set).
+    /// AWS region for CodeArtifact (required for --type codeartifact unless --codeartifact-profile is set).
     #[arg(long)]
     codeartifact_region: Option<String>,
-    /// Named CodeArtifact profile from config (for --type codeartifact).
+    /// Named CodeArtifact domain profile from config (for --type codeartifact).
     #[arg(long)]
     codeartifact_profile: Option<String>,
 }
@@ -230,7 +238,7 @@ impl CodeArtifactArgs {
             domain: self.codeartifact_domain.as_deref(),
             domain_owner: self.codeartifact_domain_owner.as_deref(),
             region: self.codeartifact_region.as_deref(),
-            profile: self.codeartifact_profile.as_deref(),
+            domain_profile: self.codeartifact_profile.as_deref(),
         }
     }
 }
@@ -675,12 +683,12 @@ async fn run() -> Result<()> {
             CredentialCommands::Github { operation } => {
                 commands::credential::github::run(&operation).await
             }
-            CredentialCommands::Docker { operation } => {
-                commands::credential::docker::run(&operation).await
+            CredentialCommands::Docker { operation, profile } => {
+                commands::credential::docker::run(&operation, profile.as_deref()).await
             }
             CredentialCommands::Cargo { .. } => commands::credential::cargo::run().await,
-            CredentialCommands::Codecommit { operation } => {
-                commands::credential::codecommit::run(&operation).await
+            CredentialCommands::Codecommit { operation, profile } => {
+                commands::credential::codecommit::run(&operation, profile.as_deref()).await
             }
             CredentialCommands::Pip {
                 operation,
@@ -756,6 +764,7 @@ async fn run() -> Result<()> {
                 domain,
                 domain_owner,
                 region,
+                domain_profile,
                 profile,
             } => {
                 commands::credential::codeartifact::run(
@@ -763,6 +772,7 @@ async fn run() -> Result<()> {
                     domain.as_deref(),
                     domain_owner.as_deref(),
                     region.as_deref(),
+                    domain_profile.as_deref(),
                     profile.as_deref(),
                 )
                 .await
@@ -838,7 +848,8 @@ async fn run() -> Result<()> {
             SetupCommands::Docker {
                 registries,
                 configure,
-            } => commands::setup::docker::run(&registries, configure).await,
+                profile,
+            } => commands::setup::docker::run(&registries, configure, profile.as_deref()).await,
             SetupCommands::Cargo {
                 registry,
                 configure,
@@ -891,16 +902,22 @@ async fn run() -> Result<()> {
                 domain_owner,
                 region,
                 repository,
+                domain_profile,
                 profile,
             } => {
-                commands::setup::codeartifact::run(
-                    server,
-                    tool,
+                let target = commands::credential::codeartifact::resolve_codeartifact_params(
                     domain.as_deref(),
                     domain_owner.as_deref(),
                     region.as_deref(),
-                    &repository,
+                    domain_profile.as_deref(),
                     profile.as_deref(),
+                )?;
+                commands::setup::codeartifact::run(
+                    server,
+                    tool,
+                    &target,
+                    &repository,
+                    domain_profile.as_deref(),
                 )
                 .await
             }

@@ -117,7 +117,7 @@ async fn run_fapi_login(
 
     let dpop_proof = DpopProofBuilder::new("POST", &challenge_url)
         .build(fapi_key)
-        .context("failed to build DPoP proof for challenge request")?;
+        .context(tr!("err-failed-build-dpop-proof-challenge-request"))?;
 
     let interaction = FapiInteraction::new();
     let fapi_headers = interaction.headers();
@@ -131,7 +131,7 @@ async fn run_fapi_login(
         .json(&serde_json::json!({}))
         .send()
         .await
-        .context("failed to request FIDO2 challenge")?;
+        .context(tr!("err-failed-request-fido2-challenge"))?;
 
     let status = response.status();
     if !status.is_success() {
@@ -153,7 +153,7 @@ async fn run_fapi_login(
     let challenge_resp: Fido2ChallengeResponse = response
         .json()
         .await
-        .context("failed to parse challenge response")?;
+        .context(tr!("err-failed-parse-challenge-response"))?;
 
     tr_println!("login-contact-ok");
 
@@ -168,7 +168,7 @@ async fn run_fapi_login(
     // Decode the base64url challenge into raw bytes for the FIDO2 library.
     let challenge_bytes = URL_SAFE_NO_PAD
         .decode(&challenge_b64)
-        .context("challenge is not valid base64url")?;
+        .context(tr!("err-challenge-is-not-valid-base64url"))?;
 
     let assertion_result = fido2::spawn_fido2(move || {
         let key = YubiKey::wait_for_device(timeout_secs)?;
@@ -187,7 +187,7 @@ async fn run_fapi_login(
     };
 
     let payload_json =
-        serde_json::to_vec(&payload).context("failed to serialize assertion payload")?;
+        serde_json::to_vec(&payload).context(tr!("err-failed-serialize-assertion-payload"))?;
     let assertion_b64 = URL_SAFE_NO_PAD.encode(&payload_json);
 
     // Step 6: Await posture collection (started before FIDO2 wait).
@@ -235,7 +235,7 @@ async fn run_fapi_login(
     }
     let dpop_proof = dpop_builder
         .build(fapi_key)
-        .context("failed to build DPoP proof for token request")?;
+        .context(tr!("err-failed-build-dpop-proof-token-request"))?;
 
     let token_request = Fido2AssertionTokenRequest {
         grant_type: "urn:ietf:params:oauth:grant-type:fido2-assertion",
@@ -250,8 +250,8 @@ async fn run_fapi_login(
     let interaction = FapiInteraction::with_presence(true);
     let fapi_headers = interaction.headers();
 
-    let form_body =
-        serde_urlencoded::to_string(&token_request).context("failed to encode token request")?;
+    let form_body = serde_urlencoded::to_string(&token_request)
+        .context(tr!("err-failed-encode-token-request"))?;
 
     let token_resp = client
         .raw_client()
@@ -263,7 +263,7 @@ async fn run_fapi_login(
         .body(form_body)
         .send()
         .await
-        .context("failed to send token request")?;
+        .context(tr!("err-failed-send-token-request"))?;
 
     let token_status = token_resp.status();
 
@@ -299,7 +299,7 @@ async fn run_fapi_login(
     let fapi_token: Fapi2TokenResponse = token_resp
         .json()
         .await
-        .context("failed to parse token response")?;
+        .context(tr!("err-failed-parse-token-response"))?;
 
     // Derive expiry: prefer server-provided `expires_at`, else compute from `expires_in`.
     let (expires_at_str, expires_at_ts) =
@@ -347,7 +347,7 @@ async fn run_fapi_login_with_nonce(
     let dpop_proof = DpopProofBuilder::new("POST", &token_endpoint_url)
         .nonce(nonce)
         .build(fapi_key)
-        .context("failed to build DPoP proof with nonce")?;
+        .context(tr!("err-failed-build-dpop-proof-with-nonce"))?;
 
     let retry_request = Fido2AssertionTokenRequest {
         grant_type: request.grant_type,
@@ -362,8 +362,8 @@ async fn run_fapi_login_with_nonce(
     let interaction = FapiInteraction::with_presence(true);
     let fapi_headers = interaction.headers();
 
-    let form_body =
-        serde_urlencoded::to_string(&retry_request).context("failed to encode token request")?;
+    let form_body = serde_urlencoded::to_string(&retry_request)
+        .context(tr!("err-failed-encode-token-request"))?;
 
     let token_resp = client
         .raw_client()
@@ -375,7 +375,7 @@ async fn run_fapi_login_with_nonce(
         .body(form_body)
         .send()
         .await
-        .context("failed to send token request (nonce retry)")?;
+        .context(tr!("err-failed-send-token-request-nonce-retry"))?;
 
     let token_status = token_resp.status();
     if !token_status.is_success() {
@@ -386,7 +386,7 @@ async fn run_fapi_login_with_nonce(
     let fapi_token: Fapi2TokenResponse = token_resp
         .json()
         .await
-        .context("failed to parse token response")?;
+        .context(tr!("err-failed-parse-token-response"))?;
 
     let (expires_at_str, expires_at_ts) =
         resolve_expiry(fapi_token.expires_at.as_deref(), fapi_token.expires_in);
@@ -519,7 +519,7 @@ async fn ensure_client_registered(client: &VouchClient, fapi_key: &ClientKey) ->
         fapi_key,
     )
     .await
-    .context("failed to register FAPI client")?;
+    .context(tr!("err-failed-register-fapi-client"))?;
 
     // Persist the registration to config.
     Config::modify(|config| {
@@ -534,7 +534,7 @@ async fn ensure_client_registered(client: &VouchClient, fapi_key: &ClientKey) ->
         }
         config.set_dpop_key_id(&result.dpop_key_id);
     })
-    .context("failed to save FAPI registration to config")?;
+    .context(tr!("err-failed-save-fapi-registration-config"))?;
 
     Ok(result.client_id)
 }
@@ -609,7 +609,11 @@ fn token_error(body: &str, status: reqwest::StatusCode) -> anyhow::Error {
             .unwrap_or("(no description)");
         anyhow::anyhow!("{}: {desc}{hint}", oauth_err.error)
     } else {
-        anyhow::anyhow!("token request failed (HTTP {status}): {body}")
+        anyhow::anyhow!(tr_args!(
+            "err-token-request-failed-http",
+            status = status.to_string(),
+            body = body
+        ))
     }
 }
 

@@ -226,6 +226,137 @@ cmd-diag-about = Run diagnostic test of { -yubikey } registration + authenticati
 cmd-diag-long-about =
     Not available on Windows: depends on the CTAP2 protocol which Windows blocks for non-elevated processes.
 
+## credential subcommands
+#
+# Every credential subcommand supplies about/long_about/help explicitly rather
+# than letting clap derive them from Rust doc comments, which would print
+# English in every locale. A subcommand whose doc comment runs past one line
+# needs long_about too — clap builds long help from the whole comment.
+
+cmd-credential-aws-about = Obtain temporary AWS credentials
+cmd-credential-aws-long-about =
+    Two access patterns:
+
+      STS role: `--role <full-arn>` — assumes the role directly, or chains
+      through the configured management role when the target is in another
+      account.
+
+      Identity Center: `--account <id> --permission-set <name>` — exchanges
+      a { -product } RS256 token for an IdC access token, then calls
+      GetRoleCredentials. Requires Identity Center configured via
+      `{ -cmd } setup aws`.
+arg-credential-aws-role-help = AWS IAM role ARN to assume (STS role path).
+arg-credential-aws-account-help = AWS account ID (Identity Center path).
+arg-credential-aws-permission-set-help = IAM Identity Center permission-set name.
+arg-credential-aws-via-help = Management role ARN to chain through when multiple organizations are configured (STS paths only; not valid with --account/--permission-set).
+arg-credential-aws-idc-application-help = Identity Center application ARN to use when multiple IdC instances are configured (Identity Center path only; omit for single-instance setups).
+
+cmd-credential-ssh-about = Obtain an SSH certificate
+arg-credential-ssh-key-help = Path to SSH private key (default: ~/.ssh/id_ed25519_vouch).
+arg-credential-ssh-force-help = Force re-issuance even if existing certificate is still valid.
+
+cmd-credential-github-about = Git credential helper for GitHub
+cmd-credential-github-long-about =
+    This is used by git as a credential helper. Users should not call this
+    directly. Instead, use `{ -cmd } setup github` to configure git.
+arg-credential-github-operation-help = Git credential operation (get, store, erase).
+
+cmd-credential-docker-about = Docker credential helper for container registries
+cmd-credential-docker-long-about =
+    This is used by Docker as a credential helper. Users should not call this
+    directly. Instead, use `{ -cmd } setup docker` to configure Docker.
+arg-credential-docker-operation-help = Docker credential operation (get, store, erase, list).
+arg-credential-docker-profile-help = AWS profile in ~/.aws/config whose role mints ECR credentials.
+
+cmd-credential-cargo-about = Cargo credential provider for private registries
+cmd-credential-cargo-long-about =
+    This implements Cargo's credential provider protocol. Users should not call
+    this directly. Instead, use `{ -cmd } setup cargo` to configure Cargo.
+
+cmd-credential-codecommit-about = Git credential helper for AWS CodeCommit
+cmd-credential-codecommit-long-about =
+    This is used by git as a credential helper. Users should not call this
+    directly. Instead, use `{ -cmd } setup codecommit` to configure git.
+arg-credential-codecommit-operation-help = Git credential operation (get, store, erase).
+arg-credential-codecommit-profile-help = AWS profile in ~/.aws/config whose role mints CodeCommit credentials.
+
+cmd-credential-pip-about = pip keyring credential helper for CodeArtifact
+cmd-credential-pip-long-about =
+    Implements the keyring CLI protocol (`keyring get/set/del`) so pip can
+    dynamically fetch fresh CodeArtifact tokens. This command is called by pip
+    when `keyring-provider = subprocess` is configured.
+
+    Users should not call this directly. Run
+    `{ -cmd } setup codeartifact --tool pip` to configure pip.
+arg-credential-pip-operation-help = Keyring operation (get, set, del).
+arg-credential-pip-service-url-help = Service URL passed by pip (the CodeArtifact index URL).
+arg-credential-pip-username-help = Username passed by pip (typically "aws").
+
+cmd-credential-eks-about = Generate a Kubernetes bearer token for Amazon EKS authentication
+cmd-credential-eks-long-about =
+    Outputs a Kubernetes ExecCredential JSON to stdout. Use as a kubeconfig
+    exec-based credential plugin.
+arg-credential-eks-cluster-name-help = EKS cluster name.
+arg-credential-eks-region-help = AWS region (auto-detected from AWS profile or env if not specified).
+arg-credential-eks-role-help = AWS IAM role ARN to assume (auto-detected from the { -product } AWS profile if not specified).
+
+cmd-credential-k8s-about = Generate a Kubernetes OIDC token for generic Kubernetes clusters
+cmd-credential-k8s-long-about =
+    Outputs a Kubernetes ExecCredential JSON to stdout. Use as a kubeconfig
+    exec-based credential plugin for clusters configured with { -product } as
+    the OIDC provider.
+arg-credential-k8s-cluster-help = Kubernetes cluster name (used as cache key).
+arg-credential-k8s-audience-help = OIDC audience (must match --oidc-client-id on the API server). Defaults to "kubernetes" if not specified.
+
+cmd-credential-rds-about = Generate an RDS IAM authentication token
+cmd-credential-rds-long-about =
+    Prints a token to stdout that can be used as the database password for RDS
+    instances with IAM authentication enabled.
+arg-credential-rds-hostname-help = RDS instance hostname.
+arg-credential-rds-port-help = Database port (default: 5432).
+arg-credential-rds-username-help = Database username.
+arg-credential-rds-region-help = AWS region (auto-detected from AWS profile or env if not specified).
+arg-credential-rds-role-help = AWS IAM role ARN to assume (auto-detected from the { -product } AWS profile if not specified).
+
+cmd-credential-redshift-about = Generate temporary Amazon Redshift database credentials
+cmd-credential-redshift-long-about =
+    Supports both provisioned clusters (`--cluster-id`) and Redshift Serverless
+    workgroups (`--workgroup`). Exactly one must be specified. Outputs JSON with
+    DbUser, DbPassword, and Expiration.
+arg-credential-redshift-cluster-id-help = Redshift provisioned cluster identifier.
+arg-credential-redshift-workgroup-help = Redshift Serverless workgroup name.
+arg-credential-redshift-db-name-help = Database name (optional).
+arg-credential-redshift-region-help = AWS region (auto-detected from AWS profile or env if not specified).
+arg-credential-redshift-role-help = AWS IAM role ARN to assume (auto-detected from the { -product } AWS profile if not specified).
+arg-credential-redshift-duration-help = Credential duration in seconds (900-3600, default: 900). Only for provisioned clusters.
+
+cmd-credential-anthropic-about = Obtain a short-lived Anthropic (Claude) API token via Workload Identity Federation
+cmd-credential-anthropic-long-about =
+    Requires `{ -cmd } setup anthropic` and an active session
+    (`{ -cmd } login`). Prints a bare `sk-ant-oat01-...` token to stdout with no
+    trailing newline. The token acts as a non-human service account — intended
+    as a credential source for CI/headless automation, not for interactive
+    Claude Code sessions.
+
+cmd-credential-openai-about = Obtain a short-lived OpenAI API token via Workload Identity Federation
+cmd-credential-openai-long-about =
+    Requires `{ -cmd } setup openai`, an active session (`{ -cmd } login`), and
+    that OpenAI has onboarded the { -product } issuer as a workload identity
+    provider (custom OIDC is not self-service on OpenAI's side). Prints a bare
+    token to stdout — designed to be invoked by the OpenAI Codex CLI as a
+    `[model_providers.<id>.auth]` command with `refresh_interval_ms`.
+
+cmd-credential-token-about = Print the current session token for use with curl or other tools
+
+cmd-credential-codeartifact-about = Obtain a CodeArtifact authorization token
+arg-credential-codeartifact-domain-help = CodeArtifact domain name (or use --domain-profile / saved default).
+arg-credential-codeartifact-domain-owner-help = AWS account ID that owns the domain.
+arg-credential-codeartifact-region-help = AWS region.
+arg-credential-codeartifact-domain-profile-help = Named CodeArtifact domain profile from config.
+arg-credential-codeartifact-profile-help = AWS profile in ~/.aws/config whose role mints the token (distinct from --domain-profile, which names a saved CodeArtifact domain).
+
+credential-codecommit-err-exec-git = failed to exec git remote-http: { $error }
+
 ## Shared arg help
 
 arg-register-name-help = Human-readable name for this { -yubikey } (e.g., "My { -yubikey } 5"). Defaults to "{ -yubikey }" if not specified.
@@ -634,6 +765,41 @@ aws-err-not-configured =
     AWS not configured.
     Run '{ -cmd } setup aws --role <role-arn>' first, or specify --role.
 
+aws-err-no-vouch-profile =
+    No { -product } AWS profile found in ~/.aws/config.
+    Run '{ -cmd } setup aws --role <role-arn>' first.
+
+aws-err-ambiguous-profile =
+    Multiple { -product } AWS profiles found in ~/.aws/config; refusing to guess which account you meant:
+    { $listing }
+    Set AWS_PROFILE, or name the account with { $override_hint }.
+
+# Override-flag hints rendered into { $override_hint } above, one per command
+# tier. The flag tokens stay literal in every locale — they are what the user
+# types. Each hint is a whole message rather than a shared "or" joiner because
+# conjunction and word order vary by language; do not factor the joiner out.
+aws-override-hint-profile = --profile
+aws-override-hint-role = --role
+aws-override-hint-profile-or-role = --profile or --role
+
+aws-err-profile-not-found =
+    AWS profile '{ $profile }' not found in ~/.aws/config.
+    Run '{ -cmd } setup aws --profile { $profile } --role <role-arn>' to create it.
+
+aws-err-profile-not-managed =
+    AWS profile '{ $profile }' has no credential_process and is not managed by { -product }.
+    Run '{ -cmd } setup aws --profile { $profile } --role <role-arn>'.
+
+aws-err-profile-is-identity-center =
+    AWS profile '{ $profile }' uses Identity Center ({ $target }).
+    This command needs a role-based profile — run '{ -cmd } setup aws --profile <name> --role <role-arn>'.
+
+aws-err-profile-missing-role = AWS profile '{ $profile }' has no --role in its credential_process.
+
+aws-err-no-region =
+    Could not determine AWS region.
+    Specify --region, or set a region in your AWS profile or AWS_DEFAULT_REGION.
+
 sso-portal-err-token-expired = Identity Center access token is invalid or expired. Run '{ -cmd } login' to re-authenticate.
 
 aws-console-opening = Opening AWS Console...
@@ -712,6 +878,8 @@ credential-helper-err-not-configured = vouch: not configured - run '{ -cmd } enr
 
 ## credential/docker
 
+credential-docker-err-no-server-url = no server URL provided
+credential-docker-err-unsupported-registry = unsupported registry: { $url }
 credential-docker-err-unknown-registry = vouch: unknown registry type for URL: { $url }
 
 ## credential/github
@@ -804,6 +972,8 @@ arg-setup-k8s-kubeconfig-help = Path to kubeconfig file (defaults to ~/.kube/con
 
 # setup/docker arg help
 arg-setup-docker-registries-help = Container registries to configure (e.g., ghcr.io).
+setup-docker-anchored-profile = Registry { $registry } will use AWS profile { $profile }.
+arg-setup-docker-profile-help = AWS profile in ~/.aws/config whose role mints ECR credentials for these registries.
 arg-setup-docker-configure-help = Automatically configure Docker (otherwise just show instructions).
 
 # setup/cargo arg help
@@ -838,11 +1008,12 @@ arg-setup-openai-force-help = Overwrite an existing Codex `model_provider` or `v
 
 # setup/codeartifact arg help
 arg-setup-codeartifact-tool-help = Package manager to configure (cargo, pip, npm).
-arg-setup-codeartifact-domain-help = CodeArtifact domain name (or use --profile / saved default).
+arg-setup-codeartifact-domain-help = CodeArtifact domain name (or use --domain-profile / saved default).
 arg-setup-codeartifact-domain-owner-help = AWS account ID that owns the domain.
 arg-setup-codeartifact-region-help = AWS region.
 arg-setup-codeartifact-repository-help = CodeArtifact repository name.
-arg-setup-codeartifact-profile-help = Named CodeArtifact profile to use / save.
+arg-setup-codeartifact-domain-profile-help = Named CodeArtifact domain profile to use / save.
+arg-setup-codeartifact-profile-help = AWS profile in ~/.aws/config whose role mints tokens for this domain (distinct from --domain-profile).
 
 ## Shared setup helpers
 
@@ -1294,7 +1465,6 @@ setup-ssm-err-write = failed to write { $path }
 
 ## setup/eks
 
-setup-eks-err-aws-not-configured = AWS not configured. Run '{ -cmd } setup aws --role <role-arn>' first.
 setup-eks-header-block =
     Amazon EKS Setup
     ================
@@ -1358,13 +1528,6 @@ setup-codecommit-tail-block =
       rm "{ $path }"
 # Loop body: emitted once per credential pattern after the tail block above.
 setup-codecommit-undo-config = { $indent }git config --global --remove-section credential."{ $pattern }"
-setup-codecommit-err-aws-not-configured = AWS not configured. Run '{ -cmd } setup aws --role <role-arn>' first.
-setup-codecommit-err-profile-not-found =
-    AWS profile '{ $profile }' not found in ~/.aws/config.
-    Run '{ -cmd } setup aws --role <role-arn>' first.
-setup-codecommit-err-no-vouch-profile =
-    No { -product } AWS profile found in ~/.aws/config.
-    Run '{ -cmd } setup aws --role <role-arn>' first.
 setup-codecommit-err-run-config = failed to run git config
 setup-codecommit-warn-existing-block =
     Warning: Existing CodeCommit credential helper detected:
@@ -1376,7 +1539,7 @@ setup-codecommit-warn-existing-block =
 setup-ca-header =
     CodeArtifact Setup
     ==================
-setup-ca-saved-profile = Saved CodeArtifact profile '{ $name }' to config.
+setup-ca-saved-profile = Saved CodeArtifact domain profile '{ $name }' to config.
 setup-ca-cargo-usage =
     Usage:
       cargo build --registry { $name }
@@ -1435,7 +1598,7 @@ setup-ca-pnpm-conflict-block =
          ln -sf "{ $vouch_path }" "{ $path }"
 setup-ca-pnpm-wrote = Wrote pnpm config: { $path }
 setup-ca-refreshed-npmrc = Refreshed CodeArtifact token in ~/.npmrc
-setup-ca-err-save-profile = failed to save CodeArtifact profile
+setup-ca-err-save-profile = failed to save CodeArtifact domain profile
 setup-ca-err-create-dir = failed to create { $path }
 setup-ca-err-read = failed to read { $path }
 setup-ca-err-parse = failed to parse { $path }
@@ -1485,3 +1648,207 @@ fapi-err-jwt-signing = failed to sign JWT: { $error }
 fapi-err-serialization = serialization error: { $error }
 fapi-err-thumbprint = failed to compute JWK thumbprint: { $error }
 fapi-err-keychain = keychain access error: { $error }
+
+## Shared error context
+#
+# Messages attached with .context()/.with_context() as an operation fails.
+# Deduplicated: one key per distinct message, reused across call sites.
+
+err-account-is-required = account is required
+err-account-is-required-identity-center-path = --account is required for Identity Center path
+err-anthropic-federation-not-configured-run-vouch-setup = Anthropic federation not configured — run 'vouch setup anthropic' first
+err-authenticator-data-length-exceeds-usize = authenticator data length exceeds usize
+err-body-must-be-an-object = body must be an object
+err-cached-anthropic-token-is-missing-access-token-field = cached Anthropic token is missing the access_token field
+err-cached-codeartifact-token-missing-authorization-toke = cached CodeArtifact token missing authorization_token
+err-cached-codeartifact-token-missing-expiration = cached CodeArtifact token missing expiration
+err-cached-openai-token-is-missing-access-token-field = cached OpenAI token is missing the access_token field
+err-cached-rds-token-is-not-string = cached RDS token is not a string
+err-cannot-determine-data-directory = cannot determine data directory
+err-challenge-is-not-valid-base64url = challenge is not valid base64url
+err-could-not-determine-config-directory = could not determine config directory
+err-could-not-determine-home-directory = could not determine home directory
+err-could-not-extract-region-from-codecommit-hostname = could not extract region from CodeCommit hostname
+err-createtokenwithiam-exchange-failed = CreateTokenWithIAM exchange failed
+err-cred-params-count-overflow = cred params count overflow
+err-ecr-authorization-token-is-not-valid-utf-8 = ECR authorization token is not valid UTF-8
+err-exclude-credentials-count-exceeds-u32 = exclude credentials count exceeds u32
+err-expires-in-does-not-fit-in-i64 = expires_in does not fit in i64
+err-failed-acquire-config-file-lock = failed to acquire config file lock
+err-failed-assume-aws-role = failed to assume AWS role
+err-failed-assume-management-role = failed to assume management role
+err-failed-assume-management-role-idc-exchange = failed to assume management role for IdC exchange
+err-failed-assume-target-role-via-chaining = failed to assume target role via chaining
+err-failed-build-client-assertion = failed to build client assertion
+err-failed-build-dpop-proof-challenge-request = failed to build DPoP proof for challenge request
+err-failed-build-dpop-proof-token-request = failed to build DPoP proof for token request
+err-failed-build-dpop-proof-with-nonce = failed to build DPoP proof with nonce
+err-failed-build-request = failed to build request
+err-failed-call-aws-sts = failed to call AWS STS
+err-failed-call-aws-sts-assumerole = failed to call AWS STS AssumeRole
+err-failed-call-codeartifact-getauthorizationtoken = failed to call CodeArtifact GetAuthorizationToken
+err-failed-call-ecr-getauthorizationtoken = failed to call ECR GetAuthorizationToken
+err-failed-call-redshift-getclustercredentialswithiam = failed to call Redshift GetClusterCredentialsWithIAM
+err-failed-call-redshift-serverless-getcredentials = failed to call Redshift Serverless GetCredentials
+err-failed-call-sso-portal-get-role-credentials = failed to call SSO Portal get role credentials
+err-failed-call-sso-portal-list-accounts = failed to call SSO Portal list accounts
+err-failed-call-sso-portal-list-roles = failed to call SSO Portal list roles
+err-failed-complete-key-registration = failed to complete key registration
+err-failed-complete-registration = failed to complete registration
+err-failed-compute-eks-token-expiration = failed to compute EKS token expiration
+err-failed-compute-kubernetes-token-expiration = failed to compute Kubernetes token expiration
+err-failed-compute-rds-token-cache-expiry = failed to compute RDS token cache expiry
+err-failed-create-http-client = failed to create HTTP client
+err-failed-decode-ecr-authorization-token = failed to decode ECR authorization token
+err-failed-encode-attestation-object = failed to encode attestation object
+err-failed-encode-role-arn-query-parameter = failed to encode role_arn query parameter
+err-failed-encode-token-exchange-request = failed to encode token-exchange request
+err-failed-encode-token-request = failed to encode token request
+err-failed-export-public-key-registration = failed to export public key for registration
+err-failed-generate-fapi-client-key = failed to generate FAPI client key
+err-failed-get-codeartifact-authorization-token = failed to get CodeArtifact authorization token
+err-failed-get-codeartifact-token = failed to get CodeArtifact token
+err-failed-get-ecr-authorization-token = failed to get ECR authorization token
+err-failed-get-github-token = failed to get GitHub token
+err-failed-get-oidc-token-from-vouch-server = failed to get OIDC token from Vouch server
+err-failed-get-oidc-token-management-role = failed to get OIDC token for management role
+err-failed-get-redshift-cluster-credentials = failed to get Redshift cluster credentials
+err-failed-get-redshift-serverless-credentials = failed to get Redshift Serverless credentials
+err-failed-get-ssh-certificate = failed to get SSH certificate
+err-failed-list-sso-accounts = failed to list SSO accounts
+err-failed-load-config = failed to load config
+err-failed-load-vouch-config = failed to load Vouch config
+err-failed-obtain-identity-center-token = failed to obtain Identity Center token
+err-failed-parse-challenge-response = failed to parse challenge response
+err-failed-parse-codeartifact-response = failed to parse CodeArtifact response
+err-failed-parse-createtokenwithiam-response = failed to parse CreateTokenWithIAM response
+err-failed-parse-credential-request = failed to parse credential request
+err-failed-parse-ecr-response = failed to parse ECR response
+err-failed-parse-eks-describecluster-response = failed to parse EKS DescribeCluster response
+err-failed-parse-json-response = failed to parse JSON response
+err-failed-parse-redshift-serverless-json-response = failed to parse Redshift Serverless JSON response
+err-failed-parse-redshift-xml-response = failed to parse Redshift XML response
+err-failed-parse-registration-response = failed to parse registration response
+err-failed-parse-sso-portal-accounts-response = failed to parse SSO Portal accounts response
+err-failed-parse-sso-portal-role-credentials-response = failed to parse SSO Portal role credentials response
+err-failed-parse-sso-portal-roles-response = failed to parse SSO Portal roles response
+err-failed-parse-sts-xml-response = failed to parse STS XML response
+err-failed-parse-token-response = failed to parse token response
+err-failed-read-aws-api-response-body = failed to read AWS API response body
+err-failed-read-from-stdin = failed to read from stdin
+err-failed-read-pin = failed to read PIN
+err-failed-read-response-body = failed to read response body
+err-failed-read-stdin = failed to read stdin
+err-failed-read-sts-response = failed to read STS response
+err-failed-read-vouch-token-exchange-response-body = failed to read Vouch token-exchange response body
+err-failed-register-fapi-client = failed to register FAPI client
+err-failed-request-fido2-challenge = failed to request FIDO2 challenge
+err-failed-run-git-remote-http = failed to run git remote-http
+err-failed-save-fapi-client-key-disk = failed to save FAPI client key to disk
+err-failed-save-fapi-registration-config = failed to save FAPI registration to config
+err-failed-send-aws-api-request = failed to send AWS API request
+err-failed-send-registration-request = failed to send registration request
+err-failed-send-token-request = failed to send token request
+err-failed-send-token-request-nonce-retry = failed to send token request (nonce retry)
+err-failed-serialize-assertion-payload = failed to serialize assertion payload
+err-failed-serialize-client-data = failed to serialize client data
+err-failed-serialize-config = failed to serialize config
+err-failed-serialize-credentials = failed to serialize credentials
+err-failed-serialize-execcredential = failed to serialize ExecCredential
+err-failed-serialize-form-data = failed to serialize form data
+err-failed-serialize-message = failed to serialize message
+err-failed-serialize-redshift-credentials = failed to serialize Redshift credentials
+err-failed-serialize-request = failed to serialize request
+err-failed-serialize-token-exchange-request = failed to serialize token-exchange request
+err-failed-start-key-registration = failed to start key registration
+err-failed-start-registration = failed to start registration
+err-fido2-thread-panicked = FIDO2 thread panicked
+err-http-request-failed = HTTP request failed
+err-invalid-base64 = invalid base64
+err-invalid-dns-over-https-configuration = invalid DNS-over-HTTPS configuration
+err-invalid-ecr-registry-url = invalid ECR registry URL
+err-invalid-expiration-timestamp-in-redshift-serverless = invalid expiration timestamp in Redshift Serverless response
+err-invalid-http-method = invalid HTTP method
+err-invalid-jwt-expected-3-dot-separated-parts = invalid JWT: expected 3 dot-separated parts
+err-invalid-jwt-payload-is-not-valid-base64url = invalid JWT: payload is not valid base64url
+err-invalid-jwt-payload-missing-required-sub-claim = invalid JWT: payload missing required 'sub' claim
+err-invalid-token-exchange-response-from-vouch-server-ex = invalid token-exchange response from Vouch server: expected access_token
+err-invalid-uri-in-test-client-request = invalid URI in test client request
+err-invalid-url = invalid URL
+err-missing-accesskeyid-in-cached-credentials = missing AccessKeyId in cached credentials
+err-missing-credentials-element-in-sts-response = missing Credentials element in STS response
+err-missing-dbpassword-in-redshift-serverless-response = missing dbPassword in Redshift Serverless response
+err-missing-dbuser-in-redshift-serverless-response = missing dbUser in Redshift Serverless response
+err-missing-expiration-in-redshift-serverless-response = missing expiration in Redshift Serverless response
+err-missing-getclustercredentialswithiamresult-in-redshi = missing GetClusterCredentialsWithIAMResult in Redshift response
+err-missing-secretaccesskey-in-cached-credentials = missing SecretAccessKey in cached credentials
+err-missing-sessiontoken-in-cached-credentials = missing SessionToken in cached credentials
+err-no-authorization-data-in-ecr-response = no authorization data in ECR response
+err-no-fapi-client-key-found-run-vouch-login-first = no FAPI client key found — run 'vouch login' first
+err-no-oauth-client-registered-run-vouch-login-first = no OAuth client registered — run 'vouch login' first
+err-not-configured-run-vouch-enroll-first = not configured - run 'vouch enroll' first
+err-openai-federation-not-configured-run-vouch-setup-ope = OpenAI federation not configured — run 'vouch setup openai' first
+err-permission-set-is-required = permission_set is required
+err-permission-set-is-required-identity-center-path = --permission-set is required for Identity Center path
+err-response-body-is-not-valid-utf-8 = response body is not valid UTF-8
+err-router-error = router error
+err-server-returned-invalid-oidc-token = server returned invalid OIDC token
+err-server-url-has-no-host = server URL has no host
+err-sso-portal-returned-an-out-range-credential-expirati = SSO Portal returned an out-of-range credential expiration
+err-step-up-re-authentication-failed = step-up re-authentication failed
+err-vouch-is-not-enrolled-run-vouch-enroll-set-up-authen = vouch is not enrolled - run 'vouch enroll' to set up authentication
+err-webauthn-buffer-length-exceeds-usize = WebAuthn buffer length exceeds usize
+err- = { $e }
+err-client-registration-failed-http = client registration failed (HTTP { $status }): { $body }
+err-docker-credential-vouch = docker-credential-vouch: { $e }
+err-failed-connect = failed to connect to { $url }
+err-failed-format-public-key = failed to format public key: { $e }
+err-failed-generate-ssh-key = failed to generate SSH key: { $e }
+err-failed-parse-cached-expiration = failed to parse cached Expiration: { $expiration_str }
+err-failed-parse-public-key = failed to parse public key: { $e }
+err-failed-parse-sts-expiration = failed to parse STS Expiration: { $expiration_str }
+err-failed-reach-token-endpoint = failed to reach { $label } token endpoint at { $endpoint }
+err-failed-reach-vouch-token-endpoint = failed to reach Vouch token endpoint at { $endpoint }
+err-failed-read-token-response-body = failed to read { $label } token response body
+err-failed-serialize-posture = failed to serialize posture: { $e }
+err-failed-serialize-private-key = failed to serialize private key: { $e }
+err-failed-serialize-public-key = failed to serialize public key: { $e }
+err-failed-serialize-session-policy = failed to serialize session policy: { $e }
+err-git-remote-codecommit = git-remote-codecommit: { $e }
+err-invalid-server-url = invalid server URL: { $url_str }
+err-keyring = keyring: { $e }
+err-length-exceeds-u32-max = { $what } length exceeds u32::MAX
+err-missing-redshift-response = missing { $tag } in Redshift response
+err-missing-sts-response = missing { $tag } in STS response
+err-server-error-run-vouch-doctor-check-connectivity = server error ({ $status }). Run 'vouch doctor' to check connectivity.
+err-token-exchange-failed = { $label } token exchange failed ({ $status })
+err-token-request-failed-http = token request failed (HTTP { $status }): { $body }
+err-unexpected-server-response = unexpected server response ({ $status })
+err-vouch-pnpm-tokenhelper = vouch-pnpm-tokenhelper: { $e }
+err-vouch-token-exchange-failed = Vouch token exchange failed ({ $status })
+err-failed-create = failed to create { $value }
+err-failed-create-directory-3 = failed to create directory { $value }
+err-failed-create-symlink = failed to create symlink at { $value }
+err-failed-list-roles-account = failed to list roles for account { $value }
+err-failed-load = failed to load { $value }
+err-failed-open-lock-file = failed to open lock file { $value }
+err-failed-parse = failed to parse { $value }
+err-failed-parse-config = failed to parse config from { $value }
+err-failed-read-2 = failed to read { $value }
+err-failed-read-config = failed to read config from { $value }
+err-failed-remove-existing-2 = failed to remove existing { $value }
+err-failed-serialize = failed to serialize { $value }
+err-failed-write-5 = failed to write { $value }
+err-failed-write-config = failed to write config to { $value }
+err-specify-either-cluster-id-or-workgroup-not-both = specify either --cluster-id or --workgroup, not both
+err-specify-either-cluster-id-or-workgroup = specify either --cluster-id or --workgroup
+err-vouch-token-endpoint-repeatedly-demanded-dpop-no = Vouch token endpoint repeatedly demanded a DPoP nonce
+err-doctor-one-or-more-checks-failed = doctor: one or more checks failed
+err-operation-cancelled-by-user = Operation cancelled by user
+err-fido2-registration-succeeded-but-returned-no-att = FIDO2 registration succeeded but returned no attestation
+err-failed-extract-cose-public-key-authenticator-dat = failed to extract COSE public key from authenticator data
+err-fido2-authentication-succeeded-but-returned-no-a = FIDO2 authentication succeeded but returned no assertion
+err-not-authenticated-run-vouch-login-first = not authenticated - run 'vouch login' first
+err-permission-denied-by-server = permission denied by server
+err-server-endpoint-not-found-status-404-check-your = server endpoint not found (status 404). Check your server URL.
+credential-cache-using-cached = vouch: using cached { $label } (server unreachable)

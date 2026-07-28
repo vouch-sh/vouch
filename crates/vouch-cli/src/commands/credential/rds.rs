@@ -16,6 +16,7 @@
 
 use anyhow::{Context, Result};
 use secrecy::{ExposeSecret, SecretString};
+use vouch_cli::tr;
 
 use crate::commands::credential::aws::{StsRequest, exchange_for_sts_credentials};
 use crate::commands::credential::cache;
@@ -66,7 +67,7 @@ pub(crate) async fn fetch_rds_token(
 
     let hostname_region = extract_region_from_rds_hostname(hostname);
     let effective_region = region.or(hostname_region);
-    let (role_arn, region_name) = aws::resolve_role_and_region(role, effective_region)?;
+    let (role_arn, region_name) = aws::resolve_role_and_region(role, effective_region, None)?;
 
     // Detect agent context BEFORE the cache lookup. Folding the source into
     // the cache key ensures agent and non-agent invocations never share a
@@ -97,7 +98,9 @@ pub(crate) async fn fetch_rds_token(
     .await?;
 
     // Extract token string from cached JSON value
-    let token = data.as_str().context("cached RDS token is not a string")?;
+    let token = data
+        .as_str()
+        .context(tr!("err-cached-rds-token-is-not-string"))?;
     Ok(SecretString::from(token.to_string()))
 }
 
@@ -158,7 +161,7 @@ fn extract_region_from_rds_hostname(hostname: &str) -> Option<&str> {
 fn rds_cache_expiry() -> Result<String> {
     let expires = jiff::Timestamp::now()
         .checked_add(jiff::SignedDuration::from_mins(RDS_CACHE_VALIDITY_MINUTES))
-        .context("failed to compute RDS token cache expiry")?;
+        .context(tr!("err-failed-compute-rds-token-cache-expiry"))?;
     Ok(expires.to_string())
 }
 

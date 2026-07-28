@@ -8,6 +8,7 @@
 //! The server accepts `POST /oauth/register` without authentication when
 //! open registration is enabled (FAPI 2.0 open registration mode).
 
+use crate::{tr, tr_args};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
@@ -83,7 +84,7 @@ pub async fn register_fapi_client(
 ) -> Result<RegistrationResult> {
     let public_jwk = key
         .public_jwk()
-        .context("failed to export public key for registration")?;
+        .context(tr!("err-failed-export-public-key-registration"))?;
 
     // Build JWKS with a single key (RFC 7517)
     let jwks = serde_json::json!({
@@ -121,18 +122,22 @@ pub async fn register_fapi_client(
     let response = builder
         .send()
         .await
-        .context("failed to send registration request")?;
+        .context(tr!("err-failed-send-registration-request"))?;
 
     let status = response.status();
     if !status.is_success() {
         let body = response.text().await.unwrap_or_default();
-        anyhow::bail!("client registration failed (HTTP {status}): {body}");
+        anyhow::bail!(tr_args!(
+            "err-client-registration-failed-http",
+            status = status.to_string(),
+            body = body
+        ));
     }
 
     let reg_response: RegistrationResponse = response
         .json()
         .await
-        .context("failed to parse registration response")?;
+        .context(tr!("err-failed-parse-registration-response"))?;
 
     tracing::info!(
         "Registered as FAPI 2.0 client: client_id={}",

@@ -4,6 +4,7 @@
 //! Talks directly to the YubiKey via HID. PIN entry happens in the CLI
 //! (via `rpassword`) before the CTAP2 call.
 
+use crate::tr;
 use anyhow::{Context, Result, bail};
 use ctap_hid_fido2::FidoKeyHid;
 use ctap_hid_fido2::FidoKeyHidFactory;
@@ -162,7 +163,7 @@ fn build_attestation_object(attestation: &Attestation) -> Result<Vec<u8>> {
 
     let mut buf = Vec::new();
     ciborium::into_writer(&attestation_obj, &mut buf)
-        .context("failed to encode attestation object")?;
+        .context(tr!("err-failed-encode-attestation-object"))?;
     Ok(buf)
 }
 

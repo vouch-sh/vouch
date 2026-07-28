@@ -33,6 +33,7 @@
 //! This module provides typed result types using `vouch_common::fido2_types`
 //! for compile-time safety.
 
+use crate::tr;
 use anyhow::{Context, Result};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -97,16 +98,16 @@ where
     #[cfg(target_os = "windows")]
     {
         tokio::select! {
-            result = rx => result.context("FIDO2 thread panicked")?,
+            result = rx => result.context(tr!("err-fido2-thread-panicked"))?,
             _ = tokio::signal::ctrl_c() => {
                 windows::cancel_current_operation();
-                anyhow::bail!("Operation cancelled by user")
+                anyhow::bail!(tr!("err-operation-cancelled-by-user"))
             }
         }
     }
     #[cfg(not(target_os = "windows"))]
     {
-        rx.await.context("FIDO2 thread panicked")?
+        rx.await.context(tr!("err-fido2-thread-panicked"))?
     }
 }
 
@@ -206,7 +207,7 @@ impl ClientData {
     }
 
     pub(crate) fn to_json(&self) -> Result<Vec<u8>> {
-        serde_json::to_vec(self).context("failed to serialize client data")
+        serde_json::to_vec(self).context(tr!("err-failed-serialize-client-data"))
     }
 }
 
@@ -474,7 +475,7 @@ fn build_none_attestation_object(auth_data: &[u8]) -> Result<Vec<u8>> {
 
     let mut buf = Vec::new();
     ciborium::into_writer(&attestation_obj, &mut buf)
-        .context("failed to encode attestation object")?;
+        .context(tr!("err-failed-encode-attestation-object"))?;
     Ok(buf)
 }
 

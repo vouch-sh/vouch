@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
+use vouch_cli::{tr, tr_args};
 use vouch_common::dns::{DohConfigSerde, NetworkConfig};
 
 /// Minimal legacy SSO session record.
@@ -84,6 +85,8 @@ pub(crate) struct Config {
     servers: BTreeMap<String, ServerConfig>,
     /// Global CodeArtifact profile configuration.
     codeartifact: Option<CodeArtifactConfig>,
+    /// Container registry → AWS profile anchors.
+    docker: Option<DockerRegistriesConfig>,
     /// AWS organizations configuration (role chaining + IdC).
     aws: Option<AwsOrgsConfig>,
     /// Global network configuration (DoH, …).
@@ -112,15 +115,20 @@ pub(crate) struct ServerConfig {
     registration_verified_at: Option<String>,
 }
 
-/// CodeArtifact configuration with named profiles (similar to AWS CLI profiles).
+/// CodeArtifact configuration with named domain profiles.
+///
+/// A "domain profile" here is a vouch-local bundle of (domain, domain_owner,
+/// region) — a different concept from an *AWS* profile in `~/.aws/config`.
+/// The CLI surface keeps the two distinct: `--domain-profile` names one of
+/// these, `--profile` always means the AWS profile.
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub(crate) struct CodeArtifactConfig {
-    /// Name of the default profile (used when `--profile` is omitted).
+    /// Name of the default domain profile (used when `--domain-profile` is omitted).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default: Option<String>,
-    /// Named profiles, keyed by user-chosen name.
+    /// Named domain profiles, keyed by user-chosen name.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub profiles: BTreeMap<String, CodeArtifactProfile>,
+    pub domain_profiles: BTreeMap<String, CodeArtifactProfile>,
 }
 
 /// A single CodeArtifact domain profile.
@@ -132,6 +140,27 @@ pub(crate) struct CodeArtifactProfile {
     pub domain_owner: String,
     /// AWS region (e.g., "us-east-1").
     pub region: String,
+    /// AWS profile in `~/.aws/config` whose role mints tokens for this domain.
+    ///
+    /// Package managers reach `vouch credential codeartifact` through
+    /// argument-less shims (a pip/pnpm keyring helper, a Cargo credential
+    /// provider), so the account has to be recorded here rather than passed on
+    /// the command line. `None` falls back to resolving a Vouch profile from
+    /// `~/.aws/config`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aws_profile: Option<String>,
+}
+
+/// Container registry → AWS profile anchors.
+///
+/// Docker invokes `docker-credential-vouch` as an argument-less symlink, so the
+/// account backing each ECR registry cannot be passed on the command line and is
+/// recorded here by `vouch setup docker --profile`.
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub(crate) struct DockerRegistriesConfig {
+    /// Registry host → AWS profile name in `~/.aws/config`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub registries: BTreeMap<String, String>,
 }
 
 // =========================================================================
@@ -214,6 +243,9 @@ struct ConfigFile {
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     codeartifact: Option<CodeArtifactConfig>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    docker: Option<DockerRegistriesConfig>,
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     aws: Option<AwsOrgsConfig>,
@@ -317,10 +349,12 @@ impl std::fmt::Debug for ServerConfig {
 /// Returns `host` for standard ports (443/80), or `host:port` for
 /// non-standard ports (e.g. `localhost:3000`).
 pub(crate) fn hostname_from_url(url_str: &str) -> Result<String> {
-    let parsed =
-        url::Url::parse(url_str).with_context(|| format!("invalid server URL: {url_str}"))?;
+    let parsed = url::Url::parse(url_str)
+        .with_context(|| tr_args!("err-invalid-server-url", url_str = url_str))?;
 
-    let host = parsed.host_str().context("server URL has no host")?;
+    let host = parsed
+        .host_str()
+        .context(tr!("err-server-url-has-no-host"))?;
 
     match parsed.port() {
         Some(port) if !is_standard_port(parsed.scheme(), port) => Ok(format!("{host}:{port}")),
@@ -343,10 +377,15 @@ impl Config {
         let path = Self::config_path()?;
 
         if path.exists() {
-            let content = fs::read_to_string(&path)
-                .with_context(|| format!("failed to read config from {}", path.display()))?;
-            let config_file: ConfigFile = serde_json::from_str(&content)
-                .with_context(|| format!("failed to parse config from {}", path.display()))?;
+            let content = fs::read_to_string(&path).with_context(|| {
+                tr_args!("err-failed-read-config", value = path.display().to_string())
+            })?;
+            let config_file: ConfigFile = serde_json::from_str(&content).with_context(|| {
+                tr_args!(
+                    "err-failed-parse-config",
+                    value = path.display().to_string()
+                )
+            })?;
             Ok(Self::from(config_file))
         } else {
             Ok(Self::default())
@@ -361,11 +400,17 @@ impl Config {
         let path = Self::config_path()?;
 
         let config_file = ConfigFile::from(self);
-        let content =
-            serde_json::to_string_pretty(&config_file).context("failed to serialize config")?;
+        let content = serde_json::to_string_pretty(&config_file)
+            .context(tr!("err-failed-serialize-config"))?;
 
-        vouch_common::fs::atomic_write_secure(path.as_path(), content.as_bytes())
-            .with_context(|| format!("failed to write config to {}", path.display()))?;
+        vouch_common::fs::atomic_write_secure(path.as_path(), content.as_bytes()).with_context(
+            || {
+                tr_args!(
+                    "err-failed-write-config",
+                    value = path.display().to_string()
+                )
+            },
+        )?;
 
         Ok(())
     }
@@ -382,8 +427,12 @@ impl Config {
         let lock_path = path.with_added_extension("lock");
 
         if let Some(parent) = lock_path.parent() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("failed to create directory {}", parent.display()))?;
+            fs::create_dir_all(parent).with_context(|| {
+                tr_args!(
+                    "err-failed-create-directory-3",
+                    value = parent.display().to_string()
+                )
+            })?;
         }
 
         let lock_file = fs::OpenOptions::new()
@@ -391,7 +440,12 @@ impl Config {
             .write(true)
             .truncate(true)
             .open(&lock_path)
-            .with_context(|| format!("failed to open lock file {}", lock_path.display()))?;
+            .with_context(|| {
+                tr_args!(
+                    "err-failed-open-lock-file",
+                    value = lock_path.display().to_string()
+                )
+            })?;
 
         #[cfg(unix)]
         {
@@ -403,7 +457,7 @@ impl Config {
 
         lock_file
             .lock()
-            .context("failed to acquire config file lock")?;
+            .context(tr!("err-failed-acquire-config-file-lock"))?;
 
         let mut config = Self::load()?;
         f(&mut config);
@@ -504,16 +558,33 @@ impl Config {
         self.codeartifact.as_ref()
     }
 
-    /// Add a CodeArtifact profile (in memory only, call `save()` to
-    /// persist). If this is the first profile, it becomes the default.
+    /// Look up the AWS profile anchored to a container registry.
+    pub(crate) fn docker_registry_profile(&self, registry: &str) -> Option<&str> {
+        self.docker
+            .as_ref()?
+            .registries
+            .get(registry)
+            .map(String::as_str)
+    }
+
+    /// Anchor a container registry to an AWS profile (in memory; call `save()`).
+    pub(crate) fn set_docker_registry_profile(&mut self, registry: &str, profile: &str) {
+        self.docker
+            .get_or_insert_with(DockerRegistriesConfig::default)
+            .registries
+            .insert(registry.to_string(), profile.to_string());
+    }
+
+    /// Add a CodeArtifact domain profile (in memory only, call `save()` to
+    /// persist). If this is the first one, it becomes the default.
     pub(crate) fn set_codeartifact_profile(&mut self, name: &str, profile: CodeArtifactProfile) {
         let ca = self
             .codeartifact
             .get_or_insert_with(CodeArtifactConfig::default);
-        if ca.profiles.is_empty() && ca.default.is_none() {
+        if ca.domain_profiles.is_empty() && ca.default.is_none() {
             ca.default = Some(name.to_string());
         }
-        ca.profiles.insert(name.to_string(), profile);
+        ca.domain_profiles.insert(name.to_string(), profile);
     }
 
     // =====================================================================
@@ -574,7 +645,7 @@ impl Config {
     /// Get the path to the config file
     /// (`$XDG_CONFIG_HOME/vouch/config.json`).
     fn config_path() -> Result<PathBuf> {
-        vouch_common::paths::config_file().context("could not determine config directory")
+        vouch_common::paths::config_file().context(tr!("err-could-not-determine-config-directory"))
     }
 }
 
@@ -725,6 +796,7 @@ impl From<ConfigFile> for Config {
             current_server,
             servers,
             codeartifact: file.codeartifact.take(),
+            docker: file.docker.take(),
             aws,
             network: file.network.take(),
             ai: file.ai.take(),
@@ -763,10 +835,14 @@ impl From<&Config> for ConfigFile {
         // not run 'vouch setup aws' has no `aws` key in their config file.
         let aws = config.aws.clone().filter(|a| !a.organizations.is_empty());
 
+        // Same guard: an empty registry map would serialize as `docker: {}`.
+        let docker = config.docker.clone().filter(|d| !d.registries.is_empty());
+
         Self {
             current_server: config.current_server.clone(),
             servers,
             codeartifact: config.codeartifact.clone(),
+            docker,
             aws,
             network: config.network.clone(),
             ai: config.ai.clone(),
@@ -884,7 +960,7 @@ mod tests {
             },
             "codeartifact": {
                 "default": "prod",
-                "profiles": {
+                "domain_profiles": {
                     "prod": {
                         "domain": "my-domain",
                         "domain_owner": "123456789012",
@@ -909,7 +985,7 @@ mod tests {
         // CodeArtifact is global.
         let ca = config.codeartifact().expect("codeartifact should exist");
         assert_eq!(ca.default.as_deref(), Some("prod"));
-        assert_eq!(ca.profiles.len(), 1);
+        assert_eq!(ca.domain_profiles.len(), 1);
 
         // Round-trip to JSON and back.
         let file2 = ConfigFile::from(&config);
@@ -936,7 +1012,7 @@ mod tests {
             "dpop_key_id": "legacy-kid",
             "codeartifact": {
                 "default": "prod",
-                "profiles": {
+                "domain_profiles": {
                     "prod": {
                         "domain": "d",
                         "domain_owner": "o",
@@ -1072,7 +1148,7 @@ mod tests {
             },
             "codeartifact": {
                 "default": "prod",
-                "profiles": {
+                "domain_profiles": {
                     "prod": {
                         "domain": "my-domain",
                         "domain_owner": "123456789012",
@@ -1094,9 +1170,12 @@ mod tests {
             .codeartifact()
             .expect("codeartifact config should exist");
         assert_eq!(ca.default.as_deref(), Some("prod"));
-        assert_eq!(ca.profiles.len(), 2);
+        assert_eq!(ca.domain_profiles.len(), 2);
 
-        let prod = ca.profiles.get("prod").expect("prod profile should exist");
+        let prod = ca
+            .domain_profiles
+            .get("prod")
+            .expect("prod profile should exist");
         assert_eq!(prod.domain, "my-domain");
     }
 
@@ -1131,6 +1210,7 @@ mod tests {
                 domain: "team-domain".into(),
                 domain_owner: "111111111111".into(),
                 region: "us-west-2".into(),
+                aws_profile: None,
             },
         );
 
@@ -1138,7 +1218,7 @@ mod tests {
             .codeartifact()
             .expect("should have codeartifact config");
         assert_eq!(ca.default.as_deref(), Some("myteam"));
-        assert_eq!(ca.profiles.len(), 1);
+        assert_eq!(ca.domain_profiles.len(), 1);
     }
 
     // -----------------------------------------------------------------

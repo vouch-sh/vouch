@@ -9,6 +9,7 @@
 use anyhow::{Context, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
+use vouch_cli::{tr, tr_args};
 
 /// Ensure a directory exists with secure permissions (0o700 on Unix).
 ///
@@ -17,8 +18,12 @@ use std::path::{Path, PathBuf};
 /// even if the directory already exists, to guard against directories created
 /// by another process with permissive modes.
 pub(crate) fn ensure_secure_dir(path: &Path) -> Result<()> {
-    fs::create_dir_all(path)
-        .with_context(|| format!("failed to create directory {}", path.display()))?;
+    fs::create_dir_all(path).with_context(|| {
+        tr_args!(
+            "err-failed-create-directory-3",
+            value = path.display().to_string()
+        )
+    })?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -27,12 +32,24 @@ pub(crate) fn ensure_secure_dir(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Single-quote a value for safe inclusion in a POSIX shell command.
+///
+/// Wraps `value` in single quotes, which make every character but `'` itself
+/// literal to the shell. Each embedded `'` is closed out, escaped, and
+/// reopened using the standard `'\''` idiom (end quote, escaped quote, start
+/// quote). Used for values a shell will otherwise interpret — e.g. install
+/// paths handed to a `!`-prefixed git credential helper, which a shell
+/// evaluates on every invocation.
+pub(crate) fn shell_single_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', r"'\''"))
+}
+
 /// Get the path for a vouch helper binary in `~/.local/bin/`.
 ///
 /// All vouch helper symlinks (docker-credential-vouch, git-remote-codecommit,
 /// keyring, vouch-pnpm-tokenhelper) live in `~/.local/bin/`.
 pub(crate) fn vouch_helper_path(name: &str) -> Result<PathBuf> {
-    let home = dirs::home_dir().context("could not determine home directory")?;
+    let home = dirs::home_dir().context(tr!("err-could-not-determine-home-directory"))?;
     Ok(home.join(".local").join("bin").join(name))
 }
 
@@ -74,8 +91,12 @@ pub(crate) fn create_symlink_with_fallback(
     if let Some(parent) = symlink_path.parent()
         && !parent.exists()
     {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create directory {}", parent.display()))?;
+        fs::create_dir_all(parent).with_context(|| {
+            tr_args!(
+                "err-failed-create-directory-3",
+                value = parent.display().to_string()
+            )
+        })?;
         crate::tr_println!(
             "utils-created-directory",
             path = parent.display().to_string()
@@ -103,12 +124,20 @@ pub(crate) fn create_symlink_with_fallback(
 
         // Remove existing symlink if present
         if symlink_path.exists() || symlink_path.is_symlink() {
-            fs::remove_file(symlink_path)
-                .with_context(|| format!("failed to remove existing {}", symlink_path.display()))?;
+            fs::remove_file(symlink_path).with_context(|| {
+                tr_args!(
+                    "err-failed-remove-existing-2",
+                    value = symlink_path.display().to_string()
+                )
+            })?;
         }
 
-        std::os::unix::fs::symlink(vouch_path, symlink_path)
-            .with_context(|| format!("failed to create symlink at {}", symlink_path.display()))?;
+        std::os::unix::fs::symlink(vouch_path, symlink_path).with_context(|| {
+            tr_args!(
+                "err-failed-create-symlink",
+                value = symlink_path.display().to_string()
+            )
+        })?;
 
         crate::tr_println!(
             "utils-created-symlink",
@@ -133,12 +162,17 @@ pub(crate) fn create_symlink_with_fallback(
         let bat_path = symlink_path.with_extension("bat");
 
         if bat_path.exists() {
-            fs::remove_file(&bat_path)
-                .with_context(|| format!("failed to remove existing {}", bat_path.display()))?;
+            fs::remove_file(&bat_path).with_context(|| {
+                tr_args!(
+                    "err-failed-remove-existing-2",
+                    value = bat_path.display().to_string()
+                )
+            })?;
         }
 
-        vouch_common::fs::atomic_write(&bat_path, windows_batch_content.as_bytes())
-            .with_context(|| format!("failed to create {}", bat_path.display()))?;
+        vouch_common::fs::atomic_write(&bat_path, windows_batch_content.as_bytes()).with_context(
+            || tr_args!("err-failed-create", value = bat_path.display().to_string()),
+        )?;
 
         crate::tr_println!("utils-created-file", path = bat_path.display().to_string());
 
@@ -163,6 +197,29 @@ pub(crate) fn create_symlink_with_fallback(
 )]
 mod tests {
     use super::*;
+
+    // -- shell_single_quote --
+
+    #[test]
+    fn test_shell_single_quote_plain_value() {
+        assert_eq!(
+            shell_single_quote("/opt/homebrew/bin/vouch"),
+            "'/opt/homebrew/bin/vouch'"
+        );
+    }
+
+    #[test]
+    fn test_shell_single_quote_path_with_space() {
+        assert_eq!(
+            shell_single_quote("/Users/John Smith/.cargo/bin/vouch"),
+            "'/Users/John Smith/.cargo/bin/vouch'"
+        );
+    }
+
+    #[test]
+    fn test_shell_single_quote_escapes_embedded_quote() {
+        assert_eq!(shell_single_quote("it's/vouch"), r"'it'\''s/vouch'");
+    }
 
     // -- vouch_helper_path --
 

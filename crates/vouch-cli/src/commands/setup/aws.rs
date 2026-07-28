@@ -56,7 +56,7 @@ fn sanitize_profile_name(name: &str) -> String {
 fn load_or_create_aws_config() -> Result<AwsConfig> {
     let config_path = AwsConfig::default_path()?;
     let aws_dir = dirs::home_dir()
-        .context("could not determine home directory")?
+        .context(tr!("err-could-not-determine-home-directory"))?
         .join(".aws");
     ensure_secure_dir(&aws_dir)?;
     Ok(AwsConfig::load_from(config_path.clone()).unwrap_or_else(|_| AwsConfig::empty(config_path)))
@@ -466,15 +466,15 @@ async fn run_discover(
     let management_role = &org.management_role;
 
     let http_client = credential_client(&format!("vouch-cli/{}", env!("CARGO_PKG_VERSION")))
-        .context("failed to create HTTP client")?;
+        .context(tr!("err-failed-create-http-client"))?;
 
     let idc_token = obtain_identity_center_token(&http_client, server, management_role, idc)
         .await
-        .context("failed to obtain Identity Center token")?;
+        .context(tr!("err-failed-obtain-identity-center-token"))?;
 
     let accounts = list_accounts(&http_client, &idc.region, &idc_token)
         .await
-        .context("failed to list SSO accounts")?;
+        .context(tr!("err-failed-list-sso-accounts"))?;
 
     let vouch_path = resolve_install_path();
     let mut aws_config = load_or_create_aws_config()?;
@@ -484,7 +484,12 @@ async fn run_discover(
     for account in &accounts {
         let roles = list_account_roles(&http_client, &idc.region, &idc_token, &account.account_id)
             .await
-            .with_context(|| format!("failed to list roles for account {}", account.account_id))?;
+            .with_context(|| {
+                tr_args!(
+                    "err-failed-list-roles-account",
+                    value = account.account_id.to_string()
+                )
+            })?;
 
         for role in &roles {
             let safe_name = sanitize_profile_name(&account.account_name);

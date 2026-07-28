@@ -165,7 +165,7 @@ fn wait_for_device_and_pin(json: bool) -> Result<(FidoKeyHid, String)> {
 
     out!(json, "");
     eprint!("{} ", tr!("diag-pin-prompt"));
-    let pin = rpassword::read_password().context("failed to read PIN")?;
+    let pin = rpassword::read_password().context(tr!("err-failed-read-pin"))?;
     // Note: In diag mode, we keep this as a plain String for simplicity since
     // this is a debugging tool that immediately uses and discards the PIN.
     // In production code (fido2.rs), we use SecretString.

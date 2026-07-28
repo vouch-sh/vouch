@@ -21,13 +21,15 @@ use anyhow::{Context, Result};
 use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
 use std::io::{BufRead, Write};
+use vouch_cli::{tr, tr_args};
 use vouch_common::{GitHubTokenRequest, GitHubTokenResponse};
 
 use crate::client::VouchClient;
 use crate::commands::credential::aws::{StsRequest, exchange_for_sts_credentials};
-use crate::integrations::aws::get_local_aws_role;
+use crate::config::Config;
 use crate::integrations::aws::sigv4::sign_and_send_json_rpc;
 use crate::integrations::aws::sts::StsCredentials;
+use crate::integrations::aws::{ProfileOverride, resolve_vouch_profile};
 use crate::session::resolve_session;
 
 /// Docker credential helper output format.
@@ -80,9 +82,9 @@ pub(crate) enum RegistryType {
 ///
 /// # Arguments
 /// * `operation` - The Docker credential operation ("get", "store", "erase", or "list")
-pub(crate) async fn run(operation: &str) -> Result<()> {
+pub(crate) async fn run(operation: &str, profile: Option<&str>) -> Result<()> {
     match operation {
-        "get" => get_credential().await,
+        "get" => get_credential(profile).await,
         "store" | "erase" => {
             // These operations are no-ops for Vouch since we don't store credentials
             // Just consume stdin to avoid broken pipe
@@ -109,7 +111,7 @@ fn read_server_url() -> Result<String> {
 
     // Docker sends just the URL on a single line
     if let Some(line) = stdin.lock().lines().next() {
-        let line = line.context("failed to read stdin")?;
+        let line = line.context(tr!("err-failed-read-stdin"))?;
         if !line.is_empty() {
             url = line;
         }
@@ -153,14 +155,15 @@ pub(crate) fn detect_registry_type(server_url: &str) -> RegistryType {
 }
 
 /// Handle the "get" operation - provide credentials to Docker.
-async fn get_credential() -> Result<()> {
+async fn get_credential(profile: Option<&str>) -> Result<()> {
     // Read server URL from stdin
     let server_url = read_server_url()?;
 
     if server_url.is_empty() {
-        return Err(
-            crate::exit_code::CliError::ConfigError("no server URL provided".to_string()).into(),
-        );
+        return Err(crate::exit_code::CliError::ConfigError(tr!(
+            "credential-docker-err-no-server-url"
+        ))
+        .into());
     }
 
     // Detect registry type
@@ -179,7 +182,24 @@ async fn get_credential() -> Result<()> {
             domain_suffix,
             ..
         } => {
-            get_ecr_credential(server, &session.token, &region, &domain_suffix, &server_url).await?
+            // Docker runs the helper through an argument-less symlink, so
+            // `--profile` is normally absent and the anchor recorded by
+            // `vouch setup docker` is what picks the account.
+            let anchored = match Config::load() {
+                Ok(config) => config
+                    .docker_registry_profile(&server_url)
+                    .map(str::to_string),
+                Err(_) => None,
+            };
+            let profile = profile.map(str::to_string).or(anchored);
+            get_ecr_credential(
+                server,
+                &region,
+                &domain_suffix,
+                &server_url,
+                profile.as_deref(),
+            )
+            .await?
         }
         RegistryType::Ghcr => get_ghcr_credential(server, &session.token).await?,
         RegistryType::Unknown => {
@@ -187,8 +207,9 @@ async fn get_credential() -> Result<()> {
                 "credential-docker-err-unknown-registry",
                 url = server_url.as_str()
             );
-            return Err(crate::exit_code::CliError::ConfigError(format!(
-                "unsupported registry: {server_url}"
+            return Err(crate::exit_code::CliError::ConfigError(tr_args!(
+                "credential-docker-err-unsupported-registry",
+                url = server_url.as_str()
             ))
             .into());
         }
@@ -198,8 +219,8 @@ async fn get_credential() -> Result<()> {
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
 
-    let json_str =
-        serde_json::to_string(&credential.to_json()).context("failed to serialize credentials")?;
+    let json_str = serde_json::to_string(&credential.to_json())
+        .context(tr!("err-failed-serialize-credentials"))?;
     writeln!(out, "{json_str}")?;
 
     Ok(())
@@ -208,17 +229,12 @@ async fn get_credential() -> Result<()> {
 /// Get credentials for AWS ECR.
 async fn get_ecr_credential(
     server: &str,
-    _token: &SecretString,
     region: &str,
     domain_suffix: &str,
     registry_url: &str,
+    profile: Option<&str>,
 ) -> Result<DockerCredential> {
-    let role_arn = get_local_aws_role().ok_or_else(|| {
-        anyhow::anyhow!(
-            "AWS not configured. Run 'vouch setup aws --role <role-arn>' \
-             with a role that has ECR permissions"
-        )
-    })?;
+    let role_arn = resolve_vouch_profile(profile, ProfileOverride::Profile)?.role_arn;
 
     let agent_source = crate::commands::credential::aws::detect_agent_source();
     let result = exchange_for_sts_credentials(StsRequest {
@@ -239,7 +255,7 @@ async fn get_ecr_credential(
         &result.credentials,
     )
     .await
-    .context("failed to get ECR authorization token")?;
+    .context(tr!("err-failed-get-ecr-authorization-token"))?;
 
     Ok(DockerCredential {
         username: "AWS".to_string(),
@@ -259,7 +275,7 @@ async fn get_ecr_authorization_token(
     let account_id = registry_url
         .split('.')
         .next()
-        .context("invalid ECR registry URL")?;
+        .context(tr!("err-invalid-ecr-registry-url"))?;
 
     let ecr_endpoint = format!("https://api.ecr.{region}.{domain_suffix}");
 
@@ -277,23 +293,23 @@ async fn get_ecr_authorization_token(
         &request_body,
     )
     .await
-    .context("failed to call ECR GetAuthorizationToken")?;
+    .context(tr!("err-failed-call-ecr-getauthorizationtoken"))?;
 
     let ecr_response: EcrAuthorizationResponse =
-        serde_json::from_str(&response_body).context("failed to parse ECR response")?;
+        serde_json::from_str(&response_body).context(tr!("err-failed-parse-ecr-response"))?;
 
     // The authorization token is base64(username:password)
     // We need to extract just the password part
     let auth_data = ecr_response
         .authorization_data
         .first()
-        .context("no authorization data in ECR response")?;
+        .context(tr!("err-no-authorization-data-in-ecr-response"))?;
 
     // Decode base64 to get "AWS:password"
     let decoded = base64_decode(auth_data.authorization_token.expose_secret())
-        .context("failed to decode ECR authorization token")?;
-    let decoded_str =
-        String::from_utf8(decoded).context("ECR authorization token is not valid UTF-8")?;
+        .context(tr!("err-failed-decode-ecr-authorization-token"))?;
+    let decoded_str = String::from_utf8(decoded)
+        .context(tr!("err-ecr-authorization-token-is-not-valid-utf-8"))?;
 
     // Split on ':' to get the password part
     let password = decoded_str
@@ -330,7 +346,7 @@ fn base64_decode(input: &str) -> Result<Vec<u8>> {
     use base64::Engine;
     base64::engine::general_purpose::STANDARD
         .decode(input)
-        .context("invalid base64")
+        .context(tr!("err-invalid-base64"))
 }
 
 /// Get credentials for GitHub Container Registry.
@@ -343,7 +359,7 @@ async fn get_ghcr_credential(server: &str, token: &SecretString) -> Result<Docke
     let response: GitHubTokenResponse = client
         .post_authenticated("/v1/credentials/github/token", &request)
         .await
-        .context("failed to get GitHub token")?;
+        .context(tr!("err-failed-get-github-token"))?;
 
     Ok(DockerCredential {
         username: "x-access-token".to_string(),

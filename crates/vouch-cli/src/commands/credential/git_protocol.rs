@@ -8,6 +8,7 @@
 
 use anyhow::{Context, Result};
 use std::io::{BufRead, Write};
+use vouch_cli::tr;
 
 /// Git credential protocol input.
 #[derive(Debug, Default)]
@@ -25,7 +26,7 @@ pub(crate) fn read_credential_input() -> Result<CredentialInput> {
     let mut input = CredentialInput::default();
 
     for line in stdin.lock().lines() {
-        let line = line.context("failed to read stdin")?;
+        let line = line.context(tr!("err-failed-read-stdin"))?;
         if line.is_empty() {
             break;
         }

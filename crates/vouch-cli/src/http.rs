@@ -5,6 +5,7 @@
 //! enabling integration testing by injecting an axum router directly
 //! instead of making real network requests.
 
+use crate::{tr, tr_args};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -64,7 +65,7 @@ impl HttpResponse {
     ///
     /// Returns an error if deserialization fails.
     pub fn json<T: DeserializeOwned>(&self) -> Result<T> {
-        serde_json::from_slice(&self.body).context("failed to parse JSON response")
+        serde_json::from_slice(&self.body).context(tr!("err-failed-parse-json-response"))
     }
 
     /// Get the body as a UTF-8 string.
@@ -73,7 +74,7 @@ impl HttpResponse {
     ///
     /// Returns an error if the body is not valid UTF-8.
     pub fn text(&self) -> Result<String> {
-        String::from_utf8(self.body.clone()).context("response body is not valid UTF-8")
+        String::from_utf8(self.body.clone()).context(tr!("err-response-body-is-not-valid-utf-8"))
     }
 }
 
@@ -243,7 +244,7 @@ impl ReqwestClient {
 
         let client = vouch_common::http::with_process_doh(builder)
             .build()
-            .context("failed to create HTTP client")?;
+            .context(tr!("err-failed-create-http-client"))?;
 
         Ok(Self { client })
     }
@@ -267,8 +268,8 @@ impl HttpClient for ReqwestClient {
         auth_header: Option<&str>,
         extra_headers: Option<&[(&str, &str)]>,
     ) -> Result<HttpResponse> {
-        let method =
-            reqwest::Method::from_bytes(method.as_bytes()).context("invalid HTTP method")?;
+        let method = reqwest::Method::from_bytes(method.as_bytes())
+            .context(tr!("err-invalid-http-method"))?;
         let method_str = method.to_string();
 
         let mut builder = self.client.request(method, url);
@@ -302,7 +303,10 @@ impl HttpClient for ReqwestClient {
             );
         }
 
-        let response = builder.send().await.context("HTTP request failed")?;
+        let response = builder
+            .send()
+            .await
+            .context(tr!("err-http-request-failed"))?;
 
         let status = response.status().as_u16();
         let (www_authenticate, dpop_nonce, sig_nonce, retry_after) =
@@ -322,7 +326,7 @@ impl HttpClient for ReqwestClient {
         let body = response
             .bytes()
             .await
-            .context("failed to read response body")?;
+            .context(tr!("err-failed-read-response-body"))?;
 
         Ok(HttpResponse {
             status,
@@ -348,7 +352,7 @@ pub trait HttpClientExt: HttpClient {
         Resp: DeserializeOwned,
     {
         async move {
-            let json = serde_json::to_vec(body).context("failed to serialize request")?;
+            let json = serde_json::to_vec(body).context(tr!("err-failed-serialize-request"))?;
             let response = self
                 .request(
                     "POST",
@@ -376,7 +380,7 @@ pub trait HttpClientExt: HttpClient {
     {
         let auth = format!("Bearer {}", token.expose_secret());
         async move {
-            let json = serde_json::to_vec(body).context("failed to serialize request")?;
+            let json = serde_json::to_vec(body).context(tr!("err-failed-serialize-request"))?;
             let response = self
                 .request(
                     "POST",
@@ -403,7 +407,7 @@ pub trait HttpClientExt: HttpClient {
     {
         async move {
             let form =
-                serde_urlencoded::to_string(body).context("failed to serialize form data")?;
+                serde_urlencoded::to_string(body).context(tr!("err-failed-serialize-form-data"))?;
             let response = self
                 .request(
                     "POST",
@@ -433,14 +437,20 @@ pub fn format_http_error(status: u16, error_text: &str) -> anyhow::Error {
     }
     // Non-JSON error body — provide actionable guidance
     match status {
-        401 => anyhow::anyhow!("not authenticated - run 'vouch login' first"),
-        403 => anyhow::anyhow!("permission denied by server"),
-        404 => anyhow::anyhow!("server endpoint not found (status 404). Check your server URL."),
-        429 => anyhow::anyhow!("rate limited by server — wait a moment and retry"),
+        401 => anyhow::anyhow!(tr!("err-not-authenticated-run-vouch-login-first")),
+        403 => anyhow::anyhow!(tr!("err-permission-denied-by-server")),
+        404 => anyhow::anyhow!(tr!("err-server-endpoint-not-found-status-404-check-your")),
+        429 => anyhow::anyhow!(tr!("err-rate-limited")),
         500..=599 => {
-            anyhow::anyhow!("server error ({status}). Run 'vouch doctor' to check connectivity.")
+            anyhow::anyhow!(tr_args!(
+                "err-server-error-run-vouch-doctor-check-connectivity",
+                status = status.to_string()
+            ))
         }
-        _ => anyhow::anyhow!("unexpected server response ({status})"),
+        _ => anyhow::anyhow!(tr_args!(
+            "err-unexpected-server-response",
+            status = status.to_string()
+        )),
     }
 }
 
@@ -626,15 +636,15 @@ mod test_utils {
             use axum::body::Body;
 
             // Keep the absolute URI so middleware can derive @scheme/@authority in tests.
-            let parsed = url::Url::parse(url).context("invalid URL")?;
+            let parsed = url::Url::parse(url).context(tr!("err-invalid-url"))?;
             let uri: http::Uri = parsed
                 .as_str()
                 .parse()
-                .context("invalid URI in test client request")?;
+                .context(tr!("err-invalid-uri-in-test-client-request"))?;
 
             // Build request
-            let method =
-                http::Method::from_bytes(method.as_bytes()).context("invalid HTTP method")?;
+            let method = http::Method::from_bytes(method.as_bytes())
+                .context(tr!("err-invalid-http-method"))?;
 
             let mut builder = http::Request::builder().method(method).uri(uri);
 
@@ -657,7 +667,9 @@ mod test_utils {
                 None => Body::empty(),
             };
 
-            let request = builder.body(body).context("failed to build request")?;
+            let request = builder
+                .body(body)
+                .context(tr!("err-failed-build-request"))?;
             let (mut parts, body) = request.into_parts();
             parts
                 .extensions
@@ -671,7 +683,7 @@ mod test_utils {
             let router: axum::Router = (*self.router).clone();
             let response = tower::ServiceExt::oneshot(router, request)
                 .await
-                .context("router error")?;
+                .context(tr!("err-router-error"))?;
 
             let status = response.status().as_u16();
             let (www_authenticate, dpop_nonce, sig_nonce, retry_after) =
@@ -679,7 +691,7 @@ mod test_utils {
 
             let body_bytes = axum::body::to_bytes(response.into_body(), 10 * 1024 * 1024)
                 .await
-                .context("failed to read response body")?;
+                .context(tr!("err-failed-read-response-body"))?;
 
             Ok(HttpResponse {
                 status,
