@@ -28,7 +28,7 @@
 | Web framework | `axum` | actix-web, rocket |
 | FIDO2 | `ctap-hid-fido2` (pure Rust) | |
 | SSH keys | `ssh-key` | |
-| Credential storage | `keyring` | |
+| Credential storage | `keyring-core` | |
 | Serialization | `serde` + `serde_json` | |
 | Async runtime | `tokio` | async-std |
 | Error types | `thiserror` (libraries), `anyhow` (binaries) | |

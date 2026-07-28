@@ -15,6 +15,7 @@ Vouch is a Rust workspace with these crates:
 | `vouch-cli` | User-facing CLI binary (commands, credential helpers, integrations) |
 | `vouch-agent` | Background daemon for session/cert management (Unix socket IPC) |
 | `vouch-common` | Shared types, FIDO2 helpers, API client |
+| `vouch-i18n` | Locale-agnostic Fluent i18n core shared by the server, CLI, and agent |
 | `vouch-server` | Auth server with OIDC provider, SSH CA, SCIM |
 | `vouch-httpsig` | HTTP Message Signatures (RFC 9421) |
 | `vouch-tests` | Integration and property-based tests |

@@ -18,11 +18,26 @@ The workspace enforces panic-free code via clippy lints in `Cargo.toml`. These a
 - `cast_possible_truncation`, `cast_sign_loss`, `cast_possible_wrap`, `cast_precision_loss`, `checked_conversions`
 - Use `try_from`, `try_into`, or checked conversions -- never `as` for numeric casts
 
+### Panics in Result-returning functions
+- `unwrap_in_result`, `panic_in_result_fn`, `get_unwrap`
+
+### Floats
+- `float_cmp`, `float_cmp_const`, `lossy_float_literal`, `zero_divided_by_zero`
+
+### Stack/memory safety
+- `large_stack_arrays`, `large_stack_frames`, `infinite_iter`
+- `recursive_format_impl`, `fallible_impl_from`
+- `mem_replace_with_uninit`, `uninit_assumed_init`, `uninit_vec`
+
 ### Safety
 - `unsafe_code` denied at the Rust lint level
 - `await_holding_lock`, `large_futures`, `mem_forget` denied
 
-The `vouch-tests` crate overrides these to allow unwrap/expect/panic in test code.
+### Style/hygiene
+- `dbg_macro`, `mutex_atomic`, `rc_buffer`, `map_unwrap_or`, `let_underscore_must_use`
+- `too_many_lines` warned (threshold: 150 lines, configured in `.clippy.toml`)
+
+The `vouch-tests` crate overrides `expect_used`, `unwrap_used`, `panic`, and `indexing_slicing` to allow them in test code.
 
 ## Error Handling
 
