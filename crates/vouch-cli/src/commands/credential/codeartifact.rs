@@ -209,17 +209,25 @@ pub(crate) async fn get_token(
     server: &str,
     target: &CodeArtifactTarget,
 ) -> Result<CodeArtifactToken> {
+    // Resolve the role BEFORE the cache lookup: `target.aws_profile` is only
+    // the *configured* anchor, and is `None` whenever the account has to be
+    // inferred (AWS_PROFILE, or the sole remaining Vouch profile). Keying the
+    // cache on that optional field would let two invocations that resolve to
+    // different accounts share an entry; the resolved role ARN is the value
+    // that actually determines which account's token comes back.
+    let role_arn = resolve_vouch_profile(target.aws_profile.as_deref())?.role_arn;
+
     // Detect the agent context BEFORE the cache lookup and fold it into the
     // cache key so agent and non-agent invocations never share a cached
     // entry — an agent must not receive a token minted without the
     // ReadOnlyAccess session policy / `vouch:AccessType=ai` tags
     // (issues #398, #426).
     let agent_source = crate::commands::credential::aws::detect_agent_source();
-    let cache_key = build_cache_key(target, agent_source.as_deref());
+    let cache_key = build_cache_key(target, &role_arn, agent_source.as_deref());
 
     let agent = agent_source;
     let data = cache::get_or_fetch(&cache_key, "CodeArtifact token", || async {
-        let token = fetch_token(server, target, agent.as_deref()).await?;
+        let token = fetch_token(server, target, &role_arn, agent.as_deref()).await?;
         let expires_at = jiff::Timestamp::from_second(token.expiration)
             .map_or_else(|_| cache::default_expiry(), |ts| ts.to_string());
         let data = serde_json::json!({
@@ -247,18 +255,17 @@ pub(crate) async fn get_token(
 
 /// Build the cache key for CodeArtifact tokens.
 ///
-/// The AWS profile is part of the key because two CodeArtifact profiles may
-/// share a domain while minting tokens from different accounts; the agent source
-/// is folded in so that agent and non-agent invocations never share a cached
-/// entry (same pattern as the STS, EKS, RDS, and Redshift credential caches).
-fn build_cache_key(target: &CodeArtifactTarget, agent: Option<&str>) -> String {
+/// The resolved role ARN is part of the key — not the optional
+/// `target.aws_profile` — because two invocations against the same domain can
+/// resolve to different accounts (different `AWS_PROFILE` values, or a
+/// changed set of Vouch profiles) even when neither names an AWS profile
+/// explicitly. The agent source is folded in so that agent and non-agent
+/// invocations never share a cached entry (same pattern as the STS, EKS,
+/// RDS, and Redshift credential caches).
+fn build_cache_key(target: &CodeArtifactTarget, role_arn: &str, agent: Option<&str>) -> String {
     let suffix = agent.map_or(String::new(), |src| format!(":agent:{src}"));
-    let profile = target
-        .aws_profile
-        .as_deref()
-        .map_or(String::new(), |p| format!(":profile:{p}"));
     format!(
-        "codeartifact:{}:{}:{}{profile}{suffix}",
+        "codeartifact:{}:{}:{}:{role_arn}{suffix}",
         target.domain, target.domain_owner, target.region
     )
 }
@@ -267,13 +274,12 @@ fn build_cache_key(target: &CodeArtifactTarget, agent: Option<&str>) -> String {
 async fn fetch_token(
     server: &str,
     target: &CodeArtifactTarget,
+    role_arn: &str,
     agent_source: Option<&str>,
 ) -> Result<CodeArtifactToken> {
-    let role_arn = resolve_vouch_profile(target.aws_profile.as_deref())?.role_arn;
-
     let result = exchange_for_sts_credentials(StsRequest {
         server,
-        role_arn: &role_arn,
+        role_arn,
         region: &target.region,
         management_role: None,
         agent_source,
@@ -302,6 +308,9 @@ async fn fetch_token(
 mod tests {
     use super::{CodeArtifactTarget, build_cache_key};
 
+    const PROD_ROLE: &str = "arn:aws:iam::111111111111:role/vouch-prod";
+    const DEMO_ROLE: &str = "arn:aws:iam::222222222222:role/vouch-demo";
+
     fn target(aws_profile: Option<&str>) -> CodeArtifactTarget {
         CodeArtifactTarget {
             domain: "my-domain".to_string(),
@@ -316,12 +325,15 @@ mod tests {
     /// would otherwise be bypassed by a full-access cached entry (#716).
     #[test]
     fn test_cache_key_includes_agent_source() {
-        let plain = build_cache_key(&target(None), None);
-        let agent = build_cache_key(&target(None), Some("claude-code"));
-        assert_eq!(plain, "codeartifact:my-domain:123456789012:us-east-1");
+        let plain = build_cache_key(&target(None), PROD_ROLE, None);
+        let agent = build_cache_key(&target(None), PROD_ROLE, Some("claude-code"));
+        assert_eq!(
+            plain,
+            format!("codeartifact:my-domain:123456789012:us-east-1:{PROD_ROLE}")
+        );
         assert_eq!(
             agent,
-            "codeartifact:my-domain:123456789012:us-east-1:agent:claude-code"
+            format!("codeartifact:my-domain:123456789012:us-east-1:{PROD_ROLE}:agent:claude-code")
         );
         assert_ne!(plain, agent);
     }
@@ -331,14 +343,23 @@ mod tests {
     /// account's token to the other.
     #[test]
     fn test_cache_key_separates_aws_profiles() {
-        let prod = build_cache_key(&target(Some("vouch-prod")), None);
-        let demo = build_cache_key(&target(Some("vouch-demo")), None);
+        let prod = build_cache_key(&target(Some("vouch-prod")), PROD_ROLE, None);
+        let demo = build_cache_key(&target(Some("vouch-demo")), DEMO_ROLE, None);
         assert_ne!(prod, demo);
-        assert_eq!(
-            prod,
-            "codeartifact:my-domain:123456789012:us-east-1:profile:vouch-prod"
-        );
-        assert_ne!(prod, build_cache_key(&target(None), None));
+    }
+
+    /// The resolved account can differ between two calls that never name an
+    /// AWS profile at all — e.g. `AWS_PROFILE` changes, or the set of
+    /// Vouch-managed profiles in `~/.aws/config` changes between them.
+    /// `target.aws_profile` is `None` in both cases here; keying on that
+    /// field alone (rather than the resolved role ARN) would collapse both
+    /// calls into one cache entry and hand one account's token to the other
+    /// (reported against an earlier revision of this cache key).
+    #[test]
+    fn test_cache_key_separates_resolved_roles_when_profile_unset() {
+        let first = build_cache_key(&target(None), PROD_ROLE, None);
+        let second = build_cache_key(&target(None), DEMO_ROLE, None);
+        assert_ne!(first, second);
     }
 
     /// Verify the CodeArtifact cache JSON round-trips correctly.
