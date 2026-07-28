@@ -142,7 +142,7 @@ pub fn authenticate(...) -> Result<...>
 
 All dependencies are declared at workspace level in the root `Cargo.toml` under `[workspace.dependencies]` with exact versions and minimal features. Crates reference them with `dep.workspace = true`. Add sparingly. Prefer:
 - `ctap-hid-fido2` for FIDO2 (pure Rust)
-- `keyring` for credential storage
+- `keyring-core` for credential storage
 - `reqwest` + `rustls` (avoid OpenSSL)
 - `aws-lc-rs` for crypto (not `ring`)
 - `jiff` for time (not `chrono`)
