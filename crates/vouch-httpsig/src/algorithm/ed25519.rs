@@ -48,7 +48,6 @@ impl Ed25519Signer {
     pub fn verifier(&self) -> Ed25519Verifier {
         Ed25519Verifier {
             public_key: self.key_pair.public_key().as_ref().to_vec(),
-            key_id: self.key_id.clone(),
         }
     }
 }
@@ -80,23 +79,15 @@ impl SigningAlgorithm for Ed25519Signer {
 #[derive(Debug, Clone)]
 pub struct Ed25519Verifier {
     public_key: Vec<u8>,
-    key_id: String,
 }
 
 impl Ed25519Verifier {
     /// Create a verifier from a raw 32-byte Ed25519 public key.
     #[must_use]
-    pub fn new(public_key: &[u8], key_id: &str) -> Self {
+    pub fn new(public_key: &[u8]) -> Self {
         Self {
             public_key: public_key.to_vec(),
-            key_id: key_id.to_string(),
         }
-    }
-
-    /// Return the key identifier.
-    #[must_use]
-    pub fn key_id(&self) -> &str {
-        &self.key_id
     }
 }
 
