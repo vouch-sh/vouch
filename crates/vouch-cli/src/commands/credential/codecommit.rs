@@ -16,6 +16,7 @@
 
 use anyhow::{Context, Result};
 use secrecy::ExposeSecret;
+use vouch_cli::tr_args;
 
 use crate::commands::credential::git_protocol::read_credential_input;
 use crate::integrations::aws::codecommit::{
@@ -258,8 +259,9 @@ fn exec_git_remote_http(remote_name: &str, signed_url: &str) -> Result<()> {
         use std::os::unix::process::CommandExt;
         // exec replaces this process — only returns on error
         let err = cmd.exec();
-        Err(crate::exit_code::CliError::ConfigError(format!(
-            "failed to exec git remote-http: {err}"
+        Err(crate::exit_code::CliError::ConfigError(tr_args!(
+            "credential-codecommit-err-exec-git",
+            error = err.to_string()
         ))
         .into())
     }

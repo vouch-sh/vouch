@@ -21,6 +21,7 @@ use anyhow::{Context, Result};
 use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
 use std::io::{BufRead, Write};
+use vouch_cli::{tr, tr_args};
 use vouch_common::{GitHubTokenRequest, GitHubTokenResponse};
 
 use crate::client::VouchClient;
@@ -159,9 +160,10 @@ async fn get_credential(profile: Option<&str>) -> Result<()> {
     let server_url = read_server_url()?;
 
     if server_url.is_empty() {
-        return Err(
-            crate::exit_code::CliError::ConfigError("no server URL provided".to_string()).into(),
-        );
+        return Err(crate::exit_code::CliError::ConfigError(tr!(
+            "credential-docker-err-no-server-url"
+        ))
+        .into());
     }
 
     // Detect registry type
@@ -205,8 +207,9 @@ async fn get_credential(profile: Option<&str>) -> Result<()> {
                 "credential-docker-err-unknown-registry",
                 url = server_url.as_str()
             );
-            return Err(crate::exit_code::CliError::ConfigError(format!(
-                "unsupported registry: {server_url}"
+            return Err(crate::exit_code::CliError::ConfigError(tr_args!(
+                "credential-docker-err-unsupported-registry",
+                url = server_url.as_str()
             ))
             .into());
         }

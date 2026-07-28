@@ -226,6 +226,137 @@ cmd-diag-about = Run diagnostic test of { -yubikey } registration + authenticati
 cmd-diag-long-about =
     Not available on Windows: depends on the CTAP2 protocol which Windows blocks for non-elevated processes.
 
+## credential subcommands
+#
+# Every credential subcommand supplies about/long_about/help explicitly rather
+# than letting clap derive them from Rust doc comments, which would print
+# English in every locale. A subcommand whose doc comment runs past one line
+# needs long_about too — clap builds long help from the whole comment.
+
+cmd-credential-aws-about = Obtain temporary AWS credentials
+cmd-credential-aws-long-about =
+    Two access patterns:
+
+      STS role: `--role <full-arn>` — assumes the role directly, or chains
+      through the configured management role when the target is in another
+      account.
+
+      Identity Center: `--account <id> --permission-set <name>` — exchanges
+      a { -product } RS256 token for an IdC access token, then calls
+      GetRoleCredentials. Requires Identity Center configured via
+      `{ -cmd } setup aws`.
+arg-credential-aws-role-help = AWS IAM role ARN to assume (STS role path).
+arg-credential-aws-account-help = AWS account ID (Identity Center path).
+arg-credential-aws-permission-set-help = IAM Identity Center permission-set name.
+arg-credential-aws-via-help = Management role ARN to chain through when multiple organizations are configured (STS paths only; not valid with --account/--permission-set).
+arg-credential-aws-idc-application-help = Identity Center application ARN to use when multiple IdC instances are configured (Identity Center path only; omit for single-instance setups).
+
+cmd-credential-ssh-about = Obtain an SSH certificate
+arg-credential-ssh-key-help = Path to SSH private key (default: ~/.ssh/id_ed25519_vouch).
+arg-credential-ssh-force-help = Force re-issuance even if existing certificate is still valid.
+
+cmd-credential-github-about = Git credential helper for GitHub
+cmd-credential-github-long-about =
+    This is used by git as a credential helper. Users should not call this
+    directly. Instead, use `{ -cmd } setup github` to configure git.
+arg-credential-github-operation-help = Git credential operation (get, store, erase).
+
+cmd-credential-docker-about = Docker credential helper for container registries
+cmd-credential-docker-long-about =
+    This is used by Docker as a credential helper. Users should not call this
+    directly. Instead, use `{ -cmd } setup docker` to configure Docker.
+arg-credential-docker-operation-help = Docker credential operation (get, store, erase, list).
+arg-credential-docker-profile-help = AWS profile in ~/.aws/config whose role mints ECR credentials.
+
+cmd-credential-cargo-about = Cargo credential provider for private registries
+cmd-credential-cargo-long-about =
+    This implements Cargo's credential provider protocol. Users should not call
+    this directly. Instead, use `{ -cmd } setup cargo` to configure Cargo.
+
+cmd-credential-codecommit-about = Git credential helper for AWS CodeCommit
+cmd-credential-codecommit-long-about =
+    This is used by git as a credential helper. Users should not call this
+    directly. Instead, use `{ -cmd } setup codecommit` to configure git.
+arg-credential-codecommit-operation-help = Git credential operation (get, store, erase).
+arg-credential-codecommit-profile-help = AWS profile in ~/.aws/config whose role mints CodeCommit credentials.
+
+cmd-credential-pip-about = pip keyring credential helper for CodeArtifact
+cmd-credential-pip-long-about =
+    Implements the keyring CLI protocol (`keyring get/set/del`) so pip can
+    dynamically fetch fresh CodeArtifact tokens. This command is called by pip
+    when `keyring-provider = subprocess` is configured.
+
+    Users should not call this directly. Run
+    `{ -cmd } setup codeartifact --tool pip` to configure pip.
+arg-credential-pip-operation-help = Keyring operation (get, set, del).
+arg-credential-pip-service-url-help = Service URL passed by pip (the CodeArtifact index URL).
+arg-credential-pip-username-help = Username passed by pip (typically "aws").
+
+cmd-credential-eks-about = Generate a Kubernetes bearer token for Amazon EKS authentication
+cmd-credential-eks-long-about =
+    Outputs a Kubernetes ExecCredential JSON to stdout. Use as a kubeconfig
+    exec-based credential plugin.
+arg-credential-eks-cluster-name-help = EKS cluster name.
+arg-credential-eks-region-help = AWS region (auto-detected from AWS profile or env if not specified).
+arg-credential-eks-role-help = AWS IAM role ARN to assume (auto-detected from the { -product } AWS profile if not specified).
+
+cmd-credential-k8s-about = Generate a Kubernetes OIDC token for generic Kubernetes clusters
+cmd-credential-k8s-long-about =
+    Outputs a Kubernetes ExecCredential JSON to stdout. Use as a kubeconfig
+    exec-based credential plugin for clusters configured with { -product } as
+    the OIDC provider.
+arg-credential-k8s-cluster-help = Kubernetes cluster name (used as cache key).
+arg-credential-k8s-audience-help = OIDC audience (must match --oidc-client-id on the API server). Defaults to "kubernetes" if not specified.
+
+cmd-credential-rds-about = Generate an RDS IAM authentication token
+cmd-credential-rds-long-about =
+    Prints a token to stdout that can be used as the database password for RDS
+    instances with IAM authentication enabled.
+arg-credential-rds-hostname-help = RDS instance hostname.
+arg-credential-rds-port-help = Database port (default: 5432).
+arg-credential-rds-username-help = Database username.
+arg-credential-rds-region-help = AWS region (auto-detected from AWS profile or env if not specified).
+arg-credential-rds-role-help = AWS IAM role ARN to assume (auto-detected from the { -product } AWS profile if not specified).
+
+cmd-credential-redshift-about = Generate temporary Amazon Redshift database credentials
+cmd-credential-redshift-long-about =
+    Supports both provisioned clusters (`--cluster-id`) and Redshift Serverless
+    workgroups (`--workgroup`). Exactly one must be specified. Outputs JSON with
+    DbUser, DbPassword, and Expiration.
+arg-credential-redshift-cluster-id-help = Redshift provisioned cluster identifier.
+arg-credential-redshift-workgroup-help = Redshift Serverless workgroup name.
+arg-credential-redshift-db-name-help = Database name (optional).
+arg-credential-redshift-region-help = AWS region (auto-detected from AWS profile or env if not specified).
+arg-credential-redshift-role-help = AWS IAM role ARN to assume (auto-detected from the { -product } AWS profile if not specified).
+arg-credential-redshift-duration-help = Credential duration in seconds (900-3600, default: 900). Only for provisioned clusters.
+
+cmd-credential-anthropic-about = Obtain a short-lived Anthropic (Claude) API token via Workload Identity Federation
+cmd-credential-anthropic-long-about =
+    Requires `{ -cmd } setup anthropic` and an active session
+    (`{ -cmd } login`). Prints a bare `sk-ant-oat01-...` token to stdout with no
+    trailing newline. The token acts as a non-human service account — intended
+    as a credential source for CI/headless automation, not for interactive
+    Claude Code sessions.
+
+cmd-credential-openai-about = Obtain a short-lived OpenAI API token via Workload Identity Federation
+cmd-credential-openai-long-about =
+    Requires `{ -cmd } setup openai`, an active session (`{ -cmd } login`), and
+    that OpenAI has onboarded the { -product } issuer as a workload identity
+    provider (custom OIDC is not self-service on OpenAI's side). Prints a bare
+    token to stdout — designed to be invoked by the OpenAI Codex CLI as a
+    `[model_providers.<id>.auth]` command with `refresh_interval_ms`.
+
+cmd-credential-token-about = Print the current session token for use with curl or other tools
+
+cmd-credential-codeartifact-about = Obtain a CodeArtifact authorization token
+arg-credential-codeartifact-domain-help = CodeArtifact domain name (or use --domain-profile / saved default).
+arg-credential-codeartifact-domain-owner-help = AWS account ID that owns the domain.
+arg-credential-codeartifact-region-help = AWS region.
+arg-credential-codeartifact-domain-profile-help = Named CodeArtifact domain profile from config.
+arg-credential-codeartifact-profile-help = AWS profile in ~/.aws/config whose role mints the token (distinct from --domain-profile, which names a saved CodeArtifact domain).
+
+credential-codecommit-err-exec-git = failed to exec git remote-http: { $error }
+
 ## Shared arg help
 
 arg-register-name-help = Human-readable name for this { -yubikey } (e.g., "My { -yubikey } 5"). Defaults to "{ -yubikey }" if not specified.
@@ -747,6 +878,8 @@ credential-helper-err-not-configured = vouch: not configured - run '{ -cmd } enr
 
 ## credential/docker
 
+credential-docker-err-no-server-url = no server URL provided
+credential-docker-err-unsupported-registry = unsupported registry: { $url }
 credential-docker-err-unknown-registry = vouch: unknown registry type for URL: { $url }
 
 ## credential/github

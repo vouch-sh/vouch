@@ -2,6 +2,7 @@
 //! Credential issuance commands.
 
 use clap::Subcommand;
+use vouch_cli::tr;
 
 pub(crate) mod anthropic;
 pub(crate) mod aws;
@@ -24,238 +25,266 @@ pub(crate) mod token;
 pub(crate) mod wif;
 
 /// Credential subcommands.
+///
+/// Doc comments on this enum are for developers. Every user-visible string is
+/// supplied by `about` / `long_about` / `help` so it resolves through Fluent —
+/// clap would otherwise derive them from the doc comments and print English in
+/// every locale. `long_about` is required wherever a doc comment runs past its
+/// first line, because clap derives long help from the whole comment.
 #[derive(Subcommand)]
 pub(crate) enum CredentialCommands {
     /// Obtain temporary AWS credentials.
-    ///
-    /// Two access patterns:
-    ///
-    ///   STS role: `--role <full-arn>` — assumes the role directly,
-    ///   or chains through the configured management role when the target
-    ///   is in another account.
-    ///
-    ///   Identity Center: `--account <id> --permission-set <name>` —
-    ///   exchanges a Vouch RS256 token for an IdC access token, then calls
-    ///   `GetRoleCredentials`. Requires Identity Center configured via
-    ///   `vouch setup aws`.
+    #[command(
+        about = tr!("cmd-credential-aws-about"),
+        long_about = tr!("cmd-credential-aws-long-about"),
+    )]
     Aws {
         /// AWS IAM role ARN to assume (STS role path).
         #[arg(
             long,
             conflicts_with_all = ["account", "permission_set"],
             required_unless_present_any = ["account", "permission_set"],
+            help = tr!("arg-credential-aws-role-help"),
         )]
         role: Option<String>,
 
         /// AWS account ID (Identity Center path).
-        #[arg(long, requires = "permission_set", conflicts_with = "role")]
+        #[arg(
+            long,
+            requires = "permission_set",
+            conflicts_with = "role",
+            help = tr!("arg-credential-aws-account-help"),
+        )]
         account: Option<String>,
 
         /// IAM Identity Center permission-set name.
-        #[arg(long, requires = "account", conflicts_with = "role")]
+        #[arg(
+            long,
+            requires = "account",
+            conflicts_with = "role",
+            help = tr!("arg-credential-aws-permission-set-help"),
+        )]
         permission_set: Option<String>,
 
         /// Management role ARN to chain through when multiple organizations
-        /// are configured (STS paths only; not valid with --account/--permission-set).
-        #[arg(long, conflicts_with_all = ["idc_application", "account", "permission_set"])]
+        /// are configured (STS paths only).
+        #[arg(
+            long,
+            conflicts_with_all = ["idc_application", "account", "permission_set"],
+            help = tr!("arg-credential-aws-via-help"),
+        )]
         via: Option<String>,
 
         /// Identity Center application ARN to use when multiple IdC instances
-        /// are configured (Identity Center path only; omit for single-instance setups).
-        #[arg(long, conflicts_with = "via")]
+        /// are configured (Identity Center path only).
+        #[arg(
+            long,
+            conflicts_with = "via",
+            help = tr!("arg-credential-aws-idc-application-help"),
+        )]
         idc_application: Option<String>,
     },
     /// Obtain an SSH certificate.
+    #[command(about = tr!("cmd-credential-ssh-about"))]
     Ssh {
-        /// Path to SSH private key (default: ~/.ssh/id_ed25519_vouch).
-        #[arg(long)]
+        /// Path to SSH private key.
+        #[arg(long, help = tr!("arg-credential-ssh-key-help"))]
         key: Option<String>,
         /// Force re-issuance even if existing certificate is still valid.
-        #[arg(long)]
+        #[arg(long, help = tr!("arg-credential-ssh-force-help"))]
         force: bool,
     },
-    /// Git credential helper for GitHub.
-    ///
-    /// This is used by git as a credential helper. Users should not call this directly.
-    /// Instead, use `vouch setup github` to configure git.
-    #[command(hide = true)]
+    /// Git credential helper for GitHub. Invoked by git, not by users.
+    #[command(
+        hide = true,
+        about = tr!("cmd-credential-github-about"),
+        long_about = tr!("cmd-credential-github-long-about"),
+    )]
     Github {
         /// Git credential operation (get, store, erase).
+        #[arg(help = tr!("arg-credential-github-operation-help"))]
         operation: String,
     },
-    /// Docker credential helper for container registries.
-    ///
-    /// This is used by Docker as a credential helper. Users should not call this directly.
-    /// Instead, use `vouch setup docker` to configure Docker.
-    #[command(hide = true)]
+    /// Docker credential helper. Invoked by Docker, not by users.
+    #[command(
+        hide = true,
+        about = tr!("cmd-credential-docker-about"),
+        long_about = tr!("cmd-credential-docker-long-about"),
+    )]
     Docker {
         /// Docker credential operation (get, store, erase, list).
+        #[arg(help = tr!("arg-credential-docker-operation-help"))]
         operation: String,
         /// AWS profile in ~/.aws/config whose role mints ECR credentials.
-        #[arg(long)]
+        #[arg(long, help = tr!("arg-credential-docker-profile-help"))]
         profile: Option<String>,
     },
-    /// Cargo credential provider for private registries.
-    ///
-    /// This implements Cargo's credential provider protocol.
-    /// Users should not call this directly.
-    /// Instead, use `vouch setup cargo` to configure Cargo.
-    #[command(hide = true)]
+    /// Cargo credential provider. Invoked by Cargo, not by users.
+    #[command(
+        hide = true,
+        about = tr!("cmd-credential-cargo-about"),
+        long_about = tr!("cmd-credential-cargo-long-about"),
+    )]
     Cargo {
-        /// Cargo plugin marker (always passed by Cargo).
+        /// Cargo plugin marker (always passed by Cargo). Hidden, so no help text.
         #[arg(long = "cargo-plugin", hide = true)]
         _cargo_plugin: bool,
     },
-    /// Git credential helper for AWS CodeCommit.
-    ///
-    /// This is used by git as a credential helper. Users should not call this directly.
-    /// Instead, use `vouch setup codecommit` to configure git.
-    #[command(hide = true)]
+    /// Git credential helper for CodeCommit. Invoked by git, not by users.
+    #[command(
+        hide = true,
+        about = tr!("cmd-credential-codecommit-about"),
+        long_about = tr!("cmd-credential-codecommit-long-about"),
+    )]
     Codecommit {
         /// Git credential operation (get, store, erase).
+        #[arg(help = tr!("arg-credential-codecommit-operation-help"))]
         operation: String,
         /// AWS profile in ~/.aws/config whose role mints CodeCommit credentials.
-        #[arg(long)]
+        #[arg(long, help = tr!("arg-credential-codecommit-profile-help"))]
         profile: Option<String>,
     },
-    /// pip keyring credential helper for CodeArtifact.
-    ///
-    /// Implements the keyring CLI protocol (`keyring get/set/del`) so pip can
-    /// dynamically fetch fresh CodeArtifact tokens. This command is called by
-    /// pip when `keyring-provider = subprocess` is configured.
-    ///
-    /// Users should not call this directly.
-    /// Run `vouch setup codeartifact --tool pip` to configure pip.
-    #[command(hide = true)]
+    /// pip keyring credential helper. Invoked by pip, not by users.
+    #[command(
+        hide = true,
+        about = tr!("cmd-credential-pip-about"),
+        long_about = tr!("cmd-credential-pip-long-about"),
+    )]
     Pip {
         /// Keyring operation (get, set, del).
+        #[arg(help = tr!("arg-credential-pip-operation-help"))]
         operation: String,
         /// Service URL passed by pip (the CodeArtifact index URL).
+        #[arg(help = tr!("arg-credential-pip-service-url-help"))]
         service_url: Option<String>,
         /// Username passed by pip (typically "aws").
+        #[arg(help = tr!("arg-credential-pip-username-help"))]
         username: Option<String>,
     },
     /// Generate a Kubernetes bearer token for Amazon EKS authentication.
-    ///
-    /// Outputs a Kubernetes ExecCredential JSON to stdout. Use as a
-    /// kubeconfig exec-based credential plugin.
+    #[command(
+        about = tr!("cmd-credential-eks-about"),
+        long_about = tr!("cmd-credential-eks-long-about"),
+    )]
     Eks {
         /// EKS cluster name.
-        #[arg(long)]
+        #[arg(long, help = tr!("arg-credential-eks-cluster-name-help"))]
         cluster_name: String,
-        /// AWS region (auto-detected from AWS profile or env if not specified).
-        #[arg(long)]
+        /// AWS region.
+        #[arg(long, help = tr!("arg-credential-eks-region-help"))]
         region: Option<String>,
-        /// AWS IAM role ARN to assume (auto-detected from vouch AWS profile if not specified).
-        #[arg(long)]
+        /// AWS IAM role ARN to assume.
+        #[arg(long, help = tr!("arg-credential-eks-role-help"))]
         role: Option<String>,
     },
     /// Generate a Kubernetes OIDC token for generic Kubernetes clusters.
-    ///
-    /// Outputs a Kubernetes ExecCredential JSON to stdout. Use as a
-    /// kubeconfig exec-based credential plugin for clusters configured with
-    /// Vouch as the OIDC provider.
+    #[command(
+        about = tr!("cmd-credential-k8s-about"),
+        long_about = tr!("cmd-credential-k8s-long-about"),
+    )]
     K8s {
         /// Kubernetes cluster name (used as cache key).
-        #[arg(long)]
+        #[arg(long, help = tr!("arg-credential-k8s-cluster-help"))]
         cluster: String,
-        /// OIDC audience (must match --oidc-client-id on the API server).
-        /// Defaults to "kubernetes" if not specified.
-        #[arg(long)]
+        /// OIDC audience.
+        #[arg(long, help = tr!("arg-credential-k8s-audience-help"))]
         audience: Option<String>,
     },
     /// Generate an RDS IAM authentication token.
-    ///
-    /// Prints a token to stdout that can be used as the database password
-    /// for RDS instances with IAM authentication enabled.
+    #[command(
+        about = tr!("cmd-credential-rds-about"),
+        long_about = tr!("cmd-credential-rds-long-about"),
+    )]
     Rds {
         /// RDS instance hostname.
-        #[arg(long)]
+        #[arg(long, help = tr!("arg-credential-rds-hostname-help"))]
         hostname: String,
-        /// Database port (default: 5432).
-        #[arg(long, default_value = "5432")]
+        /// Database port.
+        #[arg(long, default_value = "5432", help = tr!("arg-credential-rds-port-help"))]
         port: u16,
         /// Database username.
-        #[arg(long)]
+        #[arg(long, help = tr!("arg-credential-rds-username-help"))]
         username: String,
-        /// AWS region (auto-detected from AWS profile or env if not specified).
-        #[arg(long)]
+        /// AWS region.
+        #[arg(long, help = tr!("arg-credential-rds-region-help"))]
         region: Option<String>,
-        /// AWS IAM role ARN to assume (auto-detected from vouch AWS profile if not specified).
-        #[arg(long)]
+        /// AWS IAM role ARN to assume.
+        #[arg(long, help = tr!("arg-credential-rds-role-help"))]
         role: Option<String>,
     },
     /// Generate temporary Amazon Redshift database credentials.
-    ///
-    /// Supports both provisioned clusters (`--cluster-id`) and Redshift
-    /// Serverless workgroups (`--workgroup`). Exactly one must be specified.
-    /// Outputs JSON with DbUser, DbPassword, and Expiration.
+    #[command(
+        about = tr!("cmd-credential-redshift-about"),
+        long_about = tr!("cmd-credential-redshift-long-about"),
+    )]
     Redshift {
         /// Redshift provisioned cluster identifier.
         #[arg(
             long,
             conflicts_with = "workgroup",
-            required_unless_present = "workgroup"
+            required_unless_present = "workgroup",
+            help = tr!("arg-credential-redshift-cluster-id-help"),
         )]
         cluster_id: Option<String>,
         /// Redshift Serverless workgroup name.
         #[arg(
             long,
             conflicts_with = "cluster_id",
-            required_unless_present = "cluster_id"
+            required_unless_present = "cluster_id",
+            help = tr!("arg-credential-redshift-workgroup-help"),
         )]
         workgroup: Option<String>,
         /// Database name (optional).
-        #[arg(long)]
+        #[arg(long, help = tr!("arg-credential-redshift-db-name-help"))]
         db_name: Option<String>,
-        /// AWS region (auto-detected from AWS profile or env if not specified).
-        #[arg(long)]
+        /// AWS region.
+        #[arg(long, help = tr!("arg-credential-redshift-region-help"))]
         region: Option<String>,
-        /// AWS IAM role ARN to assume (auto-detected from vouch AWS profile if not specified).
-        #[arg(long)]
+        /// AWS IAM role ARN to assume.
+        #[arg(long, help = tr!("arg-credential-redshift-role-help"))]
         role: Option<String>,
-        /// Credential duration in seconds (900-3600, default: 900). Only for provisioned clusters.
-        #[arg(long, value_parser = clap::value_parser!(u32).range(900..=3600), conflicts_with = "workgroup")]
+        /// Credential duration in seconds. Only for provisioned clusters.
+        #[arg(
+            long,
+            value_parser = clap::value_parser!(u32).range(900..=3600),
+            conflicts_with = "workgroup",
+            help = tr!("arg-credential-redshift-duration-help"),
+        )]
         duration: Option<u32>,
     },
-    /// Obtain a short-lived Anthropic (Claude) API token via Workload
-    /// Identity Federation.
-    ///
-    /// Requires `vouch setup anthropic` and an active session
-    /// (`vouch login`). Prints a bare `sk-ant-oat01-...` token to stdout
-    /// with no trailing newline. The token acts as a non-human service
-    /// account — intended as a credential source for CI/headless
-    /// automation, not for interactive Claude Code sessions.
+    /// Obtain a short-lived Anthropic (Claude) API token via Workload Identity
+    /// Federation.
+    #[command(
+        about = tr!("cmd-credential-anthropic-about"),
+        long_about = tr!("cmd-credential-anthropic-long-about"),
+    )]
     Anthropic {},
     /// Obtain a short-lived OpenAI API token via Workload Identity Federation.
-    ///
-    /// Requires `vouch setup openai`, an active session (`vouch login`),
-    /// and that OpenAI has onboarded the Vouch issuer as a workload
-    /// identity provider (custom OIDC is not self-service on OpenAI's side).
-    /// Prints a bare token to stdout — designed to be invoked by the
-    /// OpenAI Codex CLI as a `[model_providers.<id>.auth]` command with
-    /// `refresh_interval_ms`.
+    #[command(
+        about = tr!("cmd-credential-openai-about"),
+        long_about = tr!("cmd-credential-openai-long-about"),
+    )]
     Openai {},
     /// Print the current session token for use with curl or other tools.
+    #[command(about = tr!("cmd-credential-token-about"))]
     Token {},
     /// Obtain a CodeArtifact authorization token.
+    #[command(about = tr!("cmd-credential-codeartifact-about"))]
     Codeartifact {
-        /// CodeArtifact domain name (or use --domain-profile / saved default).
-        #[arg(long)]
+        /// CodeArtifact domain name.
+        #[arg(long, help = tr!("arg-credential-codeartifact-domain-help"))]
         domain: Option<String>,
         /// AWS account ID that owns the domain.
-        #[arg(long)]
+        #[arg(long, help = tr!("arg-credential-codeartifact-domain-owner-help"))]
         domain_owner: Option<String>,
         /// AWS region.
-        #[arg(long)]
+        #[arg(long, help = tr!("arg-credential-codeartifact-region-help"))]
         region: Option<String>,
         /// Named CodeArtifact domain profile from config.
-        #[arg(long)]
+        #[arg(long, help = tr!("arg-credential-codeartifact-domain-profile-help"))]
         domain_profile: Option<String>,
         /// AWS profile in ~/.aws/config whose role mints the token.
-        ///
-        /// Distinct from --domain-profile, which names a saved CodeArtifact domain.
-        #[arg(long)]
+        #[arg(long, help = tr!("arg-credential-codeartifact-profile-help"))]
         profile: Option<String>,
     },
 }
