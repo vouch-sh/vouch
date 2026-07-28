@@ -19,7 +19,37 @@ pub(crate) use config::{
     extract_role_from_credential_process,
 };
 
+use vouch_cli::{tr, tr_args};
+
 use crate::exit_code::CliError;
+
+/// Which override flag(s) the invoking command accepts.
+///
+/// Threaded into [`resolve_vouch_profile`] from the call site so an ambiguous-
+/// profile error suggests a flag the invoking command actually has — some
+/// credential commands (EKS, RDS, Redshift) expose only `--role`, most setup
+/// commands and CodeArtifact/Docker/CodeCommit expose only `--profile`, and
+/// `aws console` takes either.
+#[derive(Clone, Copy)]
+pub(crate) enum ProfileOverride {
+    /// The command accepts `--profile <name>`.
+    Profile,
+    /// The command accepts `--role <arn>`.
+    Role,
+    /// The command accepts both `--profile <name>` and `--role <arn>`.
+    ProfileOrRole,
+}
+
+impl ProfileOverride {
+    /// Rendered into the ambiguity error's Fluent variable.
+    fn hint(self) -> String {
+        match self {
+            Self::Profile => tr!("aws-override-hint-profile"),
+            Self::Role => tr!("aws-override-hint-role"),
+            Self::ProfileOrRole => tr!("aws-override-hint-profile-or-role"),
+        }
+    }
+}
 
 /// Resolve which Vouch-managed AWS profile a command should use.
 ///
@@ -33,10 +63,13 @@ use crate::exit_code::CliError;
 /// when no Vouch profile exists, or when several exist and none was requested.
 /// Picking one silently would sign requests for an account the user never asked
 /// for, which surfaces as an opaque 403 from the target AWS service.
-pub(crate) fn resolve_vouch_profile(explicit: Option<&str>) -> anyhow::Result<VouchProfile> {
+pub(crate) fn resolve_vouch_profile(
+    explicit: Option<&str>,
+    accepts: ProfileOverride,
+) -> anyhow::Result<VouchProfile> {
     let config = AwsConfig::load()?;
     let env_profile = std::env::var("AWS_PROFILE").ok();
-    select_vouch_profile(&config, explicit, env_profile.as_deref())
+    select_vouch_profile(&config, explicit, env_profile.as_deref(), accepts)
 }
 
 /// Apply the profile resolution order to an already-loaded config.
@@ -47,6 +80,7 @@ fn select_vouch_profile(
     config: &AwsConfig,
     explicit: Option<&str>,
     env_profile: Option<&str>,
+    accepts: ProfileOverride,
 ) -> anyhow::Result<VouchProfile> {
     if let Some(name) = explicit {
         return named_vouch_profile(config, name);
@@ -62,27 +96,24 @@ fn select_vouch_profile(
     }
 
     match config.vouch_profiles_with_role().as_slice() {
-        [] => Err(CliError::ConfigError(
-            "No Vouch AWS profile found in ~/.aws/config.\n\
-             Run 'vouch setup aws --role <role-arn>' first."
-                .to_string(),
-        )
-        .into()),
+        [] => Err(CliError::ConfigError(tr!("aws-err-no-vouch-profile")).into()),
         [only] => Ok(only.clone()),
         candidates => {
             let width = candidates.iter().map(|p| p.name.len()).max().unwrap_or(0);
-            let mut listing = String::new();
+            // Leading newline: joined with the Fluent message's own line break
+            // before this variable, it reproduces the blank line that sets the
+            // listing apart from the heading above and the suggestion below.
+            let mut listing = String::from("\n");
             for profile in candidates {
                 listing.push_str(&format!(
                     "  {:<width$}  {}\n",
                     profile.name, profile.role_arn
                 ));
             }
-            Err(CliError::ConfigError(format!(
-                "Multiple Vouch AWS profiles found in ~/.aws/config; \
-                 refusing to guess which account you meant:\n\n\
-                 {listing}\n\
-                 Set AWS_PROFILE, or name the account with --profile or --role."
+            Err(CliError::ConfigError(tr_args!(
+                "aws-err-ambiguous-profile",
+                listing = listing,
+                override_hint = accepts.hint(),
             ))
             .into())
         }
@@ -92,19 +123,15 @@ fn select_vouch_profile(
 /// Look up a specific profile by name and extract the role it targets.
 fn named_vouch_profile(config: &AwsConfig, name: &str) -> anyhow::Result<VouchProfile> {
     let Some(profile) = config.get_profile(name) else {
-        return Err(CliError::ConfigError(format!(
-            "AWS profile '{name}' not found in ~/.aws/config.\n\
-             Run 'vouch setup aws --profile {name} --role <role-arn>' to create it."
-        ))
-        .into());
+        return Err(
+            CliError::ConfigError(tr_args!("aws-err-profile-not-found", profile = name)).into(),
+        );
     };
 
     let Some(credential_process) = profile.credential_process else {
-        return Err(CliError::ConfigError(format!(
-            "AWS profile '{name}' has no credential_process and is not managed by Vouch.\n\
-             Run 'vouch setup aws --profile {name} --role <role-arn>'."
-        ))
-        .into());
+        return Err(
+            CliError::ConfigError(tr_args!("aws-err-profile-not-managed", profile = name)).into(),
+        );
     };
 
     if let Some(role_arn) = extract_role_from_credential_process(&credential_process) {
@@ -115,18 +142,15 @@ fn named_vouch_profile(config: &AwsConfig, name: &str) -> anyhow::Result<VouchPr
     }
 
     if let Some(target) = extract_idc_target_from_credential_process(&credential_process) {
-        return Err(CliError::ConfigError(format!(
-            "AWS profile '{name}' uses Identity Center ({target}).\n\
-             This command needs a role-based profile — run \
-             'vouch setup aws --profile <name> --role <role-arn>'."
+        return Err(CliError::ConfigError(tr_args!(
+            "aws-err-profile-is-identity-center",
+            profile = name,
+            target = target,
         ))
         .into());
     }
 
-    Err(CliError::ConfigError(format!(
-        "AWS profile '{name}' has no --role in its credential_process."
-    ))
-    .into())
+    Err(CliError::ConfigError(tr_args!("aws-err-profile-missing-role", profile = name)).into())
 }
 
 /// Find a region from an explicit flag, a named profile, then the environment.
@@ -162,11 +186,7 @@ fn find_region(region: Option<&str>, profile_name: Option<&str>) -> anyhow::Resu
 
 /// The error returned when no region could be determined from any source.
 fn no_region_error() -> CliError {
-    CliError::ConfigError(
-        "Could not determine AWS region.\n\
-         Specify --region, or set a region in your AWS profile or AWS_DEFAULT_REGION."
-            .to_string(),
-    )
+    CliError::ConfigError(tr!("aws-err-no-region"))
 }
 
 /// Resolve the AWS region, checking profile config then environment variables.
@@ -210,6 +230,11 @@ pub(crate) fn resolve_region_with_fallback(role_arn: &str) -> anyhow::Result<Str
 /// that need both a role and region (EKS, RDS, Redshift). It:
 /// 1. Uses the `--role` flag if provided, otherwise resolves a Vouch profile
 /// 2. Resolves the region from `--region`, that same profile, or env vars
+///
+/// Every current caller exposes only `--role` (no `--profile` flag), so an
+/// ambiguous-profile error here always points at `--role`. Thread a
+/// [`ProfileOverride`] through instead if a `--profile`-accepting caller is
+/// ever added.
 pub(crate) fn resolve_role_and_region(
     role: Option<&str>,
     region: Option<&str>,
@@ -225,11 +250,15 @@ pub(crate) fn resolve_role_and_region(
                 .ok()
                 .and_then(|config| config.find_vouch_profile_for_role(r))
                 .map(|profile| profile.name)
-                .or_else(|| resolve_vouch_profile(profile).ok().map(|p| p.name));
+                .or_else(|| {
+                    resolve_vouch_profile(profile, ProfileOverride::Role)
+                        .ok()
+                        .map(|p| p.name)
+                });
             (owning, r.to_string())
         }
         None => {
-            let resolved = resolve_vouch_profile(profile)?;
+            let resolved = resolve_vouch_profile(profile, ProfileOverride::Role)?;
             (Some(resolved.name), resolved.role_arn)
         }
     };
@@ -444,7 +473,8 @@ region = us-east-1
 credential_process = vouch credential aws --role arn:aws:iam::222222222222:role/demo
 "#,
         );
-        let resolved = select_vouch_profile(&aws, None, None).expect("single profile resolves");
+        let resolved = select_vouch_profile(&aws, None, None, ProfileOverride::ProfileOrRole)
+            .expect("single profile resolves");
         assert_eq!(resolved.name, "vouch-demo");
         assert_eq!(resolved.role_arn, "arn:aws:iam::222222222222:role/demo");
     }
@@ -452,7 +482,7 @@ credential_process = vouch credential aws --role arn:aws:iam::222222222222:role/
     #[test]
     fn refuses_to_guess_between_several_profiles() {
         let aws = load_config(TWO_PROFILES);
-        let err = select_vouch_profile(&aws, None, None)
+        let err = select_vouch_profile(&aws, None, None, ProfileOverride::ProfileOrRole)
             .expect_err("ambiguous choice must not silently pick one")
             .to_string();
 
@@ -468,27 +498,62 @@ credential_process = vouch credential aws --role arn:aws:iam::222222222222:role/
         assert!(err.contains("--profile"), "{err}");
     }
 
+    /// The ambiguity error suggests only the flag(s) the invoking command
+    /// actually accepts — a role-only command (EKS/RDS/Redshift) must not be
+    /// told to pass `--profile`, which it doesn't have.
+    #[test]
+    fn ambiguous_profile_error_names_only_the_accepted_override() {
+        let aws = load_config(TWO_PROFILES);
+
+        let role_only = select_vouch_profile(&aws, None, None, ProfileOverride::Role)
+            .expect_err("still ambiguous")
+            .to_string();
+        assert!(role_only.contains("--role"), "{role_only}");
+        assert!(!role_only.contains("--profile"), "{role_only}");
+
+        let profile_only = select_vouch_profile(&aws, None, None, ProfileOverride::Profile)
+            .expect_err("still ambiguous")
+            .to_string();
+        assert!(profile_only.contains("--profile"), "{profile_only}");
+        assert!(!profile_only.contains("--role"), "{profile_only}");
+    }
+
     #[test]
     fn explicit_profile_wins_over_ambiguity() {
         let aws = load_config(TWO_PROFILES);
-        let resolved =
-            select_vouch_profile(&aws, Some("vouch-demo"), None).expect("named profile resolves");
+        let resolved = select_vouch_profile(
+            &aws,
+            Some("vouch-demo"),
+            None,
+            ProfileOverride::ProfileOrRole,
+        )
+        .expect("named profile resolves");
         assert_eq!(resolved.role_arn, "arn:aws:iam::222222222222:role/demo");
     }
 
     #[test]
     fn aws_profile_env_resolves_ambiguity() {
         let aws = load_config(TWO_PROFILES);
-        let resolved = select_vouch_profile(&aws, None, Some("vouch-demo"))
-            .expect("AWS_PROFILE resolves the choice");
+        let resolved = select_vouch_profile(
+            &aws,
+            None,
+            Some("vouch-demo"),
+            ProfileOverride::ProfileOrRole,
+        )
+        .expect("AWS_PROFILE resolves the choice");
         assert_eq!(resolved.name, "vouch-demo");
     }
 
     #[test]
     fn explicit_profile_outranks_aws_profile_env() {
         let aws = load_config(TWO_PROFILES);
-        let resolved = select_vouch_profile(&aws, Some("alpha-admin"), Some("vouch-demo"))
-            .expect("explicit profile wins");
+        let resolved = select_vouch_profile(
+            &aws,
+            Some("alpha-admin"),
+            Some("vouch-demo"),
+            ProfileOverride::ProfileOrRole,
+        )
+        .expect("explicit profile wins");
         assert_eq!(resolved.name, "alpha-admin");
     }
 
@@ -498,9 +563,14 @@ credential_process = vouch credential aws --role arn:aws:iam::222222222222:role/
     #[test]
     fn non_vouch_aws_profile_env_is_ignored() {
         let aws = load_config(TWO_PROFILES);
-        let err = select_vouch_profile(&aws, None, Some("some-other-profile"))
-            .expect_err("still ambiguous")
-            .to_string();
+        let err = select_vouch_profile(
+            &aws,
+            None,
+            Some("some-other-profile"),
+            ProfileOverride::ProfileOrRole,
+        )
+        .expect_err("still ambiguous")
+        .to_string();
         assert!(err.contains("alpha-admin"), "{err}");
     }
 
@@ -512,8 +582,13 @@ credential_process = vouch credential aws --role arn:aws:iam::222222222222:role/
 credential_process = vouch credential aws --role arn:aws:iam::222222222222:role/demo
 "#,
         );
-        let resolved = select_vouch_profile(&aws, None, Some("some-other-profile"))
-            .expect("falls through to the sole profile");
+        let resolved = select_vouch_profile(
+            &aws,
+            None,
+            Some("some-other-profile"),
+            ProfileOverride::ProfileOrRole,
+        )
+        .expect("falls through to the sole profile");
         assert_eq!(resolved.name, "vouch-demo");
     }
 
@@ -525,7 +600,7 @@ credential_process = vouch credential aws --role arn:aws:iam::222222222222:role/
 aws_access_key_id = AKIAIOSFODNN7EXAMPLE
 "#,
         );
-        let err = select_vouch_profile(&aws, None, None)
+        let err = select_vouch_profile(&aws, None, None, ProfileOverride::ProfileOrRole)
             .expect_err("nothing to resolve")
             .to_string();
         assert!(err.contains("vouch setup aws"), "{err}");
@@ -534,7 +609,7 @@ aws_access_key_id = AKIAIOSFODNN7EXAMPLE
     #[test]
     fn unknown_named_profile_is_reported() {
         let aws = load_config(TWO_PROFILES);
-        let err = select_vouch_profile(&aws, Some("typo"), None)
+        let err = select_vouch_profile(&aws, Some("typo"), None, ProfileOverride::ProfileOrRole)
             .expect_err("unknown profile")
             .to_string();
         assert!(err.contains("'typo' not found"), "{err}");
@@ -555,13 +630,18 @@ credential_process = vouch credential aws --role arn:aws:iam::222222222222:role/
 "#,
         );
 
-        let resolved =
-            select_vouch_profile(&aws, None, None).expect("IdC profile is not a candidate");
+        let resolved = select_vouch_profile(&aws, None, None, ProfileOverride::ProfileOrRole)
+            .expect("IdC profile is not a candidate");
         assert_eq!(resolved.name, "vouch-demo");
 
-        let err = select_vouch_profile(&aws, Some("vouch-idc"), None)
-            .expect_err("IdC profile cannot mint role credentials")
-            .to_string();
+        let err = select_vouch_profile(
+            &aws,
+            Some("vouch-idc"),
+            None,
+            ProfileOverride::ProfileOrRole,
+        )
+        .expect_err("IdC profile cannot mint role credentials")
+        .to_string();
         assert!(err.contains("Identity Center"), "{err}");
         assert!(err.contains("111111111111/Admin"), "{err}");
     }
@@ -574,7 +654,7 @@ credential_process = vouch credential aws --role arn:aws:iam::222222222222:role/
 aws_access_key_id = AKIAIOSFODNN7EXAMPLE
 "#,
         );
-        let err = select_vouch_profile(&aws, Some("prod"), None)
+        let err = select_vouch_profile(&aws, Some("prod"), None, ProfileOverride::ProfileOrRole)
             .expect_err("not a vouch profile")
             .to_string();
         assert!(err.contains("not managed by Vouch"), "{err}");

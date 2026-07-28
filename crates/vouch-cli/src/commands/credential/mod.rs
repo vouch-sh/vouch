@@ -240,7 +240,7 @@ pub(crate) enum CredentialCommands {
     Token {},
     /// Obtain a CodeArtifact authorization token.
     Codeartifact {
-        /// CodeArtifact domain name (or use --profile / saved default).
+        /// CodeArtifact domain name (or use --domain-profile / saved default).
         #[arg(long)]
         domain: Option<String>,
         /// AWS account ID that owns the domain.
@@ -249,13 +249,13 @@ pub(crate) enum CredentialCommands {
         /// AWS region.
         #[arg(long)]
         region: Option<String>,
-        /// Named CodeArtifact profile from config.
+        /// Named CodeArtifact domain profile from config.
         #[arg(long)]
-        profile: Option<String>,
+        domain_profile: Option<String>,
         /// AWS profile in ~/.aws/config whose role mints the token.
         ///
-        /// Distinct from --profile, which names a saved CodeArtifact domain.
+        /// Distinct from --domain-profile, which names a saved CodeArtifact domain.
         #[arg(long)]
-        aws_profile: Option<String>,
+        profile: Option<String>,
     },
 }

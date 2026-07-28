@@ -114,15 +114,20 @@ pub(crate) struct ServerConfig {
     registration_verified_at: Option<String>,
 }
 
-/// CodeArtifact configuration with named profiles (similar to AWS CLI profiles).
+/// CodeArtifact configuration with named domain profiles.
+///
+/// A "domain profile" here is a vouch-local bundle of (domain, domain_owner,
+/// region) — a different concept from an *AWS* profile in `~/.aws/config`.
+/// The CLI surface keeps the two distinct: `--domain-profile` names one of
+/// these, `--profile` always means the AWS profile.
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub(crate) struct CodeArtifactConfig {
-    /// Name of the default profile (used when `--profile` is omitted).
+    /// Name of the default domain profile (used when `--domain-profile` is omitted).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default: Option<String>,
-    /// Named profiles, keyed by user-chosen name.
+    /// Named domain profiles, keyed by user-chosen name.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub profiles: BTreeMap<String, CodeArtifactProfile>,
+    pub domain_profiles: BTreeMap<String, CodeArtifactProfile>,
 }
 
 /// A single CodeArtifact domain profile.
@@ -149,7 +154,7 @@ pub(crate) struct CodeArtifactProfile {
 ///
 /// Docker invokes `docker-credential-vouch` as an argument-less symlink, so the
 /// account backing each ECR registry cannot be passed on the command line and is
-/// recorded here by `vouch setup docker --aws-profile`.
+/// recorded here by `vouch setup docker --profile`.
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub(crate) struct DockerRegistriesConfig {
     /// Registry host → AWS profile name in `~/.aws/config`.
@@ -540,23 +545,23 @@ impl Config {
     }
 
     /// Anchor a container registry to an AWS profile (in memory; call `save()`).
-    pub(crate) fn set_docker_registry_profile(&mut self, registry: &str, aws_profile: &str) {
+    pub(crate) fn set_docker_registry_profile(&mut self, registry: &str, profile: &str) {
         self.docker
             .get_or_insert_with(DockerRegistriesConfig::default)
             .registries
-            .insert(registry.to_string(), aws_profile.to_string());
+            .insert(registry.to_string(), profile.to_string());
     }
 
-    /// Add a CodeArtifact profile (in memory only, call `save()` to
-    /// persist). If this is the first profile, it becomes the default.
+    /// Add a CodeArtifact domain profile (in memory only, call `save()` to
+    /// persist). If this is the first one, it becomes the default.
     pub(crate) fn set_codeartifact_profile(&mut self, name: &str, profile: CodeArtifactProfile) {
         let ca = self
             .codeartifact
             .get_or_insert_with(CodeArtifactConfig::default);
-        if ca.profiles.is_empty() && ca.default.is_none() {
+        if ca.domain_profiles.is_empty() && ca.default.is_none() {
             ca.default = Some(name.to_string());
         }
-        ca.profiles.insert(name.to_string(), profile);
+        ca.domain_profiles.insert(name.to_string(), profile);
     }
 
     // =====================================================================
@@ -932,7 +937,7 @@ mod tests {
             },
             "codeartifact": {
                 "default": "prod",
-                "profiles": {
+                "domain_profiles": {
                     "prod": {
                         "domain": "my-domain",
                         "domain_owner": "123456789012",
@@ -957,7 +962,7 @@ mod tests {
         // CodeArtifact is global.
         let ca = config.codeartifact().expect("codeartifact should exist");
         assert_eq!(ca.default.as_deref(), Some("prod"));
-        assert_eq!(ca.profiles.len(), 1);
+        assert_eq!(ca.domain_profiles.len(), 1);
 
         // Round-trip to JSON and back.
         let file2 = ConfigFile::from(&config);
@@ -984,7 +989,7 @@ mod tests {
             "dpop_key_id": "legacy-kid",
             "codeartifact": {
                 "default": "prod",
-                "profiles": {
+                "domain_profiles": {
                     "prod": {
                         "domain": "d",
                         "domain_owner": "o",
@@ -1120,7 +1125,7 @@ mod tests {
             },
             "codeartifact": {
                 "default": "prod",
-                "profiles": {
+                "domain_profiles": {
                     "prod": {
                         "domain": "my-domain",
                         "domain_owner": "123456789012",
@@ -1142,9 +1147,12 @@ mod tests {
             .codeartifact()
             .expect("codeartifact config should exist");
         assert_eq!(ca.default.as_deref(), Some("prod"));
-        assert_eq!(ca.profiles.len(), 2);
+        assert_eq!(ca.domain_profiles.len(), 2);
 
-        let prod = ca.profiles.get("prod").expect("prod profile should exist");
+        let prod = ca
+            .domain_profiles
+            .get("prod")
+            .expect("prod profile should exist");
         assert_eq!(prod.domain, "my-domain");
     }
 
@@ -1187,7 +1195,7 @@ mod tests {
             .codeartifact()
             .expect("should have codeartifact config");
         assert_eq!(ca.default.as_deref(), Some("myteam"));
-        assert_eq!(ca.profiles.len(), 1);
+        assert_eq!(ca.domain_profiles.len(), 1);
     }
 
     // -----------------------------------------------------------------

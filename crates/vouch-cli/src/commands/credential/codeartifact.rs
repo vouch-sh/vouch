@@ -19,7 +19,7 @@ use crate::config::Config;
 use crate::integrations::aws::codeartifact::{
     CodeArtifactRegistry, CodeArtifactToken, get_authorization_token,
 };
-use crate::integrations::aws::resolve_vouch_profile;
+use crate::integrations::aws::{ProfileOverride, resolve_vouch_profile};
 
 /// A CodeArtifact domain plus the AWS account that mints tokens for it.
 #[derive(Debug, Clone)]
@@ -34,7 +34,7 @@ pub(crate) struct CodeArtifactTarget {
     ///
     /// `None` means "resolve a Vouch profile from `~/.aws/config`", which only
     /// succeeds when the choice is unambiguous.
-    pub aws_profile: Option<String>,
+    pub profile: Option<String>,
 }
 
 impl CodeArtifactTarget {
@@ -43,12 +43,12 @@ impl CodeArtifactTarget {
     ///
     /// Package managers reach us through argument-less shims and rebuild the
     /// domain from an index URL, so the anchor has to be recovered from saved
-    /// profiles rather than passed along.
+    /// domain profiles rather than passed along.
     pub(crate) fn new(domain: String, domain_owner: String, region: String) -> Self {
-        let aws_profile = match Config::load() {
+        let profile = match Config::load() {
             Ok(config) => config.codeartifact().and_then(|ca| {
                 let mut anchors: Vec<&String> = Vec::new();
-                for saved in ca.profiles.values() {
+                for saved in ca.domain_profiles.values() {
                     let matches = saved.domain == domain
                         && saved.domain_owner == domain_owner
                         && saved.region == region;
@@ -59,9 +59,10 @@ impl CodeArtifactTarget {
                         anchors.push(anchor);
                     }
                 }
-                // Several saved profiles naming this domain but disagreeing on
-                // the account is exactly the case the resolver refuses to guess
-                // at; hand it back none rather than picking one by map order.
+                // Several saved domain profiles naming this domain but
+                // disagreeing on the account is exactly the case the resolver
+                // refuses to guess at; hand it back none rather than picking
+                // one by map order.
                 match anchors.as_slice() {
                     [only] => Some((*only).clone()),
                     _ => None,
@@ -73,57 +74,62 @@ impl CodeArtifactTarget {
             domain,
             domain_owner,
             region,
-            aws_profile,
+            profile,
         }
     }
 }
 
-/// Resolve CodeArtifact domain/owner/region from CLI flags, profile, or default profile.
+/// Resolve CodeArtifact domain/owner/region from CLI flags, a domain profile,
+/// or the default domain profile.
 ///
 /// Resolution order:
 /// 1. Explicit flags (if all three are provided)
-/// 2. Named profile (`--profile <name>`)
-/// 3. Default profile (`codeartifact.default`)
+/// 2. Named domain profile (`--domain-profile <name>`)
+/// 3. Default domain profile (`codeartifact.default`)
 /// 4. Error with helpful message
 ///
-/// `aws_profile` names an AWS profile in `~/.aws/config` and overrides whatever
-/// the saved CodeArtifact profile records. Note that `profile` is a *Vouch
-/// CodeArtifact* profile — the two are deliberately separate flags.
+/// `profile` names an AWS profile in `~/.aws/config` and overrides whatever
+/// the saved domain profile records. Note that `domain_profile` names a
+/// *Vouch CodeArtifact domain* bundle — the two are deliberately separate
+/// flags, since AWS CodeArtifact has no "profile" concept of its own.
 pub(crate) fn resolve_codeartifact_params(
     domain: Option<&str>,
     domain_owner: Option<&str>,
     region: Option<&str>,
+    domain_profile: Option<&str>,
     profile: Option<&str>,
-    aws_profile: Option<&str>,
 ) -> Result<CodeArtifactTarget> {
     // If all three flags are provided, use them directly. An explicit
-    // --aws-profile wins; otherwise fall back to the anchor saved for whichever
-    // CodeArtifact profile was named, then to one saved for this same domain.
+    // --profile wins; otherwise fall back to the anchor saved for whichever
+    // domain profile was named, then to one saved for this same domain.
     if let (Some(d), Some(o), Some(r)) = (domain, domain_owner, region) {
         let mut target = CodeArtifactTarget::new(d.to_string(), o.to_string(), r.to_string());
-        if let Some(p) = aws_profile {
-            target.aws_profile = Some(p.to_string());
-        } else if let Some(name) = profile {
+        if let Some(p) = profile {
+            target.profile = Some(p.to_string());
+        } else if let Some(name) = domain_profile {
             let config = Config::load().context("failed to load config")?;
-            if let Some(saved) = config.codeartifact().and_then(|c| c.profiles.get(name)) {
-                target.aws_profile = saved.aws_profile.clone();
+            if let Some(saved) = config
+                .codeartifact()
+                .and_then(|c| c.domain_profiles.get(name))
+            {
+                target.profile = saved.aws_profile.clone();
             }
         }
         return Ok(target);
     }
 
-    // Try to load from config profile
+    // Try to load from a saved domain profile
     let config = Config::load().context("failed to load config")?;
     let ca_config = config.codeartifact();
 
-    let resolved_profile = if let Some(name) = profile {
-        // Explicit --profile flag
+    let resolved_profile = if let Some(name) = domain_profile {
+        // Explicit --domain-profile flag
         ca_config
-            .and_then(|c| c.profiles.get(name))
+            .and_then(|c| c.domain_profiles.get(name))
             .ok_or_else(|| {
                 let available = ca_config
                     .map(|c| {
-                        c.profiles
+                        c.domain_profiles
                             .keys()
                             .map(String::as_str)
                             .collect::<Vec<_>>()
@@ -132,25 +138,25 @@ pub(crate) fn resolve_codeartifact_params(
                     .unwrap_or_default();
                 if available.is_empty() {
                     anyhow::anyhow!(
-                        "CodeArtifact profile '{name}' not found. \
-                         No profiles configured. Run 'vouch setup codeartifact' first."
+                        "CodeArtifact domain profile '{name}' not found. \
+                         No domain profiles configured. Run 'vouch setup codeartifact' first."
                     )
                 } else {
                     anyhow::anyhow!(
-                        "CodeArtifact profile '{name}' not found. \
-                         Available profiles: {available}"
+                        "CodeArtifact domain profile '{name}' not found. \
+                         Available domain profiles: {available}"
                     )
                 }
             })?
     } else {
-        // Try default profile
+        // Try the default domain profile
         let default_name = ca_config.and_then(|c| c.default.as_deref());
         match default_name {
             Some(name) => ca_config
-                .and_then(|c| c.profiles.get(name))
+                .and_then(|c| c.domain_profiles.get(name))
                 .ok_or_else(|| {
                     anyhow::anyhow!(
-                        "Default CodeArtifact profile '{name}' not found in config. \
+                        "Default CodeArtifact domain profile '{name}' not found in config. \
                          Run 'vouch setup codeartifact' to reconfigure."
                     )
                 })?,
@@ -158,21 +164,21 @@ pub(crate) fn resolve_codeartifact_params(
                 return Err(anyhow::anyhow!(
                     "No CodeArtifact domain specified. Either:\n  \
                      - Pass --domain, --domain-owner, and --region flags\n  \
-                     - Run 'vouch setup codeartifact' to save a profile\n  \
-                     - Pass --profile <name> to use a saved profile"
+                     - Run 'vouch setup codeartifact' to save a domain profile\n  \
+                     - Pass --domain-profile <name> to use a saved domain profile"
                 ));
             }
         }
     };
 
-    // Allow individual flags to override profile values
+    // Allow individual flags to override the domain profile's values
     Ok(CodeArtifactTarget {
         domain: domain.unwrap_or(&resolved_profile.domain).to_string(),
         domain_owner: domain_owner
             .unwrap_or(&resolved_profile.domain_owner)
             .to_string(),
         region: region.unwrap_or(&resolved_profile.region).to_string(),
-        aws_profile: aws_profile
+        profile: profile
             .map(str::to_string)
             .or_else(|| resolved_profile.aws_profile.clone()),
     })
@@ -190,10 +196,11 @@ pub(crate) async fn run(
     domain: Option<&str>,
     domain_owner: Option<&str>,
     region: Option<&str>,
+    domain_profile: Option<&str>,
     profile: Option<&str>,
-    aws_profile: Option<&str>,
 ) -> Result<()> {
-    let target = resolve_codeartifact_params(domain, domain_owner, region, profile, aws_profile)?;
+    let target =
+        resolve_codeartifact_params(domain, domain_owner, region, domain_profile, profile)?;
 
     let token = get_token(server, &target).await?;
     println!("{}", token.authorization_token.expose_secret());
@@ -209,13 +216,14 @@ pub(crate) async fn get_token(
     server: &str,
     target: &CodeArtifactTarget,
 ) -> Result<CodeArtifactToken> {
-    // Resolve the role BEFORE the cache lookup: `target.aws_profile` is only
-    // the *configured* anchor, and is `None` whenever the account has to be
+    // Resolve the role BEFORE the cache lookup: `target.profile` is only the
+    // *configured* anchor, and is `None` whenever the account has to be
     // inferred (AWS_PROFILE, or the sole remaining Vouch profile). Keying the
     // cache on that optional field would let two invocations that resolve to
     // different accounts share an entry; the resolved role ARN is the value
     // that actually determines which account's token comes back.
-    let role_arn = resolve_vouch_profile(target.aws_profile.as_deref())?.role_arn;
+    let role_arn =
+        resolve_vouch_profile(target.profile.as_deref(), ProfileOverride::Profile)?.role_arn;
 
     // Detect the agent context BEFORE the cache lookup and fold it into the
     // cache key so agent and non-agent invocations never share a cached
@@ -256,7 +264,7 @@ pub(crate) async fn get_token(
 /// Build the cache key for CodeArtifact tokens.
 ///
 /// The resolved role ARN is part of the key — not the optional
-/// `target.aws_profile` — because two invocations against the same domain can
+/// `target.profile` — because two invocations against the same domain can
 /// resolve to different accounts (different `AWS_PROFILE` values, or a
 /// changed set of Vouch profiles) even when neither names an AWS profile
 /// explicitly. The agent source is folded in so that agent and non-agent
@@ -311,12 +319,12 @@ mod tests {
     const PROD_ROLE: &str = "arn:aws:iam::111111111111:role/vouch-prod";
     const DEMO_ROLE: &str = "arn:aws:iam::222222222222:role/vouch-demo";
 
-    fn target(aws_profile: Option<&str>) -> CodeArtifactTarget {
+    fn target(profile: Option<&str>) -> CodeArtifactTarget {
         CodeArtifactTarget {
             domain: "my-domain".to_string(),
             domain_owner: "123456789012".to_string(),
             region: "us-east-1".to_string(),
-            aws_profile: aws_profile.map(str::to_string),
+            profile: profile.map(str::to_string),
         }
     }
 
@@ -351,9 +359,9 @@ mod tests {
     /// The resolved account can differ between two calls that never name an
     /// AWS profile at all — e.g. `AWS_PROFILE` changes, or the set of
     /// Vouch-managed profiles in `~/.aws/config` changes between them.
-    /// `target.aws_profile` is `None` in both cases here; keying on that
-    /// field alone (rather than the resolved role ARN) would collapse both
-    /// calls into one cache entry and hand one account's token to the other
+    /// `target.profile` is `None` in both cases here; keying on that field
+    /// alone (rather than the resolved role ARN) would collapse both calls
+    /// into one cache entry and hand one account's token to the other
     /// (reported against an earlier revision of this cache key).
     #[test]
     fn test_cache_key_separates_resolved_roles_when_profile_unset() {

@@ -152,8 +152,8 @@ async fn check_pnpm_tokenhelper_invocation(argv0: &str) -> Result<bool> {
         let domain = flag("--domain");
         let domain_owner = flag("--domain-owner");
         let region = flag("--region");
+        let domain_profile = flag("--domain-profile");
         let profile = flag("--profile");
-        let aws_profile = flag("--aws-profile");
 
         // Resolve session to get server URL
         let session = crate::session::resolve_session()
@@ -165,8 +165,8 @@ async fn check_pnpm_tokenhelper_invocation(argv0: &str) -> Result<bool> {
             domain.map(String::as_str),
             domain_owner.map(String::as_str),
             region.map(String::as_str),
+            domain_profile.map(String::as_str),
             profile.map(String::as_str),
-            aws_profile.map(String::as_str),
         )
         .await
         .map_err(|e| anyhow::anyhow!("vouch-pnpm-tokenhelper: {e}"))?;
@@ -214,16 +214,16 @@ struct Cli {
 /// Shared CodeArtifact CLI arguments for exec/env commands.
 #[derive(clap::Args)]
 struct CodeArtifactArgs {
-    /// CodeArtifact domain name (required for --type codeartifact unless profile is set).
+    /// CodeArtifact domain name (required for --type codeartifact unless --codeartifact-profile is set).
     #[arg(long)]
     codeartifact_domain: Option<String>,
-    /// AWS account ID that owns the CodeArtifact domain (required for --type codeartifact unless profile is set).
+    /// AWS account ID that owns the CodeArtifact domain (required for --type codeartifact unless --codeartifact-profile is set).
     #[arg(long)]
     codeartifact_domain_owner: Option<String>,
-    /// AWS region for CodeArtifact (required for --type codeartifact unless profile is set).
+    /// AWS region for CodeArtifact (required for --type codeartifact unless --codeartifact-profile is set).
     #[arg(long)]
     codeartifact_region: Option<String>,
-    /// Named CodeArtifact profile from config (for --type codeartifact).
+    /// Named CodeArtifact domain profile from config (for --type codeartifact).
     #[arg(long)]
     codeartifact_profile: Option<String>,
 }
@@ -234,7 +234,7 @@ impl CodeArtifactArgs {
             domain: self.codeartifact_domain.as_deref(),
             domain_owner: self.codeartifact_domain_owner.as_deref(),
             region: self.codeartifact_region.as_deref(),
-            profile: self.codeartifact_profile.as_deref(),
+            domain_profile: self.codeartifact_profile.as_deref(),
         }
     }
 }
@@ -760,16 +760,16 @@ async fn run() -> Result<()> {
                 domain,
                 domain_owner,
                 region,
+                domain_profile,
                 profile,
-                aws_profile,
             } => {
                 commands::credential::codeartifact::run(
                     server,
                     domain.as_deref(),
                     domain_owner.as_deref(),
                     region.as_deref(),
+                    domain_profile.as_deref(),
                     profile.as_deref(),
-                    aws_profile.as_deref(),
                 )
                 .await
             }
@@ -844,8 +844,8 @@ async fn run() -> Result<()> {
             SetupCommands::Docker {
                 registries,
                 configure,
-                aws_profile,
-            } => commands::setup::docker::run(&registries, configure, aws_profile.as_deref()).await,
+                profile,
+            } => commands::setup::docker::run(&registries, configure, profile.as_deref()).await,
             SetupCommands::Cargo {
                 registry,
                 configure,
@@ -898,22 +898,22 @@ async fn run() -> Result<()> {
                 domain_owner,
                 region,
                 repository,
+                domain_profile,
                 profile,
-                aws_profile,
             } => {
                 let target = commands::credential::codeartifact::resolve_codeartifact_params(
                     domain.as_deref(),
                     domain_owner.as_deref(),
                     region.as_deref(),
+                    domain_profile.as_deref(),
                     profile.as_deref(),
-                    aws_profile.as_deref(),
                 )?;
                 commands::setup::codeartifact::run(
                     server,
                     tool,
                     &target,
                     &repository,
-                    profile.as_deref(),
+                    domain_profile.as_deref(),
                 )
                 .await
             }

@@ -10,6 +10,7 @@ use vouch_cli::{tr, tr_args, tr_println};
 
 use crate::config::Config;
 use crate::install_path::resolve_install_path;
+use crate::integrations::aws::{ProfileOverride, resolve_vouch_profile};
 
 /// Docker config.json structure (partial).
 #[derive(Debug, Serialize, Deserialize, Default)]
@@ -31,11 +32,11 @@ struct DockerConfig {
 /// # Arguments
 /// * `registries` - Registry URLs to configure (e.g., "ghcr.io", "123456789012.dkr.ecr.us-east-1.amazonaws.com")
 /// * `configure` - If true, automatically configure Docker; if false, just show instructions
-/// * `aws_profile` - AWS profile whose role mints ECR credentials for these registries
+/// * `profile` - AWS profile whose role mints ECR credentials for these registries
 pub(crate) async fn run(
     registries: &[String],
     configure: bool,
-    aws_profile: Option<&str>,
+    profile: Option<&str>,
 ) -> Result<()> {
     // Load config to verify enrollment
     let config = Config::load().with_context(|| tr!("setup-err-load-config"))?;
@@ -55,7 +56,7 @@ pub(crate) async fn run(
     // The anchor lives in Vouch's own config, so record it on both paths —
     // the manual-instructions path still ends with Docker calling the helper,
     // which has no other way to learn which account a registry belongs to.
-    anchor_registries_to_profile(registries, aws_profile)?;
+    anchor_registries_to_profile(registries, profile)?;
 
     if configure {
         // Create symlink
@@ -110,14 +111,14 @@ pub(crate) async fn run(
 /// the only way the helper can tell which account a registry belongs to when
 /// more than one Vouch profile exists. Non-ECR registries (ghcr.io) need no
 /// anchor and are skipped.
-fn anchor_registries_to_profile(registries: &[String], aws_profile: Option<&str>) -> Result<()> {
-    let Some(profile) = aws_profile else {
+fn anchor_registries_to_profile(registries: &[String], profile: Option<&str>) -> Result<()> {
+    let Some(profile) = profile else {
         return Ok(());
     };
 
     // Fail before writing if the profile is not usable, rather than leaving an
     // anchor that every later `docker push` would trip over.
-    let resolved = crate::integrations::aws::resolve_vouch_profile(Some(profile))?;
+    let resolved = resolve_vouch_profile(Some(profile), ProfileOverride::Profile)?;
 
     let ecr_registries: Vec<&String> = registries
         .iter()

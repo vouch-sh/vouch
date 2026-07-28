@@ -180,6 +180,21 @@ fn strip_ssm_block(content: &str) -> String {
     result
 }
 
+/// Resolve the AWS profile name for the SSM SSH config block.
+///
+/// Unlike every other AWS-backed command here, SSM never mints credentials
+/// through Vouch: `aws ssm start-session --profile <name>` resolves that
+/// profile's `credential_process` directly through the AWS CLI, so the named
+/// profile does not need to be Vouch-managed. An explicit `--profile` is used
+/// as-is (matching the AWS CLI's own lack of validation); with none given,
+/// fall back to the auto-detected Vouch profile.
+fn resolve_ssm_profile(profile: Option<&str>) -> Result<String> {
+    if let Some(name) = profile {
+        return Ok(name.to_string());
+    }
+    Ok(aws::resolve_vouch_profile(None, aws::ProfileOverride::Profile)?.name)
+}
+
 /// Run the SSM setup command.
 ///
 /// 1. Validates inputs for shell safety
@@ -196,7 +211,7 @@ pub(crate) async fn run(
     check_session_manager_plugin()?;
 
     // Auto-discover profile and region
-    let profile_name = aws::resolve_vouch_profile(profile)?.name;
+    let profile_name = resolve_ssm_profile(profile)?;
     let region_name = aws::resolve_region(region, &profile_name)?;
     let host_pattern = hosts;
 

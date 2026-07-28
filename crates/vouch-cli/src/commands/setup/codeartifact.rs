@@ -13,8 +13,8 @@ use crate::commands::credential::codeartifact::CodeArtifactTarget;
 use crate::config::{CodeArtifactProfile, Config};
 use crate::install_path::resolve_install_path;
 use crate::integrations::aws::codeartifact::{CodeArtifactRegistry, parse_codeartifact_url};
-use crate::integrations::aws::resolve_vouch_profile;
 use crate::integrations::aws::sts::parse_role_arn;
+use crate::integrations::aws::{ProfileOverride, resolve_vouch_profile};
 use crate::integrations::cargo::CargoConfig;
 
 /// Supported package manager tools for CodeArtifact.
@@ -44,26 +44,26 @@ pub(crate) enum Tool {
 /// * `domain_owner` - AWS account ID that owns the domain (optional if profile configured)
 /// * `region` - AWS region (optional if profile configured)
 /// * `repository` - CodeArtifact repository name
-/// * `profile` - Named profile to save the resolved domain under
+/// * `domain_profile` - Named domain profile to save the resolved domain under
 pub(crate) async fn run(
     server: &str,
     tool: Tool,
     resolved: &CodeArtifactTarget,
     repository: &str,
-    profile: Option<&str>,
+    domain_profile: Option<&str>,
 ) -> Result<()> {
     vouch_cli::tr_println!("setup-ca-header");
     println!();
 
-    // Save profile to config (using file lock for concurrent safety)
-    let profile_name = profile.unwrap_or("default");
+    // Save the domain profile to config (using file lock for concurrent safety)
+    let profile_name = domain_profile.unwrap_or("default");
     {
         let name = profile_name.to_string();
         let ca_profile = CodeArtifactProfile {
             domain: resolved.domain.clone(),
             domain_owner: resolved.domain_owner.clone(),
             region: resolved.region.clone(),
-            aws_profile: resolved.aws_profile.clone(),
+            aws_profile: resolved.profile.clone(),
         };
         Config::modify(|config| {
             config.set_codeartifact_profile(&name, ca_profile);
@@ -77,7 +77,7 @@ pub(crate) async fn run(
     // GovCloud get the right host. Propagate a resolution failure rather than
     // defaulting: a silent fall back to amazonaws.com writes an unreachable
     // registry URL into pip.conf / .cargo/config.toml and only fails later.
-    let anchor = resolve_vouch_profile(resolved.aws_profile.as_deref())?;
+    let anchor = resolve_vouch_profile(resolved.profile.as_deref(), ProfileOverride::Profile)?;
     let domain_suffix =
         parse_role_arn(&anchor.role_arn).map_or("amazonaws.com", |arn| arn.partition.dns_suffix());
 

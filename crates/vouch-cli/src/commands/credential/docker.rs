@@ -26,9 +26,9 @@ use vouch_common::{GitHubTokenRequest, GitHubTokenResponse};
 use crate::client::VouchClient;
 use crate::commands::credential::aws::{StsRequest, exchange_for_sts_credentials};
 use crate::config::Config;
-use crate::integrations::aws::resolve_vouch_profile;
 use crate::integrations::aws::sigv4::sign_and_send_json_rpc;
 use crate::integrations::aws::sts::StsCredentials;
+use crate::integrations::aws::{ProfileOverride, resolve_vouch_profile};
 use crate::session::resolve_session;
 
 /// Docker credential helper output format.
@@ -189,13 +189,13 @@ async fn get_credential(profile: Option<&str>) -> Result<()> {
                     .map(str::to_string),
                 Err(_) => None,
             };
-            let aws_profile = profile.map(str::to_string).or(anchored);
+            let profile = profile.map(str::to_string).or(anchored);
             get_ecr_credential(
                 server,
                 &region,
                 &domain_suffix,
                 &server_url,
-                aws_profile.as_deref(),
+                profile.as_deref(),
             )
             .await?
         }
@@ -229,9 +229,9 @@ async fn get_ecr_credential(
     region: &str,
     domain_suffix: &str,
     registry_url: &str,
-    aws_profile: Option<&str>,
+    profile: Option<&str>,
 ) -> Result<DockerCredential> {
-    let role_arn = resolve_vouch_profile(aws_profile)?.role_arn;
+    let role_arn = resolve_vouch_profile(profile, ProfileOverride::Profile)?.role_arn;
 
     let agent_source = crate::commands::credential::aws::detect_agent_source();
     let result = exchange_for_sts_credentials(StsRequest {

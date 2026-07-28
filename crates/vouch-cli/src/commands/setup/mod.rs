@@ -131,8 +131,8 @@ pub(crate) enum SetupCommands {
         #[arg(long, help = tr!("arg-setup-docker-configure-help"))]
         configure: bool,
         /// AWS profile whose role mints ECR credentials for these registries.
-        #[arg(long, help = tr!("arg-setup-docker-aws-profile-help"))]
-        aws_profile: Option<String>,
+        #[arg(long, help = tr!("arg-setup-docker-profile-help"))]
+        profile: Option<String>,
     },
     /// Configure Cargo to use Vouch for private registry authentication.
     #[command(about = tr!("cmd-setup-cargo-about"))]
@@ -226,7 +226,7 @@ pub(crate) enum SetupCommands {
         /// Package manager to configure (cargo, pip, npm).
         #[arg(long, help = tr!("arg-setup-codeartifact-tool-help"))]
         tool: codeartifact::Tool,
-        /// CodeArtifact domain name (or use --profile / saved default).
+        /// CodeArtifact domain name (or use --domain-profile / saved default).
         #[arg(long, help = tr!("arg-setup-codeartifact-domain-help"))]
         domain: Option<String>,
         /// AWS account ID that owns the domain.
@@ -238,12 +238,13 @@ pub(crate) enum SetupCommands {
         /// CodeArtifact repository name.
         #[arg(long, help = tr!("arg-setup-codeartifact-repository-help"))]
         repository: String,
-        /// Named CodeArtifact profile to use / save.
+        /// Named CodeArtifact domain profile to use / save.
+        #[arg(long, help = tr!("arg-setup-codeartifact-domain-profile-help"))]
+        domain_profile: Option<String>,
+        /// AWS profile whose role mints tokens for this domain (distinct from
+        /// --domain-profile, which names a saved domain bundle).
         #[arg(long, help = tr!("arg-setup-codeartifact-profile-help"))]
         profile: Option<String>,
-        /// AWS profile whose role mints tokens for this domain.
-        #[arg(long, help = tr!("arg-setup-codeartifact-aws-profile-help"))]
-        aws_profile: Option<String>,
     },
 }
 

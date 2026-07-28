@@ -22,8 +22,8 @@ use crate::integrations::aws::codecommit::{
     extract_region_from_hostname, hostname_for_region, is_codecommit_host, parse_codecommit_url,
     sign_request,
 };
-use crate::integrations::aws::resolve_vouch_profile;
 use crate::integrations::aws::sts::StsCredentials;
+use crate::integrations::aws::{ProfileOverride, resolve_vouch_profile};
 
 /// Run the git credential helper for CodeCommit.
 ///
@@ -143,7 +143,7 @@ async fn get_sts_credentials(profile: Option<&str>) -> Result<StsCredentials> {
 
     let server = session.server_url;
 
-    let role_arn = resolve_vouch_profile(profile)?.role_arn;
+    let role_arn = resolve_vouch_profile(profile, ProfileOverride::Profile)?.role_arn;
 
     let data = super::aws::get_aws_credentials(&server, &role_arn).await?;
 
@@ -205,7 +205,7 @@ fn resolve_region(url_region: Option<&str>, profile: Option<&str>) -> Result<Str
         // Fall back to the sole vouch profile's region. An ambiguous choice is
         // not fatal here — region has an env/us-east-1 fallback, and the account
         // itself is decided by `get_sts_credentials`.
-        if let Ok(vouch_profile) = resolve_vouch_profile(None)
+        if let Ok(vouch_profile) = resolve_vouch_profile(None, ProfileOverride::Profile)
             && let Some(region) = aws_config
                 .get_profile(&vouch_profile.name)
                 .and_then(|p| p.region)

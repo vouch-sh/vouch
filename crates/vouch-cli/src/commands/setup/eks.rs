@@ -120,7 +120,7 @@ pub(crate) async fn run(
 
     // Resolve profile, region, and role together so the kubeconfig records the
     // role belonging to the profile the user named.
-    let vouch_profile = aws::resolve_vouch_profile(profile)?;
+    let vouch_profile = aws::resolve_vouch_profile(profile, aws::ProfileOverride::Profile)?;
     let profile_name = vouch_profile.name;
     let role_arn = vouch_profile.role_arn;
     let region_name = aws::resolve_region(region, &profile_name)?;

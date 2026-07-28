@@ -139,7 +139,13 @@ async fn get_sts_console_creds(server: &str, args: ConsoleArgs) -> Result<Consol
     // Resolve role ARN from explicit arg or from ~/.aws/config
     let role_arn = match args.role {
         Some(r) => r,
-        None => aws::resolve_vouch_profile(args.profile.as_deref())?.role_arn,
+        None => {
+            aws::resolve_vouch_profile(
+                args.profile.as_deref(),
+                aws::ProfileOverride::ProfileOrRole,
+            )?
+            .role_arn
+        }
     };
 
     // Determine partition and region from role ARN

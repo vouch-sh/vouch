@@ -634,6 +634,41 @@ aws-err-not-configured =
     AWS not configured.
     Run '{ -cmd } setup aws --role <role-arn>' first, or specify --role.
 
+aws-err-no-vouch-profile =
+    No { -product } AWS profile found in ~/.aws/config.
+    Run '{ -cmd } setup aws --role <role-arn>' first.
+
+aws-err-ambiguous-profile =
+    Multiple { -product } AWS profiles found in ~/.aws/config; refusing to guess which account you meant:
+    { $listing }
+    Set AWS_PROFILE, or name the account with { $override_hint }.
+
+# Override-flag hints rendered into { $override_hint } above, one per command
+# tier. The flag tokens stay literal in every locale — they are what the user
+# types. Each hint is a whole message rather than a shared "or" joiner because
+# conjunction and word order vary by language; do not factor the joiner out.
+aws-override-hint-profile = --profile
+aws-override-hint-role = --role
+aws-override-hint-profile-or-role = --profile or --role
+
+aws-err-profile-not-found =
+    AWS profile '{ $profile }' not found in ~/.aws/config.
+    Run '{ -cmd } setup aws --profile { $profile } --role <role-arn>' to create it.
+
+aws-err-profile-not-managed =
+    AWS profile '{ $profile }' has no credential_process and is not managed by { -product }.
+    Run '{ -cmd } setup aws --profile { $profile } --role <role-arn>'.
+
+aws-err-profile-is-identity-center =
+    AWS profile '{ $profile }' uses Identity Center ({ $target }).
+    This command needs a role-based profile — run '{ -cmd } setup aws --profile <name> --role <role-arn>'.
+
+aws-err-profile-missing-role = AWS profile '{ $profile }' has no --role in its credential_process.
+
+aws-err-no-region =
+    Could not determine AWS region.
+    Specify --region, or set a region in your AWS profile or AWS_DEFAULT_REGION.
+
 sso-portal-err-token-expired = Identity Center access token is invalid or expired. Run '{ -cmd } login' to re-authenticate.
 
 aws-console-opening = Opening AWS Console...
@@ -805,7 +840,7 @@ arg-setup-k8s-kubeconfig-help = Path to kubeconfig file (defaults to ~/.kube/con
 # setup/docker arg help
 arg-setup-docker-registries-help = Container registries to configure (e.g., ghcr.io).
 setup-docker-anchored-profile = Registry { $registry } will use AWS profile { $profile }.
-arg-setup-docker-aws-profile-help = AWS profile in ~/.aws/config whose role mints ECR credentials for these registries.
+arg-setup-docker-profile-help = AWS profile in ~/.aws/config whose role mints ECR credentials for these registries.
 arg-setup-docker-configure-help = Automatically configure Docker (otherwise just show instructions).
 
 # setup/cargo arg help
@@ -840,12 +875,12 @@ arg-setup-openai-force-help = Overwrite an existing Codex `model_provider` or `v
 
 # setup/codeartifact arg help
 arg-setup-codeartifact-tool-help = Package manager to configure (cargo, pip, npm).
-arg-setup-codeartifact-domain-help = CodeArtifact domain name (or use --profile / saved default).
+arg-setup-codeartifact-domain-help = CodeArtifact domain name (or use --domain-profile / saved default).
 arg-setup-codeartifact-domain-owner-help = AWS account ID that owns the domain.
 arg-setup-codeartifact-region-help = AWS region.
 arg-setup-codeartifact-repository-help = CodeArtifact repository name.
-arg-setup-codeartifact-profile-help = Named CodeArtifact profile to use / save.
-arg-setup-codeartifact-aws-profile-help = AWS profile in ~/.aws/config whose role mints tokens for this domain (distinct from --profile).
+arg-setup-codeartifact-domain-profile-help = Named CodeArtifact domain profile to use / save.
+arg-setup-codeartifact-profile-help = AWS profile in ~/.aws/config whose role mints tokens for this domain (distinct from --domain-profile).
 
 ## Shared setup helpers
 
@@ -1371,7 +1406,7 @@ setup-codecommit-warn-existing-block =
 setup-ca-header =
     CodeArtifact Setup
     ==================
-setup-ca-saved-profile = Saved CodeArtifact profile '{ $name }' to config.
+setup-ca-saved-profile = Saved CodeArtifact domain profile '{ $name }' to config.
 setup-ca-cargo-usage =
     Usage:
       cargo build --registry { $name }
@@ -1430,7 +1465,7 @@ setup-ca-pnpm-conflict-block =
          ln -sf "{ $vouch_path }" "{ $path }"
 setup-ca-pnpm-wrote = Wrote pnpm config: { $path }
 setup-ca-refreshed-npmrc = Refreshed CodeArtifact token in ~/.npmrc
-setup-ca-err-save-profile = failed to save CodeArtifact profile
+setup-ca-err-save-profile = failed to save CodeArtifact domain profile
 setup-ca-err-create-dir = failed to create { $path }
 setup-ca-err-read = failed to read { $path }
 setup-ca-err-parse = failed to parse { $path }

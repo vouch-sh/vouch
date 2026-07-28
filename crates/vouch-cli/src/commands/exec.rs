@@ -15,7 +15,8 @@ pub(crate) struct CodeArtifactOptions<'a> {
     pub domain: Option<&'a str>,
     pub domain_owner: Option<&'a str>,
     pub region: Option<&'a str>,
-    pub profile: Option<&'a str>,
+    /// Named CodeArtifact domain profile from config — not an AWS profile.
+    pub domain_profile: Option<&'a str>,
 }
 
 /// RDS-specific options for exec/env commands.
@@ -299,7 +300,7 @@ pub(super) async fn fetch_codeartifact_token(
         opts.domain,
         opts.domain_owner,
         opts.region,
-        opts.profile,
+        opts.domain_profile,
         None,
     )?;
 

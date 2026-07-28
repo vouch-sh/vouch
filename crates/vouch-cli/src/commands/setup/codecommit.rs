@@ -16,7 +16,7 @@ use anyhow::{Context, Result};
 
 use crate::config::Config;
 use crate::install_path::resolve_install_path;
-use crate::integrations::aws::resolve_vouch_profile;
+use crate::integrations::aws::{ProfileOverride, resolve_vouch_profile};
 
 /// Git config patterns for CodeCommit credential helper by partition.
 ///
@@ -58,7 +58,7 @@ pub(crate) async fn run(
 
     // Resolve the AWS profile now: its name is baked into the helper command, so
     // the helper resolves the same account at run time that we report here.
-    let vouch_profile = resolve_vouch_profile(profile)?;
+    let vouch_profile = resolve_vouch_profile(profile, ProfileOverride::Profile)?;
     let profile_name = vouch_profile.name;
     tr_println!(
         "setup-codecommit-aws-profile",
