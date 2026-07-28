@@ -27,6 +27,18 @@ pub(crate) fn ensure_secure_dir(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Single-quote a value for safe inclusion in a POSIX shell command.
+///
+/// Wraps `value` in single quotes, which make every character but `'` itself
+/// literal to the shell. Each embedded `'` is closed out, escaped, and
+/// reopened using the standard `'\''` idiom (end quote, escaped quote, start
+/// quote). Used for values a shell will otherwise interpret — e.g. install
+/// paths handed to a `!`-prefixed git credential helper, which a shell
+/// evaluates on every invocation.
+pub(crate) fn shell_single_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', r"'\''"))
+}
+
 /// Get the path for a vouch helper binary in `~/.local/bin/`.
 ///
 /// All vouch helper symlinks (docker-credential-vouch, git-remote-codecommit,
@@ -163,6 +175,29 @@ pub(crate) fn create_symlink_with_fallback(
 )]
 mod tests {
     use super::*;
+
+    // -- shell_single_quote --
+
+    #[test]
+    fn test_shell_single_quote_plain_value() {
+        assert_eq!(
+            shell_single_quote("/opt/homebrew/bin/vouch"),
+            "'/opt/homebrew/bin/vouch'"
+        );
+    }
+
+    #[test]
+    fn test_shell_single_quote_path_with_space() {
+        assert_eq!(
+            shell_single_quote("/Users/John Smith/.cargo/bin/vouch"),
+            "'/Users/John Smith/.cargo/bin/vouch'"
+        );
+    }
+
+    #[test]
+    fn test_shell_single_quote_escapes_embedded_quote() {
+        assert_eq!(shell_single_quote("it's/vouch"), r"'it'\''s/vouch'");
+    }
 
     // -- vouch_helper_path --
 

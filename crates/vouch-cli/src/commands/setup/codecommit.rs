@@ -208,10 +208,9 @@ pub(crate) async fn run(
 /// Returns an error when the profile name is not one the AWS CLI could address.
 fn credential_helper_command(vouch_path: &std::path::Path, profile_name: &str) -> Result<String> {
     reject_unaddressable_profile(profile_name)?;
-    // POSIX single-quote escaping, for the rare path containing an apostrophe.
-    let quoted_path = vouch_path.display().to_string().replace('\'', r"'\''");
+    let quoted_path = crate::utils::shell_single_quote(&vouch_path.display().to_string());
     Ok(format!(
-        "!'{quoted_path}' credential codecommit --profile {profile_name}"
+        "!{quoted_path} credential codecommit --profile {profile_name}"
     ))
 }
 
