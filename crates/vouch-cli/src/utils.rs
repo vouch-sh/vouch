@@ -9,6 +9,7 @@
 use anyhow::{Context, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
+use vouch_cli::{tr, tr_args};
 
 /// Ensure a directory exists with secure permissions (0o700 on Unix).
 ///
@@ -17,8 +18,12 @@ use std::path::{Path, PathBuf};
 /// even if the directory already exists, to guard against directories created
 /// by another process with permissive modes.
 pub(crate) fn ensure_secure_dir(path: &Path) -> Result<()> {
-    fs::create_dir_all(path)
-        .with_context(|| format!("failed to create directory {}", path.display()))?;
+    fs::create_dir_all(path).with_context(|| {
+        tr_args!(
+            "err-failed-create-directory-3",
+            value = path.display().to_string()
+        )
+    })?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -44,7 +49,7 @@ pub(crate) fn shell_single_quote(value: &str) -> String {
 /// All vouch helper symlinks (docker-credential-vouch, git-remote-codecommit,
 /// keyring, vouch-pnpm-tokenhelper) live in `~/.local/bin/`.
 pub(crate) fn vouch_helper_path(name: &str) -> Result<PathBuf> {
-    let home = dirs::home_dir().context("could not determine home directory")?;
+    let home = dirs::home_dir().context(tr!("err-could-not-determine-home-directory"))?;
     Ok(home.join(".local").join("bin").join(name))
 }
 
@@ -86,8 +91,12 @@ pub(crate) fn create_symlink_with_fallback(
     if let Some(parent) = symlink_path.parent()
         && !parent.exists()
     {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create directory {}", parent.display()))?;
+        fs::create_dir_all(parent).with_context(|| {
+            tr_args!(
+                "err-failed-create-directory-3",
+                value = parent.display().to_string()
+            )
+        })?;
         crate::tr_println!(
             "utils-created-directory",
             path = parent.display().to_string()
@@ -115,12 +124,20 @@ pub(crate) fn create_symlink_with_fallback(
 
         // Remove existing symlink if present
         if symlink_path.exists() || symlink_path.is_symlink() {
-            fs::remove_file(symlink_path)
-                .with_context(|| format!("failed to remove existing {}", symlink_path.display()))?;
+            fs::remove_file(symlink_path).with_context(|| {
+                tr_args!(
+                    "err-failed-remove-existing-2",
+                    value = symlink_path.display().to_string()
+                )
+            })?;
         }
 
-        std::os::unix::fs::symlink(vouch_path, symlink_path)
-            .with_context(|| format!("failed to create symlink at {}", symlink_path.display()))?;
+        std::os::unix::fs::symlink(vouch_path, symlink_path).with_context(|| {
+            tr_args!(
+                "err-failed-create-symlink",
+                value = symlink_path.display().to_string()
+            )
+        })?;
 
         crate::tr_println!(
             "utils-created-symlink",
@@ -145,12 +162,17 @@ pub(crate) fn create_symlink_with_fallback(
         let bat_path = symlink_path.with_extension("bat");
 
         if bat_path.exists() {
-            fs::remove_file(&bat_path)
-                .with_context(|| format!("failed to remove existing {}", bat_path.display()))?;
+            fs::remove_file(&bat_path).with_context(|| {
+                tr_args!(
+                    "err-failed-remove-existing-2",
+                    value = bat_path.display().to_string()
+                )
+            })?;
         }
 
-        vouch_common::fs::atomic_write(&bat_path, windows_batch_content.as_bytes())
-            .with_context(|| format!("failed to create {}", bat_path.display()))?;
+        vouch_common::fs::atomic_write(&bat_path, windows_batch_content.as_bytes()).with_context(
+            || tr_args!("err-failed-create", value = bat_path.display().to_string()),
+        )?;
 
         crate::tr_println!("utils-created-file", path = bat_path.display().to_string());
 

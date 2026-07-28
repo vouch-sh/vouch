@@ -15,6 +15,7 @@
 
 use anyhow::{Context, Result};
 use secrecy::ExposeSecret;
+use vouch_cli::tr;
 
 use crate::integrations::aws::codeartifact::parse_codeartifact_url;
 
@@ -54,9 +55,9 @@ async fn handle_get(url: &str) -> Result<()> {
         )
     })?;
 
-    let session = crate::session::resolve_session()
-        .await
-        .context("vouch is not enrolled - run 'vouch enroll' to set up authentication")?;
+    let session = crate::session::resolve_session().await.context(tr!(
+        "err-vouch-is-not-enrolled-run-vouch-enroll-set-up-authen"
+    ))?;
 
     // The keyring shim carries no arguments, so the AWS account backing this
     // domain is recovered from the saved CodeArtifact profile.
@@ -67,7 +68,7 @@ async fn handle_get(url: &str) -> Result<()> {
     );
     let token = super::codeartifact::get_token(&session.server_url, &target)
         .await
-        .context("failed to get CodeArtifact token")?;
+        .context(tr!("err-failed-get-codeartifact-token"))?;
 
     // Print the token to stdout (keyring protocol: password on stdout, nothing else)
     print!("{}", token.authorization_token.expose_secret());

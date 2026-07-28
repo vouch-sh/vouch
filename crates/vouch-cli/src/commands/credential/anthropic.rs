@@ -9,6 +9,7 @@
 
 use anyhow::{Context, Result};
 use secrecy::{ExposeSecret, SecretString};
+use vouch_cli::tr;
 
 use crate::config::Config;
 
@@ -26,11 +27,13 @@ pub(crate) async fn run(server: &str) -> Result<()> {
 
 /// Fetch (or return from cache) a short-lived Anthropic access token.
 pub(crate) async fn get_token(server: &str) -> Result<SecretString> {
-    let config = Config::load().context("failed to load Vouch config")?;
+    let config = Config::load().context(tr!("err-failed-load-vouch-config"))?;
     let fed = config
         .ai()
         .and_then(|ai| ai.anthropic.clone())
-        .context("Anthropic federation not configured — run 'vouch setup anthropic' first")?;
+        .context(tr!(
+            "err-anthropic-federation-not-configured-run-vouch-setup"
+        ))?;
     let endpoint = fed
         .token_endpoint
         .clone()
@@ -67,6 +70,8 @@ pub(crate) async fn get_token(server: &str) -> Result<SecretString> {
     let token = data
         .get("access_token")
         .and_then(serde_json::Value::as_str)
-        .context("cached Anthropic token is missing the access_token field")?;
+        .context(tr!(
+            "err-cached-anthropic-token-is-missing-access-token-field"
+        ))?;
     Ok(SecretString::from(token.to_string()))
 }

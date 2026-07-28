@@ -5,6 +5,7 @@
 //! and other AWS API calls (both JSON-RPC and REST style).
 
 use std::collections::BTreeMap;
+use vouch_cli::tr;
 
 use anyhow::{Context, Result};
 use secrecy::{ExposeSecret, SecretString};
@@ -228,7 +229,7 @@ async fn send_signed_request(
         .header("Authorization", &signed.authorization)
         .send()
         .await
-        .context("failed to send AWS API request")?;
+        .context(tr!("err-failed-send-aws-api-request"))?;
 
     if !response.status().is_success() {
         let status = response.status();
@@ -243,7 +244,7 @@ async fn send_signed_request(
     response
         .text()
         .await
-        .context("failed to read AWS API response body")
+        .context(tr!("err-failed-read-aws-api-response-body"))
 }
 
 /// Send a SigV4-signed JSON-RPC style POST request to an AWS service.

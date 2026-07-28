@@ -12,6 +12,7 @@
 
 use anyhow::{Context, Result};
 use secrecy::{ExposeSecret, SecretString};
+use vouch_cli::tr;
 
 use crate::commands::credential::aws::{StsRequest, exchange_for_sts_credentials};
 use crate::commands::credential::cache;
@@ -107,7 +108,7 @@ pub(crate) fn resolve_codeartifact_params(
         if let Some(p) = profile {
             target.profile = Some(p.to_string());
         } else if let Some(name) = domain_profile {
-            let config = Config::load().context("failed to load config")?;
+            let config = Config::load().context(tr!("err-failed-load-config"))?;
             if let Some(saved) = config
                 .codeartifact()
                 .and_then(|c| c.domain_profiles.get(name))
@@ -119,7 +120,7 @@ pub(crate) fn resolve_codeartifact_params(
     }
 
     // Try to load from a saved domain profile
-    let config = Config::load().context("failed to load config")?;
+    let config = Config::load().context(tr!("err-failed-load-config"))?;
     let ca_config = config.codeartifact();
 
     let resolved_profile = if let Some(name) = domain_profile {
@@ -249,11 +250,13 @@ pub(crate) async fn get_token(
     let auth_token = data
         .get("authorization_token")
         .and_then(|v| v.as_str())
-        .context("cached CodeArtifact token missing authorization_token")?;
+        .context(tr!(
+            "err-cached-codeartifact-token-missing-authorization-toke"
+        ))?;
     let expiration = data
         .get("expiration")
         .and_then(|v| v.as_i64())
-        .context("cached CodeArtifact token missing expiration")?;
+        .context(tr!("err-cached-codeartifact-token-missing-expiration"))?;
 
     Ok(CodeArtifactToken {
         authorization_token: SecretString::from(auth_token.to_string()),
@@ -303,7 +306,7 @@ async fn fetch_token(
 
     let ca_token = get_authorization_token(&result.http_client, &registry, &result.credentials)
         .await
-        .context("failed to get CodeArtifact authorization token")?;
+        .context(tr!("err-failed-get-codeartifact-authorization-token"))?;
 
     Ok(ca_token)
 }

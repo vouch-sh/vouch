@@ -59,6 +59,7 @@
     reason = "WebAuthn API requires raw FFI; safety documented per call site"
 )]
 
+use crate::{tr, tr_args};
 use anyhow::{Context, Result, bail};
 use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
@@ -238,7 +239,7 @@ impl FidoDevice for YubiKey {
         ];
         let cose_params = WEBAUTHN_COSE_CREDENTIAL_PARAMETERS {
             cCredentialParameters: u32::try_from(cred_params.len())
-                .context("cred params count overflow")?,
+                .context(tr!("err-cred-params-count-overflow"))?,
             pCredentialParameters: cred_params.as_ptr().cast_mut(),
         };
 
@@ -263,7 +264,7 @@ impl FidoDevice for YubiKey {
             .collect();
         let mut exclude_list = WEBAUTHN_CREDENTIAL_LIST {
             cCredentials: u32::try_from(exclude_ex_ptrs.len())
-                .context("exclude credentials count exceeds u32")?,
+                .context(tr!("err-exclude-credentials-count-exceeds-u32"))?,
             ppCredentials: exclude_ex_ptrs.as_mut_ptr(),
         };
         let exclude_list_ptr: *mut WEBAUTHN_CREDENTIAL_LIST = if exclude_credentials.is_empty() {
@@ -308,7 +309,7 @@ impl FidoDevice for YubiKey {
         let _guard = CredentialAttestationGuard(attestation_ptr);
 
         if attestation_ptr.is_null() {
-            bail!("FIDO2 registration succeeded but returned no attestation");
+            bail!(tr!("err-fido2-registration-succeeded-but-returned-no-att"));
         }
 
         // SAFETY: WebAuthn API guarantees that on Ok return, `attestation_ptr`
@@ -327,7 +328,7 @@ impl FidoDevice for YubiKey {
         )?;
 
         let auth_data_len = usize::try_from(attestation_ref.cbAuthenticatorData)
-            .context("authenticator data length exceeds usize")?;
+            .context(tr!("err-authenticator-data-length-exceeds-usize"))?;
         // SAFETY: WebAuthn API guarantees pbAuthenticatorData/cbAuthenticatorData
         // describe a valid initialized byte slice while the guard owns the pointer.
         let auth_data_slice = unsafe {
@@ -335,7 +336,7 @@ impl FidoDevice for YubiKey {
         };
         let public_key = vouch_common::extract_public_key_from_auth_data(auth_data_slice)
             .ok_or_else(|| {
-                anyhow::anyhow!("failed to extract COSE public key from authenticator data")
+                anyhow::anyhow!(tr!("err-failed-extract-cose-public-key-authenticator-dat"))
             })?;
 
         // Drop the guard explicitly to free the WebAuthn allocation.
@@ -390,7 +391,7 @@ impl FidoDevice for YubiKey {
         let _guard = AssertionGuard(assertion_ptr);
 
         if assertion_ptr.is_null() {
-            bail!("FIDO2 authentication succeeded but returned no assertion");
+            bail!(tr!("err-fido2-authentication-succeeded-but-returned-no-a"));
         }
 
         // SAFETY: WebAuthn API guarantees on Ok that assertion_ptr points to a
@@ -444,7 +445,7 @@ fn wide(s: &str) -> Vec<u16> {
 
 /// Cast a slice length to `u32`, with a meaningful error context.
 fn u32_len(data: &[u8], what: &str) -> Result<u32> {
-    u32::try_from(data.len()).with_context(|| format!("{what} length exceeds u32::MAX"))
+    u32::try_from(data.len()).with_context(|| tr_args!("err-length-exceeds-u32-max", what = what))
 }
 
 /// Copy a `*const u8 + len` pair into an owned `Vec<u8>`.
@@ -452,7 +453,8 @@ fn slice_to_vec(ptr: *const u8, len: u32) -> Result<Vec<u8>> {
     if ptr.is_null() || len == 0 {
         return Ok(Vec::new());
     }
-    let len_usize = usize::try_from(len).context("WebAuthn buffer length exceeds usize")?;
+    let len_usize =
+        usize::try_from(len).context(tr!("err-webauthn-buffer-length-exceeds-usize"))?;
     // SAFETY: caller (WebAuthn API) guarantees `ptr` is a valid pointer to at
     // least `len` initialized bytes. We immediately copy into an owned Vec, so
     // no aliasing concerns.

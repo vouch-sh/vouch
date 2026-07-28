@@ -28,6 +28,7 @@
 use anyhow::{Context, Result};
 use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
+use vouch_cli::{tr, tr_args};
 
 use crate::config::Config;
 use crate::session::resolve_token;
@@ -90,17 +91,18 @@ pub(crate) async fn fetch_assertion(
     server: &str,
     audience: Option<&str>,
 ) -> Result<(SecretString, Option<u64>)> {
-    let config = Config::load().context("failed to load Vouch config")?;
+    let config = Config::load().context(tr!("err-failed-load-vouch-config"))?;
     let client_id = config
         .client_id()
-        .context("no OAuth client registered — run 'vouch login' first")?;
-    let key = load_client_key().context("no FAPI client key found — run 'vouch login' first")?;
+        .context(tr!("err-no-oauth-client-registered-run-vouch-login-first"))?;
+    let key =
+        load_client_key().context(tr!("err-no-fapi-client-key-found-run-vouch-login-first"))?;
     let subject_token = resolve_token().await?;
 
     let endpoint = format!("{server}/oauth/token");
     let http =
         vouch_common::http::credential_client(&format!("vouch-cli/{}", env!("CARGO_PKG_VERSION")))
-            .context("failed to create HTTP client")?;
+            .context(tr!("err-failed-create-http-client"))?;
 
     // First attempt without a nonce. A DPoP-bound client at the token
     // endpoint always gets `use_dpop_nonce` on the first try (RFC 9449),
@@ -139,7 +141,7 @@ pub(crate) async fn fetch_assertion(
     {
         ExchangeOutcome::Success(token, expires_in) => Ok((token, expires_in)),
         ExchangeOutcome::NeedNonce(_) => {
-            anyhow::bail!("Vouch token endpoint repeatedly demanded a DPoP nonce")
+            anyhow::bail!(tr!("err-vouch-token-endpoint-repeatedly-demanded-dpop-no"))
         }
     }
 }
@@ -149,7 +151,7 @@ pub(crate) async fn fetch_assertion(
 fn build_exchange_form(req: &ExchangeRequest<'_>) -> Result<String> {
     let assertion = ClientAssertionBuilder::new(req.client_id, req.server)
         .build(req.key)
-        .context("failed to build client assertion")?;
+        .context(tr!("err-failed-build-client-assertion"))?;
     let subject_token = req.subject_token.expose_secret();
     let mut form: Vec<(&str, &str)> = vec![
         ("grant_type", GRANT_TYPE_TOKEN_EXCHANGE),
@@ -163,7 +165,7 @@ fn build_exchange_form(req: &ExchangeRequest<'_>) -> Result<String> {
     if let Some(aud) = req.audience.filter(|s| !s.is_empty()) {
         form.push(("audience", aud));
     }
-    serde_urlencoded::to_string(&form).context("failed to encode token-exchange request")
+    serde_urlencoded::to_string(&form).context(tr!("err-failed-encode-token-exchange-request"))
 }
 
 /// Send one token-exchange request and classify the response.
@@ -179,7 +181,7 @@ async fn send_exchange(
     }
     let dpop_proof = dpop_builder
         .build(req.key)
-        .context("failed to build DPoP proof for token request")?;
+        .context(tr!("err-failed-build-dpop-proof-token-request"))?;
 
     let response = http
         .post(endpoint)
@@ -188,7 +190,7 @@ async fn send_exchange(
         .body(body)
         .send()
         .await
-        .with_context(|| format!("failed to reach Vouch token endpoint at {endpoint}"))?;
+        .with_context(|| tr_args!("err-failed-reach-vouch-token-endpoint", endpoint = endpoint))?;
 
     let status = response.status();
     let nonce = response
@@ -199,13 +201,14 @@ async fn send_exchange(
     let text = response
         .text()
         .await
-        .context("failed to read Vouch token-exchange response body")?;
+        .context(tr!("err-failed-read-vouch-token-exchange-response-body"))?;
 
     if status.is_success() {
         // A 2xx response that fails to deserialize almost certainly contains
         // the ID token itself; never echo the body into the error message.
-        let parsed: VouchTokenExchangeResponse = serde_json::from_str(&text)
-            .context("invalid token-exchange response from Vouch server: expected access_token")?;
+        let parsed: VouchTokenExchangeResponse = serde_json::from_str(&text).context(tr!(
+            "err-invalid-token-exchange-response-from-vouch-server-ex"
+        ))?;
         return Ok(ExchangeOutcome::Success(
             parsed.access_token,
             parsed.expires_in,
@@ -226,7 +229,10 @@ async fn send_exchange(
     // server bug could include token material in error responses.
     match parsed_err {
         Some(err) => anyhow::bail!("{}", format_oauth_error("Vouch", status, &err)),
-        None => anyhow::bail!("Vouch token exchange failed ({status})"),
+        None => anyhow::bail!(tr_args!(
+            "err-vouch-token-exchange-failed",
+            status = status.to_string()
+        )),
     }
 }
 
@@ -278,9 +284,10 @@ pub(crate) async fn exchange(
 ) -> Result<(SecretString, String)> {
     let client =
         vouch_common::http::credential_client(&format!("vouch-cli/{}", env!("CARGO_PKG_VERSION")))
-            .context("failed to create HTTP client")?;
+            .context(tr!("err-failed-create-http-client"))?;
 
-    let payload = serde_json::to_vec(body).context("failed to serialize token-exchange request")?;
+    let payload =
+        serde_json::to_vec(body).context(tr!("err-failed-serialize-token-exchange-request"))?;
 
     let response = client
         .post(endpoint)
@@ -288,13 +295,19 @@ pub(crate) async fn exchange(
         .body(payload)
         .send()
         .await
-        .with_context(|| format!("failed to reach {label} token endpoint at {endpoint}"))?;
+        .with_context(|| {
+            tr_args!(
+                "err-failed-reach-token-endpoint",
+                label = label,
+                endpoint = endpoint
+            )
+        })?;
 
     let status = response.status();
     let text = response
         .text()
         .await
-        .with_context(|| format!("failed to read {label} token response body"))?;
+        .with_context(|| tr_args!("err-failed-read-token-response-body", label = label))?;
 
     if !status.is_success() {
         // Surface the RFC 6749 standard `error` / `error_description` fields
@@ -303,7 +316,11 @@ pub(crate) async fn exchange(
         // diagnostics, partial credentials).
         match serde_json::from_str::<vouch_common::OAuthError>(&text).ok() {
             Some(err) => anyhow::bail!("{}", format_oauth_error(label, status, &err)),
-            None => anyhow::bail!("{label} token exchange failed ({status})"),
+            None => anyhow::bail!(tr_args!(
+                "err-token-exchange-failed",
+                label = label,
+                status = status.to_string()
+            )),
         }
     }
 

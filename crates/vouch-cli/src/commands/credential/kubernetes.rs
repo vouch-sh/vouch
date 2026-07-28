@@ -11,6 +11,7 @@
 
 use anyhow::{Context, Result};
 use secrecy::ExposeSecret;
+use vouch_cli::tr;
 
 use crate::commands::credential::cache;
 
@@ -34,7 +35,7 @@ pub(crate) async fn run(server: &str, cluster: &str, audience: Option<&str>) -> 
     })
     .await?;
 
-    let json = serde_json::to_string(&data).context("failed to serialize ExecCredential")?;
+    let json = serde_json::to_string(&data).context(tr!("err-failed-serialize-execcredential"))?;
     // Machine-readable JSON output: stays English (consumed by kubectl).
     println!("{json}");
     Ok(())
@@ -57,7 +58,7 @@ fn expiration_rfc3339(expires_in: u64) -> Result<String> {
     let ttl = i64::try_from(expires_in).unwrap_or(3600);
     let expires = jiff::Timestamp::now()
         .checked_add(jiff::SignedDuration::from_secs(ttl))
-        .context("failed to compute Kubernetes token expiration")?;
+        .context(tr!("err-failed-compute-kubernetes-token-expiration"))?;
     Ok(expires.to_string())
 }
 

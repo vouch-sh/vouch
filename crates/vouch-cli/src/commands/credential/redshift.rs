@@ -12,6 +12,7 @@
 
 use anyhow::{Context, Result, bail};
 use secrecy::ExposeSecret;
+use vouch_cli::tr;
 
 use crate::commands::credential::aws::{StsRequest, exchange_for_sts_credentials};
 use crate::commands::credential::cache;
@@ -100,7 +101,8 @@ pub(crate) async fn run(
     })
     .await?;
 
-    let json = serde_json::to_string(&data).context("failed to serialize Redshift credentials")?;
+    let json =
+        serde_json::to_string(&data).context(tr!("err-failed-serialize-redshift-credentials"))?;
     // Machine-readable JSON output: stays English (consumed by Redshift driver).
     println!("{json}");
     Ok(())
@@ -142,7 +144,7 @@ pub(crate) async fn fetch_redshift_credentials(
                 &result.credentials,
             )
             .await
-            .context("failed to get Redshift cluster credentials")
+            .context(tr!("err-failed-get-redshift-cluster-credentials"))
         }
         RedshiftTarget::Serverless { workgroup } => get_serverless_credentials(
             &result.http_client,
@@ -153,7 +155,7 @@ pub(crate) async fn fetch_redshift_credentials(
             &result.credentials,
         )
         .await
-        .context("failed to get Redshift Serverless credentials"),
+        .context(tr!("err-failed-get-redshift-serverless-credentials")),
     }
 }
 
@@ -172,10 +174,10 @@ pub(crate) fn resolve_target<'a>(
         }),
         (None, Some(wg)) => Ok(RedshiftTarget::Serverless { workgroup: wg }),
         (Some(_), Some(_)) => {
-            bail!("specify either --cluster-id or --workgroup, not both")
+            bail!(tr!("err-specify-either-cluster-id-or-workgroup-not-both"))
         }
         (None, None) => {
-            bail!("specify either --cluster-id or --workgroup")
+            bail!(tr!("err-specify-either-cluster-id-or-workgroup"))
         }
     }
 }

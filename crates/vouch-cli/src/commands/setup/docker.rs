@@ -270,7 +270,7 @@ pub(crate) struct DockerSetupStatus {
 
 /// Get registries configured to use vouch in Docker config.
 fn get_configured_registries() -> Result<Vec<String>> {
-    let home = dirs::home_dir().context("could not determine home directory")?;
+    let home = dirs::home_dir().context(tr!("err-could-not-determine-home-directory"))?;
     let docker_config_path = home.join(".docker/config.json");
 
     if !docker_config_path.exists() {

@@ -88,12 +88,12 @@ fn extract_sub_from_jwt(token: &str) -> Result<String> {
     let payload = token
         .split('.')
         .nth(1)
-        .context("invalid JWT: expected 3 dot-separated parts")?;
+        .context(tr!("err-invalid-jwt-expected-3-dot-separated-parts"))?;
     let decoded = URL_SAFE_NO_PAD
         .decode(payload)
-        .context("invalid JWT: payload is not valid base64url")?;
+        .context(tr!("err-invalid-jwt-payload-is-not-valid-base64url"))?;
     let claims: JwtIdTokenClaims = serde_json::from_slice(&decoded)
-        .context("invalid JWT: payload missing required 'sub' claim")?;
+        .context(tr!("err-invalid-jwt-payload-missing-required-sub-claim"))?;
     anyhow::ensure!(!claims.sub.is_empty(), "invalid JWT: 'sub' claim is empty");
     // AWS RoleSessionName max is 64 chars.
     Ok(claims.sub.chars().take(64).collect())
@@ -331,7 +331,7 @@ pub(crate) async fn exchange_for_sts_credentials(req: StsRequest<'_>) -> Result<
         session_policy: None,
     })
     .await
-    .context("failed to assume AWS role")?;
+    .context(tr!("err-failed-assume-aws-role"))?;
 
     Ok(StsExchangeResult {
         http_client,
@@ -367,14 +367,14 @@ async fn fetch_aws_oidc_token(
     let token_response: OidcTokenResponse = client
         .get_authenticated(&path)
         .await
-        .context("failed to get OIDC token from Vouch server")?;
+        .context(tr!("err-failed-get-oidc-token-from-vouch-server"))?;
 
     let http_client =
         vouch_common::http::credential_client(&format!("vouch-cli/{}", env!("CARGO_PKG_VERSION")))
-            .context("failed to create HTTP client")?;
+            .context(tr!("err-failed-create-http-client"))?;
 
     let session = extract_sub_from_jwt(token_response.id_token.expose_secret())
-        .context("server returned invalid OIDC token")?;
+        .context(tr!("err-server-returned-invalid-oidc-token"))?;
 
     Ok((http_client, token_response.id_token, session))
 }
@@ -405,7 +405,7 @@ fn aws_token_path(pin_role: Option<&str>) -> Result<String> {
     match pin_role {
         Some(role) => {
             let query = serde_urlencoded::to_string([("role_arn", role)])
-                .context("failed to encode role_arn query parameter")?;
+                .context(tr!("err-failed-encode-role-arn-query-parameter"))?;
             Ok(format!("{TOKEN_PATH}?{query}"))
         }
         None => Ok(TOKEN_PATH.to_string()),
@@ -448,7 +448,7 @@ async fn assume_role_via_management_chain(
         session_policy: input.policies.mgmt_hop_policy.as_ref(),
     })
     .await
-    .context("failed to assume management role")?;
+    .context(tr!("err-failed-assume-management-role"))?;
 
     assume_role(AssumeRoleRequest {
         http_client: input.http_client,
@@ -463,7 +463,7 @@ async fn assume_role_via_management_chain(
         identity_context: None,
     })
     .await
-    .context("failed to assume target role via chaining")
+    .context(tr!("err-failed-assume-target-role-via-chaining"))
 }
 
 /// Session policies applied to STS calls, restricted when an AI coding
@@ -703,9 +703,10 @@ pub(crate) async fn obtain_identity_center_token(
     let token_response: OidcTokenResponse = client
         .get_authenticated(&aws_token_path(Some(management_role))?)
         .await
-        .context("failed to get OIDC token for management role")?;
+        .context(tr!("err-failed-get-oidc-token-management-role"))?;
     let id_token = token_response.id_token.expose_secret();
-    let session = extract_sub_from_jwt(id_token).context("server returned invalid OIDC token")?;
+    let session =
+        extract_sub_from_jwt(id_token).context(tr!("err-server-returned-invalid-oidc-token"))?;
 
     let caller_creds = assume_role_with_web_identity(WebIdentityRequest {
         http_client,
@@ -718,7 +719,7 @@ pub(crate) async fn obtain_identity_center_token(
         session_policy: None,
     })
     .await
-    .context("failed to assume management role for IdC exchange")?;
+    .context(tr!("err-failed-assume-management-role-idc-exchange"))?;
 
     // Step 2: exchange the same RS256 token (the TTI assertion) for an IdC
     // access token. The identity context in the exchange is not needed on
@@ -789,7 +790,7 @@ pub(crate) async fn get_idc_credentials(
 
     super::cache::get_or_fetch(&cache_key, "IdC credentials", || async move {
         let http_client = credential_client(&format!("vouch-cli/{}", env!("CARGO_PKG_VERSION")))
-            .context("failed to create HTTP client")?;
+            .context(tr!("err-failed-create-http-client"))?;
 
         let idc_token =
             obtain_identity_center_token(&http_client, server, &management_role, &idc).await?;
@@ -882,12 +883,13 @@ pub(crate) async fn run(
         .await?
     } else {
         // Identity Center path
-        let acct = account.context("--account is required for Identity Center path")?;
-        let ps = permission_set.context("--permission-set is required for Identity Center path")?;
+        let acct = account.context(tr!("err-account-is-required-identity-center-path"))?;
+        let ps =
+            permission_set.context(tr!("err-permission-set-is-required-identity-center-path"))?;
         get_idc_credentials(server, acct, ps, idc_application, via).await?
     };
 
-    let json = serde_json::to_string(&data).context("failed to serialize credentials")?;
+    let json = serde_json::to_string(&data).context(tr!("err-failed-serialize-credentials"))?;
     // Machine-readable JSON output: stays English (consumed by AWS CLI).
     println!("{json}");
     Ok(())

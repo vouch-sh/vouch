@@ -8,6 +8,7 @@
 
 use anyhow::{Context, Result};
 use secrecy::SecretString;
+use vouch_cli::{tr, tr_args};
 
 use super::sigv4::{sign_and_send_form_post, sign_and_send_json_rpc};
 use super::sts::StsCredentials;
@@ -68,7 +69,7 @@ pub(crate) async fn get_cluster_credentials(
     let response_body =
         sign_and_send_form_post(http_client, &endpoint, "redshift", region, creds, &params)
             .await
-            .context("failed to call Redshift GetClusterCredentialsWithIAM")?;
+            .context(tr!("err-failed-call-redshift-getclustercredentialswithiam"))?;
 
     parse_redshift_xml_response(&response_body)
 }
@@ -95,7 +96,7 @@ pub(crate) async fn get_serverless_credentials(
 
     if let Some(db) = db_name {
         body.as_object_mut()
-            .context("body must be an object")?
+            .context(tr!("err-body-must-be-an-object"))?
             .insert(
                 "dbName".to_string(),
                 serde_json::Value::String(db.to_string()),
@@ -112,20 +113,23 @@ pub(crate) async fn get_serverless_credentials(
         &body,
     )
     .await
-    .context("failed to call Redshift Serverless GetCredentials")?;
+    .context(tr!("err-failed-call-redshift-serverless-getcredentials"))?;
 
     parse_serverless_json_response(&response_body)
 }
 
 /// Parse Redshift `GetClusterCredentialsWithIAM` XML response.
 fn parse_redshift_xml_response(xml: &str) -> Result<RedshiftCredentials> {
-    let doc = roxmltree::Document::parse(xml).context("failed to parse Redshift XML response")?;
+    let doc =
+        roxmltree::Document::parse(xml).context(tr!("err-failed-parse-redshift-xml-response"))?;
 
     // Find the result element
     let result_node = doc
         .descendants()
         .find(|n| n.has_tag_name("GetClusterCredentialsWithIAMResult"))
-        .context("missing GetClusterCredentialsWithIAMResult in Redshift response")?;
+        .context(tr!(
+            "err-missing-getclustercredentialswithiamresult-in-redshi"
+        ))?;
 
     let extract = |tag: &str| -> Result<String> {
         result_node
@@ -133,7 +137,7 @@ fn parse_redshift_xml_response(xml: &str) -> Result<RedshiftCredentials> {
             .find(|n| n.has_tag_name(tag))
             .and_then(|n| n.text())
             .map(String::from)
-            .with_context(|| format!("missing {tag} in Redshift response"))
+            .with_context(|| tr_args!("err-missing-redshift-response", tag = tag))
     };
 
     let db_user = extract("DbUser")?;
@@ -162,26 +166,30 @@ fn parse_redshift_xml_response(xml: &str) -> Result<RedshiftCredentials> {
 /// The `expiration` field is a Unix timestamp (seconds since epoch),
 /// which we convert to ISO 8601 for consistency with the provisioned API.
 fn parse_serverless_json_response(json: &str) -> Result<RedshiftCredentials> {
-    let parsed: serde_json::Value =
-        serde_json::from_str(json).context("failed to parse Redshift Serverless JSON response")?;
+    let parsed: serde_json::Value = serde_json::from_str(json)
+        .context(tr!("err-failed-parse-redshift-serverless-json-response"))?;
 
     let db_user = parsed
         .get("dbUser")
         .and_then(|v| v.as_str())
-        .context("missing dbUser in Redshift Serverless response")?
+        .context(tr!("err-missing-dbuser-in-redshift-serverless-response"))?
         .to_string();
 
     let db_password = parsed
         .get("dbPassword")
         .and_then(|v| v.as_str())
-        .context("missing dbPassword in Redshift Serverless response")?
+        .context(tr!(
+            "err-missing-dbpassword-in-redshift-serverless-response"
+        ))?
         .to_string();
 
     // expiration is a Unix timestamp (f64 seconds since epoch)
     let expiration_ts = parsed
         .get("expiration")
         .and_then(|v| v.as_f64())
-        .context("missing expiration in Redshift Serverless response")?;
+        .context(tr!(
+            "err-missing-expiration-in-redshift-serverless-response"
+        ))?;
 
     #[expect(
         clippy::cast_possible_truncation,
@@ -189,7 +197,9 @@ fn parse_serverless_json_response(json: &str) -> Result<RedshiftCredentials> {
     )]
     let expiration_secs = expiration_ts as i64;
     let expiration = jiff::Timestamp::from_second(expiration_secs)
-        .context("invalid expiration timestamp in Redshift Serverless response")?
+        .context(tr!(
+            "err-invalid-expiration-timestamp-in-redshift-serverless"
+        ))?
         .to_string();
 
     Ok(RedshiftCredentials {

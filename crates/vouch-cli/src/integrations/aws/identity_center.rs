@@ -16,6 +16,7 @@
 use anyhow::{Context, Result};
 use secrecy::SecretString;
 use serde::Deserialize;
+use vouch_cli::tr;
 use vouch_common::aws::Partition;
 
 use super::sigv4::sign_and_send_json_post;
@@ -99,10 +100,10 @@ pub(crate) async fn create_token_with_iam(
         &body,
     )
     .await
-    .context("CreateTokenWithIAM exchange failed")?;
+    .context(tr!("err-createtokenwithiam-exchange-failed"))?;
 
-    let parsed: CreateTokenResponse =
-        serde_json::from_str(&response).context("failed to parse CreateTokenWithIAM response")?;
+    let parsed: CreateTokenResponse = serde_json::from_str(&response)
+        .context(tr!("err-failed-parse-createtokenwithiam-response"))?;
 
     Ok(IdcTokenExchange {
         access_token: SecretString::from(parsed.access_token),

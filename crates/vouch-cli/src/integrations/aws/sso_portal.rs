@@ -104,7 +104,7 @@ pub(crate) async fn list_accounts(
         let response = request
             .send()
             .await
-            .context("failed to call SSO Portal list accounts")?;
+            .context(tr!("err-failed-call-sso-portal-list-accounts"))?;
 
         if response.status() == reqwest::StatusCode::UNAUTHORIZED {
             return Err(crate::exit_code::CliError::NotAuthenticated {
@@ -125,7 +125,7 @@ pub(crate) async fn list_accounts(
         let resp: ListAccountsResponse = response
             .json()
             .await
-            .context("failed to parse SSO Portal accounts response")?;
+            .context(tr!("err-failed-parse-sso-portal-accounts-response"))?;
 
         accounts.extend(resp.account_list);
 
@@ -176,7 +176,7 @@ pub(crate) async fn list_account_roles(
         let response = request
             .send()
             .await
-            .context("failed to call SSO Portal list roles")?;
+            .context(tr!("err-failed-call-sso-portal-list-roles"))?;
 
         if response.status() == reqwest::StatusCode::UNAUTHORIZED {
             return Err(crate::exit_code::CliError::NotAuthenticated {
@@ -197,7 +197,7 @@ pub(crate) async fn list_account_roles(
         let resp: ListAccountRolesResponse = response
             .json()
             .await
-            .context("failed to parse SSO Portal roles response")?;
+            .context(tr!("err-failed-parse-sso-portal-roles-response"))?;
 
         roles.extend(resp.role_list);
 
@@ -248,7 +248,7 @@ pub(crate) async fn get_role_credentials(
         .query(&[("account_id", account_id), ("role_name", role_name)])
         .send()
         .await
-        .context("failed to call SSO Portal get role credentials")?;
+        .context(tr!("err-failed-call-sso-portal-get-role-credentials"))?;
 
     if response.status() == reqwest::StatusCode::UNAUTHORIZED {
         return Err(crate::exit_code::CliError::NotAuthenticated {
@@ -269,10 +269,11 @@ pub(crate) async fn get_role_credentials(
     let resp: RoleCredentialsResponse = response
         .json()
         .await
-        .context("failed to parse SSO Portal role credentials response")?;
+        .context(tr!("err-failed-parse-sso-portal-role-credentials-response"))?;
 
-    let expiration = jiff::Timestamp::from_millisecond(resp.role_credentials.expiration)
-        .context("SSO Portal returned an out-of-range credential expiration")?;
+    let expiration = jiff::Timestamp::from_millisecond(resp.role_credentials.expiration).context(
+        tr!("err-sso-portal-returned-an-out-range-credential-expirati"),
+    )?;
 
     Ok(StsCredentials {
         access_key_id: resp.role_credentials.access_key_id,

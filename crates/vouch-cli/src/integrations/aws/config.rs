@@ -7,6 +7,7 @@
 use anyhow::{Context, Result};
 use ini::Ini;
 use std::path::PathBuf;
+use vouch_cli::{tr, tr_args};
 
 /// Represents an AWS profile configuration.
 #[derive(Debug, Clone, Default)]
@@ -50,7 +51,7 @@ impl AwsConfig {
     pub(crate) fn load_from(path: PathBuf) -> Result<Self> {
         let ini = if path.exists() {
             Ini::load_from_file(&path)
-                .with_context(|| format!("failed to load {}", path.display()))?
+                .with_context(|| tr_args!("err-failed-load", value = path.display().to_string()))?
         } else {
             Ini::new()
         };
@@ -201,11 +202,18 @@ impl AwsConfig {
     /// if the process is interrupted mid-write.
     pub(crate) fn save(&self) -> Result<()> {
         let mut buf = Vec::new();
-        self.ini
-            .write_to(&mut buf)
-            .with_context(|| format!("failed to serialize {}", self.path.display()))?;
-        vouch_common::fs::atomic_write(&self.path, &buf)
-            .with_context(|| format!("failed to write {}", self.path.display()))
+        self.ini.write_to(&mut buf).with_context(|| {
+            tr_args!(
+                "err-failed-serialize",
+                value = self.path.display().to_string()
+            )
+        })?;
+        vouch_common::fs::atomic_write(&self.path, &buf).with_context(|| {
+            tr_args!(
+                "err-failed-write-5",
+                value = self.path.display().to_string()
+            )
+        })
     }
 
     /// Convert a profile name to its INI section name.
@@ -233,7 +241,7 @@ impl AwsConfig {
 
     /// Get the default AWS config path (~/.aws/config).
     pub(crate) fn default_path() -> Result<PathBuf> {
-        let home = dirs::home_dir().context("could not determine home directory")?;
+        let home = dirs::home_dir().context(tr!("err-could-not-determine-home-directory"))?;
         Ok(home.join(".aws").join("config"))
     }
 }

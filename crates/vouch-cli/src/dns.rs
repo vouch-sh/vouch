@@ -7,6 +7,7 @@
 //! DoH resolver (or none, the default).
 
 use anyhow::{Context, Result};
+use vouch_cli::tr;
 
 use crate::config::Config;
 
@@ -22,5 +23,5 @@ use crate::config::Config;
 pub(crate) fn init(config: Option<&Config>) -> Result<()> {
     let env = std::env::var(vouch_common::dns::DOH_ENV_VAR).ok();
     vouch_common::dns::init_from(env.as_deref(), config.and_then(Config::doh))
-        .context("invalid DNS-over-HTTPS configuration")
+        .context(tr!("err-invalid-dns-over-https-configuration"))
 }

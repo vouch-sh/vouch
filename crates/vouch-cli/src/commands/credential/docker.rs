@@ -111,7 +111,7 @@ fn read_server_url() -> Result<String> {
 
     // Docker sends just the URL on a single line
     if let Some(line) = stdin.lock().lines().next() {
-        let line = line.context("failed to read stdin")?;
+        let line = line.context(tr!("err-failed-read-stdin"))?;
         if !line.is_empty() {
             url = line;
         }
@@ -219,8 +219,8 @@ async fn get_credential(profile: Option<&str>) -> Result<()> {
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
 
-    let json_str =
-        serde_json::to_string(&credential.to_json()).context("failed to serialize credentials")?;
+    let json_str = serde_json::to_string(&credential.to_json())
+        .context(tr!("err-failed-serialize-credentials"))?;
     writeln!(out, "{json_str}")?;
 
     Ok(())
@@ -255,7 +255,7 @@ async fn get_ecr_credential(
         &result.credentials,
     )
     .await
-    .context("failed to get ECR authorization token")?;
+    .context(tr!("err-failed-get-ecr-authorization-token"))?;
 
     Ok(DockerCredential {
         username: "AWS".to_string(),
@@ -275,7 +275,7 @@ async fn get_ecr_authorization_token(
     let account_id = registry_url
         .split('.')
         .next()
-        .context("invalid ECR registry URL")?;
+        .context(tr!("err-invalid-ecr-registry-url"))?;
 
     let ecr_endpoint = format!("https://api.ecr.{region}.{domain_suffix}");
 
@@ -293,23 +293,23 @@ async fn get_ecr_authorization_token(
         &request_body,
     )
     .await
-    .context("failed to call ECR GetAuthorizationToken")?;
+    .context(tr!("err-failed-call-ecr-getauthorizationtoken"))?;
 
     let ecr_response: EcrAuthorizationResponse =
-        serde_json::from_str(&response_body).context("failed to parse ECR response")?;
+        serde_json::from_str(&response_body).context(tr!("err-failed-parse-ecr-response"))?;
 
     // The authorization token is base64(username:password)
     // We need to extract just the password part
     let auth_data = ecr_response
         .authorization_data
         .first()
-        .context("no authorization data in ECR response")?;
+        .context(tr!("err-no-authorization-data-in-ecr-response"))?;
 
     // Decode base64 to get "AWS:password"
     let decoded = base64_decode(auth_data.authorization_token.expose_secret())
-        .context("failed to decode ECR authorization token")?;
-    let decoded_str =
-        String::from_utf8(decoded).context("ECR authorization token is not valid UTF-8")?;
+        .context(tr!("err-failed-decode-ecr-authorization-token"))?;
+    let decoded_str = String::from_utf8(decoded)
+        .context(tr!("err-ecr-authorization-token-is-not-valid-utf-8"))?;
 
     // Split on ':' to get the password part
     let password = decoded_str
@@ -346,7 +346,7 @@ fn base64_decode(input: &str) -> Result<Vec<u8>> {
     use base64::Engine;
     base64::engine::general_purpose::STANDARD
         .decode(input)
-        .context("invalid base64")
+        .context(tr!("err-invalid-base64"))
 }
 
 /// Get credentials for GitHub Container Registry.
@@ -359,7 +359,7 @@ async fn get_ghcr_credential(server: &str, token: &SecretString) -> Result<Docke
     let response: GitHubTokenResponse = client
         .post_authenticated("/v1/credentials/github/token", &request)
         .await
-        .context("failed to get GitHub token")?;
+        .context(tr!("err-failed-get-github-token"))?;
 
     Ok(DockerCredential {
         username: "x-access-token".to_string(),

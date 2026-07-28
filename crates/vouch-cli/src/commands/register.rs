@@ -95,7 +95,7 @@ pub(crate) async fn run(server: &str, name: Option<&str>, timeout_secs: u64) -> 
             },
         )
         .await
-        .context("failed to start registration")?;
+        .context(tr!("err-failed-start-registration"))?;
     tr_println!("register-contact-ok");
 
     // Show info about existing keys
@@ -145,7 +145,7 @@ pub(crate) async fn run(server: &str, name: Option<&str>, timeout_secs: u64) -> 
             },
         )
         .await
-        .context("failed to complete registration")?;
+        .context(tr!("err-failed-complete-registration"))?;
     tr_println!("register-completed-ok");
 
     println!();

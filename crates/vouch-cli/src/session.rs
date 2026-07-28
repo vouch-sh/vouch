@@ -6,6 +6,7 @@ use anyhow::{Context, Result};
 use secrecy::SecretString;
 #[cfg(unix)]
 use vouch_agent::{AgentClient, AgentError};
+use vouch_cli::tr;
 use vouch_common::{SessionCookie, write_cookie};
 
 /// A resolved session: server URL and authentication token.
@@ -59,7 +60,7 @@ pub(crate) async fn resolve_session() -> Result<ResolvedSession> {
     }
 
     // 2. Fall back to config file
-    let config = Config::load().context("failed to load config")?;
+    let config = Config::load().context(tr!("err-failed-load-config"))?;
     let server = config
         .server_url()
         .ok_or(crate::exit_code::CliError::ConfigError(
@@ -95,7 +96,7 @@ pub(crate) async fn resolve_token() -> Result<SecretString> {
     }
 
     // 2. Fall back to config file
-    let config = Config::load().context("failed to load config")?;
+    let config = Config::load().context(tr!("err-failed-load-config"))?;
     let token = config
         .token()
         .ok_or(crate::exit_code::CliError::NotAuthenticated {

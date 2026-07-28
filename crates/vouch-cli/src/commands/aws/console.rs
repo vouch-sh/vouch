@@ -75,11 +75,14 @@ async fn get_idc_console_creds(server: &str, args: &ConsoleArgs) -> Result<Conso
         );
     }
 
-    let account_id = args.account.as_deref().context("account is required")?;
+    let account_id = args
+        .account
+        .as_deref()
+        .context(tr!("err-account-is-required"))?;
     let permission_set = args
         .permission_set
         .as_deref()
-        .context("permission_set is required")?;
+        .context(tr!("err-permission-set-is-required"))?;
 
     let vouch_config = crate::config::Config::load()?;
     let aws_cfg = vouch_config
@@ -108,7 +111,7 @@ async fn get_idc_console_creds(server: &str, args: &ConsoleArgs) -> Result<Conso
     let management_role = org.management_role.clone();
 
     let http_client = credential_client(&format!("vouch-cli/{}", env!("CARGO_PKG_VERSION")))
-        .context("failed to create HTTP client")?;
+        .context(tr!("err-failed-create-http-client"))?;
 
     let idc_token = obtain_identity_center_token(&http_client, server, &management_role, idc)
         .await

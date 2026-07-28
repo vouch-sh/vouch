@@ -14,6 +14,7 @@
 use anyhow::{Context, Result};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use vouch_cli::tr;
 
 use crate::commands::credential::aws::{StsRequest, exchange_for_sts_credentials};
 use crate::commands::credential::cache;
@@ -72,7 +73,7 @@ pub(crate) async fn run(
     })
     .await?;
 
-    let json = serde_json::to_string(&data).context("failed to serialize ExecCredential")?;
+    let json = serde_json::to_string(&data).context(tr!("err-failed-serialize-execcredential"))?;
     // Machine-readable JSON output: stays English (consumed by kubectl/aws eks).
     println!("{json}");
     Ok(())
@@ -139,7 +140,7 @@ fn expiration_rfc3339() -> Result<String> {
     let ttl_seconds = (EKS_TOKEN_EXPIRES_SECONDS as i64).saturating_sub(EKS_EXPIRY_MARGIN_SECONDS);
     let expires = jiff::Timestamp::now()
         .checked_add(jiff::SignedDuration::from_secs(ttl_seconds))
-        .context("failed to compute EKS token expiration")?;
+        .context(tr!("err-failed-compute-eks-token-expiration"))?;
     Ok(expires.to_string())
 }
 

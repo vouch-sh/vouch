@@ -7,6 +7,7 @@
 use anyhow::{Context, Result};
 use jiff::Timestamp;
 use secrecy::SecretString;
+use vouch_cli::{tr, tr_args};
 
 pub(crate) use vouch_common::aws::Arn;
 
@@ -19,7 +20,8 @@ pub(crate) use vouch_common::aws::Arn;
 /// Returns an error if the ARN format is invalid, the partition
 /// is unrecognized, or the resource is not an IAM role.
 pub(crate) fn parse_role_arn(arn: &str) -> Result<Arn> {
-    let parsed = Arn::parse(arn).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let parsed =
+        Arn::parse(arn).map_err(|e| anyhow::anyhow!(tr_args!("err-", e = e.to_string())))?;
 
     if !parsed.is_iam_role() {
         return Err(crate::exit_code::CliError::ConfigError(format!(
@@ -123,8 +125,12 @@ pub(crate) async fn assume_role_with_web_identity(
 
     // Attach inline session policy if provided.
     if let Some(policy) = req.session_policy {
-        let policy_json = serde_json::to_string(policy)
-            .map_err(|e| anyhow::anyhow!("failed to serialize session policy: {e}"))?;
+        let policy_json = serde_json::to_string(policy).map_err(|e| {
+            anyhow::anyhow!(tr_args!(
+                "err-failed-serialize-session-policy",
+                e = e.to_string()
+            ))
+        })?;
         form_params.push(("Policy".to_string(), policy_json));
     }
 
@@ -134,7 +140,7 @@ pub(crate) async fn assume_role_with_web_identity(
         .form(&form_params)
         .send()
         .await
-        .context("failed to call AWS STS")?;
+        .context(tr!("err-failed-call-aws-sts"))?;
 
     if !response.status().is_success() {
         let status = response.status();
@@ -148,7 +154,7 @@ pub(crate) async fn assume_role_with_web_identity(
     let body = response
         .text()
         .await
-        .context("failed to read STS response")?;
+        .context(tr!("err-failed-read-sts-response"))?;
 
     parse_sts_xml_response(&body)
 }
@@ -218,8 +224,12 @@ pub(crate) async fn assume_role(req: AssumeRoleRequest<'_>) -> Result<StsCredent
     // Attach inline session policy if provided.
     let policy_json;
     if let Some(policy) = req.session_policy {
-        policy_json = serde_json::to_string(policy)
-            .map_err(|e| anyhow::anyhow!("failed to serialize session policy: {e}"))?;
+        policy_json = serde_json::to_string(policy).map_err(|e| {
+            anyhow::anyhow!(tr_args!(
+                "err-failed-serialize-session-policy",
+                e = e.to_string()
+            ))
+        })?;
         params.push(("Policy", &policy_json));
     }
 
@@ -241,20 +251,20 @@ pub(crate) async fn assume_role(req: AssumeRoleRequest<'_>) -> Result<StsCredent
         &params,
     )
     .await
-    .context("failed to call AWS STS AssumeRole")?;
+    .context(tr!("err-failed-call-aws-sts-assumerole"))?;
 
     parse_sts_xml_response(&body)
 }
 
 /// Parse AWS STS XML response using `roxmltree`.
 fn parse_sts_xml_response(xml: &str) -> Result<StsCredentials> {
-    let doc = roxmltree::Document::parse(xml).context("failed to parse STS XML response")?;
+    let doc = roxmltree::Document::parse(xml).context(tr!("err-failed-parse-sts-xml-response"))?;
 
     // Find the Credentials element anywhere in the document
     let credentials_node = doc
         .descendants()
         .find(|n| n.has_tag_name("Credentials"))
-        .context("missing Credentials element in STS response")?;
+        .context(tr!("err-missing-credentials-element-in-sts-response"))?;
 
     let extract_child_text = |parent: roxmltree::Node, tag: &str| -> Result<String> {
         parent
@@ -262,16 +272,19 @@ fn parse_sts_xml_response(xml: &str) -> Result<StsCredentials> {
             .find(|n| n.has_tag_name(tag))
             .and_then(|n| n.text())
             .map(String::from)
-            .with_context(|| format!("missing {tag} in STS response"))
+            .with_context(|| tr_args!("err-missing-sts-response", tag = tag))
     };
 
     let access_key_id = extract_child_text(credentials_node, "AccessKeyId")?;
     let secret_access_key = extract_child_text(credentials_node, "SecretAccessKey")?;
     let session_token = extract_child_text(credentials_node, "SessionToken")?;
     let expiration_str = extract_child_text(credentials_node, "Expiration")?;
-    let expiration = expiration_str
-        .parse::<Timestamp>()
-        .with_context(|| format!("failed to parse STS Expiration: {expiration_str}"))?;
+    let expiration = expiration_str.parse::<Timestamp>().with_context(|| {
+        tr_args!(
+            "err-failed-parse-sts-expiration",
+            expiration_str = expiration_str
+        )
+    })?;
 
     Ok(StsCredentials {
         access_key_id,

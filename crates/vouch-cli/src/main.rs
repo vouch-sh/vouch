@@ -70,7 +70,9 @@ async fn check_docker_credential_invocation(argv0: &str) -> Result<bool> {
         // `vouch setup docker` recorded for the registry.
         commands::credential::docker::run(&operation, None)
             .await
-            .map_err(|e| anyhow::anyhow!("docker-credential-vouch: {e}"))?;
+            .map_err(|e| {
+                anyhow::anyhow!(tr_args!("err-docker-credential-vouch", e = e.to_string()))
+            })?;
 
         return Ok(true);
     }
@@ -108,7 +110,9 @@ async fn check_git_remote_codecommit_invocation(argv0: &str) -> Result<bool> {
 
         commands::credential::codecommit::run_remote_helper(&remote_name, &url)
             .await
-            .map_err(|e| anyhow::anyhow!("git-remote-codecommit: {e}"))?;
+            .map_err(|e| {
+                anyhow::anyhow!(tr_args!("err-git-remote-codecommit", e = e.to_string()))
+            })?;
 
         return Ok(true);
     }
@@ -128,7 +132,7 @@ async fn check_keyring_invocation(argv0: &str) -> Result<bool> {
 
         commands::credential::pip::run(&operation, service_url.as_deref(), username.as_deref())
             .await
-            .map_err(|e| anyhow::anyhow!("keyring: {e}"))?;
+            .map_err(|e| anyhow::anyhow!(tr_args!("err-keyring", e = e.to_string())))?;
 
         return Ok(true);
     }
@@ -156,9 +160,9 @@ async fn check_pnpm_tokenhelper_invocation(argv0: &str) -> Result<bool> {
         let profile = flag("--profile");
 
         // Resolve session to get server URL
-        let session = crate::session::resolve_session()
-            .await
-            .map_err(|e| anyhow::anyhow!("vouch-pnpm-tokenhelper: {e}"))?;
+        let session = crate::session::resolve_session().await.map_err(|e| {
+            anyhow::anyhow!(tr_args!("err-vouch-pnpm-tokenhelper", e = e.to_string()))
+        })?;
 
         commands::credential::codeartifact::run(
             &session.server_url,
@@ -169,7 +173,7 @@ async fn check_pnpm_tokenhelper_invocation(argv0: &str) -> Result<bool> {
             profile.map(String::as_str),
         )
         .await
-        .map_err(|e| anyhow::anyhow!("vouch-pnpm-tokenhelper: {e}"))?;
+        .map_err(|e| anyhow::anyhow!(tr_args!("err-vouch-pnpm-tokenhelper", e = e.to_string())))?;
 
         return Ok(true);
     }

@@ -7,6 +7,7 @@
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::path::PathBuf;
+use vouch_cli::tr;
 
 use crate::commands::credential::aws::{StsRequest, exchange_for_sts_credentials};
 use crate::integrations::aws;
@@ -87,7 +88,7 @@ async fn describe_cluster(
     })?;
 
     let parsed: DescribeClusterOutput = serde_json::from_str(&response_body)
-        .context("failed to parse EKS DescribeCluster response")?;
+        .context(tr!("err-failed-parse-eks-describecluster-response"))?;
 
     let ca_data = parsed
         .cluster

@@ -7,6 +7,7 @@
 
 use anyhow::{Context, Result};
 use secrecy::SecretString;
+use vouch_cli::tr;
 
 use super::sigv4::sign_and_send_rest;
 use super::sts::StsCredentials;
@@ -159,10 +160,10 @@ pub(crate) async fn get_authorization_token(
         creds,
     )
     .await
-    .context("failed to call CodeArtifact GetAuthorizationToken")?;
+    .context(tr!("err-failed-call-codeartifact-getauthorizationtoken"))?;
 
-    let ca_response: GetAuthorizationTokenResponse =
-        serde_json::from_str(&response_body).context("failed to parse CodeArtifact response")?;
+    let ca_response: GetAuthorizationTokenResponse = serde_json::from_str(&response_body)
+        .context(tr!("err-failed-parse-codeartifact-response"))?;
 
     #[expect(
         clippy::cast_possible_truncation,

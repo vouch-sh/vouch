@@ -71,6 +71,9 @@ pub(crate) fn print_shell(
     email: Option<&str>,
     expires_in_seconds: Option<u64>,
 ) {
+    // Shell-eval output, not prose: these lines are consumed by `eval $(vouch
+    // status ...)`, so the variable names are an interface and stay English in
+    // every locale. Do not route them through Fluent.
     if authenticated {
         println!("VOUCH_AUTHENTICATED=1");
         if let Some(email) = email {
@@ -355,7 +358,7 @@ fn print_expiry(expires_in: u64) -> Result<()> {
 
     let remaining = format_remaining_time(expires_in);
 
-    let secs = i64::try_from(expires_in).context("expires_in does not fit in i64")?;
+    let secs = i64::try_from(expires_in).context(tr!("err-expires-in-does-not-fit-in-i64"))?;
     let duration = jiff::SignedDuration::from_secs(secs);
     let now = jiff::Zoned::now();
     if let Ok(expiry_ts) = now.timestamp().checked_add(duration) {

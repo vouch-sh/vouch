@@ -16,7 +16,7 @@
 
 use anyhow::{Context, Result};
 use secrecy::ExposeSecret;
-use vouch_cli::tr_args;
+use vouch_cli::{tr, tr_args};
 
 use crate::commands::credential::git_protocol::read_credential_input;
 use crate::integrations::aws::codecommit::{
@@ -66,7 +66,7 @@ async fn get_credential(profile: Option<&str>) -> Result<()> {
     })?;
 
     let region = extract_region_from_hostname(host)
-        .context("could not extract region from CodeCommit hostname")?;
+        .context(tr!("err-could-not-extract-region-from-codecommit-hostname"))?;
 
     // Path from git doesn't have leading slash; SigV4 canonical URI requires it
     let canonical_path = if path.starts_with('/') {
@@ -140,7 +140,7 @@ pub(crate) async fn run_remote_helper(remote_name: &str, url: &str) -> Result<()
 async fn get_sts_credentials(profile: Option<&str>) -> Result<StsCredentials> {
     let session = crate::session::resolve_session()
         .await
-        .context("not configured - run 'vouch enroll' first")?;
+        .context(tr!("err-not-configured-run-vouch-enroll-first"))?;
 
     let server = session.server_url;
 
@@ -152,25 +152,28 @@ async fn get_sts_credentials(profile: Option<&str>) -> Result<StsCredentials> {
     let access_key_id = data
         .get("AccessKeyId")
         .and_then(serde_json::Value::as_str)
-        .context("missing AccessKeyId in cached credentials")?
+        .context(tr!("err-missing-accesskeyid-in-cached-credentials"))?
         .to_string();
     let secret_access_key = data
         .get("SecretAccessKey")
         .and_then(serde_json::Value::as_str)
-        .context("missing SecretAccessKey in cached credentials")?
+        .context(tr!("err-missing-secretaccesskey-in-cached-credentials"))?
         .to_string();
     let session_token = data
         .get("SessionToken")
         .and_then(serde_json::Value::as_str)
-        .context("missing SessionToken in cached credentials")?
+        .context(tr!("err-missing-sessiontoken-in-cached-credentials"))?
         .to_string();
     let expiration_str = data
         .get("Expiration")
         .and_then(serde_json::Value::as_str)
         .unwrap_or("");
-    let expiration: jiff::Timestamp = expiration_str
-        .parse()
-        .with_context(|| format!("failed to parse cached Expiration: {expiration_str}"))?;
+    let expiration: jiff::Timestamp = expiration_str.parse().with_context(|| {
+        tr_args!(
+            "err-failed-parse-cached-expiration",
+            expiration_str = expiration_str
+        )
+    })?;
 
     Ok(StsCredentials {
         access_key_id,
@@ -268,7 +271,9 @@ fn exec_git_remote_http(remote_name: &str, signed_url: &str) -> Result<()> {
 
     #[cfg(not(unix))]
     {
-        let status = cmd.status().context("failed to run git remote-http")?;
+        let status = cmd
+            .status()
+            .context(tr!("err-failed-run-git-remote-http"))?;
         if !status.success() {
             anyhow::bail!(
                 "git remote-http exited with code {}",

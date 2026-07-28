@@ -7,6 +7,7 @@
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 use toml_edit::{Array, DocumentMut, Item, Table, Value};
+use vouch_cli::{tr, tr_args};
 
 /// Cargo config file parser and writer.
 ///
@@ -29,11 +30,12 @@ impl CargoConfig {
     /// Load Cargo config from a specific path.
     pub(crate) fn load_from(path: PathBuf) -> Result<Self> {
         let doc = if path.exists() {
-            let content = std::fs::read_to_string(&path)
-                .with_context(|| format!("failed to read {}", path.display()))?;
+            let content = std::fs::read_to_string(&path).with_context(|| {
+                tr_args!("err-failed-read-2", value = path.display().to_string())
+            })?;
             content
                 .parse::<DocumentMut>()
-                .with_context(|| format!("failed to parse {}", path.display()))?
+                .with_context(|| tr_args!("err-failed-parse", value = path.display().to_string()))?
         } else {
             DocumentMut::new()
         };
@@ -171,8 +173,14 @@ impl CargoConfig {
     /// Uses atomic write (temp file + rename) to prevent corruption
     /// if the process is interrupted mid-write.
     pub(crate) fn save(&self) -> Result<()> {
-        vouch_common::fs::atomic_write(&self.path, self.doc.to_string().as_bytes())
-            .with_context(|| format!("failed to write {}", self.path.display()))
+        vouch_common::fs::atomic_write(&self.path, self.doc.to_string().as_bytes()).with_context(
+            || {
+                tr_args!(
+                    "err-failed-write-5",
+                    value = self.path.display().to_string()
+                )
+            },
+        )
     }
 
     /// Get the path to this config file.
@@ -191,7 +199,7 @@ impl CargoConfig {
         }
 
         // Default to ~/.cargo/config.toml
-        let home = dirs::home_dir().context("could not determine home directory")?;
+        let home = dirs::home_dir().context(tr!("err-could-not-determine-home-directory"))?;
         Ok(home.join(".cargo").join("config.toml"))
     }
 
