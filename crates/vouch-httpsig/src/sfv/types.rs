@@ -67,18 +67,6 @@ impl SfvParams {
     pub fn iter(&self) -> impl Iterator<Item = (&std::string::String, &Option<SfvBareItem>)> {
         self.entries.iter().map(|(k, v)| (k, v))
     }
-
-    /// Returns `true` if there are no parameters.
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
-    }
-
-    /// Returns the number of parameters.
-    #[must_use]
-    pub fn len(&self) -> usize {
-        self.entries.len()
-    }
 }
 
 /// An SFV item: a bare item with optional parameters.
