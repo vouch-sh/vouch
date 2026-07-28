@@ -84,6 +84,8 @@ pub(crate) struct Config {
     servers: BTreeMap<String, ServerConfig>,
     /// Global CodeArtifact profile configuration.
     codeartifact: Option<CodeArtifactConfig>,
+    /// Container registry → AWS profile anchors.
+    docker: Option<DockerRegistriesConfig>,
     /// AWS organizations configuration (role chaining + IdC).
     aws: Option<AwsOrgsConfig>,
     /// Global network configuration (DoH, …).
@@ -132,6 +134,27 @@ pub(crate) struct CodeArtifactProfile {
     pub domain_owner: String,
     /// AWS region (e.g., "us-east-1").
     pub region: String,
+    /// AWS profile in `~/.aws/config` whose role mints tokens for this domain.
+    ///
+    /// Package managers reach `vouch credential codeartifact` through
+    /// argument-less shims (a pip/pnpm keyring helper, a Cargo credential
+    /// provider), so the account has to be recorded here rather than passed on
+    /// the command line. `None` falls back to resolving a Vouch profile from
+    /// `~/.aws/config`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aws_profile: Option<String>,
+}
+
+/// Container registry → AWS profile anchors.
+///
+/// Docker invokes `docker-credential-vouch` as an argument-less symlink, so the
+/// account backing each ECR registry cannot be passed on the command line and is
+/// recorded here by `vouch setup docker --aws-profile`.
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub(crate) struct DockerRegistriesConfig {
+    /// Registry host → AWS profile name in `~/.aws/config`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub registries: BTreeMap<String, String>,
 }
 
 // =========================================================================
@@ -214,6 +237,9 @@ struct ConfigFile {
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     codeartifact: Option<CodeArtifactConfig>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    docker: Option<DockerRegistriesConfig>,
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     aws: Option<AwsOrgsConfig>,
@@ -504,6 +530,23 @@ impl Config {
         self.codeartifact.as_ref()
     }
 
+    /// Look up the AWS profile anchored to a container registry.
+    pub(crate) fn docker_registry_profile(&self, registry: &str) -> Option<&str> {
+        self.docker
+            .as_ref()?
+            .registries
+            .get(registry)
+            .map(String::as_str)
+    }
+
+    /// Anchor a container registry to an AWS profile (in memory; call `save()`).
+    pub(crate) fn set_docker_registry_profile(&mut self, registry: &str, aws_profile: &str) {
+        self.docker
+            .get_or_insert_with(DockerRegistriesConfig::default)
+            .registries
+            .insert(registry.to_string(), aws_profile.to_string());
+    }
+
     /// Add a CodeArtifact profile (in memory only, call `save()` to
     /// persist). If this is the first profile, it becomes the default.
     pub(crate) fn set_codeartifact_profile(&mut self, name: &str, profile: CodeArtifactProfile) {
@@ -725,6 +768,7 @@ impl From<ConfigFile> for Config {
             current_server,
             servers,
             codeartifact: file.codeartifact.take(),
+            docker: file.docker.take(),
             aws,
             network: file.network.take(),
             ai: file.ai.take(),
@@ -763,10 +807,14 @@ impl From<&Config> for ConfigFile {
         // not run 'vouch setup aws' has no `aws` key in their config file.
         let aws = config.aws.clone().filter(|a| !a.organizations.is_empty());
 
+        // Same guard: an empty registry map would serialize as `docker: {}`.
+        let docker = config.docker.clone().filter(|d| !d.registries.is_empty());
+
         Self {
             current_server: config.current_server.clone(),
             servers,
             codeartifact: config.codeartifact.clone(),
+            docker,
             aws,
             network: config.network.clone(),
             ai: config.ai.clone(),
@@ -1131,6 +1179,7 @@ mod tests {
                 domain: "team-domain".into(),
                 domain_owner: "111111111111".into(),
                 region: "us-west-2".into(),
+                aws_profile: None,
             },
         );
 

@@ -66,7 +66,7 @@ pub(crate) async fn fetch_rds_token(
 
     let hostname_region = extract_region_from_rds_hostname(hostname);
     let effective_region = region.or(hostname_region);
-    let (role_arn, region_name) = aws::resolve_role_and_region(role, effective_region)?;
+    let (role_arn, region_name) = aws::resolve_role_and_region(role, effective_region, None)?;
 
     // Detect agent context BEFORE the cache lookup. Folding the source into
     // the cache key ensures agent and non-agent invocations never share a

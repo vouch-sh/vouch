@@ -44,7 +44,7 @@ pub(crate) async fn run(
 ) -> Result<()> {
     validate_sigv4_input(cluster_name, "cluster name")?;
 
-    let (role_arn, region_name) = aws::resolve_role_and_region(role, region)?;
+    let (role_arn, region_name) = aws::resolve_role_and_region(role, region, None)?;
 
     // Detect agent context BEFORE the cache lookup. Folding the source into
     // the cache key ensures agent and non-agent invocations never share a

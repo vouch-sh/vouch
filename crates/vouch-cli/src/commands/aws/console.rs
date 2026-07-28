@@ -23,6 +23,10 @@ pub(crate) struct ConsoleArgs {
     )]
     pub role: Option<String>,
 
+    /// AWS profile in ~/.aws/config to take the role from.
+    #[arg(long, conflicts_with_all = ["role", "account", "permission_set"])]
+    pub profile: Option<String>,
+
     /// AWS account ID for Identity Center (`GetRoleCredentials`) path.
     #[arg(long, requires = "permission_set", conflicts_with = "role")]
     pub account: Option<String>,
@@ -135,22 +139,13 @@ async fn get_sts_console_creds(server: &str, args: ConsoleArgs) -> Result<Consol
     // Resolve role ARN from explicit arg or from ~/.aws/config
     let role_arn = match args.role {
         Some(r) => r,
-        None => aws::get_local_aws_role()
-            .ok_or_else(|| anyhow::anyhow!(tr!("aws-err-not-configured")))?,
+        None => aws::resolve_vouch_profile(args.profile.as_deref())?.role_arn,
     };
 
     // Determine partition and region from role ARN
     let partition = vouch_common::aws::Partition::from_arn(&role_arn)
         .with_context(|| tr!("aws-console-err-invalid-role-arn"))?;
-    let profile_name = aws::resolve_profile(None).unwrap_or_default();
-    let region = match aws::resolve_region(None, &profile_name) {
-        Ok(r) => r,
-        Err(_) => {
-            let default = partition.default_sts_region();
-            tracing::debug!("no region configured, defaulting to {default}");
-            default.to_string()
-        }
-    };
+    let region = aws::resolve_region_with_fallback(&role_arn)?;
 
     // Validate/resolve --via the same way `vouch credential aws` does, so an
     // unconfigured management role fails fast with a Vouch error instead of an
@@ -283,6 +278,7 @@ mod tests {
         }
         let args = ConsoleArgs {
             role: None,
+            profile: None,
             account: Some("111111111111".to_string()),
             permission_set: Some("Admin".to_string()),
             via: None,

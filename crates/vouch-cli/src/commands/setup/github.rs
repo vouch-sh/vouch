@@ -71,8 +71,14 @@ pub(crate) async fn run(host: &str, configure: bool) -> Result<()> {
     let vouch_path = resolve_install_path();
     let vouch_path_str = vouch_path.display().to_string();
 
-    // Build the helper command
-    let helper_command = format!("\"{}\" credential github", vouch_path_str);
+    // Build the helper command.
+    //
+    // The leading `!` is required: git only runs a helper value through a shell
+    // when it starts with `!` or is literally an absolute path. A value starting
+    // with `"` matches neither, so git would build `git credential-"<path>"` and
+    // fail with "is not a git command". The `!` also preserves the quoting that
+    // keeps a vouch binary under a path containing spaces working.
+    let helper_command = format!("!\"{vouch_path_str}\" credential github");
 
     // Git config key for this host
     let config_key = format!("credential.https://{}.helper", host);

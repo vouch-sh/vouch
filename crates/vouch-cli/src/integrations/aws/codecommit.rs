@@ -144,6 +144,15 @@ pub(crate) struct CodeCommitUrl {
 pub(crate) fn parse_codecommit_url(url: &str) -> Option<CodeCommitUrl> {
     // Format 1: codecommit::region://[profile@]repo
     // Format 2: codecommit://[profile@]repo
+    // Format 3: region://[profile@]repo
+    //
+    // Format 3 is what the remote helper actually receives for format 1. Per
+    // gitremote-helpers(7): "A URL of the form <transport>::<address> explicitly
+    // instructs Git to invoke git remote-<transport> with <address> as the
+    // second argument" — so `codecommit::us-east-1://repo` arrives as
+    // `us-east-1://repo`. Format 2 matches the neighbouring rule, where Git
+    // "invokes git remote-<transport> with the full URL", and is seen whole.
+    // Format 1 still has to parse for direct/manual invocation.
     let (region, remainder) = if let Some(after_double_colon) = url.strip_prefix("codecommit::") {
         // codecommit::region://...
         let (region, rest) = after_double_colon.split_once("://")?;
@@ -151,10 +160,17 @@ pub(crate) fn parse_codecommit_url(url: &str) -> Option<CodeCommitUrl> {
             return None;
         }
         (Some(region.to_string()), rest)
-    } else {
+    } else if let Some(rest) = url.strip_prefix("codecommit://") {
         // codecommit://...
-        let rest = url.strip_prefix("codecommit://")?;
         (None, rest)
+    } else {
+        // region://... — requires a region-shaped scheme so ordinary URLs
+        // (https://, ssh://) are still rejected.
+        let (region, rest) = url.split_once("://")?;
+        if !is_region_like(region) {
+            return None;
+        }
+        (Some(region.to_string()), rest)
     };
 
     if remainder.is_empty() {
@@ -181,6 +197,37 @@ pub(crate) fn parse_codecommit_url(url: &str) -> Option<CodeCommitUrl> {
         repository,
         region,
     })
+}
+
+/// Check whether a URL scheme looks like an AWS region.
+///
+/// AWS regions are `<group>-<direction>-<number>`, e.g. `us-east-1`,
+/// `ap-southeast-2`, `us-gov-west-1`, `cn-north-1`. Requiring that shape keeps
+/// the bare `<region>://` form from swallowing `https://` and friends.
+fn is_region_like(scheme: &str) -> bool {
+    let mut parts = scheme.split('-');
+
+    let Some(first) = parts.next() else {
+        return false;
+    };
+    if first.len() < 2 || !first.chars().all(|c| c.is_ascii_lowercase()) {
+        return false;
+    }
+
+    let mut middle_parts = 0usize;
+    let mut last = None;
+    for part in parts {
+        if let Some(previous) = last.replace(part) {
+            if previous.is_empty() || !previous.chars().all(|c| c.is_ascii_lowercase()) {
+                return false;
+            }
+            middle_parts = middle_parts.saturating_add(1);
+        }
+    }
+
+    // At least one middle segment (`us` + `east` + `1`) and a trailing number.
+    middle_parts >= 1
+        && last.is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))
 }
 
 /// Extract the AWS region from a CodeCommit hostname.
@@ -331,6 +378,44 @@ mod tests {
     #[test]
     fn test_parse_repo_with_backslash() {
         assert!(parse_codecommit_url("codecommit://my\\repo").is_none());
+    }
+
+    /// Git strips everything through the first `::` before invoking a remote
+    /// helper, so `codecommit::us-east-1://repo` arrives here as
+    /// `us-east-1://repo`. Rejecting that form broke every regional clone,
+    /// including the verification command `vouch setup codecommit` prints.
+    #[test]
+    fn test_parse_post_strip_region_form() {
+        let parsed = parse_codecommit_url("us-east-1://my-repo").expect("should parse");
+        assert_eq!(parsed.region, Some("us-east-1".to_string()));
+        assert_eq!(parsed.repository, "my-repo");
+        assert_eq!(parsed.profile, None);
+    }
+
+    #[test]
+    fn test_parse_post_strip_region_and_profile() {
+        let parsed =
+            parse_codecommit_url("ap-southeast-2://vouch-demo@my-repo").expect("should parse");
+        assert_eq!(parsed.region, Some("ap-southeast-2".to_string()));
+        assert_eq!(parsed.profile, Some("vouch-demo".to_string()));
+        assert_eq!(parsed.repository, "my-repo");
+    }
+
+    #[test]
+    fn test_parse_post_strip_govcloud_region() {
+        let parsed = parse_codecommit_url("us-gov-west-1://my-repo").expect("should parse");
+        assert_eq!(parsed.region, Some("us-gov-west-1".to_string()));
+    }
+
+    /// The bare `<region>://` form must not turn every URL into a CodeCommit
+    /// one — only region-shaped schemes qualify.
+    #[test]
+    fn test_parse_rejects_non_region_schemes() {
+        assert!(parse_codecommit_url("ssh://git@example.com").is_none());
+        assert!(parse_codecommit_url("http://my-repo").is_none());
+        assert!(parse_codecommit_url("git://my-repo").is_none());
+        assert!(parse_codecommit_url("us-east://my-repo").is_none());
+        assert!(parse_codecommit_url("useast1://my-repo").is_none());
     }
 
     #[test]

@@ -21,6 +21,15 @@ pub(crate) struct AwsProfile {
     pub output: Option<String>,
 }
 
+/// A Vouch-managed AWS profile and the role ARN its `credential_process` targets.
+#[derive(Debug, Clone)]
+pub(crate) struct VouchProfile {
+    /// Profile name as it appears in `~/.aws/config`.
+    pub name: String,
+    /// Role ARN extracted from the profile's `credential_process`.
+    pub role_arn: String,
+}
+
 /// AWS config file parser and writer.
 ///
 /// Uses rust-ini to properly parse and modify ~/.aws/config files,
@@ -77,10 +86,28 @@ impl AwsConfig {
         })
     }
 
-    /// Find the first profile that uses vouch for credential_process.
+    /// Find every vouch profile that names a role ARN, in file order.
+    ///
+    /// Identity Center profiles written by `vouch setup aws --discover` also use
+    /// a vouch `credential_process`, but carry `--account`/`--permission-set`
+    /// instead of `--role`, so they cannot serve the role-based credential
+    /// commands and are excluded here.
     #[must_use]
-    pub(crate) fn find_vouch_profile(&self) -> Option<AwsProfile> {
-        self.find_all_vouch_profiles().into_iter().next()
+    pub(crate) fn vouch_profiles_with_role(&self) -> Vec<VouchProfile> {
+        let mut profiles = Vec::new();
+        for profile in self.find_all_vouch_profiles() {
+            let Some(credential_process) = profile.credential_process.as_deref() else {
+                continue;
+            };
+            let Some(role_arn) = extract_role_from_credential_process(credential_process) else {
+                continue;
+            };
+            profiles.push(VouchProfile {
+                name: profile.name,
+                role_arn,
+            });
+        }
+        profiles
     }
 
     /// Find all profiles that use vouch via `credential_process`.
@@ -353,7 +380,7 @@ credential_process = vouch credential aws --role arn:aws:iam::123456789012:role/
     }
 
     #[test]
-    fn test_find_vouch_profile() {
+    fn test_vouch_profiles_with_role() {
         let content = r#"
 [profile prod]
 aws_access_key_id = AKIAIOSFODNN7EXAMPLE
@@ -367,21 +394,15 @@ region = us-east-1
         let file = create_temp_config(content);
         let config = AwsConfig::load_from(file.path().to_path_buf()).unwrap();
 
-        let profile = config
-            .find_vouch_profile()
-            .expect("should find vouch profile");
+        let profiles = config.vouch_profiles_with_role();
+        assert_eq!(profiles.len(), 1);
+        let profile = profiles.first().unwrap();
         assert_eq!(profile.name, "vouch");
-        assert!(
-            profile
-                .credential_process
-                .as_ref()
-                .unwrap()
-                .contains("vouch")
-        );
+        assert_eq!(profile.role_arn, "arn:aws:iam::123456789012:role/MyRole");
     }
 
     #[test]
-    fn test_find_vouch_profile_in_default() {
+    fn test_vouch_profiles_with_role_in_default() {
         let content = r#"
 [default]
 credential_process = vouch credential aws --role arn:aws:iam::123456789012:role/DefaultRole
@@ -389,14 +410,13 @@ credential_process = vouch credential aws --role arn:aws:iam::123456789012:role/
         let file = create_temp_config(content);
         let config = AwsConfig::load_from(file.path().to_path_buf()).unwrap();
 
-        let profile = config
-            .find_vouch_profile()
-            .expect("should find vouch profile");
-        assert_eq!(profile.name, "default");
+        let profiles = config.vouch_profiles_with_role();
+        assert_eq!(profiles.len(), 1);
+        assert_eq!(profiles.first().unwrap().name, "default");
     }
 
     #[test]
-    fn test_find_vouch_profile_none() {
+    fn test_vouch_profiles_with_role_none() {
         let content = r#"
 [profile prod]
 aws_access_key_id = AKIAIOSFODNN7EXAMPLE
@@ -405,7 +425,7 @@ aws_secret_access_key = wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
         let file = create_temp_config(content);
         let config = AwsConfig::load_from(file.path().to_path_buf()).unwrap();
 
-        assert!(config.find_vouch_profile().is_none());
+        assert!(config.vouch_profiles_with_role().is_empty());
     }
 
     #[test]
@@ -420,7 +440,7 @@ credential_process = vouch credential aws --role some-role
         let config = AwsConfig::load_from(file.path().to_path_buf()).unwrap();
 
         // Should not find vouch because [sso-session] is not a profile
-        assert!(config.find_vouch_profile().is_none());
+        assert!(config.vouch_profiles_with_role().is_empty());
         assert!(!config.profile_exists("my-sso"));
     }
 
@@ -552,7 +572,7 @@ output = json
 
         assert!(!config.profile_exists("vouch"));
         assert!(!config.profile_exists("default"));
-        assert!(config.find_vouch_profile().is_none());
+        assert!(config.vouch_profiles_with_role().is_empty());
     }
 
     #[test]
@@ -561,7 +581,7 @@ output = json
         let config = AwsConfig::load_from(path).unwrap();
 
         assert!(!config.profile_exists("vouch"));
-        assert!(config.find_vouch_profile().is_none());
+        assert!(config.vouch_profiles_with_role().is_empty());
     }
 
     #[test]
@@ -611,7 +631,7 @@ output = json
     }
 
     #[test]
-    fn test_multiple_profiles_finds_first_vouch() {
+    fn test_multiple_profiles_returns_every_candidate() {
         let content = r#"
 [profile regular]
 aws_access_key_id = AKIAIOSFODNN7EXAMPLE
@@ -626,18 +646,37 @@ credential_process = vouch credential aws --role arn:aws:iam::222:role/Staging
         let file = create_temp_config(content);
         let config = AwsConfig::load_from(file.path().to_path_buf()).unwrap();
 
-        let profile = config
-            .find_vouch_profile()
-            .expect("should find vouch profile");
-        // Should find one of the vouch profiles (order depends on INI iteration)
-        assert!(profile.name == "vouch-prod" || profile.name == "vouch-staging");
-        assert!(
-            profile
-                .credential_process
-                .as_ref()
-                .unwrap()
-                .contains("vouch")
+        // Every candidate must be reported so the caller can refuse to guess;
+        // silently returning whichever came first signed requests for the wrong
+        // account.
+        let profiles = config.vouch_profiles_with_role();
+        let names: Vec<&str> = profiles.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["vouch-prod", "vouch-staging"]);
+        assert_eq!(
+            profiles.first().unwrap().role_arn,
+            "arn:aws:iam::111:role/Prod"
         );
+    }
+
+    #[test]
+    fn test_identity_center_profile_is_not_a_role_candidate() {
+        // `vouch setup aws --discover` writes IdC profiles whose credential_process
+        // matches "vouch" but names no --role, so they cannot serve role-based
+        // credential commands.
+        let content = r#"
+[profile vouch-idc]
+credential_process = vouch credential aws --account 111111111111 --permission-set Admin
+
+[profile vouch-role]
+credential_process = vouch credential aws --role arn:aws:iam::222:role/Staging
+"#;
+        let file = create_temp_config(content);
+        let config = AwsConfig::load_from(file.path().to_path_buf()).unwrap();
+
+        assert_eq!(config.find_all_vouch_profiles().len(), 2);
+        let profiles = config.vouch_profiles_with_role();
+        assert_eq!(profiles.len(), 1);
+        assert_eq!(profiles.first().unwrap().name, "vouch-role");
     }
 
     #[test]
@@ -651,10 +690,8 @@ credential_process = vouch credential aws --role arn:aws:iam::222:role/Staging
 
         // rust-ini handles whitespace properly
         assert!(config.profile_exists("vouch"));
-        let profile = config
-            .find_vouch_profile()
-            .expect("should find vouch profile");
-        assert_eq!(profile.name, "vouch");
+        let profiles = config.vouch_profiles_with_role();
+        assert_eq!(profiles.first().unwrap().name, "vouch");
     }
 
     #[test]

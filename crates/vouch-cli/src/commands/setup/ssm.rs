@@ -196,7 +196,7 @@ pub(crate) async fn run(
     check_session_manager_plugin()?;
 
     // Auto-discover profile and region
-    let profile_name = aws::resolve_profile(profile)?;
+    let profile_name = aws::resolve_vouch_profile(profile)?.name;
     let region_name = aws::resolve_region(region, &profile_name)?;
     let host_pattern = hosts;
 

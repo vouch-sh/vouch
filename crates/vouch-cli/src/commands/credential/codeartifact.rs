@@ -19,7 +19,64 @@ use crate::config::Config;
 use crate::integrations::aws::codeartifact::{
     CodeArtifactRegistry, CodeArtifactToken, get_authorization_token,
 };
-use crate::integrations::aws::get_local_aws_role;
+use crate::integrations::aws::resolve_vouch_profile;
+
+/// A CodeArtifact domain plus the AWS account that mints tokens for it.
+#[derive(Debug, Clone)]
+pub(crate) struct CodeArtifactTarget {
+    /// CodeArtifact domain name.
+    pub domain: String,
+    /// AWS account ID that owns the domain.
+    pub domain_owner: String,
+    /// AWS region hosting the domain.
+    pub region: String,
+    /// AWS profile whose role mints the token, when one is anchored.
+    ///
+    /// `None` means "resolve a Vouch profile from `~/.aws/config`", which only
+    /// succeeds when the choice is unambiguous.
+    pub aws_profile: Option<String>,
+}
+
+impl CodeArtifactTarget {
+    /// Build a target, adopting the AWS profile anchored to this domain by
+    /// `vouch setup codeartifact` when one matches.
+    ///
+    /// Package managers reach us through argument-less shims and rebuild the
+    /// domain from an index URL, so the anchor has to be recovered from saved
+    /// profiles rather than passed along.
+    pub(crate) fn new(domain: String, domain_owner: String, region: String) -> Self {
+        let aws_profile = match Config::load() {
+            Ok(config) => config.codeartifact().and_then(|ca| {
+                let mut anchors: Vec<&String> = Vec::new();
+                for saved in ca.profiles.values() {
+                    let matches = saved.domain == domain
+                        && saved.domain_owner == domain_owner
+                        && saved.region == region;
+                    if let Some(anchor) = saved.aws_profile.as_ref()
+                        && matches
+                        && !anchors.contains(&anchor)
+                    {
+                        anchors.push(anchor);
+                    }
+                }
+                // Several saved profiles naming this domain but disagreeing on
+                // the account is exactly the case the resolver refuses to guess
+                // at; hand it back none rather than picking one by map order.
+                match anchors.as_slice() {
+                    [only] => Some((*only).clone()),
+                    _ => None,
+                }
+            }),
+            Err(_) => None,
+        };
+        Self {
+            domain,
+            domain_owner,
+            region,
+            aws_profile,
+        }
+    }
+}
 
 /// Resolve CodeArtifact domain/owner/region from CLI flags, profile, or default profile.
 ///
@@ -28,15 +85,31 @@ use crate::integrations::aws::get_local_aws_role;
 /// 2. Named profile (`--profile <name>`)
 /// 3. Default profile (`codeartifact.default`)
 /// 4. Error with helpful message
+///
+/// `aws_profile` names an AWS profile in `~/.aws/config` and overrides whatever
+/// the saved CodeArtifact profile records. Note that `profile` is a *Vouch
+/// CodeArtifact* profile — the two are deliberately separate flags.
 pub(crate) fn resolve_codeartifact_params(
     domain: Option<&str>,
     domain_owner: Option<&str>,
     region: Option<&str>,
     profile: Option<&str>,
-) -> Result<(String, String, String)> {
-    // If all three flags are provided, use them directly
+    aws_profile: Option<&str>,
+) -> Result<CodeArtifactTarget> {
+    // If all three flags are provided, use them directly. An explicit
+    // --aws-profile wins; otherwise fall back to the anchor saved for whichever
+    // CodeArtifact profile was named, then to one saved for this same domain.
     if let (Some(d), Some(o), Some(r)) = (domain, domain_owner, region) {
-        return Ok((d.to_string(), o.to_string(), r.to_string()));
+        let mut target = CodeArtifactTarget::new(d.to_string(), o.to_string(), r.to_string());
+        if let Some(p) = aws_profile {
+            target.aws_profile = Some(p.to_string());
+        } else if let Some(name) = profile {
+            let config = Config::load().context("failed to load config")?;
+            if let Some(saved) = config.codeartifact().and_then(|c| c.profiles.get(name)) {
+                target.aws_profile = saved.aws_profile.clone();
+            }
+        }
+        return Ok(target);
     }
 
     // Try to load from config profile
@@ -93,13 +166,16 @@ pub(crate) fn resolve_codeartifact_params(
     };
 
     // Allow individual flags to override profile values
-    Ok((
-        domain.unwrap_or(&resolved_profile.domain).to_string(),
-        domain_owner
+    Ok(CodeArtifactTarget {
+        domain: domain.unwrap_or(&resolved_profile.domain).to_string(),
+        domain_owner: domain_owner
             .unwrap_or(&resolved_profile.domain_owner)
             .to_string(),
-        region.unwrap_or(&resolved_profile.region).to_string(),
-    ))
+        region: region.unwrap_or(&resolved_profile.region).to_string(),
+        aws_profile: aws_profile
+            .map(str::to_string)
+            .or_else(|| resolved_profile.aws_profile.clone()),
+    })
 }
 
 /// Run the CodeArtifact credential command.
@@ -115,11 +191,11 @@ pub(crate) async fn run(
     domain_owner: Option<&str>,
     region: Option<&str>,
     profile: Option<&str>,
+    aws_profile: Option<&str>,
 ) -> Result<()> {
-    let (domain, domain_owner, region) =
-        resolve_codeartifact_params(domain, domain_owner, region, profile)?;
+    let target = resolve_codeartifact_params(domain, domain_owner, region, profile, aws_profile)?;
 
-    let token = get_token(server, &domain, &domain_owner, &region).await?;
+    let token = get_token(server, &target).await?;
     println!("{}", token.authorization_token.expose_secret());
     Ok(())
 }
@@ -131,9 +207,7 @@ pub(crate) async fn run(
 /// Cargo credential provider when it detects a CodeArtifact index URL.
 pub(crate) async fn get_token(
     server: &str,
-    domain: &str,
-    domain_owner: &str,
-    region: &str,
+    target: &CodeArtifactTarget,
 ) -> Result<CodeArtifactToken> {
     // Detect the agent context BEFORE the cache lookup and fold it into the
     // cache key so agent and non-agent invocations never share a cached
@@ -141,11 +215,11 @@ pub(crate) async fn get_token(
     // ReadOnlyAccess session policy / `vouch:AccessType=ai` tags
     // (issues #398, #426).
     let agent_source = crate::commands::credential::aws::detect_agent_source();
-    let cache_key = build_cache_key(domain, domain_owner, region, agent_source.as_deref());
+    let cache_key = build_cache_key(target, agent_source.as_deref());
 
     let agent = agent_source;
     let data = cache::get_or_fetch(&cache_key, "CodeArtifact token", || async {
-        let token = fetch_token(server, domain, domain_owner, region, agent.as_deref()).await?;
+        let token = fetch_token(server, target, agent.as_deref()).await?;
         let expires_at = jiff::Timestamp::from_second(token.expiration)
             .map_or_else(|_| cache::default_expiry(), |ts| ts.to_string());
         let data = serde_json::json!({
@@ -173,42 +247,43 @@ pub(crate) async fn get_token(
 
 /// Build the cache key for CodeArtifact tokens.
 ///
-/// The agent source is folded into the key so that agent and non-agent
-/// invocations never share a cached entry (same pattern as the STS, EKS,
-/// RDS, and Redshift credential caches).
-fn build_cache_key(domain: &str, domain_owner: &str, region: &str, agent: Option<&str>) -> String {
+/// The AWS profile is part of the key because two CodeArtifact profiles may
+/// share a domain while minting tokens from different accounts; the agent source
+/// is folded in so that agent and non-agent invocations never share a cached
+/// entry (same pattern as the STS, EKS, RDS, and Redshift credential caches).
+fn build_cache_key(target: &CodeArtifactTarget, agent: Option<&str>) -> String {
     let suffix = agent.map_or(String::new(), |src| format!(":agent:{src}"));
-    format!("codeartifact:{domain}:{domain_owner}:{region}{suffix}")
+    let profile = target
+        .aws_profile
+        .as_deref()
+        .map_or(String::new(), |p| format!(":profile:{p}"));
+    format!(
+        "codeartifact:{}:{}:{}{profile}{suffix}",
+        target.domain, target.domain_owner, target.region
+    )
 }
 
 /// Fetch a fresh CodeArtifact token (no caching).
 async fn fetch_token(
     server: &str,
-    domain: &str,
-    domain_owner: &str,
-    region: &str,
+    target: &CodeArtifactTarget,
     agent_source: Option<&str>,
 ) -> Result<CodeArtifactToken> {
-    let role_arn = get_local_aws_role().ok_or_else(|| {
-        anyhow::anyhow!(
-            "AWS not configured. Run 'vouch setup aws --role <role-arn>' \
-             with a role that has CodeArtifact permissions"
-        )
-    })?;
+    let role_arn = resolve_vouch_profile(target.aws_profile.as_deref())?.role_arn;
 
     let result = exchange_for_sts_credentials(StsRequest {
         server,
         role_arn: &role_arn,
-        region,
+        region: &target.region,
         management_role: None,
         agent_source,
     })
     .await?;
 
     let registry = CodeArtifactRegistry {
-        domain: domain.to_string(),
-        domain_owner: domain_owner.to_string(),
-        region: region.to_string(),
+        domain: target.domain.clone(),
+        domain_owner: target.domain_owner.clone(),
+        region: target.region.clone(),
         domain_suffix: result.domain_suffix.to_string(),
     };
 
@@ -225,26 +300,45 @@ async fn fetch_token(
     reason = "test code: panic on assertion failure is acceptable"
 )]
 mod tests {
-    use super::build_cache_key;
+    use super::{CodeArtifactTarget, build_cache_key};
+
+    fn target(aws_profile: Option<&str>) -> CodeArtifactTarget {
+        CodeArtifactTarget {
+            domain: "my-domain".to_string(),
+            domain_owner: "123456789012".to_string(),
+            region: "us-east-1".to_string(),
+            aws_profile: aws_profile.map(str::to_string),
+        }
+    }
 
     /// Agent and non-agent invocations must never share a cached token:
     /// the agent-restricted STS exchange (ReadOnlyAccess session policy)
     /// would otherwise be bypassed by a full-access cached entry (#716).
     #[test]
     fn test_cache_key_includes_agent_source() {
-        let plain = build_cache_key("my-domain", "123456789012", "us-east-1", None);
-        let agent = build_cache_key(
-            "my-domain",
-            "123456789012",
-            "us-east-1",
-            Some("claude-code"),
-        );
+        let plain = build_cache_key(&target(None), None);
+        let agent = build_cache_key(&target(None), Some("claude-code"));
         assert_eq!(plain, "codeartifact:my-domain:123456789012:us-east-1");
         assert_eq!(
             agent,
             "codeartifact:my-domain:123456789012:us-east-1:agent:claude-code"
         );
         assert_ne!(plain, agent);
+    }
+
+    /// Two CodeArtifact profiles may name the same domain while minting tokens
+    /// from different AWS accounts; sharing a cache entry would hand one
+    /// account's token to the other.
+    #[test]
+    fn test_cache_key_separates_aws_profiles() {
+        let prod = build_cache_key(&target(Some("vouch-prod")), None);
+        let demo = build_cache_key(&target(Some("vouch-demo")), None);
+        assert_ne!(prod, demo);
+        assert_eq!(
+            prod,
+            "codeartifact:my-domain:123456789012:us-east-1:profile:vouch-prod"
+        );
+        assert_ne!(prod, build_cache_key(&target(None), None));
     }
 
     /// Verify the CodeArtifact cache JSON round-trips correctly.

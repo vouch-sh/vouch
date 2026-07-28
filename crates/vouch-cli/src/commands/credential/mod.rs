@@ -91,6 +91,9 @@ pub(crate) enum CredentialCommands {
     Docker {
         /// Docker credential operation (get, store, erase, list).
         operation: String,
+        /// AWS profile in ~/.aws/config whose role mints ECR credentials.
+        #[arg(long)]
+        profile: Option<String>,
     },
     /// Cargo credential provider for private registries.
     ///
@@ -111,6 +114,9 @@ pub(crate) enum CredentialCommands {
     Codecommit {
         /// Git credential operation (get, store, erase).
         operation: String,
+        /// AWS profile in ~/.aws/config whose role mints CodeCommit credentials.
+        #[arg(long)]
+        profile: Option<String>,
     },
     /// pip keyring credential helper for CodeArtifact.
     ///
@@ -246,5 +252,10 @@ pub(crate) enum CredentialCommands {
         /// Named CodeArtifact profile from config.
         #[arg(long)]
         profile: Option<String>,
+        /// AWS profile in ~/.aws/config whose role mints the token.
+        ///
+        /// Distinct from --profile, which names a saved CodeArtifact domain.
+        #[arg(long)]
+        aws_profile: Option<String>,
     },
 }

@@ -25,7 +25,8 @@ use vouch_common::{GitHubTokenRequest, GitHubTokenResponse};
 
 use crate::client::VouchClient;
 use crate::commands::credential::aws::{StsRequest, exchange_for_sts_credentials};
-use crate::integrations::aws::get_local_aws_role;
+use crate::config::Config;
+use crate::integrations::aws::resolve_vouch_profile;
 use crate::integrations::aws::sigv4::sign_and_send_json_rpc;
 use crate::integrations::aws::sts::StsCredentials;
 use crate::session::resolve_session;
@@ -80,9 +81,9 @@ pub(crate) enum RegistryType {
 ///
 /// # Arguments
 /// * `operation` - The Docker credential operation ("get", "store", "erase", or "list")
-pub(crate) async fn run(operation: &str) -> Result<()> {
+pub(crate) async fn run(operation: &str, profile: Option<&str>) -> Result<()> {
     match operation {
-        "get" => get_credential().await,
+        "get" => get_credential(profile).await,
         "store" | "erase" => {
             // These operations are no-ops for Vouch since we don't store credentials
             // Just consume stdin to avoid broken pipe
@@ -153,7 +154,7 @@ pub(crate) fn detect_registry_type(server_url: &str) -> RegistryType {
 }
 
 /// Handle the "get" operation - provide credentials to Docker.
-async fn get_credential() -> Result<()> {
+async fn get_credential(profile: Option<&str>) -> Result<()> {
     // Read server URL from stdin
     let server_url = read_server_url()?;
 
@@ -179,7 +180,24 @@ async fn get_credential() -> Result<()> {
             domain_suffix,
             ..
         } => {
-            get_ecr_credential(server, &session.token, &region, &domain_suffix, &server_url).await?
+            // Docker runs the helper through an argument-less symlink, so
+            // `--profile` is normally absent and the anchor recorded by
+            // `vouch setup docker` is what picks the account.
+            let anchored = match Config::load() {
+                Ok(config) => config
+                    .docker_registry_profile(&server_url)
+                    .map(str::to_string),
+                Err(_) => None,
+            };
+            let aws_profile = profile.map(str::to_string).or(anchored);
+            get_ecr_credential(
+                server,
+                &region,
+                &domain_suffix,
+                &server_url,
+                aws_profile.as_deref(),
+            )
+            .await?
         }
         RegistryType::Ghcr => get_ghcr_credential(server, &session.token).await?,
         RegistryType::Unknown => {
@@ -208,17 +226,12 @@ async fn get_credential() -> Result<()> {
 /// Get credentials for AWS ECR.
 async fn get_ecr_credential(
     server: &str,
-    _token: &SecretString,
     region: &str,
     domain_suffix: &str,
     registry_url: &str,
+    aws_profile: Option<&str>,
 ) -> Result<DockerCredential> {
-    let role_arn = get_local_aws_role().ok_or_else(|| {
-        anyhow::anyhow!(
-            "AWS not configured. Run 'vouch setup aws --role <role-arn>' \
-             with a role that has ECR permissions"
-        )
-    })?;
+    let role_arn = resolve_vouch_profile(aws_profile)?.role_arn;
 
     let agent_source = crate::commands::credential::aws::detect_agent_source();
     let result = exchange_for_sts_credentials(StsRequest {

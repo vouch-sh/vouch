@@ -804,6 +804,8 @@ arg-setup-k8s-kubeconfig-help = Path to kubeconfig file (defaults to ~/.kube/con
 
 # setup/docker arg help
 arg-setup-docker-registries-help = Container registries to configure (e.g., ghcr.io).
+setup-docker-anchored-profile = Registry { $registry } will use AWS profile { $profile }.
+arg-setup-docker-aws-profile-help = AWS profile in ~/.aws/config whose role mints ECR credentials for these registries.
 arg-setup-docker-configure-help = Automatically configure Docker (otherwise just show instructions).
 
 # setup/cargo arg help
@@ -843,6 +845,7 @@ arg-setup-codeartifact-domain-owner-help = AWS account ID that owns the domain.
 arg-setup-codeartifact-region-help = AWS region.
 arg-setup-codeartifact-repository-help = CodeArtifact repository name.
 arg-setup-codeartifact-profile-help = Named CodeArtifact profile to use / save.
+arg-setup-codeartifact-aws-profile-help = AWS profile in ~/.aws/config whose role mints tokens for this domain (distinct from --profile).
 
 ## Shared setup helpers
 
@@ -1294,7 +1297,6 @@ setup-ssm-err-write = failed to write { $path }
 
 ## setup/eks
 
-setup-eks-err-aws-not-configured = AWS not configured. Run '{ -cmd } setup aws --role <role-arn>' first.
 setup-eks-header-block =
     Amazon EKS Setup
     ================
@@ -1358,13 +1360,6 @@ setup-codecommit-tail-block =
       rm "{ $path }"
 # Loop body: emitted once per credential pattern after the tail block above.
 setup-codecommit-undo-config = { $indent }git config --global --remove-section credential."{ $pattern }"
-setup-codecommit-err-aws-not-configured = AWS not configured. Run '{ -cmd } setup aws --role <role-arn>' first.
-setup-codecommit-err-profile-not-found =
-    AWS profile '{ $profile }' not found in ~/.aws/config.
-    Run '{ -cmd } setup aws --role <role-arn>' first.
-setup-codecommit-err-no-vouch-profile =
-    No { -product } AWS profile found in ~/.aws/config.
-    Run '{ -cmd } setup aws --role <role-arn>' first.
 setup-codecommit-err-run-config = failed to run git config
 setup-codecommit-warn-existing-block =
     Warning: Existing CodeCommit credential helper detected:

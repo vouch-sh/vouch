@@ -66,7 +66,9 @@ async fn check_docker_credential_invocation(argv0: &str) -> Result<bool> {
     if is_docker_credential_argv0(argv0) {
         let operation = std::env::args().nth(1).unwrap_or_default();
 
-        commands::credential::docker::run(&operation)
+        // The symlink carries no arguments; the profile comes from the anchor
+        // `vouch setup docker` recorded for the registry.
+        commands::credential::docker::run(&operation, None)
             .await
             .map_err(|e| anyhow::anyhow!("docker-credential-vouch: {e}"))?;
 
@@ -151,6 +153,7 @@ async fn check_pnpm_tokenhelper_invocation(argv0: &str) -> Result<bool> {
         let domain_owner = flag("--domain-owner");
         let region = flag("--region");
         let profile = flag("--profile");
+        let aws_profile = flag("--aws-profile");
 
         // Resolve session to get server URL
         let session = crate::session::resolve_session()
@@ -163,6 +166,7 @@ async fn check_pnpm_tokenhelper_invocation(argv0: &str) -> Result<bool> {
             domain_owner.map(String::as_str),
             region.map(String::as_str),
             profile.map(String::as_str),
+            aws_profile.map(String::as_str),
         )
         .await
         .map_err(|e| anyhow::anyhow!("vouch-pnpm-tokenhelper: {e}"))?;
@@ -675,12 +679,12 @@ async fn run() -> Result<()> {
             CredentialCommands::Github { operation } => {
                 commands::credential::github::run(&operation).await
             }
-            CredentialCommands::Docker { operation } => {
-                commands::credential::docker::run(&operation).await
+            CredentialCommands::Docker { operation, profile } => {
+                commands::credential::docker::run(&operation, profile.as_deref()).await
             }
             CredentialCommands::Cargo { .. } => commands::credential::cargo::run().await,
-            CredentialCommands::Codecommit { operation } => {
-                commands::credential::codecommit::run(&operation).await
+            CredentialCommands::Codecommit { operation, profile } => {
+                commands::credential::codecommit::run(&operation, profile.as_deref()).await
             }
             CredentialCommands::Pip {
                 operation,
@@ -757,6 +761,7 @@ async fn run() -> Result<()> {
                 domain_owner,
                 region,
                 profile,
+                aws_profile,
             } => {
                 commands::credential::codeartifact::run(
                     server,
@@ -764,6 +769,7 @@ async fn run() -> Result<()> {
                     domain_owner.as_deref(),
                     region.as_deref(),
                     profile.as_deref(),
+                    aws_profile.as_deref(),
                 )
                 .await
             }
@@ -838,7 +844,8 @@ async fn run() -> Result<()> {
             SetupCommands::Docker {
                 registries,
                 configure,
-            } => commands::setup::docker::run(&registries, configure).await,
+                aws_profile,
+            } => commands::setup::docker::run(&registries, configure, aws_profile.as_deref()).await,
             SetupCommands::Cargo {
                 registry,
                 configure,
@@ -892,13 +899,19 @@ async fn run() -> Result<()> {
                 region,
                 repository,
                 profile,
+                aws_profile,
             } => {
-                commands::setup::codeartifact::run(
-                    server,
-                    tool,
+                let target = commands::credential::codeartifact::resolve_codeartifact_params(
                     domain.as_deref(),
                     domain_owner.as_deref(),
                     region.as_deref(),
+                    profile.as_deref(),
+                    aws_profile.as_deref(),
+                )?;
+                commands::setup::codeartifact::run(
+                    server,
+                    tool,
+                    &target,
                     &repository,
                     profile.as_deref(),
                 )

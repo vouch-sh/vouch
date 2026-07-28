@@ -16,7 +16,7 @@ use anyhow::{Context, Result};
 
 use crate::config::Config;
 use crate::install_path::resolve_install_path;
-use crate::integrations::aws::{AwsConfig, extract_role_from_credential_process};
+use crate::integrations::aws::resolve_vouch_profile;
 
 /// Git config patterns for CodeCommit credential helper by partition.
 ///
@@ -56,24 +56,32 @@ pub(crate) async fn run(
     tr_println!("setup-codecommit-header");
     println!();
 
-    // Check AWS configuration
-    let (profile_name, role_arn) = check_aws_config(profile)?;
+    // Resolve the AWS profile now: its name is baked into the helper command, so
+    // the helper resolves the same account at run time that we report here.
+    let vouch_profile = resolve_vouch_profile(profile)?;
+    let profile_name = vouch_profile.name;
     tr_println!(
         "setup-codecommit-aws-profile",
         profile = profile_name.as_str()
     );
-    if let Some(ref role) = role_arn {
-        tr_println!("setup-codecommit-aws-role", role = role.as_str());
-    }
+    tr_println!(
+        "setup-codecommit-aws-role",
+        role = vouch_profile.role_arn.as_str()
+    );
     println!();
 
     // Get vouch binary path for the credential helper command and symlink
     let vouch_path = resolve_install_path();
 
-    // Build the native credential helper command. Git runs credential helpers
-    // through a shell, so the path must be quoted or it breaks when the vouch
-    // binary lives under a path containing spaces (matches setup/github.rs).
-    let helper_command = format!("\"{}\" credential codecommit", vouch_path.display());
+    // Build the native credential helper command.
+    //
+    // The leading `!` is required: git only runs a helper value through a shell
+    // when it starts with `!` or is literally an absolute path. A value starting
+    // with `"` matches neither, so git would build `git credential-"<path>"` and
+    // fail with "is not a git command". The `!` also preserves the quoting that
+    // keeps a vouch binary under a path containing spaces working.
+    //
+    let helper_command = credential_helper_command(&vouch_path, &profile_name)?;
 
     // Determine the credential pattern(s)
     let patterns: Vec<String> = if let Some(r) = region {
@@ -180,37 +188,56 @@ pub(crate) async fn run(
     Ok(())
 }
 
-/// Check AWS configuration and return (profile_name, optional_role_arn).
-fn check_aws_config(profile: Option<&str>) -> Result<(String, Option<String>)> {
-    use vouch_cli::{tr, tr_args};
+/// Build the `credential.<pattern>.helper` value git will execute.
+///
+/// The leading `!` is required: git only runs a helper value through a shell
+/// when it starts with `!` or is literally an absolute path. A value starting
+/// with a quote matches neither, so git would build `git credential-"<path>"`
+/// and fail with "is not a git command".
+///
+/// The install path is single-quoted because it routinely contains spaces
+/// (`/Users/John Smith/.cargo/bin/vouch`), and single quotes make every other
+/// character literal to the shell. The profile name is not quoted: it is
+/// screened to the characters the AWS CLI can actually address, which excludes
+/// whitespace and every shell metacharacter.
+///
+/// The profile has to be baked in at all because git passes a credential helper
+/// only `protocol`, `host` and `path` — there is no other channel for it.
+///
+/// # Errors
+/// Returns an error when the profile name is not one the AWS CLI could address.
+fn credential_helper_command(vouch_path: &std::path::Path, profile_name: &str) -> Result<String> {
+    reject_unaddressable_profile(profile_name)?;
+    // POSIX single-quote escaping, for the rare path containing an apostrophe.
+    let quoted_path = vouch_path.display().to_string().replace('\'', r"'\''");
+    Ok(format!(
+        "!'{quoted_path}' credential codecommit --profile {profile_name}"
+    ))
+}
 
-    let aws_config = AwsConfig::load()
-        .map_err(|_| anyhow::anyhow!(tr!("setup-codecommit-err-aws-not-configured")))?;
+/// Reject profile names the AWS CLI itself cannot address.
+///
+/// `[profile my dev]` is silently unusable — the AWS CLI reports "The config
+/// profile (my dev) could not be found" — so there is no working setup to
+/// preserve by accepting one. Screening here also keeps shell metacharacters
+/// out of the `!`-prefixed helper value, which a shell evaluates on every
+/// credential request.
+fn reject_unaddressable_profile(profile_name: &str) -> Result<()> {
+    let addressable = !profile_name.is_empty()
+        && profile_name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '@' | '+' | '='));
 
-    if let Some(profile_name) = profile {
-        // User specified a profile — look it up
-        let profile_data = aws_config.get_profile(profile_name).ok_or_else(|| {
-            anyhow::anyhow!(tr_args!(
-                "setup-codecommit-err-profile-not-found",
-                profile = profile_name,
-            ))
-        })?;
-        let role_arn = profile_data
-            .credential_process
-            .as_deref()
-            .and_then(extract_role_from_credential_process);
-        Ok((profile_name.to_string(), role_arn))
-    } else {
-        // Auto-detect the vouch profile
-        let profile = aws_config
-            .find_vouch_profile()
-            .ok_or_else(|| anyhow::anyhow!(tr!("setup-codecommit-err-no-vouch-profile")))?;
-        let role_arn = profile
-            .credential_process
-            .as_deref()
-            .and_then(extract_role_from_credential_process);
-        Ok((profile.name, role_arn))
+    if !addressable {
+        return Err(crate::exit_code::CliError::ConfigError(format!(
+            "AWS profile name {profile_name:?} cannot be used with CodeCommit.\n\
+             Use a name of letters, digits and _-.@+= — the AWS CLI cannot \
+             address profiles containing spaces or other characters either."
+        ))
+        .into());
     }
+
+    Ok(())
 }
 
 /// Create the `git-remote-codecommit` symlink pointing to the vouch binary.
@@ -248,23 +275,167 @@ fn detect_conflicting_helpers() {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::expect_used,
+    reason = "test code: panic on assertion failure is acceptable"
+)]
 mod tests {
+    /// Call the real constructor; a duplicated format string here is what let
+    /// the unusable-helper bug ship with a passing test.
+    fn helper_command(vouch_path: &std::path::Path, profile: &str) -> String {
+        super::credential_helper_command(vouch_path, profile).expect("safe profile name")
+    }
+
     /// Git runs credential helpers through a shell, so a vouch binary path
     /// containing spaces must stay quoted as a single token. This guards
     /// against re-dropping the quotes (the bug regressed once via the #597
-    /// revert). Mirrors the `helper_command` format built in `run`.
+    /// revert).
     #[test]
     fn helper_command_quotes_path_with_spaces() {
         let vouch_path = std::path::Path::new("/Users/John Smith/.cargo/bin/vouch");
-        let helper_command = format!("\"{}\" credential codecommit", vouch_path.display());
 
         assert_eq!(
-            helper_command,
-            "\"/Users/John Smith/.cargo/bin/vouch\" credential codecommit"
+            helper_command(vouch_path, "vouch-demo"),
+            "!'/Users/John Smith/.cargo/bin/vouch' credential codecommit --profile vouch-demo"
+        );
+    }
+
+    /// Git only executes a credential helper value that starts with `!` or is
+    /// literally an absolute path; a value starting with `"` takes neither
+    /// branch and git builds `git credential-"<path>"` instead.
+    #[test]
+    fn helper_command_is_shell_prefixed() {
+        let value = helper_command(
+            std::path::Path::new("/opt/homebrew/bin/vouch"),
+            "vouch-demo",
         );
         assert!(
-            helper_command.starts_with('"'),
-            "helper command must quote the binary path: {helper_command}"
+            value.starts_with('!'),
+            "git will not execute a helper value that lacks the '!' prefix: {value}"
+        );
+    }
+
+    /// The `!` prefix means a shell evaluates this value on every credential
+    /// request, so names carrying shell syntax must be refused. The AWS CLI
+    /// cannot address any of these either — `[profile my dev]` reports "The
+    /// config profile (my dev) could not be found" — so nothing usable is lost.
+    #[test]
+    fn unaddressable_profile_names_are_refused() {
+        for name in [
+            "",
+            "my dev",
+            "demo\"; id; \"",
+            "demo$(whoami)",
+            "demo`id`",
+            "demo\\bad",
+            "demo\nhost=evil",
+            "demo'quote",
+        ] {
+            assert!(
+                super::reject_unaddressable_profile(name).is_err(),
+                "should refuse {name:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn ordinary_profile_names_are_accepted() {
+        for name in ["vouch-demo", "vouch", "acct.prod_1", "team@corp", "a+b=c"] {
+            assert!(
+                super::reject_unaddressable_profile(name).is_ok(),
+                "should accept {name:?}"
+            );
+        }
+    }
+
+    /// Drive a real `git credential fill` against a stub helper installed at a
+    /// path containing a space, and return git's stdout.
+    ///
+    /// The stub echoes back argv so callers can assert how the shell split the
+    /// helper value: `$3` and `$4` are the `--profile` flag and its value.
+    #[cfg(unix)]
+    fn run_helper_via_git(profile: &str) -> String {
+        use std::io::Write as _;
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let bin_dir = dir.path().join("bin with space");
+        std::fs::create_dir_all(&bin_dir).expect("create bin dir");
+        let stub = bin_dir.join("vouch");
+        std::fs::write(
+            &stub,
+            "#!/bin/sh\necho \"username=$3|$4\"\necho password=stub-pass\n",
+        )
+        .expect("write stub helper");
+        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod stub helper");
+
+        // Write the value through `git config`, exactly as `run` does. This has
+        // to be a real config file: `git -c key=value` runs the value through
+        // git's config *value* parser, which consumes the double quotes, while
+        // `git config` writes them escaped so they survive the round trip.
+        let gitconfig = dir.path().join("gitconfig");
+        let status = std::process::Command::new("git")
+            .args(["config", "--file"])
+            .arg(&gitconfig)
+            .arg("credential.https://example.com.helper")
+            .arg(helper_command(&stub, profile))
+            .status()
+            .expect("write helper into a git config file");
+        assert!(status.success(), "git config write failed");
+
+        let mut child = std::process::Command::new("git")
+            // Isolate from the developer's real git configuration.
+            .env("GIT_CONFIG_GLOBAL", &gitconfig)
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .args(["credential", "fill"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn git credential fill");
+
+        child
+            .stdin
+            .take()
+            .expect("stdin")
+            .write_all(b"protocol=https\nhost=example.com\n\n")
+            .expect("write credential request");
+
+        let output = child.wait_with_output().expect("wait for git");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success(),
+            "git credential fill failed: {stderr}"
+        );
+
+        // Keep only the helper-supplied lines; git echoes protocol/host back.
+        stdout
+            .lines()
+            .filter(|l| l.starts_with("username=") || l.starts_with("password="))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// End-to-end proof that git runs the helper and reads its output.
+    ///
+    /// The previous string-shape assertion passed while the configured helper
+    /// was unusable, so this drives real `git credential fill` against a stub on
+    /// a path containing a space — catching both a missing `!` and dropped
+    /// quotes around the binary path.
+    #[cfg(unix)]
+    #[test]
+    fn git_executes_the_helper_command() {
+        let output = run_helper_via_git("vouch-demo");
+        assert!(
+            output.contains("username=--profile|vouch-demo"),
+            "git did not run the helper with the baked-in profile: {output}"
+        );
+        assert!(
+            output.contains("password=stub-pass"),
+            "git did not read the helper output: {output}"
         );
     }
 }

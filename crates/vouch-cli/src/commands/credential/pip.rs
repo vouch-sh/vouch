@@ -58,14 +58,16 @@ async fn handle_get(url: &str) -> Result<()> {
         .await
         .context("vouch is not enrolled - run 'vouch enroll' to set up authentication")?;
 
-    let token = super::codeartifact::get_token(
-        &session.server_url,
-        &registry.domain,
-        &registry.domain_owner,
-        &registry.region,
-    )
-    .await
-    .context("failed to get CodeArtifact token")?;
+    // The keyring shim carries no arguments, so the AWS account backing this
+    // domain is recovered from the saved CodeArtifact profile.
+    let target = super::codeartifact::CodeArtifactTarget::new(
+        registry.domain,
+        registry.domain_owner,
+        registry.region,
+    );
+    let token = super::codeartifact::get_token(&session.server_url, &target)
+        .await
+        .context("failed to get CodeArtifact token")?;
 
     // Print the token to stdout (keyring protocol: password on stdout, nothing else)
     print!("{}", token.authorization_token.expose_secret());

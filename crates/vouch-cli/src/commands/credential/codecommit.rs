@@ -22,16 +22,17 @@ use crate::integrations::aws::codecommit::{
     extract_region_from_hostname, hostname_for_region, is_codecommit_host, parse_codecommit_url,
     sign_request,
 };
-use crate::integrations::aws::get_local_aws_role;
+use crate::integrations::aws::resolve_vouch_profile;
 use crate::integrations::aws::sts::StsCredentials;
 
 /// Run the git credential helper for CodeCommit.
 ///
 /// # Arguments
 /// * `operation` - The git credential operation ("get", "store", or "erase")
-pub(crate) async fn run(operation: &str) -> Result<()> {
+/// * `profile` - AWS profile in `~/.aws/config` that mints the credentials
+pub(crate) async fn run(operation: &str, profile: Option<&str>) -> Result<()> {
     match operation {
-        "get" => get_credential().await,
+        "get" => get_credential(profile).await,
         "store" | "erase" => {
             // No-ops for Vouch — we don't store credentials
             Ok(())
@@ -41,7 +42,10 @@ pub(crate) async fn run(operation: &str) -> Result<()> {
 }
 
 /// Handle the "get" operation — provide CodeCommit credentials to git.
-async fn get_credential() -> Result<()> {
+///
+/// Git supplies only `protocol`, `host` and `path`, so `profile` can only reach
+/// here from the helper line `vouch setup codecommit` writes into git config.
+async fn get_credential(profile: Option<&str>) -> Result<()> {
     let input = read_credential_input()?;
 
     let protocol = input.protocol.as_deref().unwrap_or("");
@@ -70,7 +74,7 @@ async fn get_credential() -> Result<()> {
         format!("/{path}")
     };
 
-    let creds = get_sts_credentials().await?;
+    let creds = get_sts_credentials(profile).await?;
     let signed = sign_request(&creds, host, &canonical_path, region);
 
     let stdout = std::io::stdout();
@@ -101,7 +105,10 @@ pub(crate) async fn run_remote_helper(remote_name: &str, url: &str) -> Result<()
         anyhow::anyhow!(
             "invalid CodeCommit URL: {url}\n\
              Expected: codecommit://[profile@]repo-name\n\
-             Or:       codecommit::region://[profile@]repo-name"
+             Or:       codecommit::<region>://[profile@]repo-name\n\
+             \n\
+             The profile selects the AWS profile in ~/.aws/config that mints \
+             credentials, and its region."
         )
     })?;
 
@@ -111,7 +118,8 @@ pub(crate) async fn run_remote_helper(remote_name: &str, url: &str) -> Result<()
     let hostname = hostname_for_region(&region);
     let path = format!("/v1/repos/{}", parsed.repository);
 
-    let creds = get_sts_credentials().await?;
+    // The URL profile selects the account, not just the region.
+    let creds = get_sts_credentials(parsed.profile.as_deref()).await?;
     let signed = sign_request(&creds, &hostname, &path, &region);
 
     // Percent-encode credentials for URL embedding
@@ -128,19 +136,14 @@ pub(crate) async fn run_remote_helper(remote_name: &str, url: &str) -> Result<()
 ///
 /// Reuses the shared `fetch_and_assume` from the AWS credential module to avoid
 /// duplicating the OIDC → STS logic, and wraps it with the agent credential cache.
-async fn get_sts_credentials() -> Result<StsCredentials> {
+async fn get_sts_credentials(profile: Option<&str>) -> Result<StsCredentials> {
     let session = crate::session::resolve_session()
         .await
         .context("not configured - run 'vouch enroll' first")?;
 
     let server = session.server_url;
 
-    let role_arn = get_local_aws_role().ok_or_else(|| {
-        anyhow::anyhow!(
-            "AWS not configured. Run 'vouch setup aws --role <role-arn>' with a role \
-             that has CodeCommit permissions"
-        )
-    })?;
+    let role_arn = resolve_vouch_profile(profile)?.role_arn;
 
     let data = super::aws::get_aws_credentials(&server, &role_arn).await?;
 
@@ -199,9 +202,13 @@ fn resolve_region(url_region: Option<&str>, profile: Option<&str>) -> Result<Str
             return Ok(region);
         }
 
-        // Fall back to the vouch AWS profile's region
-        if let Some(vouch_profile) = aws_config.find_vouch_profile()
-            && let Some(region) = vouch_profile.region
+        // Fall back to the sole vouch profile's region. An ambiguous choice is
+        // not fatal here — region has an env/us-east-1 fallback, and the account
+        // itself is decided by `get_sts_credentials`.
+        if let Ok(vouch_profile) = resolve_vouch_profile(None)
+            && let Some(region) = aws_config
+                .get_profile(&vouch_profile.name)
+                .and_then(|p| p.region)
         {
             return Ok(region);
         }

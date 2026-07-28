@@ -305,14 +305,12 @@ async fn handle_get_codeartifact(registry: &codeartifact::CodeArtifactRegistry) 
     let server = resolved.server_url;
 
     // Use the shared CodeArtifact credential flow
-    let result = match super::codeartifact::get_token(
-        &server,
-        &registry.domain,
-        &registry.domain_owner,
-        &registry.region,
-    )
-    .await
-    {
+    let target = super::codeartifact::CodeArtifactTarget::new(
+        registry.domain.clone(),
+        registry.domain_owner.clone(),
+        registry.region.clone(),
+    );
+    let result = match super::codeartifact::get_token(&server, &target).await {
         Ok(r) => r,
         Err(e) => {
             return send_error(

@@ -295,15 +295,15 @@ pub(super) async fn fetch_codeartifact_token(
     server: &str,
     opts: &CodeArtifactOptions<'_>,
 ) -> Result<crate::integrations::aws::codeartifact::CodeArtifactToken> {
-    let (domain, domain_owner, region) =
-        super::credential::codeartifact::resolve_codeartifact_params(
-            opts.domain,
-            opts.domain_owner,
-            opts.region,
-            opts.profile,
-        )?;
+    let target = super::credential::codeartifact::resolve_codeartifact_params(
+        opts.domain,
+        opts.domain_owner,
+        opts.region,
+        opts.profile,
+        None,
+    )?;
 
-    super::credential::codeartifact::get_token(server, &domain, &domain_owner, &region)
+    super::credential::codeartifact::get_token(server, &target)
         .await
         .with_context(|| tr!("exec-err-codeartifact-fetch"))
 }
@@ -360,7 +360,7 @@ pub(super) async fn fetch_redshift_with_opts(
     )?;
 
     let (role_arn, region_name) =
-        crate::integrations::aws::resolve_role_and_region(role, opts.region)?;
+        crate::integrations::aws::resolve_role_and_region(role, opts.region, None)?;
 
     let agent_source = super::credential::aws::detect_agent_source();
     super::credential::redshift::fetch_redshift_credentials(
