@@ -249,8 +249,9 @@ filled in.
 
 - **Parameter name.** Read from the `VouchConfigParameter` EC2 instance tag (requires
   the instance to have been launched with `--metadata-options
-  'InstanceMetadataTags=enabled'`). Falls back to `/vouch-server/config` if the tag is
-  absent.
+  'InstanceMetadataTags=enabled'`). The tag is the opt-in: when it is not visible, the
+  SSM fetch is skipped and the server keeps only the IMDS-derived instance facts,
+  starting from CLI flags and process environment.
 - **Format.** Strict `KEY=VALUE` lines, one per line, with `#` comments and blank lines
   allowed — the same format systemd's `EnvironmentFile=` accepts. No `export ` prefix, no
   CRLF line endings, no quoted values; any of these is a hard startup error rather than a

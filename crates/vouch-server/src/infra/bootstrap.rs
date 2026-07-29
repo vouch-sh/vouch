@@ -5,8 +5,10 @@
 //! unit that shelled out to the AWS CLI for exactly this. [`discover`] degrades to
 //! `Ok(None)` when IMDS is unreachable — not running on EC2, or
 //! `AWS_EC2_METADATA_DISABLED=true` — so non-EC2 deployments pay nothing. Once IMDS
-//! has answered, the instance is on EC2 and a subsequent SSM failure is terminal for
-//! that attempt: there is no silent fallback to an empty config. The systemd unit's
+//! has answered, the `VouchConfigParameter` instance tag is the opt-in for the SSM
+//! fetch: without a visible tag the server keeps the instance facts and starts from
+//! env/CLI alone. With the tag present, an SSM failure is terminal for that attempt:
+//! there is no silent fallback to an empty config. The systemd unit's
 //! `Restart=always` / `RestartSec=30` retries transient failures; a persistent
 //! failure becomes "never healthy", which an ASG replaces.
 
@@ -15,13 +17,6 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use aws_config::imds::client::Client as ImdsClient;
-
-/// Default bootstrap parameter name, used when the `VouchConfigParameter`
-/// instance tag is absent. IMDS returns 404 identically whether instance tags
-/// are disabled or the tag is simply unset (requires
-/// `InstanceMetadataTags=enabled`), so the two cases are not distinguished —
-/// doing so would need a second request to `/latest/meta-data/tags/instance`.
-const DEFAULT_PARAMETER_NAME: &str = "/vouch-server/config";
 
 const REGION_PATH: &str = "/latest/meta-data/placement/region";
 const AZ_PATH: &str = "/latest/meta-data/placement/availability-zone";
@@ -37,7 +32,8 @@ pub struct Bootstrap {
     /// AWS partition, from IMDS `services/partition`. `None` on instance
     /// generations that 404 on this path.
     pub partition: Option<String>,
-    /// Parsed `KEY=VALUE` bootstrap parameter contents.
+    /// Parsed `KEY=VALUE` bootstrap parameter contents. Empty when the
+    /// instance has no visible `VouchConfigParameter` tag (SSM fetch skipped).
     pub params: BTreeMap<String, String>,
 }
 
@@ -45,10 +41,13 @@ pub struct Bootstrap {
 ///
 /// Returns `Ok(None)` when IMDS is unreachable — not running on EC2, or
 /// `AWS_EC2_METADATA_DISABLED=true` — in which case the caller falls back to
-/// CLI flags and process environment only. Returns `Err` when IMDS answered
-/// (confirming this is EC2) but the SSM `GetParameter` call or parameter
-/// parsing failed; that failure is never papered over, since doing so would
-/// start the server with no S3 config.
+/// CLI flags and process environment only. The SSM fetch happens only when
+/// the `VouchConfigParameter` instance tag is visible (requires launching
+/// with `InstanceMetadataTags=enabled`); without it, the instance facts are
+/// returned with empty `params`. Returns `Err` when the tag named a
+/// parameter but the SSM `GetParameter` call or parameter parsing failed;
+/// that failure is never papered over, since doing so would start the
+/// server with no S3 config.
 ///
 /// The caller skips this entirely when `s3_config_bucket` is already
 /// configured (CLI flag or env), so local development and deployments that
@@ -57,8 +56,9 @@ pub struct Bootstrap {
 /// # Errors
 ///
 /// Returns an error if IMDS is reachable but the availability-zone lookup
-/// fails, if the SSM `GetParameter` call fails, if the parameter has no
-/// value, or if the value cannot be parsed as `KEY=VALUE` lines.
+/// fails, or — when the `VouchConfigParameter` tag is visible — if the SSM
+/// `GetParameter` call fails, the parameter has no value, or the value
+/// cannot be parsed as `KEY=VALUE` lines.
 pub async fn discover() -> Result<Option<Bootstrap>> {
     if std::env::var("AWS_EC2_METADATA_DISABLED").is_ok_and(|v| v.eq_ignore_ascii_case("true")) {
         tracing::debug!("AWS_EC2_METADATA_DISABLED=true; skipping IMDS/SSM bootstrap");
@@ -96,11 +96,22 @@ pub async fn discover() -> Result<Option<Bootstrap>> {
     let parameter_name = match imds.get(CONFIG_PARAMETER_TAG_PATH).await {
         Ok(value) => value.as_ref().to_string(),
         Err(_) => {
+            // IMDS returns 404 identically whether the tag is unset or the
+            // instance was launched without InstanceMetadataTags=enabled;
+            // distinguishing them would need a second request to
+            // /latest/meta-data/tags/instance. Either way the tag is the
+            // opt-in for SSM config, so keep the instance facts and let the
+            // server start from env/CLI alone.
             tracing::warn!(
-                "VouchConfigParameter instance tag not found; falling back to \
-                 {DEFAULT_PARAMETER_NAME}"
+                "VouchConfigParameter instance tag not visible (tag unset, or instance \
+                 launched without InstanceMetadataTags=enabled); skipping SSM config fetch"
             );
-            DEFAULT_PARAMETER_NAME.to_string()
+            return Ok(Some(Bootstrap {
+                region,
+                availability_zone,
+                partition,
+                params: BTreeMap::new(),
+            }));
         }
     };
 
