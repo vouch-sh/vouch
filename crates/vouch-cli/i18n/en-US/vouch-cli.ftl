@@ -1605,6 +1605,7 @@ setup-ca-err-parse = failed to parse { $path }
 setup-ca-err-write = failed to write { $path }
 setup-ca-err-serialize-pip = failed to serialize pip config for { $path }
 setup-ca-err-fetch-token = failed to get CodeArtifact token
+setup-ca-err-invalid-role-arn = invalid IAM role ARN, cannot derive CodeArtifact host: { $arn }
 
 ## setup/kubeconfig
 
