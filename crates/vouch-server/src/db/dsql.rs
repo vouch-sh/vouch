@@ -19,30 +19,6 @@ use aws_config::{Region, SdkConfig};
 use aws_sdk_dsql::auth_token::{AuthTokenGenerator, Config};
 use sqlx::postgres::PgSslMode;
 
-/// Load AWS SDK config with credential chain support.
-///
-/// This function loads AWS credentials using the standard credential chain,
-/// which supports environment variables, AWS profiles, EKS IRSA, ECS task roles,
-/// and EC2 instance metadata.
-///
-/// Goes through `config::aws_config_loader` (framework metadata, no `use_fips`
-/// override here — `AuthTokenGenerator` only presigns a URL locally from
-/// credentials/region/time-source; it makes no smithy operation, so the
-/// endpoint-resolution rules that `use_fips` affects are never exercised).
-///
-/// # Arguments
-///
-/// * `region` - Optional AWS region override. If not provided, the SDK will
-///   attempt to determine the region from environment variables or config files.
-///
-/// # Errors
-///
-/// Returns an error if the framework metadata cannot be constructed (see
-/// `config::aws_config_loader`; unreachable for any valid build).
-pub(crate) async fn load_sdk_config(region: Option<&str>) -> Result<SdkConfig> {
-    Ok(crate::config::aws_config_loader(region, None)?.load().await)
-}
-
 /// Generate a DSQL authentication token using AWS credentials.
 ///
 /// DSQL authentication tokens are SigV4 presigned URLs that grant temporary

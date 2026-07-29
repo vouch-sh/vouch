@@ -66,7 +66,7 @@ impl Default for PoolConfig {
     }
 }
 
-use super::dsql::{DsqlEndpoint, generate_dsql_token, load_sdk_config};
+use super::dsql::{DsqlEndpoint, generate_dsql_token};
 
 /// Database type enum for runtime SQL dialect selection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -226,8 +226,13 @@ impl Pool {
             "connecting to Aurora DSQL with IAM authentication"
         );
 
-        // Load AWS SDK config (handles all credential sources)
-        let sdk_config = load_sdk_config(Some(&region)).await?;
+        // Load AWS SDK config (handles all credential sources). No use_fips
+        // override: the token generator presigns locally from credentials and
+        // never dispatches an SDK operation, so FIPS endpoint resolution is
+        // never exercised on this path.
+        let sdk_config = crate::config::aws_config_loader(Some(&region), None)?
+            .load()
+            .await;
 
         // Generate initial authentication token (against the token hostname)
         let token =
@@ -725,8 +730,8 @@ fn spawn_token_refresh(pool: sqlx::PgPool, dsql: DsqlEndpoint, user: String, is_
                 }
                 _ = interval.tick() => {
                     // Reload AWS credentials (in case they've been rotated)
-                    let sdk_config = match load_sdk_config(Some(&region)).await {
-                        Ok(config) => config,
+                    let sdk_config = match crate::config::aws_config_loader(Some(&region), None) {
+                        Ok(loader) => loader.load().await,
                         Err(e) => {
                             tracing::warn!(
                                 error = %e,
