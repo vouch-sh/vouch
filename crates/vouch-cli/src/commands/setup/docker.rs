@@ -134,12 +134,15 @@ fn anchor_registries_to_profile(registries: &[String], profile: Option<&str>) ->
         return Ok(());
     }
 
+    // No context wrapper: Config::modify saves as well as loads, and each
+    // phase already carries an accurate message. A load-focused wrapper here
+    // would misreport save failures (disk full, permissions) as enrollment
+    // problems.
     Config::modify(|config| {
         for registry in &ecr_registries {
             config.set_docker_registry_profile(registry, &resolved.name);
         }
-    })
-    .with_context(|| tr!("setup-err-load-config"))?;
+    })?;
 
     for registry in ecr_registries {
         tr_println!(
