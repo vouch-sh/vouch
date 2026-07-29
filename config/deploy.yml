@@ -42,6 +42,7 @@ env:
     RUST_LOG: "info,vouch_server=debug"
     VOUCH_IDPS: "google"
     VOUCH_IDP_GOOGLE_TYPE: "oidc"
+    AWS_EC2_METADATA_DISABLED: "true"
   secret:
     - VOUCH_JWT_SECRET
     - VOUCH_IDP_GOOGLE_ISSUER
