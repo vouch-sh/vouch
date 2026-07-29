@@ -10,7 +10,7 @@ use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use vouch_cli::{tr, tr_args};
 use vouch_common::dns::{DohConfigSerde, NetworkConfig};
 
@@ -374,10 +374,16 @@ fn is_standard_port(scheme: &str, port: u16) -> bool {
 impl Config {
     /// Load configuration from disk, or return defaults if not found.
     pub(crate) fn load() -> Result<Self> {
-        let path = Self::config_path()?;
+        Self::load_from(&Self::config_path()?)
+    }
 
+    /// Load configuration from `path`, or return defaults if it is missing.
+    ///
+    /// Split from [`Config::load`] so error handling can be tested against a
+    /// temporary directory without touching the process environment.
+    fn load_from(path: &Path) -> Result<Self> {
         if path.exists() {
-            let content = fs::read_to_string(&path).with_context(|| {
+            let content = fs::read_to_string(path).with_context(|| {
                 tr_args!("err-failed-read-config", value = path.display().to_string())
             })?;
             let config_file: ConfigFile = serde_json::from_str(&content).with_context(|| {
@@ -397,20 +403,24 @@ impl Config {
     /// Uses atomic write (temp file + rename) to prevent corruption
     /// if the process is interrupted mid-write.
     pub(crate) fn save(&self) -> Result<()> {
-        let path = Self::config_path()?;
+        self.save_to(&Self::config_path()?)
+    }
 
+    /// Save configuration to `path`.
+    ///
+    /// Split from [`Config::save`] for the same testability reason as
+    /// [`Config::load_from`].
+    fn save_to(&self, path: &Path) -> Result<()> {
         let config_file = ConfigFile::from(self);
         let content = serde_json::to_string_pretty(&config_file)
             .context(tr!("err-failed-serialize-config"))?;
 
-        vouch_common::fs::atomic_write_secure(path.as_path(), content.as_bytes()).with_context(
-            || {
-                tr_args!(
-                    "err-failed-write-config",
-                    value = path.display().to_string()
-                )
-            },
-        )?;
+        vouch_common::fs::atomic_write_secure(path, content.as_bytes()).with_context(|| {
+            tr_args!(
+                "err-failed-write-config",
+                value = path.display().to_string()
+            )
+        })?;
 
         Ok(())
     }
@@ -423,7 +433,15 @@ impl Config {
     /// load-modify-save cycle.
     #[cfg(unix)]
     pub(crate) fn modify(f: impl FnOnce(&mut Config)) -> Result<()> {
-        let path = Self::config_path()?;
+        Self::modify_at(&Self::config_path()?, f)
+    }
+
+    /// [`Config::modify`] against an explicit config path.
+    ///
+    /// Split from [`Config::modify`] for the same testability reason as
+    /// [`Config::load_from`].
+    #[cfg(unix)]
+    fn modify_at(path: &Path, f: impl FnOnce(&mut Config)) -> Result<()> {
         let lock_path = path.with_added_extension("lock");
 
         if let Some(parent) = lock_path.parent() {
@@ -459,9 +477,9 @@ impl Config {
             .lock()
             .context(tr!("err-failed-acquire-config-file-lock"))?;
 
-        let mut config = Self::load()?;
+        let mut config = Self::load_from(path)?;
         f(&mut config);
-        config.save()?;
+        config.save_to(path)?;
 
         drop(lock_file);
 
@@ -473,9 +491,18 @@ impl Config {
     /// Non-Unix fallback without advisory locking.
     #[cfg(not(unix))]
     pub(crate) fn modify(f: impl FnOnce(&mut Config)) -> Result<()> {
-        let mut config = Self::load()?;
+        Self::modify_at(&Self::config_path()?, f)
+    }
+
+    /// [`Config::modify`] against an explicit config path.
+    ///
+    /// Split from [`Config::modify`] for the same testability reason as
+    /// [`Config::load_from`].
+    #[cfg(not(unix))]
+    fn modify_at(path: &Path, f: impl FnOnce(&mut Config)) -> Result<()> {
+        let mut config = Self::load_from(path)?;
         f(&mut config);
-        config.save()
+        config.save_to(path)
     }
 
     // =====================================================================
@@ -2141,5 +2168,73 @@ mod tests {
         assert!(config.dpop_key_id().is_none());
         assert!(config.registration_access_token().is_none());
         assert!(config.registration_client_uri().is_none());
+    }
+
+    // -----------------------------------------------------------------
+    // modify_at error contexts
+    // -----------------------------------------------------------------
+
+    /// A save-phase failure inside `modify_at` must surface the write
+    /// context, never a load-focused message: `vouch setup docker` once
+    /// wrapped `Config::modify` errors with "failed to load config - run
+    /// 'vouch enroll' first", misdiagnosing disk-full/permission errors
+    /// as a missing enrollment.
+    #[test]
+    fn modify_save_failure_reports_write_error_not_load_error() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cfg_dir = tmp.path().join("vouch");
+        std::fs::create_dir_all(&cfg_dir).expect("create config dir");
+        let cfg_path = cfg_dir.join("config.json");
+
+        // Replace the config directory with a regular file after the load has
+        // succeeded so the failure is isolated to the save phase. A file in
+        // the directory's place (rather than chmod 0o555) fails even as root.
+        let result = Config::modify_at(&cfg_path, |cfg| {
+            cfg.set_docker_registry_profile(
+                "123456789012.dkr.ecr.us-east-1.amazonaws.com",
+                "vouch-demo",
+            );
+            std::fs::remove_dir_all(&cfg_dir).expect("remove config dir");
+            std::fs::write(&cfg_dir, b"not a directory").expect("shadow dir with file");
+        });
+
+        let msg = format!("{:#}", result.expect_err("save should fail"));
+        assert!(
+            msg.contains("failed to write config"),
+            "expected save-phase context, got: {msg}"
+        );
+        assert!(
+            !msg.contains("failed to load config"),
+            "save-phase error must not say 'failed to load config': {msg}"
+        );
+        assert!(
+            !msg.contains("enroll' first"),
+            "save-phase error must not suggest enrolling: {msg}"
+        );
+    }
+
+    /// A load-phase failure inside `modify_at` must surface the parse context
+    /// from `load_from` itself; callers need no wrapper of their own.
+    #[test]
+    fn modify_load_failure_reports_parse_error() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cfg_dir = tmp.path().join("vouch");
+        std::fs::create_dir_all(&cfg_dir).expect("create config dir");
+        let cfg_path = cfg_dir.join("config.json");
+        std::fs::write(&cfg_path, "{ not valid json").expect("write corrupt config");
+
+        let result = Config::modify_at(&cfg_path, |cfg| {
+            cfg.set_docker_registry_profile("ghcr.io", "vouch-demo");
+        });
+
+        let msg = format!("{:#}", result.expect_err("load should fail"));
+        assert!(
+            msg.contains("failed to parse config"),
+            "expected load-phase parse context, got: {msg}"
+        );
+        assert!(
+            !msg.contains("enroll' first"),
+            "load-phase error must not suggest enrolling: {msg}"
+        );
     }
 }
