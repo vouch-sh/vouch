@@ -67,11 +67,12 @@ jobs:
             echo "ERROR: Invalid tag format '${TAG}'. Must be a semantic version tag (e.g., v1.0.0 or v1.0.0-beta.1)"
             exit 1
           fi
-          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
-
-          # Test AMI name: unique per run, never collides with release AMI names
-          echo "ami_name=vouch-server-test-${RUN_ID}-${ARCH}" >> "$GITHUB_OUTPUT"
-          echo "short_sha=${SHA:0:7}" >> "$GITHUB_OUTPUT"
+          {
+            echo "version=${TAG#v}"
+            # Test AMI name: unique per run, never collides with release AMI names
+            echo "ami_name=vouch-server-test-${RUN_ID}-${ARCH}"
+            echo "short_sha=${SHA:0:7}"
+          } >> "$GITHUB_OUTPUT"
 
           if [ "$ARCH" = "x86_64" ]; then
             echo "instance_type=m5.xlarge" >> "$GITHUB_OUTPUT"
@@ -308,6 +309,35 @@ jobs:
           role-session-name: test-ami-verify-${{ inputs.arch }}
           mask-aws-account-id: true
 
+      - name: Seed test bootstrap parameter
+        id: param
+        env:
+          RUN_ID: ${{ github.run_id }}
+          ARCH: ${{ inputs.arch }}
+        run: |
+          # Exercises the full in-process bootstrap path (IMDS placement/tag
+          # lookups, SSM GetParameter, blob parsing, overlay) end to end.
+          # Plain String matches the Terraform-managed production parameter;
+          # the server's with_decryption(true) is a no-op for String types.
+          # This account has no S3 bucket, KMS key, or DSQL cluster, so the
+          # blob only carries what's needed for the server to reach a fully
+          # started state without an upstream IdP.
+          PARAM_NAME="/vouch-server/ami-test/${RUN_ID}-${ARCH}"
+          PARAM_VALUE=$(cat <<EOF
+          VOUCH_RP_ID=localhost
+          VOUCH_JWT_SECRET=ami-test-bootstrap-secret-not-for-production-use
+          VOUCH_CERTIFICATION_TEST_TOKEN=ami-test-${RUN_ID}-${ARCH}
+          VOUCH_DATABASE_URL=sqlite:/var/lib/vouch-server/ami-test.db?mode=rwc
+          RUST_LOG=info
+          EOF
+          )
+          aws ssm put-parameter \
+            --name "$PARAM_NAME" \
+            --type String \
+            --value "$PARAM_VALUE" \
+            --overwrite
+          echo "param_name=${PARAM_NAME}" >> "$GITHUB_OUTPUT"
+
       - name: Launch test instance
         id: instance
         env:
@@ -315,18 +345,19 @@ jobs:
           INSTANCE_TYPE: ${{ needs.build.outputs.instance_type }}
           SUBNET_ID: ${{ vars.AMI_BUILD_SUBNET_ID }}
           ARCH: ${{ inputs.arch }}
+          PARAM_NAME: ${{ steps.param.outputs.param_name }}
         run: |
           INSTANCE_ID=$(aws ec2 run-instances \
             --image-id "${AMI_ID}" \
             --instance-type "${INSTANCE_TYPE}" \
             --subnet-id "${SUBNET_ID}" \
             --metadata-options 'HttpTokens=required,InstanceMetadataTags=enabled' \
-            --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=vouch-ami-test-verify-${ARCH}}]" \
+            --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=vouch-ami-test-verify-${ARCH}},{Key=VouchConfigParameter,Value=${PARAM_NAME}}]" \
             --query 'Instances[0].InstanceId' \
             --output text)
 
           echo "instance_id=${INSTANCE_ID}" >> "$GITHUB_OUTPUT"
-          echo "Launched test instance ${INSTANCE_ID} from ${AMI_ID}"
+          echo "Launched test instance ${INSTANCE_ID} from ${AMI_ID} (bootstrap parameter: ${PARAM_NAME})"
 
       - name: Wait for boot and verify FIPS via serial console
         env:
@@ -384,6 +415,22 @@ jobs:
             FAILED=1
           fi
 
+          # Best-effort, non-failing signal for the in-process IMDS/SSM
+          # bootstrap: systemd's default boot status reporting goes to the
+          # console even though vouch-server.service itself redirects
+          # stdout/stderr to a log file this workflow cannot read (no SSH/SSM
+          # on this image). A repeated restart suggests bootstrap or startup
+          # is crash-looping -- but this instance also needs an IAM instance
+          # profile granting ssm:GetParameter on /vouch-server/* for the
+          # seeded parameter above to actually be reachable, which is a
+          # vouch-infra prerequisite this workflow does not provision. Warn
+          # rather than fail so a missing profile isn't mistaken for a
+          # bootstrap regression.
+          RESTART_COUNT=$(grep -c 'vouch-server.service: Scheduled restart job' "$CONSOLE_FILE" || true)
+          if [ "${RESTART_COUNT:-0}" -gt 1 ]; then
+            echo "WARN: vouch-server.service restarted ${RESTART_COUNT} times -- possible bootstrap/startup crash loop"
+          fi
+
           if [ "$FAILED" -ne 0 ]; then
             echo "Boot verification FAILED"
             exit 1
@@ -398,6 +445,15 @@ jobs:
         run: |
           if [ -n "${INSTANCE_ID}" ]; then
             aws ec2 terminate-instances --instance-ids "${INSTANCE_ID}" || true
+          fi
+
+      - name: Cleanup test bootstrap parameter
+        if: always()
+        env:
+          PARAM_NAME: ${{ steps.param.outputs.param_name }}
+        run: |
+          if [ -n "${PARAM_NAME}" ]; then
+            aws ssm delete-parameter --name "${PARAM_NAME}" 2>/dev/null || true
           fi
 
   cleanup:

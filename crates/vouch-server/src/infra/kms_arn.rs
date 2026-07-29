@@ -2,17 +2,16 @@
 //! Cross-account KMS key ARN resolution.
 //!
 //! When KMS keys live in a different AWS account than the server, the AWS SDK
-//! must be given the full ARN rather than a bare key ID. This module reads
-//! `AWS_PARTITION` and `AWS_REGION`/`AWS_DEFAULT_REGION` from the environment,
-//! combines them with the `kms_account_id` field from config, and wraps raw
-//! key IDs into full ARNs.
+//! must be given the full ARN rather than a bare key ID. This module combines
+//! a resolved partition and region (from `ServerConfig`'s `aws_partition` /
+//! `aws_region` fields — env or, on EC2, IMDS; see `infra::bootstrap`) with
+//! the `kms_account_id` field from config, and wraps raw key IDs into full
+//! ARNs.
 //!
 //! Pass-through cases (return the raw value unchanged):
 //! - The configured value already starts with `arn:`.
 //! - `kms_account_id` is unset (no cross-account access configured).
-//! - Required env vars are missing (logged once at construction).
-
-use std::env;
+//! - Partition or region is missing (logged once at construction).
 
 /// Resolves bare KMS key IDs into full ARNs for cross-account access.
 #[derive(Debug, Clone)]
@@ -23,30 +22,31 @@ pub struct KmsArnResolver {
 }
 
 impl KmsArnResolver {
-    /// Build a resolver from process environment plus the configured
-    /// `kms_account_id`.
+    /// Build a resolver from an already-resolved partition, region, and the
+    /// configured `kms_account_id`.
     ///
     /// When `kms_account_id` is `None`, the resolver becomes a no-op:
     /// every call to [`resolve`](Self::resolve) returns the input unchanged.
-    pub fn from_env(kms_account_id: Option<&str>) -> Self {
+    pub fn new(
+        kms_account_id: Option<&str>,
+        partition: Option<&str>,
+        region: Option<&str>,
+    ) -> Self {
         let account_id = kms_account_id.map(str::to_owned);
-        let partition = env::var("AWS_PARTITION").ok();
-        let region = env::var("AWS_REGION")
-            .ok()
-            .or_else(|| env::var("AWS_DEFAULT_REGION").ok());
+        let partition = partition.map(str::to_owned);
+        let region = region.map(str::to_owned);
 
         if account_id.is_some() {
             if partition.is_none() {
                 tracing::warn!(
-                    "kms_account_id is set but AWS_PARTITION is unset; \
+                    "kms_account_id is set but the AWS partition is unresolved; \
                      KMS key IDs will be passed through unchanged"
                 );
             }
             if region.is_none() {
                 tracing::warn!(
-                    "kms_account_id is set but neither AWS_REGION nor \
-                     AWS_DEFAULT_REGION is set; KMS key IDs will be passed \
-                     through unchanged"
+                    "kms_account_id is set but the AWS region is unresolved; \
+                     KMS key IDs will be passed through unchanged"
                 );
             }
         }
@@ -58,9 +58,24 @@ impl KmsArnResolver {
         }
     }
 
+    /// Derive a resolver sharing this one's partition and region, but
+    /// resolving keys under a different account.
+    ///
+    /// Used when an account ID becomes known after this resolver was
+    /// constructed — e.g. an S3 config document's own `kms_account_id`,
+    /// read only once the document has been fetched and parsed.
+    #[must_use]
+    pub fn with_account_id(&self, kms_account_id: Option<&str>) -> Self {
+        Self {
+            partition: self.partition.clone(),
+            region: self.region.clone(),
+            account_id: kms_account_id.map(str::to_owned),
+        }
+    }
+
     /// Wrap a raw KMS key ID into a full ARN, or pass it through if the
-    /// resolver has no target account configured, env vars are missing, or
-    /// the input is already an ARN.
+    /// resolver has no target account configured, partition/region are
+    /// missing, or the input is already an ARN.
     pub fn resolve(&self, raw: &str) -> String {
         if raw.starts_with("arn:") {
             return raw.to_owned();

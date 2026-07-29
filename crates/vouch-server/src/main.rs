@@ -7,34 +7,33 @@
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+use std::ffi::OsString;
+
 use anyhow::Result;
-use clap::Parser;
+use clap::{ArgMatches, CommandFactory, FromArgMatches, Parser};
 
 use vouch_server::{
     config,
-    infra::{generate_document_key, i18n, router, serve, startup, telemetry},
+    infra::{bootstrap, generate_document_key, i18n, router, serve, startup, telemetry},
 };
 
 // ============================================================================
-// Subcommand Dispatch
+// CLI
 // ============================================================================
 
-/// Top-level CLI with subcommands.
+/// Bare invocation runs the server (the mode every launcher uses: systemd
+/// units, Docker entrypoint, Helm chart); subcommands are auxiliary utilities.
 #[derive(Parser)]
 #[command(name = "vouch-server", about = "Vouch identity server")]
 struct Cli {
+    #[command(flatten)]
+    args: config::Args,
     #[command(subcommand)]
-    command: Commands,
+    command: Option<Commands>,
 }
 
 #[derive(clap::Subcommand)]
-#[expect(
-    clippy::large_enum_variant,
-    reason = "clap::Subcommand variants vary in payload size by command"
-)]
 enum Commands {
-    /// Start the identity server.
-    Serve(config::Args),
     /// Generate a P-384 document encryption key pair via KMS.
     GenerateDocumentKey(generate_document_key::GenerateDocumentKeyArgs),
 }
@@ -50,26 +49,20 @@ async fn main() -> Result<()> {
     // Load .env file if present (before anything else so env vars are available)
     dotenvy::dotenv().ok();
 
-    // Two-pass CLI parse for backwards compatibility:
-    // If the first argument is a known subcommand or help flag, parse with Cli struct
-    // (so subcommands appear in --help). Otherwise, parse with config::Args directly
-    // (legacy: `vouch-server --listen-addr ...`).
-    let first_arg = std::env::args().nth(1).unwrap_or_default();
-    match first_arg.as_str() {
-        "serve" | "generate-document-key" | "help" | "--help" | "-h" => {
-            let cli = Cli::parse();
-            match cli.command {
-                Commands::Serve(args) => Box::pin(run_server(args)).await,
-                Commands::GenerateDocumentKey(args) => {
-                    init_stderr_logging();
-                    generate_document_key::run(args).await
-                }
-            }
+    let matches = Cli::command().get_matches();
+    match matches.subcommand() {
+        Some(("generate-document-key", sub_matches)) => {
+            let args =
+                generate_document_key::GenerateDocumentKeyArgs::from_arg_matches(sub_matches)?;
+            init_stderr_logging();
+            generate_document_key::run(args).await
         }
-        _ => {
-            // Legacy mode: no subcommand, parse as direct server args
-            let args = config::Args::parse();
-            Box::pin(run_server(args)).await
+        Some((other, _)) => Err(anyhow::anyhow!(
+            "vouch-server: unknown subcommand '{other}'"
+        )),
+        None => {
+            let (args, instance) = prepare_serve(&matches).await?;
+            Box::pin(run_server(args, instance)).await
         }
     }
 }
@@ -85,23 +78,67 @@ fn init_stderr_logging() {
         .init();
 }
 
-async fn run_server(args: config::Args) -> Result<()> {
-    // Parse log format early (before full config parsing) so logging is
-    // initialized before any other work that might emit log messages.
-    let log_format = match args.log_format.trim().to_lowercase().as_str() {
+/// Initialize tracing, print the startup banner, validate i18n catalogs, run
+/// EC2 instance bootstrap (IMDS + SSM, see `infra::bootstrap`), and resolve
+/// the final server `Args`.
+///
+/// `matches` is the already-parsed top-level `ArgMatches` (the server args
+/// are flattened into `Cli`). When a blob value needs to fill a gap the
+/// first parse left as `None`/`DefaultValue`, argv is re-parsed with the
+/// overlay tokens appended; both `matches` and the eventual `args` therefore
+/// reflect the *same* CLI invocation, just before and after the overlay.
+///
+/// Tracing is initialized from the first parse's `log_format` (before
+/// bootstrap runs) so a bootstrap failure is itself logged; the one accepted
+/// gap is an operator setting `VOUCH_LOG_FORMAT` only in the bootstrap
+/// parameter, never in real CLI/env — symmetric with the same accepted gap
+/// for `RUST_LOG`.
+///
+/// # Errors
+///
+/// Returns an error if tracing or i18n fail to initialize, if bootstrap
+/// discovery fails (IMDS reachable but SSM failed), or if the overlaid
+/// re-parse fails.
+async fn prepare_serve(
+    matches: &ArgMatches,
+) -> Result<(config::Args, Option<bootstrap::Bootstrap>)> {
+    let preliminary = config::Args::from_arg_matches(matches)?;
+
+    let log_format = match preliminary.log_format.trim().to_lowercase().as_str() {
         "json" => config::LogFormat::Json,
         _ => config::LogFormat::Text,
     };
     telemetry::init_tracing(log_format)?;
-
     router::print_startup_banner();
-
-    // Verify the embedded i18n catalogs loaded — refuses to start if the UI
-    // would render with raw Fluent message ids.
     i18n::validate_startup()?;
 
+    let instance = if preliminary.s3_config_bucket.is_some() {
+        tracing::debug!("s3_config_bucket already configured; skipping IMDS/SSM bootstrap");
+        None
+    } else {
+        bootstrap::discover().await.inspect_err(|e| {
+            tracing::error!("VOUCH_BOOTSTRAP_FAILED: {e:#}");
+        })?
+    };
+    let Some(instance) = instance else {
+        return Ok((preliminary, None));
+    };
+
+    let overlay = config::bootstrap_overlay_args(matches, &instance.params);
+    if overlay.is_empty() {
+        return Ok((preliminary, Some(instance)));
+    }
+
+    let mut argv: Vec<OsString> = std::env::args_os().collect();
+    argv.extend(overlay);
+    let reparsed = Cli::command().try_get_matches_from(argv)?;
+    let args = config::Args::from_arg_matches(&reparsed)?;
+    Ok((args, Some(instance)))
+}
+
+async fn run_server(args: config::Args, instance: Option<bootstrap::Bootstrap>) -> Result<()> {
     // Initialize all server components (config, database, state, background tasks)
-    let components = startup::initialize(args).await?;
+    let components = startup::initialize(args, instance.as_ref()).await?;
 
     // Build the HTTP router with all routes, middleware, and state
     let app = components.build_app()?;

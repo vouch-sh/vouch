@@ -654,7 +654,7 @@ jobs:
           - dm-verity filesystem protection
           - TPM 2.0 attestation support (PCR4, PCR7, PCR12)
           - No SSH or interactive access
-          - Configuration via AWS Secrets Manager
+          - Configuration via SSM Parameter Store
 
           ### Usage
 
@@ -664,7 +664,7 @@ jobs:
             --image-id <AMI_ID> \
             --instance-type t3.medium \
             --metadata-options 'HttpTokens=required,InstanceMetadataTags=enabled' \
-            --tag-specifications 'ResourceType=instance,Tags=[{Key=VouchSecretName,Value=vouch-server/config}]'
+            --tag-specifications 'ResourceType=instance,Tags=[{Key=VouchConfigParameter,Value=/vouch-server/config}]'
           ```
 
           ### SSM Parameter Store

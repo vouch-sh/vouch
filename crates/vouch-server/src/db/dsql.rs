@@ -15,27 +15,9 @@
 //! 5. EC2 instance metadata (IMDS)
 
 use anyhow::{Context, Result, bail};
-use aws_config::{BehaviorVersion, Region, SdkConfig};
+use aws_config::{Region, SdkConfig};
 use aws_sdk_dsql::auth_token::{AuthTokenGenerator, Config};
 use sqlx::postgres::PgSslMode;
-
-/// Load AWS SDK config with credential chain support.
-///
-/// This function loads AWS credentials using the standard credential chain,
-/// which supports environment variables, AWS profiles, EKS IRSA, ECS task roles,
-/// and EC2 instance metadata.
-///
-/// # Arguments
-///
-/// * `region` - Optional AWS region override. If not provided, the SDK will
-///   attempt to determine the region from environment variables or config files.
-pub(crate) async fn load_sdk_config(region: Option<&str>) -> SdkConfig {
-    let mut loader = aws_config::defaults(BehaviorVersion::latest());
-    if let Some(r) = region {
-        loader = loader.region(Region::new(r.to_string()));
-    }
-    loader.load().await
-}
 
 /// Generate a DSQL authentication token using AWS credentials.
 ///

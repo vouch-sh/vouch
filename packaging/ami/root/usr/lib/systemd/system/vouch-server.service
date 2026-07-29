@@ -1,9 +1,8 @@
 [Unit]
 Description=Vouch identity server
 Documentation=https://github.com/vouch-sh/vouch
-After=network-online.target vouch-config.service
+After=network-online.target
 Wants=network-online.target
-Requires=vouch-config.service
 StartLimitIntervalSec=0
 
 [Service]
@@ -11,7 +10,6 @@ Type=simple
 User=vouch
 Group=vouch
 SupplementaryGroups=tss
-EnvironmentFile=/run/vouch-server/env
 Environment=AWS_CONFIG_FILE=/dev/null
 Environment=AWS_SHARED_CREDENTIALS_FILE=/dev/null
 Environment=AWS_USE_DUALSTACK_ENDPOINT=true
