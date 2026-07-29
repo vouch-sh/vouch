@@ -316,8 +316,9 @@ jobs:
           ARCH: ${{ inputs.arch }}
         run: |
           # Exercises the full in-process bootstrap path (IMDS placement/tag
-          # lookups, SSM GetParameter with decryption, blob parsing, overlay)
-          # end to end. SecureString specifically exercises with_decryption.
+          # lookups, SSM GetParameter, blob parsing, overlay) end to end.
+          # Plain String matches the Terraform-managed production parameter;
+          # the server's with_decryption(true) is a no-op for String types.
           # This account has no S3 bucket, KMS key, or DSQL cluster, so the
           # blob only carries what's needed for the server to reach a fully
           # started state without an upstream IdP.
@@ -332,7 +333,7 @@ jobs:
           )
           aws ssm put-parameter \
             --name "$PARAM_NAME" \
-            --type SecureString \
+            --type String \
             --value "$PARAM_VALUE" \
             --overwrite
           echo "param_name=${PARAM_NAME}" >> "$GITHUB_OUTPUT"
