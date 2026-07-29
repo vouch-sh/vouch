@@ -78,8 +78,7 @@ pub(crate) async fn run(
     // defaulting: a silent fall back to amazonaws.com writes an unreachable
     // registry URL into pip.conf / .cargo/config.toml and only fails later.
     let anchor = resolve_vouch_profile(resolved.profile.as_deref(), ProfileOverride::Profile)?;
-    let domain_suffix =
-        parse_role_arn(&anchor.role_arn).map_or("amazonaws.com", |arn| arn.partition.dns_suffix());
+    let domain_suffix = domain_suffix_from_role_arn(&anchor.role_arn)?;
 
     let ca_host = format!(
         "{}-{}.d.codeartifact.{}.{domain_suffix}",
@@ -93,6 +92,26 @@ pub(crate) async fn run(
         Tool::Pnpm => setup_pnpm(&ca_host, repository),
         Tool::Uv => setup_uv(&ca_host, repository),
     }
+}
+
+/// Derive the CodeArtifact DNS suffix from an IAM role ARN's partition.
+///
+/// Parses the role ARN and maps its partition to the corresponding AWS DNS
+/// suffix (e.g. `amazonaws.com` for the commercial partition,
+/// `amazonaws.com.cn` for China). This keeps the generated CodeArtifact host
+/// reachable in non-commercial partitions.
+///
+/// # Errors
+///
+/// Propagates a [`parse_role_arn`] failure (malformed ARN, unrecognized
+/// partition, non-IAM-role resource) instead of defaulting to
+/// `amazonaws.com`. A silent fall back would write an unreachable registry
+/// URL into `pip.conf` / `.cargo/config.toml` that only fails later during a
+/// package fetch, so the error is surfaced here with the offending ARN.
+fn domain_suffix_from_role_arn(role_arn: &str) -> Result<&'static str> {
+    let arn = parse_role_arn(role_arn)
+        .with_context(|| vouch_cli::tr_args!("setup-ca-err-invalid-role-arn", arn = role_arn))?;
+    Ok(arn.partition.dns_suffix())
 }
 
 /// Configure Cargo for CodeArtifact.
@@ -762,6 +781,8 @@ fn build_npmrc_pnpm_content(
 #[cfg(test)]
 #[expect(
     clippy::indexing_slicing,
+    clippy::expect_used,
+    clippy::unwrap_used,
     reason = "test code: panic on assertion failure is acceptable"
 )]
 mod tests {
@@ -780,6 +801,51 @@ mod tests {
         assert_eq!(Tool::from_str("uv", true), Ok(Tool::Uv));
         assert!(Tool::from_str("maven", true).is_err());
         assert!(Tool::from_str("", true).is_err());
+    }
+
+    // =========================================================================
+    // domain_suffix_from_role_arn tests
+    //
+    // The helper MUST propagate parse failures rather than silently fall back
+    // to "amazonaws.com" — a wrong suffix writes an unreachable CodeArtifact
+    // URL into pip.conf / .cargo/config.toml that only fails later.
+    // =========================================================================
+
+    #[test]
+    fn test_domain_suffix_china_partition() {
+        // China uses a distinct DNS suffix — silent fallback to amazonaws.com
+        // would produce an unreachable host.
+        let suffix =
+            domain_suffix_from_role_arn("arn:aws-cn:iam::123456789012:role/MyRole").unwrap();
+        assert_eq!(suffix, "amazonaws.com.cn");
+    }
+
+    #[test]
+    fn test_domain_suffix_invalid_arn_propagates_error() {
+        // Each of these is rejected by parse_role_arn; the helper MUST surface
+        // the error rather than silently returning "amazonaws.com".
+        let invalid_inputs = [
+            "invalid",
+            "",
+            "arn:aws:s3:::my-bucket",
+            "arn:aws:iam::123456789012:user/MyUser",
+            "arn:aws:iam::123456789012:role/",
+            "arn:unknown:iam::123456789012:role/MyRole",
+        ];
+        for input in invalid_inputs {
+            let result = domain_suffix_from_role_arn(input);
+            assert!(
+                result.is_err(),
+                "expected error for invalid ARN {input:?}, got {result:?}",
+            );
+            // The offending ARN must appear in the error context so the user
+            // can see which value failed.
+            let err = result.expect_err("error checked above");
+            assert!(
+                err.to_string().contains(input) || input.is_empty(),
+                "error message should mention the offending ARN {input:?}: {err}",
+            );
+        }
     }
 
     #[test]
