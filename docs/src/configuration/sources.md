@@ -9,7 +9,7 @@ and the [S3 Configuration Schema](../reference/s3-config-schema.md).
 ## Precedence
 
 1. **S3 configuration** (highest) — a JSON object fetched from S3 at startup
-2. **Command-line arguments** — `--kebab-case` flags passed to `vouch-server serve`
+2. **Command-line arguments** — `--kebab-case` flags passed to `vouch-server`
 3. **Environment variables** — `VOUCH_*` prefixed
 
 Every setting is available in all three forms. The command-line flags and environment variables

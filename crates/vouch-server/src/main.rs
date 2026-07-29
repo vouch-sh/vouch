@@ -18,25 +18,22 @@ use vouch_server::{
 };
 
 // ============================================================================
-// Subcommand Dispatch
+// CLI
 // ============================================================================
 
-/// Top-level CLI with subcommands.
+/// Bare invocation runs the server (the mode every launcher uses: systemd
+/// units, Docker entrypoint, Helm chart); subcommands are auxiliary utilities.
 #[derive(Parser)]
 #[command(name = "vouch-server", about = "Vouch identity server")]
 struct Cli {
+    #[command(flatten)]
+    args: config::Args,
     #[command(subcommand)]
-    command: Commands,
+    command: Option<Commands>,
 }
 
 #[derive(clap::Subcommand)]
-#[expect(
-    clippy::large_enum_variant,
-    reason = "clap::Subcommand variants vary in payload size by command"
-)]
 enum Commands {
-    /// Start the identity server.
-    Serve(config::Args),
     /// Generate a P-384 document encryption key pair via KMS.
     GenerateDocumentKey(generate_document_key::GenerateDocumentKeyArgs),
 }
@@ -52,46 +49,19 @@ async fn main() -> Result<()> {
     // Load .env file if present (before anything else so env vars are available)
     dotenvy::dotenv().ok();
 
-    // Two-pass CLI parse for backwards compatibility:
-    // If the first argument is a known subcommand or help flag, parse with Cli struct
-    // (so subcommands appear in --help). Otherwise, parse with config::Args directly
-    // (legacy: `vouch-server --listen-addr ...`).
-    let first_arg = std::env::args().nth(1).unwrap_or_default();
-    match first_arg.as_str() {
-        "serve" | "generate-document-key" | "help" | "--help" | "-h" => {
-            let matches = Cli::command().get_matches();
-            match matches.subcommand() {
-                Some(("serve", sub_matches)) => {
-                    let (args, instance) = prepare_serve(sub_matches, |argv| {
-                        let matches = Cli::command().try_get_matches_from(argv)?;
-                        let Some(("serve", serve_matches)) = matches.subcommand() else {
-                            return Err(clap::Error::raw(
-                                clap::error::ErrorKind::MissingSubcommand,
-                                "bootstrap overlay re-parse lost the 'serve' subcommand",
-                            ));
-                        };
-                        config::Args::from_arg_matches(serve_matches)
-                    })
-                    .await?;
-                    Box::pin(run_server(args, instance)).await
-                }
-                Some(("generate-document-key", sub_matches)) => {
-                    let args = generate_document_key::GenerateDocumentKeyArgs::from_arg_matches(
-                        sub_matches,
-                    )?;
-                    init_stderr_logging();
-                    generate_document_key::run(args).await
-                }
-                _ => Err(anyhow::anyhow!("vouch-server: no subcommand matched")),
-            }
+    let matches = Cli::command().get_matches();
+    match matches.subcommand() {
+        Some(("generate-document-key", sub_matches)) => {
+            let args =
+                generate_document_key::GenerateDocumentKeyArgs::from_arg_matches(sub_matches)?;
+            init_stderr_logging();
+            generate_document_key::run(args).await
         }
-        _ => {
-            let matches = config::Args::command().get_matches();
-            let (args, instance) = prepare_serve(&matches, |argv| {
-                let matches = config::Args::command().try_get_matches_from(argv)?;
-                config::Args::from_arg_matches(&matches)
-            })
-            .await?;
+        Some((other, _)) => Err(anyhow::anyhow!(
+            "vouch-server: unknown subcommand '{other}'"
+        )),
+        None => {
+            let (args, instance) = prepare_serve(&matches).await?;
             Box::pin(run_server(args, instance)).await
         }
     }
@@ -110,15 +80,13 @@ fn init_stderr_logging() {
 
 /// Initialize tracing, print the startup banner, validate i18n catalogs, run
 /// EC2 instance bootstrap (IMDS + SSM, see `infra::bootstrap`), and resolve
-/// the final `serve` `Args`.
+/// the final server `Args`.
 ///
-/// `matches` is the already-parsed `ArgMatches` for `Args` — the top-level
-/// matches in legacy invocation, or the `serve` subcommand's matches when
-/// invoked as `vouch-server serve`. `reparse` performs the mode-specific
-/// second parse (from the bootstrap-overlaid argv) when a blob value needs
-/// to fill a gap that the first parse left as `None`/`DefaultValue`; both
-/// `matches` and the eventual `args` therefore reflect the *same* CLI
-/// invocation, just before and after the overlay is applied.
+/// `matches` is the already-parsed top-level `ArgMatches` (the server args
+/// are flattened into `Cli`). When a blob value needs to fill a gap the
+/// first parse left as `None`/`DefaultValue`, argv is re-parsed with the
+/// overlay tokens appended; both `matches` and the eventual `args` therefore
+/// reflect the *same* CLI invocation, just before and after the overlay.
 ///
 /// Tracing is initialized from the first parse's `log_format` (before
 /// bootstrap runs) so a bootstrap failure is itself logged; the one accepted
@@ -133,7 +101,6 @@ fn init_stderr_logging() {
 /// re-parse fails.
 async fn prepare_serve(
     matches: &ArgMatches,
-    reparse: impl FnOnce(Vec<OsString>) -> clap::error::Result<config::Args>,
 ) -> Result<(config::Args, Option<bootstrap::Bootstrap>)> {
     let preliminary = config::Args::from_arg_matches(matches)?;
 
@@ -164,7 +131,8 @@ async fn prepare_serve(
 
     let mut argv: Vec<OsString> = std::env::args_os().collect();
     argv.extend(overlay);
-    let args = reparse(argv)?;
+    let reparsed = Cli::command().try_get_matches_from(argv)?;
+    let args = config::Args::from_arg_matches(&reparsed)?;
     Ok((args, Some(instance)))
 }
 

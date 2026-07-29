@@ -56,7 +56,7 @@ Two of these deserve a second look before you go further:
 ## 2. Start the server
 
 ```bash
-vouch-server serve
+vouch-server
 ```
 
 ## 3. Read the startup log
