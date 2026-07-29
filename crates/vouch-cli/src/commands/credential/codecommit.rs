@@ -24,7 +24,7 @@ use crate::integrations::aws::codecommit::{
     sign_request,
 };
 use crate::integrations::aws::sts::StsCredentials;
-use crate::integrations::aws::{ProfileOverride, resolve_vouch_profile};
+use crate::integrations::aws::{ProfileOverride, resolve_vouch_profile, select_vouch_profile};
 
 /// Run the git credential helper for CodeCommit.
 ///
@@ -198,22 +198,8 @@ fn resolve_region(url_region: Option<&str>, profile: Option<&str>) -> Result<Str
     }
 
     if let Ok(aws_config) = crate::integrations::aws::AwsConfig::load() {
-        // If a profile was specified in the URL, try its region
-        if let Some(profile_name) = profile
-            && let Some(profile_data) = aws_config.get_profile(profile_name)
-            && let Some(region) = profile_data.region
-        {
-            return Ok(region);
-        }
-
-        // Fall back to the sole vouch profile's region. An ambiguous choice is
-        // not fatal here — region has an env/us-east-1 fallback, and the account
-        // itself is decided by `get_sts_credentials`.
-        if let Ok(vouch_profile) = resolve_vouch_profile(None, ProfileOverride::Profile)
-            && let Some(region) = aws_config
-                .get_profile(&vouch_profile.name)
-                .and_then(|p| p.region)
-        {
+        let env_profile = std::env::var("AWS_PROFILE").ok();
+        if let Some(region) = select_region(&aws_config, profile, env_profile.as_deref()) {
             return Ok(region);
         }
     }
@@ -228,6 +214,44 @@ fn resolve_region(url_region: Option<&str>, profile: Option<&str>) -> Result<Str
 
     // Default to us-east-1
     Ok("us-east-1".to_string())
+}
+
+/// Pure region selection against an already-loaded config.
+///
+/// Split from [`resolve_region`] so the priority order can be tested without
+/// touching the filesystem or the process environment, mirroring the
+/// `select_vouch_profile` / `resolve_vouch_profile` split.
+///
+/// Implements priorities 2 and 3 of [`resolve_region`]: the specified
+/// profile's region, then the resolved Vouch profile's region. The Vouch
+/// profile is resolved with the same `explicit` -> `$AWS_PROFILE` -> sole
+/// profile ordering used for role resolution in `get_sts_credentials`, so a
+/// machine with several Vouch profiles never borrows an unrelated profile's
+/// region — region and credentials come from the same profile. Returns `None`
+/// when neither source names a region, leaving the caller to fall back to env
+/// vars and the `us-east-1` default.
+fn select_region(
+    config: &crate::integrations::aws::AwsConfig,
+    profile: Option<&str>,
+    env_profile: Option<&str>,
+) -> Option<String> {
+    // Priority 2: the profile named in the URL (`codecommit://profile@repo`).
+    if let Some(profile_name) = profile
+        && let Some(profile_data) = config.get_profile(profile_name)
+        && let Some(region) = profile_data.region
+    {
+        return Some(region);
+    }
+
+    // Priority 3: the Vouch profile that mints the credentials. Resolved with
+    // the explicit profile first so region follows the same account as the
+    // role resolved by `get_sts_credentials`; an ambiguous or missing choice
+    // is not fatal here — region still has an env/us-east-1 fallback.
+    let vouch_profile =
+        select_vouch_profile(config, profile, env_profile, ProfileOverride::Profile).ok()?;
+    config
+        .get_profile(&vouch_profile.name)
+        .and_then(|p| p.region)
 }
 
 /// Percent-encode a string for use in a URL.
@@ -285,8 +309,120 @@ fn exec_git_remote_http(remote_name: &str, signed_url: &str) -> Result<()> {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::expect_used,
+    reason = "test code: panic on assertion failure is acceptable"
+)]
 mod tests {
     use super::*;
+    use crate::integrations::aws::AwsConfig;
+    use std::io::Write;
+    use tempfile::NamedTempFile;
+
+    fn load_config(content: &str) -> AwsConfig {
+        let mut file = NamedTempFile::new().expect("failed to create temp file");
+        file.write_all(content.as_bytes())
+            .expect("failed to write temp file");
+        AwsConfig::load_from(file.path().to_path_buf()).expect("failed to load aws config")
+    }
+
+    /// Two Vouch-managed profiles, each with a distinct region and account.
+    /// Mirrors the multi-account setup that surfaced the bug: `AWS_PROFILE`
+    /// points at one profile while the URL names the other.
+    const TWO_PROFILES: &str = r#"
+[profile alpha-admin]
+credential_process = vouch credential aws --role arn:aws:iam::111111111111:role/vouch/VouchAdmin
+region = us-west-2
+
+[profile vouch-dev]
+credential_process = vouch credential aws --role arn:aws:iam::222222222222:role/Developer
+region = us-east-1
+"#;
+
+    /// The exact reproduction from the bug report: the URL-named profile has
+    /// no `region` field, while the `AWS_PROFILE`-named profile does. Before
+    /// the fix, region resolution borrowed `AWS_PROFILE`'s region (eu-west-1)
+    /// instead of falling through to env vars / the us-east-1 default.
+    const SPLIT_PROFILE_REGION: &str = r#"
+[profile vouch-admin]
+credential_process = vouch credential aws --role arn:aws:iam::111111111111:role/Admin
+region = eu-west-1
+
+[profile vouch-dev]
+credential_process = vouch credential aws --role arn:aws:iam::222222222222:role/Developer
+"#;
+
+    // -- select_region: priority 1 is handled by resolve_region, not select_region --
+
+    /// Priority 2: the profile named in the URL supplies its own region.
+    #[test]
+    fn select_region_uses_specified_profile_region() {
+        let aws = load_config(TWO_PROFILES);
+        let region =
+            select_region(&aws, Some("alpha-admin"), None).expect("specified profile has a region");
+        assert_eq!(region, "us-west-2");
+    }
+
+    /// The bug: when the URL-named profile has no region, region resolution
+    /// must NOT borrow the `AWS_PROFILE`-named profile's region. Before the
+    /// fix, `select_region` returned `Some("eu-west-1")` from `vouch-admin`;
+    /// after the fix it returns `None` so the caller falls through to env
+    /// vars / the us-east-1 default.
+    #[test]
+    fn select_region_does_not_borrow_aws_profile_region_when_specified_has_none() {
+        let aws = load_config(SPLIT_PROFILE_REGION);
+        // Explicit profile is vouch-dev (no region). AWS_PROFILE is
+        // vouch-admin (has region eu-west-1). With the bug, select_region
+        // ignored the explicit profile, resolved vouch-admin, and returned
+        // Some("eu-west-1"). With the fix, select_region resolves vouch-dev
+        // (the explicit profile), which has no region, so returns None.
+        assert_eq!(
+            select_region(&aws, Some("vouch-dev"), Some("vouch-admin")),
+            None,
+            "must not borrow AWS_PROFILE's region when the explicit profile has none"
+        );
+    }
+
+    /// Priority 3: with no explicit profile and a single Vouch profile, the
+    /// Vouch profile's region is used. This is the "sole vouch profile"
+    /// fallback the original comment described, and it must still work.
+    #[test]
+    fn select_region_falls_back_to_sole_vouch_profile_region() {
+        let aws = load_config(
+            r#"
+[profile vouch-demo]
+credential_process = vouch credential aws --role arn:aws:iam::222222222222:role/demo
+region = ap-southeast-2
+"#,
+        );
+        let region = select_region(&aws, None, None).expect("sole profile has a region");
+        assert_eq!(region, "ap-southeast-2");
+    }
+
+    /// Priority 3 with `AWS_PROFILE`: when no profile is in the URL,
+    /// `$AWS_PROFILE` (naming a Vouch profile) supplies the region. This
+    /// preserves the documented behavior for users who set `AWS_PROFILE`
+    /// instead of putting the profile in the URL.
+    #[test]
+    fn select_region_uses_aws_profile_when_no_explicit_profile() {
+        let aws = load_config(TWO_PROFILES);
+        let region = select_region(&aws, None, Some("vouch-dev"))
+            .expect("AWS_PROFILE names a vouch profile with a region");
+        assert_eq!(region, "us-east-1");
+    }
+
+    /// Explicit profile outranks `AWS_PROFILE` for region resolution, just
+    /// as it does for role resolution. This is the invariant the bug
+    /// violated: the explicit profile must select the same account for both
+    /// credentials and region.
+    #[test]
+    fn select_region_explicit_profile_outranks_aws_profile_for_region() {
+        let aws = load_config(TWO_PROFILES);
+        // explicit alpha-admin (us-west-2) beats AWS_PROFILE=vouch-dev (us-east-1)
+        let region = select_region(&aws, Some("alpha-admin"), Some("vouch-dev"))
+            .expect("explicit profile has a region");
+        assert_eq!(region, "us-west-2");
+    }
 
     #[test]
     fn test_percent_encode_simple() {

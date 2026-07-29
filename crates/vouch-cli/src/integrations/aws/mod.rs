@@ -75,8 +75,10 @@ pub(crate) fn resolve_vouch_profile(
 /// Apply the profile resolution order to an already-loaded config.
 ///
 /// Split from [`resolve_vouch_profile`] so the ordering can be tested without
-/// touching the filesystem or the process environment.
-fn select_vouch_profile(
+/// touching the filesystem or the process environment. Re-used by the
+/// CodeCommit remote helper's region resolution, which needs to resolve the
+/// Vouch profile against an already-loaded config rather than re-reading disk.
+pub(crate) fn select_vouch_profile(
     config: &AwsConfig,
     explicit: Option<&str>,
     env_profile: Option<&str>,
