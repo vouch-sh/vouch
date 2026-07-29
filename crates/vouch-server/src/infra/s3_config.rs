@@ -569,6 +569,9 @@ async fn decrypt_document_key(
 /// * `source` - S3 bucket/key/region configuration
 /// * `kms_client` - Optional KMS client; required for document key decryption
 /// * `use_attestation` - Whether to use NitroTPM attestation for KMS calls
+/// * `kms_resolver` - Base resolver (partition/region already resolved from
+///   `ServerConfig`); rebound to this document's own `kms_account_id` (if any)
+///   before resolving the document key's KMS key ID
 ///
 /// Returns the parsed config, the ETag for change detection, and optionally the
 /// document key material for `HpkeDocumentCrypto`.
@@ -577,6 +580,7 @@ pub async fn fetch_s3_config(
     source: &S3ConfigSource,
     kms_client: Option<&KmsClient>,
     use_attestation: bool,
+    kms_resolver: &KmsArnResolver,
 ) -> Result<(S3Config, String, Option<DocumentKeyMaterial>)> {
     let (raw_bytes, etag) = fetch_s3_raw(s3_client, source).await?;
 
@@ -587,7 +591,7 @@ pub async fn fetch_s3_config(
         let kms = kms_client.ok_or_else(|| {
             anyhow::anyhow!("S3 config has document_key but no KMS client is available")
         })?;
-        let resolver = KmsArnResolver::from_env(config.kms_account_id.as_deref());
+        let resolver = kms_resolver.with_account_id(config.kms_account_id.as_deref());
         let key_arn = resolver.resolve(&doc_key_config.kms_key_id);
         Some(decrypt_document_key(kms, doc_key_config, &key_arn, use_attestation).await?)
     } else {
@@ -794,13 +798,18 @@ impl ServerConfig {
 
         // Database URL - priority: dsql_endpoints > database_url
         if let Some(endpoints) = &s3.dsql_endpoints {
-            match crate::config::resolve_dsql_endpoints(endpoints) {
+            match crate::config::resolve_dsql_endpoints(
+                endpoints,
+                self.aws_az.as_deref(),
+                self.aws_region.as_deref(),
+            ) {
                 Ok(resolved) => {
                     // Log which location was used (AZ or region)
-                    let location = std::env::var("AWS_AZ")
-                        .or_else(|_| std::env::var("AWS_REGION"))
-                        .or_else(|_| std::env::var("AWS_DEFAULT_REGION"))
-                        .unwrap_or_else(|_| "unknown".into());
+                    let location = self
+                        .aws_az
+                        .clone()
+                        .or_else(|| self.aws_region.clone())
+                        .unwrap_or_else(|| "unknown".into());
                     tracing::info!("Using dsql_endpoints for location {}", location);
                     self.database_url = resolved;
                 }

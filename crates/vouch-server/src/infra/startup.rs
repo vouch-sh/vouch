@@ -19,7 +19,9 @@ use crate::{
         ssh_ca, tpm_decrypt,
     },
     db::{Pool, dsql::DsqlEndpoint, migrations::run_dsql_migrations, pool::redact_database_url},
-    infra::{cleanup, kms_arn::KmsArnResolver, s3_config, s3_config::DocumentKeyMaterial},
+    infra::{
+        bootstrap, cleanup, kms_arn::KmsArnResolver, s3_config, s3_config::DocumentKeyMaterial,
+    },
     services::integrations::github::GitHubApp,
 };
 
@@ -59,12 +61,19 @@ impl ServerComponents {
 /// 3. Builds `AppState` with WebAuthn, SSH CA, OIDC, GitHub, DPoP
 /// 4. Starts the background cleanup task
 ///
+/// `instance` carries IMDS-discovered facts and the bootstrap parameter blob
+/// (see `infra::bootstrap`); `None` when not running on EC2 or when bootstrap
+/// was skipped because config is already fully specified via env/CLI.
+///
 /// # Errors
 ///
 /// Returns an error if configuration is invalid, database connection fails,
 /// or required components cannot be initialized.
-pub async fn initialize(args: config::Args) -> Result<ServerComponents> {
-    let mut config = config::ServerConfig::from_args(args)?;
+pub async fn initialize(
+    args: config::Args,
+    instance: Option<&bootstrap::Bootstrap>,
+) -> Result<ServerComponents> {
+    let mut config = config::ServerConfig::from_args(args, instance)?;
 
     // Probe NitroTPM BEFORE S3 config loading so we know whether to
     // use attested kms:Decrypt for document key decryption.
@@ -72,7 +81,7 @@ pub async fn initialize(args: config::Args) -> Result<ServerComponents> {
 
     // Load S3 config if configured (BEFORE database connection).
     // If the config has a document_key, also recovers the HPKE key pair.
-    let (s3_client, s3_source, initial_etag, doc_keys, kms_client) =
+    let (s3_client, s3_source, initial_etag, doc_keys, kms_client, kms_arn_resolver) =
         load_s3_config(&mut config, use_attestation).await?;
 
     // Connect to database and run migrations
@@ -93,8 +102,14 @@ pub async fn initialize(args: config::Args) -> Result<ServerComponents> {
 
     log_startup_summary(&config);
 
+    // Re-bind the resolver to the FINAL (post-merge) kms_account_id: S3 merge
+    // may have set it, and `merge_s3_config` runs strictly after `load_s3_config`
+    // returned the pre-merge resolver above.
+    let kms_arn_resolver = kms_arn_resolver.with_account_id(config.kms_account_id.as_deref());
+
     // Build AppState and start background tasks
-    let state = build_app_state(&config, db.clone(), doc_keys, kms_client).await?;
+    let state =
+        build_app_state(&config, db.clone(), doc_keys, kms_client, kms_arn_resolver).await?;
 
     // Start background cleanup task if enabled
     let cleanup_handle = if config.cleanup_interval_minutes > 0 {
@@ -162,6 +177,13 @@ async fn probe_nitro_tpm() -> bool {
 /// Fetches the initial config from S3 and merges into the server config.
 /// If the config has a `document_key`, decrypts it via KMS (with NitroTPM
 /// attestation when available) and returns the key material.
+///
+/// Also constructs the single `KmsArnResolver` for this boot: partition and
+/// region come from `config.aws_partition`/`config.aws_region` (resolved once
+/// in `ServerConfig::from_args`), while the account ID is the S3 document's
+/// own `kms_account_id` — the only value that isn't already known before the
+/// document is fetched. The caller re-binds the returned resolver to the
+/// final merged `kms_account_id` before reusing it for other KMS keys.
 async fn load_s3_config(
     config: &mut config::ServerConfig,
     use_attestation: bool,
@@ -171,10 +193,16 @@ async fn load_s3_config(
     Option<String>,
     Option<DocumentKeyMaterial>,
     Option<aws_sdk_kms::Client>,
+    KmsArnResolver,
 )> {
     let Some(bucket) = &config.s3_config_bucket else {
         tracing::info!("Configuration source: environment variables");
-        return Ok((None, None, None, None, None));
+        let resolver = KmsArnResolver::new(
+            config.kms_account_id.as_deref(),
+            config.aws_partition.as_deref(),
+            config.aws_region.as_deref(),
+        );
+        return Ok((None, None, None, None, None, resolver));
     };
 
     tracing::info!(
@@ -186,9 +214,12 @@ async fn load_s3_config(
     // Only override the region when VOUCH_S3_CONFIG_REGION is set; passing
     // Option::<Region>::None to `.region(...)` disables the default region
     // provider chain (env / shared config / IMDS) and breaks S3 requests.
-    let sdk_config = crate::config::aws_config_loader(config.s3_config_region.as_deref())?
-        .load()
-        .await;
+    let sdk_config = crate::config::aws_config_loader(
+        config.s3_config_region.as_deref(),
+        config.aws_use_fips_endpoint,
+    )?
+    .load()
+    .await;
 
     let s3_client = aws_sdk_s3::Client::new(&sdk_config);
 
@@ -207,13 +238,27 @@ async fn load_s3_config(
         poll_interval_seconds: config.s3_config_poll_interval,
     };
 
+    // kms_account_id is always None pre-merge (it has no CLI/env source of
+    // its own — see ServerConfig::from_args); fetch_s3_config rebinds it to
+    // the S3 document's own value before resolving the document key.
+    let kms_resolver = KmsArnResolver::new(
+        config.kms_account_id.as_deref(),
+        config.aws_partition.as_deref(),
+        config.aws_region.as_deref(),
+    );
+
     // Fetch initial config - fail fast if unreachable.
     // If the config has a document_key, the private key is decrypted
     // via KMS (with NitroTPM attestation when available).
-    let (s3_cfg, etag, doc_keys) =
-        s3_config::fetch_s3_config(&s3_client, &source, Some(&kms_client), use_attestation)
-            .await
-            .context("Failed to fetch S3 configuration")?;
+    let (s3_cfg, etag, doc_keys) = s3_config::fetch_s3_config(
+        &s3_client,
+        &source,
+        Some(&kms_client),
+        use_attestation,
+        &kms_resolver,
+    )
+    .await
+    .context("Failed to fetch S3 configuration")?;
 
     // Merge S3 config (S3 wins over env vars) — fail fast if oidc block present
     config.merge_s3_config(&s3_cfg, false)?;
@@ -225,6 +270,7 @@ async fn load_s3_config(
         Some(etag),
         doc_keys,
         Some(kms_client),
+        kms_resolver,
     ))
 }
 
@@ -309,6 +355,7 @@ async fn build_app_state(
     db: Pool,
     doc_keys: Option<DocumentKeyMaterial>,
     kms_client: Option<aws_sdk_kms::Client>,
+    kms_arn_resolver: KmsArnResolver,
 ) -> Result<Arc<AppState>> {
     // Build WebAuthn instance
     // Use base_url as origin (handles localhost with http and port correctly)
@@ -325,9 +372,12 @@ async fn build_app_state(
         || config.jwt_hmac_kms_key_id.is_some();
     let kms_client = if kms_needs && kms_client.is_none() {
         tracing::info!("Creating KMS client for signing key access");
-        let sdk_config = crate::config::aws_config_loader(config.s3_config_region.as_deref())?
-            .load()
-            .await;
+        let sdk_config = crate::config::aws_config_loader(
+            config.s3_config_region.as_deref(),
+            config.aws_use_fips_endpoint,
+        )?
+        .load()
+        .await;
         Some(aws_sdk_kms::Client::from_conf(
             aws_sdk_kms::config::Builder::from(&sdk_config)
                 .timeout_config(kms_timeout_config())
@@ -336,11 +386,6 @@ async fn build_app_state(
     } else {
         kms_client
     };
-
-    // Build the KMS ARN resolver once. When `kms_account_id` is set, raw key
-    // IDs from config are wrapped into full cross-account ARNs using
-    // AWS_PARTITION/AWS_REGION from the environment.
-    let kms_arn_resolver = KmsArnResolver::from_env(config.kms_account_id.as_deref());
 
     // Initialize SSH CA if configured
     // Priority: KMS key ID > PEM content (VOUCH_SSH_CA_KEY) > file path (VOUCH_SSH_CA_KEY_PATH)
@@ -699,12 +744,21 @@ async fn build_configured_idp(
 /// feature for searchable CloudWatch events — plus security warnings for
 /// suspicious configurations.
 fn log_startup_summary(config: &config::ServerConfig) {
-    // AWS SDK and runtime configuration
+    // AWS SDK and runtime configuration. region/az/partition/fips print the
+    // values ServerConfig resolved (env, or on EC2 the bootstrap parameter /
+    // IMDS) rather than raw process env, since the bootstrap blob is never
+    // written back to the environment. dualstack/sts_regional/defaults_mode
+    // are unit-pinned Environment= lines in the AMI, always real process env.
     let env_or = |key: &str| -> String { std::env::var(key).unwrap_or_else(|_| "(empty)".into()) };
     tracing::info!(
-        "AWS SDK: region={}, fips={}, dualstack={}, sts_regional={}, defaults_mode={}",
-        env_or("AWS_REGION"),
-        env_or("AWS_USE_FIPS_ENDPOINT"),
+        "AWS SDK: region={}, az={}, partition={}, fips={}, dualstack={}, sts_regional={}, \
+         defaults_mode={}",
+        config.aws_region.as_deref().unwrap_or("(empty)"),
+        config.aws_az.as_deref().unwrap_or("(empty)"),
+        config.aws_partition.as_deref().unwrap_or("(empty)"),
+        config
+            .aws_use_fips_endpoint
+            .map_or_else(|| "(empty)".to_string(), |v| v.to_string()),
         env_or("AWS_USE_DUALSTACK_ENDPOINT"),
         env_or("AWS_STS_REGIONAL_ENDPOINTS"),
         env_or("AWS_DEFAULTS_MODE"),

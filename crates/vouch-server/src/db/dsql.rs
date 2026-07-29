@@ -15,7 +15,7 @@
 //! 5. EC2 instance metadata (IMDS)
 
 use anyhow::{Context, Result, bail};
-use aws_config::{BehaviorVersion, Region, SdkConfig};
+use aws_config::{Region, SdkConfig};
 use aws_sdk_dsql::auth_token::{AuthTokenGenerator, Config};
 use sqlx::postgres::PgSslMode;
 
@@ -25,16 +25,22 @@ use sqlx::postgres::PgSslMode;
 /// which supports environment variables, AWS profiles, EKS IRSA, ECS task roles,
 /// and EC2 instance metadata.
 ///
+/// Goes through `config::aws_config_loader` (framework metadata, no `use_fips`
+/// override here — `AuthTokenGenerator` only presigns a URL locally from
+/// credentials/region/time-source; it makes no smithy operation, so the
+/// endpoint-resolution rules that `use_fips` affects are never exercised).
+///
 /// # Arguments
 ///
 /// * `region` - Optional AWS region override. If not provided, the SDK will
 ///   attempt to determine the region from environment variables or config files.
-pub(crate) async fn load_sdk_config(region: Option<&str>) -> SdkConfig {
-    let mut loader = aws_config::defaults(BehaviorVersion::latest());
-    if let Some(r) = region {
-        loader = loader.region(Region::new(r.to_string()));
-    }
-    loader.load().await
+///
+/// # Errors
+///
+/// Returns an error if the framework metadata cannot be constructed (see
+/// `config::aws_config_loader`; unreachable for any valid build).
+pub(crate) async fn load_sdk_config(region: Option<&str>) -> Result<SdkConfig> {
+    Ok(crate::config::aws_config_loader(region, None)?.load().await)
 }
 
 /// Generate a DSQL authentication token using AWS credentials.

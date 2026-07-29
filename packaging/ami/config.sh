@@ -10,7 +10,7 @@ set -ex
 # Enable set-hostname-imds service
 #======================================
 # This sets the hostname based on IMDS in place of cloud-init
-echo "enable set-hostname-imds.service" >> /usr/lib/systemd/system-preset/80-amzn-overrides.preset
+echo "enable set-hostname-imds.service" >>/usr/lib/systemd/system-preset/80-amzn-overrides.preset
 systemctl preset set-hostname-imds
 
 #======================================
@@ -21,17 +21,11 @@ useradd --system --gid vouch --home-dir /var/lib/vouch-server --no-create-home -
 usermod -a -G tss vouch
 
 #======================================
-# Set permissions on overlay files
-#======================================
-# The overlay copies files but doesn't preserve execute permissions
-chmod +x /usr/local/bin/vouch-fetch-config.sh
-
-#======================================
 # Verify vouch-server binary
 #======================================
 if [ ! -x /usr/bin/vouch-server ]; then
-    echo "ERROR: /usr/bin/vouch-server not found or not executable"
-    exit 1
+  echo "ERROR: /usr/bin/vouch-server not found or not executable"
+  exit 1
 fi
 
 #======================================
@@ -45,13 +39,12 @@ chown vouch:vouch /var/lib/vouch-server/.pgpass
 #======================================
 # Create log directories
 #======================================
-mkdir -p /var/log/vouch-server /var/log/vouch-config
+mkdir -p /var/log/vouch-server
 chown vouch:vouch /var/log/vouch-server
 
 #======================================
 # Enable services
 #======================================
-systemctl enable vouch-config.service
 systemctl enable vouch-server.service
 systemctl enable amazon-cloudwatch-agent.service
 
@@ -86,8 +79,8 @@ rm -f /etc/ssh/ssh_host_*
 update-crypto-policies --no-reload --set FIPS
 CURRENT_POLICY=$(update-crypto-policies --show)
 if [ "$CURRENT_POLICY" != "FIPS" ]; then
-    echo "ERROR: crypto-policy is '${CURRENT_POLICY}', expected 'FIPS'"
-    exit 1
+  echo "ERROR: crypto-policy is '${CURRENT_POLICY}', expected 'FIPS'"
+  exit 1
 fi
 
 #======================================
@@ -97,8 +90,8 @@ fi
 # applied at boot by systemd-sysctl; here we only assert the file is present so
 # a missing overlay fails the build instead of silently shipping unhardened.
 if [ ! -f /etc/sysctl.d/90-vouch-hardening.conf ]; then
-    echo "ERROR: /etc/sysctl.d/90-vouch-hardening.conf not found"
-    exit 1
+  echo "ERROR: /etc/sysctl.d/90-vouch-hardening.conf not found"
+  exit 1
 fi
 
 echo "Vouch Server image configuration complete"

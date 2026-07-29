@@ -48,12 +48,6 @@
             "log_group_name": "/vouch-server/vouch-server",
             "log_stream_name": "{instance_id}",
             "retention_in_days": 3
-          },
-          {
-            "file_path": "/var/log/vouch-config/output.log",
-            "log_group_name": "/vouch-server/vouch-config",
-            "log_stream_name": "{instance_id}",
-            "retention_in_days": 3
           }
         ]
       }

@@ -1,5 +1,4 @@
 /var/log/vouch-server/output.log
-/var/log/vouch-config/output.log
 {
     size 10M
     rotate 1

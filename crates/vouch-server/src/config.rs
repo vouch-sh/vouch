@@ -3,10 +3,11 @@
 
 use anyhow::{Context, Result};
 use aws_config::FrameworkMetadata;
-use clap::Parser;
+use clap::{ArgAction, CommandFactory, Parser, parser::ValueSource};
 use ipnet::IpNet;
 use secrecy::{ExposeSecret, SecretString};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
+use std::ffi::OsString;
 
 /// Build an AWS SDK config loader tagged with vouch-server framework metadata.
 ///
@@ -14,20 +15,29 @@ use std::collections::HashMap;
 /// header, so operators can attribute KMS and S3 API calls to Vouch in CloudTrail.
 /// It is additive: it composes with any `sdk_ua_app_id` the operator configures
 /// instead of overriding it. `region` overrides the default region provider chain
-/// (env / shared config / IMDS) only when `Some`.
+/// (env / shared config / IMDS) only when `Some`. `use_fips` overrides the
+/// `AWS_USE_FIPS_ENDPOINT` provider chain only when `Some` — needed because that
+/// variable is resolved from `ServerConfig` (env or the bootstrap parameter), not
+/// necessarily from real process environment.
 ///
 /// # Errors
 ///
 /// Returns an error if the framework metadata cannot be constructed. This is
 /// unreachable for any valid build: the crate name and version are always within
 /// the SDK's permitted user-agent charset.
-pub(crate) fn aws_config_loader(region: Option<&str>) -> Result<aws_config::ConfigLoader> {
+pub(crate) fn aws_config_loader(
+    region: Option<&str>,
+    use_fips: Option<bool>,
+) -> Result<aws_config::ConfigLoader> {
     let metadata = FrameworkMetadata::new("vouch-server", Some(env!("CARGO_PKG_VERSION")))
         .context("failed to build AWS SDK framework metadata")?;
     let mut loader =
         aws_config::defaults(aws_config::BehaviorVersion::latest()).framework_metadata(metadata);
     if let Some(region) = region {
         loader = loader.region(aws_config::Region::new(region.to_string()));
+    }
+    if let Some(use_fips) = use_fips {
+        loader = loader.use_fips(use_fips);
     }
     Ok(loader)
 }
@@ -451,6 +461,29 @@ pub struct Args {
     #[arg(long, env = "VOUCH_S3_CONFIG_POLL_INTERVAL", default_value = "60")]
     pub s3_config_poll_interval: u64,
 
+    /// AWS region. Used for KMS/S3 calls, resolving `dsql_endpoints`, and
+    /// cross-account KMS ARN construction. Falls back to `AWS_DEFAULT_REGION`,
+    /// then to IMDS when running on EC2 with no upstream bootstrap parameter.
+    #[arg(long, env = "AWS_REGION", hide = true)]
+    pub aws_region: Option<String>,
+
+    /// AWS availability zone, checked first when resolving `dsql_endpoints`.
+    /// Falls back to IMDS when running on EC2.
+    #[arg(long, env = "AWS_AZ", hide = true)]
+    pub aws_az: Option<String>,
+
+    /// AWS partition segment (`aws`, `aws-us-gov`, ...) for cross-account KMS
+    /// ARN construction. Falls back to IMDS `services/partition` when running
+    /// on EC2 (absent on older instance generations).
+    #[arg(long, env = "AWS_PARTITION", hide = true)]
+    pub aws_partition: Option<String>,
+
+    /// Whether AWS SDK clients should use FIPS endpoints. Per-deployment (not
+    /// baked into the AMI, since FIPS endpoint availability varies by region),
+    /// so it is delivered the same way as other bootstrap-parameter values.
+    #[arg(long, env = "AWS_USE_FIPS_ENDPOINT", hide = true)]
+    pub aws_use_fips_endpoint: Option<String>,
+
     /// Maximum lifetime for JWT assertions in seconds (RFC 7523).
     #[arg(long, env = "VOUCH_JWT_ASSERTION_MAX_LIFETIME", default_value = "300")]
     pub jwt_assertion_max_lifetime: i64,
@@ -534,6 +567,60 @@ pub struct Args {
     /// Time-to-live for session cache entries in seconds.
     #[arg(long, env = "VOUCH_SESSION_CACHE_TTL_SECS", default_value = "30")]
     pub session_cache_ttl_secs: u64,
+}
+
+// ============================================================================
+// Bootstrap Overlay
+// ============================================================================
+
+/// Build `--flag=value` overlay tokens for every `Args` field whose current
+/// value source is `None` or `DefaultValue`, so a bootstrap-supplied blob
+/// (see `infra::bootstrap`) can fill gaps without ever overriding an explicit
+/// CLI flag or process environment variable.
+///
+/// `matches` is the already-parsed `ArgMatches` for `Args` — the top-level
+/// matches in legacy invocation, or the `serve` subcommand's matches when
+/// invoked as `vouch-server serve`. The env-name-to-arg mapping is built from
+/// `Args::command()` rather than hand-maintained, so adding a new `Args`
+/// field with an `env = "..."` attribute is automatically covered.
+#[must_use]
+pub fn bootstrap_overlay_args(
+    matches: &clap::ArgMatches,
+    blob: &BTreeMap<String, String>,
+) -> Vec<OsString> {
+    let command = Args::command();
+    let mut tokens = Vec::new();
+    for arg in command.get_arguments() {
+        let Some(env_name) = arg.get_env().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        let Some(value) = blob.get(env_name) else {
+            continue;
+        };
+        if !matches!(
+            matches.value_source(arg.get_id().as_str()),
+            None | Some(ValueSource::DefaultValue)
+        ) {
+            continue;
+        }
+        let Some(long) = arg.get_long() else {
+            continue;
+        };
+        if matches!(arg.get_action(), ArgAction::SetTrue) {
+            // SetTrue args cannot accept `--flag=value`, so parse the blob
+            // value leniently and emit the bare flag only when truthy.
+            let truthy = matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "true" | "1" | "yes" | "on"
+            );
+            if truthy {
+                tokens.push(OsString::from(format!("--{long}")));
+            }
+        } else {
+            tokens.push(OsString::from(format!("--{long}={value}")));
+        }
+    }
+    tokens
 }
 
 // ============================================================================
@@ -655,6 +742,15 @@ pub struct ServerConfig {
     pub s3_config_region: Option<String>,
     /// S3 config poll interval in seconds.
     pub s3_config_poll_interval: u64,
+    /// AWS region, resolved from `AWS_REGION`/`AWS_DEFAULT_REGION` or, on EC2
+    /// with no bootstrap parameter override, from IMDS.
+    pub aws_region: Option<String>,
+    /// AWS availability zone, resolved from `AWS_AZ` or IMDS.
+    pub aws_az: Option<String>,
+    /// AWS partition segment, resolved from `AWS_PARTITION` or IMDS.
+    pub aws_partition: Option<String>,
+    /// Whether AWS SDK clients should use FIPS endpoints.
+    pub aws_use_fips_endpoint: Option<bool>,
     /// Maximum lifetime for JWT assertions in seconds (RFC 7523, default: 300).
     pub jwt_assertion_max_lifetime_seconds: i64,
     /// AAGUID allowlist policy for WebAuthn registration (default: `Any`).
@@ -738,9 +834,31 @@ impl ServerConfig {
     }
 
     /// Create configuration from parsed command-line arguments.
-    pub fn from_args(args: Args) -> Result<Self> {
+    ///
+    /// `instance` carries IMDS-discovered facts (region, availability zone,
+    /// partition) used only as a fallback beneath `AWS_REGION`/`AWS_AZ`/
+    /// `AWS_PARTITION` — see `infra::bootstrap`.
+    pub fn from_args(
+        args: Args,
+        instance: Option<&crate::infra::bootstrap::Bootstrap>,
+    ) -> Result<Self> {
         // Note: Validation of rp_id and jwt_secret is deferred to validate()
         // to allow these values to come from S3 config.
+
+        let aws_region = args
+            .aws_region
+            .or_else(|| std::env::var("AWS_DEFAULT_REGION").ok())
+            .or_else(|| instance.map(|b| b.region.clone()));
+        let aws_az = args
+            .aws_az
+            .or_else(|| instance.map(|b| b.availability_zone.clone()));
+        let aws_partition = args
+            .aws_partition
+            .or_else(|| instance.and_then(|b| b.partition.clone()));
+        let aws_use_fips_endpoint = args
+            .aws_use_fips_endpoint
+            .as_deref()
+            .map(|v| v.eq_ignore_ascii_case("true"));
 
         let base_url = derive_base_url(args.base_url, &args.rp_id, &args.listen_addr);
 
@@ -828,6 +946,10 @@ impl ServerConfig {
             s3_config_key: args.s3_config_key,
             s3_config_region: args.s3_config_region,
             s3_config_poll_interval: args.s3_config_poll_interval,
+            aws_region,
+            aws_az,
+            aws_partition,
+            aws_use_fips_endpoint,
             jwt_assertion_max_lifetime_seconds: args.jwt_assertion_max_lifetime,
             allowed_aaguids,
             require_attestation_cert: args.require_attestation_cert,
@@ -1037,30 +1159,37 @@ impl ServerConfig {
 /// Resolve DSQL endpoint from AZ or region map.
 ///
 /// Lookup priority:
-/// 1. `AWS_AZ` (e.g., "us-east-1a") - for AZ-specific endpoint routing
-/// 2. `AWS_REGION` / `AWS_DEFAULT_REGION` (e.g., "us-east-1") - fallback for regional endpoints
+/// 1. `aws_az` (e.g., "us-east-1a") - for AZ-specific endpoint routing
+/// 2. `aws_region` (e.g., "us-east-1") - fallback for regional endpoints
 ///
-/// Returns an error if no environment variable is set or if the location is not in the map.
-pub fn resolve_dsql_endpoints(endpoints: &HashMap<String, String>) -> Result<String> {
+/// Both values are `ServerConfig` fields (resolved from env or, on EC2, IMDS)
+/// rather than raw environment reads, so this stays a pure function of its
+/// arguments.
+///
+/// Returns an error if neither value is set or if the location is not in the map.
+pub fn resolve_dsql_endpoints(
+    endpoints: &HashMap<String, String>,
+    aws_az: Option<&str>,
+    aws_region: Option<&str>,
+) -> Result<String> {
     // Try AZ first (e.g., "us-east-1a")
-    if let Ok(az) = std::env::var("AWS_AZ") {
-        if let Some(url) = endpoints.get(&az) {
-            tracing::debug!("Resolved DSQL endpoint using AWS_AZ={}", az);
+    if let Some(az) = aws_az {
+        if let Some(url) = endpoints.get(az) {
+            tracing::debug!("Resolved DSQL endpoint using aws_az={}", az);
             return Ok(url.clone());
         }
         // AZ not in map, fall through to region lookup
         tracing::debug!(
-            "AWS_AZ={} not found in dsql_endpoints, trying region fallback",
+            "aws_az={} not found in dsql_endpoints, trying region fallback",
             az
         );
     }
 
     // Fall back to region (e.g., "us-east-1")
-    let region = std::env::var("AWS_REGION")
-        .or_else(|_| std::env::var("AWS_DEFAULT_REGION"))
-        .context("Neither AWS_AZ nor AWS_REGION is set - required for dsql_endpoints lookup")?;
+    let region = aws_region
+        .context("Neither aws_az nor aws_region is set - required for dsql_endpoints lookup")?;
 
-    let url = endpoints.get(&region).with_context(|| {
+    let url = endpoints.get(region).with_context(|| {
         format!(
             "Location '{}' not found in dsql_endpoints. Available: {:?}",
             region,
@@ -1074,13 +1203,19 @@ pub fn resolve_dsql_endpoints(endpoints: &HashMap<String, String>) -> Result<Str
 #[cfg(test)]
 #[expect(
     clippy::unwrap_used,
+    clippy::expect_used,
     clippy::indexing_slicing,
     reason = "test code: panic on assertion failure is acceptable"
 )]
 mod tests {
-    use crate::config::{IdpConfig, SamlProviderConfig, validate_provider_slug};
+    use crate::config::{
+        Args, IdpConfig, SamlProviderConfig, bootstrap_overlay_args, resolve_dsql_endpoints,
+        validate_provider_slug,
+    };
     use crate::test_utils::test_config;
+    use clap::CommandFactory;
     use secrecy::SecretString;
+    use std::collections::{BTreeMap, HashMap};
 
     fn saml_provider_for_tests() -> SamlProviderConfig {
         SamlProviderConfig {
@@ -1383,5 +1518,152 @@ mod tests {
             "https://other.example.com:8443".to_string(),
         ]);
         assert!(config.validate().is_ok());
+    }
+
+    // ========================================================================
+    // Bootstrap overlay precedence
+    //
+    // These construct `ArgMatches` directly via `Command::try_get_matches_from`
+    // rather than mutating real process environment variables, per the no-`unsafe`
+    // policy (`std::env::set_var` requires `unsafe` and is denied workspace-wide).
+    // There is no test asserting a real environment variable beats the blob: the
+    // overlay's guard (`matches!(value_source, None | Some(ValueSource::DefaultValue))`)
+    // treats `EnvVariable` and `CommandLine` identically -- both are excluded -- so
+    // `bootstrap_overlay_does_not_override_explicit_cli_flag` below already exercises
+    // the shared branch; only clap's own (independently tested) env resolution would
+    // differ, not any code in this crate.
+    // ========================================================================
+
+    fn blob(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn bootstrap_overlay_fills_unset_option_arg() {
+        // s3_config_bucket has no default_value, so with no CLI flag and no
+        // env var, its value_source is None -- the arm the issue calls "essential".
+        let matches = Args::command()
+            .try_get_matches_from(["vouch-server"])
+            .expect("parse with no flags");
+        let blob = blob(&[("VOUCH_S3_CONFIG_BUCKET", "my-bucket")]);
+        let tokens = bootstrap_overlay_args(&matches, &blob);
+        assert_eq!(
+            tokens,
+            vec![std::ffi::OsString::from("--s3-config-bucket=my-bucket")]
+        );
+    }
+
+    #[test]
+    fn bootstrap_overlay_fills_defaulted_arg() {
+        // mtls_port defaults to "8443"; with no CLI flag and no env var its
+        // value_source is Some(DefaultValue), the other arm the overlay covers.
+        let matches = Args::command()
+            .try_get_matches_from(["vouch-server"])
+            .expect("parse with no flags");
+        let blob = blob(&[("VOUCH_MTLS_PORT", "9443")]);
+        let tokens = bootstrap_overlay_args(&matches, &blob);
+        assert_eq!(tokens, vec![std::ffi::OsString::from("--mtls-port=9443")]);
+    }
+
+    #[test]
+    fn bootstrap_overlay_does_not_override_explicit_cli_flag() {
+        let matches = Args::command()
+            .try_get_matches_from(["vouch-server", "--mtls-port", "1234"])
+            .expect("parse with explicit flag");
+        let blob = blob(&[("VOUCH_MTLS_PORT", "9999")]);
+        let tokens = bootstrap_overlay_args(&matches, &blob);
+        assert!(
+            tokens.is_empty(),
+            "blob must not override an explicit CLI flag, got: {tokens:?}"
+        );
+    }
+
+    #[test]
+    fn bootstrap_overlay_ignores_unmapped_blob_keys() {
+        let matches = Args::command()
+            .try_get_matches_from(["vouch-server"])
+            .expect("parse with no flags");
+        let blob = blob(&[("RUST_LOG", "debug"), ("SOME_UNRELATED_KEY", "x")]);
+        let tokens = bootstrap_overlay_args(&matches, &blob);
+        assert!(
+            tokens.is_empty(),
+            "blob keys with no matching Args env name must be ignored, got: {tokens:?}"
+        );
+    }
+
+    #[test]
+    fn bootstrap_overlay_sets_true_for_set_true_bool_arg_when_blob_truthy() {
+        // require_attestation_cert is ArgAction::SetTrue (plain bool field),
+        // which cannot accept `--flag=value` on the command line.
+        let matches = Args::command()
+            .try_get_matches_from(["vouch-server"])
+            .expect("parse with no flags");
+        let blob = blob(&[("VOUCH_REQUIRE_ATTESTATION_CERT", "true")]);
+        let tokens = bootstrap_overlay_args(&matches, &blob);
+        assert_eq!(
+            tokens,
+            vec![std::ffi::OsString::from("--require-attestation-cert")]
+        );
+    }
+
+    #[test]
+    fn bootstrap_overlay_omits_token_for_set_true_bool_arg_when_blob_falsy() {
+        let matches = Args::command()
+            .try_get_matches_from(["vouch-server"])
+            .expect("parse with no flags");
+        let blob = blob(&[("VOUCH_REQUIRE_ATTESTATION_CERT", "false")]);
+        let tokens = bootstrap_overlay_args(&matches, &blob);
+        assert!(tokens.is_empty(), "got: {tokens:?}");
+    }
+
+    // ========================================================================
+    // resolve_dsql_endpoints
+    // ========================================================================
+
+    #[test]
+    fn resolve_dsql_endpoints_prefers_az_over_region() {
+        let mut endpoints = HashMap::new();
+        endpoints.insert(
+            "us-east-1a".to_string(),
+            "postgres://az.example/postgres".to_string(),
+        );
+        endpoints.insert(
+            "us-east-1".to_string(),
+            "postgres://region.example/postgres".to_string(),
+        );
+        let resolved =
+            resolve_dsql_endpoints(&endpoints, Some("us-east-1a"), Some("us-east-1")).unwrap();
+        assert_eq!(resolved, "postgres://az.example/postgres");
+    }
+
+    #[test]
+    fn resolve_dsql_endpoints_falls_back_to_region_when_az_not_in_map() {
+        let mut endpoints = HashMap::new();
+        endpoints.insert(
+            "us-east-1".to_string(),
+            "postgres://region.example/postgres".to_string(),
+        );
+        let resolved =
+            resolve_dsql_endpoints(&endpoints, Some("us-east-1z"), Some("us-east-1")).unwrap();
+        assert_eq!(resolved, "postgres://region.example/postgres");
+    }
+
+    #[test]
+    fn resolve_dsql_endpoints_errors_when_neither_az_nor_region_set() {
+        let mut endpoints = HashMap::new();
+        endpoints.insert("us-east-1".to_string(), "postgres://x/postgres".to_string());
+        let err = resolve_dsql_endpoints(&endpoints, None, None).unwrap_err();
+        assert!(err.to_string().contains("aws_az"), "got: {err}");
+    }
+
+    #[test]
+    fn resolve_dsql_endpoints_errors_when_location_not_in_map() {
+        let mut endpoints = HashMap::new();
+        endpoints.insert("us-east-1".to_string(), "postgres://x/postgres".to_string());
+        let err = resolve_dsql_endpoints(&endpoints, None, Some("us-west-2")).unwrap_err();
+        assert!(err.to_string().contains("not found"), "got: {err}");
     }
 }

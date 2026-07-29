@@ -229,6 +229,51 @@ These are read by the AWS SDK or by Vouch's AWS-specific resolution logic. None 
 | `AWS_REGION` / `AWS_DEFAULT_REGION` | Region for KMS and S3, and for resolving `dsql_endpoints` |
 | `AWS_AZ` | Availability zone, checked first when resolving `dsql_endpoints` |
 | `AWS_PARTITION` | Partition segment (`aws`, `aws-us-gov`) when building cross-account KMS ARNs |
+| `AWS_USE_FIPS_ENDPOINT` | Whether AWS SDK clients (S3, KMS) use FIPS endpoints |
+
+On EC2, `AWS_REGION`, `AWS_AZ`, and `AWS_PARTITION` fall back to IMDS
+(`placement/region`, `placement/availability-zone`, `services/partition`) when unset —
+see [EC2 instance bootstrap](#ec2-instance-bootstrap) below. `AWS_PARTITION` has no IMDS
+equivalent on older instance generations (`services/partition` 404s), in which case
+cross-account KMS ARN construction is skipped.
+
+## EC2 Instance Bootstrap
+
+On EC2, `vouch-server` performs its own bootstrap at startup before building
+`ServerConfig`: it reads the region, availability zone, and partition from IMDSv2, then
+fetches a `KEY=VALUE` configuration blob from AWS Systems Manager Parameter Store
+(`ssm:GetParameter` with decryption) and applies it as a config layer strictly *below*
+CLI flags and process environment variables — an explicit `--flag` or a real env var
+always wins over the parameter; only variables the operator hasn't already set are
+filled in.
+
+- **Parameter name.** Read from the `VouchConfigParameter` EC2 instance tag (requires
+  the instance to have been launched with `--metadata-options
+  'InstanceMetadataTags=enabled'`). Falls back to `/vouch-server/config` if the tag is
+  absent.
+- **Format.** Strict `KEY=VALUE` lines, one per line, with `#` comments and blank lines
+  allowed — the same format systemd's `EnvironmentFile=` accepts. No `export ` prefix, no
+  CRLF line endings, no quoted values; any of these is a hard startup error rather than a
+  silent misparse.
+- **Scope.** Only variables backed by a `vouch-server` CLI flag (every `VOUCH_*`
+  variable in this reference, plus `AWS_REGION`/`AWS_AZ`/`AWS_PARTITION`/
+  `AWS_USE_FIPS_ENDPOINT`) are read from the parameter. Anything else in the blob
+  (for example a stray `RUST_LOG`) is ignored, since it was never real process
+  environment to begin with. In particular, use `AWS_REGION` — not
+  `AWS_DEFAULT_REGION` — in the parameter: the alias is honored only as a real
+  environment variable, and inside the blob it is ignored in favor of the
+  IMDS-derived region.
+- **Never running on EC2 (IMDS unreachable), or `AWS_EC2_METADATA_DISABLED=true`.**
+  Bootstrap is skipped entirely and the server starts from CLI flags and process
+  environment only, same as a non-EC2 deployment.
+- **On EC2 but the SSM call fails.** This is treated as a startup failure (never a
+  silent fallback to an unconfigured server) — the log records a `VOUCH_BOOTSTRAP_FAILED`
+  line naming the parameter and region. The unit's `Restart=always` retries transient
+  failures (e.g. SSM throttling); a persistent failure means the instance never becomes
+  healthy, which an Auto Scaling Group replaces.
+- **Already configured via env/CLI.** If the S3 config bucket is already set (the
+  `VOUCH_S3_CONFIG_BUCKET` variable or the `--s3-config-bucket` flag), the IMDS probe
+  is skipped entirely, so non-EC2 and fully env-configured deployments pay nothing.
 
 ## Test Mode
 

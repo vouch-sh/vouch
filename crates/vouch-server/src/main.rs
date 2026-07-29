@@ -7,12 +7,14 @@
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+use std::ffi::OsString;
+
 use anyhow::Result;
-use clap::Parser;
+use clap::{ArgMatches, CommandFactory, FromArgMatches, Parser};
 
 use vouch_server::{
     config,
-    infra::{generate_document_key, i18n, router, serve, startup, telemetry},
+    infra::{bootstrap, generate_document_key, i18n, router, serve, startup, telemetry},
 };
 
 // ============================================================================
@@ -57,19 +59,40 @@ async fn main() -> Result<()> {
     let first_arg = std::env::args().nth(1).unwrap_or_default();
     match first_arg.as_str() {
         "serve" | "generate-document-key" | "help" | "--help" | "-h" => {
-            let cli = Cli::parse();
-            match cli.command {
-                Commands::Serve(args) => Box::pin(run_server(args)).await,
-                Commands::GenerateDocumentKey(args) => {
+            let matches = Cli::command().get_matches();
+            match matches.subcommand() {
+                Some(("serve", sub_matches)) => {
+                    let (args, instance) = prepare_serve(sub_matches, |argv| {
+                        let matches = Cli::command().try_get_matches_from(argv)?;
+                        let Some(("serve", serve_matches)) = matches.subcommand() else {
+                            return Err(clap::Error::raw(
+                                clap::error::ErrorKind::MissingSubcommand,
+                                "bootstrap overlay re-parse lost the 'serve' subcommand",
+                            ));
+                        };
+                        config::Args::from_arg_matches(serve_matches)
+                    })
+                    .await?;
+                    Box::pin(run_server(args, instance)).await
+                }
+                Some(("generate-document-key", sub_matches)) => {
+                    let args = generate_document_key::GenerateDocumentKeyArgs::from_arg_matches(
+                        sub_matches,
+                    )?;
                     init_stderr_logging();
                     generate_document_key::run(args).await
                 }
+                _ => Err(anyhow::anyhow!("vouch-server: no subcommand matched")),
             }
         }
         _ => {
-            // Legacy mode: no subcommand, parse as direct server args
-            let args = config::Args::parse();
-            Box::pin(run_server(args)).await
+            let matches = config::Args::command().get_matches();
+            let (args, instance) = prepare_serve(&matches, |argv| {
+                let matches = config::Args::command().try_get_matches_from(argv)?;
+                config::Args::from_arg_matches(&matches)
+            })
+            .await?;
+            Box::pin(run_server(args, instance)).await
         }
     }
 }
@@ -85,23 +108,69 @@ fn init_stderr_logging() {
         .init();
 }
 
-async fn run_server(args: config::Args) -> Result<()> {
-    // Parse log format early (before full config parsing) so logging is
-    // initialized before any other work that might emit log messages.
-    let log_format = match args.log_format.trim().to_lowercase().as_str() {
+/// Initialize tracing, print the startup banner, validate i18n catalogs, run
+/// EC2 instance bootstrap (IMDS + SSM, see `infra::bootstrap`), and resolve
+/// the final `serve` `Args`.
+///
+/// `matches` is the already-parsed `ArgMatches` for `Args` — the top-level
+/// matches in legacy invocation, or the `serve` subcommand's matches when
+/// invoked as `vouch-server serve`. `reparse` performs the mode-specific
+/// second parse (from the bootstrap-overlaid argv) when a blob value needs
+/// to fill a gap that the first parse left as `None`/`DefaultValue`; both
+/// `matches` and the eventual `args` therefore reflect the *same* CLI
+/// invocation, just before and after the overlay is applied.
+///
+/// Tracing is initialized from the first parse's `log_format` (before
+/// bootstrap runs) so a bootstrap failure is itself logged; the one accepted
+/// gap is an operator setting `VOUCH_LOG_FORMAT` only in the bootstrap
+/// parameter, never in real CLI/env — symmetric with the same accepted gap
+/// for `RUST_LOG`.
+///
+/// # Errors
+///
+/// Returns an error if tracing or i18n fail to initialize, if bootstrap
+/// discovery fails (IMDS reachable but SSM failed), or if the overlaid
+/// re-parse fails.
+async fn prepare_serve(
+    matches: &ArgMatches,
+    reparse: impl FnOnce(Vec<OsString>) -> clap::error::Result<config::Args>,
+) -> Result<(config::Args, Option<bootstrap::Bootstrap>)> {
+    let preliminary = config::Args::from_arg_matches(matches)?;
+
+    let log_format = match preliminary.log_format.trim().to_lowercase().as_str() {
         "json" => config::LogFormat::Json,
         _ => config::LogFormat::Text,
     };
     telemetry::init_tracing(log_format)?;
-
     router::print_startup_banner();
-
-    // Verify the embedded i18n catalogs loaded — refuses to start if the UI
-    // would render with raw Fluent message ids.
     i18n::validate_startup()?;
 
+    let instance = if preliminary.s3_config_bucket.is_some() {
+        tracing::debug!("s3_config_bucket already configured; skipping IMDS/SSM bootstrap");
+        None
+    } else {
+        bootstrap::discover().await.inspect_err(|e| {
+            tracing::error!("VOUCH_BOOTSTRAP_FAILED: {e:#}");
+        })?
+    };
+    let Some(instance) = instance else {
+        return Ok((preliminary, None));
+    };
+
+    let overlay = config::bootstrap_overlay_args(matches, &instance.params);
+    if overlay.is_empty() {
+        return Ok((preliminary, Some(instance)));
+    }
+
+    let mut argv: Vec<OsString> = std::env::args_os().collect();
+    argv.extend(overlay);
+    let args = reparse(argv)?;
+    Ok((args, Some(instance)))
+}
+
+async fn run_server(args: config::Args, instance: Option<bootstrap::Bootstrap>) -> Result<()> {
     // Initialize all server components (config, database, state, background tasks)
-    let components = startup::initialize(args).await?;
+    let components = startup::initialize(args, instance.as_ref()).await?;
 
     // Build the HTTP router with all routes, middleware, and state
     let app = components.build_app()?;

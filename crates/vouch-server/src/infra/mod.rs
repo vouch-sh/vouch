@@ -5,6 +5,7 @@
 //! These modules handle operational concerns for running the server binary.
 //! They are not part of the business logic or HTTP handler layers.
 
+pub mod bootstrap;
 pub mod cleanup;
 pub mod csp;
 pub mod dns;

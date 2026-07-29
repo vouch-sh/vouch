@@ -66,8 +66,6 @@
         <!-- Networking -->
         <package name="systemd-resolved"/>
         <package name="amazon-chrony-config"/>
-        <!-- AWS integration (v2 has no curl dependency) -->
-        <package name="awscli-2"/>
         <!-- CloudWatch Logs forwarding -->
         <package name="amazon-cloudwatch-agent"/>
         <!-- Don't install these packages -->
