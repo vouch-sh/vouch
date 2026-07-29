@@ -17,6 +17,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, Validation};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
+use std::collections::HashSet;
 use std::fmt;
 use zeroize::Zeroizing;
 
@@ -454,15 +455,17 @@ pub(crate) fn decode_state_token<T: DeserializeOwned>(
     jwt_type: JwtType,
     secret: &[u8],
 ) -> Result<T, jsonwebtoken::errors::Error> {
-    let mut validation = Validation::default();
-    // No leeway: state tokens are server-issued and server-validated on the
-    // same clock, so clock skew is zero. A 60s grace would allow replaying an
-    // expired token after its DB single-use marker is already cleaned up.
-    validation.leeway = 0;
-    validation.required_spec_claims.clear();
-    // Skip aud validation — callers that need it (e.g. AuthorizationCode)
-    // validate iss/aud manually after decode.
-    validation.validate_aud = false;
+    let validation = Validation {
+        // No leeway: state tokens are server-issued and server-validated on the
+        // same clock, so clock skew is zero. A 60s grace would allow replaying an
+        // expired token after its DB single-use marker is already cleaned up.
+        leeway: 0,
+        required_spec_claims: HashSet::new(),
+        // Skip aud validation — callers that need it (e.g. AuthorizationCode)
+        // validate iss/aud manually after decode.
+        validate_aud: false,
+        ..Validation::default()
+    };
     let data = jsonwebtoken::decode::<T>(token, &DecodingKey::from_secret(secret), &validation)?;
     // RFC 8725 §3.11: Validate typ header
     if data.header.typ.as_deref() != Some(jwt_type.as_header_str()) {

@@ -513,12 +513,16 @@ fn extract_entra_tenant_from_issuer(issuer: &str) -> Option<&str> {
 }
 
 /// Find a `DecodingKey` from a JWKS matching the given `kid` and algorithm.
+///
+/// A JWKS may contain key types this crate cannot use — `jsonwebtoken` keeps
+/// them as `AlgorithmParameters::Other` rather than rejecting the whole set —
+/// so the algorithm and last-resort searches skip entries that fail to convert.
 fn find_decoding_key(
     jwks: &jsonwebtoken::jwk::JwkSet,
     kid: Option<&str>,
     alg: jsonwebtoken::Algorithm,
 ) -> Result<jsonwebtoken::DecodingKey, anyhow::Error> {
-    let expected_key_alg = algorithm_to_key_algorithm(alg);
+    let expected_key_alg = jsonwebtoken::jwk::KeyAlgorithm::from(alg);
 
     // Try matching by kid first
     if let Some(kid) = kid {
@@ -532,44 +536,26 @@ fn find_decoding_key(
     }
 
     // Fall back to matching by algorithm
-    if let Some(expected) = expected_key_alg {
-        for jwk in &jwks.keys {
-            if jwk.common.key_algorithm == Some(expected) {
-                return jsonwebtoken::DecodingKey::from_jwk(jwk)
-                    .map_err(|e| anyhow::anyhow!("Failed to build key from JWK: {e}"));
-            }
+    for jwk in &jwks.keys {
+        if jwk.common.key_algorithm != Some(expected_key_alg) {
+            continue;
+        }
+        match jsonwebtoken::DecodingKey::from_jwk(jwk) {
+            Ok(key) => return Ok(key),
+            Err(e) => tracing::warn!(error = %e, "Skipping unusable {expected_key_alg} JWK"),
         }
     }
 
-    // Last resort: try the first key (no kid/algorithm matched)
-    tracing::warn!("No JWK matched by kid or algorithm, falling back to first key in JWKS");
-    jwks.keys.first().map_or_else(
-        || Err(anyhow::anyhow!("Upstream JWKS is empty")),
-        |jwk| {
-            jsonwebtoken::DecodingKey::from_jwk(jwk)
-                .map_err(|e| anyhow::anyhow!("Failed to build key from JWK: {e}"))
-        },
-    )
-}
-
-/// Convert a `jsonwebtoken::Algorithm` to its `jwk::KeyAlgorithm` equivalent.
-fn algorithm_to_key_algorithm(
-    alg: jsonwebtoken::Algorithm,
-) -> Option<jsonwebtoken::jwk::KeyAlgorithm> {
-    use jsonwebtoken::Algorithm;
-    use jsonwebtoken::jwk::KeyAlgorithm;
-    match alg {
-        Algorithm::ES256 => Some(KeyAlgorithm::ES256),
-        Algorithm::ES384 => Some(KeyAlgorithm::ES384),
-        Algorithm::RS256 => Some(KeyAlgorithm::RS256),
-        Algorithm::RS384 => Some(KeyAlgorithm::RS384),
-        Algorithm::RS512 => Some(KeyAlgorithm::RS512),
-        Algorithm::PS256 => Some(KeyAlgorithm::PS256),
-        Algorithm::PS384 => Some(KeyAlgorithm::PS384),
-        Algorithm::PS512 => Some(KeyAlgorithm::PS512),
-        Algorithm::EdDSA => Some(KeyAlgorithm::EdDSA),
-        _ => None,
+    // Last resort: the first key we can actually use (no kid/algorithm matched)
+    tracing::warn!("No JWK matched by kid or algorithm, falling back to first usable key in JWKS");
+    for jwk in &jwks.keys {
+        match jsonwebtoken::DecodingKey::from_jwk(jwk) {
+            Ok(key) => return Ok(key),
+            Err(e) => tracing::warn!(error = %e, "Skipping unusable JWK"),
+        }
     }
+
+    anyhow::bail!("Upstream JWKS contains no key usable for {alg:?}")
 }
 
 /// Check if a URL points to localhost.
@@ -592,6 +578,7 @@ mod tests {
     )]
 
     use super::*;
+    use jsonwebtoken::Algorithm;
 
     // ── Issuer host matching (#425) ────────────────────────────────────────
 
@@ -643,6 +630,83 @@ mod tests {
     fn is_google_host_rejects_malformed_url() {
         assert!(!is_google_host("not a url"));
         assert!(!is_google_host(""));
+    }
+
+    // ── Upstream JWKS key selection ─────────────────────────────────────────
+
+    /// RSA public key modulus from RFC 7638 Section 3.1.
+    const RFC7638_N: &str = "0vx7agoebGcQSuuPiLJXZptN9nndrQmbXEps2aiAFbWhM78LhWx4cbbfAAtVT86zwu1\
+        RK7aPFFxuhDR1L6tSoc_BJECPebWKRXjBZCiFV4n3oknjhMstn64tZ_2W-5JsGY4Hc5n9yBXArwl93lqt7_RN5w6\
+        Cf0h4QyQ5v-65YGjQR0_FDW2QvzqY368QQMicAtaSqzs8KJZgnYb9c7d0zgdAZHzu6qMQvRL5hajrn1n91CbOpbI\
+        SD08qNLyrdkt-bFTWhAI4vMQFh6WeZu0fM4lFd2NcRwr3XPksINHaQ-G_xBniIqbw0Ls1jF44-csFCur-kEgU8aw\
+        apJzKnqDKgw";
+
+    fn rsa_jwk(kid: &str) -> serde_json::Value {
+        serde_json::json!({
+            "kty": "RSA",
+            "alg": "RS256",
+            "use": "sig",
+            "kid": kid,
+            "n": RFC7638_N,
+            "e": "AQAB",
+        })
+    }
+
+    /// A key type `jsonwebtoken` has no decoder for, shaped like the ML-DSA
+    /// entry in RFC 9964 Appendix A.1.
+    fn unusable_jwk(kid: &str) -> serde_json::Value {
+        serde_json::json!({
+            "kty": "AKP",
+            "use": "sig",
+            "kid": kid,
+            "pub": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        })
+    }
+
+    fn jwks_of(keys: Vec<serde_json::Value>) -> jsonwebtoken::jwk::JwkSet {
+        serde_json::from_value(serde_json::json!({ "keys": keys })).expect("JWKS must deserialize")
+    }
+
+    #[test]
+    fn find_decoding_key_matches_by_kid() {
+        let jwks = jwks_of(vec![rsa_jwk("other"), rsa_jwk("wanted")]);
+        assert!(find_decoding_key(&jwks, Some("wanted"), Algorithm::RS256).is_ok());
+    }
+
+    #[test]
+    fn find_decoding_key_reports_missing_kid() {
+        let jwks = jwks_of(vec![rsa_jwk("other")]);
+        let err = find_decoding_key(&jwks, Some("wanted"), Algorithm::RS256)
+            .expect_err("unknown kid must not resolve a key");
+        assert!(err.to_string().contains("wanted"));
+    }
+
+    /// jsonwebtoken 11 keeps unrecognized `kty` values as
+    /// `AlgorithmParameters::Other` instead of failing the whole set, so a
+    /// JWKS that lists one first must still resolve the usable key behind it.
+    #[test]
+    fn find_decoding_key_skips_unusable_key_when_matching_by_algorithm() {
+        let mut unusable = unusable_jwk("pq-1");
+        unusable["alg"] = serde_json::json!("RS256");
+        let jwks = jwks_of(vec![unusable, rsa_jwk("rsa-1")]);
+        assert!(find_decoding_key(&jwks, None, Algorithm::RS256).is_ok());
+    }
+
+    #[test]
+    fn find_decoding_key_skips_unusable_key_in_last_resort_fallback() {
+        // Neither key advertises `alg`, so selection falls through to the
+        // first key the crate can actually build a `DecodingKey` from.
+        let mut usable = rsa_jwk("rsa-1");
+        usable.as_object_mut().expect("object").remove("alg");
+        let jwks = jwks_of(vec![unusable_jwk("pq-1"), usable]);
+        assert!(find_decoding_key(&jwks, None, Algorithm::RS256).is_ok());
+    }
+
+    #[test]
+    fn find_decoding_key_rejects_jwks_without_a_usable_key() {
+        let jwks = jwks_of(vec![unusable_jwk("pq-1")]);
+        assert!(find_decoding_key(&jwks, None, Algorithm::RS256).is_err());
+        assert!(find_decoding_key(&jwks_of(vec![]), None, Algorithm::RS256).is_err());
     }
 
     // ── Test helpers for verify_id_token ────────────────────────────────────
