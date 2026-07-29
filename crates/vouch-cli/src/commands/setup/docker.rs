@@ -134,12 +134,17 @@ fn anchor_registries_to_profile(registries: &[String], profile: Option<&str>) ->
         return Ok(());
     }
 
+    // Config::modify performs both a load and a save; its internal context
+    // already distinguishes the two (load errors via Config::load, save errors
+    // via Config::save). Wrapping it with a load-focused message would be
+    // misleading — the config already loaded successfully at the top of `run`,
+    // so a failure here is far more likely to come from the save phase (e.g.
+    // disk full, permissions) than from re-loading a file that just loaded.
     Config::modify(|config| {
         for registry in &ecr_registries {
             config.set_docker_registry_profile(registry, &resolved.name);
         }
-    })
-    .with_context(|| tr!("setup-err-load-config"))?;
+    })?;
 
     for registry in ecr_registries {
         tr_println!(
@@ -288,4 +293,139 @@ fn get_configured_registries() -> Result<Vec<String>> {
         .collect();
 
     Ok(registries)
+}
+
+#[cfg(test)]
+#[expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "test code: panic on assertion failure is acceptable"
+)]
+mod tests {
+    use super::*;
+
+    /// Serialize tests that mutate `XDG_CONFIG_HOME` (process-wide env) so
+    /// parallel test threads cannot observe each other's config-path
+    /// redirection. `Mutex<()>` is permitted by the `mutex_atomic` lint
+    /// (which only flags `Mutex<bool>`/`Mutex<integer>`).
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// The config dir that `Config::modify` creates under `XDG_CONFIG_HOME`.
+    fn vouch_config_dir(tmp: &tempfile::TempDir) -> std::path::PathBuf {
+        tmp.path().join("vouch")
+    }
+
+    /// Config::modify performs both a load AND a save. When the save phase
+    /// fails (e.g. disk full, read-only filesystem), the error must surface a
+    /// save-appropriate message — NOT the load-focused "failed to load config
+    /// \- run 'vouch enroll' first" wrapper that `anchor_registries_to_profile`
+    /// previously applied (and which this fix removed).
+    ///
+    /// This test calls `Config::modify` directly with the same mutation that
+    /// `anchor_registries_to_profile` uses, and forces the save to fail by
+    /// replacing the config directory with a regular file inside the closure
+    /// (after load succeeds, before save runs). Replacing the directory with a
+    /// file (rather than chmod 0o555) ensures the failure is deterministic
+    /// even when the test runs as root, which bypasses permission checks. The
+    /// resulting error chain is identical to what
+    /// `anchor_registries_to_profile` propagates (it uses `?` with no extra
+    /// wrapping).
+    #[test]
+    #[cfg(unix)]
+    #[expect(
+        unsafe_code,
+        reason = "XDG_CONFIG_HOME mutation to isolate the config path; restored before assertion"
+    )]
+    fn save_failure_does_not_report_failed_to_load_config() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cfg_dir = vouch_config_dir(&tmp);
+
+        // SAFETY: XDG_CONFIG_HOME is removed before the test returns,
+        // regardless of assertion outcome.
+        unsafe {
+            std::env::set_var("XDG_CONFIG_HOME", tmp.path());
+        }
+
+        // The closure replaces the vouch/ directory with a regular file so
+        // that config.save() → atomic_write_secure → create_dir_all(parent)
+        // fails with "Not a directory". Load has already succeeded by the
+        // time the closure runs, so this deterministically isolates a
+        // SAVE-phase failure.
+        let result = Config::modify(|cfg| {
+            cfg.set_docker_registry_profile(
+                "123456789012.dkr.ecr.us-east-1.amazonaws.com",
+                "vouch-demo",
+            );
+            let _removed: Result<(), std::io::Error> = std::fs::remove_dir_all(&cfg_dir);
+            let _written: Result<(), std::io::Error> = std::fs::write(&cfg_dir, b"not a directory");
+        });
+
+        // SAFETY: env restored.
+        unsafe {
+            std::env::remove_var("XDG_CONFIG_HOME");
+        }
+
+        let err = result.expect_err("save should fail when config dir is a file");
+        let msg = format!("{err:#}");
+        assert!(
+            !msg.contains("failed to load config"),
+            "save-phase error must not say 'failed to load config': {msg}"
+        );
+        assert!(
+            !msg.contains("enroll' first"),
+            "save-phase error must not suggest enrolling: {msg}"
+        );
+        assert!(
+            msg.contains("failed to write config"),
+            "expected save-phase error ('failed to write config'), got: {msg}"
+        );
+    }
+
+    /// When `Config::modify` fails during the LOAD phase (e.g. corrupt config
+    /// file), the error must surface a load-appropriate message from
+    /// `Config::load`'s own internal context — NOT the removed
+    /// `setup-err-load-config` wrapper. This confirms the removal didn't
+    /// discard useful load-error context.
+    #[test]
+    #[cfg(unix)]
+    #[expect(
+        unsafe_code,
+        reason = "XDG_CONFIG_HOME mutation to isolate the config path; restored before assertion"
+    )]
+    fn load_failure_surfaces_parse_error_without_load_wrapper() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cfg_dir = vouch_config_dir(&tmp);
+        std::fs::create_dir_all(&cfg_dir).expect("create vouch dir");
+        // Write invalid JSON so Config::load's parse step fails.
+        std::fs::write(cfg_dir.join("config.json"), "{ not valid json")
+            .expect("write corrupt config");
+
+        // SAFETY: XDG_CONFIG_HOME is removed before the test returns.
+        unsafe {
+            std::env::set_var("XDG_CONFIG_HOME", tmp.path());
+        }
+
+        let result = Config::modify(|cfg| {
+            cfg.set_docker_registry_profile("ghcr.io", "vouch-demo");
+        });
+
+        // SAFETY: env restored.
+        unsafe {
+            std::env::remove_var("XDG_CONFIG_HOME");
+        }
+
+        let err = result.expect_err("load should fail on corrupt config");
+        let msg = format!("{err:#}");
+        assert!(
+            !msg.contains("enroll' first"),
+            "load-phase error must not carry the old enroll-remediation wrapper: {msg}"
+        );
+        // Config::load wraps parse failures with err-failed-parse-config.
+        assert!(
+            msg.contains("failed to parse config"),
+            "expected parse-related load error, got: {msg}"
+        );
+    }
 }
