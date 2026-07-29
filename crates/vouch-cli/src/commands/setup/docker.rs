@@ -302,15 +302,18 @@ fn get_configured_registries() -> Result<Vec<String>> {
     reason = "test code: panic on assertion failure is acceptable"
 )]
 mod tests {
+    #[cfg(unix)]
     use super::*;
 
     /// Serialize tests that mutate `XDG_CONFIG_HOME` (process-wide env) so
     /// parallel test threads cannot observe each other's config-path
     /// redirection. `Mutex<()>` is permitted by the `mutex_atomic` lint
     /// (which only flags `Mutex<bool>`/`Mutex<integer>`).
+    #[cfg(unix)]
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     /// The config dir that `Config::modify` creates under `XDG_CONFIG_HOME`.
+    #[cfg(unix)]
     fn vouch_config_dir(tmp: &tempfile::TempDir) -> std::path::PathBuf {
         tmp.path().join("vouch")
     }
