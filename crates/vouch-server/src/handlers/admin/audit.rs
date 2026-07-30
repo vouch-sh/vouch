@@ -448,6 +448,42 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn test_audit_page_shows_event_with_mixed_case_email_domain() {
+        // Reproduces the production bug path: an audit event inserted with a
+        // mixed-case email domain (as an IdP might return) must still appear
+        // on the admin audit page, which filters by the org's stored
+        // lowercase domain.
+        let (app, state) = test_app().await;
+        let org = create_test_org(&state.store, "corp.example.com").await;
+        let admin =
+            create_test_user_in_org(&state.store, "admin@corp.example.com", &org.id, true).await;
+        let auth_id = create_test_authenticator(&state.store, &admin.id).await;
+        let token = create_test_session(&state, &admin.id, &admin.email, &auth_id).await;
+        let cookie = format!("{}={token}", vouch_common::SESSION_COOKIE_NAME);
+
+        // Seed an audit event with a mixed-case email domain, as an IdP might
+        // return. The org domain is stored lowercase ("corp.example.com"), so
+        // the page's email_domain filter must match via case normalization.
+        state
+            .audit
+            .insert_event(
+                crate::db::audit::AuditEventKind::LoginSuccess,
+                Some(&admin.id),
+                Some("Alice@CORP.Example.COM"),
+                r#"{"success":true}"#,
+            )
+            .await
+            .unwrap();
+
+        let (status, body) = http_get(&app, "/admin/audit", &[("Cookie", &cookie)]).await;
+        assert_eq!(status, StatusCode::OK, "admin should get 200");
+        assert!(
+            body.contains("login_success"),
+            "audit page should list the mixed-case-domain event; body did not contain event_type"
+        );
+    }
+
     // ---- audit_filter_event_types helper tests ----
 
     #[test]
