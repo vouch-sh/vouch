@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/*"]
 
 [workspace.package]
-version = "2026.7.4"
+version = "2026.7.5"
 edition = "2024"
 license = "Apache-2.0 OR MIT"
 rust-version = "1.97.1"
@@ -157,7 +157,7 @@ ipnet = { version = "=2.12.0", default-features = false }
 headers = { version = "=0.4.1", default-features = false }
 hex = { version = "=0.4.3", default-features = false }
 hickory-resolver = { version = "=0.26.1", default-features = false }
-http = { version = "=1.4.2", default-features = false }
+http = { version = "=1.5.0", default-features = false }
 fluent-bundle = { version = "=0.16.0", default-features = false }
 i18n-embed = { version = "=0.16.0", default-features = false }
 i18n-embed-fl = { version = "=0.10.1", default-features = false }
@@ -184,7 +184,7 @@ roxmltree = { version = "=0.21.1", default-features = false }
 rpassword = { version = "=7.5.4", default-features = false }
 rust-embed = { version = "=8.12.0", default-features = false }
 rust-ini = { version = "=0.21.3", default-features = false }
-rustls = { version = "=0.23.42", default-features = false }
+rustls = { version = "=0.23.43", default-features = false }
 sea-query = { version = "=1.0.1", default-features = false }
 sea-query-sqlx = { version = "=0.9.1", default-features = false }
 sha2 = { version = "=0.10.9", default-features = false }
