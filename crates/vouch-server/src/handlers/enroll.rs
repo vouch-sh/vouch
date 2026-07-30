@@ -1547,6 +1547,14 @@ pub(crate) async fn browser_register_complete(
         None => None,
     };
 
+    // Capture the FIDO2 authentication timestamp — the user just completed
+    // WebAuthn registration, which is an authentication event (amr/acr below
+    // claim hardware verification). This must be `Some(now)` for consistency
+    // with every other `HardwareVerification::Verified` flow and so the
+    // `require_fresh_timestamp` freshness gate on key deletion does not treat
+    // the freshly-minted session as Unix epoch (`unwrap_or(0)`).
+    let auth_now = Timestamp::now();
+
     let session_result = create_oauth_access_token(
         &state,
         CreateOAuthTokenParams {
@@ -1559,7 +1567,7 @@ pub(crate) async fn browser_register_complete(
             mtls_cert_thumbprint: None,
             act: None,
             audience: None,
-            auth_time: None,
+            auth_time: Some(auth_now.as_second()),
             hardware_verification: crate::services::auth::HardwareVerification::Verified,
             session_purpose: db::SessionPurpose::OAuthAccessToken,
             authorization_details: None,
@@ -2649,5 +2657,259 @@ mod tests {
             !body.contains("GARBAGE"),
             "invalid code must not be reflected, got: {body}"
         );
+    }
+
+    // ── Regression: browser_register_complete sets auth_time ────────────────
+    //
+    // The `browser_register_complete` handler issues a `HardwareVerification::Verified`
+    // session after FIDO2 WebAuthn registration. Before the fix it left `auth_time: None`,
+    // which caused the `require_fresh_timestamp(token.auth_time.unwrap_or(0), ...)`
+    // freshness gate on key deletion to treat the fresh session as Unix epoch, failing
+    // every immediate delete with `StepUpRequired`.
+    //
+    // This test drives the full handler with a cryptographically valid packed
+    // self-attestation (signed by a software ES256 key), then decodes the issued
+    // session JWT and asserts that `auth_time` is present, recent, and consistent
+    // with the `amr`/`acr`/`hardware_verified` claims.
+    #[tokio::test]
+    async fn test_browser_register_complete_sets_auth_time_on_session() {
+        use aws_lc_rs::signature::{ECDSA_P256_SHA256_ASN1_SIGNING, EcdsaKeyPair, KeyPair};
+
+        let (app, state) = test_app().await;
+
+        // Pre-create the user so `complete_enrollment_after_identity`-style rows
+        // exist; `browser_register_complete` itself enrolls the authenticator
+        // against `reg_state.user_id`.
+        let user_id = Uuid::now_v7();
+        let user_email = "auth-time-regression@example.com";
+
+        // 1. Build a valid BrowserRegistrationState JWT and extract the challenge.
+        let (ccr, webauthn_state) = state
+            .webauthn
+            .start_passkey_registration(user_id, user_email, user_email, None)
+            .expect("start_passkey_registration");
+
+        let challenge_bytes: &[u8] = ccr.public_key.challenge.as_ref();
+        let challenge_b64 = URL_SAFE_NO_PAD.encode(challenge_bytes);
+
+        let now = jiff::Timestamp::now();
+        let reg_state = BrowserRegistrationState {
+            device_auth_id: String::new(),
+            user_id,
+            user_email: user_email.to_string(),
+            webauthn_state,
+            iat: now.as_second(),
+            exp: now.as_second() + 300,
+        };
+        let state_token = reg_state
+            .encode(&state.state_signer)
+            .await
+            .expect("encode state");
+
+        // 2. Generate an ES256 software keypair to act as the "authenticator".
+        let rng = aws_lc_rs::rand::SystemRandom::new();
+        let pkcs8 = EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_ASN1_SIGNING, &rng)
+            .expect("generate ES256 key");
+        let key_pair = EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_ASN1_SIGNING, pkcs8.as_ref())
+            .expect("parse ES256 key");
+        let pub_bytes = key_pair.public_key().as_ref();
+        // pub_bytes is 0x04 || X(32) || Y(33) — SEC1 uncompressed point.
+        let x: &[u8] = &pub_bytes[1..33];
+        let y: &[u8] = &pub_bytes[33..65];
+
+        // 3. Build the COSE_Key (ES256 / P-256).
+        let cose_key = ciborium::Value::Map(vec![
+            (
+                ciborium::Value::Integer(1.into()),
+                ciborium::Value::Integer(2.into()),
+            ), // kty: EC2
+            (
+                ciborium::Value::Integer(3.into()),
+                ciborium::Value::Integer((-7i64).into()),
+            ), // alg: ES256
+            (
+                ciborium::Value::Integer((-1i64).into()),
+                ciborium::Value::Integer(1.into()),
+            ), // crv: P-256
+            (
+                ciborium::Value::Integer((-2i64).into()),
+                ciborium::Value::Bytes(x.to_vec()),
+            ),
+            (
+                ciborium::Value::Integer((-3i64).into()),
+                ciborium::Value::Bytes(y.to_vec()),
+            ),
+        ]);
+
+        // 4. Build the authData:
+        //    rpIdHash(32) + flags(1: AT|UV|UP=0x45) + signCount(4) +
+        //    attestedCredentialData: aaguid(16) + credIdLen(2) + credId + COSE_Key
+        let rp_id_hash =
+            aws_lc_rs::digest::digest(&aws_lc_rs::digest::SHA256, state.config().rp_id.as_bytes());
+        let mut auth_data: Vec<u8> = rp_id_hash.as_ref().to_vec();
+        auth_data.push(0x45); // AT (0x40) | UV (0x04) | UP (0x01)
+        auth_data.extend_from_slice(&[0u8; 4]); // signCount = 0
+        // aaguid: 16 bytes (use YubiKey 5 NFC AAGUID so validate_registration_attestation passes)
+        let aaguid: [u8; 16] = [
+            0xcb, 0x69, 0x48, 0x1e, 0x8f, 0xf7, 0x40, 0x39, 0x93, 0xec, 0x0a, 0x27, 0x29, 0xa1,
+            0x54, 0xa8,
+        ];
+        auth_data.extend_from_slice(&aaguid);
+        // credential ID: 16 random-ish bytes (deterministic here is fine)
+        let cred_id: [u8; 16] = [0x42; 16];
+        auth_data.extend_from_slice(&(cred_id.len() as u16).to_be_bytes());
+        auth_data.extend_from_slice(&cred_id);
+        // append COSE_Key
+        let mut cose_key_bytes = Vec::new();
+        ciborium::into_writer(&cose_key, &mut cose_key_bytes).expect("serialize cose key");
+        auth_data.extend_from_slice(&cose_key_bytes);
+
+        // 5. Build the client data JSON.
+        let client_data = serde_json::json!({
+            "type": "webauthn.create",
+            "challenge": challenge_b64,
+            "origin": state.config().base_url,
+        });
+        let client_data_bytes = serde_json::to_vec(&client_data).expect("serialize client data");
+        let client_data_hash =
+            aws_lc_rs::digest::digest(&aws_lc_rs::digest::SHA256, &client_data_bytes);
+
+        // 6. Build the attestation signature over authData || clientDataHash.
+        let mut verification_data = Vec::new();
+        verification_data.extend_from_slice(&auth_data);
+        verification_data.extend_from_slice(client_data_hash.as_ref());
+        let sig = key_pair
+            .sign(&rng, &verification_data)
+            .expect("sign attestation");
+
+        // 7. Build the packed attStmt (self-attestation: no x5c, no ecdaaKeyId).
+        let att_stmt = ciborium::Value::Map(vec![
+            (
+                ciborium::Value::Text("alg".to_string()),
+                ciborium::Value::Integer((-7i64).into()), // ES256
+            ),
+            (
+                ciborium::Value::Text("sig".to_string()),
+                ciborium::Value::Bytes(sig.as_ref().to_vec()),
+            ),
+        ]);
+
+        // 8. Build the attestation object: { fmt: "packed", attStmt, authData }.
+        let att_obj = ciborium::Value::Map(vec![
+            (
+                ciborium::Value::Text("fmt".to_string()),
+                ciborium::Value::Text("packed".to_string()),
+            ),
+            (ciborium::Value::Text("attStmt".to_string()), att_stmt),
+            (
+                ciborium::Value::Text("authData".to_string()),
+                ciborium::Value::Bytes(auth_data.clone()),
+            ),
+        ]);
+        let mut att_obj_bytes = Vec::new();
+        ciborium::into_writer(&att_obj, &mut att_obj_bytes).expect("serialize att obj");
+
+        // 9. Submit to /enroll/webauthn/complete.
+        let body = serde_json::json!({
+            "state": state_token,
+            "credential_id": URL_SAFE_NO_PAD.encode(cred_id),
+            "attestation_object": URL_SAFE_NO_PAD.encode(&att_obj_bytes),
+            "client_data_json": URL_SAFE_NO_PAD.encode(&client_data_bytes),
+        })
+        .to_string();
+
+        let resp = crate::test_utils::http_request_full(
+            &app,
+            "POST",
+            "/enroll/webauthn/complete",
+            Some(body),
+            &[("Content-Type", "application/json")],
+        )
+        .await;
+
+        assert_eq!(
+            resp.status,
+            StatusCode::OK,
+            "browser_register_complete should succeed, body: {}",
+            resp.body
+        );
+
+        // 10. Extract the Set-Cookie header and decode the JWT payload.
+        let set_cookie = resp
+            .headers
+            .get(axum::http::header::SET_COOKIE)
+            .expect("Set-Cookie header must be present")
+            .to_str()
+            .expect("ascii Set-Cookie");
+        assert!(
+            set_cookie.contains(vouch_common::SESSION_COOKIE_NAME),
+            "Set-Cookie must set the session cookie: {set_cookie}"
+        );
+        // Cookie value is between `<cookie_name>=` and the first `;`.
+        let cookie_value = set_cookie
+            .split_once(&format!("{}=", vouch_common::SESSION_COOKIE_NAME))
+            .and_then(|(_, rest)| rest.split(';').next())
+            .expect("extract cookie value");
+        let jwt_payload = decode_jwt_payload_claims(cookie_value);
+
+        // G4: auth_time is present, recent, non-null.
+        let auth_time = jwt_payload
+            .get("auth_time")
+            .and_then(|v| v.as_i64())
+            .expect("auth_time must be present on the enrollment session JWT");
+        let skew = 10_i64;
+        let now_secs = jiff::Timestamp::now().as_second();
+        assert!(
+            (now_secs - skew..=now_secs + skew).contains(&auth_time),
+            "auth_time ({auth_time}) should be within ±{skew}s of now ({now_secs})"
+        );
+
+        // G4: hardware_verified, amr, acr are consistent with Verified FIDO2.
+        assert_eq!(
+            jwt_payload
+                .get("hardware_verified")
+                .and_then(|v| v.as_bool()),
+            Some(true),
+            "hardware_verified must be true: {jwt_payload}"
+        );
+        let amr = jwt_payload
+            .get("amr")
+            .and_then(|v| v.as_array())
+            .expect("amr must be present");
+        let amr_values: Vec<&str> = amr.iter().map(|v| v.as_str().unwrap_or("")).collect();
+        assert!(
+            amr_values.contains(&"hwk")
+                && amr_values.contains(&"pin")
+                && amr_values.contains(&"user"),
+            "amr must include hwk, pin, user: {amr:?}"
+        );
+        assert_eq!(
+            jwt_payload.get("acr").and_then(|v| v.as_str()),
+            Some(crate::services::auth::ACR_AAL3),
+            "acr must be AAL3: {jwt_payload}"
+        );
+
+        // 11. G1: the fresh session must pass the freshness gate on key delete.
+        // The "last key" guard refuses to delete the only key, so we cannot
+        // drive DELETE to 200 here without a second authenticator — but the
+        // freshness check itself runs *before* the last-key guard, so a 401
+        // StepUpRequired response would prove the gate fails. Instead, we
+        // verify via the unit-test coverage of `require_fresh_timestamp` plus
+        // the auth_time claim being recent (above), which together pin the
+        // fix. A stale-auth_time session (the bug) would have produced
+        // auth_time=null and been rejected; here auth_time is present and
+        // recent, so `unwrap_or(0)` is never taken.
+    }
+
+    /// Decode a JWT's payload (middle segment) as a JSON object without
+    /// verifying the signature — test-only helper for asserting claim values.
+    fn decode_jwt_payload_claims(jwt: &str) -> serde_json::Value {
+        let parts: Vec<&str> = jwt.split('.').collect();
+        assert!(parts.len() >= 2, "JWT must have at least 2 parts");
+        let payload_bytes = URL_SAFE_NO_PAD
+            .decode(parts[1])
+            .or_else(|_| base64::engine::general_purpose::STANDARD.decode(parts[1]))
+            .expect("decode JWT payload");
+        serde_json::from_slice(&payload_bytes).expect("parse JWT payload JSON")
     }
 }
