@@ -178,6 +178,10 @@ jobs:
           targets: ci
         env:
           TARGET: ${{ matrix.target }}
+          # Write the bake layer cache only from main: entries written from
+          # PR/merge-queue refs are readable only by that ref and evict the
+          # shared main-scoped cache. All refs still read main's cache.
+          WRITE_CACHE: ${{ github.ref == 'refs/heads/main' && 'true' || 'false' }}
       - name: Build # zizmor: ignore[template-injection] — static matrix values
         if: runner.os != 'Linux'
         run: cargo build --release --locked --target ${{ matrix.target }} ${{ matrix.packages }}
