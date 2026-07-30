@@ -181,7 +181,12 @@ where
     F: Fn(&str) -> Option<String>,
 {
     // Emerging standard: https://github.com/agentsmd/agents.md/issues/136
-    if let Some(val) = get("AGENT") {
+    // An empty value falls through to the vendor-specific checks below,
+    // matching `AI_AGENT`'s behavior so a stray empty `AGENT` doesn't
+    // suppress a real signal (e.g. `CLAUDECODE=1`).
+    if let Some(val) = get("AGENT")
+        && !val.is_empty()
+    {
         return Some(match val.as_str() {
             "amp" => "amp".to_string(),
             "goose" => "goose".to_string(),
@@ -1162,6 +1167,24 @@ mod tests {
     #[test]
     fn test_detect_agent_empty_ai_agent_alone_returns_none() {
         let got = detect_agent_source_from(env(&[("AI_AGENT", "")]));
+        assert_eq!(got, None);
+    }
+
+    /// Empty `AGENT` must not suppress vendor-specific signals: it falls
+    /// through so a real `CLAUDECODE=1` is still detected. Mirrors the
+    /// `AI_AGENT` empty-value behavior and the documented intent that
+    /// "an empty value falls through to the vendor-specific checks below."
+    #[test]
+    fn test_detect_agent_empty_agent_falls_through_to_claudecode() {
+        let got = detect_agent_source_from(env(&[("AGENT", ""), ("CLAUDECODE", "1")]));
+        assert_eq!(got.as_deref(), Some("claude-code"));
+    }
+
+    /// Empty `AGENT` with no other agent vars returns `None` (does not
+    /// produce a generic `"agent"` tag).
+    #[test]
+    fn test_detect_agent_empty_agent_alone_returns_none() {
+        let got = detect_agent_source_from(env(&[("AGENT", "")]));
         assert_eq!(got, None);
     }
 
