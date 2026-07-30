@@ -191,6 +191,35 @@ fn no_region_error() -> CliError {
     CliError::ConfigError(tr!("aws-err-no-region"))
 }
 
+/// Validate that a resolved region belongs to the same AWS partition as the
+/// role ARN.
+///
+/// The STS endpoint DNS suffix is derived from the role ARN's partition, so a
+/// region from a different partition (e.g., `cn-north-1` with a commercial
+/// role ARN) would produce an invalid endpoint URL — the request fails with a
+/// confusing DNS or connection error. Catch the mismatch early with a clear
+/// message instead.
+///
+/// # Errors
+///
+/// Returns a [`CliError::ConfigError`] when the partition inferred from
+/// `region` (via [`Partition::from_region`]) differs from `arn_partition`.
+fn validate_region_partition(
+    region: &str,
+    arn_partition: vouch_common::aws::Partition,
+) -> Result<(), crate::exit_code::CliError> {
+    let region_partition = vouch_common::aws::Partition::from_region(region);
+    if region_partition == arn_partition {
+        return Ok(());
+    }
+    Err(crate::exit_code::CliError::ConfigError(tr_args!(
+        "aws-err-region-partition-mismatch",
+        region = region.to_string(),
+        region_partition = region_partition.as_str().to_string(),
+        arn_partition = arn_partition.as_str().to_string(),
+    )))
+}
+
 /// Resolve the AWS region, checking profile config then environment variables.
 pub(crate) fn resolve_region(region: Option<&str>, profile_name: &str) -> anyhow::Result<String> {
     find_region(region, Some(profile_name))?.ok_or_else(|| no_region_error().into())
@@ -201,7 +230,16 @@ pub(crate) fn resolve_region(region: Option<&str>, profile_name: &str) -> anyhow
 ///
 /// The region comes from the profile that targets `role_arn`, so a machine with
 /// several Vouch profiles does not borrow an unrelated profile's region.
+///
+/// Validates that the resolved region belongs to the same AWS partition as
+/// `role_arn`. A mismatched region (e.g., a China region with a commercial
+/// role ARN) would produce an invalid STS endpoint URL, since the DNS suffix
+/// is derived from the role ARN's partition.
 pub(crate) fn resolve_region_with_fallback(role_arn: &str) -> anyhow::Result<String> {
+    let arn_partition = vouch_common::aws::Partition::from_arn(role_arn).map_err(|_| {
+        crate::exit_code::CliError::ConfigError(tr!("aws-console-err-invalid-role-arn"))
+    })?;
+
     let profile_name = AwsConfig::load().ok().and_then(|config| {
         config
             .find_vouch_profile_for_role(role_arn)
@@ -217,11 +255,11 @@ pub(crate) fn resolve_region_with_fallback(role_arn: &str) -> anyhow::Result<Str
     });
 
     if let Some(r) = find_region(None, profile_name.as_deref())? {
+        validate_region_partition(&r, arn_partition)?;
         return Ok(r);
     }
 
-    let arn = sts::parse_role_arn(role_arn)?;
-    let default = arn.partition.default_sts_region();
+    let default = arn_partition.default_sts_region();
     tracing::debug!("no region configured, defaulting to {default} for STS");
     Ok(default.to_string())
 }
@@ -237,6 +275,11 @@ pub(crate) fn resolve_region_with_fallback(role_arn: &str) -> anyhow::Result<Str
 /// ambiguous-profile error here always points at `--role`. Thread a
 /// [`ProfileOverride`] through instead if a `--profile`-accepting caller is
 /// ever added.
+///
+/// Validates that the resolved region belongs to the same AWS partition as
+/// the role ARN. A mismatched region (e.g., a China region with a commercial
+/// role ARN) would produce an invalid STS endpoint URL, since the DNS suffix
+/// is derived from the role ARN's partition.
 pub(crate) fn resolve_role_and_region(
     role: Option<&str>,
     region: Option<&str>,
@@ -265,7 +308,11 @@ pub(crate) fn resolve_role_and_region(
         }
     };
 
+    let arn_partition = vouch_common::aws::Partition::from_arn(&role_arn).map_err(|_| {
+        crate::exit_code::CliError::ConfigError(tr!("aws-console-err-invalid-role-arn"))
+    })?;
     let region_name = find_region(region, profile_name.as_deref())?.ok_or_else(no_region_error)?;
+    validate_region_partition(&region_name, arn_partition)?;
 
     Ok((role_arn, region_name))
 }
@@ -440,6 +487,7 @@ fn render_multi(profiles: &[ProfileSummary], org_count: usize) -> IntegrationSta
     clippy::expect_used,
     clippy::panic,
     clippy::indexing_slicing,
+    clippy::unwrap_used,
     reason = "test code: panic on assertion failure is acceptable"
 )]
 mod tests {
@@ -958,5 +1006,93 @@ credential_process = vouch credential aws --role arn:aws:iam::111:role/X
             panic!("expected NotConfigured");
         };
         assert_eq!(setup_hint, SETUP_HINT);
+    }
+
+    // =========================================================================
+    // validate_region_partition tests
+    // =========================================================================
+
+    /// Matching region+partition combinations are accepted for every partition.
+    #[test]
+    fn validate_region_partition_accepts_matching_partitions() {
+        validate_region_partition("us-east-1", vouch_common::aws::Partition::Aws).unwrap();
+        validate_region_partition("cn-north-1", vouch_common::aws::Partition::AwsCn).unwrap();
+        validate_region_partition("us-gov-west-1", vouch_common::aws::Partition::AwsUsGov).unwrap();
+        validate_region_partition("eusc-de-east-1", vouch_common::aws::Partition::AwsEusc).unwrap();
+        validate_region_partition("us-iso-east-1", vouch_common::aws::Partition::AwsIso).unwrap();
+        validate_region_partition("us-isob-east-1", vouch_common::aws::Partition::AwsIsoB).unwrap();
+        validate_region_partition("eu-isoe-west-1", vouch_common::aws::Partition::AwsIsoE).unwrap();
+        validate_region_partition("us-isof-south-1", vouch_common::aws::Partition::AwsIsoF)
+            .unwrap();
+    }
+
+    /// The exact scenario from the bug report: commercial role ARN with a
+    /// China region from env vars. The error must name the region, both
+    /// partitions, and the remediation hint.
+    #[test]
+    fn validate_region_partition_rejects_china_region_with_commercial_arn() {
+        let err = validate_region_partition("cn-north-1", vouch_common::aws::Partition::Aws)
+            .expect_err("China region must not match commercial partition");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("cn-north-1"),
+            "error should name the region: {msg}"
+        );
+        assert!(
+            msg.contains("aws-cn"),
+            "error should name the region partition: {msg}"
+        );
+        assert!(
+            msg.contains("partition 'aws'."),
+            "error should name the ARN partition: {msg}"
+        );
+    }
+
+    /// The reverse mismatch: China role ARN with a commercial region.
+    #[test]
+    fn validate_region_partition_rejects_commercial_region_with_china_arn() {
+        let err = validate_region_partition("us-east-1", vouch_common::aws::Partition::AwsCn)
+            .expect_err("commercial region must not match China partition");
+        let msg = err.to_string();
+        assert!(msg.contains("us-east-1"), "{msg}");
+        assert!(
+            msg.contains("partition 'aws'"),
+            "error should name region partition: {msg}"
+        );
+        assert!(
+            msg.contains("partition 'aws-cn'."),
+            "error should name the ARN partition: {msg}"
+        );
+    }
+
+    /// `from_region` falls back to the commercial partition for unknown
+    /// regions, so an unrecognized region is accepted against a commercial
+    /// ARN. This is intentional: a new commercial region that the prefix
+    /// table doesn't yet know about should not break credential issuance.
+    #[test]
+    fn validate_region_partition_accepts_unknown_region_for_commercial() {
+        validate_region_partition("us-unknown-99", vouch_common::aws::Partition::Aws)
+            .expect("unknown region defaults to commercial partition");
+    }
+
+    /// An unknown region is rejected against a non-commercial ARN, because
+    /// `from_region` maps it to commercial, which differs from the ARN
+    /// partition.
+    #[test]
+    fn validate_region_partition_rejects_unknown_region_for_china() {
+        validate_region_partition("us-unknown-99", vouch_common::aws::Partition::AwsCn)
+            .expect_err("unknown region defaults to commercial, not China");
+    }
+
+    /// The error must be a `CliError::ConfigError` so it is mapped to the
+    /// same exit code as other configuration errors.
+    #[test]
+    fn validate_region_partition_error_is_cli_config_error() {
+        let err = validate_region_partition("cn-north-1", vouch_common::aws::Partition::Aws)
+            .expect_err("mismatch");
+        assert!(
+            matches!(err, CliError::ConfigError(_)),
+            "expected CliError::ConfigError, got: {err:?}"
+        );
     }
 }
