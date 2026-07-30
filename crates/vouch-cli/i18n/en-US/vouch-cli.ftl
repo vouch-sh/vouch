@@ -800,6 +800,11 @@ aws-err-no-region =
     Could not determine AWS region.
     Specify --region, or set a region in your AWS profile or AWS_DEFAULT_REGION.
 
+aws-err-region-partition-mismatch =
+    Region '{ $region }' belongs to partition '{ $region_partition }' but the role ARN is in partition '{ $arn_partition }'.
+    The AWS region must be in the same partition as the role ARN.
+    Set a region from the correct partition in your AWS profile or AWS_DEFAULT_REGION.
+
 sso-portal-err-token-expired = Identity Center access token is invalid or expired. Run '{ -cmd } login' to re-authenticate.
 
 aws-console-opening = Opening AWS Console...

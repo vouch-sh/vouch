@@ -124,7 +124,7 @@ pub(crate) async fn run(
     let vouch_profile = aws::resolve_vouch_profile(profile, aws::ProfileOverride::Profile)?;
     let profile_name = vouch_profile.name;
     let role_arn = vouch_profile.role_arn;
-    let region_name = aws::resolve_region(region, &profile_name)?;
+    let region_name = aws::resolve_region(region, &profile_name, Some(&role_arn))?;
 
     vouch_cli::tr_println!(
         "setup-eks-header-block",
