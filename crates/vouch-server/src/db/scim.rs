@@ -552,6 +552,28 @@ pub async fn get_scim_user(
 /// `alice@example.com` resolve to the same user instead of producing a
 /// duplicate. The stored `UserDoc.email` and the returned
 /// [`ScimUserRecord.email`] are always lowercase.
+///
+/// # Race safety
+///
+/// The user ID is derived deterministically from the *normalized* email via
+/// [`deterministic_user_id`](crate::db::documents::user::deterministic_user_id)
+/// (a version-8 SHA-256-based UUID) and inserted with
+/// [`StoreTransaction::insert_with_id`]. Two concurrent `create_scim_user`
+/// calls for the same email — in any casing — therefore compute the same
+/// primary key: the winning insert commits, and the loser's insert fails
+/// with a primary-key violation. `is_unique_violation` catches that and
+/// surfaces the same "UNIQUE constraint failed" error returned by the explicit
+/// pre-check, so the SCIM handler maps both paths to `409 Conflict`.
+///
+/// This closes the check-then-act TOCTOU window that existed when each insert
+/// used a fresh random UUID v7: two transactions could both observe "no user
+/// exists" and then commit distinct rows, because neither `SERIALIZABLE`
+/// isolation nor a `SELECT FOR UPDATE` catches two concurrent inserts of
+/// *distinct* primary keys (documented in `db/oauth.rs` for the analogous JTI
+/// case). The deterministic ID makes the keys collide, forcing serialization
+/// at the `documents` PRIMARY KEY constraint. The same pattern is used by
+/// `deterministic_org_id`, `deterministic_jti_id`, and
+/// `deterministic_challenge_state_id`.
 pub async fn create_scim_user(
     store: &DocumentStore,
     org_id: Option<&str>,
@@ -560,6 +582,8 @@ pub async fn create_scim_user(
     external_id: Option<&str>,
     active: bool,
 ) -> Result<ScimUserRecord> {
+    use super::documents::user::deterministic_user_id;
+
     // Normalize email to ASCII lowercase so the duplicate check and the
     // stored row match the casing used by `enroll_user_with_org`. Without
     // this, a SCIM provision of `Alice@example.com` would not collide with
@@ -568,9 +592,24 @@ pub async fn create_scim_user(
     let email = email.to_ascii_lowercase();
     let email = email.as_str();
 
+    // Derived once outside the retried block: stable across retries and
+    // identical for concurrent callers passing the same email in any casing.
+    // `deterministic_user_id` lowercases internally as well, so the
+    // primary-key collision holds even if a future caller skips the
+    // normalization above — which is still required here so the stored
+    // `UserDoc.email` and its index row match the lowercase convention.
+    let user_id = deterministic_user_id(email);
+
     crate::with_dsql_retry!(async {
         let mut tx = store.begin().await?;
 
+        // Pre-check by email index. This is the fast path for the common
+        // "user already exists" case: it returns the existing-user error
+        // without attempting an insert and without relying on the primary-key
+        // collision. It also catches the case where a user was created by a
+        // *different* code path (e.g. `enroll_user_with_org`) that did not use
+        // the deterministic ID, so their row has a random UUID v7 ID and would
+        // not collide with `user_id`.
         if tx.find_one::<UserDoc>("email", email).await?.is_some() {
             anyhow::bail!("UNIQUE constraint failed: user with email already exists");
         }
@@ -586,7 +625,18 @@ pub async fn create_scim_user(
             github_login: None,
             github_refresh_token: None,
         };
-        let result = tx.insert(&doc).await?;
+        // insert_with_id: the loser of a concurrent create race fails here with
+        // a primary-key violation (SQLSTATE 23505 / SQLite SQLITE_CONSTRAINT_PRIMARYKEY).
+        // 23505 is not retryable, so with_dsql_retry! surfaces it as Err(e) and
+        // the `is_unique_violation` arm below maps it to the same error string
+        // the handler expects.
+        let result = match tx.insert_with_id(&user_id, &doc).await {
+            Ok(result) => result,
+            Err(e) if super::pool::is_unique_violation(&e) => {
+                anyhow::bail!("UNIQUE constraint failed: user with email already exists");
+            }
+            Err(e) => return Err(e),
+        };
 
         tx.commit().await?;
         Ok(ScimUserRecord::from(result))
