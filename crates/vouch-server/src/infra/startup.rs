@@ -81,6 +81,11 @@ pub async fn initialize(
 
     // Load S3 config if configured (BEFORE database connection).
     // If the config has a document_key, also recovers the HPKE key pair.
+    //
+    // Every KMS key (document key and signing keys) lives in the same
+    // region as the S3 config bucket, so the KMS client and ARN resolver
+    // built here both key off `s3_config_region`, falling back to
+    // `aws_region` for single-region deployments — see `kms_region`.
     let (s3_client, s3_source, initial_etag, doc_keys, kms_client, kms_arn_resolver) =
         load_s3_config(&mut config, use_attestation).await?;
 
@@ -178,12 +183,19 @@ async fn probe_nitro_tpm() -> bool {
 /// If the config has a `document_key`, decrypts it via KMS (with NitroTPM
 /// attestation when available) and returns the key material.
 ///
-/// Also constructs the single `KmsArnResolver` for this boot: partition and
-/// region come from `config.aws_partition`/`config.aws_region` (resolved once
-/// in `ServerConfig::from_args`), while the account ID is the S3 document's
-/// own `kms_account_id` — the only value that isn't already known before the
-/// document is fetched. The caller re-binds the returned resolver to the
-/// final merged `kms_account_id` before reusing it for other KMS keys.
+/// Constructs the single `KmsArnResolver` for this boot: partition comes
+/// from `config.aws_partition`, and the region from [`kms_region`] —
+/// `s3_config_region` when set, else `aws_region` — because every KMS key
+/// (document key and signing keys) lives in the same region as the S3
+/// config bucket. The account ID is the S3 document's own `kms_account_id`
+/// (the only value that isn't already known before the document is
+/// fetched, and the knob that selects the separate key-admin account); the
+/// caller re-binds the returned resolver to the final merged
+/// `kms_account_id` before reusing it for signing keys.
+///
+/// The KMS client built here decrypts the document key and is returned for
+/// reuse by signing operations — both address keys in the bucket's region,
+/// which the S3 SDK config already targets.
 async fn load_s3_config(
     config: &mut config::ServerConfig,
     use_attestation: bool,
@@ -200,7 +212,7 @@ async fn load_s3_config(
         let resolver = KmsArnResolver::new(
             config.kms_account_id.as_deref(),
             config.aws_partition.as_deref(),
-            config.aws_region.as_deref(),
+            kms_region(config).as_deref(),
         );
         return Ok((None, None, None, None, None, resolver));
     };
@@ -223,8 +235,9 @@ async fn load_s3_config(
 
     let s3_client = aws_sdk_s3::Client::new(&sdk_config);
 
-    // Create KMS client for document key decryption and signing.
-    // Uses the same SDK config (region, credentials) as S3.
+    // KMS client for document-key decryption, returned for reuse by signing
+    // operations — every KMS key lives in the same region as the S3 bucket,
+    // which the S3 SDK config (region = `s3_config_region`) targets.
     let kms_client = aws_sdk_kms::Client::from_conf(
         aws_sdk_kms::config::Builder::from(&sdk_config)
             .timeout_config(kms_timeout_config())
@@ -244,7 +257,7 @@ async fn load_s3_config(
     let kms_resolver = KmsArnResolver::new(
         config.kms_account_id.as_deref(),
         config.aws_partition.as_deref(),
-        config.aws_region.as_deref(),
+        kms_region(config).as_deref(),
     );
 
     // Fetch initial config - fail fast if unreachable.
@@ -366,6 +379,7 @@ async fn build_app_state(
 
     // Create a KMS client if any KMS key IDs are configured but no client
     // was provided (e.g., non-S3 deployments that still use KMS signing).
+    // Same region source as the S3-config KMS client — see `kms_region`.
     let kms_needs = config.ssh_ca_kms_key_id.is_some()
         || config.oidc_signing_kms_key_id.is_some()
         || config.oidc_rsa_signing_kms_key_id.is_some()
@@ -373,7 +387,7 @@ async fn build_app_state(
     let kms_client = if kms_needs && kms_client.is_none() {
         tracing::info!("Creating KMS client for signing key access");
         let sdk_config = crate::config::aws_config_loader(
-            config.s3_config_region.as_deref(),
+            kms_region(config).as_deref(),
             config.aws_use_fips_endpoint,
         )?
         .load()
@@ -860,4 +874,71 @@ fn kms_timeout_config() -> aws_sdk_kms::config::timeout::TimeoutConfig {
         .operation_attempt_timeout(Duration::from_secs(2))
         .operation_timeout(Duration::from_secs(5))
         .build()
+}
+
+/// Select the AWS region for KMS clients and key ARNs.
+///
+/// Every KMS key Vouch uses — the S3 config document key and the signing
+/// keys (SSH CA, OIDC ES256/RS256, JWT HMAC) — lives in the same region as
+/// the S3 config bucket, in a separate key-admin account selected by
+/// `kms_account_id`. The region is therefore `s3_config_region` when set,
+/// falling back to `aws_region` for single-region deployments that don't
+/// pin a bucket region. The AWS SDK picks the KMS endpoint from the
+/// client's configured region and `KmsArnResolver` embeds this region in
+/// key ARNs, so every consumer must draw from this one source or clients
+/// and ARNs drift apart. Returning `None` (both unset) lets
+/// `aws_config_loader` fall back to the AWS SDK's default region provider
+/// chain (env / shared config / IMDS).
+fn kms_region(config: &config::ServerConfig) -> Option<String> {
+    config
+        .s3_config_region
+        .clone()
+        .or_else(|| config.aws_region.clone())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression for the cross-region KMS bug: every KMS key lives in the
+    /// same region as the S3 config bucket, so the shared region source
+    /// must prefer `s3_config_region`. Previously the ARN resolver used
+    /// `aws_region`, so a deployment pinning `VOUCH_S3_CONFIG_REGION` to a
+    /// different region built key ARNs for the wrong region and KMS calls
+    /// failed with `NotFoundException` / `AccessDeniedException`.
+    #[test]
+    fn kms_region_prefers_s3_config_region() {
+        let mut config = crate::test_utils::test_config();
+        config.aws_region = Some("us-east-1".to_string());
+        config.s3_config_region = Some("us-west-2".to_string());
+
+        assert_eq!(
+            kms_region(&config).as_deref(),
+            Some("us-west-2"),
+            "KMS keys live with the S3 bucket; s3_config_region must win"
+        );
+    }
+
+    /// Single-region deployments don't pin a bucket region; the KMS region
+    /// falls back to the server's own `aws_region`.
+    #[test]
+    fn kms_region_falls_back_to_aws_region() {
+        let mut config = crate::test_utils::test_config();
+        config.aws_region = Some("us-east-1".to_string());
+        config.s3_config_region = None;
+
+        assert_eq!(kms_region(&config).as_deref(), Some("us-east-1"));
+    }
+
+    /// With neither region configured, `None` lets `aws_config_loader` use
+    /// the AWS SDK's default region provider chain (env / shared config /
+    /// IMDS) instead of pinning a blank region.
+    #[test]
+    fn kms_region_none_when_unset() {
+        let mut config = crate::test_utils::test_config();
+        config.aws_region = None;
+        config.s3_config_region = None;
+
+        assert!(kms_region(&config).is_none());
+    }
 }
