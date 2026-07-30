@@ -78,11 +78,17 @@ impl DocumentType for UserDoc {
 /// custom derivation, avoiding the SHA-1 dependency a version-5 UUID
 /// would pull in.
 ///
-/// Callers pass the already-normalized (lower-cased) email:
-/// `create_scim_user` normalizes before deriving, and two strings that
-/// differ only in case produce two distinct IDs.
+/// The email is ASCII-lowercased inside this function before hashing,
+/// so two casings of the same address always produce the same ID —
+/// a caller that forgets to normalize cannot reopen the cross-case
+/// duplicate-row race. Callers still normalize before storage and
+/// lookup (`create_scim_user` lowercases first), since the stored
+/// `UserDoc.email` and its index row must match the lowercase
+/// convention too.
 pub(crate) fn deterministic_user_id(email: &str) -> String {
     use aws_lc_rs::digest::{self, SHA256};
+
+    let email = email.to_ascii_lowercase();
 
     let mut ctx = digest::Context::new(&SHA256);
     ctx.update(b"user_email\0");
@@ -140,13 +146,17 @@ mod tests {
     }
 
     #[test]
-    fn deterministic_user_id_is_case_sensitive() {
-        // Pins the documented contract: the derivation itself is
-        // case-sensitive, so callers must lower-case the email first.
-        // `create_scim_user` normalizes before deriving; this test is
-        // the tripwire for a future caller that forgets to.
-        assert_ne!(
+    fn deterministic_user_id_is_case_insensitive() {
+        // The derivation lowercases internally, so every casing of the
+        // same address maps to one primary key — a caller that forgets
+        // to normalize cannot mint a second user row for the same
+        // person via a differently-cased concurrent create.
+        assert_eq!(
             deterministic_user_id("Mixed@Example.com"),
+            deterministic_user_id("mixed@example.com"),
+        );
+        assert_eq!(
+            deterministic_user_id("MIXED@EXAMPLE.COM"),
             deterministic_user_id("mixed@example.com"),
         );
     }

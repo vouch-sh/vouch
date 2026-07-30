@@ -592,11 +592,12 @@ pub async fn create_scim_user(
     let email = email.to_ascii_lowercase();
     let email = email.as_str();
 
-    // Derived once outside the retried block, from the normalized email:
-    // stable across retries and identical for concurrent callers passing
-    // the same email in any casing. Deriving before normalizing would give
-    // `Alice@x.com` and `alice@x.com` different primary keys and reopen the
-    // duplicate-row race for cross-case concurrent creates.
+    // Derived once outside the retried block: stable across retries and
+    // identical for concurrent callers passing the same email in any casing.
+    // `deterministic_user_id` lowercases internally as well, so the
+    // primary-key collision holds even if a future caller skips the
+    // normalization above — which is still required here so the stored
+    // `UserDoc.email` and its index row match the lowercase convention.
     let user_id = deterministic_user_id(email);
 
     crate::with_dsql_retry!(async {
