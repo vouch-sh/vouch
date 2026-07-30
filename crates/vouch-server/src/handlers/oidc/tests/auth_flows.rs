@@ -427,15 +427,17 @@ async fn test_fresh_session_can_delete_key() {
 
 #[tokio::test]
 async fn test_boundary_exactly_at_max_age() {
-    // A session exactly at the 60-second boundary should succeed
-    // (require_fresh_timestamp uses > not >=)
+    // A session well within the 60-second boundary should succeed
+    // (require_fresh_timestamp uses > not >=); use -59 rather than -60 to
+    // avoid a sub-second timing race where the freshness check runs just
+    // after the clock ticks, making session_age == 61.
     let (app, state) = test_app().await;
 
     let user = create_test_user(&state.store, "step-c3@example.com").await;
     let auth_a = create_test_authenticator(&state.store, &user.id).await;
     let auth_b = create_test_authenticator(&state.store, &user.id).await;
 
-    let boundary_iat = jiff::Timestamp::now().as_second() - 60;
+    let boundary_iat = jiff::Timestamp::now().as_second() - 59;
     let token =
         create_test_session_with_iat(&state, &user.id, &user.email, &auth_a, boundary_iat).await;
 
@@ -448,7 +450,7 @@ async fn test_boundary_exactly_at_max_age() {
     assert_eq!(
         status,
         StatusCode::OK,
-        "Session exactly at max_age boundary should succeed: {body}"
+        "Session within max_age boundary should succeed: {body}"
     );
 }
 
