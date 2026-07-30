@@ -10,6 +10,16 @@ variable "GENERATE_SBOM" {
   default = "false"
 }
 
+variable "WRITE_CACHE" {
+  // "true" only on main-branch CI runs. GHA cache entries written from PR,
+  // merge-queue, or tag refs are readable only by that same ref, so writing
+  // from them burns the repo's 10 GB Actions cache budget (evicting the
+  // shared main-scoped entries every ref restores from) without ever
+  // producing a cache hit. Reads (cache-from) stay enabled everywhere:
+  // any ref may restore caches written from the default branch.
+  default = "false"
+}
+
 group "default" {
   targets = ["ci"]
 }
@@ -29,7 +39,7 @@ target "ci" {
     GENERATE_SBOM     = "false"
   }
   cache-from = ["type=gha,scope=bake-ci-${TARGET}"]
-  cache-to   = ["type=gha,mode=max,ignore-error=true,scope=bake-ci-${TARGET}"]
+  cache-to   = WRITE_CACHE == "true" ? ["type=gha,mode=max,ignore-error=true,scope=bake-ci-${TARGET}"] : []
 }
 
 target "cli" {
@@ -41,7 +51,7 @@ target "cli" {
     GENERATE_SBOM     = GENERATE_SBOM
   }
   cache-from = ["type=gha,scope=bake-cli-${TARGET}"]
-  cache-to   = ["type=gha,mode=max,ignore-error=true,scope=bake-cli-${TARGET}"]
+  cache-to   = WRITE_CACHE == "true" ? ["type=gha,mode=max,ignore-error=true,scope=bake-cli-${TARGET}"] : []
 }
 
 target "server" {
@@ -53,7 +63,7 @@ target "server" {
     GENERATE_SBOM     = GENERATE_SBOM
   }
   cache-from = ["type=gha,scope=bake-server-${TARGET}"]
-  cache-to   = ["type=gha,mode=max,ignore-error=true,scope=bake-server-${TARGET}"]
+  cache-to   = WRITE_CACHE == "true" ? ["type=gha,mode=max,ignore-error=true,scope=bake-server-${TARGET}"] : []
 }
 
 target "reproduce" {
