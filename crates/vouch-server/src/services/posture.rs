@@ -144,7 +144,10 @@ pub(crate) const PRECONFIGURED_POLICIES: &[PreconfiguredPolicy] = &[
     //     Sonoma users during a transition year. Uses marketing version as
     //     reported by `sw_vers -productVersion` on the client. Darwin kernel
     //     versions (25.x) must NOT be used here.
-    //   Windows: 10.0.26100 = 24H2
+    //   Windows: build 26100 = 24H2. Compared via `os_build` (not `os_version`)
+    //     because the Windows CLI reports `os_version` as a 4-component string
+    //     (e.g., "10.0.26100.0") that `semver()` rejects. `os_build` is the
+    //     registry `CurrentBuild` value, a plain integer string like "26100".
     // Linux is excluded — distributions manage versions independently.
     // Admins can create custom policies for specific distro versions
     // (e.g., `posture.os_distribution == "ubuntu" && semver(posture.os_version) >= semver("22.04.0")`).
@@ -156,7 +159,7 @@ pub(crate) const PRECONFIGURED_POLICIES: &[PreconfiguredPolicy] = &[
             "(posture.os == \"macos\"",
             " && semver(posture.os_version) >= semver(\"14.0.0\"))",
             " || (posture.os == \"windows\"",
-            " && semver(posture.os_version) >= semver(\"10.0.26100\"))",
+            " && int(posture.os_build) >= 26100)",
         ),
     },
 ];
@@ -884,6 +887,107 @@ mod tests {
         assert!(
             !evaluate_cel(expr, &ctx),
             "macOS 13.7.0 (Ventura) must fail OsRecency (< 14.0.0)"
+        );
+    }
+
+    /// Regression for the Windows OsRecency 4-component version bug.
+    ///
+    /// The Windows CLI reports `os_version` as a 4-component string
+    /// (e.g., "10.0.26100.0" from `[System.Environment]::OSVersion.Version`)
+    /// which `semver()` rejects ("expected 1-3 version components"). The
+    /// preconfigured OsRecency policy must compare Windows by `os_build`
+    /// (the registry `CurrentBuild` integer, e.g. "26100"), not `os_version`.
+    /// Before the fix, the CEL error propagated through `||` and denied
+    /// every Windows login — including compliant Windows 11 24H2.
+    #[test]
+    fn test_os_recency_windows_24h2_four_component_version_passes() {
+        let mut posture = sample_posture();
+        posture.os = Some(OperatingSystem::Windows);
+        // Realistic Windows 11 24H2 posture: 4-component os_version + os_build.
+        posture.os_version = Some("10.0.26100.0".to_string());
+        posture.os_build = Some("26100".to_string());
+
+        let ctx = build_cel_context(&posture);
+        let expr = PRECONFIGURED_POLICIES
+            .iter()
+            .find(|p| p.slug == PreconfiguredSlug::OsRecency)
+            .unwrap()
+            .cel_expression;
+        assert!(
+            evaluate_cel(expr, &ctx),
+            "Windows 11 24H2 (build 26100) must pass OsRecency even though \
+             os_version has 4 components"
+        );
+    }
+
+    /// Windows builds below the 26100 threshold (e.g., 22631 = 23H2) must
+    /// fail OsRecency. Ensures the `int(os_build) >= 26100` comparison is
+    /// actually enforced and not short-circuited to always-true.
+    #[test]
+    fn test_os_recency_windows_old_build_fails() {
+        let mut posture = sample_posture();
+        posture.os = Some(OperatingSystem::Windows);
+        posture.os_version = Some("10.0.22631.0".to_string());
+        posture.os_build = Some("22631".to_string()); // 23H2
+
+        let ctx = build_cel_context(&posture);
+        let expr = PRECONFIGURED_POLICIES
+            .iter()
+            .find(|p| p.slug == PreconfiguredSlug::OsRecency)
+            .unwrap()
+            .cel_expression;
+        assert!(
+            !evaluate_cel(expr, &ctx),
+            "Windows 11 23H2 (build 22631) must fail OsRecency (< 26100)"
+        );
+    }
+
+    /// Windows OsRecency must pass when `os_version` is absent entirely —
+    /// the policy must rely on `os_build`, not `os_version`. A Windows
+    /// device where `os_version` detection failed but `os_build` was
+    /// collected should still be evaluated correctly.
+    #[test]
+    fn test_os_recency_windows_missing_os_version_passes_on_build() {
+        let mut posture = sample_posture();
+        posture.os = Some(OperatingSystem::Windows);
+        posture.os_version = None;
+        posture.os_build = Some("26100".to_string());
+
+        let ctx = build_cel_context(&posture);
+        let expr = PRECONFIGURED_POLICIES
+            .iter()
+            .find(|p| p.slug == PreconfiguredSlug::OsRecency)
+            .unwrap()
+            .cel_expression;
+        assert!(
+            evaluate_cel(expr, &ctx),
+            "Windows with a compliant os_build but missing os_version must pass"
+        );
+    }
+
+    /// Windows OsRecency must fail when `os_build` is below the threshold,
+    /// even if `os_version` looks like a 3-component semver that would have
+    /// passed the old (buggy) comparison. Guards against a regression that
+    /// re-introduces `os_version`-based comparison for Windows.
+    #[test]
+    fn test_os_recency_windows_ignores_os_version_for_comparison() {
+        let mut posture = sample_posture();
+        posture.os = Some(OperatingSystem::Windows);
+        // A 3-component os_version that the old semver() comparison would
+        // have accepted — but the build is below threshold, so the policy
+        // must still fail.
+        posture.os_version = Some("10.0.26100".to_string());
+        posture.os_build = Some("22631".to_string()); // 23H2
+
+        let ctx = build_cel_context(&posture);
+        let expr = PRECONFIGURED_POLICIES
+            .iter()
+            .find(|p| p.slug == PreconfiguredSlug::OsRecency)
+            .unwrap()
+            .cel_expression;
+        assert!(
+            !evaluate_cel(expr, &ctx),
+            "Windows OsRecency must compare os_build, not os_version"
         );
     }
 
