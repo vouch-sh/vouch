@@ -124,15 +124,22 @@ where
 /// the user-facing `fido2-err-not-ready` error.
 ///
 /// Both return paths of [`YubiKey::wait_for_device`] and the `diag` command's
-/// device wait must call this so the "device is ready for CTAP2 commands"
+/// device wait share this loop so the "device is ready for CTAP2 commands"
 /// post-condition is path-independent.
-pub(crate) fn wait_device_until_ready(device: &FidoKeyHid) -> Result<()> {
+///
+/// This probe does NOT suppress the CTAP library's stdout output, so it has
+/// no threading constraint and `diag` may call it directly on the tokio
+/// runtime thread (matching diag's other direct, unsuppressed device calls).
+/// [`YubiKey::wait_until_ready`] wraps it in [`with_suppressed_stdout`] for
+/// the `spawn_fido2`-protected paths — that wrapper must stay off the tokio
+/// runtime thread.
+pub(crate) fn probe_device_ready(device: &FidoKeyHid) -> Result<()> {
     use crate::tr;
     use std::thread;
     use std::time::Duration;
 
     for _ in 0..10 {
-        match with_suppressed_stdout(|| device.enable_info_option(&InfoOption::ClientPin)) {
+        match device.enable_info_option(&InfoOption::ClientPin) {
             Ok(_) => return Ok(()),
             Err(_) => thread::sleep(Duration::from_millis(200)),
         }
@@ -249,7 +256,7 @@ impl YubiKey {
     /// channel. This method retries a lightweight query until the device is ready
     /// rather than using a fixed delay.
     fn wait_until_ready(&self) -> Result<()> {
-        wait_device_until_ready(&self.device)
+        with_suppressed_stdout(|| probe_device_ready(&self.device))
     }
 
     /// Check if a PIN is configured on this `YubiKey`.
