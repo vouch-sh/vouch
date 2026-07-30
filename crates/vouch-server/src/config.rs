@@ -594,7 +594,7 @@ pub fn bootstrap_overlay_args(
         let Some(env_name) = arg.get_env().and_then(|s| s.to_str()) else {
             continue;
         };
-        let Some(value) = blob.get(env_name) else {
+        let Some(value) = blob.get(env_name).filter(|v| !v.is_empty()) else {
             continue;
         };
         if !matches!(
@@ -845,15 +845,28 @@ impl ServerConfig {
         // Note: Validation of rp_id and jwt_secret is deferred to validate()
         // to allow these values to come from S3 config.
 
+        // Empty strings are treated as unset so the fallback chain can
+        // progress to IMDS-derived values and the AWS SDK default region
+        // provider chain (env / shared config / IMDS) is not overridden with
+        // a blank `Region::new("")` — see `aws_config_loader`. The same
+        // empty-means-unset pattern is already used by `ssh_ca_key_path` and
+        // `allowed_domains` below.
         let aws_region = args
             .aws_region
-            .or_else(|| std::env::var("AWS_DEFAULT_REGION").ok())
+            .filter(|s| !s.is_empty())
+            .or_else(|| {
+                std::env::var("AWS_DEFAULT_REGION")
+                    .ok()
+                    .filter(|s| !s.is_empty())
+            })
             .or_else(|| instance.map(|b| b.region.clone()));
         let aws_az = args
             .aws_az
+            .filter(|s| !s.is_empty())
             .or_else(|| instance.map(|b| b.availability_zone.clone()));
         let aws_partition = args
             .aws_partition
+            .filter(|s| !s.is_empty())
             .or_else(|| instance.and_then(|b| b.partition.clone()));
         let aws_use_fips_endpoint = args
             .aws_use_fips_endpoint
@@ -1209,11 +1222,11 @@ pub fn resolve_dsql_endpoints(
 )]
 mod tests {
     use crate::config::{
-        Args, IdpConfig, SamlProviderConfig, bootstrap_overlay_args, resolve_dsql_endpoints,
-        validate_provider_slug,
+        Args, IdpConfig, SamlProviderConfig, ServerConfig, bootstrap_overlay_args,
+        resolve_dsql_endpoints, validate_provider_slug,
     };
     use crate::test_utils::test_config;
-    use clap::CommandFactory;
+    use clap::{CommandFactory, Parser};
     use secrecy::SecretString;
     use std::collections::{BTreeMap, HashMap};
 
@@ -1617,6 +1630,99 @@ mod tests {
         let blob = blob(&[("VOUCH_REQUIRE_ATTESTATION_CERT", "false")]);
         let tokens = bootstrap_overlay_args(&matches, &blob);
         assert!(tokens.is_empty(), "got: {tokens:?}");
+    }
+
+    #[test]
+    fn bootstrap_overlay_skips_empty_blob_values() {
+        // Regression: an empty value in the bootstrap blob used to emit
+        // `--flag=`, which clap parses as `Some("")`. That blocked the
+        // IMDS fallback and overrode the AWS SDK default region provider
+        // chain downstream in `ServerConfig::from_args`. Empty blob values
+        // must be treated as absent so the next provider in the chain wins.
+        let matches = Args::command()
+            .try_get_matches_from(["vouch-server"])
+            .expect("parse with no flags");
+        let blob = blob(&[
+            ("AWS_REGION", ""),
+            ("AWS_AZ", ""),
+            ("AWS_PARTITION", ""),
+            ("VOUCH_S3_CONFIG_BUCKET", "real-bucket"),
+        ]);
+        let tokens = bootstrap_overlay_args(&matches, &blob);
+        // Only the non-empty entry should produce a token; the three empty
+        // AWS_* entries must be skipped entirely (no `--aws-region=` etc.).
+        assert_eq!(
+            tokens,
+            vec![std::ffi::OsString::from("--s3-config-bucket=real-bucket")]
+        );
+    }
+
+    // ========================================================================
+    // ServerConfig::from_args — AWS region/AZ/partition empty-string handling
+    //
+    // These tests construct `Args` via `Args::try_parse_from` (parsing CLI
+    // flags) and pass a synthetic `Bootstrap` as the IMDS fallback. The
+    // `AWS_DEFAULT_REGION` env fallback cannot be unit-tested here because
+    // `std::env::set_var` is `unsafe` under edition 2024 and `unsafe_code`
+    // is denied workspace-wide — the same constraint documented above the
+    // "Bootstrap overlay precedence" section. The `.filter(|s| !s.is_empty())`
+    // guard on that branch mirrors the guard on the CLI branch, which is
+    // exercised below.
+    // ========================================================================
+
+    fn imds_bootstrap() -> crate::infra::bootstrap::Bootstrap {
+        crate::infra::bootstrap::Bootstrap {
+            region: "us-east-1".to_string(),
+            availability_zone: "us-east-1a".to_string(),
+            partition: Some("aws".to_string()),
+            params: std::collections::BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn from_args_empty_aws_region_cli_falls_back_to_imds() {
+        // Regression: `--aws-region=` used to leave `aws_region = Some("")`,
+        // which blocked the IMDS fallback. With the fix, the empty CLI value
+        // is filtered out and the IMDS region wins.
+        let args = Args::try_parse_from(["vouch-server", "--aws-region="])
+            .expect("parse with empty --aws-region");
+        let instance = imds_bootstrap();
+        let config = ServerConfig::from_args(args, Some(&instance)).expect("config builds");
+        assert_eq!(
+            config.aws_region.as_deref(),
+            Some("us-east-1"),
+            "empty CLI aws_region should fall back to IMDS region"
+        );
+    }
+
+    #[test]
+    fn from_args_empty_aws_values_without_imds_yield_none() {
+        // No IMDS instance available (non-EC2). Empty CLI values must become
+        // `None`, NOT `Some("")` — otherwise `aws_config_loader` would call
+        // `Region::new("")`, overriding the SDK default region provider chain.
+        let args = Args::try_parse_from([
+            "vouch-server",
+            "--aws-region=",
+            "--aws-az=",
+            "--aws-partition=",
+        ])
+        .expect("parse with empty AWS flags");
+        let config = ServerConfig::from_args(args, None).expect("config builds");
+        assert!(
+            config.aws_region.is_none(),
+            "empty CLI aws_region without IMDS must be None, got {:?}",
+            config.aws_region
+        );
+        assert!(
+            config.aws_az.is_none(),
+            "empty CLI aws_az without IMDS must be None, got {:?}",
+            config.aws_az
+        );
+        assert!(
+            config.aws_partition.is_none(),
+            "empty CLI aws_partition without IMDS must be None, got {:?}",
+            config.aws_partition
+        );
     }
 
     // ========================================================================
