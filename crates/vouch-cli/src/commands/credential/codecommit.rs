@@ -299,10 +299,15 @@ fn exec_git_remote_http(remote_name: &str, signed_url: &str) -> Result<()> {
             .status()
             .context(tr!("err-failed-run-git-remote-http"))?;
         if !status.success() {
-            anyhow::bail!(
-                "git remote-http exited with code {}",
-                status.code().unwrap_or(1)
-            );
+            let code = status.code().unwrap_or(1);
+            // Match Unix `exec()` semantics: the child's exit code becomes
+            // vouch's exit code. Returning an `anyhow::Error` here would lose
+            // the numeric code to `classify()`'s `GENERAL` fallback (exit 1).
+            #[expect(
+                clippy::exit,
+                reason = "propagate child exit code on non-Unix; matches Unix exec()"
+            )]
+            std::process::exit(code);
         }
         Ok(())
     }

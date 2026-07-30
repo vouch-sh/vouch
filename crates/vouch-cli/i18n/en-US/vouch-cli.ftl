@@ -655,7 +655,6 @@ exec-err-no-command-short = no command specified
 exec-err-aws-needs-role = AWS credentials require --role.
 exec-err-execute-failed = failed to execute { $program }: { $reason }
 exec-err-execute-simple = failed to execute: { $program }
-exec-err-exit-status = command exited with status { $code }
 exec-err-aws-missing-key-id = AWS credentials missing AccessKeyId
 exec-err-aws-missing-secret = AWS credentials missing SecretAccessKey
 exec-err-aws-missing-token = AWS credentials missing SessionToken
