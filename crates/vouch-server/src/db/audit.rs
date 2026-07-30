@@ -239,7 +239,10 @@ impl AuditStore {
         let now = jiff::Timestamp::now().to_string();
 
         let email_domain = email.and_then(extract_domain);
-        let email_hmac = email.map(|e| self.crypto.hmac_index(e));
+        // Normalize the local part to lowercase so the same user's events
+        // correlate across casings returned by the IdP over time. The domain
+        // is normalized by `extract_domain`.
+        let email_hmac = email.map(|e| self.crypto.hmac_index(&e.to_lowercase()));
 
         let domain_ref: Option<&str> = email_domain.as_deref();
         let hmac_ref: Option<&str> = email_hmac.as_deref();
@@ -341,7 +344,10 @@ impl AuditStore {
                 q.and_where(Expr::col(AuditEvents::UserId).eq(uid.as_str()));
             }
             if let Some(ref email) = filter.email {
-                let hmac = self.crypto.hmac_index(email);
+                // Normalize to lowercase to match the HMAC computed at insert
+                // time, so lookups correlate regardless of the casing supplied
+                // by the caller or returned by the IdP.
+                let hmac = self.crypto.hmac_index(&email.to_lowercase());
                 q.and_where(Expr::col(AuditEvents::EmailHmac).eq(hmac));
             }
             if let Some(ref domain) = filter.email_domain {
@@ -461,9 +467,15 @@ impl std::fmt::Debug for AuditStore {
 // Helpers
 // ============================================================================
 
-/// Extract the domain portion of an email address.
+/// Extract the domain portion of an email address, normalized to ASCII
+/// lowercase to match the IdP layer's domain normalization. Org domains
+/// are stored lowercase, so a mixed-case domain from an IdP (e.g.
+/// `CORP.Example.COM`) would otherwise fail to match the `email_domain`
+/// filter used by the admin audit page.
 fn extract_domain(email: &str) -> Option<String> {
-    email.rsplit_once('@').map(|(_, domain)| domain.to_string())
+    email
+        .rsplit_once('@')
+        .map(|(_, domain)| domain.to_ascii_lowercase())
 }
 
 /// Convert a raw row to an `AuditEvent`.
@@ -666,5 +678,171 @@ mod tests {
             extract_domain("user@sub.domain.com"),
             Some("sub.domain.com".to_string())
         );
+    }
+
+    #[test]
+    fn extract_domain_normalizes_case() {
+        // Mixed-case domains from the IdP must be normalized to ASCII
+        // lowercase so they match the org's stored (lowercase) domain.
+        assert_eq!(
+            extract_domain("Alice@CORP.Example.COM"),
+            Some("corp.example.com".to_string())
+        );
+        assert_eq!(
+            extract_domain("bob@EXAMPLE.COM"),
+            Some("example.com".to_string())
+        );
+        assert_eq!(
+            extract_domain("bob@Example.Com"),
+            Some("example.com".to_string())
+        );
+        // Already-lowercase input is unchanged.
+        assert_eq!(
+            extract_domain("alice@example.com"),
+            Some("example.com".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn query_by_email_domain_is_case_insensitive() {
+        let audit = test_audit().await;
+
+        // Event inserted with a mixed-case email domain, as an IdP might
+        // return. The admin audit page queries by the org's stored domain,
+        // which is always lowercase (see OIDC/SAML normalization).
+        audit
+            .insert_event(
+                AuditEventKind::LoginSuccess,
+                Some("user-1"),
+                Some("Alice@CORP.Example.COM"),
+                "{}",
+            )
+            .await
+            .unwrap();
+
+        let events = audit
+            .query_events(&AuditEventFilter {
+                email_domain: Some("corp.example.com".to_string()),
+                ..AuditEventFilter::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            events.len(),
+            1,
+            "querying by lowercase domain should find event inserted with mixed-case email domain"
+        );
+        assert_eq!(events[0].email_domain.as_deref(), Some("corp.example.com"));
+    }
+
+    #[tokio::test]
+    async fn query_by_email_is_case_insensitive() {
+        let audit = test_audit().await;
+
+        audit
+            .insert_event(
+                AuditEventKind::LoginSuccess,
+                Some("user-1"),
+                Some("Alice@CORP.Example.COM"),
+                "{}",
+            )
+            .await
+            .unwrap();
+
+        // Querying with the lowercase variant of the same email must find
+        // the event written under the mixed-case variant.
+        let events = audit
+            .query_events(&AuditEventFilter {
+                email: Some("alice@corp.example.com".to_string()),
+                ..AuditEventFilter::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            events.len(),
+            1,
+            "querying lowercase email should find event inserted with mixed-case email"
+        );
+        assert_eq!(events[0].user_id.as_deref(), Some("user-1"));
+    }
+
+    #[tokio::test]
+    async fn query_by_email_correlates_across_cases() {
+        let audit = test_audit().await;
+
+        // Two events for the same user, written under different casings of
+        // the same email (e.g. an IdP config change over time). Both must be
+        // correlated by the email HMAC filter.
+        audit
+            .insert_event(
+                AuditEventKind::LoginSuccess,
+                Some("user-1"),
+                Some("Alice@CORP.Example.COM"),
+                "{}",
+            )
+            .await
+            .unwrap();
+        audit
+            .insert_event(
+                AuditEventKind::LoginFailed,
+                Some("user-1"),
+                Some("alice@corp.example.com"),
+                "{}",
+            )
+            .await
+            .unwrap();
+
+        let events = audit
+            .query_events(&AuditEventFilter {
+                email: Some("ALICE@Corp.Example.Com".to_string()),
+                ..AuditEventFilter::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            events.len(),
+            2,
+            "querying by email should correlate both mixed-case and lowercase variants"
+        );
+    }
+
+    #[tokio::test]
+    async fn email_normalization_does_not_conflate_distinct_emails() {
+        // Only the casing of the same email should be normalized; emails
+        // that differ in their domain must remain distinct.
+        let audit = test_audit().await;
+
+        audit
+            .insert_event(
+                AuditEventKind::LoginSuccess,
+                Some("user-1"),
+                Some("alice@corp.example.com"),
+                "{}",
+            )
+            .await
+            .unwrap();
+        audit
+            .insert_event(
+                AuditEventKind::LoginSuccess,
+                Some("user-2"),
+                Some("alice@other.example.com"),
+                "{}",
+            )
+            .await
+            .unwrap();
+
+        let events = audit
+            .query_events(&AuditEventFilter {
+                email: Some("ALICE@Corp.Example.Com".to_string()),
+                ..AuditEventFilter::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            events.len(),
+            1,
+            "case normalization must not conflate emails with different domains"
+        );
+        assert_eq!(events[0].user_id.as_deref(), Some("user-1"));
     }
 }

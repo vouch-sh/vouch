@@ -543,14 +543,25 @@ pub async fn get_scim_user(
 /// email already exists (application-level uniqueness enforcement,
 /// global because emails are globally unique by design).
 ///
+/// # Email normalization
+///
+/// `email` is normalized to ASCII lowercase before lookup and storage,
+/// matching [`crate::db::enroll_user_with_org`]. This makes the
+/// application-level uniqueness check case-insensitive so that a SCIM
+/// provision of `Alice@example.com` and a later OIDC enrollment as
+/// `alice@example.com` resolve to the same user instead of producing a
+/// duplicate. The stored `UserDoc.email` and the returned
+/// [`ScimUserRecord.email`] are always lowercase.
+///
 /// # Race safety
 ///
-/// The user ID is derived deterministically from the email via
+/// The user ID is derived deterministically from the *normalized* email via
 /// [`deterministic_user_id`](crate::db::documents::user::deterministic_user_id)
-/// (a version-5 name-based UUID) and inserted with [`StoreTransaction::insert_with_id`].
-/// Two concurrent `create_scim_user` calls for the same email therefore compute
-/// the same primary key: the winning insert commits, and the loser's insert
-/// fails with a primary-key violation. `is_unique_violation` catches that and
+/// (a version-8 SHA-256-based UUID) and inserted with
+/// [`StoreTransaction::insert_with_id`]. Two concurrent `create_scim_user`
+/// calls for the same email — in any casing — therefore compute the same
+/// primary key: the winning insert commits, and the loser's insert fails
+/// with a primary-key violation. `is_unique_violation` catches that and
 /// surfaces the same "UNIQUE constraint failed" error returned by the explicit
 /// pre-check, so the SCIM handler maps both paths to `409 Conflict`.
 ///
@@ -573,8 +584,19 @@ pub async fn create_scim_user(
 ) -> Result<ScimUserRecord> {
     use super::documents::user::deterministic_user_id;
 
-    // Derived once outside the retried block: stable across retries and
-    // identical for concurrent callers passing the same email.
+    // Normalize email to ASCII lowercase so the duplicate check and the
+    // stored row match the casing used by `enroll_user_with_org`. Without
+    // this, a SCIM provision of `Alice@example.com` would not collide with
+    // a subsequent OIDC enrollment as `alice@example.com`, producing two
+    // user records for the same person.
+    let email = email.to_ascii_lowercase();
+    let email = email.as_str();
+
+    // Derived once outside the retried block, from the normalized email:
+    // stable across retries and identical for concurrent callers passing
+    // the same email in any casing. Deriving before normalizing would give
+    // `Alice@x.com` and `alice@x.com` different primary keys and reopen the
+    // duplicate-row race for cross-case concurrent creates.
     let user_id = deterministic_user_id(email);
 
     crate::with_dsql_retry!(async {
