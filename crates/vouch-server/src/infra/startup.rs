@@ -188,16 +188,19 @@ async fn probe_nitro_tpm() -> bool {
 /// If the config has a `document_key`, decrypts it via KMS (with NitroTPM
 /// attestation when available) and returns the key material.
 ///
-/// Also constructs the single `KmsArnResolver` for this boot: partition and
-/// region come from `config.aws_partition`/`config.aws_region` (resolved once
-/// in `ServerConfig::from_args`), while the account ID is the S3 document's
-/// own `kms_account_id` — the only value that isn't already known before the
-/// document is fetched. The caller re-binds the returned resolver to the
-/// final merged `kms_account_id` before reusing it for other KMS keys.
+/// Constructs two `KmsArnResolver`s for this boot. The one used to resolve
+/// the document key takes its region from `s3_config_region` (falling back
+/// to `aws_region`) so it matches the doc-key KMS client below. The one
+/// returned to the caller uses `config.aws_partition`/`config.aws_region`
+/// for signing keys; the caller re-binds it to the final merged
+/// `kms_account_id` before reusing it. In both, the account ID is the S3
+/// document's own `kms_account_id` — the only value that isn't already
+/// known before the document is fetched.
 ///
 /// The KMS client built here is used **only for document-key decryption**.
 /// It reuses the S3 SDK config (region = `s3_config_region`) because the
-/// document key's KMS key is typically co-located with the S3 bucket. It is
+/// document key's KMS key lives in the same region as the S3 bucket
+/// (the account may differ — that is what `kms_account_id` selects). It is
 /// deliberately NOT returned for signing operations: signing-key ARNs embed
 /// `aws_region` (see `KmsArnResolver`), and the AWS SDK picks the KMS
 /// endpoint from the client's configured region. Reusing this client for
@@ -263,6 +266,21 @@ async fn load_s3_config(
     // kms_account_id is always None pre-merge (it has no CLI/env source of
     // its own — see ServerConfig::from_args); fetch_s3_config rebinds it to
     // the S3 document's own value before resolving the document key.
+    //
+    // Two resolvers, matching the two KMS clients: the document key's KMS
+    // key lives in the same region as the S3 bucket, so its ARN region must
+    // be `s3_config_region` — the same region `doc_key_kms_client` sends
+    // requests to. The resolver returned to the caller keeps `aws_region`
+    // for signing keys, pairing with the signing client `build_app_state`
+    // creates.
+    let doc_key_resolver = KmsArnResolver::new(
+        config.kms_account_id.as_deref(),
+        config.aws_partition.as_deref(),
+        config
+            .s3_config_region
+            .as_deref()
+            .or(config.aws_region.as_deref()),
+    );
     let kms_resolver = KmsArnResolver::new(
         config.kms_account_id.as_deref(),
         config.aws_partition.as_deref(),
@@ -278,7 +296,7 @@ async fn load_s3_config(
         &source,
         Some(&doc_key_kms_client),
         use_attestation,
-        &kms_resolver,
+        &doc_key_resolver,
     )
     .await
     .context("Failed to fetch S3 configuration")?;
