@@ -2672,6 +2672,7 @@ mod tests {
     // session JWT and asserts that `auth_time` is present, recent, and consistent
     // with the `amr`/`acr`/`hardware_verified` claims.
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn test_browser_register_complete_sets_auth_time_on_session() {
         use aws_lc_rs::signature::{ECDSA_P256_SHA256_ASN1_SIGNING, EcdsaKeyPair, KeyPair};
 
@@ -2757,7 +2758,11 @@ mod tests {
         auth_data.extend_from_slice(&aaguid);
         // credential ID: 16 random-ish bytes (deterministic here is fine)
         let cred_id: [u8; 16] = [0x42; 16];
-        auth_data.extend_from_slice(&(cred_id.len() as u16).to_be_bytes());
+        auth_data.extend_from_slice(
+            &u16::try_from(cred_id.len())
+                .expect("cred_id length fits in u16")
+                .to_be_bytes(),
+        );
         auth_data.extend_from_slice(&cred_id);
         // append COSE_Key
         let mut cose_key_bytes = Vec::new();
