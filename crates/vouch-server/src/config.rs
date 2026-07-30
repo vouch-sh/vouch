@@ -957,7 +957,7 @@ impl ServerConfig {
             tls_key: args.tls_key.map(SecretString::from),
             s3_config_bucket: args.s3_config_bucket,
             s3_config_key: args.s3_config_key,
-            s3_config_region: args.s3_config_region,
+            s3_config_region: args.s3_config_region.filter(|s| !s.is_empty()),
             s3_config_poll_interval: args.s3_config_poll_interval,
             aws_region,
             aws_az,
@@ -1722,6 +1722,21 @@ mod tests {
             config.aws_partition.is_none(),
             "empty CLI aws_partition without IMDS must be None, got {:?}",
             config.aws_partition
+        );
+    }
+
+    #[test]
+    fn from_args_empty_s3_config_region_yields_none() {
+        // `s3_config_region` feeds `aws_config_loader` directly (S3 config
+        // loading and the doc-key KMS client), so an empty value must become
+        // `None` for the same reason as `aws_region` above.
+        let args = Args::try_parse_from(["vouch-server", "--s3-config-region="])
+            .expect("parse with empty --s3-config-region");
+        let config = ServerConfig::from_args(args, None).expect("config builds");
+        assert!(
+            config.s3_config_region.is_none(),
+            "empty CLI s3_config_region must be None, got {:?}",
+            config.s3_config_region
         );
     }
 
