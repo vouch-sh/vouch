@@ -2409,6 +2409,81 @@ async fn test_create_scim_user_concurrent_same_email_produces_one_user() {
     );
 }
 
+/// Concurrent creates for the same email in DIFFERENT casings must still
+/// collide on one row: `create_scim_user` lowercases the email before
+/// deriving the deterministic ID, so `Alice@…`, `ALICE@…`, and `alice@…`
+/// all compute the same primary key. Deriving from the verbatim email
+/// instead would give each casing its own ID, letting cross-case concurrent
+/// creates commit distinct rows — reopening the duplicate-user bug the
+/// deterministic ID exists to close.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_create_scim_user_concurrent_mixed_case_same_email_produces_one_user() {
+    use crate::db::documents::user::UserDoc;
+    let (store, _audit) = test_db().await;
+    let store = std::sync::Arc::new(store);
+
+    let casings = [
+        "Case.Race@Example.com",
+        "case.race@example.com",
+        "CASE.RACE@EXAMPLE.COM",
+        "case.Race@example.COM",
+    ];
+    let num_tasks = 20;
+    let mut handles = Vec::with_capacity(num_tasks);
+    for &email in casings.iter().cycle().take(num_tasks) {
+        let s = std::sync::Arc::clone(&store);
+        handles.push(tokio::spawn(async move {
+            create_scim_user(&s, Some(TEST_ORG_ID), email, Some("Racer"), None, true).await
+        }));
+    }
+
+    let mut successes = 0u32;
+    let mut unique_errors = 0u32;
+    for handle in handles {
+        let result = handle.await.expect("task should not panic");
+        match result {
+            Ok(record) => {
+                successes += 1;
+                assert_eq!(
+                    record.email, "case.race@example.com",
+                    "the stored email must be the lowercase normalization"
+                );
+            }
+            Err(ref e) if e.to_string().contains("UNIQUE") => unique_errors += 1,
+            Err(ref e) => panic!("unexpected error from create_scim_user: {e}"),
+        }
+    }
+
+    assert_eq!(
+        successes, 1,
+        "exactly one mixed-case concurrent create should succeed; got {successes}"
+    );
+    assert_eq!(
+        unique_errors,
+        u32::try_from(num_tasks - 1).expect("num_tasks - 1 fits in u32"),
+        "every other mixed-case concurrent create should be rejected with a UNIQUE error"
+    );
+
+    // Exactly one row exists, stored under the lowercase email, with the
+    // deterministic ID derived from that lowercase form.
+    let all_for_email = store
+        .find_all::<UserDoc>("email", "case.race@example.com")
+        .await
+        .expect("find_all by lowercase email");
+    assert_eq!(
+        all_for_email.len(),
+        1,
+        "exactly one user row must exist across all casings; got {}",
+        all_for_email.len()
+    );
+    let expected_id = crate::db::documents::user::deterministic_user_id("case.race@example.com");
+    let winner = all_for_email.first().expect("one row exists");
+    assert_eq!(
+        winner.id, expected_id,
+        "the winning row's ID must derive from the lowercase email"
+    );
+}
+
 /// The deterministic user ID is stable across calls and across process
 /// restarts (it is a pure function of the email). A user created by
 /// `create_scim_user`, deleted, then re-created with the same email must

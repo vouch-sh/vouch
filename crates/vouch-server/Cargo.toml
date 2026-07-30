@@ -95,7 +95,7 @@ tracing-subscriber = { workspace = true, features = ["std", "fmt", "env-filter",
 unic-langid = { workspace = true, features = ["macros"] }
 url = { workspace = true }
 urlencoding = { workspace = true }
-uuid = { workspace = true, features = ["v5", "v7", "serde", "std"] }
+uuid = { workspace = true, features = ["v7", "v8", "serde", "std"] }
 vouch-common = { workspace = true }
 vouch-httpsig = { workspace = true, features = ["axum"] }
 vouch-i18n = { workspace = true }
