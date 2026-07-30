@@ -31,6 +31,12 @@ impl IntegrationMockDevice {
         self.inner.credential_id().to_vec()
     }
 
+    /// Get the public key in COSE format (for DB storage during test setup).
+    #[must_use]
+    pub fn inner_public_key_cose(&self) -> Vec<u8> {
+        self.inner.public_key_cose()
+    }
+
     /// Get the current counter.
     #[must_use]
     pub fn counter(&self) -> u32 {
