@@ -198,6 +198,20 @@ jobs:
           path: target/${{ matrix.target }}/release/vouch.exe
           retention-days: 7
 
+  # Satisfies the required "Build (linux-amd64)" check in merge groups,
+  # where the real build matrix is skipped. A job-level skip of a matrix
+  # job never expands the matrix, so it reports one check literally named
+  # "Build (${{ matrix.name }})" — the required name never reports and the
+  # queue waits forever. This shim reports the exact required name and
+  # exits immediately; its `if` is mutually exclusive with the build job's.
+  build-merge-group-shim:
+    name: Build (linux-amd64)
+    if: github.event_name == 'merge_group'
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - run: echo "Build matrix runs on PR heads and main pushes; skipped in merge groups."
+
   dependency-review:
     name: Dependency Review
     runs-on: ubuntu-latest
