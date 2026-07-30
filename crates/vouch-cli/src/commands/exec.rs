@@ -207,7 +207,14 @@ pub(crate) async fn run(
 
         if !status.success() {
             let code = status.code().unwrap_or(1);
-            bail!(tr_args!("exec-err-exit-status", code = code));
+            // Match Unix `exec()` semantics: the child's exit code becomes
+            // vouch's exit code. Returning an `anyhow::Error` here would lose
+            // the numeric code to `classify()`'s `GENERAL` fallback (exit 1).
+            #[expect(
+                clippy::exit,
+                reason = "propagate child exit code on non-Unix; matches Unix exec()"
+            )]
+            std::process::exit(code);
         }
 
         Ok(())
