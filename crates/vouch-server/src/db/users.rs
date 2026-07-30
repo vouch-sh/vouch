@@ -42,17 +42,22 @@ impl From<Document<UserDoc>> for User {
 ///
 /// Note: Only used in tests. Production code uses the transactional
 /// `enroll_user_with_org` function.
+///
+/// Like the production enrollment path, `email` is normalized to ASCII
+/// lowercase before lookup and storage so test fixtures match the same
+/// case-insensitive uniqueness contract.
 #[cfg(any(test, feature = "test-utils"))]
 pub async fn upsert_user(
     store: &DocumentStore,
     email: &str,
     name: Option<&str>,
 ) -> Result<(String, bool)> {
-    if let Some(doc) = store.find_one::<UserDoc>("email", email).await? {
+    let email = email.to_ascii_lowercase();
+    if let Some(doc) = store.find_one::<UserDoc>("email", &email).await? {
         return Ok((doc.id, false));
     }
     let user_doc = UserDoc {
-        email: email.to_string(),
+        email,
         name: name.map(String::from),
         org_id: None,
         is_org_admin: false,
@@ -69,6 +74,10 @@ pub async fn upsert_user(
 /// Create or find a user by email, with an organization.
 ///
 /// Note: Only used in tests. Production code uses `enroll_user_with_org`.
+///
+/// Like the production enrollment path, `email` is normalized to ASCII
+/// lowercase before lookup and storage so test fixtures match the same
+/// case-insensitive uniqueness contract.
 #[cfg(any(test, feature = "test-utils"))]
 pub async fn upsert_user_with_org(
     store: &DocumentStore,
@@ -77,11 +86,12 @@ pub async fn upsert_user_with_org(
     org_id: Option<&str>,
     is_org_admin: bool,
 ) -> Result<(String, bool)> {
-    if let Some(doc) = store.find_one::<UserDoc>("email", email).await? {
+    let email = email.to_ascii_lowercase();
+    if let Some(doc) = store.find_one::<UserDoc>("email", &email).await? {
         return Ok((doc.id, false));
     }
     let user_doc = UserDoc {
-        email: email.to_string(),
+        email,
         name: name.map(String::from),
         org_id: org_id.map(String::from),
         is_org_admin,
@@ -96,8 +106,13 @@ pub async fn upsert_user_with_org(
 }
 
 /// Get a user by email.
+///
+/// `email` is normalized to ASCII lowercase before the indexed lookup so
+/// callers may pass any casing; user emails are stored lowercase by
+/// `enroll_user_with_org` and `create_scim_user`.
 pub async fn get_user_by_email(store: &DocumentStore, email: &str) -> Result<Option<User>> {
-    let doc = store.find_one::<UserDoc>("email", email).await?;
+    let email = email.to_ascii_lowercase();
+    let doc = store.find_one::<UserDoc>("email", &email).await?;
     Ok(doc.map(User::from))
 }
 

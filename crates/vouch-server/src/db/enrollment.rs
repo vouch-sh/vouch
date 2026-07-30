@@ -107,12 +107,31 @@ async fn get_or_create_org(store: &DocumentStore, domain: &str) -> Result<String
 /// transaction against fresh state. If the organization row was deleted
 /// after step 1, the snapshot is `None` and the user is enrolled without
 /// any admin claim.
+///
+/// # Email normalization
+///
+/// `email` is normalized to ASCII lowercase before lookup and storage so
+/// that a user pre-provisioned via SCIM with `Alice@example.com` is found
+/// when the same person enrolls via OIDC with `alice@example.com`. This
+/// matches the domain normalization contract documented on
+/// [`get_or_create_org`] and prevents duplicate user records for the same
+/// person across protocols. The caller may pass any casing; the stored
+/// `UserDoc.email` and the returned [`EnrolledUser.email`] are always
+/// lowercase.
 pub async fn enroll_user_with_org(
     store: &DocumentStore,
     email: &str,
     name: Option<&str>,
     domain: Option<&str>,
 ) -> Result<EnrolledUser> {
+    // Normalize email to ASCII lowercase so the lookup matches a
+    // pre-provisioned user regardless of the casing the IdP returned.
+    // `to_ascii_lowercase` only folds A-Z, preserving the byte length and
+    // validity of any internationalized local-part — the same normalization
+    // `extract_domain` already applies to the domain component.
+    let email = email.to_ascii_lowercase();
+    let email = email.as_str();
+
     let org_id = match domain {
         Some(domain) => Some(get_or_create_org(store, domain).await?),
         None => None,
