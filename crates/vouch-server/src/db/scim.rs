@@ -542,6 +542,16 @@ pub async fn get_scim_user(
 /// Returns an error containing "UNIQUE" if a user with the same
 /// email already exists (application-level uniqueness enforcement,
 /// global because emails are globally unique by design).
+///
+/// # Email normalization
+///
+/// `email` is normalized to ASCII lowercase before lookup and storage,
+/// matching [`crate::db::enroll_user_with_org`]. This makes the
+/// application-level uniqueness check case-insensitive so that a SCIM
+/// provision of `Alice@example.com` and a later OIDC enrollment as
+/// `alice@example.com` resolve to the same user instead of producing a
+/// duplicate. The stored `UserDoc.email` and the returned
+/// [`ScimUserRecord.email`] are always lowercase.
 pub async fn create_scim_user(
     store: &DocumentStore,
     org_id: Option<&str>,
@@ -550,6 +560,14 @@ pub async fn create_scim_user(
     external_id: Option<&str>,
     active: bool,
 ) -> Result<ScimUserRecord> {
+    // Normalize email to ASCII lowercase so the duplicate check and the
+    // stored row match the casing used by `enroll_user_with_org`. Without
+    // this, a SCIM provision of `Alice@example.com` would not collide with
+    // a subsequent OIDC enrollment as `alice@example.com`, producing two
+    // user records for the same person.
+    let email = email.to_ascii_lowercase();
+    let email = email.as_str();
+
     crate::with_dsql_retry!(async {
         let mut tx = store.begin().await?;
 
