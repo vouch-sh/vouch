@@ -221,8 +221,28 @@ fn validate_region_partition(
 }
 
 /// Resolve the AWS region, checking profile config then environment variables.
-pub(crate) fn resolve_region(region: Option<&str>, profile_name: &str) -> anyhow::Result<String> {
-    find_region(region, Some(profile_name))?.ok_or_else(|| no_region_error().into())
+///
+/// When `role_arn` is provided, validates that the resolved region belongs
+/// to the same AWS partition as the ARN. Callers that build service
+/// endpoints from the ARN's partition (STS, EKS `describe_cluster`) must
+/// pass it so a mismatched region fails early with a clear message; callers
+/// whose region never feeds a Vouch-built endpoint (e.g. `setup ssm`, where
+/// the region only reaches the native AWS CLI) pass `None`.
+pub(crate) fn resolve_region(
+    region: Option<&str>,
+    profile_name: &str,
+    role_arn: Option<&str>,
+) -> anyhow::Result<String> {
+    let Some(resolved) = find_region(region, Some(profile_name))? else {
+        return Err(no_region_error().into());
+    };
+    if let Some(arn) = role_arn {
+        let arn_partition = vouch_common::aws::Partition::from_arn(arn).map_err(|_| {
+            crate::exit_code::CliError::ConfigError(tr!("aws-console-err-invalid-role-arn"))
+        })?;
+        validate_region_partition(&resolved, arn_partition)?;
+    }
+    Ok(resolved)
 }
 
 /// Resolve the AWS region, falling back to the partition's default STS region

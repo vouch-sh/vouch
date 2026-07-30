@@ -212,7 +212,9 @@ pub(crate) async fn run(
 
     // Auto-discover profile and region
     let profile_name = resolve_ssm_profile(profile)?;
-    let region_name = aws::resolve_region(region, &profile_name)?;
+    // No partition validation: this region only feeds the native AWS CLI's
+    // own `--region` flag, never a Vouch-built endpoint.
+    let region_name = aws::resolve_region(region, &profile_name, None)?;
     let host_pattern = hosts;
 
     // Validate all inputs before building the config block
