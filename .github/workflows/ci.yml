@@ -114,6 +114,11 @@ jobs:
 
   build:
     name: Build (${{ matrix.name }})
+    # Skipped in merge groups: the queue gates on the fast checks (fmt,
+    # clippy, unit tests, cargo-deny) and a skipped required check counts
+    # as satisfied. The full build matrix still runs on every PR head and
+    # on main after each merge, so platform-build breakage surfaces there.
+    if: github.event_name != 'merge_group'
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
