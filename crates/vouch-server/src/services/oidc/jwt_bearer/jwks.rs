@@ -142,6 +142,21 @@ pub fn find_matching_key(
     if let Some(ref kid) = header.kid {
         for key in &jwks.keys {
             if key.kid.as_deref() == Some(kid) {
+                // Enforce the same `use`/`alg` constraints as the algorithm-fallback
+                // path: a key declared for encryption (`use != "sig"`) or a different
+                // algorithm must not be selected for signature verification, even when
+                // its `kid` matches. This mirrors the SAML KeyDescriptor behavior, which
+                // skips encryption-only keys.
+                if let Some(ref use_) = key.use_
+                    && use_ != "sig"
+                {
+                    continue;
+                }
+                if let Some(ref key_alg) = key.alg
+                    && key_alg != &header.alg
+                {
+                    continue;
+                }
                 return build_decoding_key_from_jwk(key, &header.alg);
             }
         }
@@ -643,6 +658,63 @@ mod tests {
         assert!(
             result.is_err(),
             "RSA key with ES256 alg should fail to build"
+        );
+    }
+
+    #[test]
+    fn test_find_matching_key_kid_match_skips_enc_use() {
+        // A key with use="enc" must not be selected for signature verification,
+        // even when its kid matches the header. This mirrors the SAML KeyDescriptor
+        // behavior (encryption-only keys are skipped) and the algorithm-fallback path.
+        let jwks = JwkSet {
+            keys: vec![ec_jwk_entry(Some("key-1"), None, Some("enc"))],
+        };
+        let hdr = header("ES256", Some("key-1"));
+
+        let result = find_matching_key(&jwks, &hdr);
+        let err = result.unwrap_err();
+        assert!(
+            matches!(&err, ServiceError::OAuth { code, .. } if *code == OAuthErrorCode::InvalidClient)
+        );
+        assert!(
+            matches!(&err, ServiceError::OAuth { description, .. } if description == "No matching key found in JWKS")
+        );
+    }
+
+    #[test]
+    fn test_find_matching_key_kid_match_skips_wrong_alg_field() {
+        // A key whose declared alg differs from the header alg must not be selected,
+        // even when its kid matches. This prevents a key declared for PS256 from
+        // being used to verify an RS256 JWT (and vice versa).
+        let jwks = JwkSet {
+            keys: vec![rsa_jwk_entry(Some("key-1"), Some("PS256"), None)],
+        };
+        let hdr = header("RS256", Some("key-1"));
+
+        let result = find_matching_key(&jwks, &hdr);
+        let err = result.unwrap_err();
+        assert!(
+            matches!(&err, ServiceError::OAuth { code, .. } if *code == OAuthErrorCode::InvalidClient)
+        );
+        assert!(
+            matches!(&err, ServiceError::OAuth { description, .. } if description == "No matching key found in JWKS")
+        );
+    }
+
+    #[test]
+    fn test_find_matching_key_kid_match_allows_absent_use_and_alg() {
+        // A key with no use and no alg fields (both absent) should be accepted
+        // when kid matches — absence means the key is valid for any use/alg.
+        // This is the common case (e.g. vouch-cli's PublicEcJwk emits no use/alg).
+        let jwks = JwkSet {
+            keys: vec![ec_jwk_entry(Some("key-1"), None, None)],
+        };
+        let hdr = header("ES256", Some("key-1"));
+
+        let result = find_matching_key(&jwks, &hdr);
+        assert!(
+            result.is_ok(),
+            "key with absent use/alg and matching kid should be accepted"
         );
     }
 

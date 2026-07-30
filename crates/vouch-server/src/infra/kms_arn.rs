@@ -64,8 +64,27 @@ impl KmsArnResolver {
     /// Used when an account ID becomes known after this resolver was
     /// constructed — e.g. an S3 config document's own `kms_account_id`,
     /// read only once the document has been fetched and parsed.
+    ///
+    /// As with [`new`](Self::new), this logs a WARN once when
+    /// `kms_account_id` is set but partition and/or region are still
+    /// unresolved: ARN construction requires both, so a bare key ID would
+    /// otherwise be silently passed through.
     #[must_use]
     pub fn with_account_id(&self, kms_account_id: Option<&str>) -> Self {
+        if kms_account_id.is_some() {
+            if self.partition.is_none() {
+                tracing::warn!(
+                    "kms_account_id is set but the AWS partition is unresolved; \
+                     KMS key IDs will be passed through unchanged"
+                );
+            }
+            if self.region.is_none() {
+                tracing::warn!(
+                    "kms_account_id is set but the AWS region is unresolved; \
+                     KMS key IDs will be passed through unchanged"
+                );
+            }
+        }
         Self {
             partition: self.partition.clone(),
             region: self.region.clone(),
@@ -95,6 +114,8 @@ impl KmsArnResolver {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Mutex};
+
     use super::*;
 
     fn resolver(
@@ -198,5 +219,124 @@ mod tests {
             r.resolve("alias/"),
             "arn:aws:kms:us-east-1:111122223333:alias/",
         );
+    }
+
+    // --- `with_account_id` logging contract --------------------------------
+    //
+    // The module docs promise partition/region omission is "logged once at
+    // construction". In production the resolver used for signing keys is
+    // built via `new(None, ...)` (kms_account_id has no CLI/env source) and
+    // then rebound to the post-merge `kms_account_id` via
+    // `with_account_id()`. The warning must therefore fire from
+    // `with_account_id()` too — otherwise operators see KMS "working"
+    // (the SDK client resolves its own region from the default chain) while
+    // cross-account ARN construction is silently skipped.
+
+    /// `io::Write` adapter that appends to a shared `Arc<Mutex<Vec<u8>>>`.
+    struct BufWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for BufWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            let mut guard = self
+                .0
+                .lock()
+                .map_err(|e| std::io::Error::other(e.to_string()))?;
+            guard.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// `MakeWriter` that hands out `BufWriter`s sharing one buffer.
+    struct MakeBuf(Arc<Mutex<Vec<u8>>>);
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for MakeBuf {
+        type Writer = BufWriter;
+        fn make_writer(&'a self) -> Self::Writer {
+            BufWriter(self.0.clone())
+        }
+    }
+
+    #[expect(
+        clippy::expect_used,
+        reason = "test code: panic on lock poison is acceptable"
+    )]
+    fn snapshot(buf: &Arc<Mutex<Vec<u8>>>) -> String {
+        let mut guard = buf.lock().expect("log buffer mutex poisoned");
+        let bytes = std::mem::take(&mut *guard);
+        String::from_utf8(bytes).expect("captured log output is valid UTF-8")
+    }
+
+    /// Install a thread-local `tracing` subscriber capturing WARN+ events
+    /// into `buf`. Returns a guard that must be held alive for the duration
+    /// of the code under test.
+    fn install_capture(buf: Arc<Mutex<Vec<u8>>>) -> tracing::dispatcher::DefaultGuard {
+        use tracing_subscriber::EnvFilter;
+        use tracing_subscriber::layer::SubscriberExt;
+
+        let subscriber = tracing_subscriber::registry()
+            .with(EnvFilter::new("warn"))
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .with_writer(MakeBuf(buf))
+                    .with_ansi(false)
+                    .without_time(),
+            );
+        tracing::subscriber::set_default(subscriber)
+    }
+
+    #[test]
+    fn with_account_id_warns_when_partition_missing() {
+        let base = KmsArnResolver::new(None, None, Some("us-east-1"));
+        let buf = Arc::new(Mutex::new(Vec::new()));
+        let _guard = install_capture(buf.clone());
+        let r = base.with_account_id(Some("111122223333"));
+        let logs = snapshot(&buf);
+        assert!(
+            logs.contains("kms_account_id is set but the AWS partition is unresolved"),
+            "expected partition-missing WARN, got: {logs:?}"
+        );
+        assert!(
+            !logs.contains("AWS region is unresolved"),
+            "region is set; region-missing WARN must not fire, got: {logs:?}"
+        );
+        // Behavior: still passes through (no partition => no ARN).
+        assert_eq!(r.resolve("mrk-abc"), "mrk-abc");
+    }
+
+    #[test]
+    fn with_account_id_warns_when_region_missing() {
+        let base = KmsArnResolver::new(None, Some("aws"), None);
+        let buf = Arc::new(Mutex::new(Vec::new()));
+        let _guard = install_capture(buf.clone());
+        let r = base.with_account_id(Some("111122223333"));
+        let logs = snapshot(&buf);
+        assert!(
+            logs.contains("kms_account_id is set but the AWS region is unresolved"),
+            "expected region-missing WARN, got: {logs:?}"
+        );
+        assert!(
+            !logs.contains("AWS partition is unresolved"),
+            "partition is set; partition-missing WARN must not fire, got: {logs:?}"
+        );
+        assert_eq!(r.resolve("mrk-abc"), "mrk-abc");
+    }
+
+    #[test]
+    fn with_account_id_no_warn_when_account_none() {
+        // No account => resolver is a no-op by design. No warning should
+        // fire, mirroring `new()`'s `account_id.is_some()` guard.
+        let base = KmsArnResolver::new(None, None, None);
+        let buf = Arc::new(Mutex::new(Vec::new()));
+        let _guard = install_capture(buf.clone());
+        let r = base.with_account_id(None);
+        let logs = snapshot(&buf);
+        assert!(
+            logs.is_empty(),
+            "no WARN expected when kms_account_id is None, got: {logs:?}"
+        );
+        assert_eq!(r.resolve("mrk-abc"), "mrk-abc");
     }
 }
