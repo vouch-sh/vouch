@@ -2672,7 +2672,10 @@ mod tests {
     // session JWT and asserts that `auth_time` is present, recent, and consistent
     // with the `amr`/`acr`/`hardware_verified` claims.
     #[tokio::test]
-    #[allow(clippy::too_many_lines)]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "hand-built WebAuthn packed attestation payload is inherently linear"
+    )]
     async fn test_browser_register_complete_sets_auth_time_on_session() {
         use aws_lc_rs::signature::{ECDSA_P256_SHA256_ASN1_SIGNING, EcdsaKeyPair, KeyPair};
 
