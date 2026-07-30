@@ -15,6 +15,7 @@
     reason = "debugging command for diagnostics output, not production code paths"
 )]
 
+use crate::fido2::unix::wait_device_until_ready;
 use anyhow::{Context, Result, bail};
 use aws_lc_rs::digest::{SHA256, digest};
 use aws_lc_rs::signature::{ECDSA_P256_SHA256_ASN1, UnparsedPublicKey};
@@ -158,6 +159,7 @@ fn wait_for_device_and_pin(json: bool) -> Result<(FidoKeyHid, String)> {
     let device = loop {
         if let Ok(dev) = FidoKeyHidFactory::create(&cfg) {
             out!(json, "{}", tr!("diag-detected"));
+            wait_device_until_ready(&dev)?;
             break dev;
         }
         std::thread::sleep(std::time::Duration::from_millis(500));

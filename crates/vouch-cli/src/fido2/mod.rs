@@ -44,7 +44,7 @@ use vouch_common::fido2_types::{
 };
 
 #[cfg(not(target_os = "windows"))]
-mod unix;
+pub(crate) mod unix;
 #[cfg(not(target_os = "windows"))]
 pub use unix::YubiKey;
 
