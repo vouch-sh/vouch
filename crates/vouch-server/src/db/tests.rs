@@ -2272,7 +2272,7 @@ async fn test_create_scim_user_duplicate_email_rejected() {
     let (store, _audit) = test_db().await;
 
     // First creation succeeds
-    create_scim_user(
+    let user = create_scim_user(
         &store,
         Some(TEST_ORG_ID),
         "dup@example.com",
@@ -2299,6 +2299,352 @@ async fn test_create_scim_user_duplicate_email_rejected() {
         err.to_string().contains("UNIQUE"),
         "Error message should mention UNIQUE; got: {err}"
     );
+
+    // The created user must be addressable by its deterministic ID: the
+    // SCIM handler's `validate_resource_id` only accepts `uuid::Uuid`-parseable
+    // IDs, so a deterministic ID that isn't a valid UUID would make the user
+    // unreachable via GET/PATCH/PUT/DELETE.
+    use crate::db::documents::user::UserDoc;
+    let by_id = store
+        .get::<UserDoc>(&user.id)
+        .await
+        .expect("query by id")
+        .expect("user must be findable by its deterministic ID");
+    assert_eq!(by_id.data.email, "dup@example.com");
+    assert!(
+        uuid::Uuid::try_parse(&user.id).is_ok(),
+        "deterministic user ID must parse as a UUID; got {}",
+        user.id
+    );
+}
+
+/// Regression for the SCIM concurrent-create race: two concurrent
+/// `create_scim_user` calls with the same email must produce exactly one
+/// user row, not two. Before the deterministic-ID fix, each call generated
+/// a fresh random UUID v7 primary key, so neither insert conflicted with the
+/// other and both committed — producing duplicate accounts for the same email.
+///
+/// The fix derives the user ID from the email (a version-5 name-based UUID),
+/// so the two inserts collide on the `documents` PRIMARY KEY. The losing
+/// insert fails with a unique/primary-key violation, which
+/// `is_unique_violation` maps to the same "UNIQUE constraint failed" error
+/// returned by the explicit pre-check; the SCIM handler then returns
+/// `409 Conflict` for the loser.
+///
+/// Mirrors `test_dpop_jti_concurrent_insert_rejects_duplicates`. Uses
+/// `multi_thread` for defensive OS-level parallelism (SQLite `busy_timeout`
+/// waits happen inside sqlx-sqlite's dedicated OS thread and don't block
+/// tokio worker threads). Under DSQL's optimistic concurrency the loser
+/// first receives a serialization error (`40001`), `with_dsql_retry!`
+/// retries, and the retried insert then collides with the winner's
+/// committed row (`23505`) — `23505` is not retryable, so the loser surfaces
+/// as `Err`. This SQLite test exercises the post-retry collision path.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_create_scim_user_concurrent_same_email_produces_one_user() {
+    use crate::db::documents::user::UserDoc;
+    let (store, _audit) = test_db().await;
+    let store = std::sync::Arc::new(store);
+    let email = "race@example.com";
+
+    let num_tasks = 20;
+    let mut handles = Vec::with_capacity(num_tasks);
+    for _ in 0..num_tasks {
+        let s = std::sync::Arc::clone(&store);
+        handles.push(tokio::spawn(async move {
+            create_scim_user(&s, Some(TEST_ORG_ID), email, Some("Racer"), None, true).await
+        }));
+    }
+
+    let mut successes = 0u32;
+    let mut unique_errors = 0u32;
+    for handle in handles {
+        let result = handle.await.expect("task should not panic");
+        match result {
+            Ok(_) => successes += 1,
+            Err(ref e) if e.to_string().contains("UNIQUE") => unique_errors += 1,
+            Err(ref e) => panic!("unexpected error from create_scim_user: {e}"),
+        }
+    }
+
+    assert_eq!(
+        successes, 1,
+        "exactly one concurrent create should succeed; got {successes}"
+    );
+    assert_eq!(
+        unique_errors,
+        u32::try_from(num_tasks - 1).expect("num_tasks - 1 fits in u32"),
+        "every other concurrent create should be rejected with a UNIQUE error"
+    );
+
+    // Verify at the DB level: exactly one user row for the email, and exactly
+    // one row with the deterministic ID. No duplicate accounts can exist.
+    let by_email = store
+        .find_one::<UserDoc>("email", email)
+        .await
+        .expect("query by email")
+        .expect("exactly one user must exist for the email");
+    let all_for_email = store
+        .find_all::<UserDoc>("email", email)
+        .await
+        .expect("find_all by email");
+    assert_eq!(
+        all_for_email.len(),
+        1,
+        "exactly one user row must exist for the email; got {}",
+        all_for_email.len()
+    );
+    // The row found by email must be the same row found by the deterministic ID.
+    let by_id = store
+        .get::<UserDoc>(&by_email.id)
+        .await
+        .expect("query by id")
+        .expect("user must be findable by its deterministic ID");
+    assert_eq!(by_id.id, by_email.id);
+    assert_eq!(by_id.data.email, email);
+    // And the ID must be a valid UUID (SCIM resource ID contract).
+    assert!(
+        uuid::Uuid::try_parse(&by_email.id).is_ok(),
+        "the winning user's ID must be a valid UUID; got {}",
+        by_email.id
+    );
+}
+
+/// The deterministic user ID is stable across calls and across process
+/// restarts (it is a pure function of the email). A user created by
+/// `create_scim_user`, deleted, then re-created with the same email must
+/// receive the same ID — confirming the derivation has no per-process
+/// randomness and that the `documents` PRIMARY KEY collision behaviour is
+/// not an arte fact of a single test run.
+#[tokio::test]
+async fn test_create_scim_user_deterministic_id_is_stable_across_recreate() {
+    use crate::db::documents::user::UserDoc;
+    let (store, _audit) = test_db().await;
+    let email = "recreate@example.com";
+
+    let first = create_scim_user(&store, Some(TEST_ORG_ID), email, Some("First"), None, true)
+        .await
+        .expect("first create");
+    let first_id = first.id.clone();
+
+    // Delete the user (and any associated data) so the email is free again.
+    store.delete(&first.id).await.expect("delete user");
+
+    // Re-create with the same email — must get the same ID.
+    let second = create_scim_user(&store, Some(TEST_ORG_ID), email, Some("Second"), None, true)
+        .await
+        .expect("re-create after delete");
+    assert_eq!(
+        second.id, first_id,
+        "re-creating a user with the same email must produce the same deterministic ID"
+    );
+
+    // Only one row exists for the email.
+    let all_for_email = store
+        .find_all::<UserDoc>("email", email)
+        .await
+        .expect("find_all by email");
+    assert_eq!(all_for_email.len(), 1);
+}
+
+/// A pre-existing user created by a *different* code path that does not use
+/// the deterministic ID (e.g. `enroll_user_with_org`, which still generates a
+/// random UUID v7) must still block a subsequent `create_scim_user` for the
+/// same email. The `find_one` pre-check catches this before the insert is
+/// attempted, so the deterministic ID never collides with the random one —
+/// the user sees the existing-user `UNIQUE` error, not a silent duplicate.
+#[tokio::test]
+async fn test_create_scim_user_blocked_by_preexisting_random_id_user() {
+    use crate::db::documents::user::UserDoc;
+    let (store, _audit) = test_db().await;
+    let email = "preexisting@example.com";
+
+    // Seed a user with a random UUID v7 ID, as `enroll_user_with_org` does.
+    let seeded = UserDoc {
+        email: email.to_string(),
+        name: Some("Seeded".to_string()),
+        org_id: Some(TEST_ORG_ID.to_string()),
+        is_org_admin: false,
+        active: true,
+        external_id: None,
+        github_id: None,
+        github_login: None,
+        github_refresh_token: None,
+    };
+    let seeded_doc = store.insert(&seeded).await.expect("seed random-id user");
+    assert!(
+        uuid::Uuid::try_parse(&seeded_doc.id).is_ok(),
+        "seeded user should have a valid UUID v7 id"
+    );
+
+    // SCIM create for the same email must be rejected with a UNIQUE error,
+    // even though the seeded user's ID differs from the deterministic one.
+    let result = create_scim_user(&store, Some(TEST_ORG_ID), email, Some("SCIM"), None, true).await;
+    assert!(result.is_err(), "create should be rejected");
+    let err = result.unwrap_err();
+    assert!(
+        err.to_string().contains("UNIQUE"),
+        "error should mention UNIQUE; got: {err}"
+    );
+
+    // Exactly one user row exists — no duplicate created.
+    let all_for_email = store
+        .find_all::<UserDoc>("email", email)
+        .await
+        .expect("find_all by email");
+    assert_eq!(
+        all_for_email.len(),
+        1,
+        "no duplicate user should be created"
+    );
+    assert_eq!(all_for_email[0].id, seeded_doc.id);
+}
+
+/// Snapshot-isolation verification of the SCIM concurrent-create fix.
+///
+/// The SQLite `test_create_scim_user_concurrent_same_email_produces_one_user`
+/// test confirms the post-retry collision path and the DB-level invariant, but
+/// SQLite serializes writers so it cannot reproduce the original race (two
+/// transactions both reading "no user exists" from the same snapshot and both
+/// attempting to commit distinct rows). This test runs the same scenario
+/// against a real PostgreSQL backend when `VOUCH_TEST_POSTGRES_URL` is set,
+/// exercising true snapshot isolation where the deterministic-ID collision is
+/// the only thing preventing duplicate accounts.
+///
+/// To run:
+///   VOUCH_TEST_POSTGRES_URL="postgres://user:pass@localhost/db" \
+///     cargo test -p vouch-server --all-features --lib -- \
+///     test_create_scim_user_concurrent_same_email_produces_one_user_postgres --nocapture
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_create_scim_user_concurrent_same_email_produces_one_user_postgres() {
+    use crate::db::documents::user::UserDoc;
+    use crate::db::pool::{Pool, PoolConfig};
+
+    let url = match std::env::var("VOUCH_TEST_POSTGRES_URL") {
+        Ok(u) if !u.is_empty() => u,
+        _ => {
+            eprintln!("skipping Postgres snapshot-isolation test: VOUCH_TEST_POSTGRES_URL not set");
+            return;
+        }
+    };
+
+    let pool = Pool::connect(&url, &PoolConfig::default())
+        .await
+        .expect("connect to Postgres test DB");
+    let crate::db::pool::Pool::Postgres(p) = &pool else {
+        panic!("VOUCH_TEST_POSTGRES_URL must point to a Postgres database");
+    };
+
+    // The bundled Postgres migrations use `CREATE INDEX ASYNC`, which is
+    // DSQL-specific syntax. For vanilla PostgreSQL we create the schema
+    // inline with standard `CREATE INDEX`. This mirrors the migration files
+    // in `migrations/postgres/` with the `ASYNC` keyword removed.
+    sqlx::raw_sql(
+        r#"
+        CREATE TABLE IF NOT EXISTS documents (
+            id TEXT PRIMARY KEY,
+            doc_type TEXT NOT NULL,
+            schema_version INTEGER NOT NULL DEFAULT 1,
+            encapped_key TEXT,
+            data TEXT NOT NULL,
+            expires_at TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            version INTEGER NOT NULL DEFAULT 1,
+            last_used_at TEXT
+        );
+        CREATE TABLE IF NOT EXISTS document_indexes (
+            id TEXT PRIMARY KEY,
+            document_id TEXT NOT NULL,
+            index_field TEXT NOT NULL,
+            index_value TEXT NOT NULL,
+            UNIQUE(document_id, index_field, index_value)
+        );
+        CREATE INDEX IF NOT EXISTS idx_documents_doc_type ON documents(doc_type);
+        CREATE INDEX IF NOT EXISTS idx_documents_expires_at ON documents(expires_at);
+        CREATE INDEX IF NOT EXISTS idx_documents_doc_type_created ON documents(doc_type, created_at);
+        CREATE INDEX IF NOT EXISTS idx_document_indexes_lookup ON document_indexes(index_field, index_value);
+        CREATE INDEX IF NOT EXISTS idx_document_indexes_document_id ON document_indexes(document_id);
+        CREATE INDEX IF NOT EXISTS idx_document_indexes_covering ON document_indexes(index_field, index_value, document_id);
+        CREATE INDEX IF NOT EXISTS idx_documents_cleanup ON documents(doc_type, expires_at);
+        "#,
+    )
+    .execute(p)
+    .await
+    .expect("create Postgres schema");
+
+    let crypto: std::sync::Arc<dyn crate::crypto::document_crypto::DocumentCrypto> =
+        std::sync::Arc::new(crate::crypto::document_crypto::PlaintextDocumentCrypto);
+    let store = crate::db::store::DocumentStore::new(pool.clone(), crypto.clone());
+
+    let email = "pg-race@example.com";
+
+    // Clean up any leftover row from a previous run.
+    if let Some(existing) = store
+        .find_one::<UserDoc>("email", email)
+        .await
+        .expect("find_one before test")
+    {
+        store.delete(&existing.id).await.expect("delete leftover");
+    }
+
+    let store = std::sync::Arc::new(store);
+    let num_tasks = 20;
+    let mut handles = Vec::with_capacity(num_tasks);
+    for _ in 0..num_tasks {
+        let s = std::sync::Arc::clone(&store);
+        handles.push(tokio::spawn(async move {
+            create_scim_user(&s, Some("pg-test-org"), email, Some("Racer"), None, true).await
+        }));
+    }
+
+    let mut successes = 0u32;
+    let mut unique_errors = 0u32;
+    let mut other_errors = Vec::new();
+    for handle in handles {
+        let result = handle.await.expect("task should not panic");
+        match result {
+            Ok(_) => successes += 1,
+            Err(ref e) if e.to_string().contains("UNIQUE") => unique_errors += 1,
+            Err(ref e) => other_errors.push(format!("{e:#}")),
+        }
+    }
+
+    assert!(
+        other_errors.is_empty(),
+        "unexpected non-UNIQUE errors: {other_errors:?}"
+    );
+    assert_eq!(
+        successes, 1,
+        "exactly one concurrent create should succeed on Postgres; got {successes}"
+    );
+    assert_eq!(
+        unique_errors,
+        u32::try_from(num_tasks - 1).expect("num_tasks - 1 fits in u32"),
+        "every other concurrent create should be rejected with a UNIQUE error on Postgres"
+    );
+
+    // Verify at the DB level: exactly one user row for the email.
+    let all_for_email = store
+        .find_all::<UserDoc>("email", email)
+        .await
+        .expect("find_all by email");
+    assert_eq!(
+        all_for_email.len(),
+        1,
+        "exactly one user row must exist for the email on Postgres; got {}",
+        all_for_email.len()
+    );
+    assert!(
+        uuid::Uuid::try_parse(&all_for_email[0].id).is_ok(),
+        "the winning user's ID must be a valid UUID; got {}",
+        all_for_email[0].id
+    );
+
+    // Clean up.
+    store
+        .delete(&all_for_email[0].id)
+        .await
+        .expect("cleanup after test");
 }
 
 // ========================================================================
