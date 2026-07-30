@@ -214,7 +214,7 @@ async fn exchange_fido2_assertion(
 
 // ── Tests ────────────────────────────────────────────────────────────────
 
-/// G15: Windows 11 24H2 with OsRecency active must successfully obtain a token.
+/// Windows 11 24H2 with OsRecency active must successfully obtain a token.
 ///
 /// Before the fix, the 4-component `os_version` ("10.0.26100.0") caused
 /// `semver()` to error, which propagated through `||` and denied the grant.
@@ -285,8 +285,7 @@ async fn test_fido2_grant_windows_24h2_os_recency_passes() {
     );
 }
 
-/// G15 negative case: Windows 11 23H2 (build 22631) with OsRecency active
-/// must be denied.
+/// Windows 11 23H2 (build 22631) with OsRecency active must be denied.
 #[tokio::test]
 async fn test_fido2_grant_windows_23h2_os_recency_denied() {
     let harness = TestHarness::new().await;
@@ -347,7 +346,7 @@ async fn test_fido2_grant_windows_23h2_os_recency_denied() {
     );
 }
 
-/// G5 regression: macOS 15 with OsRecency active must still pass (no regression).
+/// macOS 15 with OsRecency active must still pass (no regression).
 #[tokio::test]
 async fn test_fido2_grant_macos_15_os_recency_passes() {
     let harness = TestHarness::new().await;
@@ -406,7 +405,7 @@ async fn test_fido2_grant_macos_15_os_recency_passes() {
     );
 }
 
-/// G15: FIDO2 grant with no posture data but OsRecency active must be denied
+/// FIDO2 grant with no posture data but OsRecency active must be denied
 /// (posture data is required when policies are active).
 #[tokio::test]
 async fn test_fido2_grant_os_recency_no_posture_denied() {
