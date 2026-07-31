@@ -223,11 +223,13 @@ fn validate_region_partition(
 /// Resolve the AWS region, checking profile config then environment variables.
 ///
 /// When `role_arn` is provided, validates that the resolved region belongs
-/// to the same AWS partition as the ARN. Callers that build service
-/// endpoints from the ARN's partition (STS, EKS `describe_cluster`) must
-/// pass it so a mismatched region fails early with a clear message; callers
-/// whose region never feeds a Vouch-built endpoint (e.g. `setup ssm`, where
-/// the region only reaches the native AWS CLI) pass `None`.
+/// to the same AWS partition as the ARN so a mismatched region fails early
+/// with a clear message — whether the caller builds a service endpoint from
+/// the ARN's partition (STS, EKS `describe_cluster`) or hands the region to
+/// the native AWS CLI while `credential_process` mints credentials under the
+/// ARN's partition (`setup ssm`). Callers with no role ARN to validate
+/// against (e.g. `setup ssm` with an explicit non-Vouch `--profile`) pass
+/// `None` and accept the region as-is.
 pub(crate) fn resolve_region(
     region: Option<&str>,
     profile_name: &str,
