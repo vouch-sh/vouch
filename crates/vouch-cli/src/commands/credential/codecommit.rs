@@ -75,7 +75,21 @@ async fn get_credential(profile: Option<&str>) -> Result<()> {
         format!("/{path}")
     };
 
-    let creds = get_sts_credentials(profile).await?;
+    let vouch_profile = resolve_vouch_profile(profile, ProfileOverride::Profile)?;
+    // Credentials are partition-scoped, so signing a request to a host in
+    // another partition is guaranteed a 403. Decline with no output instead of
+    // erroring: git then continues to any other configured credential helper,
+    // which may legitimately serve this host.
+    if let Err(e) =
+        crate::integrations::aws::validate_region_for_role(region, &vouch_profile.role_arn)
+    {
+        vouch_cli::tr_eprintln!(
+            "credential-codecommit-warn-partition-mismatch",
+            error = e.to_string()
+        );
+        return Ok(());
+    }
+    let creds = get_sts_credentials(&vouch_profile.role_arn).await?;
     let signed = sign_request(&creds, host, &canonical_path, region);
 
     let stdout = std::io::stdout();
@@ -120,7 +134,12 @@ pub(crate) async fn run_remote_helper(remote_name: &str, url: &str) -> Result<()
     let path = format!("/v1/repos/{}", parsed.repository);
 
     // The URL profile selects the account, not just the region.
-    let creds = get_sts_credentials(parsed.profile.as_deref()).await?;
+    let vouch_profile = resolve_vouch_profile(parsed.profile.as_deref(), ProfileOverride::Profile)?;
+    // The endpoint above is built from `region` while credentials mint under
+    // the role's partition; a cross-partition pair is guaranteed an opaque
+    // 403 from CodeCommit at git time, so fail now with a clear message.
+    crate::integrations::aws::validate_region_for_role(&region, &vouch_profile.role_arn)?;
+    let creds = get_sts_credentials(&vouch_profile.role_arn).await?;
     let signed = sign_request(&creds, &hostname, &path, &region);
 
     // Percent-encode credentials for URL embedding
@@ -136,17 +155,17 @@ pub(crate) async fn run_remote_helper(remote_name: &str, url: &str) -> Result<()
 /// Get temporary AWS credentials via Vouch OIDC -> STS flow, with caching.
 ///
 /// Reuses the shared `fetch_and_assume` from the AWS credential module to avoid
-/// duplicating the OIDC → STS logic, and wraps it with the agent credential cache.
-async fn get_sts_credentials(profile: Option<&str>) -> Result<StsCredentials> {
+/// duplicating the OIDC → STS logic, and wraps it with the agent credential
+/// cache. The role is resolved by the caller so both CodeCommit flows can
+/// validate the target region's partition against it before signing anything.
+async fn get_sts_credentials(role_arn: &str) -> Result<StsCredentials> {
     let session = crate::session::resolve_session()
         .await
         .context(tr!("err-not-configured-run-vouch-enroll-first"))?;
 
     let server = session.server_url;
 
-    let role_arn = resolve_vouch_profile(profile, ProfileOverride::Profile)?.role_arn;
-
-    let data = super::aws::get_aws_credentials(&server, &role_arn).await?;
+    let data = super::aws::get_aws_credentials(&server, role_arn).await?;
 
     // Extract STS credentials from the cached JSON
     let access_key_id = data
@@ -225,7 +244,7 @@ fn resolve_region(url_region: Option<&str>, profile: Option<&str>) -> Result<Str
 /// Implements priorities 2 and 3 of [`resolve_region`]: the specified
 /// profile's region, then the resolved Vouch profile's region. The Vouch
 /// profile is resolved with the same `explicit` -> `$AWS_PROFILE` -> sole
-/// profile ordering used for role resolution in `get_sts_credentials`, so a
+/// profile ordering used for role resolution in [`run_remote_helper`], so a
 /// machine with several Vouch profiles never borrows an unrelated profile's
 /// region — region and credentials come from the same profile. Returns `None`
 /// when neither source names a region, leaving the caller to fall back to env
@@ -245,7 +264,7 @@ fn select_region(
 
     // Priority 3: the Vouch profile that mints the credentials. Resolved with
     // the explicit profile first so region follows the same account as the
-    // role resolved by `get_sts_credentials`; an ambiguous or missing choice
+    // role resolved for credential minting; an ambiguous or missing choice
     // is not fatal here — region still has an env/us-east-1 fallback.
     let vouch_profile =
         select_vouch_profile(config, profile, env_profile, ProfileOverride::Profile).ok()?;

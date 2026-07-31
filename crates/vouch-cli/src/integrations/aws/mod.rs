@@ -220,6 +220,24 @@ fn validate_region_partition(
     )))
 }
 
+/// Validate that a region belongs to the same AWS partition as a role ARN.
+///
+/// Thin wrapper over [`validate_region_partition`] for callers that hold the
+/// ARN string rather than an already-parsed partition — region/ARN pairs that
+/// only meet at a service call, such as the CodeCommit helpers, where the
+/// endpoint is built from the region while credentials mint under the role's
+/// partition.
+///
+/// # Errors
+///
+/// Returns a [`CliError::ConfigError`] when the ARN's partition cannot be
+/// parsed or the region belongs to a different partition.
+pub(crate) fn validate_region_for_role(region: &str, role_arn: &str) -> Result<(), CliError> {
+    let arn_partition = vouch_common::aws::Partition::from_arn(role_arn)
+        .map_err(|_| CliError::ConfigError(tr!("aws-console-err-invalid-role-arn")))?;
+    validate_region_partition(region, arn_partition)
+}
+
 /// Resolve the AWS region, checking profile config then environment variables.
 ///
 /// When `role_arn` is provided, validates that the resolved region belongs
@@ -237,10 +255,7 @@ pub(crate) fn resolve_region(
         return Err(no_region_error().into());
     };
     if let Some(arn) = role_arn {
-        let arn_partition = vouch_common::aws::Partition::from_arn(arn).map_err(|_| {
-            crate::exit_code::CliError::ConfigError(tr!("aws-console-err-invalid-role-arn"))
-        })?;
-        validate_region_partition(&resolved, arn_partition)?;
+        validate_region_for_role(&resolved, arn)?;
     }
     Ok(resolved)
 }
@@ -1114,5 +1129,36 @@ credential_process = vouch credential aws --role arn:aws:iam::111:role/X
             matches!(err, CliError::ConfigError(_)),
             "expected CliError::ConfigError, got: {err:?}"
         );
+    }
+
+    /// Matching region/ARN partition pairs pass for commercial, China, and
+    /// GovCloud roles.
+    #[test]
+    fn validate_region_for_role_accepts_matching_partitions() {
+        validate_region_for_role("us-east-1", "arn:aws:iam::123456789012:role/demo").unwrap();
+        validate_region_for_role("cn-north-1", "arn:aws-cn:iam::123456789012:role/demo").unwrap();
+        validate_region_for_role(
+            "us-gov-west-1",
+            "arn:aws-us-gov:iam::123456789012:role/demo",
+        )
+        .unwrap();
+    }
+
+    /// The CodeCommit failure mode: a region in one partition with a role ARN
+    /// in another must be rejected before any request is signed.
+    #[test]
+    fn validate_region_for_role_rejects_cross_partition() {
+        let err = validate_region_for_role("cn-north-1", "arn:aws:iam::123456789012:role/demo")
+            .expect_err("commercial role must not pair with a China region");
+        let msg = err.to_string();
+        assert!(msg.contains("cn-north-1"), "{msg}");
+    }
+
+    /// An ARN whose partition cannot be parsed is a configuration error, not
+    /// a silently skipped check.
+    #[test]
+    fn validate_region_for_role_rejects_unparsable_arn() {
+        validate_region_for_role("us-east-1", "not-an-arn")
+            .expect_err("unparsable ARN cannot be validated");
     }
 }
