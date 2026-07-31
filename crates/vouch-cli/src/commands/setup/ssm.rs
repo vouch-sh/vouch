@@ -199,11 +199,18 @@ fn strip_ssm_block(content: &str) -> String {
 /// another, surfacing as a confusing AWS error at SSH time. Returning the
 /// `role_arn` here lets [`aws::resolve_region`] catch the mismatch at setup
 /// time with a clear message instead.
-fn resolve_ssm_profile(profile: Option<&str>) -> Result<(String, Option<String>)> {
+///
+/// `auto_detect` performs the disk/environment lookup and is injected so the
+/// fallback branch can be tested without either (the [`aws::select_vouch_profile`]
+/// pattern); it is only invoked when no explicit profile was given.
+fn resolve_ssm_profile(
+    profile: Option<&str>,
+    auto_detect: impl FnOnce() -> anyhow::Result<aws::VouchProfile>,
+) -> Result<(String, Option<String>)> {
     if let Some(name) = profile {
         return Ok((name.to_string(), None));
     }
-    let vouch_profile = aws::resolve_vouch_profile(None, aws::ProfileOverride::Profile)?;
+    let vouch_profile = auto_detect()?;
     Ok((vouch_profile.name, Some(vouch_profile.role_arn)))
 }
 
@@ -223,7 +230,9 @@ pub(crate) async fn run(
     check_session_manager_plugin()?;
 
     // Auto-discover profile and region
-    let (profile_name, role_arn) = resolve_ssm_profile(profile)?;
+    let (profile_name, role_arn) = resolve_ssm_profile(profile, || {
+        aws::resolve_vouch_profile(None, aws::ProfileOverride::Profile)
+    })?;
     // Validate partition consistency when the profile was auto-detected
     // (Vouch-managed): `credential_process` resolves region independently from
     // the profile config, so a mismatch between this `--region` and the ARN's
@@ -377,12 +386,35 @@ mod tests {
     /// caller skips partition validation and a non-Vouch profile may be used.
     #[test]
     fn resolve_ssm_profile_explicit_returns_no_role_arn() {
-        let (name, role_arn) = resolve_ssm_profile(Some("my-profile"))
-            .expect("explicit profile should resolve without touching disk");
+        let (name, role_arn) = resolve_ssm_profile(Some("my-profile"), || {
+            bail!("auto-detect must not run when --profile is given")
+        })
+        .expect("explicit profile should resolve without touching disk");
         assert_eq!(name, "my-profile");
         assert!(
             role_arn.is_none(),
             "explicit profile must not yield role_arn"
+        );
+    }
+
+    /// The auto-detected Vouch profile's `role_arn` is carried through so the
+    /// caller validates the region's partition against it. Returning `None`
+    /// here would silently skip partition validation and reintroduce the
+    /// confusing SSH-time AWS errors from #811.
+    #[test]
+    fn resolve_ssm_profile_auto_detect_returns_role_arn() {
+        let (name, role_arn) = resolve_ssm_profile(None, || {
+            Ok(aws::VouchProfile {
+                name: "vouch-demo".to_string(),
+                role_arn: "arn:aws:iam::222222222222:role/demo".to_string(),
+            })
+        })
+        .expect("auto-detected profile should resolve");
+        assert_eq!(name, "vouch-demo");
+        assert_eq!(
+            role_arn.as_deref(),
+            Some("arn:aws:iam::222222222222:role/demo"),
+            "auto-detected profile must carry its role_arn for partition validation"
         );
     }
 
