@@ -871,6 +871,7 @@ impl ServerConfig {
         let aws_use_fips_endpoint = args
             .aws_use_fips_endpoint
             .as_deref()
+            .filter(|s| !s.is_empty())
             .map(|v| v.eq_ignore_ascii_case("true"));
 
         let base_url = derive_base_url(args.base_url, &args.rp_id, &args.listen_addr);
@@ -1737,6 +1738,32 @@ mod tests {
             config.s3_config_region.is_none(),
             "empty CLI s3_config_region must be None, got {:?}",
             config.s3_config_region
+        );
+    }
+
+    #[test]
+    fn from_args_empty_aws_use_fips_endpoint_yields_none() {
+        // `aws_use_fips_endpoint` feeds `aws_config_loader`, where `Some(false)`
+        // explicitly disables FIPS and overrides the AWS SDK's
+        // `AWS_USE_FIPS_ENDPOINT` provider chain. An empty CLI value must become
+        // `None` (matching the SDK's own `parse_bool`, which rejects `""` as
+        // invalid and falls through to the next provider), NOT `Some(false)`.
+        //
+        // The env-var path (`AWS_USE_FIPS_ENDPOINT=""`) is not exercised here
+        // because `std::env::set_var` is `unsafe` under edition 2024 and
+        // `unsafe_code` is denied workspace-wide (see the note above the
+        // "ServerConfig::from_args" section). Clap's `#[arg(env = ...)]`
+        // resolution populates the same `Option<String>` field whether the
+        // value came from the CLI or the environment, so this CLI case covers
+        // both: in either path the field is `Some("")`, which the
+        // `.filter(|s| !s.is_empty())` guard converts to `None`.
+        let args = Args::try_parse_from(["vouch-server", "--aws-use-fips-endpoint="])
+            .expect("parse with empty --aws-use-fips-endpoint");
+        let config = ServerConfig::from_args(args, None).expect("config builds");
+        assert!(
+            config.aws_use_fips_endpoint.is_none(),
+            "empty CLI aws_use_fips_endpoint must be None, got {:?}",
+            config.aws_use_fips_endpoint
         );
     }
 
