@@ -180,38 +180,65 @@ fn strip_ssm_block(content: &str) -> String {
     result
 }
 
-/// Resolve the AWS profile name for the SSM SSH config block.
+/// Which profile the SSM ProxyCommand will name, and what Vouch knows about it.
 ///
-/// Unlike every other AWS-backed command here, SSM never mints credentials
-/// through Vouch: `aws ssm start-session --profile <name>` resolves that
-/// profile's `credential_process` directly through the AWS CLI, so the named
-/// profile does not need to be Vouch-managed. An explicit `--profile` is used
-/// as-is with no `role_arn` (matching the AWS CLI's own lack of validation,
-/// and preserving the ability to target a non-Vouch profile); with none given,
-/// fall back to the auto-detected Vouch profile and return its `role_arn` so
-/// the caller can validate the region's partition against it.
-///
-/// Although the region only reaches the native AWS CLI's `--region` flag, the
-/// AWS CLI's `credential_process` resolves region independently from the
-/// profile's `region` setting. When those two regions differ (e.g. the user
-/// passes `--region cn-north-1` while the profile configures `us-east-1`),
-/// credentials mint under one partition while the SSM API call targets
-/// another, surfacing as a confusing AWS error at SSH time. Returning the
-/// `role_arn` here lets [`aws::resolve_region`] catch the mismatch at setup
-/// time with a clear message instead.
-///
-/// `auto_detect` performs the disk/environment lookup and is injected so the
-/// fallback branch can be tested without either (the [`aws::select_vouch_profile`]
-/// pattern); it is only invoked when no explicit profile was given.
-fn resolve_ssm_profile(
-    profile: Option<&str>,
-    auto_detect: impl FnOnce() -> anyhow::Result<aws::VouchProfile>,
-) -> Result<(String, Option<String>)> {
-    if let Some(name) = profile {
-        return Ok((name.to_string(), None));
+/// The variant records where the profile came from, which decides whether
+/// partition validation is possible: an auto-detected Vouch profile always
+/// carries the role ARN its `credential_process` targets, while a user-named
+/// profile may be non-Vouch and offers nothing to validate against.
+enum SsmProfile {
+    /// User-named `--profile`: used verbatim, may be non-Vouch.
+    Explicit(String),
+    /// Auto-detected Vouch profile, with the role ARN for partition validation.
+    Vouch(aws::VouchProfile),
+}
+
+impl SsmProfile {
+    /// Resolve which profile the SSM SSH config block will name.
+    ///
+    /// Unlike every other AWS-backed command here, SSM never mints credentials
+    /// through Vouch: `aws ssm start-session --profile <name>` resolves that
+    /// profile's `credential_process` directly through the AWS CLI, so the
+    /// named profile does not need to be Vouch-managed. An explicit
+    /// `--profile` is used as-is (matching the AWS CLI's own lack of
+    /// validation, and preserving the ability to target a non-Vouch profile);
+    /// with none given, fall back to the auto-detected Vouch profile.
+    fn resolve(profile: Option<&str>) -> Result<Self> {
+        match profile {
+            Some(name) => Ok(Self::Explicit(name.to_string())),
+            None => {
+                let vouch_profile =
+                    aws::resolve_vouch_profile(None, aws::ProfileOverride::Profile)?;
+                Ok(Self::Vouch(vouch_profile))
+            }
+        }
     }
-    let vouch_profile = auto_detect()?;
-    Ok((vouch_profile.name, Some(vouch_profile.role_arn)))
+
+    /// Profile name baked into the ProxyCommand's `--profile` flag.
+    fn name(&self) -> &str {
+        match self {
+            Self::Explicit(name) => name,
+            Self::Vouch(profile) => &profile.name,
+        }
+    }
+
+    /// Role ARN to validate the region's partition against — `None` only when
+    /// the user explicitly named a profile.
+    ///
+    /// Although the region only reaches the native AWS CLI's `--region` flag,
+    /// the AWS CLI's `credential_process` resolves region independently from
+    /// the profile's `region` setting. When those diverge across partitions
+    /// (e.g. `--region cn-north-1` with a commercial role), credentials mint
+    /// under one partition while the SSM API call targets another, surfacing
+    /// as a confusing AWS error at SSH time. Handing this ARN to
+    /// [`aws::resolve_region`] catches the mismatch at setup time with a
+    /// clear message instead.
+    fn validation_arn(&self) -> Option<&str> {
+        match self {
+            Self::Explicit(_) => None,
+            Self::Vouch(profile) => Some(&profile.role_arn),
+        }
+    }
 }
 
 /// Run the SSM setup command.
@@ -230,20 +257,13 @@ pub(crate) async fn run(
     check_session_manager_plugin()?;
 
     // Auto-discover profile and region
-    let (profile_name, role_arn) = resolve_ssm_profile(profile, || {
-        aws::resolve_vouch_profile(None, aws::ProfileOverride::Profile)
-    })?;
-    // Validate partition consistency when the profile was auto-detected
-    // (Vouch-managed): `credential_process` resolves region independently from
-    // the profile config, so a mismatch between this `--region` and the ARN's
-    // partition would mint credentials under one partition while the SSM API
-    // call targets another. An explicit `--profile` passes `None` here, since
-    // no `role_arn` is available to validate against.
-    let region_name = aws::resolve_region(region, &profile_name, role_arn.as_deref())?;
+    let ssm_profile = SsmProfile::resolve(profile)?;
+    let profile_name = ssm_profile.name();
+    let region_name = aws::resolve_region(region, profile_name, ssm_profile.validation_arn())?;
     let host_pattern = hosts;
 
     // Validate all inputs before building the config block
-    validate_shell_safe(&profile_name, "--profile")?;
+    validate_shell_safe(profile_name, "--profile")?;
     validate_shell_safe(&region_name, "--region")?;
     validate_shell_safe(host_pattern, "--hosts")?;
 
@@ -253,7 +273,7 @@ pub(crate) async fn run(
     println!();
     tr_println!(
         "setup-ssm-summary",
-        profile = profile_name.as_str(),
+        profile = profile_name,
         region = region_name.as_str(),
         hosts = host_pattern,
     );
@@ -315,7 +335,7 @@ pub(crate) async fn run(
     }
 
     // Build the SSH config block
-    let ssm_config = build_ssh_config_block(host_pattern, &profile_name, &region_name);
+    let ssm_config = build_ssh_config_block(host_pattern, profile_name, &region_name);
 
     let base = if force && existing.contains(SSM_MARKER) {
         strip_ssm_block(&existing)
@@ -380,41 +400,35 @@ mod tests {
         assert!(!existing.contains(SSM_MARKER));
     }
 
-    // ---- resolve_ssm_profile tests ----
+    // ---- SsmProfile tests ----
 
-    /// An explicit `--profile` is returned verbatim with no `role_arn`, so the
-    /// caller skips partition validation and a non-Vouch profile may be used.
+    /// An explicit `--profile` is used verbatim and offers no ARN to validate,
+    /// so partition validation is skipped and a non-Vouch profile may be used.
     #[test]
-    fn resolve_ssm_profile_explicit_returns_no_role_arn() {
-        let (name, role_arn) = resolve_ssm_profile(Some("my-profile"), || {
-            bail!("auto-detect must not run when --profile is given")
-        })
-        .expect("explicit profile should resolve without touching disk");
-        assert_eq!(name, "my-profile");
+    fn explicit_profile_skips_partition_validation() {
+        let ssm_profile = SsmProfile::resolve(Some("my-profile"))
+            .expect("explicit profile should resolve without touching disk");
+        assert_eq!(ssm_profile.name(), "my-profile");
         assert!(
-            role_arn.is_none(),
-            "explicit profile must not yield role_arn"
+            ssm_profile.validation_arn().is_none(),
+            "explicit profile must not yield a validation ARN"
         );
     }
 
-    /// The auto-detected Vouch profile's `role_arn` is carried through so the
-    /// caller validates the region's partition against it. Returning `None`
-    /// here would silently skip partition validation and reintroduce the
-    /// confusing SSH-time AWS errors from #811.
+    /// An auto-detected Vouch profile carries its role ARN into partition
+    /// validation. Yielding `None` here would silently skip validation and
+    /// reintroduce the confusing SSH-time AWS errors from #811.
     #[test]
-    fn resolve_ssm_profile_auto_detect_returns_role_arn() {
-        let (name, role_arn) = resolve_ssm_profile(None, || {
-            Ok(aws::VouchProfile {
-                name: "vouch-demo".to_string(),
-                role_arn: "arn:aws:iam::222222222222:role/demo".to_string(),
-            })
-        })
-        .expect("auto-detected profile should resolve");
-        assert_eq!(name, "vouch-demo");
+    fn vouch_ssm_profile_carries_validation_arn() {
+        let ssm_profile = SsmProfile::Vouch(aws::VouchProfile {
+            name: "vouch-demo".to_string(),
+            role_arn: "arn:aws:iam::222222222222:role/demo".to_string(),
+        });
+        assert_eq!(ssm_profile.name(), "vouch-demo");
         assert_eq!(
-            role_arn.as_deref(),
+            ssm_profile.validation_arn(),
             Some("arn:aws:iam::222222222222:role/demo"),
-            "auto-detected profile must carry its role_arn for partition validation"
+            "Vouch-detected profile must carry its role ARN for partition validation"
         );
     }
 
