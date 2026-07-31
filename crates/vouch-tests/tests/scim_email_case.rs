@@ -193,3 +193,83 @@ async fn get_user_by_email_finds_scim_user_across_casing() {
     assert_eq!(fetched.id, scim_user_id);
     assert_eq!(fetched.email, "carol@e2e-get.example.com");
 }
+
+/// `GET /scim/v2/Users?filter=userName eq "..."` finds a user when the
+/// filter value uses different casing than the stored (lowercase) email.
+///
+/// This is the end-to-end regression for the SCIM filter path: RFC 7643
+/// defines `userName` with `caseExact: false`, so a client (Entra/Okta)
+/// sending `userName eq "Alice@..."` must find the user stored as
+/// `alice@...`. The indexed lookup in `try_indexed_user_lookup` must
+/// lowercase the filter value to match the lowercase index.
+#[tokio::test]
+async fn scim_list_filter_user_name_eq_is_case_insensitive() {
+    let harness = TestHarness::new().await;
+
+    let org = harness
+        .create_org("e2e-filter.example.com")
+        .await
+        .expect("create org");
+    let scim_token = harness
+        .create_scim_token("E2E SCIM token", &org.id)
+        .await
+        .expect("create scim token");
+
+    // Provision with a lowercase email (the storage path lowercases it).
+    let resp = harness
+        .post_json_authenticated(
+            "/scim/v2/Users",
+            &json!({
+                "schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"],
+                "userName": "filter@example.com",
+                "active": true,
+            }),
+            &scim_token,
+        )
+        .await
+        .expect("SCIM user creation HTTP call");
+    assert_eq!(resp.status, 201, "SCIM user creation should succeed");
+    let created: serde_json::Value = resp.json().expect("parse SCIM response");
+    let scim_user_id = created["id"]
+        .as_str()
+        .expect("SCIM response must include user id")
+        .to_string();
+
+    // Mixed-case `userName eq` filter must find the user.
+    let path = "/scim/v2/Users?filter=userName%20eq%20%22Filter@Example.com%22";
+    let list_resp = harness
+        .get_authenticated(path, &scim_token)
+        .await
+        .expect("SCIM list users HTTP call");
+    assert_eq!(list_resp.status, 200);
+    let list: serde_json::Value = list_resp.json().expect("parse SCIM list response");
+    assert_eq!(
+        list["totalResults"].as_u64(),
+        Some(1),
+        "mixed-case userName eq filter should find 1 user; got {list}"
+    );
+    let resources = list["Resources"]
+        .as_array()
+        .expect("Resources must be an array");
+    assert_eq!(resources.len(), 1);
+    assert_eq!(resources[0]["id"].as_str(), Some(scim_user_id.as_str()));
+    assert_eq!(
+        resources[0]["userName"].as_str(),
+        Some("filter@example.com"),
+        "returned email must be the stored lowercase form"
+    );
+
+    // A genuinely different address (not a case variant) must not match.
+    let path = "/scim/v2/Users?filter=userName%20eq%20%22filter@other.example.com%22";
+    let list_resp = harness
+        .get_authenticated(path, &scim_token)
+        .await
+        .expect("SCIM list users HTTP call");
+    assert_eq!(list_resp.status, 200);
+    let list: serde_json::Value = list_resp.json().expect("parse SCIM list response");
+    assert_eq!(
+        list["totalResults"].as_u64(),
+        Some(0),
+        "a different address must not match; got {list}"
+    );
+}

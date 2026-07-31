@@ -1373,6 +1373,192 @@ async fn test_scim_user_list_and_filter() {
     assert_eq!(page2.len(), 2);
 }
 
+// ===========================================================================
+// SCIM user lookup — case-insensitive eq on userName / email
+//
+// `userName` and `email` are `caseExact: false` per RFC 7643, and emails are
+// stored ASCII-lowercase. `eq` filters must therefore match regardless of the
+// casing supplied by the client. See `try_indexed_user_lookup`.
+// ===========================================================================
+
+#[tokio::test]
+async fn test_scim_filter_user_name_eq_is_case_insensitive() {
+    let (store, _audit) = test_db().await;
+
+    create_scim_user(
+        &store,
+        Some(TEST_ORG_ID),
+        "alice@example.com",
+        None,
+        None,
+        true,
+    )
+    .await
+    .expect("Failed to create user");
+
+    let (users, total) = list_scim_users(
+        &store,
+        TEST_ORG_ID,
+        Some("userName eq \"Alice@Example.com\""),
+        1,
+        100,
+    )
+    .await
+    .expect("Failed to filter users");
+
+    assert_eq!(total, 1, "should find 1 user via case-insensitive filter");
+    assert_eq!(users.len(), 1);
+    assert_eq!(users[0].email, "alice@example.com");
+}
+
+#[tokio::test]
+async fn test_scim_filter_email_eq_is_case_insensitive() {
+    let (store, _audit) = test_db().await;
+
+    create_scim_user(
+        &store,
+        Some(TEST_ORG_ID),
+        "bob@example.com",
+        None,
+        None,
+        true,
+    )
+    .await
+    .expect("Failed to create user");
+
+    // The `email` attribute path uses the same indexed lookup as `userName`.
+    let (users, total) = list_scim_users(
+        &store,
+        TEST_ORG_ID,
+        Some("email eq \"BOB@example.com\""),
+        1,
+        100,
+    )
+    .await
+    .expect("Failed to filter users");
+
+    assert_eq!(
+        total, 1,
+        "should find 1 user via case-insensitive email filter"
+    );
+    assert_eq!(users.len(), 1);
+    assert_eq!(users[0].email, "bob@example.com");
+}
+
+#[tokio::test]
+async fn test_scim_filter_user_name_eq_case_insensitive_is_org_scoped() {
+    // User IDs are derived deterministically from email, so an email is
+    // globally unique to one user. The indexed lookup combines the email
+    // index with the `org_id` index, so a case-insensitive match must still
+    // honor the org scope: a user in `other-org` must not be returned when
+    // querying `TEST_ORG_ID`.
+    let (store, _audit) = test_db().await;
+
+    create_scim_user(
+        &store,
+        Some(TEST_ORG_ID),
+        "carol@example.com",
+        None,
+        None,
+        true,
+    )
+    .await
+    .expect("Failed to create user in TEST_ORG_ID");
+    create_scim_user(
+        &store,
+        Some("other-org"),
+        "carol-other@example.com",
+        None,
+        None,
+        true,
+    )
+    .await
+    .expect("Failed to create user in other-org");
+
+    // Mixed-case filter resolves to the lowercase `carol@example.com` in
+    // TEST_ORG_ID only.
+    let (users, total) = list_scim_users(
+        &store,
+        TEST_ORG_ID,
+        Some("userName eq \"Carol@Example.com\""),
+        1,
+        100,
+    )
+    .await
+    .expect("Failed to filter users");
+
+    assert_eq!(total, 1, "case-insensitive lookup must stay org-scoped");
+    assert_eq!(users.len(), 1);
+    assert_eq!(users[0].email, "carol@example.com");
+
+    // Querying the other org with a mixed-case filter for its user must
+    // find that user and not the TEST_ORG_ID one.
+    let (users, total) = list_scim_users(
+        &store,
+        "other-org",
+        Some("userName eq \"Carol-Other@Example.com\""),
+        1,
+        100,
+    )
+    .await
+    .expect("Failed to filter users");
+    assert_eq!(
+        total, 1,
+        "case-insensitive lookup must find the other-org user"
+    );
+    assert_eq!(users.len(), 1);
+    assert_eq!(users[0].email, "carol-other@example.com");
+}
+
+#[tokio::test]
+async fn test_scim_filter_external_id_eq_is_case_sensitive() {
+    // `externalId` is `caseExact: true` per RFC 7643 Section 3.1, so the
+    // indexed lookup must NOT be lowercased. This guards against the fix for
+    // userName/email being over-applied to externalId.
+    let (store, _audit) = test_db().await;
+
+    create_scim_user(
+        &store,
+        Some(TEST_ORG_ID),
+        "erin@example.com",
+        None,
+        Some("Ext-Case-123"),
+        true,
+    )
+    .await
+    .expect("Failed to create user");
+
+    // Exact case matches.
+    let (users, total) = list_scim_users(
+        &store,
+        TEST_ORG_ID,
+        Some(r#"externalId eq "Ext-Case-123""#),
+        1,
+        100,
+    )
+    .await
+    .expect("Failed to filter users");
+    assert_eq!(total, 1, "exact-case externalId should match");
+    assert_eq!(users.len(), 1);
+    assert_eq!(users[0].email, "erin@example.com");
+
+    // Wrong case must NOT match.
+    let (users, total) = list_scim_users(
+        &store,
+        TEST_ORG_ID,
+        Some(r#"externalId eq "ext-case-123""#),
+        1,
+        100,
+    )
+    .await
+    .expect("Failed to filter users");
+    assert_eq!(
+        total, 0,
+        "externalId is caseExact: wrong case must not match"
+    );
+    assert!(users.is_empty());
+}
+
 #[tokio::test]
 async fn test_scim_session_invalidation_on_deactivation() {
     let (store, _audit) = test_db().await;
