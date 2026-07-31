@@ -453,19 +453,29 @@ async fn try_indexed_user_lookup(
     org_id: &str,
     filter: &str,
 ) -> Result<Option<Vec<ScimUserRecord>>> {
-    // userName/email eq → find_by_indexes combining email + org_id at DB level
+    // userName/email eq → find_by_indexes combining email + org_id at DB level.
+    //
+    // `userName` and `email` are both `caseExact: false` per RFC 7643, and
+    // emails are stored ASCII-lowercase by `create_scim_user` /
+    // `enroll_user_with_org`. Normalize the filter value to match the stored
+    // index; otherwise a mixed-case filter like `userName eq "Alice@example.com"`
+    // misses the user stored as `alice@example.com`.
     for attr in &["userName", "email"] {
         if let Some(f) = parse_scim_filter(filter, attr)?
             && f.op == ScimFilterOp::Eq
         {
+            let email_lower = f.value.to_ascii_lowercase();
             let docs = store
-                .find_by_indexes::<UserDoc>(&[("email", &f.value), ("org_id", org_id)])
+                .find_by_indexes::<UserDoc>(&[("email", &email_lower), ("org_id", org_id)])
                 .await?;
             return Ok(Some(docs.into_iter().map(ScimUserRecord::from).collect()));
         }
     }
 
     // externalId eq → find_by_indexes combining external_id + org_id
+    // (externalId has caseExact: true per RFC 7643 Section 3.1, so the
+    // case-sensitive indexed lookup below is correct and must not be
+    // lowercased.)
     if let Some(f) = parse_scim_filter(filter, "externalId")?
         && f.op == ScimFilterOp::Eq
     {
