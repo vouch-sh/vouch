@@ -356,6 +356,7 @@ arg-credential-codeartifact-domain-profile-help = Named CodeArtifact domain prof
 arg-credential-codeartifact-profile-help = AWS profile in ~/.aws/config whose role mints the token (distinct from --domain-profile, which names a saved CodeArtifact domain).
 
 credential-codecommit-err-exec-git = failed to exec git remote-http: { $error }
+credential-codecommit-warn-partition-mismatch = vouch: declining CodeCommit credential request: { $error }
 
 ## Shared arg help
 
