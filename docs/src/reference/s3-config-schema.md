@@ -141,6 +141,15 @@ The S3 configuration file is a JSON document with the following schema:
 | `device_code_expires_seconds` | integer | Device code expiration in seconds. |
 | `device_poll_interval_seconds` | integer | Device code polling interval in seconds. |
 
+## Reserved Keys
+
+| Key | Owner | Description |
+|-----|-------|-------------|
+| `_acme` | External certificate renewal process | ACME (Let's Encrypt) account state: `account_key` (base64-encoded PEM), `email`, and `account_uri`. The renewal process reads and writes this key directly in the S3 object when it renews the certificate and updates `tls.cert`/`tls.key`. The server ignores it. |
+
+Do not remove, rename, or hand-edit reserved keys. They are not parsed by the server, but
+external automation depends on them being present in the S3 object.
+
 ## Base64 Encoding
 
 All certificate and key fields in the S3 configuration must be **base64-encoded PEM** strings. To encode a PEM file:
