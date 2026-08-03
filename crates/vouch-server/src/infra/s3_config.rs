@@ -69,28 +69,6 @@ impl std::fmt::Debug for S3TlsConfig {
     }
 }
 
-/// Nested ACME (Let's Encrypt) configuration from S3.
-///
-/// Stored as `_acme` in the S3 config JSON so that external ACME certificate
-/// renewal processes can read it directly from the S3 object.
-#[derive(Clone, Deserialize, Serialize)]
-pub struct S3AcmeConfig {
-    /// ACME account private key (PEM or base64-encoded).
-    pub account_key: String,
-    /// ACME account email address.
-    pub email: String,
-}
-
-// Custom Debug that redacts account_key to prevent accidental log exposure.
-impl std::fmt::Debug for S3AcmeConfig {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("S3AcmeConfig")
-            .field("account_key", &"[REDACTED]")
-            .field("email", &self.email)
-            .finish()
-    }
-}
-
 /// Key algorithm of the document encryption key.
 ///
 /// Selects the KMS `DataKeyPairSpec` at generation time, the key-material
@@ -332,11 +310,6 @@ pub struct S3Config {
     /// Nested TLS config.
     pub tls: Option<S3TlsConfig>,
 
-    // ACME configuration
-    /// Nested ACME config.
-    #[serde(rename = "_acme")]
-    pub acme: Option<S3AcmeConfig>,
-
     // Domain restrictions
     /// Allowed email domains for enrollment.
     pub allowed_domains: Option<Vec<String>>,
@@ -443,7 +416,6 @@ impl std::fmt::Debug for S3Config {
             .field("session_hours", &self.session_hours)
             .field("idps", &self.idps)
             .field("tls", &self.tls)
-            .field("acme", &self.acme)
             .field("allowed_domains", &self.allowed_domains)
             .field("org_name", &self.org_name)
             .field("resource_name", &self.resource_name)
@@ -1196,27 +1168,6 @@ mod tests {
     }
 
     #[test]
-    fn test_s3_config_deserialization_with_acme() {
-        let json = r#"{
-            "version": 1,
-            "rp_id": "vouch.example.com",
-            "_acme": {
-                "account_key": "secret-acme-key",
-                "email": "admin@example.com"
-            }
-        }"#;
-
-        let config: S3Config = serde_json::from_str(json).expect("Failed to parse");
-
-        assert_eq!(config.version, Some(1));
-        assert_eq!(config.rp_id, Some("vouch.example.com".to_string()));
-        assert!(config.acme.is_some());
-        let acme = config.acme.unwrap();
-        assert_eq!(acme.account_key, "secret-acme-key");
-        assert_eq!(acme.email, "admin@example.com");
-    }
-
-    #[test]
     fn test_s3_config_deserialization_with_document_key() {
         let json = r#"{
             "version": 1,
@@ -1316,27 +1267,6 @@ mod tests {
             Some("mrk-oidc-key".to_string())
         );
         assert_eq!(config.jwt_hmac_kms_key_id, Some("mrk-hmac-key".to_string()));
-    }
-
-    #[test]
-    fn test_s3_acme_config_debug_redacts_account_key() {
-        let acme = S3AcmeConfig {
-            account_key: "super-secret-pem-key".to_string(),
-            email: "admin@example.com".to_string(),
-        };
-        let debug = format!("{acme:?}");
-        assert!(
-            debug.contains("[REDACTED]"),
-            "Debug output must redact account_key"
-        );
-        assert!(
-            !debug.contains("super-secret-pem-key"),
-            "Debug output must not leak the actual key"
-        );
-        assert!(
-            debug.contains("admin@example.com"),
-            "Debug output should show email"
-        );
     }
 
     #[test]
