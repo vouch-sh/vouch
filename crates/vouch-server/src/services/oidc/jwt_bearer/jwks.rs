@@ -45,11 +45,6 @@ pub struct JwkEntry {
     pub n: Option<String>,
     #[serde(default)]
     pub e: Option<String>,
-
-    /// X.509 certificate chain (RFC 7517 Section 4.7).
-    /// Each entry is base64-encoded (standard, NOT base64url) DER.
-    #[serde(default)]
-    pub x5c: Option<Vec<String>>,
 }
 
 /// Resolve the JWKS for a client — from inline `jwks` or fetched `jwks_uri`.
@@ -371,7 +366,6 @@ mod tests {
             y: Some(EC_Y.to_string()),
             n: None,
             e: None,
-            x5c: None,
         }
     }
 
@@ -386,7 +380,6 @@ mod tests {
             y: None,
             n: Some(RSA_N.to_string()),
             e: Some(RSA_E.to_string()),
-            x5c: None,
         }
     }
 
@@ -404,7 +397,6 @@ mod tests {
             y: None,
             n: None,
             e: None,
-            x5c: None,
         }
     }
 
@@ -869,37 +861,6 @@ mod tests {
         let key = ec_jwk_entry(None, None, None);
         let result = build_decoding_key_from_jwk(&key, "ES384");
         assert!(result.is_err());
-    }
-
-    // ====================================================================
-    // x5c field parsing (RFC 7517 Section 4.7)
-    // ====================================================================
-
-    #[test]
-    fn test_parse_jwks_with_x5c() {
-        // x5c uses standard base64 (not base64url) per RFC 7517 §4.7
-        let x5c_val = "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA";
-        let json = format!(
-            r#"{{"keys":[{{"kty":"EC","crv":"P-256","x":"{EC_X}","y":"{EC_Y}",
-                "x5c":["{x5c_val}"]}}]}}"#,
-        );
-        let jwks = parse_jwks(&json).expect("should parse JWKS with x5c");
-        let key = jwks.keys.first().expect("one key");
-        let x5c = key.x5c.as_ref().expect("x5c should be present");
-        assert_eq!(x5c.len(), 1);
-        assert_eq!(x5c.first().map(String::as_str), Some(x5c_val));
-    }
-
-    #[test]
-    fn test_parse_jwks_without_x5c_defaults_to_none() {
-        let json =
-            format!(r#"{{"keys":[{{"kty":"EC","crv":"P-256","x":"{EC_X}","y":"{EC_Y}"}}]}}"#);
-        let jwks = parse_jwks(&json).expect("should parse JWKS without x5c");
-        let key = jwks.keys.first().expect("one key");
-        assert!(
-            key.x5c.is_none(),
-            "x5c should default to None when absent from JSON"
-        );
     }
 
     // ====================================================================
