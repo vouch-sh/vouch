@@ -281,15 +281,15 @@ pub async fn build_protected_resource_metadata(
         Some(p) => classify_sub_path(p),
     };
 
-    let (resource, sub_path_for_claims) = match classification {
-        SubPathClassification::Root => (config.base_url.clone(), None),
+    let resource = match classification {
+        SubPathClassification::Root => config.base_url.clone(),
         SubPathClassification::Known(canonical) => {
             // Concatenate base_url + "/" + tail literally (no URL
             // normalization) so the echoed value is byte-identical
             // to what the client asked for, per RFC 9728 §4.
             let trimmed_base = config.base_url.trim_end_matches('/');
             let full = format!("{trimmed_base}/{canonical}");
-            (full, Some(canonical))
+            full
         }
         SubPathClassification::Unknown => {
             return Err(ServiceError::NotFound("protected resource"));
@@ -340,10 +340,6 @@ pub async fn build_protected_resource_metadata(
 
     let jwt = build_signed_metadata(state, &metadata, &config.base_url).await?;
     metadata.signed_metadata = jwt;
-
-    // Keep `sub_path_for_claims` alive for tracing; silences unused warn
-    // if the variable ends up dead in optimized builds.
-    let _ = sub_path_for_claims;
 
     Ok(metadata)
 }
