@@ -116,9 +116,9 @@ All SCIM operations are logged for compliance and security monitoring:
 
 | Operation | Resource Type | Logged Data |
 |-----------|--------------|-------------|
-| `create` | `User` | resource_id, email, scim_token_id, timestamp |
+| `create` | `User` | resource_id, scim_token_id, timestamp |
 | `update` | `User` | resource_id, scim_token_id, timestamp |
-| `delete` | `User` | resource_id, email, scim_token_id, timestamp |
+| `delete` | `User` | resource_id, scim_token_id, timestamp |
 | `create` | `Group` | resource_id, display_name, scim_token_id, timestamp |
 | `update` | `Group` | resource_id, scim_token_id, timestamp |
 | `delete` | `Group` | resource_id, scim_token_id, timestamp |
