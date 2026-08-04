@@ -221,23 +221,37 @@ pub struct AdditionalDomain {
 /// back to unverified.
 pub const UNVERIFY_FAILURE_THRESHOLD: u32 = 3;
 
+impl OrganizationDoc {
+    /// Domains this org has proven ownership of: the primary domain plus
+    /// every `additional_domains` entry that has completed DNS TXT
+    /// verification.
+    ///
+    /// Pending and unverified (flipped-back) entries are excluded — this is
+    /// the same set that participates in login matching and subdomain
+    /// eligibility (see the doc comment on [`OrganizationDoc::additional_domains`]),
+    /// and the set SCIM provisioning checks a candidate email's domain
+    /// against.
+    pub fn verified_domains(&self) -> impl Iterator<Item = &str> {
+        std::iter::once(self.domain.as_str()).chain(self.additional_domains.iter().filter_map(
+            |ad| {
+                matches!(ad.state, AdditionalDomainState::Verified { .. })
+                    .then_some(ad.domain.as_str())
+            },
+        ))
+    }
+}
+
 impl DocumentType for OrganizationDoc {
     const DOC_TYPE: &'static str = "organization";
 
     fn index_entries(&self) -> Vec<IndexEntry> {
         let cap = self.additional_domains.len().saturating_add(2);
         let mut entries = Vec::with_capacity(cap);
-        entries.push(IndexEntry {
-            field: "domain",
-            value: self.domain.clone(),
-        });
-        for ad in &self.additional_domains {
-            if matches!(ad.state, AdditionalDomainState::Verified { .. }) {
-                entries.push(IndexEntry {
-                    field: "domain",
-                    value: ad.domain.clone(),
-                });
-            }
+        for domain in self.verified_domains() {
+            entries.push(IndexEntry {
+                field: "domain",
+                value: domain.to_string(),
+            });
         }
         if let Some(label) = &self.subdomain {
             entries.push(IndexEntry {

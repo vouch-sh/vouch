@@ -52,6 +52,8 @@ An organization may hold up to **10** additional domains, on top of its primary 
 | **Unverified** | Was verified, then failed re-verification repeatedly | No |
 
 Only `Verified` entries — plus the primary domain — make up the organization's owned domain set.
+This same set gates [SCIM user provisioning](scim.md#domain-validation): an IdP token can only
+create users whose email domain is in it.
 
 ## Ongoing re-verification
 

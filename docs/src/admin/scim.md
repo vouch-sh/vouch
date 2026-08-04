@@ -37,6 +37,23 @@ Enter the following in your IdP's SCIM configuration:
 - **SCIM endpoint URL**: `https://auth.example.com/scim/v2/`
 - **Bearer token**: the `vouch_scim_...` token from step 1
 
+### Domain validation
+
+`POST /scim/v2/Users` requires `userName` to be an email address, or `emails[]` to supply one —
+Vouch keys users by email, so a value that is neither is rejected with `400` and
+`"userName must be an email address"`.
+
+The email's domain must also be one the token's organization has proven it owns: the
+organization's primary domain, or an additional domain that has completed DNS TXT verification
+(see [Email Domains](domains.md)). A push for any other domain — including a domain that is
+merely added but not yet verified, or a subdomain of a verified one — is rejected with `400` and
+`"scimType": "invalidValue"`.
+
+This closes an isolation gap rather than adding a new setup step: it matters whenever your IdP
+pushes a user whose address isn't already on the org's own domain — provisioning from a second
+email domain, or a misconfigured IdP pointed at the wrong tenant. If you provision from more than
+one domain, verify each one first at `/admin/domains` before pushing users on it.
+
 ### 3. Manage tokens
 
 List and revoke tokens at `/admin/scim-tokens`, or through the API:

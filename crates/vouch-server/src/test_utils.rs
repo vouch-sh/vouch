@@ -1276,7 +1276,13 @@ pub async fn create_test_scim_token(
             .insert_with_id(
                 org_id,
                 &crate::db::documents::organization::OrganizationDoc {
-                    domain: format!("{org_id}.example"),
+                    // ".example" alone is a reserved TLD (RESERVED_TLDS) and
+                    // is rejected by `normalize_domain`, which SCIM user
+                    // creation now runs the candidate email's domain
+                    // through — use the RFC 2606 second-level reservation
+                    // instead so per-org_id domains stay both valid and
+                    // collision-free.
+                    domain: format!("{org_id}.example.com"),
                     name: Some(org_id.to_string()),
                     created_by_user_id: None,
                     additional_domains: Vec::new(),

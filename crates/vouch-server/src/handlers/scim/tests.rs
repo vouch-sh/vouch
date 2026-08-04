@@ -132,7 +132,7 @@ async fn test_rfc7643_create_user_requires_username() {
     let (status, body) = http_post_json(
         &app,
         "/scim/v2/Users",
-        r#"{"schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"], "userName": "test@example.com", "active": true}"#,
+        r#"{"schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"], "userName": "test@test-org.example.com", "active": true}"#,
         &[("Authorization", &format!("Bearer {}", token))],
     )
     .await;
@@ -140,7 +140,7 @@ async fn test_rfc7643_create_user_requires_username() {
     assert_eq!(status, StatusCode::CREATED);
     let user: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
     assert!(user.get("id").is_some(), "Created user should have id");
-    assert_eq!(user["userName"], "test@example.com");
+    assert_eq!(user["userName"], "test@test-org.example.com");
 }
 
 #[tokio::test]
@@ -155,7 +155,7 @@ async fn test_rfc7644_create_user_conflict() {
     let (status, _) = http_post_json(
         &app,
         "/scim/v2/Users",
-        r#"{"schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"], "userName": "duplicate@example.com"}"#,
+        r#"{"schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"], "userName": "duplicate@test-org.example.com"}"#,
         &[("Authorization", &auth_header)],
     )
     .await;
@@ -165,7 +165,7 @@ async fn test_rfc7644_create_user_conflict() {
     let (status, body) = http_post_json(
         &app,
         "/scim/v2/Users",
-        r#"{"schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"], "userName": "duplicate@example.com"}"#,
+        r#"{"schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"], "userName": "duplicate@test-org.example.com"}"#,
         &[("Authorization", &auth_header)],
     )
     .await;
@@ -192,7 +192,7 @@ async fn test_rfc7644_get_user_by_id() {
     let (status, body) = http_post_json(
         &app,
         "/scim/v2/Users",
-        r#"{"schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"], "userName": "gettest@example.com"}"#,
+        r#"{"schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"], "userName": "gettest@test-org.example.com"}"#,
         &[("Authorization", &auth_header)],
     )
     .await;
@@ -211,7 +211,7 @@ async fn test_rfc7644_get_user_by_id() {
     assert_eq!(status, StatusCode::OK);
     let user: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
     assert_eq!(user["id"], user_id);
-    assert_eq!(user["userName"], "gettest@example.com");
+    assert_eq!(user["userName"], "gettest@test-org.example.com");
 }
 
 #[tokio::test]
@@ -252,7 +252,7 @@ async fn test_rfc7644_list_users_pagination() {
             &app,
             "/scim/v2/Users",
             &format!(
-                r#"{{"schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"], "userName": "page{}@example.com"}}"#,
+                r#"{{"schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"], "userName": "page{}@test-org.example.com"}}"#,
                 i
             ),
             &[("Authorization", &auth_header)],
@@ -289,7 +289,7 @@ async fn test_rfc7644_list_users_filter() {
     let _ = http_post_json(
         &app,
         "/scim/v2/Users",
-        r#"{"schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"], "userName": "filtertest@example.com"}"#,
+        r#"{"schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"], "userName": "filtertest@test-org.example.com"}"#,
         &[("Authorization", &auth_header)],
     )
     .await;
@@ -297,7 +297,7 @@ async fn test_rfc7644_list_users_filter() {
     // Filter by userName
     let (status, body) = http_get(
         &app,
-        "/scim/v2/Users?filter=userName%20eq%20%22filtertest@example.com%22",
+        "/scim/v2/Users?filter=userName%20eq%20%22filtertest@test-org.example.com%22",
         &[("Authorization", &auth_header)],
     )
     .await;
@@ -324,7 +324,7 @@ async fn test_rfc7644_patch_user_deactivate() {
     let (status, body) = http_post_json(
         &app,
         "/scim/v2/Users",
-        r#"{"schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"], "userName": "deactivate@example.com", "active": true}"#,
+        r#"{"schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"], "userName": "deactivate@test-org.example.com", "active": true}"#,
         &[("Authorization", &auth_header)],
     )
     .await;
@@ -363,7 +363,7 @@ async fn test_patch_user_active_string_rejected() {
     let (status, body) = http_post_json(
         &app,
         "/scim/v2/Users",
-        r#"{"schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"], "userName": "stringactive@example.com", "active": false}"#,
+        r#"{"schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"], "userName": "stringactive@test-org.example.com", "active": false}"#,
         &[("Authorization", &auth_header)],
     )
     .await;
@@ -412,7 +412,7 @@ async fn test_patch_user_active_add_op_string_rejected() {
     let (status, body) = http_post_json(
         &app,
         "/scim/v2/Users",
-        r#"{"schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"], "userName": "addactive@example.com", "active": false}"#,
+        r#"{"schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"], "userName": "addactive@test-org.example.com", "active": false}"#,
         &[("Authorization", &auth_header)],
     )
     .await;
@@ -453,7 +453,7 @@ async fn test_rfc7644_patch_unsupported_path_returns_400() {
     let (status, body) = http_post_json(
         &app,
         "/scim/v2/Users",
-        r#"{"schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"], "userName": "patchpath@example.com", "active": true}"#,
+        r#"{"schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"], "userName": "patchpath@test-org.example.com", "active": true}"#,
         &[("Authorization", &auth_header)],
     )
     .await;
@@ -500,7 +500,7 @@ async fn test_rfc7644_delete_user() {
     let (status, body) = http_post_json(
         &app,
         "/scim/v2/Users",
-        r#"{"schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"], "userName": "todelete@example.com"}"#,
+        r#"{"schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"], "userName": "todelete@test-org.example.com"}"#,
         &[("Authorization", &auth_header)],
     )
     .await;
@@ -581,7 +581,7 @@ async fn test_rfc7644_filter_eq_operator() {
     let _ = http_post_json(
         &app,
         "/scim/v2/Users",
-        r#"{"schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"], "userName": "eqtest@example.com"}"#,
+        r#"{"schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"], "userName": "eqtest@test-org.example.com"}"#,
         &[("Authorization", &auth_header)],
     )
     .await;
@@ -589,7 +589,7 @@ async fn test_rfc7644_filter_eq_operator() {
     // Filter with eq operator
     let (status, body) = http_get(
         &app,
-        "/scim/v2/Users?filter=userName%20eq%20%22eqtest@example.com%22",
+        "/scim/v2/Users?filter=userName%20eq%20%22eqtest@test-org.example.com%22",
         &[("Authorization", &auth_header)],
     )
     .await;
@@ -600,7 +600,7 @@ async fn test_rfc7644_filter_eq_operator() {
     assert!(
         resources
             .iter()
-            .any(|r| r["userName"] == "eqtest@example.com"),
+            .any(|r| r["userName"] == "eqtest@test-org.example.com"),
         "eq filter should find the matching user"
     );
 }
@@ -685,10 +685,10 @@ async fn test_rfc7644_filter_co_operator_contains() {
 
     // Create users with known usernames
     let users_to_create = [
-        "alice-partial-match@example.com",
-        "partial-prefix@example.com",
-        "suffix-partial@example.com",
-        "nomatch@example.com",
+        "alice-partial-match@test-org.example.com",
+        "partial-prefix@test-org.example.com",
+        "suffix-partial@test-org.example.com",
+        "nomatch@test-org.example.com",
     ];
     for email in &users_to_create {
         let _ = http_post_json(
@@ -733,7 +733,7 @@ async fn test_rfc7644_filter_co_operator_contains() {
     assert!(
         !resources
             .iter()
-            .any(|r| r["userName"].as_str().unwrap_or("") == "nomatch@example.com"),
+            .any(|r| r["userName"].as_str().unwrap_or("") == "nomatch@test-org.example.com"),
         "co filter must not return users that don't contain 'partial'"
     );
 }
@@ -749,10 +749,10 @@ async fn test_rfc7644_filter_sw_operator_starts_with() {
 
     // Create users with known usernames
     let users_to_create = [
-        "swprefix-one@example.com",
-        "swprefix-two@example.com",
-        "other-swprefix@example.com", // Contains but does NOT start with "swprefix"
-        "notmatching@example.com",
+        "swprefix-one@test-org.example.com",
+        "swprefix-two@test-org.example.com",
+        "other-swprefix@test-org.example.com", // Contains but does NOT start with "swprefix"
+        "notmatching@test-org.example.com",
     ];
     for email in &users_to_create {
         let _ = http_post_json(
@@ -797,7 +797,7 @@ async fn test_rfc7644_filter_sw_operator_starts_with() {
     assert!(
         !resources
             .iter()
-            .any(|r| r["userName"].as_str().unwrap_or("") == "other-swprefix@example.com"),
+            .any(|r| r["userName"].as_str().unwrap_or("") == "other-swprefix@test-org.example.com"),
         "sw filter must not return users that contain but don't START with the prefix"
     );
 }
@@ -815,14 +815,14 @@ async fn test_rfc7644_filter_eq_still_works_alongside_new_operators() {
     let _ = http_post_json(
         &app,
         "/scim/v2/Users",
-        r#"{"schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"], "userName": "exact@example.com"}"#,
+        r#"{"schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"], "userName": "exact@test-org.example.com"}"#,
         &[("Authorization", &auth_header)],
     )
     .await;
     let _ = http_post_json(
         &app,
         "/scim/v2/Users",
-        r#"{"schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"], "userName": "exact-extra@example.com"}"#,
+        r#"{"schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"], "userName": "exact-extra@test-org.example.com"}"#,
         &[("Authorization", &auth_header)],
     )
     .await;
@@ -830,7 +830,7 @@ async fn test_rfc7644_filter_eq_still_works_alongside_new_operators() {
     // Filter with eq — must return only the exact match
     let (status, body) = http_get(
         &app,
-        "/scim/v2/Users?filter=userName%20eq%20%22exact@example.com%22",
+        "/scim/v2/Users?filter=userName%20eq%20%22exact@test-org.example.com%22",
         &[("Authorization", &auth_header)],
     )
     .await;
@@ -842,7 +842,7 @@ async fn test_rfc7644_filter_eq_still_works_alongside_new_operators() {
     // Only the exact match should be returned
     let matching: Vec<_> = resources
         .iter()
-        .filter(|r| r["userName"].as_str().unwrap_or("") == "exact@example.com")
+        .filter(|r| r["userName"].as_str().unwrap_or("") == "exact@test-org.example.com")
         .collect();
     assert!(
         !matching.is_empty(),
@@ -853,7 +853,7 @@ async fn test_rfc7644_filter_eq_still_works_alongside_new_operators() {
     assert!(
         !resources
             .iter()
-            .any(|r| r["userName"].as_str().unwrap_or("") == "exact-extra@example.com"),
+            .any(|r| r["userName"].as_str().unwrap_or("") == "exact-extra@test-org.example.com"),
         "eq filter must not return non-exact matches (superstring found)"
     );
 }
@@ -871,7 +871,7 @@ async fn test_rfc7644_filter_unsupported_operator_returns_error() {
     let _ = http_post_json(
         &app,
         "/scim/v2/Users",
-        r#"{"schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"], "userName": "ne-test@example.com"}"#,
+        r#"{"schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"], "userName": "ne-test@test-org.example.com"}"#,
         &[("Authorization", &auth_header)],
     )
     .await;
@@ -879,7 +879,7 @@ async fn test_rfc7644_filter_unsupported_operator_returns_error() {
     // Attempt to use "ne" (not equal) — unsupported operator
     let (status, body) = http_get(
         &app,
-        "/scim/v2/Users?filter=userName%20ne%20%22ne-test@example.com%22",
+        "/scim/v2/Users?filter=userName%20ne%20%22ne-test@test-org.example.com%22",
         &[("Authorization", &auth_header)],
     )
     .await;
@@ -1060,7 +1060,7 @@ async fn test_validation_filter_within_limit_succeeds() {
     // A normal-length filter should succeed
     let (status, _body) = http_get(
         &app,
-        "/scim/v2/Users?filter=userName%20eq%20%22test@example.com%22",
+        "/scim/v2/Users?filter=userName%20eq%20%22test@test-org.example.com%22",
         &[("Authorization", &auth_header)],
     )
     .await;
@@ -1450,7 +1450,7 @@ async fn test_scim_create_group_with_members() {
     let (_, user_body) = http_post_json(
         &app,
         "/scim/v2/Users",
-        r#"{"schemas":["urn:ietf:params:scim:schemas:core:2.0:User"],"userName":"member-create@example.com"}"#,
+        r#"{"schemas":["urn:ietf:params:scim:schemas:core:2.0:User"],"userName":"member-create@test-org.example.com"}"#,
         &[("Authorization", &auth_header)],
     )
     .await;
@@ -1500,7 +1500,7 @@ async fn test_scim_patch_group_add_members() {
     let (_, user_body) = http_post_json(
         &app,
         "/scim/v2/Users",
-        r#"{"schemas":["urn:ietf:params:scim:schemas:core:2.0:User"],"userName":"member-add@example.com"}"#,
+        r#"{"schemas":["urn:ietf:params:scim:schemas:core:2.0:User"],"userName":"member-add@test-org.example.com"}"#,
         &[("Authorization", &auth_header)],
     )
     .await;
@@ -1564,7 +1564,7 @@ async fn test_scim_patch_group_remove_member() {
     let (_, user_body) = http_post_json(
         &app,
         "/scim/v2/Users",
-        r#"{"schemas":["urn:ietf:params:scim:schemas:core:2.0:User"],"userName":"member-remove@example.com"}"#,
+        r#"{"schemas":["urn:ietf:params:scim:schemas:core:2.0:User"],"userName":"member-remove@test-org.example.com"}"#,
         &[("Authorization", &auth_header)],
     )
     .await;

@@ -102,6 +102,37 @@ pub async fn get_organization(store: &DocumentStore, org_id: &str) -> Result<Opt
     let doc = store.get::<OrganizationDoc>(org_id).await?;
     Ok(doc.map(Organization::from))
 }
+
+/// Whether `org_id` has proven ownership of `domain` — its primary domain
+/// or a verified additional domain (see [`OrganizationDoc::verified_domains`]).
+///
+/// Membership is checked ASCII-case-insensitively, but `domain` is otherwise
+/// compared as given — no trimming, and no shape validation like
+/// [`normalize_domain`]. Ownership was already decided when a domain
+/// entered the set (the primary domain at org creation, an additional
+/// domain at DNS TXT verification); re-validating shape here would only
+/// create asymmetry, since neither side of the comparison is guaranteed to
+/// have passed `normalize_domain` (a primary domain from on-prem/AD-derived
+/// enrollment can be a reserved-TLD or IDN address). Not trimming means a
+/// candidate with stray whitespace never matches, rather than being
+/// silently repaired.
+///
+/// A nonexistent org is treated as owning nothing rather than an error,
+/// since the caller (SCIM user creation) has already authenticated the org
+/// via its token and only needs a yes/no membership answer.
+pub async fn org_owns_verified_domain(
+    store: &DocumentStore,
+    org_id: &str,
+    domain: &str,
+) -> Result<bool> {
+    let Some(doc) = store.get::<OrganizationDoc>(org_id).await? else {
+        return Ok(false);
+    };
+    Ok(doc
+        .data
+        .verified_domains()
+        .any(|d| d.eq_ignore_ascii_case(domain)))
+}
 /// Shared test fixture: a fresh document store on the test database.
 #[cfg(test)]
 pub(super) async fn fresh_store() -> DocumentStore {
@@ -253,5 +284,129 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(slot.data.released_at.is_some(), "slot must be released");
+    }
+
+    #[tokio::test]
+    async fn org_owns_verified_domain_true_for_primary_domain() {
+        let store = fresh_store().await;
+        let org = create_organization(&store, "acme.com", None, None)
+            .await
+            .unwrap();
+
+        assert!(
+            org_owns_verified_domain(&store, &org.id, "acme.com")
+                .await
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn org_owns_verified_domain_true_for_verified_additional_domain() {
+        let store = fresh_store().await;
+        let org = create_organization(&store, "acme.com", None, None)
+            .await
+            .unwrap();
+        add_additional_domain(&store, &org.id, "widgets.io", "u1", "u1@acme.com")
+            .await
+            .unwrap();
+        mark_additional_domain_verified(&store, &org.id, "widgets.io")
+            .await
+            .unwrap();
+
+        assert!(
+            org_owns_verified_domain(&store, &org.id, "widgets.io")
+                .await
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn org_owns_verified_domain_false_for_pending_additional_domain() {
+        let store = fresh_store().await;
+        let org = create_organization(&store, "acme.com", None, None)
+            .await
+            .unwrap();
+        add_additional_domain(&store, &org.id, "widgets.io", "u1", "u1@acme.com")
+            .await
+            .unwrap();
+
+        assert!(
+            !org_owns_verified_domain(&store, &org.id, "widgets.io")
+                .await
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn org_owns_verified_domain_false_for_unowned_domain() {
+        let store = fresh_store().await;
+        let org = create_organization(&store, "acme.com", None, None)
+            .await
+            .unwrap();
+
+        assert!(
+            !org_owns_verified_domain(&store, &org.id, "other-corp.com")
+                .await
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn org_owns_verified_domain_false_for_nonexistent_org() {
+        let store = fresh_store().await;
+
+        assert!(
+            !org_owns_verified_domain(&store, "does-not-exist", "acme.com")
+                .await
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn org_owns_verified_domain_is_case_insensitive() {
+        let store = fresh_store().await;
+        let org = create_organization(&store, "acme.com", None, None)
+            .await
+            .unwrap();
+
+        assert!(
+            org_owns_verified_domain(&store, &org.id, "ACME.COM")
+                .await
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn org_owns_verified_domain_does_not_validate_candidate_shape() {
+        // A reserved-TLD primary domain (realistic for on-prem/AD-derived
+        // enrollment) is stored as-is; the ownership check is set
+        // membership, not a re-run of normalize_domain, so it still
+        // matches rather than permanently locking the org out.
+        let store = fresh_store().await;
+        let org = create_organization(&store, "corp.internal", None, None)
+            .await
+            .unwrap();
+
+        assert!(
+            org_owns_verified_domain(&store, &org.id, "corp.internal")
+                .await
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn org_owns_verified_domain_false_for_whitespace_padded_candidate() {
+        // No trimming: a candidate that needs whitespace stripped to match
+        // is rejected rather than silently repaired.
+        let store = fresh_store().await;
+        let org = create_organization(&store, "acme.com", None, None)
+            .await
+            .unwrap();
+
+        assert!(
+            !org_owns_verified_domain(&store, &org.id, " acme.com")
+                .await
+                .unwrap()
+        );
     }
 }
