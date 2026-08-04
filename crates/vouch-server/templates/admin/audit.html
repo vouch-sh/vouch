@@ -37,6 +37,33 @@
             <a href="/admin/audit?filter=revocations" class="px-2 py-1 rounded {% if filter.as_deref() == Some("revocations") %}bg-vouch-accent/10 text-vouch-accent{% else %}bg-gray-700 text-gray-400 hover:text-gray-200{% endif %}">{{ self.tr("admin-audit-filter-revocations") }}</a>
         </div>
 
+        {# Advanced filters: user, email, date range #}
+        <form method="get" action="/admin/audit" class="mb-4 flex flex-wrap items-end gap-2 text-sm">
+            {% if let Some(f) = filter %}
+            <input type="hidden" name="filter" value="{{ f }}">
+            {% endif %}
+            <div>
+                <label class="block text-xs text-gray-500 mb-1" for="audit-filter-email">{{ self.tr("admin-audit-filter-email-label") }}</label>
+                <input id="audit-filter-email" type="text" name="email" value="{{ email.as_deref().unwrap_or("") }}" placeholder="user@example.com" class="bg-vouch-surface border border-vouch-border rounded px-2 py-1 text-gray-200 text-xs">
+            </div>
+            <div>
+                <label class="block text-xs text-gray-500 mb-1" for="audit-filter-user-id">{{ self.tr("admin-audit-filter-user-id-label") }}</label>
+                <input id="audit-filter-user-id" type="text" name="user_id" value="{{ user_id.as_deref().unwrap_or("") }}" class="bg-vouch-surface border border-vouch-border rounded px-2 py-1 text-gray-200 text-xs font-mono">
+            </div>
+            <div>
+                <label class="block text-xs text-gray-500 mb-1" for="audit-filter-since">{{ self.tr("admin-audit-filter-since-label") }}</label>
+                <input id="audit-filter-since" type="text" name="since" value="{{ since.as_deref().unwrap_or("") }}" placeholder="2026-01-01T00:00:00Z" class="bg-vouch-surface border border-vouch-border rounded px-2 py-1 text-gray-200 text-xs font-mono">
+            </div>
+            <div>
+                <label class="block text-xs text-gray-500 mb-1" for="audit-filter-until">{{ self.tr("admin-audit-filter-until-label") }}</label>
+                <input id="audit-filter-until" type="text" name="until" value="{{ until.as_deref().unwrap_or("") }}" placeholder="2026-12-31T00:00:00Z" class="bg-vouch-surface border border-vouch-border rounded px-2 py-1 text-gray-200 text-xs font-mono">
+            </div>
+            <button type="submit" class="px-3 py-1 rounded bg-vouch-accent/10 text-vouch-accent hover:bg-vouch-accent/20">{{ self.tr("admin-audit-filter-apply") }}</button>
+            {% if has_advanced_filters %}
+            <a href="/admin/audit{% if let Some(f) = filter %}?filter={{ f }}{% endif %}" class="px-3 py-1 text-gray-400 hover:text-gray-200">{{ self.tr("admin-audit-filter-clear") }}</a>
+            {% endif %}
+        </form>
+
         <div class="bg-vouch-surface border border-vouch-border rounded-lg overflow-hidden">
             <table class="w-full text-sm">
                 <thead>
@@ -45,6 +72,7 @@
                         <th class="px-4 py-3 font-medium">{{ self.tr("admin-audit-th-ip") }}</th>
                         <th class="px-4 py-3 font-medium">{{ self.tr("admin-audit-th-event") }}</th>
                         <th class="px-4 py-3 font-medium">{{ self.tr("admin-audit-th-domain") }}</th>
+                        <th class="px-4 py-3 font-medium">{{ self.tr("admin-audit-th-target") }}</th>
                         <th class="px-4 py-3 font-medium">{{ self.tr("admin-audit-th-details") }}</th>
                     </tr>
                 </thead>
@@ -64,12 +92,13 @@
                             </span>
                         </td>
                         <td class="px-4 py-3 text-gray-400">{{ event.email_domain.as_deref().unwrap_or("-") }}</td>
+                        <td class="px-4 py-3 text-gray-400">{{ event.target_email.as_deref().unwrap_or("-") }}</td>
                         <td class="px-4 py-3 text-gray-500 text-xs font-mono max-w-xs truncate" title="{{ event.data }}">{{ event.data }}</td>
                     </tr>
                     {% endfor %}
                     {% if events.is_empty() %}
                     <tr>
-                        <td colspan="5" class="px-4 py-8 text-center text-gray-500">{{ self.tr("admin-audit-none") }}</td>
+                        <td colspan="6" class="px-4 py-8 text-center text-gray-500">{{ self.tr("admin-audit-none") }}</td>
                     </tr>
                     {% endif %}
                 </tbody>
@@ -83,7 +112,7 @@
         {% if has_more %}
         {% if let Some(cursor) = next_cursor %}
         <div class="mt-4 flex justify-center">
-            <a href="/admin/audit?after={{ cursor }}{% if let Some(f) = filter %}&filter={{ f }}{% endif %}" class="px-4 py-2 text-sm rounded bg-vouch-surface border border-vouch-border text-gray-300 hover:bg-gray-700">{{ self.tr("admin-audit-older") }}</a>
+            <a href="/admin/audit?after={{ cursor|urlencode }}{% if let Some(f) = filter %}&filter={{ f|urlencode }}{% endif %}{% if let Some(v) = email %}&email={{ v|urlencode }}{% endif %}{% if let Some(v) = user_id %}&user_id={{ v|urlencode }}{% endif %}{% if let Some(v) = since %}&since={{ v|urlencode }}{% endif %}{% if let Some(v) = until %}&until={{ v|urlencode }}{% endif %}" class="px-4 py-2 text-sm rounded bg-vouch-surface border border-vouch-border text-gray-300 hover:bg-gray-700">{{ self.tr("admin-audit-older") }}</a>
         </div>
         {% endif %}
         {% endif %}

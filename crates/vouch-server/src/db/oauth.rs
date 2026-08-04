@@ -866,6 +866,43 @@ impl OAuthEventType {
     }
 }
 
+/// Parameters for [`record_oauth_event`].
+pub struct RecordOAuthEventParams<'a> {
+    pub oauth_client_id: &'a str,
+    pub event_type: OAuthEventType,
+    pub user_id: Option<&'a str>,
+    pub ip_address: Option<std::net::IpAddr>,
+    pub user_agent: Option<&'a str>,
+    pub details: Option<&'a str>,
+}
+
+/// Resolve the org domain to stamp on an OAuth event's `email_domain`.
+///
+/// OAuth usage events have no email of their own. Prefer the acting user's
+/// org (the token subject, when present); fall back to the client's own
+/// `org_id` (set for org-scoped applications, e.g. client-credentials
+/// grants with no human user). Lookup failures are swallowed — a transient
+/// DB error here must not fail the OAuth operation that already succeeded.
+async fn resolve_oauth_event_org_domain(
+    store: &DocumentStore,
+    params: &RecordOAuthEventParams<'_>,
+) -> Option<String> {
+    if let Some(user_id) = params.user_id
+        && let Ok(Some(user)) = super::get_user_by_id(store, user_id).await
+        && let Some(org_id) = user.org_id
+        && let Ok(Some(domain)) = super::get_organization_domain(store, &org_id).await
+    {
+        return Some(domain);
+    }
+    if let Ok(Some(client)) = get_oauth_client_by_id(store, params.oauth_client_id).await
+        && let Some(org_id) = client.org_id
+        && let Ok(Some(domain)) = super::get_organization_domain(store, &org_id).await
+    {
+        return Some(domain);
+    }
+    None
+}
+
 /// Record an OAuth usage event via the audit store.
 ///
 /// Best-effort: audit writes must never fail the OAuth operation that
@@ -873,27 +910,29 @@ impl OAuthEventType {
 /// at every call site.
 pub async fn record_oauth_event(
     audit: &AuditStore,
-    oauth_client_id: &str,
-    event_type: OAuthEventType,
-    user_id: Option<&str>,
-    ip_address: Option<std::net::IpAddr>,
-    user_agent: Option<&str>,
-    details: Option<&str>,
+    store: &DocumentStore,
+    params: &RecordOAuthEventParams<'_>,
 ) {
-    let (country_code, asn, org_name) = crate::geo::audit_fields(ip_address);
+    let (country_code, asn, org_name) = crate::geo::audit_fields(params.ip_address);
     let data = OAuthUsageData {
-        oauth_client_id: oauth_client_id.to_string(),
-        details: details.map(String::from),
-        client_ip: ip_address.map(|ip| ip.to_string()),
-        user_agent: user_agent.map(String::from),
+        oauth_client_id: params.oauth_client_id.to_string(),
+        details: params.details.map(String::from),
+        client_ip: params.ip_address.map(|ip| ip.to_string()),
+        user_agent: params.user_agent.map(String::from),
         country_code,
         asn,
         org_name,
     };
+    let org_domain = resolve_oauth_event_org_domain(store, params).await;
     let result = match serde_json::to_string(&data) {
         Ok(data_json) => {
             audit
-                .insert_event(event_type.kind(), user_id, None, &data_json)
+                .insert_event_with_domain(
+                    params.event_type.kind(),
+                    params.user_id,
+                    org_domain.as_deref(),
+                    &data_json,
+                )
                 .await
         }
         Err(e) => Err(e.into()),
@@ -901,7 +940,7 @@ pub async fn record_oauth_event(
     if let Err(e) = result {
         tracing::warn!(
             error = %e,
-            event_type = event_type.kind().as_str(),
+            event_type = params.event_type.kind().as_str(),
             "failed to record OAuth event"
         );
     }
@@ -1682,12 +1721,15 @@ mod tests {
         for event_type in usage_variants {
             record_oauth_event(
                 &audit,
-                "oauth-client-1",
-                event_type,
-                Some("user-1"),
-                None,
-                None,
-                Some("coverage test"),
+                &store,
+                &RecordOAuthEventParams {
+                    oauth_client_id: "oauth-client-1",
+                    event_type,
+                    user_id: Some("user-1"),
+                    ip_address: None,
+                    user_agent: None,
+                    details: Some("coverage test"),
+                },
             )
             .await;
         }

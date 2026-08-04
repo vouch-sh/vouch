@@ -810,12 +810,15 @@ async fn handle_client_credentials_grant(
             // Record audit event
             crate::db::record_oauth_event(
                 &state.audit,
-                &authenticated_client.client.id,
-                crate::db::OAuthEventType::TokenIssued,
-                None,
-                client_info.client_ip,
-                client_info.user_agent.as_deref(),
-                Some("grant_type=client_credentials"),
+                &state.store,
+                &crate::db::RecordOAuthEventParams {
+                    oauth_client_id: &authenticated_client.client.id,
+                    event_type: crate::db::OAuthEventType::TokenIssued,
+                    user_id: None,
+                    ip_address: client_info.client_ip,
+                    user_agent: client_info.user_agent.as_deref(),
+                    details: Some("grant_type=client_credentials"),
+                },
             )
             .await;
 

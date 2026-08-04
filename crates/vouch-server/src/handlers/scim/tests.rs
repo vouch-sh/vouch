@@ -1856,3 +1856,103 @@ async fn test_scim_group_response_has_meta() {
     );
     assert!(meta.get("created").is_some(), "meta must include created");
 }
+
+// ========================================================================
+// scim_operation audit events carry the org's domain (NULL-domain fix)
+// ========================================================================
+
+#[tokio::test]
+async fn test_scim_operation_audit_event_carries_org_domain() {
+    // Regression test: `scim_operation` audit events have no user/email of
+    // their own (the actor is a bearer token, not a person), so without
+    // stamping the org's primary domain at write time they'd have a NULL
+    // `email_domain` and be invisible to org-scoped audit reads.
+    let (app, state) = test_app().await;
+    let token = create_test_scim_token(&state.store, "test-audit-domain", "test-org").await;
+
+    let (status, _) = http_post_json(
+        &app,
+        "/scim/v2/Users",
+        r#"{"schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"], "userName": "audit-domain@test-org.example.com"}"#,
+        &[("Authorization", &format!("Bearer {token}"))],
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    let events = state
+        .audit
+        .query_events(&crate::db::AuditEventFilter {
+            event_types: Some(vec!["scim_operation".to_string()]),
+            ..crate::db::AuditEventFilter::default()
+        })
+        .await
+        .expect("query audit events");
+    assert_eq!(events.len(), 1, "one scim_operation event must be written");
+    assert_eq!(
+        events[0].email_domain.as_deref(),
+        Some("test-org.example.com"),
+        "event must carry the org's primary domain, not NULL"
+    );
+}
+
+#[tokio::test]
+async fn test_scim_create_and_delete_user_audit_events_never_carry_a_raw_email() {
+    // Regression test: `create`/`delete` scim_operation events used to
+    // embed the user's raw email in `details` (-> `data`), even though
+    // `resource_id` already identifies the affected user and emails are
+    // documented as masked to domain-only in the audit log.
+    let (app, state) = test_app().await;
+    let email = "no-raw-email@test-org.example.com";
+    let token = create_test_scim_token(&state.store, "test-no-raw-email", "test-org").await;
+
+    let (status, create_body) = http_post_json(
+        &app,
+        "/scim/v2/Users",
+        &format!(
+            r#"{{"schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"], "userName": "{email}"}}"#
+        ),
+        &[("Authorization", &format!("Bearer {token}"))],
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "body: {create_body}");
+    let created: serde_json::Value = serde_json::from_str(&create_body).expect("valid JSON");
+    let user_id = created["id"].as_str().expect("id present");
+
+    let (status, _) = http_delete(
+        &app,
+        &format!("/scim/v2/Users/{user_id}"),
+        &[("Authorization", &format!("Bearer {token}"))],
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    let events = state
+        .audit
+        .query_events(&crate::db::AuditEventFilter {
+            event_types: Some(vec!["scim_operation".to_string()]),
+            ..crate::db::AuditEventFilter::default()
+        })
+        .await
+        .expect("query audit events");
+    let create_and_delete: Vec<_> = events
+        .iter()
+        .filter(|e| e.data.contains("\"create\"") || e.data.contains("\"delete\""))
+        .collect();
+    assert_eq!(
+        create_and_delete.len(),
+        2,
+        "one create and one delete event"
+    );
+    for event in create_and_delete {
+        assert!(
+            !event.data.contains(email),
+            "scim_operation data must not contain the raw email; got {}",
+            event.data
+        );
+        assert!(
+            event.data.contains(user_id),
+            "scim_operation data must still identify the resource via resource_id; got {}",
+            event.data
+        );
+    }
+}

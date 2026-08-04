@@ -21,10 +21,29 @@ use crate::handlers::session::{AuthContext, get_resource_auth_context};
 const AUDIT_PAGE_SIZE: u64 = 50;
 
 /// Query parameters for audit page (pagination + optional semantic filter).
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 pub(crate) struct AuditParams {
     pub after: Option<String>,
     pub filter: Option<String>,
+    /// Filter to a specific user ID (exact match).
+    pub user_id: Option<String>,
+    /// Filter to a specific email address (exact match, case-insensitive).
+    pub email: Option<String>,
+    /// Only events created on or after this RFC 3339 timestamp.
+    pub since: Option<String>,
+    /// Only events created before this RFC 3339 timestamp.
+    pub until: Option<String>,
+}
+
+impl AuditParams {
+    /// Whether any of the date-range/user/email filters are set — used by
+    /// the template to decide whether to show a "clear filters" link.
+    fn has_advanced_filters(&self) -> bool {
+        self.user_id.is_some()
+            || self.email.is_some()
+            || self.since.is_some()
+            || self.until.is_some()
+    }
 }
 
 /// Map a UI filter name to the corresponding audit event types.
@@ -47,6 +66,12 @@ pub(crate) struct AuditRow {
     pub event_type: String,
     pub email_domain: Option<String>,
     pub data: String,
+    /// The target member's current email, resolved at display time via
+    /// `data.target_user_id` for member-management events (promote,
+    /// demote, deactivate, activate, revoke-credentials, remove). `None`
+    /// for event types with no target, or when resolution fails and no
+    /// fallback is available.
+    pub target_email: Option<String>,
     /// Event timestamp, rendered client-side in the viewer's locale and
     /// timezone (`humandatetime` is the no-JS fallback).
     pub created_at: Timestamp,
@@ -65,6 +90,12 @@ pub(crate) struct AdminAuditTemplate {
     pub has_more: bool,
     pub next_cursor: Option<String>,
     pub filter: Option<String>,
+    /// Echoed back into the filter form so a submitted filter stays visible.
+    pub user_id: Option<String>,
+    pub email: Option<String>,
+    pub since: Option<String>,
+    pub until: Option<String>,
+    pub has_advanced_filters: bool,
 }
 
 impl_template_response!(AdminAuditTemplate);
@@ -89,10 +120,11 @@ pub(crate) async fn admin_audit_page(
         None => return Redirect::to("/enroll/start").into_response(),
     };
 
-    // Get the org domain for filtering audit events
-    let org_domain = match db::get_user_by_id(&state.store, &user_id).await {
+    // Get the org's domains (primary + verified additional) to scope
+    // audit events to this org.
+    let org = match db::get_user_by_id(&state.store, &user_id).await {
         Ok(Some(user)) => match user.org_id {
-            Some(ref org_id) => db::get_organization_domain(&state.store, org_id)
+            Some(ref org_id) => db::get_organization(&state.store, org_id)
                 .await
                 .ok()
                 .flatten(),
@@ -101,16 +133,19 @@ pub(crate) async fn admin_audit_page(
         _ => None,
     };
 
-    let org_domain = match org_domain {
-        Some(d) => d,
-        None => return Redirect::to("/integrations").into_response(),
+    let Some(org) = org else {
+        return Redirect::to("/integrations").into_response();
     };
 
     let event_types = params.filter.as_deref().and_then(audit_filter_event_types);
 
     let filter = AuditEventFilter {
-        email_domain: Some(org_domain),
+        email_domains: Some(org.matching_email_domains()),
         event_types,
+        user_id: params.user_id.clone(),
+        email: params.email.clone(),
+        since: params.since.clone(),
+        until: params.until.clone(),
         before_id: params.after.clone(),
         ..AuditEventFilter::default()
     };
@@ -127,21 +162,24 @@ pub(crate) async fn admin_audit_page(
         }
     };
 
-    let events: Vec<AuditRow> = audit_events
-        .iter()
-        .map(|e| {
-            let geo = GeoFields::from_json(&e.data);
-            AuditRow {
-                id: e.id.clone(),
-                event_type: e.event_type.clone(),
-                email_domain: e.email_domain.clone(),
-                data: e.data.clone(),
-                created_at: e.created_at,
-                ip_display: geo.ip_display(),
-                ip_title: geo.ip_title(),
-            }
-        })
-        .collect();
+    // Bounded by AUDIT_PAGE_SIZE (50) — one extra lookup per
+    // member-management row to resolve the target's current email, an
+    // acceptable cost for an admin-only, infrequently-loaded page.
+    let mut events: Vec<AuditRow> = Vec::with_capacity(audit_events.len());
+    for e in &audit_events {
+        let geo = GeoFields::from_json(&e.data);
+        let target_email = resolve_target_email(&state, e).await;
+        events.push(AuditRow {
+            id: e.id.clone(),
+            event_type: e.event_type.clone(),
+            email_domain: e.email_domain.clone(),
+            data: e.data.clone(),
+            target_email,
+            created_at: e.created_at,
+            ip_display: geo.ip_display(),
+            ip_title: geo.ip_title(),
+        });
+    }
 
     let next_cursor = if has_more {
         events.last().map(|e| e.id.clone())
@@ -149,14 +187,80 @@ pub(crate) async fn admin_audit_page(
         None
     };
 
+    let has_advanced_filters = params.has_advanced_filters();
+
     AdminAuditTemplate {
         auth,
         events,
         has_more,
         next_cursor,
         filter: params.filter,
+        user_id: params.user_id,
+        email: params.email,
+        since: params.since,
+        until: params.until,
+        has_advanced_filters,
     }
     .into_response()
+}
+
+/// Member-management event types whose `data` carries a `target_user_id`
+/// to resolve into a display email, rather than storing the target's email
+/// raw in `data` (which would then be re-exposed verbatim to `audit:read`
+/// API consumers — emails are documented as masked to domain-only).
+const MEMBER_EVENT_TYPES: &[&str] = &[
+    "admin_promote",
+    "admin_demote",
+    "admin_deactivate",
+    "admin_activate",
+    "admin_revoke_credentials",
+    "admin_remove_user",
+];
+
+/// `target_user_id` parsed out of a member-management event's `data`.
+#[derive(Default, Deserialize)]
+struct TargetFields {
+    target_user_id: Option<String>,
+}
+
+impl TargetFields {
+    fn from_json(data_json: &str) -> Self {
+        serde_json::from_str::<Self>(data_json).unwrap_or_else(|e| {
+            tracing::trace!("Could not parse target fields from audit data: {e}");
+            Self::default()
+        })
+    }
+}
+
+/// Resolve a member-management event's target to a display email via
+/// `target_user_id`, looked up fresh rather than stored raw in `data`.
+///
+/// Falls back to the event's own `email_domain`/`email_hmac` columns —
+/// stamped from the target's email at write time — when the target no
+/// longer exists. This is not a rare case: `admin_remove_user` events are
+/// written *after* the target is deleted, so that fallback always applies
+/// for removals.
+async fn resolve_target_email(
+    state: &AppState,
+    event: &crate::db::audit::AuditEvent,
+) -> Option<String> {
+    if !MEMBER_EVENT_TYPES.contains(&event.event_type.as_str()) {
+        return None;
+    }
+    let target_user_id = TargetFields::from_json(&event.data).target_user_id?;
+
+    if let Ok(Some(user)) = db::get_user_by_id(&state.store, &target_user_id).await {
+        return Some(user.email);
+    }
+
+    match (event.email_domain.as_deref(), event.email_hmac.as_deref()) {
+        (Some(domain), Some(hmac)) => {
+            let short_hmac = hmac.get(..8).unwrap_or(hmac);
+            Some(format!("(removed user, {short_hmac}…@{domain})"))
+        }
+        (Some(domain), None) => Some(format!("(removed user @{domain})")),
+        _ => Some("(removed user)".to_string()),
+    }
 }
 
 /// Geo fields extracted from audit event JSON data.
@@ -214,6 +318,7 @@ impl GeoFields {
 #[cfg(test)]
 #[expect(
     clippy::unwrap_used,
+    clippy::expect_used,
     reason = "test code: panic on assertion failure is acceptable"
 )]
 mod tests {
@@ -482,6 +587,76 @@ mod tests {
             body.contains("login_success"),
             "audit page should list the mixed-case-domain event; body did not contain event_type"
         );
+    }
+
+    // ---- resolve_target_email ----
+
+    #[tokio::test]
+    async fn resolve_target_email_resolves_live_user() {
+        let state = test_app_state().await;
+        let org = create_test_org(&state.store, "example.com").await;
+        let target =
+            create_test_user_in_org(&state.store, "target@example.com", &org.id, false).await;
+
+        let data =
+            serde_json::json!({ "action": "promote", "target_user_id": target.id }).to_string();
+        let event = crate::db::audit::AuditEvent {
+            id: "evt-1".to_string(),
+            event_type: "admin_promote".to_string(),
+            user_id: None,
+            email_domain: None,
+            email_hmac: None,
+            data,
+            created_at: Timestamp::now(),
+        };
+
+        let resolved = resolve_target_email(&state, &event).await;
+        assert_eq!(resolved.as_deref(), Some("target@example.com"));
+    }
+
+    #[tokio::test]
+    async fn resolve_target_email_falls_back_when_user_is_gone() {
+        let state = test_app_state().await;
+
+        let data =
+            serde_json::json!({ "action": "remove_user", "target_user_id": "nonexistent-id" })
+                .to_string();
+        let event = crate::db::audit::AuditEvent {
+            id: "evt-2".to_string(),
+            event_type: "admin_remove_user".to_string(),
+            user_id: None,
+            email_domain: Some("example.com".to_string()),
+            email_hmac: Some("abcdef0123456789".to_string()),
+            data,
+            created_at: Timestamp::now(),
+        };
+
+        let resolved = resolve_target_email(&state, &event).await;
+        let resolved = resolved.expect("fallback must produce a display string");
+        assert!(
+            resolved.contains("example.com"),
+            "fallback must surface the org domain; got {resolved}"
+        );
+        assert!(
+            resolved.to_lowercase().contains("removed"),
+            "fallback must signal the user is gone; got {resolved}"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_target_email_is_none_for_non_member_event_types() {
+        let state = test_app_state().await;
+        let event = crate::db::audit::AuditEvent {
+            id: "evt-3".to_string(),
+            event_type: "login_success".to_string(),
+            user_id: None,
+            email_domain: Some("example.com".to_string()),
+            email_hmac: None,
+            data: "{}".to_string(),
+            created_at: Timestamp::now(),
+        };
+
+        assert_eq!(resolve_target_email(&state, &event).await, None);
     }
 
     // ---- audit_filter_event_types helper tests ----

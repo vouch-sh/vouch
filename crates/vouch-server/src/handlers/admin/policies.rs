@@ -208,7 +208,7 @@ pub(crate) async fn toggle_preconfigured_policy(
         .insert_event(
             db::AuditEventKind::AdminPolicyToggle,
             Some(&admin.id),
-            Some(&slug),
+            Some(&admin.email),
             &data.to_string(),
         )
         .await
@@ -320,7 +320,7 @@ pub(crate) async fn create_custom_policy(
         .insert_event(
             db::AuditEventKind::AdminPolicyCreate,
             Some(&admin.id),
-            Some(&policy.name),
+            Some(&admin.email),
             &data.to_string(),
         )
         .await
@@ -410,7 +410,7 @@ pub(crate) async fn update_custom_policy(
         .insert_event(
             db::AuditEventKind::AdminPolicyUpdate,
             Some(&admin.id),
-            Some(&form.name),
+            Some(&admin.email),
             &data.to_string(),
         )
         .await
@@ -459,7 +459,7 @@ pub(crate) async fn delete_custom_policy(
         .insert_event(
             db::AuditEventKind::AdminPolicyDelete,
             Some(&admin.id),
-            Some(&*id),
+            Some(&admin.email),
             &data.to_string(),
         )
         .await
@@ -562,7 +562,7 @@ pub(crate) async fn toggle_custom_policy(
         .insert_event(
             db::AuditEventKind::AdminPolicyToggle,
             Some(&admin.id),
-            Some(&policy.name),
+            Some(&admin.email),
             &data.to_string(),
         )
         .await

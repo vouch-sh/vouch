@@ -6,14 +6,17 @@
 //! from regular FIDO2 sessions. Only organization admins can access these endpoints.
 
 mod audit;
+mod audit_api;
 mod domains;
 pub(crate) mod flash;
 mod members;
+mod ocsf;
 mod policies;
 mod scim_tokens;
 mod subdomain;
 
 pub(crate) use audit::*;
+pub(crate) use audit_api::*;
 pub(crate) use domains::*;
 pub(crate) use members::*;
 pub(crate) use policies::*;

@@ -3,6 +3,7 @@
 
 use crate::AppState;
 use crate::db;
+use crate::db::{CreateScimTokenParams, ScimScope, ScimScopeSet};
 use crate::error::ServiceError;
 use crate::handlers::admin::flash;
 use crate::impl_template_response;
@@ -27,12 +28,38 @@ use crate::handlers::{ValidPath, ValidUuid};
 // SCIM Token Management API
 // ============================================================================
 
-/// Request to create a SCIM token.
+/// The four SCIM provisioning scopes plus, if requested, `audit:read`.
+/// Shared by the API and UI create handlers so the scope set granted to a
+/// new token can't drift between the two entry points.
+fn requested_scope(audit_read: bool) -> ScimScopeSet {
+    let mut scopes = vec![
+        ScimScope::UsersRead,
+        ScimScope::UsersWrite,
+        ScimScope::GroupsRead,
+        ScimScope::GroupsWrite,
+    ];
+    if audit_read {
+        scopes.push(ScimScope::AuditRead);
+    }
+    ScimScopeSet::from_scopes(scopes)
+}
+
+/// Whether a stored scope string grants `audit:read`. Malformed scope
+/// strings (should not occur — always written by [`requested_scope`]) are
+/// treated as not granting it, matching `ScimAuth`'s fail-closed behavior.
+fn has_audit_read(scope: &str) -> bool {
+    ScimScopeSet::parse(scope).is_some_and(|s| s.contains(ScimScope::AuditRead))
+}
+
+/// Request to create an organization API token.
 #[derive(Debug, Deserialize)]
 pub(crate) struct CreateScimTokenRequest {
     pub description: Option<String>,
     /// Token expiration in days (required, 1-365 days).
     pub expires_in_days: i64,
+    /// Grant the `audit:read` scope (`GET /api/v1/org/audit-events`).
+    #[serde(default)]
+    pub audit_read: bool,
 }
 
 /// Response for created SCIM token.
@@ -44,6 +71,7 @@ pub(crate) struct CreateScimTokenResponse {
     pub token: String,
     pub description: Option<String>,
     pub expires_at: Option<Timestamp>,
+    pub audit_read: bool,
 }
 
 impl std::fmt::Debug for CreateScimTokenResponse {
@@ -53,6 +81,7 @@ impl std::fmt::Debug for CreateScimTokenResponse {
             .field("token", &"[REDACTED]")
             .field("description", &self.description)
             .field("expires_at", &self.expires_at)
+            .field("audit_read", &self.audit_read)
             .finish()
     }
 }
@@ -65,6 +94,7 @@ pub(crate) struct ScimTokenInfo {
     pub created_at: Timestamp,
     pub last_used_at: Option<Timestamp>,
     pub expires_at: Option<Timestamp>,
+    pub audit_read: bool,
 }
 
 /// Response for listing SCIM tokens.
@@ -107,15 +137,19 @@ pub(crate) async fn create_scim_token(
 
     let generated = generate_scim_token()?;
     let expires_at = Some(compute_token_expiry(req.expires_in_days)?);
+    let scope = requested_scope(req.audit_read);
 
     // The 2-token limit is enforced inside the transaction: counting here and
     // inserting afterwards lets two concurrent requests both pass the check.
     let token_id = db::create_scim_token(
         &state.store,
-        &org_id,
-        &generated.hash,
-        req.description.as_deref(),
-        expires_at,
+        &CreateScimTokenParams {
+            org_id: &org_id,
+            token_hash: &generated.hash,
+            description: req.description.as_deref(),
+            expires_at,
+            scope,
+        },
     )
     .await?;
 
@@ -144,6 +178,7 @@ pub(crate) async fn create_scim_token(
         token: generated.plaintext.expose_secret().to_string(),
         description: req.description,
         expires_at,
+        audit_read: req.audit_read,
     }))
 }
 
@@ -169,6 +204,7 @@ pub(crate) async fn list_scim_tokens(
             created_at: t.created_at,
             last_used_at: t.last_used_at,
             expires_at: t.expires_at,
+            audit_read: has_audit_read(&t.scope),
         })
         .collect();
 
@@ -236,6 +272,7 @@ pub(crate) struct ScimTokenRow {
     pub created_at: Timestamp,
     pub last_used_at: Option<Timestamp>,
     pub expires_at: Option<Timestamp>,
+    pub audit_read: bool,
 }
 
 /// SCIM tokens page template.
@@ -255,6 +292,10 @@ impl_template_response!(AdminScimTokensTemplate);
 pub(crate) struct CreateScimTokenForm {
     pub description: Option<String>,
     pub expires_in_days: i64,
+    /// Grant the `audit:read` scope. HTML checkboxes omit the field
+    /// entirely when unchecked, hence the default.
+    #[serde(default)]
+    pub audit_read: bool,
 }
 
 const REDIRECT_BASE: &str = "/admin/scim-tokens";
@@ -306,6 +347,7 @@ pub(crate) async fn admin_scim_tokens_page(
             created_at: t.created_at,
             last_used_at: t.last_used_at,
             expires_at: t.expires_at,
+            audit_read: has_audit_read(&t.scope),
         })
         .collect();
 
@@ -368,10 +410,13 @@ pub(crate) async fn admin_create_scim_token(
     // inserting afterwards lets two concurrent requests both pass the check.
     let token_id = match db::create_scim_token(
         &state.store,
-        &org_id,
-        &generated.hash,
-        description.as_deref(),
-        expires_at,
+        &CreateScimTokenParams {
+            org_id: &org_id,
+            token_hash: &generated.hash,
+            description: description.as_deref(),
+            expires_at,
+            scope: requested_scope(form.audit_read),
+        },
     )
     .await
     {
@@ -420,6 +465,7 @@ pub(crate) async fn admin_create_scim_token(
             created_at: t.created_at,
             last_used_at: t.last_used_at,
             expires_at: t.expires_at,
+            audit_read: has_audit_read(&t.scope),
         })
         .collect();
 

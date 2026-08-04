@@ -117,8 +117,8 @@ pub use config::{AuthEventParams, AuthEventType, ClientInfo, spawn_audit_event};
 
 // Re-export SCIM types and functions
 pub use scim::{
-    ScimFilterError, ScimGroupRecord, ScimScope, ScimScopeSet, ScimToken, ScimUserRecord,
-    add_scim_group_member, create_scim_group, create_scim_token, create_scim_user,
+    CreateScimTokenParams, ScimFilterError, ScimGroupRecord, ScimScope, ScimScopeSet, ScimToken,
+    ScimUserRecord, add_scim_group_member, create_scim_group, create_scim_token, create_scim_user,
     delete_expired_scim_tokens, delete_scim_group, delete_scim_token, get_scim_group,
     get_scim_group_members, get_scim_token_by_hash, get_scim_user, insert_scim_audit,
     list_scim_groups, list_scim_tokens, list_scim_users, remove_scim_group_member,
@@ -139,14 +139,14 @@ pub use documents::oauth::{
 pub(crate) use oauth::JwtAssertionJtiClaim;
 pub use oauth::{
     CreateOAuthClientParams, MAX_ACTIVE_SECRETS, MAX_POST_LOGOUT_REDIRECT_URIS, OAuthClient,
-    OAuthClientSecret, OAuthEventType, OAuthUsageStats, UpdateClientRegistrationParams,
-    UpdateOAuthClientParams, create_oauth_client, create_oauth_client_secret,
-    delete_expired_jwt_assertion_jtis, delete_oauth_client, get_oauth_client_by_client_id,
-    get_oauth_client_by_id, get_oauth_client_secret_by_id, get_oauth_client_secrets,
-    get_oauth_clients_for_user, get_oauth_secret_by_hash, get_oauth_usage_stats,
-    is_valid_post_logout_redirect_uri_str, record_oauth_event, revoke_all_oauth_client_secrets,
-    revoke_oauth_client_secret, store_jwt_assertion_jti, update_oauth_client,
-    update_oauth_client_last_used, update_oauth_client_registration,
+    OAuthClientSecret, OAuthEventType, OAuthUsageStats, RecordOAuthEventParams,
+    UpdateClientRegistrationParams, UpdateOAuthClientParams, create_oauth_client,
+    create_oauth_client_secret, delete_expired_jwt_assertion_jtis, delete_oauth_client,
+    get_oauth_client_by_client_id, get_oauth_client_by_id, get_oauth_client_secret_by_id,
+    get_oauth_client_secrets, get_oauth_clients_for_user, get_oauth_secret_by_hash,
+    get_oauth_usage_stats, is_valid_post_logout_redirect_uri_str, record_oauth_event,
+    revoke_all_oauth_client_secrets, revoke_oauth_client_secret, store_jwt_assertion_jti,
+    update_oauth_client, update_oauth_client_last_used, update_oauth_client_registration,
     validate_oauth_client_credentials,
 };
 

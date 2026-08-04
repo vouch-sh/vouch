@@ -2,7 +2,7 @@
 //! Organization database operations.
 
 use super::document_type::Document;
-use super::documents::organization::{AdditionalDomain, OrganizationDoc};
+use super::documents::organization::{AdditionalDomain, AdditionalDomainState, OrganizationDoc};
 use super::store::DocumentStore;
 use anyhow::Result;
 
@@ -64,6 +64,28 @@ impl From<Document<OrganizationDoc>> for Organization {
             additional_domains: doc.data.additional_domains,
             subdomain: doc.data.subdomain,
         }
+    }
+}
+
+impl Organization {
+    /// Every domain that participates in login matching for this org: the
+    /// primary domain plus any additional domain that has completed DNS
+    /// TXT verification. Pending and unverified additional domains are
+    /// excluded — mirrors the set `OrganizationDoc::index_entries` indexes.
+    ///
+    /// Used to scope audit-event reads to an org: filtering by only the
+    /// primary domain misses events for users on a verified additional
+    /// domain.
+    #[must_use]
+    pub fn matching_email_domains(&self) -> Vec<String> {
+        let mut domains = Vec::with_capacity(self.additional_domains.len().saturating_add(1));
+        domains.push(self.domain.clone());
+        for ad in &self.additional_domains {
+            if matches!(ad.state, AdditionalDomainState::Verified { .. }) {
+                domains.push(ad.domain.clone());
+            }
+        }
+        domains
     }
 }
 
@@ -408,5 +430,39 @@ mod tests {
                 .await
                 .unwrap()
         );
+    }
+
+    #[tokio::test]
+    async fn matching_email_domains_includes_primary_and_verified_only() {
+        let store = fresh_store().await;
+        let org = create_organization(&store, "acme.com", None, None)
+            .await
+            .unwrap();
+        add_additional_domain(&store, &org.id, "verified.io", "u1", "u1@acme.com")
+            .await
+            .unwrap();
+        mark_additional_domain_verified(&store, &org.id, "verified.io")
+            .await
+            .unwrap();
+        add_additional_domain(&store, &org.id, "pending.io", "u1", "u1@acme.com")
+            .await
+            .unwrap();
+
+        let refreshed = get_organization(&store, &org.id).await.unwrap().unwrap();
+        let domains = refreshed.matching_email_domains();
+
+        assert!(
+            domains.contains(&"acme.com".to_string()),
+            "must include primary domain"
+        );
+        assert!(
+            domains.contains(&"verified.io".to_string()),
+            "must include verified additional domain"
+        );
+        assert!(
+            !domains.contains(&"pending.io".to_string()),
+            "must exclude pending (unverified) additional domain"
+        );
+        assert_eq!(domains.len(), 2);
     }
 }
