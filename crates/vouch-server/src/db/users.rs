@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 //! User database operations.
 
+use std::collections::HashMap;
+
 use super::document_type::Document;
 use super::documents::user::UserDoc;
 use super::store::DocumentStore;
@@ -120,6 +122,25 @@ pub async fn get_user_by_email(store: &DocumentStore, email: &str) -> Result<Opt
 pub async fn get_user_by_id(store: &DocumentStore, user_id: &str) -> Result<Option<User>> {
     let doc = store.get::<UserDoc>(user_id).await?;
     Ok(doc.map(User::from))
+}
+
+/// Get multiple users by ID in a single query.
+///
+/// Returns a map keyed by user ID. IDs with no matching user are simply
+/// absent from the map — not an error. An empty `ids` slice returns an
+/// empty map without issuing a query.
+pub async fn get_users_by_ids(
+    store: &DocumentStore,
+    ids: &[String],
+) -> Result<HashMap<String, User>> {
+    if ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let docs = store.get_by_ids::<UserDoc>(ids).await?;
+    Ok(docs
+        .into_iter()
+        .map(|doc| (doc.id.clone(), User::from(doc)))
+        .collect())
 }
 
 /// Delete a user and all associated data atomically.

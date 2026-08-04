@@ -12,6 +12,7 @@ use axum::response::{IntoResponse, Redirect, Response};
 use axum_extra::extract::cookie::CookieJar;
 use jiff::Timestamp;
 use serde::Deserialize;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::filters;
@@ -162,13 +163,28 @@ pub(crate) async fn admin_audit_page(
         }
     };
 
-    // Bounded by AUDIT_PAGE_SIZE (50) — one extra lookup per
-    // member-management row to resolve the target's current email, an
-    // acceptable cost for an admin-only, infrequently-loaded page.
+    // Batch-resolve every member-management row's target email in a single
+    // query instead of one lookup per row (bounded by AUDIT_PAGE_SIZE = 50).
+    let target_ids: Vec<String> = audit_events
+        .iter()
+        .filter(|e| MEMBER_EVENT_TYPES.contains(&e.event_type.as_str()))
+        .filter_map(|e| TargetFields::from_json(&e.data).target_user_id)
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
+
+    let target_users = match db::get_users_by_ids(&state.store, &target_ids).await {
+        Ok(map) => map,
+        Err(e) => {
+            tracing::error!("Failed to batch-resolve audit target users: {e}");
+            HashMap::new()
+        }
+    };
+
     let mut events: Vec<AuditRow> = Vec::with_capacity(audit_events.len());
     for e in &audit_events {
         let geo = GeoFields::from_json(&e.data);
-        let target_email = resolve_target_email(&state, e).await;
+        let target_email = resolve_target_email(&target_users, e);
         events.push(AuditRow {
             id: e.id.clone(),
             event_type: e.event_type.clone(),
@@ -233,15 +249,17 @@ impl TargetFields {
 }
 
 /// Resolve a member-management event's target to a display email via
-/// `target_user_id`, looked up fresh rather than stored raw in `data`.
+/// `target_user_id`, looked up in a map pre-fetched once per page load
+/// (`admin_audit_page` batches all target IDs into a single
+/// `db::get_users_by_ids` call) rather than stored raw in `data`.
 ///
 /// Falls back to the event's own `email_domain`/`email_hmac` columns —
 /// stamped from the target's email at write time — when the target no
 /// longer exists. This is not a rare case: `admin_remove_user` events are
 /// written *after* the target is deleted, so that fallback always applies
 /// for removals.
-async fn resolve_target_email(
-    state: &AppState,
+fn resolve_target_email(
+    target_users: &HashMap<String, db::User>,
     event: &crate::db::audit::AuditEvent,
 ) -> Option<String> {
     if !MEMBER_EVENT_TYPES.contains(&event.event_type.as_str()) {
@@ -249,8 +267,8 @@ async fn resolve_target_email(
     }
     let target_user_id = TargetFields::from_json(&event.data).target_user_id?;
 
-    if let Ok(Some(user)) = db::get_user_by_id(&state.store, &target_user_id).await {
-        return Some(user.email);
+    if let Some(user) = target_users.get(&target_user_id) {
+        return Some(user.email.clone());
     }
 
     match (event.email_domain.as_deref(), event.email_hmac.as_deref()) {
@@ -589,14 +607,66 @@ mod tests {
         );
     }
 
-    // ---- resolve_target_email ----
-
     #[tokio::test]
-    async fn resolve_target_email_resolves_live_user() {
-        let state = test_app_state().await;
+    async fn test_audit_page_resolves_duplicate_targets_consistently() {
+        // Two member-management events referencing the same target_user_id
+        // must both resolve to that target's email.
+        let (app, state) = test_app().await;
         let org = create_test_org(&state.store, "example.com").await;
+        let admin = create_test_user_in_org(&state.store, "admin@example.com", &org.id, true).await;
         let target =
             create_test_user_in_org(&state.store, "target@example.com", &org.id, false).await;
+        let auth_id = create_test_authenticator(&state.store, &admin.id).await;
+        let token = create_test_session(&state, &admin.id, &admin.email, &auth_id).await;
+        let cookie = format!("{}={token}", vouch_common::SESSION_COOKIE_NAME);
+
+        let data = serde_json::json!({ "target_user_id": target.id }).to_string();
+        state
+            .audit
+            .insert_event(
+                crate::db::audit::AuditEventKind::AdminPromote,
+                Some(&admin.id),
+                Some(&admin.email),
+                &data,
+            )
+            .await
+            .unwrap();
+        state
+            .audit
+            .insert_event(
+                crate::db::audit::AuditEventKind::AdminDemote,
+                Some(&admin.id),
+                Some(&admin.email),
+                &data,
+            )
+            .await
+            .unwrap();
+
+        let (status, body) = http_get(&app, "/admin/audit", &[("Cookie", &cookie)]).await;
+        assert_eq!(status, StatusCode::OK, "admin should get 200");
+        let occurrences = body.matches("target@example.com").count();
+        assert_eq!(
+            occurrences, 2,
+            "both duplicate-target events should resolve to the shared target's email; body:\n{body}"
+        );
+    }
+
+    // ---- resolve_target_email ----
+
+    #[test]
+    fn resolve_target_email_resolves_live_user() {
+        let target = db::User {
+            id: "target-id".to_string(),
+            email: "target@example.com".to_string(),
+            name: None,
+            org_id: None,
+            is_org_admin: false,
+            active: true,
+            external_id: None,
+            github_id: None,
+            github_login: None,
+            github_refresh_token: None,
+        };
 
         let data =
             serde_json::json!({ "action": "promote", "target_user_id": target.id }).to_string();
@@ -610,13 +680,16 @@ mod tests {
             created_at: Timestamp::now(),
         };
 
-        let resolved = resolve_target_email(&state, &event).await;
+        let mut target_users = HashMap::new();
+        target_users.insert(target.id.clone(), target);
+
+        let resolved = resolve_target_email(&target_users, &event);
         assert_eq!(resolved.as_deref(), Some("target@example.com"));
     }
 
-    #[tokio::test]
-    async fn resolve_target_email_falls_back_when_user_is_gone() {
-        let state = test_app_state().await;
+    #[test]
+    fn resolve_target_email_falls_back_when_user_is_gone() {
+        let target_users = HashMap::new();
 
         let data =
             serde_json::json!({ "action": "remove_user", "target_user_id": "nonexistent-id" })
@@ -631,7 +704,7 @@ mod tests {
             created_at: Timestamp::now(),
         };
 
-        let resolved = resolve_target_email(&state, &event).await;
+        let resolved = resolve_target_email(&target_users, &event);
         let resolved = resolved.expect("fallback must produce a display string");
         assert!(
             resolved.contains("example.com"),
@@ -643,9 +716,9 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn resolve_target_email_is_none_for_non_member_event_types() {
-        let state = test_app_state().await;
+    #[test]
+    fn resolve_target_email_is_none_for_non_member_event_types() {
+        let target_users = HashMap::new();
         let event = crate::db::audit::AuditEvent {
             id: "evt-3".to_string(),
             event_type: "login_success".to_string(),
@@ -656,7 +729,7 @@ mod tests {
             created_at: Timestamp::now(),
         };
 
-        assert_eq!(resolve_target_email(&state, &event).await, None);
+        assert_eq!(resolve_target_email(&target_users, &event), None);
     }
 
     // ---- audit_filter_event_types helper tests ----
