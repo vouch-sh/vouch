@@ -62,6 +62,10 @@
                         <option value="365">{{ self.tr("admin-scim-days-365") }}</option>
                     </select>
                 </div>
+                <div class="flex items-center gap-2 pb-2">
+                    <input type="checkbox" id="audit_read" name="audit_read" value="true" class="rounded bg-gray-800 border-gray-700">
+                    <label for="audit_read" class="text-xs text-gray-400">{{ self.tr("admin-scim-audit-read-label").arg("scope", "audit:read") }}</label>
+                </div>
                 <button type="submit" class="px-4 py-2 text-sm rounded bg-vouch-accent text-white hover:bg-vouch-accent-hover">{{ self.tr("admin-scim-create") }}</button>
             </form>
         </div>
@@ -75,6 +79,7 @@
                         <th class="px-4 py-3 font-medium">{{ self.tr("apps-detail-created") }}</th>
                         <th class="px-4 py-3 font-medium">{{ self.tr("apps-list-th-last-used") }}</th>
                         <th class="px-4 py-3 font-medium">{{ self.tr("admin-scim-th-expires") }}</th>
+                        <th class="px-4 py-3 font-medium">{{ self.tr("admin-scim-th-scopes") }}</th>
                         <th class="px-4 py-3 font-medium text-right">{{ self.tr("apps-list-th-actions") }}</th>
                     </tr>
                 </thead>
@@ -85,6 +90,12 @@
                         <td class="px-4 py-3 text-gray-400 whitespace-nowrap"><time datetime="{{ token.created_at }}" data-localize-time>{{ token.created_at|humandatetime }}</time></td>
                         <td class="px-4 py-3 text-gray-400 whitespace-nowrap">{% match token.last_used_at %}{% when Some with (v) %}<time datetime="{{ v }}" data-localize-time>{{ v|humandatetime }}</time>{% when None %}{{ self.tr("apps-list-never") }}{% endmatch %}</td>
                         <td class="px-4 py-3 text-gray-400 whitespace-nowrap">{% match token.expires_at %}{% when Some with (v) %}<time datetime="{{ v }}" data-localize-time>{{ v|humandatetime }}</time>{% when None %}{{ self.tr("apps-list-never") }}{% endmatch %}</td>
+                        <td class="px-4 py-3 whitespace-nowrap">
+                            <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-gray-700 text-gray-300">{{ self.tr("admin-scim-scope-provisioning") }}</span>
+                            {% if token.audit_read %}
+                            <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-vouch-accent/10 text-vouch-accent">{{ self.tr("admin-scim-scope-audit-read") }}</span>
+                            {% endif %}
+                        </td>
                         <td class="px-4 py-3 text-right">
                             <form method="POST" action="/admin/scim-tokens/{{ token.id }}/revoke" data-confirm-message="{{ self.tr("admin-scim-revoke-confirm") }}">
                                 <button type="submit" class="px-2 py-1 text-xs rounded bg-red-900/40 text-red-400 hover:bg-red-900/60">{{ self.tr("apps-detail-revoke") }}</button>
@@ -94,7 +105,7 @@
                     {% endfor %}
                     {% if tokens.is_empty() %}
                     <tr>
-                        <td colspan="5" class="px-4 py-8 text-center text-gray-500">{{ self.tr("admin-scim-none") }}</td>
+                        <td colspan="6" class="px-4 py-8 text-center text-gray-500">{{ self.tr("admin-scim-none") }}</td>
                     </tr>
                     {% endif %}
                 </tbody>

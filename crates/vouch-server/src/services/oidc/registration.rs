@@ -585,12 +585,15 @@ pub async fn register_client(
     let base_url = &state.config().base_url;
     db::record_oauth_event(
         &state.audit,
-        &client.id,
-        OAuthEventType::ClientRegistered,
-        authenticated_user_id,
-        None,
-        None,
-        Some("RFC 7591 dynamic registration"),
+        &state.store,
+        &db::RecordOAuthEventParams {
+            oauth_client_id: &client.id,
+            event_type: OAuthEventType::ClientRegistered,
+            user_id: authenticated_user_id,
+            ip_address: None,
+            user_agent: None,
+            details: Some("RFC 7591 dynamic registration"),
+        },
     )
     .await;
 
@@ -1097,12 +1100,15 @@ pub async fn delete_client_configuration(
 
     db::record_oauth_event(
         &state.audit,
-        &client.id,
-        OAuthEventType::ClientDeleted,
-        client.user_id.as_deref(),
-        None,
-        None,
-        Some("RFC 7592 client configuration DELETE"),
+        &state.store,
+        &db::RecordOAuthEventParams {
+            oauth_client_id: &client.id,
+            event_type: OAuthEventType::ClientDeleted,
+            user_id: client.user_id.as_deref(),
+            ip_address: None,
+            user_agent: None,
+            details: Some("RFC 7592 client configuration DELETE"),
+        },
     )
     .await;
 
@@ -1223,12 +1229,15 @@ pub async fn update_client_configuration(
 
     db::record_oauth_event(
         &state.audit,
-        &client.id,
-        OAuthEventType::ClientUpdated,
-        client.user_id.as_deref(),
-        None,
-        None,
-        Some("RFC 7592 client configuration PUT"),
+        &state.store,
+        &db::RecordOAuthEventParams {
+            oauth_client_id: &client.id,
+            event_type: OAuthEventType::ClientUpdated,
+            user_id: client.user_id.as_deref(),
+            ip_address: None,
+            user_agent: None,
+            details: Some("RFC 7592 client configuration PUT"),
+        },
     )
     .await;
 

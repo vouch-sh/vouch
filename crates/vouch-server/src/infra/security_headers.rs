@@ -37,7 +37,7 @@ pub fn build_api_cors_layer() -> CorsLayer {
             header::ACCEPT,
             HeaderName::from_static("dpop"),
         ])
-        .expose_headers([HeaderName::from_static("dpop-nonce")])
+        .expose_headers([HeaderName::from_static("dpop-nonce"), header::LINK])
         .max_age(std::time::Duration::from_hours(1))
 }
 

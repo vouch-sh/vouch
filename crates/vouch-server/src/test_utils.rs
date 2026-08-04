@@ -1241,14 +1241,19 @@ pub async fn create_test_session_with_mtls(
     result.token.expose_secret().to_string()
 }
 
-/// Create a SCIM bearer token for testing, bound to the given org.
+/// Create an organization API token for testing, bound to the given org,
+/// with an explicit scope set. Shared primitive behind
+/// [`create_test_scim_token`] (default SCIM scopes) and
+/// [`create_test_audit_token`] (`audit:read` only, no SCIM scopes).
 ///
 /// `authenticate_scim` rejects tokens without an `org_id`, so every
-/// test that authenticates via SCIM must supply one.
-pub async fn create_test_scim_token(
+/// test that authenticates via SCIM (or the audit events API's org-token
+/// path) must supply one.
+pub async fn create_test_org_token_with_scope(
     store: &DocumentStore,
     description: &str,
     org_id: &str,
+    scope: crate::db::ScimScopeSet,
 ) -> String {
     use aws_lc_rs::digest::{self, SHA256};
     use aws_lc_rs::rand as aws_rand;
@@ -1288,11 +1293,53 @@ pub async fn create_test_scim_token(
     }
 
     // Store in database with org_id so authenticate_scim accepts it
-    crate::db::create_scim_token(store, org_id, &token_hash, Some(description), None)
-        .await
-        .expect("Failed to create SCIM token");
+    crate::db::create_scim_token(
+        store,
+        &crate::db::CreateScimTokenParams {
+            org_id,
+            token_hash: &token_hash,
+            description: Some(description),
+            expires_at: None,
+            scope,
+        },
+    )
+    .await
+    .expect("Failed to create SCIM token");
 
     token
+}
+
+/// Create a SCIM bearer token for testing, bound to the given org, with
+/// the four default SCIM provisioning scopes (no `audit:read`).
+pub async fn create_test_scim_token(
+    store: &DocumentStore,
+    description: &str,
+    org_id: &str,
+) -> String {
+    create_test_org_token_with_scope(
+        store,
+        description,
+        org_id,
+        crate::db::ScimScopeSet::default(),
+    )
+    .await
+}
+
+/// Create an organization API token for testing with the `audit:read`
+/// scope (and no SCIM scopes) — the token flavor
+/// `GET /api/v1/org/audit-events` accepts from unattended pollers.
+pub async fn create_test_audit_token(
+    store: &DocumentStore,
+    description: &str,
+    org_id: &str,
+) -> String {
+    create_test_org_token_with_scope(
+        store,
+        description,
+        org_id,
+        crate::db::ScimScopeSet::from_scopes(vec![crate::db::ScimScope::AuditRead]),
+    )
+    .await
 }
 
 /// What JWKS, if any, a test OAuth client is created with.

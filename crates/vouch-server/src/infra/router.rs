@@ -333,6 +333,11 @@ fn build_general_limited_routes(
             "/api/v1/org/scim-tokens/{id}",
             delete(handlers::admin::delete_scim_token),
         )
+        // Org-scoped audit event export (JSON/NDJSON/OCSF)
+        .route(
+            "/api/v1/org/audit-events",
+            get(handlers::admin::audit_events),
+        )
         // CEL validation API (used by admin UI CEL playground)
         .route(
             "/api/v1/org/policies/validate",

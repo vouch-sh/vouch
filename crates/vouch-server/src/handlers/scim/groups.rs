@@ -100,6 +100,7 @@ pub(crate) async fn list_groups(
         "*",
         Some(&auth.token_id),
         Some(&format!("{{\"count\": {}}}", resources.len())),
+        auth.org_domain.as_deref(),
     )
     .await
     {
@@ -191,6 +192,7 @@ pub(crate) async fn create_group(
         &db_group.id,
         Some(&auth.token_id),
         Some(&serde_json::json!({"displayName": &db_group.display_name}).to_string()),
+        auth.org_domain.as_deref(),
     )
     .await
     {
@@ -432,6 +434,7 @@ pub(crate) async fn patch_group(
         &id,
         Some(&auth.token_id),
         None,
+        auth.org_domain.as_deref(),
     )
     .await
     {
@@ -516,6 +519,7 @@ pub(crate) async fn delete_group(
         &id,
         Some(&auth.token_id),
         Some(&serde_json::json!({"displayName": &group.display_name}).to_string()),
+        auth.org_domain.as_deref(),
     )
     .await
     {

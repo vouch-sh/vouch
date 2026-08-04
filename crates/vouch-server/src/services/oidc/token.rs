@@ -364,16 +364,19 @@ pub(crate) async fn exchange_authorization_code(
     if let Some(auth_client) = authenticated_client {
         db::record_oauth_event(
             &state.audit,
-            &auth_client.client.id,
-            db::OAuthEventType::TokenIssued,
-            Some(&auth_code.user_id),
-            None, // IP address
-            None, // User-Agent
-            params
-                .dpop_proof
-                .as_ref()
-                .map(|p| format!("dpop_jkt={}", p.jkt))
-                .as_deref(),
+            &state.store,
+            &db::RecordOAuthEventParams {
+                oauth_client_id: &auth_client.client.id,
+                event_type: db::OAuthEventType::TokenIssued,
+                user_id: Some(&auth_code.user_id),
+                ip_address: None,
+                user_agent: None,
+                details: params
+                    .dpop_proof
+                    .as_ref()
+                    .map(|p| format!("dpop_jkt={}", p.jkt))
+                    .as_deref(),
+            },
         )
         .await;
     }

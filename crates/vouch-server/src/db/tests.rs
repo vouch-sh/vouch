@@ -1219,32 +1219,41 @@ async fn test_oauth_usage_recording() {
     // Record some events (now uses AuditStore)
     record_oauth_event(
         &audit,
-        &client.id,
-        OAuthEventType::TokenIssued,
-        Some(&user_id),
-        None,
-        None,
-        None,
+        &store,
+        &RecordOAuthEventParams {
+            oauth_client_id: &client.id,
+            event_type: OAuthEventType::TokenIssued,
+            user_id: Some(&user_id),
+            ip_address: None,
+            user_agent: None,
+            details: None,
+        },
     )
     .await;
     record_oauth_event(
         &audit,
-        &client.id,
-        OAuthEventType::TokenIssued,
-        Some(&user_id),
-        None,
-        None,
-        None,
+        &store,
+        &RecordOAuthEventParams {
+            oauth_client_id: &client.id,
+            event_type: OAuthEventType::TokenIssued,
+            user_id: Some(&user_id),
+            ip_address: None,
+            user_agent: None,
+            details: None,
+        },
     )
     .await;
     record_oauth_event(
         &audit,
-        &client.id,
-        OAuthEventType::TokenRevoked,
-        Some(&user_id),
-        None,
-        None,
-        None,
+        &store,
+        &RecordOAuthEventParams {
+            oauth_client_id: &client.id,
+            event_type: OAuthEventType::TokenRevoked,
+            user_id: Some(&user_id),
+            ip_address: None,
+            user_agent: None,
+            details: None,
+        },
     )
     .await;
 
@@ -1641,14 +1650,15 @@ async fn test_scim_audit_logging() {
         "user-123",
         Some("token-123"),
         Some("Created user via SCIM"),
+        Some("example.com"),
     )
     .await
     .expect("Failed to insert audit log");
 
     assert!(!audit_id.is_empty());
 
-    // Insert another audit log without token (None is valid)
-    let audit_id2 = insert_scim_audit(&audit, "DELETE", "User", "user-789", None, None)
+    // Insert another audit log without token or org domain (None is valid)
+    let audit_id2 = insert_scim_audit(&audit, "DELETE", "User", "user-789", None, None, None)
         .await
         .expect("Failed to insert audit log");
 
@@ -1915,9 +1925,18 @@ async fn test_scim_token_management() {
 
     // Create SCIM token with org
     let token_hash = "hashed_scim_token";
-    let token_id = create_scim_token(&store, org_id, token_hash, Some("Admin token"), None)
-        .await
-        .expect("Failed to create SCIM token");
+    let token_id = create_scim_token(
+        &store,
+        &CreateScimTokenParams {
+            org_id,
+            token_hash,
+            description: Some("Admin token"),
+            expires_at: None,
+            scope: ScimScopeSet::default(),
+        },
+    )
+    .await
+    .expect("Failed to create SCIM token");
 
     assert!(!token_id.is_empty());
 
@@ -2000,9 +2019,18 @@ async fn test_expired_scim_tokens_excluded_from_active_count() {
         ("expired-2", Some(past)),
         ("active-1", Some(future)),
     ] {
-        create_scim_token(&store, org_id, hash, None, expiry)
-            .await
-            .expect("Failed to create SCIM token");
+        create_scim_token(
+            &store,
+            &CreateScimTokenParams {
+                org_id,
+                token_hash: hash,
+                description: None,
+                expires_at: expiry,
+                scope: ScimScopeSet::default(),
+            },
+        )
+        .await
+        .expect("Failed to create SCIM token");
     }
 
     // list returns everything, expired rows included
@@ -2030,11 +2058,31 @@ async fn test_expired_scim_tokens_excluded_from_active_count() {
     // ...so it must not consume a slot either. Only `active-1` counts against
     // the cap of 2, leaving room for one more. A token with no expiration is
     // always active, so the one after that is refused.
-    create_scim_token(&store, org_id, "no-expiry", None, None)
-        .await
-        .expect("a second active token must be allowed alongside 2 expired ones");
+    create_scim_token(
+        &store,
+        &CreateScimTokenParams {
+            org_id,
+            token_hash: "no-expiry",
+            description: None,
+            expires_at: None,
+            scope: ScimScopeSet::default(),
+        },
+    )
+    .await
+    .expect("a second active token must be allowed alongside 2 expired ones");
 
-    match create_scim_token(&store, org_id, "third-active", None, Some(future)).await {
+    match create_scim_token(
+        &store,
+        &CreateScimTokenParams {
+            org_id,
+            token_hash: "third-active",
+            description: None,
+            expires_at: Some(future),
+            scope: ScimScopeSet::default(),
+        },
+    )
+    .await
+    {
         Err(crate::error::ServiceError::Api { ref code, .. }) if code == "token_limit_reached" => {}
         other => panic!("a third active token must hit the cap; got {other:?}"),
     }
@@ -2240,12 +2288,15 @@ async fn test_oauth_client_cascade_delete() {
 
     record_oauth_event(
         &audit,
-        &client.id,
-        OAuthEventType::TokenIssued,
-        None,
-        None,
-        None,
-        None,
+        &store,
+        &RecordOAuthEventParams {
+            oauth_client_id: &client.id,
+            event_type: OAuthEventType::TokenIssued,
+            user_id: None,
+            ip_address: None,
+            user_agent: None,
+            details: None,
+        },
     )
     .await;
 
@@ -6134,7 +6185,17 @@ async fn test_concurrent_scim_token_create_never_exceeds_two() {
             let store = store.clone();
             let org_id = org.id.clone();
             tokio::spawn(async move {
-                create_scim_token(&store, &org_id, &format!("scim_hash_{i}"), None, None).await
+                create_scim_token(
+                    &store,
+                    &CreateScimTokenParams {
+                        org_id: &org_id,
+                        token_hash: &format!("scim_hash_{i}"),
+                        description: None,
+                        expires_at: None,
+                        scope: ScimScopeSet::default(),
+                    },
+                )
+                .await
             })
         })
         .collect();

@@ -100,6 +100,7 @@ pub(crate) async fn list_users(
         "*",
         Some(&auth.token_id),
         Some(&format!("{{\"count\": {}}}", resources.len())),
+        auth.org_domain.as_deref(),
     )
     .await
     {
@@ -195,7 +196,8 @@ pub(crate) async fn create_user(
         "User",
         &db_user.id,
         Some(&auth.token_id),
-        Some(&serde_json::json!({"email": email}).to_string()),
+        None,
+        auth.org_domain.as_deref(),
     )
     .await
     {
@@ -472,6 +474,7 @@ pub(crate) async fn patch_user(
         &id,
         Some(&auth.token_id),
         Some(&serde_json::json!({"active": active, "deactivated": deactivated}).to_string()),
+        auth.org_domain.as_deref(),
     )
     .await
     {
@@ -585,7 +588,8 @@ pub(crate) async fn delete_user(
         "User",
         &id,
         Some(&auth.token_id),
-        Some(&serde_json::json!({"email": user.email}).to_string()),
+        None,
+        auth.org_domain.as_deref(),
     )
     .await
     {

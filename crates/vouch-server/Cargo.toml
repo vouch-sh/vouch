@@ -23,7 +23,7 @@ path = "src/main.rs"
 [dependencies]
 anyhow = { workspace = true, features = ["std"] }
 arc-swap = { workspace = true }
-askama = { workspace = true, features = ["derive", "config", "alloc"] }
+askama = { workspace = true, features = ["derive", "config", "alloc", "std", "urlencode"] }
 aws-config = { workspace = true, features = ["rt-tokio", "default-https-client", "behavior-version-latest", "sso"] }
 aws-lc-rs = { workspace = true }
 aws-sdk-dsql = { workspace = true, features = ["rt-tokio", "default-https-client", "behavior-version-latest"] }
@@ -70,7 +70,7 @@ sea-query = { workspace = true, features = ["backend-sqlite", "backend-postgres"
 sea-query-sqlx = { workspace = true, features = ["sqlx-sqlite", "sqlx-postgres", "runtime-tokio"] }
 secrecy = { workspace = true, features = ["serde"] }
 serde = { workspace = true, features = ["std", "derive"] }
-serde_json = { workspace = true, features = ["std"] }
+serde_json = { workspace = true, features = ["std", "raw_value"] }
 serde_urlencoded = { workspace = true }
 signature = { workspace = true }
 # Direct dep only to enable sha2/oid: x509-cert's CertificateBuilder requires
