@@ -601,12 +601,15 @@ pub(crate) async fn add_secret_api(
 
     db::record_oauth_event(
         &state.audit,
-        &app_id,
-        OAuthEventType::SecretAdded,
-        Some(&token.sub),
-        None,
-        None,
-        Some("Secret added"),
+        &state.store,
+        &db::RecordOAuthEventParams {
+            oauth_client_id: &app_id,
+            event_type: OAuthEventType::SecretAdded,
+            user_id: Some(&token.sub),
+            ip_address: None,
+            user_agent: None,
+            details: Some("Secret added"),
+        },
     )
     .await;
 
@@ -797,12 +800,15 @@ pub(crate) async fn delete_secret_api(
 
     db::record_oauth_event(
         &state.audit,
-        &app_id,
-        OAuthEventType::SecretRevoked,
-        Some(&token.sub),
-        None,
-        None,
-        Some("Secret revoked"),
+        &state.store,
+        &db::RecordOAuthEventParams {
+            oauth_client_id: &app_id,
+            event_type: OAuthEventType::SecretRevoked,
+            user_id: Some(&token.sub),
+            ip_address: None,
+            user_agent: None,
+            details: Some("Secret revoked"),
+        },
     )
     .await;
 
@@ -901,12 +907,15 @@ pub(crate) async fn revoke_tokens_api(
     // Log the event
     db::record_oauth_event(
         &state.audit,
-        &app_id,
-        OAuthEventType::TokenRevoked,
-        Some(&token.sub),
-        None,
-        None,
-        Some("All tokens revoked"),
+        &state.store,
+        &db::RecordOAuthEventParams {
+            oauth_client_id: &app_id,
+            event_type: OAuthEventType::TokenRevoked,
+            user_id: Some(&token.sub),
+            ip_address: None,
+            user_agent: None,
+            details: Some("All tokens revoked"),
+        },
     )
     .await;
 

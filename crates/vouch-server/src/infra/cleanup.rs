@@ -296,11 +296,21 @@ async fn gc_stale_additional_domains(
             "org_id": r.org_id,
             "reason": reason,
         });
+        // Stamp the org's primary domain into `email_domain` — this event
+        // has no user/email of its own, and without a domain it would be
+        // invisible to org-scoped audit reads.
+        let org_domain = match db::get_organization_domain(store, &r.org_id).await {
+            Ok(domain) => domain,
+            Err(e) => {
+                tracing::warn!(error = %e, org_id = %r.org_id, "failed to look up org domain for org_domain_expired audit stamping");
+                None
+            }
+        };
         if let Err(e) = audit
-            .insert_event(
+            .insert_event_with_domain(
                 db::AuditEventKind::OrgDomainExpired,
                 None,
-                None,
+                org_domain.as_deref(),
                 &data.to_string(),
             )
             .await
@@ -404,6 +414,17 @@ async fn recheck_one(store: &DocumentStore, audit: &AuditStore, rec: db::Verifie
                 org_id = %rec.org_id,
                 "Additional domain flipped to unverified after repeated DNS failures"
             );
+            // Stamp the org's primary domain into `email_domain` for both
+            // writes below — neither event has a user/email of its own,
+            // and without a domain they'd be invisible to org-scoped
+            // audit reads.
+            let org_domain = match db::get_organization_domain(store, &rec.org_id).await {
+                Ok(domain) => domain,
+                Err(e) => {
+                    tracing::warn!(error = %e, org_id = %rec.org_id, "failed to look up org domain for domain-unverify audit stamping");
+                    None
+                }
+            };
             let data = serde_json::json!({
                 "action": "auto_unverify_org_domain",
                 "domain": rec.domain,
@@ -411,10 +432,10 @@ async fn recheck_one(store: &DocumentStore, audit: &AuditStore, rec: db::Verifie
                 "reason": "consecutive_dns_recheck_failures",
             });
             if let Err(e) = audit
-                .insert_event(
+                .insert_event_with_domain(
                     db::AuditEventKind::OrgDomainUnverified,
                     None,
-                    None,
+                    org_domain.as_deref(),
                     &data.to_string(),
                 )
                 .await
@@ -429,10 +450,10 @@ async fn recheck_one(store: &DocumentStore, audit: &AuditStore, rec: db::Verifie
                     "reason": "backing_domain_unverified",
                 });
                 if let Err(e) = audit
-                    .insert_event(
+                    .insert_event_with_domain(
                         db::AuditEventKind::OrgSubdomainReleased,
                         None,
-                        None,
+                        org_domain.as_deref(),
                         &data.to_string(),
                     )
                     .await
@@ -459,10 +480,161 @@ async fn recheck_one(store: &DocumentStore, audit: &AuditStore, rec: db::Verifie
 #[cfg(test)]
 #[expect(
     clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::indexing_slicing,
     reason = "test code: panic on assertion failure is acceptable"
 )]
 mod tests {
     use super::*;
+
+    /// Regression test for the NULL-`email_domain` bug: `gc_stale_additional_domains`
+    /// writes `org_domain_expired` with no user/email of its own, so without
+    /// stamping the org's primary domain, the event would be invisible to
+    /// org-scoped audit reads (`/admin/audit`, the audit events API).
+    #[tokio::test]
+    async fn gc_stale_additional_domains_stamps_org_primary_domain() {
+        use crate::crypto::document_crypto::PlaintextDocumentCrypto;
+        use crate::db::documents::organization::{
+            AdditionalDomain, AdditionalDomainState, OrganizationDoc,
+        };
+        use std::sync::Arc;
+
+        let pool = crate::test_utils::test_db().await;
+        let crypto: Arc<dyn crate::crypto::document_crypto::DocumentCrypto> =
+            Arc::new(PlaintextDocumentCrypto);
+        let store = DocumentStore::new(pool.clone(), crypto.clone());
+        let audit = AuditStore::new(pool, crypto);
+
+        let org = db::create_organization(&store, "acme.com", None, None)
+            .await
+            .unwrap();
+
+        // A pending additional domain added 10 days ago (past the 7-day
+        // pending TTL) so the cleanup pass removes it.
+        let stale_added = Timestamp::now()
+            .checked_sub(Span::new().hours(10 * 24))
+            .unwrap();
+        let mut doc = store
+            .get::<OrganizationDoc>(&org.id)
+            .await
+            .unwrap()
+            .unwrap();
+        doc.data.additional_domains.push(AdditionalDomain {
+            domain: "squatted.example.com".to_string(),
+            verification_token: "tok".to_string(),
+            added_at: stale_added,
+            added_by_user_id: "u1".to_string(),
+            added_by_email: "u1@acme.com".to_string(),
+            consecutive_failures: 0,
+            state: AdditionalDomainState::Pending,
+        });
+        store.update(&org.id, &doc.data).await.unwrap();
+
+        gc_stale_additional_domains(&store, &audit, Timestamp::now())
+            .await
+            .expect("cleanup pass must succeed");
+
+        let events = audit
+            .query_events(&db::AuditEventFilter {
+                event_types: Some(vec!["org_domain_expired".to_string()]),
+                ..db::AuditEventFilter::default()
+            })
+            .await
+            .expect("query audit events");
+        assert_eq!(
+            events.len(),
+            1,
+            "one org_domain_expired event must be written"
+        );
+        assert_eq!(
+            events[0].email_domain.as_deref(),
+            Some("acme.com"),
+            "event must carry the org's primary domain, not NULL"
+        );
+    }
+
+    /// Regression test for the NULL-`email_domain` bug at `recheck_one`'s
+    /// two write sites (`org_domain_unverified`, `org_subdomain_released`)
+    /// — the sibling fix to `gc_stale_additional_domains_stamps_org_primary_domain`
+    /// above, for the other cleanup entry point that stamps an org domain.
+    ///
+    /// Drives `recheck_one` through real DNS resolution against a domain
+    /// with no `_vouch-verification` TXT record: `verify_txt_record`
+    /// converges to `RecheckOutcome::Failure` whether that lookup returns
+    /// "no records found" or errors outright (e.g. no network egress in a
+    /// sandboxed test run) — `recheck_one` maps both to `Failure` — so this
+    /// is deterministic regardless of network availability.
+    #[tokio::test]
+    async fn recheck_one_stamps_org_primary_domain_on_unverify_and_subdomain_release() {
+        use crate::crypto::document_crypto::PlaintextDocumentCrypto;
+        use std::sync::Arc;
+
+        let pool = crate::test_utils::test_db().await;
+        let crypto: Arc<dyn crate::crypto::document_crypto::DocumentCrypto> =
+            Arc::new(PlaintextDocumentCrypto);
+        let store = DocumentStore::new(pool.clone(), crypto.clone());
+        let audit = AuditStore::new(pool, crypto);
+
+        let org = db::create_organization(&store, "acme.com", None, None)
+            .await
+            .unwrap();
+        db::add_additional_domain(&store, &org.id, "widgets.io", "u1", "u1@acme.com")
+            .await
+            .unwrap();
+        db::mark_additional_domain_verified(&store, &org.id, "widgets.io")
+            .await
+            .unwrap();
+        db::claim_subdomain(&store, &org.id, "widgets-io")
+            .await
+            .unwrap();
+
+        let rec = db::VerifiedDomainRecord {
+            org_id: org.id.clone(),
+            domain: "widgets.io".to_string(),
+            verification_token: "tok".to_string(),
+            last_checked_at: None,
+            consecutive_failures: 0,
+        };
+        for _ in 0..db::UNVERIFY_FAILURE_THRESHOLD {
+            recheck_one(&store, &audit, rec.clone()).await;
+        }
+
+        let unverified_events = audit
+            .query_events(&db::AuditEventFilter {
+                event_types: Some(vec!["org_domain_unverified".to_string()]),
+                ..db::AuditEventFilter::default()
+            })
+            .await
+            .expect("query audit events");
+        assert_eq!(
+            unverified_events.len(),
+            1,
+            "one org_domain_unverified event must be written"
+        );
+        assert_eq!(
+            unverified_events[0].email_domain.as_deref(),
+            Some("acme.com"),
+            "org_domain_unverified event must carry the org's primary domain, not NULL"
+        );
+
+        let released_events = audit
+            .query_events(&db::AuditEventFilter {
+                event_types: Some(vec!["org_subdomain_released".to_string()]),
+                ..db::AuditEventFilter::default()
+            })
+            .await
+            .expect("query audit events");
+        assert_eq!(
+            released_events.len(),
+            1,
+            "one org_subdomain_released event must be written"
+        );
+        assert_eq!(
+            released_events[0].email_domain.as_deref(),
+            Some("acme.com"),
+            "org_subdomain_released event must carry the org's primary domain, not NULL"
+        );
+    }
 
     #[test]
     fn test_retention_cutoff_30_days() {

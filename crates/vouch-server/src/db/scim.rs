@@ -16,7 +16,12 @@ use jiff::Timestamp;
 // SCIM Scopes
 // ============================================================================
 
-/// Individual SCIM permission scope.
+/// Individual permission scope for an organization API token.
+///
+/// Named `ScimScope` for historical reasons (SCIM was the first consumer);
+/// the type now also carries non-SCIM scopes like [`Self::AuditRead`] as the
+/// token type has generalized into a general-purpose org API token. See
+/// `docs/src/admin/audit.md` for the org API token model.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScimScope {
     /// Read access to user resources.
@@ -27,6 +32,9 @@ pub enum ScimScope {
     GroupsRead,
     /// Write access to group resources.
     GroupsWrite,
+    /// Read access to the organization's audit event log
+    /// (`GET /api/v1/org/audit-events`).
+    AuditRead,
 }
 
 impl ScimScope {
@@ -38,6 +46,7 @@ impl ScimScope {
             Self::UsersWrite => "users:write",
             Self::GroupsRead => "groups:read",
             Self::GroupsWrite => "groups:write",
+            Self::AuditRead => "audit:read",
         }
     }
 
@@ -49,6 +58,7 @@ impl ScimScope {
             "users:write" => Some(Self::UsersWrite),
             "groups:read" => Some(Self::GroupsRead),
             "groups:write" => Some(Self::GroupsWrite),
+            "audit:read" => Some(Self::AuditRead),
             _ => None,
         }
     }
@@ -62,7 +72,9 @@ pub struct ScimScopeSet {
 }
 
 impl ScimScopeSet {
-    /// Create a scope set containing all four scopes (full access).
+    /// Create a scope set containing the four SCIM provisioning scopes
+    /// (full SCIM access). Does **not** include [`ScimScope::AuditRead`] —
+    /// that scope is opt-in per token, granted via [`Self::from_scopes`].
     #[must_use]
     pub fn all() -> Self {
         Self {
@@ -73,6 +85,12 @@ impl ScimScopeSet {
                 ScimScope::GroupsWrite,
             ],
         }
+    }
+
+    /// Construct a scope set from an explicit list of scopes.
+    #[must_use]
+    pub fn from_scopes(scopes: Vec<ScimScope>) -> Self {
+        Self { scopes }
     }
 
     /// Parse a comma-separated scope string from the database.
@@ -179,7 +197,19 @@ pub async fn update_scim_token_last_used(store: &DocumentStore, token_id: &str) 
 /// Maximum SCIM tokens an organization may hold at once (supports rotation).
 pub(crate) const MAX_SCIM_TOKENS: usize = 2;
 
-/// Create an organization's SCIM token, enforcing [`MAX_SCIM_TOKENS`] atomically.
+/// Parameters for creating an organization API token.
+pub struct CreateScimTokenParams<'a> {
+    pub org_id: &'a str,
+    pub token_hash: &'a str,
+    pub description: Option<&'a str>,
+    pub expires_at: Option<Timestamp>,
+    /// Scopes granted to the token. SCIM tokens minted before the
+    /// [`ScimScope::AuditRead`] scope existed keep whatever scope string
+    /// they were created with — this only governs new tokens.
+    pub scope: ScimScopeSet,
+}
+
+/// Create an organization's API token, enforcing [`MAX_SCIM_TOKENS`] atomically.
 ///
 /// The cap cannot be enforced by counting in the handler and then inserting:
 /// two concurrent requests both observe `active < MAX_SCIM_TOKENS` and both
@@ -195,15 +225,14 @@ pub(crate) const MAX_SCIM_TOKENS: usize = 2;
 /// - `ServiceError::Api(409 "conflict")` — OCC retry budget exhausted; caller may retry.
 pub async fn create_scim_token(
     store: &DocumentStore,
-    org_id: &str,
-    token_hash: &str,
-    description: Option<&str>,
-    expires_at: Option<Timestamp>,
+    params: &CreateScimTokenParams<'_>,
 ) -> Result<String, ServiceError> {
     // Owned copies so the async block, which re-runs on retry, can borrow them.
-    let org_id = org_id.to_string();
-    let token_hash = token_hash.to_string();
-    let description = description.map(String::from);
+    let org_id = params.org_id.to_string();
+    let token_hash = params.token_hash.to_string();
+    let description = params.description.map(String::from);
+    let expires_at = params.expires_at;
+    let scope = params.scope.as_db_string();
 
     crate::with_dsql_retry!(async {
         let mut tx = store.begin().await.map_err(|e| {
@@ -249,7 +278,7 @@ pub async fn create_scim_token(
             org_id: Some(org_id.clone()),
             description: description.clone(),
             expires_at,
-            scope: ScimScopeSet::default().as_db_string(),
+            scope: scope.clone(),
         };
         let inserted = tx
             .insert(&doc)
@@ -336,6 +365,12 @@ pub async fn delete_expired_scim_tokens(store: &DocumentStore) -> Result<u64> {
 // ============================================================================
 
 /// Insert SCIM audit log entry via AuditStore.
+///
+/// `org_domain` is the acting organization's primary email domain
+/// ([`ScimAuth::org_domain`]). SCIM operations have no user/email of their
+/// own, so without it the event is written with a NULL `email_domain` and
+/// is invisible to org-scoped audit reads (`/admin/audit`,
+/// `GET /api/v1/org/audit-events`).
 pub async fn insert_scim_audit(
     audit: &AuditStore,
     operation: &str,
@@ -343,6 +378,7 @@ pub async fn insert_scim_audit(
     resource_id: &str,
     actor_token_id: Option<&str>,
     details: Option<&str>,
+    org_domain: Option<&str>,
 ) -> Result<String> {
     let data = ScimAuditData {
         operation: operation.to_string(),
@@ -353,7 +389,7 @@ pub async fn insert_scim_audit(
     };
     let data_json = serde_json::to_string(&data)?;
     audit
-        .insert_event(AuditEventKind::ScimOperation, None, None, &data_json)
+        .insert_event_with_domain(AuditEventKind::ScimOperation, None, org_domain, &data_json)
         .await
 }
 

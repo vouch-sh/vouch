@@ -573,12 +573,15 @@ pub(crate) async fn add_secret_form(
 
     db::record_oauth_event(
         &state.audit,
-        &app_id,
-        db::OAuthEventType::SecretAdded,
-        auth.user_id.as_deref(),
-        None,
-        None,
-        Some("Secret added"),
+        &state.store,
+        &db::RecordOAuthEventParams {
+            oauth_client_id: &app_id,
+            event_type: db::OAuthEventType::SecretAdded,
+            user_id: auth.user_id.as_deref(),
+            ip_address: None,
+            user_agent: None,
+            details: Some("Secret added"),
+        },
     )
     .await;
 
@@ -679,12 +682,15 @@ pub(crate) async fn delete_secret_form(
 
     db::record_oauth_event(
         &state.audit,
-        &app_id,
-        db::OAuthEventType::SecretRevoked,
-        Some(user_id),
-        None,
-        None,
-        Some("Secret revoked"),
+        &state.store,
+        &db::RecordOAuthEventParams {
+            oauth_client_id: &app_id,
+            event_type: db::OAuthEventType::SecretRevoked,
+            user_id: Some(user_id),
+            ip_address: None,
+            user_agent: None,
+            details: Some("Secret revoked"),
+        },
     )
     .await;
 

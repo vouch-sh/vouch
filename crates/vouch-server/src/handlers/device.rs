@@ -401,12 +401,15 @@ pub(crate) async fn device_token(
                 };
             db::record_oauth_event(
                 &state.audit,
-                &audit_client_id,
-                db::OAuthEventType::TokenIssued,
-                Some(&user_id),
-                client_info.client_ip,
-                client_info.user_agent.as_deref(),
-                Some("grant_type=device_code"),
+                &state.store,
+                &db::RecordOAuthEventParams {
+                    oauth_client_id: &audit_client_id,
+                    event_type: db::OAuthEventType::TokenIssued,
+                    user_id: Some(&user_id),
+                    ip_address: client_info.client_ip,
+                    user_agent: client_info.user_agent.as_deref(),
+                    details: Some("grant_type=device_code"),
+                },
             )
             .await;
 

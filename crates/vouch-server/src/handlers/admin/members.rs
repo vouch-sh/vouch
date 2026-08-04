@@ -151,7 +151,6 @@ pub(crate) async fn promote_member(
 
     let data = serde_json::json!({
         "action": "promote",
-        "target_email": target.email,
         "target_user_id": &*target_id,
         "admin_user_id": admin.id,
     });
@@ -211,7 +210,6 @@ pub(crate) async fn demote_member(
 
     let data = serde_json::json!({
         "action": "demote",
-        "target_email": target.email,
         "target_user_id": &*target_id,
         "admin_user_id": admin.id,
     });
@@ -291,7 +289,6 @@ pub(crate) async fn deactivate_member(
 
     let data = serde_json::json!({
         "action": "deactivate",
-        "target_email": target.email,
         "target_user_id": &*target_id,
         "admin_user_id": admin.id,
     });
@@ -338,7 +335,6 @@ pub(crate) async fn activate_member(
 
     let data = serde_json::json!({
         "action": "activate",
-        "target_email": target.email,
         "target_user_id": &*target_id,
         "admin_user_id": admin.id,
     });
@@ -420,7 +416,6 @@ pub(crate) async fn revoke_member_credentials(
 
     let data = serde_json::json!({
         "action": "revoke_credentials",
-        "target_email": target.email,
         "target_user_id": &*target_id,
         "admin_user_id": admin.id,
         "keys_revoked": key_count,
@@ -503,7 +498,6 @@ pub(crate) async fn remove_member(
 
     let data = serde_json::json!({
         "action": "remove_user",
-        "target_email": target_email,
         "target_user_id": &*target_id,
         "admin_user_id": admin.id,
     });
@@ -939,6 +933,82 @@ mod tests {
             .await
             .unwrap();
         assert!(deleted.is_none(), "User should be deleted");
+    }
+
+    // ---- No raw email in audit `data` payloads (member-management events) ----
+
+    #[tokio::test]
+    async fn member_management_audit_events_never_carry_a_raw_target_email() {
+        // Regression test: `data.target_email` used to store the target's
+        // address raw, which the audit events API then re-exposed verbatim
+        // to `audit:read` token holders (a third party) even though emails
+        // are documented as masked to domain-only. `target_user_id` (kept)
+        // is how the admin UI resolves a display email now — at view time,
+        // not baked into the stored event.
+        let (app, state) = test_app().await;
+        let org = create_test_org(&state.store, "example.com").await;
+        let admin = create_test_user_in_org(&state.store, "admin@example.com", &org.id, true).await;
+        let auth_id = create_test_authenticator(&state.store, &admin.id).await;
+        let token = create_test_session(&state, &admin.id, &admin.email, &auth_id).await;
+        let cookie = admin_cookie(&token);
+        let target_email = "target@example.com";
+        let target = create_test_user_in_org(&state.store, target_email, &org.id, false).await;
+
+        let actions = [
+            "promote",
+            "demote",
+            "deactivate",
+            "activate",
+            "revoke-credentials",
+            // "remove" last: it deletes the user.
+            "remove",
+        ];
+        for action in actions {
+            let (status, body) = http_post_form(
+                &app,
+                &format!("/admin/members/{}/{action}", target.id),
+                "",
+                &[("Cookie", &cookie), ("Origin", "https://test.example.com")],
+            )
+            .await;
+            assert_eq!(
+                status,
+                StatusCode::SEE_OTHER,
+                "{action} should succeed: {body}"
+            );
+        }
+
+        let events = state
+            .audit
+            .query_events(&crate::db::AuditEventFilter {
+                user_id: Some(admin.id.clone()),
+                ..crate::db::AuditEventFilter::default()
+            })
+            .await
+            .expect("query audit events");
+        let member_events: Vec<_> = events
+            .iter()
+            .filter(|e| e.event_type.starts_with("admin_"))
+            .collect();
+        assert_eq!(
+            member_events.len(),
+            actions.len(),
+            "one audit event per action must be written"
+        );
+        for event in member_events {
+            assert!(
+                !event.data.contains(target_email),
+                "{}'s data payload must not contain the raw target email; got {}",
+                event.event_type,
+                event.data
+            );
+            assert!(
+                event.data.contains(&target.id),
+                "{}'s data payload must still carry target_user_id; got {}",
+                event.event_type,
+                event.data
+            );
+        }
     }
 
     // ---- Security: SSH certificate revocation on admin actions ----

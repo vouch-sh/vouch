@@ -95,6 +95,10 @@ pub(crate) struct ScimAuth {
     pub org_id: String,
     /// Parsed scope set.
     pub scope: ScimScopeSet,
+    /// The organization's primary email domain, if it still exists.
+    /// Stamped into `email_domain` on SCIM audit writes so org-scoped
+    /// audit reads (which filter by domain) can see them.
+    pub org_domain: Option<String>,
 }
 
 impl ScimAuth {
@@ -192,10 +196,23 @@ pub(crate) async fn authenticate_scim(
         )
     })?;
 
+    let org_domain = match db::get_organization_domain(&state.store, &org_id).await {
+        Ok(domain) => domain,
+        Err(e) => {
+            // A transient DB error here must not fail authentication (the
+            // token itself is valid) — but swallowing it silently would
+            // reintroduce the NULL-`email_domain` bug this lookup exists
+            // to fix, so it's worth a warning even though it's non-fatal.
+            tracing::warn!(error = %e, org_id = %org_id, "failed to look up org domain for SCIM audit stamping");
+            None
+        }
+    };
+
     Ok(ScimAuth {
         token_id: token_record.id,
         org_id,
         scope,
+        org_domain,
     })
 }
 

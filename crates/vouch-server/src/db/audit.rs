@@ -75,6 +75,16 @@ macro_rules! audit_event_kinds {
                 match self { $(Self::$variant => $name,)+ }
             }
 
+            /// Parse a wire string (the stored `event_type` column value)
+            /// back into a kind. Returns `None` for strings that don't
+            /// match any registered kind — callers must not 500 on this,
+            /// since it can be reached from caller-supplied filters
+            /// (`event_type` query parameter) as well as from stored rows.
+            #[must_use]
+            pub fn from_wire(s: &str) -> Option<Self> {
+                match s { $($name => Some(Self::$variant),)+ _ => None }
+            }
+
             /// Which retention class governs this event.
             #[must_use]
             pub fn retention(self) -> Retention {
@@ -179,7 +189,7 @@ pub struct AuditEvent {
 }
 
 /// Filter criteria for querying audit events.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct AuditEventFilter {
     /// Filter by event types (matches any in the list).
     pub event_types: Option<Vec<String>>,
@@ -187,13 +197,24 @@ pub struct AuditEventFilter {
     pub user_id: Option<String>,
     /// Filter by email (computes HMAC for lookup).
     pub email: Option<String>,
-    /// Filter by email domain (plaintext match on domain portion).
-    pub email_domain: Option<String>,
-    /// Filter events created after this timestamp.
+    /// Filter by email domain(s) — matches any domain in the list via `IN`.
+    /// Used for org scoping: callers pass the org's primary domain plus any
+    /// verified additional domains (see `Organization::matching_email_domains`),
+    /// not a single caller-chosen domain.
+    pub email_domains: Option<Vec<String>>,
+    /// Filter events created strictly after this timestamp (RFC 3339,
+    /// matching [`jiff::Timestamp::to_string`] output).
     pub since: Option<String>,
+    /// Filter events created strictly before this timestamp (RFC 3339,
+    /// matching [`jiff::Timestamp::to_string`] output).
+    pub until: Option<String>,
     /// Cursor for pagination: only return events with ID less than this
     /// (events are ordered newest-first, so "before" means older events).
     pub before_id: Option<String>,
+    /// Cursor for forward pagination: only return events with ID greater
+    /// than this, ordered oldest-first. Used by pollers walking the log
+    /// forward; set this and `before_id` is ignored.
+    pub after_id: Option<String>,
     /// Maximum number of events to return.
     pub limit: Option<u64>,
 }
@@ -234,18 +255,89 @@ impl AuditStore {
         email: Option<&str>,
         data_json: &str,
     ) -> Result<String> {
-        let event_type = kind.as_str();
-        let id = uuid::Uuid::now_v7().to_string();
-        let now = jiff::Timestamp::now().to_string();
-
         let email_domain = email.and_then(extract_domain);
         // Normalize the local part to lowercase so the same user's events
         // correlate across casings returned by the IdP over time. The domain
         // is normalized by `extract_domain`.
         let email_hmac = email.map(|e| self.crypto.hmac_index(&e.to_lowercase()));
 
-        let domain_ref: Option<&str> = email_domain.as_deref();
-        let hmac_ref: Option<&str> = email_hmac.as_deref();
+        self.insert_event_raw(
+            kind,
+            user_id,
+            email_domain.as_deref(),
+            email_hmac.as_deref(),
+            jiff::Timestamp::now(),
+            data_json,
+        )
+        .await
+    }
+
+    /// Insert a new audit event with an explicit `email_domain`, bypassing
+    /// the email→domain derivation in [`Self::insert_event`].
+    ///
+    /// Used by write sites that act on behalf of an organization rather
+    /// than a specific user — SCIM operations, org-lifecycle cleanup
+    /// events — and so have no email to derive a domain from. Without
+    /// this, those events are written with a NULL `email_domain` and are
+    /// invisible to org-scoped audit reads.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database write fails.
+    pub async fn insert_event_with_domain(
+        &self,
+        kind: AuditEventKind,
+        user_id: Option<&str>,
+        email_domain: Option<&str>,
+        data_json: &str,
+    ) -> Result<String> {
+        self.insert_event_raw(
+            kind,
+            user_id,
+            email_domain,
+            None,
+            jiff::Timestamp::now(),
+            data_json,
+        )
+        .await
+    }
+
+    /// Insert an audit event with an explicit `created_at`.
+    ///
+    /// Test-only: backdates events past the audit events API's 30-second
+    /// lag window ([`crate::handlers::admin::audit_api`]) without a test
+    /// needing to actually wait.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database write fails.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub async fn insert_event_for_test(
+        &self,
+        kind: AuditEventKind,
+        email_domain: Option<&str>,
+        created_at: jiff::Timestamp,
+        data_json: &str,
+    ) -> Result<String> {
+        self.insert_event_raw(kind, None, email_domain, None, created_at, data_json)
+            .await
+    }
+
+    /// Shared insert path for [`Self::insert_event`],
+    /// [`Self::insert_event_with_domain`], and (test-only)
+    /// [`Self::insert_event_for_test`].
+    async fn insert_event_raw(
+        &self,
+        kind: AuditEventKind,
+        user_id: Option<&str>,
+        email_domain: Option<&str>,
+        email_hmac: Option<&str>,
+        created_at: jiff::Timestamp,
+        data_json: &str,
+    ) -> Result<String> {
+        let event_type = kind.as_str();
+        let id = uuid::Uuid::now_v7().to_string();
+        let created_at = created_at.to_string();
 
         let stmt = Query::insert()
             .into_table(AuditEvents::Table)
@@ -262,10 +354,10 @@ impl AuditStore {
                 id.as_str().into(),
                 event_type.into(),
                 user_id.into(),
-                domain_ref.into(),
-                hmac_ref.into(),
+                email_domain.into(),
+                email_hmac.into(),
                 data_json.into(),
-                now.as_str().into(),
+                created_at.as_str().into(),
             ])?
             .to_owned();
 
@@ -350,17 +442,30 @@ impl AuditStore {
                 let hmac = self.crypto.hmac_index(&email.to_lowercase());
                 q.and_where(Expr::col(AuditEvents::EmailHmac).eq(hmac));
             }
-            if let Some(ref domain) = filter.email_domain {
-                q.and_where(Expr::col(AuditEvents::EmailDomain).eq(domain.as_str()));
+            if let Some(ref domains) = filter.email_domains {
+                q.and_where(
+                    Expr::col(AuditEvents::EmailDomain).is_in(domains.iter().map(String::as_str)),
+                );
             }
             if let Some(ref since) = filter.since {
-                q.and_where(Expr::col(AuditEvents::CreatedAt).gt(since.as_str()));
+                q.and_where(Expr::col(AuditEvents::CreatedAt).gt(normalize_timestamp_bound(since)));
             }
-            if let Some(ref before) = filter.before_id {
-                q.and_where(Expr::col(AuditEvents::Id).lt(before.as_str()));
+            if let Some(ref until) = filter.until {
+                q.and_where(Expr::col(AuditEvents::CreatedAt).lt(normalize_timestamp_bound(until)));
             }
 
-            q.order_by(AuditEvents::Id, Order::Desc);
+            // `after_id` (forward/ascending polling) takes precedence over
+            // `before_id` (backward/descending browsing) when both are set —
+            // callers are expected to use one or the other.
+            if let Some(ref after) = filter.after_id {
+                q.and_where(Expr::col(AuditEvents::Id).gt(after.as_str()));
+                q.order_by(AuditEvents::Id, Order::Asc);
+            } else {
+                if let Some(ref before) = filter.before_id {
+                    q.and_where(Expr::col(AuditEvents::Id).lt(before.as_str()));
+                }
+                q.order_by(AuditEvents::Id, Order::Desc);
+            }
 
             if let Some(limit) = filter.limit {
                 q.limit(limit);
@@ -391,13 +496,8 @@ impl AuditStore {
         page_size: u64,
     ) -> Result<(Vec<AuditEvent>, bool)> {
         let f = AuditEventFilter {
-            event_types: filter.event_types.clone(),
-            user_id: filter.user_id.clone(),
-            email: filter.email.clone(),
-            email_domain: filter.email_domain.clone(),
-            since: filter.since.clone(),
-            before_id: filter.before_id.clone(),
             limit: Some(page_size.saturating_add(1)),
+            ..filter.clone()
         };
         let mut events = self.query_events(&f).await?;
         let has_more = events.len() as u64 > page_size;
@@ -418,7 +518,7 @@ impl AuditStore {
         let stmt = Query::delete()
             .from_table(AuditEvents::Table)
             .and_where(Expr::col(AuditEvents::EventType).eq(kind.as_str()))
-            .and_where(Expr::col(AuditEvents::CreatedAt).lt(before))
+            .and_where(Expr::col(AuditEvents::CreatedAt).lt(normalize_timestamp_bound(before)))
             .to_owned();
 
         let result = crate::db_execute!(&self.pool, stmt)?;
@@ -476,6 +576,44 @@ fn extract_domain(email: &str) -> Option<String> {
     email
         .rsplit_once('@')
         .map(|(_, domain)| domain.to_ascii_lowercase())
+}
+
+/// Normalize a `since`/`until`/cleanup-cutoff timestamp bound for
+/// lexicographic comparison against the `created_at` column, by truncating
+/// it to whole-second precision (dropping any fractional-second component
+/// and the trailing `Z`).
+///
+/// `created_at` is stored as [`jiff::Timestamp::to_string`] output, which
+/// trims trailing zero fractional-second digits to a *variable* width — one
+/// row might store `...T00:00:00.5Z` (500ms) and another `...T00:00:00Z`
+/// (exactly on the second) or `...T00:00:00.537239482Z` (full nanosecond
+/// precision). Comparing two such strings lexicographically is only
+/// guaranteed correct when one is a zero-padding-equivalent prefix of the
+/// other; it silently breaks whenever the digits actually differ at a
+/// shared position. Concrete counterexample: bound `...16.537239482` (no Z)
+/// vs row `...16.5Z` — chronologically 0.5 < 0.537239482, so the row is
+/// *earlier*, but lexicographically `'Z'` (0x5A) > `'3'` (0x33) at the
+/// second differing character, so the row compares as *greater*. Because
+/// the id-based forward cursor never retries a skipped id, a row wrongly
+/// excluded from an `until`/lag-window comparison this way is lost
+/// permanently, not just delayed.
+///
+/// Truncating the *bound* to whole seconds sidesteps the ambiguity
+/// entirely: a bound with no fractional part at all is always a strict
+/// string prefix of every `created_at` value in that same second
+/// (fractional or not), which sorts correctly on both sides of the
+/// comparison. The cost is that rows within the bound's own second are
+/// compared at second granularity — for `until`, this makes the effective
+/// cutoff up to ~1s more conservative (never less), which only strengthens
+/// the "never return events newer than the lag window" guarantee and
+/// self-corrects on the next poll as `now` advances; for `since`, it makes
+/// the filter up to ~1s more inclusive at the boundary, never lossy.
+fn normalize_timestamp_bound(bound: &str) -> &str {
+    let bound = bound.strip_suffix('Z').unwrap_or(bound);
+    match bound.split_once('.') {
+        Some((whole_seconds, _fraction)) => whole_seconds,
+        None => bound,
+    }
 }
 
 /// Convert a raw row to an `AuditEvent`.
@@ -722,7 +860,7 @@ mod tests {
 
         let events = audit
             .query_events(&AuditEventFilter {
-                email_domain: Some("corp.example.com".to_string()),
+                email_domains: Some(vec!["corp.example.com".to_string()]),
                 ..AuditEventFilter::default()
             })
             .await
@@ -844,5 +982,287 @@ mod tests {
             "case normalization must not conflate emails with different domains"
         );
         assert_eq!(events[0].user_id.as_deref(), Some("user-1"));
+    }
+
+    #[tokio::test]
+    async fn insert_event_with_domain_stamps_domain_without_email() {
+        let audit = test_audit().await;
+
+        let id = audit
+            .insert_event_with_domain(
+                AuditEventKind::ScimOperation,
+                None,
+                Some("example.com"),
+                "{}",
+            )
+            .await
+            .unwrap();
+        assert!(!id.is_empty());
+
+        let events = audit
+            .query_events(&AuditEventFilter::default())
+            .await
+            .unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].email_domain.as_deref(), Some("example.com"));
+        assert_eq!(
+            events[0].email_hmac, None,
+            "no email was supplied, so no HMAC should be computed"
+        );
+    }
+
+    #[tokio::test]
+    async fn email_domains_filter_matches_any_domain_in_list() {
+        let audit = test_audit().await;
+
+        audit
+            .insert_event(AuditEventKind::LoginSuccess, None, Some("a@one.com"), "{}")
+            .await
+            .unwrap();
+        audit
+            .insert_event(AuditEventKind::LoginSuccess, None, Some("b@two.com"), "{}")
+            .await
+            .unwrap();
+        audit
+            .insert_event(
+                AuditEventKind::LoginSuccess,
+                None,
+                Some("c@three.com"),
+                "{}",
+            )
+            .await
+            .unwrap();
+
+        let events = audit
+            .query_events(&AuditEventFilter {
+                email_domains: Some(vec!["one.com".to_string(), "two.com".to_string()]),
+                ..AuditEventFilter::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            events.len(),
+            2,
+            "is_in should match either listed domain and exclude the third"
+        );
+    }
+
+    #[tokio::test]
+    async fn after_id_cursor_walks_forward_without_gap_or_duplicate() {
+        let audit = test_audit().await;
+
+        let mut ids = Vec::new();
+        for _ in 0..5 {
+            let id = audit
+                .insert_event(AuditEventKind::LoginSuccess, None, None, "{}")
+                .await
+                .unwrap();
+            ids.push(id);
+        }
+
+        // Page through with a page size smaller than the total count and
+        // confirm the union of pages is exactly the inserted set, in
+        // ascending (oldest-first) order, with no gap or duplicate. Seed
+        // the cursor with an empty string (sorts before every real UUID)
+        // rather than `None`: `after_id: None` falls back to the store's
+        // default descending order (what the `/admin/audit` UI wants),
+        // not forward polling — an `Some(_)` cursor is what selects
+        // ascending order, even on the very first page.
+        let mut seen = Vec::new();
+        let mut cursor: Option<String> = Some(String::new());
+        loop {
+            let (page, has_more) = audit
+                .query_events_paginated(
+                    &AuditEventFilter {
+                        after_id: cursor.clone(),
+                        ..AuditEventFilter::default()
+                    },
+                    2,
+                )
+                .await
+                .unwrap();
+            if page.is_empty() {
+                break;
+            }
+            for e in &page {
+                seen.push(e.id.clone());
+            }
+            cursor = Some(seen.last().unwrap().clone());
+            if !has_more {
+                break;
+            }
+        }
+
+        assert_eq!(
+            seen, ids,
+            "forward pagination must reproduce insert order with no gap or dupe"
+        );
+    }
+
+    #[tokio::test]
+    async fn until_filter_excludes_events_after_bound() {
+        let audit = test_audit().await;
+
+        audit
+            .insert_event(AuditEventKind::LoginSuccess, None, None, "{}")
+            .await
+            .unwrap();
+
+        // A bound far in the past excludes everything.
+        let events = audit
+            .query_events(&AuditEventFilter {
+                until: Some("2000-01-01T00:00:00Z".to_string()),
+                ..AuditEventFilter::default()
+            })
+            .await
+            .unwrap();
+        assert!(
+            events.is_empty(),
+            "until in the past must exclude all events"
+        );
+
+        // A bound far in the future includes it.
+        let events = audit
+            .query_events(&AuditEventFilter {
+                until: Some("2999-01-01T00:00:00Z".to_string()),
+                ..AuditEventFilter::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            events.len(),
+            1,
+            "until in the future must include the event"
+        );
+    }
+
+    #[tokio::test]
+    async fn since_at_whole_second_bound_includes_fractional_second_row() {
+        // Regression test for the lexicographic timestamp-bound bug: jiff
+        // trims trailing zero fractional digits, so a whole-second stored
+        // row ("...00Z") and a fractional one ("...00.123Z") in the same
+        // second must both compare correctly against a whole-second bound.
+        let audit = test_audit().await;
+
+        // Insert directly via SQL so the stored `created_at` is exactly
+        // controlled, rather than depending on `Timestamp::now()` landing
+        // on a particular fraction.
+        let Pool::Sqlite(ref pool) = audit.pool else {
+            unreachable!("tests always run on sqlite")
+        };
+        sqlx::query(
+            "INSERT INTO audit_events (id, event_type, user_id, email_domain, email_hmac, data, created_at) \
+             VALUES (?, 'login_success', NULL, NULL, NULL, '{}', ?)",
+        )
+        .bind("00000000000000000000000001")
+        .bind("2026-01-01T00:00:00.123Z")
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO audit_events (id, event_type, user_id, email_domain, email_hmac, data, created_at) \
+             VALUES (?, 'login_success', NULL, NULL, NULL, '{}', ?)",
+        )
+        .bind("00000000000000000000000002")
+        .bind("2026-01-01T00:00:00Z")
+        .execute(pool)
+        .await
+        .unwrap();
+
+        // since = exactly the whole-second bound. Before the fix, the
+        // fractional row sorted lexicographically *below* the bound and was
+        // wrongly dropped. The exact-equal (zero-fraction) row is also
+        // included by the prefix comparison the fix uses — over-inclusive
+        // by one exact-boundary instant is the accepted trade-off for a
+        // security audit log, versus silently dropping sub-second events.
+        let events = audit
+            .query_events(&AuditEventFilter {
+                since: Some("2026-01-01T00:00:00Z".to_string()),
+                ..AuditEventFilter::default()
+            })
+            .await
+            .unwrap();
+        let ids: Vec<&str> = events.iter().map(|e| e.id.as_str()).collect();
+        assert!(
+            ids.contains(&"00000000000000000000000001"),
+            "the fractional-second row must not be dropped by a whole-second bound; got {ids:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn until_defers_same_second_rows_but_never_loses_them() {
+        // Regression test for the timestamp-bound fix, using a
+        // counterexample found in review: a bound that itself has a fractional part (as
+        // every lag-window cutoff computed from `Timestamp::now()` does)
+        // compared against a row with a *shorter* trimmed fraction in the
+        // same second. Before truncating the bound to whole seconds,
+        // comparing "...16.537239482" (bound, no Z) against "...16.5Z"
+        // (row) lexicographically found 'Z' (0x5A) > '3' (0x33) at the
+        // second differing character, wrongly excluding the row even
+        // though 0.5 < 0.537239482 chronologically — and because the
+        // id-based forward cursor never retries a skipped id, that
+        // exclusion was permanent, not just delayed.
+        //
+        // Truncating the bound to whole seconds fixes the *permanence*:
+        // rows in the bound's own second are conservatively deferred
+        // (excluded until `until` advances past that second), never lost.
+        // This asserts both halves — deferred now, visible once `until`
+        // moves to the next second — since asserting only "eventually
+        // visible" wouldn't catch a regression back to the old bug (which
+        // also let it through, just via a coin-flip on the digits).
+        let audit = test_audit().await;
+
+        let Pool::Sqlite(ref pool) = audit.pool else {
+            unreachable!("tests always run on sqlite")
+        };
+        sqlx::query(
+            "INSERT INTO audit_events (id, event_type, user_id, email_domain, email_hmac, data, created_at) \
+             VALUES (?, 'login_success', NULL, NULL, NULL, '{}', ?)",
+        )
+        .bind("00000000000000000000000003")
+        .bind("2026-01-01T00:00:16.5Z")
+        .execute(pool)
+        .await
+        .unwrap();
+
+        let events = audit
+            .query_events(&AuditEventFilter {
+                until: Some("2026-01-01T00:00:16.537239482Z".to_string()),
+                ..AuditEventFilter::default()
+            })
+            .await
+            .unwrap();
+        assert!(
+            events.is_empty(),
+            "a row must be deferred (not immediately visible) under an until bound in its own \
+             second; got {events:?}"
+        );
+
+        let events = audit
+            .query_events(&AuditEventFilter {
+                until: Some("2026-01-01T00:00:17.000000000Z".to_string()),
+                ..AuditEventFilter::default()
+            })
+            .await
+            .unwrap();
+        let ids: Vec<&str> = events.iter().map(|e| e.id.as_str()).collect();
+        assert!(
+            ids.contains(&"00000000000000000000000003"),
+            "the row must become visible once until advances past its whole second — \
+             deferred, not permanently lost; got {ids:?}"
+        );
+    }
+
+    #[test]
+    fn from_wire_round_trips_every_kind() {
+        for kind in AuditEventKind::ALL {
+            assert_eq!(AuditEventKind::from_wire(kind.as_str()), Some(*kind));
+        }
+    }
+
+    #[test]
+    fn from_wire_rejects_unknown_string() {
+        assert_eq!(AuditEventKind::from_wire("not_a_real_event_type"), None);
+        assert_eq!(AuditEventKind::from_wire(""), None);
     }
 }
