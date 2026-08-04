@@ -135,8 +135,9 @@ pub(crate) async fn create_user(
         return (status, json).into_response();
     }
 
-    // Extract email from userName or emails (RFC 7643: userName is not
-    // required to be an email, so we accept whatever the IdP sends)
+    // Extract email from userName or emails. RFC 7643 doesn't require
+    // userName to be an email, but Vouch keys users by email — a userName
+    // with no '@' and no emails[] fallback is rejected below.
     let email = if user.user_name.contains('@') {
         user.user_name.clone()
     } else if let Some(emails) = &user.emails {
@@ -148,6 +149,59 @@ pub(crate) async fn create_user(
     } else {
         user.user_name.clone()
     };
+
+    let Some((_, candidate_domain)) = email.rsplit_once('@') else {
+        tracing::warn!(
+            org_id = %auth.org_id,
+            "rejected SCIM user creation: userName is not an email address"
+        );
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(
+                ScimError::new(400, "userName must be an email address").with_type("invalidValue"),
+            ),
+        )
+            .into_response();
+    };
+
+    // Reject provisioning for a domain the calling org hasn't proven it
+    // owns (its primary domain, or an additional domain that has passed
+    // DNS TXT verification) — otherwise Org A's SCIM token could create
+    // `bob@orgB-domain.com` and claim that address for itself. Comparison
+    // is case-insensitive set membership only — no trimming or other
+    // repair, so a domain needing whitespace stripped (`bob@ acme.com`) is
+    // rejected rather than silently repaired, and no shape validation
+    // (ASCII, reserved-TLD, ...) runs against the candidate: an org whose
+    // own primary or additional domain is itself unusual (a reserved-TLD
+    // or IDN address, e.g. from on-prem/AD-derived enrollment) can still
+    // provision against its own domain.
+    let domain_owned =
+        match db::org_owns_verified_domain(&state.store, &auth.org_id, candidate_domain).await {
+            Ok(owned) => owned,
+            Err(e) => {
+                tracing::error!("Failed to check org domain ownership: {e}");
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ScimError::new(500, "Failed to validate email domain")),
+                )
+                    .into_response();
+            }
+        };
+    if !domain_owned {
+        tracing::warn!(
+            org_id = %auth.org_id,
+            email = %redact_email(&email),
+            "rejected SCIM user creation: email domain is not verified for this organization"
+        );
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(
+                ScimError::new(400, "Email domain is not verified for this organization")
+                    .with_type("invalidValue"),
+            ),
+        )
+            .into_response();
+    }
 
     // Extract name
     let name = user.name.as_ref().and_then(|n| {

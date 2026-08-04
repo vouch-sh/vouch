@@ -221,7 +221,7 @@ async fn scim_list_filter_user_name_eq_is_case_insensitive() {
             "/scim/v2/Users",
             &json!({
                 "schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"],
-                "userName": "filter@example.com",
+                "userName": "filter@e2e-filter.example.com",
                 "active": true,
             }),
             &scim_token,
@@ -236,7 +236,7 @@ async fn scim_list_filter_user_name_eq_is_case_insensitive() {
         .to_string();
 
     // Mixed-case `userName eq` filter must find the user.
-    let path = "/scim/v2/Users?filter=userName%20eq%20%22Filter@Example.com%22";
+    let path = "/scim/v2/Users?filter=userName%20eq%20%22Filter@E2E-Filter.example.com%22";
     let list_resp = harness
         .get_authenticated(path, &scim_token)
         .await
@@ -255,7 +255,7 @@ async fn scim_list_filter_user_name_eq_is_case_insensitive() {
     assert_eq!(resources[0]["id"].as_str(), Some(scim_user_id.as_str()));
     assert_eq!(
         resources[0]["userName"].as_str(),
-        Some("filter@example.com"),
+        Some("filter@e2e-filter.example.com"),
         "returned email must be the stored lowercase form"
     );
 

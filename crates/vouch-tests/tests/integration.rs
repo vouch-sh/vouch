@@ -1386,7 +1386,7 @@ mod scim {
 
         let user = ScimUserCreate {
             schemas: vec!["urn:ietf:params:scim:schemas:core:2.0:User".to_string()],
-            user_name: "scim-new@example.com".to_string(),
+            user_name: "scim-new@scim-create.example.com".to_string(),
             active: true,
         };
 
@@ -1398,7 +1398,7 @@ mod scim {
         assert_eq!(response.status, 201);
         let resp: serde_json::Value = response.json().expect("Failed to parse response");
         assert!(resp.get("id").is_some(), "Should have id");
-        assert_eq!(resp["userName"], "scim-new@example.com");
+        assert_eq!(resp["userName"], "scim-new@scim-create.example.com");
     }
 
     /// Test SCIM get user by ID.
@@ -1428,7 +1428,7 @@ mod scim {
                 "/scim/v2/Users",
                 &ScimUserCreate {
                     schemas: vec!["urn:ietf:params:scim:schemas:core:2.0:User".to_string()],
-                    user_name: "scim-get@example.com".to_string(),
+                    user_name: "scim-get@scim-get.example.com".to_string(),
                 },
                 &scim_token,
             )
@@ -1499,7 +1499,7 @@ mod scim {
                 "/scim/v2/Users",
                 &ScimUserCreate {
                     schemas: vec!["urn:ietf:params:scim:schemas:core:2.0:User".to_string()],
-                    user_name: "scim-delete@example.com".to_string(),
+                    user_name: "scim-delete@scim-delete.example.com".to_string(),
                 },
                 &scim_token,
             )
