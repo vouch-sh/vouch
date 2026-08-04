@@ -492,6 +492,44 @@ impl DocumentStore {
         }
     }
 
+    /// Get multiple documents by ID in a single query.
+    ///
+    /// IDs with no matching document are simply absent from the result —
+    /// callers should not assume the returned `Vec` has the same length as
+    /// `ids`. An empty `ids` slice returns `Ok(vec![])` without issuing a
+    /// query.
+    ///
+    /// Like `find_all`, a single row that fails to decrypt or deserialize
+    /// fails the whole call rather than being skipped. Callers pass a
+    /// bounded set of IDs — there is no enforced limit here, but SQLite
+    /// caps bind parameters at 32766 and Postgres at 65535 per statement.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if decryption or deserialization fails.
+    pub async fn get_by_ids<T: DocumentType>(&self, ids: &[String]) -> Result<Vec<Document<T>>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let id_values: Vec<sea_query::Value> = ids.iter().map(|id| id.as_str().into()).collect();
+
+        let stmt = Query::select()
+            .columns(DOC_COLUMNS)
+            .from(Documents::Table)
+            .and_where(Expr::col(Documents::Id).is_in(id_values))
+            .and_where(Expr::col(Documents::DocType).eq(T::DOC_TYPE))
+            .to_owned();
+
+        let rows: Vec<RawDocumentRow> = crate::db_fetch_all!(&self.pool, stmt, RawDocumentRow)?;
+
+        let mut results = Vec::with_capacity(rows.len());
+        for row in rows {
+            results.push(raw_to_document::<T>(&self.crypto, row)?);
+        }
+        Ok(results)
+    }
+
     // ========================================================================
     // Find by Index
     // ========================================================================

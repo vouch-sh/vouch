@@ -108,6 +108,49 @@ async fn test_user_not_found() {
 }
 
 #[tokio::test]
+async fn test_get_users_by_ids_multiple_found_and_some_missing() {
+    let (store, _audit) = test_db().await;
+
+    let (id1, _) = upsert_user(&store, "alice@example.com", Some("Alice"))
+        .await
+        .expect("Failed to create user");
+    let (id2, _) = upsert_user(&store, "bob@example.com", Some("Bob"))
+        .await
+        .expect("Failed to create user");
+
+    let ids = vec![id1.clone(), id2.clone(), "nonexistent-id".to_string()];
+    let users = get_users_by_ids(&store, &ids)
+        .await
+        .expect("Query should succeed");
+
+    assert_eq!(
+        users.len(),
+        2,
+        "a missing id should simply be absent, not an error"
+    );
+    assert_eq!(
+        users.get(&id1).map(|u| u.email.as_str()),
+        Some("alice@example.com")
+    );
+    assert_eq!(
+        users.get(&id2).map(|u| u.email.as_str()),
+        Some("bob@example.com")
+    );
+    assert!(!users.contains_key("nonexistent-id"));
+}
+
+#[tokio::test]
+async fn test_get_users_by_ids_empty_input_returns_empty_map() {
+    let (store, _audit) = test_db().await;
+
+    let users = get_users_by_ids(&store, &[])
+        .await
+        .expect("Query should succeed");
+
+    assert!(users.is_empty());
+}
+
+#[tokio::test]
 async fn test_session_lifecycle() {
     let (store, _audit) = test_db().await;
 
