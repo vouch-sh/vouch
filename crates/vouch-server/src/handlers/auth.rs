@@ -32,9 +32,15 @@ pub(crate) async fn status(
         .get(header::AUTHORIZATION)
         .and_then(|h| h.to_str().ok());
 
-    let token = match auth_header {
-        Some(h) if h.starts_with("Bearer ") => h.strip_prefix("Bearer ").unwrap_or(""),
-        Some(h) if h.starts_with("DPoP ") => h.strip_prefix("DPoP ").unwrap_or(""),
+    // RFC 9110 Section 11.1: the auth-scheme token is case-insensitive, so
+    // `BEARER`, `bearer`, and `BeArEr` must all match like `Bearer`, and
+    // likewise for `DPoP`. Split on the first space and compare the scheme
+    // with `eq_ignore_ascii_case` rather than hard-coding casings via
+    // `starts_with`. An unrecognized scheme (or no header at all) yields
+    // `authenticated: false` — this endpoint never 401s.
+    let token = match auth_header.and_then(|h| h.split_once(' ')) {
+        Some((scheme, tok)) if scheme.eq_ignore_ascii_case("bearer") => tok,
+        Some((scheme, tok)) if scheme.eq_ignore_ascii_case("dpop") => tok,
         _ => {
             return Ok(Json(SessionStatus {
                 authenticated: false,

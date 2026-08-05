@@ -140,10 +140,14 @@ pub(crate) async fn authenticate_scim(
             )
         })?;
 
-    // Case-insensitive check for "Bearer " prefix, extract token safely
+    // RFC 9110 Section 11.1: the auth-scheme token is case-insensitive, so
+    // `BEARER`, `bearer`, and `BeArEr` must all match like `Bearer`. Split
+    // on the first space and compare the scheme with `eq_ignore_ascii_case`
+    // rather than hard-coding a small set of casings via `strip_prefix`.
     let token = auth_header
-        .strip_prefix("Bearer ")
-        .or_else(|| auth_header.strip_prefix("bearer "))
+        .split_once(' ')
+        .filter(|(scheme, _)| scheme.eq_ignore_ascii_case("bearer"))
+        .map(|(_, token)| token)
         .ok_or_else(|| {
             (
                 StatusCode::UNAUTHORIZED,

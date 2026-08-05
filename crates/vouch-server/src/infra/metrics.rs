@@ -31,8 +31,10 @@ pub fn install_recorder() -> Result<PrometheusHandle, metrics_exporter_prometheu
 /// Extract the bearer token from an `Authorization` header value.
 fn extract_bearer_token(headers: &HeaderMap) -> Option<&str> {
     let value = headers.get("authorization")?.to_str().ok()?;
-    let token = value.strip_prefix("Bearer ")?;
-    if token.is_empty() {
+    // RFC 9110 Section 11.1: the auth-scheme token is case-insensitive, so
+    // `BEARER`, `bearer`, and `BeArEr` must all match like `Bearer`.
+    let (scheme, token) = value.split_once(' ')?;
+    if !scheme.eq_ignore_ascii_case("bearer") || token.is_empty() {
         return None;
     }
     Some(token)
@@ -75,4 +77,46 @@ pub fn record_credential_issuance(credential_type: &str) {
         "type" => credential_type.to_string()
     )
     .increment(1);
+}
+
+#[cfg(test)]
+#[expect(
+    clippy::expect_used,
+    reason = "test code: panic on assertion failure is acceptable"
+)]
+mod tests {
+    use super::*;
+
+    fn headers_with_auth(value: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", value.parse().expect("valid header value"));
+        headers
+    }
+
+    /// RFC 9110 Section 11.1: the auth-scheme token is case-insensitive, so
+    /// `BEARER`, `bearer`, and `BeArEr` must all match like `Bearer`.
+    #[test]
+    fn extract_bearer_token_accepts_scheme_case_variants() {
+        for scheme in ["Bearer", "BEARER", "bearer", "BeArEr"] {
+            let headers = headers_with_auth(&format!("{scheme} tok"));
+            assert_eq!(
+                extract_bearer_token(&headers),
+                Some("tok"),
+                "{scheme} scheme must be accepted (RFC 9110 case-insensitivity)"
+            );
+        }
+    }
+
+    #[test]
+    fn extract_bearer_token_rejects_unrecognized_scheme() {
+        for value in ["Basic dXNlcjpwYXNz", "DPoP tok", "Beareralone"] {
+            assert_eq!(extract_bearer_token(&headers_with_auth(value)), None);
+        }
+    }
+
+    #[test]
+    fn extract_bearer_token_rejects_empty_token_and_missing_header() {
+        assert_eq!(extract_bearer_token(&headers_with_auth("Bearer ")), None);
+        assert_eq!(extract_bearer_token(&HeaderMap::new()), None);
+    }
 }

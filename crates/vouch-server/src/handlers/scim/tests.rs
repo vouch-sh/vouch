@@ -117,6 +117,59 @@ async fn test_rfc7644_auth_invalid_token() {
     assert_eq!(error["status"], "401");
 }
 
+/// RFC 9110 Section 11.1: the auth-scheme token is case-insensitive, so
+/// `BEARER`, `bearer`, and `BeArEr` must all authenticate the same as
+/// `Bearer`. Regression test for the case-sensitive `strip_prefix` pattern
+/// (and the misleading "Case-insensitive check" comment) that incorrectly
+/// rejected uppercase/mixed-case schemes.
+#[tokio::test]
+async fn test_rfc7644_auth_scheme_case_insensitive() {
+    let (app, state) = test_app().await;
+    let token = create_test_scim_token(&state.store, "case-insensitive", "test-org").await;
+
+    for scheme in ["BEARER", "bearer", "BeArEr", "bEaReR"] {
+        let (status, _body) = http_get(
+            &app,
+            "/scim/v2/Users",
+            &[("Authorization", &format!("{scheme} {token}"))],
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "{scheme} scheme must be accepted (RFC 9110 §11.1 case-insensitivity)"
+        );
+    }
+}
+
+/// A non-Bearer scheme must still be rejected as an invalid Authorization
+/// header format, confirming case-insensitive matching didn't make the
+/// check overly permissive.
+#[tokio::test]
+async fn test_rfc7644_auth_rejects_non_bearer_scheme() {
+    let (app, state) = test_app().await;
+    let token = create_test_scim_token(&state.store, "non-bearer", "test-org").await;
+
+    for scheme in ["Basic", "basic", "BASIC", "DPoP", "dpop"] {
+        let (status, body) = http_get(
+            &app,
+            "/scim/v2/Users",
+            &[("Authorization", &format!("{scheme} {token}"))],
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "{scheme} must be rejected as a non-Bearer scheme"
+        );
+        let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+        assert_eq!(
+            error["status"], "401",
+            "{scheme} must yield 401; got: {body}"
+        );
+    }
+}
+
 // ========================================================================
 // RFC 7643 Section 4.1 - User Resource Tests
 // ========================================================================

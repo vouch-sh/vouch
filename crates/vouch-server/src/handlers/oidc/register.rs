@@ -207,9 +207,55 @@ pub(crate) async fn delete_client(
 
 /// Extract a Bearer token from the Authorization header.
 fn extract_bearer_token(headers: &HeaderMap) -> Option<&str> {
-    headers
+    let value = headers
         .get(axum::http::header::AUTHORIZATION)?
         .to_str()
-        .ok()?
-        .strip_prefix("Bearer ")
+        .ok()?;
+    // RFC 9110 Section 11.1: the auth-scheme token is case-insensitive, so
+    // `BEARER`, `bearer`, and `BeArEr` must all match like `Bearer`.
+    let (scheme, token) = value.split_once(' ')?;
+    scheme.eq_ignore_ascii_case("bearer").then_some(token)
+}
+
+#[cfg(test)]
+#[expect(
+    clippy::expect_used,
+    reason = "test code: panic on assertion failure is acceptable"
+)]
+mod tests {
+    use super::*;
+
+    fn headers_with_auth(value: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            value.parse().expect("valid header value"),
+        );
+        headers
+    }
+
+    /// RFC 9110 Section 11.1: the auth-scheme token is case-insensitive, so
+    /// `BEARER`, `bearer`, and `BeArEr` must all match like `Bearer` when
+    /// extracting the RFC 7592 registration access token.
+    #[test]
+    fn extract_bearer_token_accepts_scheme_case_variants() {
+        for scheme in ["Bearer", "BEARER", "bearer", "BeArEr"] {
+            let headers = headers_with_auth(&format!("{scheme} reg-token"));
+            assert_eq!(
+                extract_bearer_token(&headers),
+                Some("reg-token"),
+                "{scheme} scheme must be accepted (RFC 9110 case-insensitivity)"
+            );
+        }
+    }
+
+    #[test]
+    fn extract_bearer_token_rejects_unrecognized_scheme_or_missing_header() {
+        assert_eq!(
+            extract_bearer_token(&headers_with_auth("Basic dXNlcjpwYXNz")),
+            None
+        );
+        assert_eq!(extract_bearer_token(&headers_with_auth("Bearer")), None);
+        assert_eq!(extract_bearer_token(&HeaderMap::new()), None);
+    }
 }
