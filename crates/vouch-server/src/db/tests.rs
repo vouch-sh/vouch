@@ -1324,10 +1324,35 @@ async fn test_oauth_usage_recording() {
 // ========================================================================
 
 const TEST_ORG_ID: &str = "test-org";
+const TEST_ORG_DOMAIN: &str = "example.com";
+
+/// Create the `TEST_ORG_ID` organization with `example.com` as its primary
+/// domain, so `create_scim_user`'s in-transaction domain-ownership check
+/// passes for the `*@example.com` emails used throughout the SCIM tests.
+///
+/// `create_scim_user` validates domain ownership inside the transaction that
+/// inserts the user (closing the TOCTOU race with `remove_additional_domain`),
+/// so every test that provisions a `*@example.com` user against `TEST_ORG_ID`
+/// must seed this org first.
+async fn seed_test_org(store: &DocumentStore) {
+    use crate::db::documents::organization::OrganizationDoc;
+    let doc = OrganizationDoc {
+        domain: TEST_ORG_DOMAIN.to_string(),
+        name: None,
+        created_by_user_id: None,
+        additional_domains: Vec::new(),
+        subdomain: None,
+    };
+    store
+        .insert_with_id(TEST_ORG_ID, &doc)
+        .await
+        .expect("seed test org");
+}
 
 #[tokio::test]
 async fn test_scim_user_crud() {
     let (store, _audit) = test_db().await;
+    seed_test_org(&store).await;
 
     // Create SCIM user
     let user = create_scim_user(
@@ -1378,6 +1403,7 @@ async fn test_scim_user_crud() {
 #[tokio::test]
 async fn test_scim_user_list_and_filter() {
     let (store, _audit) = test_db().await;
+    seed_test_org(&store).await;
 
     // Create multiple users
     for i in 0..5 {
@@ -1436,6 +1462,7 @@ async fn test_scim_user_list_and_filter() {
 #[tokio::test]
 async fn test_scim_filter_user_name_eq_is_case_insensitive() {
     let (store, _audit) = test_db().await;
+    seed_test_org(&store).await;
 
     create_scim_user(
         &store,
@@ -1466,6 +1493,7 @@ async fn test_scim_filter_user_name_eq_is_case_insensitive() {
 #[tokio::test]
 async fn test_scim_filter_email_eq_is_case_insensitive() {
     let (store, _audit) = test_db().await;
+    seed_test_org(&store).await;
 
     create_scim_user(
         &store,
@@ -1505,6 +1533,24 @@ async fn test_scim_filter_user_name_eq_case_insensitive_is_org_scoped() {
     // honor the org scope: a user in `other-org` must not be returned when
     // querying `TEST_ORG_ID`.
     let (store, _audit) = test_db().await;
+    seed_test_org(&store).await;
+    // `other-org` also needs an org doc because `create_scim_user` validates
+    // domain ownership in-transaction; both orgs own `example.com` in this
+    // test fixture (the test exercises org scoping, not domain isolation).
+    {
+        use crate::db::documents::organization::OrganizationDoc;
+        let doc = OrganizationDoc {
+            domain: TEST_ORG_DOMAIN.to_string(),
+            name: None,
+            created_by_user_id: None,
+            additional_domains: Vec::new(),
+            subdomain: None,
+        };
+        store
+            .insert_with_id("other-org", &doc)
+            .await
+            .expect("seed other-org");
+    }
 
     create_scim_user(
         &store,
@@ -1568,6 +1614,7 @@ async fn test_scim_filter_external_id_eq_is_case_sensitive() {
     // indexed lookup must NOT be lowercased. This guards against the fix for
     // userName/email being over-applied to externalId.
     let (store, _audit) = test_db().await;
+    seed_test_org(&store).await;
 
     create_scim_user(
         &store,
@@ -1614,6 +1661,7 @@ async fn test_scim_filter_external_id_eq_is_case_sensitive() {
 #[tokio::test]
 async fn test_scim_session_invalidation_on_deactivation() {
     let (store, _audit) = test_db().await;
+    seed_test_org(&store).await;
 
     // Create user with session
     let user = create_scim_user(
@@ -2550,6 +2598,7 @@ async fn test_store_delete_expired_cleans_up_indexes() {
 #[tokio::test]
 async fn test_create_scim_user_duplicate_email_rejected() {
     let (store, _audit) = test_db().await;
+    seed_test_org(&store).await;
 
     // First creation succeeds
     let user = create_scim_user(
@@ -2598,7 +2647,397 @@ async fn test_create_scim_user_duplicate_email_rejected() {
     );
 }
 
-/// Regression for the SCIM concurrent-create race: two concurrent
+// ============================================================================
+// SCIM user creation — in-transaction domain-ownership validation
+// ============================================================================
+//
+// Regression for the TOCTOU race in SCIM user provisioning: domain ownership
+// must be validated inside the same transaction that inserts the user, with
+// an OCC version-bump on the org doc forcing a conflict with concurrent
+// domain removal. Before the fix, the check ran as a separate non-transactional
+// read, so a `remove_additional_domain` committing between the check and the
+// insert let a user be created on a domain the org no longer owned.
+
+/// `create_scim_user` rejects when the org does not exist: a nonexistent org
+/// owns no domains, so the in-transaction check returns `DomainNotOwned`.
+#[tokio::test]
+async fn test_create_scim_user_rejects_when_org_does_not_exist() {
+    let (store, _audit) = test_db().await;
+
+    let result = create_scim_user(
+        &store,
+        Some("nonexistent-org"),
+        "alice@example.com",
+        Some("Alice"),
+        None,
+        true,
+    )
+    .await;
+
+    assert!(
+        matches!(result, Err(CreateScimUserError::DomainNotOwned)),
+        "expected DomainNotOwned for nonexistent org; got {result:?}"
+    );
+
+    // No user row was inserted.
+    let count = store
+        .count::<crate::db::documents::user::UserDoc>("email", "alice@example.com")
+        .await
+        .expect("count");
+    assert_eq!(count, 0, "no user should be inserted when org is missing");
+}
+
+/// `create_scim_user` rejects when the email's domain is not in the org's
+/// verified-domain set — the in-transaction read sees the org but the domain
+/// is not among its verified domains.
+#[tokio::test]
+async fn test_create_scim_user_rejects_unowned_domain_in_transaction() {
+    let (store, _audit) = test_db().await;
+    seed_test_org(&store).await;
+
+    let result = create_scim_user(
+        &store,
+        Some(TEST_ORG_ID),
+        "alice@not-owned.example.com",
+        Some("Alice"),
+        None,
+        true,
+    )
+    .await;
+
+    assert!(
+        matches!(result, Err(CreateScimUserError::DomainNotOwned)),
+        "expected DomainNotOwned for unowned domain; got {result:?}"
+    );
+
+    let count = store
+        .count::<crate::db::documents::user::UserDoc>("email", "alice@not-owned.example.com")
+        .await
+        .expect("count");
+    assert_eq!(count, 0, "no user should be inserted for an unowned domain");
+}
+
+/// A pending (unverified) additional domain must not accept provisioning:
+/// the in-transaction check is set membership against `verified_domains()`,
+/// which yields only the primary domain and additional domains that have
+/// passed DNS TXT verification.
+#[tokio::test]
+async fn test_create_scim_user_rejects_pending_additional_domain() {
+    let (store, _audit) = test_db().await;
+    let org = create_organization(&store, "primary.example.com", None, None)
+        .await
+        .expect("create org");
+    add_additional_domain(
+        &store,
+        &org.id,
+        "pending.example.com",
+        "u1",
+        "u1@primary.example.com",
+    )
+    .await
+    .expect("add domain");
+
+    let result = create_scim_user(
+        &store,
+        Some(&org.id),
+        "alice@pending.example.com",
+        None,
+        None,
+        true,
+    )
+    .await;
+
+    assert!(
+        matches!(result, Err(CreateScimUserError::DomainNotOwned)),
+        "expected DomainNotOwned for a pending (unverified) additional domain; got {result:?}"
+    );
+}
+
+/// A verified additional domain accepts provisioning, matching the primary
+/// domain's behavior.
+#[tokio::test]
+async fn test_create_scim_user_accepts_verified_additional_domain() {
+    let (store, _audit) = test_db().await;
+    let org = create_organization(&store, "primary.example.com", None, None)
+        .await
+        .expect("create org");
+    add_additional_domain(
+        &store,
+        &org.id,
+        "alt.example.com",
+        "u1",
+        "u1@primary.example.com",
+    )
+    .await
+    .expect("add domain");
+    mark_additional_domain_verified(&store, &org.id, "alt.example.com")
+        .await
+        .expect("mark verified");
+
+    let user = create_scim_user(
+        &store,
+        Some(&org.id),
+        "alice@alt.example.com",
+        None,
+        None,
+        true,
+    )
+    .await
+    .expect("user creation on verified additional domain");
+    assert_eq!(user.email, "alice@alt.example.com");
+}
+
+/// No repair of the candidate: an email whose domain part carries stray
+/// whitespace (`bob@ example.com`) never matches a verified domain, rather
+/// than being silently trimmed into a match.
+#[tokio::test]
+async fn test_create_scim_user_rejects_whitespace_padded_domain() {
+    let (store, _audit) = test_db().await;
+    seed_test_org(&store).await;
+
+    let result = create_scim_user(
+        &store,
+        Some(TEST_ORG_ID),
+        "bob@ example.com",
+        None,
+        None,
+        true,
+    )
+    .await;
+
+    assert!(
+        matches!(result, Err(CreateScimUserError::DomainNotOwned)),
+        "expected DomainNotOwned for a whitespace-padded domain; got {result:?}"
+    );
+}
+
+/// A reserved-TLD primary domain (realistic for on-prem/AD-derived
+/// enrollment) still accepts provisioning against itself: the check is set
+/// membership against `verified_domains()`, not a re-run of
+/// `normalize_domain` shape validation.
+#[tokio::test]
+async fn test_create_scim_user_accepts_reserved_tld_primary_domain() {
+    let (store, _audit) = test_db().await;
+    let org = create_organization(&store, "corp.internal", None, None)
+        .await
+        .expect("create org");
+
+    let user = create_scim_user(
+        &store,
+        Some(&org.id),
+        "alice@corp.internal",
+        None,
+        None,
+        true,
+    )
+    .await
+    .expect("user creation on reserved-TLD primary domain");
+    assert_eq!(user.email, "alice@corp.internal");
+}
+
+/// `create_scim_user` version-bumps the org doc on success, proving the OCC
+/// guard is in place. A concurrent domain removal that commits between the
+/// in-transaction org-doc read and the CAS would change the version, causing
+/// the CAS to fail and the transaction to retry against fresh state.
+#[tokio::test]
+async fn test_create_scim_user_version_bumps_org_doc() {
+    use crate::db::documents::organization::OrganizationDoc;
+
+    let (store, _audit) = test_db().await;
+    seed_test_org(&store).await;
+
+    // Read the org doc version before user creation.
+    let before = store
+        .get::<OrganizationDoc>(TEST_ORG_ID)
+        .await
+        .expect("get org")
+        .expect("org exists");
+    let version_before = before.version;
+
+    create_scim_user(
+        &store,
+        Some(TEST_ORG_ID),
+        "version-check@example.com",
+        None,
+        None,
+        true,
+    )
+    .await
+    .expect("user creation should succeed");
+
+    // Read the org doc version after user creation — must have increased.
+    let after = store
+        .get::<OrganizationDoc>(TEST_ORG_ID)
+        .await
+        .expect("get org")
+        .expect("org exists");
+    assert!(
+        after.version > version_before,
+        "org doc version must increase after create_scim_user (OCC version-bump); \
+         before={version_before}, after={}",
+        after.version
+    );
+}
+
+/// `create_scim_user` does NOT version-bump the org doc when `org_id` is
+/// `None` (the certification test path): there is no org to validate or bump.
+#[tokio::test]
+async fn test_create_scim_user_no_org_does_not_touch_org_doc() {
+    let (store, _audit) = test_db().await;
+    seed_test_org(&store).await;
+
+    // No org doc should be touched when org_id is None. Read the org version
+    // before and after; it must not change.
+    let before = store
+        .get::<crate::db::documents::organization::OrganizationDoc>(TEST_ORG_ID)
+        .await
+        .expect("get org")
+        .expect("org exists");
+
+    create_scim_user(&store, None, "orgless@example.com", None, None, true)
+        .await
+        .expect("orgless user creation should succeed");
+
+    let after = store
+        .get::<crate::db::documents::organization::OrganizationDoc>(TEST_ORG_ID)
+        .await
+        .expect("get org")
+        .expect("org exists");
+    assert_eq!(
+        before.version, after.version,
+        "org doc version must not change when org_id is None"
+    );
+}
+
+/// Concurrent `create_scim_user` and `remove_additional_domain` must not
+/// produce a user on the removed domain. This test deterministically hits
+/// the TOCTOU window using a barrier: the user-creation task reads the org
+/// doc (seeing the domain as verified), then the removal task removes the
+/// domain (committing before the user-creation's CAS), then the user-creation
+/// task's CAS fails and retries — the retry re-reads the org doc (now without
+/// the domain) and rejects with `DomainNotOwned`.
+///
+/// Before the fix (domain check outside the transaction), this test would
+/// produce a user on the removed domain because the check would pass before
+/// the removal and the insert would commit after it.
+///
+/// Uses `multi_thread` so the two tasks can run on separate worker threads.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_create_scim_user_toctou_domain_removal_during_creation() {
+    let (store, _audit) = test_db().await;
+    let store = std::sync::Arc::new(store);
+
+    let org = create_organization(&store, "primary.example.com", None, None)
+        .await
+        .expect("create org");
+    add_additional_domain(
+        &store,
+        &org.id,
+        "toctou.example.com",
+        "u1",
+        "u1@primary.example.com",
+    )
+    .await
+    .expect("add domain");
+    mark_additional_domain_verified(&store, &org.id, "toctou.example.com")
+        .await
+        .expect("mark verified");
+
+    let org_id = org.id.clone();
+    let store_for_create = std::sync::Arc::clone(&store);
+    let store_for_remove = std::sync::Arc::clone(&store);
+
+    // Spawn the user-creation task. It will either succeed (domain removal
+    // lost the race and the user was created while the domain was still
+    // owned — acceptable) or fail with DomainNotOwned (domain removal won
+    // the race and the retry saw the removal — the TOCTOU guard working).
+    // The OLD behavior (bug) would return Ok even when the domain was
+    // already removed at the time of the insert's commit.
+    let create_handle = tokio::spawn(async move {
+        create_scim_user(
+            &store_for_create,
+            Some(&org_id),
+            "racer@toctou.example.com",
+            Some("Racer"),
+            None,
+            true,
+        )
+        .await
+    });
+
+    // Concurrently remove the domain. The removal commits independently;
+    // if it lands before the user-creation's CAS, the CAS fails and retries.
+    let org_id_for_remove = org.id.clone();
+    let remove_handle = tokio::spawn(async move {
+        remove_additional_domain(&store_for_remove, &org_id_for_remove, "toctou.example.com")
+            .await
+            .expect("remove domain")
+    });
+
+    let create_result = create_handle.await.expect("create task panicked");
+    let remove_result = remove_handle.await.expect("remove task panicked");
+
+    // The removal must succeed.
+    assert!(
+        remove_result.is_some(),
+        "domain removal should have found and removed the domain"
+    );
+
+    // After both operations complete, check the invariant:
+    // - If the user was created, the domain must still be attached to the org
+    //   at the time of creation (the OCC guard ensured this). Since the
+    //   domain was removed, the user creation must NOT have succeeded after
+    //   the removal committed.
+    // - If the user was not created, it must be because the domain was
+    //   removed before or during the transaction (DomainNotOwned).
+    match create_result {
+        Err(CreateScimUserError::DomainNotOwned) => {
+            // The TOCTOU guard worked: domain was removed, user creation
+            // rejected. Verify no user row exists.
+            let count = store
+                .count::<crate::db::documents::user::UserDoc>("email", "racer@toctou.example.com")
+                .await
+                .expect("count");
+            assert_eq!(
+                count, 0,
+                "no user should exist when DomainNotOwned was returned"
+            );
+        }
+        Ok(user) => {
+            // The user creation won the race: it committed before the removal.
+            // This is acceptable — the domain was owned at creation time.
+            // But the domain must now be removed (the removal succeeded).
+            assert_eq!(user.email, "racer@toctou.example.com");
+            let org_after = get_organization(&store, &org.id)
+                .await
+                .expect("get org")
+                .expect("org exists");
+            assert!(
+                !org_after
+                    .additional_domains
+                    .iter()
+                    .any(|d| d.domain == "toctou.example.com"),
+                "domain must be removed after both operations complete"
+            );
+        }
+        Err(CreateScimUserError::DuplicateEmail) => {
+            panic!("DuplicateEmail unexpected for a fresh email");
+        }
+        Err(CreateScimUserError::OccConflict) => {
+            // OCC retry budget exhausted — the domain was being removed and
+            // re-added concurrently, or the retry kept losing. This is
+            // acceptable: the user was NOT created on the removed domain.
+            let count = store
+                .count::<crate::db::documents::user::UserDoc>("email", "racer@toctou.example.com")
+                .await
+                .expect("count");
+            assert_eq!(count, 0, "no user should exist after OccConflict");
+        }
+        Err(CreateScimUserError::Other(e)) => {
+            panic!("unexpected error from create_scim_user: {e}");
+        }
+    }
+}
 /// `create_scim_user` calls with the same email must produce exactly one
 /// user row, not two. Before the deterministic-ID fix, each call generated
 /// a fresh random UUID v7 primary key, so neither insert conflicted with the
@@ -2623,6 +3062,7 @@ async fn test_create_scim_user_duplicate_email_rejected() {
 async fn test_create_scim_user_concurrent_same_email_produces_one_user() {
     use crate::db::documents::user::UserDoc;
     let (store, _audit) = test_db().await;
+    seed_test_org(&store).await;
     let store = std::sync::Arc::new(store);
     let email = "race@example.com";
 
@@ -2700,6 +3140,7 @@ async fn test_create_scim_user_concurrent_same_email_produces_one_user() {
 async fn test_create_scim_user_concurrent_mixed_case_same_email_produces_one_user() {
     use crate::db::documents::user::UserDoc;
     let (store, _audit) = test_db().await;
+    seed_test_org(&store).await;
     let store = std::sync::Arc::new(store);
 
     let casings = [
@@ -2774,6 +3215,7 @@ async fn test_create_scim_user_concurrent_mixed_case_same_email_produces_one_use
 async fn test_create_scim_user_deterministic_id_is_stable_across_recreate() {
     use crate::db::documents::user::UserDoc;
     let (store, _audit) = test_db().await;
+    seed_test_org(&store).await;
     let email = "recreate@example.com";
 
     let first = create_scim_user(&store, Some(TEST_ORG_ID), email, Some("First"), None, true)
@@ -2811,6 +3253,7 @@ async fn test_create_scim_user_deterministic_id_is_stable_across_recreate() {
 async fn test_create_scim_user_blocked_by_preexisting_random_id_user() {
     use crate::db::documents::user::UserDoc;
     let (store, _audit) = test_db().await;
+    seed_test_org(&store).await;
     let email = "preexisting@example.com";
 
     // Seed a user with a random UUID v7 ID, as `enroll_user_with_org` does.
@@ -2930,6 +3373,34 @@ async fn test_create_scim_user_concurrent_same_email_produces_one_user_postgres(
     let crypto: std::sync::Arc<dyn crate::crypto::document_crypto::DocumentCrypto> =
         std::sync::Arc::new(crate::crypto::document_crypto::PlaintextDocumentCrypto);
     let store = crate::db::store::DocumentStore::new(pool.clone(), crypto.clone());
+
+    // Seed the org doc that `create_scim_user`'s in-transaction
+    // domain-ownership check reads. `pg-test-org` owns `example.com`.
+    {
+        use crate::db::documents::organization::OrganizationDoc;
+        let org_doc = OrganizationDoc {
+            domain: "example.com".to_string(),
+            name: None,
+            created_by_user_id: None,
+            additional_domains: Vec::new(),
+            subdomain: None,
+        };
+        // Clean up any leftover org from a previous run before inserting.
+        if let Some(existing) = store
+            .get::<OrganizationDoc>("pg-test-org")
+            .await
+            .expect("org lookup before test")
+        {
+            store
+                .delete(&existing.id)
+                .await
+                .expect("delete leftover org");
+        }
+        store
+            .insert_with_id("pg-test-org", &org_doc)
+            .await
+            .expect("seed pg-test-org");
+    }
 
     let email = "pg-race@example.com";
 
@@ -3071,6 +3542,7 @@ async fn test_scim_group_lifecycle() {
 #[tokio::test]
 async fn test_scim_group_member_add_remove() {
     let (store, _audit) = test_db().await;
+    seed_test_org(&store).await;
 
     let group = create_scim_group(&store, TEST_ORG_ID, "Beta", None)
         .await
@@ -3136,6 +3608,7 @@ async fn test_scim_group_member_add_remove() {
 #[tokio::test]
 async fn test_scim_group_replace_members() {
     let (store, _audit) = test_db().await;
+    seed_test_org(&store).await;
 
     let group = create_scim_group(&store, TEST_ORG_ID, "Gamma", None)
         .await
@@ -3216,6 +3689,7 @@ async fn test_scim_group_replace_members() {
 #[tokio::test]
 async fn test_scim_group_delete_cascades_members() {
     let (store, _audit) = test_db().await;
+    seed_test_org(&store).await;
 
     let group = create_scim_group(&store, TEST_ORG_ID, "ToBeCascaded", None)
         .await
@@ -3646,6 +4120,7 @@ fn test_scim_filter_parse_no_match_for_other_attribute() {
 #[tokio::test]
 async fn test_scim_user_list_filter_co_operator() {
     let (store, _audit) = test_db().await;
+    seed_test_org(&store).await;
 
     create_scim_user(
         &store,
@@ -3696,6 +4171,7 @@ async fn test_scim_user_list_filter_co_operator() {
 #[tokio::test]
 async fn test_scim_user_list_filter_sw_operator() {
     let (store, _audit) = test_db().await;
+    seed_test_org(&store).await;
 
     create_scim_user(
         &store,
@@ -5513,6 +5989,7 @@ async fn test_update_scim_user_concurrent_org_change_reports_not_applied() {
     use crate::db::documents::user::UserDoc;
 
     let (store, _audit) = test_db().await;
+    seed_test_org(&store).await;
     let user = create_scim_user(
         &store,
         Some(TEST_ORG_ID),
@@ -6566,6 +7043,7 @@ async fn test_enroll_finds_scim_user_with_different_email_casing() {
 #[tokio::test]
 async fn test_scim_duplicate_email_rejected_across_case() {
     let (store, _audit) = test_db().await;
+    seed_test_org(&store).await;
 
     // First provisioning with lowercase email succeeds.
     create_scim_user(

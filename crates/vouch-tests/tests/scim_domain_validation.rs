@@ -374,3 +374,153 @@ async fn subdomain_of_verified_domain_is_rejected() {
     );
     assert_eq!(body["scimType"], "invalidValue");
 }
+
+// ============================================================================
+// TOCTOU regression: domain removal during SCIM user creation
+// ============================================================================
+//
+// Before the fix, the domain-ownership check ran as a separate non-transactional
+// read before `create_scim_user`'s transaction. A concurrent domain removal
+// committing between the check and the user insert would let a user be created
+// on a domain the org no longer owned. The fix moves the check inside the
+// transaction and version-bumps the org doc, forcing an OCC conflict with the
+// removal so the transaction retries against fresh state.
+
+/// A user provisioned AFTER the domain has been removed is rejected with 400,
+/// not created with 201. This is the core TOCTOU regression at the HTTP
+/// handler level: the in-transaction check sees the removal and rejects.
+#[tokio::test]
+async fn user_creation_rejected_after_domain_removed() {
+    let harness = TestHarness::new().await;
+    let org = harness
+        .create_org("toctou-removed.example.com")
+        .await
+        .expect("create org");
+    let token = harness
+        .create_scim_token("token", &org.id)
+        .await
+        .expect("create scim token");
+
+    vouch_server::db::add_additional_domain(
+        &harness.state.store,
+        &org.id,
+        "toctou-removed-alt.example.com",
+        "admin-user-id",
+        "admin@toctou-removed.example.com",
+    )
+    .await
+    .expect("add additional domain");
+    vouch_server::db::mark_additional_domain_verified(
+        &harness.state.store,
+        &org.id,
+        "toctou-removed-alt.example.com",
+    )
+    .await
+    .expect("mark additional domain verified");
+
+    // Remove the domain before user creation. The in-transaction check
+    // must see the removal and reject with 400.
+    vouch_server::db::remove_additional_domain(
+        &harness.state.store,
+        &org.id,
+        "toctou-removed-alt.example.com",
+    )
+    .await
+    .expect("remove additional domain");
+
+    let (status, body) =
+        create_user(&harness, &token, "alice@toctou-removed-alt.example.com").await;
+
+    assert_eq!(
+        status, 400,
+        "user creation must be rejected after domain removed: {body}"
+    );
+    assert_eq!(body["scimType"], "invalidValue");
+}
+
+/// A user provisioned on a verified domain succeeds (201), and the domain
+/// can be removed afterward without affecting the already-created user.
+/// This verifies the fix doesn't break the happy path: users created while
+/// the domain was owned remain valid after the domain is later removed.
+#[tokio::test]
+async fn user_creation_succeeds_then_domain_removed() {
+    let harness = TestHarness::new().await;
+    let org = harness
+        .create_org("toctou-happy.example.com")
+        .await
+        .expect("create org");
+    let token = harness
+        .create_scim_token("token", &org.id)
+        .await
+        .expect("create scim token");
+
+    vouch_server::db::add_additional_domain(
+        &harness.state.store,
+        &org.id,
+        "toctou-happy-alt.example.com",
+        "admin-user-id",
+        "admin@toctou-happy.example.com",
+    )
+    .await
+    .expect("add additional domain");
+    vouch_server::db::mark_additional_domain_verified(
+        &harness.state.store,
+        &org.id,
+        "toctou-happy-alt.example.com",
+    )
+    .await
+    .expect("mark additional domain verified");
+
+    // Create user while domain is owned — must succeed.
+    let (status, body) = create_user(&harness, &token, "bob@toctou-happy-alt.example.com").await;
+    assert_eq!(
+        status, 201,
+        "user creation must succeed while domain is owned: {body}"
+    );
+
+    // Remove the domain afterward. The already-created user remains valid
+    // (existing users keep their org_id by design — this is about retention
+    // of existing membership, not creation of new membership).
+    vouch_server::db::remove_additional_domain(
+        &harness.state.store,
+        &org.id,
+        "toctou-happy-alt.example.com",
+    )
+    .await
+    .expect("remove additional domain");
+
+    // A SECOND user creation on the now-removed domain must be rejected.
+    let (status, body) = create_user(&harness, &token, "carol@toctou-happy-alt.example.com").await;
+    assert_eq!(
+        status, 400,
+        "second user creation must be rejected after domain removed: {body}"
+    );
+    assert_eq!(body["scimType"], "invalidValue");
+}
+
+/// A duplicate email returns 409 (not 400) even when domain validation is
+/// in scope. This verifies the error-type mapping in the handler:
+/// `DomainNotOwned` → 400, `DuplicateEmail` → 409.
+#[tokio::test]
+async fn duplicate_email_returns_409_not_400() {
+    let harness = TestHarness::new().await;
+    let org = harness
+        .create_org("dup-type-test.example.com")
+        .await
+        .expect("create org");
+    let token = harness
+        .create_scim_token("token", &org.id)
+        .await
+        .expect("create scim token");
+
+    // First creation succeeds.
+    let (status, _) = create_user(&harness, &token, "alice@dup-type-test.example.com").await;
+    assert_eq!(status, 201);
+
+    // Second creation with the same email must return 409 (uniqueness),
+    // not 400 (domain validation) — the email's domain is owned, so the
+    // domain check passes, and the duplicate check fires.
+    let (status, body) = create_user(&harness, &token, "alice@dup-type-test.example.com").await;
+    assert_eq!(status, 409, "duplicate email must return 409: {body}");
+    assert_eq!(body["scimType"], "uniqueness");
+}
