@@ -150,7 +150,12 @@ pub(crate) async fn create_user(
         user.user_name.clone()
     };
 
-    let Some((_, candidate_domain)) = email.rsplit_once('@') else {
+    // Shape check only — domain ownership is validated inside
+    // `create_scim_user`'s transaction (reading the org doc and
+    // version-bumping it via `compare_and_update`), which closes the TOCTOU
+    // race with a concurrent `remove_additional_domain` that a standalone
+    // pre-check here could not.
+    if email.rsplit_once('@').is_none() {
         tracing::warn!(
             org_id = %auth.org_id,
             "rejected SCIM user creation: userName is not an email address"
@@ -162,19 +167,7 @@ pub(crate) async fn create_user(
             ),
         )
             .into_response();
-    };
-
-    // The domain-ownership check is performed inside `create_scim_user`'s
-    // transaction (reading the org doc and version-bumping it via
-    // `compare_and_update`) to close the TOCTOU race that existed when this
-    // check ran as a separate non-transactional read. A concurrent
-    // `remove_additional_domain` that commits between the in-transaction read
-    // and the version-bump changes the org doc's version, so the CAS fails and
-    // the whole transaction re-runs against fresh state — re-reading the org
-    // doc, which now reflects the removed domain, and rejecting. The candidate
-    // domain is only used here for the rejection log message; the authoritative
-    // comparison happens inside the transaction against `verified_domains()`.
-    let _candidate_domain = candidate_domain;
+    }
 
     // Extract name
     let name = user.name.as_ref().and_then(|n| {

@@ -146,8 +146,9 @@ pub async fn get_organization(store: &DocumentStore, org_id: &str) -> Result<Opt
 /// function — it performs the same check inside the user-creation transaction
 /// (reading `OrganizationDoc` and version-bumping it via `compare_and_update`)
 /// to close the TOCTOU race that existed when this check ran as a separate
-/// non-transactional read. This function remains for other callers that need
-/// a standalone read-only membership check.
+/// non-transactional read. That leaves this function with no production
+/// callers; it is a standalone read-only membership check unsuitable for
+/// guarding writes (a concurrent domain removal can invalidate its answer).
 pub async fn org_owns_verified_domain(
     store: &DocumentStore,
     org_id: &str,

@@ -2717,6 +2717,124 @@ async fn test_create_scim_user_rejects_unowned_domain_in_transaction() {
     assert_eq!(count, 0, "no user should be inserted for an unowned domain");
 }
 
+/// A pending (unverified) additional domain must not accept provisioning:
+/// the in-transaction check is set membership against `verified_domains()`,
+/// which yields only the primary domain and additional domains that have
+/// passed DNS TXT verification.
+#[tokio::test]
+async fn test_create_scim_user_rejects_pending_additional_domain() {
+    let (store, _audit) = test_db().await;
+    let org = create_organization(&store, "primary.example.com", None, None)
+        .await
+        .expect("create org");
+    add_additional_domain(
+        &store,
+        &org.id,
+        "pending.example.com",
+        "u1",
+        "u1@primary.example.com",
+    )
+    .await
+    .expect("add domain");
+
+    let result = create_scim_user(
+        &store,
+        Some(&org.id),
+        "alice@pending.example.com",
+        None,
+        None,
+        true,
+    )
+    .await;
+
+    assert!(
+        matches!(result, Err(CreateScimUserError::DomainNotOwned)),
+        "expected DomainNotOwned for a pending (unverified) additional domain; got {result:?}"
+    );
+}
+
+/// A verified additional domain accepts provisioning, matching the primary
+/// domain's behavior.
+#[tokio::test]
+async fn test_create_scim_user_accepts_verified_additional_domain() {
+    let (store, _audit) = test_db().await;
+    let org = create_organization(&store, "primary.example.com", None, None)
+        .await
+        .expect("create org");
+    add_additional_domain(
+        &store,
+        &org.id,
+        "alt.example.com",
+        "u1",
+        "u1@primary.example.com",
+    )
+    .await
+    .expect("add domain");
+    mark_additional_domain_verified(&store, &org.id, "alt.example.com")
+        .await
+        .expect("mark verified");
+
+    let user = create_scim_user(
+        &store,
+        Some(&org.id),
+        "alice@alt.example.com",
+        None,
+        None,
+        true,
+    )
+    .await
+    .expect("user creation on verified additional domain");
+    assert_eq!(user.email, "alice@alt.example.com");
+}
+
+/// No repair of the candidate: an email whose domain part carries stray
+/// whitespace (`bob@ example.com`) never matches a verified domain, rather
+/// than being silently trimmed into a match.
+#[tokio::test]
+async fn test_create_scim_user_rejects_whitespace_padded_domain() {
+    let (store, _audit) = test_db().await;
+    seed_test_org(&store).await;
+
+    let result = create_scim_user(
+        &store,
+        Some(TEST_ORG_ID),
+        "bob@ example.com",
+        None,
+        None,
+        true,
+    )
+    .await;
+
+    assert!(
+        matches!(result, Err(CreateScimUserError::DomainNotOwned)),
+        "expected DomainNotOwned for a whitespace-padded domain; got {result:?}"
+    );
+}
+
+/// A reserved-TLD primary domain (realistic for on-prem/AD-derived
+/// enrollment) still accepts provisioning against itself: the check is set
+/// membership against `verified_domains()`, not a re-run of
+/// `normalize_domain` shape validation.
+#[tokio::test]
+async fn test_create_scim_user_accepts_reserved_tld_primary_domain() {
+    let (store, _audit) = test_db().await;
+    let org = create_organization(&store, "corp.internal", None, None)
+        .await
+        .expect("create org");
+
+    let user = create_scim_user(
+        &store,
+        Some(&org.id),
+        "alice@corp.internal",
+        None,
+        None,
+        true,
+    )
+    .await
+    .expect("user creation on reserved-TLD primary domain");
+    assert_eq!(user.email, "alice@corp.internal");
+}
+
 /// `create_scim_user` version-bumps the org doc on success, proving the OCC
 /// guard is in place. A concurrent domain removal that commits between the
 /// in-transaction org-doc read and the CAS would change the version, causing
