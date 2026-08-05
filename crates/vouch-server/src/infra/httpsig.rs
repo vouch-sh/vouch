@@ -158,9 +158,16 @@ impl KeyResolver for OAuthClientKeyResolver {
 fn extract_client_id(headers: &http::HeaderMap, _state: &AppState) -> Option<String> {
     let auth_header = headers.get("authorization")?.to_str().ok()?;
 
-    let token = auth_header
-        .strip_prefix("DPoP ")
-        .or_else(|| auth_header.strip_prefix("Bearer "))?;
+    // RFC 9110 Section 11.1: the auth-scheme token is case-insensitive, so
+    // `BEARER`, `bearer`, and `BeArEr` must all match like `Bearer`, and
+    // likewise for `DPoP`. Must stay in sync with the schemes accepted by
+    // `handlers/session.rs::extract_token_from_request`, or a request with a
+    // non-canonical scheme casing would pass token auth but fail signature
+    // key resolution on signature-required `/v1/*` routes.
+    let (scheme, token) = auth_header.split_once(' ')?;
+    if !scheme.eq_ignore_ascii_case("dpop") && !scheme.eq_ignore_ascii_case("bearer") {
+        return None;
+    }
 
     // Parse JWT payload (second segment) without verification
     let parts: Vec<&str> = token.split('.').collect();
@@ -196,6 +203,50 @@ fn jwk_to_p256_public_key(jwk: &serde_json::Value) -> Option<Vec<u8>> {
 )]
 mod tests {
     use super::*;
+
+    fn auth_headers(value: &str) -> http::HeaderMap {
+        let mut headers = http::HeaderMap::new();
+        headers.insert("authorization", value.parse().expect("valid header value"));
+        headers
+    }
+
+    /// Unsigned JWT-shaped token whose payload carries the given `client_id`.
+    fn jwt_with_client_id(client_id: &str) -> String {
+        let payload =
+            URL_SAFE_NO_PAD.encode(serde_json::json!({ "client_id": client_id }).to_string());
+        format!("eyJhbGciOiJFUzI1NiJ9.{payload}.sig")
+    }
+
+    /// RFC 9110 Section 11.1: the auth-scheme token is case-insensitive, so
+    /// `BEARER`, `bearer`, `DPOP`, and `dpop` must all match. If this
+    /// resolver rejected casings that `extract_token_from_request` accepts,
+    /// a request with a non-canonical scheme would pass token auth but fail
+    /// signature key resolution on signature-required `/v1/*` routes.
+    #[tokio::test]
+    async fn extract_client_id_accepts_scheme_case_variants() {
+        let state = crate::test_utils::test_app_state().await;
+        let token = jwt_with_client_id("client-123");
+
+        for scheme in ["Bearer", "BEARER", "bearer", "DPoP", "DPOP", "dpop"] {
+            let headers = auth_headers(&format!("{scheme} {token}"));
+            assert_eq!(
+                extract_client_id(&headers, &state).as_deref(),
+                Some("client-123"),
+                "{scheme} scheme must be accepted (RFC 9110 case-insensitivity)"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn extract_client_id_rejects_unrecognized_scheme() {
+        let state = crate::test_utils::test_app_state().await;
+        let token = jwt_with_client_id("client-123");
+
+        for value in [format!("Basic {token}"), "Bearer".to_string()] {
+            let headers = auth_headers(&value);
+            assert_eq!(extract_client_id(&headers, &state), None);
+        }
+    }
 
     #[test]
     fn test_jwk_to_p256_public_key_valid() {
