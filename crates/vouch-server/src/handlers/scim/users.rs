@@ -164,44 +164,17 @@ pub(crate) async fn create_user(
             .into_response();
     };
 
-    // Reject provisioning for a domain the calling org hasn't proven it
-    // owns (its primary domain, or an additional domain that has passed
-    // DNS TXT verification) — otherwise Org A's SCIM token could create
-    // `bob@orgB-domain.com` and claim that address for itself. Comparison
-    // is case-insensitive set membership only — no trimming or other
-    // repair, so a domain needing whitespace stripped (`bob@ acme.com`) is
-    // rejected rather than silently repaired, and no shape validation
-    // (ASCII, reserved-TLD, ...) runs against the candidate: an org whose
-    // own primary or additional domain is itself unusual (a reserved-TLD
-    // or IDN address, e.g. from on-prem/AD-derived enrollment) can still
-    // provision against its own domain.
-    let domain_owned =
-        match db::org_owns_verified_domain(&state.store, &auth.org_id, candidate_domain).await {
-            Ok(owned) => owned,
-            Err(e) => {
-                tracing::error!("Failed to check org domain ownership: {e}");
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ScimError::new(500, "Failed to validate email domain")),
-                )
-                    .into_response();
-            }
-        };
-    if !domain_owned {
-        tracing::warn!(
-            org_id = %auth.org_id,
-            email = %redact_email(&email),
-            "rejected SCIM user creation: email domain is not verified for this organization"
-        );
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(
-                ScimError::new(400, "Email domain is not verified for this organization")
-                    .with_type("invalidValue"),
-            ),
-        )
-            .into_response();
-    }
+    // The domain-ownership check is performed inside `create_scim_user`'s
+    // transaction (reading the org doc and version-bumping it via
+    // `compare_and_update`) to close the TOCTOU race that existed when this
+    // check ran as a separate non-transactional read. A concurrent
+    // `remove_additional_domain` that commits between the in-transaction read
+    // and the version-bump changes the org doc's version, so the CAS fails and
+    // the whole transaction re-runs against fresh state — re-reading the org
+    // doc, which now reflects the removed domain, and rejecting. The candidate
+    // domain is only used here for the rejection log message; the authoritative
+    // comparison happens inside the transaction against `verified_domains()`.
+    let _candidate_domain = candidate_domain;
 
     // Extract name
     let name = user.name.as_ref().and_then(|n| {
@@ -215,7 +188,7 @@ pub(crate) async fn create_user(
             })
     });
 
-    // Create user
+    // Create user (domain ownership validated inside the transaction)
     let db_user = match db::create_scim_user(
         &state.store,
         Some(&auth.org_id),
@@ -227,17 +200,38 @@ pub(crate) async fn create_user(
     .await
     {
         Ok(u) => u,
-        Err(e) => {
-            tracing::error!("Failed to create user: {e}");
-            // Check if it's a uniqueness constraint
-            let detail = if e.to_string().contains("UNIQUE") {
-                "User already exists"
-            } else {
-                "Failed to create user"
-            };
+        Err(db::CreateScimUserError::DomainNotOwned) => {
+            tracing::warn!(
+                org_id = %auth.org_id,
+                email = %redact_email(&email),
+                "rejected SCIM user creation: email domain is not verified for this organization"
+            );
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(
+                    ScimError::new(400, "Email domain is not verified for this organization")
+                        .with_type("invalidValue"),
+                ),
+            )
+                .into_response();
+        }
+        Err(db::CreateScimUserError::DuplicateEmail) => {
+            tracing::debug!(
+                org_id = %auth.org_id,
+                email = %redact_email(&email),
+                "rejected SCIM user creation: user already exists"
+            );
             return (
                 StatusCode::CONFLICT,
-                Json(ScimError::new(409, detail).with_type("uniqueness")),
+                Json(ScimError::new(409, "User already exists").with_type("uniqueness")),
+            )
+                .into_response();
+        }
+        Err(e) => {
+            tracing::error!("Failed to create user: {e}");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ScimError::new(500, "Failed to create user")),
             )
                 .into_response();
         }

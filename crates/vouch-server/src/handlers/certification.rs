@@ -309,7 +309,7 @@ async fn get_or_create_cert_user(state: &Arc<AppState>) -> anyhow::Result<db::Us
         if let Some(user) = db::get_user_by_email(&state.store, CERT_USER_EMAIL).await? {
             return Ok(user);
         }
-        return Err(e);
+        return Err(e.into());
     }
 
     // Fetch the newly created user to get a full `User` record.

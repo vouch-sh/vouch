@@ -582,12 +582,62 @@ pub async fn get_scim_user(
     Ok(Some(ScimUserRecord::from(doc)))
 }
 
+/// Errors returned by [`create_scim_user`].
+///
+/// Business-rejection variants are terminal (not retried); `OccConflict` and
+/// DB-retryable `Other` errors are re-run by `with_dsql_retry!`.
+#[derive(Debug, thiserror::Error)]
+pub enum CreateScimUserError {
+    /// The email's domain is not a verified domain of the calling org.
+    ///
+    /// Returned when `org_id` is `Some` and either the org does not exist or
+    /// the email's domain is not in the org's verified-domain set. The SCIM
+    /// handler maps this to `400 invalidValue`.
+    #[error("email domain is not verified for this organization")]
+    DomainNotOwned,
+    /// A user with the same (normalized) email already exists.
+    ///
+    /// Surfaced from both the explicit pre-check and the deterministic-ID
+    /// primary-key collision. The SCIM handler maps this to `409 uniqueness`.
+    #[error("UNIQUE constraint failed: user with email already exists")]
+    DuplicateEmail,
+    /// OCC version race on the org doc; retried by `with_dsql_retry!`, reaches
+    /// callers only when the retry budget is exhausted.
+    #[error("organization was modified concurrently; please retry")]
+    OccConflict,
+    /// Database or unexpected infrastructure failure.
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
+}
+
+impl crate::db::pool::RetryableError for CreateScimUserError {
+    fn is_retryable(&self) -> bool {
+        match self {
+            Self::OccConflict => true,
+            Self::Other(e) => crate::db::pool::is_retryable_db_error(e),
+            Self::DomainNotOwned | Self::DuplicateEmail => false,
+        }
+    }
+}
+
 /// Create a user via SCIM, bound to the given org (or org-less for
 /// the certification test path which passes `None`).
 ///
-/// Returns an error containing "UNIQUE" if a user with the same
-/// email already exists (application-level uniqueness enforcement,
-/// global because emails are globally unique by design).
+/// When `org_id` is `Some`, the email's domain is validated against the
+/// org's verified-domain set **inside the same transaction** as the user
+/// insert, and the org doc is version-bumped via `compare_and_update` to
+/// force an OCC conflict with any concurrent domain removal. This closes
+/// the TOCTOU race window that existed when the domain-ownership check ran
+/// as a separate non-transactional read before user creation: a concurrent
+/// `remove_additional_domain` could commit between the check and the insert,
+/// letting a user be created on a domain the org no longer owned. The
+/// version-bump makes the two writers collide on the org doc's row, so
+/// `with_dsql_retry!` re-runs the loser against fresh state — mirroring the
+/// pattern established by [`create_scim_token`] for the token-cap invariant.
+///
+/// Returns [`CreateScimUserError::DuplicateEmail`] if a user with the same
+/// email already exists (application-level uniqueness enforcement, global
+/// because emails are globally unique by design).
 ///
 /// # Email normalization
 ///
@@ -608,8 +658,8 @@ pub async fn get_scim_user(
 /// calls for the same email — in any casing — therefore compute the same
 /// primary key: the winning insert commits, and the loser's insert fails
 /// with a primary-key violation. `is_unique_violation` catches that and
-/// surfaces the same "UNIQUE constraint failed" error returned by the explicit
-/// pre-check, so the SCIM handler maps both paths to `409 Conflict`.
+/// surfaces the same [`CreateScimUserError::DuplicateEmail`] returned by the
+/// explicit pre-check, so the SCIM handler maps both paths to `409 Conflict`.
 ///
 /// This closes the check-then-act TOCTOU window that existed when each insert
 /// used a fresh random UUID v7: two transactions could both observe "no user
@@ -620,6 +670,18 @@ pub async fn get_scim_user(
 /// at the `documents` PRIMARY KEY constraint. The same pattern is used by
 /// `deterministic_org_id`, `deterministic_jti_id`, and
 /// `deterministic_challenge_state_id`.
+///
+/// The domain-ownership invariant is additionally guarded by a
+/// `compare_and_update` version-bump on the org doc: a concurrent
+/// `remove_additional_domain` that commits between this transaction's org-doc
+/// read and its CAS changes the version, so the CAS returns `Ok(false)` and
+/// the whole block re-runs with fresh state (re-reading the org doc, which
+/// now reflects the removed domain, and rejecting with
+/// [`CreateScimUserError::DomainNotOwned`]). Without the version-bump, the
+/// in-transaction read alone would not close the race under READ COMMITTED
+/// (Postgres default) or SQLite deferred transactions, because the user
+/// insert touches a different row and would not conflict with the org-doc
+/// update.
 pub async fn create_scim_user(
     store: &DocumentStore,
     org_id: Option<&str>,
@@ -627,7 +689,7 @@ pub async fn create_scim_user(
     name: Option<&str>,
     external_id: Option<&str>,
     active: bool,
-) -> Result<ScimUserRecord> {
+) -> Result<ScimUserRecord, CreateScimUserError> {
     use super::documents::user::deterministic_user_id;
 
     // Normalize email to ASCII lowercase so the duplicate check and the
@@ -646,8 +708,45 @@ pub async fn create_scim_user(
     // `UserDoc.email` and its index row match the lowercase convention.
     let user_id = deterministic_user_id(email);
 
+    // Owned `Option<String>` so the retried async block can borrow it
+    // without borrowing `org_id` (a `&str` from the caller's stack frame).
+    let org_id_owned = org_id.map(String::from);
+
     crate::with_dsql_retry!(async {
         let mut tx = store.begin().await?;
+
+        // Validate domain ownership inside the transaction and capture the
+        // org doc version for the OCC version-bump below. When `org_id` is
+        // `None` (certification test path), there is no org to validate
+        // against and no version-bump to perform — the user is created
+        // org-less, matching the prior behavior.
+        let org_snapshot = match &org_id_owned {
+            Some(oid) => {
+                let org_doc = tx
+                    .get::<OrganizationDoc>(oid)
+                    .await?
+                    .ok_or(CreateScimUserError::DomainNotOwned)?;
+                // Extract the domain from the already-lowercased email so the
+                // comparison matches the lowercase convention used by
+                // `OrganizationDoc::verified_domains` (additional domains are
+                // stored verbatim from `normalize_domain`, which lowercases;
+                // the primary domain is lowercased by `get_or_create_org`).
+                let (_, candidate_domain) = email.rsplit_once('@').ok_or_else(|| {
+                    CreateScimUserError::Other(anyhow::anyhow!(
+                        "invalid email format: no '@' separator"
+                    ))
+                })?;
+                let domain_owned = org_doc
+                    .data
+                    .verified_domains()
+                    .any(|d| d.eq_ignore_ascii_case(candidate_domain));
+                if !domain_owned {
+                    return Err(CreateScimUserError::DomainNotOwned);
+                }
+                Some((org_doc.id, org_doc.version, org_doc.data))
+            }
+            None => None,
+        };
 
         // Pre-check by email index. This is the fast path for the common
         // "user already exists" case: it returns the existing-user error
@@ -657,13 +756,13 @@ pub async fn create_scim_user(
         // the deterministic ID, so their row has a random UUID v7 ID and would
         // not collide with `user_id`.
         if tx.find_one::<UserDoc>("email", email).await?.is_some() {
-            anyhow::bail!("UNIQUE constraint failed: user with email already exists");
+            return Err(CreateScimUserError::DuplicateEmail);
         }
 
         let doc = UserDoc {
             email: email.to_string(),
             name: name.map(String::from),
-            org_id: org_id.map(String::from),
+            org_id: org_id_owned.clone(),
             is_org_admin: false,
             active,
             external_id: external_id.map(String::from),
@@ -674,15 +773,34 @@ pub async fn create_scim_user(
         // insert_with_id: the loser of a concurrent create race fails here with
         // a primary-key violation (SQLSTATE 23505 / SQLite SQLITE_CONSTRAINT_PRIMARYKEY).
         // 23505 is not retryable, so with_dsql_retry! surfaces it as Err(e) and
-        // the `is_unique_violation` arm below maps it to the same error string
-        // the handler expects.
+        // the `is_unique_violation` arm below maps it to the same error the
+        // handler expects.
         let result = match tx.insert_with_id(&user_id, &doc).await {
             Ok(result) => result,
             Err(e) if super::pool::is_unique_violation(&e) => {
-                anyhow::bail!("UNIQUE constraint failed: user with email already exists");
+                return Err(CreateScimUserError::DuplicateEmail);
             }
-            Err(e) => return Err(e),
+            Err(e) => return Err(CreateScimUserError::Other(e)),
         };
+
+        // Version-bump the organization doc (same data, new version) to force
+        // an OCC conflict with any concurrent writer that modified the org
+        // between our read above and this CAS — most importantly
+        // `remove_additional_domain`. If the domain was removed in that
+        // window, the CAS returns `Ok(false)` (version mismatch) and
+        // `with_dsql_retry!` re-runs the whole block: the re-read sees the
+        // removed domain and rejects with `DomainNotOwned`. Without this
+        // version-bump, the in-transaction read alone would not close the
+        // TOCTOU race under READ COMMITTED, because the user insert touches a
+        // different row and would not conflict with the org-doc update.
+        if let Some((org_doc_id, org_version, org_data)) = org_snapshot {
+            let won = tx
+                .compare_and_update::<OrganizationDoc>(&org_doc_id, org_version, &org_data)
+                .await?;
+            if !won {
+                return Err(CreateScimUserError::OccConflict);
+            }
+        }
 
         tx.commit().await?;
         Ok(ScimUserRecord::from(result))

@@ -140,8 +140,14 @@ pub async fn get_organization(store: &DocumentStore, org_id: &str) -> Result<Opt
 /// silently repaired.
 ///
 /// A nonexistent org is treated as owning nothing rather than an error,
-/// since the caller (SCIM user creation) has already authenticated the org
-/// via its token and only needs a yes/no membership answer.
+/// since the caller only needs a yes/no membership answer.
+///
+/// **Note**: SCIM user creation (`create_scim_user`) no longer calls this
+/// function — it performs the same check inside the user-creation transaction
+/// (reading `OrganizationDoc` and version-bumping it via `compare_and_update`)
+/// to close the TOCTOU race that existed when this check ran as a separate
+/// non-transactional read. This function remains for other callers that need
+/// a standalone read-only membership check.
 pub async fn org_owns_verified_domain(
     store: &DocumentStore,
     org_id: &str,
