@@ -152,9 +152,12 @@ async fn authenticate(
         ));
     };
 
-    if let Some(token) = auth_header
-        .strip_prefix("Bearer ")
-        .or_else(|| auth_header.strip_prefix("bearer "))
+    // RFC 9110 Section 11.1: the auth-scheme token is case-insensitive, so
+    // `BEARER`, `bearer`, and `BeArEr` must all match like `Bearer`. Split
+    // on the first space and compare the scheme with `eq_ignore_ascii_case`
+    // rather than hard-coding a small set of casings via `strip_prefix`.
+    if let Some((scheme, token)) = auth_header.split_once(' ')
+        && scheme.eq_ignore_ascii_case("bearer")
     {
         let token_hash = hex::encode(digest::digest(&SHA256, token.as_bytes()));
         let token_record = db::get_scim_token_by_hash(&state.store, &token_hash)
@@ -203,10 +206,13 @@ async fn authenticate(
     // must reject cookie auth outright, a header that's present but
     // doesn't match a known bearer scheme is a hard 401 here rather than
     // being allowed to fall through to that cookie fallback.
-    if !auth_header.starts_with("DPoP ")
-        && !auth_header.starts_with("Bearer ")
-        && !auth_header.starts_with("bearer ")
-    {
+    //
+    // RFC 9110 Section 11.1: scheme matching is case-insensitive, so
+    // `bearer`, `BEARER`, `dpop`, and `DPOP` are all valid here.
+    let scheme_valid = auth_header.split_once(' ').is_some_and(|(scheme, _)| {
+        scheme.eq_ignore_ascii_case("dpop") || scheme.eq_ignore_ascii_case("bearer")
+    });
+    if !scheme_valid {
         return Err(ServiceError::api(
             StatusCode::UNAUTHORIZED,
             "unauthorized",
@@ -581,6 +587,57 @@ mod tests {
         let (status, _body) =
             http_get(&app, PATH, &[("Authorization", &format!("Bearer {token}"))]).await;
         assert_eq!(status, StatusCode::OK);
+    }
+
+    /// RFC 9110 Section 11.1: the auth-scheme token is case-insensitive, so
+    /// `BEARER`, `bearer`, and `BeArEr` must all authenticate the same as
+    /// `Bearer`. Regression test for the case-sensitive `strip_prefix`
+    /// pattern that incorrectly rejected uppercase/mixed-case schemes.
+    #[tokio::test]
+    async fn audit_token_accepts_bearer_scheme_case_variants() {
+        let (app, state) = test_app().await;
+        let org = create_test_org(&state.store, "example.com").await;
+        let token = create_test_audit_token(&state.store, "poller", &org.id).await;
+
+        for scheme in ["BEARER", "bearer", "BeArEr", "bEaReR"] {
+            let (status, _body) = http_get(
+                &app,
+                PATH,
+                &[("Authorization", &format!("{scheme} {token}"))],
+            )
+            .await;
+            assert_eq!(
+                status,
+                StatusCode::OK,
+                "{scheme} scheme must be accepted (RFC 9110 §11.1 case-insensitivity)"
+            );
+        }
+    }
+
+    /// An unrecognized scheme must still be rejected by the guard clause
+    /// even when it's a case variant of a scheme we don't support (e.g.
+    /// `Basic`). This confirms the guard didn't become overly permissive.
+    #[tokio::test]
+    async fn guard_clause_rejects_unrecognized_scheme_case_variants() {
+        let (app, _state) = test_app().await;
+
+        for scheme in ["Basic", "basic", "BASIC", "bAsIc"] {
+            let (status, body) = http_get(
+                &app,
+                PATH,
+                &[("Authorization", &format!("{scheme} dXNlcjpwYXNz"))],
+            )
+            .await;
+            assert_eq!(
+                status,
+                StatusCode::UNAUTHORIZED,
+                "{scheme} must be rejected by the guard clause"
+            );
+            assert!(
+                body.contains("Unsupported authorization scheme"),
+                "{scheme} must be rejected as an unsupported scheme; got: {body}"
+            );
+        }
     }
 
     #[tokio::test]
