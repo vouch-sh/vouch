@@ -87,8 +87,8 @@ pub use organizations::{
     get_org_signing_key, get_organization, get_organization_domain, get_verification_token,
     ineligible_subdomain_candidates, list_additional_domains, list_all_verified_additional_domains,
     list_org_signing_keys, mark_additional_domain_verified, normalize_domain,
-    org_owns_verified_domain, record_recheck_result, release_subdomain, remove_additional_domain,
-    try_insert_org_signing_key, unicode_form, validate_subdomain_label,
+    record_recheck_result, release_subdomain, remove_additional_domain, try_insert_org_signing_key,
+    unicode_form, validate_subdomain_label,
 };
 
 // Re-export organization test helpers (only available in tests)
