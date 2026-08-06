@@ -579,19 +579,22 @@ pub(crate) async fn browser_login_complete(
         )
     })?;
 
-    // Helper to log failed login attempts
-    let log_failure = |user_id: &str, authenticator_id: Option<&str>, reason: &str| {
-        let params = AuthEventParams {
-            user_id: user_id.to_string(),
-            event_type: AuthEventType::LoginFailed,
-            authenticator_id: authenticator_id.map(String::from),
-            success: false,
-            failure_reason: Some(reason.to_string()),
-            client: client_info.clone(),
-            ..AuthEventParams::default()
+    // Helper to log failed login attempts. The email feeds the audit row's
+    // `email_domain`/`email_hmac` columns (never stored raw); without it the
+    // event is invisible to org-scoped audit queries, which filter on domain.
+    let log_failure =
+        |user_id: &str, email: Option<&str>, authenticator_id: Option<&str>, reason: &str| {
+            let params = AuthEventParams {
+                user_id: user_id.to_string(),
+                event_type: AuthEventType::LoginFailed,
+                authenticator_id: authenticator_id.map(String::from),
+                success: false,
+                failure_reason: Some(reason.to_string()),
+                client: client_info.clone(),
+                ..AuthEventParams::default()
+            };
+            db::spawn_audit_event(&state.audit, params, email.map(String::from));
         };
-        db::spawn_audit_event(&state.audit, params, None);
-    };
 
     // Look up authenticator and verify ownership (single JOIN query)
     use crate::services::auth::{AuthenticatorLookupParams, lookup_and_verify_authenticator};
@@ -611,7 +614,8 @@ pub(crate) async fn browser_login_complete(
             crate::error::ServiceError::Forbidden(_) => "user_mismatch".to_string(),
             _ => "lookup_error".to_string(),
         };
-        log_failure(&user_id.to_string(), None, &reason);
+        // Credential lookup failed — no user row was loaded, so no email.
+        log_failure(&user_id.to_string(), None, None, &reason);
         // Return generic error to prevent credential enumeration
         ServiceError::api(
             StatusCode::UNAUTHORIZED,
@@ -644,7 +648,12 @@ pub(crate) async fn browser_login_complete(
     })
     .await
     .map_err(|e| {
-        log_failure(&user.id, Some(&authenticator.id), &e.to_string());
+        log_failure(
+            &user.id,
+            Some(&user.email),
+            Some(&authenticator.id),
+            &e.to_string(),
+        );
         ServiceError::api(
             StatusCode::UNAUTHORIZED,
             "auth_failed",
@@ -732,7 +741,7 @@ pub(crate) async fn browser_login_complete(
         client: client_info,
         ..AuthEventParams::default()
     };
-    db::spawn_audit_event(&state.audit, auth_event_params, None);
+    db::spawn_audit_event(&state.audit, auth_event_params, Some(user.email.clone()));
 
     crate::infra::metrics::record_auth_event("browser_login_success");
 
@@ -1090,5 +1099,106 @@ mod tests {
             resp_body.contains("state_already_used"),
             "expected 'state_already_used' in response body, got: {resp_body}"
         );
+    }
+
+    #[tokio::test]
+    async fn test_login_failed_audit_event_is_org_visible() {
+        // Browser login audit events were inserted with a `None` email,
+        // leaving `email_domain`/`email_hmac` NULL — invisible to org-scoped
+        // audit queries, whose domain `IN` filter never matches NULL. Drive a
+        // real signature-verification failure through the endpoint and assert
+        // the resulting login_failed row is found by a domain-scoped query.
+        let (app, state) = crate::test_utils::test_app().await;
+
+        let user =
+            crate::test_utils::create_test_user(&state.store, "audit-event@example.com").await;
+        let credential_id: Vec<u8> = b"browser-login-audit-cred".to_vec();
+        crate::db::create_authenticator(
+            &state.store,
+            &crate::db::CreateAuthenticatorParams {
+                user_id: &user.id,
+                user_email: &user.email,
+                name: "Test Key",
+                credential_id: &credential_id,
+                public_key: &[0u8; 32],
+                aaguid: None,
+                user_handle: Some(user.id.as_bytes()),
+                attestation_verified: false,
+            },
+        )
+        .await
+        .expect("create authenticator");
+
+        // Fresh (unconsumed) state JWT.
+        let now = jiff::Timestamp::now();
+        let auth_state = BrowserAuthenticationState {
+            challenge: vec![0u8; 32],
+            rp_id: state.config().rp_id.clone(),
+            created_at: now.as_second(),
+            exp: now.as_second().saturating_add(300),
+            pending_auth: None,
+        };
+        let state_jwt = auth_state
+            .encode(&state.state_signer)
+            .await
+            .expect("encode auth state");
+
+        let user_uuid = Uuid::parse_str(&user.id).expect("user id is a uuid");
+        let client_data = serde_json::json!({
+            "origin": state.config().base_url,
+            "type": "webauthn.get",
+        })
+        .to_string();
+
+        let enc = |b: &[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b);
+        let body = serde_json::json!({
+            "state": state_jwt,
+            "credential_id": enc(&credential_id),
+            "authenticator_data": enc(&[0u8; 37]),
+            "client_data_json": enc(client_data.as_bytes()),
+            "signature": enc(&[0u8; 64]),
+            "user_handle": enc(user_uuid.as_bytes()),
+        })
+        .to_string();
+
+        let (status, resp_body) = crate::test_utils::http_post_json(
+            &app,
+            "/login/webauthn/complete",
+            &body,
+            &[("Origin", state.config().base_url.as_str())],
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "invalid signature must fail authentication: {resp_body}"
+        );
+
+        // The audit event is spawned fire-and-forget; poll briefly.
+        let filter = crate::db::AuditEventFilter {
+            event_types: Some(vec!["login_failed".to_string()]),
+            email_domains: Some(vec!["example.com".to_string()]),
+            user_id: Some(user.id.clone()),
+            ..crate::db::AuditEventFilter::default()
+        };
+        let mut events = Vec::new();
+        for _ in 0..100 {
+            events = state
+                .audit
+                .query_events(&filter)
+                .await
+                .expect("query audit events");
+            if !events.is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            events.len(),
+            1,
+            "login_failed must be visible to an org-scoped (email_domains) audit query"
+        );
+        let event = events.first().expect("one event");
+        assert_eq!(event.email_domain.as_deref(), Some("example.com"));
     }
 }
