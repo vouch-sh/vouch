@@ -535,18 +535,21 @@ fn apply_scim_user_filter(
         if let Some(f) = parse_scim_filter(filter, attr)? {
             return Ok(records
                 .into_iter()
-                .filter(|r| match_filter_value(&r.email, &f))
+                .filter(|r| match_filter_value(&r.email, &f, false))
                 .collect());
         }
     }
 
+    // `externalId` has `caseExact: true` per RFC 7643 Section 3.1, so the
+    // in-memory filter must be case-sensitive for all operators — matching
+    // the case-sensitive indexed `eq` lookup in `try_indexed_user_lookup`.
     if let Some(f) = parse_scim_filter(filter, "externalId")? {
         return Ok(records
             .into_iter()
             .filter(|r| {
                 r.external_id
                     .as_deref()
-                    .is_some_and(|eid| match_filter_value(eid, &f))
+                    .is_some_and(|eid| match_filter_value(eid, &f, true))
             })
             .collect());
     }
@@ -556,13 +559,27 @@ fn apply_scim_user_filter(
 }
 
 /// Check if a value matches a SCIM filter.
-fn match_filter_value(value: &str, filter: &ScimFilter) -> bool {
-    let value_lower = value.to_lowercase();
-    let filter_lower = filter.value.to_lowercase();
-    match filter.op {
-        ScimFilterOp::Eq => value_lower == filter_lower,
-        ScimFilterOp::Co => value_lower.contains(&filter_lower),
-        ScimFilterOp::Sw => value_lower.starts_with(&filter_lower),
+///
+/// Per RFC 7644 Section 3.4.2.2, the case sensitivity of string comparisons
+/// "SHALL be determined by the attribute's 'caseExact' characteristic". When
+/// `case_exact` is true (e.g. `externalId`, see RFC 7643 Section 3.1),
+/// comparisons are case-sensitive for all operators. When false (e.g.
+/// `userName`, `email`, `displayName`), comparisons are case-insensitive.
+fn match_filter_value(value: &str, filter: &ScimFilter, case_exact: bool) -> bool {
+    if case_exact {
+        match filter.op {
+            ScimFilterOp::Eq => value == filter.value,
+            ScimFilterOp::Co => value.contains(&filter.value),
+            ScimFilterOp::Sw => value.starts_with(&filter.value),
+        }
+    } else {
+        let value_lower = value.to_lowercase();
+        let filter_lower = filter.value.to_lowercase();
+        match filter.op {
+            ScimFilterOp::Eq => value_lower == filter_lower,
+            ScimFilterOp::Co => value_lower.contains(&filter_lower),
+            ScimFilterOp::Sw => value_lower.starts_with(&filter_lower),
+        }
     }
 }
 
@@ -1136,17 +1153,20 @@ fn apply_scim_group_filter(
     if let Some(f) = parse_scim_filter(filter, "displayName")? {
         return Ok(records
             .into_iter()
-            .filter(|r| match_filter_value(&r.display_name, &f))
+            .filter(|r| match_filter_value(&r.display_name, &f, false))
             .collect());
     }
 
+    // `externalId` has `caseExact: true` per RFC 7643 Section 3.1, so the
+    // in-memory filter must be case-sensitive for all operators — matching
+    // the case-sensitive indexed `eq` lookup in `try_indexed_group_lookup`.
     if let Some(f) = parse_scim_filter(filter, "externalId")? {
         return Ok(records
             .into_iter()
             .filter(|r| {
                 r.external_id
                     .as_deref()
-                    .is_some_and(|eid| match_filter_value(eid, &f))
+                    .is_some_and(|eid| match_filter_value(eid, &f, true))
             })
             .collect());
     }
