@@ -1659,6 +1659,88 @@ async fn test_scim_filter_external_id_eq_is_case_sensitive() {
 }
 
 #[tokio::test]
+async fn test_scim_filter_external_id_co_is_case_sensitive() {
+    // `externalId` is `caseExact: true` per RFC 7643 Section 3.1, so the
+    // "co" operator must also be case-sensitive (RFC 7644 Section 3.4.2.2).
+    // This guards the in-memory `co` path against the bug where
+    // `match_filter_value` lowercased all attributes unconditionally.
+    let (store, _audit) = test_db().await;
+    seed_test_org(&store).await;
+
+    create_scim_user(
+        &store,
+        Some(TEST_ORG_ID),
+        "test-co@example.com",
+        None,
+        Some("CaseSensitive-ID-123"),
+        true,
+    )
+    .await
+    .expect("Failed to create user");
+
+    // Exact-case "co" matches.
+    let (users, total) = list_scim_users(
+        &store,
+        TEST_ORG_ID,
+        Some(r#"externalId co "CaseSensitive""#),
+        1,
+        100,
+    )
+    .await
+    .expect("Failed to filter users");
+    assert_eq!(total, 1, "exact-case co should match");
+    assert_eq!(users.len(), 1);
+    assert_eq!(users[0].email, "test-co@example.com");
+
+    // Wrong-case "co" must NOT match.
+    let (users, total) = list_scim_users(
+        &store,
+        TEST_ORG_ID,
+        Some(r#"externalId co "casesensitive""#),
+        1,
+        100,
+    )
+    .await
+    .expect("Failed to filter users");
+    assert_eq!(
+        total, 0,
+        "externalId is caseExact: lowercase co should not match"
+    );
+    assert!(users.is_empty());
+}
+
+#[tokio::test]
+async fn test_scim_filter_user_name_co_remains_case_insensitive() {
+    // `userName` and `email` are `caseExact: false` per RFC 7643, so "co"
+    // must remain case-insensitive. Guards against the fix being
+    // over-applied to case-insensitive attributes.
+    let (store, _audit) = test_db().await;
+    seed_test_org(&store).await;
+
+    create_scim_user(
+        &store,
+        Some(TEST_ORG_ID),
+        "swcase@example.com",
+        None,
+        None,
+        true,
+    )
+    .await
+    .expect("Failed to create user");
+
+    let (users, total) =
+        list_scim_users(&store, TEST_ORG_ID, Some(r#"userName co "SWCASE""#), 1, 100)
+            .await
+            .expect("Failed to filter users");
+    assert_eq!(
+        total, 1,
+        "userName is caseExact: false; co must stay case-insensitive"
+    );
+    assert_eq!(users.len(), 1);
+    assert_eq!(users[0].email, "swcase@example.com");
+}
+
+#[tokio::test]
 async fn test_scim_session_invalidation_on_deactivation() {
     let (store, _audit) = test_db().await;
     seed_test_org(&store).await;
@@ -3722,6 +3804,77 @@ async fn test_scim_group_delete_cascades_members() {
         user_exists.is_some(),
         "user should not be deleted when group is deleted"
     );
+}
+
+#[tokio::test]
+async fn test_scim_filter_group_external_id_co_is_case_sensitive() {
+    // `externalId` is `caseExact: true` per RFC 7643 Section 3.1, so the
+    // "co" operator must be case-sensitive for group externalId filters too
+    // (RFC 7644 Section 3.4.2.2). Mirrors the user-side coverage.
+    let (store, _audit) = test_db().await;
+    seed_test_org(&store).await;
+
+    create_scim_group(&store, TEST_ORG_ID, "Eng", Some("GroupCase-ID-1"))
+        .await
+        .expect("Failed to create group");
+
+    // Exact-case "co" matches.
+    let (groups, total) = list_scim_groups(
+        &store,
+        TEST_ORG_ID,
+        Some(r#"externalId co "GroupCase""#),
+        1,
+        100,
+    )
+    .await
+    .expect("Failed to filter groups");
+    assert_eq!(total, 1, "exact-case co should match");
+    assert_eq!(groups.len(), 1);
+    assert_eq!(groups[0].external_id.as_deref(), Some("GroupCase-ID-1"));
+
+    // Wrong-case "co" must NOT match.
+    let (groups, total) = list_scim_groups(
+        &store,
+        TEST_ORG_ID,
+        Some(r#"externalId co "groupcase""#),
+        1,
+        100,
+    )
+    .await
+    .expect("Failed to filter groups");
+    assert_eq!(
+        total, 0,
+        "externalId is caseExact: lowercase co should not match"
+    );
+    assert!(groups.is_empty());
+}
+
+#[tokio::test]
+async fn test_scim_filter_group_display_name_co_remains_case_insensitive() {
+    // `displayName` is `caseExact: false` per RFC 7643, so "co" must stay
+    // case-insensitive. Guards against the fix being over-applied.
+    let (store, _audit) = test_db().await;
+    seed_test_org(&store).await;
+
+    create_scim_group(&store, TEST_ORG_ID, "Engineering", None)
+        .await
+        .expect("Failed to create group");
+
+    let (groups, total) = list_scim_groups(
+        &store,
+        TEST_ORG_ID,
+        Some(r#"displayName co "ENGINEER""#),
+        1,
+        100,
+    )
+    .await
+    .expect("Failed to filter groups");
+    assert_eq!(
+        total, 1,
+        "displayName is caseExact: false; co must stay case-insensitive"
+    );
+    assert_eq!(groups.len(), 1);
+    assert_eq!(groups[0].display_name, "Engineering");
 }
 
 // ========================================================================
