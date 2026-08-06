@@ -290,8 +290,8 @@ async fn resolve_user(
 /// 3. **Create** — no match creates a new user carrying the binding.
 ///
 /// When `upstream` is `None` (no stable subject available, e.g. a SAML
-/// IdP emitting transient NameIDs), matching is by email alone, as it
-/// was before identity binding existed.
+/// IdP not asserting a `persistent`-format NameID), matching is by email
+/// alone, as it was before identity binding existed.
 pub async fn enroll_user_with_org(
     store: &DocumentStore,
     email: &str,

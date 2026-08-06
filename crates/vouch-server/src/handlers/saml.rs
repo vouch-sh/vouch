@@ -21,40 +21,6 @@ use crate::db::{self, ClientInfo};
 use crate::handlers::enroll::{ErrorTemplate, complete_enrollment_after_identity};
 use crate::services::idp::IdentityResult;
 
-/// SAML NameID formats stable enough to bind as a durable identity.
-///
-/// Only these are bound as the account's `(issuer, subject)` identity.
-/// Any other format — `transient` (rotates by design), `unspecified`,
-/// an unknown URN, or an absent `Format` attribute — may change between
-/// logins; binding one would lazily bind the first value and then refuse
-/// the next login for the same email as an identity conflict, locking
-/// the user out. Those cases fall back to email-only matching (logged).
-const STABLE_NAMEID_FORMATS: &[&str] = &[
-    "urn:oasis:names:tc:SAML:2.0:nameid-format:persistent",
-    "urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress",
-];
-
-/// Build the durable upstream identity from a validated SAML assertion.
-///
-/// Returns `Some` only for a NameID whose `Format` is in
-/// [`STABLE_NAMEID_FORMATS`]; every other case (including an absent
-/// format or a missing NameID) returns `None`, leaving account matching
-/// to fall back to email alone.
-fn saml_upstream_identity(
-    entity_id: &str,
-    name_id: Option<&str>,
-    name_id_format: Option<&str>,
-) -> Option<db::IdpIdentity> {
-    let name_id = name_id?;
-    match name_id_format {
-        Some(format) if STABLE_NAMEID_FORMATS.contains(&format) => Some(db::IdpIdentity {
-            issuer: entity_id.to_string(),
-            subject: name_id.to_string(),
-        }),
-        _ => None,
-    }
-}
-
 // ============================================================================
 // Request types
 // ============================================================================
@@ -203,21 +169,17 @@ pub(crate) async fn acs(
     };
 
     // Step 7: Convert SamlAssertion to the protocol-agnostic IdentityResult.
-    // The upstream identity is (IdP entity ID, NameID), bound only for
-    // NameID formats that are stable across logins (see
-    // `saml_upstream_identity`). Anything else falls back to email-only
-    // matching so a rotating NameID cannot lock the user out.
     let upstream = saml_upstream_identity(
         &saml_provider.idp_metadata.entity_id,
         assertion.name_id.as_deref(),
         assertion.name_id_format.as_deref(),
     );
-    if upstream.is_none() && assertion.name_id.is_some() {
-        tracing::warn!(
+    if assertion.name_id.is_some() && upstream.is_none() {
+        tracing::debug!(
             idp = %saml_provider.id,
-            name_id_format = ?assertion.name_id_format,
-            "SAML NameID format is not stable (need persistent or emailAddress); \
-             skipping identity binding (account matching falls back to email only)"
+            name_id_format = assertion.name_id_format.as_deref().unwrap_or("(missing)"),
+            "SAML NameID format is not persistent; skipping identity binding \
+             (account matching falls back to email only)"
         );
     }
     let identity = IdentityResult {
@@ -236,72 +198,48 @@ pub(crate) async fn acs(
     .await
 }
 
+/// SAML 2.0 NameID format the OASIS Core spec (§8.3.7) defines specifically
+/// for durable cross-session account linking: the IdP guarantees the same
+/// value for the same principal and must not reassign it to another one.
+const NAMEID_PERSISTENT: &str = "urn:oasis:names:tc:SAML:2.0:nameid-format:persistent";
+
+/// Decide the upstream `(issuer, subject)` identity to bind for a SAML
+/// sign-in, if any.
+///
+/// Only a `persistent`-format NameID is eligible for identity binding — it
+/// is the one format the SAML spec designates for this exact purpose.
+/// Every other format is not a durable per-principal identifier: an IdP
+/// may mint a new NameID on every login without declaring `transient`
+/// (many default to `unspecified`), and `emailAddress` carries the same
+/// reassignment risk that motivates keying binding on something other
+/// than the email address in the first place. A missing `Format`
+/// attribute defaults to `unspecified` per the SAML core spec and is
+/// treated the same way. Deployments on those formats fall back to
+/// email-only account matching, as they did before identity binding
+/// existed — see `enroll_user_with_org`'s "Identity matching" docs.
+fn saml_upstream_identity(
+    entity_id: &str,
+    name_id: Option<&str>,
+    name_id_format: Option<&str>,
+) -> Option<crate::db::IdpIdentity> {
+    let name_id = name_id?;
+    if name_id_format != Some(NAMEID_PERSISTENT) {
+        return None;
+    }
+    Some(crate::db::IdpIdentity {
+        issuer: entity_id.to_string(),
+        subject: name_id.to_string(),
+    })
+}
+
 // ============================================================================
 // Tests
 // ============================================================================
 
 #[cfg(test)]
-#[expect(
-    clippy::expect_used,
-    reason = "test code: panic on assertion failure is acceptable"
-)]
 mod tests {
-    use super::saml_upstream_identity;
     use crate::test_utils::{http_get_full, http_post_form, test_app};
     use axum::http::StatusCode;
-
-    const ENTITY: &str = "https://idp.example.com/saml";
-
-    #[test]
-    fn saml_binds_persistent_and_email_formats() {
-        let persistent = saml_upstream_identity(
-            ENTITY,
-            Some("stable-1"),
-            Some("urn:oasis:names:tc:SAML:2.0:nameid-format:persistent"),
-        )
-        .expect("persistent NameID must bind");
-        assert_eq!(persistent.issuer, ENTITY);
-        assert_eq!(persistent.subject, "stable-1");
-
-        let email = saml_upstream_identity(
-            ENTITY,
-            Some("user@example.com"),
-            Some("urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress"),
-        )
-        .expect("emailAddress NameID must bind");
-        assert_eq!(email.subject, "user@example.com");
-    }
-
-    #[test]
-    fn saml_skips_unstable_or_unknown_formats() {
-        // Transient, unspecified, an unknown URN, and an absent Format all
-        // may rotate per login, so none may be bound — binding them would
-        // lock the user out on their second sign-in.
-        for format in [
-            Some("urn:oasis:names:tc:SAML:2.0:nameid-format:transient"),
-            Some("urn:oasis:names:tc:SAML:1.1:nameid-format:unspecified"),
-            Some("urn:example:custom-format"),
-            None,
-        ] {
-            assert!(
-                saml_upstream_identity(ENTITY, Some("rotating-value"), format).is_none(),
-                "format {format:?} must not be bound"
-            );
-        }
-    }
-
-    #[test]
-    fn saml_skips_when_name_id_absent() {
-        assert!(
-            saml_upstream_identity(
-                ENTITY,
-                None,
-                Some("urn:oasis:names:tc:SAML:2.0:nameid-format:persistent"),
-            )
-            .is_none(),
-            "a missing NameID cannot be bound"
-        );
-    }
 
     #[tokio::test]
     async fn metadata_endpoint_returns_xml_content_type() {
@@ -364,6 +302,93 @@ mod tests {
         assert!(
             body.contains("Invalid") || body.contains("Error") || body.contains("expired"),
             "Expected error content in response: {body}"
+        );
+    }
+
+    // ========================================================================
+    // saml_upstream_identity: NameID format eligibility for identity binding
+    // ========================================================================
+
+    #[test]
+    fn saml_upstream_identity_binds_on_persistent_format() {
+        let upstream = super::saml_upstream_identity(
+            "https://idp.example.com/entity",
+            Some("stable-subject-1"),
+            Some("urn:oasis:names:tc:SAML:2.0:nameid-format:persistent"),
+        );
+        assert!(upstream.is_some(), "persistent NameID must bind");
+        let issuer = upstream.as_ref().map(|u| u.issuer.as_str());
+        let subject = upstream.as_ref().map(|u| u.subject.as_str());
+        assert_eq!(issuer, Some("https://idp.example.com/entity"));
+        assert_eq!(subject, Some("stable-subject-1"));
+    }
+
+    // emailAddress-format NameIDs carry the exact reassignment risk that
+    // identity binding exists to close (see PR discussion on issuer/subject
+    // vs. email as the durable link) — must not bind.
+    #[test]
+    fn saml_upstream_identity_skips_email_format() {
+        assert!(
+            super::saml_upstream_identity(
+                "https://idp.example.com/entity",
+                Some("alice@example.com"),
+                Some("urn:oasis:names:tc:SAML:2.0:nameid-format:emailAddress"),
+            )
+            .is_none()
+        );
+    }
+
+    // A rotating NameID sent under `unspecified` (or any format other than
+    // `transient`) must not bind either — otherwise the first login lazily
+    // binds a value that never recurs, and every later login is refused as
+    // an identity conflict (the bug this test guards against).
+    #[test]
+    fn saml_upstream_identity_skips_unspecified_format() {
+        assert!(
+            super::saml_upstream_identity(
+                "https://idp.example.com/entity",
+                Some("rotates-every-login"),
+                Some("urn:oasis:names:tc:SAML:2.0:nameid-format:unspecified"),
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn saml_upstream_identity_skips_transient_format() {
+        assert!(
+            super::saml_upstream_identity(
+                "https://idp.example.com/entity",
+                Some("one-time-value"),
+                Some("urn:oasis:names:tc:SAML:2.0:nameid-format:transient"),
+            )
+            .is_none()
+        );
+    }
+
+    // A missing `Format` attribute defaults to `unspecified` per the SAML
+    // core spec — no stability guarantee, so no binding.
+    #[test]
+    fn saml_upstream_identity_skips_missing_format() {
+        assert!(
+            super::saml_upstream_identity(
+                "https://idp.example.com/entity",
+                Some("some-subject"),
+                None,
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn saml_upstream_identity_skips_missing_name_id() {
+        assert!(
+            super::saml_upstream_identity(
+                "https://idp.example.com/entity",
+                None,
+                Some("urn:oasis:names:tc:SAML:2.0:nameid-format:persistent"),
+            )
+            .is_none()
         );
     }
 }

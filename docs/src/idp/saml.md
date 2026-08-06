@@ -49,19 +49,27 @@ For domain-based enrollment restrictions, set `VOUCH_IDP_<SLUG>_DOMAIN_ATTRIBUTE
 ## NameID Stability
 
 Vouch binds accounts to the pair (IdP entity ID, NameID) — not to the email address — so
-the NameID must be a stable identifier for the user (see
-[Account linking](overview.md#account-linking-and-identity-binding)). Configure the IdP to
-send a NameID with one of these formats:
+the NameID must be a stable, non-reassignable identifier for the user (see
+[Account linking](overview.md#account-linking-and-identity-binding)). Only the
+`urn:oasis:names:tc:SAML:2.0:nameid-format:persistent` format is eligible for identity
+binding: it is the one NameID format the SAML 2.0 spec defines specifically for durable
+cross-session account linking. Configure the IdP to send a `persistent` NameID.
 
-- `urn:oasis:names:tc:SAML:2.0:nameid-format:persistent`
-- `urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress`
+Every other format falls back to email-only account matching for that sign-in, and Vouch
+does not attempt to bind an identity from it:
 
-Vouch binds **only** these two formats. Any other format — `transient` (a fresh value on
-every login), `unspecified`, a vendor-specific URN, or a NameID sent with no `Format`
-attribute — is treated as potentially rotating and is **not** bound: Vouch skips identity
-binding for that sign-in and falls back to email-only account matching, logging a warning.
-This keeps such deployments working, but they do not get the reassignment protection that
-identity binding provides — switch the IdP to `persistent` or `emailAddress` to enable it.
+- **`transient`** — a fresh value on every login; binding it would treat each login as a
+  different person.
+- **`emailAddress`** — carries the same reassignment risk as the email address itself, so
+  it cannot serve as the durable link that binding requires.
+- **`unspecified`, or a missing `Format` attribute** — the SAML spec gives no stability
+  guarantee for these, and some IdPs mint a new value per login under this format without
+  declaring `transient`. Treating it as stable would bind the first login's value and then
+  refuse every later login as an identity conflict once the IdP sends a different one.
+
+Deployments on a non-`persistent` format keep working exactly as they did before identity
+binding existed, but without the reassignment protection it provides — switch the IdP to
+send a `persistent` NameID to enable it.
 
 ## Configuration Example
 
