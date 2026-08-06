@@ -114,10 +114,13 @@ pub(crate) async fn run(
     profile: Option<&str>,
     kubeconfig_path: Option<&str>,
 ) -> Result<()> {
-    let kubeconfig_path = kubeconfig_path.map_or_else(
-        || default_kubeconfig_path().unwrap_or_else(|_| PathBuf::from("~/.kube/config")),
-        PathBuf::from,
-    );
+    // Propagate the "could not determine home directory" error rather than
+    // falling back to a literal `~/.kube/config`, which Rust would treat as a
+    // directory named `~` in the current working directory (no tilde expansion).
+    let kubeconfig_path = match kubeconfig_path {
+        Some(p) => PathBuf::from(p),
+        None => default_kubeconfig_path()?,
+    };
 
     // Resolve profile, region, and role together so the kubeconfig records the
     // role belonging to the profile the user named.
