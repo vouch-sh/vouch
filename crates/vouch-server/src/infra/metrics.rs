@@ -19,13 +19,25 @@ pub struct MetricsState {
     pub bearer_token: SecretString,
 }
 
+/// The one process-global recorder. The `metrics` crate allows a single
+/// global recorder per process, so the handle is installed once and shared
+/// by every later caller (server rebuilds, tests in one binary).
+static RECORDER: std::sync::LazyLock<
+    Result<PrometheusHandle, metrics_exporter_prometheus::BuildError>,
+> = std::sync::LazyLock::new(|| PrometheusBuilder::new().install_recorder());
+
 /// Install the Prometheus metrics recorder and return a handle for rendering.
+///
+/// Idempotent: the first call installs the recorder; later calls return a
+/// clone of the same handle.
 ///
 /// # Errors
 ///
-/// Returns an error if the recorder cannot be installed (e.g., already installed).
-pub fn install_recorder() -> Result<PrometheusHandle, metrics_exporter_prometheus::BuildError> {
-    PrometheusBuilder::new().install_recorder()
+/// Returns an error if the global recorder was already installed outside this
+/// function, in which case no renderable handle exists.
+pub fn install_recorder()
+-> Result<PrometheusHandle, &'static metrics_exporter_prometheus::BuildError> {
+    RECORDER.as_ref().map(Clone::clone)
 }
 
 /// Extract the bearer token from an `Authorization` header value.

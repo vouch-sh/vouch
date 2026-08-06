@@ -905,19 +905,6 @@ mod tests {
             .expect("valid request")
     }
 
-    /// Install the global Prometheus recorder, returning a renderable handle
-    /// when this test is the first installer in the process.
-    ///
-    /// `PrometheusBuilder::install_recorder` sets a process-global recorder
-    /// and returns `Err` if one is already installed. `#[tokio::test]` tests
-    /// run in the same process, so later callers cannot recover the handle —
-    /// callers should early-return on `Err` (the unique-path assertions keep
-    /// surviving tests deterministic against the shared recorder).
-    fn install_recorder_handle() -> Option<metrics_exporter_prometheus::PrometheusHandle> {
-        drop(metrics::install_recorder());
-        metrics::install_recorder().ok()
-    }
-
     /// Regression test for the layer-ordering bug where `metrics_middleware`
     /// was placed INSIDE the `TimeoutLayer`.
     ///
@@ -931,6 +918,11 @@ mod tests {
     /// the process-global recorder.
     #[tokio::test]
     async fn timeout_records_408_in_metrics() {
+        // The recorder must be live BEFORE the request runs, or the
+        // observations land in the no-op recorder. `install_recorder` is
+        // idempotent and shares one process-global handle across tests.
+        let handle = metrics::install_recorder().expect("prometheus recorder");
+
         // Mirror the FIXED layer ordering from `build_app`: the timeout is
         // innermost (applied first), and `metrics_middleware` is applied
         // after it, making metrics the outer observer of the 408 response.
@@ -952,9 +944,6 @@ mod tests {
             "slow handler must be terminated by the TimeoutLayer with a 408"
         );
 
-        let Some(handle) = install_recorder_handle() else {
-            return;
-        };
         let text = handle.render();
 
         assert!(
