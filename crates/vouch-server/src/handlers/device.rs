@@ -280,17 +280,51 @@ pub(crate) async fn device_token(
             // code before issuing a token. The returned claim is the
             // structural proof that this caller won the consume; it is
             // threaded into TokenIssuanceProof below.
-            let device_claim = db::try_consume_device_auth(&state.store, &device_code_hash)
-                .await
-                .map_err(|e| match e {
-                    db::claim::ClaimError::AlreadyConsumed => {
-                        oauth_error(StatusCode::BAD_REQUEST, OAuthError::invalid_grant())
+            //
+            // `AlreadyConsumed` is deliberately indistinguishable between a
+            // code that was consumed earlier (replay) and a code that a
+            // concurrent caller just consumed (race loser) — see
+            // `try_consume_device_auth`. Match the authorization code flow's
+            // defensive "replay = full logout" posture and revoke all of the
+            // user's OAuth sessions in either case. We use `request.user_id`
+            // (read at the top of the handler, set when the device was
+            // authorized) rather than a fresh lookup, since it is already
+            // available and immune to read-snapshot timing under WAL.
+            let device_claim =
+                match db::try_consume_device_auth(&state.store, &device_code_hash).await {
+                    Ok(claim) => claim,
+                    Err(db::claim::ClaimError::AlreadyConsumed) => {
+                        if let Some(ref user_id) = request.user_id {
+                            tracing::warn!(
+                                target: "security",
+                                "Device code replay detected \
+                                 — revoking tokens for user"
+                            );
+                            if let Ok(count) =
+                                db::delete_oauth_sessions_for_user(&state.store, user_id).await
+                                && count > 0
+                            {
+                                state.session_cache.invalidate_for_user(user_id);
+                                tracing::warn!(
+                                    target: "security",
+                                    user_id = %user_id,
+                                    revoked_count = count,
+                                    "Revoked tokens due to device code replay"
+                                );
+                            }
+                        }
+                        return Err(oauth_error(
+                            StatusCode::BAD_REQUEST,
+                            OAuthError::invalid_grant(),
+                        ));
                     }
-                    _ => oauth_error(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        OAuthError::invalid_grant(),
-                    ),
-                })?;
+                    Err(_) => {
+                        return Err(oauth_error(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            OAuthError::invalid_grant(),
+                        ));
+                    }
+                };
 
             // Get user info and create OAuth access token
             let user_id = request.user_id.ok_or_else(|| {
@@ -1178,6 +1212,186 @@ mod tests {
         assert_eq!(
             error["error"], "invalid_grant",
             "Consumed code without user_id should return invalid_grant"
+        );
+    }
+
+    // ========================================================================
+    // Device Code Race-Loser Session Revocation Tests
+    // ========================================================================
+
+    /// Helper: set up an authorized device code for a user and create a
+    /// pre-existing OAuth session for that user. Returns everything the
+    /// race tests need.
+    struct RaceSetup {
+        device_code_hash: String,
+        body: String,
+        token_hash: String,
+        user_id: String,
+    }
+
+    async fn setup_race(setup_label: &str) -> (axum::Router, Arc<AppState>, RaceSetup) {
+        let (app, state) = test_app().await;
+
+        let device_code = format!("test_race_{setup_label}");
+        let device_code_hash = hash_device_code(&device_code);
+        let user_code = "RACE-CODE";
+
+        let now = Timestamp::now();
+        let expires_at = now.checked_add(Span::new().hours(1)).unwrap();
+
+        let id = crate::db::create_device_auth_request(
+            &state.store,
+            &device_code_hash,
+            user_code,
+            None,
+            expires_at,
+            0,
+        )
+        .await
+        .expect("create device auth");
+
+        let user = create_test_user(&state.store, &format!("{setup_label}@example.com")).await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+
+        crate::db::authorize_device_auth(&state.store, &id, &user.id, &user.email, &auth_id)
+            .await
+            .expect("authorize device");
+
+        // Create a pre-existing OAuth session for the user. Its survival
+        // after a race-loser AlreadyConsumed is the regression we test for.
+        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let token_hash = {
+            use aws_lc_rs::digest::{self, SHA256};
+            URL_SAFE_NO_PAD.encode(digest::digest(&SHA256, token.as_bytes()).as_ref())
+        };
+        let session =
+            crate::db::get_session_by_token_hash(&state.store, &token_hash, Timestamp::now())
+                .await
+                .expect("session lookup");
+        assert!(session.is_some(), "pre-existing session should exist");
+
+        let body = format!(
+            "grant_type=urn:ietf:params:oauth:grant-type:\
+             device_code&device_code={}",
+            device_code
+        );
+
+        (
+            app,
+            state,
+            RaceSetup {
+                device_code_hash,
+                body,
+                token_hash,
+                user_id: user.id,
+            },
+        )
+    }
+
+    /// The race-loser `AlreadyConsumed` path must revoke all of the user's
+    /// pre-existing OAuth sessions, matching the authorization code flow's
+    /// defensive posture.
+    #[tokio::test]
+    async fn test_device_code_race_loser_revokes_sessions() {
+        use crate::db::claim::ClaimError;
+
+        let (_app, state, setup) = setup_race("revoke").await;
+
+        // Two concurrent consumes of the same device code. Exactly one wins;
+        // the other gets AlreadyConsumed. This is the same OCC pattern used
+        // by the authorization code flow.
+        let store_a = state.store.clone();
+        let store_b = state.store.clone();
+        let hash_a = setup.device_code_hash.clone();
+        let hash_b = setup.device_code_hash.clone();
+        let (result_a, result_b) = tokio::join!(
+            async move { crate::db::try_consume_device_auth(&store_a, &hash_a).await },
+            async move { crate::db::try_consume_device_auth(&store_b, &hash_b).await },
+        );
+
+        let a_won = result_a.is_ok();
+        let b_won = result_b.is_ok();
+        assert!(
+            a_won ^ b_won,
+            "exactly one concurrent device-code consume must win, got a={a_won}, b={b_won}"
+        );
+        for r in [result_a, result_b] {
+            if let Err(e) = r {
+                assert!(
+                    matches!(e, ClaimError::AlreadyConsumed),
+                    "loser should be AlreadyConsumed, got: {e:?}"
+                );
+            }
+        }
+
+        // Simulate what the handler does on the AlreadyConsumed branch:
+        // revoke all OAuth sessions for the user that authorized the device
+        // code (request.user_id, captured here as setup.user_id).
+        let count = crate::db::delete_oauth_sessions_for_user(&state.store, &setup.user_id)
+            .await
+            .expect("delete sessions");
+        assert!(count > 0, "should have revoked at least one session");
+        state.session_cache.invalidate_for_user(&setup.user_id);
+
+        // The pre-existing session must now be gone.
+        let session =
+            crate::db::get_session_by_token_hash(&state.store, &setup.token_hash, Timestamp::now())
+                .await
+                .expect("session lookup");
+        assert!(
+            session.is_none(),
+            "race-loser AlreadyConsumed must revoke pre-existing sessions"
+        );
+    }
+
+    /// End-to-end: when two concurrent `/oauth/token` device-code polls
+    /// race, the loser's response must trigger revocation of the user's
+    /// pre-existing session. Drives the HTTP handler, not just the db layer.
+    #[tokio::test]
+    async fn test_device_code_race_loser_revokes_sessions_via_handler() {
+        let (app, state, setup) = setup_race("handler").await;
+
+        // Issue two concurrent token requests for the same device code.
+        // Exactly one wins and gets an access token; the other gets a 400
+        // invalid_grant and — via the handler — revokes sessions.
+        let app_a = app.clone();
+        let app_b = app.clone();
+        let body_a = setup.body.clone();
+        let body_b = setup.body.clone();
+        let (resp_a, resp_b) = tokio::join!(
+            async move { http_post_form(&app_a, "/oauth/token", &body_a, &[]).await },
+            async move { http_post_form(&app_b, "/oauth/token", &body_b, &[]).await },
+        );
+
+        let a_ok = resp_a.0 == StatusCode::OK;
+        let b_ok = resp_b.0 == StatusCode::OK;
+        assert!(
+            a_ok ^ b_ok,
+            "exactly one concurrent poll must succeed, got a={} b={}",
+            resp_a.0,
+            resp_b.0
+        );
+
+        // The loser must return invalid_grant (400).
+        let (loser_status, loser_body) = if !a_ok { resp_a } else { resp_b };
+        assert_eq!(loser_status, StatusCode::BAD_REQUEST);
+        let error: serde_json::Value = serde_json::from_str(&loser_body).expect("Valid JSON");
+        assert_eq!(
+            error["error"], "invalid_grant",
+            "race-loser must return invalid_grant"
+        );
+
+        // After the race, the user's pre-existing session must be revoked.
+        // Note: the winner's freshly-issued session is ALSO revoked under the
+        // "replay = full logout" posture — matching the authorization code
+        // flow. So we only assert the pre-existing session is gone.
+        let session =
+            crate::db::get_session_by_token_hash(&state.store, &setup.token_hash, Timestamp::now())
+                .await
+                .expect("session lookup");
+        assert!(
+            session.is_none(),
+            "race-loser handler path must revoke pre-existing sessions"
         );
     }
 }
