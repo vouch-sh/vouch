@@ -59,6 +59,17 @@ pub enum EnrollUserError {
         /// The issuer whose bound subject differed.
         issuer: String,
     },
+    /// The email matched an existing account that is deactivated (SCIM
+    /// `active: false` or admin deactivation). SSO sign-in must not mint a
+    /// session or mutate the account; re-entry requires SCIM or admin
+    /// reactivation.
+    #[error("account is deactivated")]
+    Deactivated {
+        /// ID of the deactivated account.
+        user_id: String,
+        /// Email on the deactivated account, for the refusal audit event.
+        email: String,
+    },
     /// Any other enrollment failure.
     #[error(transparent)]
     Service(#[from] ServiceError),
@@ -74,6 +85,7 @@ impl super::pool::RetryableError for EnrollUserError {
     fn is_retryable(&self) -> bool {
         match self {
             Self::IdentityConflict { .. } => false,
+            Self::Deactivated { .. } => false,
             Self::Service(e) => super::pool::RetryableError::is_retryable(e),
         }
     }
@@ -192,6 +204,17 @@ async fn resolve_user(
             newly_bound: false,
         });
     };
+
+    // A deactivated account must not re-enter through SSO: refuse before any
+    // side effect (identity binding below, admin-slot claim in the caller).
+    // Every other login path already refuses `active: false`; re-entry is via
+    // SCIM `active: true` or admin reactivation only.
+    if !doc.data.active {
+        return Err(EnrollUserError::Deactivated {
+            user_id: doc.id,
+            email: doc.data.email,
+        });
+    }
 
     let mut newly_bound = false;
     if let Some(login) = upstream {

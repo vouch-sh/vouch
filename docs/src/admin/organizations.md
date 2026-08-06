@@ -66,7 +66,7 @@ All of these are on the Members page, and every one writes an audit event.
 |--------|--------|
 | **Promote** | Grants administrator rights. Audited as `admin_promote`. |
 | **Demote** | Removes administrator rights; the account otherwise keeps working. Audited as `admin_demote`. |
-| **Deactivate** | Marks the account inactive, deletes all of its sessions, revokes all of its SSH certificates, and clears any stored GitHub refresh token. Enrolled authenticators are kept, so reactivating restores access without re-enrollment. Audited as `admin_deactivate`. |
+| **Deactivate** | Marks the account inactive, deletes all of its sessions, revokes all of its SSH certificates, and clears any stored GitHub refresh token. A deactivated account is refused everywhere it could sign back in — browser and SAML SSO (audited as `login_failed` with reason `user_deactivated`), the device-authorization flow, and hardware-key registration — until reactivated here or via SCIM `active: true`. Enrolled authenticators are kept, so reactivating restores access without re-enrollment. Audited as `admin_deactivate`. |
 | **Activate** | Reverses a deactivation. The user must sign in again — deactivation already destroyed their sessions. Audited as `admin_activate`. |
 | **Revoke credentials** | Deletes every enrolled authenticator, deletes all sessions, revokes all SSH certificates, and clears the GitHub refresh token — but keeps the account. The user must enroll a hardware key again before they can log in. Audited as `admin_revoke_credentials`. |
 | **Remove** | Revokes the user's SSH certificates and then deletes the user record, cascading to their authenticators. Audited as `admin_remove_user`. |

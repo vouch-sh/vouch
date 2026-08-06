@@ -7768,3 +7768,64 @@ async fn test_get_user_by_email_is_case_insensitive() {
     assert_eq!(fetched.id, user_id);
     assert_eq!(fetched.email, "carol@example.com");
 }
+
+// A deactivated account must not re-enter through SSO enrollment: the
+// refusal happens inside the transaction, before any identity binding or
+// admin-slot side effect. Re-entry is only via SCIM `active: true` or an
+// admin reactivating the account.
+#[tokio::test]
+async fn test_enroll_refuses_deactivated_account() {
+    use crate::db::documents::user::UserDoc;
+    use crate::db::{
+        EnrollUserError, UpstreamLogin, enroll_user_with_org, update_user_active_status,
+    };
+
+    let (store, _audit) = test_db().await;
+    let domain = "deactivated.example";
+    let issuer = "https://idp.deactivated.example";
+    let login = UpstreamLogin {
+        issuer: issuer.to_string(),
+        durable_subject: Some("subject-1".to_string()),
+    };
+
+    let enrolled = enroll_user_with_org(
+        &store,
+        "gone@deactivated.example",
+        None,
+        Some(domain),
+        Some(&login),
+    )
+    .await
+    .expect("initial enrollment");
+
+    update_user_active_status(&store, &enrolled.id, false)
+        .await
+        .expect("deactivate");
+
+    let result = enroll_user_with_org(
+        &store,
+        "gone@deactivated.example",
+        None,
+        Some(domain),
+        Some(&login),
+    )
+    .await;
+
+    match result {
+        Err(EnrollUserError::Deactivated { user_id, email }) => {
+            assert_eq!(user_id, enrolled.id);
+            assert_eq!(email, "gone@deactivated.example");
+        }
+        other => panic!("expected Deactivated refusal, got {other:?}"),
+    }
+
+    let doc = store
+        .get::<UserDoc>(&enrolled.id)
+        .await
+        .expect("get user")
+        .expect("user exists");
+    assert!(
+        !doc.data.active,
+        "the refused login must not reactivate the account"
+    );
+}
