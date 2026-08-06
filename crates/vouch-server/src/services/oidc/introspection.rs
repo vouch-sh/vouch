@@ -177,22 +177,6 @@ pub async fn introspect_token(
         None => return Ok(IntrospectionResult::inactive()),
     };
 
-    // RFC 7662 Section 4: A token's active status depends on the resource
-    // owner's current authorization state, not just session existence.
-    // Deactivation paths (admin/SCIM) are not atomic — `update_user_active_status`
-    // and `delete_sessions_for_user` commit in separate transactions, so a
-    // deactivated user may still have live sessions. Mirror the `user.active`
-    // check performed by the direct API path (`extract_user_with_org`) and the
-    // token exchange path, so introspection cannot bypass deactivation.
-    let user = db::get_user_by_id(&state.store, &session.user_id)
-        .await
-        .map_err(|e| ServiceError::Internal(format!("Database error: {e}")))?
-        .ok_or_else(|| ServiceError::Internal("User not found for session".to_string()))?;
-
-    if !user.active {
-        return Ok(IntrospectionResult::inactive());
-    }
-
     let DecodedToken::AccessToken(claims) = decoded;
 
     // RFC 7662 Section 4: Prevent cross-client information leakage.
@@ -202,6 +186,29 @@ pub async fn introspect_token(
         && caller_id != claims.client_id
     {
         return Ok(IntrospectionResult::inactive());
+    }
+
+    // RFC 7662 Section 4: A token's active status depends on the resource
+    // owner's current authorization state, not just session existence.
+    // Deactivation paths (admin/SCIM) are not atomic — `update_user_active_status`
+    // and `delete_sessions_for_user` commit in separate transactions, so a
+    // deactivated user may still have live sessions. Mirror the `user.active`
+    // check performed by the direct API path (`extract_user_with_org`) and the
+    // token exchange path, so introspection cannot bypass deactivation.
+    //
+    // M2M tokens (client_credentials grant) have no user row — their session's
+    // `user_id` holds the client_id, so there is no resource owner whose
+    // deactivation could apply. A user session whose user row has vanished is
+    // reported inactive rather than as a server error (Section 2.2: the
+    // inactive response is the uniform "not valid here" answer).
+    if session.session_type != db::SessionPurpose::M2MAccessToken {
+        let user_active = db::get_user_by_id(&state.store, &session.user_id)
+            .await
+            .map_err(|e| ServiceError::Internal(format!("Database error: {e}")))?
+            .is_some_and(|u| u.active);
+        if !user_active {
+            return Ok(IntrospectionResult::inactive());
+        }
     }
 
     // RFC 9396: authorization_details from session (already a Value).

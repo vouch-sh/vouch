@@ -796,3 +796,57 @@ async fn test_introspection_returns_active_for_reactivated_user() {
         "Reactivated user's token must return active=true, got: {response}"
     );
 }
+
+#[tokio::test]
+async fn test_introspection_m2m_client_credentials_token_is_active() {
+    // M2M sessions store the client_id in `user_id` and have no user row.
+    // Introspection must report them active — not 500, and not inactive —
+    // since there is no resource owner whose deactivation could apply.
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "m2m-introspect@example.com").await;
+    let client = create_test_client(
+        &state.store,
+        &user.id,
+        TestClientSpec {
+            grant_types: Some(vec!["client_credentials".to_string()]),
+            ..TestClientSpec::default()
+        },
+    )
+    .await;
+    let auth_header = client.basic_auth_header();
+
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        "grant_type=client_credentials",
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "client_credentials issuance: {body}"
+    );
+    let token_response: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let access_token = token_response["access_token"]
+        .as_str()
+        .expect("access_token in response");
+
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/introspect",
+        &format!("token={access_token}"),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "M2M introspection must not error: {body}"
+    );
+    let response: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(
+        response["active"], true,
+        "M2M token must introspect as active despite having no user row: {response}"
+    );
+}

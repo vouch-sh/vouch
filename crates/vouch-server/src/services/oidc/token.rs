@@ -1080,6 +1080,14 @@ pub async fn validate_session_token(
         None => return Ok(None),
     };
 
+    // Deactivation and session deletion commit in separate transactions, so a
+    // deactivated user can retain live sessions. Refuse to validate them here
+    // so downstream consumers (userinfo, authorize) cannot serve a deactivated
+    // account — mirroring the `user.active` guards on the other token paths.
+    if !user.active {
+        return Ok(None);
+    }
+
     // Get authenticator from the server-side session record.
     // The authenticator_id is stored server-side and is NOT included in the JWT
     // to prevent information leakage.
