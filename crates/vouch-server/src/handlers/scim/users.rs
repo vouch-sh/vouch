@@ -661,7 +661,7 @@ pub(crate) fn db_user_to_scim(base_url: &str, user: db::ScimUserRecord) -> ScimU
         meta: Some(ScimMeta {
             resource_type: "User".to_string(),
             created: user.created_at,
-            last_modified: Some(user.created_at),
+            last_modified: Some(user.updated_at),
             location: format!("{base_url}/scim/v2/Users/{}", user.id),
         }),
     }

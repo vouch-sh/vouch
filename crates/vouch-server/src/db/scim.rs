@@ -404,6 +404,7 @@ pub struct ScimUserRecord {
     pub email: String,
     pub name: Option<String>,
     pub created_at: Timestamp,
+    pub updated_at: Timestamp,
     pub active: bool,
     pub external_id: Option<String>,
 }
@@ -415,6 +416,7 @@ impl From<Document<UserDoc>> for ScimUserRecord {
             email: doc.data.email,
             name: doc.data.name,
             created_at: doc.created_at,
+            updated_at: doc.updated_at,
             active: doc.data.active,
             external_id: doc.data.external_id,
         }
