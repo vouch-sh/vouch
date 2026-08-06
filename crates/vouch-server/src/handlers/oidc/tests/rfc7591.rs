@@ -79,15 +79,42 @@ async fn test_rfc7591_register_rejects_expired_token() {
         "redirect_uris": ["https://example.com/callback"],
     });
 
-    let (status, _body) = http_post_json(
+    let response = http_request_full(
         &app,
+        "POST",
         "/oauth/register",
-        &body.to_string(),
-        &[("Authorization", &format!("Bearer {token}"))],
+        Some(body.to_string()),
+        &[
+            ("Content-Type", "application/json"),
+            ("Authorization", &format!("Bearer {token}")),
+        ],
     )
     .await;
 
-    assert_eq!(status, StatusCode::UNAUTHORIZED, "Revoked token → 401");
+    // RFC 6750 §3.1: invalid bearer tokens MUST return `invalid_token`, not
+    // `invalid_client`. OAuth client libraries use this distinction to decide
+    // whether to retry (invalid_token) or re-prompt (invalid_client).
+    assert_eq!(
+        response.status,
+        StatusCode::UNAUTHORIZED,
+        "Revoked token → 401"
+    );
+    let json: serde_json::Value = serde_json::from_str(&response.body).expect("Valid JSON");
+    assert_eq!(
+        json["error"], "invalid_token",
+        "Revoked token must return invalid_token (RFC 6750): {}",
+        response.body
+    );
+    // RFC 6750 §3.1: WWW-Authenticate MUST carry error="invalid_token".
+    let www_auth = response
+        .headers
+        .get("www-authenticate")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert!(
+        www_auth.contains("invalid_token"),
+        "WWW-Authenticate must contain error=\"invalid_token\": {www_auth}"
+    );
 }
 
 #[tokio::test]
@@ -98,15 +125,38 @@ async fn test_rfc7591_register_rejects_invalid_jwt() {
         "redirect_uris": ["https://example.com/callback"],
     });
 
-    let (status, _body) = http_post_json(
+    let response = http_request_full(
         &app,
+        "POST",
         "/oauth/register",
-        &body.to_string(),
-        &[("Authorization", "Bearer not-a-valid-jwt")],
+        Some(body.to_string()),
+        &[
+            ("Content-Type", "application/json"),
+            ("Authorization", "Bearer not-a-valid-jwt"),
+        ],
     )
     .await;
 
-    assert_eq!(status, StatusCode::UNAUTHORIZED, "Invalid JWT → 401");
+    assert_eq!(
+        response.status,
+        StatusCode::UNAUTHORIZED,
+        "Invalid JWT → 401"
+    );
+    let json: serde_json::Value = serde_json::from_str(&response.body).expect("Valid JSON");
+    assert_eq!(
+        json["error"], "invalid_token",
+        "Invalid JWT must return invalid_token (RFC 6750): {}",
+        response.body
+    );
+    let www_auth = response
+        .headers
+        .get("www-authenticate")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert!(
+        www_auth.contains("invalid_token"),
+        "WWW-Authenticate must contain error=\"invalid_token\": {www_auth}"
+    );
 }
 
 // ========================================================================

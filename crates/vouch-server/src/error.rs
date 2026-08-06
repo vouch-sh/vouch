@@ -140,6 +140,11 @@ pub enum OAuthErrorCode {
     AccessDenied,
     /// RFC 6749 Section 4.1.2.1: The response type is not supported.
     UnsupportedResponseType,
+    /// RFC 6750 Section 3.1: The access token provided is expired, revoked,
+    /// malformed, or invalid for other reasons. Used by OAuth 2.0 protected
+    /// resources (e.g., RFC 7592 registration endpoints) when bearer-token
+    /// validation fails.
+    InvalidToken,
     /// RFC 9449 Section 5.1: Invalid DPoP proof.
     InvalidDpopProof,
     /// RFC 9449 Section 5.1: DPoP nonce required.
@@ -192,6 +197,7 @@ impl OAuthErrorCode {
             | Self::SlowDown
             | Self::ExpiredToken
             | Self::AccessDenied => StatusCode::BAD_REQUEST,
+            Self::InvalidToken => StatusCode::UNAUTHORIZED,
             Self::ServerError | Self::TemporarilyUnavailable => StatusCode::INTERNAL_SERVER_ERROR,
             Self::UseDpopNonce => StatusCode::BAD_REQUEST,
         }
@@ -214,6 +220,7 @@ impl OAuthErrorCode {
             Self::SlowDown => "slow_down",
             Self::ExpiredToken => "expired_token",
             Self::AccessDenied => "access_denied",
+            Self::InvalidToken => "invalid_token",
             Self::InvalidDpopProof => "invalid_dpop_proof",
             Self::UseDpopNonce => "use_dpop_nonce",
             Self::InvalidTarget => "invalid_target",
@@ -318,11 +325,23 @@ impl ServiceError {
                     error_uri: None,
                 }),
             ),
+            Self::Api {
+                status,
+                code,
+                message,
+            } => (
+                status,
+                Json(OAuthErrorResponse {
+                    error: code,
+                    error_description: Some(message),
+                    error_uri: None,
+                }),
+            ),
             Self::Unauthorized(_) => (
                 StatusCode::UNAUTHORIZED,
                 Json(OAuthErrorResponse {
-                    error: "invalid_client".to_string(),
-                    error_description: Some("Client authentication failed".to_string()),
+                    error: OAuthErrorCode::InvalidToken.as_str().to_string(),
+                    error_description: Some("Invalid or expired token".to_string()),
                     error_uri: None,
                 }),
             ),
@@ -774,6 +793,56 @@ mod tests {
         assert_eq!(
             json["error_description"],
             "jwks and jwks_uri are mutually exclusive"
+        );
+    }
+
+    // =========================================================================
+    // RFC 6750 Bearer Token Error Code Tests
+    // =========================================================================
+
+    #[test]
+    fn test_rfc6750_invalid_token_error_code() {
+        assert_eq!(OAuthErrorCode::InvalidToken.as_str(), "invalid_token");
+        assert_eq!(
+            OAuthErrorCode::InvalidToken.status_code(),
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
+    /// RFC 6750 §3.1: `ServiceError::Unauthorized` (used by RFC 7592
+    /// registration-endpoint token validation) MUST render as `invalid_token`,
+    /// not `invalid_client`. OAuth client libraries distinguish these to decide
+    /// whether to retry (invalid_token) or re-prompt (invalid_client).
+    #[test]
+    fn test_unauthorized_renders_as_invalid_token_in_oauth_response() {
+        let err = ServiceError::Unauthorized("Invalid registration access token");
+        let (status, json) = err.into_oauth_response();
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(json.error, "invalid_token");
+        assert!(
+            json.error_description
+                .as_deref()
+                .is_some_and(|d| !d.is_empty())
+        );
+    }
+
+    /// RFC 6750 §3.1: `ServiceError::Api` carrying `invalid_token` (emitted by
+    /// `extract_resource_token` for session JWT failures) MUST be preserved by
+    /// `into_oauth_response()` instead of falling through to a 500
+    /// `server_error`.
+    #[test]
+    fn test_api_invalid_token_preserved_in_oauth_response() {
+        let err = ServiceError::api(
+            StatusCode::UNAUTHORIZED,
+            "invalid_token",
+            "Invalid or expired access token",
+        );
+        let (status, json) = err.into_oauth_response();
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(json.error, "invalid_token");
+        assert_eq!(
+            json.error_description,
+            Some("Invalid or expired access token".to_string())
         );
     }
 }
