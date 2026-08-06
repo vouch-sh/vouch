@@ -68,6 +68,7 @@ pub async fn upsert_user(
         github_id: None,
         github_login: None,
         github_refresh_token: None,
+        idp_identities: Vec::new(),
     };
     let doc = store.insert(&user_doc).await?;
     Ok((doc.id, true))
@@ -102,6 +103,7 @@ pub async fn upsert_user_with_org(
         github_id: None,
         github_login: None,
         github_refresh_token: None,
+        idp_identities: Vec::new(),
     };
     let doc = store.insert(&user_doc).await?;
     Ok((doc.id, true))

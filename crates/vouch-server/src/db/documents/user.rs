@@ -19,6 +19,68 @@ pub struct UserDoc {
     pub github_id: Option<i64>,
     pub github_login: Option<String>,
     pub github_refresh_token: Option<String>,
+    /// Upstream IdP identities bound to this account, at most one per
+    /// issuer (enforced by `enroll_user_with_org`, not the schema).
+    /// Empty for accounts that predate identity binding and for
+    /// SCIM-provisioned accounts that have not yet signed in through an
+    /// IdP — they bind lazily on their first verified-email login.
+    #[serde(default)]
+    pub idp_identities: Vec<IdpIdentity>,
+}
+
+/// An upstream identity: the OIDC `(iss, sub)` pair, or for SAML the
+/// IdP entity ID and NameID. This — not the email address — is the
+/// durable link between a Vouch account and the person the upstream
+/// IdP authenticated. Email is treated as mutable profile data: it can
+/// be reassigned or recycled upstream, so it must never be the only
+/// thing that maps a login onto an existing account.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct IdpIdentity {
+    /// Validated token issuer (OIDC `iss`) or SAML IdP entity ID.
+    pub issuer: String,
+    /// Subject within that issuer (OIDC `sub` or SAML NameID).
+    pub subject: String,
+}
+
+/// The upstream identity presented by a single login, before it is known
+/// whether the subject is eligible for identity binding.
+///
+/// `issuer` is known whenever a login went through a configured IdP, for
+/// both protocols. `durable_subject` is the OIDC `sub` (always present —
+/// OIDC verification is fail-closed on a missing `sub`) or the SAML
+/// NameID, but only when the NameID's `Format` guarantees it will not be
+/// reassigned or rotated (see `saml_upstream_login` in `handlers/saml.rs`).
+/// A SAML login whose NameID format has no such guarantee still carries
+/// `issuer`, with `durable_subject: None` — enough for
+/// `enroll_user_with_org` to refuse a login that cannot reassert the
+/// subject an account is already bound to, without enough to create a new
+/// binding from an unstable value.
+#[derive(Debug, Clone)]
+pub struct UpstreamLogin {
+    pub issuer: String,
+    pub durable_subject: Option<String>,
+}
+
+impl UpstreamLogin {
+    /// The durable `(issuer, subject)` pair this login can bind or match
+    /// against, when its subject is eligible for identity binding.
+    pub(crate) fn as_idp_identity(&self) -> Option<IdpIdentity> {
+        self.durable_subject.clone().map(|subject| IdpIdentity {
+            issuer: self.issuer.clone(),
+            subject,
+        })
+    }
+}
+
+/// Combined index value for the `idp_identity` blind index.
+///
+/// `issuer` and `subject` are joined with a NUL byte, which cannot
+/// appear in an issuer URL or SAML entity ID, so the encoding is
+/// unambiguous: distinct `(issuer, subject)` pairs never collide. The
+/// store HMACs index values before persisting them, so the pair is a
+/// blind equality key like every other index.
+pub(crate) fn idp_identity_index_value(issuer: &str, subject: &str) -> String {
+    format!("{issuer}\u{0}{subject}")
 }
 
 fn default_active() -> bool {
@@ -49,6 +111,12 @@ impl DocumentType for UserDoc {
             entries.push(IndexEntry {
                 field: "github_login",
                 value: github_login.clone(),
+            });
+        }
+        for identity in &self.idp_identities {
+            entries.push(IndexEntry {
+                field: "idp_identity",
+                value: idp_identity_index_value(&identity.issuer, &identity.subject),
             });
         }
         entries
@@ -103,8 +171,90 @@ pub(crate) fn deterministic_user_id(email: &str) -> String {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::expect_used,
+    reason = "test code: panic on assertion failure is acceptable"
+)]
 mod tests {
-    use super::deterministic_user_id;
+    use super::{IdpIdentity, UserDoc, deterministic_user_id, idp_identity_index_value};
+    use crate::db::document_type::DocumentType;
+
+    #[test]
+    fn legacy_user_json_without_idp_identities_deserializes() {
+        // Stored user documents written before identity binding have no
+        // `idp_identities` key; they must deserialize to an empty Vec so
+        // legacy accounts keep working (lazy bind on first login).
+        let json = r#"{
+            "email": "legacy@example.com",
+            "name": null,
+            "org_id": null,
+            "is_org_admin": false,
+            "external_id": null,
+            "github_id": null,
+            "github_login": null,
+            "github_refresh_token": null
+        }"#;
+        let doc: Result<UserDoc, _> = serde_json::from_str(json);
+        let doc = doc.expect("legacy user JSON must deserialize");
+        assert!(doc.idp_identities.is_empty());
+    }
+
+    #[test]
+    fn index_entries_include_one_row_per_idp_identity() {
+        let doc = UserDoc {
+            email: "user@example.com".to_string(),
+            name: None,
+            org_id: None,
+            is_org_admin: false,
+            active: true,
+            external_id: None,
+            github_id: None,
+            github_login: None,
+            github_refresh_token: None,
+            idp_identities: vec![
+                IdpIdentity {
+                    issuer: "https://idp-a.example.com".to_string(),
+                    subject: "subject-a".to_string(),
+                },
+                IdpIdentity {
+                    issuer: "https://idp-b.example.com".to_string(),
+                    subject: "subject-b".to_string(),
+                },
+            ],
+        };
+        let values: Vec<String> = doc
+            .index_entries()
+            .into_iter()
+            .filter(|e| e.field == "idp_identity")
+            .map(|e| e.value)
+            .collect();
+        assert_eq!(
+            values,
+            vec![
+                idp_identity_index_value("https://idp-a.example.com", "subject-a"),
+                idp_identity_index_value("https://idp-b.example.com", "subject-b"),
+            ]
+        );
+    }
+
+    #[test]
+    fn idp_identity_index_value_distinguishes_issuer_and_subject() {
+        // The NUL separator makes the encoding unambiguous for real
+        // issuer values (URLs / entity IDs, which cannot contain NUL):
+        // moving characters across the boundary changes the value.
+        assert_ne!(
+            idp_identity_index_value("https://a.example", "sub-1"),
+            idp_identity_index_value("https://a.example", "sub-2"),
+        );
+        assert_ne!(
+            idp_identity_index_value("https://a.example", "sub-1"),
+            idp_identity_index_value("https://b.example", "sub-1"),
+        );
+        assert_eq!(
+            idp_identity_index_value("https://a.example", "sub-1"),
+            "https://a.example\u{0}sub-1",
+        );
+    }
 
     #[test]
     fn deterministic_user_id_collides_on_equal_emails() {

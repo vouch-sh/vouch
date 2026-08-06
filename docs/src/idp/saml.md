@@ -46,6 +46,39 @@ Vouch extracts user identity from SAML assertion attributes. By default, it look
 
 For domain-based enrollment restrictions, set `VOUCH_IDP_<SLUG>_DOMAIN_ATTRIBUTE` to the attribute name containing the user's domain. If not set, the domain is extracted from the email address.
 
+## NameID Stability
+
+Vouch binds accounts to the pair (IdP entity ID, NameID) — not to the email address — so
+the NameID must be a stable, non-reassignable identifier for the user (see
+[Account linking](overview.md#account-linking-and-identity-binding)). Only the
+`urn:oasis:names:tc:SAML:2.0:nameid-format:persistent` format is eligible for identity
+binding: it is the one NameID format the SAML 2.0 spec defines specifically for durable
+cross-session account linking. Configure the IdP to send a `persistent` NameID.
+
+Every other format cannot create a binding, and Vouch does not attempt to bind an identity
+from it:
+
+- **`transient`** — a fresh value on every login; binding it would treat each login as a
+  different person.
+- **`emailAddress`** — carries the same reassignment risk as the email address itself, so
+  it cannot serve as the durable link that binding requires.
+- **`unspecified`, or a missing `Format` attribute** — the SAML spec gives no stability
+  guarantee for these, and some IdPs mint a new value per login under this format without
+  declaring `transient`. Treating it as stable would bind the first login's value and then
+  refuse every later login as an identity conflict once the IdP sends a different one.
+
+For an account with **no existing binding** for this IdP, a sign-in in one of these formats
+matches on email alone, exactly as it did before identity binding existed. For an account
+that **already has** a binding for this IdP — established by an earlier `persistent`-format
+sign-in — a later sign-in in one of these formats is refused with the same "Account Linking
+Blocked" error as a subject mismatch: it cannot reassert the bound identity, so it must not
+be allowed to fall back to a weaker, email-only check. This is what stops a mix of NameID
+formats from the same IdP from reopening the account-takeover risk identity binding closes.
+
+Deployments on a non-`persistent` format keep working exactly as they did before identity
+binding existed, but without the reassignment protection it provides — switch the IdP to
+send a `persistent` NameID to enable it.
+
 ## Configuration Example
 
 ```bash

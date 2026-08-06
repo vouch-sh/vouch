@@ -104,6 +104,12 @@ pub(crate) struct IdentityResult {
     pub email: String,
     /// Email domain (e.g., "acme.com").
     pub domain: Option<String>,
+    /// The upstream login's issuer, and its subject when the format the
+    /// IdP used guarantees it is durable (see
+    /// [`crate::db::UpstreamLogin`]). `None` only when there is no IdP
+    /// context at all; both OIDC and SAML always know at least the
+    /// issuer, so this is `Some` for every real IdP login.
+    pub upstream: Option<crate::db::UpstreamLogin>,
 }
 
 /// How to send the user to the upstream IdP.

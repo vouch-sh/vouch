@@ -104,6 +104,9 @@ audit_event_kinds! {
     KeyRemoved => "key_removed", AuthEvents;
     DeviceAuthApproved => "device_auth_approved", AuthEvents;
     KeyRegistrationReplay => "key_registration_replay", AuthEvents;
+    // Upstream identity binding (issuer/subject account linking)
+    IdentityBound => "identity_bound", AuthEvents;
+    IdentityBindRefused => "identity_bind_refused", AuthEvents;
     // SCIM provisioning operations
     ScimOperation => "scim_operation", AuthEvents;
     // Credential issuance

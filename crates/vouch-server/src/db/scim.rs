@@ -769,6 +769,7 @@ pub async fn create_scim_user(
             github_id: None,
             github_login: None,
             github_refresh_token: None,
+            idp_identities: Vec::new(),
         };
         // insert_with_id: the loser of a concurrent create race fails here with
         // a primary-key violation (SQLSTATE 23505 / SQLite SQLITE_CONSTRAINT_PRIMARYKEY).

@@ -47,6 +47,13 @@ pub(crate) struct SamlAssertion {
     pub email: String,
     /// Domain extracted from email or configured domain attribute.
     pub domain: Option<String>,
+    /// The `<saml:NameID>` text, when present. Paired with the IdP
+    /// entity ID this is the stable upstream identity used for account
+    /// matching (unless the format is transient — see `name_id_format`).
+    pub name_id: Option<String>,
+    /// The NameID `Format` attribute, when present. Transient-format
+    /// NameIDs change on every login and must not be bound as identity.
+    pub name_id_format: Option<String>,
 }
 
 /// SAML 2.0 bearer subject confirmation method URI.
@@ -287,7 +294,18 @@ pub(crate) fn validate_saml_response(
     // Step 11: Extract domain
     let domain = extract_domain(assertion, provider.domain_attribute.as_deref(), &email);
 
-    Ok(SamlAssertion { email, domain })
+    // Step 12: Extract the NameID and its Format for identity binding.
+    let (name_id, name_id_format) = match extract_name_id(assertion) {
+        Some((id, format)) => (Some(id), format),
+        None => (None, None),
+    };
+
+    Ok(SamlAssertion {
+        email,
+        domain,
+        name_id,
+        name_id_format,
+    })
 }
 
 // ============================================================================
@@ -540,15 +558,21 @@ fn extract_email(
     }
 
     // Fall back to NameID
-    let name_id = assertion
+    extract_name_id(assertion)
+        .map(|(id, _format)| id)
+        .ok_or(ResponseError::NoEmail)
+}
+
+/// Extract the `<saml:Subject>/<saml:NameID>` text and its `Format`
+/// attribute. Returns `None` when the element is missing or empty.
+fn extract_name_id(assertion: roxmltree::Node<'_, '_>) -> Option<(String, Option<String>)> {
+    let node = assertion
         .children()
         .find(|n| n.has_tag_name((NS_SAML, "Subject")))
-        .and_then(|s| s.children().find(|n| n.has_tag_name((NS_SAML, "NameID"))))
-        .and_then(|n| n.text())
-        .map(str::trim)
-        .filter(|s| !s.is_empty());
-
-    name_id.map(str::to_string).ok_or(ResponseError::NoEmail)
+        .and_then(|s| s.children().find(|n| n.has_tag_name((NS_SAML, "NameID"))))?;
+    let text = node.text().map(str::trim).filter(|s| !s.is_empty())?;
+    let format = node.attribute("Format").map(str::to_string);
+    Some((text.to_string(), format))
 }
 
 /// Extract the domain from the assertion or derive it from the email.
@@ -1532,6 +1556,41 @@ mod tests {
 
         assert_eq!(assertion.email, "alice@example.com");
         assert_eq!(assertion.domain, Some("example.com".to_string()));
+        // NameID and its Format must be captured for identity binding.
+        assert_eq!(assertion.name_id.as_deref(), Some("alice@example.com"));
+        assert_eq!(
+            assertion.name_id_format.as_deref(),
+            Some("urn:oasis:names:tc:SAML:2.0:nameid-format:emailAddress"),
+        );
+    }
+
+    /// The NameID extractor returns the text and Format together, and
+    /// `None` when the Format attribute is absent.
+    #[test]
+    fn extract_name_id_reads_text_and_format() {
+        let with_format = r#"<saml:Assertion xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion">
+            <saml:Subject>
+                <saml:NameID Format="urn:oasis:names:tc:SAML:2.0:nameid-format:persistent">stable-id-1</saml:NameID>
+            </saml:Subject>
+        </saml:Assertion>"#;
+        let doc = roxmltree::Document::parse(with_format).expect("parse");
+        let assertion = doc.root_element();
+        let (id, format) = super::extract_name_id(assertion).expect("name id present");
+        assert_eq!(id, "stable-id-1");
+        assert_eq!(
+            format.as_deref(),
+            Some("urn:oasis:names:tc:SAML:2.0:nameid-format:persistent")
+        );
+
+        let no_format = r#"<saml:Assertion xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion">
+            <saml:Subject>
+                <saml:NameID>bare-id</saml:NameID>
+            </saml:Subject>
+        </saml:Assertion>"#;
+        let doc = roxmltree::Document::parse(no_format).expect("parse");
+        let (id, format) = super::extract_name_id(doc.root_element()).expect("name id present");
+        assert_eq!(id, "bare-id");
+        assert_eq!(format, None);
     }
 
     /// Tamper-detection: modifying the email in the assertion after signing must
