@@ -605,3 +605,34 @@ async fn test_id_token_does_not_contain_hardware_claims() {
         "OIDC id_token must not contain hardware_aaguid (OIDC conformance)"
     );
 }
+
+#[tokio::test]
+async fn test_userinfo_rejects_deactivated_user_with_live_session() {
+    // Deactivation and session deletion commit in separate transactions, so a
+    // deactivated user can retain a live session. That session must not serve
+    // userinfo claims (same guard class as introspection, issue #838).
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "userinfo-deactivated@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+
+    crate::db::update_user_active_status(&state.store, &user.id, false)
+        .await
+        .expect("deactivate user");
+
+    let (status, body) = http_get(
+        &app,
+        "/oauth/userinfo",
+        &[("Authorization", &format!("Bearer {token}"))],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "Deactivated user's surviving session must not serve userinfo: {body}"
+    );
+    assert!(
+        !body.contains("userinfo-deactivated@example.com"),
+        "Response must not leak the deactivated user's claims: {body}"
+    );
+}
