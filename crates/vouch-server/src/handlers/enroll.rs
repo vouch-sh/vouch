@@ -666,22 +666,27 @@ pub(crate) async fn complete_enrollment_after_identity(
     {
         Ok(user) => user,
         Err(db::EnrollUserError::IdentityConflict { user_id, issuer }) => {
-            // The email matched an existing account bound to a different
-            // upstream subject at the same issuer. This is the shape of an
-            // upstream email reassignment (account-takeover attempt), so
-            // refuse to link and leave an audit trail.
+            // The email matched an existing account already bound to this
+            // issuer, and this login either asserted a different subject
+            // or (a non-durable NameID/sub format) asserted none at all.
+            // Both are the shape of an upstream email reassignment
+            // (account-takeover attempt) or a login too weak to trust for
+            // an already-bound account, so refuse to link and leave an
+            // audit trail.
             tracing::warn!(
                 user_id = %user_id,
                 issuer = %issuer,
                 email = %redact_email(&identity.email),
-                "Refusing IdP login: asserted subject differs from the \
-                 subject bound to the account with this email"
+                "Refusing IdP login: could not reassert the subject bound \
+                 to the account with this email for this issuer"
             );
             let event = db::AuthEventParams {
                 user_id,
                 event_type: db::AuthEventType::IdentityBindRefused,
                 success: false,
-                failure_reason: Some("upstream subject differs from bound subject".to_string()),
+                failure_reason: Some(
+                    "upstream subject did not match the bound subject".to_string(),
+                ),
                 idp_issuer: Some(issuer),
                 client: client_info,
                 ..Default::default()
@@ -2266,9 +2271,9 @@ mod tests {
             "shared@example.com",
             None,
             None,
-            Some(&db::IdpIdentity {
+            Some(&db::UpstreamLogin {
                 issuer: issuer.to_string(),
-                subject: "victim-subject".to_string(),
+                durable_subject: Some("victim-subject".to_string()),
             }),
         )
         .await
@@ -2279,9 +2284,9 @@ mod tests {
         let identity = IdentityResult {
             email: "shared@example.com".to_string(),
             domain: Some("example.com".to_string()),
-            upstream: Some(db::IdpIdentity {
+            upstream: Some(db::UpstreamLogin {
                 issuer: issuer.to_string(),
-                subject: "attacker-subject".to_string(),
+                durable_subject: Some("attacker-subject".to_string()),
             }),
         };
 
@@ -2313,6 +2318,64 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_non_durable_login_refused_once_issuer_is_bound() {
+        // Bugbot finding on PR #837: an account bound to a durable
+        // (issuer, subject) — e.g. via a persistent-format SAML NameID —
+        // must refuse a later login through the same issuer that carries
+        // no durable subject at all (e.g. the IdP sent an
+        // emailAddress-format NameID this time), rather than silently
+        // falling back to an email-only match. Same observable behavior
+        // as a subject mismatch: error page, no cookie, one
+        // identity_bind_refused event.
+        let state = test_app_state().await;
+        let issuer = "https://idp.downgrade.example";
+        let victim = db::enroll_user_with_org(
+            &state.store,
+            "shared@example.com",
+            None,
+            None,
+            Some(&db::UpstreamLogin {
+                issuer: issuer.to_string(),
+                durable_subject: Some("victim-subject".to_string()),
+            }),
+        )
+        .await
+        .expect("seed bound victim");
+
+        let (stored, claim) = seed_and_consume_oidc_state(&state, "downgrade-state", None).await;
+
+        let identity = IdentityResult {
+            email: "shared@example.com".to_string(),
+            domain: Some("example.com".to_string()),
+            upstream: Some(db::UpstreamLogin {
+                issuer: issuer.to_string(),
+                durable_subject: None,
+            }),
+        };
+
+        let resp = complete_enrollment_after_identity(
+            &state,
+            &stored,
+            identity,
+            claim,
+            ClientInfo::default(),
+        )
+        .await;
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(
+            resp.headers().get(header::SET_COOKIE).is_none(),
+            "a refused login must not set a session cookie"
+        );
+
+        let events = wait_for_audit_events(&state, "identity_bind_refused", &victim.id).await;
+        assert_eq!(events.len(), 1, "one refusal -> one audit event");
+        let event = events.first().expect("identity_bind_refused event");
+        let data: serde_json::Value = serde_json::from_str(&event.data).expect("event data JSON");
+        assert_eq!(data["idp_issuer"], issuer);
+    }
+
+    #[tokio::test]
     async fn test_lazy_bind_emits_identity_bound_event() {
         // A legacy account (no bindings) signing in through an IdP for the
         // first time is lazily bound and emits identity_bound with the
@@ -2326,9 +2389,9 @@ mod tests {
         let identity = IdentityResult {
             email: "legacy@example.com".to_string(),
             domain: Some("example.com".to_string()),
-            upstream: Some(db::IdpIdentity {
+            upstream: Some(db::UpstreamLogin {
                 issuer: issuer.to_string(),
-                subject: "legacy-subject".to_string(),
+                durable_subject: Some("legacy-subject".to_string()),
             }),
         };
 

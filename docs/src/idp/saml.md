@@ -55,8 +55,8 @@ the NameID must be a stable, non-reassignable identifier for the user (see
 binding: it is the one NameID format the SAML 2.0 spec defines specifically for durable
 cross-session account linking. Configure the IdP to send a `persistent` NameID.
 
-Every other format falls back to email-only account matching for that sign-in, and Vouch
-does not attempt to bind an identity from it:
+Every other format cannot create a binding, and Vouch does not attempt to bind an identity
+from it:
 
 - **`transient`** — a fresh value on every login; binding it would treat each login as a
   different person.
@@ -66,6 +66,14 @@ does not attempt to bind an identity from it:
   guarantee for these, and some IdPs mint a new value per login under this format without
   declaring `transient`. Treating it as stable would bind the first login's value and then
   refuse every later login as an identity conflict once the IdP sends a different one.
+
+For an account with **no existing binding** for this IdP, a sign-in in one of these formats
+matches on email alone, exactly as it did before identity binding existed. For an account
+that **already has** a binding for this IdP — established by an earlier `persistent`-format
+sign-in — a later sign-in in one of these formats is refused with the same "Account Linking
+Blocked" error as a subject mismatch: it cannot reassert the bound identity, so it must not
+be allowed to fall back to a weaker, email-only check. This is what stops a mix of NameID
+formats from the same IdP from reopening the account-takeover risk identity binding closes.
 
 Deployments on a non-`persistent` format keep working exactly as they did before identity
 binding existed, but without the reassignment protection it provides — switch the IdP to

@@ -42,6 +42,36 @@ pub struct IdpIdentity {
     pub subject: String,
 }
 
+/// The upstream identity presented by a single login, before it is known
+/// whether the subject is eligible for identity binding.
+///
+/// `issuer` is known whenever a login went through a configured IdP, for
+/// both protocols. `durable_subject` is the OIDC `sub` (always present —
+/// OIDC verification is fail-closed on a missing `sub`) or the SAML
+/// NameID, but only when the NameID's `Format` guarantees it will not be
+/// reassigned or rotated (see `saml_upstream_login` in `handlers/saml.rs`).
+/// A SAML login whose NameID format has no such guarantee still carries
+/// `issuer`, with `durable_subject: None` — enough for
+/// `enroll_user_with_org` to refuse a login that cannot reassert the
+/// subject an account is already bound to, without enough to create a new
+/// binding from an unstable value.
+#[derive(Debug, Clone)]
+pub struct UpstreamLogin {
+    pub issuer: String,
+    pub durable_subject: Option<String>,
+}
+
+impl UpstreamLogin {
+    /// The durable `(issuer, subject)` pair this login can bind or match
+    /// against, when its subject is eligible for identity binding.
+    pub(crate) fn as_idp_identity(&self) -> Option<IdpIdentity> {
+        self.durable_subject.clone().map(|subject| IdpIdentity {
+            issuer: self.issuer.clone(),
+            subject,
+        })
+    }
+}
+
 /// Combined index value for the `idp_identity` blind index.
 ///
 /// `issuer` and `subject` are joined with a NUL byte, which cannot

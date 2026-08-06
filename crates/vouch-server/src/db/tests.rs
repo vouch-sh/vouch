@@ -5321,13 +5321,13 @@ async fn test_enroll_second_user_after_winner_commit_is_not_admin() {
 #[tokio::test]
 async fn test_enroll_identity_binding_wins_over_email() {
     use crate::db::documents::user::UserDoc;
-    use crate::db::{IdpIdentity, enroll_user_with_org};
+    use crate::db::{UpstreamLogin, enroll_user_with_org};
 
     let (store, _audit) = test_db().await;
     let domain = "bind-wins.example";
-    let upstream = IdpIdentity {
+    let upstream = UpstreamLogin {
         issuer: "https://idp.bind-wins.example".to_string(),
-        subject: "subject-1".to_string(),
+        durable_subject: Some("subject-1".to_string()),
     };
 
     let first = enroll_user_with_org(
@@ -5382,7 +5382,7 @@ async fn test_enroll_identity_binding_wins_over_email() {
 #[tokio::test]
 async fn test_enroll_same_issuer_different_subject_refused() {
     use crate::db::documents::user::UserDoc;
-    use crate::db::{EnrollUserError, IdpIdentity, enroll_user_with_org};
+    use crate::db::{EnrollUserError, IdpIdentity, UpstreamLogin, enroll_user_with_org};
 
     let (store, _audit) = test_db().await;
     let domain = "reassigned.example";
@@ -5393,9 +5393,9 @@ async fn test_enroll_same_issuer_different_subject_refused() {
         "shared@reassigned.example",
         None,
         Some(domain),
-        Some(&IdpIdentity {
+        Some(&UpstreamLogin {
             issuer: issuer.to_string(),
-            subject: "victim-subject".to_string(),
+            durable_subject: Some("victim-subject".to_string()),
         }),
     )
     .await
@@ -5407,9 +5407,131 @@ async fn test_enroll_same_issuer_different_subject_refused() {
         "shared@reassigned.example",
         None,
         Some(domain),
-        Some(&IdpIdentity {
+        Some(&UpstreamLogin {
             issuer: issuer.to_string(),
-            subject: "attacker-subject".to_string(),
+            durable_subject: Some("attacker-subject".to_string()),
+        }),
+    )
+    .await;
+
+    match result {
+        Err(EnrollUserError::IdentityConflict { user_id, issuer: i }) => {
+            assert_eq!(user_id, victim.id);
+            assert_eq!(i, issuer);
+        }
+        other => panic!("expected IdentityConflict, got {other:?}"),
+    }
+
+    let doc = store
+        .get::<UserDoc>(&victim.id)
+        .await
+        .expect("get user")
+        .expect("user exists");
+    assert_eq!(
+        doc.data.idp_identities,
+        vec![IdpIdentity {
+            issuer: issuer.to_string(),
+            subject: "victim-subject".to_string(),
+        }],
+        "the refused login must not mutate the account's bindings"
+    );
+}
+
+// A login through an issuer the account has no binding for, but which
+// carries no durable subject (e.g. a non-persistent SAML NameID format),
+// must succeed via the email match alone and must never create a
+// binding — otherwise a legitimately rotating NameID would still trip
+// the #837 lockout the persistent-only allowlist exists to prevent.
+#[tokio::test]
+async fn test_enroll_non_durable_login_matches_email_without_binding() {
+    use crate::db::documents::user::UserDoc;
+    use crate::db::{UpstreamLogin, enroll_user_with_org};
+
+    let (store, _audit) = test_db().await;
+    let domain = "non-durable.example";
+    let issuer = "https://idp.non-durable.example";
+
+    let first = enroll_user_with_org(
+        &store,
+        "alice@non-durable.example",
+        None,
+        Some(domain),
+        Some(&UpstreamLogin {
+            issuer: issuer.to_string(),
+            durable_subject: None,
+        }),
+    )
+    .await
+    .expect("first login with no durable subject");
+    assert!(!first.newly_bound);
+
+    // A second login through the same issuer, again with no durable
+    // subject (simulating a rotating NameID) — must still succeed, and
+    // still create no binding.
+    let second = enroll_user_with_org(
+        &store,
+        "alice@non-durable.example",
+        None,
+        Some(domain),
+        Some(&UpstreamLogin {
+            issuer: issuer.to_string(),
+            durable_subject: None,
+        }),
+    )
+    .await
+    .expect("second non-durable login must not be refused");
+    assert_eq!(second.id, first.id);
+    assert!(!second.newly_bound);
+
+    let doc = store
+        .get::<UserDoc>(&first.id)
+        .await
+        .expect("get user")
+        .expect("user exists");
+    assert!(
+        doc.data.idp_identities.is_empty(),
+        "a non-durable login must never create a binding"
+    );
+}
+
+// Bugbot finding on PR #837: once an account is bound to a durable
+// (issuer, subject), a later login through that SAME issuer that cannot
+// reassert a durable subject must be refused — not silently downgraded
+// to an email-only match. Restricting binding *creation* to
+// persistent-format NameIDs must not let a different-format login walk
+// past a binding that already exists.
+#[tokio::test]
+async fn test_enroll_non_durable_login_refused_once_issuer_is_bound() {
+    use crate::db::documents::user::UserDoc;
+    use crate::db::{EnrollUserError, IdpIdentity, UpstreamLogin, enroll_user_with_org};
+
+    let (store, _audit) = test_db().await;
+    let domain = "downgrade.example";
+    let issuer = "https://idp.downgrade.example";
+
+    let victim = enroll_user_with_org(
+        &store,
+        "shared@downgrade.example",
+        None,
+        Some(domain),
+        Some(&UpstreamLogin {
+            issuer: issuer.to_string(),
+            durable_subject: Some("victim-subject".to_string()),
+        }),
+    )
+    .await
+    .expect("victim binds via a durable-format login");
+
+    // Same email, same issuer, but this login carries no durable subject
+    // (e.g. the IdP sent a non-persistent NameID this time).
+    let result = enroll_user_with_org(
+        &store,
+        "shared@downgrade.example",
+        None,
+        Some(domain),
+        Some(&UpstreamLogin {
+            issuer: issuer.to_string(),
+            durable_subject: None,
         }),
     )
     .await;
@@ -5443,7 +5565,7 @@ async fn test_enroll_same_issuer_different_subject_refused() {
 #[tokio::test]
 async fn test_enroll_lazy_binds_legacy_account() {
     use crate::db::documents::user::UserDoc;
-    use crate::db::{IdpIdentity, enroll_user_with_org};
+    use crate::db::{IdpIdentity, UpstreamLogin, enroll_user_with_org};
 
     let (store, _audit) = test_db().await;
     let domain = "legacy-bind.example";
@@ -5459,9 +5581,9 @@ async fn test_enroll_lazy_binds_legacy_account() {
     .await
     .expect("legacy enrollment");
 
-    let idp_a = IdpIdentity {
+    let idp_a = UpstreamLogin {
         issuer: "https://idp-a.legacy-bind.example".to_string(),
-        subject: "legacy-subject-a".to_string(),
+        durable_subject: Some("legacy-subject-a".to_string()),
     };
     let bound = enroll_user_with_org(
         &store,
@@ -5489,9 +5611,9 @@ async fn test_enroll_lazy_binds_legacy_account() {
     assert!(!via_binding.newly_bound);
 
     // A second issuer (org adds another IdP) binds alongside, no conflict.
-    let idp_b = IdpIdentity {
+    let idp_b = UpstreamLogin {
         issuer: "https://idp-b.legacy-bind.example".to_string(),
-        subject: "legacy-subject-b".to_string(),
+        durable_subject: Some("legacy-subject-b".to_string()),
     };
     let second = enroll_user_with_org(
         &store,
@@ -5512,7 +5634,16 @@ async fn test_enroll_lazy_binds_legacy_account() {
         .expect("user exists");
     assert_eq!(
         doc.data.idp_identities,
-        vec![idp_a, idp_b],
+        vec![
+            IdpIdentity {
+                issuer: idp_a.issuer,
+                subject: "legacy-subject-a".to_string(),
+            },
+            IdpIdentity {
+                issuer: idp_b.issuer,
+                subject: "legacy-subject-b".to_string(),
+            },
+        ],
         "one binding per issuer, in bind order"
     );
 }
@@ -5523,7 +5654,7 @@ async fn test_enroll_lazy_binds_legacy_account() {
 #[tokio::test]
 async fn test_enroll_scim_user_binds_on_first_idp_login() {
     use crate::db::documents::user::UserDoc;
-    use crate::db::{IdpIdentity, create_scim_user, enroll_user_with_org};
+    use crate::db::{UpstreamLogin, create_scim_user, enroll_user_with_org};
 
     let (store, _audit) = test_db().await;
     seed_test_org(&store).await;
@@ -5539,9 +5670,9 @@ async fn test_enroll_scim_user_binds_on_first_idp_login() {
     .await
     .expect("SCIM create");
 
-    let upstream = IdpIdentity {
+    let upstream = UpstreamLogin {
         issuer: "https://idp.example.com".to_string(),
-        subject: "scim-subject".to_string(),
+        durable_subject: Some("scim-subject".to_string()),
     };
     // First IdP login for the SCIM-provisioned account, email in a
     // different casing than SCIM stored — must find by email and bind.

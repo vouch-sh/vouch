@@ -495,9 +495,9 @@ pub(crate) async fn verify_id_token(
     // is the literal `{tenantid}` template, while `claims.iss` names the
     // concrete tenant — the identity must be pinned to the real tenant.
     Ok(IdentityResult {
-        upstream: Some(crate::db::IdpIdentity {
+        upstream: Some(crate::db::UpstreamLogin {
             issuer: claims.iss,
-            subject: claims.sub,
+            durable_subject: Some(claims.sub),
         }),
         email: claims.email,
         domain,
@@ -1272,7 +1272,7 @@ mod tests {
         assert_eq!(result.domain, Some("example.com".to_string()));
         let upstream = result.upstream.expect("upstream identity must be set");
         assert_eq!(upstream.issuer, issuer);
-        assert_eq!(upstream.subject, "user-123");
+        assert_eq!(upstream.durable_subject.as_deref(), Some("user-123"));
     }
 
     /// A token missing the required `sub` claim must fail verification
@@ -1717,7 +1717,7 @@ mod tests {
         // token, not the `{tenantid}` template stored in provider.issuer.
         let upstream = result.upstream.expect("upstream identity must be set");
         assert_eq!(upstream.issuer, token_iss);
-        assert_eq!(upstream.subject, "user-123");
+        assert_eq!(upstream.durable_subject.as_deref(), Some("user-123"));
     }
 
     /// When provider.issuer is the `{tenantid}` template, a token whose tid

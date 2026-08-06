@@ -5,7 +5,7 @@
 //! when creating organizations and users during the OIDC enrollment flow.
 
 use super::documents::organization::OrganizationDoc;
-use super::documents::user::{IdpIdentity, UserDoc, idp_identity_index_value};
+use super::documents::user::{IdpIdentity, UpstreamLogin, UserDoc, idp_identity_index_value};
 use super::store::DocumentStore;
 use crate::error::ServiceError;
 use anyhow::{Context, Result};
@@ -139,14 +139,17 @@ async fn resolve_user(
     name: Option<&str>,
     org_id: Option<&str>,
     is_org_admin: bool,
-    upstream: Option<&IdpIdentity>,
+    upstream: Option<&UpstreamLogin>,
 ) -> Result<EnrolledUser, EnrollUserError> {
-    // The binding — not the email — is the durable identity link.
-    let bound_user = match upstream {
-        Some(u) => tx
+    // Only a login with a durable subject can be looked up by binding —
+    // the binding index has nothing to match a bare issuer against.
+    let durable = upstream.and_then(UpstreamLogin::as_idp_identity);
+
+    let bound_user = match &durable {
+        Some(id) => tx
             .find_one::<UserDoc>(
                 "idp_identity",
-                &idp_identity_index_value(&u.issuer, &u.subject),
+                &idp_identity_index_value(&id.issuer, &id.subject),
             )
             .await
             .map_err(|e| {
@@ -174,7 +177,7 @@ async fn resolve_user(
             github_id: None,
             github_login: None,
             github_refresh_token: None,
-            idp_identities: upstream.cloned().into_iter().collect(),
+            idp_identities: durable.into_iter().collect(),
         };
         let result = tx
             .insert(&new_doc)
@@ -191,40 +194,56 @@ async fn resolve_user(
     };
 
     let mut newly_bound = false;
-    if let Some(u) = upstream {
+    if let Some(login) = upstream {
         match doc
             .data
             .idp_identities
             .iter()
-            .find(|b| b.issuer == u.issuer)
+            .find(|b| b.issuer == login.issuer)
         {
-            // Bound to a different person at the same issuer: this email
-            // match is what an upstream address reassignment looks like.
-            // Refuse to link.
-            Some(bound) if bound.subject != u.subject => {
+            // Bound to a different subject at the same issuer — or bound
+            // at all while this login has no durable subject to reassert.
+            // Both are what an upstream email reassignment (or a login
+            // that can't prove the bound identity) looks like: refuse
+            // rather than fall back to a weaker check. This is also what
+            // stops the fix for #837 from reopening the takeover hole —
+            // a non-durable-format SAML login cannot walk past an
+            // existing persistent-format binding just because it can't
+            // be compared to one.
+            Some(bound) if Some(bound.subject.as_str()) != login.durable_subject.as_deref() => {
                 return Err(EnrollUserError::IdentityConflict {
                     user_id: doc.id,
-                    issuer: u.issuer.clone(),
+                    issuer: login.issuer.clone(),
                 });
             }
             Some(_) => {}
-            // No binding for this issuer yet — lazy bind. CAS against the
-            // version read in this transaction; a lost race aborts with
-            // OccConflict and `with_dsql_retry!` re-runs against fresh
-            // state (which then sees the winner's binding).
+            // No binding for this issuer yet. Lazy-bind only when this
+            // login has a durable subject to offer — a non-durable-format
+            // login leaves the account exactly as it was, so a
+            // legitimately rotating NameID never creates a binding that a
+            // later login could conflict with (the #837 lockout).
             None => {
-                let mut data = doc.data.clone();
-                data.idp_identities.push(u.clone());
-                let won = tx
-                    .compare_and_update(&doc.id, doc.version, &data)
-                    .await
-                    .map_err(|e| {
-                        ServiceError::from_db_contention(e, "Failed to bind upstream identity")
-                    })?;
-                if !won {
-                    return Err(EnrollUserError::Service(ServiceError::OccConflict));
+                if let Some(subject) = &login.durable_subject {
+                    // CAS against the version read in this transaction; a
+                    // lost race aborts with OccConflict and
+                    // `with_dsql_retry!` re-runs against fresh state
+                    // (which then sees the winner's binding).
+                    let mut data = doc.data.clone();
+                    data.idp_identities.push(IdpIdentity {
+                        issuer: login.issuer.clone(),
+                        subject: subject.clone(),
+                    });
+                    let won = tx
+                        .compare_and_update(&doc.id, doc.version, &data)
+                        .await
+                        .map_err(|e| {
+                            ServiceError::from_db_contention(e, "Failed to bind upstream identity")
+                        })?;
+                    if !won {
+                        return Err(EnrollUserError::Service(ServiceError::OccConflict));
+                    }
+                    newly_bound = true;
                 }
-                newly_bound = true;
             }
         }
     }
@@ -270,34 +289,46 @@ async fn resolve_user(
 ///
 /// # Identity matching
 ///
-/// When `upstream` is provided (the validated `(issuer, subject)` pair
-/// from the IdP), the user is resolved in this order:
+/// `upstream` carries the login's issuer, and — when the format the IdP
+/// used guarantees per-principal stability — its subject
+/// (`upstream.durable_subject`; see [`UpstreamLogin`]). The user is
+/// resolved in this order:
 ///
-/// 1. **Binding match** — an account already bound to this exact
-///    `(issuer, subject)` wins, regardless of the asserted email. The
-///    caller decides how to handle an email that drifted from the
-///    stored one; this function never rewrites `UserDoc.email`.
-/// 2. **Email match** — an account with this email but **no binding
-///    for this issuer** is lazily bound to `(issuer, subject)` now
-///    (`newly_bound: true`). There is no batch backfill: accounts that
-///    predate identity binding, and SCIM-provisioned accounts, acquire
-///    their binding on their first IdP login. An account whose binding
-///    for this issuer names a **different subject** is NOT linked —
-///    the call fails with [`EnrollUserError::IdentityConflict`],
-///    because an email match with a subject mismatch is what an
-///    upstream email reassignment (account-takeover attempt) looks
-///    like.
-/// 3. **Create** — no match creates a new user carrying the binding.
+/// 1. **Binding match** — when `durable_subject` is present, an account
+///    already bound to this exact `(issuer, subject)` wins, regardless of
+///    the asserted email. The caller decides how to handle an email that
+///    drifted from the stored one; this function never rewrites
+///    `UserDoc.email`.
+/// 2. **Email match, no binding for this issuer yet** — an account with
+///    this email and no binding for `upstream.issuer` is lazily bound to
+///    `(issuer, subject)` now (`newly_bound: true`), but only when
+///    `durable_subject` is present. There is no batch backfill: accounts
+///    that predate identity binding, and SCIM-provisioned accounts,
+///    acquire their binding on their first IdP login with a durable
+///    subject. A login with no durable subject (e.g. a SAML NameID
+///    format with no stability guarantee) leaves such an account
+///    unbound and proceeds on the email match alone — it neither creates
+///    nor needs to satisfy a binding.
+/// 3. **Email match, already bound to this issuer** — refused with
+///    [`EnrollUserError::IdentityConflict`] unless this login's
+///    `durable_subject` equals the bound one. This covers both an
+///    asserted subject that differs (an upstream email reassignment) and
+///    a login with no durable subject at all — once an account is bound
+///    for an issuer, a login through that issuer that cannot reassert
+///    the bound subject must not be allowed to fall back to a weaker,
+///    email-only check.
+/// 4. **Create** — no match creates a new user, carrying the binding
+///    when `durable_subject` is present.
 ///
-/// When `upstream` is `None` (no stable subject available, e.g. a SAML
-/// IdP not asserting a `persistent`-format NameID), matching is by email
-/// alone, as it was before identity binding existed.
+/// When `upstream` is `None` (no IdP context at all — not even an
+/// issuer), matching is by email alone, as it was before identity
+/// binding existed.
 pub async fn enroll_user_with_org(
     store: &DocumentStore,
     email: &str,
     name: Option<&str>,
     domain: Option<&str>,
-    upstream: Option<&IdpIdentity>,
+    upstream: Option<&UpstreamLogin>,
 ) -> Result<EnrolledUser, EnrollUserError> {
     // Normalize email to ASCII lowercase so the lookup matches a
     // pre-provisioned user regardless of the casing the IdP returned.

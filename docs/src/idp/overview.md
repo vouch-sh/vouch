@@ -147,14 +147,18 @@ When an IdP sign-in completes, Vouch resolves the account in this order:
    a drifted upstream email is logged but never written back.
 2. **Email match with lazy binding.** An account with a matching email and *no binding for
    this issuer* is bound to the asserted issuer + subject on the spot (audit event
-   `identity_bound`). This is how accounts that predate identity binding, and
-   SCIM-provisioned accounts, acquire their binding — there is no batch backfill; each
-   account binds on its first IdP sign-in.
-3. **Refusal on subject mismatch.** If the email matches an account whose binding for this
-   issuer names a *different* subject, the sign-in is refused with an "Account Linking
-   Blocked" error page and an `identity_bind_refused` audit event. This is deliberate: an
-   email match with a subject mismatch is what an upstream email reassignment (and the
-   resulting account-takeover attempt) looks like.
+   `identity_bound`), provided the sign-in asserts a subject at all — see the SAML caveat
+   below. This is how accounts that predate identity binding, and SCIM-provisioned
+   accounts, acquire their binding — there is no batch backfill; each account binds on its
+   first eligible IdP sign-in.
+3. **Refusal when the bound subject can't be reasserted.** If the email matches an account
+   already bound for this issuer, and the sign-in either asserts a *different* subject or
+   asserts none at all (e.g. a SAML NameID format identity binding doesn't trust — see
+   [SAML 2.0](saml.md)), the sign-in is refused with an "Account Linking Blocked" error
+   page and an `identity_bind_refused` audit event. This is deliberate: an email match that
+   can't reassert the bound identity is what an upstream email reassignment (and the
+   resulting account-takeover attempt) looks like, and a sign-in this weak must not fall
+   back to matching on email alone once an account is bound.
 4. **New account.** No match creates a new account carrying the binding.
 
 Bindings are per-issuer: an account can hold one binding for each configured IdP, so
@@ -168,9 +172,11 @@ which the user re-enrolls and a fresh account binds to the new subject.
 
 SAML deployments must send a `persistent`-format NameID to get identity binding — it is
 the only format the SAML spec guarantees is stable per principal. Every other format
-(`emailAddress`, `unspecified`, `transient`, or a missing `Format` attribute) falls back
-to email-only account matching, as it did before identity binding existed — see
-[SAML 2.0](saml.md) for details.
+(`emailAddress`, `unspecified`, `transient`, or a missing `Format` attribute) cannot create
+a binding: for an account with no existing binding for the IdP, matching falls back to
+email alone, as it did before identity binding existed; for an account that already has a
+binding, such a sign-in hits step 3 above and is refused instead — see [SAML 2.0](saml.md)
+for details.
 
 ## User Lifecycle
 

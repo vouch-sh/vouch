@@ -215,7 +215,7 @@ pub use authorization_codes::{
 };
 
 // Re-export enrollment types and functions
-pub use documents::user::IdpIdentity;
+pub use documents::user::{IdpIdentity, UpstreamLogin};
 pub use enrollment::{EnrollUserError, EnrolledUser, enroll_user_with_org};
 
 // Re-export posture policy types and functions
