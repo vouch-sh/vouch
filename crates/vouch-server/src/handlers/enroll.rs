@@ -653,15 +653,47 @@ pub(crate) async fn complete_enrollment_after_identity(
     // Enroll user with organization in a single atomic transaction.
     // This ensures that if org creation succeeds but user creation fails,
     // the entire operation is rolled back to prevent orphaned state.
+    // Account matching keys on the upstream (issuer, subject) pair first;
+    // email is only a linking fallback for accounts with no binding yet.
     let user = match db::enroll_user_with_org(
         &state.store,
         &identity.email,
         None,
         identity.domain.as_deref(),
+        identity.upstream.as_ref(),
     )
     .await
     {
         Ok(user) => user,
+        Err(db::EnrollUserError::IdentityConflict { user_id, issuer }) => {
+            // The email matched an existing account bound to a different
+            // upstream subject at the same issuer. This is the shape of an
+            // upstream email reassignment (account-takeover attempt), so
+            // refuse to link and leave an audit trail.
+            tracing::warn!(
+                user_id = %user_id,
+                issuer = %issuer,
+                email = %redact_email(&identity.email),
+                "Refusing IdP login: asserted subject differs from the \
+                 subject bound to the account with this email"
+            );
+            let event = db::AuthEventParams {
+                user_id,
+                event_type: db::AuthEventType::IdentityBindRefused,
+                success: false,
+                failure_reason: Some("upstream subject differs from bound subject".to_string()),
+                idp_issuer: Some(issuer),
+                client: client_info,
+                ..Default::default()
+            };
+            db::spawn_audit_event(&state.audit, event, Some(identity.email.clone()));
+            return ErrorTemplate {
+                title: Tr::new("enroll-error-identity-conflict-title").to_string(),
+                message: Tr::new("enroll-error-identity-conflict").to_string(),
+                back_url: None,
+            }
+            .into_response();
+        }
         Err(e) => {
             tracing::error!("Failed to enroll user: {}", e);
             return ErrorTemplate {
@@ -672,6 +704,34 @@ pub(crate) async fn complete_enrollment_after_identity(
             .into_response();
         }
     };
+
+    // The account email is canonical. If the IdP asserted a different
+    // address for a (issuer, subject)-matched account, the drift is
+    // logged but never written back: there is no email-change machinery,
+    // and downstream artifacts (sessions, certs, audit) must stay
+    // consistent with the stored account.
+    if user.email != identity.email.to_ascii_lowercase() {
+        tracing::warn!(
+            user_id = %user.id,
+            account_email = %redact_email(&user.email),
+            asserted_email = %redact_email(&identity.email),
+            "Upstream email differs from account email; keeping account email"
+        );
+    }
+
+    if user.newly_bound
+        && let Some(ref upstream) = identity.upstream
+    {
+        let event = db::AuthEventParams {
+            user_id: user.id.clone(),
+            event_type: db::AuthEventType::IdentityBound,
+            success: true,
+            idp_issuer: Some(upstream.issuer.clone()),
+            client: client_info.clone(),
+            ..Default::default()
+        };
+        db::spawn_audit_event(&state.audit, event, Some(user.email.clone()));
+    }
 
     // Create session for this user (using session cookie instead of enrollment cookie)
     let now = Timestamp::now();
@@ -775,7 +835,7 @@ pub(crate) async fn complete_enrollment_after_identity(
                 &state.store,
                 device_auth_id,
                 &user.id,
-                &identity.email,
+                &user.email,
                 auth_id,
             )
             .await
@@ -801,14 +861,14 @@ pub(crate) async fn complete_enrollment_after_identity(
                 client: client_info,
                 ..Default::default()
             };
-            db::spawn_audit_event(&state.audit, event, Some(identity.email.clone()));
+            db::spawn_audit_event(&state.audit, event, Some(user.email.clone()));
         } else {
             // No key yet — store the device_auth_id in an enrollment session
             // so browser_register_complete can authorize it after WebAuthn registration.
             if let Err(e) = db::create_enrollment_session(
                 &state.store,
                 &user.id,
-                &identity.email,
+                &user.email,
                 &token_hash,
                 Some(device_auth_id),
                 expires,
@@ -840,17 +900,14 @@ pub(crate) async fn complete_enrollment_after_identity(
             client: client_info,
             ..Default::default()
         };
-        db::spawn_audit_event(&state.audit, event, Some(identity.email.clone()));
+        db::spawn_audit_event(&state.audit, event, Some(user.email.clone()));
     }
 
     // No explicit state delete here — `try_consume_oidc_state` already
     // marked the row `consumed_at = Some(now)` (replay-blocking) and
     // `delete_expired_oidc_states` will reclaim the row at expiry.
 
-    tracing::info!(
-        "Session created for user: {}",
-        redact_email(&identity.email)
-    );
+    tracing::info!("Session created for user: {}", redact_email(&user.email));
     tracing::debug!("Setting session cookie and redirecting to /enroll/keys");
 
     // Create session cookie and redirect to keys page
@@ -2164,6 +2221,7 @@ mod tests {
         let identity = IdentityResult {
             email: "returning@example.com".to_string(),
             domain: Some("example.com".to_string()),
+            upstream: None,
         };
 
         let resp =
@@ -2192,6 +2250,103 @@ mod tests {
             approvals.is_empty(),
             "direct sign-in must not emit device_auth_approved"
         );
+    }
+
+    #[tokio::test]
+    async fn test_identity_conflict_renders_error_and_audits() {
+        // An IdP login whose asserted (issuer, subject) does not match the
+        // subject already bound to the account with this email must be
+        // refused: no session cookie, an error page, and one
+        // identity_bind_refused audit event that carries idp_issuer but no
+        // raw email in its data payload.
+        let state = test_app_state().await;
+        let issuer = "https://idp.conflict.example";
+        let victim = db::enroll_user_with_org(
+            &state.store,
+            "shared@example.com",
+            None,
+            None,
+            Some(&db::IdpIdentity {
+                issuer: issuer.to_string(),
+                subject: "victim-subject".to_string(),
+            }),
+        )
+        .await
+        .expect("seed bound victim");
+
+        let (stored, claim) = seed_and_consume_oidc_state(&state, "conflict-state", None).await;
+
+        let identity = IdentityResult {
+            email: "shared@example.com".to_string(),
+            domain: Some("example.com".to_string()),
+            upstream: Some(db::IdpIdentity {
+                issuer: issuer.to_string(),
+                subject: "attacker-subject".to_string(),
+            }),
+        };
+
+        let resp = complete_enrollment_after_identity(
+            &state,
+            &stored,
+            identity,
+            claim,
+            ClientInfo::default(),
+        )
+        .await;
+
+        // Error page renders 200 OK, and crucially carries no session cookie.
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(
+            resp.headers().get(header::SET_COOKIE).is_none(),
+            "a refused login must not set a session cookie"
+        );
+
+        let events = wait_for_audit_events(&state, "identity_bind_refused", &victim.id).await;
+        assert_eq!(events.len(), 1, "one refusal -> one audit event");
+        let event = events.first().expect("identity_bind_refused event");
+        let data: serde_json::Value = serde_json::from_str(&event.data).expect("event data JSON");
+        assert_eq!(data["idp_issuer"], issuer);
+        assert!(
+            data.get("email").is_none() && data.get("subject").is_none(),
+            "audit payload must not carry raw email or subject: {data}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_lazy_bind_emits_identity_bound_event() {
+        // A legacy account (no bindings) signing in through an IdP for the
+        // first time is lazily bound and emits identity_bound with the
+        // issuer; the sign-in itself succeeds (redirects to the keys page).
+        let state = test_app_state().await;
+        let user = create_test_user(&state.store, "legacy@example.com").await;
+
+        let (stored, claim) = seed_and_consume_oidc_state(&state, "lazy-bind-state", None).await;
+
+        let issuer = "https://idp.lazy.example";
+        let identity = IdentityResult {
+            email: "legacy@example.com".to_string(),
+            domain: Some("example.com".to_string()),
+            upstream: Some(db::IdpIdentity {
+                issuer: issuer.to_string(),
+                subject: "legacy-subject".to_string(),
+            }),
+        };
+
+        let resp = complete_enrollment_after_identity(
+            &state,
+            &stored,
+            identity,
+            claim,
+            ClientInfo::default(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+
+        let events = wait_for_audit_events(&state, "identity_bound", &user.id).await;
+        assert_eq!(events.len(), 1, "first IdP login -> one identity_bound");
+        let event = events.first().expect("identity_bound event");
+        let data: serde_json::Value = serde_json::from_str(&event.data).expect("event data JSON");
+        assert_eq!(data["idp_issuer"], issuer);
     }
 
     #[tokio::test]
@@ -2225,6 +2380,7 @@ mod tests {
         let identity = IdentityResult {
             email: "cli-returning@example.com".to_string(),
             domain: Some("example.com".to_string()),
+            upstream: None,
         };
 
         let resp =
@@ -2284,6 +2440,7 @@ mod tests {
         let identity = IdentityResult {
             email: "cli-stale-da@example.com".to_string(),
             domain: Some("example.com".to_string()),
+            upstream: None,
         };
 
         let resp = complete_enrollment_after_identity(
@@ -2332,6 +2489,7 @@ mod tests {
         let identity = IdentityResult {
             email: "fresh@example.com".to_string(),
             domain: Some("example.com".to_string()),
+            upstream: None,
         };
         let resp = complete_enrollment_after_identity(
             &state,

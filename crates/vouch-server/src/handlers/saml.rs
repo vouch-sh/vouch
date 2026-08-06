@@ -169,9 +169,30 @@ pub(crate) async fn acs(
     };
 
     // Step 7: Convert SamlAssertion to the protocol-agnostic IdentityResult.
+    // The upstream identity is (IdP entity ID, NameID). Transient-format
+    // NameIDs change on every login, so binding one would make every
+    // subsequent sign-in look like a different person — skip binding and
+    // fall back to email-only matching for such deployments.
+    const NAMEID_TRANSIENT: &str = "urn:oasis:names:tc:SAML:2.0:nameid-format:transient";
+    let upstream = match (&assertion.name_id, assertion.name_id_format.as_deref()) {
+        (Some(_), Some(NAMEID_TRANSIENT)) => {
+            tracing::warn!(
+                idp = %saml_provider.id,
+                "SAML NameID format is transient; skipping identity binding \
+                 (account matching falls back to email only)"
+            );
+            None
+        }
+        (Some(name_id), _) => Some(crate::db::IdpIdentity {
+            issuer: saml_provider.idp_metadata.entity_id.clone(),
+            subject: name_id.clone(),
+        }),
+        (None, _) => None,
+    };
     let identity = IdentityResult {
         email: assertion.email,
         domain: assertion.domain,
+        upstream,
     };
 
     complete_enrollment_after_identity(

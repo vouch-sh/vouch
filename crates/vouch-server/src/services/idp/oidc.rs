@@ -116,6 +116,11 @@ struct DiscoveryDocument {
 struct IdTokenClaims {
     /// Token issuer — used for Entra cross-tenant validation.
     iss: String,
+    /// Subject — the IdP's stable identifier for this user. Required by
+    /// OIDC Core Section 2; a token without it fails deserialization and
+    /// therefore verification (fail-closed). Account matching keys on
+    /// `(iss, sub)`, never on the email string alone.
+    sub: String,
     email: String,
     #[serde(default)]
     email_verified: bool,
@@ -485,7 +490,15 @@ pub(crate) async fn verify_id_token(
         claims.email.split('@').nth(1).map(str::to_ascii_lowercase)
     };
 
+    // Bind to `claims.iss` (the validated token issuer), not
+    // `provider.issuer`: for Entra `/organizations/` the configured issuer
+    // is the literal `{tenantid}` template, while `claims.iss` names the
+    // concrete tenant — the identity must be pinned to the real tenant.
     Ok(IdentityResult {
+        upstream: Some(crate::db::IdpIdentity {
+            issuer: claims.iss,
+            subject: claims.sub,
+        }),
         email: claims.email,
         domain,
     })
@@ -1257,6 +1270,41 @@ mod tests {
 
         assert_eq!(result.email, "alice@example.com");
         assert_eq!(result.domain, Some("example.com".to_string()));
+        let upstream = result.upstream.expect("upstream identity must be set");
+        assert_eq!(upstream.issuer, issuer);
+        assert_eq!(upstream.subject, "user-123");
+    }
+
+    /// A token missing the required `sub` claim must fail verification
+    /// (fail-closed): without a stable subject there is nothing to bind
+    /// the account to, so email-only linking must not silently happen.
+    #[tokio::test]
+    async fn verify_id_token_missing_sub_rejected() {
+        use wiremock::MockServer;
+
+        let server = MockServer::start().await;
+        let issuer = server.uri();
+        let client_id = "test-client";
+        let nonce = "test-nonce-abc";
+
+        let key = crate::crypto::keys::OidcSigningKey::generate().unwrap();
+        mount_jwks(&server, &key).await;
+
+        let mut claims = base_claims(&issuer, client_id);
+        claims["nonce"] = serde_json::json!(nonce);
+        claims.as_object_mut().expect("claims object").remove("sub");
+
+        let token = sign_test_jwt(&key, claims).await;
+        let provider = make_test_provider(&issuer);
+        let client = reqwest::Client::new();
+
+        let err = verify_id_token(&client, &provider, &token, client_id, nonce)
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("verification failed"),
+            "expected verification failure for missing sub, got: {err}",
+        );
     }
 
     /// Nonce mismatch: JWT has a nonce that differs from expected → error
@@ -1665,6 +1713,11 @@ mod tests {
             .unwrap();
 
         assert_eq!(result.email, "alice@example.com");
+        // The binding must pin the concrete per-tenant issuer from the
+        // token, not the `{tenantid}` template stored in provider.issuer.
+        let upstream = result.upstream.expect("upstream identity must be set");
+        assert_eq!(upstream.issuer, token_iss);
+        assert_eq!(upstream.subject, "user-123");
     }
 
     /// When provider.issuer is the `{tenantid}` template, a token whose tid

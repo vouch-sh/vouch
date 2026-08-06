@@ -27,6 +27,13 @@ pub enum AuthEventType {
     KeyRegistered,
     KeyRemoved,
     DeviceAuthApproved,
+    /// An upstream `(issuer, subject)` identity was bound to an existing
+    /// account on its first IdP login (lazy bind).
+    IdentityBound,
+    /// An email match was refused because the account is already bound to
+    /// a different subject for the same issuer (possible upstream email
+    /// reassignment / takeover attempt).
+    IdentityBindRefused,
 }
 
 impl AuthEventType {
@@ -42,6 +49,8 @@ impl AuthEventType {
             Self::KeyRegistered => AuditEventKind::KeyRegistered,
             Self::KeyRemoved => AuditEventKind::KeyRemoved,
             Self::DeviceAuthApproved => AuditEventKind::DeviceAuthApproved,
+            Self::IdentityBound => AuditEventKind::IdentityBound,
+            Self::IdentityBindRefused => AuditEventKind::IdentityBindRefused,
         }
     }
 }
@@ -64,6 +73,12 @@ pub struct AuthEventParams {
     /// distinguishable from user-initiated ones without a schema migration.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub client_id: Option<String>,
+    /// Upstream IdP issuer for identity-binding events. The upstream
+    /// subject is deliberately NOT recorded: a SAML NameID is frequently
+    /// an email address, and audit payloads must not carry raw emails
+    /// (see `tests/no_raw_email_in_audit_data.rs`).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub idp_issuer: Option<String>,
 }
 
 /// Client information extracted from the request.
@@ -232,6 +247,8 @@ mod tests {
             AuthEventType::KeyRegistered,
             AuthEventType::KeyRemoved,
             AuthEventType::DeviceAuthApproved,
+            AuthEventType::IdentityBound,
+            AuthEventType::IdentityBindRefused,
         ];
 
         for (idx, event_type) in variants.iter().copied().enumerate() {

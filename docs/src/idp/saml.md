@@ -46,6 +46,18 @@ Vouch extracts user identity from SAML assertion attributes. By default, it look
 
 For domain-based enrollment restrictions, set `VOUCH_IDP_<SLUG>_DOMAIN_ATTRIBUTE` to the attribute name containing the user's domain. If not set, the domain is extracted from the email address.
 
+## NameID Stability
+
+Vouch binds accounts to the pair (IdP entity ID, NameID) — not to the email address — so
+the NameID must be a stable identifier for the user (see
+[Account linking](overview.md#account-linking-and-identity-binding)). Configure the IdP to
+send a `persistent` or `emailAddress` format NameID.
+
+If the IdP sends a `transient` NameID (a fresh value on every login), Vouch skips identity
+binding for that sign-in and falls back to email-only account matching, logging a warning.
+This keeps such deployments working, but they do not get the reassignment protection that
+identity binding provides — switch the IdP to a stable NameID format to enable it.
+
 ## Configuration Example
 
 ```bash

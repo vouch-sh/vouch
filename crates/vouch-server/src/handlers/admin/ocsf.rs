@@ -273,6 +273,13 @@ fn ocsf_class(kind: AuditEventKind) -> OcsfMapping {
         AuditEventKind::DeviceAuthApproved => {
             OcsfMapping::new(ClassUid::Authentication, ActivityId::LOGON)
         }
+        // A refused identity link is a blocked logon attempt: the asserted
+        // upstream subject did not match the subject bound to the account.
+        AuditEventKind::IdentityBindRefused => {
+            OcsfMapping::new(ClassUid::Authentication, ActivityId::LOGON)
+                .failure()
+                .medium()
+        }
 
         // Account Change (3001) — user account and credential lifecycle
         AuditEventKind::Enrollment => {
@@ -288,6 +295,10 @@ fn ocsf_class(kind: AuditEventKind) -> OcsfMapping {
             OcsfMapping::new(ClassUid::AccountChange, ActivityId::MFA_FACTOR_ENABLE)
                 .failure()
                 .medium()
+        }
+        // Binding an upstream (issuer, subject) identity mutates the account.
+        AuditEventKind::IdentityBound => {
+            OcsfMapping::new(ClassUid::AccountChange, ActivityId::OTHER)
         }
         AuditEventKind::AdminPromote | AuditEventKind::AdminDemote => {
             OcsfMapping::new(ClassUid::AccountChange, ActivityId::OTHER)

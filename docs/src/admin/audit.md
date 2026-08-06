@@ -24,6 +24,8 @@ code, ASN, and network organization resolved from the client IP.
 | `key_removed` | Hardware key removed |
 | `device_auth_approved` | Browser approved a CLI device-authorization request |
 | `key_registration_replay` | Replayed key-registration link rejected (possible attack) |
+| `identity_bound` | Upstream IdP identity (issuer + subject) bound to an account on its first IdP login; `data.idp_issuer` names the issuer |
+| `identity_bind_refused` | IdP sign-in refused: the asserted email matched an account already bound to a different subject at the same issuer (possible upstream email reassignment); `data.idp_issuer` names the issuer |
 
 ### Credential issuance
 
@@ -248,7 +250,9 @@ records is still present in `data`.
 | `login_failed` | 3002 | Authentication |
 | `logout` | 3002 | Authentication |
 | `device_auth_approved` | 3002 | Authentication |
+| `identity_bind_refused` | 3002 | Authentication |
 | `enrollment` | 3001 | Account Change |
+| `identity_bound` | 3001 | Account Change |
 | `key_registered` | 3001 | Account Change |
 | `key_removed` | 3001 | Account Change |
 | `key_registration_replay` | 3001 | Account Change |

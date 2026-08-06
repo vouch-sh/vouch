@@ -65,6 +65,7 @@ async fn scim_provisioned_user_reused_by_oidc_enrollment_across_casing() {
         "ALICE@e2e-case.example.com",
         Some("Alice Smith"),
         Some("e2e-case.example.com"),
+        None,
     )
     .await
     .expect("OIDC enrollment should succeed");

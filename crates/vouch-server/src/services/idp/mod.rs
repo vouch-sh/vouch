@@ -104,6 +104,11 @@ pub(crate) struct IdentityResult {
     pub email: String,
     /// Email domain (e.g., "acme.com").
     pub domain: Option<String>,
+    /// Stable upstream identity: the validated OIDC `(iss, sub)` pair, or
+    /// the SAML `(IdP entity ID, NameID)` pair. `None` when the IdP offers
+    /// no stable subject (e.g. SAML transient NameIDs) — account matching
+    /// then falls back to email alone, as it did before identity binding.
+    pub upstream: Option<crate::db::IdpIdentity>,
 }
 
 /// How to send the user to the upstream IdP.

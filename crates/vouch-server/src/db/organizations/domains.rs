@@ -1742,6 +1742,7 @@ mod tests {
             github_id: None,
             github_login: None,
             github_refresh_token: None,
+            idp_identities: Vec::new(),
         };
         let matched_user = store.insert(&mk_user("alice@Acme.Co.UK")).await.unwrap();
         let other_user = store.insert(&mk_user("bob@acme.com")).await.unwrap();

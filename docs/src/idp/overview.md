@@ -122,6 +122,7 @@ Order in the `idps` array controls login-page button order.
 |------------|-----------------|----------|
 | `email` | User email / principal | Yes |
 | `email_verified` | Email verification status | Yes (must be `true`) |
+| `sub` | Upstream subject, bound to the account together with the token issuer (see [Account linking](#account-linking-and-identity-binding)) | Yes |
 | `hd` | Google Workspace hosted domain | No (Google-specific) |
 | `tid` | Entra tenant ID | No (Entra-specific, cross-checked against issuer UUID to prevent cross-tenant token injection) |
 
@@ -131,6 +132,42 @@ Order in the `idps` array controls login-page button order.
 |----------------|-----------------|-------|
 | Configurable via `VOUCH_IDP_<SLUG>_EMAIL_ATTRIBUTE` | User email / principal | Falls back to NameID if not found |
 | Configurable via `VOUCH_IDP_<SLUG>_DOMAIN_ATTRIBUTE` | Domain for enrollment restriction | Extracted from email if not set |
+
+## Account Linking and Identity Binding
+
+Email addresses are a lease, not a name: employers reassign them and providers recycle
+them. Vouch therefore treats the upstream identity pair — the validated OIDC `(iss, sub)`
+claims, or for SAML the IdP entity ID plus NameID — as the durable link between a Vouch
+account and a person. The email address is profile data.
+
+When an IdP sign-in completes, Vouch resolves the account in this order:
+
+1. **Binding match.** An account already bound to this exact issuer + subject signs in,
+   even if the asserted email has since changed upstream. The account email is canonical;
+   a drifted upstream email is logged but never written back.
+2. **Email match with lazy binding.** An account with a matching email and *no binding for
+   this issuer* is bound to the asserted issuer + subject on the spot (audit event
+   `identity_bound`). This is how accounts that predate identity binding, and
+   SCIM-provisioned accounts, acquire their binding — there is no batch backfill; each
+   account binds on its first IdP sign-in.
+3. **Refusal on subject mismatch.** If the email matches an account whose binding for this
+   issuer names a *different* subject, the sign-in is refused with an "Account Linking
+   Blocked" error page and an `identity_bind_refused` audit event. This is deliberate: an
+   email match with a subject mismatch is what an upstream email reassignment (and the
+   resulting account-takeover attempt) looks like.
+4. **New account.** No match creates a new account carrying the binding.
+
+Bindings are per-issuer: an account can hold one binding for each configured IdP, so
+multi-IdP deployments and IdP migrations work without intervention — the first sign-in
+through a newly configured IdP adds a binding for that issuer alongside the existing ones.
+
+**Recovery.** If an IdP legitimately re-issues subjects (e.g. a directory tenant rebuild),
+affected users are refused at step 3 and cannot sign in. There is currently no unbind
+operation: an org admin must remove the affected user (Admin → Members → Remove), after
+which the user re-enrolls and a fresh account binds to the new subject.
+
+SAML deployments should send a stable NameID (`persistent` or `emailAddress` format).
+Transient NameIDs cannot be bound — see [SAML 2.0](saml.md) for details.
 
 ## User Lifecycle
 
