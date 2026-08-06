@@ -530,7 +530,7 @@ pub(crate) async fn toggle_custom_policy(
         }
     }
 
-    db::update_custom_policy(
+    let result = db::update_custom_policy(
         &state.store,
         &id,
         &org_id,
@@ -543,6 +543,14 @@ pub(crate) async fn toggle_custom_policy(
     )
     .await
     .map_err(|e| ServiceError::Internal(format!("Failed to toggle policy: {e}")))?;
+
+    if result.is_none() {
+        return Err(ServiceError::api(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "Policy not found",
+        ));
+    }
 
     let action = if new_active {
         "activated"
@@ -665,12 +673,16 @@ pub(crate) async fn validate_cel_api(
 #[cfg(test)]
 #[expect(
     clippy::unwrap_used,
+    clippy::expect_used,
     clippy::indexing_slicing,
+    clippy::let_underscore_must_use,
     reason = "test code: panic on assertion failure is acceptable"
 )]
 mod tests {
+    use crate::db;
     use crate::test_utils::*;
     use axum::http::StatusCode;
+    use std::sync::Arc;
 
     fn admin_cookie(token: &str) -> String {
         format!("{}={token}", vouch_common::SESSION_COOKIE_NAME)
@@ -1076,6 +1088,195 @@ mod tests {
             status,
             StatusCode::NOT_FOUND,
             "Unknown preconfigured slug must return 404"
+        );
+    }
+
+    // ── Custom policy toggle ─────────────────────────────────────────────────
+
+    /// Helper: create a custom policy (inactive) owned by `setup_admin`'s org
+    /// and return its id.
+    async fn create_inactive_custom_policy(state: &crate::AppState, org_id: &str) -> String {
+        let policy = db::create_custom_policy(
+            &state.store,
+            db::CreateCustomPolicyParams {
+                name: "Toggle Me",
+                description: None,
+                cel_expression: "posture.os == \"linux\"",
+                org_id,
+            },
+        )
+        .await
+        .expect("create custom policy");
+        policy.id
+    }
+
+    /// Count `admin_policy_toggle` audit events for `admin_id`.
+    async fn count_toggle_audit_events(state: &crate::AppState, admin_id: &str) -> usize {
+        let filter = db::AuditEventFilter {
+            event_types: Some(vec![
+                db::AuditEventKind::AdminPolicyToggle.as_str().to_string(),
+            ]),
+            user_id: Some(admin_id.to_string()),
+            ..Default::default()
+        };
+        state
+            .audit
+            .query_events(&filter)
+            .await
+            .expect("query audit events")
+            .len()
+    }
+
+    #[tokio::test]
+    async fn test_toggle_custom_policy_activates_and_logs_audit_event() {
+        let (app, state) = test_app().await;
+        let (admin, token) = setup_admin(&state).await;
+        let cookie = admin_cookie(&token);
+        let origin = "https://test.example.com";
+
+        let org_id = admin.org_id.clone().expect("admin has org");
+        let policy_id = create_inactive_custom_policy(&state, &org_id).await;
+
+        let before = count_toggle_audit_events(&state, &admin.id).await;
+        let (status, _body) = http_post_form(
+            &app,
+            &format!("/admin/policies/custom/{policy_id}/toggle"),
+            "",
+            &[("Cookie", &cookie), ("Origin", origin)],
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::SEE_OTHER,
+            "Successful toggle must redirect"
+        );
+
+        // The policy is now active in the DB.
+        let updated = db::get_custom_policy(&state.store, &policy_id)
+            .await
+            .expect("get policy")
+            .expect("policy exists");
+        assert!(updated.active, "policy must be activated by the toggle");
+
+        // Exactly one new toggle audit event was logged for the admin.
+        let after = count_toggle_audit_events(&state, &admin.id).await;
+        assert_eq!(
+            after,
+            before + 1,
+            "exactly one audit event must follow a successful toggle"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_toggle_custom_policy_unknown_id_returns_not_found() {
+        let (app, state) = test_app().await;
+        let (admin, token) = setup_admin(&state).await;
+        let cookie = admin_cookie(&token);
+        let origin = "https://test.example.com";
+
+        let before = count_toggle_audit_events(&state, &admin.id).await;
+        let (status, body) = http_post_form(
+            &app,
+            "/admin/policies/custom/does-not-exist/toggle",
+            "",
+            &[("Cookie", &cookie), ("Origin", origin)],
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::NOT_FOUND,
+            "Toggle of unknown policy id must return 404: {body}"
+        );
+        assert!(
+            body.contains("not_found"),
+            "404 body must carry the not_found code: {body}"
+        );
+
+        // No audit event may be logged for a failed toggle.
+        let after = count_toggle_audit_events(&state, &admin.id).await;
+        assert_eq!(
+            after, before,
+            "no audit event must be logged when the policy is not found"
+        );
+    }
+
+    /// Regression: when the policy is deleted between the handler's initial
+    /// GET and its `db::update_custom_policy` call (the OCC race window),
+    /// `update_custom_policy` returns `Ok(None)`. The handler must return
+    /// 404 NOT_FOUND and must NOT log an audit event.
+    ///
+    /// Before the fix the handler ignored the `None` result, logged a
+    /// fraudulent `admin_policy_toggle` audit event, and returned a success
+    /// redirect.
+    #[tokio::test]
+    async fn test_toggle_custom_policy_concurrent_delete_returns_not_found() {
+        // Build the app with a `modify` hook that deletes whichever document
+        // is being modified on the first OCC attempt. There is exactly one
+        // custom policy in this test, so the hook deterministically deletes
+        // it mid-flight, forcing `update_custom_policy` to return `Ok(None)`
+        // exactly as it does in production when a policy is deleted
+        // concurrently.
+        //
+        // The hook writes through a hookless clone of the store (mirroring the
+        // pattern in `db::tests`) so the delete does not re-enter the hook.
+        let (app, state) = test_app_with_modify_hook(|store| {
+            let writer = store.clone();
+            store.set_modify_test_hook(Arc::new(move |doc_id: &str, attempt: u32| {
+                let writer = writer.clone();
+                let doc_id = doc_id.to_string();
+                Box::pin(async move {
+                    if attempt != 0 {
+                        return;
+                    }
+                    // Delete the policy mid-flight so `modify` re-reads a
+                    // missing document and `update_custom_policy` returns
+                    // `Ok(None)`.
+                    let _ = writer.delete(&doc_id).await;
+                })
+            }));
+        })
+        .await;
+
+        let (admin, token) = setup_admin(&state).await;
+        let cookie = admin_cookie(&token);
+        let origin = "https://test.example.com";
+
+        let org_id = admin.org_id.clone().expect("admin has org");
+        let policy_id = create_inactive_custom_policy(&state, &org_id).await;
+
+        let before = count_toggle_audit_events(&state, &admin.id).await;
+        let (status, body) = http_post_form(
+            &app,
+            &format!("/admin/policies/custom/{policy_id}/toggle"),
+            "",
+            &[("Cookie", &cookie), ("Origin", origin)],
+        )
+        .await;
+
+        assert_eq!(
+            status,
+            StatusCode::NOT_FOUND,
+            "Toggle of a policy deleted mid-flight must return 404, not a success redirect: {body}"
+        );
+        assert!(
+            body.contains("not_found"),
+            "race-condition 404 body must carry the not_found code: {body}"
+        );
+
+        // The fraudulent audit event must NOT be logged.
+        let after = count_toggle_audit_events(&state, &admin.id).await;
+        assert_eq!(
+            after, before,
+            "no audit event must be logged when the update did not occur"
+        );
+
+        // Confirm the policy is really gone (the hook deleted it).
+        let gone = db::get_custom_policy(&state.store, &policy_id)
+            .await
+            .expect("get policy");
+        assert!(
+            gone.is_none(),
+            "policy must have been deleted by the OCC hook"
         );
     }
 }

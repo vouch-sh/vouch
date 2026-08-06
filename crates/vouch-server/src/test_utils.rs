@@ -136,6 +136,23 @@ pub async fn test_app_state() -> Arc<AppState> {
 pub async fn test_app_state_with_idps(
     idps: Vec<crate::services::idp::ConfiguredIdp>,
 ) -> Arc<AppState> {
+    build_test_app_state(idps, |_| {}).await
+}
+
+/// Build an [`AppState`] for tests, invoking `configure_store` on the document
+/// store before it is wired into state.
+///
+/// Lets handler-level tests install the `modify` test hook
+/// ([`DocumentStore::set_modify_test_hook`]) to deterministically reproduce
+/// OCC races through the full axum router, without each test reconstructing
+/// the entire state by hand.
+pub async fn build_test_app_state<F>(
+    idps: Vec<crate::services::idp::ConfiguredIdp>,
+    configure_store: F,
+) -> Arc<AppState>
+where
+    F: FnOnce(&mut DocumentStore),
+{
     let pool = test_db().await;
     let config = test_config();
 
@@ -151,7 +168,8 @@ pub async fn test_app_state_with_idps(
 
     let crypto: Arc<dyn crate::crypto::document_crypto::DocumentCrypto> =
         Arc::new(PlaintextDocumentCrypto);
-    let store = DocumentStore::new(pool.clone(), crypto.clone());
+    let mut store = DocumentStore::new(pool.clone(), crypto.clone());
+    configure_store(&mut store);
     let audit = AuditStore::new(pool.clone(), crypto);
 
     // Register the first-party client whose JWKS holds the shared test signing
@@ -278,6 +296,21 @@ pub async fn test_app_state_encrypted() -> Arc<AppState> {
 /// Create test app (router + state) for handler testing.
 pub async fn test_app() -> (Router, Arc<AppState>) {
     let state = test_app_state().await;
+    let config = state.config();
+    let router = build_app(state.clone(), &config).expect("Failed to build test app router");
+    (router, state)
+}
+
+/// Create a test app whose document store is configured via `configure_store`
+/// before the router is built.
+///
+/// Lets handler tests install [`DocumentStore::set_modify_test_hook`] to
+/// deterministically drive the OCC race window through the full router.
+pub async fn test_app_with_modify_hook<F>(configure_store: F) -> (Router, Arc<AppState>)
+where
+    F: FnOnce(&mut DocumentStore),
+{
+    let state = build_test_app_state(Vec::new(), configure_store).await;
     let config = state.config();
     let router = build_app(state.clone(), &config).expect("Failed to build test app router");
     (router, state)
