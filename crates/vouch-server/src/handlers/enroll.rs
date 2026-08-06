@@ -699,6 +699,32 @@ pub(crate) async fn complete_enrollment_after_identity(
             }
             .into_response();
         }
+        Err(db::EnrollUserError::Deactivated { user_id, email }) => {
+            // The account exists but is deactivated (SCIM `active: false` or
+            // admin deactivation). Every other login path refuses these
+            // accounts; the SSO front door must too — otherwise deactivation
+            // is a soft-delete the user can undo by signing in again.
+            tracing::warn!(
+                user_id = %user_id,
+                email = %redact_email(&email),
+                "Refusing IdP login for deactivated account"
+            );
+            let event = db::AuthEventParams {
+                user_id,
+                event_type: db::AuthEventType::LoginFailed,
+                success: false,
+                failure_reason: Some("user_deactivated".to_string()),
+                client: client_info,
+                ..Default::default()
+            };
+            db::spawn_audit_event(&state.audit, event, Some(email));
+            return ErrorTemplate {
+                title: Tr::new("enroll-error-account-deactivated-title").to_string(),
+                message: Tr::new("enroll-error-account-deactivated").to_string(),
+                back_url: None,
+            }
+            .into_response();
+        }
         Err(e) => {
             tracing::error!("Failed to enroll user: {}", e);
             return ErrorTemplate {
@@ -1049,6 +1075,21 @@ pub(crate) async fn browser_register_start(
 
     let user_email = token.email.clone().unwrap_or_default();
 
+    // A deactivated user's surviving enrollment cookie must not begin new
+    // hardware-key registration. `extract_session_from_cookie` deliberately
+    // skips the `active` check, so this mutating endpoint carries its own
+    // guard (per-handler point-fix pattern).
+    let account = db::get_user_by_id(&state.store, &token.sub)
+        .await
+        .map_err(|e| {
+            ServiceError::api(StatusCode::INTERNAL_SERVER_ERROR, "db_error", e.to_string())
+        })?;
+    if let Some(account) = account
+        && !account.active
+    {
+        return Err(ServiceError::Forbidden("user_deactivated"));
+    }
+
     // Get device_auth_id from enrollment session if available (for CLI polling).
     // Look up by session token hash, since oidc_callback stores the
     // enrollment session keyed to the same token.
@@ -1268,6 +1309,20 @@ pub(crate) async fn browser_register_complete(
     let reg_state = BrowserRegistrationState::decode(&req.state, &state.state_signer)
         .await
         .map_err(|e| ServiceError::api(StatusCode::BAD_REQUEST, "invalid_state", e.to_string()))?;
+
+    // ── Phase 2a: Account must be active ────────────────────────────────
+    // A user deactivated after obtaining the registration state (valid for
+    // five minutes) must not register a new hardware key.
+    let account = db::get_user_by_id(&state.store, &reg_state.user_id.to_string())
+        .await
+        .map_err(|e| {
+            ServiceError::api(StatusCode::INTERNAL_SERVER_ERROR, "db_error", e.to_string())
+        })?;
+    if let Some(account) = account
+        && !account.active
+    {
+        return Err(ServiceError::Forbidden("user_deactivated"));
+    }
 
     // ── Phase 2b: Single-use enforcement ───────────────────────────────
     // Consume the state token before any WebAuthn work so that a captured
@@ -1859,7 +1914,8 @@ mod tests {
 
     use super::*;
     use crate::test_utils::{
-        create_test_authenticator, create_test_user, http_post_json, test_app, test_app_state,
+        create_test_authenticator, create_test_session, create_test_user, http_post_json, test_app,
+        test_app_state,
     };
     use axum::http::StatusCode;
     use base64::Engine;
@@ -3140,5 +3196,73 @@ mod tests {
             .or_else(|_| base64::engine::general_purpose::STANDARD.decode(parts[1]))
             .expect("decode JWT payload");
         serde_json::from_slice(&payload_bytes).expect("parse JWT payload JSON")
+    }
+
+    #[tokio::test]
+    async fn test_browser_register_start_refuses_deactivated_user() {
+        // A deactivated user's surviving enrollment cookie must not begin
+        // new hardware-key registration (issue #846).
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "deactivated-start@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+
+        crate::db::update_user_active_status(&state.store, &user.id, false)
+            .await
+            .expect("deactivate user");
+
+        let cookie = format!("{}={token}", vouch_common::SESSION_COOKIE_NAME);
+        let (status, body) =
+            http_post_json(&app, "/enroll/webauthn/start", "{}", &[("Cookie", &cookie)]).await;
+        assert_eq!(
+            status,
+            StatusCode::FORBIDDEN,
+            "deactivated user must not start key registration: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_browser_register_complete_refuses_deactivated_user() {
+        // A user deactivated after obtaining the registration state (valid
+        // for five minutes) must not complete key registration (issue #846).
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "deactivated-complete@example.com").await;
+        crate::db::update_user_active_status(&state.store, &user.id, false)
+            .await
+            .expect("deactivate user");
+        let user_uuid = Uuid::parse_str(&user.id).expect("user id is a uuid");
+
+        let (_ccr, webauthn_state) = state
+            .webauthn
+            .start_passkey_registration(user_uuid, &user.email, &user.email, None)
+            .expect("start_passkey_registration");
+        let now = jiff::Timestamp::now();
+        let reg_state = BrowserRegistrationState {
+            device_auth_id: String::new(),
+            user_id: user_uuid,
+            user_email: user.email.clone(),
+            webauthn_state,
+            iat: now.as_second(),
+            exp: now.as_second() + 300,
+        };
+        let state_jwt = reg_state
+            .encode(&state.state_signer)
+            .await
+            .expect("encode state");
+
+        let body = serde_json::json!({
+            "state": state_jwt,
+            "credential_id": valid_credential_id(),
+            "attestation_object": valid_attestation_object(),
+            "client_data_json": valid_client_data_json(),
+        })
+        .to_string();
+
+        let (status, resp) = http_post_json(&app, "/enroll/webauthn/complete", &body, &[]).await;
+        assert_eq!(
+            status,
+            StatusCode::FORBIDDEN,
+            "deactivated user must not complete key registration: {resp}"
+        );
     }
 }

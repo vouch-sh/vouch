@@ -369,16 +369,29 @@ pub(crate) async fn device_token(
                 .await
                 .map_err(|_| db_error())?
                 .and_then(|a| a.aaguid);
-            let org_domain = match db::get_user_by_id(&state.store, &user_id)
+            // A user deactivated (or deleted) after approving the device
+            // authorization must not receive a token — the same `active`
+            // guard every other grant path applies. The device code was
+            // already consumed above, so the refusal burns it.
+            let user = db::get_user_by_id(&state.store, &user_id)
                 .await
                 .map_err(|_| db_error())?
-            {
-                Some(u) => match u.org_id {
-                    Some(org_id) => db::get_organization_domain(&state.store, &org_id)
-                        .await
-                        .map_err(|_| db_error())?,
-                    None => None,
-                },
+                .ok_or_else(|| oauth_error(StatusCode::BAD_REQUEST, OAuthError::invalid_grant()))?;
+            if !user.active {
+                tracing::warn!(
+                    target: "security",
+                    user_id = %user_id,
+                    "Refusing device-flow token for deactivated user"
+                );
+                return Err(oauth_error(
+                    StatusCode::BAD_REQUEST,
+                    OAuthError::invalid_grant(),
+                ));
+            }
+            let org_domain = match user.org_id {
+                Some(org_id) => db::get_organization_domain(&state.store, &org_id)
+                    .await
+                    .map_err(|_| db_error())?,
                 None => None,
             };
 
@@ -1392,6 +1405,56 @@ mod tests {
         assert!(
             session.is_none(),
             "race-loser handler path must revoke pre-existing sessions"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_device_token_refused_for_deactivated_user() {
+        // A user deactivated between the browser approval and the CLI's
+        // token poll must not receive a token (issue #846: the device flow
+        // was the one grant path without a `user.active` check).
+        let (app, state) = test_app().await;
+
+        let device_code = "test_deactivated_user_code";
+        let device_code_hash = hash_device_code(device_code);
+        let now = Timestamp::now();
+        let expires_at = now.checked_add(Span::new().hours(1)).unwrap();
+        let id = crate::db::create_device_auth_request(
+            &state.store,
+            &device_code_hash,
+            "DEAC-CODE",
+            None,
+            expires_at,
+            0,
+        )
+        .await
+        .expect("create device auth");
+
+        let user = create_test_user(&state.store, "device-deactivated@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        crate::db::authorize_device_auth(&state.store, &id, &user.id, &user.email, &auth_id)
+            .await
+            .expect("authorize device");
+
+        crate::db::update_user_active_status(&state.store, &user.id, false)
+            .await
+            .expect("deactivate user");
+
+        let body = format!(
+            "grant_type=urn:ietf:params:oauth:grant-type:\
+             device_code&device_code={device_code}"
+        );
+        let (status, resp) = http_post_form(&app, "/oauth/token", &body, &[]).await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "deactivated user must not mint a device-flow token: {resp}"
+        );
+        let error: serde_json::Value = serde_json::from_str(&resp).expect("Valid JSON");
+        assert_eq!(error["error"], "invalid_grant");
+        assert!(
+            !resp.contains("access_token"),
+            "no token may be issued: {resp}"
         );
     }
 }
