@@ -896,6 +896,119 @@ mod tests {
         assert_eq!(events[0]["class_uid"], 3002);
     }
 
+    /// OCSF 1.9.0 MUST: events mapped to `activity_id: 99` (Other) must
+    /// emit a source-specific `activity_name` (not the literal "Other")
+    /// and preserve `event_type` in `unmapped`. End-to-end check through
+    /// the `?format=ocsf` HTTP endpoint, covering all five affected kinds
+    /// and confirming `AdminPromote`/`AdminDemote` are distinguishable.
+    #[tokio::test]
+    async fn ocsf_format_activity_id_99_events_carry_source_specific_name() {
+        let (app, state) = test_app().await;
+        let org = create_test_org(&state.store, "example.com").await;
+        let token = create_test_audit_token(&state.store, "poller", &org.id).await;
+
+        let old = jiff::Timestamp::now()
+            .checked_sub(jiff::Span::new().minutes(5))
+            .expect("valid timestamp");
+        // Seed one event of each activity_id: 99 kind.
+        let cases: [(AuditEventKind, u16, &str); 5] = [
+            (AuditEventKind::AdminPromote, 3001, "Admin Promote"),
+            (AuditEventKind::AdminDemote, 3001, "Admin Demote"),
+            (
+                AuditEventKind::AdminRevokeCredentials,
+                3001,
+                "Admin Revoke Credentials",
+            ),
+            (
+                AuditEventKind::OauthTokenRevoked,
+                3003,
+                "OAuth Token Revoked",
+            ),
+            (AuditEventKind::ScimOperation, 3004, "SCIM Operation"),
+        ];
+        for (kind, _, _) in &cases {
+            state
+                .audit
+                .insert_event_for_test(*kind, Some("example.com"), old, "{}")
+                .await
+                .expect("insert event");
+        }
+
+        let (status, body) = http_get(
+            &app,
+            &format!("{PATH}?format=ocsf&limit=100"),
+            &[("Authorization", &format!("Bearer {token}"))],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let resp: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
+        let events = resp["events"].as_array().expect("events array");
+        assert_eq!(events.len(), cases.len());
+
+        // Build a lookup by event_type so order doesn't matter.
+        use std::collections::HashMap;
+        let mut by_type: HashMap<&str, &serde_json::Value> = HashMap::new();
+        for ev in events {
+            let et = ev["unmapped"]["event_type"]
+                .as_str()
+                .expect("event_type in unmapped");
+            by_type.insert(et, ev);
+        }
+
+        for (kind, expected_class_uid, expected_activity_name) in &cases {
+            let ev = by_type
+                .get(kind.as_str())
+                .expect("event_type must be present in response");
+            assert_eq!(
+                ev["activity_id"],
+                99,
+                "{}: activity_id must be 99",
+                kind.as_str()
+            );
+            assert_ne!(
+                ev["activity_name"],
+                "Other",
+                "{}: activity_name must not be the generic \"Other\"",
+                kind.as_str()
+            );
+            assert_eq!(
+                ev["activity_name"],
+                *expected_activity_name,
+                "{}: activity_name mismatch",
+                kind.as_str()
+            );
+            assert_eq!(
+                ev["class_uid"],
+                *expected_class_uid,
+                "{}: class_uid mismatch",
+                kind.as_str()
+            );
+            assert_eq!(
+                ev["unmapped"]["event_type"],
+                kind.as_str(),
+                "{}: unmapped.event_type must preserve source event_type",
+                kind.as_str()
+            );
+            // type_uid = class_uid * 100 + activity_id
+            let expected_type_uid = u32::from(*expected_class_uid) * 100 + 99;
+            assert_eq!(
+                ev["type_uid"],
+                expected_type_uid,
+                "{}: type_uid mismatch",
+                kind.as_str()
+            );
+        }
+
+        // Explicitly confirm the security-critical distinction: promote
+        // vs demote must be distinguishable at the OCSF layer.
+        let promote = by_type.get("admin_promote").expect("admin_promote present");
+        let demote = by_type.get("admin_demote").expect("admin_demote present");
+        assert_ne!(
+            promote["activity_name"], demote["activity_name"],
+            "admin_promote and admin_demote must be distinguishable by activity_name"
+        );
+    }
+
     #[tokio::test]
     async fn forward_cursor_pages_without_gap_or_duplicate() {
         let (app, state) = test_app().await;
