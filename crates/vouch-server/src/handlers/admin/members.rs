@@ -147,7 +147,10 @@ pub(crate) async fn promote_member(
         ));
     }
 
-    db::update_user_admin_status(&state.store, &target_id, true).await?;
+    let updated = db::update_user_admin_status(&state.store, &target_id, true).await?;
+    if !updated {
+        return Err(member_gone());
+    }
 
     let data = serde_json::json!({
         "action": "promote",
@@ -206,7 +209,10 @@ pub(crate) async fn demote_member(
         ));
     }
 
-    db::update_user_admin_status(&state.store, &target_id, false).await?;
+    let updated = db::update_user_admin_status(&state.store, &target_id, false).await?;
+    if !updated {
+        return Err(member_gone());
+    }
 
     let data = serde_json::json!({
         "action": "demote",
@@ -265,7 +271,10 @@ pub(crate) async fn deactivate_member(
         ));
     }
 
-    db::update_user_active_status(&state.store, &target_id, false).await?;
+    let updated = db::update_user_active_status(&state.store, &target_id, false).await?;
+    if !updated {
+        return Err(member_gone());
+    }
 
     // Invalidate all sessions for the deactivated user
     db::delete_sessions_for_user(&state.store, &target_id).await?;
@@ -331,7 +340,10 @@ pub(crate) async fn activate_member(
     )
     .await?;
 
-    db::update_user_active_status(&state.store, &target_id, true).await?;
+    let updated = db::update_user_active_status(&state.store, &target_id, true).await?;
+    if !updated {
+        return Err(member_gone());
+    }
 
     let data = serde_json::json!({
         "action": "activate",
@@ -494,7 +506,10 @@ pub(crate) async fn remove_member(
         )
     })?;
 
-    db::delete_user(&state.store, &target_id).await?;
+    let deleted = db::delete_user(&state.store, &target_id).await?;
+    if !deleted {
+        return Err(member_gone());
+    }
 
     let data = serde_json::json!({
         "action": "remove_user",
@@ -521,6 +536,14 @@ pub(crate) async fn remove_member(
     );
 
     Ok(Redirect::to("/admin").into_response())
+}
+
+/// 404 for a member document that vanished between the admin's read and the
+/// mutation. The DB layer reported no document to change, so returning an
+/// error (instead of logging an audit event and redirecting with success)
+/// keeps the audit log truthful.
+fn member_gone() -> ServiceError {
+    ServiceError::api(StatusCode::NOT_FOUND, "not_found", "User not found")
 }
 
 #[cfg(test)]
@@ -1131,5 +1154,80 @@ mod tests {
         .await;
 
         assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    // ---- Concurrent-delete races: no success + no audit event on a miss ----
+
+    #[tokio::test]
+    async fn test_member_actions_return_404_when_target_vanishes_mid_update() {
+        // Same bug class as the custom-policy toggle (issue #844): the
+        // handlers discarded the bool from `update_user_admin_status` /
+        // `update_user_active_status`, so a member deleted between the
+        // admin's read and the update produced a success redirect plus a
+        // fraudulent audit event. The modify hook deletes the target's doc
+        // on the first OCC attempt, deterministically forcing the miss.
+        use std::sync::{Arc, Mutex};
+
+        for (action, kind) in [
+            ("promote", "admin_promote"),
+            ("demote", "admin_demote"),
+            ("deactivate", "admin_deactivate"),
+            ("activate", "admin_activate"),
+        ] {
+            let target_slot: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+            let slot = Arc::clone(&target_slot);
+            let (app, state) = test_app_with_modify_hook(move |store| {
+                let writer = store.clone();
+                store.set_modify_test_hook(Arc::new(move |doc_id: &str, attempt: u32| {
+                    let writer = writer.clone();
+                    let doc_id = doc_id.to_string();
+                    let slot = Arc::clone(&slot);
+                    Box::pin(async move {
+                        // Only delete the member under test — other documents
+                        // (admin session bookkeeping) must stay intact.
+                        let is_target =
+                            slot.lock().expect("slot lock").as_deref() == Some(doc_id.as_str());
+                        if attempt == 0 && is_target {
+                            writer
+                                .delete(&doc_id)
+                                .await
+                                .expect("delete target member doc");
+                        }
+                    })
+                }));
+            })
+            .await;
+
+            let (_admin, token, member) = setup_admin_and_member(&state).await;
+            *target_slot.lock().expect("slot lock") = Some(member.id.clone());
+            let cookie = admin_cookie(&token);
+
+            let (status, body) = http_post_form(
+                &app,
+                &format!("/admin/members/{}/{action}", member.id),
+                "",
+                &[("Cookie", &cookie), ("Origin", "https://test.example.com")],
+            )
+            .await;
+
+            assert_eq!(
+                status,
+                StatusCode::NOT_FOUND,
+                "{action}: a member deleted mid-update must produce 404, got {status}: {body}"
+            );
+
+            let events = state
+                .audit
+                .query_events(&crate::db::AuditEventFilter {
+                    event_types: Some(vec![kind.to_string()]),
+                    ..crate::db::AuditEventFilter::default()
+                })
+                .await
+                .expect("query audit events");
+            assert!(
+                events.is_empty(),
+                "{action}: no {kind} audit event may be logged when the update did not occur"
+            );
+        }
     }
 }
