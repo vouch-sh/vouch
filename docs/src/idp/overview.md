@@ -166,8 +166,10 @@ affected users are refused at step 3 and cannot sign in. There is currently no u
 operation: an org admin must remove the affected user (Admin → Members → Remove), after
 which the user re-enrolls and a fresh account binds to the new subject.
 
-SAML deployments should send a stable NameID (`persistent` or `emailAddress` format).
-Transient NameIDs cannot be bound — see [SAML 2.0](saml.md) for details.
+SAML deployments should send a stable NameID (`persistent` or `emailAddress` format); only
+those formats are bound. Any other format (transient, unspecified, vendor-specific, or an
+absent `Format`) is treated as potentially rotating and falls back to email-only matching —
+see [SAML 2.0](saml.md) for details.
 
 ## User Lifecycle
 

@@ -51,12 +51,17 @@ For domain-based enrollment restrictions, set `VOUCH_IDP_<SLUG>_DOMAIN_ATTRIBUTE
 Vouch binds accounts to the pair (IdP entity ID, NameID) — not to the email address — so
 the NameID must be a stable identifier for the user (see
 [Account linking](overview.md#account-linking-and-identity-binding)). Configure the IdP to
-send a `persistent` or `emailAddress` format NameID.
+send a NameID with one of these formats:
 
-If the IdP sends a `transient` NameID (a fresh value on every login), Vouch skips identity
+- `urn:oasis:names:tc:SAML:2.0:nameid-format:persistent`
+- `urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress`
+
+Vouch binds **only** these two formats. Any other format — `transient` (a fresh value on
+every login), `unspecified`, a vendor-specific URN, or a NameID sent with no `Format`
+attribute — is treated as potentially rotating and is **not** bound: Vouch skips identity
 binding for that sign-in and falls back to email-only account matching, logging a warning.
 This keeps such deployments working, but they do not get the reassignment protection that
-identity binding provides — switch the IdP to a stable NameID format to enable it.
+identity binding provides — switch the IdP to `persistent` or `emailAddress` to enable it.
 
 ## Configuration Example
 
