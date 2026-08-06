@@ -24,6 +24,7 @@ use crate::db::{
     OAuthEventType, RegistrationSource, TokenEndpointAuthMethod, UpdateClientRegistrationParams,
 };
 use crate::error::{OAuthErrorCode, ServiceError};
+use axum::http::StatusCode;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde::{Deserialize, Serialize};
@@ -1060,7 +1061,7 @@ fn determine_client_type(
 ///
 /// # Errors
 ///
-/// - `ServiceError::Unauthorized` if the Bearer token is missing or invalid.
+/// - A 401 `invalid_token` API error if the Bearer token is missing or invalid.
 /// - `ServiceError::NotFound` if the `client_id` does not exist.
 pub async fn read_client_configuration(
     state: &Arc<AppState>,
@@ -1081,7 +1082,7 @@ pub async fn read_client_configuration(
 ///
 /// # Errors
 ///
-/// - `ServiceError::Unauthorized` if the Bearer token is missing or invalid.
+/// - A 401 `invalid_token` API error if the Bearer token is missing or invalid.
 /// - `ServiceError::NotFound` if the `client_id` does not exist.
 pub async fn delete_client_configuration(
     state: &Arc<AppState>,
@@ -1129,7 +1130,7 @@ pub async fn delete_client_configuration(
 ///
 /// # Errors
 ///
-/// - `ServiceError::Unauthorized` if the Bearer token is invalid.
+/// - A 401 `invalid_token` API error if the Bearer token is invalid.
 /// - `ServiceError::NotFound` if the `client_id` does not exist.
 /// - `ServiceError::OAuth` if the request body contains invalid metadata.
 pub async fn update_client_configuration(
@@ -1272,13 +1273,20 @@ async fn lookup_and_verify_registration_token(
         return Err(ServiceError::NotFound("Client"));
     }
 
-    let stored_hash =
-        client
-            .registration_access_token_hash
-            .as_deref()
-            .ok_or(ServiceError::Unauthorized(
+    let stored_hash = client
+        .registration_access_token_hash
+        .as_deref()
+        .ok_or_else(|| {
+            // RFC 7592 §2 / RFC 6750 §3.1: registration endpoints are OAuth
+            // protected resources, so bearer-token failures are
+            // `invalid_token`, not the client-authentication error
+            // `invalid_client`.
+            ServiceError::api(
+                StatusCode::UNAUTHORIZED,
+                OAuthErrorCode::InvalidToken.as_str(),
                 "Client has no registration access token",
-            ))?;
+            )
+        })?;
 
     let provided_hash = hash_token(token);
     let is_match: bool = provided_hash
@@ -1287,7 +1295,9 @@ async fn lookup_and_verify_registration_token(
         .into();
 
     if !is_match {
-        return Err(ServiceError::Unauthorized(
+        return Err(ServiceError::api(
+            StatusCode::UNAUTHORIZED,
+            OAuthErrorCode::InvalidToken.as_str(),
             "Invalid registration access token",
         ));
     }

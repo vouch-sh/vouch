@@ -190,6 +190,14 @@ fn extract_bearer_token(headers: &HeaderMap) -> Option<&str> {
 /// endpoint. The `error` and `error_description` parameters mirror the JSON
 /// body so OAuth client libraries can rely on either source.
 fn bearer_challenge(error: &str, description: &str) -> String {
+    // RFC 6750 Section 3 limits challenge parameter values to
+    // %x20-21 / %x23-5B / %x5D-7E — no double quote, no backslash. Strip
+    // anything outside that set so a future description cannot produce a
+    // malformed (or quote-escaping) challenge.
+    let description: String = description
+        .chars()
+        .filter(|c| (' '..='!').contains(c) || ('#'..='[').contains(c) || (']'..='~').contains(c))
+        .collect();
     format!("Bearer error=\"{error}\", error_description=\"{description}\"")
 }
 
@@ -321,8 +329,13 @@ mod tests {
     async fn into_registration_response_adds_www_authenticate_on_401() {
         use axum::body::to_bytes;
 
-        // 401 path: ServiceError::Unauthorized now renders as invalid_token.
-        let err = crate::error::ServiceError::Unauthorized("Invalid registration access token");
+        // 401 path: registration-token validation emits a 401 invalid_token
+        // API error, which the Api arm of into_oauth_response preserves.
+        let err = crate::error::ServiceError::api(
+            StatusCode::UNAUTHORIZED,
+            "invalid_token",
+            "Invalid registration access token",
+        );
         let response = into_registration_response(err);
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
         let www_auth = response

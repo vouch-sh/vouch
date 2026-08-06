@@ -25,10 +25,6 @@ pub enum ServiceError {
     #[error("validation: {0}")]
     Validation(String),
 
-    /// Authentication required.
-    #[error("unauthorized: {0}")]
-    Unauthorized(&'static str),
-
     /// Permission denied.
     #[error("forbidden: {0}")]
     Forbidden(&'static str),
@@ -325,23 +321,21 @@ impl ServiceError {
                     error_uri: None,
                 }),
             ),
+            // RFC 6750 Section 3.1: preserve bearer-token errors (`invalid_token`
+            // from `extract_resource_token` or RFC 7592 registration-token
+            // validation) instead of collapsing them to a 500 `server_error`.
+            // Only 401s are preserved: other `Api` errors carry internal codes
+            // (e.g. `issuer_error`) that are not registered OAuth error codes
+            // and must keep falling through to the generic `server_error`.
             Self::Api {
                 status,
                 code,
                 message,
-            } => (
+            } if status == StatusCode::UNAUTHORIZED => (
                 status,
                 Json(OAuthErrorResponse {
                     error: code,
                     error_description: Some(message),
-                    error_uri: None,
-                }),
-            ),
-            Self::Unauthorized(_) => (
-                StatusCode::UNAUTHORIZED,
-                Json(OAuthErrorResponse {
-                    error: OAuthErrorCode::InvalidToken.as_str().to_string(),
-                    error_description: Some("Invalid or expired token".to_string()),
                     error_uri: None,
                 }),
             ),
@@ -400,9 +394,6 @@ impl ServiceError {
                 format!("{entity} not found"),
             ),
             Self::Validation(msg) => (StatusCode::BAD_REQUEST, "invalid_request", msg.clone()),
-            Self::Unauthorized(msg) => {
-                (StatusCode::UNAUTHORIZED, "unauthorized", (*msg).to_string())
-            }
             Self::Forbidden(msg) => (StatusCode::FORBIDDEN, "forbidden", (*msg).to_string()),
             Self::Conflict(msg) => (StatusCode::CONFLICT, "conflict", msg.clone()),
             Self::Api {
@@ -592,9 +583,9 @@ mod tests {
                 "bad input",
             ),
             (
-                ServiceError::Unauthorized("no token"),
+                ServiceError::api(StatusCode::UNAUTHORIZED, "invalid_token", "no token"),
                 StatusCode::UNAUTHORIZED,
-                "unauthorized",
+                "invalid_token",
                 "no token",
             ),
             (
@@ -809,23 +800,6 @@ mod tests {
         );
     }
 
-    /// RFC 6750 §3.1: `ServiceError::Unauthorized` (used by RFC 7592
-    /// registration-endpoint token validation) MUST render as `invalid_token`,
-    /// not `invalid_client`. OAuth client libraries distinguish these to decide
-    /// whether to retry (invalid_token) or re-prompt (invalid_client).
-    #[test]
-    fn test_unauthorized_renders_as_invalid_token_in_oauth_response() {
-        let err = ServiceError::Unauthorized("Invalid registration access token");
-        let (status, json) = err.into_oauth_response();
-        assert_eq!(status, StatusCode::UNAUTHORIZED);
-        assert_eq!(json.error, "invalid_token");
-        assert!(
-            json.error_description
-                .as_deref()
-                .is_some_and(|d| !d.is_empty())
-        );
-    }
-
     /// RFC 6750 §3.1: `ServiceError::Api` carrying `invalid_token` (emitted by
     /// `extract_resource_token` for session JWT failures) MUST be preserved by
     /// `into_oauth_response()` instead of falling through to a 500
@@ -843,6 +817,29 @@ mod tests {
         assert_eq!(
             json.error_description,
             Some("Invalid or expired access token".to_string())
+        );
+    }
+
+    /// Non-401 `ServiceError::Api` errors carry internal codes (e.g.
+    /// `issuer_error` from org-issuer construction) that are not registered
+    /// OAuth error codes. `into_oauth_response()` must keep collapsing them to
+    /// the generic 500 `server_error` rather than leaking them from the token
+    /// endpoint.
+    #[test]
+    fn test_api_non_401_still_collapses_to_server_error() {
+        let err = ServiceError::api(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "issuer_error",
+            "Failed to construct the organization issuer",
+        );
+        let (status, json) = err.into_oauth_response();
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(json.error, "server_error");
+        assert!(
+            json.error_description
+                .as_deref()
+                .is_none_or(|d| !d.contains("issuer")),
+            "internal error detail must not leak: {json:?}"
         );
     }
 }
