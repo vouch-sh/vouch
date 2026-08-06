@@ -56,6 +56,15 @@ async fn get_credential(profile: Option<&str>) -> Result<()> {
         return Ok(());
     }
 
+    // Git's credential protocol includes the port in the `host` field when the
+    // URL explicitly specifies one (e.g., `git-codecommit.us-east-1.amazonaws.com:443`).
+    // `is_codecommit_host` already accepts that form, but libcurl strips the
+    // default `:443` from the HTTP `Host` header it sends to CodeCommit. SigV4
+    // signs the host header value, so signing with the port-annotated hostname
+    // would produce a signature mismatch and a 403 from AWS. Strip the
+    // standard HTTPS port so the signed hostname matches what libcurl sends.
+    let host = host.strip_suffix(":443").unwrap_or(host);
+
     // Path is required for signing (useHttpPath must be true in git config)
     let path = input.path.as_deref().ok_or_else(|| {
         anyhow::anyhow!(

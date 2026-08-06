@@ -19,7 +19,15 @@ use crate::commands::credential::git_protocol::read_credential_input;
 use crate::session::resolve_session;
 
 /// Check if the host is a GitHub host.
+///
+/// Git's credential protocol includes the port in the `host` field when the
+/// URL explicitly specifies one (e.g., `github.com:443`). The standard HTTPS
+/// port is stripped before matching so that explicit `:443` doesn't cause the
+/// host check — and thus the entire credential helper — to fail silently.
+/// Non-standard ports are intentionally not stripped: the helper should
+/// decline to provide GitHub credentials for them.
 fn is_github_host(host: &str) -> bool {
+    let host = host.strip_suffix(":443").unwrap_or(host);
     let host = host.to_lowercase();
     host == "github.com"
         || host.ends_with(".github.com")
@@ -115,4 +123,41 @@ pub(crate) async fn check_status(server: &str) -> Result<GitHubStatusResponse> {
     client
         .get_authenticated("/v1/credentials/github/status")
         .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Git's credential protocol includes the port in the `host` field when the
+    /// URL explicitly specifies one. The standard HTTPS port must be stripped
+    /// before matching so explicit `:443` doesn't silently fail the helper.
+    #[test]
+    fn test_is_github_host_with_port_443() {
+        assert!(is_github_host("github.com:443"));
+        assert!(is_github_host("ghe.com:443"));
+        assert!(is_github_host("ssh.github.com:443"));
+        assert!(is_github_host("foo.ghe.com:443"));
+        // Case-insensitive matching must still work when `:443` is present.
+        assert!(is_github_host("GitHub.com:443"));
+        assert!(is_github_host("GITHUB.COM:443"));
+    }
+
+    /// Non-standard ports are intentionally NOT stripped: GitHub only serves
+    /// HTTPS on 443, so a request to a different port should not be treated as
+    /// a GitHub host. The helper declines with no output and git falls through
+    /// to other helpers.
+    #[test]
+    fn test_is_github_host_rejects_non_standard_port() {
+        assert!(!is_github_host("github.com:8443"));
+        assert!(!is_github_host("github.com:80"));
+    }
+
+    /// A bare `:443` suffix on a non-GitHub host must not produce a false
+    /// positive. The equality/suffix checks still apply after port stripping.
+    #[test]
+    fn test_is_github_host_with_port_443_not_github() {
+        assert!(!is_github_host("example.com:443"));
+        assert!(!is_github_host("notgithub.com:443"));
+    }
 }

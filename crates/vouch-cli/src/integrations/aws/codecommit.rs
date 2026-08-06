@@ -258,8 +258,16 @@ const CODECOMMIT_DOMAINS: &[&str] = &[
 ];
 
 /// Check if a hostname is a CodeCommit host in any partition.
+///
+/// Git's credential protocol includes the port in the `host` field when the
+/// URL explicitly specifies one (e.g., `git-codecommit.us-east-1.amazonaws.com:443`).
+/// The standard HTTPS port is stripped before matching so that explicit `:443`
+/// doesn't cause the host check — and thus the entire credential helper — to
+/// fail silently. Non-standard ports are intentionally not stripped: the helper
+/// should decline to provide CodeCommit credentials for them.
 #[must_use]
 pub(crate) fn is_codecommit_host(host: &str) -> bool {
+    let host = host.strip_suffix(":443").unwrap_or(host);
     if !host.starts_with("git-codecommit.") {
         return false;
     }
@@ -491,6 +499,62 @@ mod tests {
     fn test_is_codecommit_host_not_codecommit() {
         assert!(!is_codecommit_host("github.com"));
         assert!(!is_codecommit_host("git-codecommit.us-east-1.example.com"));
+    }
+
+    // -- Host detection tests: explicit standard port (:443) --
+
+    /// Git's credential protocol includes the port in the `host` field when the
+    /// URL explicitly specifies one. The standard HTTPS port must be stripped
+    /// before matching so explicit `:443` doesn't silently fail the helper.
+    #[test]
+    fn test_is_codecommit_host_with_port_443() {
+        assert!(is_codecommit_host(
+            "git-codecommit.us-east-1.amazonaws.com:443"
+        ));
+        assert!(is_codecommit_host(
+            "git-codecommit.cn-north-1.amazonaws.com.cn:443"
+        ));
+    }
+
+    /// Non-standard ports are intentionally NOT stripped: CodeCommit only
+    /// serves HTTPS on 443, so a request to a different port should not be
+    /// treated as a CodeCommit host. The helper declines with no output and
+    /// git falls through to other helpers.
+    #[test]
+    fn test_is_codecommit_host_rejects_non_standard_port() {
+        assert!(!is_codecommit_host(
+            "git-codecommit.us-east-1.amazonaws.com:8443"
+        ));
+        assert!(!is_codecommit_host(
+            "git-codecommit.us-east-1.amazonaws.com:80"
+        ));
+    }
+
+    /// A bare `:443` suffix on a non-CodeCommit host must not produce a false
+    /// positive. The prefix/suffix checks still apply after port stripping.
+    #[test]
+    fn test_is_codecommit_host_with_port_443_not_codecommit() {
+        assert!(!is_codecommit_host("github.com:443"));
+        assert!(!is_codecommit_host(
+            "git-codecommit.us-east-1.example.com:443"
+        ));
+    }
+
+    /// `extract_region_from_hostname` receives the same `host` string git
+    /// emitted (after the caller strips `:443`). It extracts the region from
+    /// before the first `.` after the `git-codecommit.` prefix, so a trailing
+    /// `:443` wouldn't affect it — but verify that explicitly to guard the
+    /// signing pipeline against regressions if the extraction logic changes.
+    #[test]
+    fn test_extract_region_with_port_443() {
+        assert_eq!(
+            extract_region_from_hostname("git-codecommit.us-east-1.amazonaws.com:443"),
+            Some("us-east-1")
+        );
+        assert_eq!(
+            extract_region_from_hostname("git-codecommit.cn-north-1.amazonaws.com.cn:443"),
+            Some("cn-north-1")
+        );
     }
 
     // -- Hostname construction tests --
