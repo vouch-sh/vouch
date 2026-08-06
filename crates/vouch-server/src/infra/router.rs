@@ -187,12 +187,26 @@ pub fn build_app(state: Arc<AppState>, config: &config::ServerConfig) -> anyhow:
         Arc::clone(&state),
         crate::infra::org_host::org_host_gate,
     ))
-    .layer(axum::middleware::from_fn(metrics_middleware))
     // Global request timeout: 30 seconds.
+    //
+    // The `TimeoutLayer` MUST be placed INSIDE (innermost relative to) the
+    // observability middleware below. In tower/axum the last `.layer()` call
+    // is the outermost, so the request flows outside→in as:
+    //   set_request_id → request_span_middleware → propagate_request_id
+    //   → DefaultBodyLimit → metrics_middleware → TimeoutLayer → handler
+    // When the timeout fires it returns a 408 and drops the inner future
+    // (the handler). Because `metrics_middleware` is OUTSIDE the timeout, its
+    // `next.run(req).await` resolves with the 408 response and it records the
+    // request count/duration with `status="408"`. If it were placed inside the
+    // `TimeoutLayer` (as it was previously), the metrics recording — which runs
+    // AFTER `next.run(req).await` — would be cancelled along with the handler,
+    // and timed-out requests would be completely invisible to Prometheus.
+    // See commit 7bbcbb0f for the regression that introduced this ordering bug.
     .layer(TimeoutLayer::with_status_code(
         StatusCode::REQUEST_TIMEOUT,
         std::time::Duration::from_secs(30),
     ))
+    .layer(axum::middleware::from_fn(metrics_middleware))
     .layer(DefaultBodyLimit::max(GLOBAL_BODY_LIMIT))
     .layer(request_id::propagate_request_id_layer())
     .layer(axum::middleware::from_fn(
@@ -861,4 +875,118 @@ async fn metrics_middleware(req: Request<axum::body::Body>, next: Next) -> impl 
     ::metrics::histogram!("http_request_duration_seconds", &labels[..2]).record(duration);
 
     response
+}
+
+#[cfg(test)]
+#[expect(
+    clippy::expect_used,
+    reason = "test code: panic on assertion failure is acceptable"
+)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    use axum::body::Body;
+    use tower::ServiceExt;
+
+    /// Handler that never completes, used to trigger `TimeoutLayer`.
+    async fn slow_handler() -> &'static str {
+        // Sleep longer than any test timeout below. The `TimeoutLayer` will
+        // cancel this future and return 408 before it elapses.
+        tokio::time::sleep(Duration::from_secs(60)).await;
+        "unreachable"
+    }
+
+    fn build_request(uri: &str) -> Request<Body> {
+        Request::builder()
+            .method("GET")
+            .uri(uri)
+            .body(Body::empty())
+            .expect("valid request")
+    }
+
+    /// Regression test for the layer-ordering bug where `metrics_middleware`
+    /// was placed INSIDE the `TimeoutLayer`.
+    ///
+    /// With the buggy ordering, a timed-out request cancels the metrics
+    /// middleware (which records observations after `next.run(req).await`),
+    /// so 408s are completely invisible to Prometheus. The fixed ordering in
+    /// `build_app` places `metrics_middleware` OUTSIDE the `TimeoutLayer` so
+    /// it observes and records the 408 response.
+    ///
+    /// Uses a unique path so the assertion is robust to other tests sharing
+    /// the process-global recorder.
+    #[tokio::test]
+    async fn timeout_records_408_in_metrics() {
+        // The recorder must be live BEFORE the request runs, or the
+        // observations land in the no-op recorder. `install_recorder` is
+        // idempotent and shares one process-global handle across tests.
+        let handle = metrics::install_recorder().expect("prometheus recorder");
+
+        // Mirror the FIXED layer ordering from `build_app`: the timeout is
+        // innermost (applied first), and `metrics_middleware` is applied
+        // after it, making metrics the outer observer of the 408 response.
+        let router = Router::new()
+            .route("/slow-timeout-regression", get(slow_handler))
+            .layer(TimeoutLayer::with_status_code(
+                StatusCode::REQUEST_TIMEOUT,
+                Duration::from_millis(50),
+            ))
+            .layer(axum::middleware::from_fn(metrics_middleware));
+
+        let resp = router
+            .oneshot(build_request("/slow-timeout-regression"))
+            .await
+            .expect("oneshot succeeds");
+        assert_eq!(
+            resp.status(),
+            StatusCode::REQUEST_TIMEOUT,
+            "slow handler must be terminated by the TimeoutLayer with a 408"
+        );
+
+        let text = handle.render();
+
+        assert!(
+            text.contains("http_requests_total"),
+            "metrics middleware must emit http_requests_total; got:\n{text}"
+        );
+        assert!(
+            text.contains(r#"status="408""#),
+            "timed-out request must be recorded with status=\"408\"; got:\n{text}"
+        );
+        assert!(
+            text.contains("/slow-timeout-regression"),
+            "timed-out request path must appear in metrics; got:\n{text}"
+        );
+        assert!(
+            text.contains("http_request_duration_seconds"),
+            "metrics middleware must emit http_request_duration_seconds; got:\n{text}"
+        );
+    }
+
+    /// Guards the source-level layer ordering in `build_app` against silent
+    /// re-regression. In axum the last `.layer()` is outermost, so for the
+    /// timeout to be the innermost layer (cancellable while metrics observes
+    /// the 408), the `TimeoutLayer` call must appear BEFORE the
+    /// `metrics_middleware` call in source order within `build_app`.
+    #[test]
+    fn build_app_timeout_is_innermost_relative_to_metrics() {
+        let src = include_str!("router.rs");
+        // Restrict to the `build_app` body so the test module's own layer
+        // stacks don't pollute the search.
+        let (build_app_src, _rest) = src.split_once("#[cfg(test)]").expect("test module present");
+
+        let timeout_pos = build_app_src
+            .find("TimeoutLayer::with_status_code")
+            .expect("TimeoutLayer in build_app");
+        let metrics_pos = build_app_src
+            .find("axum::middleware::from_fn(metrics_middleware)")
+            .expect("metrics_middleware in build_app");
+        assert!(
+            timeout_pos < metrics_pos,
+            "TimeoutLayer must be applied before metrics_middleware in build_app \
+             (innermost vs. outer observer); source order: TimeoutLayer at \
+             {timeout_pos}, metrics at {metrics_pos}"
+        );
+    }
 }
