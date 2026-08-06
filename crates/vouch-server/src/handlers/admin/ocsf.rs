@@ -156,10 +156,6 @@ impl ActivityId {
         id: 0,
         name: "Unknown",
     };
-    const OTHER: Self = Self {
-        id: 99,
-        name: "Other",
-    };
 
     // Authentication (3002)
     const LOGON: Self = Self {
@@ -196,11 +192,39 @@ impl ActivityId {
         id: 11,
         name: "MFA Factor Disable",
     };
+    // OCSF `activity_id: 99` ("Other") is the catch-all for activities
+    // without a predefined enum value. Per the OCSF 1.9.0 spec ("When
+    // `activity_id` is `99` (Other), this attribute **must** contain the
+    // source-specific activity label"), each of these carries a
+    // source-specific `name` rather than the literal "Other", so SIEM
+    // consumers can distinguish them at the classification layer without
+    // parsing `data`. The original `event_type` is additionally preserved
+    // in `unmapped` by [`to_ocsf`].
+    const ADMIN_PROMOTE: Self = Self {
+        id: 99,
+        name: "Admin Promote",
+    };
+    const ADMIN_DEMOTE: Self = Self {
+        id: 99,
+        name: "Admin Demote",
+    };
+    const ADMIN_REVOKE_CREDENTIALS: Self = Self {
+        id: 99,
+        name: "Admin Revoke Credentials",
+    };
+    const IDENTITY_BOUND: Self = Self {
+        id: 99,
+        name: "Identity Bound",
+    };
 
     // Authorize Session (3003)
     const ASSIGN_PRIVILEGES: Self = Self {
         id: 1,
         name: "Assign Privileges",
+    };
+    const OAUTH_TOKEN_REVOKED: Self = Self {
+        id: 99,
+        name: "OAuth Token Revoked",
     };
 
     // Entity Management (3004)
@@ -215,6 +239,10 @@ impl ActivityId {
     const ENTITY_DELETE: Self = Self {
         id: 4,
         name: "Delete",
+    };
+    const SCIM_OPERATION: Self = Self {
+        id: 99,
+        name: "SCIM Operation",
     };
 }
 
@@ -298,10 +326,13 @@ fn ocsf_class(kind: AuditEventKind) -> OcsfMapping {
         }
         // Binding an upstream (issuer, subject) identity mutates the account.
         AuditEventKind::IdentityBound => {
-            OcsfMapping::new(ClassUid::AccountChange, ActivityId::OTHER)
+            OcsfMapping::new(ClassUid::AccountChange, ActivityId::IDENTITY_BOUND)
         }
-        AuditEventKind::AdminPromote | AuditEventKind::AdminDemote => {
-            OcsfMapping::new(ClassUid::AccountChange, ActivityId::OTHER)
+        AuditEventKind::AdminPromote => {
+            OcsfMapping::new(ClassUid::AccountChange, ActivityId::ADMIN_PROMOTE)
+        }
+        AuditEventKind::AdminDemote => {
+            OcsfMapping::new(ClassUid::AccountChange, ActivityId::ADMIN_DEMOTE)
         }
         AuditEventKind::AdminActivate => {
             OcsfMapping::new(ClassUid::AccountChange, ActivityId::ACCOUNT_ENABLE)
@@ -309,9 +340,11 @@ fn ocsf_class(kind: AuditEventKind) -> OcsfMapping {
         AuditEventKind::AdminDeactivate => {
             OcsfMapping::new(ClassUid::AccountChange, ActivityId::ACCOUNT_DISABLE)
         }
-        AuditEventKind::AdminRevokeCredentials => {
-            OcsfMapping::new(ClassUid::AccountChange, ActivityId::OTHER).medium()
-        }
+        AuditEventKind::AdminRevokeCredentials => OcsfMapping::new(
+            ClassUid::AccountChange,
+            ActivityId::ADMIN_REVOKE_CREDENTIALS,
+        )
+        .medium(),
         AuditEventKind::AdminRemoveUser => {
             OcsfMapping::new(ClassUid::AccountChange, ActivityId::ACCOUNT_DELETE)
         }
@@ -325,13 +358,13 @@ fn ocsf_class(kind: AuditEventKind) -> OcsfMapping {
             OcsfMapping::new(ClassUid::AuthorizeSession, ActivityId::ASSIGN_PRIVILEGES)
         }
         AuditEventKind::OauthTokenRevoked => {
-            OcsfMapping::new(ClassUid::AuthorizeSession, ActivityId::OTHER)
+            OcsfMapping::new(ClassUid::AuthorizeSession, ActivityId::OAUTH_TOKEN_REVOKED)
         }
 
         // Entity Management (3004) — resource lifecycle: SCIM, OAuth
         // clients, posture policies, API tokens, org domains/keys.
         AuditEventKind::ScimOperation => {
-            OcsfMapping::new(ClassUid::EntityManagement, ActivityId::OTHER)
+            OcsfMapping::new(ClassUid::EntityManagement, ActivityId::SCIM_OPERATION)
         }
         AuditEventKind::OauthClientRegistered | AuditEventKind::OauthSecretAdded => {
             OcsfMapping::new(ClassUid::EntityManagement, ActivityId::ENTITY_CREATE)
@@ -536,6 +569,18 @@ pub(crate) fn to_ocsf(event: &AuditEvent) -> OcsfEvent {
         .saturating_mul(100)
         .saturating_add(u32::from(mapping.activity.id));
 
+    // OCSF 1.9.0: when `activity_id` is `99` (Other), the source-specific
+    // activity label must be carried by `activity_name` (handled above via
+    // per-event `ActivityId` constants). We additionally preserve the
+    // original `event_type` in `unmapped` so SIEM consumers can correlate
+    // back to the native Vouch event without parsing the opaque `data`
+    // blob — useful for cross-product correlation and schema evolution.
+    let unmapped = if mapping.activity.id == 99 {
+        Some(serde_json::json!({ "event_type": event.event_type }))
+    } else {
+        None
+    };
+
     OcsfEvent {
         uid: event.id.clone(),
         class_uid,
@@ -553,7 +598,7 @@ pub(crate) fn to_ocsf(event: &AuditEvent) -> OcsfEvent {
         metadata: OcsfMetadata::default(),
         user,
         data,
-        unmapped: None,
+        unmapped,
     }
 }
 
@@ -687,6 +732,125 @@ mod tests {
         let ocsf = to_ocsf(&event);
         assert_eq!(ocsf.status_id.value(), StatusId::Failure.value());
         assert_eq!(ocsf.severity_id.value(), SeverityId::Medium.value());
+    }
+
+    /// OCSF 1.9.0: when `activity_id` is `99` (Other), `activity_name`
+    /// **must** carry a source-specific label (not the literal "Other"),
+    /// and we additionally preserve the original `event_type` in
+    /// `unmapped` so SIEM consumers can distinguish these events at the
+    /// OCSF classification layer without parsing the opaque `data` blob.
+    #[test]
+    fn activity_id_99_events_have_source_specific_name_and_unmapped_event_type() {
+        let cases: [(AuditEventKind, u16, &str); 5] = [
+            (AuditEventKind::AdminPromote, 3001, "Admin Promote"),
+            (AuditEventKind::AdminDemote, 3001, "Admin Demote"),
+            (
+                AuditEventKind::AdminRevokeCredentials,
+                3001,
+                "Admin Revoke Credentials",
+            ),
+            (
+                AuditEventKind::OauthTokenRevoked,
+                3003,
+                "OAuth Token Revoked",
+            ),
+            (AuditEventKind::ScimOperation, 3004, "SCIM Operation"),
+        ];
+
+        for (kind, expected_class_uid, expected_activity_name) in cases {
+            let event = sample_event(kind, "{}");
+            let ocsf = to_ocsf(&event);
+            assert_eq!(
+                ocsf.activity_id.0, 99,
+                "{kind:?}: activity_id must be 99 (Other)"
+            );
+            assert_ne!(
+                ocsf.activity_name, "Other",
+                "{kind:?}: activity_name must be source-specific, not the generic \"Other\""
+            );
+            assert_eq!(
+                ocsf.activity_name, expected_activity_name,
+                "{kind:?}: activity_name mismatch"
+            );
+            assert_eq!(
+                ocsf.class_uid, expected_class_uid,
+                "{kind:?}: class_uid mismatch"
+            );
+            // type_uid is class_uid * 100 + activity_id, so 300199, 300399, 300499.
+            assert_eq!(
+                ocsf.type_uid,
+                u32::from(expected_class_uid) * 100 + 99,
+                "{kind:?}: type_uid must reflect activity_id 99"
+            );
+            // The original Vouch event_type must be preserved in unmapped
+            // for cross-product correlation without parsing `data`.
+            let unmapped = ocsf
+                .unmapped
+                .as_ref()
+                .expect("unmapped must be populated for activity_id 99");
+            assert_eq!(
+                unmapped["event_type"],
+                kind.as_str(),
+                "{kind:?}: unmapped.event_type must preserve the source event_type"
+            );
+        }
+    }
+
+    /// Regression guard: `AdminPromote` and `AdminDemote` are opposite
+    /// security-relevant actions within the Account Change class. Before
+    /// the fix they were indistinguishable at the OCSF layer (both
+    /// `activity_id: 99`, `activity_name: "Other"`). They must now carry
+    /// distinct `activity_name` values.
+    #[test]
+    fn admin_promote_and_demote_are_distinguishable_at_ocsf_layer() {
+        let promote = to_ocsf(&sample_event(AuditEventKind::AdminPromote, "{}"));
+        let demote = to_ocsf(&sample_event(AuditEventKind::AdminDemote, "{}"));
+        assert_eq!(promote.class_uid, demote.class_uid);
+        assert_eq!(promote.activity_id.0, demote.activity_id.0);
+        assert_ne!(
+            promote.activity_name, demote.activity_name,
+            "AdminPromote and AdminDemote must be distinguishable by activity_name"
+        );
+        assert_ne!(
+            promote.unmapped, demote.unmapped,
+            "AdminPromote and AdminDemote must be distinguishable by unmapped.event_type"
+        );
+    }
+
+    /// Regression guard: events that map to a non-99 `activity_id` must
+    /// NOT populate `unmapped` — it's only for unrecognized wire strings
+    /// and the activity_id: 99 escape hatch.
+    #[test]
+    fn non_other_activities_do_not_populate_unmapped() {
+        for kind in AuditEventKind::ALL {
+            let ocsf = to_ocsf(&sample_event(*kind, "{}"));
+            if ocsf.activity_id.0 == 99 {
+                assert!(
+                    ocsf.unmapped.is_some(),
+                    "{kind:?}: activity_id 99 must populate unmapped"
+                );
+            } else {
+                assert!(
+                    ocsf.unmapped.is_none(),
+                    "{kind:?}: non-99 activity_id must not populate unmapped (got {:?})",
+                    ocsf.unmapped
+                );
+            }
+        }
+    }
+
+    /// OCSF 1.9.0 MUST: no event may serialize `activity_name` as the
+    /// literal "Other" — that's the spec's explicit anti-pattern for
+    /// `activity_id: 99`. Sweep every kind to be sure.
+    #[test]
+    fn no_event_serializes_activity_name_as_literal_other() {
+        for kind in AuditEventKind::ALL {
+            let ocsf = to_ocsf(&sample_event(*kind, "{}"));
+            assert_ne!(
+                ocsf.activity_name, "Other",
+                "{kind:?}: activity_name must never be the literal \"Other\""
+            );
+        }
     }
 
     /// Parity guard: the "## OCSF Mapping" table in `docs/src/admin/audit.md`

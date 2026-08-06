@@ -244,6 +244,21 @@ event types onto four Identity & Access Management classes. Native JSON stays th
 lossless representation — this is a projection for SIEM ingestion, and every field Vouch
 records is still present in `data`.
 
+Six event types map to OCSF `activity_id: 99` ("Other") because the OCSF IAM classes have no
+predefined activity for them. Per the OCSF 1.9.0 spec, when `activity_id` is `99` the
+`activity_name` attribute **must** carry a source-specific label (not the literal "Other"), so
+each of these events emits a distinct `activity_name` and also preserves the original Vouch
+`event_type` in `unmapped.event_type` for cross-product correlation:
+
+| Event Type | OCSF Class | `activity_id` | `activity_name` |
+|------------|------------|---------------|------------------|
+| `admin_promote` | Account Change (3001) | 99 | `Admin Promote` |
+| `admin_demote` | Account Change (3001) | 99 | `Admin Demote` |
+| `admin_revoke_credentials` | Account Change (3001) | 99 | `Admin Revoke Credentials` |
+| `identity_bound` | Account Change (3001) | 99 | `Identity Bound` |
+| `oauth_token_revoked` | Authorize Session (3003) | 99 | `OAuth Token Revoked` |
+| `scim_operation` | Entity Management (3004) | 99 | `SCIM Operation` |
+
 | Event Type | OCSF Class UID | OCSF Class Name |
 |------------|-----------------|------------------|
 | `login_success` | 3002 | Authentication |
