@@ -697,3 +697,102 @@ async fn test_rfc7662_valid_token_is_active_unknown_token_is_inactive() {
         "Unknown token must be active=false: {body2}"
     );
 }
+
+// ========================================================================
+// Deactivated user — introspection MUST return active=false
+//
+// Deactivation paths (admin `members.rs`, SCIM `users.rs`) are not atomic:
+// `update_user_active_status` and `delete_sessions_for_user` commit in
+// separate transactions. If session deletion fails after the user is
+// deactivated, live sessions remain. Introspection must not grant access
+// to a deactivated user's token in that state — it mirrors the `user.active`
+// check already performed by the direct API path (`extract_user_with_org`)
+// and the token exchange path.
+// ========================================================================
+
+#[tokio::test]
+async fn test_introspection_returns_inactive_for_deactivated_user_with_session() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "introspect-deactivated@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+    let (access_token, _) = issue_oauth_access_token(&app, &state, &user, &auth_id, &client).await;
+
+    // Deactivate the user WITHOUT deleting the session.
+    // This simulates the scenario where session deletion fails after
+    // user deactivation succeeds. Each operation commits independently
+    // since there is no transaction wrapping both.
+    crate::db::update_user_active_status(&state.store, &user.id, false)
+        .await
+        .expect("deactivate user");
+
+    let auth_header = client.basic_auth_header();
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/introspect",
+        &format!("token={access_token}"),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    let response: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(
+        response["active"], false,
+        "Deactivated user's token must return active=false, got: {response}"
+    );
+
+    // RFC 7662 Section 2.2: Inactive response MUST NOT leak token metadata.
+    assert!(
+        response.get("exp").is_none(),
+        "Inactive response must not include exp: {response}"
+    );
+    assert!(
+        response.get("sub").is_none(),
+        "Inactive response must not include sub: {response}"
+    );
+    assert!(
+        response.get("client_id").is_none(),
+        "Inactive response must not include client_id: {response}"
+    );
+    assert!(
+        response.get("username").is_none(),
+        "Inactive response must not include username: {response}"
+    );
+}
+
+#[tokio::test]
+async fn test_introspection_returns_active_for_reactivated_user() {
+    // Reactivating a user must restore introspection to active=true, confirming
+    // the deactivation branch is a status check (not token/session destruction)
+    // and that reactivation re-grants access to existing unexpired sessions.
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "introspect-reactivate@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+    let (access_token, _) = issue_oauth_access_token(&app, &state, &user, &auth_id, &client).await;
+
+    // Deactivate, then reactivate.
+    crate::db::update_user_active_status(&state.store, &user.id, false)
+        .await
+        .expect("deactivate user");
+    crate::db::update_user_active_status(&state.store, &user.id, true)
+        .await
+        .expect("reactivate user");
+
+    let auth_header = client.basic_auth_header();
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/introspect",
+        &format!("token={access_token}"),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "Reactivated user: {body}");
+    let response: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(
+        response["active"], true,
+        "Reactivated user's token must return active=true, got: {response}"
+    );
+}

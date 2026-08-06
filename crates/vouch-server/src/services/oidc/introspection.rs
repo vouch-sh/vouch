@@ -177,6 +177,22 @@ pub async fn introspect_token(
         None => return Ok(IntrospectionResult::inactive()),
     };
 
+    // RFC 7662 Section 4: A token's active status depends on the resource
+    // owner's current authorization state, not just session existence.
+    // Deactivation paths (admin/SCIM) are not atomic — `update_user_active_status`
+    // and `delete_sessions_for_user` commit in separate transactions, so a
+    // deactivated user may still have live sessions. Mirror the `user.active`
+    // check performed by the direct API path (`extract_user_with_org`) and the
+    // token exchange path, so introspection cannot bypass deactivation.
+    let user = db::get_user_by_id(&state.store, &session.user_id)
+        .await
+        .map_err(|e| ServiceError::Internal(format!("Database error: {e}")))?
+        .ok_or_else(|| ServiceError::Internal("User not found for session".to_string()))?;
+
+    if !user.active {
+        return Ok(IntrospectionResult::inactive());
+    }
+
     let DecodedToken::AccessToken(claims) = decoded;
 
     // RFC 7662 Section 4: Prevent cross-client information leakage.
