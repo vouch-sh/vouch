@@ -5559,6 +5559,65 @@ async fn test_enroll_non_durable_login_refused_once_issuer_is_bound() {
     );
 }
 
+// A binding is scoped per-issuer: an account already bound for issuer A
+// must not have that binding gate a login through unrelated issuer B. A
+// non-durable login through B still matches on email and succeeds,
+// because B itself has no binding to satisfy or conflict with.
+#[tokio::test]
+async fn test_enroll_non_durable_login_matches_email_when_bound_only_for_other_issuer() {
+    use crate::db::documents::user::UserDoc;
+    use crate::db::{IdpIdentity, UpstreamLogin, enroll_user_with_org};
+
+    let (store, _audit) = test_db().await;
+    let domain = "other-issuer.example";
+    let bound_issuer = "https://idp-a.other-issuer.example";
+    let other_issuer = "https://idp-b.other-issuer.example";
+
+    let user = enroll_user_with_org(
+        &store,
+        "alice@other-issuer.example",
+        None,
+        Some(domain),
+        Some(&UpstreamLogin {
+            issuer: bound_issuer.to_string(),
+            durable_subject: Some("alice-subject-a".to_string()),
+        }),
+    )
+    .await
+    .expect("bind via issuer A");
+
+    // A login through issuer B, with no durable subject, must still
+    // match on email — the account has no binding for issuer B.
+    let second = enroll_user_with_org(
+        &store,
+        "alice@other-issuer.example",
+        None,
+        Some(domain),
+        Some(&UpstreamLogin {
+            issuer: other_issuer.to_string(),
+            durable_subject: None,
+        }),
+    )
+    .await
+    .expect("email match through an unrelated issuer must not be refused");
+    assert_eq!(second.id, user.id);
+    assert!(!second.newly_bound);
+
+    let doc = store
+        .get::<UserDoc>(&user.id)
+        .await
+        .expect("get user")
+        .expect("user exists");
+    assert_eq!(
+        doc.data.idp_identities,
+        vec![IdpIdentity {
+            issuer: bound_issuer.to_string(),
+            subject: "alice-subject-a".to_string(),
+        }],
+        "a non-durable login through a different issuer must not touch bindings"
+    );
+}
+
 // Accounts that predate identity binding (no bindings stored) bind
 // lazily on their first IdP login; a second, different issuer adds a
 // second binding rather than conflicting.
