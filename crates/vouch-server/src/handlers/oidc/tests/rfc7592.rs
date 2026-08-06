@@ -116,7 +116,7 @@ async fn test_rfc7592_put_rotates_token() {
         .to_string();
 
     // Old token must no longer work
-    let (status, _body) = http_request(
+    let response = http_request_full(
         &app,
         "GET",
         &format!("/oauth/register/{client_id}"),
@@ -125,9 +125,17 @@ async fn test_rfc7592_put_rotates_token() {
     )
     .await;
     assert_eq!(
-        status,
+        response.status,
         StatusCode::UNAUTHORIZED,
         "Old token should be rejected after rotation"
+    );
+    // RFC 7592 §2.1 / RFC 6750 §3.1: a rotated (now-invalid) registration
+    // access token MUST return `invalid_token`, not `invalid_client`.
+    let json: serde_json::Value = serde_json::from_str(&response.body).expect("Valid JSON");
+    assert_eq!(
+        json["error"], "invalid_token",
+        "Rotated token must return invalid_token: {}",
+        response.body
     );
 
     // New token must work
@@ -160,6 +168,23 @@ async fn test_rfc7592_put_missing_bearer_token() {
     )
     .await;
     assert_eq!(response.status, StatusCode::UNAUTHORIZED);
+    // RFC 7592 §2.2 / RFC 6750 §3.1: missing bearer token on a protected
+    // registration endpoint MUST return `invalid_token` (not `invalid_client`).
+    let json: serde_json::Value = serde_json::from_str(&response.body).expect("Valid JSON");
+    assert_eq!(
+        json["error"], "invalid_token",
+        "Missing bearer must return invalid_token: {}",
+        response.body
+    );
+    let www_auth = response
+        .headers
+        .get("www-authenticate")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert!(
+        www_auth.contains("invalid_token"),
+        "WWW-Authenticate must contain error=\"invalid_token\": {www_auth}"
+    );
 }
 
 #[tokio::test]
@@ -171,7 +196,7 @@ async fn test_rfc7592_put_invalid_bearer_token() {
         "redirect_uris": ["https://example.com/callback"]
     });
 
-    let (status, _body) = http_request(
+    let response = http_request_full(
         &app,
         "PUT",
         &format!("/oauth/register/{client_id}"),
@@ -182,7 +207,24 @@ async fn test_rfc7592_put_invalid_bearer_token() {
         ],
     )
     .await;
-    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(response.status, StatusCode::UNAUTHORIZED);
+    // RFC 7592 §2.2 / RFC 6750 §3.1: an invalid bearer token MUST return
+    // `invalid_token` (not `invalid_client`).
+    let json: serde_json::Value = serde_json::from_str(&response.body).expect("Valid JSON");
+    assert_eq!(
+        json["error"], "invalid_token",
+        "Invalid bearer must return invalid_token: {}",
+        response.body
+    );
+    let www_auth = response
+        .headers
+        .get("www-authenticate")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert!(
+        www_auth.contains("invalid_token"),
+        "WWW-Authenticate must contain error=\"invalid_token\": {www_auth}"
+    );
 }
 
 #[tokio::test]
@@ -205,6 +247,67 @@ async fn test_rfc7592_put_nonexistent_client() {
     )
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+// =========================================================================
+// GET /oauth/register/:client_id — Read Client Configuration
+// =========================================================================
+
+#[tokio::test]
+async fn test_rfc7592_get_missing_bearer_token() {
+    let (app, _state) = test_app().await;
+    let (client_id, _token) = register_dynamic_client(&app).await;
+
+    let response = http_get_full(&app, &format!("/oauth/register/{client_id}"), &[]).await;
+    assert_eq!(response.status, StatusCode::UNAUTHORIZED);
+    // RFC 7592 §2.1 / RFC 6750 §3.1: missing bearer token on a protected
+    // registration endpoint MUST return `invalid_token` (not `invalid_client`).
+    let json: serde_json::Value = serde_json::from_str(&response.body).expect("Valid JSON");
+    assert_eq!(
+        json["error"], "invalid_token",
+        "Missing bearer must return invalid_token: {}",
+        response.body
+    );
+    let www_auth = response
+        .headers
+        .get("www-authenticate")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert!(
+        www_auth.contains("invalid_token"),
+        "WWW-Authenticate must contain error=\"invalid_token\": {www_auth}"
+    );
+}
+
+#[tokio::test]
+async fn test_rfc7592_get_invalid_bearer_token() {
+    let (app, _state) = test_app().await;
+    let (client_id, _token) = register_dynamic_client(&app).await;
+
+    let response = http_get_full(
+        &app,
+        &format!("/oauth/register/{client_id}"),
+        &[("Authorization", "Bearer invalid_token_value")],
+    )
+    .await;
+    assert_eq!(response.status, StatusCode::UNAUTHORIZED);
+    // RFC 7592 §2.1 / RFC 6750 §3.1: an invalid bearer token MUST return
+    // `invalid_token` (not `invalid_client`).
+    let json: serde_json::Value = serde_json::from_str(&response.body).expect("Valid JSON");
+    assert_eq!(
+        json["error"], "invalid_token",
+        "Invalid bearer must return invalid_token: {}",
+        response.body
+    );
+    let www_auth = response
+        .headers
+        .get("www-authenticate")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert!(
+        www_auth.contains("invalid_token"),
+        "WWW-Authenticate must contain error=\"invalid_token\": {www_auth}"
+    );
 }
 
 // =========================================================================
@@ -256,6 +359,23 @@ async fn test_rfc7592_delete_client_missing_bearer_token() {
             .is_some_and(|v| v.to_str().is_ok_and(|s| s.contains("Bearer"))),
         "Must include WWW-Authenticate: Bearer header"
     );
+    // RFC 7592 §2.3 / RFC 6750 §3.1: missing bearer token MUST return
+    // `invalid_token` (not `invalid_client`).
+    let json: serde_json::Value = serde_json::from_str(&response.body).expect("Valid JSON");
+    assert_eq!(
+        json["error"], "invalid_token",
+        "Missing bearer must return invalid_token: {}",
+        response.body
+    );
+    let www_auth = response
+        .headers
+        .get("www-authenticate")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert!(
+        www_auth.contains("invalid_token"),
+        "WWW-Authenticate must contain error=\"invalid_token\": {www_auth}"
+    );
 }
 
 #[tokio::test]
@@ -264,13 +384,30 @@ async fn test_rfc7592_delete_client_invalid_bearer_token() {
     let (client_id, _token) = register_dynamic_client(&app).await;
 
     // DELETE with wrong token — expect 401
-    let (status, _body) = http_delete(
+    let response = http_delete_full(
         &app,
         &format!("/oauth/register/{client_id}"),
         &[("Authorization", "Bearer invalid_token_value")],
     )
     .await;
-    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(response.status, StatusCode::UNAUTHORIZED);
+    // RFC 7592 §2.3 / RFC 6750 §3.1: invalid bearer token MUST return
+    // `invalid_token` (not `invalid_client`).
+    let json: serde_json::Value = serde_json::from_str(&response.body).expect("Valid JSON");
+    assert_eq!(
+        json["error"], "invalid_token",
+        "Invalid bearer must return invalid_token: {}",
+        response.body
+    );
+    let www_auth = response
+        .headers
+        .get("www-authenticate")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert!(
+        www_auth.contains("invalid_token"),
+        "WWW-Authenticate must contain error=\"invalid_token\": {www_auth}"
+    );
 }
 
 #[tokio::test]

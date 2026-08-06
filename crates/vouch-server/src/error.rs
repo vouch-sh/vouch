@@ -25,10 +25,6 @@ pub enum ServiceError {
     #[error("validation: {0}")]
     Validation(String),
 
-    /// Authentication required.
-    #[error("unauthorized: {0}")]
-    Unauthorized(&'static str),
-
     /// Permission denied.
     #[error("forbidden: {0}")]
     Forbidden(&'static str),
@@ -140,6 +136,11 @@ pub enum OAuthErrorCode {
     AccessDenied,
     /// RFC 6749 Section 4.1.2.1: The response type is not supported.
     UnsupportedResponseType,
+    /// RFC 6750 Section 3.1: The access token provided is expired, revoked,
+    /// malformed, or invalid for other reasons. Used by OAuth 2.0 protected
+    /// resources (e.g., RFC 7592 registration endpoints) when bearer-token
+    /// validation fails.
+    InvalidToken,
     /// RFC 9449 Section 5.1: Invalid DPoP proof.
     InvalidDpopProof,
     /// RFC 9449 Section 5.1: DPoP nonce required.
@@ -192,6 +193,7 @@ impl OAuthErrorCode {
             | Self::SlowDown
             | Self::ExpiredToken
             | Self::AccessDenied => StatusCode::BAD_REQUEST,
+            Self::InvalidToken => StatusCode::UNAUTHORIZED,
             Self::ServerError | Self::TemporarilyUnavailable => StatusCode::INTERNAL_SERVER_ERROR,
             Self::UseDpopNonce => StatusCode::BAD_REQUEST,
         }
@@ -214,6 +216,7 @@ impl OAuthErrorCode {
             Self::SlowDown => "slow_down",
             Self::ExpiredToken => "expired_token",
             Self::AccessDenied => "access_denied",
+            Self::InvalidToken => "invalid_token",
             Self::InvalidDpopProof => "invalid_dpop_proof",
             Self::UseDpopNonce => "use_dpop_nonce",
             Self::InvalidTarget => "invalid_target",
@@ -318,11 +321,21 @@ impl ServiceError {
                     error_uri: None,
                 }),
             ),
-            Self::Unauthorized(_) => (
-                StatusCode::UNAUTHORIZED,
+            // RFC 6750 Section 3.1: preserve bearer-token errors (`invalid_token`
+            // from `extract_resource_token` or RFC 7592 registration-token
+            // validation) instead of collapsing them to a 500 `server_error`.
+            // Only 401s are preserved: other `Api` errors carry internal codes
+            // (e.g. `issuer_error`) that are not registered OAuth error codes
+            // and must keep falling through to the generic `server_error`.
+            Self::Api {
+                status,
+                code,
+                message,
+            } if status == StatusCode::UNAUTHORIZED => (
+                status,
                 Json(OAuthErrorResponse {
-                    error: "invalid_client".to_string(),
-                    error_description: Some("Client authentication failed".to_string()),
+                    error: code,
+                    error_description: Some(message),
                     error_uri: None,
                 }),
             ),
@@ -381,9 +394,6 @@ impl ServiceError {
                 format!("{entity} not found"),
             ),
             Self::Validation(msg) => (StatusCode::BAD_REQUEST, "invalid_request", msg.clone()),
-            Self::Unauthorized(msg) => {
-                (StatusCode::UNAUTHORIZED, "unauthorized", (*msg).to_string())
-            }
             Self::Forbidden(msg) => (StatusCode::FORBIDDEN, "forbidden", (*msg).to_string()),
             Self::Conflict(msg) => (StatusCode::CONFLICT, "conflict", msg.clone()),
             Self::Api {
@@ -573,9 +583,9 @@ mod tests {
                 "bad input",
             ),
             (
-                ServiceError::Unauthorized("no token"),
+                ServiceError::api(StatusCode::UNAUTHORIZED, "invalid_token", "no token"),
                 StatusCode::UNAUTHORIZED,
-                "unauthorized",
+                "invalid_token",
                 "no token",
             ),
             (
@@ -774,6 +784,62 @@ mod tests {
         assert_eq!(
             json["error_description"],
             "jwks and jwks_uri are mutually exclusive"
+        );
+    }
+
+    // =========================================================================
+    // RFC 6750 Bearer Token Error Code Tests
+    // =========================================================================
+
+    #[test]
+    fn test_rfc6750_invalid_token_error_code() {
+        assert_eq!(OAuthErrorCode::InvalidToken.as_str(), "invalid_token");
+        assert_eq!(
+            OAuthErrorCode::InvalidToken.status_code(),
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
+    /// RFC 6750 §3.1: `ServiceError::Api` carrying `invalid_token` (emitted by
+    /// `extract_resource_token` for session JWT failures) MUST be preserved by
+    /// `into_oauth_response()` instead of falling through to a 500
+    /// `server_error`.
+    #[test]
+    fn test_api_invalid_token_preserved_in_oauth_response() {
+        let err = ServiceError::api(
+            StatusCode::UNAUTHORIZED,
+            "invalid_token",
+            "Invalid or expired access token",
+        );
+        let (status, json) = err.into_oauth_response();
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(json.error, "invalid_token");
+        assert_eq!(
+            json.error_description,
+            Some("Invalid or expired access token".to_string())
+        );
+    }
+
+    /// Non-401 `ServiceError::Api` errors carry internal codes (e.g.
+    /// `issuer_error` from org-issuer construction) that are not registered
+    /// OAuth error codes. `into_oauth_response()` must keep collapsing them to
+    /// the generic 500 `server_error` rather than leaking them from the token
+    /// endpoint.
+    #[test]
+    fn test_api_non_401_still_collapses_to_server_error() {
+        let err = ServiceError::api(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "issuer_error",
+            "Failed to construct the organization issuer",
+        );
+        let (status, json) = err.into_oauth_response();
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(json.error, "server_error");
+        assert!(
+            json.error_description
+                .as_deref()
+                .is_none_or(|d| !d.contains("issuer")),
+            "internal error detail must not leak: {json:?}"
         );
     }
 }

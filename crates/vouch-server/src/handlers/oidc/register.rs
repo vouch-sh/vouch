@@ -13,6 +13,7 @@
 //!   with a valid FIDO2 key (hardware-bound) to obtain any token.
 
 use crate::AppState;
+use crate::error::OAuthErrorCode;
 use crate::services::oidc::registration::{
     RegistrationRequest, delete_client_configuration, read_client_configuration, register_client,
     update_client_configuration,
@@ -58,15 +59,12 @@ pub(crate) async fn register(
         .await
         {
             Ok(token) => Some(token.sub),
-            Err(_) => {
-                // If a Bearer token was provided but is invalid, reject it
-                return crate::error::ServiceError::oauth(
-                    crate::error::OAuthErrorCode::InvalidClient,
-                    "Invalid Bearer token",
-                )
-                .into_oauth_response()
-                .into_response();
-            }
+            // RFC 7592 §2 / RFC 6750 §3.1: `extract_resource_token` returns
+            // `ServiceError::Api` with code `invalid_token` for any bearer-token
+            // validation failure. Propagate that error so the response carries
+            // `invalid_token` (not `invalid_client`), the correct 401 status,
+            // and a `WWW-Authenticate` challenge.
+            Err(e) => return into_registration_response(e),
         }
     } else {
         None // Open registration — no user association
@@ -104,17 +102,7 @@ pub(crate) async fn read_client(
 ) -> Response {
     let token = match extract_bearer_token(&headers) {
         Some(t) => t,
-        None => {
-            return (
-                StatusCode::UNAUTHORIZED,
-                [("www-authenticate", "Bearer")],
-                Json(serde_json::json!({
-                    "error": "invalid_client",
-                    "error_description": "Bearer token required"
-                })),
-            )
-                .into_response();
-        }
+        None => return missing_token_response(),
     };
 
     match read_client_configuration(&state, &client_id, token).await {
@@ -128,7 +116,7 @@ pub(crate) async fn read_client(
             Json(response),
         )
             .into_response(),
-        Err(e) => e.into_oauth_response().into_response(),
+        Err(e) => into_registration_response(e),
     }
 }
 
@@ -146,17 +134,7 @@ pub(crate) async fn update_client(
 ) -> Response {
     let token = match extract_bearer_token(&headers) {
         Some(t) => t,
-        None => {
-            return (
-                StatusCode::UNAUTHORIZED,
-                [("www-authenticate", "Bearer")],
-                Json(serde_json::json!({
-                    "error": "invalid_client",
-                    "error_description": "Bearer token required"
-                })),
-            )
-                .into_response();
-        }
+        None => return missing_token_response(),
     };
 
     match update_client_configuration(&state, &client_id, token, request).await {
@@ -170,7 +148,7 @@ pub(crate) async fn update_client(
             Json(response),
         )
             .into_response(),
-        Err(e) => e.into_oauth_response().into_response(),
+        Err(e) => into_registration_response(e),
     }
 }
 
@@ -186,22 +164,12 @@ pub(crate) async fn delete_client(
 ) -> Response {
     let token = match extract_bearer_token(&headers) {
         Some(t) => t,
-        None => {
-            return (
-                StatusCode::UNAUTHORIZED,
-                [("www-authenticate", "Bearer")],
-                Json(serde_json::json!({
-                    "error": "invalid_client",
-                    "error_description": "Bearer token required"
-                })),
-            )
-                .into_response();
-        }
+        None => return missing_token_response(),
     };
 
     match delete_client_configuration(&state, &client_id, token).await {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
-        Err(e) => e.into_oauth_response().into_response(),
+        Err(e) => into_registration_response(e),
     }
 }
 
@@ -217,9 +185,78 @@ fn extract_bearer_token(headers: &HeaderMap) -> Option<&str> {
     scheme.eq_ignore_ascii_case("bearer").then_some(token)
 }
 
+/// Build the RFC 6750 Section 3.1 `WWW-Authenticate` challenge returned when a
+/// bearer token is missing from (or invalid for) an RFC 7592 registration
+/// endpoint. The `error` and `error_description` parameters mirror the JSON
+/// body so OAuth client libraries can rely on either source.
+fn bearer_challenge(error: &str, description: &str) -> String {
+    // RFC 6750 Section 3 limits challenge parameter values to
+    // %x20-21 / %x23-5B / %x5D-7E — no double quote, no backslash. Strip
+    // anything outside that set so a future description cannot produce a
+    // malformed (or quote-escaping) challenge.
+    let description: String = description
+        .chars()
+        .filter(|c| (' '..='!').contains(c) || ('#'..='[').contains(c) || (']'..='~').contains(c))
+        .collect();
+    format!("Bearer error=\"{error}\", error_description=\"{description}\"")
+}
+
+/// Build a 401 response for a missing bearer token on an RFC 7592 endpoint.
+///
+/// Per RFC 7592 Sections 2.1–2.3 (cross-referencing RFC 6750), a missing
+/// access token on a protected registration endpoint MUST be reported with
+/// `error="invalid_token"` and a `WWW-Authenticate` header carrying the
+/// `error` / `error_description` parameters.
+fn missing_token_response() -> Response {
+    let description = "Bearer token required";
+    (
+        StatusCode::UNAUTHORIZED,
+        [(
+            axum::http::header::WWW_AUTHENTICATE,
+            bearer_challenge(OAuthErrorCode::InvalidToken.as_str(), description),
+        )],
+        Json(serde_json::json!({
+            "error": OAuthErrorCode::InvalidToken.as_str(),
+            "error_description": description
+        })),
+    )
+        .into_response()
+}
+
+/// Convert a `ServiceError` into an RFC 6750-compliant response for an RFC 7592
+/// registration endpoint.
+///
+/// This wraps [`ServiceError::into_oauth_response`] and, for 401 responses,
+/// appends a `WWW-Authenticate: Bearer error="invalid_token", ...` header as
+/// required by RFC 6750 Section 3.1 for protected resources.
+fn into_registration_response(err: crate::error::ServiceError) -> Response {
+    let (status, json) = err.into_oauth_response();
+    if status == StatusCode::UNAUTHORIZED {
+        let description = json
+            .error_description
+            .clone()
+            .unwrap_or_else(|| "Invalid or expired token".to_string());
+        let www_auth = bearer_challenge(json.error.as_str(), description.as_str());
+        (
+            status,
+            [(
+                axum::http::header::WWW_AUTHENTICATE,
+                axum::http::HeaderValue::from_str(&www_auth)
+                    .unwrap_or_else(|_| axum::http::HeaderValue::from_static("Bearer")),
+            )],
+            json,
+        )
+            .into_response()
+    } else {
+        (status, json).into_response()
+    }
+}
+
 #[cfg(test)]
 #[expect(
     clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::indexing_slicing,
     reason = "test code: panic on assertion failure is acceptable"
 )]
 mod tests {
@@ -257,5 +294,82 @@ mod tests {
         );
         assert_eq!(extract_bearer_token(&headers_with_auth("Bearer")), None);
         assert_eq!(extract_bearer_token(&HeaderMap::new()), None);
+    }
+
+    /// RFC 7592 §2.1–2.3 / RFC 6750 §3.1: a missing bearer token on a
+    /// registration endpoint MUST produce a 401 with `error="invalid_token"`
+    /// and a `WWW-Authenticate` header carrying the same error.
+    #[tokio::test]
+    async fn missing_token_response_is_rfc6750_compliant() {
+        use axum::body::to_bytes;
+
+        let response = missing_token_response();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        let www_auth = response
+            .headers()
+            .get("www-authenticate")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(
+            www_auth.contains("error=\"invalid_token\""),
+            "WWW-Authenticate must contain error=\"invalid_token\": {www_auth}"
+        );
+
+        let body = to_bytes(response.into_body(), 4096).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["error"], "invalid_token");
+        assert_eq!(json["error_description"], "Bearer token required");
+    }
+
+    /// RFC 6750 §3.1: `into_registration_response` must add a
+    /// `WWW-Authenticate` header (with `error="invalid_token"`) to any 401
+    /// `ServiceError`, while preserving non-401 errors unchanged.
+    #[tokio::test]
+    async fn into_registration_response_adds_www_authenticate_on_401() {
+        use axum::body::to_bytes;
+
+        // 401 path: registration-token validation emits a 401 invalid_token
+        // API error, which the Api arm of into_oauth_response preserves.
+        let err = crate::error::ServiceError::api(
+            StatusCode::UNAUTHORIZED,
+            "invalid_token",
+            "Invalid registration access token",
+        );
+        let response = into_registration_response(err);
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let www_auth = response
+            .headers()
+            .get("www-authenticate")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(
+            www_auth.contains("error=\"invalid_token\""),
+            "401 must carry WWW-Authenticate with error=\"invalid_token\": {www_auth}"
+        );
+        let body = to_bytes(response.into_body(), 4096).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["error"], "invalid_token");
+    }
+
+    /// Non-401 errors (e.g. RFC 7591 metadata validation → 400) must pass
+    /// through `into_registration_response` without a `WWW-Authenticate` header.
+    #[tokio::test]
+    async fn into_registration_response_passes_through_non_401() {
+        use axum::body::to_bytes;
+
+        let err = crate::error::ServiceError::oauth(
+            OAuthErrorCode::InvalidClientMetadata,
+            "jwks and jwks_uri are mutually exclusive",
+        );
+        let response = into_registration_response(err);
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(
+            response.headers().get("www-authenticate").is_none(),
+            "Non-401 errors must not carry a WWW-Authenticate header"
+        );
+        let body = to_bytes(response.into_body(), 4096).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["error"], "invalid_client_metadata");
     }
 }
