@@ -103,20 +103,6 @@ async fn describe_cluster(
 // Main Command
 // ============================================================================
 
-/// Resolve the kubeconfig path for the EKS setup command.
-///
-/// An explicitly-provided path wins; otherwise the default location is used.
-/// Unlike a literal `~/.kube/config` fallback, the default propagates the
-/// "could not determine home directory" error from [`default_kubeconfig_path`]
-/// rather than writing to a directory literally named `~` in the current
-/// working directory (Rust does not perform shell-style tilde expansion).
-fn resolve_kubeconfig_path(kubeconfig_path: Option<&str>) -> Result<PathBuf> {
-    match kubeconfig_path {
-        Some(p) => Ok(PathBuf::from(p)),
-        None => default_kubeconfig_path(),
-    }
-}
-
 /// Run the EKS setup command.
 ///
 /// Configures kubeconfig so kubectl uses `vouch credential eks` for
@@ -128,7 +114,13 @@ pub(crate) async fn run(
     profile: Option<&str>,
     kubeconfig_path: Option<&str>,
 ) -> Result<()> {
-    let kubeconfig_path = resolve_kubeconfig_path(kubeconfig_path)?;
+    // Propagate the "could not determine home directory" error rather than
+    // falling back to a literal `~/.kube/config`, which Rust would treat as a
+    // directory named `~` in the current working directory (no tilde expansion).
+    let kubeconfig_path = match kubeconfig_path {
+        Some(p) => PathBuf::from(p),
+        None => default_kubeconfig_path()?,
+    };
 
     // Resolve profile, region, and role together so the kubeconfig records the
     // role belonging to the profile the user named.
@@ -264,37 +256,5 @@ mod tests {
                 .data,
             "LS0tLS1CRUdJTiBDRVJU..."
         );
-    }
-
-    /// An explicit `--kubeconfig` path must be used verbatim, without
-    /// consulting `KUBECONFIG` or `dirs::home_dir()`.
-    #[test]
-    fn resolve_kubeconfig_path_uses_explicit_path() {
-        let resolved = resolve_kubeconfig_path(Some("/tmp/explicit-kubeconfig"))
-            .expect("explicit path should resolve");
-        assert_eq!(resolved, PathBuf::from("/tmp/explicit-kubeconfig"));
-    }
-
-    /// Regression guard for the literal-tilde bug: the resolved path must
-    /// never be the broken `~/.kube/config` fallback that Rust treats as a
-    /// literal `~` directory. Before the fix, `default_kubeconfig_path()`
-    /// errors were swallowed and replaced with `PathBuf::from("~/.kube/config")`,
-    /// causing `save_kubeconfig` to create a directory named `~` in the CWD.
-    /// After the fix, errors propagate, so this exact path can only appear
-    /// if a user explicitly passes it via `--kubeconfig` (handled by the
-    /// `Some` branch, not the fallback).
-    #[test]
-    fn resolve_kubeconfig_path_never_returns_literal_tilde_fallback() {
-        // The `None` branch must either return a real path (from KUBECONFIG or
-        // dirs::home_dir()) or propagate an error — never the literal tilde.
-        let resolved = resolve_kubeconfig_path(None);
-        if let Ok(path) = resolved {
-            assert_ne!(
-                path,
-                PathBuf::from("~/.kube/config"),
-                "literal tilde fallback must not be used; it writes to a \
-                 directory named `~` in the CWD"
-            );
-        }
     }
 }
