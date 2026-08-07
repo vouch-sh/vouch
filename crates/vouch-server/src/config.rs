@@ -1555,13 +1555,27 @@ mod tests {
             .collect()
     }
 
+    /// Parse `argv` with every arg's `env` attachment cleared, so variables
+    /// exported in the developer's shell (e.g. a sourced `.env` setting
+    /// `VOUCH_REQUIRE_ATTESTATION_CERT` or `AWS_REGION`) cannot leak into
+    /// `value_source` and flip these precedence assertions.
+    fn matches_ignoring_process_env(argv: &[&str]) -> clap::ArgMatches {
+        let mut command = Args::command();
+        let arg_ids: Vec<clap::Id> = command
+            .get_arguments()
+            .map(|a| a.get_id().clone())
+            .collect();
+        for id in arg_ids {
+            command = command.mut_arg(id, |arg| arg.env(None::<&'static str>));
+        }
+        command.try_get_matches_from(argv).expect("parse test argv")
+    }
+
     #[test]
     fn bootstrap_overlay_fills_unset_option_arg() {
         // s3_config_bucket has no default_value, so with no CLI flag and no
         // env var, its value_source is None -- the arm the issue calls "essential".
-        let matches = Args::command()
-            .try_get_matches_from(["vouch-server"])
-            .expect("parse with no flags");
+        let matches = matches_ignoring_process_env(&["vouch-server"]);
         let blob = blob(&[("VOUCH_S3_CONFIG_BUCKET", "my-bucket")]);
         let tokens = bootstrap_overlay_args(&matches, &blob);
         assert_eq!(
@@ -1574,9 +1588,7 @@ mod tests {
     fn bootstrap_overlay_fills_defaulted_arg() {
         // mtls_port defaults to "8443"; with no CLI flag and no env var its
         // value_source is Some(DefaultValue), the other arm the overlay covers.
-        let matches = Args::command()
-            .try_get_matches_from(["vouch-server"])
-            .expect("parse with no flags");
+        let matches = matches_ignoring_process_env(&["vouch-server"]);
         let blob = blob(&[("VOUCH_MTLS_PORT", "9443")]);
         let tokens = bootstrap_overlay_args(&matches, &blob);
         assert_eq!(tokens, vec![std::ffi::OsString::from("--mtls-port=9443")]);
@@ -1584,9 +1596,7 @@ mod tests {
 
     #[test]
     fn bootstrap_overlay_does_not_override_explicit_cli_flag() {
-        let matches = Args::command()
-            .try_get_matches_from(["vouch-server", "--mtls-port", "1234"])
-            .expect("parse with explicit flag");
+        let matches = matches_ignoring_process_env(&["vouch-server", "--mtls-port", "1234"]);
         let blob = blob(&[("VOUCH_MTLS_PORT", "9999")]);
         let tokens = bootstrap_overlay_args(&matches, &blob);
         assert!(
@@ -1597,9 +1607,7 @@ mod tests {
 
     #[test]
     fn bootstrap_overlay_ignores_unmapped_blob_keys() {
-        let matches = Args::command()
-            .try_get_matches_from(["vouch-server"])
-            .expect("parse with no flags");
+        let matches = matches_ignoring_process_env(&["vouch-server"]);
         let blob = blob(&[("RUST_LOG", "debug"), ("SOME_UNRELATED_KEY", "x")]);
         let tokens = bootstrap_overlay_args(&matches, &blob);
         assert!(
@@ -1609,12 +1617,10 @@ mod tests {
     }
 
     #[test]
-    fn bootstrap_overlay_sets_true_for_set_true_bool_arg_when_blob_truthy() {
+    fn bootstrap_overlay_emits_bare_flag_for_truthy_bool() {
         // require_attestation_cert is ArgAction::SetTrue (plain bool field),
         // which cannot accept `--flag=value` on the command line.
-        let matches = Args::command()
-            .try_get_matches_from(["vouch-server"])
-            .expect("parse with no flags");
+        let matches = matches_ignoring_process_env(&["vouch-server"]);
         let blob = blob(&[("VOUCH_REQUIRE_ATTESTATION_CERT", "true")]);
         let tokens = bootstrap_overlay_args(&matches, &blob);
         assert_eq!(
@@ -1624,10 +1630,8 @@ mod tests {
     }
 
     #[test]
-    fn bootstrap_overlay_omits_token_for_set_true_bool_arg_when_blob_falsy() {
-        let matches = Args::command()
-            .try_get_matches_from(["vouch-server"])
-            .expect("parse with no flags");
+    fn bootstrap_overlay_emits_nothing_for_falsy_bool() {
+        let matches = matches_ignoring_process_env(&["vouch-server"]);
         let blob = blob(&[("VOUCH_REQUIRE_ATTESTATION_CERT", "false")]);
         let tokens = bootstrap_overlay_args(&matches, &blob);
         assert!(tokens.is_empty(), "got: {tokens:?}");
@@ -1640,9 +1644,7 @@ mod tests {
         // IMDS fallback and overrode the AWS SDK default region provider
         // chain downstream in `ServerConfig::from_args`. Empty blob values
         // must be treated as absent so the next provider in the chain wins.
-        let matches = Args::command()
-            .try_get_matches_from(["vouch-server"])
-            .expect("parse with no flags");
+        let matches = matches_ignoring_process_env(&["vouch-server"]);
         let blob = blob(&[
             ("AWS_REGION", ""),
             ("AWS_AZ", ""),
