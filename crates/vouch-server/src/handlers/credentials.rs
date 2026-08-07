@@ -69,27 +69,7 @@ pub(crate) async fn issue_ssh_certificate(
     .await?;
 
     // Reject deactivated users (defense-in-depth for SCIM deactivation)
-    let user = db::get_user_by_id(&state.store, &token.sub)
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to get user by ID: {e}");
-            ServiceError::api(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "db_error",
-                "Internal database error",
-            )
-        })?
-        .ok_or_else(|| {
-            ServiceError::api(StatusCode::NOT_FOUND, "user_not_found", "User not found")
-        })?;
-
-    if !user.active {
-        return Err(ServiceError::api(
-            StatusCode::UNAUTHORIZED,
-            "unauthorized",
-            "User account is deactivated",
-        ));
-    }
+    let user = super::session::load_active_user(&state, &token.sub).await?;
 
     // Certificate validity matches session duration
     let valid_seconds = state.config().session_hours.saturating_mul(3600);
@@ -383,27 +363,7 @@ async fn authorize_aws_token_request(
 
     // Confirm the user is still active. Email and federation claims come from
     // the session snapshot, not from current state.
-    let user = db::get_user_by_id(&state.store, &token.sub)
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to get user by ID: {e}");
-            ServiceError::api(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "db_error",
-                "Internal database error",
-            )
-        })?
-        .ok_or_else(|| {
-            ServiceError::api(StatusCode::NOT_FOUND, "user_not_found", "User not found")
-        })?;
-
-    if !user.active {
-        return Err(ServiceError::api(
-            StatusCode::UNAUTHORIZED,
-            "unauthorized",
-            "User account is deactivated",
-        ));
-    }
+    let user = super::session::load_active_user(state, &token.sub).await?;
 
     let user_email = token.email.clone().unwrap_or_else(|| user.email.clone());
 
@@ -659,27 +619,7 @@ pub(crate) async fn get_github_status(
     .await?;
 
     // Get user
-    let user = db::get_user_by_id(&state.store, &token.sub)
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to get user by ID: {e}");
-            ServiceError::api(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "db_error",
-                "Internal database error",
-            )
-        })?
-        .ok_or_else(|| {
-            ServiceError::api(StatusCode::NOT_FOUND, "user_not_found", "User not found")
-        })?;
-
-    if !user.active {
-        return Err(ServiceError::api(
-            StatusCode::UNAUTHORIZED,
-            "unauthorized",
-            "User account is deactivated",
-        ));
-    }
+    let user = super::session::load_active_user(&state, &token.sub).await?;
 
     // Check if GitHub App is configured
     let configured = state.github_app.is_some();
@@ -760,27 +700,7 @@ pub(crate) async fn get_github_token(
     .await?;
 
     // Get user
-    let user = db::get_user_by_id(&state.store, &token.sub)
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to get user by ID: {e}");
-            ServiceError::api(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "db_error",
-                "Internal database error",
-            )
-        })?
-        .ok_or_else(|| {
-            ServiceError::api(StatusCode::NOT_FOUND, "user_not_found", "User not found")
-        })?;
-
-    if !user.active {
-        return Err(ServiceError::api(
-            StatusCode::UNAUTHORIZED,
-            "unauthorized",
-            "User account is deactivated",
-        ));
-    }
+    let user = super::session::load_active_user(&state, &token.sub).await?;
 
     // Verify user has an organization
     let org_id = user.org_id.as_ref().ok_or_else(|| {

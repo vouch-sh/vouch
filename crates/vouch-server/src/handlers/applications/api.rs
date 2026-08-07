@@ -79,25 +79,7 @@ async fn load_active_user_for_scope(
     user_id: &str,
     wants_org_scope: bool,
 ) -> Result<db::User, ServiceError> {
-    let user = db::get_user_by_id(&state.store, user_id)
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to get user: {e}");
-            ServiceError::api(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "db_error",
-                "Internal database error",
-            )
-        })?
-        .ok_or_else(|| ServiceError::api(StatusCode::NOT_FOUND, "not_found", "User not found"))?;
-
-    if !user.active {
-        return Err(ServiceError::api(
-            StatusCode::UNAUTHORIZED,
-            "unauthorized",
-            "User account is deactivated",
-        ));
-    }
+    let user = crate::handlers::session::load_active_user(state, user_id).await?;
 
     // Validate: Organization scope requires user to have an org
     if wants_org_scope && user.org_id.is_none() {

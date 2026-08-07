@@ -62,18 +62,11 @@ async fn extract_auth_from_cookie(state: &AppState, jar: &CookieJar) -> Option<A
     // Use shared cookie extraction
     let session = extract_session_from_cookie(state, jar).await.ok()?;
 
-    // Get user info
-    let user = db::get_user_by_id(&state.store, &session.sub)
+    // Missing or deactivated users are unauthenticated — the active-account
+    // invariant is enforced once, in `load_active_user`.
+    let user = super::session::load_active_user(state, &session.sub)
         .await
-        .ok()??;
-
-    // Deactivated users may still hold a live cookie in the window between
-    // `update_user_active_status` and `delete_sessions_for_user` (separate
-    // transactions); treat them as unauthenticated, matching
-    // `get_resource_auth_context`.
-    if !user.active {
-        return None;
-    }
+        .ok()?;
 
     Some(AuthContext {
         authenticated: true,
