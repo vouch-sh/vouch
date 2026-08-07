@@ -591,8 +591,9 @@ fn extract_domain(
         return Some(value.to_ascii_lowercase());
     }
 
-    // Derive from email address
-    email.split('@').nth(1).map(str::to_ascii_lowercase)
+    // Derive from email address (last-`@` split, matching the audit and
+    // org-domain layers)
+    crate::email::Email::domain_of(email)
 }
 
 /// Find the value of a SAML attribute by name.

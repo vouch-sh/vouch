@@ -243,6 +243,17 @@ impl AuditStore {
         Self { pool, crypto }
     }
 
+    /// Blind-index HMAC of an email address, canonicalized first.
+    ///
+    /// The single policy for email correlation keys: insert and query must
+    /// both HMAC the canonical form (`crate::email::Email`) or the same
+    /// address keys differently depending on the casing the IdP or caller
+    /// supplied.
+    fn email_hmac(&self, email: &str) -> String {
+        self.crypto
+            .hmac_index(crate::email::Email::new(email).as_str())
+    }
+
     /// Insert a new audit event.
     ///
     /// `email` is masked to domain-only and HMAC-hashed for correlation.
@@ -258,11 +269,8 @@ impl AuditStore {
         email: Option<&str>,
         data_json: &str,
     ) -> Result<String> {
-        let email_domain = email.and_then(extract_domain);
-        // Normalize the local part to lowercase so the same user's events
-        // correlate across casings returned by the IdP over time. The domain
-        // is normalized by `extract_domain`.
-        let email_hmac = email.map(|e| self.crypto.hmac_index(&e.to_lowercase()));
+        let email_domain = email.and_then(crate::email::Email::domain_of);
+        let email_hmac = email.map(|e| self.email_hmac(e));
 
         self.insert_event_raw(
             kind,
@@ -439,10 +447,10 @@ impl AuditStore {
                 q.and_where(Expr::col(AuditEvents::UserId).eq(uid.as_str()));
             }
             if let Some(ref email) = filter.email {
-                // Normalize to lowercase to match the HMAC computed at insert
-                // time, so lookups correlate regardless of the casing supplied
-                // by the caller or returned by the IdP.
-                let hmac = self.crypto.hmac_index(&email.to_lowercase());
+                // Same canonicalizing HMAC as insert time, so lookups
+                // correlate regardless of the casing supplied by the caller
+                // or returned by the IdP.
+                let hmac = self.email_hmac(email);
                 q.and_where(Expr::col(AuditEvents::EmailHmac).eq(hmac));
             }
             if let Some(ref domains) = filter.email_domains {
@@ -569,17 +577,6 @@ impl std::fmt::Debug for AuditStore {
 // ============================================================================
 // Helpers
 // ============================================================================
-
-/// Extract the domain portion of an email address, normalized to ASCII
-/// lowercase to match the IdP layer's domain normalization. Org domains
-/// are stored lowercase, so a mixed-case domain from an IdP (e.g.
-/// `CORP.Example.COM`) would otherwise fail to match the `email_domain`
-/// filter used by the admin audit page.
-fn extract_domain(email: &str) -> Option<String> {
-    email
-        .rsplit_once('@')
-        .map(|(_, domain)| domain.to_ascii_lowercase())
-}
 
 /// Normalize a `since`/`until`/cleanup-cutoff timestamp bound for
 /// lexicographic comparison against the `created_at` column, by truncating
@@ -806,42 +803,6 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(events.len(), 2);
-    }
-
-    #[test]
-    fn extract_domain_works() {
-        assert_eq!(
-            extract_domain("alice@example.com"),
-            Some("example.com".to_string())
-        );
-        assert_eq!(extract_domain("nodomain"), None);
-        assert_eq!(
-            extract_domain("user@sub.domain.com"),
-            Some("sub.domain.com".to_string())
-        );
-    }
-
-    #[test]
-    fn extract_domain_normalizes_case() {
-        // Mixed-case domains from the IdP must be normalized to ASCII
-        // lowercase so they match the org's stored (lowercase) domain.
-        assert_eq!(
-            extract_domain("Alice@CORP.Example.COM"),
-            Some("corp.example.com".to_string())
-        );
-        assert_eq!(
-            extract_domain("bob@EXAMPLE.COM"),
-            Some("example.com".to_string())
-        );
-        assert_eq!(
-            extract_domain("bob@Example.Com"),
-            Some("example.com".to_string())
-        );
-        // Already-lowercase input is unchanged.
-        assert_eq!(
-            extract_domain("alice@example.com"),
-            Some("example.com".to_string())
-        );
     }
 
     #[tokio::test]

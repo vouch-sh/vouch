@@ -5,11 +5,16 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::db::document_type::{DocumentType, IndexEntry};
+use crate::email::Email;
 
 /// A Vouch user.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct UserDoc {
-    pub email: String,
+    /// Canonical (trimmed, ASCII-lowercased) address. The [`Email`] type
+    /// canonicalizes on construction and deserialization, so the `email`
+    /// index row emitted by [`DocumentType::index_entries`] is normalized
+    /// structurally — no call site can store a mixed-case address.
+    pub email: Email,
     pub name: Option<String>,
     pub org_id: Option<String>,
     pub is_org_admin: bool,
@@ -93,7 +98,7 @@ impl DocumentType for UserDoc {
     fn index_entries(&self) -> Vec<IndexEntry> {
         let mut entries = vec![IndexEntry {
             field: "email",
-            value: self.email.clone(),
+            value: self.email.as_str().to_string(),
         }];
         if let Some(ref org_id) = self.org_id {
             entries.push(IndexEntry {
@@ -146,21 +151,16 @@ impl DocumentType for UserDoc {
 /// custom derivation, avoiding the SHA-1 dependency a version-5 UUID
 /// would pull in.
 ///
-/// The email is ASCII-lowercased inside this function before hashing,
-/// so two casings of the same address always produce the same ID —
-/// a caller that forgets to normalize cannot reopen the cross-case
-/// duplicate-row race. Callers still normalize before storage and
-/// lookup (`create_scim_user` lowercases first), since the stored
-/// `UserDoc.email` and its index row must match the lowercase
-/// convention too.
-pub(crate) fn deterministic_user_id(email: &str) -> String {
+/// Taking [`Email`] (canonical by construction) means two casings of the
+/// same address always produce the same ID — a caller cannot reopen the
+/// cross-case duplicate-row race, because the type system already
+/// normalized the value it must store and index.
+pub(crate) fn deterministic_user_id(email: &Email) -> String {
     use aws_lc_rs::digest::{self, SHA256};
-
-    let email = email.to_ascii_lowercase();
 
     let mut ctx = digest::Context::new(&SHA256);
     ctx.update(b"user_email\0");
-    ctx.update(email.as_bytes());
+    ctx.update(email.as_str().as_bytes());
     let digest = ctx.finish();
 
     let mut bytes = [0u8; 16];
@@ -178,6 +178,7 @@ pub(crate) fn deterministic_user_id(email: &str) -> String {
 mod tests {
     use super::{IdpIdentity, UserDoc, deterministic_user_id, idp_identity_index_value};
     use crate::db::document_type::DocumentType;
+    use crate::email::Email;
 
     #[test]
     fn legacy_user_json_without_idp_identities_deserializes() {
@@ -202,7 +203,7 @@ mod tests {
     #[test]
     fn index_entries_include_one_row_per_idp_identity() {
         let doc = UserDoc {
-            email: "user@example.com".to_string(),
+            email: Email::new("user@example.com"),
             name: None,
             org_id: None,
             is_org_admin: false,
@@ -263,16 +264,16 @@ mod tests {
         // surface a primary-key violation instead of silently creating a
         // second user row.
         assert_eq!(
-            deterministic_user_id("dup@example.com"),
-            deterministic_user_id("dup@example.com"),
+            deterministic_user_id(&Email::new("dup@example.com")),
+            deterministic_user_id(&Email::new("dup@example.com")),
         );
     }
 
     #[test]
     fn deterministic_user_id_differs_for_distinct_emails() {
         assert_ne!(
-            deterministic_user_id("alice@example.com"),
-            deterministic_user_id("bob@example.com"),
+            deterministic_user_id(&Email::new("alice@example.com")),
+            deterministic_user_id(&Email::new("bob@example.com")),
         );
     }
 
@@ -282,7 +283,7 @@ mod tests {
         // `handlers::scim::validate_resource_id`). A deterministic ID
         // that fails to parse would make the user it identifies
         // unaddressable via GET/PATCH/PUT/DELETE.
-        let id = deterministic_user_id("uuid-shape@example.com");
+        let id = deterministic_user_id(&Email::new("uuid-shape@example.com"));
         let parsed = uuid::Uuid::try_parse(&id);
         assert!(
             parsed.is_ok(),
@@ -302,12 +303,12 @@ mod tests {
         // to normalize cannot mint a second user row for the same
         // person via a differently-cased concurrent create.
         assert_eq!(
-            deterministic_user_id("Mixed@Example.com"),
-            deterministic_user_id("mixed@example.com"),
+            deterministic_user_id(&Email::new("Mixed@Example.com")),
+            deterministic_user_id(&Email::new("mixed@example.com")),
         );
         assert_eq!(
-            deterministic_user_id("MIXED@EXAMPLE.COM"),
-            deterministic_user_id("mixed@example.com"),
+            deterministic_user_id(&Email::new("MIXED@EXAMPLE.COM")),
+            deterministic_user_id(&Email::new("mixed@example.com")),
         );
     }
 }

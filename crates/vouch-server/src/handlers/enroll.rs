@@ -741,7 +741,7 @@ pub(crate) async fn complete_enrollment_after_identity(
     // logged but never written back: there is no email-change machinery,
     // and downstream artifacts (sessions, certs, audit) must stay
     // consistent with the stored account.
-    if user.email != identity.email.to_ascii_lowercase() {
+    if user.email != crate::email::Email::new(&identity.email).as_str() {
         tracing::warn!(
             user_id = %user.id,
             account_email = %redact_email(&user.email),

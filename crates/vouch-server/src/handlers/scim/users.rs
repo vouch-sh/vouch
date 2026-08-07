@@ -155,7 +155,7 @@ pub(crate) async fn create_user(
     // version-bumping it via `compare_and_update`), which closes the TOCTOU
     // race with a concurrent `remove_additional_domain` that a standalone
     // pre-check here could not.
-    if email.rsplit_once('@').is_none() {
+    if crate::email::Email::domain_of(&email).is_none() {
         tracing::warn!(
             org_id = %auth.org_id,
             "rejected SCIM user creation: userName is not an email address"
