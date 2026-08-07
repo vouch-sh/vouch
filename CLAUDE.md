@@ -259,7 +259,16 @@ cargo test test_session_expiration -- --nocapture  # Single test with output
 cargo test --features yubikey-tests -- --ignored
 ```
 
-## What NOT to Do
+**Test placement convention** (no lint enforces this — convention + review):
+
+- An inline `#[cfg(test)] mod tests` is fine until it passes ~500 lines; then move it
+  to a sibling file: keep `foo.rs`, declare `#[cfg(test)] mod tests;` in it, and put the
+  body in `foo/tests.rs` (still a child module — private access is unchanged).
+- When a test file itself grows past a few thousand lines, split it into a per-topic
+  directory like `handlers/oidc/tests/` (one file per RFC) and `db/tests/` (one file per
+  domain). `db/tests.rs` is the module root: shared fixtures live there, and its module
+  doc lists every submodule's scope — put new db tests in the file whose scope matches,
+  and add a new file (listed in that doc) when none does.
 
 1. **Don't add dependencies without justification** — Each dep is attack surface
 2. **Don't store secrets in plain types** — Use `SecretString`, `Zeroizing`
