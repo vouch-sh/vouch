@@ -105,16 +105,7 @@ async fn test_rfc7591_register_rejects_expired_token() {
         "Revoked token must return invalid_token (RFC 6750): {}",
         response.body
     );
-    // RFC 6750 §3.1: WWW-Authenticate MUST carry error="invalid_token".
-    let www_auth = response
-        .headers
-        .get("www-authenticate")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-    assert!(
-        www_auth.contains("invalid_token"),
-        "WWW-Authenticate must contain error=\"invalid_token\": {www_auth}"
-    );
+    assert_invalid_token_challenge(&response);
 }
 
 #[tokio::test]
@@ -148,15 +139,7 @@ async fn test_rfc7591_register_rejects_invalid_jwt() {
         "Invalid JWT must return invalid_token (RFC 6750): {}",
         response.body
     );
-    let www_auth = response
-        .headers
-        .get("www-authenticate")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-    assert!(
-        www_auth.contains("invalid_token"),
-        "WWW-Authenticate must contain error=\"invalid_token\": {www_auth}"
-    );
+    assert_invalid_token_challenge(&response);
 }
 
 // ========================================================================

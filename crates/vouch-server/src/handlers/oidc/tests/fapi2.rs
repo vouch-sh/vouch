@@ -72,33 +72,6 @@ fn sign_jwt_assertion(
     format!("{header_b64}.{claims_b64}.{sig_b64}")
 }
 
-/// Build a `private_key_jwt` client assertion (RFC 7523 Section 2.2).
-///
-/// Per RFC 7523, the audience must be the token endpoint URL even when the
-/// assertion is used at the PAR endpoint.
-fn build_client_assertion(
-    client_id: &str,
-    audience: &str,
-    pkcs8_bytes: &[u8],
-    jti: Option<&str>,
-) -> String {
-    let now = jiff::Timestamp::now().as_second();
-    let header = serde_json::json!({
-        "alg": "ES256",
-        "typ": "JWT",
-        "kid": "test-key-1"
-    });
-    let mut claims = serde_json::json!({
-        "iss": client_id,
-        "sub": client_id,
-        "aud": audience,
-        "iat": now,
-        "exp": now + 60
-    });
-    claims["jti"] = serde_json::json!(jti.unwrap_or(&uuid::Uuid::now_v7().to_string()));
-    sign_jwt_assertion(pkcs8_bytes, &header, &claims)
-}
-
 /// Build a signed JAR Request Object JWT (RFC 9101).
 fn build_request_object(
     client_id: &str,

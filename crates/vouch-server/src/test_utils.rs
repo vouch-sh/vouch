@@ -1670,3 +1670,46 @@ pub async fn make_test_access_token(key: &OidcSigningKey) -> String {
     };
     key.sign_access_token_jwt(&claims).await.expect("sign")
 }
+
+/// Build a JWT assertion for `private_key_jwt` client auth (RFC 7523
+/// Section 2.2), signed ES256 with `kid: "test-key-1"`.
+///
+/// `jti: None` generates a fresh UUID so repeated calls do not trip replay
+/// protection; pass `Some(..)` to exercise replay handling deliberately.
+#[must_use]
+pub fn build_client_assertion(
+    client_id: &str,
+    audience: &str,
+    pkcs8_bytes: &[u8],
+    jti: Option<&str>,
+) -> String {
+    use aws_lc_rs::signature::{ECDSA_P256_SHA256_FIXED_SIGNING, EcdsaKeyPair};
+    use base64::Engine;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+
+    let key_pair = EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, pkcs8_bytes)
+        .expect("parse ES256 key");
+
+    let now = jiff::Timestamp::now().as_second();
+    let header = serde_json::json!({ "alg": "ES256", "typ": "JWT", "kid": "test-key-1" });
+    let claims = serde_json::json!({
+        "iss": client_id,
+        "sub": client_id,
+        "aud": audience,
+        "iat": now,
+        "exp": now.saturating_add(60),
+        "jti": jti.map_or_else(|| uuid::Uuid::now_v7().to_string(), str::to_string)
+    });
+
+    let header_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&header).expect("encode header"));
+    let claims_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).expect("encode claims"));
+    let signing_input = format!("{header_b64}.{claims_b64}");
+
+    let rng = aws_lc_rs::rand::SystemRandom::new();
+    let sig = key_pair
+        .sign(&rng, signing_input.as_bytes())
+        .expect("sign assertion");
+    let sig_b64 = URL_SAFE_NO_PAD.encode(sig.as_ref());
+
+    format!("{header_b64}.{claims_b64}.{sig_b64}")
+}

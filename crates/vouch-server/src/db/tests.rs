@@ -1335,18 +1335,23 @@ const TEST_ORG_DOMAIN: &str = "example.com";
 /// so every test that provisions a `*@example.com` user against `TEST_ORG_ID`
 /// must seed this org first.
 async fn seed_test_org(store: &DocumentStore) {
-    use crate::db::documents::organization::OrganizationDoc;
-    let doc = OrganizationDoc {
-        domain: TEST_ORG_DOMAIN.to_string(),
+    store
+        .insert_with_id(TEST_ORG_ID, &test_org_doc(TEST_ORG_DOMAIN))
+        .await
+        .expect("seed test org");
+}
+
+/// A minimal org document owning `domain` — no name, creator, additional
+/// domains, or subdomain. The shape every org fixture in this file needs;
+/// construct through here instead of inlining the literal.
+fn test_org_doc(domain: &str) -> crate::db::documents::organization::OrganizationDoc {
+    crate::db::documents::organization::OrganizationDoc {
+        domain: domain.to_string(),
         name: None,
         created_by_user_id: None,
         additional_domains: Vec::new(),
         subdomain: None,
-    };
-    store
-        .insert_with_id(TEST_ORG_ID, &doc)
-        .await
-        .expect("seed test org");
+    }
 }
 
 #[tokio::test]
@@ -1537,20 +1542,10 @@ async fn test_scim_filter_user_name_eq_case_insensitive_is_org_scoped() {
     // `other-org` also needs an org doc because `create_scim_user` validates
     // domain ownership in-transaction; both orgs own `example.com` in this
     // test fixture (the test exercises org scoping, not domain isolation).
-    {
-        use crate::db::documents::organization::OrganizationDoc;
-        let doc = OrganizationDoc {
-            domain: TEST_ORG_DOMAIN.to_string(),
-            name: None,
-            created_by_user_id: None,
-            additional_domains: Vec::new(),
-            subdomain: None,
-        };
-        store
-            .insert_with_id("other-org", &doc)
-            .await
-            .expect("seed other-org");
-    }
+    store
+        .insert_with_id("other-org", &test_org_doc(TEST_ORG_DOMAIN))
+        .await
+        .expect("seed other-org");
 
     create_scim_user(
         &store,
@@ -2992,16 +2987,17 @@ async fn test_create_scim_user_no_org_does_not_touch_org_doc() {
 }
 
 /// Concurrent `create_scim_user` and `remove_additional_domain` must not
-/// produce a user on the removed domain. This test deterministically hits
-/// the TOCTOU window using a barrier: the user-creation task reads the org
-/// doc (seeing the domain as verified), then the removal task removes the
-/// domain (committing before the user-creation's CAS), then the user-creation
-/// task's CAS fails and retries — the retry re-reads the org doc (now without
-/// the domain) and rejects with `DomainNotOwned`.
+/// produce a user on the removed domain.
 ///
-/// Before the fix (domain check outside the transaction), this test would
-/// produce a user on the removed domain because the check would pass before
-/// the removal and the insert would commit after it.
+/// This is a best-effort race, not a deterministic interleaving: the
+/// transactional create path has no injection point, so the two tasks
+/// simply run concurrently and every outcome's invariant is checked. The
+/// `Ok` arm cannot distinguish "creation legitimately committed before the
+/// removal" from the original bug (creation committing after the removal),
+/// so this test alone cannot prove the guard; the deterministic regression
+/// coverage is the sequential rejection tests above, and what this adds is
+/// that no interleaving panics, double-creates, or strands a user row on a
+/// rejected outcome.
 ///
 /// Uses `multi_thread` so the two tasks can run on separate worker threads.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -3120,15 +3116,17 @@ async fn test_create_scim_user_toctou_domain_removal_during_creation() {
         }
     }
 }
+
+/// Regression for the SCIM concurrent-create race: two concurrent
 /// `create_scim_user` calls with the same email must produce exactly one
 /// user row, not two. Before the deterministic-ID fix, each call generated
 /// a fresh random UUID v7 primary key, so neither insert conflicted with the
 /// other and both committed — producing duplicate accounts for the same email.
 ///
-/// The fix derives the user ID from the email (a version-5 name-based UUID),
-/// so the two inserts collide on the `documents` PRIMARY KEY. The losing
-/// insert fails with a unique/primary-key violation, which
-/// `is_unique_violation` maps to the same "UNIQUE constraint failed" error
+/// The fix derives the user ID from the email (an RFC 9562 version-8 UUID
+/// packing a SHA-256 digest), so the two inserts collide on the `documents`
+/// PRIMARY KEY. The losing insert fails with a unique/primary-key violation,
+/// which `is_unique_violation` maps to the same `DuplicateEmail` error
 /// returned by the explicit pre-check; the SCIM handler then returns
 /// `409 Conflict` for the loser.
 ///
@@ -3294,7 +3292,7 @@ async fn test_create_scim_user_concurrent_mixed_case_same_email_produces_one_use
 /// `create_scim_user`, deleted, then re-created with the same email must
 /// receive the same ID — confirming the derivation has no per-process
 /// randomness and that the `documents` PRIMARY KEY collision behaviour is
-/// not an arte fact of a single test run.
+/// not an artifact of a single test run.
 #[tokio::test]
 async fn test_create_scim_user_deterministic_id_is_stable_across_recreate() {
     use crate::db::documents::user::UserDoc;
@@ -3417,43 +3415,28 @@ async fn test_create_scim_user_concurrent_same_email_produces_one_user_postgres(
         panic!("VOUCH_TEST_POSTGRES_URL must point to a Postgres database");
     };
 
-    // The bundled Postgres migrations use `CREATE INDEX ASYNC`, which is
-    // DSQL-specific syntax. For vanilla PostgreSQL we create the schema
-    // inline with standard `CREATE INDEX`. This mirrors the migration files
-    // in `migrations/postgres/` with the `ASYNC` keyword removed.
-    sqlx::raw_sql(
-        r#"
-        CREATE TABLE IF NOT EXISTS documents (
-            id TEXT PRIMARY KEY,
-            doc_type TEXT NOT NULL,
-            schema_version INTEGER NOT NULL DEFAULT 1,
-            encapped_key TEXT,
-            data TEXT NOT NULL,
-            expires_at TEXT,
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL,
-            version INTEGER NOT NULL DEFAULT 1,
-            last_used_at TEXT
-        );
-        CREATE TABLE IF NOT EXISTS document_indexes (
-            id TEXT PRIMARY KEY,
-            document_id TEXT NOT NULL,
-            index_field TEXT NOT NULL,
-            index_value TEXT NOT NULL,
-            UNIQUE(document_id, index_field, index_value)
-        );
-        CREATE INDEX IF NOT EXISTS idx_documents_doc_type ON documents(doc_type);
-        CREATE INDEX IF NOT EXISTS idx_documents_expires_at ON documents(expires_at);
-        CREATE INDEX IF NOT EXISTS idx_documents_doc_type_created ON documents(doc_type, created_at);
-        CREATE INDEX IF NOT EXISTS idx_document_indexes_lookup ON document_indexes(index_field, index_value);
-        CREATE INDEX IF NOT EXISTS idx_document_indexes_document_id ON document_indexes(document_id);
-        CREATE INDEX IF NOT EXISTS idx_document_indexes_covering ON document_indexes(index_field, index_value, document_id);
-        CREATE INDEX IF NOT EXISTS idx_documents_cleanup ON documents(doc_type, expires_at);
-        "#,
-    )
-    .execute(p)
-    .await
-    .expect("create Postgres schema");
+    // Apply the real Postgres migrations rather than an inline schema copy,
+    // so schema drift breaks this test instead of silently passing. Two
+    // vanilla-PostgreSQL adaptations: the files target Aurora DSQL, whose
+    // `CREATE INDEX ASYNC` syntax vanilla Postgres rejects, and a reused
+    // test database needs idempotent DDL (`IF NOT EXISTS`).
+    let migrations_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/migrations/postgres");
+    let mut migration_files: Vec<_> = std::fs::read_dir(migrations_dir)
+        .expect("read migrations/postgres")
+        .map(|entry| entry.expect("read migration entry").path())
+        .collect();
+    migration_files.sort();
+    for file in migration_files {
+        let sql = std::fs::read_to_string(&file)
+            .expect("read migration file")
+            .replace("CREATE INDEX ASYNC ", "CREATE INDEX IF NOT EXISTS ")
+            .replace("CREATE TABLE ", "CREATE TABLE IF NOT EXISTS ");
+        // Migration files are repo-owned trusted content, not user input.
+        sqlx::raw_sql(sqlx::AssertSqlSafe(sql))
+            .execute(p)
+            .await
+            .unwrap_or_else(|e| panic!("apply Postgres migration {}: {e}", file.display()));
+    }
 
     let crypto: std::sync::Arc<dyn crate::crypto::document_crypto::DocumentCrypto> =
         std::sync::Arc::new(crate::crypto::document_crypto::PlaintextDocumentCrypto);
@@ -3463,13 +3446,7 @@ async fn test_create_scim_user_concurrent_same_email_produces_one_user_postgres(
     // domain-ownership check reads. `pg-test-org` owns `example.com`.
     {
         use crate::db::documents::organization::OrganizationDoc;
-        let org_doc = OrganizationDoc {
-            domain: "example.com".to_string(),
-            name: None,
-            created_by_user_id: None,
-            additional_domains: Vec::new(),
-            subdomain: None,
-        };
+        let org_doc = test_org_doc("example.com");
         // Clean up any leftover org from a previous run before inserting.
         if let Some(existing) = store
             .get::<OrganizationDoc>("pg-test-org")
@@ -5307,14 +5284,10 @@ async fn test_enroll_promotes_admin_for_org_without_one() {
 
     // Seed an org row with no admin (e.g. previous enrollee crashed
     // mid-flow before Step 4 ran).
-    let seed_doc = OrganizationDoc {
-        domain: domain.to_string(),
-        name: None,
-        created_by_user_id: None,
-        additional_domains: Vec::new(),
-        subdomain: None,
-    };
-    store.insert(&seed_doc).await.expect("seed org row");
+    store
+        .insert(&test_org_doc(domain))
+        .await
+        .expect("seed org row");
 
     let user = enroll_user_with_org(
         &store,
@@ -7592,7 +7565,6 @@ async fn test_revoke_expired_secret_allowed_when_valid_remains() {
 /// of creating a duplicate.
 #[tokio::test]
 async fn test_enroll_finds_scim_user_with_different_email_casing() {
-    use crate::db::documents::organization::OrganizationDoc;
     use crate::db::{create_scim_user, enroll_user_with_org};
 
     let (store, _audit) = test_db().await;
@@ -7600,16 +7572,11 @@ async fn test_enroll_finds_scim_user_with_different_email_casing() {
 
     // Org is required for SCIM token binding and is the one OIDC enrollment
     // will resolve to via the (lowercased) domain.
-    let org_id = {
-        let org_doc = OrganizationDoc {
-            domain: domain.to_string(),
-            name: None,
-            created_by_user_id: None,
-            additional_domains: Vec::new(),
-            subdomain: None,
-        };
-        store.insert(&org_doc).await.expect("org insert").id
-    };
+    let org_id = store
+        .insert(&test_org_doc(domain))
+        .await
+        .expect("org insert")
+        .id;
 
     // 1. SCIM creates a user with a mixed-case email, as an IdP directory
     //    API might return it.
@@ -7757,7 +7724,7 @@ async fn test_enroll_twice_with_different_email_casing_reuses_user() {
 async fn test_get_user_by_email_is_case_insensitive() {
     let (store, _audit) = test_db().await;
 
-    // Store via the test helper with a lowercase email.
+    // The test helper canonicalizes to lowercase before storing.
     let (user_id, _) = upsert_user(&store, "Carol@example.com", Some("Carol"))
         .await
         .expect("upsert user");
