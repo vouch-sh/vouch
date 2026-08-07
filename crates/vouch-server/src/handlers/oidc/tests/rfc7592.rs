@@ -168,22 +168,39 @@ async fn test_rfc7592_put_missing_bearer_token() {
     )
     .await;
     assert_eq!(response.status, StatusCode::UNAUTHORIZED);
-    // RFC 7592 §2.2 / RFC 6750 §3.1: missing bearer token on a protected
-    // registration endpoint MUST return `invalid_token` (not `invalid_client`).
-    let json: serde_json::Value = serde_json::from_str(&response.body).expect("Valid JSON");
-    assert_eq!(
-        json["error"], "invalid_token",
-        "Missing bearer must return invalid_token: {}",
-        response.body
-    );
+    // RFC 6750 §3.1: when the request lacks any authentication
+    // information, the WWW-Authenticate challenge SHOULD NOT include
+    // an error code or other error information. The `invalid_token`
+    // error is reserved for requests that carry a token that is
+    // expired/revoked/malformed.
     let www_auth = response
         .headers
         .get("www-authenticate")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
     assert!(
-        www_auth.contains("invalid_token"),
-        "WWW-Authenticate must contain error=\"invalid_token\": {www_auth}"
+        www_auth.starts_with("Bearer"),
+        "WWW-Authenticate must be a Bearer challenge: {www_auth}"
+    );
+    assert!(
+        !www_auth.contains("error="),
+        "Missing bearer must not include an error parameter: {www_auth}"
+    );
+    assert!(
+        !www_auth.contains("invalid_token"),
+        "Missing bearer must not include invalid_token: {www_auth}"
+    );
+    // RFC 9728 §5.2: the resource_metadata middleware still appends its
+    // pointer so unauthenticated callers can discover the metadata document.
+    assert!(
+        www_auth.contains("resource_metadata="),
+        "Missing bearer must still advertise resource_metadata (RFC 9728 §5.2): {www_auth}"
+    );
+    // RFC 6750 §3.1: no error information, so no JSON error body.
+    assert!(
+        response.body.is_empty(),
+        "Missing bearer must not carry a JSON error body: {}",
+        response.body
     );
 }
 
@@ -260,22 +277,39 @@ async fn test_rfc7592_get_missing_bearer_token() {
 
     let response = http_get_full(&app, &format!("/oauth/register/{client_id}"), &[]).await;
     assert_eq!(response.status, StatusCode::UNAUTHORIZED);
-    // RFC 7592 §2.1 / RFC 6750 §3.1: missing bearer token on a protected
-    // registration endpoint MUST return `invalid_token` (not `invalid_client`).
-    let json: serde_json::Value = serde_json::from_str(&response.body).expect("Valid JSON");
-    assert_eq!(
-        json["error"], "invalid_token",
-        "Missing bearer must return invalid_token: {}",
-        response.body
-    );
+    // RFC 6750 §3.1: when the request lacks any authentication
+    // information, the WWW-Authenticate challenge SHOULD NOT include
+    // an error code or other error information. The `invalid_token`
+    // error is reserved for requests that carry a token that is
+    // expired/revoked/malformed.
     let www_auth = response
         .headers
         .get("www-authenticate")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
     assert!(
-        www_auth.contains("invalid_token"),
-        "WWW-Authenticate must contain error=\"invalid_token\": {www_auth}"
+        www_auth.starts_with("Bearer"),
+        "WWW-Authenticate must be a Bearer challenge: {www_auth}"
+    );
+    assert!(
+        !www_auth.contains("error="),
+        "Missing bearer must not include an error parameter: {www_auth}"
+    );
+    assert!(
+        !www_auth.contains("invalid_token"),
+        "Missing bearer must not include invalid_token: {www_auth}"
+    );
+    // RFC 9728 §5.2: the resource_metadata middleware still appends its
+    // pointer so unauthenticated callers can discover the metadata document.
+    assert!(
+        www_auth.contains("resource_metadata="),
+        "Missing bearer must still advertise resource_metadata (RFC 9728 §5.2): {www_auth}"
+    );
+    // RFC 6750 §3.1: no error information, so no JSON error body.
+    assert!(
+        response.body.is_empty(),
+        "Missing bearer must not carry a JSON error body: {}",
+        response.body
     );
 }
 
@@ -352,29 +386,39 @@ async fn test_rfc7592_delete_client_missing_bearer_token() {
     // DELETE without Authorization header — expect 401
     let response = http_delete_full(&app, &format!("/oauth/register/{client_id}"), &[]).await;
     assert_eq!(response.status, StatusCode::UNAUTHORIZED);
-    assert!(
-        response
-            .headers
-            .get("www-authenticate")
-            .is_some_and(|v| v.to_str().is_ok_and(|s| s.contains("Bearer"))),
-        "Must include WWW-Authenticate: Bearer header"
-    );
-    // RFC 7592 §2.3 / RFC 6750 §3.1: missing bearer token MUST return
-    // `invalid_token` (not `invalid_client`).
-    let json: serde_json::Value = serde_json::from_str(&response.body).expect("Valid JSON");
-    assert_eq!(
-        json["error"], "invalid_token",
-        "Missing bearer must return invalid_token: {}",
-        response.body
-    );
     let www_auth = response
         .headers
         .get("www-authenticate")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
     assert!(
-        www_auth.contains("invalid_token"),
-        "WWW-Authenticate must contain error=\"invalid_token\": {www_auth}"
+        www_auth.starts_with("Bearer"),
+        "WWW-Authenticate must be a Bearer challenge: {www_auth}"
+    );
+    // RFC 6750 §3.1: when the request lacks any authentication
+    // information, the WWW-Authenticate challenge SHOULD NOT include
+    // an error code or other error information. The `invalid_token`
+    // error is reserved for requests that carry a token that is
+    // expired/revoked/malformed.
+    assert!(
+        !www_auth.contains("error="),
+        "Missing bearer must not include an error parameter: {www_auth}"
+    );
+    assert!(
+        !www_auth.contains("invalid_token"),
+        "Missing bearer must not include invalid_token: {www_auth}"
+    );
+    // RFC 9728 §5.2: the resource_metadata middleware still appends its
+    // pointer so unauthenticated callers can discover the metadata document.
+    assert!(
+        www_auth.contains("resource_metadata="),
+        "Missing bearer must still advertise resource_metadata (RFC 9728 §5.2): {www_auth}"
+    );
+    // RFC 6750 §3.1: no error information, so no JSON error body.
+    assert!(
+        response.body.is_empty(),
+        "Missing bearer must not carry a JSON error body: {}",
+        response.body
     );
 }
 
