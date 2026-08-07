@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
-//! URL security validation for server connections.
+//! URL security validation and host normalization.
 
 use url::Url;
 
@@ -98,9 +98,69 @@ pub fn is_loopback_host(host: &str) -> bool {
     false
 }
 
+/// Strip the default HTTPS port (`:443`) from a `host[:port]` value.
+///
+/// Non-standard ports are preserved so that callers matching or signing hosts
+/// treat them as distinct.
+#[must_use]
+pub fn strip_default_https_port(host: &str) -> &str {
+    host.strip_suffix(":443").unwrap_or(host)
+}
+
+/// Normalize a git credential `host` value for matching.
+///
+/// Git's credential protocol passes through whatever the remote URL contained,
+/// so the same host can arrive as `GitHub.com`, `github.com:443`, etc. An
+/// explicit default HTTPS port is stripped and the hostname ASCII-lowercased
+/// (DNS names are case-insensitive per RFC 4343); comparing raw values makes a
+/// credential helper silently decline requests it should serve. Non-standard
+/// ports are intentionally preserved so helpers decline them.
+#[must_use]
+pub fn normalize_git_host(host: &str) -> String {
+    strip_default_https_port(host).to_ascii_lowercase()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn strip_default_https_port_removes_443() {
+        assert_eq!(strip_default_https_port("github.com:443"), "github.com");
+    }
+
+    #[test]
+    fn strip_default_https_port_keeps_bare_host() {
+        assert_eq!(strip_default_https_port("github.com"), "github.com");
+    }
+
+    #[test]
+    fn strip_default_https_port_keeps_non_standard_ports() {
+        assert_eq!(
+            strip_default_https_port("github.com:8443"),
+            "github.com:8443"
+        );
+        assert_eq!(strip_default_https_port("github.com:80"), "github.com:80");
+    }
+
+    #[test]
+    fn normalize_git_host_lowercases() {
+        assert_eq!(normalize_git_host("GitHub.com"), "github.com");
+        assert_eq!(
+            normalize_git_host("GIT-CODECOMMIT.US-EAST-1.AMAZONAWS.COM"),
+            "git-codecommit.us-east-1.amazonaws.com"
+        );
+    }
+
+    #[test]
+    fn normalize_git_host_strips_port_and_lowercases() {
+        assert_eq!(normalize_git_host("GitHub.com:443"), "github.com");
+    }
+
+    #[test]
+    fn normalize_git_host_keeps_non_standard_ports() {
+        assert_eq!(normalize_git_host("GitHub.com:8443"), "github.com:8443");
+    }
 
     #[test]
     fn https_is_secure() {

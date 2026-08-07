@@ -259,15 +259,13 @@ const CODECOMMIT_DOMAINS: &[&str] = &[
 
 /// Check if a hostname is a CodeCommit host in any partition.
 ///
-/// Git's credential protocol includes the port in the `host` field when the
-/// URL explicitly specifies one (e.g., `git-codecommit.us-east-1.amazonaws.com:443`).
-/// The standard HTTPS port is stripped before matching so that explicit `:443`
-/// doesn't cause the host check — and thus the entire credential helper — to
-/// fail silently. Non-standard ports are intentionally not stripped: the helper
-/// should decline to provide CodeCommit credentials for them.
+/// The host is normalized via [`vouch_common::normalize_git_host`] (explicit
+/// `:443` stripped, hostname lowercased) before matching; non-standard ports
+/// are intentionally rejected — the helper should decline to provide
+/// CodeCommit credentials for them.
 #[must_use]
 pub(crate) fn is_codecommit_host(host: &str) -> bool {
-    let host = host.strip_suffix(":443").unwrap_or(host);
+    let host = vouch_common::normalize_git_host(host);
     if !host.starts_with("git-codecommit.") {
         return false;
     }
@@ -513,6 +511,18 @@ mod tests {
         ));
         assert!(is_codecommit_host(
             "git-codecommit.cn-north-1.amazonaws.com.cn:443"
+        ));
+    }
+
+    /// DNS hostnames are case-insensitive and git passes through whatever the
+    /// remote URL contained, so an uppercased host must still match — the
+    /// GitHub helper already did this, and the divergence made the CodeCommit
+    /// helper silently decline uppercase remotes.
+    #[test]
+    fn test_is_codecommit_host_case_insensitive() {
+        assert!(is_codecommit_host("GIT-CODECOMMIT.US-EAST-1.AMAZONAWS.COM"));
+        assert!(is_codecommit_host(
+            "Git-CodeCommit.Us-East-1.Amazonaws.Com:443"
         ));
     }
 

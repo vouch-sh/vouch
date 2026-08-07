@@ -7,6 +7,7 @@ pub mod aws;
 pub(crate) mod cookie;
 pub mod dns;
 pub mod encoding;
+pub mod env;
 pub(crate) mod error;
 pub mod fido2_types;
 pub mod fixtures;
@@ -45,7 +46,9 @@ pub use api::{
 };
 pub use cookie::{SessionCookie, clear_cookie, cookie_path, write_cookie};
 pub use error::ApiError;
-pub use url::{UrlSecurity, check_url_security, is_loopback_host};
+pub use url::{
+    UrlSecurity, check_url_security, is_loopback_host, normalize_git_host, strip_default_https_port,
+};
 
 /// Session cookie name with `__Host-` prefix (RFC 6265bis).
 ///
