@@ -370,17 +370,21 @@ impl ServiceError {
 
     /// Build a `WWW-Authenticate` header value for RFC 9470 step-up challenges.
     fn build_www_authenticate(acr_values: &Option<String>, max_age: &Option<u64>) -> String {
-        let mut parts = vec![
-            "Bearer error=\"insufficient_user_authentication\"".to_string(),
-            "error_description=\"A recent authentication is required\"".to_string(),
+        let mut params = vec![
+            ("error", "insufficient_user_authentication".to_string()),
+            (
+                "error_description",
+                "A recent authentication is required".to_string(),
+            ),
         ];
         if let Some(acr) = acr_values {
-            parts.push(format!("acr_values=\"{acr}\""));
+            params.push(("acr_values", acr.clone()));
         }
         if let Some(age) = max_age {
-            parts.push(format!("max_age=\"{age}\""));
+            params.push(("max_age", age.to_string()));
         }
-        parts.join(", ")
+        let params: Vec<(&str, &str)> = params.iter().map(|(n, v)| (*n, v.as_str())).collect();
+        crate::http::bearer_challenge(&params)
     }
 
     /// Convert to a standard API error response.

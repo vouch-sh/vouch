@@ -22,6 +22,7 @@ pub(crate) mod error;
 pub mod filters;
 pub(crate) mod geo;
 pub(crate) mod handlers;
+pub(crate) mod http;
 pub mod infra;
 pub mod services;
 

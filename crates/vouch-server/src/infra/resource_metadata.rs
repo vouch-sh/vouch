@@ -77,12 +77,13 @@ pub async fn layer(State(state): State<Arc<AppState>>, req: Request, next: Next)
 /// ASCII), but as a defense-in-depth measure we strip `\` and `"`
 /// from the URL before interpolation.
 fn append_resource_metadata(headers: &mut axum::http::HeaderMap, url: &str) {
-    let sanitized_url = sanitize_for_quoted_string(url);
+    let sanitized_url = crate::http::sanitize_challenge_value(url);
     let parameter = format!("{RESOURCE_METADATA_PARAM}=\"{sanitized_url}\"");
 
     match headers.get(WWW_AUTHENTICATE) {
         None => {
-            if let Ok(value) = HeaderValue::from_str(&format!("Bearer {parameter}")) {
+            let challenge = crate::http::bearer_challenge(&[(RESOURCE_METADATA_PARAM, url)]);
+            if let Ok(value) = HeaderValue::from_str(&challenge) {
                 headers.insert(WWW_AUTHENTICATE, value);
             }
         }
@@ -159,20 +160,6 @@ fn has_resource_metadata_parameter(header: &str) -> bool {
         i = i.saturating_add(1);
     }
     false
-}
-
-/// Strip characters that would break an RFC 7235 `quoted-string`.
-///
-/// `quoted-string` forbids unescaped `"` and `\` and bare control
-/// characters. URLs produced by `format!("{base_url}{suffix}")`
-/// never legitimately contain any of these, so removal is a safe
-/// conservative choice that also prevents accidental header
-/// injection if `base_url` is ever misconfigured.
-fn sanitize_for_quoted_string(value: &str) -> String {
-    value
-        .chars()
-        .filter(|c| !c.is_control() && *c != '"' && *c != '\\')
-        .collect()
 }
 
 #[cfg(test)]
@@ -287,7 +274,7 @@ mod tests {
     #[test]
     fn sanitize_strips_quotes_and_backslashes() {
         let raw = "https://bad\"example.com\\/foo";
-        let cleaned = sanitize_for_quoted_string(raw);
+        let cleaned = crate::http::sanitize_challenge_value(raw);
         assert!(!cleaned.contains('"'));
         assert!(!cleaned.contains('\\'));
     }

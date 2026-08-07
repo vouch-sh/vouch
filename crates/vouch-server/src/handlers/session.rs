@@ -359,18 +359,11 @@ fn extract_token_from_request(
 
     // Check Authorization header
     if let Some(auth_value) = headers.get(AUTHORIZATION).and_then(|v| v.to_str().ok()) {
-        // RFC 9110 Section 11.1: the auth-scheme token is case-insensitive,
-        // so `BEARER`, `bearer`, and `BeArEr` must all match like `Bearer`,
-        // and likewise for `DPoP`. Split on the first space and compare the
-        // scheme with `eq_ignore_ascii_case` rather than hard-coding a small
-        // set of casings via `strip_prefix`.
-        if let Some((scheme, token)) = auth_value.split_once(' ') {
-            if scheme.eq_ignore_ascii_case("dpop") {
-                return Ok((token.to_string(), AuthScheme::DPoP));
-            }
-            if scheme.eq_ignore_ascii_case("bearer") {
-                return Ok((token.to_string(), AuthScheme::Bearer));
-            }
+        if let Some(token) = crate::http::strip_auth_scheme(auth_value, "DPoP") {
+            return Ok((token.to_string(), AuthScheme::DPoP));
+        }
+        if let Some(token) = crate::http::strip_auth_scheme(auth_value, "Bearer") {
+            return Ok((token.to_string(), AuthScheme::Bearer));
         }
     }
 

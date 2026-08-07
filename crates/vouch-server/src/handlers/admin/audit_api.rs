@@ -152,13 +152,7 @@ async fn authenticate(
         ));
     };
 
-    // RFC 9110 Section 11.1: the auth-scheme token is case-insensitive, so
-    // `BEARER`, `bearer`, and `BeArEr` must all match like `Bearer`. Split
-    // on the first space and compare the scheme with `eq_ignore_ascii_case`
-    // rather than hard-coding a small set of casings via `strip_prefix`.
-    if let Some((scheme, token)) = auth_header.split_once(' ')
-        && scheme.eq_ignore_ascii_case("bearer")
-    {
+    if let Some(token) = crate::http::strip_auth_scheme(auth_header, "Bearer") {
         let token_hash = hex::encode(digest::digest(&SHA256, token.as_bytes()));
         let token_record = db::get_scim_token_by_hash(&state.store, &token_hash)
             .await
@@ -207,11 +201,8 @@ async fn authenticate(
     // doesn't match a known bearer scheme is a hard 401 here rather than
     // being allowed to fall through to that cookie fallback.
     //
-    // RFC 9110 Section 11.1: scheme matching is case-insensitive, so
-    // `bearer`, `BEARER`, `dpop`, and `DPOP` are all valid here.
-    let scheme_valid = auth_header.split_once(' ').is_some_and(|(scheme, _)| {
-        scheme.eq_ignore_ascii_case("dpop") || scheme.eq_ignore_ascii_case("bearer")
-    });
+    let scheme_valid = crate::http::strip_auth_scheme(auth_header, "DPoP").is_some()
+        || crate::http::strip_auth_scheme(auth_header, "Bearer").is_some();
     if !scheme_valid {
         return Err(ServiceError::api(
             StatusCode::UNAUTHORIZED,

@@ -140,20 +140,12 @@ pub(crate) async fn authenticate_scim(
             )
         })?;
 
-    // RFC 9110 Section 11.1: the auth-scheme token is case-insensitive, so
-    // `BEARER`, `bearer`, and `BeArEr` must all match like `Bearer`. Split
-    // on the first space and compare the scheme with `eq_ignore_ascii_case`
-    // rather than hard-coding a small set of casings via `strip_prefix`.
-    let token = auth_header
-        .split_once(' ')
-        .filter(|(scheme, _)| scheme.eq_ignore_ascii_case("bearer"))
-        .map(|(_, token)| token)
-        .ok_or_else(|| {
-            (
-                StatusCode::UNAUTHORIZED,
-                Json(ScimError::new(401, "Invalid Authorization header format")),
-            )
-        })?;
+    let token = crate::http::strip_auth_scheme(auth_header, "Bearer").ok_or_else(|| {
+        (
+            StatusCode::UNAUTHORIZED,
+            Json(ScimError::new(401, "Invalid Authorization header format")),
+        )
+    })?;
     let token_hash = hex::encode(digest::digest(&SHA256, token.as_bytes()));
 
     // Verify token exists and is valid

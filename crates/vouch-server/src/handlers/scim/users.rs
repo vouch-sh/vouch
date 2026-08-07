@@ -117,6 +117,74 @@ pub(crate) async fn list_users(
     .into_response()
 }
 
+/// Map a [`db::CreateScimUserError`] onto its SCIM wire response.
+///
+/// Split from the create handler so every error arm — including the 503
+/// backpressure mapping — has a test that triggers it directly.
+pub(super) fn create_scim_user_error_response(
+    org_id: &str,
+    email: &str,
+    err: db::CreateScimUserError,
+) -> Response {
+    match err {
+        db::CreateScimUserError::DomainNotOwned => {
+            tracing::warn!(
+                org_id = %org_id,
+                email = %redact_email(email),
+                "rejected SCIM user creation: email domain is not verified for this organization"
+            );
+            (
+                StatusCode::BAD_REQUEST,
+                Json(
+                    ScimError::new(400, "Email domain is not verified for this organization")
+                        .with_type("invalidValue"),
+                ),
+            )
+                .into_response()
+        }
+        db::CreateScimUserError::DuplicateEmail => {
+            tracing::debug!(
+                org_id = %org_id,
+                email = %redact_email(email),
+                "rejected SCIM user creation: user already exists"
+            );
+            (
+                StatusCode::CONFLICT,
+                Json(ScimError::new(409, "User already exists").with_type("uniqueness")),
+            )
+                .into_response()
+        }
+        db::CreateScimUserError::OccConflict => {
+            // The org doc is the OCC serialization point for user creation
+            // (domain validation version-bumps it), so bulk provisioning or
+            // concurrent domain churn can exhaust the retry budget. That is
+            // transient backpressure, not a server fault: return 503 with
+            // Retry-After — IdP provisioners (Okta, Entra) retry on 503.
+            tracing::warn!(
+                org_id = %org_id,
+                "SCIM user creation exhausted OCC retries (concurrent provisioning or domain churn)"
+            );
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                [(axum::http::header::RETRY_AFTER, "1")],
+                Json(ScimError::new(
+                    503,
+                    "Concurrent modification, retry the request",
+                )),
+            )
+                .into_response()
+        }
+        db::CreateScimUserError::Other(e) => {
+            tracing::error!("Failed to create user: {e}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ScimError::new(500, "Failed to create user")),
+            )
+                .into_response()
+        }
+    }
+}
+
 /// POST /scim/v2/Users (RFC 7644 Section 3.3).
 ///
 /// Creates a new User resource. Returns 201 Created on success,
@@ -193,41 +261,7 @@ pub(crate) async fn create_user(
     .await
     {
         Ok(u) => u,
-        Err(db::CreateScimUserError::DomainNotOwned) => {
-            tracing::warn!(
-                org_id = %auth.org_id,
-                email = %redact_email(&email),
-                "rejected SCIM user creation: email domain is not verified for this organization"
-            );
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(
-                    ScimError::new(400, "Email domain is not verified for this organization")
-                        .with_type("invalidValue"),
-                ),
-            )
-                .into_response();
-        }
-        Err(db::CreateScimUserError::DuplicateEmail) => {
-            tracing::debug!(
-                org_id = %auth.org_id,
-                email = %redact_email(&email),
-                "rejected SCIM user creation: user already exists"
-            );
-            return (
-                StatusCode::CONFLICT,
-                Json(ScimError::new(409, "User already exists").with_type("uniqueness")),
-            )
-                .into_response();
-        }
-        Err(e) => {
-            tracing::error!("Failed to create user: {e}");
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ScimError::new(500, "Failed to create user")),
-            )
-                .into_response();
-        }
+        Err(e) => return create_scim_user_error_response(&auth.org_id, &email, e),
     };
 
     // Audit log
