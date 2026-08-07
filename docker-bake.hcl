@@ -10,13 +10,22 @@ variable "GENERATE_SBOM" {
   default = "false"
 }
 
+variable "CACHE_IMAGE" {
+  // Registry ref for the shared dependency layer cache, e.g.
+  // ghcr.io/vouch-sh/vouch/buildcache. Registry storage keeps the multi-GB
+  // Rust layer cache out of the repo's 10 GB GitHub Actions cache budget.
+  // Empty (local builds) disables the remote cache; the local BuildKit
+  // layer cache still applies.
+  default = ""
+}
+
 variable "WRITE_CACHE" {
-  // "true" only on main-branch CI runs. GHA cache entries written from PR,
-  // merge-queue, or tag refs are readable only by that same ref, so writing
-  // from them burns the repo's 10 GB Actions cache budget (evicting the
-  // shared main-scoped entries every ref restores from) without ever
-  // producing a cache hit. Reads (cache-from) stay enabled everywhere:
-  // any ref may restore caches written from the default branch.
+  // "true" only on main-branch CI runs. The deps cache is shared by every
+  // ref, so only post-merge builds may publish it: PR and merge-queue runs
+  // read the cache but never write, keeping unmerged dependency trees out
+  // of the shared cache. For the remaining GHA-backed scopes (cli/server),
+  // ref-scoped writes would also burn the 10 GB Actions cache budget
+  // without ever producing a cache hit.
   default = "false"
 }
 
@@ -30,16 +39,33 @@ target "_common" {
   output     = ["type=local,dest=."]
 }
 
+// Dependency layers only (through `cargo chef cook`). Built alongside `ci`
+// in CI so the reusable layers can be published to the registry cache
+// without also exporting the per-commit source and workspace-compile
+// layers, which change on every push and can never produce a cache hit.
+target "deps" {
+  inherits = ["_common"]
+  target   = "deps"
+  output   = ["type=cacheonly"]
+  args = {
+    TARGET        = TARGET
+    CARGO_PROFILE = "ci"
+  }
+  cache-from = CACHE_IMAGE != "" ? ["type=registry,ref=${CACHE_IMAGE}:deps-ci-${TARGET}"] : []
+  cache-to   = CACHE_IMAGE != "" && WRITE_CACHE == "true" ? ["type=registry,ref=${CACHE_IMAGE}:deps-ci-${TARGET},mode=max,image-manifest=true,oci-mediatypes=true,ignore-error=true"] : []
+}
+
 target "ci" {
   inherits = ["_common"]
   args = {
     TARGET            = TARGET
+    CARGO_PROFILE     = "ci"
     CARGO_PACKAGES    = "-p vouch-cli -p vouch-agent -p vouch-server"
     SOURCE_DATE_EPOCH = "0"
     GENERATE_SBOM     = "false"
   }
-  cache-from = ["type=gha,scope=bake-ci-${TARGET}"]
-  cache-to   = WRITE_CACHE == "true" ? ["type=gha,mode=max,ignore-error=true,scope=bake-ci-${TARGET}"] : []
+  cache-from = CACHE_IMAGE != "" ? ["type=registry,ref=${CACHE_IMAGE}:deps-ci-${TARGET}"] : []
+  cache-to   = []
 }
 
 target "cli" {

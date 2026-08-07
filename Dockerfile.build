@@ -26,22 +26,32 @@ WORKDIR /app
 COPY . .
 RUN cargo chef prepare --recipe-path recipe.json
 
-# --- Builder: cook dependencies, then build workspace crates ---
-FROM base AS builder
+# --- Deps: cook dependencies from the recipe ---
+# Terminal stage for the bake `deps` cache target: everything through the
+# cook layer is reusable across source changes, so only this stage is
+# exported to the layer cache. The later builder layers change on every
+# commit and are never exported.
+FROM base AS deps
 
 ARG TARGET
+ARG CARGO_PROFILE=release
 
 WORKDIR /app
 RUN rustup target add "${TARGET}"
 
 # Cook dependencies from recipe (cached when only source files change)
 COPY --from=planner /app/recipe.json recipe.json
-RUN cargo chef cook --release --locked --target "${TARGET}" --recipe-path recipe.json
+RUN cargo chef cook --profile "${CARGO_PROFILE}" --locked --target "${TARGET}" --recipe-path recipe.json
+
+# --- Builder: build workspace crates on top of cooked deps ---
+FROM deps AS builder
 
 # Copy source and build workspace crates (only these recompile)
 COPY . .
 
 # Declare build-time ARGs after the cook layer so changes don't bust the cache
+ARG TARGET
+ARG CARGO_PROFILE=release
 ARG SOURCE_DATE_EPOCH=0
 ARG GENERATE_SBOM=false
 ARG CARGO_PACKAGES="-p vouch-cli -p vouch-agent -p vouch-server"
@@ -54,7 +64,7 @@ RUN touch -d "@${SOURCE_DATE_EPOCH}" \
       crates/vouch-agent/src/main.rs \
       crates/vouch-server/src/main.rs
 
-RUN cargo build --release --locked --target "${TARGET}" ${CARGO_PACKAGES}
+RUN cargo build --profile "${CARGO_PROFILE}" --locked --target "${TARGET}" ${CARGO_PACKAGES}
 
 # Generate SBOM if requested
 RUN if [ "${GENERATE_SBOM}" = "true" ]; then \
@@ -62,11 +72,12 @@ RUN if [ "${GENERATE_SBOM}" = "true" ]; then \
       && cargo cyclonedx --target "${TARGET}" --format json; \
     fi
 
-# Collect only release binaries and SBOMs
-RUN mkdir -p "/out/target/${TARGET}/release" \
+# Collect only built binaries and SBOMs (cargo's output dir is named after
+# the profile: release/ for the release profile, ci/ for the ci profile)
+RUN mkdir -p "/out/target/${TARGET}/${CARGO_PROFILE}" \
     && for bin in vouch vouch-agent vouch-server; do \
-         if [ -f "target/${TARGET}/release/${bin}" ]; then \
-           cp "target/${TARGET}/release/${bin}" "/out/target/${TARGET}/release/"; \
+         if [ -f "target/${TARGET}/${CARGO_PROFILE}/${bin}" ]; then \
+           cp "target/${TARGET}/${CARGO_PROFILE}/${bin}" "/out/target/${TARGET}/${CARGO_PROFILE}/"; \
          fi; \
        done \
     && find crates/ -name "*cdx.json" 2>/dev/null | while read -r f; do \

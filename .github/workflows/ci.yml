@@ -31,13 +31,6 @@ jobs:
           persist-credentials: false
       - name: Setup Rust toolchain
         run: rustup show
-      - name: Setup Rust cache
-        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
-        with:
-          prefix-key: "v2"
-          shared-key: "fmt"
-          cache-targets: false
-          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo fmt --all --check
 
   clippy:
@@ -122,6 +115,9 @@ jobs:
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
+      # Push the shared dependency layer cache to GHCR from main; PR runs
+      # get a read-only token downgrade automatically.
+      packages: write
     strategy:
       fail-fast: false
       matrix:
@@ -175,17 +171,30 @@ jobs:
       - name: Set up Docker Buildx
         if: runner.os == 'Linux'
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+      - name: Log in to GHCR
+        if: runner.os == 'Linux'
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build (Linux)
         if: runner.os == 'Linux'
         uses: docker/bake-action@d3418bd7d0e9324001bca92fa8ba175ea7e6dc9b # v7.3.0
         with:
-          targets: ci
+          # `deps` builds nothing extra (its layers are a prefix of `ci`);
+          # it exists so only the reusable dependency layers are exported
+          # to the registry cache, never the per-commit compile layers.
+          targets: |
+            ci
+            deps
         env:
           TARGET: ${{ matrix.target }}
-          # Write the bake layer cache only from main: entries written from
-          # PR/merge-queue refs are readable only by that ref and evict the
-          # shared main-scoped cache. All refs still read main's cache.
+          # Dependency layer cache lives on GHCR, outside the 10 GB GitHub
+          # Actions cache budget. Written only from main so unmerged
+          # dependency trees never enter the shared cache; all refs read it.
+          CACHE_IMAGE: ghcr.io/${{ github.repository }}/buildcache
           WRITE_CACHE: ${{ github.ref == 'refs/heads/main' && 'true' || 'false' }}
       - name: Build # zizmor: ignore[template-injection] — static matrix values
         if: runner.os != 'Linux'
