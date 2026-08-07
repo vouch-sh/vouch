@@ -3,10 +3,6 @@
 # Multi-stage Dockerfile for producing static musl binaries.
 # Used by docker-bake.hcl targets (ci, cli, server, reproduce).
 # The existing Dockerfile (server Docker image) is NOT replaced by this file.
-#
-# Uses cargo-chef to cache dependency compilation. Only workspace crates
-# are recompiled when source changes — dependencies are cached as long as
-# Cargo.toml/Cargo.lock stay the same.
 
 FROM rust:1.97.1-alpine AS base
 RUN apk add --no-cache musl-dev pkgconfig cmake make go clang linux-headers \
@@ -17,44 +13,19 @@ ENV OPENSSL_STATIC=1
 ENV OPENSSL_LIB_DIR=/usr/lib
 ENV OPENSSL_INCLUDE_DIR=/usr/include
 
-# Install cargo-chef (cached with base OS layer)
-RUN cargo install cargo-chef --locked
+# --- Builder ---
+FROM base AS builder
 
-# --- Planner: compute dependency recipe ---
-FROM base AS planner
-WORKDIR /app
-COPY . .
-RUN cargo chef prepare --recipe-path recipe.json
-
-# --- Deps: cook dependencies from the recipe ---
-# Terminal stage for the bake `deps` cache target: everything through the
-# cook layer is reusable across source changes, so only this stage is
-# exported to the layer cache. The later builder layers change on every
-# commit and are never exported.
-FROM base AS deps
-
-ARG TARGET
-ARG CARGO_PROFILE=release
-
-WORKDIR /app
-RUN rustup target add "${TARGET}"
-
-# Cook dependencies from recipe (cached when only source files change)
-COPY --from=planner /app/recipe.json recipe.json
-RUN cargo chef cook --profile "${CARGO_PROFILE}" --locked --target "${TARGET}" --recipe-path recipe.json
-
-# --- Builder: build workspace crates on top of cooked deps ---
-FROM deps AS builder
-
-# Copy source and build workspace crates (only these recompile)
-COPY . .
-
-# Declare build-time ARGs after the cook layer so changes don't bust the cache
 ARG TARGET
 ARG CARGO_PROFILE=release
 ARG SOURCE_DATE_EPOCH=0
 ARG GENERATE_SBOM=false
 ARG CARGO_PACKAGES="-p vouch-cli -p vouch-agent -p vouch-server"
+
+WORKDIR /app
+RUN rustup target add "${TARGET}"
+
+COPY . .
 
 # Touch entry-point files for reproducible builds
 RUN touch -d "@${SOURCE_DATE_EPOCH}" \

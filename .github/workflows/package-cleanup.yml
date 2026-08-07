@@ -1,10 +1,10 @@
 name: Package Cleanup
 
-# Both BuildKit registry caches overwrite a tag on every write, orphaning the
+# The Kamal deploy cache overwrites a tag on every write, orphaning the
 # previous cache manifest as an untagged version that cache-from can never
 # pull again. Untagged versions are pure storage cost; delete them weekly.
 #
-# Only the two cache packages are cleaned. The vouch server image and the
+# Only the cache package is cleaned. The vouch server image and the
 # Helm chart are multi-platform indexes whose child manifests appear as
 # untagged versions — deleting those would corrupt the tagged index.
 
@@ -22,17 +22,10 @@ jobs:
     permissions:
       packages: write
     steps:
-      - name: Clean vouch/buildcache (CI deps cache)
-        uses: actions/delete-package-versions@e5bc658cc4c965c472efe991f8beea3981499c55 # v5.0.0
-        with:
-          package-name: vouch/buildcache
-          package-type: container
-          delete-only-untagged-versions: "true"
       # Kamal's deploy cache is not published from this repo's workflows, so
       # GITHUB_TOKEN can only delete from it after the package grants this
       # repo the Admin role: package settings -> Manage Actions access.
       - name: Clean vouch-build-cache (Kamal deploy cache)
-        if: ${{ !cancelled() }}
         uses: actions/delete-package-versions@e5bc658cc4c965c472efe991f8beea3981499c55 # v5.0.0
         with:
           package-name: vouch-build-cache
