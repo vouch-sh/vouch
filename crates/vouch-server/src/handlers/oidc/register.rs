@@ -13,7 +13,6 @@
 //!   with a valid FIDO2 key (hardware-bound) to obtain any token.
 
 use crate::AppState;
-use crate::error::OAuthErrorCode;
 use crate::services::oidc::registration::{
     RegistrationRequest, delete_client_configuration, read_client_configuration, register_client,
     update_client_configuration,
@@ -203,22 +202,17 @@ fn bearer_challenge(error: &str, description: &str) -> String {
 
 /// Build a 401 response for a missing bearer token on an RFC 7592 endpoint.
 ///
-/// Per RFC 7592 Sections 2.1–2.3 (cross-referencing RFC 6750), a missing
-/// access token on a protected registration endpoint MUST be reported with
-/// `error="invalid_token"` and a `WWW-Authenticate` header carrying the
-/// `error` / `error_description` parameters.
+/// Per RFC 6750 Section 3.1: when the request lacks any authentication
+/// information, the `WWW-Authenticate` challenge SHOULD NOT include an
+/// error code or other error information. The `invalid_token` error is
+/// reserved for requests that *do* carry a token that is expired,
+/// revoked, or malformed; that path is handled by
+/// [`into_registration_response`], which still emits
+/// `error="invalid_token"`.
 fn missing_token_response() -> Response {
-    let description = "Bearer token required";
     (
         StatusCode::UNAUTHORIZED,
-        [(
-            axum::http::header::WWW_AUTHENTICATE,
-            bearer_challenge(OAuthErrorCode::InvalidToken.as_str(), description),
-        )],
-        Json(serde_json::json!({
-            "error": OAuthErrorCode::InvalidToken.as_str(),
-            "error_description": description
-        })),
+        [(axum::http::header::WWW_AUTHENTICATE, "Bearer")],
     )
         .into_response()
 }
@@ -261,6 +255,7 @@ fn into_registration_response(err: crate::error::ServiceError) -> Response {
 )]
 mod tests {
     use super::*;
+    use crate::error::OAuthErrorCode;
 
     fn headers_with_auth(value: &str) -> HeaderMap {
         let mut headers = HeaderMap::new();
@@ -296,9 +291,12 @@ mod tests {
         assert_eq!(extract_bearer_token(&HeaderMap::new()), None);
     }
 
-    /// RFC 7592 §2.1–2.3 / RFC 6750 §3.1: a missing bearer token on a
-    /// registration endpoint MUST produce a 401 with `error="invalid_token"`
-    /// and a `WWW-Authenticate` header carrying the same error.
+    /// RFC 6750 §3.1: when the request lacks any authentication
+    /// information, the `WWW-Authenticate` challenge SHOULD NOT include
+    /// an error code or other error information. A missing bearer token
+    /// on a registration endpoint therefore produces a bare `Bearer`
+    /// challenge with no `error` / `error_description` parameters and no
+    /// JSON error body.
     #[tokio::test]
     async fn missing_token_response_is_rfc6750_compliant() {
         use axum::body::to_bytes;
@@ -312,14 +310,20 @@ mod tests {
             .and_then(|v| v.to_str().ok())
             .unwrap_or("");
         assert!(
-            www_auth.contains("error=\"invalid_token\""),
-            "WWW-Authenticate must contain error=\"invalid_token\": {www_auth}"
+            www_auth == "Bearer",
+            "WWW-Authenticate must be a bare 'Bearer' (no error parameters): {www_auth}"
+        );
+        assert!(
+            !www_auth.contains("error="),
+            "Missing-auth challenge must not include an error parameter: {www_auth}"
         );
 
+        // RFC 6750 §3.1: no error information, so no JSON error body.
         let body = to_bytes(response.into_body(), 4096).await.unwrap();
-        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(json["error"], "invalid_token");
-        assert_eq!(json["error_description"], "Bearer token required");
+        assert!(
+            body.is_empty(),
+            "Missing-auth response must not carry a JSON error body: {body:?}"
+        );
     }
 
     /// RFC 6750 §3.1: `into_registration_response` must add a
