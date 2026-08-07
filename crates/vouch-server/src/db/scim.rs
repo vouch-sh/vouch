@@ -413,7 +413,7 @@ impl From<Document<UserDoc>> for ScimUserRecord {
     fn from(doc: Document<UserDoc>) -> Self {
         Self {
             id: doc.id,
-            email: doc.data.email,
+            email: doc.data.email.into_string(),
             name: doc.data.name,
             created_at: doc.created_at,
             updated_at: doc.updated_at,
@@ -502,9 +502,9 @@ async fn try_indexed_user_lookup(
         if let Some(f) = parse_scim_filter(filter, attr)?
             && f.op == ScimFilterOp::Eq
         {
-            let email_lower = f.value.to_ascii_lowercase();
+            let email = crate::email::Email::new(&f.value);
             let docs = store
-                .find_by_indexes::<UserDoc>(&[("email", &email_lower), ("org_id", org_id)])
+                .find_by_indexes::<UserDoc>(&[("email", email.as_str()), ("org_id", org_id)])
                 .await?;
             return Ok(Some(docs.into_iter().map(ScimUserRecord::from).collect()));
         }
@@ -711,21 +711,17 @@ pub async fn create_scim_user(
 ) -> Result<ScimUserRecord, CreateScimUserError> {
     use super::documents::user::deterministic_user_id;
 
-    // Normalize email to ASCII lowercase so the duplicate check and the
-    // stored row match the casing used by `enroll_user_with_org`. Without
-    // this, a SCIM provision of `Alice@example.com` would not collide with
-    // a subsequent OIDC enrollment as `alice@example.com`, producing two
-    // user records for the same person.
-    let email = email.to_ascii_lowercase();
-    let email = email.as_str();
+    // Canonicalize so the duplicate check and the stored row match the
+    // casing used by `enroll_user_with_org`. Without this, a SCIM provision
+    // of `Alice@example.com` would not collide with a subsequent OIDC
+    // enrollment as `alice@example.com`, producing two user records for the
+    // same person.
+    let email = crate::email::Email::new(email);
 
     // Derived once outside the retried block: stable across retries and
-    // identical for concurrent callers passing the same email in any casing.
-    // `deterministic_user_id` lowercases internally as well, so the
-    // primary-key collision holds even if a future caller skips the
-    // normalization above — which is still required here so the stored
-    // `UserDoc.email` and its index row match the lowercase convention.
-    let user_id = deterministic_user_id(email);
+    // identical for concurrent callers passing the same email in any casing
+    // (`Email` is canonical by construction).
+    let user_id = deterministic_user_id(&email);
 
     // Owned `Option<String>` so the retried async block can borrow it
     // without borrowing `org_id` (a `&str` from the caller's stack frame).
@@ -745,12 +741,12 @@ pub async fn create_scim_user(
                     .get::<OrganizationDoc>(oid)
                     .await?
                     .ok_or(CreateScimUserError::DomainNotOwned)?;
-                // Extract the domain from the already-lowercased email so the
-                // comparison matches the lowercase convention used by
-                // `OrganizationDoc::verified_domains` (additional domains are
-                // stored verbatim from `normalize_domain`, which lowercases;
-                // the primary domain is lowercased by `get_or_create_org`).
-                let (_, candidate_domain) = email.rsplit_once('@').ok_or_else(|| {
+                // `Email::domain` is already canonical (lowercase), matching
+                // the convention used by `OrganizationDoc::verified_domains`
+                // (additional domains are stored verbatim from
+                // `normalize_domain`, which lowercases; the primary domain is
+                // lowercased by `get_or_create_org`).
+                let candidate_domain = email.domain().ok_or_else(|| {
                     CreateScimUserError::Other(anyhow::anyhow!(
                         "invalid email format: no '@' separator"
                     ))
@@ -774,12 +770,16 @@ pub async fn create_scim_user(
         // *different* code path (e.g. `enroll_user_with_org`) that did not use
         // the deterministic ID, so their row has a random UUID v7 ID and would
         // not collide with `user_id`.
-        if tx.find_one::<UserDoc>("email", email).await?.is_some() {
+        if tx
+            .find_one::<UserDoc>("email", email.as_str())
+            .await?
+            .is_some()
+        {
             return Err(CreateScimUserError::DuplicateEmail);
         }
 
         let doc = UserDoc {
-            email: email.to_string(),
+            email: email.clone(),
             name: name.map(String::from),
             org_id: org_id_owned.clone(),
             is_org_admin: false,

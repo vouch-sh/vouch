@@ -17,6 +17,7 @@ pub(crate) mod attestation;
 pub mod config;
 pub mod crypto;
 pub mod db;
+pub(crate) mod email;
 pub(crate) mod error;
 pub mod filters;
 pub(crate) mod geo;
@@ -49,7 +50,10 @@ use std::sync::Arc;
 /// - `"not-an-email"` → `"n***"`
 #[must_use]
 pub(crate) fn redact_email(email: &str) -> String {
-    match email.split_once('@') {
+    // Last `@` (matching `Email::domain`): a quoted local part may contain
+    // `@`, and splitting on the first would print part of the local in the
+    // unredacted "domain" segment.
+    match email.rsplit_once('@') {
         Some((local, domain)) => {
             let first_char = local.chars().next().unwrap_or('*');
             format!("{first_char}***@{domain}")

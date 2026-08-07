@@ -147,7 +147,7 @@ async fn get_or_create_org(store: &DocumentStore, domain: &str) -> Result<String
 /// [`enroll_user_with_org`] for the full contract.
 async fn resolve_user(
     tx: &mut super::store::StoreTransaction<'_>,
-    email: &str,
+    email: &crate::email::Email,
     name: Option<&str>,
     org_id: Option<&str>,
     is_org_admin: bool,
@@ -173,14 +173,14 @@ async fn resolve_user(
     let existing_user = match bound_user {
         Some(doc) => Some(doc),
         None => tx
-            .find_one::<UserDoc>("email", email)
+            .find_one::<UserDoc>("email", email.as_str())
             .await
             .map_err(|e| ServiceError::from_db_contention(e, "Failed to look up user by email"))?,
     };
 
     let Some(doc) = existing_user else {
         let new_doc = UserDoc {
-            email: email.to_string(),
+            email: email.clone(),
             name: name.map(String::from),
             org_id: org_id.map(String::from),
             is_org_admin,
@@ -197,7 +197,7 @@ async fn resolve_user(
             .map_err(|e| ServiceError::from_db_contention(e, "Failed to insert user"))?;
         return Ok(EnrolledUser {
             id: result.id,
-            email: result.data.email,
+            email: result.data.email.into_string(),
             name: result.data.name,
             org_id: result.data.org_id,
             is_org_admin: result.data.is_org_admin,
@@ -212,7 +212,7 @@ async fn resolve_user(
     if !doc.data.active {
         return Err(EnrollUserError::Deactivated {
             user_id: doc.id,
-            email: doc.data.email,
+            email: doc.data.email.into_string(),
         });
     }
 
@@ -272,7 +272,7 @@ async fn resolve_user(
     }
     Ok(EnrolledUser {
         id: doc.id,
-        email: doc.data.email,
+        email: doc.data.email.into_string(),
         name: doc.data.name,
         org_id: doc.data.org_id,
         is_org_admin: doc.data.is_org_admin,
@@ -353,13 +353,10 @@ pub async fn enroll_user_with_org(
     domain: Option<&str>,
     upstream: Option<&UpstreamLogin>,
 ) -> Result<EnrolledUser, EnrollUserError> {
-    // Normalize email to ASCII lowercase so the lookup matches a
-    // pre-provisioned user regardless of the casing the IdP returned.
-    // `to_ascii_lowercase` only folds A-Z, preserving the byte length and
-    // validity of any internationalized local-part — the same normalization
-    // `extract_domain` already applies to the domain component.
-    let email = email.to_ascii_lowercase();
-    let email = email.as_str();
+    // Canonicalize so the lookup matches a pre-provisioned user regardless
+    // of the casing the IdP returned; see `crate::email::Email` for the
+    // folding policy.
+    let email = crate::email::Email::new(email);
 
     let org_id = match domain {
         Some(domain) => Some(get_or_create_org(store, domain).await?),
@@ -400,7 +397,7 @@ pub async fn enroll_user_with_org(
 
         let user = resolve_user(
             &mut tx,
-            email,
+            &email,
             name,
             org_id.as_deref(),
             is_org_admin,

@@ -2721,7 +2721,7 @@ async fn test_create_scim_user_duplicate_email_rejected() {
         .await
         .expect("query by id")
         .expect("user must be findable by its deterministic ID");
-    assert_eq!(by_id.data.email, "dup@example.com");
+    assert_eq!(by_id.data.email.as_str(), "dup@example.com");
     assert!(
         uuid::Uuid::try_parse(&user.id).is_ok(),
         "deterministic user ID must parse as a UUID; got {}",
@@ -3202,7 +3202,7 @@ async fn test_create_scim_user_concurrent_same_email_produces_one_user() {
         .expect("query by id")
         .expect("user must be findable by its deterministic ID");
     assert_eq!(by_id.id, by_email.id);
-    assert_eq!(by_id.data.email, email);
+    assert_eq!(by_id.data.email.as_str(), email);
     // And the ID must be a valid UUID (SCIM resource ID contract).
     assert!(
         uuid::Uuid::try_parse(&by_email.id).is_ok(),
@@ -3279,7 +3279,9 @@ async fn test_create_scim_user_concurrent_mixed_case_same_email_produces_one_use
         "exactly one user row must exist across all casings; got {}",
         all_for_email.len()
     );
-    let expected_id = crate::db::documents::user::deterministic_user_id("case.race@example.com");
+    let expected_id = crate::db::documents::user::deterministic_user_id(&crate::email::Email::new(
+        "case.race@example.com",
+    ));
     let winner = all_for_email.first().expect("one row exists");
     assert_eq!(
         winner.id, expected_id,
@@ -3340,7 +3342,7 @@ async fn test_create_scim_user_blocked_by_preexisting_random_id_user() {
 
     // Seed a user with a random UUID v7 ID, as `enroll_user_with_org` does.
     let seeded = UserDoc {
-        email: email.to_string(),
+        email: crate::email::Email::new(email),
         name: Some("Seeded".to_string()),
         org_id: Some(TEST_ORG_ID.to_string()),
         is_org_admin: false,

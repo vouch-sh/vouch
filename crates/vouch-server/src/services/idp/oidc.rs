@@ -483,11 +483,14 @@ pub(crate) async fn verify_id_token(
     //
     // Normalize to ASCII lowercase so that org lookups match regardless of
     // the case the IdP returned. Org domains are stored lowercase.
+    // `Email::domain_of` splits on the last `@` — the same semantics the
+    // audit and org-domain layers use — where `split('@').nth(1)` picked
+    // the wrong "domain" for a quoted local part containing `@`.
     let is_google = is_google_host(&provider.issuer);
     let domain = if is_google {
         claims.hd.as_deref().map(str::to_ascii_lowercase)
     } else {
-        claims.email.split('@').nth(1).map(str::to_ascii_lowercase)
+        crate::email::Email::domain_of(&claims.email)
     };
 
     // Bind to `claims.iss` (the validated token issuer), not

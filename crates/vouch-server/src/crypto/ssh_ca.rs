@@ -325,6 +325,12 @@ impl SshCa {
     /// Returns two principals:
     /// 1. The full email address (user@domain.com)
     /// 2. The username part (user)
+    ///
+    /// Folding stays local rather than using `crate::email::Email` — the
+    /// crypto layer imports no other layer — and stays full-Unicode
+    /// `to_lowercase`: SSH principals are matched by sshd against
+    /// `AuthorizedPrincipals` entries, not against Vouch's ASCII-folded
+    /// email index, so changing the fold would break issued certificates.
     fn extract_principals(email: &str) -> Result<Vec<String>> {
         let email = email.trim().to_lowercase();
 

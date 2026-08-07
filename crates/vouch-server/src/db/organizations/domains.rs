@@ -491,8 +491,8 @@ async fn revoke_sessions_for_domain_users(
         let matches = user
             .data
             .email
-            .rsplit_once('@')
-            .is_some_and(|(_, d)| d.eq_ignore_ascii_case(domain));
+            .domain()
+            .is_some_and(|d| d.eq_ignore_ascii_case(domain));
         if !matches {
             continue;
         }
@@ -1733,7 +1733,7 @@ mod tests {
             .unwrap();
 
         let mk_user = |email: &str| UserDoc {
-            email: email.to_string(),
+            email: crate::email::Email::new(email),
             name: None,
             org_id: Some(org.id.clone()),
             is_org_admin: false,
