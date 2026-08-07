@@ -67,6 +67,14 @@ async fn extract_auth_from_cookie(state: &AppState, jar: &CookieJar) -> Option<A
         .await
         .ok()??;
 
+    // Deactivated users may still hold a live cookie in the window between
+    // `update_user_active_status` and `delete_sessions_for_user` (separate
+    // transactions); treat them as unauthenticated, matching
+    // `get_resource_auth_context`.
+    if !user.active {
+        return None;
+    }
+
     Some(AuthContext {
         authenticated: true,
         user_id: Some(session.sub),
@@ -162,5 +170,44 @@ fn validate_redirect_uris(uris: &[String]) -> Result<(), Vec<String>> {
         Ok(())
     } else {
         Err(invalid)
+    }
+}
+
+#[cfg(test)]
+#[expect(
+    clippy::expect_used,
+    reason = "test code: panic on assertion failure is acceptable"
+)]
+mod tests {
+    use axum_extra::extract::cookie::{Cookie, CookieJar};
+
+    use crate::test_utils::*;
+
+    /// A deactivated user whose session has not yet been swept must be treated
+    /// as unauthenticated by the web UI, matching `get_resource_auth_context`
+    /// on the API path.
+    #[tokio::test]
+    async fn deactivated_user_cookie_is_unauthenticated() {
+        let state = test_app_state().await;
+        let user = create_test_user(&state.store, "deactivated-web@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let jar = CookieJar::new().add(Cookie::new(vouch_common::SESSION_COOKIE_NAME, token));
+
+        let auth = super::extract_auth_from_cookie(&state, &jar).await;
+        assert!(
+            auth.is_some(),
+            "active user with a valid cookie must authenticate"
+        );
+
+        crate::db::update_user_active_status(&state.store, &user.id, false)
+            .await
+            .expect("deactivate user");
+
+        let auth = super::extract_auth_from_cookie(&state, &jar).await;
+        assert!(
+            auth.is_none(),
+            "deactivated user must be unauthenticated even while the session still exists"
+        );
     }
 }

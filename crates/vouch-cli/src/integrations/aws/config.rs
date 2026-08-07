@@ -82,7 +82,11 @@ impl AwsConfig {
         Some(AwsProfile {
             name: name.to_string(),
             credential_process: section.get("credential_process").map(|s| s.to_string()),
-            region: section.get("region").map(|s| s.to_string()),
+            // A bare `region =` line means unset, matching the env-var handling
+            // in `env_region` — an empty region would otherwise short-circuit
+            // the fallback chain and build endpoints like
+            // `https://sts..amazonaws.com`.
+            region: vouch_common::env::non_empty(section.get("region").map(|s| s.to_string())),
             output: section.get("output").map(|s| s.to_string()),
         })
     }
@@ -139,7 +143,8 @@ impl AwsConfig {
         AwsProfile {
             name,
             credential_process: props.get("credential_process").map(|s| s.to_string()),
-            region: props.get("region").map(|s| s.to_string()),
+            // Bare `region =` means unset — see `get_profile`.
+            region: vouch_common::env::non_empty(props.get("region").map(|s| s.to_string())),
             output: props.get("output").map(|s| s.to_string()),
         }
     }
@@ -384,6 +389,26 @@ credential_process = vouch credential aws --role arn:aws:iam::123456789012:role/
                     .to_string()
             )
         );
+        assert_eq!(profile.region, None);
+    }
+
+    #[test]
+    fn test_get_profile_empty_region_is_unset() {
+        let content = r#"
+[profile vouch]
+credential_process = vouch credential aws --role arn:aws:iam::123456789012:role/MyRole
+region =
+"#;
+        let file = create_temp_config(content);
+        let config = AwsConfig::load_from(file.path().to_path_buf()).unwrap();
+
+        let profile = config.get_profile("vouch").expect("profile should exist");
+        assert_eq!(profile.region, None);
+
+        let vouch_profiles = config.find_all_vouch_profiles();
+        let profile = vouch_profiles
+            .first()
+            .expect("vouch profile should be found");
         assert_eq!(profile.region, None);
     }
 

@@ -56,17 +56,15 @@ async fn get_credential(profile: Option<&str>) -> Result<()> {
         return Ok(());
     }
 
-    // Git's credential protocol includes the port in the `host` field when the
-    // URL explicitly specifies one (e.g., `git-codecommit.us-east-1.amazonaws.com:443`).
-    // `is_codecommit_host` already accepts that form, but libcurl strips the
-    // default `:443` from the HTTP `Host` header it sends to CodeCommit. SigV4
-    // signs the host header value, so signing with the port-annotated hostname
-    // would produce a signature mismatch and a 403 from AWS. Strip the
-    // standard HTTPS port for signing only — the original `host` must be
-    // echoed back to git verbatim so its credential cache can match on
-    // subsequent requests (git uses exact string comparison on `host`, with no
-    // normalization, when looking up cached credentials).
-    let signing_host = strip_default_port(original_host);
+    // SigV4 signs the `Host` header value libcurl actually sends, which is the
+    // canonical form: lowercase hostname with the default `:443` omitted.
+    // Signing the raw `host` git supplied (port-annotated or uppercased) would
+    // produce a signature mismatch and a 403 from AWS. Normalize for signing
+    // only — the original `host` must be echoed back to git verbatim so its
+    // credential cache can match on subsequent requests (git uses exact string
+    // comparison on `host`, with no normalization, when looking up cached
+    // credentials).
+    let signing_host = vouch_common::normalize_git_host(original_host);
 
     // Path is required for signing (useHttpPath must be true in git config)
     let path = input.path.as_deref().ok_or_else(|| {
@@ -77,7 +75,7 @@ async fn get_credential(profile: Option<&str>) -> Result<()> {
         )
     })?;
 
-    let region = extract_region_from_hostname(signing_host)
+    let region = extract_region_from_hostname(&signing_host)
         .context(tr!("err-could-not-extract-region-from-codecommit-hostname"))?;
 
     // Path from git doesn't have leading slash; SigV4 canonical URI requires it
@@ -102,7 +100,7 @@ async fn get_credential(profile: Option<&str>) -> Result<()> {
         return Ok(());
     }
     let creds = get_sts_credentials(&vouch_profile.role_arn).await?;
-    let signed = sign_request(&creds, signing_host, &canonical_path, region);
+    let signed = sign_request(&creds, &signing_host, &canonical_path, region);
 
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
@@ -116,22 +114,6 @@ async fn get_credential(profile: Option<&str>) -> Result<()> {
     )?;
 
     Ok(())
-}
-
-/// Strip the standard HTTPS port (`:443`) from a git credential `host` value.
-///
-/// Git includes the port in `host` whenever the remote URL specifies one
-/// explicitly. The default HTTPS port is removed for SigV4 signing (libcurl
-/// omits `:443` from the `Host` header it sends, so the signed hostname must
-/// match), but the original `host` is still what git caches and looks up.
-/// Non-standard ports are left untouched — they would already have failed
-/// `is_codecommit_host`, so reaching here with one is unexpected.
-///
-/// Split out from [`get_credential`] so the port-stripping decision is
-/// unit-testable without a live Vouch session or network. This mirrors the
-/// `select_region` / `resolve_region` split already used in this file.
-fn strip_default_port(host: &str) -> &str {
-    host.strip_suffix(":443").unwrap_or(host)
 }
 
 /// Run the git remote helper for `codecommit://` URLs.
@@ -239,6 +221,8 @@ async fn get_sts_credentials(role_arn: &str) -> Result<StsCredentials> {
 /// 4. `AWS_DEFAULT_REGION` env var
 /// 5. `AWS_REGION` env var
 /// 6. Default: `us-east-1`
+///
+/// Empty environment values are treated as unset.
 fn resolve_region(url_region: Option<&str>, profile: Option<&str>) -> Result<String> {
     if let Some(region) = url_region {
         return Ok(region.to_string());
@@ -251,11 +235,7 @@ fn resolve_region(url_region: Option<&str>, profile: Option<&str>) -> Result<Str
         }
     }
 
-    // Check environment variables
-    if let Ok(r) = std::env::var("AWS_DEFAULT_REGION") {
-        return Ok(r);
-    }
-    if let Ok(r) = std::env::var("AWS_REGION") {
+    if let Some(r) = crate::integrations::aws::env_region() {
         return Ok(r);
     }
 
@@ -497,18 +477,19 @@ region = ap-southeast-2
         assert_eq!(percent_encode("50%done"), "50%25done");
     }
 
-    // -- strip_default_port: SigV4 signing host vs. git cache key --
+    // -- normalize_git_host: SigV4 signing host vs. git cache key --
 
-    /// The standard HTTPS port is stripped for SigV4 signing so the signed
-    /// hostname matches the `Host` header libcurl sends (which omits `:443`).
+    /// The signing host is the canonical form of whatever git supplied: the
+    /// default HTTPS port stripped and the hostname lowercased, matching the
+    /// `Host` header libcurl sends.
     #[test]
-    fn test_strip_default_port_removes_443() {
+    fn test_signing_host_is_canonical() {
         assert_eq!(
-            strip_default_port("git-codecommit.us-east-1.amazonaws.com:443"),
+            vouch_common::normalize_git_host("git-codecommit.us-east-1.amazonaws.com:443"),
             "git-codecommit.us-east-1.amazonaws.com"
         );
         assert_eq!(
-            strip_default_port("git-codecommit.cn-north-1.amazonaws.com.cn:443"),
+            vouch_common::normalize_git_host("GIT-CODECOMMIT.CN-NORTH-1.AMAZONAWS.COM.CN:443"),
             "git-codecommit.cn-north-1.amazonaws.com.cn"
         );
     }
@@ -520,11 +501,11 @@ region = ap-southeast-2
     #[test]
     fn test_strip_default_port_keeps_non_standard_port() {
         assert_eq!(
-            strip_default_port("git-codecommit.us-east-1.amazonaws.com:8443"),
+            vouch_common::normalize_git_host("git-codecommit.us-east-1.amazonaws.com:8443"),
             "git-codecommit.us-east-1.amazonaws.com:8443"
         );
         assert_eq!(
-            strip_default_port("git-codecommit.us-east-1.amazonaws.com:80"),
+            vouch_common::normalize_git_host("git-codecommit.us-east-1.amazonaws.com:80"),
             "git-codecommit.us-east-1.amazonaws.com:80"
         );
     }
@@ -543,7 +524,7 @@ region = ap-southeast-2
     #[test]
     fn get_credential_returns_original_host_to_git_but_signs_with_stripped() {
         let original_host = "git-codecommit.us-east-1.amazonaws.com:443";
-        let signing_host = strip_default_port(original_host);
+        let signing_host = vouch_common::normalize_git_host(original_host);
 
         // The signing host fed to `sign_request` / `extract_region_from_hostname`
         // drops the default port so the SigV4 signature matches libcurl's Host

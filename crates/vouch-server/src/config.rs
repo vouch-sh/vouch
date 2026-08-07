@@ -851,27 +851,14 @@ impl ServerConfig {
         // a blank `Region::new("")` — see `aws_config_loader`. The same
         // empty-means-unset pattern is already used by `ssh_ca_key_path` and
         // `allowed_domains` below.
-        let aws_region = args
-            .aws_region
-            .filter(|s| !s.is_empty())
-            .or_else(|| {
-                std::env::var("AWS_DEFAULT_REGION")
-                    .ok()
-                    .filter(|s| !s.is_empty())
-            })
+        let aws_region = vouch_common::env::non_empty(args.aws_region)
+            .or_else(|| vouch_common::env::non_empty_env("AWS_DEFAULT_REGION"))
             .or_else(|| instance.map(|b| b.region.clone()));
-        let aws_az = args
-            .aws_az
-            .filter(|s| !s.is_empty())
+        let aws_az = vouch_common::env::non_empty(args.aws_az)
             .or_else(|| instance.map(|b| b.availability_zone.clone()));
-        let aws_partition = args
-            .aws_partition
-            .filter(|s| !s.is_empty())
+        let aws_partition = vouch_common::env::non_empty(args.aws_partition)
             .or_else(|| instance.and_then(|b| b.partition.clone()));
-        let aws_use_fips_endpoint = args
-            .aws_use_fips_endpoint
-            .as_deref()
-            .filter(|s| !s.is_empty())
+        let aws_use_fips_endpoint = vouch_common::env::non_empty(args.aws_use_fips_endpoint)
             .map(|v| v.eq_ignore_ascii_case("true"));
 
         let base_url = derive_base_url(args.base_url, &args.rp_id, &args.listen_addr);
@@ -958,7 +945,7 @@ impl ServerConfig {
             tls_key: args.tls_key.map(SecretString::from),
             s3_config_bucket: args.s3_config_bucket,
             s3_config_key: args.s3_config_key,
-            s3_config_region: args.s3_config_region.filter(|s| !s.is_empty()),
+            s3_config_region: vouch_common::env::non_empty(args.s3_config_region),
             s3_config_poll_interval: args.s3_config_poll_interval,
             aws_region,
             aws_az,

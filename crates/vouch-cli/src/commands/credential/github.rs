@@ -20,15 +20,12 @@ use crate::session::resolve_session;
 
 /// Check if the host is a GitHub host.
 ///
-/// Git's credential protocol includes the port in the `host` field when the
-/// URL explicitly specifies one (e.g., `github.com:443`). The standard HTTPS
-/// port is stripped before matching so that explicit `:443` doesn't cause the
-/// host check — and thus the entire credential helper — to fail silently.
-/// Non-standard ports are intentionally not stripped: the helper should
-/// decline to provide GitHub credentials for them.
+/// The host is normalized via [`vouch_common::normalize_git_host`] (explicit
+/// `:443` stripped, hostname lowercased) before matching; non-standard ports
+/// are intentionally rejected — the helper should decline to provide GitHub
+/// credentials for them.
 fn is_github_host(host: &str) -> bool {
-    let host = host.strip_suffix(":443").unwrap_or(host);
-    let host = host.to_lowercase();
+    let host = vouch_common::normalize_git_host(host);
     host == "github.com"
         || host.ends_with(".github.com")
         || host.ends_with(".ghe.com")

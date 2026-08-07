@@ -175,15 +175,17 @@ fn find_region(region: Option<&str>, profile_name: Option<&str>) -> anyhow::Resu
         }
     }
 
-    // Check environment variables
-    if let Ok(r) = std::env::var("AWS_DEFAULT_REGION") {
-        return Ok(Some(r));
-    }
-    if let Ok(r) = std::env::var("AWS_REGION") {
-        return Ok(Some(r));
-    }
+    Ok(env_region())
+}
 
-    Ok(None)
+/// Region from the process environment, treating empty values as unset.
+///
+/// An empty `AWS_REGION=""` must fall through to the next source instead of
+/// producing endpoints like `https://sts..amazonaws.com`. `AWS_DEFAULT_REGION`
+/// keeps its historical precedence over `AWS_REGION` here.
+pub(crate) fn env_region() -> Option<String> {
+    vouch_common::env::non_empty_env("AWS_DEFAULT_REGION")
+        .or_else(|| vouch_common::env::non_empty_env("AWS_REGION"))
 }
 
 /// The error returned when no region could be determined from any source.

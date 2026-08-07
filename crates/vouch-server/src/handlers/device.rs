@@ -161,6 +161,40 @@ pub(crate) async fn device_code(
     }))
 }
 
+/// Revoke all OAuth sessions for the user that authorized a replayed device
+/// code, and drop them from the session cache.
+///
+/// The caller is already returning `invalid_grant` for the replay; a failed
+/// revocation must not mask that response, but it is a security event that
+/// must stay visible, so it is logged at error level rather than propagated.
+async fn revoke_sessions_for_device_replay(state: &AppState, user_id: &str) {
+    tracing::warn!(
+        target: "security",
+        "Device code replay detected — revoking tokens for user"
+    );
+    match db::delete_oauth_sessions_for_user(&state.store, user_id).await {
+        Ok(count) => {
+            if count > 0 {
+                state.session_cache.invalidate_for_user(user_id);
+                tracing::warn!(
+                    target: "security",
+                    user_id = %user_id,
+                    revoked_count = count,
+                    "Revoked tokens due to device code replay"
+                );
+            }
+        }
+        Err(e) => {
+            tracing::error!(
+                target: "security",
+                user_id = %user_id,
+                error = %e,
+                "Failed to revoke tokens after device code replay"
+            );
+        }
+    }
+}
+
 /// Poll for device token (RFC 8628 Section 3.4).
 /// POST /oauth/token
 ///
@@ -253,22 +287,7 @@ pub(crate) async fn device_token(
             // RFC 8628 Section 3.5: Device code already used.
             // Replay detected — revoke all tokens for the affected user.
             if let Some(ref user_id) = request.user_id {
-                tracing::warn!(
-                    target: "security",
-                    "Device code replay detected \
-                     — revoking tokens for user"
-                );
-                if let Ok(count) = db::delete_oauth_sessions_for_user(&state.store, user_id).await
-                    && count > 0
-                {
-                    state.session_cache.invalidate_for_user(user_id);
-                    tracing::warn!(
-                        target: "security",
-                        user_id = %user_id,
-                        revoked_count = count,
-                        "Revoked tokens due to device code replay"
-                    );
-                }
+                revoke_sessions_for_device_replay(&state, user_id).await;
             }
             Err(oauth_error(
                 StatusCode::BAD_REQUEST,
@@ -295,23 +314,7 @@ pub(crate) async fn device_token(
                     Ok(claim) => claim,
                     Err(db::claim::ClaimError::AlreadyConsumed) => {
                         if let Some(ref user_id) = request.user_id {
-                            tracing::warn!(
-                                target: "security",
-                                "Device code replay detected \
-                                 — revoking tokens for user"
-                            );
-                            if let Ok(count) =
-                                db::delete_oauth_sessions_for_user(&state.store, user_id).await
-                                && count > 0
-                            {
-                                state.session_cache.invalidate_for_user(user_id);
-                                tracing::warn!(
-                                    target: "security",
-                                    user_id = %user_id,
-                                    revoked_count = count,
-                                    "Revoked tokens due to device code replay"
-                                );
-                            }
+                            revoke_sessions_for_device_replay(&state, user_id).await;
                         }
                         return Err(oauth_error(
                             StatusCode::BAD_REQUEST,
