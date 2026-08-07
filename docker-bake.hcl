@@ -57,12 +57,15 @@ target "deps" {
 
 target "ci" {
   inherits = ["_common"]
+  // No SOURCE_DATE_EPOCH here: it is a predefined BuildKit arg that stamps
+  // the epoch into WORKDIR/COPY op digests, forking this target's cache
+  // chain away from `deps` — the only chain published to CACHE_IMAGE. The
+  // Dockerfile's ARG default (0) still governs the builder-stage touch.
   args = {
-    TARGET            = TARGET
-    CARGO_PROFILE     = "ci"
-    CARGO_PACKAGES    = "-p vouch-cli -p vouch-agent -p vouch-server"
-    SOURCE_DATE_EPOCH = "0"
-    GENERATE_SBOM     = "false"
+    TARGET         = TARGET
+    CARGO_PROFILE  = "ci"
+    CARGO_PACKAGES = "-p vouch-cli -p vouch-agent -p vouch-server"
+    GENERATE_SBOM  = "false"
   }
   cache-from = CACHE_IMAGE != "" ? ["type=registry,ref=${CACHE_IMAGE}:deps-ci-${TARGET}"] : []
   cache-to   = []
