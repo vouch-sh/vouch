@@ -52,7 +52,12 @@ target "deps" {
     CARGO_PROFILE = "ci"
   }
   cache-from = CACHE_IMAGE != "" ? ["type=registry,ref=${CACHE_IMAGE}:deps-ci-${TARGET}"] : []
-  cache-to   = CACHE_IMAGE != "" && WRITE_CACHE == "true" ? ["type=registry,ref=${CACHE_IMAGE}:deps-ci-${TARGET},mode=max,image-manifest=true,oci-mediatypes=true,ignore-error=true"] : []
+  // zstd shrinks the multi-hundred-MB cook layers and decompresses faster
+  // than gzip on import; force-compression re-encodes blobs that already
+  // exist as gzip, so the published cache converges to zstd instead of
+  // reusing the old blobs forever. Smaller pulls also reduce exposure to
+  // GHCR secondary rate limits, which have failed PR builds mid-pull.
+  cache-to   = CACHE_IMAGE != "" && WRITE_CACHE == "true" ? ["type=registry,ref=${CACHE_IMAGE}:deps-ci-${TARGET},mode=max,image-manifest=true,oci-mediatypes=true,compression=zstd,force-compression=true,ignore-error=true"] : []
 }
 
 target "ci" {
