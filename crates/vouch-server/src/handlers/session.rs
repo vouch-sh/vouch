@@ -390,20 +390,20 @@ fn extract_token_from_request(
 // Shared Auth Extraction Helpers
 // ============================================================================
 
-/// Extract authenticated user and their org_id.
+/// Load the user for a validated token subject, rejecting missing or
+/// deactivated accounts.
 ///
-/// Returns `(user, org_id)` or an error if not authenticated or no org.
-pub(crate) async fn extract_user_with_org(
+/// This is the single enforcement point for the account-active invariant on
+/// the session path: every extractor that turns a validated token or cookie
+/// into a user must obtain that user through here, so a deactivated account
+/// cannot authenticate anywhere — including during the window between
+/// `update_user_active_status` and `delete_sessions_for_user`, which commit
+/// in separate transactions.
+pub(crate) async fn load_active_user(
     state: &AppState,
-    headers: &axum::http::HeaderMap,
-    jar: &CookieJar,
-    method: &str,
-    uri: &str,
-    client_cert: Option<&crate::services::oidc::mtls::ClientCertificate>,
-) -> Result<(db::User, String), ServiceError> {
-    let token = extract_resource_token(state, headers, jar, method, uri, client_cert).await?;
-
-    let user = db::get_user_by_id(&state.store, &token.sub)
+    user_id: &str,
+) -> Result<db::User, ServiceError> {
+    let user = db::get_user_by_id(&state.store, user_id)
         .await?
         .ok_or_else(|| {
             ServiceError::api(StatusCode::UNAUTHORIZED, "unauthorized", "User not found")
@@ -416,6 +416,23 @@ pub(crate) async fn extract_user_with_org(
             "User account is deactivated",
         ));
     }
+
+    Ok(user)
+}
+
+/// Extract authenticated user and their org_id.
+///
+/// Returns `(user, org_id)` or an error if not authenticated or no org.
+pub(crate) async fn extract_user_with_org(
+    state: &AppState,
+    headers: &axum::http::HeaderMap,
+    jar: &CookieJar,
+    method: &str,
+    uri: &str,
+    client_cert: Option<&crate::services::oidc::mtls::ClientCertificate>,
+) -> Result<(db::User, String), ServiceError> {
+    let token = extract_resource_token(state, headers, jar, method, uri, client_cert).await?;
+    let user = load_active_user(state, &token.sub).await?;
 
     let org_id = user.org_id.clone().ok_or_else(|| {
         ServiceError::api(
@@ -431,8 +448,8 @@ pub(crate) async fn extract_user_with_org(
 /// Extract and validate an org admin from the access token.
 ///
 /// Returns the user and their org_id if they are an org admin.
-/// Reuses `extract_user_with_org` for token validation and user lookup,
-/// then adds active-status and admin-role checks.
+/// Reuses `extract_user_with_org` for token validation and the
+/// active-user lookup, then adds the admin-role check.
 pub(crate) async fn extract_org_admin(
     state: &AppState,
     headers: &axum::http::HeaderMap,
@@ -443,14 +460,6 @@ pub(crate) async fn extract_org_admin(
 ) -> Result<(db::User, String), ServiceError> {
     let (user, org_id) =
         extract_user_with_org(state, headers, jar, method, uri, client_cert).await?;
-
-    if !user.active {
-        return Err(ServiceError::api(
-            StatusCode::UNAUTHORIZED,
-            "unauthorized",
-            "User account is deactivated",
-        ));
-    }
 
     if !user.is_org_admin {
         return Err(ServiceError::api(
@@ -529,10 +538,10 @@ pub(crate) async fn get_resource_auth_context(state: &AppState, jar: &CookieJar)
     let user_email = decoded.email().map(String::from);
 
     // Look up user to check active status, org membership, and admin status
-    let (has_org, is_org_admin) = match db::get_user_by_id(&state.store, &user_id).await {
-        Ok(Some(user)) if user.active => (user.org_id.is_some(), user.is_org_admin),
-        _ => return AuthContext::unauthenticated(),
+    let Ok(user) = load_active_user(state, &user_id).await else {
+        return AuthContext::unauthenticated();
     };
+    let (has_org, is_org_admin) = (user.org_id.is_some(), user.is_org_admin);
 
     AuthContext {
         authenticated: true,
