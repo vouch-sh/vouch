@@ -126,14 +126,14 @@ allow_attributes_without_reason = "deny"
 
 [workspace.dependencies]
 anyhow = { version = "=1.0.104", default-features = false }
-apple-native-keyring-store = { version = "=1.0.1", default-features = false }
+apple-native-keyring-store = { version = "=1.0.2", default-features = false }
 arc-swap = { version = "=1.9.2", default-features = false }
 askama = { version = "=0.16.0", default-features = false }
 aws-config = { version = "=1.10.1", default-features = false }
 aws-lc-rs = { version = "=1.17.3", default-features = false }
-aws-sdk-dsql = { version = "=1.63.0", default-features = false }
+aws-sdk-dsql = { version = "=1.63.1", default-features = false }
 aws-sdk-kms = { version = "=1.114.0", default-features = false }
-aws-sdk-s3 = { version = "=1.140.0", default-features = false }
+aws-sdk-s3 = { version = "=1.141.0", default-features = false }
 aws-sdk-ssm = { version = "=1.118.0", default-features = false }
 aws-smithy-types = { version = "=1.6.1", default-features = false }
 axum = { version = "=0.8.9", default-features = false }
@@ -142,7 +142,7 @@ axum-server = { version = "=0.8.0", default-features = false }
 base64 = { version = "=0.23.1", default-features = false }
 cel = { version = "=0.14.1", default-features = false }
 ciborium = { version = "=0.2.2", default-features = false }
-clap = { version = "=4.6.5", default-features = false }
+clap = { version = "=4.6.6", default-features = false }
 clap_complete = { version = "=4.6.8", default-features = false }
 const-oid = { version = "=0.9.6", default-features = false }
 ctap-hid-fido2 = { version = "=3.5.12", default-features = false }
@@ -172,7 +172,7 @@ maxminddb = { version = "=0.30.0", default-features = false }
 metrics = { version = "=0.24.6", default-features = false }
 metrics-exporter-prometheus = { version = "=0.18.3", default-features = false }
 mimalloc = { version = "=0.1.52", default-features = false }
-open = { version = "=5.4.0", default-features = false }
+open = { version = "=5.4.1", default-features = false }
 opentelemetry = { version = "=0.32.0", default-features = false }
 opentelemetry_sdk = { version = "=0.32.1", default-features = false }
 opentelemetry-otlp = { version = "=0.32.0", default-features = false }
@@ -192,7 +192,7 @@ secrecy = { version = "=0.10.3", default-features = false }
 serde = { version = "=1.0.229", default-features = false }
 serde_json = { version = "=1.0.151", default-features = false }
 serde_urlencoded = { version = "=0.7.1", default-features = false }
-serde-saphyr = { version = "=1.0.0", default-features = false }
+serde-saphyr = { version = "=1.0.1", default-features = false }
 sqlx = { version = "=0.9.0", default-features = false }
 signature = { version = "=2.2.0", default-features = false }
 spki = { version = "=0.7.3", default-features = false }
@@ -201,7 +201,7 @@ subtle = { version = "=2.6.1", default-features = false }
 sys-locale = { version = "=0.3.2", default-features = false }
 tempfile = { version = "=3.27.0", default-features = false }
 thiserror = { version = "=2.0.19", default-features = false }
-time = { version = "=0.3.54", default-features = false }
+time = { version = "=0.3.55", default-features = false }
 tokio = { version = "=1.53.1", default-features = false }
 tokio-rustls = { version = "=0.26.4", default-features = false }
 tokio-util = { version = "=0.7.19", default-features = false }
