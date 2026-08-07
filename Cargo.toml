@@ -236,3 +236,11 @@ lto = true        # Enable full link time optimization for better size reduction
 codegen-units = 1 # Maximize size reduction optimizations
 panic = "abort"   # Terminate process upon panic
 opt-level = "z"   # Optimize for size (more aggressive than "s")
+
+# CI build-check profile: same codegen as release except fat LTO and single
+# codegen unit, which dominate wall-clock time. Shipped binaries (release.yml)
+# always use [profile.release].
+[profile.ci]
+inherits = "release"
+lto = "thin"
+codegen-units = 16
