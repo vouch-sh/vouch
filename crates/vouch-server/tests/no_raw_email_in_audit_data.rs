@@ -40,6 +40,16 @@ fn no_audit_data_payload_embeds_a_raw_email_field() {
 
     let mut violations = Vec::new();
     for path in &files {
+        // Standalone test files (`foo/tests.rs`, `foo/tests/*.rs`) are entirely
+        // test code — the audit-payload rule only governs production sources.
+        let in_tests_dir = path
+            .parent()
+            .and_then(|d| d.file_name())
+            .is_some_and(|d| d == "tests");
+        if path.file_name().is_some_and(|f| f == "tests.rs") || in_tests_dir {
+            continue;
+        }
+
         let content = fs::read_to_string(path).expect("read source file");
         let cutoff = test_module_cutoff(&content);
         let production = content.get(..cutoff).unwrap_or(&content);
