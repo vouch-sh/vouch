@@ -113,35 +113,47 @@ jobs:
     # on main after each merge, so platform-build breakage surfaces there.
     if: github.event_name != 'merge_group'
     runs-on: ${{ matrix.runner }}
+    # Linux musl builds run in the same Alpine image as Dockerfile.build
+    # with plain cargo, like every other platform. The bake targets and
+    # Dockerfile.build are reserved for reproducible release builds.
+    container: ${{ matrix.container }}
     permissions:
       contents: read
-      # Push the shared dependency layer cache to GHCR from main; PR runs
-      # get a read-only token downgrade automatically.
-      packages: write
     strategy:
       fail-fast: false
       matrix:
         include:
           - name: linux-amd64
             runner: ubuntu-latest
+            container: rust:1.97.1-alpine
             target: x86_64-unknown-linux-musl
+            profile: ci
+            packages: "-p vouch-cli -p vouch-agent -p vouch-server"
+            install: apk add --no-cache musl-dev pkgconfig cmake make go clang linux-headers openssl-dev openssl-libs-static perl eudev-dev
           - name: linux-arm64
             runner: ubuntu-24.04-arm
+            container: rust:1.97.1-alpine
             target: aarch64-unknown-linux-musl
+            profile: ci
+            packages: "-p vouch-cli -p vouch-agent -p vouch-server"
+            install: apk add --no-cache musl-dev pkgconfig cmake make go clang linux-headers openssl-dev openssl-libs-static perl eudev-dev
           - name: macos-arm64
             runner: macos-latest
             target: aarch64-apple-darwin
+            profile: release
             packages: "-p vouch-cli -p vouch-agent"
             install: brew install go
           - name: windows-amd64
             runner: windows-latest
             target: x86_64-pc-windows-msvc
+            profile: release
             packages: "-p vouch-cli"
             install: ""
             rustflags: "-C target-feature=+crt-static"
           - name: windows-arm64
             runner: windows-latest
             target: aarch64-pc-windows-msvc
+            profile: release
             packages: "-p vouch-cli"
             install: ""
             rustflags: "-C target-feature=+crt-static"
@@ -152,13 +164,21 @@ jobs:
       - name: Install system dependencies
         if: matrix.install != ''
         run: ${{ matrix.install }} # zizmor: ignore[template-injection] — static matrix value
+      - name: Set musl build environment
+        if: runner.os == 'Linux'
+        run: |
+          {
+            echo "AWS_LC_FIPS_SYS_CC=clang"
+            echo "AWS_LC_FIPS_SYS_CXX=clang++"
+            echo "OPENSSL_STATIC=1"
+            echo "OPENSSL_LIB_DIR=/usr/lib"
+            echo "OPENSSL_INCLUDE_DIR=/usr/include"
+          } >> "$GITHUB_ENV"
       - name: Setup Rust toolchain
-        if: runner.os != 'Linux'
         run: |
           rustup show
           rustup target add ${{ matrix.target }}
       - name: Setup Rust cache
-        if: runner.os != 'Linux'
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           prefix-key: "v2"
@@ -168,37 +188,8 @@ jobs:
         if: matrix.rustflags
         shell: bash
         run: echo "RUSTFLAGS=${{ matrix.rustflags }}" >> "$GITHUB_ENV"
-      - name: Set up Docker Buildx
-        if: runner.os == 'Linux'
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
-      - name: Log in to GHCR
-        if: runner.os == 'Linux'
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Build (Linux)
-        if: runner.os == 'Linux'
-        uses: docker/bake-action@d3418bd7d0e9324001bca92fa8ba175ea7e6dc9b # v7.3.0
-        with:
-          # `deps` builds nothing extra (its layers are a prefix of `ci`);
-          # it exists so only the reusable dependency layers are exported
-          # to the registry cache, never the per-commit compile layers.
-          targets: |
-            ci
-            deps
-        env:
-          TARGET: ${{ matrix.target }}
-          # Dependency layer cache lives on GHCR, outside the 10 GB GitHub
-          # Actions cache budget. Written only from main so unmerged
-          # dependency trees never enter the shared cache; all refs read it.
-          CACHE_IMAGE: ghcr.io/${{ github.repository }}/buildcache
-          WRITE_CACHE: ${{ github.ref == 'refs/heads/main' && 'true' || 'false' }}
       - name: Build # zizmor: ignore[template-injection] — static matrix values
-        if: runner.os != 'Linux'
-        run: cargo build --release --locked --target ${{ matrix.target }} ${{ matrix.packages }}
+        run: cargo build --profile ${{ matrix.profile }} --locked --target ${{ matrix.target }} ${{ matrix.packages }}
       - name: Upload Windows binary
         if: runner.os == 'Windows'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
