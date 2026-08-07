@@ -50,9 +50,9 @@ async fn get_credential(profile: Option<&str>) -> Result<()> {
     let input = read_credential_input()?;
 
     let protocol = input.protocol.as_deref().unwrap_or("");
-    let host = input.host.as_deref().unwrap_or("");
+    let original_host = input.host.as_deref().unwrap_or("");
 
-    if protocol != "https" || !is_codecommit_host(host) {
+    if protocol != "https" || !is_codecommit_host(original_host) {
         return Ok(());
     }
 
@@ -62,8 +62,11 @@ async fn get_credential(profile: Option<&str>) -> Result<()> {
     // default `:443` from the HTTP `Host` header it sends to CodeCommit. SigV4
     // signs the host header value, so signing with the port-annotated hostname
     // would produce a signature mismatch and a 403 from AWS. Strip the
-    // standard HTTPS port so the signed hostname matches what libcurl sends.
-    let host = host.strip_suffix(":443").unwrap_or(host);
+    // standard HTTPS port for signing only — the original `host` must be
+    // echoed back to git verbatim so its credential cache can match on
+    // subsequent requests (git uses exact string comparison on `host`, with no
+    // normalization, when looking up cached credentials).
+    let signing_host = strip_default_port(original_host);
 
     // Path is required for signing (useHttpPath must be true in git config)
     let path = input.path.as_deref().ok_or_else(|| {
@@ -74,7 +77,7 @@ async fn get_credential(profile: Option<&str>) -> Result<()> {
         )
     })?;
 
-    let region = extract_region_from_hostname(host)
+    let region = extract_region_from_hostname(signing_host)
         .context(tr!("err-could-not-extract-region-from-codecommit-hostname"))?;
 
     // Path from git doesn't have leading slash; SigV4 canonical URI requires it
@@ -99,7 +102,7 @@ async fn get_credential(profile: Option<&str>) -> Result<()> {
         return Ok(());
     }
     let creds = get_sts_credentials(&vouch_profile.role_arn).await?;
-    let signed = sign_request(&creds, host, &canonical_path, region);
+    let signed = sign_request(&creds, signing_host, &canonical_path, region);
 
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
@@ -107,12 +110,28 @@ async fn get_credential(profile: Option<&str>) -> Result<()> {
     super::git_protocol::write_credential_output(
         &mut out,
         protocol,
-        host,
+        original_host,
         signed.username.expose_secret(),
         signed.password.expose_secret(),
     )?;
 
     Ok(())
+}
+
+/// Strip the standard HTTPS port (`:443`) from a git credential `host` value.
+///
+/// Git includes the port in `host` whenever the remote URL specifies one
+/// explicitly. The default HTTPS port is removed for SigV4 signing (libcurl
+/// omits `:443` from the `Host` header it sends, so the signed hostname must
+/// match), but the original `host` is still what git caches and looks up.
+/// Non-standard ports are left untouched — they would already have failed
+/// `is_codecommit_host`, so reaching here with one is unexpected.
+///
+/// Split out from [`get_credential`] so the port-stripping decision is
+/// unit-testable without a live Vouch session or network. This mirrors the
+/// `select_region` / `resolve_region` split already used in this file.
+fn strip_default_port(host: &str) -> &str {
+    host.strip_suffix(":443").unwrap_or(host)
 }
 
 /// Run the git remote helper for `codecommit://` URLs.
@@ -348,6 +367,7 @@ fn exec_git_remote_http(remote_name: &str, signed_url: &str) -> Result<()> {
 )]
 mod tests {
     use super::*;
+    use crate::commands::credential::git_protocol;
     use crate::integrations::aws::AwsConfig;
     use std::io::Write;
     use tempfile::NamedTempFile;
@@ -475,5 +495,96 @@ region = ap-southeast-2
     #[test]
     fn test_percent_encode_percent() {
         assert_eq!(percent_encode("50%done"), "50%25done");
+    }
+
+    // -- strip_default_port: SigV4 signing host vs. git cache key --
+
+    /// The standard HTTPS port is stripped for SigV4 signing so the signed
+    /// hostname matches the `Host` header libcurl sends (which omits `:443`).
+    #[test]
+    fn test_strip_default_port_removes_443() {
+        assert_eq!(
+            strip_default_port("git-codecommit.us-east-1.amazonaws.com:443"),
+            "git-codecommit.us-east-1.amazonaws.com"
+        );
+        assert_eq!(
+            strip_default_port("git-codecommit.cn-north-1.amazonaws.com.cn:443"),
+            "git-codecommit.cn-north-1.amazonaws.com.cn"
+        );
+    }
+
+    /// Non-standard ports must NOT be stripped — CodeCommit only serves HTTPS
+    /// on 443, so a different port should not produce a signing host that
+    /// matches a real CodeCommit endpoint. Such hosts already fail
+    /// `is_codecommit_host`, so `get_credential` returns before signing.
+    #[test]
+    fn test_strip_default_port_keeps_non_standard_port() {
+        assert_eq!(
+            strip_default_port("git-codecommit.us-east-1.amazonaws.com:8443"),
+            "git-codecommit.us-east-1.amazonaws.com:8443"
+        );
+        assert_eq!(
+            strip_default_port("git-codecommit.us-east-1.amazonaws.com:80"),
+            "git-codecommit.us-east-1.amazonaws.com:80"
+        );
+    }
+
+    /// Regression guard for the cache-key bug: the `host` value written back
+    /// to git must be the original (port-bearing) value, while the value used
+    /// for SigV4 signing must have `:443` stripped. Git's credential cache
+    /// matches `host` by exact string comparison with no normalization, so
+    /// echoing a stripped host back to git causes a cache miss on the next
+    /// request for the same `:443` URL.
+    ///
+    /// This models the two `host` values `get_credential` derives from a
+    /// single git input and asserts the invariant the bug violated:
+    ///   - `signing_host` (passed to `sign_request`) has `:443` removed
+    ///   - `original_host` (passed to `write_credential_output`) is unchanged
+    #[test]
+    fn get_credential_returns_original_host_to_git_but_signs_with_stripped() {
+        let original_host = "git-codecommit.us-east-1.amazonaws.com:443";
+        let signing_host = strip_default_port(original_host);
+
+        // The signing host fed to `sign_request` / `extract_region_from_hostname`
+        // drops the default port so the SigV4 signature matches libcurl's Host
+        // header (which omits `:443`).
+        assert_eq!(
+            signing_host, "git-codecommit.us-east-1.amazonaws.com",
+            "signing host must have :443 stripped to match libcurl's Host header"
+        );
+
+        // The host written back to git must be byte-for-byte identical to the
+        // input. Git caches credentials keyed on the exact `host` string, so
+        // any modification — including a "harmless" default-port strip —
+        // breaks cache lookups for `:443` URLs on subsequent operations.
+        assert_ne!(
+            original_host, signing_host,
+            "original host and signing host must differ when the URL has an explicit :443; \
+             if they were equal, the bug (returning the stripped host to git) would recur"
+        );
+
+        // Verify the actual git credential protocol output carries the
+        // original host, proving the value reaches git unchanged. This is the
+        // line git's `credential_read()` uses to overwrite its in-memory
+        // `c->host` before caching.
+        let mut buf = Vec::new();
+        git_protocol::write_credential_output(
+            &mut buf,
+            "https",
+            original_host,
+            "AKIAEXAMPLE%token",
+            "20240114T100000Zabc123",
+        )
+        .expect("write should succeed");
+        let output = String::from_utf8(buf).expect("valid UTF-8");
+        assert!(
+            output.contains("host=git-codecommit.us-east-1.amazonaws.com:443\n"),
+            "git credential output must echo the original (port-bearing) host so the cache key \
+             matches; got: {output}"
+        );
+        assert!(
+            !output.contains("host=git-codecommit.us-east-1.amazonaws.com\n"),
+            "git credential output must NOT contain the stripped host; got: {output}"
+        );
     }
 }
