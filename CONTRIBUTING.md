@@ -349,7 +349,7 @@ To verify that a release binary is reproducible:
 SOURCE_DATE_EPOCH=$(git log -1 --format=%ct v2026.6.1)
 
 # Rebuild using Docker Bake with the same epoch
-docker buildx bake ci \
+docker buildx bake server \
   --set "*.args.SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH}"
 
 # Compare SHA-256 of resulting binaries against published checksums
