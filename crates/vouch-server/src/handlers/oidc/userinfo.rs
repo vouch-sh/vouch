@@ -94,22 +94,16 @@ pub(crate) async fn userinfo(
     };
 
     let (token, is_dpop_scheme) = if let Some(ref auth_header) = auth_header_value {
-        // RFC 9110 Section 11.1: auth-scheme is case-insensitive.
-        // Compare the scheme in lowercase but extract the token from the original
-        // header since JWT tokens are case-sensitive (base64url encoding).
-        let scheme_and_token = auth_header.split_once(' ');
-        match scheme_and_token {
-            Some((scheme, tok)) if scheme.eq_ignore_ascii_case("dpop") => (tok.to_string(), true),
-            Some((scheme, tok)) if scheme.eq_ignore_ascii_case("bearer") => {
-                (tok.to_string(), false)
-            }
-            _ => {
-                return oauth_error(
-                    StatusCode::UNAUTHORIZED,
-                    "invalid_token",
-                    "Unsupported authorization scheme. Use Bearer or DPoP",
-                );
-            }
+        if let Some(tok) = crate::http::strip_auth_scheme(auth_header, "DPoP") {
+            (tok.to_string(), true)
+        } else if let Some(tok) = crate::http::strip_auth_scheme(auth_header, "Bearer") {
+            (tok.to_string(), false)
+        } else {
+            return oauth_error(
+                StatusCode::UNAUTHORIZED,
+                "invalid_token",
+                "Unsupported authorization scheme. Use Bearer or DPoP",
+            );
         }
     } else if let Some(ref ft) = form_token {
         // RFC 6750 Section 2.2: POST body access_token (Bearer only, no DPoP)
@@ -120,7 +114,7 @@ pub(crate) async fn userinfo(
         // an error code or other error information.
         return (
             StatusCode::UNAUTHORIZED,
-            [(header::WWW_AUTHENTICATE, "Bearer")],
+            [(header::WWW_AUTHENTICATE, crate::http::bearer_challenge(&[]))],
         )
             .into_response();
     };
@@ -460,7 +454,8 @@ fn oauth_error(status: StatusCode, error: &str, description: &str) -> Response {
 
     if status == StatusCode::UNAUTHORIZED {
         // RFC 6750 Section 3: Include WWW-Authenticate header on 401 responses
-        let www_auth = format!("Bearer error=\"{error}\", error_description=\"{description}\"");
+        let www_auth =
+            crate::http::bearer_challenge(&[("error", error), ("error_description", description)]);
         (status, [("WWW-Authenticate", www_auth.as_str())], body).into_response()
     } else {
         (status, body).into_response()

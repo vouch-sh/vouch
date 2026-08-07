@@ -38,10 +38,12 @@ pub(crate) async fn status(
     // with `eq_ignore_ascii_case` rather than hard-coding casings via
     // `starts_with`. An unrecognized scheme (or no header at all) yields
     // `authenticated: false` — this endpoint never 401s.
-    let token = match auth_header.and_then(|h| h.split_once(' ')) {
-        Some((scheme, tok)) if scheme.eq_ignore_ascii_case("bearer") => tok,
-        Some((scheme, tok)) if scheme.eq_ignore_ascii_case("dpop") => tok,
-        _ => {
+    let token = match auth_header.and_then(|h| {
+        crate::http::strip_auth_scheme(h, "Bearer")
+            .or_else(|| crate::http::strip_auth_scheme(h, "DPoP"))
+    }) {
+        Some(tok) => tok,
+        None => {
             return Ok(Json(SessionStatus {
                 authenticated: false,
                 email: None,

@@ -154,7 +154,6 @@ flate2 = { version = "=1.1.9", default-features = false }
 gethostname = { version = "=1.1.0", default-features = false }
 governor = { version = "=0.10.4", default-features = false }
 ipnet = { version = "=2.12.1", default-features = false }
-headers = { version = "=0.4.1", default-features = false }
 hex = { version = "=0.4.3", default-features = false }
 hickory-resolver = { version = "=0.26.1", default-features = false }
 http = { version = "=1.5.0", default-features = false }

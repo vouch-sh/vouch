@@ -42,11 +42,8 @@ pub fn install_recorder()
 
 /// Extract the bearer token from an `Authorization` header value.
 fn extract_bearer_token(headers: &HeaderMap) -> Option<&str> {
-    let value = headers.get("authorization")?.to_str().ok()?;
-    // RFC 9110 Section 11.1: the auth-scheme token is case-insensitive, so
-    // `BEARER`, `bearer`, and `BeArEr` must all match like `Bearer`.
-    let (scheme, token) = value.split_once(' ')?;
-    if !scheme.eq_ignore_ascii_case("bearer") || token.is_empty() {
+    let token = crate::http::bearer_token(headers)?;
+    if token.is_empty() {
         return None;
     }
     Some(token)

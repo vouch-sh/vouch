@@ -158,16 +158,10 @@ impl KeyResolver for OAuthClientKeyResolver {
 fn extract_client_id(headers: &http::HeaderMap, _state: &AppState) -> Option<String> {
     let auth_header = headers.get("authorization")?.to_str().ok()?;
 
-    // RFC 9110 Section 11.1: the auth-scheme token is case-insensitive, so
-    // `BEARER`, `bearer`, and `BeArEr` must all match like `Bearer`, and
-    // likewise for `DPoP`. Must stay in sync with the schemes accepted by
-    // `handlers/session.rs::extract_token_from_request`, or a request with a
-    // non-canonical scheme casing would pass token auth but fail signature
-    // key resolution on signature-required `/v1/*` routes.
-    let (scheme, token) = auth_header.split_once(' ')?;
-    if !scheme.eq_ignore_ascii_case("dpop") && !scheme.eq_ignore_ascii_case("bearer") {
-        return None;
-    }
+    // Accepts the same schemes as `extract_token_from_request` — both go
+    // through the shared matcher, so they cannot drift.
+    let token = crate::http::strip_auth_scheme(auth_header, "DPoP")
+        .or_else(|| crate::http::strip_auth_scheme(auth_header, "Bearer"))?;
 
     // Parse JWT payload (second segment) without verification
     let parts: Vec<&str> = token.split('.').collect();

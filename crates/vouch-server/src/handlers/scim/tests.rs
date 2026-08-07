@@ -2204,3 +2204,71 @@ async fn test_user_last_modified_uses_db_updated_at_not_created_at() {
         "meta.lastModified must not fall back to created_at after a modification"
     );
 }
+
+// ============================================================================
+// create_scim_user_error_response — every arm has a test that triggers it
+// ============================================================================
+
+/// Read a response body as JSON (2 MB cap is far above any SCIM error body).
+async fn error_body(resp: axum::response::Response) -> serde_json::Value {
+    let bytes = axum::body::to_bytes(resp.into_body(), 2 * 1024 * 1024)
+        .await
+        .expect("read body");
+    serde_json::from_slice(&bytes).expect("parse body")
+}
+
+#[tokio::test]
+async fn create_error_domain_not_owned_maps_to_400_invalid_value() {
+    let resp = super::users::create_scim_user_error_response(
+        "org-1",
+        "a@b.example",
+        crate::db::CreateScimUserError::DomainNotOwned,
+    );
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body = error_body(resp).await;
+    assert_eq!(body["scimType"], "invalidValue");
+}
+
+#[tokio::test]
+async fn create_error_duplicate_email_maps_to_409_uniqueness() {
+    let resp = super::users::create_scim_user_error_response(
+        "org-1",
+        "a@b.example",
+        crate::db::CreateScimUserError::DuplicateEmail,
+    );
+    assert_eq!(resp.status(), StatusCode::CONFLICT);
+    let body = error_body(resp).await;
+    assert_eq!(body["scimType"], "uniqueness");
+}
+
+/// OCC retry exhaustion is transient backpressure (concurrent provisioning
+/// or domain churn colliding on the org doc), not a server fault: the
+/// client must see 503 + Retry-After so IdP provisioners retry, not 500.
+#[tokio::test]
+async fn create_error_occ_conflict_maps_to_503_with_retry_after() {
+    let resp = super::users::create_scim_user_error_response(
+        "org-1",
+        "a@b.example",
+        crate::db::CreateScimUserError::OccConflict,
+    );
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        resp.headers()
+            .get(axum::http::header::RETRY_AFTER)
+            .and_then(|v| v.to_str().ok()),
+        Some("1"),
+        "503 must carry Retry-After so provisioners back off and retry"
+    );
+    let body = error_body(resp).await;
+    assert_eq!(body["status"], "503");
+}
+
+#[tokio::test]
+async fn create_error_other_maps_to_500() {
+    let resp = super::users::create_scim_user_error_response(
+        "org-1",
+        "a@b.example",
+        crate::db::CreateScimUserError::Other(anyhow::anyhow!("db down")),
+    );
+    assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+}

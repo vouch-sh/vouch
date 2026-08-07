@@ -99,7 +99,7 @@ pub(crate) async fn read_client(
     Path(client_id): Path<String>,
     headers: HeaderMap,
 ) -> Response {
-    let token = match extract_bearer_token(&headers) {
+    let token = match crate::http::bearer_token(&headers) {
         Some(t) => t,
         None => return missing_token_response(),
     };
@@ -131,7 +131,7 @@ pub(crate) async fn update_client(
     headers: HeaderMap,
     Json(request): Json<RegistrationRequest>,
 ) -> Response {
-    let token = match extract_bearer_token(&headers) {
+    let token = match crate::http::bearer_token(&headers) {
         Some(t) => t,
         None => return missing_token_response(),
     };
@@ -161,7 +161,7 @@ pub(crate) async fn delete_client(
     Path(client_id): Path<String>,
     headers: HeaderMap,
 ) -> Response {
-    let token = match extract_bearer_token(&headers) {
+    let token = match crate::http::bearer_token(&headers) {
         Some(t) => t,
         None => return missing_token_response(),
     };
@@ -170,34 +170,6 @@ pub(crate) async fn delete_client(
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => into_registration_response(e),
     }
-}
-
-/// Extract a Bearer token from the Authorization header.
-fn extract_bearer_token(headers: &HeaderMap) -> Option<&str> {
-    let value = headers
-        .get(axum::http::header::AUTHORIZATION)?
-        .to_str()
-        .ok()?;
-    // RFC 9110 Section 11.1: the auth-scheme token is case-insensitive, so
-    // `BEARER`, `bearer`, and `BeArEr` must all match like `Bearer`.
-    let (scheme, token) = value.split_once(' ')?;
-    scheme.eq_ignore_ascii_case("bearer").then_some(token)
-}
-
-/// Build the RFC 6750 Section 3.1 `WWW-Authenticate` challenge returned when a
-/// bearer token is missing from (or invalid for) an RFC 7592 registration
-/// endpoint. The `error` and `error_description` parameters mirror the JSON
-/// body so OAuth client libraries can rely on either source.
-fn bearer_challenge(error: &str, description: &str) -> String {
-    // RFC 6750 Section 3 limits challenge parameter values to
-    // %x20-21 / %x23-5B / %x5D-7E — no double quote, no backslash. Strip
-    // anything outside that set so a future description cannot produce a
-    // malformed (or quote-escaping) challenge.
-    let description: String = description
-        .chars()
-        .filter(|c| (' '..='!').contains(c) || ('#'..='[').contains(c) || (']'..='~').contains(c))
-        .collect();
-    format!("Bearer error=\"{error}\", error_description=\"{description}\"")
 }
 
 /// Build a 401 response for a missing bearer token on an RFC 7592 endpoint.
@@ -212,7 +184,10 @@ fn bearer_challenge(error: &str, description: &str) -> String {
 fn missing_token_response() -> Response {
     (
         StatusCode::UNAUTHORIZED,
-        [(axum::http::header::WWW_AUTHENTICATE, "Bearer")],
+        [(
+            axum::http::header::WWW_AUTHENTICATE,
+            crate::http::bearer_challenge(&[]),
+        )],
     )
         .into_response()
 }
@@ -230,7 +205,12 @@ fn into_registration_response(err: crate::error::ServiceError) -> Response {
             .error_description
             .clone()
             .unwrap_or_else(|| "Invalid or expired token".to_string());
-        let www_auth = bearer_challenge(json.error.as_str(), description.as_str());
+        // The `error` and `error_description` parameters mirror the JSON body
+        // so OAuth client libraries can rely on either source (RFC 6750 §3.1).
+        let www_auth = crate::http::bearer_challenge(&[
+            ("error", json.error.as_str()),
+            ("error_description", description.as_str()),
+        ]);
         (
             status,
             [(
@@ -248,7 +228,6 @@ fn into_registration_response(err: crate::error::ServiceError) -> Response {
 
 #[cfg(test)]
 #[expect(
-    clippy::expect_used,
     clippy::unwrap_used,
     clippy::indexing_slicing,
     reason = "test code: panic on assertion failure is acceptable"
@@ -256,40 +235,6 @@ fn into_registration_response(err: crate::error::ServiceError) -> Response {
 mod tests {
     use super::*;
     use crate::error::OAuthErrorCode;
-
-    fn headers_with_auth(value: &str) -> HeaderMap {
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            axum::http::header::AUTHORIZATION,
-            value.parse().expect("valid header value"),
-        );
-        headers
-    }
-
-    /// RFC 9110 Section 11.1: the auth-scheme token is case-insensitive, so
-    /// `BEARER`, `bearer`, and `BeArEr` must all match like `Bearer` when
-    /// extracting the RFC 7592 registration access token.
-    #[test]
-    fn extract_bearer_token_accepts_scheme_case_variants() {
-        for scheme in ["Bearer", "BEARER", "bearer", "BeArEr"] {
-            let headers = headers_with_auth(&format!("{scheme} reg-token"));
-            assert_eq!(
-                extract_bearer_token(&headers),
-                Some("reg-token"),
-                "{scheme} scheme must be accepted (RFC 9110 case-insensitivity)"
-            );
-        }
-    }
-
-    #[test]
-    fn extract_bearer_token_rejects_unrecognized_scheme_or_missing_header() {
-        assert_eq!(
-            extract_bearer_token(&headers_with_auth("Basic dXNlcjpwYXNz")),
-            None
-        );
-        assert_eq!(extract_bearer_token(&headers_with_auth("Bearer")), None);
-        assert_eq!(extract_bearer_token(&HeaderMap::new()), None);
-    }
 
     /// RFC 6750 §3.1: when the request lacks any authentication
     /// information, the `WWW-Authenticate` challenge SHOULD NOT include

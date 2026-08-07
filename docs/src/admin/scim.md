@@ -110,6 +110,18 @@ curl -X DELETE https://auth.example.com/scim/v2/Users/usr_abc123 \
 - Bound to specific organization
 - Minimum 256 bits of entropy
 
+## Concurrent Provisioning
+
+User creation validates domain ownership inside a transaction keyed on the
+organization record, so heavy concurrent provisioning (an IdP bulk-syncing
+many users at once) or simultaneous domain changes can occasionally collide.
+When the server exhausts its internal retries it responds with
+`503 Service Unavailable` and a `Retry-After` header rather than an error:
+this is transient backpressure, not a fault. Okta and Entra retry such
+responses automatically; no operator action is needed unless 503s persist,
+which indicates sustained contention on the organization (for example, a
+domain-management script running during a bulk sync).
+
 ## SCIM Audit Logging
 
 All SCIM operations are logged for compliance and security monitoring:
