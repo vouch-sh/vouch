@@ -1242,7 +1242,6 @@ mod tests {
         device_code_hash: String,
         body: String,
         token_hash: String,
-        user_id: String,
     }
 
     async fn setup_race(setup_label: &str) -> (axum::Router, Arc<AppState>, RaceSetup) {
@@ -1299,16 +1298,16 @@ mod tests {
                 device_code_hash,
                 body,
                 token_hash,
-                user_id: user.id,
             },
         )
     }
 
-    /// The race-loser `AlreadyConsumed` path must revoke all of the user's
-    /// pre-existing OAuth sessions, matching the authorization code flow's
-    /// defensive posture.
+    /// Two concurrent consumes of the same device code: exactly one wins and
+    /// the loser sees `AlreadyConsumed` — the signal the handler maps to
+    /// session revocation (verified end-to-end by
+    /// `test_device_code_race_loser_revokes_sessions_via_handler`).
     #[tokio::test]
-    async fn test_device_code_race_loser_revokes_sessions() {
+    async fn test_device_code_concurrent_consume_single_winner() {
         use crate::db::claim::ClaimError;
 
         let (_app, state, setup) = setup_race("revoke").await;
@@ -1339,25 +1338,6 @@ mod tests {
                 );
             }
         }
-
-        // Simulate what the handler does on the AlreadyConsumed branch:
-        // revoke all OAuth sessions for the user that authorized the device
-        // code (request.user_id, captured here as setup.user_id).
-        let count = crate::db::delete_oauth_sessions_for_user(&state.store, &setup.user_id)
-            .await
-            .expect("delete sessions");
-        assert!(count > 0, "should have revoked at least one session");
-        state.session_cache.invalidate_for_user(&setup.user_id);
-
-        // The pre-existing session must now be gone.
-        let session =
-            crate::db::get_session_by_token_hash(&state.store, &setup.token_hash, Timestamp::now())
-                .await
-                .expect("session lookup");
-        assert!(
-            session.is_none(),
-            "race-loser AlreadyConsumed must revoke pre-existing sessions"
-        );
     }
 
     /// End-to-end: when two concurrent `/oauth/token` device-code polls

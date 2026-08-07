@@ -15,40 +15,7 @@ use vouch_tests::{IntegrationMockDevice, TestHarness};
 // ── Helpers ──────────────────────────────────────────────────────────────
 
 /// Build a `private_key_jwt` client assertion (ES256 JWT) for the token endpoint.
-fn build_client_assertion(
-    client_id: &str,
-    audience: &str,
-    pkcs8_bytes: &[u8],
-    jti: Option<&str>,
-) -> String {
-    use aws_lc_rs::signature::{ECDSA_P256_SHA256_FIXED_SIGNING, EcdsaKeyPair};
-
-    let key_pair = EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, pkcs8_bytes)
-        .expect("Failed to parse key");
-
-    let now = jiff::Timestamp::now().as_second();
-    let header = serde_json::json!({ "alg": "ES256", "typ": "JWT", "kid": "test-key-1" });
-    let claims = serde_json::json!({
-        "iss": client_id,
-        "sub": client_id,
-        "aud": audience,
-        "iat": now,
-        "exp": now + 60,
-        "jti": jti.map_or_else(|| uuid::Uuid::now_v7().to_string(), str::to_string)
-    });
-
-    let header_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&header).unwrap());
-    let claims_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).unwrap());
-    let signing_input = format!("{header_b64}.{claims_b64}");
-
-    let rng = aws_lc_rs::rand::SystemRandom::new();
-    let sig = key_pair
-        .sign(&rng, signing_input.as_bytes())
-        .expect("Failed to sign");
-    let sig_b64 = URL_SAFE_NO_PAD.encode(sig.as_ref());
-
-    format!("{header_b64}.{claims_b64}.{sig_b64}")
-}
+use vouch_server::test_utils::build_client_assertion;
 
 /// Create an OAuth client configured for `private_key_jwt` with inline JWKS.
 async fn create_jwt_client(
@@ -149,17 +116,31 @@ async fn get_challenge(harness: &TestHarness) -> (Vec<u8>, String) {
     (challenge, state)
 }
 
+/// Everything a FIDO2 assertion exchange needs, bundled so call sites read
+/// as named fields instead of eight positional arguments.
+struct AssertionExchange<'a> {
+    harness: &'a TestHarness,
+    device: &'a IntegrationMockDevice,
+    challenge: &'a [u8],
+    state_jwt: &'a str,
+    user_id: &'a str,
+    client: &'a vouch_server::test_utils::TestOAuthClient,
+    pkcs8: &'a [u8],
+    authorization_details: Option<&'a str>,
+}
+
 /// Build the assertion payload and exchange it for an access token.
-#[allow(clippy::too_many_arguments)]
 async fn exchange_fido2_assertion(
-    harness: &TestHarness,
-    device: &IntegrationMockDevice,
-    challenge: &[u8],
-    state_jwt: &str,
-    user_id: &str,
-    client: &vouch_server::test_utils::TestOAuthClient,
-    pkcs8: &[u8],
-    authorization_details: Option<&str>,
+    AssertionExchange {
+        harness,
+        device,
+        challenge,
+        state_jwt,
+        user_id,
+        client,
+        pkcs8,
+        authorization_details,
+    }: AssertionExchange<'_>,
 ) -> (u16, serde_json::Value) {
     // The mock device signs the assertion
     let auth_result = device
@@ -263,16 +244,16 @@ async fn test_fido2_grant_windows_24h2_os_recency_passes() {
     .to_string();
 
     // Exchange the FIDO2 assertion with the posture data
-    let (status, json) = exchange_fido2_assertion(
-        &harness,
-        &device,
-        &challenge,
-        &state,
-        &user.id,
-        &client,
-        &pkcs8,
-        Some(&posture_json),
-    )
+    let (status, json) = exchange_fido2_assertion(AssertionExchange {
+        harness: &harness,
+        device: &device,
+        challenge: &challenge,
+        state_jwt: &state,
+        user_id: &user.id,
+        client: &client,
+        pkcs8: &pkcs8,
+        authorization_details: Some(&posture_json),
+    })
     .await;
 
     assert_eq!(
@@ -323,16 +304,16 @@ async fn test_fido2_grant_windows_23h2_os_recency_denied() {
     }])
     .to_string();
 
-    let (status, json) = exchange_fido2_assertion(
-        &harness,
-        &device,
-        &challenge,
-        &state,
-        &user.id,
-        &client,
-        &pkcs8,
-        Some(&posture_json),
-    )
+    let (status, json) = exchange_fido2_assertion(AssertionExchange {
+        harness: &harness,
+        device: &device,
+        challenge: &challenge,
+        state_jwt: &state,
+        user_id: &user.id,
+        client: &client,
+        pkcs8: &pkcs8,
+        authorization_details: Some(&posture_json),
+    })
     .await;
 
     assert_eq!(
@@ -383,16 +364,16 @@ async fn test_fido2_grant_macos_15_os_recency_passes() {
     }])
     .to_string();
 
-    let (status, json) = exchange_fido2_assertion(
-        &harness,
-        &device,
-        &challenge,
-        &state,
-        &user.id,
-        &client,
-        &pkcs8,
-        Some(&posture_json),
-    )
+    let (status, json) = exchange_fido2_assertion(AssertionExchange {
+        harness: &harness,
+        device: &device,
+        challenge: &challenge,
+        state_jwt: &state,
+        user_id: &user.id,
+        client: &client,
+        pkcs8: &pkcs8,
+        authorization_details: Some(&posture_json),
+    })
     .await;
 
     assert_eq!(
@@ -435,9 +416,16 @@ async fn test_fido2_grant_os_recency_no_posture_denied() {
     let (challenge, state) = get_challenge(&harness).await;
 
     // No authorization_details — posture data is required
-    let (status, json) = exchange_fido2_assertion(
-        &harness, &device, &challenge, &state, &user.id, &client, &pkcs8, None,
-    )
+    let (status, json) = exchange_fido2_assertion(AssertionExchange {
+        harness: &harness,
+        device: &device,
+        challenge: &challenge,
+        state_jwt: &state,
+        user_id: &user.id,
+        client: &client,
+        pkcs8: &pkcs8,
+        authorization_details: None,
+    })
     .await;
 
     assert_eq!(

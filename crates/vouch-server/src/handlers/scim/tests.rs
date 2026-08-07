@@ -2078,8 +2078,8 @@ async fn test_user_meta_last_modified_differs_after_patch() {
         .expect("meta.created")
         .to_string();
 
-    // Wait so the PATCH timestamp is strictly greater even on coarse clocks.
-    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    // No wait needed: the store writes `Timestamp::now()` at nanosecond
+    // precision, so sequential writes always produce distinct timestamps.
 
     // PATCH: toggle active from true -> false.
     let (status, body) = http_request(
@@ -2155,9 +2155,8 @@ async fn test_user_last_modified_uses_db_updated_at_not_created_at() {
     .expect("create_scim_user");
     let created_at = created.created_at;
 
-    // Advance the clock past second granularity so the modify timestamp is
-    // observably different even on coarse clocks.
-    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    // No wait needed: the store writes `Timestamp::now()` at nanosecond
+    // precision, so the modify timestamp is always strictly greater.
 
     let found = db::update_scim_user(
         &state.store,

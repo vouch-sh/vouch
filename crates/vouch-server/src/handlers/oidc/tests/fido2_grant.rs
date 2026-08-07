@@ -794,39 +794,3 @@ async fn test_client_assertion_jti_committed_on_success_and_rejected_on_replay()
 // ========================================================================
 // Helpers local to this module
 // ========================================================================
-
-/// Build a `private_key_jwt` client assertion for the token endpoint.
-fn build_client_assertion(
-    client_id: &str,
-    audience: &str,
-    pkcs8_bytes: &[u8],
-    jti: Option<&str>,
-) -> String {
-    use aws_lc_rs::signature::{ECDSA_P256_SHA256_FIXED_SIGNING, EcdsaKeyPair};
-
-    let key_pair = EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, pkcs8_bytes)
-        .expect("Failed to parse key");
-
-    let now = jiff::Timestamp::now().as_second();
-    let header = serde_json::json!({ "alg": "ES256", "typ": "JWT", "kid": "test-key-1" });
-    let claims = serde_json::json!({
-        "iss": client_id,
-        "sub": client_id,
-        "aud": audience,
-        "iat": now,
-        "exp": now + 60,
-        "jti": jti.map_or_else(|| uuid::Uuid::now_v7().to_string(), str::to_string)
-    });
-
-    let header_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&header).unwrap());
-    let claims_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).unwrap());
-    let signing_input = format!("{header_b64}.{claims_b64}");
-
-    let rng = aws_lc_rs::rand::SystemRandom::new();
-    let sig = key_pair
-        .sign(&rng, signing_input.as_bytes())
-        .expect("Failed to sign");
-    let sig_b64 = URL_SAFE_NO_PAD.encode(sig.as_ref());
-
-    format!("{header_b64}.{claims_b64}.{sig_b64}")
-}

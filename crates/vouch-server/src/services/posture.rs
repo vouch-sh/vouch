@@ -717,6 +717,15 @@ mod tests {
         }
     }
 
+    /// The CEL expression of a preconfigured policy, by slug.
+    fn preconfigured_expression(slug: PreconfiguredSlug) -> &'static str {
+        PRECONFIGURED_POLICIES
+            .iter()
+            .find(|p| p.slug == slug)
+            .unwrap()
+            .cel_expression
+    }
+
     fn minimal_posture() -> DevicePosture {
         DevicePosture::new()
     }
@@ -797,11 +806,7 @@ mod tests {
     fn test_evaluate_os_recency_macos_pass() {
         let posture = sample_posture();
         let ctx = build_cel_context(&posture);
-        let expr = PRECONFIGURED_POLICIES
-            .iter()
-            .find(|p| p.slug == PreconfiguredSlug::OsRecency)
-            .unwrap()
-            .cel_expression;
+        let expr = preconfigured_expression(PreconfiguredSlug::OsRecency);
         assert!(evaluate_cel(expr, &ctx));
     }
 
@@ -811,11 +816,7 @@ mod tests {
         let mut posture = sample_posture();
         posture.os_version = Some("13.7.0".to_string());
         let ctx = build_cel_context(&posture);
-        let expr = PRECONFIGURED_POLICIES
-            .iter()
-            .find(|p| p.slug == PreconfiguredSlug::OsRecency)
-            .unwrap()
-            .cel_expression;
+        let expr = preconfigured_expression(PreconfiguredSlug::OsRecency);
         assert!(!evaluate_cel(expr, &ctx));
     }
 
@@ -824,11 +825,7 @@ mod tests {
         let mut posture = minimal_posture();
         posture.os = Some(OperatingSystem::Linux);
         let ctx = build_cel_context(&posture);
-        let expr = PRECONFIGURED_POLICIES
-            .iter()
-            .find(|p| p.slug == PreconfiguredSlug::OsRecency)
-            .unwrap()
-            .cel_expression;
+        let expr = preconfigured_expression(PreconfiguredSlug::OsRecency);
         // Linux is not covered by the preconfigured os_recency policy;
         // admins should create per-distro custom policies instead.
         assert!(!evaluate_cel(expr, &ctx));
@@ -862,11 +859,7 @@ mod tests {
         let mut posture = sample_posture();
         posture.os_version = Some("15.3.1".to_string());
         let ctx = build_cel_context(&posture);
-        let expr = PRECONFIGURED_POLICIES
-            .iter()
-            .find(|p| p.slug == PreconfiguredSlug::OsRecency)
-            .unwrap()
-            .cel_expression;
+        let expr = preconfigured_expression(PreconfiguredSlug::OsRecency);
         assert!(
             evaluate_cel(expr, &ctx),
             "macOS 15.3.1 (Sequoia) must pass OsRecency (>= 14.0.0)"
@@ -879,11 +872,7 @@ mod tests {
         let mut posture = sample_posture();
         posture.os_version = Some("13.7.0".to_string());
         let ctx = build_cel_context(&posture);
-        let expr = PRECONFIGURED_POLICIES
-            .iter()
-            .find(|p| p.slug == PreconfiguredSlug::OsRecency)
-            .unwrap()
-            .cel_expression;
+        let expr = preconfigured_expression(PreconfiguredSlug::OsRecency);
         assert!(
             !evaluate_cel(expr, &ctx),
             "macOS 13.7.0 (Ventura) must fail OsRecency (< 14.0.0)"
@@ -908,11 +897,7 @@ mod tests {
         posture.os_build = Some("26100".to_string());
 
         let ctx = build_cel_context(&posture);
-        let expr = PRECONFIGURED_POLICIES
-            .iter()
-            .find(|p| p.slug == PreconfiguredSlug::OsRecency)
-            .unwrap()
-            .cel_expression;
+        let expr = preconfigured_expression(PreconfiguredSlug::OsRecency);
         assert!(
             evaluate_cel(expr, &ctx),
             "Windows 11 24H2 (build 26100) must pass OsRecency even though \
@@ -931,11 +916,7 @@ mod tests {
         posture.os_build = Some("22631".to_string()); // 23H2
 
         let ctx = build_cel_context(&posture);
-        let expr = PRECONFIGURED_POLICIES
-            .iter()
-            .find(|p| p.slug == PreconfiguredSlug::OsRecency)
-            .unwrap()
-            .cel_expression;
+        let expr = preconfigured_expression(PreconfiguredSlug::OsRecency);
         assert!(
             !evaluate_cel(expr, &ctx),
             "Windows 11 23H2 (build 22631) must fail OsRecency (< 26100)"
@@ -954,11 +935,7 @@ mod tests {
         posture.os_build = Some("26100".to_string());
 
         let ctx = build_cel_context(&posture);
-        let expr = PRECONFIGURED_POLICIES
-            .iter()
-            .find(|p| p.slug == PreconfiguredSlug::OsRecency)
-            .unwrap()
-            .cel_expression;
+        let expr = preconfigured_expression(PreconfiguredSlug::OsRecency);
         assert!(
             evaluate_cel(expr, &ctx),
             "Windows with a compliant os_build but missing os_version must pass"
@@ -980,11 +957,7 @@ mod tests {
         posture.os_build = Some("22631".to_string()); // 23H2
 
         let ctx = build_cel_context(&posture);
-        let expr = PRECONFIGURED_POLICIES
-            .iter()
-            .find(|p| p.slug == PreconfiguredSlug::OsRecency)
-            .unwrap()
-            .cel_expression;
+        let expr = preconfigured_expression(PreconfiguredSlug::OsRecency);
         assert!(
             !evaluate_cel(expr, &ctx),
             "Windows OsRecency must compare os_build, not os_version"

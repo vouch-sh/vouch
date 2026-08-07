@@ -79,34 +79,6 @@ async fn create_test_jwt_client(
     (client, pkcs8_bytes)
 }
 
-/// Build a JWT assertion for private_key_jwt client auth (RFC 7523 Section 2.2).
-fn build_client_assertion(
-    client_id: &str,
-    audience: &str,
-    pkcs8_bytes: &[u8],
-    jti: Option<&str>,
-) -> String {
-    let now = jiff::Timestamp::now().as_second();
-    let header = serde_json::json!({
-        "alg": "ES256",
-        "typ": "JWT",
-        "kid": "test-key-1"
-    });
-    let mut claims = serde_json::json!({
-        "iss": client_id,
-        "sub": client_id,
-        "aud": audience,
-        "iat": now,
-        "exp": now + 60
-    });
-    if let Some(jti_val) = jti {
-        claims["jti"] = serde_json::json!(jti_val);
-    } else {
-        claims["jti"] = serde_json::json!(uuid::Uuid::now_v7().to_string());
-    }
-    sign_jwt_assertion(pkcs8_bytes, &header, &claims)
-}
-
 // ========================================================================
 // P1: RFC 7523 §2.2 — JWT Profile for Client Authentication
 //

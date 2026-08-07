@@ -168,34 +168,7 @@ async fn test_rfc7592_put_missing_bearer_token() {
     )
     .await;
     assert_eq!(response.status, StatusCode::UNAUTHORIZED);
-    // RFC 6750 §3.1: when the request lacks any authentication
-    // information, the WWW-Authenticate challenge SHOULD NOT include
-    // an error code or other error information. The `invalid_token`
-    // error is reserved for requests that carry a token that is
-    // expired/revoked/malformed.
-    let www_auth = response
-        .headers
-        .get("www-authenticate")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-    assert!(
-        www_auth.starts_with("Bearer"),
-        "WWW-Authenticate must be a Bearer challenge: {www_auth}"
-    );
-    assert!(
-        !www_auth.contains("error="),
-        "Missing bearer must not include an error parameter: {www_auth}"
-    );
-    assert!(
-        !www_auth.contains("invalid_token"),
-        "Missing bearer must not include invalid_token: {www_auth}"
-    );
-    // RFC 9728 §5.2: the resource_metadata middleware still appends its
-    // pointer so unauthenticated callers can discover the metadata document.
-    assert!(
-        www_auth.contains("resource_metadata="),
-        "Missing bearer must still advertise resource_metadata (RFC 9728 §5.2): {www_auth}"
-    );
+    assert_bare_bearer_challenge(&response);
     // RFC 6750 §3.1: no error information, so no JSON error body.
     assert!(
         response.body.is_empty(),
@@ -233,15 +206,7 @@ async fn test_rfc7592_put_invalid_bearer_token() {
         "Invalid bearer must return invalid_token: {}",
         response.body
     );
-    let www_auth = response
-        .headers
-        .get("www-authenticate")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-    assert!(
-        www_auth.contains("invalid_token"),
-        "WWW-Authenticate must contain error=\"invalid_token\": {www_auth}"
-    );
+    assert_invalid_token_challenge(&response);
 }
 
 #[tokio::test]
@@ -277,34 +242,7 @@ async fn test_rfc7592_get_missing_bearer_token() {
 
     let response = http_get_full(&app, &format!("/oauth/register/{client_id}"), &[]).await;
     assert_eq!(response.status, StatusCode::UNAUTHORIZED);
-    // RFC 6750 §3.1: when the request lacks any authentication
-    // information, the WWW-Authenticate challenge SHOULD NOT include
-    // an error code or other error information. The `invalid_token`
-    // error is reserved for requests that carry a token that is
-    // expired/revoked/malformed.
-    let www_auth = response
-        .headers
-        .get("www-authenticate")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-    assert!(
-        www_auth.starts_with("Bearer"),
-        "WWW-Authenticate must be a Bearer challenge: {www_auth}"
-    );
-    assert!(
-        !www_auth.contains("error="),
-        "Missing bearer must not include an error parameter: {www_auth}"
-    );
-    assert!(
-        !www_auth.contains("invalid_token"),
-        "Missing bearer must not include invalid_token: {www_auth}"
-    );
-    // RFC 9728 §5.2: the resource_metadata middleware still appends its
-    // pointer so unauthenticated callers can discover the metadata document.
-    assert!(
-        www_auth.contains("resource_metadata="),
-        "Missing bearer must still advertise resource_metadata (RFC 9728 §5.2): {www_auth}"
-    );
+    assert_bare_bearer_challenge(&response);
     // RFC 6750 §3.1: no error information, so no JSON error body.
     assert!(
         response.body.is_empty(),
@@ -333,15 +271,7 @@ async fn test_rfc7592_get_invalid_bearer_token() {
         "Invalid bearer must return invalid_token: {}",
         response.body
     );
-    let www_auth = response
-        .headers
-        .get("www-authenticate")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-    assert!(
-        www_auth.contains("invalid_token"),
-        "WWW-Authenticate must contain error=\"invalid_token\": {www_auth}"
-    );
+    assert_invalid_token_challenge(&response);
 }
 
 // =========================================================================
@@ -386,34 +316,7 @@ async fn test_rfc7592_delete_client_missing_bearer_token() {
     // DELETE without Authorization header — expect 401
     let response = http_delete_full(&app, &format!("/oauth/register/{client_id}"), &[]).await;
     assert_eq!(response.status, StatusCode::UNAUTHORIZED);
-    let www_auth = response
-        .headers
-        .get("www-authenticate")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-    assert!(
-        www_auth.starts_with("Bearer"),
-        "WWW-Authenticate must be a Bearer challenge: {www_auth}"
-    );
-    // RFC 6750 §3.1: when the request lacks any authentication
-    // information, the WWW-Authenticate challenge SHOULD NOT include
-    // an error code or other error information. The `invalid_token`
-    // error is reserved for requests that carry a token that is
-    // expired/revoked/malformed.
-    assert!(
-        !www_auth.contains("error="),
-        "Missing bearer must not include an error parameter: {www_auth}"
-    );
-    assert!(
-        !www_auth.contains("invalid_token"),
-        "Missing bearer must not include invalid_token: {www_auth}"
-    );
-    // RFC 9728 §5.2: the resource_metadata middleware still appends its
-    // pointer so unauthenticated callers can discover the metadata document.
-    assert!(
-        www_auth.contains("resource_metadata="),
-        "Missing bearer must still advertise resource_metadata (RFC 9728 §5.2): {www_auth}"
-    );
+    assert_bare_bearer_challenge(&response);
     // RFC 6750 §3.1: no error information, so no JSON error body.
     assert!(
         response.body.is_empty(),
@@ -443,15 +346,7 @@ async fn test_rfc7592_delete_client_invalid_bearer_token() {
         "Invalid bearer must return invalid_token: {}",
         response.body
     );
-    let www_auth = response
-        .headers
-        .get("www-authenticate")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-    assert!(
-        www_auth.contains("invalid_token"),
-        "WWW-Authenticate must contain error=\"invalid_token\": {www_auth}"
-    );
+    assert_invalid_token_challenge(&response);
 }
 
 #[tokio::test]

@@ -176,33 +176,7 @@ pub(super) async fn create_test_jwt_client(
     (client, pkcs8_bytes)
 }
 
-/// Build a JWT assertion for `private_key_jwt` client auth (RFC 7523 Section 2.2).
-pub(super) fn build_client_assertion(
-    client_id: &str,
-    audience: &str,
-    pkcs8_bytes: &[u8],
-    jti: Option<&str>,
-) -> String {
-    let now = jiff::Timestamp::now().as_second();
-    let header = serde_json::json!({
-        "alg": "ES256",
-        "typ": "JWT",
-        "kid": "test-key-1"
-    });
-    let mut claims = serde_json::json!({
-        "iss": client_id,
-        "sub": client_id,
-        "aud": audience,
-        "iat": now,
-        "exp": now + 60
-    });
-    if let Some(jti_val) = jti {
-        claims["jti"] = serde_json::json!(jti_val);
-    } else {
-        claims["jti"] = serde_json::json!(uuid::Uuid::now_v7().to_string());
-    }
-    sign_jwt_assertion(pkcs8_bytes, &header, &claims)
-}
+pub(super) use crate::test_utils::build_client_assertion;
 
 /// Build a JWT assertion for `private_key_jwt` client auth, deliberately
 /// omitting the `jti` claim. RFC 7523 §3 makes `jti` OPTIONAL for non-FAPI
@@ -417,4 +391,42 @@ pub(super) async fn acquire_dpop_nonce(
         .to_str()
         .expect("DPoP-Nonce must be valid UTF-8")
         .to_string()
+}
+
+/// The response's `WWW-Authenticate` value, or `""` when absent.
+pub(super) fn www_authenticate(response: &HttpResponse) -> &str {
+    response
+        .headers
+        .get("www-authenticate")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+}
+
+/// RFC 6750 §3.1: a 401 for a request carrying an invalid, expired, or
+/// revoked token must challenge with `error="invalid_token"`.
+pub(super) fn assert_invalid_token_challenge(response: &HttpResponse) {
+    let www_auth = www_authenticate(response);
+    assert!(
+        www_auth.contains("invalid_token"),
+        "WWW-Authenticate must contain error=\"invalid_token\": {www_auth}"
+    );
+}
+
+/// RFC 6750 §3.1 + RFC 9728 §5.2: a 401 for a request with no credentials
+/// at all is a bare `Bearer` challenge — no error information — that still
+/// advertises the `resource_metadata` pointer for client discovery.
+pub(super) fn assert_bare_bearer_challenge(response: &HttpResponse) {
+    let www_auth = www_authenticate(response);
+    assert!(
+        www_auth.starts_with("Bearer"),
+        "WWW-Authenticate must be a Bearer challenge: {www_auth}"
+    );
+    assert!(
+        !www_auth.contains("error="),
+        "missing credentials must not include an error parameter: {www_auth}"
+    );
+    assert!(
+        www_auth.contains("resource_metadata="),
+        "missing credentials must still advertise resource_metadata (RFC 9728 §5.2): {www_auth}"
+    );
 }
