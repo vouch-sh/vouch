@@ -109,20 +109,7 @@ pub(crate) async fn register_start(
         )
     })?;
 
-    // Verify user exists (should always exist if they have a valid session)
-    let user = db::get_user_by_id(&state.store, &token.sub)
-        .await?
-        .ok_or_else(|| {
-            ServiceError::api(StatusCode::NOT_FOUND, "user_not_found", "User not found")
-        })?;
-
-    if !user.active {
-        return Err(ServiceError::api(
-            StatusCode::UNAUTHORIZED,
-            "unauthorized",
-            "User account is deactivated",
-        ));
-    }
+    let user = super::session::load_active_user(&state, &token.sub).await?;
 
     tracing::info!(
         "Registration start for authenticated user: {} (adding key: {})",
