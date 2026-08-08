@@ -777,6 +777,15 @@ fn log_startup_summary(config: &config::ServerConfig) {
         env_or("AWS_STS_REGIONAL_ENDPOINTS"),
         env_or("AWS_DEFAULTS_MODE"),
     );
+    // fips_mode is the runtime FIPS_mode() check; fips_module is the FIPS
+    // module version baked in at build time — None on non-FIPS builds (the
+    // fips feature is Linux-only, so macOS dev prints (none)).
+    tracing::info!(
+        "Crypto: aws-lc={}, fips_mode={}, fips_module={}",
+        aws_lc_rs::awslc_version(),
+        aws_lc_rs::try_fips_mode().is_ok(),
+        aws_lc_rs::fips_version().map_or_else(|| "(none)".to_string(), |v| v.to_string()),
+    );
     tracing::info!("Logging: RUST_LOG={}", env_or("RUST_LOG"));
 
     if !config.trusted_proxies.is_empty() {
