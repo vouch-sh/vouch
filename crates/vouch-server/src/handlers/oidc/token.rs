@@ -322,7 +322,8 @@ pub(crate) async fn token(
             handle_device_code_grant(State(state), client_info, params).await
         }
         OAuthGrantType::TokenExchange => {
-            handle_token_exchange_grant(State(state), client_cert, headers, params).await
+            handle_token_exchange_grant(State(state), client_info, client_cert, headers, params)
+                .await
         }
         OAuthGrantType::Fido2Assertion => {
             handle_fido2_assertion_grant(State(state), client_info, client_cert, headers, params)
@@ -859,6 +860,7 @@ async fn handle_device_code_grant(
 /// match any client_id provided in the request body.
 async fn handle_token_exchange_grant(
     State(state): State<Arc<AppState>>,
+    client_info: crate::db::ClientInfo,
     client_cert: crate::handlers::extractors::OptionalClientCert,
     headers: HeaderMap,
     params: TokenRequest,
@@ -946,6 +948,7 @@ async fn handle_token_exchange_grant(
         dpop_jkt: dpop_jkt.as_deref(),
         authorization_details: params.authorization_details.as_deref(),
         mtls_cert_thumbprint: mtls_thumbprint.as_deref(),
+        client_ip: client_info.client_ip,
     };
 
     let jti_claim = match commit_optional_jti(&state, pending_jti, "token_exchange").await {

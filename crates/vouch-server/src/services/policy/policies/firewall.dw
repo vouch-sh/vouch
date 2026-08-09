@@ -1,0 +1,7 @@
+// Require an active host firewall.
+//
+// Any platform firewall satisfies this — the technology name is reported
+// separately and not checked here.
+@id("firewall")
+forbid (principal, action == Vouch::Action::"IssueToken", resource)
+unless { context.device.firewall_enabled };

@@ -4,6 +4,15 @@ Posture policies let you require that a user's device meets a security standard 
 issue them credentials. A laptop without full-disk encryption, or running an unsupported OS
 version, can be refused a token even though the user holds a valid hardware key.
 
+Policies also cover *timing*: a policy can require a recent hardware login before workload
+credentials are issued, cap how many tokens a user obtains per hour, or refuse credentials after a
+logout. These read the user's recent authentication history rather than their device.
+
+> **Migrating from CEL.** Policies are written in
+> [Dogwood](https://dogwood-policy.github.io/dogwood/) (Cedar plus temporal conditions). Custom
+> policies written for the previous CEL engine are rejected when you edit them and fail closed at
+> login until re-authored — see [Rewriting a CEL policy](#rewriting-a-cel-policy).
+
 Manage them at `/admin/policies`.
 
 ## How enforcement works
@@ -11,6 +20,23 @@ Manage them at `/admin/policies`.
 The `vouch` CLI collects device posture attributes locally and sends them with the FIDO2 token
 request. The server evaluates your active policies against those attributes **after** verifying the
 FIDO2 assertion and **before** issuing the access token.
+
+Policies are enforced at two points:
+
+| Decision | When | Policies that apply |
+|----------|------|---------------------|
+| Token issuance | `vouch login` (FIDO2 assertion grant) | Device posture, plus history policies that count prior activity |
+| Token exchange | Workload identity and agent credentials (RFC 8693) | History policies only — an exchange carries no device posture |
+
+Recency policies ("logged in within 15 minutes") deliberately gate *exchange*, not login: the login
+itself is a hardware authentication, so requiring a recent login there would always be satisfied.
+
+> **Browser enrollment is not posture-checked.** Policies gate the CLI token endpoint. The browser
+> WebAuthn flow (`vouch enroll`) issues a session without evaluating device posture, and records a
+> successful login that satisfies the recency and IP policies above. A user who enrolls in the
+> browser can therefore obtain credentials — including via token exchange — from a device your
+> posture policies would reject at `vouch login`. Treat posture policies as a control on the CLI
+> credential path, not a fleet-wide device gate, until browser enrollment is covered.
 
 If any active policy fails, the token request is rejected with OAuth `access_denied` and a message
 naming the failed policy plus remediation guidance for the user's operating system:
@@ -49,6 +75,21 @@ Six policies ship built in. Toggle each on or off from `/admin/policies`.
 | `platform_integrity` | Platform Integrity | Secure Boot enabled |
 | `os_recency` | OS Recency | macOS 14.0.0+ or Windows 24H2+. **Denies all Linux devices** — see below |
 
+Five more policies read the user's recent authentication history instead of their device:
+
+| Slug | Name | Denies when |
+|------|------|-------------|
+| `issuance_rate_limit` | Issuance Rate Limit | The user obtained 10 or more tokens in the past hour |
+| `failed_login_burst` | Failed Login Burst | The user had 5 or more failed logins in the past ten minutes |
+| `token_exchange_step_up` | Token Exchange Step-Up | No successful hardware login in the past 15 minutes (exchange only) |
+| `exchange_ip_consistency` | Exchange IP Consistency | No successful login from this IP address in the past 8 hours (exchange only) |
+| `logout_invalidates_exchange` | Logout Invalidates Exchange | The user logged out and has not logged in again (exchange only) |
+
+History comes from the audit log, scoped to the requesting user and the past 24 hours. Two
+consequences worth knowing: audit retention shorter than two days truncates the window a policy can
+see (the server warns at startup), and audit writes on the login path are best-effort, so a dropped
+write can under-count a rate limit by one event.
+
 `os_recency` is the one with moving parts, and the one to be careful with. It passes a device only
 if it is macOS 14.0.0 or later, **or** Windows 10.0.26100 (24H2) or later.
 
@@ -61,11 +102,14 @@ if it is macOS 14.0.0 or later, **or** Windows 10.0.26100 (24H2) or later.
 > If any part of your fleet runs Linux, do not enable `os_recency`. Write a custom policy that
 > covers all three platforms instead:
 >
-> ```javascript
-> (posture.os == "macos" && semver(posture.os_version) >= semver("14.0.0"))
->   || (posture.os == "windows" && semver(posture.os_version) >= semver("10.0.26100"))
->   || (posture.os == "linux" && posture.os_distribution == "ubuntu"
->       && semver(posture.os_version) >= semver("22.04.0"))
+> ```cedar
+> forbid (principal, action == Vouch::Action::"IssueToken", resource)
+> unless {
+>     (context.device.os == "macos" && context.device.os_version_num >= 14000000) ||
+>     (context.device.os == "windows" && context.device.os_build_num >= 26100) ||
+>     (context.device.os == "linux" && context.device.os_distribution == "ubuntu"
+>         && context.device.os_version_num >= 22004000)
+> };
 > ```
 
 Those thresholds are compiled into the server, so they advance when you upgrade Vouch. Read the
@@ -74,29 +118,89 @@ were passing yesterday.
 
 ## Custom policies
 
-For anything the built-ins do not cover, write a CEL
-([Common Expression Language](https://github.com/google/cel-spec)) expression. It must evaluate to
-a boolean, where `true` means the device passes.
+An organization can author up to 20 custom policies and have 10 active at once, alongside any of
+the built-ins.
 
-```javascript
+For anything the built-ins do not cover, write a
+[Dogwood/Cedar](https://dogwood-policy.github.io/dogwood/) `forbid` rule. The rule fires — and the
+token request is denied — when its `unless` requirement is **not** met. Posture attributes live at
+`context.device`.
+
+```cedar
 // Require BitLocker specifically, not just any disk encryption
-posture.disk_encryption_technology == "BitLocker"
+forbid (principal, action == Vouch::Action::"IssueToken", resource)
+unless { context.device.disk_encryption_technology == "bitlocker" };
 
 // Require a recent Ubuntu
-posture.os_distribution == "ubuntu" && semver(posture.os_version) >= semver("22.04.0")
+forbid (principal, action == Vouch::Action::"IssueToken", resource)
+unless { context.device.os_distribution == "ubuntu"
+         && context.device.os_version_num >= 22004000 };
 
 // Screen lock must engage within five minutes
-posture.screen_lock_enabled == true && posture.screen_lock_idle_timeout_secs <= 300
+forbid (principal, action == Vouch::Action::"IssueToken", resource)
+unless { context.device.screen_lock_enabled
+         && context.device.screen_lock_idle_timeout_secs <= 300 };
 
 // Require both an EDR agent and MDM enrollment
-size(posture.edr) > 0 && size(posture.mdm) > 0
+forbid (principal, action == Vouch::Action::"IssueToken", resource)
+unless { context.device.edr_count > 0 && context.device.mdm_count > 0 };
 
 // Apply a rule only on macOS, passing every other platform
-posture.os != "macos" || posture.sip_enabled == true
+forbid (principal, action == Vouch::Action::"IssueToken", resource)
+unless { context.device.os != "macos" || context.device.sip_enabled };
 ```
 
 That last pattern matters: attributes are populated per platform, so an unqualified rule applies
-everywhere. Guard on `posture.os` when a requirement is platform-specific.
+everywhere. Guard on `context.device.os` when a requirement is platform-specific.
+
+### Writing a history policy
+
+A `when temporal { … }` clause reads the user's recent events. Windows are required, capped at 24
+hours, and only `&&` and `!` are available inside the block (write separate policies for "or"):
+
+```cedar
+// Require a successful login within the last 30 minutes before exchanging tokens
+forbid (principal, action == Vouch::Action::"ExchangeToken", resource)
+when temporal {
+    !(formerly within 30m Vouch::Action::"Login"::response{ output.result: true })
+};
+
+// Cap SSH certificate issuance at 5 per hour
+forbid (principal, action == Vouch::Action::"IssueToken", resource)
+when temporal {
+    exists (n: Long). (
+        (count_within(1h, Vouch::Action::"IssueCredential"::response{ input.kind: "ssh" })) == n
+        && n >= 5
+    )
+};
+```
+
+Aggregations must be compared inside an `exists (n: Long). ((count_within(…)) == n && n >= K)`
+binding — that shape is what lets the count be thresholded.
+
+The policy editor validates history policies but cannot evaluate them: the test device has no
+history, so a temporal result is labelled rather than reported as a plain pass or fail. Verify
+these against a real account in a staging organization.
+
+### Rewriting a CEL policy
+
+CEL expressions were bare booleans; Dogwood policies are `forbid` rules, and posture attributes
+moved from `posture.*` to `context.device.*`. A CEL rule that read:
+
+```
+posture.disk_encryption_technology == "bitlocker"
+```
+
+becomes:
+
+```cedar
+forbid (principal, action == Vouch::Action::"IssueToken", resource)
+unless { context.device.disk_encryption_technology == "bitlocker" };
+```
+
+Note the inversion: CEL expressions stated what must be **true** to pass; a `forbid … unless` rule
+states the same requirement, and denies when it is not met. Version comparisons that used
+`semver(posture.os_version)` use the precomputed `context.device.os_version_num` field.
 
 ### Available attributes
 
@@ -118,19 +222,25 @@ missing field. The corollary: **a missing attribute looks identical to a negativ
 
 **Numbers** (default `0`)
 
-`screen_lock_idle_timeout_secs`, `uptime_secs`
+`screen_lock_idle_timeout_secs`, `uptime_secs`, `edr_count`, `mdm_count`
 
-**Lists** (default `[]`)
+**Derived version numbers** (`-1` when unparseable)
 
-`edr`, `mdm`
+`os_version_num` — `os_version` encoded as `major*1000000 + minor*1000 + patch`
+(`"15.3.1"` → `15003001`; 4-component Windows versions encode as `-1`).
+`os_build_num` — `os_build` parsed as an integer (`"26100"` → `26100`).
 
-### The `semver` function
+**Sets** (default empty)
 
-Beyond standard CEL, Vouch provides `semver(string)` for version comparison. Use it rather than
-comparing version strings directly — lexical comparison puts `"10.0.0"` before `"9.0.0"`.
+`edr`, `mdm` — test membership with `context.device.edr.contains("crowdstrike")`
 
-```javascript
-semver(posture.os_version) >= semver("14.0.0")
+### Version comparison
+
+Compare `os_version_num` (never the `os_version` string) — lexical comparison puts `"10.0.0"`
+before `"9.0.0"`, the numeric encoding does not.
+
+```cedar
+context.device.os_version_num >= 14000000
 ```
 
 ## Testing an expression before you enable it
@@ -154,6 +264,7 @@ To roll back an over-strict policy, toggle it off — no restart required.
 
 | Event | Trigger |
 |-------|---------|
+| `policy_denied` | A policy denied token issuance or exchange |
 | `admin_policy_create` | Custom policy created |
 | `admin_policy_update` | Custom policy edited |
 | `admin_policy_delete` | Custom policy deleted |
@@ -173,6 +284,7 @@ The attribute probably is not reported on that platform and is defaulting to `fa
 the server log at `RUST_LOG=vouch_server=debug`, which logs each policy evaluation and its result,
 then guard the expression on `posture.os`.
 
-**A custom expression never passes.**
-Runtime errors and non-boolean results both count as failures. Test it in the policy editor against
-known-good sample posture.
+**A custom policy never passes.**
+Runtime evaluation errors count as failures (fail-closed), and policies written in CEL syntax for
+the pre-Dogwood engine always fail. Test the rule in the policy editor against known-good sample
+posture.

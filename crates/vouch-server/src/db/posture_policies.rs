@@ -2,7 +2,7 @@
 //! Device posture policy database operations.
 //!
 //! Manages per-org activation of preconfigured policies (stored as a
-//! `PostureConfigDoc`) and custom CEL-based policies (stored as
+//! `PostureConfigDoc`) and admin-authored policies (stored as
 //! `CustomPosturePolicyDoc` documents).
 
 use super::document_type::Document;
@@ -21,7 +21,7 @@ pub struct CustomPosturePolicy {
     pub id: String,
     pub name: String,
     pub description: Option<String>,
-    pub cel_expression: String,
+    pub policy_text: String,
     pub active: bool,
     pub org_id: String,
     pub created_at: Timestamp,
@@ -34,7 +34,7 @@ impl From<Document<CustomPosturePolicyDoc>> for CustomPosturePolicy {
             id: doc.id,
             name: doc.data.name,
             description: doc.data.description,
-            cel_expression: doc.data.cel_expression,
+            policy_text: doc.data.policy_text,
             active: doc.data.active,
             org_id: doc.data.org_id,
             created_at: doc.created_at,
@@ -106,7 +106,7 @@ pub async fn get_active_preconfigured_slugs(
 pub struct CreateCustomPolicyParams<'a> {
     pub name: &'a str,
     pub description: Option<&'a str>,
-    pub cel_expression: &'a str,
+    pub policy_text: &'a str,
     pub org_id: &'a str,
 }
 
@@ -118,7 +118,7 @@ pub async fn create_custom_policy(
     let doc = CustomPosturePolicyDoc {
         name: params.name.to_string(),
         description: params.description.map(String::from),
-        cel_expression: params.cel_expression.to_string(),
+        policy_text: params.policy_text.to_string(),
         active: false,
         org_id: params.org_id.to_string(),
     };
@@ -175,7 +175,7 @@ pub enum FieldUpdate<'a> {
 pub struct UpdateCustomPolicyParams<'a> {
     pub name: Option<&'a str>,
     pub description: FieldUpdate<'a>,
-    pub cel_expression: Option<&'a str>,
+    pub policy_text: Option<&'a str>,
     pub active: Option<bool>,
 }
 
@@ -207,7 +207,7 @@ pub async fn update_custom_policy(
         FieldUpdate::Clear => Some(None::<String>),
         FieldUpdate::Set(d) => Some(Some(d.to_string())),
     };
-    let cel_owned = params.cel_expression.map(String::from);
+    let cel_owned = params.policy_text.map(String::from);
     let active_owned = params.active;
 
     let applied = std::sync::atomic::AtomicBool::new(false);
@@ -230,7 +230,7 @@ pub async fn update_custom_policy(
                 data.description = desc_opt.clone();
             }
             if let Some(ref cel) = cel_owned {
-                data.cel_expression = cel.clone();
+                data.policy_text = cel.clone();
             }
             if let Some(active) = active_owned {
                 data.active = active;

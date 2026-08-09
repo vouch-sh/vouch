@@ -56,6 +56,7 @@ code, ASN, and network organization resolved from the client IP.
 | `admin_activate` / `admin_deactivate` | User account reactivated / deactivated |
 | `admin_revoke_credentials` | Admin revoked a member's keys, sessions, and certificates |
 | `admin_remove_user` | Admin removed a member from the organization |
+| `policy_denied` | A posture or temporal policy denied credential issuance |
 | `admin_policy_create` / `admin_policy_update` / `admin_policy_delete` / `admin_policy_toggle` | Posture policy changes |
 | `admin_create_scim_token` / `admin_delete_scim_token` / `admin_revoke_scim_token` | SCIM token lifecycle |
 | `scim_operation` | SCIM provisioning operation (`data` carries operation and resource type) |
@@ -289,6 +290,7 @@ each of these events emits a distinct `activity_name` and also preserves the ori
 | `oauth_client_deleted` | 3004 | Entity Management |
 | `oauth_secret_added` | 3004 | Entity Management |
 | `oauth_secret_revoked` | 3004 | Entity Management |
+| `policy_denied` | 3002 | Authentication |
 | `admin_policy_toggle` | 3004 | Entity Management |
 | `admin_policy_create` | 3004 | Entity Management |
 | `admin_policy_update` | 3004 | Entity Management |

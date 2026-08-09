@@ -8,7 +8,7 @@
 # the strings injected into static JS (see templates' `js_i18n` blocks).
 #
 # do-not-translate: some user-visible text is intentionally NOT in this catalog
-# because it is code, not prose — shell commands, CEL expression examples, JSON
+# because it is code, not prose — shell commands, policy examples, JSON
 # and URI placeholders, and proper nouns (OS names like macOS / Debian / Ubuntu).
 # Those stay verbatim in the templates so they read identically in every locale.
 #
@@ -730,19 +730,30 @@ admin-policies-platform-macos = Secure Boot via Apple Silicon or T2 chip
 admin-policies-platform-windows = UEFI Secure Boot enabled
 admin-policies-platform-linux = UEFI Secure Boot enabled
 admin-policies-osrecency-linux = Not checked — use a custom policy per distro
-admin-policies-semver-explain = converts versions to numbers for correct comparison
+admin-policies-semver-explain = encodes versions as numbers for correct comparison
 admin-policies-custom = Custom Policies
+admin-policies-copy-btn = Copy to a custom policy
 admin-policies-new-btn = + New
 admin-policies-playground-title = New Custom Policy
 admin-policies-name-placeholder = e.g., Require macOS Sequoia
 admin-policies-optional = (optional)
 admin-policies-desc-placeholder = e.g., Require macOS 15 or later
+admin-policies-syntax-rule = Write a Cedar
+admin-policies-syntax-over = rule over
+admin-policies-syntax-operators = Operators:
+admin-policies-syntax-lists = for lists.
+admin-policies-syntax-versions = for version comparison.
+admin-policies-syntax-temporal = for event-history rules.
+admin-policies-syntax-fieldref = See field reference below.
 admin-policies-rule-label = Rule
-admin-policies-rule-hint = — must evaluate to true
-admin-policies-cel-ref-title = CEL language reference
-admin-policies-cel-valid = Valid expression
+admin-policies-rule-hint = — a Cedar forbid rule; issuance is denied when it fires
+admin-policies-ref-title = Dogwood policy language reference
+admin-policies-valid = Valid policy
+admin-policies-invalid-badge = invalid
+admin-policies-invalid-title = This policy no longer validates and denies every request while active. Edit it to see the error.
 admin-policies-delete-confirm = Delete this custom policy?
 admin-policies-none = No custom policies yet.
+admin-policies-sample-device-note = Your rule is tested against this sample device when editing. Fields not listed below default to "" (string), false (boolean), or 0 (number).
 admin-policies-fieldref-summary = Field reference & test device
 admin-policies-fieldref-th-field = Field
 admin-policies-fieldref-th-test = Test value
@@ -750,11 +761,83 @@ admin-policies-example-rules = Example rules:
 admin-policies-note-label = Note:
 admin-policies-note-body = Posture data is self-reported by the CLI. Policies are a compliance baseline, not a cryptographic guarantee.
 
+## Posture policy names, descriptions, and remediation guidance
+admin-policies-name-disk-encryption = Disk Encryption
+admin-policies-desc-disk-encryption = Require full-disk encryption (FileVault, BitLocker, LUKS)
+admin-policies-fix-disk-encryption = Enable full-disk encryption on your device
+admin-policies-fix-disk-encryption-macos = Enable FileVault in System Settings > Privacy & Security
+admin-policies-fix-disk-encryption-linux = Enable LUKS encryption with cryptsetup
+admin-policies-fix-disk-encryption-windows = Enable BitLocker in Settings > Device encryption
+
+admin-policies-name-firewall = Firewall
+admin-policies-desc-firewall = Require an active firewall
+admin-policies-fix-firewall = Enable your system firewall
+admin-policies-fix-firewall-macos = Enable Firewall in System Settings > Network > Firewall
+admin-policies-fix-firewall-linux = Enable firewall with: sudo ufw enable
+admin-policies-fix-firewall-windows = Enable Windows Firewall in Windows Security
+
+admin-policies-name-screen-lock = Screen Lock
+admin-policies-desc-screen-lock = Require screen lock on idle
+admin-policies-fix-screen-lock = Enable screen lock on your device
+admin-policies-fix-screen-lock-macos = Set screen lock in System Settings > Lock Screen
+admin-policies-fix-screen-lock-linux = Configure screen lock in your display settings. If authenticating via SSH, screen lock status may not be detectable — try authenticating from a graphical session
+admin-policies-fix-screen-lock-windows = Set screen lock in Settings > Accounts > Sign-in options
+
+admin-policies-name-endpoint-protection = Endpoint Protection
+admin-policies-desc-endpoint-protection = Require at least one EDR agent installed
+admin-policies-fix-endpoint-protection = Install an endpoint detection and response (EDR) agent
+# macOS and Linux share this guidance.
+admin-policies-fix-endpoint-protection-macos = Install an EDR agent (e.g., CrowdStrike, SentinelOne)
+admin-policies-fix-endpoint-protection-windows = Install an EDR agent (e.g., CrowdStrike, Microsoft Defender for Endpoint)
+
+admin-policies-name-platform-integrity = Platform Integrity
+admin-policies-desc-platform-integrity = Require Secure Boot to be enabled
+admin-policies-fix-platform-integrity = Enable Secure Boot on your device
+admin-policies-fix-platform-integrity-macos = Secure Boot is managed by Apple and should be enabled by default
+# Linux and Windows share this guidance.
+admin-policies-fix-platform-integrity-windows = Enable Secure Boot in your UEFI/BIOS firmware settings
+
+admin-policies-name-os-recency = OS Recency
+admin-policies-desc-os-recency = Require a supported OS version (N-1)
+admin-policies-fix-os-recency = Update your operating system to a supported version
+admin-policies-fix-os-recency-macos = Update macOS to a supported version (14 or later)
+admin-policies-fix-os-recency-linux = Linux is not covered by the built-in OS recency check. Your organization may have a custom policy for your distribution
+admin-policies-fix-os-recency-windows = Update Windows to a supported version (build 26100 or later)
+
+admin-policies-name-issuance-rate-limit = Issuance Rate Limit
+admin-policies-desc-issuance-rate-limit = Deny token issuance after 10 issuances within one hour
+admin-policies-fix-issuance-rate-limit = Too many token issuances in the last hour. Wait and retry
+
+admin-policies-name-failed-login-burst = Failed Login Burst
+admin-policies-desc-failed-login-burst = Deny token issuance after 5 failed logins within ten minutes
+admin-policies-fix-failed-login-burst = Too many failed login attempts recently. Wait a few minutes and retry
+
+admin-policies-name-token-exchange-step-up = Token Exchange Step-Up
+admin-policies-desc-token-exchange-step-up = Token exchange (WIF/agent credentials) requires a hardware login within 15 minutes
+admin-policies-fix-token-exchange-step-up = A recent hardware login is required. Run `vouch login` and retry
+
+admin-policies-name-exchange-ip-consistency = Exchange IP Consistency
+admin-policies-desc-exchange-ip-consistency = Token exchange must come from the same IP as a successful login within 8 hours
+admin-policies-fix-exchange-ip-consistency = This request came from a different network than your recent login. Run `vouch login` from this network and retry
+
+admin-policies-name-logout-invalidates-exchange = Logout Invalidates Exchange
+admin-policies-desc-logout-invalidates-exchange = Token exchange is denied after logout until the user logs in again
+admin-policies-fix-logout-invalidates-exchange = You logged out since your last login. Run `vouch login` and retry
+
+admin-policies-err-empty = Policy text must not be empty
+admin-policies-err-invalid = Invalid policy: { $detail }
+# Shown when a deny cannot be traced to a specific policy.
+admin-policies-deny-unattributed = device posture
+admin-policies-deny-generic = Check your device settings to meet your organization's compliance requirements
+admin-policies-deny-message = Device posture policy '{ $policy }' not satisfied. { $remediation }
+
 ## Admin policies — client-side JS (admin.js, policies page)
 admin-js-edit-policy-title = Edit Custom Policy
-admin-js-cel-passes = — passes against test device
-admin-js-cel-fails = — fails against test device
-admin-js-cel-invalid = Invalid expression
+admin-js-copy-of = Copy of { $name }
+admin-js-policy-passes = — passes against test device
+admin-js-policy-fails = — fails against test device
+admin-js-policy-invalid = Invalid policy
+admin-js-policy-history-note = — reads event history, which the test device has none of; this result reflects an empty history, not the policy's logic
 
 ## Admin SCIM tokens (admin/scim_tokens.html)
 admin-scim-page-title = { -product } - API Tokens

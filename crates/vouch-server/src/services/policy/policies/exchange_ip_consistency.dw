@@ -1,0 +1,17 @@
+// Require token exchange to come from the same address as a recent login.
+//
+// The `input.ip` pin correlates the exchange request's address with the
+// address recorded on a successful login in the window. Both values are
+// server-derived from the connection (and a trusted proxy header where
+// configured), not client-supplied.
+//
+// Denies a stolen token replayed from elsewhere. Expect false denials for
+// users whose address changes mid-session — roaming, VPN, or CGNAT.
+@id("exchange_ip_consistency")
+forbid (principal, action == Vouch::Action::"ExchangeToken", resource)
+when temporal {
+    !(formerly within 8h Vouch::Action::"Login"::response{
+        input.ip: context.input.ip,
+        output.result: true
+    })
+};

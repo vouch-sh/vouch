@@ -5,7 +5,7 @@
 //! (FIDO2 assertion grant) flow using the software `IntegrationMockDevice`,
 //! with the OsRecency posture policy active. They verify that the bug fix
 //! (comparing `os_build` instead of `os_version` for Windows) works
-//! end-to-end through the real CEL evaluation path in `fido2_grant.rs`.
+//! end-to-end through the policy gate in `fido2_grant.rs`.
 
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -486,5 +486,94 @@ async fn test_fido2_grant_records_token_issued_audit_event() {
         rows[0].data.contains("fido2-assertion"),
         "the audit payload must carry the grant type: {}",
         rows[0].data
+    );
+}
+
+/// A posture-denied grant records `login_failed`, never `login_success` —
+/// temporal step-up policies treat `login_success` as proof of a completed,
+/// policy-compliant hardware login, so the denied attempt must not refresh
+/// the recency window on the token-exchange path.
+#[tokio::test]
+async fn test_posture_denied_grant_records_login_failed_not_success() {
+    let harness = TestHarness::new().await;
+    let org = harness
+        .create_org("denied-audit.example.com")
+        .await
+        .expect("Failed to create org");
+    let user = harness
+        .create_user_in_org("denied-audit@example.com", &org.id, false)
+        .await
+        .expect("Failed to create user");
+    let device = IntegrationMockDevice::new();
+    let _auth_id = register_mock_device_in_db(&harness, &user.id, &user.email, &device).await;
+    db::set_preconfigured_active(
+        &harness.state.store,
+        &org.id,
+        vec!["os_recency".to_string()],
+    )
+    .await
+    .expect("Failed to activate OsRecency");
+    let (client, pkcs8) = create_jwt_client(&harness, &user.id).await;
+    let (challenge, state) = get_challenge(&harness).await;
+
+    // Windows 23H2 fails the os_recency floor (build < 26100).
+    let posture_json = serde_json::json!([{
+        "type": "device_posture",
+        "posture_version": 1,
+        "os": "windows",
+        "os_version": "10.0.22631.0",
+        "os_build": "22631",
+    }])
+    .to_string();
+    let (status, json) = exchange_fido2_assertion(AssertionExchange {
+        harness: &harness,
+        device: &device,
+        challenge: &challenge,
+        state_jwt: &state,
+        user_id: &user.id,
+        client: &client,
+        pkcs8: &pkcs8,
+        authorization_details: Some(&posture_json),
+    })
+    .await;
+    assert_eq!(status, 400, "grant must be denied: {json}");
+
+    // The audit write is spawned; poll briefly for it to land.
+    let query = |kind: &'static str| {
+        let audit = harness.state.audit.clone();
+        let user_id = user.id.clone();
+        async move {
+            audit
+                .query_events(&db::AuditEventFilter {
+                    event_types: Some(vec![kind.to_string()]),
+                    user_id: Some(user_id),
+                    ..Default::default()
+                })
+                .await
+                .expect("query audit events")
+        }
+    };
+    let mut failed_rows = Vec::new();
+    for _ in 0..40 {
+        failed_rows = query("login_failed").await;
+        if !failed_rows.is_empty() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert_eq!(
+        failed_rows.len(),
+        1,
+        "denied attempt must record login_failed"
+    );
+    assert!(
+        failed_rows[0].data.contains("posture policy denied"),
+        "failure reason must name the posture policy: {}",
+        failed_rows[0].data
+    );
+    let success_rows = query("login_success").await;
+    assert!(
+        success_rows.is_empty(),
+        "denied attempt must not record login_success"
     );
 }

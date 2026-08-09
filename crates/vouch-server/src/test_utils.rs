@@ -192,6 +192,7 @@ where
         http_client: reqwest::Client::new(),
         session_cache: crate::db::SessionCache::new(10_000, 30),
         org_keys_cache: Default::default(),
+        policy: Default::default(),
         idps,
     })
 }
@@ -240,6 +241,7 @@ pub async fn test_app_state_with_rsa_key() -> Arc<AppState> {
         http_client: reqwest::Client::new(),
         session_cache: crate::db::SessionCache::new(10_000, 30),
         org_keys_cache: Default::default(),
+        policy: Default::default(),
         idps: Vec::new(),
     })
 }
@@ -289,6 +291,7 @@ pub async fn test_app_state_encrypted() -> Arc<AppState> {
         http_client: reqwest::Client::new(),
         session_cache: crate::db::SessionCache::new(10_000, 30),
         org_keys_cache: Default::default(),
+        policy: Default::default(),
         idps: Vec::new(),
     })
 }
@@ -1640,6 +1643,27 @@ pub const TEST_JWT_SECRET: &[u8] = b"test-jwt-secret-for-unit-tests-only";
 pub const TEST_ISSUER: &str = "https://example.com";
 
 /// Generate a fresh OIDC signing key for tests.
+/// Fuzzing entry: run arbitrary policy text through the production
+/// validation path (compose + lower + validate against the embedded Vouch
+/// schema). Must never panic — admin-supplied policy text reaches this
+/// path, and the release profile is `panic = "abort"`.
+pub fn fuzz_validate_policy_text(text: &str) {
+    let _result = crate::services::policy::validate_policy_text(text);
+}
+
+/// Fuzzing entry: run arbitrary history-event shapes through the runtime
+/// evaluation path (`Authorizer::is_authorized` over a replayed trace) with
+/// every temporal policy active. This is the path that executes on each
+/// login and token exchange, and it must never panic — the release profile
+/// is `panic = "abort"`, so a panic here takes down every org on the
+/// replica, not just the triggering request.
+///
+/// `rows` are `(event_type, user_id, data_json, secs_offset)` tuples, mapped
+/// through the same ingestion the production path uses.
+pub fn fuzz_evaluate_history(rows: &[(String, String, String, i64)]) {
+    crate::services::policy::fuzz_evaluate_history(rows);
+}
+
 pub fn make_test_oidc_key() -> OidcSigningKey {
     OidcSigningKey::generate().expect("generate key")
 }

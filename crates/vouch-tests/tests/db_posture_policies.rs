@@ -2,7 +2,7 @@
 //! CRUD round-trip tests for the posture-policy DB layer
 //! (`crates/vouch-server/src/db/posture_policies.rs`).
 //!
-//! Covers preconfigured-policy activation, custom CEL policy create/list/get
+//! Covers preconfigured-policy activation, custom policy create/list/get
 //! /update/delete, and org-scoped isolation.
 
 #![allow(
@@ -90,7 +90,7 @@ async fn custom_policy_create_defaults_to_inactive() {
         CreateCustomPolicyParams {
             name: "Require macOS",
             description: Some("Block non-mac platforms"),
-            cel_expression: "device.platform == 'mac'",
+            policy_text: "device.platform == 'mac'",
             org_id: &org_id,
         },
     )
@@ -102,7 +102,7 @@ async fn custom_policy_create_defaults_to_inactive() {
         policy.description.as_deref(),
         Some("Block non-mac platforms")
     );
-    assert_eq!(policy.cel_expression, "device.platform == 'mac'");
+    assert_eq!(policy.policy_text, "device.platform == 'mac'");
     assert!(!policy.active, "new policies must default to inactive");
     assert_eq!(policy.org_id, org_id);
 }
@@ -118,7 +118,7 @@ async fn custom_policy_list_is_scoped_to_org() {
         CreateCustomPolicyParams {
             name: "A1",
             description: None,
-            cel_expression: "true",
+            policy_text: "true",
             org_id: &org_a,
         },
     )
@@ -129,7 +129,7 @@ async fn custom_policy_list_is_scoped_to_org() {
         CreateCustomPolicyParams {
             name: "B1",
             description: None,
-            cel_expression: "true",
+            policy_text: "true",
             org_id: &org_b,
         },
     )
@@ -158,7 +158,7 @@ async fn custom_policy_get_returns_record() {
         CreateCustomPolicyParams {
             name: "Lookup test",
             description: None,
-            cel_expression: "true",
+            policy_text: "true",
             org_id: &org_id,
         },
     )
@@ -191,7 +191,7 @@ async fn custom_policy_update_can_activate_and_rename() {
         CreateCustomPolicyParams {
             name: "old name",
             description: Some("old desc"),
-            cel_expression: "true",
+            policy_text: "true",
             org_id: &org_id,
         },
     )
@@ -205,7 +205,7 @@ async fn custom_policy_update_can_activate_and_rename() {
         UpdateCustomPolicyParams {
             name: Some("new name"),
             description: FieldUpdate::Clear,
-            cel_expression: Some("device.os_version >= '14'"),
+            policy_text: Some("device.os_version >= '14'"),
             active: Some(true),
         },
     )
@@ -218,7 +218,7 @@ async fn custom_policy_update_can_activate_and_rename() {
         updated.description.is_none(),
         "description should be cleared"
     );
-    assert_eq!(updated.cel_expression, "device.os_version >= '14'");
+    assert_eq!(updated.policy_text, "device.os_version >= '14'");
     assert!(updated.active);
 }
 
@@ -232,7 +232,7 @@ async fn custom_policy_update_refuses_cross_org_writes() {
         CreateCustomPolicyParams {
             name: "owned by A",
             description: None,
-            cel_expression: "true",
+            policy_text: "true",
             org_id: &org_a,
         },
     )
@@ -246,7 +246,7 @@ async fn custom_policy_update_refuses_cross_org_writes() {
         UpdateCustomPolicyParams {
             name: Some("hijacked"),
             description: FieldUpdate::Keep,
-            cel_expression: None,
+            policy_text: None,
             active: None,
         },
     )
@@ -273,7 +273,7 @@ async fn custom_policy_delete_removes_record() {
         CreateCustomPolicyParams {
             name: "ephemeral",
             description: None,
-            cel_expression: "true",
+            policy_text: "true",
             org_id: &org_id,
         },
     )
@@ -301,7 +301,7 @@ async fn custom_policy_delete_refuses_cross_org() {
         CreateCustomPolicyParams {
             name: "owned by A",
             description: None,
-            cel_expression: "true",
+            policy_text: "true",
             org_id: &org_a,
         },
     )
@@ -341,7 +341,7 @@ async fn get_active_custom_policies_filters_by_flag() {
         CreateCustomPolicyParams {
             name: "off",
             description: None,
-            cel_expression: "true",
+            policy_text: "true",
             org_id: &org_id,
         },
     )
@@ -352,7 +352,7 @@ async fn get_active_custom_policies_filters_by_flag() {
         CreateCustomPolicyParams {
             name: "on",
             description: None,
-            cel_expression: "true",
+            policy_text: "true",
             org_id: &org_id,
         },
     )
@@ -365,7 +365,7 @@ async fn get_active_custom_policies_filters_by_flag() {
         UpdateCustomPolicyParams {
             name: None,
             description: FieldUpdate::Keep,
-            cel_expression: None,
+            policy_text: None,
             active: Some(true),
         },
     )

@@ -88,6 +88,28 @@ pub fn record_credential_issuance(credential_type: &str) {
     .increment(1);
 }
 
+/// Record a posture/temporal policy decision. `policy` is the denying
+/// policy's slug (or "custom" / "unattributed"); "none" for allows.
+pub fn record_policy_decision(outcome: &str, policy: &str) {
+    metrics::counter!(
+        "vouch_policy_decisions_total",
+        "outcome" => outcome.to_string(),
+        "policy" => policy.to_string()
+    )
+    .increment(1);
+}
+
+/// Record how long a policy decision took. Split by whether the org's set
+/// reads event history: only those decisions pay the audit query and
+/// replay, whose cost grows with the user's recent activity.
+pub fn record_policy_decision_duration(seconds: f64, temporal: bool) {
+    metrics::histogram!(
+        "vouch_policy_decision_duration_seconds",
+        "temporal" => if temporal { "true" } else { "false" }
+    )
+    .record(seconds);
+}
+
 #[cfg(test)]
 #[expect(
     clippy::expect_used,

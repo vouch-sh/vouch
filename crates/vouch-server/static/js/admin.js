@@ -30,8 +30,8 @@ document.addEventListener("DOMContentLoaded", function () {
     });
   }
 
-  // CEL Playground for posture policies page
-  var playground = document.getElementById("cel-playground");
+  // Policy editor on the posture policies page
+  var playground = document.getElementById("policy-playground");
   if (!playground) return;
 
   var btnNew = document.getElementById("btn-new-policy");
@@ -43,11 +43,11 @@ document.addEventListener("DOMContentLoaded", function () {
   var descInput = document.getElementById("policy-description");
   var exprInput = document.getElementById("policy-expression");
   var playgroundTitle = document.getElementById("playground-title");
-  var validationBox = document.getElementById("cel-validation");
-  var validEl = document.getElementById("cel-valid");
-  var invalidEl = document.getElementById("cel-invalid");
-  var errorMsg = document.getElementById("cel-error-msg");
-  var testResult = document.getElementById("cel-test-result");
+  var validationBox = document.getElementById("policy-validation");
+  var validEl = document.getElementById("policy-valid");
+  var invalidEl = document.getElementById("policy-invalid");
+  var errorMsg = document.getElementById("policy-error-msg");
+  var testResult = document.getElementById("policy-test-result");
 
   var debounceTimer = null;
   var isValid = false;
@@ -127,7 +127,24 @@ document.addEventListener("DOMContentLoaded", function () {
     });
   });
 
-  // Debounced CEL validation
+  // Seed the editor from a built-in policy. Creates a new custom policy
+  // rather than editing the built-in, which is code-defined.
+  document.querySelectorAll(".btn-copy-policy").forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      hidePlayground();
+      editIdInput.value = "";
+      nameInput.value = t("admin-js-copy-of", { name: btn.dataset.name });
+      descInput.value = btn.dataset.description;
+      exprInput.value = btn.dataset.expression;
+      policyForm.action = "/admin/policies/custom";
+      showPlayground(t("admin-policies-playground-title"));
+      validateExpression(btn.dataset.expression);
+      playground.scrollIntoView({ behavior: "smooth", block: "center" });
+      nameInput.focus();
+    });
+  });
+
+  // Debounced policy validation
   exprInput.addEventListener("input", function () {
     clearTimeout(debounceTimer);
     var expr = exprInput.value.trim();
@@ -144,7 +161,7 @@ document.addEventListener("DOMContentLoaded", function () {
 
   function validateExpression(expr) {
     var body = {
-      cel_expression: expr,
+      policy_text: expr,
       test_posture: samplePosture(),
     };
     fetch("/api/v1/org/policies/validate", {
@@ -163,19 +180,27 @@ document.addEventListener("DOMContentLoaded", function () {
           btnSave.disabled = false;
           if (data.test_result) {
             var pass = data.test_result.pass;
-            testResult.textContent = pass
-              ? t("admin-js-cel-passes")
-              : t("admin-js-cel-fails");
-            testResult.className = "ml-1 " + (pass
-              ? "text-green-400"
-              : "text-yellow-400");
+            // A history-dependent policy's verdict reflects an empty test
+            // history, so the server sends a note instead of letting a bare
+            // pass/fail be misread as a check of the policy's logic.
+            if (data.test_result.reads_history) {
+              testResult.textContent = t("admin-js-policy-history-note");
+              testResult.className = "ml-1 text-gray-400";
+            } else {
+              testResult.textContent = pass
+                ? t("admin-js-policy-passes")
+                : t("admin-js-policy-fails");
+              testResult.className = "ml-1 " + (pass
+                ? "text-green-400"
+                : "text-yellow-400");
+            }
           } else {
             testResult.textContent = "";
           }
         } else {
           validEl.classList.add("hidden");
           invalidEl.classList.remove("hidden");
-          errorMsg.textContent = data.error || t("admin-js-cel-invalid");
+          errorMsg.textContent = data.error || t("admin-js-policy-invalid");
           isValid = false;
           btnSave.disabled = true;
           testResult.textContent = "";

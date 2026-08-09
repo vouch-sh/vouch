@@ -58,6 +58,9 @@ pub struct TokenExchangeParams<'a> {
     pub client_id: &'a str,
     /// RFC 9449: DPoP JWK thumbprint for sender-constrained token binding.
     pub dpop_jkt: Option<&'a str>,
+    /// Client IP from the TCP peer socket, for temporal policy correlation
+    /// (e.g. the exchange-IP-consistency policy).
+    pub client_ip: Option<std::net::IpAddr>,
     /// RFC 9396 Section 6: Authorization details for narrowing.
     pub authorization_details: Option<&'a str>,
     /// RFC 8705 Section 3: mTLS certificate thumbprint for token binding.
@@ -178,6 +181,22 @@ pub(crate) async fn exchange_token(
             OAuthErrorCode::InvalidGrant,
             "User account is deactivated",
         ));
+    }
+
+    // Temporal policy gate (WIF/agent credential path): active exchange
+    // policies — step-up recency, IP consistency, logout-invalidates —
+    // are enforced here, before any token is minted.
+    if let Some(ref org_id) = subject_user.org_id {
+        crate::services::policy::evaluate_exchange_policies(
+            state,
+            org_id,
+            &subject_user.id,
+            &subject_user.email,
+            params.client_ip,
+            params.client_id,
+            params.audience,
+        )
+        .await?;
     }
 
     let subject_email = &subject_user.email;

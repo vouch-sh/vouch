@@ -6,7 +6,7 @@ use crate::db;
 use crate::error::ServiceError;
 use crate::handlers::admin::flash;
 use crate::impl_template_response;
-use crate::services::posture;
+use crate::services::policy as posture;
 use askama::Template;
 use aws_lc_rs::digest::{self, SHA256};
 use axum::Json;
@@ -35,7 +35,9 @@ pub(crate) struct PreconfiguredPolicyRow {
     pub slug: String,
     pub name: String,
     pub description: String,
-    pub cel_expression: String,
+    pub policy_text: String,
+    /// The rule alone, for seeding a custom policy the admin can edit.
+    pub editable_text: String,
     pub active: bool,
 }
 
@@ -44,8 +46,12 @@ pub(crate) struct CustomPolicyRow {
     pub id: String,
     pub name: String,
     pub description: Option<String>,
-    pub cel_expression: String,
+    pub policy_text: String,
     pub active: bool,
+    /// Whether the stored text still validates. A policy that does not
+    /// denies every request while active, so the page flags it rather than
+    /// letting an admin discover that through locked-out users.
+    pub valid: bool,
 }
 
 /// Policies page template.
@@ -99,9 +105,10 @@ pub(crate) async fn admin_policies_page(
         .iter()
         .map(|p| PreconfiguredPolicyRow {
             slug: p.slug.to_string(),
-            name: p.name.to_string(),
-            description: p.description.to_string(),
-            cel_expression: p.cel_expression.to_string(),
+            name: p.slug.name(),
+            description: p.slug.description(),
+            policy_text: p.policy_text.to_string(),
+            editable_text: posture::as_editable(p.policy_text),
             active: active_slugs.iter().any(|s| s == p.slug.as_str()),
         })
         .collect();
@@ -114,7 +121,8 @@ pub(crate) async fn admin_policies_page(
                     id: p.id,
                     name: p.name,
                     description: p.description,
-                    cel_expression: p.cel_expression,
+                    valid: posture::validate_policy_text(&p.policy_text).is_ok(),
+                    policy_text: p.policy_text,
                     active: p.active,
                 })
                 .collect(),
@@ -233,7 +241,7 @@ pub(crate) struct CustomPolicyForm {
     pub name: String,
     #[serde(default, alias = "policy_description")]
     pub description: Option<String>,
-    pub cel_expression: String,
+    pub policy_text: String,
 }
 
 /// POST /admin/policies/custom — Create a new custom policy.
@@ -255,10 +263,10 @@ pub(crate) async fn create_custom_policy(
         ));
     }
 
-    if form.cel_expression.is_empty() || form.cel_expression.len() > 1024 {
+    if form.policy_text.is_empty() || form.policy_text.len() > 4096 {
         return Ok(redirect_error(
             jar,
-            "CEL expression must be between 1 and 1024 characters",
+            "Policy text must be between 1 and 4096 characters",
         ));
     }
 
@@ -271,13 +279,13 @@ pub(crate) async fn create_custom_policy(
         ));
     }
 
-    // Auth before CEL compilation (fixes security finding F-04)
+    // Authenticate before parsing: policy text is attacker-influenced
+    // input, so only an authenticated org admin may reach the parser.
     let (admin, org_id) =
         extract_org_admin(&state, &headers, &jar, method.as_str(), uri.path(), None).await?;
 
-    // Validate CEL syntax
-    if let Err(e) = posture::validate_cel_expression(&form.cel_expression) {
-        return Ok(redirect_error(jar, format!("Invalid CEL expression: {e}")));
+    if let Err(e) = posture::validate_policy_text(&form.policy_text) {
+        return Ok(redirect_error(jar, format!("Invalid policy: {e}")));
     }
 
     // Check total custom policy count limit
@@ -300,20 +308,20 @@ pub(crate) async fn create_custom_policy(
         db::CreateCustomPolicyParams {
             name: &form.name,
             description: description.as_deref(),
-            cel_expression: &form.cel_expression,
+            policy_text: &form.policy_text,
             org_id: &org_id,
         },
     )
     .await
     .map_err(|e| ServiceError::Internal(format!("Failed to create policy: {e}")))?;
 
-    let cel_hash = cel_expression_hash(&form.cel_expression);
+    let policy_hash = policy_text_hash(&form.policy_text);
     let data = serde_json::json!({
         "action": "custom_policy_created",
         "policy_id": policy.id,
         "policy_name": policy.name,
         "admin_user_id": admin.id,
-        "cel_expression_hash": cel_hash,
+        "policy_text_hash": policy_hash,
     });
     if let Err(e) = state
         .audit
@@ -356,19 +364,18 @@ pub(crate) async fn update_custom_policy(
         ));
     }
 
-    if form.cel_expression.is_empty() || form.cel_expression.len() > 1024 {
+    if form.policy_text.is_empty() || form.policy_text.len() > 4096 {
         return Ok(redirect_error(
             jar,
-            "CEL expression must be between 1 and 1024 characters",
+            "Policy text must be between 1 and 4096 characters",
         ));
     }
 
-    // Auth before CEL compilation
     let (admin, org_id) =
         extract_org_admin(&state, &headers, &jar, method.as_str(), uri.path(), None).await?;
 
-    if let Err(e) = posture::validate_cel_expression(&form.cel_expression) {
-        return Ok(redirect_error(jar, format!("Invalid CEL expression: {e}")));
+    if let Err(e) = posture::validate_policy_text(&form.policy_text) {
+        return Ok(redirect_error(jar, format!("Invalid policy: {e}")));
     }
 
     let description = form.description.filter(|d| !d.is_empty());
@@ -382,7 +389,7 @@ pub(crate) async fn update_custom_policy(
             description: description
                 .as_deref()
                 .map_or(db::FieldUpdate::Clear, db::FieldUpdate::Set),
-            cel_expression: Some(&form.cel_expression),
+            policy_text: Some(&form.policy_text),
             active: None,
         },
     )
@@ -397,13 +404,13 @@ pub(crate) async fn update_custom_policy(
         ));
     }
 
-    let cel_hash = cel_expression_hash(&form.cel_expression);
+    let policy_hash = policy_text_hash(&form.policy_text);
     let data = serde_json::json!({
         "action": "custom_policy_updated",
         "policy_id": &*id,
         "policy_name": form.name,
         "admin_user_id": admin.id,
-        "cel_expression_hash": cel_hash,
+        "policy_text_hash": policy_hash,
     });
     if let Err(e) = state
         .audit
@@ -537,7 +544,7 @@ pub(crate) async fn toggle_custom_policy(
         db::UpdateCustomPolicyParams {
             name: None,
             description: db::FieldUpdate::Keep,
-            cel_expression: None,
+            policy_text: None,
             active: Some(new_active),
         },
     )
@@ -557,13 +564,13 @@ pub(crate) async fn toggle_custom_policy(
     } else {
         "deactivated"
     };
-    let cel_hash = cel_expression_hash(&policy.cel_expression);
+    let policy_hash = policy_text_hash(&policy.policy_text);
     let data = serde_json::json!({
         "action": format!("custom_policy_{action}"),
         "policy_id": &*id,
         "policy_name": policy.name,
         "admin_user_id": admin.id,
-        "cel_expression_hash": cel_hash,
+        "policy_text_hash": policy_hash,
     });
     if let Err(e) = state
         .audit
@@ -588,11 +595,13 @@ pub(crate) async fn toggle_custom_policy(
     Ok(Redirect::to("/admin/policies").into_response())
 }
 
-/// SHA-256 hash of a CEL expression, truncated to 16 hex chars.
+/// SHA-256 hash of policy text, truncated to 16 hex chars. Audit
+/// events record the hash so a policy change is attributable without
+/// copying the policy itself into the log.
 ///
 /// Included in audit events to trace which version of a policy was in
 /// effect at the time of an admin action.
-fn cel_expression_hash(expression: &str) -> String {
+fn policy_text_hash(expression: &str) -> String {
     let hash = digest::digest(&SHA256, expression.as_bytes());
     hash.as_ref()
         .iter()
@@ -601,7 +610,7 @@ fn cel_expression_hash(expression: &str) -> String {
         .collect()
 }
 
-/// Response for validating a CEL expression (JSON API for CEL playground).
+/// Response for the policy editor's validate call.
 #[derive(Debug, serde::Serialize)]
 pub(crate) struct ValidateResponse {
     pub valid: bool,
@@ -611,22 +620,26 @@ pub(crate) struct ValidateResponse {
     pub test_result: Option<TestResult>,
 }
 
-/// Test result from dry-running a CEL expression against sample posture.
+/// Result of dry-running policy text against the sample device.
 #[derive(Debug, serde::Serialize)]
 pub(crate) struct TestResult {
     pub pass: bool,
+    /// True when the verdict reflects an empty event history rather than
+    /// the policy's logic. The editor renders the explanation from the
+    /// i18n catalog.
+    pub reads_history: bool,
 }
 
-/// Request to validate a CEL expression (JSON API for CEL playground).
+/// Request to validate policy text (JSON API for the policy editor).
 #[derive(Debug, Deserialize)]
 pub(crate) struct ValidateRequest {
-    pub cel_expression: String,
+    pub policy_text: String,
     #[serde(default)]
     pub test_posture: Option<vouch_common::posture::DevicePosture>,
 }
 
-/// POST /api/v1/org/policies/validate — Validate CEL expression (JSON).
-pub(crate) async fn validate_cel_api(
+/// POST /api/v1/org/policies/validate — validate policy text (JSON).
+pub(crate) async fn validate_policy_api(
     method: Method,
     uri: OriginalUri,
     State(state): State<Arc<AppState>>,
@@ -634,19 +647,20 @@ pub(crate) async fn validate_cel_api(
     jar: CookieJar,
     Json(req): Json<ValidateRequest>,
 ) -> Result<Json<ValidateResponse>, ServiceError> {
-    // Auth before CEL compilation (fixes security finding F-04)
+    // Authenticate before parsing: policy text is attacker-influenced
+    // input, so only an authenticated org admin may reach the parser.
     let _auth =
         extract_org_admin(&state, &headers, &jar, method.as_str(), uri.path(), None).await?;
 
-    if req.cel_expression.is_empty() || req.cel_expression.len() > 1024 {
+    if req.policy_text.is_empty() || req.policy_text.len() > 4096 {
         return Ok(Json(ValidateResponse {
             valid: false,
-            error: Some("CEL expression must be between 1 and 1024 characters".to_string()),
+            error: Some("Policy text must be between 1 and 4096 characters".to_string()),
             test_result: None,
         }));
     }
 
-    if let Err(e) = posture::validate_cel_expression(&req.cel_expression) {
+    if let Err(e) = posture::validate_policy_text(&req.policy_text) {
         return Ok(Json(ValidateResponse {
             valid: false,
             error: Some(format!("{e}")),
@@ -655,9 +669,15 @@ pub(crate) async fn validate_cel_api(
     }
 
     let test_result = if let Some(ref test_posture) = req.test_posture {
-        match posture::test_cel_expression(&req.cel_expression, test_posture) {
-            Ok(pass) => Some(TestResult { pass }),
-            Err(_) => Some(TestResult { pass: false }),
+        match posture::test_policy_text(&req.policy_text, test_posture) {
+            Ok(result) => Some(TestResult {
+                pass: result.pass,
+                reads_history: result.reads_history,
+            }),
+            Err(_) => Some(TestResult {
+                pass: false,
+                reads_history: false,
+            }),
         }
     } else {
         None
@@ -679,6 +699,7 @@ pub(crate) async fn validate_cel_api(
     reason = "test code: panic on assertion failure is acceptable"
 )]
 mod tests {
+    use super::{CustomPolicyRow, posture};
     use crate::db;
     use crate::test_utils::*;
     use axum::http::StatusCode;
@@ -697,16 +718,16 @@ mod tests {
         (admin, token)
     }
 
-    // ── CEL Validation API — Positive ────────────────────────────────────────
+    // ── Validation API — accepted input ──────────────────────────────────────
 
     #[tokio::test]
-    async fn test_cel_validate_valid_expression() {
+    async fn test_policy_validate_valid_expression() {
         let (app, state) = test_app().await;
         let (_admin, token) = setup_admin(&state).await;
         let auth = format!("Bearer {token}");
 
         let body = serde_json::json!({
-            "cel_expression": "posture.os == \"macos\""
+            "policy_text": "forbid (principal, action == Vouch::Action::\"IssueToken\", resource) unless { context.device.os == \"macos\" };"
         });
         let (status, resp) = http_post_json(
             &app,
@@ -719,13 +740,13 @@ mod tests {
         assert_eq!(
             status,
             StatusCode::OK,
-            "Valid CEL should return 200: {resp}"
+            "valid policy text should return 200: {resp}"
         );
         let json: serde_json::Value = serde_json::from_str(&resp).unwrap();
         assert_eq!(json["valid"], true, "valid field must be true");
         assert!(
             json.get("error").is_none() || json["error"].is_null(),
-            "no error for valid CEL"
+            "no error for valid policy text"
         );
         assert!(
             json.get("test_result").is_none() || json["test_result"].is_null(),
@@ -734,13 +755,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_cel_validate_with_test_posture() {
+    async fn test_policy_validate_with_test_posture() {
         let (app, state) = test_app().await;
         let (_admin, token) = setup_admin(&state).await;
         let auth = format!("Bearer {token}");
 
         let body = serde_json::json!({
-            "cel_expression": "posture.os == \"macos\"",
+            "policy_text": "forbid (principal, action == Vouch::Action::\"IssueToken\", resource) unless { context.device.os == \"macos\" };",
             "test_posture": {
                 "type": "device_posture",
                 "posture_version": 1,
@@ -758,7 +779,7 @@ mod tests {
         assert_eq!(
             status,
             StatusCode::OK,
-            "Valid CEL with matching posture should return 200: {resp}"
+            "valid policy with matching posture should return 200: {resp}"
         );
         let json: serde_json::Value = serde_json::from_str(&resp).unwrap();
         assert_eq!(json["valid"], true, "valid must be true");
@@ -769,14 +790,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_cel_validate_with_failing_test_posture() {
+    async fn test_policy_validate_with_failing_test_posture() {
         let (app, state) = test_app().await;
         let (_admin, token) = setup_admin(&state).await;
         let auth = format!("Bearer {token}");
 
         // Expression checks for macos but posture reports linux
         let body = serde_json::json!({
-            "cel_expression": "posture.os == \"macos\"",
+            "policy_text": "forbid (principal, action == Vouch::Action::\"IssueToken\", resource) unless { context.device.os == \"macos\" };",
             "test_posture": {
                 "type": "device_posture",
                 "posture_version": 1,
@@ -793,20 +814,20 @@ mod tests {
 
         assert_eq!(status, StatusCode::OK, "Response should be 200: {resp}");
         let json: serde_json::Value = serde_json::from_str(&resp).unwrap();
-        assert_eq!(json["valid"], true, "CEL itself is valid");
+        assert_eq!(json["valid"], true, "the policy text itself is valid");
         assert_eq!(
             json["test_result"]["pass"], false,
             "test_result.pass must be false when posture does not match"
         );
     }
 
-    // ── CEL Validation API — Negative ────────────────────────────────────────
+    // ── Validation API — rejected input ──────────────────────────────────────
 
     #[tokio::test]
-    async fn test_cel_validate_requires_auth() {
+    async fn test_policy_validate_requires_auth() {
         let (app, _state) = test_app().await;
 
-        let body = serde_json::json!({"cel_expression": "posture.os == \"macos\""});
+        let body = serde_json::json!({"policy_text": "forbid (principal, action == Vouch::Action::\"IssueToken\", resource) unless { context.device.os == \"macos\" };"});
         let (status, _resp) = http_post_json(
             &app,
             "/api/v1/org/policies/validate",
@@ -823,7 +844,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_cel_validate_requires_org_admin() {
+    async fn test_policy_validate_requires_org_admin() {
         let (app, state) = test_app().await;
         let org = create_test_org(&state.store, "example.com").await;
         let member =
@@ -832,7 +853,7 @@ mod tests {
         let token = create_test_session(&state, &member.id, &member.email, &auth_id).await;
         let auth = format!("Bearer {token}");
 
-        let body = serde_json::json!({"cel_expression": "posture.os == \"macos\""});
+        let body = serde_json::json!({"policy_text": "forbid (principal, action == Vouch::Action::\"IssueToken\", resource) unless { context.device.os == \"macos\" };"});
         let (status, _resp) = http_post_json(
             &app,
             "/api/v1/org/policies/validate",
@@ -849,12 +870,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_cel_validate_empty_expression() {
+    async fn test_policy_validate_empty_expression() {
         let (app, state) = test_app().await;
         let (_admin, token) = setup_admin(&state).await;
         let auth = format!("Bearer {token}");
 
-        let body = serde_json::json!({"cel_expression": ""});
+        let body = serde_json::json!({"policy_text": ""});
         let (status, resp) = http_post_json(
             &app,
             "/api/v1/org/policies/validate",
@@ -880,13 +901,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_cel_validate_too_long_expression() {
+    async fn test_policy_validate_too_long_expression() {
         let (app, state) = test_app().await;
         let (_admin, token) = setup_admin(&state).await;
         let auth = format!("Bearer {token}");
 
-        let long_expr = "a".repeat(1025);
-        let body = serde_json::json!({"cel_expression": long_expr});
+        let long_expr = "a".repeat(4097);
+        let body = serde_json::json!({"policy_text": long_expr});
         let (status, resp) = http_post_json(
             &app,
             "/api/v1/org/policies/validate",
@@ -903,7 +924,7 @@ mod tests {
         let json: serde_json::Value = serde_json::from_str(&resp).unwrap();
         assert_eq!(
             json["valid"], false,
-            "valid must be false for >1024 char expression"
+            "valid must be false for >4096 char expression"
         );
         assert!(
             json["error"].as_str().is_some(),
@@ -912,13 +933,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_cel_validate_invalid_syntax() {
+    async fn test_policy_validate_invalid_syntax() {
         let (app, state) = test_app().await;
         let (_admin, token) = setup_admin(&state).await;
         let auth = format!("Bearer {token}");
 
-        // Unterminated string literal is genuinely invalid CEL syntax
-        let body = serde_json::json!({"cel_expression": "posture.os == \"unterminated"});
+        // An unterminated string literal cannot parse
+        let body = serde_json::json!({"policy_text": "posture.os == \"unterminated"});
         let (status, resp) = http_post_json(
             &app,
             "/api/v1/org/policies/validate",
@@ -927,7 +948,7 @@ mod tests {
         )
         .await;
 
-        assert_eq!(status, StatusCode::OK, "Invalid CEL returns 200: {resp}");
+        assert_eq!(status, StatusCode::OK, "Invalid policy returns 200: {resp}");
         let json: serde_json::Value = serde_json::from_str(&resp).unwrap();
         assert_eq!(
             json["valid"], false,
@@ -935,7 +956,7 @@ mod tests {
         );
         assert!(
             json["error"].as_str().is_some(),
-            "error message must be present for invalid CEL"
+            "error message must be present for invalid policy text"
         );
     }
 
@@ -984,7 +1005,7 @@ mod tests {
         let (status, _body) = http_post_form(
             &app,
             "/admin/policies/custom",
-            "policy_name=Test&cel_expression=posture.os+%3D%3D+%22macos%22",
+            "policy_name=Test&policy_text=posture.os+%3D%3D+%22macos%22",
             &[("Cookie", &cookie)],
         )
         .await;
@@ -1029,7 +1050,7 @@ mod tests {
         let (status, _body) = http_post_form(
             &app,
             "/admin/policies/custom",
-            "policy_name=&cel_expression=posture.os+%3D%3D+%22macos%22",
+            "policy_name=&policy_text=posture.os+%3D%3D+%22macos%22",
             &[("Cookie", &cookie), ("Origin", origin)],
         )
         .await;
@@ -1051,7 +1072,7 @@ mod tests {
 
         let long_cel = "a".repeat(1025);
         let body = format!(
-            "policy_name=Test&cel_expression={}",
+            "policy_name=Test&policy_text={}",
             urlencoding::encode(&long_cel)
         );
         let (status, _body) = http_post_form(
@@ -1065,7 +1086,7 @@ mod tests {
         assert_eq!(
             status,
             StatusCode::SEE_OTHER,
-            "Over-length CEL must result in redirect"
+            "over-length policy text must result in redirect"
         );
     }
 
@@ -1101,7 +1122,7 @@ mod tests {
             db::CreateCustomPolicyParams {
                 name: "Toggle Me",
                 description: None,
-                cel_expression: "posture.os == \"linux\"",
+                policy_text: "posture.os == \"linux\"",
                 org_id,
             },
         )
@@ -1278,5 +1299,50 @@ mod tests {
             gone.is_none(),
             "policy must have been deleted by the OCC hook"
         );
+    }
+    /// A stored policy that fails validation is flagged on the page, so an
+    /// admin sees it before users are locked out.
+    #[tokio::test]
+    async fn test_policies_page_flags_invalid_custom_policy() {
+        let (app, state) = test_app().await;
+        let (admin, _token) = setup_admin(&state).await;
+        let org_id = admin.org_id.clone().expect("admin must have an org");
+
+        // A bare boolean expression stores fine but is not a policy.
+        db::create_custom_policy(
+            &state.store,
+            db::CreateCustomPolicyParams {
+                name: "Unparseable",
+                description: None,
+                policy_text: "posture.disk_encryption_enabled == true",
+                org_id: &org_id,
+            },
+        )
+        .await
+        .expect("create unparseable policy");
+
+        let rows: Vec<CustomPolicyRow> = db::list_custom_policies(&state.store, &org_id)
+            .await
+            .expect("list")
+            .into_iter()
+            .map(|p| CustomPolicyRow {
+                id: p.id,
+                name: p.name,
+                description: p.description,
+                valid: posture::validate_policy_text(&p.policy_text).is_ok(),
+                policy_text: p.policy_text,
+                active: p.active,
+            })
+            .collect();
+
+        let unparseable = rows
+            .iter()
+            .find(|r| r.name == "Unparseable")
+            .expect("unparseable policy row");
+        assert!(
+            !unparseable.valid,
+            "text that does not validate must be flagged on the policies page"
+        );
+        drop(app);
     }
 }

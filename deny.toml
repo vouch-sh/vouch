@@ -46,6 +46,13 @@ allow = [
 ]
 exceptions = []
 
+# The dogwood-language crate manifest omits the `license` field; the
+# repository is Apache-2.0 (LICENSE at repo root).
+[[licenses.clarify]]
+crate = "amzn-dogwood-language"
+expression = "Apache-2.0"
+license-files = []
+
 [bans]
 multiple-versions = "deny"
 wildcards = "deny"
@@ -126,6 +133,14 @@ skip = [
     { crate = "syn:>=2,<3", reason = "most proc-macros still on syn 2; async-trait pulls syn 3" },
     # tower-http 0.6 vs 0.7 (reqwest 0.13 still on 0.6; workspace pins 0.7)
     { crate = "tower-http:>=0.6,<0.7", reason = "reqwest 0.13 still on tower-http 0.6" },
+    # Duplicates pulled in by the amzn-dogwood-language git dependency
+    # (cedar-policy 4.11, rhai, mcp-schema-generator).
+    { crate = "arrayvec:>=0.5,<0.6", reason = "cedar-policy-formatter → pretty still on arrayvec 0.5" },
+    { crate = "darling:>=0.20,<0.21", reason = "sea-query-derive on darling 0.20; cedar → serde_with pulls 0.23" },
+    { crate = "darling_core:>=0.20,<0.21", reason = "transitive via darling 0.20" },
+    { crate = "darling_macro:>=0.20,<0.21", reason = "transitive via darling 0.20" },
+    { crate = "nom:>=8,<9", reason = "cedar-policy-mcp-schema-generator → iso8601 on nom 8; webauthn stack on nom 7" },
+    { crate = "nonempty:>=0.12,<0.13", reason = "dogwood-language on nonempty 0.12; tower_governor on 0.7" },
 ]
 skip-tree = [
     # windows-sys bumps frequently; many crates lag behind. Rather than tracking
@@ -137,4 +152,8 @@ skip-tree = [
 unknown-registry = "deny"
 unknown-git = "warn"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
-allow-git = []
+allow-git = [
+    # Dogwood spike (feat/dogwood-spike, never merged): reference interpreter,
+    # not published on crates.io — pinned to an exact rev in Cargo.toml.
+    "https://github.com/dogwood-policy/dogwood",
+]

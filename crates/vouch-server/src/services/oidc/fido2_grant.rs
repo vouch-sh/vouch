@@ -287,18 +287,9 @@ pub(crate) async fn exchange_fido2_assertion(
     .await
     .map_err(|e| ServiceError::Internal(format!("Failed to update counter: {e}")))?;
 
-    // 8. Log auth event (fire-and-forget)
+    // 8. Capture client metadata for the audit events below.
     let client_ip = params.client_info.client_ip;
     let client_user_agent = params.client_info.user_agent.clone();
-    let auth_event_params = AuthEventParams {
-        user_id: user.id.clone(),
-        event_type: AuthEventType::LoginSuccess,
-        authenticator_id: Some(authenticator.id.clone()),
-        success: true,
-        client: params.client_info,
-        ..AuthEventParams::default()
-    };
-    db::spawn_audit_event(&state.audit, auth_event_params, Some(user.email.clone()));
 
     // 9. Validate authorization_details if provided (RFC 9396)
     let validated_ad = params
@@ -308,15 +299,46 @@ pub(crate) async fn exchange_fido2_assertion(
 
     let ad_value = validated_ad.as_ref().map(serde_json::Value::from);
 
-    // 9b. Evaluate device posture policies (if org has active policies)
-    if let Some(ref org_id) = user.org_id {
-        crate::services::posture::evaluate_posture_policies(
-            &state.store,
+    // 9b. Evaluate device posture policies (if org has active policies).
+    // The login audit event is written AFTER this gate: a policy-denied
+    // attempt records login_failed, never login_success — temporal
+    // policies (step-up recency on token exchange) treat login_success as
+    // proof of a completed, policy-compliant hardware login.
+    if let Some(ref org_id) = user.org_id
+        && let Err(denied) = crate::services::policy::evaluate_posture_policies(
+            state,
             org_id,
+            &user.id,
+            &user.email,
+            client_ip,
+            &params.client.client.client_id,
             ad_value.as_ref(),
         )
-        .await?;
+        .await
+    {
+        let failed_event = AuthEventParams {
+            user_id: user.id.clone(),
+            event_type: AuthEventType::LoginFailed,
+            authenticator_id: Some(authenticator.id.clone()),
+            success: false,
+            failure_reason: Some("posture policy denied".to_string()),
+            client: params.client_info,
+            ..AuthEventParams::default()
+        };
+        db::spawn_audit_event(&state.audit, failed_event, Some(user.email.clone()));
+        return Err(denied);
     }
+
+    // 9c. Log the successful auth event (fire-and-forget)
+    let auth_event_params = AuthEventParams {
+        user_id: user.id.clone(),
+        event_type: AuthEventType::LoginSuccess,
+        authenticator_id: Some(authenticator.id.clone()),
+        success: true,
+        client: params.client_info,
+        ..AuthEventParams::default()
+    };
+    db::spawn_audit_event(&state.audit, auth_event_params, Some(user.email.clone()));
 
     // 10. Create OAuth access token
     let scope = params.scope.map_or_else(ScopeSet::all, ScopeSet::parse);

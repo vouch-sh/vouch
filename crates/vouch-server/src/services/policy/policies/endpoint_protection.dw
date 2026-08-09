@@ -1,0 +1,8 @@
+// Require at least one EDR agent.
+//
+// `edr_count` is derived in Rust from the detected-agent list, since policy
+// text has no arithmetic. Which agent is present is not checked; an org
+// that requires a specific vendor can add `edr.contains("crowdstrike")`.
+@id("endpoint_protection")
+forbid (principal, action == Vouch::Action::"IssueToken", resource)
+unless { context.device.edr_count > 0 };

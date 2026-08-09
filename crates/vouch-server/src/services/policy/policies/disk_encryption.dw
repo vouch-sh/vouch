@@ -1,0 +1,8 @@
+// Require full-disk encryption on the system volume.
+//
+// The CLI reports whichever technology it detects (FileVault, BitLocker,
+// LUKS); this checks only that one is enabled. A device that reports
+// nothing defaults to false and is denied.
+@id("disk_encryption")
+forbid (principal, action == Vouch::Action::"IssueToken", resource)
+unless { context.device.disk_encryption_enabled };

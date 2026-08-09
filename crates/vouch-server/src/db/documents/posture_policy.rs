@@ -4,8 +4,8 @@
 //! Two document types support posture policies:
 //! - [`PostureConfigDoc`]: Per-org config tracking which preconfigured
 //!   policy slugs are active (one per org).
-//! - [`CustomPosturePolicyDoc`]: Admin-created custom CEL policies
-//!   (zero to many per org).
+//! - [`CustomPosturePolicyDoc`]: Admin-authored Dogwood policies (zero
+//!   to many per org).
 
 use serde::{Deserialize, Serialize};
 
@@ -33,12 +33,16 @@ impl DocumentType for PostureConfigDoc {
     }
 }
 
-/// An admin-created custom posture policy with a CEL expression.
+/// An admin-created custom posture policy (Dogwood/Cedar policy text).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CustomPosturePolicyDoc {
     pub name: String,
     pub description: Option<String>,
-    pub cel_expression: String,
+    /// Dogwood policy text. Documents predating the field rename store it
+    /// as `cel_expression`; the alias keeps those readable, and text that
+    /// no longer validates denies until an admin re-authors it.
+    #[serde(alias = "cel_expression")]
+    pub policy_text: String,
     pub active: bool,
     pub org_id: String,
 }
@@ -57,5 +61,44 @@ impl DocumentType for CustomPosturePolicyDoc {
                 value: self.active.to_string(),
             },
         ]
+    }
+}
+
+#[cfg(test)]
+#[expect(
+    clippy::unwrap_used,
+    reason = "test code: panic on assertion failure is acceptable"
+)]
+mod tests {
+    use super::*;
+
+    /// Documents stored under the older `cel_expression` field name must
+    /// still deserialize.
+    #[test]
+    fn test_legacy_field_name_still_deserializes() {
+        let json = r#"{
+            "name": "old policy",
+            "description": null,
+            "cel_expression": "posture.disk_encryption_enabled == true",
+            "active": true,
+            "org_id": "org-1"
+        }"#;
+        let doc: CustomPosturePolicyDoc = serde_json::from_str(json).unwrap();
+        assert_eq!(doc.policy_text, "posture.disk_encryption_enabled == true");
+    }
+
+    /// New documents serialize under the new field name.
+    #[test]
+    fn test_serializes_as_policy_text() {
+        let doc = CustomPosturePolicyDoc {
+            name: "p".to_string(),
+            description: None,
+            policy_text: "permit (principal, action, resource);".to_string(),
+            active: false,
+            org_id: "org-1".to_string(),
+        };
+        let json = serde_json::to_value(&doc).unwrap();
+        assert!(json.get("policy_text").is_some());
+        assert!(json.get("cel_expression").is_none());
     }
 }

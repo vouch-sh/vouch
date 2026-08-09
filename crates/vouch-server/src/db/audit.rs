@@ -130,6 +130,10 @@ audit_event_kinds! {
     AdminRevokeCredentials => "admin_revoke_credentials", Keep;
     AdminRemoveUser => "admin_remove_user", Keep;
     // Posture policies
+    // A denied decision is the evidence trail for the policy gate; it is
+    // deliberately NOT ingested as temporal history (a denial feeding a
+    // count policy would amplify denials).
+    PolicyDenied => "policy_denied", AuthEvents;
     AdminPolicyToggle => "admin_policy_toggle", Keep;
     AdminPolicyCreate => "admin_policy_create", Keep;
     AdminPolicyUpdate => "admin_policy_update", Keep;
@@ -331,6 +335,24 @@ impl AuditStore {
         data_json: &str,
     ) -> Result<String> {
         self.insert_event_raw(kind, None, email_domain, None, created_at, data_json)
+            .await
+    }
+
+    /// Test-only: like [`Self::insert_event_for_test`] but with a user id,
+    /// for seeding per-principal temporal policy history.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database write fails.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub async fn insert_user_event_for_test(
+        &self,
+        kind: AuditEventKind,
+        user_id: &str,
+        created_at: jiff::Timestamp,
+        data_json: &str,
+    ) -> Result<String> {
+        self.insert_event_raw(kind, Some(user_id), None, None, created_at, data_json)
             .await
     }
 
