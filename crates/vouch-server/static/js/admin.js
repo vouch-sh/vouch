@@ -127,6 +127,23 @@ document.addEventListener("DOMContentLoaded", function () {
     });
   });
 
+  // Seed the editor from a built-in policy. Creates a new custom policy
+  // rather than editing the built-in, which is code-defined.
+  document.querySelectorAll(".btn-copy-policy").forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      hidePlayground();
+      editIdInput.value = "";
+      nameInput.value = t("admin-js-copy-of", { name: btn.dataset.name });
+      descInput.value = btn.dataset.description;
+      exprInput.value = btn.dataset.expression;
+      policyForm.action = "/admin/policies/custom";
+      showPlayground(t("admin-policies-playground-title"));
+      validateExpression(btn.dataset.expression);
+      playground.scrollIntoView({ behavior: "smooth", block: "center" });
+      nameInput.focus();
+    });
+  });
+
   // Debounced policy validation
   exprInput.addEventListener("input", function () {
     clearTimeout(debounceTimer);

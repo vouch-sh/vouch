@@ -732,6 +732,7 @@ admin-policies-platform-linux = UEFI Secure Boot enabled
 admin-policies-osrecency-linux = Not checked — use a custom policy per distro
 admin-policies-semver-explain = encodes versions as numbers for correct comparison
 admin-policies-custom = Custom Policies
+admin-policies-copy-btn = Copy to a custom policy
 admin-policies-new-btn = + New
 admin-policies-playground-title = New Custom Policy
 admin-policies-name-placeholder = e.g., Require macOS Sequoia
@@ -832,6 +833,7 @@ admin-policies-deny-message = Device posture policy '{ $policy }' not satisfied.
 
 ## Admin policies — client-side JS (admin.js, policies page)
 admin-js-edit-policy-title = Edit Custom Policy
+admin-js-copy-of = Copy of { $name }
 admin-js-policy-passes = — passes against test device
 admin-js-policy-fails = — fails against test device
 admin-js-policy-invalid = Invalid policy

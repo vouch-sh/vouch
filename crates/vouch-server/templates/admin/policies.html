@@ -85,6 +85,10 @@
                         </summary>
                         <div class="px-4 pb-3 pt-0 ml-[3.125rem]">
                             <pre class="text-gray-600 text-xs font-mono mb-2 whitespace-pre-wrap break-words">{{ policy.policy_text }}</pre>
+                            <button type="button" class="btn-copy-policy mb-2 px-2 py-1 text-xs rounded bg-gray-700 text-gray-300 hover:bg-gray-600"
+                                data-name="{{ policy.name }}"
+                                data-description="{{ policy.description }}"
+                                data-expression="{{ policy.editable_text }}">{{ self.tr("admin-policies-copy-btn") }}</button>
                             {% if policy.slug == "disk_encryption" %}
                             <div class="text-xs text-gray-500 space-y-1">
                                 <p class="flex items-center gap-1.5">{{ os::apple("w-3.5 h-3.5 text-gray-500 shrink-0") }} {{ self.tr("admin-policies-disk-macos") }}</p>

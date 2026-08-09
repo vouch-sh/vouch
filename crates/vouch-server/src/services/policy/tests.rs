@@ -1185,3 +1185,25 @@ fn test_ingestion_reads_the_keys_writers_serialize() {
         "issuance history must carry the client address the writer stored"
     );
 }
+
+/// The editable copy of a built-in drops its explanatory header and `@id`,
+/// leaving a rule an admin can adapt without inheriting the built-in's
+/// identity or its maintenance notes. What remains must still validate.
+#[test]
+fn test_as_editable_strips_comments_and_id() {
+    for policy in PRECONFIGURED_POLICIES {
+        let editable = as_editable(policy.policy_text);
+        assert!(
+            !editable.contains("//") && !editable.contains("@id("),
+            "'{}' must copy without comments or an id: {editable}",
+            policy.slug
+        );
+        assert!(
+            editable.starts_with("forbid") || editable.starts_with("permit"),
+            "'{}' must copy as a rule: {editable}",
+            policy.slug
+        );
+        validate_policy_text(&editable)
+            .unwrap_or_else(|e| panic!("copy of '{}' must validate: {e:?}", policy.slug));
+    }
+}

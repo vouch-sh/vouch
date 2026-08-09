@@ -366,6 +366,7 @@ pub(crate) const JS_I18N_KEYS: &[&str] = &[
     "admin-js-policy-fails",
     "admin-js-policy-invalid",
     "admin-js-policy-passes",
+    "admin-js-copy-of",
     "admin-js-edit-policy-title",
     "admin-js-policy-history-note",
     "admin-policies-playground-title",

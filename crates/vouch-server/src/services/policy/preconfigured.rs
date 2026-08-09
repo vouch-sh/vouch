@@ -249,6 +249,25 @@ pub(crate) const PRECONFIGURED_POLICIES: &[PreconfiguredPolicy] = &[
     },
 ];
 
+/// A built-in's text prepared as the starting point for a custom policy.
+///
+/// Drops the explanatory header, which describes the built-in's intent and
+/// maintenance rather than the admin's copy, and the `@id` annotation, so
+/// the copy does not claim the built-in's identity.
+#[must_use]
+pub(crate) fn as_editable(policy_text: &str) -> String {
+    policy_text
+        .lines()
+        .filter(|line| {
+            let trimmed = line.trim_start();
+            !trimmed.starts_with("//") && !trimmed.starts_with("@id(")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_string()
+}
+
 /// Check if a slug string is a valid preconfigured policy.
 #[must_use]
 pub(crate) fn is_valid_preconfigured_slug(slug: &str) -> bool {

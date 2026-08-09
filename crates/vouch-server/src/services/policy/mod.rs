@@ -30,7 +30,8 @@ pub(crate) mod schema;
 mod tests;
 
 pub(crate) use preconfigured::{
-    MAX_ACTIVE_POLICIES, PRECONFIGURED_POLICIES, PreconfiguredSlug, is_valid_preconfigured_slug,
+    MAX_ACTIVE_POLICIES, PRECONFIGURED_POLICIES, PreconfiguredSlug, as_editable,
+    is_valid_preconfigured_slug,
 };
 pub(crate) use remediation::remediation_for_slug;
 

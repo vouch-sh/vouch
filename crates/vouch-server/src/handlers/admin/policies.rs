@@ -36,6 +36,8 @@ pub(crate) struct PreconfiguredPolicyRow {
     pub name: String,
     pub description: String,
     pub policy_text: String,
+    /// The rule alone, for seeding a custom policy the admin can edit.
+    pub editable_text: String,
     pub active: bool,
 }
 
@@ -106,6 +108,7 @@ pub(crate) async fn admin_policies_page(
             name: p.slug.name(),
             description: p.slug.description(),
             policy_text: p.policy_text.to_string(),
+            editable_text: posture::as_editable(p.policy_text),
             active: active_slugs.iter().any(|s| s == p.slug.as_str()),
         })
         .collect();
