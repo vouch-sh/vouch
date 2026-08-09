@@ -32,7 +32,9 @@ pub(crate) use remediation::remediation_for_slug;
 
 use crate::db;
 use crate::error::{OAuthErrorCode, ServiceError, ServiceResult};
-use dogwood_language::{Authorizer, Decision, Event, LoweredPolicySet, Validator, Value};
+use dogwood_language::{
+    Authorizer, Decision, Event, EventBuilder, LoweredPolicySet, Validator, Value,
+};
 use preconfigured::BASE_ALLOW;
 use vouch_common::posture::DevicePosture;
 
@@ -54,19 +56,28 @@ fn compose(policy_texts: &[&str]) -> String {
     composed
 }
 
+/// Write the posture fields into the request-only `device` context group.
+/// The builder sets one `group.field` at a time, so the record's fields are
+/// written individually — policies read `context.device.<field>`.
+fn with_device_context(builder: EventBuilder, posture: &DevicePosture) -> EventBuilder {
+    let mut builder = builder;
+    for (name, value) in posture_input::posture_fields(posture) {
+        builder = builder.request_context("device", &name, value);
+    }
+    builder
+}
+
 /// Build the `IssueToken` decision event for one evaluation.
 fn issue_token_request(posture: &DevicePosture, user_id: &str, org_id: &str) -> Event {
-    let posture_value = posture_input::posture_record(posture);
-    Event::builder("Vouch::Action::IssueToken", "request")
+    let builder = Event::builder("Vouch::Action::IssueToken", "request")
         .timestamp(0)
         .principal_for("Vouch::User", user_id)
         .resource_for("Vouch::Org", org_id)
-        .request_context("device", "posture", posture_value)
         .request_context("input", "ip", Value::String(String::new()))
         .request_context("input", "client_id", Value::String(String::new()))
         .field("input", "ip", Value::String(String::new()))
-        .field("input", "client_id", Value::String(String::new()))
-        .build()
+        .field("input", "client_id", Value::String(String::new()));
+    with_device_context(builder, posture).build()
 }
 
 /// Lower a composed policy set and decide the given event with a fresh
@@ -219,11 +230,10 @@ fn decision_event(kind: &DecisionKind<'_>, user_id: &str, org_id: &str, ts: i64)
             // carries no posture, so it must not be temporally matchable.
             // `input` fields go to both bags — the Cedar request context
             // and the logged record temporal predicates match against.
-            Event::builder("Vouch::Action::IssueToken", "request")
+            let builder = Event::builder("Vouch::Action::IssueToken", "request")
                 .timestamp(ts)
                 .principal_for("Vouch::User", user_id)
                 .resource_for("Vouch::Org", org_id)
-                .request_context("device", "posture", posture_input::posture_record(posture))
                 .request_context("input", "ip", Value::String(ip.clone()))
                 .request_context(
                     "input",
@@ -235,8 +245,8 @@ fn decision_event(kind: &DecisionKind<'_>, user_id: &str, org_id: &str, ts: i64)
                     "input",
                     "client_id",
                     Value::String((*client_id).to_string()),
-                )
-                .build()
+                );
+            with_device_context(builder, posture).build()
         }
         DecisionKind::ExchangeToken {
             ip,

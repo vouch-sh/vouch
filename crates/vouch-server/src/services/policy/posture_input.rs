@@ -57,12 +57,14 @@ fn long_value(value: Option<u64>) -> Value {
     Value::Int(value.map_or(0, |v| i64::try_from(v).unwrap_or(i64::MAX)))
 }
 
-/// Build the `posture` record for `context.input.posture`.
+/// Build the posture fields for the `device` context group, as
+/// `(field name, value)` pairs — the event builder writes one
+/// `group.field` at a time, so policies read `context.device.<field>`.
 ///
 /// The exhaustive destructuring is deliberate: adding a field to
 /// `DevicePosture` breaks this function at compile time, forcing the schema
 /// (`vouch.cedarschema`) and the parity test to be updated with it.
-pub(crate) fn posture_record(posture: &DevicePosture) -> Value {
+pub(crate) fn posture_fields(posture: &DevicePosture) -> BTreeMap<String, Value> {
     let DevicePosture {
         detail_type: _,
         posture_version: _,
@@ -194,5 +196,5 @@ pub(crate) fn posture_record(posture: &DevicePosture) -> Value {
     record.insert("cli_version".to_string(), string_value(cli_version));
     record.insert("collected_at".to_string(), string_value(collected_at));
 
-    Value::Object(record)
+    record
 }

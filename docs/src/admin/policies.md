@@ -98,10 +98,10 @@ if it is macOS 14.0.0 or later, **or** Windows 10.0.26100 (24H2) or later.
 > ```cedar
 > forbid (principal, action == Vouch::Action::"IssueToken", resource)
 > unless {
->     (context.device.posture.os == "macos" && context.device.posture.os_version_num >= 14000000) ||
->     (context.device.posture.os == "windows" && context.device.posture.os_build_num >= 26100) ||
->     (context.device.posture.os == "linux" && context.device.posture.os_distribution == "ubuntu"
->         && context.device.posture.os_version_num >= 22004000)
+>     (context.device.os == "macos" && context.device.os_version_num >= 14000000) ||
+>     (context.device.os == "windows" && context.device.os_build_num >= 26100) ||
+>     (context.device.os == "linux" && context.device.os_distribution == "ubuntu"
+>         && context.device.os_version_num >= 22004000)
 > };
 > ```
 
@@ -114,34 +114,34 @@ were passing yesterday.
 For anything the built-ins do not cover, write a
 [Dogwood/Cedar](https://dogwood-policy.github.io/dogwood/) `forbid` rule. The rule fires — and the
 token request is denied — when its `unless` requirement is **not** met. Posture attributes live at
-`context.device.posture`.
+`context.posture`.
 
 ```cedar
 // Require BitLocker specifically, not just any disk encryption
 forbid (principal, action == Vouch::Action::"IssueToken", resource)
-unless { context.device.posture.disk_encryption_technology == "bitlocker" };
+unless { context.device.disk_encryption_technology == "bitlocker" };
 
 // Require a recent Ubuntu
 forbid (principal, action == Vouch::Action::"IssueToken", resource)
-unless { context.device.posture.os_distribution == "ubuntu"
-         && context.device.posture.os_version_num >= 22004000 };
+unless { context.device.os_distribution == "ubuntu"
+         && context.device.os_version_num >= 22004000 };
 
 // Screen lock must engage within five minutes
 forbid (principal, action == Vouch::Action::"IssueToken", resource)
-unless { context.device.posture.screen_lock_enabled
-         && context.device.posture.screen_lock_idle_timeout_secs <= 300 };
+unless { context.device.screen_lock_enabled
+         && context.device.screen_lock_idle_timeout_secs <= 300 };
 
 // Require both an EDR agent and MDM enrollment
 forbid (principal, action == Vouch::Action::"IssueToken", resource)
-unless { context.device.posture.edr_count > 0 && context.device.posture.mdm_count > 0 };
+unless { context.device.edr_count > 0 && context.device.mdm_count > 0 };
 
 // Apply a rule only on macOS, passing every other platform
 forbid (principal, action == Vouch::Action::"IssueToken", resource)
-unless { context.device.posture.os != "macos" || context.device.posture.sip_enabled };
+unless { context.device.os != "macos" || context.device.sip_enabled };
 ```
 
 That last pattern matters: attributes are populated per platform, so an unqualified rule applies
-everywhere. Guard on `context.device.posture.os` when a requirement is platform-specific.
+everywhere. Guard on `context.device.os` when a requirement is platform-specific.
 
 ### Writing a history policy
 
@@ -175,7 +175,7 @@ these against a real account in a staging organization.
 ### Rewriting a CEL policy
 
 CEL expressions were bare booleans; Dogwood policies are `forbid` rules, and posture attributes
-moved from `posture.*` to `context.device.posture.*`. A CEL rule that read:
+moved from `posture.*` to `context.device.*`. A CEL rule that read:
 
 ```
 posture.disk_encryption_technology == "bitlocker"
@@ -185,12 +185,12 @@ becomes:
 
 ```cedar
 forbid (principal, action == Vouch::Action::"IssueToken", resource)
-unless { context.device.posture.disk_encryption_technology == "bitlocker" };
+unless { context.device.disk_encryption_technology == "bitlocker" };
 ```
 
 Note the inversion: CEL expressions stated what must be **true** to pass; a `forbid … unless` rule
 states the same requirement, and denies when it is not met. Version comparisons that used
-`semver(posture.os_version)` use the precomputed `context.device.posture.os_version_num` field.
+`semver(posture.os_version)` use the precomputed `context.device.os_version_num` field.
 
 ### Available attributes
 
@@ -222,7 +222,7 @@ missing field. The corollary: **a missing attribute looks identical to a negativ
 
 **Sets** (default empty)
 
-`edr`, `mdm` — test membership with `context.device.posture.edr.contains("crowdstrike")`
+`edr`, `mdm` — test membership with `context.device.edr.contains("crowdstrike")`
 
 ### Version comparison
 
@@ -230,7 +230,7 @@ Compare `os_version_num` (never the `os_version` string) — lexical comparison 
 before `"9.0.0"`, the numeric encoding does not.
 
 ```cedar
-context.device.posture.os_version_num >= 14000000
+context.device.os_version_num >= 14000000
 ```
 
 ## Testing an expression before you enable it

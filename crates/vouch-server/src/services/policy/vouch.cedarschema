@@ -7,10 +7,9 @@
 // Context groups: only `input` is mirrored into the temporal event record,
 // so every field declared there MUST be written by the ingestion mapping
 // (services/policy/events.rs) — the parity test enforces this. Device
-// posture lives in its own request-only `device` group precisely because
-// audit history carries no posture: a temporal predicate over posture is
-// then a schema error at save time, not a policy that silently never
-// matches.
+// posture is its own request-only `device` group precisely because audit
+// history carries no posture: a temporal predicate over posture is then a
+// schema error at save time, not a policy that silently never matches.
 //
 // History actions (ingested from audit_events as `::response` events, never
 // decision points): Login, Logout, RevokeToken, IssueCredential. IssueToken
@@ -58,7 +57,6 @@ namespace Vouch {
     collected_at: String
   };
 
-  type DeviceContext = { posture: Posture };
   type IssueTokenInput = { ip: String, client_id: String };
   type ExchangeTokenInput = { audience: String, client_id: String, ip: String };
   type LoginInput = { ip: String, user_agent: String };
@@ -73,7 +71,7 @@ namespace Vouch {
   action "IssueToken" appliesTo {
     principal: [User],
     resource: [Org],
-    context: { input: IssueTokenInput, device: DeviceContext }
+    context: { input: IssueTokenInput, device: Posture }
   };
   action "ExchangeToken" appliesTo {
     principal: [User],

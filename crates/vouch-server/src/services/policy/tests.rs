@@ -94,13 +94,10 @@ fn requirement(expr: &str) -> String {
 
 #[test]
 fn test_validate_policy_text_valid() {
+    validate_policy_text(&requirement("context.device.disk_encryption_enabled")).unwrap();
+    validate_policy_text(&requirement("context.device.edr_count > 0")).unwrap();
     validate_policy_text(&requirement(
-        "context.device.posture.disk_encryption_enabled",
-    ))
-    .unwrap();
-    validate_policy_text(&requirement("context.device.posture.edr_count > 0")).unwrap();
-    validate_policy_text(&requirement(
-        "context.device.posture.os == \"macos\" || context.device.posture.os == \"linux\"",
+        "context.device.os == \"macos\" || context.device.os == \"linux\"",
     ))
     .unwrap();
 }
@@ -111,9 +108,7 @@ fn test_validate_policy_text_invalid() {
     assert!(validate_policy_text("").is_err());
     assert!(validate_policy_text("   ").is_err());
     // Unterminated string literal
-    assert!(
-        validate_policy_text(&requirement("context.device.posture.os == \"unterminated")).is_err()
-    );
+    assert!(validate_policy_text(&requirement("context.device.os == \"unterminated")).is_err());
     // Truncated policy
     assert!(validate_policy_text("forbid (principal, action ==").is_err());
     // Leftover CEL text from before the migration must be rejected
@@ -124,9 +119,7 @@ fn test_validate_policy_text_invalid() {
 fn test_validate_policy_text_catches_typoed_field() {
     // The CEL engine silently evaluated unknown fields to a runtime miss;
     // the Dogwood validator reports them as type errors.
-    let result = validate_policy_text(&requirement(
-        "context.device.posture.disk_encryption_enabledz",
-    ));
+    let result = validate_policy_text(&requirement("context.device.disk_encryption_enabledz"));
     assert!(result.is_err(), "typo'd posture field must fail validation");
 }
 
@@ -191,7 +184,7 @@ fn test_none_fields_default_to_false() {
 #[test]
 fn test_none_string_fields_default_to_empty() {
     assert!(evaluate_one(
-        &requirement("context.device.posture.os == \"\""),
+        &requirement("context.device.os == \"\""),
         &minimal_posture()
     ));
 }
@@ -338,7 +331,7 @@ fn test_all_preconfigured_pass_with_full_posture() {
 #[test]
 fn test_test_policy_text_pass() {
     let result = test_policy_text(
-        &requirement("context.device.posture.disk_encryption_enabled"),
+        &requirement("context.device.disk_encryption_enabled"),
         &sample_posture(),
     )
     .unwrap();
@@ -352,7 +345,7 @@ fn test_test_policy_text_pass() {
 #[test]
 fn test_test_policy_text_fail() {
     let result = test_policy_text(
-        &requirement("context.device.posture.disk_encryption_enabled"),
+        &requirement("context.device.disk_encryption_enabled"),
         &minimal_posture(),
     )
     .unwrap();
@@ -365,7 +358,7 @@ fn test_test_policy_text_invalid() {
     assert!(test_policy_text("", &posture).is_err());
     assert!(
         test_policy_text(
-            &requirement("context.device.posture.os == \"unterminated"),
+            &requirement("context.device.os == \"unterminated"),
             &posture
         )
         .is_err()
@@ -386,7 +379,7 @@ fn test_custom_permit_cannot_widen_access() {
     // ...but an active forbid still denies even alongside a custom permit.
     let contradictory = format!(
         "{permit_everything}\n\n{}",
-        requirement("context.device.posture.disk_encryption_enabled")
+        requirement("context.device.disk_encryption_enabled")
     );
     assert!(
         !test_policy_text(&contradictory, &minimal_posture())
@@ -466,19 +459,19 @@ fn test_semver_num_encoding() {
 fn test_semver_comparison_via_policy() {
     // 15.3.1 >= 14.0.0 (passes the lenient N-2 OsRecency floor)
     assert!(evaluate_one(
-        &requirement("context.device.posture.os_version_num >= 14000000"),
+        &requirement("context.device.os_version_num >= 14000000"),
         &sample_posture()
     ));
     // 15.3.1 < 16.0.0 (does not meet a hypothetical next-year floor)
     assert!(evaluate_one(
-        &requirement("context.device.posture.os_version_num < 16000000"),
+        &requirement("context.device.os_version_num < 16000000"),
         &sample_posture()
     ));
     // 9.0.0 must NOT be >= 14.0.0 (unlike lexicographic comparison)
     let mut old = minimal_posture();
     old.os_version = Some("9.0.0".to_string());
     assert!(!evaluate_one(
-        &requirement("context.device.posture.os_version_num >= 14000000"),
+        &requirement("context.device.os_version_num >= 14000000"),
         &old
     ));
 }
@@ -515,100 +508,70 @@ fn test_extract_device_posture_no_posture_entry() {
 
 /// One schema-validated check per Posture record field, true for
 /// `full_posture()`. Together with the exhaustive destructuring in
-/// `posture_record`, this guarantees every `DevicePosture` field (plus the
+/// `posture_fields`, this guarantees every `DevicePosture` field (plus the
 /// four derived fields) is reachable — and correctly valued — from policy
 /// text.
 const POSTURE_FIELD_CHECKS: &[(&str, &str)] = &[
-    ("os", "context.device.posture.os == \"macos\""),
-    (
-        "os_version",
-        "context.device.posture.os_version == \"15.3.1\"",
-    ),
+    ("os", "context.device.os == \"macos\""),
+    ("os_version", "context.device.os_version == \"15.3.1\""),
     (
         "os_version_num",
-        "context.device.posture.os_version_num == 15003001",
+        "context.device.os_version_num == 15003001",
     ),
     (
         "os_distribution",
-        "context.device.posture.os_distribution == \"macos\"",
+        "context.device.os_distribution == \"macos\"",
     ),
-    ("os_build", "context.device.posture.os_build == \"26100\""),
-    (
-        "os_build_num",
-        "context.device.posture.os_build_num == 26100",
-    ),
-    ("arch", "context.device.posture.arch == \"aarch64\""),
+    ("os_build", "context.device.os_build == \"26100\""),
+    ("os_build_num", "context.device.os_build_num == 26100"),
+    ("arch", "context.device.arch == \"aarch64\""),
     (
         "disk_encryption_enabled",
-        "context.device.posture.disk_encryption_enabled",
+        "context.device.disk_encryption_enabled",
     ),
     (
         "disk_encryption_technology",
-        "context.device.posture.disk_encryption_technology == \"filevault\"",
+        "context.device.disk_encryption_technology == \"filevault\"",
     ),
-    (
-        "screen_lock_enabled",
-        "context.device.posture.screen_lock_enabled",
-    ),
+    ("screen_lock_enabled", "context.device.screen_lock_enabled"),
     (
         "screen_lock_idle_timeout_secs",
-        "context.device.posture.screen_lock_idle_timeout_secs == 300",
+        "context.device.screen_lock_idle_timeout_secs == 300",
     ),
-    (
-        "firewall_enabled",
-        "context.device.posture.firewall_enabled",
-    ),
+    ("firewall_enabled", "context.device.firewall_enabled"),
     (
         "firewall_technology",
-        "context.device.posture.firewall_technology == \"application firewall\"",
+        "context.device.firewall_technology == \"application firewall\"",
     ),
-    (
-        "secure_boot_enabled",
-        "context.device.posture.secure_boot_enabled",
-    ),
-    ("sip_enabled", "context.device.posture.sip_enabled"),
-    ("tpm_present", "context.device.posture.tpm_present"),
-    (
-        "tpm_version",
-        "context.device.posture.tpm_version == \"2.0\"",
-    ),
-    (
-        "auto_update_enabled",
-        "context.device.posture.auto_update_enabled",
-    ),
+    ("secure_boot_enabled", "context.device.secure_boot_enabled"),
+    ("sip_enabled", "context.device.sip_enabled"),
+    ("tpm_present", "context.device.tpm_present"),
+    ("tpm_version", "context.device.tpm_version == \"2.0\""),
+    ("auto_update_enabled", "context.device.auto_update_enabled"),
     (
         "auto_update_technology",
-        "context.device.posture.auto_update_technology == \"softwareupdate\"",
+        "context.device.auto_update_technology == \"softwareupdate\"",
     ),
-    ("uptime_secs", "context.device.posture.uptime_secs == 86400"),
+    ("uptime_secs", "context.device.uptime_secs == 86400"),
     (
         "access_control_enforcing",
-        "context.device.posture.access_control_enforcing",
+        "context.device.access_control_enforcing",
     ),
     (
         "access_control_technology",
-        "context.device.posture.access_control_technology == \"gatekeeper\"",
+        "context.device.access_control_technology == \"gatekeeper\"",
     ),
-    (
-        "edr",
-        "context.device.posture.edr.contains(\"crowdstrike\")",
-    ),
-    ("edr_count", "context.device.posture.edr_count == 1"),
-    ("mdm", "context.device.posture.mdm.contains(\"jamf\")"),
-    ("mdm_count", "context.device.posture.mdm_count == 1"),
-    ("elevated", "context.device.posture.elevated == false"),
-    ("tty", "context.device.posture.tty"),
-    (
-        "parent_process",
-        "context.device.posture.parent_process == \"zsh\"",
-    ),
-    (
-        "cli_version",
-        "context.device.posture.cli_version == \"1.2.3\"",
-    ),
+    ("edr", "context.device.edr.contains(\"crowdstrike\")"),
+    ("edr_count", "context.device.edr_count == 1"),
+    ("mdm", "context.device.mdm.contains(\"jamf\")"),
+    ("mdm_count", "context.device.mdm_count == 1"),
+    ("elevated", "context.device.elevated == false"),
+    ("tty", "context.device.tty"),
+    ("parent_process", "context.device.parent_process == \"zsh\""),
+    ("cli_version", "context.device.cli_version == \"1.2.3\""),
     (
         "collected_at",
-        "context.device.posture.collected_at == \"2026-08-08t00:00:00z\"",
+        "context.device.collected_at == \"2026-08-08t00:00:00z\"",
     ),
 ];
 
@@ -617,10 +580,7 @@ fn test_posture_field_parity() {
     let posture = full_posture();
 
     // Completeness: the check list covers exactly the record's fields.
-    let record = posture_input::posture_record(&posture);
-    let dogwood_language::Value::Object(record) = record else {
-        panic!("posture_record must build an object");
-    };
+    let record = posture_input::posture_fields(&posture);
     let checked: std::collections::BTreeSet<&str> = POSTURE_FIELD_CHECKS
         .iter()
         .map(|(field, _)| *field)
