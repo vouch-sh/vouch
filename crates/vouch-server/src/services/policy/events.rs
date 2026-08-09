@@ -135,12 +135,14 @@ pub(crate) fn history_event(row: &AuditRow, org_id: &str, min_ts: i64) -> Option
             ],
         ),
         AuditEventKind::OauthTokenRevoked => ("Vouch::Action::RevokeToken", Vec::new()),
+        // Payload is `TokenExchangeDetails`: `client_id` / `audience`, and
+        // no client address (the exchange audit record carries none).
         AuditEventKind::TokenExchange => (
             "Vouch::Action::ExchangeToken",
             vec![
                 ("input", "ip", string_or_empty("client_ip")),
-                ("input", "client_id", string_or_empty("oauth_client_id")),
-                ("input", "audience", string_or_empty("requested_audience")),
+                ("input", "client_id", string_or_empty("client_id")),
+                ("input", "audience", string_or_empty("audience")),
             ],
         ),
         AuditEventKind::SshCredential => (

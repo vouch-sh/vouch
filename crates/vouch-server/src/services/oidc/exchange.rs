@@ -191,6 +191,7 @@ pub(crate) async fn exchange_token(
             state,
             org_id,
             &subject_user.id,
+            &subject_user.email,
             params.client_ip,
             params.client_id,
             params.audience,

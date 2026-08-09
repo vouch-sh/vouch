@@ -309,6 +309,7 @@ pub(crate) async fn exchange_fido2_assertion(
             state,
             org_id,
             &user.id,
+            &user.email,
             client_ip,
             &params.client.client.client_id,
             ad_value.as_ref(),

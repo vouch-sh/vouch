@@ -338,7 +338,15 @@ fn run_precheck(composed: &str, active_custom: &[db::CustomPosturePolicy]) -> en
                     report.validation_errors().map(|e| e.to_string()).collect();
                 if errors.is_empty() {
                     // A set with no temporal leaves needs no event history.
-                    Ok(!lowered.is_self_contained_cedar())
+                    Ok(engine::Precheck::Ok {
+                        uses_temporal: !lowered.is_self_contained_cedar(),
+                        // Posture is only demanded when some policy reads
+                        // it. Checking the composed text is deliberate: a
+                        // miss means posture arrives absent, its typed
+                        // defaults apply, and the policy denies — the safe
+                        // direction.
+                        reads_device: composed.contains("context.device"),
+                    })
                 } else {
                     Err(format!(
                         "composed set failed validation: {}",
@@ -347,7 +355,7 @@ fn run_precheck(composed: &str, active_custom: &[db::CustomPosturePolicy]) -> en
                 }
             });
     let composed_error = match composed_result {
-        Ok(uses_temporal) => return engine::Precheck::Ok { uses_temporal },
+        Ok(verdict) => return verdict,
         Err(e) => e,
     };
     for custom in active_custom {
@@ -380,6 +388,7 @@ async fn record_denial(
     state: &crate::AppState,
     org_id: &str,
     user_id: &str,
+    user_email: &str,
     kind: &DecisionKind<'_>,
     policy: &str,
 ) {
@@ -397,7 +406,10 @@ async fn record_denial(
         .insert_event(
             db::AuditEventKind::PolicyDenied,
             Some(user_id),
-            None,
+            // The email sets `email_domain`, which is how the org audit
+            // view scopes rows — without it a denial is invisible to the
+            // admin it is evidence for.
+            Some(user_email),
             &data.to_string(),
         )
         .await
@@ -435,15 +447,31 @@ fn deny_error(denying: Option<engine::DenyingPolicy>, os: Option<&str>) -> Servi
 /// fingerprint), fetch the requesting principal's 24h history from the
 /// shared audit table, and evaluate with a fresh authorizer. Querying at
 /// decision time is what makes the result correct across replicas.
+/// Who is asking for what, for one decision.
+struct DecisionRequest<'a> {
+    org_id: &'a str,
+    user_id: &'a str,
+    /// Sets `email_domain` on a denial record, which is how the org audit
+    /// view scopes rows.
+    user_email: &'a str,
+    kind: DecisionKind<'a>,
+    /// Reported OS, for platform-specific remediation text.
+    os: Option<&'a str>,
+}
+
 async fn authorize_decision(
     state: &crate::AppState,
-    org_id: &str,
-    user_id: &str,
+    request: DecisionRequest<'_>,
     active_slugs: &[String],
     active_custom: &[db::CustomPosturePolicy],
-    kind: DecisionKind<'_>,
-    os: Option<&str>,
 ) -> ServiceResult<()> {
+    let DecisionRequest {
+        org_id,
+        user_id,
+        user_email,
+        kind,
+        os,
+    } = request;
     let custom_pairs: Vec<(String, String)> = active_custom
         .iter()
         .map(|c| (c.id.clone(), c.policy_text.clone()))
@@ -455,7 +483,10 @@ async fn authorize_decision(
     let needs_history = match state.policy.precheck(org_id, fingerprint, || {
         run_precheck(&set.composed, active_custom)
     }) {
-        engine::Precheck::Ok { uses_temporal } => uses_temporal,
+        engine::Precheck::Ok {
+            uses_temporal,
+            reads_device: _,
+        } => uses_temporal,
         engine::Precheck::BrokenCustom(name) => {
             crate::infra::metrics::record_policy_decision("deny", &name);
             return Err(deny_error(Some(engine::DenyingPolicy::Custom { name }), os));
@@ -518,7 +549,7 @@ async fn authorize_decision(
                 None => "unattributed",
             };
             crate::infra::metrics::record_policy_decision("deny", label);
-            record_denial(state, org_id, user_id, &kind, label).await;
+            record_denial(state, org_id, user_id, user_email, &kind, label).await;
             Err(deny_error(denying, os))
         }
     }
@@ -543,6 +574,7 @@ pub(crate) async fn evaluate_posture_policies(
     state: &crate::AppState,
     org_id: &str,
     user_id: &str,
+    user_email: &str,
     client_ip: Option<std::net::IpAddr>,
     client_id: &str,
     authorization_details: Option<&serde_json::Value>,
@@ -557,15 +589,26 @@ pub(crate) async fn evaluate_posture_policies(
         return Ok(());
     }
 
-    // Posture data is demanded only when an active policy actually reads
-    // it: any posture-requiring preconfigured slug, or any custom policy
-    // (assumed posture-targeting). Orgs running only temporal policies do
-    // not require clients to send posture.
-    let posture_required = !active_custom.is_empty()
-        || active_slugs
-            .iter()
-            .filter_map(|s| s.parse::<PreconfiguredSlug>().ok())
-            .any(PreconfiguredSlug::requires_posture);
+    // Posture is demanded only when some active policy reads it. The
+    // precheck answers that for the composed set, custom policies
+    // included, so an org whose rules are purely temporal — or whose
+    // custom text only gates token exchange — does not force every client
+    // to collect and send posture.
+    let custom_pairs: Vec<(String, String)> = active_custom
+        .iter()
+        .map(|c| (c.id.clone(), c.policy_text.clone()))
+        .collect();
+    let set = compose_org_set(&active_slugs, &active_custom);
+    let posture_required = match state.policy.precheck(
+        org_id,
+        engine::fingerprint(&active_slugs, &custom_pairs),
+        || run_precheck(&set.composed, &active_custom),
+    ) {
+        engine::Precheck::Ok { reads_device, .. } => reads_device,
+        // A set that does not precheck denies anyway; demanding posture
+        // first would only replace that denial with a worse message.
+        engine::Precheck::BrokenCustom(_) | engine::Precheck::EngineError(_) => false,
+    };
     let posture = if posture_required {
         extract_device_posture(authorization_details)?
     } else {
@@ -587,16 +630,19 @@ pub(crate) async fn evaluate_posture_policies(
     );
     authorize_decision(
         state,
-        org_id,
-        user_id,
+        DecisionRequest {
+            org_id,
+            user_id,
+            user_email,
+            kind: DecisionKind::IssueToken {
+                posture: &posture,
+                ip: client_ip,
+                client_id,
+            },
+            os: os.as_deref(),
+        },
         &active_slugs,
         &active_custom,
-        DecisionKind::IssueToken {
-            posture: &posture,
-            ip: client_ip,
-            client_id,
-        },
-        os.as_deref(),
     )
     .await
 }
@@ -615,6 +661,7 @@ pub(crate) async fn evaluate_exchange_policies(
     state: &crate::AppState,
     org_id: &str,
     user_id: &str,
+    user_email: &str,
     client_ip: Option<std::net::IpAddr>,
     client_id: &str,
     audience: Option<&str>,
@@ -630,16 +677,19 @@ pub(crate) async fn evaluate_exchange_policies(
     }
     authorize_decision(
         state,
-        org_id,
-        user_id,
+        DecisionRequest {
+            org_id,
+            user_id,
+            user_email,
+            kind: DecisionKind::ExchangeToken {
+                ip: client_ip,
+                client_id,
+                audience,
+            },
+            os: None,
+        },
         &active_slugs,
         &active_custom,
-        DecisionKind::ExchangeToken {
-            ip: client_ip,
-            client_id,
-            audience,
-        },
-        None,
     )
     .await
 }

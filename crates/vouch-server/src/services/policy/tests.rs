@@ -3,6 +3,7 @@
 //! parity, validator behaviour, and fail-closed error paths.
 #![expect(
     clippy::unwrap_used,
+    clippy::expect_used,
     clippy::panic,
     reason = "test code: panic on assertion failure is acceptable"
 )]
@@ -900,6 +901,7 @@ fn test_precheck_cache_hits_by_fingerprint_and_misses_on_change() {
         computed.fetch_add(1, Ordering::SeqCst);
         engine::Precheck::Ok {
             uses_temporal: false,
+            reads_device: false,
         }
     };
 
@@ -1009,7 +1011,7 @@ fn test_precheck_reports_whether_history_is_needed() {
         &[],
     );
     match run_precheck(&posture_only.composed, &[]) {
-        engine::Precheck::Ok { uses_temporal } => assert!(
+        engine::Precheck::Ok { uses_temporal, .. } => assert!(
             !uses_temporal,
             "a posture-only policy set must not require event history"
         ),
@@ -1024,7 +1026,7 @@ fn test_precheck_reports_whether_history_is_needed() {
         &[],
     );
     match run_precheck(&with_temporal.composed, &[]) {
-        engine::Precheck::Ok { uses_temporal } => assert!(
+        engine::Precheck::Ok { uses_temporal, .. } => assert!(
             uses_temporal,
             "a set containing a temporal policy must require event history"
         ),
@@ -1068,4 +1070,118 @@ fn test_forbid_only_set_denies_even_when_satisfied() {
 
     // The same policy composed with the base permits allows.
     assert!(evaluate_one(requirement_met, &posture));
+}
+
+/// A custom policy that only reads event history must not force clients to
+/// send device posture — the precheck reports what the set actually reads.
+#[test]
+fn test_precheck_reports_whether_posture_is_read() {
+    let temporal_only = vec![db::CustomPosturePolicy {
+        id: "p1".to_string(),
+        name: "Exchange step-up".to_string(),
+        description: None,
+        policy_text: r#"forbid (principal, action == Vouch::Action::"ExchangeToken", resource)
+when temporal {
+    !(formerly within 15m Vouch::Action::"Login"::response{ output.result: true })
+};"#
+        .to_string(),
+        active: true,
+        org_id: "org-1".to_string(),
+        created_at: jiff::Timestamp::now(),
+        updated_at: jiff::Timestamp::now(),
+    }];
+    let set = compose_org_set(&[], &temporal_only);
+    match run_precheck(&set.composed, &temporal_only) {
+        engine::Precheck::Ok {
+            uses_temporal,
+            reads_device,
+        } => {
+            assert!(uses_temporal, "the policy reads event history");
+            assert!(
+                !reads_device,
+                "a history-only policy must not demand device posture"
+            );
+        }
+        other => panic!("expected a clean precheck, got {other:?}"),
+    }
+
+    // A posture policy does read the device record.
+    let posture_set = compose_org_set(&["disk_encryption".to_string()], &[]);
+    match run_precheck(&posture_set.composed, &[]) {
+        engine::Precheck::Ok { reads_device, .. } => {
+            assert!(reads_device, "a posture policy reads the device record");
+        }
+        other => panic!("expected a clean precheck, got {other:?}"),
+    }
+}
+
+/// Ingestion reads audit payloads by key, so the keys must match what the
+/// writers actually serialize. Serializing the real payload types and
+/// asserting the values arrive catches a rename on either side — the parity
+/// test cannot, since it only checks that a field is written at all.
+#[test]
+fn test_ingestion_reads_the_keys_writers_serialize() {
+    use crate::db::documents::audit::{OAuthUsageData, TokenExchangeDetails};
+
+    let exchange = serde_json::to_string(&TokenExchangeDetails {
+        client_id: "client-abc".to_string(),
+        audience: Some("https://aud.example".to_string()),
+        scope: None,
+        issued_token_type: "urn:ietf:params:oauth:token-type:access_token".to_string(),
+        token_expires_at: None,
+    })
+    .unwrap();
+    let row = crate::db::audit::AuditEvent {
+        id: "row-1".to_string(),
+        event_type: "token_exchange".to_string(),
+        user_id: Some("user-a".to_string()),
+        email_domain: None,
+        email_hmac: None,
+        data: exchange,
+        created_at: jiff::Timestamp::now(),
+    };
+    let event = events::history_event(&row, "org-1", 0).expect("exchange row must map");
+    assert_eq!(
+        event.field("input", "client_id"),
+        Some(&dogwood_language::Value::String("client-abc".to_string())),
+        "exchange history must carry the client id the writer stored"
+    );
+    assert_eq!(
+        event.field("input", "audience"),
+        Some(&dogwood_language::Value::String(
+            "https://aud.example".to_string()
+        )),
+        "exchange history must carry the audience the writer stored"
+    );
+
+    let issuance = serde_json::to_string(&OAuthUsageData {
+        oauth_client_id: "client-xyz".to_string(),
+        details: None,
+        client_ip: Some("10.1.2.3".to_string()),
+        user_agent: None,
+        country_code: None,
+        asn: None,
+        org_name: None,
+    })
+    .unwrap();
+    let row = crate::db::audit::AuditEvent {
+        id: "row-2".to_string(),
+        event_type: "oauth_token_issued".to_string(),
+        user_id: Some("user-a".to_string()),
+        email_domain: None,
+        email_hmac: None,
+        data: issuance,
+        created_at: jiff::Timestamp::now(),
+    };
+    let event = events::history_event(&row, "org-1", 0).expect("issuance row must map");
+    assert_eq!(
+        event.field("input", "client_id"),
+        Some(&dogwood_language::Value::String("client-xyz".to_string())),
+        "issuance history must carry the client id the writer stored"
+    );
+    assert_eq!(
+        event.field("input", "ip"),
+        Some(&dogwood_language::Value::String("10.1.2.3".to_string())),
+        "issuance history must carry the client address the writer stored"
+    );
 }

@@ -163,26 +163,6 @@ impl PreconfiguredSlug {
             }
         }
     }
-
-    /// Whether this policy evaluates device posture. Temporal policies
-    /// only consult the event history — an org running exclusively
-    /// temporal policies does not demand posture data from clients.
-    #[must_use]
-    pub(crate) const fn requires_posture(self) -> bool {
-        match self {
-            Self::DiskEncryption
-            | Self::Firewall
-            | Self::ScreenLock
-            | Self::EndpointProtection
-            | Self::PlatformIntegrity
-            | Self::OsRecency => true,
-            Self::IssuanceRateLimit
-            | Self::FailedLoginBurst
-            | Self::TokenExchangeStepUp
-            | Self::ExchangeIpConsistency
-            | Self::LogoutInvalidatesExchange => false,
-        }
-    }
 }
 
 impl std::str::FromStr for PreconfiguredSlug {

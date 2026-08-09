@@ -52,11 +52,14 @@ pub(crate) enum OrgDecision {
 /// Cached verdict of the static precheck over an org's composed policy set.
 #[derive(Debug, Clone)]
 pub(crate) enum Precheck {
-    /// The composed set lowers and validates. `uses_temporal` is false when
-    /// no policy reads event history, which lets the decision path skip the
-    /// audit query and replay entirely — the common case for an org running
-    /// only device-posture policies.
-    Ok { uses_temporal: bool },
+    /// The composed set lowers and validates, with what it reads:
+    /// `uses_temporal` false lets the decision path skip the audit query
+    /// and replay, and `reads_device` false means the org's policies never
+    /// consult device posture, so a client need not send any.
+    Ok {
+        uses_temporal: bool,
+        reads_device: bool,
+    },
     /// A custom policy fails to lower or validate; decisions deny with its
     /// name until it is fixed (fail-closed, attributable).
     BrokenCustom(String),
