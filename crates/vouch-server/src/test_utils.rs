@@ -1643,6 +1643,14 @@ pub const TEST_JWT_SECRET: &[u8] = b"test-jwt-secret-for-unit-tests-only";
 pub const TEST_ISSUER: &str = "https://example.com";
 
 /// Generate a fresh OIDC signing key for tests.
+/// Fuzzing entry: run arbitrary policy text through the production
+/// validation path (compose + lower + validate against the embedded Vouch
+/// schema). Must never panic — admin-supplied policy text reaches this
+/// path, and the release profile is `panic = "abort"`.
+pub fn fuzz_validate_policy_text(text: &str) {
+    let _result = crate::services::policy::validate_policy_text(text);
+}
+
 pub fn make_test_oidc_key() -> OidcSigningKey {
     OidcSigningKey::generate().expect("generate key")
 }

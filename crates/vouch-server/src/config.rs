@@ -1102,6 +1102,28 @@ impl ServerConfig {
             );
         }
 
+        // Temporal posture policies evaluate a 24h window of audit history.
+        // Retention shorter than that silently truncates the window: the
+        // sweep deletes evidence a live policy still needs, so aggregation
+        // policies under-count and recency policies deny.
+        for (name, days) in [
+            (
+                "VOUCH_AUTH_EVENTS_RETENTION_DAYS",
+                self.auth_events_retention_days,
+            ),
+            (
+                "VOUCH_OAUTH_EVENTS_RETENTION_DAYS",
+                self.oauth_events_retention_days,
+            ),
+        ] {
+            if days < 2 {
+                tracing::warn!(
+                    "{name}={days} is shorter than the 24h window temporal posture \
+                     policies evaluate; their evidence may be deleted before use"
+                );
+            }
+        }
+
         // Reject wildcard in VOUCH_CORS_ORIGINS for UI routes: those routes use
         // cookie-based credentialed sessions, and `Access-Control-Allow-Origin: *`
         // is forbidden with `Access-Control-Allow-Credentials: true` (CORS spec

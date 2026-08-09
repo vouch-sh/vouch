@@ -95,12 +95,12 @@ fn requirement(expr: &str) -> String {
 #[test]
 fn test_validate_policy_text_valid() {
     validate_policy_text(&requirement(
-        "context.input.posture.disk_encryption_enabled",
+        "context.device.posture.disk_encryption_enabled",
     ))
     .unwrap();
-    validate_policy_text(&requirement("context.input.posture.edr_count > 0")).unwrap();
+    validate_policy_text(&requirement("context.device.posture.edr_count > 0")).unwrap();
     validate_policy_text(&requirement(
-        "context.input.posture.os == \"macos\" || context.input.posture.os == \"linux\"",
+        "context.device.posture.os == \"macos\" || context.device.posture.os == \"linux\"",
     ))
     .unwrap();
 }
@@ -112,7 +112,7 @@ fn test_validate_policy_text_invalid() {
     assert!(validate_policy_text("   ").is_err());
     // Unterminated string literal
     assert!(
-        validate_policy_text(&requirement("context.input.posture.os == \"unterminated")).is_err()
+        validate_policy_text(&requirement("context.device.posture.os == \"unterminated")).is_err()
     );
     // Truncated policy
     assert!(validate_policy_text("forbid (principal, action ==").is_err());
@@ -125,7 +125,7 @@ fn test_validate_policy_text_catches_typoed_field() {
     // The CEL engine silently evaluated unknown fields to a runtime miss;
     // the Dogwood validator reports them as type errors.
     let result = validate_policy_text(&requirement(
-        "context.input.posture.disk_encryption_enabledz",
+        "context.device.posture.disk_encryption_enabledz",
     ));
     assert!(result.is_err(), "typo'd posture field must fail validation");
 }
@@ -191,7 +191,7 @@ fn test_none_fields_default_to_false() {
 #[test]
 fn test_none_string_fields_default_to_empty() {
     assert!(evaluate_one(
-        &requirement("context.input.posture.os == \"\""),
+        &requirement("context.device.posture.os == \"\""),
         &minimal_posture()
     ));
 }
@@ -338,21 +338,25 @@ fn test_all_preconfigured_pass_with_full_posture() {
 #[test]
 fn test_test_policy_text_pass() {
     let result = test_policy_text(
-        &requirement("context.input.posture.disk_encryption_enabled"),
+        &requirement("context.device.posture.disk_encryption_enabled"),
         &sample_posture(),
     )
     .unwrap();
-    assert!(result);
+    assert!(result.pass);
+    assert!(
+        result.note.is_none(),
+        "a posture-only policy needs no history note"
+    );
 }
 
 #[test]
 fn test_test_policy_text_fail() {
     let result = test_policy_text(
-        &requirement("context.input.posture.disk_encryption_enabled"),
+        &requirement("context.device.posture.disk_encryption_enabled"),
         &minimal_posture(),
     )
     .unwrap();
-    assert!(!result);
+    assert!(!result.pass);
 }
 
 #[test]
@@ -361,7 +365,7 @@ fn test_test_policy_text_invalid() {
     assert!(test_policy_text("", &posture).is_err());
     assert!(
         test_policy_text(
-            &requirement("context.input.posture.os == \"unterminated"),
+            &requirement("context.device.posture.os == \"unterminated"),
             &posture
         )
         .is_err()
@@ -374,13 +378,21 @@ fn test_test_policy_text_invalid() {
 fn test_custom_permit_cannot_widen_access() {
     let permit_everything =
         "permit (principal, action == Vouch::Action::\"IssueToken\", resource);";
-    assert!(test_policy_text(permit_everything, &minimal_posture()).unwrap());
+    assert!(
+        test_policy_text(permit_everything, &minimal_posture())
+            .unwrap()
+            .pass
+    );
     // ...but an active forbid still denies even alongside a custom permit.
     let contradictory = format!(
         "{permit_everything}\n\n{}",
-        requirement("context.input.posture.disk_encryption_enabled")
+        requirement("context.device.posture.disk_encryption_enabled")
     );
-    assert!(!test_policy_text(&contradictory, &minimal_posture()).unwrap());
+    assert!(
+        !test_policy_text(&contradictory, &minimal_posture())
+            .unwrap()
+            .pass
+    );
 }
 
 // ============================================================
@@ -454,19 +466,19 @@ fn test_semver_num_encoding() {
 fn test_semver_comparison_via_policy() {
     // 15.3.1 >= 14.0.0 (passes the lenient N-2 OsRecency floor)
     assert!(evaluate_one(
-        &requirement("context.input.posture.os_version_num >= 14000000"),
+        &requirement("context.device.posture.os_version_num >= 14000000"),
         &sample_posture()
     ));
     // 15.3.1 < 16.0.0 (does not meet a hypothetical next-year floor)
     assert!(evaluate_one(
-        &requirement("context.input.posture.os_version_num < 16000000"),
+        &requirement("context.device.posture.os_version_num < 16000000"),
         &sample_posture()
     ));
     // 9.0.0 must NOT be >= 14.0.0 (unlike lexicographic comparison)
     let mut old = minimal_posture();
     old.os_version = Some("9.0.0".to_string());
     assert!(!evaluate_one(
-        &requirement("context.input.posture.os_version_num >= 14000000"),
+        &requirement("context.device.posture.os_version_num >= 14000000"),
         &old
     ));
 }
@@ -507,90 +519,96 @@ fn test_extract_device_posture_no_posture_entry() {
 /// four derived fields) is reachable — and correctly valued — from policy
 /// text.
 const POSTURE_FIELD_CHECKS: &[(&str, &str)] = &[
-    ("os", "context.input.posture.os == \"macos\""),
+    ("os", "context.device.posture.os == \"macos\""),
     (
         "os_version",
-        "context.input.posture.os_version == \"15.3.1\"",
+        "context.device.posture.os_version == \"15.3.1\"",
     ),
     (
         "os_version_num",
-        "context.input.posture.os_version_num == 15003001",
+        "context.device.posture.os_version_num == 15003001",
     ),
     (
         "os_distribution",
-        "context.input.posture.os_distribution == \"macos\"",
+        "context.device.posture.os_distribution == \"macos\"",
     ),
-    ("os_build", "context.input.posture.os_build == \"26100\""),
+    ("os_build", "context.device.posture.os_build == \"26100\""),
     (
         "os_build_num",
-        "context.input.posture.os_build_num == 26100",
+        "context.device.posture.os_build_num == 26100",
     ),
-    ("arch", "context.input.posture.arch == \"aarch64\""),
+    ("arch", "context.device.posture.arch == \"aarch64\""),
     (
         "disk_encryption_enabled",
-        "context.input.posture.disk_encryption_enabled",
+        "context.device.posture.disk_encryption_enabled",
     ),
     (
         "disk_encryption_technology",
-        "context.input.posture.disk_encryption_technology == \"filevault\"",
+        "context.device.posture.disk_encryption_technology == \"filevault\"",
     ),
     (
         "screen_lock_enabled",
-        "context.input.posture.screen_lock_enabled",
+        "context.device.posture.screen_lock_enabled",
     ),
     (
         "screen_lock_idle_timeout_secs",
-        "context.input.posture.screen_lock_idle_timeout_secs == 300",
+        "context.device.posture.screen_lock_idle_timeout_secs == 300",
     ),
-    ("firewall_enabled", "context.input.posture.firewall_enabled"),
+    (
+        "firewall_enabled",
+        "context.device.posture.firewall_enabled",
+    ),
     (
         "firewall_technology",
-        "context.input.posture.firewall_technology == \"application firewall\"",
+        "context.device.posture.firewall_technology == \"application firewall\"",
     ),
     (
         "secure_boot_enabled",
-        "context.input.posture.secure_boot_enabled",
+        "context.device.posture.secure_boot_enabled",
     ),
-    ("sip_enabled", "context.input.posture.sip_enabled"),
-    ("tpm_present", "context.input.posture.tpm_present"),
+    ("sip_enabled", "context.device.posture.sip_enabled"),
+    ("tpm_present", "context.device.posture.tpm_present"),
     (
         "tpm_version",
-        "context.input.posture.tpm_version == \"2.0\"",
+        "context.device.posture.tpm_version == \"2.0\"",
     ),
     (
         "auto_update_enabled",
-        "context.input.posture.auto_update_enabled",
+        "context.device.posture.auto_update_enabled",
     ),
     (
         "auto_update_technology",
-        "context.input.posture.auto_update_technology == \"softwareupdate\"",
+        "context.device.posture.auto_update_technology == \"softwareupdate\"",
     ),
-    ("uptime_secs", "context.input.posture.uptime_secs == 86400"),
+    ("uptime_secs", "context.device.posture.uptime_secs == 86400"),
     (
         "access_control_enforcing",
-        "context.input.posture.access_control_enforcing",
+        "context.device.posture.access_control_enforcing",
     ),
     (
         "access_control_technology",
-        "context.input.posture.access_control_technology == \"gatekeeper\"",
+        "context.device.posture.access_control_technology == \"gatekeeper\"",
     ),
-    ("edr", "context.input.posture.edr.contains(\"crowdstrike\")"),
-    ("edr_count", "context.input.posture.edr_count == 1"),
-    ("mdm", "context.input.posture.mdm.contains(\"jamf\")"),
-    ("mdm_count", "context.input.posture.mdm_count == 1"),
-    ("elevated", "context.input.posture.elevated == false"),
-    ("tty", "context.input.posture.tty"),
+    (
+        "edr",
+        "context.device.posture.edr.contains(\"crowdstrike\")",
+    ),
+    ("edr_count", "context.device.posture.edr_count == 1"),
+    ("mdm", "context.device.posture.mdm.contains(\"jamf\")"),
+    ("mdm_count", "context.device.posture.mdm_count == 1"),
+    ("elevated", "context.device.posture.elevated == false"),
+    ("tty", "context.device.posture.tty"),
     (
         "parent_process",
-        "context.input.posture.parent_process == \"zsh\"",
+        "context.device.posture.parent_process == \"zsh\"",
     ),
     (
         "cli_version",
-        "context.input.posture.cli_version == \"1.2.3\"",
+        "context.device.posture.cli_version == \"1.2.3\"",
     ),
     (
         "collected_at",
-        "context.input.posture.collected_at == \"2026-08-08t00:00:00z\"",
+        "context.device.posture.collected_at == \"2026-08-08t00:00:00z\"",
     ),
 ];
 
@@ -765,5 +783,135 @@ fn test_temporal_policies_ignore_other_principals_history() {
         denied_by,
         Some(PreconfiguredSlug::TokenExchangeStepUp),
         "another principal's login must not satisfy the step-up window"
+    );
+}
+
+// ============================================================
+// Schema ↔ ingestion parity
+// ============================================================
+
+/// Every `input`/`output` field the schema declares on a history event must
+/// be written by the ingestion mapping. A declared-but-unwritten field type
+/// checks fine and then silently never matches — the exact failure mode the
+/// typed-validation migration is supposed to eliminate.
+#[test]
+fn test_history_projection_matches_schema() {
+    use std::collections::BTreeSet;
+
+    // What ingestion writes, per action (from `history_event`).
+    let mut written: std::collections::BTreeMap<String, BTreeSet<String>> = Default::default();
+    for kind in events::HISTORY_KINDS {
+        let row = history_row(kind.as_str(), "user-a", 60, 0);
+        let event = events::history_event(&row, "org-1", 0)
+            .unwrap_or_else(|| panic!("history kind '{}' has no mapping arm", kind.as_str()));
+        assert!(
+            event.principal().is_some(),
+            "history event for '{}' must carry a principal",
+            kind.as_str()
+        );
+        let mut fields = BTreeSet::new();
+        for group in ["input", "output"] {
+            for (name, _) in event.fields(group) {
+                fields.insert(format!("{group}.{name}"));
+            }
+        }
+        // Actions are many-to-one with kinds (credential kinds share
+        // IssueCredential); union the fields written for each action.
+        let action_name = dogwood_action_of(kind);
+        written
+            .entry(action_name.to_string())
+            .or_default()
+            .extend(fields);
+    }
+
+    // What the schema declares, per action (from the lowered policy set's
+    // event signatures — the authoritative view of a `::response` shape).
+    let set = compose_org_set(&[], &[]);
+    let lowered = LoweredPolicySet::from_str(
+        &set.composed,
+        schema::service_schema(),
+        schema::policy_schema().unwrap(),
+    )
+    .unwrap();
+    for signature in lowered.event_signatures() {
+        if signature.kind() != "response" {
+            continue;
+        }
+        let action = format!(
+            "{}::\"{}\"",
+            signature.namespace().join("::"),
+            signature.action()
+        );
+        // `Vouch::Action::"Login"` in signature form; ingestion uses the
+        // builder's unquoted form.
+        let action = action.replace('"', "");
+        let Some(written_fields) = written.get(&action) else {
+            continue; // not a history action (decision-only, or unmapped)
+        };
+        let declared: BTreeSet<String> = signature
+            .fields()
+            .filter_map(|f| {
+                let path = f.path().join(".");
+                (path.starts_with("input.") || path.starts_with("output.")).then_some(path)
+            })
+            .collect();
+        assert_eq!(
+            &declared, written_fields,
+            "action '{action}' response fields: schema declares {declared:?}, \
+             ingestion writes {written_fields:?} — every declared field must be \
+             written (else temporal predicates over it never match), and every \
+             written field must be declared"
+        );
+    }
+}
+
+/// The qualified Dogwood action an audit kind ingests as.
+fn dogwood_action_of(kind: &crate::db::AuditEventKind) -> &'static str {
+    use crate::db::AuditEventKind as K;
+    match kind {
+        K::LoginSuccess | K::LoginFailed => "Vouch::Action::Login",
+        K::Logout => "Vouch::Action::Logout",
+        K::OauthTokenIssued => "Vouch::Action::IssueToken",
+        K::OauthTokenRevoked => "Vouch::Action::RevokeToken",
+        K::TokenExchange => "Vouch::Action::ExchangeToken",
+        K::SshCredential | K::AwsCredential | K::GitHubCredential => {
+            "Vouch::Action::IssueCredential"
+        }
+        other => panic!("kind {other:?} is in HISTORY_KINDS but has no action mapping"),
+    }
+}
+
+/// Posture lives in a request-only context group, so a temporal predicate
+/// over posture is a *schema error* at save time rather than a policy that
+/// lowers cleanly and then never matches.
+#[test]
+fn test_temporal_predicate_over_posture_is_rejected() {
+    let policy = r#"
+        forbid (principal, action == Vouch::Action::"IssueToken", resource)
+        when temporal {
+            formerly within 1h Vouch::Action::"IssueToken"::response{
+                input.posture.os: "macos"
+            }
+        };
+    "#;
+    assert!(
+        validate_policy_text(policy).is_err(),
+        "a temporal predicate over posture must be rejected: audit history \
+         carries no posture, so such a policy could never match"
+    );
+}
+
+/// A temporal policy's playground verdict reflects an empty history, so it
+/// must be labelled rather than presented as a plain pass/fail.
+#[test]
+fn test_playground_flags_temporal_policies() {
+    let temporal = r#"forbid (principal, action == Vouch::Action::"ExchangeToken", resource)
+when temporal {
+    !(formerly within 15m Vouch::Action::"Login"::response{ output.result: true })
+};"#;
+    let result = test_policy_text(temporal, &sample_posture()).unwrap();
+    assert!(
+        result.note.is_some(),
+        "a temporal policy's playground result must carry the empty-history note"
     );
 }

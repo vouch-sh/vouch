@@ -36,3 +36,8 @@ doc = false
 name = "fuzz_httpsig"
 path = "fuzz_targets/fuzz_httpsig.rs"
 doc = false
+
+[[bin]]
+name = "fuzz_dogwood_policy"
+path = "fuzz_targets/fuzz_dogwood_policy.rs"
+doc = false

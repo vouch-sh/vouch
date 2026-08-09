@@ -298,6 +298,12 @@ fn ocsf_class(kind: AuditEventKind) -> OcsfMapping {
                 .medium()
         }
         AuditEventKind::Logout => OcsfMapping::new(ClassUid::Authentication, ActivityId::LOGOFF),
+        // A posture/temporal policy denial blocks credential issuance.
+        AuditEventKind::PolicyDenied => {
+            OcsfMapping::new(ClassUid::Authentication, ActivityId::LOGON)
+                .failure()
+                .medium()
+        }
         AuditEventKind::DeviceAuthApproved => {
             OcsfMapping::new(ClassUid::Authentication, ActivityId::LOGON)
         }

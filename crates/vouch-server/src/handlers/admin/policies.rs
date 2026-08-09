@@ -615,6 +615,10 @@ pub(crate) struct ValidateResponse {
 #[derive(Debug, serde::Serialize)]
 pub(crate) struct TestResult {
     pub pass: bool,
+    /// Present when the verdict reflects an empty event history rather
+    /// than the policy's logic (temporal policies).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<&'static str>,
 }
 
 /// Request to validate a CEL expression (JSON API for CEL playground).
@@ -656,8 +660,14 @@ pub(crate) async fn validate_cel_api(
 
     let test_result = if let Some(ref test_posture) = req.test_posture {
         match posture::test_policy_text(&req.policy_text, test_posture) {
-            Ok(pass) => Some(TestResult { pass }),
-            Err(_) => Some(TestResult { pass: false }),
+            Ok(result) => Some(TestResult {
+                pass: result.pass,
+                note: result.note,
+            }),
+            Err(_) => Some(TestResult {
+                pass: false,
+                note: None,
+            }),
         }
     } else {
         None
@@ -706,7 +716,7 @@ mod tests {
         let auth = format!("Bearer {token}");
 
         let body = serde_json::json!({
-            "policy_text": "forbid (principal, action == Vouch::Action::\"IssueToken\", resource) unless { context.input.posture.os == \"macos\" };"
+            "policy_text": "forbid (principal, action == Vouch::Action::\"IssueToken\", resource) unless { context.device.posture.os == \"macos\" };"
         });
         let (status, resp) = http_post_json(
             &app,
@@ -740,7 +750,7 @@ mod tests {
         let auth = format!("Bearer {token}");
 
         let body = serde_json::json!({
-            "policy_text": "forbid (principal, action == Vouch::Action::\"IssueToken\", resource) unless { context.input.posture.os == \"macos\" };",
+            "policy_text": "forbid (principal, action == Vouch::Action::\"IssueToken\", resource) unless { context.device.posture.os == \"macos\" };",
             "test_posture": {
                 "type": "device_posture",
                 "posture_version": 1,
@@ -776,7 +786,7 @@ mod tests {
 
         // Expression checks for macos but posture reports linux
         let body = serde_json::json!({
-            "policy_text": "forbid (principal, action == Vouch::Action::\"IssueToken\", resource) unless { context.input.posture.os == \"macos\" };",
+            "policy_text": "forbid (principal, action == Vouch::Action::\"IssueToken\", resource) unless { context.device.posture.os == \"macos\" };",
             "test_posture": {
                 "type": "device_posture",
                 "posture_version": 1,
@@ -806,7 +816,7 @@ mod tests {
     async fn test_cel_validate_requires_auth() {
         let (app, _state) = test_app().await;
 
-        let body = serde_json::json!({"policy_text": "forbid (principal, action == Vouch::Action::\"IssueToken\", resource) unless { context.input.posture.os == \"macos\" };"});
+        let body = serde_json::json!({"policy_text": "forbid (principal, action == Vouch::Action::\"IssueToken\", resource) unless { context.device.posture.os == \"macos\" };"});
         let (status, _resp) = http_post_json(
             &app,
             "/api/v1/org/policies/validate",
@@ -832,7 +842,7 @@ mod tests {
         let token = create_test_session(&state, &member.id, &member.email, &auth_id).await;
         let auth = format!("Bearer {token}");
 
-        let body = serde_json::json!({"policy_text": "forbid (principal, action == Vouch::Action::\"IssueToken\", resource) unless { context.input.posture.os == \"macos\" };"});
+        let body = serde_json::json!({"policy_text": "forbid (principal, action == Vouch::Action::\"IssueToken\", resource) unless { context.device.posture.os == \"macos\" };"});
         let (status, _resp) = http_post_json(
             &app,
             "/api/v1/org/policies/validate",

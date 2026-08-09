@@ -130,6 +130,10 @@ audit_event_kinds! {
     AdminRevokeCredentials => "admin_revoke_credentials", Keep;
     AdminRemoveUser => "admin_remove_user", Keep;
     // Posture policies
+    // A denied decision is the evidence trail for the policy gate; it is
+    // deliberately NOT ingested as temporal history (a denial feeding a
+    // count policy would amplify denials).
+    PolicyDenied => "policy_denied", AuthEvents;
     AdminPolicyToggle => "admin_policy_toggle", Keep;
     AdminPolicyCreate => "admin_policy_create", Keep;
     AdminPolicyUpdate => "admin_policy_update", Keep;

@@ -61,7 +61,7 @@ fn issue_token_request(posture: &DevicePosture, user_id: &str, org_id: &str) -> 
         .timestamp(0)
         .principal_for("Vouch::User", user_id)
         .resource_for("Vouch::Org", org_id)
-        .request_context("input", "posture", posture_value)
+        .request_context("device", "posture", posture_value)
         .request_context("input", "ip", Value::String(String::new()))
         .request_context("input", "client_id", Value::String(String::new()))
         .field("input", "ip", Value::String(String::new()))
@@ -141,26 +141,48 @@ pub(crate) fn validate_policy_text(text: &str) -> ServiceResult<()> {
     Ok(())
 }
 
+/// Outcome of a playground evaluation.
+pub(crate) struct PolicyTestResult {
+    /// Whether issuance would be allowed with only this policy active.
+    pub pass: bool,
+    /// Set when the verdict depends on event history the playground cannot
+    /// reproduce, so the caller can label the result rather than present a
+    /// bare pass/fail the admin would misread.
+    pub note: Option<&'static str>,
+}
+
 /// Evaluate a candidate policy against a sample `DevicePosture` (the admin
-/// playground). Temporal conditions evaluate against an empty event history.
+/// playground).
 ///
-/// Returns `Ok(true)` if issuance would be allowed with only this policy
-/// active, `Ok(false)` if it would be denied, or `Err` if the text is
-/// invalid.
-pub(crate) fn test_policy_text(text: &str, posture: &DevicePosture) -> ServiceResult<bool> {
+/// A temporal policy's verdict depends on the requesting user's audit
+/// history, which the playground has none of. Evaluating one against an
+/// empty trace would report a confident pass/fail that says nothing about
+/// the policy's logic, so those results carry an explanatory note.
+///
+/// Returns `Err` if the text is invalid.
+pub(crate) fn test_policy_text(
+    text: &str,
+    posture: &DevicePosture,
+) -> ServiceResult<PolicyTestResult> {
     validate_policy_text(text)?;
-    let composed = compose(&[text.trim()]);
+    let trimmed = text.trim();
+    let composed = compose(&[trimmed]);
     let event = issue_token_request(posture, "playground", "playground");
-    match decide(&composed, &event) {
-        Ok(EngineDecision::Allow) => Ok(true),
-        Ok(EngineDecision::Deny) => Ok(false),
+    let pass = match decide(&composed, &event) {
+        Ok(EngineDecision::Allow) => true,
+        Ok(EngineDecision::Deny) => false,
         Err(msg) => {
             tracing::error!("playground evaluation failed: {msg}");
-            Err(ServiceError::Internal(
+            return Err(ServiceError::Internal(
                 "policy engine unavailable".to_string(),
-            ))
+            ));
         }
-    }
+    };
+    let note = trimmed.contains("when temporal").then_some(
+        "This policy reads event history, which the test device has none of. \
+         The result below reflects an empty history, not the policy's logic.",
+    );
+    Ok(PolicyTestResult { pass, note })
 }
 
 // ============================================================
@@ -193,11 +215,15 @@ fn decision_event(kind: &DecisionKind<'_>, user_id: &str, org_id: &str, ts: i64)
             client_id,
         } => {
             let ip = ip_string(*ip);
+            // Posture is request-only (`device` group): audit history
+            // carries no posture, so it must not be temporally matchable.
+            // `input` fields go to both bags — the Cedar request context
+            // and the logged record temporal predicates match against.
             Event::builder("Vouch::Action::IssueToken", "request")
                 .timestamp(ts)
                 .principal_for("Vouch::User", user_id)
                 .resource_for("Vouch::Org", org_id)
-                .request_context("input", "posture", posture_input::posture_record(posture))
+                .request_context("device", "posture", posture_input::posture_record(posture))
                 .request_context("input", "ip", Value::String(ip.clone()))
                 .request_context(
                     "input",
@@ -326,6 +352,39 @@ fn run_precheck(composed: &str, active_custom: &[db::CustomPosturePolicy]) -> en
     engine::Precheck::EngineError(composed_error)
 }
 
+/// Write the evidence trail for a denied decision. Best-effort, matching
+/// the other login-path audit writes; `policy_denied` is deliberately not a
+/// history kind (a denial feeding a count policy would amplify denials).
+async fn record_denial(
+    state: &crate::AppState,
+    org_id: &str,
+    user_id: &str,
+    kind: &DecisionKind<'_>,
+    policy: &str,
+) {
+    let action = match kind {
+        DecisionKind::IssueToken { .. } => "issue_token",
+        DecisionKind::ExchangeToken { .. } => "exchange_token",
+    };
+    let data = serde_json::json!({
+        "action": action,
+        "policy": policy,
+        "org_id": org_id,
+    });
+    if let Err(e) = state
+        .audit
+        .insert_event(
+            db::AuditEventKind::PolicyDenied,
+            Some(user_id),
+            None,
+            &data.to_string(),
+        )
+        .await
+    {
+        tracing::warn!(error = %e, "failed to write policy_denied audit event");
+    }
+}
+
 /// Deny message for a determining rule.
 fn deny_error(denying: Option<engine::PolicyRef>, os: Option<&str>) -> ServiceError {
     let (name, remediation) = match denying {
@@ -432,6 +491,7 @@ async fn authorize_decision(
                 Some(engine::PolicyRef::BasePermit) | None => "unattributed",
             };
             crate::infra::metrics::record_policy_decision("deny", label);
+            record_denial(state, org_id, user_id, &kind, label).await;
             Err(deny_error(denying, os))
         }
     }

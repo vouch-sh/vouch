@@ -2,7 +2,7 @@
 //! Preconfigured posture policies, defined in code (updatable via deploy).
 //!
 //! Each policy is a Cedar `forbid … unless { <requirement> }` over the
-//! always-present `context.input.posture` record. The composed policy set
+//! always-present `context.device.posture` record. The composed policy set
 //! (see `mod.rs`) starts with one base `permit` — Cedar is deny-by-default,
 //! forbids override permits, so all active policies are effectively ANDed,
 //! matching the CEL engine's semantics.
@@ -129,7 +129,7 @@ pub(crate) const PRECONFIGURED_POLICIES: &[PreconfiguredPolicy] = &[
         description: "Require full-disk encryption (FileVault, BitLocker, LUKS)",
         policy_text: r#"@id("disk_encryption")
 forbid (principal, action == Vouch::Action::"IssueToken", resource)
-unless { context.input.posture.disk_encryption_enabled };"#,
+unless { context.device.posture.disk_encryption_enabled };"#,
     },
     PreconfiguredPolicy {
         slug: PreconfiguredSlug::Firewall,
@@ -137,7 +137,7 @@ unless { context.input.posture.disk_encryption_enabled };"#,
         description: "Require an active firewall",
         policy_text: r#"@id("firewall")
 forbid (principal, action == Vouch::Action::"IssueToken", resource)
-unless { context.input.posture.firewall_enabled };"#,
+unless { context.device.posture.firewall_enabled };"#,
     },
     PreconfiguredPolicy {
         slug: PreconfiguredSlug::ScreenLock,
@@ -145,7 +145,7 @@ unless { context.input.posture.firewall_enabled };"#,
         description: "Require screen lock on idle",
         policy_text: r#"@id("screen_lock")
 forbid (principal, action == Vouch::Action::"IssueToken", resource)
-unless { context.input.posture.screen_lock_enabled };"#,
+unless { context.device.posture.screen_lock_enabled };"#,
     },
     PreconfiguredPolicy {
         slug: PreconfiguredSlug::EndpointProtection,
@@ -153,7 +153,7 @@ unless { context.input.posture.screen_lock_enabled };"#,
         description: "Require at least one EDR agent installed",
         policy_text: r#"@id("endpoint_protection")
 forbid (principal, action == Vouch::Action::"IssueToken", resource)
-unless { context.input.posture.edr_count > 0 };"#,
+unless { context.device.posture.edr_count > 0 };"#,
     },
     PreconfiguredPolicy {
         slug: PreconfiguredSlug::PlatformIntegrity,
@@ -161,7 +161,7 @@ unless { context.input.posture.edr_count > 0 };"#,
         description: "Require Secure Boot to be enabled",
         policy_text: r#"@id("platform_integrity")
 forbid (principal, action == Vouch::Action::"IssueToken", resource)
-unless { context.input.posture.secure_boot_enabled };"#,
+unless { context.device.posture.secure_boot_enabled };"#,
     },
     // OS version thresholds — review with each major OS release.
     // Last updated: 2026-06-21
@@ -180,8 +180,8 @@ unless { context.input.posture.secure_boot_enabled };"#,
     // Linux is excluded — distributions manage versions independently; a
     // Linux device fails both disjuncts. Admins can create custom policies
     // for specific distro versions (e.g.,
-    // `context.input.posture.os_distribution == "ubuntu" &&
-    //  context.input.posture.os_version_num >= 22004000`).
+    // `context.device.posture.os_distribution == "ubuntu" &&
+    //  context.device.posture.os_version_num >= 22004000`).
     PreconfiguredPolicy {
         slug: PreconfiguredSlug::OsRecency,
         name: "OS Recency",
@@ -189,8 +189,8 @@ unless { context.input.posture.secure_boot_enabled };"#,
         policy_text: r#"@id("os_recency")
 forbid (principal, action == Vouch::Action::"IssueToken", resource)
 unless {
-    (context.input.posture.os == "macos" && context.input.posture.os_version_num >= 14000000) ||
-    (context.input.posture.os == "windows" && context.input.posture.os_build_num >= 26100)
+    (context.device.posture.os == "macos" && context.device.posture.os_version_num >= 14000000) ||
+    (context.device.posture.os == "windows" && context.device.posture.os_build_num >= 26100)
 };"#,
     },
     // ── Temporal policies (event-history conditions) ─────────────────
