@@ -434,9 +434,18 @@ fn test_is_valid_preconfigured_slug() {
     assert!(!is_valid_preconfigured_slug("custom"));
 }
 
+/// Enabling every built-in must still leave an org its custom-policy
+/// allowance — adding a built-in must not quietly consume one.
 #[test]
-fn test_max_active_policies_covers_all_preconfigured() {
-    assert!(MAX_ACTIVE_POLICIES >= PRECONFIGURED_POLICIES.len());
+fn test_all_builtins_active_still_leaves_custom_budget() {
+    let remaining = MAX_ACTIVE_POLICIES.saturating_sub(PRECONFIGURED_POLICIES.len());
+    assert_eq!(
+        remaining,
+        preconfigured::MAX_ACTIVE_CUSTOM_POLICIES,
+        "with all {} built-ins active, an org must still have {} custom slots",
+        PRECONFIGURED_POLICIES.len(),
+        preconfigured::MAX_ACTIVE_CUSTOM_POLICIES
+    );
 }
 
 // ============================================================

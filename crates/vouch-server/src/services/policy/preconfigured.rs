@@ -7,10 +7,16 @@
 //! forbids override permits, so all active policies are effectively ANDed,
 //! matching the CEL engine's semantics.
 
+/// Active custom policies an org may run alongside the built-ins.
+pub(crate) const MAX_ACTIVE_CUSTOM_POLICIES: usize = 2;
+
 /// Maximum number of active policies (preconfigured + custom combined).
-/// There are 11 preconfigured policies, so 13 allows all 11 + 2 custom —
-/// preserving the 2 custom slots orgs had under the CEL engine's 6 + 2.
-pub(crate) const MAX_ACTIVE_POLICIES: usize = 13;
+///
+/// Derived rather than written out: the admin UI counts both kinds against
+/// one budget, so a hardcoded total silently shrinks the custom allowance
+/// every time a built-in policy is added.
+pub(crate) const MAX_ACTIVE_POLICIES: usize =
+    PRECONFIGURED_POLICIES.len() + MAX_ACTIVE_CUSTOM_POLICIES;
 
 /// The always-present base permits for the two decision actions. Custom
 /// `permit`s an admin writes are harmless (these already allow; forbids
