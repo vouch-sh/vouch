@@ -166,8 +166,8 @@ document.addEventListener("DOMContentLoaded", function () {
             // A history-dependent policy's verdict reflects an empty test
             // history, so the server sends a note instead of letting a bare
             // pass/fail be misread as a check of the policy's logic.
-            if (data.test_result.note) {
-              testResult.textContent = data.test_result.note;
+            if (data.test_result.reads_history) {
+              testResult.textContent = t("admin-js-policy-history-note");
               testResult.className = "ml-1 text-gray-400";
             } else {
               testResult.textContent = pass

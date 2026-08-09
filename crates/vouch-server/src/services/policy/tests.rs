@@ -337,8 +337,8 @@ fn test_test_policy_text_pass() {
     .unwrap();
     assert!(result.pass);
     assert!(
-        result.note.is_none(),
-        "a posture-only policy needs no history note"
+        !result.reads_history,
+        "a posture-only policy does not read event history"
     );
 }
 
@@ -871,8 +871,8 @@ when temporal {
 };"#;
     let result = test_policy_text(temporal, &sample_posture()).unwrap();
     assert!(
-        result.note.is_some(),
-        "a temporal policy's playground result must carry the empty-history note"
+        result.reads_history,
+        "a temporal policy's playground result must be flagged as history-dependent"
     );
 }
 

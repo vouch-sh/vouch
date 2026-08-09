@@ -187,15 +187,19 @@
                                     placeholder='e.g., forbid (principal, action, resource) unless {&#10;  context.device.os == "macos" };'></textarea>
                             </div>
                             <p class="text-xs text-gray-600 mb-3">
-                                Write a Cedar <span class="text-gray-500">forbid &hellip; unless { &hellip; }</span> rule over
-                                <span class="text-gray-500">context.device</span> fields.
-                                Operators: <span class="text-gray-500">==</span> <span class="text-gray-500">!=</span>
-                                <span class="text-gray-500">&amp;&amp;</span> <span class="text-gray-500">||</span>
-                                <span class="text-gray-500">&gt;=</span> <span class="text-gray-500">&lt;=</span>.
-                                <span class="text-gray-500">edr.contains("x")</span> for lists.
-                                <span class="text-gray-500">os_version_num</span> for version comparison.
-                                <span class="text-gray-500">when temporal { &hellip; }</span> for event-history rules.
-                                See field reference below.
+                                {{ self.tr("admin-policies-syntax-rule") }}
+                                <span class="text-gray-500">forbid &hellip; unless { &hellip; }</span>
+                                {{ self.tr("admin-policies-syntax-over") }}
+                                <span class="text-gray-500">context.device</span>.
+                                {{ self.tr("admin-policies-syntax-operators") }}
+                                <span class="text-gray-500">== != &amp;&amp; || &gt;= &lt;=</span>.
+                                <span class="text-gray-500">edr.contains("x")</span>
+                                {{ self.tr("admin-policies-syntax-lists") }}
+                                <span class="text-gray-500">os_version_num</span>
+                                {{ self.tr("admin-policies-syntax-versions") }}
+                                <span class="text-gray-500">when temporal { &hellip; }</span>
+                                {{ self.tr("admin-policies-syntax-temporal") }}
+                                {{ self.tr("admin-policies-syntax-fieldref") }}
                             </p>
 
                             {# Validation status #}

@@ -156,10 +156,11 @@ pub(crate) fn validate_policy_text(text: &str) -> ServiceResult<()> {
 pub(crate) struct PolicyTestResult {
     /// Whether issuance would be allowed with only this policy active.
     pub pass: bool,
-    /// Set when the verdict depends on event history the playground cannot
-    /// reproduce, so the caller can label the result rather than present a
-    /// bare pass/fail the admin would misread.
-    pub note: Option<&'static str>,
+    /// Whether the verdict depends on event history the playground cannot
+    /// reproduce. The UI labels those results instead of presenting a bare
+    /// pass/fail the admin would misread; the wording lives in the i18n
+    /// catalog, not here.
+    pub reads_history: bool,
 }
 
 /// Evaluate a candidate policy against a sample `DevicePosture` (the admin
@@ -189,11 +190,10 @@ pub(crate) fn test_policy_text(
             ));
         }
     };
-    let note = trimmed.contains("when temporal").then_some(
-        "This policy reads event history, which the test device has none of. \
-         The result below reflects an empty history, not the policy's logic.",
-    );
-    Ok(PolicyTestResult { pass, note })
+    Ok(PolicyTestResult {
+        pass,
+        reads_history: trimmed.contains("when temporal"),
+    })
 }
 
 // ============================================================

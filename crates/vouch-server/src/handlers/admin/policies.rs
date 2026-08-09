@@ -621,10 +621,10 @@ pub(crate) struct ValidateResponse {
 #[derive(Debug, serde::Serialize)]
 pub(crate) struct TestResult {
     pub pass: bool,
-    /// Present when the verdict reflects an empty event history rather
-    /// than the policy's logic (temporal policies).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub note: Option<&'static str>,
+    /// True when the verdict reflects an empty event history rather than
+    /// the policy's logic. The editor renders the explanation from the
+    /// i18n catalog.
+    pub reads_history: bool,
 }
 
 /// Request to validate policy text (JSON API for the policy editor).
@@ -669,11 +669,11 @@ pub(crate) async fn validate_policy_api(
         match posture::test_policy_text(&req.policy_text, test_posture) {
             Ok(result) => Some(TestResult {
                 pass: result.pass,
-                note: result.note,
+                reads_history: result.reads_history,
             }),
             Err(_) => Some(TestResult {
                 pass: false,
-                note: None,
+                reads_history: false,
             }),
         }
     } else {

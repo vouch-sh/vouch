@@ -367,6 +367,7 @@ pub(crate) const JS_I18N_KEYS: &[&str] = &[
     "admin-js-cel-invalid",
     "admin-js-cel-passes",
     "admin-js-edit-policy-title",
+    "admin-js-policy-history-note",
     "admin-policies-playground-title",
     "appcreate-js-fapi-required",
     "appcreate-js-jwks-json",

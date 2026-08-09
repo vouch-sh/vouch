@@ -742,6 +742,13 @@ admin-policies-playground-title = New Custom Policy
 admin-policies-name-placeholder = e.g., Require macOS Sequoia
 admin-policies-optional = (optional)
 admin-policies-desc-placeholder = e.g., Require macOS 15 or later
+admin-policies-syntax-rule = Write a Cedar
+admin-policies-syntax-over = rule over
+admin-policies-syntax-operators = Operators:
+admin-policies-syntax-lists = for lists.
+admin-policies-syntax-versions = for version comparison.
+admin-policies-syntax-temporal = for event-history rules.
+admin-policies-syntax-fieldref = See field reference below.
 admin-policies-rule-label = Rule
 admin-policies-rule-hint = — a Cedar forbid rule; issuance is denied when it fires
 admin-policies-cel-ref-title = Dogwood policy language reference
@@ -762,6 +769,7 @@ admin-js-edit-policy-title = Edit Custom Policy
 admin-js-cel-passes = — passes against test device
 admin-js-cel-fails = — fails against test device
 admin-js-cel-invalid = Invalid policy
+admin-js-policy-history-note = — reads event history, which the test device has none of; this result reflects an empty history, not the policy's logic
 
 ## Admin SCIM tokens (admin/scim_tokens.html)
 admin-scim-page-title = { -product } - API Tokens
