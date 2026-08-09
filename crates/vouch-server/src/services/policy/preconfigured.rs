@@ -65,6 +65,92 @@ impl PreconfiguredSlug {
         }
     }
 
+    /// Display name, in the requesting client's locale.
+    #[must_use]
+    pub(crate) fn name(self) -> String {
+        match self {
+            Self::DiskEncryption => {
+                crate::infra::i18n::Tr::new("admin-policies-name-disk-encryption").to_string()
+            }
+            Self::Firewall => {
+                crate::infra::i18n::Tr::new("admin-policies-name-firewall").to_string()
+            }
+            Self::ScreenLock => {
+                crate::infra::i18n::Tr::new("admin-policies-name-screen-lock").to_string()
+            }
+            Self::EndpointProtection => {
+                crate::infra::i18n::Tr::new("admin-policies-name-endpoint-protection").to_string()
+            }
+            Self::PlatformIntegrity => {
+                crate::infra::i18n::Tr::new("admin-policies-name-platform-integrity").to_string()
+            }
+            Self::OsRecency => {
+                crate::infra::i18n::Tr::new("admin-policies-name-os-recency").to_string()
+            }
+            Self::IssuanceRateLimit => {
+                crate::infra::i18n::Tr::new("admin-policies-name-issuance-rate-limit").to_string()
+            }
+            Self::FailedLoginBurst => {
+                crate::infra::i18n::Tr::new("admin-policies-name-failed-login-burst").to_string()
+            }
+            Self::TokenExchangeStepUp => {
+                crate::infra::i18n::Tr::new("admin-policies-name-token-exchange-step-up")
+                    .to_string()
+            }
+            Self::ExchangeIpConsistency => {
+                crate::infra::i18n::Tr::new("admin-policies-name-exchange-ip-consistency")
+                    .to_string()
+            }
+            Self::LogoutInvalidatesExchange => {
+                crate::infra::i18n::Tr::new("admin-policies-name-logout-invalidates-exchange")
+                    .to_string()
+            }
+        }
+    }
+
+    /// One-line description, in the requesting client's locale.
+    #[must_use]
+    pub(crate) fn description(self) -> String {
+        match self {
+            Self::DiskEncryption => {
+                crate::infra::i18n::Tr::new("admin-policies-desc-disk-encryption").to_string()
+            }
+            Self::Firewall => {
+                crate::infra::i18n::Tr::new("admin-policies-desc-firewall").to_string()
+            }
+            Self::ScreenLock => {
+                crate::infra::i18n::Tr::new("admin-policies-desc-screen-lock").to_string()
+            }
+            Self::EndpointProtection => {
+                crate::infra::i18n::Tr::new("admin-policies-desc-endpoint-protection").to_string()
+            }
+            Self::PlatformIntegrity => {
+                crate::infra::i18n::Tr::new("admin-policies-desc-platform-integrity").to_string()
+            }
+            Self::OsRecency => {
+                crate::infra::i18n::Tr::new("admin-policies-desc-os-recency").to_string()
+            }
+            Self::IssuanceRateLimit => {
+                crate::infra::i18n::Tr::new("admin-policies-desc-issuance-rate-limit").to_string()
+            }
+            Self::FailedLoginBurst => {
+                crate::infra::i18n::Tr::new("admin-policies-desc-failed-login-burst").to_string()
+            }
+            Self::TokenExchangeStepUp => {
+                crate::infra::i18n::Tr::new("admin-policies-desc-token-exchange-step-up")
+                    .to_string()
+            }
+            Self::ExchangeIpConsistency => {
+                crate::infra::i18n::Tr::new("admin-policies-desc-exchange-ip-consistency")
+                    .to_string()
+            }
+            Self::LogoutInvalidatesExchange => {
+                crate::infra::i18n::Tr::new("admin-policies-desc-logout-invalidates-exchange")
+                    .to_string()
+            }
+        }
+    }
+
     /// Whether this policy evaluates device posture. Temporal policies
     /// only consult the event history — an org running exclusively
     /// temporal policies does not demand posture data from clients.
@@ -113,11 +199,11 @@ impl std::fmt::Display for PreconfiguredSlug {
     }
 }
 
-/// A preconfigured posture policy defined in code.
+/// A preconfigured posture policy defined in code. The display name and
+/// description are not stored here: they are user-facing text and live in
+/// the i18n catalog, keyed by slug (see [`PreconfiguredSlug::name`]).
 pub(crate) struct PreconfiguredPolicy {
     pub slug: PreconfiguredSlug,
-    pub name: &'static str,
-    pub description: &'static str,
     pub policy_text: &'static str,
 }
 
@@ -125,40 +211,30 @@ pub(crate) struct PreconfiguredPolicy {
 pub(crate) const PRECONFIGURED_POLICIES: &[PreconfiguredPolicy] = &[
     PreconfiguredPolicy {
         slug: PreconfiguredSlug::DiskEncryption,
-        name: "Disk Encryption",
-        description: "Require full-disk encryption (FileVault, BitLocker, LUKS)",
         policy_text: r#"@id("disk_encryption")
 forbid (principal, action == Vouch::Action::"IssueToken", resource)
 unless { context.device.disk_encryption_enabled };"#,
     },
     PreconfiguredPolicy {
         slug: PreconfiguredSlug::Firewall,
-        name: "Firewall",
-        description: "Require an active firewall",
         policy_text: r#"@id("firewall")
 forbid (principal, action == Vouch::Action::"IssueToken", resource)
 unless { context.device.firewall_enabled };"#,
     },
     PreconfiguredPolicy {
         slug: PreconfiguredSlug::ScreenLock,
-        name: "Screen Lock",
-        description: "Require screen lock on idle",
         policy_text: r#"@id("screen_lock")
 forbid (principal, action == Vouch::Action::"IssueToken", resource)
 unless { context.device.screen_lock_enabled };"#,
     },
     PreconfiguredPolicy {
         slug: PreconfiguredSlug::EndpointProtection,
-        name: "Endpoint Protection",
-        description: "Require at least one EDR agent installed",
         policy_text: r#"@id("endpoint_protection")
 forbid (principal, action == Vouch::Action::"IssueToken", resource)
 unless { context.device.edr_count > 0 };"#,
     },
     PreconfiguredPolicy {
         slug: PreconfiguredSlug::PlatformIntegrity,
-        name: "Platform Integrity",
-        description: "Require Secure Boot to be enabled",
         policy_text: r#"@id("platform_integrity")
 forbid (principal, action == Vouch::Action::"IssueToken", resource)
 unless { context.device.secure_boot_enabled };"#,
@@ -184,8 +260,6 @@ unless { context.device.secure_boot_enabled };"#,
     //  context.device.os_version_num >= 22004000`).
     PreconfiguredPolicy {
         slug: PreconfiguredSlug::OsRecency,
-        name: "OS Recency",
-        description: "Require a supported OS version (N-1)",
         policy_text: r#"@id("os_recency")
 forbid (principal, action == Vouch::Action::"IssueToken", resource)
 unless {
@@ -205,8 +279,6 @@ unless {
     // audit history.
     PreconfiguredPolicy {
         slug: PreconfiguredSlug::IssuanceRateLimit,
-        name: "Issuance Rate Limit",
-        description: "Deny token issuance after 10 issuances within one hour",
         policy_text: r#"@id("issuance_rate_limit")
 forbid (principal, action == Vouch::Action::"IssueToken", resource)
 when temporal {
@@ -218,8 +290,6 @@ when temporal {
     },
     PreconfiguredPolicy {
         slug: PreconfiguredSlug::FailedLoginBurst,
-        name: "Failed Login Burst",
-        description: "Deny token issuance after 5 failed logins within ten minutes",
         policy_text: r#"@id("failed_login_burst")
 forbid (principal, action == Vouch::Action::"IssueToken", resource)
 when temporal {
@@ -231,8 +301,6 @@ when temporal {
     },
     PreconfiguredPolicy {
         slug: PreconfiguredSlug::TokenExchangeStepUp,
-        name: "Token Exchange Step-Up",
-        description: "Token exchange (WIF/agent credentials) requires a hardware login within 15 minutes",
         policy_text: r#"@id("token_exchange_step_up")
 forbid (principal, action == Vouch::Action::"ExchangeToken", resource)
 when temporal {
@@ -241,8 +309,6 @@ when temporal {
     },
     PreconfiguredPolicy {
         slug: PreconfiguredSlug::ExchangeIpConsistency,
-        name: "Exchange IP Consistency",
-        description: "Token exchange must come from the same IP as a successful login within 8 hours",
         policy_text: r#"@id("exchange_ip_consistency")
 forbid (principal, action == Vouch::Action::"ExchangeToken", resource)
 when temporal {
@@ -254,8 +320,6 @@ when temporal {
     },
     PreconfiguredPolicy {
         slug: PreconfiguredSlug::LogoutInvalidatesExchange,
-        name: "Logout Invalidates Exchange",
-        description: "Token exchange is denied after logout until the user logs in again",
         policy_text: r#"@id("logout_invalidates_exchange")
 forbid (principal, action == Vouch::Action::"ExchangeToken", resource)
 when temporal {

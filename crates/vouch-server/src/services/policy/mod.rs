@@ -117,7 +117,7 @@ pub(crate) fn validate_policy_text(text: &str) -> ServiceResult<()> {
         return Err(ServiceError::api(
             axum::http::StatusCode::BAD_REQUEST,
             "invalid_policy_expression",
-            "Policy text must not be empty",
+            crate::infra::i18n::Tr::new("admin-policies-err-empty").to_string(),
         ));
     }
     let Some(policy_schema) = schema::policy_schema() else {
@@ -134,7 +134,9 @@ pub(crate) fn validate_policy_text(text: &str) -> ServiceResult<()> {
                 return Err(ServiceError::api(
                     axum::http::StatusCode::BAD_REQUEST,
                     "invalid_policy_expression",
-                    format!("Invalid policy: {e}"),
+                    crate::infra::i18n::Tr::new("admin-policies-err-invalid")
+                        .arg("detail", e.to_string())
+                        .to_string(),
                 ));
             }
         };
@@ -145,7 +147,9 @@ pub(crate) fn validate_policy_text(text: &str) -> ServiceResult<()> {
         return Err(ServiceError::api(
             axum::http::StatusCode::BAD_REQUEST,
             "invalid_policy_expression",
-            format!("Invalid policy: {}", errors.join("; ")),
+            crate::infra::i18n::Tr::new("admin-policies-err-invalid")
+                .arg("detail", errors.join("; "))
+                .to_string(),
         ));
     }
     tracing::debug!("policy text validated successfully");
@@ -401,23 +405,26 @@ async fn record_denial(
 
 /// Deny message for a determining rule.
 fn deny_error(denying: Option<engine::DenyingPolicy>, os: Option<&str>) -> ServiceError {
-    let generic = "Check your device settings to meet your organization's \
-                   compliance requirements";
     let (name, remediation) = match denying {
         Some(engine::DenyingPolicy::Preconfigured(slug)) => {
-            let name = PRECONFIGURED_POLICIES
-                .iter()
-                .find(|p| p.slug == slug)
-                .map_or("policy", |p| p.name);
-            (name.to_string(), remediation_for_slug(slug, os))
+            (slug.name(), remediation_for_slug(slug, os))
         }
-        Some(engine::DenyingPolicy::Custom { name }) => (name, generic.to_string()),
-        None => ("posture".to_string(), generic.to_string()),
+        Some(engine::DenyingPolicy::Custom { name }) => (
+            name,
+            crate::infra::i18n::Tr::new("admin-policies-deny-generic").to_string(),
+        ),
+        None => (
+            "posture".to_string(),
+            crate::infra::i18n::Tr::new("admin-policies-deny-generic").to_string(),
+        ),
     };
     tracing::debug!(policy = name, "policy denied");
     ServiceError::oauth(
         OAuthErrorCode::AccessDenied,
-        format!("Device posture policy '{name}' not satisfied. {remediation}"),
+        crate::infra::i18n::Tr::new("admin-policies-deny-message")
+            .arg("policy", name.as_str())
+            .arg("remediation", remediation.as_str())
+            .to_string(),
     )
 }
 

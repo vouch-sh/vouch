@@ -1,9 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 //! OS-specific remediation guidance for preconfigured policies.
+//!
+//! The guidance is user-facing text shown by the CLI, so the catalog holds
+//! the wording and this module only selects the id.
 
 use super::preconfigured::PreconfiguredSlug;
+use crate::infra::i18n::Tr;
 
-/// Get OS-specific remediation guidance for a preconfigured policy.
+/// Get OS-specific remediation guidance for a preconfigured policy, in the
+/// requesting client's locale.
 #[must_use]
 pub(crate) fn remediation_for_slug(slug: PreconfiguredSlug, os: Option<&str>) -> String {
     let os = os.unwrap_or("unknown");
@@ -11,106 +16,91 @@ pub(crate) fn remediation_for_slug(slug: PreconfiguredSlug, os: Option<&str>) ->
     match (slug, os) {
         // Disk encryption
         (PreconfiguredSlug::DiskEncryption, "macos") => {
-            "Enable FileVault in System Settings > Privacy & Security".to_string()
+            Tr::new("admin-policies-fix-disk-encryption-macos").to_string()
         }
         (PreconfiguredSlug::DiskEncryption, "linux") => {
-            "Enable LUKS encryption with cryptsetup".to_string()
+            Tr::new("admin-policies-fix-disk-encryption-linux").to_string()
         }
         (PreconfiguredSlug::DiskEncryption, "windows") => {
-            "Enable BitLocker in Settings > Device encryption".to_string()
+            Tr::new("admin-policies-fix-disk-encryption-windows").to_string()
         }
         (PreconfiguredSlug::DiskEncryption, _) => {
-            "Enable full-disk encryption on your device".to_string()
+            Tr::new("admin-policies-fix-disk-encryption").to_string()
         }
 
         // Firewall
         (PreconfiguredSlug::Firewall, "macos") => {
-            "Enable Firewall in System Settings > Network > Firewall".to_string()
+            Tr::new("admin-policies-fix-firewall-macos").to_string()
         }
         (PreconfiguredSlug::Firewall, "linux") => {
-            "Enable firewall with: sudo ufw enable".to_string()
+            Tr::new("admin-policies-fix-firewall-linux").to_string()
         }
         (PreconfiguredSlug::Firewall, "windows") => {
-            "Enable Windows Firewall in Windows Security".to_string()
+            Tr::new("admin-policies-fix-firewall-windows").to_string()
         }
-        (PreconfiguredSlug::Firewall, _) => "Enable your system firewall".to_string(),
+        (PreconfiguredSlug::Firewall, _) => Tr::new("admin-policies-fix-firewall").to_string(),
 
         // Screen lock
         (PreconfiguredSlug::ScreenLock, "macos") => {
-            "Set screen lock in System Settings > Lock Screen".to_string()
+            Tr::new("admin-policies-fix-screen-lock-macos").to_string()
         }
         (PreconfiguredSlug::ScreenLock, "linux") => {
-            "Configure screen lock in your display settings. \
-             If authenticating via SSH, screen lock status may not be \
-             detectable — try authenticating from a graphical session"
-                .to_string()
+            Tr::new("admin-policies-fix-screen-lock-linux").to_string()
         }
         (PreconfiguredSlug::ScreenLock, "windows") => {
-            "Set screen lock in Settings > Accounts > Sign-in options".to_string()
+            Tr::new("admin-policies-fix-screen-lock-windows").to_string()
         }
-        (PreconfiguredSlug::ScreenLock, _) => "Enable screen lock on your device".to_string(),
+        (PreconfiguredSlug::ScreenLock, _) => Tr::new("admin-policies-fix-screen-lock").to_string(),
 
         // Endpoint protection
         (PreconfiguredSlug::EndpointProtection, "macos" | "linux") => {
-            "Install an EDR agent (e.g., CrowdStrike, SentinelOne)".to_string()
+            Tr::new("admin-policies-fix-endpoint-protection-macos").to_string()
         }
         (PreconfiguredSlug::EndpointProtection, "windows") => {
-            "Install an EDR agent (e.g., CrowdStrike, \
-             Microsoft Defender for Endpoint)"
-                .to_string()
+            Tr::new("admin-policies-fix-endpoint-protection-windows").to_string()
         }
         (PreconfiguredSlug::EndpointProtection, _) => {
-            "Install an endpoint detection and response (EDR) agent".to_string()
+            Tr::new("admin-policies-fix-endpoint-protection").to_string()
         }
 
         // Platform integrity
         (PreconfiguredSlug::PlatformIntegrity, "macos") => {
-            "Secure Boot is managed by Apple and should be enabled \
-             by default"
-                .to_string()
+            Tr::new("admin-policies-fix-platform-integrity-macos").to_string()
         }
         (PreconfiguredSlug::PlatformIntegrity, "linux" | "windows") => {
-            "Enable Secure Boot in your UEFI/BIOS firmware settings".to_string()
+            Tr::new("admin-policies-fix-platform-integrity-windows").to_string()
         }
         (PreconfiguredSlug::PlatformIntegrity, _) => {
-            "Enable Secure Boot on your device".to_string()
+            Tr::new("admin-policies-fix-platform-integrity").to_string()
         }
 
         // OS currency
         (PreconfiguredSlug::OsRecency, "macos") => {
-            "Update macOS to a supported version (14 or later)".to_string()
+            Tr::new("admin-policies-fix-os-recency-macos").to_string()
         }
         (PreconfiguredSlug::OsRecency, "windows") => {
-            "Update Windows to a supported version (build 26100 \
-             or later)"
-                .to_string()
+            Tr::new("admin-policies-fix-os-recency-windows").to_string()
         }
         (PreconfiguredSlug::OsRecency, "linux") => {
-            "Linux is not covered by the built-in OS recency check. \
-             Your organization may have a custom policy for your distribution"
-                .to_string()
+            Tr::new("admin-policies-fix-os-recency-linux").to_string()
         }
-        (PreconfiguredSlug::OsRecency, _) => {
-            "Update your operating system to a supported version".to_string()
-        }
+        (PreconfiguredSlug::OsRecency, _) => Tr::new("admin-policies-fix-os-recency").to_string(),
 
-        // Temporal policies — remediation is not OS-specific.
+        // Temporal policies — the advice is the same on every platform.
         (PreconfiguredSlug::IssuanceRateLimit, _) => {
-            "Too many token issuances in the last hour. Wait and retry".to_string()
+            Tr::new("admin-policies-fix-issuance-rate-limit").to_string()
         }
         (PreconfiguredSlug::FailedLoginBurst, _) => {
-            "Too many failed login attempts recently. Wait a few minutes and retry".to_string()
+            Tr::new("admin-policies-fix-failed-login-burst").to_string()
         }
         (PreconfiguredSlug::TokenExchangeStepUp, _) => {
-            "A recent hardware login is required. Run `vouch login` and retry".to_string()
+            Tr::new("admin-policies-fix-token-exchange-step-up").to_string()
         }
         (PreconfiguredSlug::ExchangeIpConsistency, _) => {
-            "This request came from a different network than your recent login. \
-             Run `vouch login` from this network and retry"
-                .to_string()
+            Tr::new("admin-policies-fix-exchange-ip-consistency").to_string()
         }
         (PreconfiguredSlug::LogoutInvalidatesExchange, _) => {
-            "You logged out since your last login. Run `vouch login` and retry".to_string()
+            Tr::new("admin-policies-fix-logout-invalidates-exchange").to_string()
         }
     }
 }

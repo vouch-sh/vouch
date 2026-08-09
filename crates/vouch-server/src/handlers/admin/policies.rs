@@ -104,8 +104,8 @@ pub(crate) async fn admin_policies_page(
         .iter()
         .map(|p| PreconfiguredPolicyRow {
             slug: p.slug.to_string(),
-            name: p.name.to_string(),
-            description: p.description.to_string(),
+            name: p.slug.name(),
+            description: p.slug.description(),
             policy_text: p.policy_text.to_string(),
             active: active_slugs.iter().any(|s| s == p.slug.as_str()),
         })
