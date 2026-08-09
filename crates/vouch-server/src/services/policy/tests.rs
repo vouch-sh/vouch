@@ -1048,3 +1048,26 @@ fn test_policy_files_declare_their_slug_id() {
         );
     }
 }
+
+/// Cedar is deny-by-default, so a set containing only `forbid` rules denies
+/// even when every requirement is met. The base permits in `base_allow.dw`
+/// are what turn "no forbid fired" into an allow — without them the engine
+/// would deny every request.
+#[test]
+fn test_forbid_only_set_denies_even_when_satisfied() {
+    let requirement_met = preconfigured_text(PreconfiguredSlug::DiskEncryption);
+    let posture = sample_posture(); // disk encryption enabled — the forbid does not fire
+    let event = issue_token_request(&posture, "test-user", "test-org");
+
+    let without_permit = matches!(
+        decide(requirement_met, &event),
+        Ok(EngineDecision::Deny) | Err(_)
+    );
+    assert!(
+        without_permit,
+        "a forbid-only set must deny: nothing grants access"
+    );
+
+    // The same policy composed with the base permits allows.
+    assert!(evaluate_one(requirement_met, &posture));
+}
