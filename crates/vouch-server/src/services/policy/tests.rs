@@ -652,3 +652,118 @@ fn test_base_allow_alone_allows() {
     };
     assert!(allowed, "base permit alone must allow");
 }
+
+// ============================================================
+// Per-principal history slicing invariant
+// ============================================================
+
+fn history_row(kind: &str, user_id: &str, secs_ago: i64, seq: u32) -> crate::db::audit::AuditEvent {
+    crate::db::audit::AuditEvent {
+        id: format!("row-{seq:04}"),
+        event_type: kind.to_string(),
+        user_id: Some(user_id.to_string()),
+        email_domain: None,
+        email_hmac: None,
+        data: "{}".to_string(),
+        created_at: jiff::Timestamp::now()
+            .checked_sub(jiff::Span::new().seconds(secs_ago))
+            .unwrap(),
+    }
+}
+
+/// The invariant the per-decision design rests on: no temporal predicate
+/// crosses principals (the default event schema pins `callerPrincipal`).
+/// Checked from both directions — another principal's history can neither
+/// trip an aggregation cap nor satisfy a recency window.
+#[test]
+fn test_temporal_policies_ignore_other_principals_history() {
+    let now = jiff::Timestamp::now().as_second();
+
+    // Aggregations: user B's 10 issuances and 5 failed logins must not
+    // deny user A's issuance.
+    let set = compose_org_set(
+        &[
+            "issuance_rate_limit".to_string(),
+            "failed_login_burst".to_string(),
+        ],
+        &[],
+    );
+    let lowered = LoweredPolicySet::from_str(
+        &set.composed,
+        schema::service_schema(),
+        schema::policy_schema().unwrap(),
+    )
+    .unwrap();
+    let mut history = Vec::new();
+    for i in 0..10_u32 {
+        history.push(history_row(
+            "oauth_token_issued",
+            "user-b",
+            600 + i64::from(i),
+            i,
+        ));
+    }
+    for i in 0..5_u32 {
+        history.push(history_row(
+            "login_failed",
+            "user-b",
+            120 + i64::from(i),
+            100 + i,
+        ));
+    }
+    history.sort_by(|a, b| (a.created_at, &a.id).cmp(&(b.created_at, &b.id)));
+    let posture = sample_posture();
+    let decision = engine::evaluate(lowered, &set.refs, &history, "org-1", now, |ts| {
+        decision_event(
+            &DecisionKind::IssueToken {
+                posture: &posture,
+                ip: None,
+                client_id: "cli",
+            },
+            "user-a",
+            "org-1",
+            ts,
+        )
+    })
+    .unwrap();
+    let allowed = match decision {
+        engine::OrgDecision::Allow => true,
+        engine::OrgDecision::Deny(_) => false,
+    };
+    assert!(
+        allowed,
+        "another principal's history must not trip aggregation caps"
+    );
+
+    // Recency: user B's fresh login must not satisfy user A's step-up.
+    let set = compose_org_set(&["token_exchange_step_up".to_string()], &[]);
+    let lowered = LoweredPolicySet::from_str(
+        &set.composed,
+        schema::service_schema(),
+        schema::policy_schema().unwrap(),
+    )
+    .unwrap();
+    let history = vec![history_row("login_success", "user-b", 60, 0)];
+    let decision = engine::evaluate(lowered, &set.refs, &history, "org-1", now, |ts| {
+        decision_event(
+            &DecisionKind::ExchangeToken {
+                ip: None,
+                client_id: "cli",
+                audience: None,
+            },
+            "user-a",
+            "org-1",
+            ts,
+        )
+    })
+    .unwrap();
+    let denied_by = match decision {
+        engine::OrgDecision::Deny(Some(engine::PolicyRef::Preconfigured(slug))) => Some(slug),
+        engine::OrgDecision::Allow | engine::OrgDecision::Deny(_) => None,
+    };
+    assert_eq!(
+        denied_by,
+        Some(PreconfiguredSlug::TokenExchangeStepUp),
+        "another principal's login must not satisfy the step-up window"
+    );
+}

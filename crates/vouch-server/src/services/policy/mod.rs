@@ -3,15 +3,17 @@
 //!
 //! Replaces the CEL engine: preconfigured policies are code-defined Cedar
 //! `forbid … unless` rules, custom policies are admin-authored Cedar/Dogwood
-//! text. The composed policy set always starts with one base `permit` for
-//! the decision action; every active policy is a `forbid` that fires on
+//! text. The composed policy set always starts with base `permit`s for the
+//! decision actions; every active policy is a `forbid` that fires on
 //! violation, so all active policies are ANDed (deny overrides permit),
 //! matching the CEL engine's semantics. All error paths fail closed.
 //!
-//! Custom policies are evaluated one policy set per policy (base permit +
-//! the candidate forbid): a policy that fails to lower — e.g. leftover CEL
-//! text from before the migration — denies with that policy's name instead
-//! of taking the whole org's policy set down.
+//! Enforcement evaluates per decision: the org's composed set is prechecked
+//! (lower + validate, cached by config fingerprint — a custom policy that
+//! fails, e.g. leftover CEL text, denies with its name), then a fresh
+//! authorizer replays the requesting principal's 24h audit history and
+//! decides. See `engine` for why per-decision replay is sound and correct
+//! across replicas.
 
 pub(crate) mod engine;
 pub(crate) mod events;
@@ -162,7 +164,7 @@ pub(crate) fn test_policy_text(text: &str, posture: &DevicePosture) -> ServiceRe
 }
 
 // ============================================================
-// Policy Enforcement (stateful, per-org engines)
+// Policy Enforcement (per-decision, principal-scoped)
 // ============================================================
 
 /// The decision being authorized.
@@ -240,15 +242,18 @@ fn decision_event(kind: &DecisionKind<'_>, user_id: &str, org_id: &str, ts: i64)
     }
 }
 
-/// Build the composed policy set for an org: base permits, active
-/// preconfigured forbids, then custom policies that individually lower.
-/// Customs that do not lower (e.g. leftover CEL text) are returned as
-/// `broken` — the engine denies while any exist (fail-closed, by name).
-fn build_engine_parts(
+/// The composed policy set for an org: the composed text plus the
+/// rule-index → source map (base permits first, then active preconfigured
+/// forbids, then customs, in composition order).
+struct OrgPolicySet {
+    composed: String,
+    refs: Vec<engine::PolicyRef>,
+}
+
+fn compose_org_set(
     active_slugs: &[String],
     active_custom: &[db::CustomPosturePolicy],
-) -> Result<(engine::EngineParts, Vec<String>), String> {
-    let policy_schema = schema::policy_schema().ok_or("policy schema unavailable")?;
+) -> OrgPolicySet {
     let mut refs = vec![engine::PolicyRef::BasePermit; preconfigured::BASE_ALLOW_RULES];
     let mut texts: Vec<&str> = Vec::new();
     for slug_str in active_slugs {
@@ -259,29 +264,66 @@ fn build_engine_parts(
             refs.push(engine::PolicyRef::Preconfigured(slug));
         }
     }
-    let mut broken = Vec::new();
+    for custom in active_custom {
+        texts.push(custom.policy_text.as_str());
+        refs.push(engine::PolicyRef::Custom {
+            name: custom.name.clone(),
+        });
+    }
+    OrgPolicySet {
+        composed: compose(&texts),
+        refs,
+    }
+}
+
+/// Static precheck of an org's composed set: it must lower AND validate.
+/// On failure, bisect the custom policies (each alone with the base
+/// permits) to attribute the failure to one policy by name — leftover CEL
+/// text and schema drift across deploys both land here.
+fn run_precheck(composed: &str, active_custom: &[db::CustomPosturePolicy]) -> engine::Precheck {
+    let Some(policy_schema) = schema::policy_schema() else {
+        return engine::Precheck::EngineError("policy schema unavailable".to_string());
+    };
+    let composed_result =
+        LoweredPolicySet::from_str(composed, schema::service_schema(), policy_schema)
+            .map_err(|e| format!("composed set failed to lower: {e}"))
+            .and_then(|lowered| {
+                let report = Validator::new().validate(&lowered);
+                let errors: Vec<String> =
+                    report.validation_errors().map(|e| e.to_string()).collect();
+                if errors.is_empty() {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "composed set failed validation: {}",
+                        errors.join("; ")
+                    ))
+                }
+            });
+    let Err(composed_error) = composed_result else {
+        return engine::Precheck::Ok;
+    };
     for custom in active_custom {
         let alone = compose(&[custom.policy_text.as_str()]);
-        match LoweredPolicySet::from_str(&alone, schema::service_schema(), policy_schema) {
-            Ok(_) => {
-                texts.push(custom.policy_text.as_str());
-                refs.push(engine::PolicyRef::Custom {
-                    name: custom.name.clone(),
-                });
+        let ok = match LoweredPolicySet::from_str(&alone, schema::service_schema(), policy_schema) {
+            Ok(lowered) => {
+                Validator::new()
+                    .validate(&lowered)
+                    .validation_errors()
+                    .count()
+                    == 0
             }
-            Err(e) => {
-                tracing::warn!(
-                    policy_name = custom.name,
-                    "custom policy does not lower (fail-closed): {e}"
-                );
-                broken.push(custom.name.clone());
-            }
+            Err(_) => false,
+        };
+        if !ok {
+            tracing::warn!(
+                policy_name = custom.name,
+                "custom policy fails precheck (fail-closed): {composed_error}"
+            );
+            return engine::Precheck::BrokenCustom(custom.name.clone());
         }
     }
-    let composed = compose(&texts);
-    let lowered = LoweredPolicySet::from_str(&composed, schema::service_schema(), policy_schema)
-        .map_err(|e| format!("composed org policy set failed to lower: {e}"))?;
-    Ok((engine::EngineParts { lowered, refs }, broken))
+    engine::Precheck::EngineError(composed_error)
 }
 
 /// Deny message for a determining rule.
@@ -314,9 +356,10 @@ fn deny_error(denying: Option<engine::PolicyRef>, os: Option<&str>) -> ServiceEr
     )
 }
 
-/// Run one decision through the org's stateful engine, building or
-/// rebuilding it (with a 24h audit replay) when the org's policy
-/// configuration changed.
+/// Run one decision: precheck the org's composed set (cached by config
+/// fingerprint), fetch the requesting principal's 24h history from the
+/// shared audit table, and evaluate with a fresh authorizer. Querying at
+/// decision time is what makes the result correct across replicas.
 async fn authorize_decision(
     state: &crate::AppState,
     org_id: &str,
@@ -331,57 +374,67 @@ async fn authorize_decision(
         .map(|c| (c.id.clone(), c.policy_text.clone()))
         .collect();
     let fingerprint = engine::fingerprint(active_slugs, &custom_pairs);
-    let now = jiff::Timestamp::now().as_second();
+    let set = compose_org_set(active_slugs, active_custom);
 
-    // Two passes: the first may find no current engine and install one; the
-    // second decides. A concurrent policy change between passes surfaces as
-    // another None — treated as unavailable rather than looping forever.
-    for _attempt in 0_u8..2 {
-        let Some(cursor) = state.policy.cursor_if_current(org_id, fingerprint) else {
-            let (parts, broken) =
-                build_engine_parts(active_slugs, active_custom).map_err(|msg| {
-                    tracing::error!(org_id, "policy engine build failed: {msg}");
-                    ServiceError::Internal("policy engine unavailable".to_string())
-                })?;
-            if let Some(name) = broken.first() {
-                return Err(deny_error(
-                    Some(engine::PolicyRef::Custom { name: name.clone() }),
-                    os,
-                ));
-            }
-            let replay = events::fetch_history(&state.audit, None)
-                .await
-                .map_err(|msg| {
-                    tracing::error!(org_id, "policy history replay failed: {msg}");
-                    ServiceError::Internal("policy engine unavailable".to_string())
-                })?;
-            state.policy.install(org_id, fingerprint, parts, &replay);
-            continue;
-        };
-        let tail = events::fetch_history(&state.audit, cursor)
-            .await
-            .map_err(|msg| {
-                tracing::error!(org_id, "policy history tail failed: {msg}");
-                ServiceError::Internal("policy engine unavailable".to_string())
-            })?;
-        match state.policy.decide(org_id, fingerprint, &tail, now, |ts| {
-            decision_event(&kind, user_id, org_id, ts)
-        }) {
-            Some(Ok(engine::OrgDecision::Allow)) => return Ok(()),
-            Some(Ok(engine::OrgDecision::Deny(denying))) => return Err(deny_error(denying, os)),
-            Some(Err(msg)) => {
-                tracing::error!(org_id, "policy decision failed: {msg}");
-                return Err(ServiceError::Internal(
-                    "policy engine unavailable".to_string(),
-                ));
-            }
-            None => {}
+    match state.policy.precheck(org_id, fingerprint, || {
+        run_precheck(&set.composed, active_custom)
+    }) {
+        engine::Precheck::Ok => {}
+        engine::Precheck::BrokenCustom(name) => {
+            crate::infra::metrics::record_policy_decision("deny", &name);
+            return Err(deny_error(Some(engine::PolicyRef::Custom { name }), os));
+        }
+        engine::Precheck::EngineError(msg) => {
+            tracing::error!(org_id, "policy precheck failed: {msg}");
+            return Err(ServiceError::Internal(
+                "policy engine unavailable".to_string(),
+            ));
         }
     }
-    tracing::error!(org_id, "policy engine unavailable after rebuild");
-    Err(ServiceError::Internal(
-        "policy engine unavailable".to_string(),
-    ))
+
+    let history = events::fetch_user_history(&state.audit, user_id)
+        .await
+        .map_err(|msg| {
+            tracing::error!(org_id, "policy history fetch failed: {msg}");
+            ServiceError::Internal("policy engine unavailable".to_string())
+        })?;
+
+    let Some(policy_schema) = schema::policy_schema() else {
+        return Err(ServiceError::Internal(
+            "policy schema unavailable".to_string(),
+        ));
+    };
+    let lowered =
+        LoweredPolicySet::from_str(&set.composed, schema::service_schema(), policy_schema)
+            .map_err(|e| {
+                tracing::error!(org_id, "composed org policy set failed to lower: {e}");
+                ServiceError::Internal("policy engine unavailable".to_string())
+            })?;
+
+    let now = jiff::Timestamp::now().as_second();
+    let decision = engine::evaluate(lowered, &set.refs, &history, org_id, now, |ts| {
+        decision_event(&kind, user_id, org_id, ts)
+    })
+    .map_err(|msg| {
+        tracing::error!(org_id, "policy decision failed: {msg}");
+        ServiceError::Internal("policy engine unavailable".to_string())
+    })?;
+
+    match decision {
+        engine::OrgDecision::Allow => {
+            crate::infra::metrics::record_policy_decision("allow", "none");
+            Ok(())
+        }
+        engine::OrgDecision::Deny(denying) => {
+            let label = match &denying {
+                Some(engine::PolicyRef::Preconfigured(slug)) => slug.as_str(),
+                Some(engine::PolicyRef::Custom { .. }) => "custom",
+                Some(engine::PolicyRef::BasePermit) | None => "unattributed",
+            };
+            crate::infra::metrics::record_policy_decision("deny", label);
+            Err(deny_error(denying, os))
+        }
+    }
 }
 
 /// Evaluate all active posture policies for an org against device posture.

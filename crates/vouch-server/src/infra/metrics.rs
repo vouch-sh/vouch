@@ -88,6 +88,17 @@ pub fn record_credential_issuance(credential_type: &str) {
     .increment(1);
 }
 
+/// Record a posture/temporal policy decision. `policy` is the denying
+/// policy's slug (or "custom" / "unattributed"); "none" for allows.
+pub fn record_policy_decision(outcome: &str, policy: &str) {
+    metrics::counter!(
+        "vouch_policy_decisions_total",
+        "outcome" => outcome.to_string(),
+        "policy" => policy.to_string()
+    )
+    .increment(1);
+}
+
 #[cfg(test)]
 #[expect(
     clippy::expect_used,

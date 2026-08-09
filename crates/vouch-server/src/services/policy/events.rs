@@ -35,27 +35,22 @@ const REPLAY_WINDOW_HOURS: i64 = 24;
 /// never silently truncated.
 const FETCH_LIMIT: u64 = 10_000;
 
-/// Fetch history rows: the full 24h window when `after_id` is `None`, or
-/// the tail after a cursor. Rows are returned oldest-first (the order the
-/// authorizer must observe them in).
-pub(crate) async fn fetch_history(
+/// Fetch one principal's history: their last 24h of mapped audit rows,
+/// oldest-first (the order the authorizer must observe them in). Queried at
+/// decision time against the shared audit table, so every replica sees the
+/// same history modulo in-flight writes.
+pub(crate) async fn fetch_user_history(
     audit: &AuditStore,
-    after_id: Option<String>,
+    user_id: &str,
 ) -> Result<Vec<AuditRow>, String> {
-    let since = match after_id {
-        Some(_) => None,
-        None => {
-            let now = jiff::Timestamp::now();
-            let floor = now
-                .checked_sub(jiff::Span::new().hours(REPLAY_WINDOW_HOURS))
-                .map_err(|e| format!("cannot compute replay window floor: {e}"))?;
-            Some(floor.to_string())
-        }
-    };
+    let now = jiff::Timestamp::now();
+    let floor = now
+        .checked_sub(jiff::Span::new().hours(REPLAY_WINDOW_HOURS))
+        .map_err(|e| format!("cannot compute replay window floor: {e}"))?;
     let filter = AuditEventFilter {
         event_types: Some(HISTORY_KINDS.iter().map(ToString::to_string).collect()),
-        since,
-        after_id,
+        user_id: Some(user_id.to_string()),
+        since: Some(floor.to_string()),
         limit: Some(FETCH_LIMIT),
         ..AuditEventFilter::default()
     };
@@ -65,6 +60,7 @@ pub(crate) async fn fetch_history(
         .map_err(|e| format!("audit history query failed: {e}"))?;
     if u64::try_from(rows.len()).unwrap_or(u64::MAX) >= FETCH_LIMIT {
         tracing::warn!(
+            user_id,
             limit = FETCH_LIMIT,
             "audit history fetch hit its row cap; temporal history may be incomplete"
         );

@@ -8,8 +8,9 @@
 //! matching the CEL engine's semantics.
 
 /// Maximum number of active policies (preconfigured + custom combined).
-/// There are 11 preconfigured policies, so 12 allows all 11 + 1 custom.
-pub(crate) const MAX_ACTIVE_POLICIES: usize = 12;
+/// There are 11 preconfigured policies, so 13 allows all 11 + 2 custom —
+/// preserving the 2 custom slots orgs had under the CEL engine's 6 + 2.
+pub(crate) const MAX_ACTIVE_POLICIES: usize = 13;
 
 /// The always-present base permits for the two decision actions. Custom
 /// `permit`s an admin writes are harmless (these already allow; forbids
