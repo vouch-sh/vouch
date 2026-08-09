@@ -1482,9 +1482,9 @@ dependencies = [
 
 [[package]]
 name = "cookie"
-version = "0.18.1"
+version = "0.18.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4ddef33a339a91ea89fb53151bd0a4689cfce27055c291dfa69945475d22c747"
+checksum = "1a373e3602691c3cdea496d2f0ee5935151e6168fe87739483c463db1b2f2f87"
 dependencies = [
  "percent-encoding",
  "time",
@@ -6573,7 +6573,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "vouch-agent"
-version = "2026.8.1"
+version = "2026.8.2"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -6604,7 +6604,7 @@ dependencies = [
 
 [[package]]
 name = "vouch-cli"
-version = "2026.8.1"
+version = "2026.8.2"
 dependencies = [
  "anyhow",
  "apple-native-keyring-store",
@@ -6666,7 +6666,7 @@ dependencies = [
 
 [[package]]
 name = "vouch-common"
-version = "2026.8.1"
+version = "2026.8.2"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -6687,7 +6687,7 @@ dependencies = [
 
 [[package]]
 name = "vouch-httpsig"
-version = "2026.8.1"
+version = "2026.8.2"
 dependencies = [
  "aws-lc-rs",
  "axum",
@@ -6703,7 +6703,7 @@ dependencies = [
 
 [[package]]
 name = "vouch-i18n"
-version = "2026.8.1"
+version = "2026.8.2"
 dependencies = [
  "anyhow",
  "fluent-bundle",
@@ -6715,7 +6715,7 @@ dependencies = [
 
 [[package]]
 name = "vouch-server"
-version = "2026.8.1"
+version = "2026.8.2"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -6801,7 +6801,7 @@ dependencies = [
 
 [[package]]
 name = "vouch-tests"
-version = "2026.8.1"
+version = "2026.8.2"
 dependencies = [
  "anyhow",
  "aws-lc-rs",

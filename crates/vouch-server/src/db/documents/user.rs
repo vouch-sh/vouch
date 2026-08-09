@@ -79,13 +79,27 @@ impl UpstreamLogin {
 
 /// Combined index value for the `idp_identity` blind index.
 ///
-/// `issuer` and `subject` are joined with a NUL byte, which cannot
-/// appear in an issuer URL or SAML entity ID, so the encoding is
-/// unambiguous: distinct `(issuer, subject)` pairs never collide. The
-/// store HMACs index values before persisting them, so the pair is a
-/// blind equality key like every other index.
+/// `issuer` and `subject` are hashed together with NUL domain
+/// separators, which cannot appear in an issuer URL or SAML entity ID,
+/// so distinct `(issuer, subject)` pairs never collide. Keeping the
+/// separator inside the digest is what makes the result storable: a NUL
+/// in the index value itself is rejected by Postgres and Aurora DSQL.
+/// Hashing also keeps the raw upstream subject out of the index table
+/// in plaintext development mode.
+///
+/// Same SHA-256-with-domain-separator derivation as
+/// `deterministic_org_id` (`db/enrollment.rs`), [`deterministic_user_id`],
+/// `deterministic_jti_id` (`db/oauth.rs`), and
+/// `deterministic_challenge_state_id` (`db/challenge_states.rs`).
 pub(crate) fn idp_identity_index_value(issuer: &str, subject: &str) -> String {
-    format!("{issuer}\u{0}{subject}")
+    use aws_lc_rs::digest::{self, SHA256};
+
+    let mut ctx = digest::Context::new(&SHA256);
+    ctx.update(b"idp_identity\0");
+    ctx.update(issuer.as_bytes());
+    ctx.update(b"\0");
+    ctx.update(subject.as_bytes());
+    hex::encode(ctx.finish().as_ref())
 }
 
 fn default_active() -> bool {
@@ -240,9 +254,10 @@ mod tests {
 
     #[test]
     fn idp_identity_index_value_distinguishes_issuer_and_subject() {
-        // The NUL separator makes the encoding unambiguous for real
-        // issuer values (URLs / entity IDs, which cannot contain NUL):
-        // moving characters across the boundary changes the value.
+        // The NUL domain separator inside the digest makes the encoding
+        // unambiguous for real issuer values (URLs / entity IDs, which
+        // cannot contain NUL): moving characters across the boundary
+        // changes the value.
         assert_ne!(
             idp_identity_index_value("https://a.example", "sub-1"),
             idp_identity_index_value("https://a.example", "sub-2"),
@@ -251,9 +266,35 @@ mod tests {
             idp_identity_index_value("https://a.example", "sub-1"),
             idp_identity_index_value("https://b.example", "sub-1"),
         );
+        // Shifting the boundary must not collide: the two pairs
+        // concatenate identically, so only the separator keeps them apart.
+        assert_ne!(
+            idp_identity_index_value("https://a.example/x", "sub-1"),
+            idp_identity_index_value("https://a.example/", "xsub-1"),
+        );
+        // The same pair always yields the same key, so the index is a
+        // stable point lookup across processes.
         assert_eq!(
             idp_identity_index_value("https://a.example", "sub-1"),
-            "https://a.example\u{0}sub-1",
+            idp_identity_index_value("https://a.example", "sub-1"),
+        );
+    }
+
+    #[test]
+    fn idp_identity_index_value_is_storable_as_sql_text() {
+        // Postgres and Aurora DSQL reject a NUL in a text value, and
+        // SQLite accepts it silently, so an unstorable index value would
+        // otherwise pass every test here and fail only in production. A
+        // subject carrying its own control characters must not be able
+        // to reintroduce one.
+        let value = idp_identity_index_value("https://a.example", "sub\u{0}\u{1}\n1");
+        assert!(
+            !value.contains(|c: char| c.is_control()),
+            "index value must contain no control characters, got {value:?}"
+        );
+        assert!(
+            value.chars().all(|c| c.is_ascii_hexdigit()),
+            "index value must be plain hex, got {value:?}"
         );
     }
 

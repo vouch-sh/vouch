@@ -237,7 +237,9 @@ fn raw_to_document<T: DocumentType>(
     })
 }
 
-/// Build an index-value match expression.
+/// Build an index-value match expression against `table`, which is either
+/// `DocumentIndexes::Table` itself or one of the per-criterion join
+/// aliases `find_by_indexes` uses to self-join without name conflicts.
 ///
 /// In HPKE mode, matches both the HMAC-hashed value (new rows) and
 /// the plaintext value (pre-encryption rows) using `IN`. In plaintext
@@ -246,28 +248,13 @@ fn raw_to_document<T: DocumentType>(
 /// This is a temporary migration bridge. Once all rows have been
 /// re-encrypted and their indexes HMAC-hashed (via update-on-read or
 /// background job), this can revert to a simple equality check.
-fn index_value_condition(crypto: &dyn DocumentCrypto, value: &str) -> sea_query::SimpleExpr {
-    let hashed = crypto.hmac_index(value);
-    let col = Expr::col((DocumentIndexes::Table, DocumentIndexes::IndexValue));
-    if hashed == value {
-        col.eq(value.to_string())
-    } else {
-        col.is_in([hashed, value.to_string()])
-    }
-}
-
-/// Like [`index_value_condition`] but references `index_value` through a
-/// join alias instead of the canonical `DocumentIndexes` table name.
-///
-/// Used by `find_by_indexes` to build self-join conditions for each
-/// additional criterion without aliasing conflicts.
-fn index_value_condition_aliased(
+fn index_value_condition<T: sea_query::IntoIden>(
     crypto: &dyn DocumentCrypto,
+    table: T,
     value: &str,
-    alias: &sea_query::Alias,
 ) -> sea_query::SimpleExpr {
     let hashed = crypto.hmac_index(value);
-    let col = Expr::col((alias.clone(), DocumentIndexes::IndexValue));
+    let col = Expr::col((table.into_iden(), DocumentIndexes::IndexValue));
     if hashed == value {
         col.eq(value.to_string())
     } else {
@@ -546,7 +533,7 @@ impl DocumentStore {
         field: &str,
         value: &str,
     ) -> Result<Option<Document<T>>> {
-        let index_cond = index_value_condition(&*self.crypto, value);
+        let index_cond = index_value_condition(&*self.crypto, DocumentIndexes::Table, value);
 
         let stmt = Query::select()
             .columns(DOC_TABLE_COLUMNS)
@@ -580,7 +567,7 @@ impl DocumentStore {
         field: &str,
         value: &str,
     ) -> Result<Vec<Document<T>>> {
-        let index_cond = index_value_condition(&*self.crypto, value);
+        let index_cond = index_value_condition(&*self.crypto, DocumentIndexes::Table, value);
 
         let stmt = Query::select()
             .columns(DOC_TABLE_COLUMNS)
@@ -620,7 +607,7 @@ impl DocumentStore {
         after_id: Option<&str>,
         limit: u64,
     ) -> Result<(Vec<Document<T>>, bool)> {
-        let index_cond = index_value_condition(&*self.crypto, value);
+        let index_cond = index_value_condition(&*self.crypto, DocumentIndexes::Table, value);
 
         let mut query = Query::select();
         query
@@ -692,7 +679,7 @@ impl DocumentStore {
                         .equals((alias.clone(), DocumentIndexes::DocumentId)),
                 )
                 .add(Expr::col((alias.clone(), DocumentIndexes::IndexField)).eq(*field))
-                .add(index_value_condition_aliased(&*self.crypto, value, &alias));
+                .add(index_value_condition(&*self.crypto, alias.clone(), value));
             query.join_as(
                 sea_query::JoinType::InnerJoin,
                 DocumentIndexes::Table,
@@ -1014,7 +1001,7 @@ impl DocumentStore {
     ///
     /// Returns an error if the query fails.
     pub async fn count<T: DocumentType>(&self, field: &str, value: &str) -> Result<i64> {
-        let index_cond = index_value_condition(&*self.crypto, value);
+        let index_cond = index_value_condition(&*self.crypto, DocumentIndexes::Table, value);
 
         let stmt = Query::select()
             .expr_as(
@@ -1140,7 +1127,7 @@ impl DocumentStore {
         offset: u64,
         limit: u64,
     ) -> Result<(Vec<Document<T>>, i64)> {
-        let index_cond = index_value_condition(&*self.crypto, value);
+        let index_cond = index_value_condition(&*self.crypto, DocumentIndexes::Table, value);
 
         let stmt = Query::select()
             .columns(DOC_TABLE_COLUMNS)
@@ -1332,7 +1319,7 @@ impl StoreTransaction<'_> {
         field: &str,
         value: &str,
     ) -> Result<Option<Document<T>>> {
-        let index_cond = index_value_condition(&**self.crypto, value);
+        let index_cond = index_value_condition(&**self.crypto, DocumentIndexes::Table, value);
 
         let stmt = Query::select()
             .columns(DOC_TABLE_COLUMNS)
@@ -1365,7 +1352,7 @@ impl StoreTransaction<'_> {
         field: &str,
         value: &str,
     ) -> Result<Vec<Document<T>>> {
-        let index_cond = index_value_condition(&**self.crypto, value);
+        let index_cond = index_value_condition(&**self.crypto, DocumentIndexes::Table, value);
 
         let stmt = Query::select()
             .columns(DOC_TABLE_COLUMNS)
@@ -1573,7 +1560,7 @@ impl StoreTransaction<'_> {
     ///
     /// Returns an error if the query fails.
     pub async fn count<T: DocumentType>(&mut self, field: &str, value: &str) -> Result<i64> {
-        let index_cond = index_value_condition(&**self.crypto, value);
+        let index_cond = index_value_condition(&**self.crypto, DocumentIndexes::Table, value);
 
         let stmt = Query::select()
             .expr_as(
@@ -1699,23 +1686,7 @@ impl StoreTransaction<'_> {
         crate::tx_execute!(self.tx, delete_idx_stmt)?;
 
         for entry in &indexes {
-            let index_id = uuid::Uuid::now_v7().to_string();
-            let hashed_value = self.crypto.hmac_index(&entry.value);
-            let idx_stmt = Query::insert()
-                .into_table(DocumentIndexes::Table)
-                .columns([
-                    DocumentIndexes::Id,
-                    DocumentIndexes::DocumentId,
-                    DocumentIndexes::IndexField,
-                    DocumentIndexes::IndexValue,
-                ])
-                .values([
-                    index_id.as_str().into(),
-                    id.into(),
-                    entry.field.into(),
-                    hashed_value.as_str().into(),
-                ])?
-                .to_owned();
+            let idx_stmt = build_index_insert(&**self.crypto, id, entry)?;
             crate::tx_execute!(self.tx, idx_stmt)?;
         }
 

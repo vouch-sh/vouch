@@ -626,7 +626,7 @@ fn index_value_condition_plaintext_emits_eq() {
     use sea_query::SqliteQueryBuilder;
 
     let crypto = PlaintextDocumentCrypto;
-    let expr = index_value_condition(&crypto, "alice@example.com");
+    let expr = index_value_condition(&crypto, DocumentIndexes::Table, "alice@example.com");
 
     let (sql, _) = Query::select()
         .column(DocumentIndexes::IndexValue)
@@ -649,7 +649,7 @@ fn index_value_condition_hpke_emits_in() {
     use sea_query::SqliteQueryBuilder;
 
     let crypto = HashingTestCrypto;
-    let expr = index_value_condition(&crypto, "alice@example.com");
+    let expr = index_value_condition(&crypto, DocumentIndexes::Table, "alice@example.com");
 
     let (sql, _) = Query::select()
         .column(DocumentIndexes::IndexValue)
