@@ -288,6 +288,8 @@ pub(crate) async fn exchange_fido2_assertion(
     .map_err(|e| ServiceError::Internal(format!("Failed to update counter: {e}")))?;
 
     // 8. Log auth event (fire-and-forget)
+    let client_ip = params.client_info.client_ip;
+    let client_user_agent = params.client_info.user_agent.clone();
     let auth_event_params = AuthEventParams {
         user_id: user.id.clone(),
         event_type: AuthEventType::LoginSuccess,
@@ -361,6 +363,21 @@ pub(crate) async fn exchange_fido2_assertion(
         proof,
     )
     .await?;
+
+    // Every access-token grant records an oauth_token_issued audit row.
+    db::record_oauth_event(
+        &state.audit,
+        &state.store,
+        &db::RecordOAuthEventParams {
+            oauth_client_id: &params.client.client.id,
+            event_type: db::OAuthEventType::TokenIssued,
+            user_id: Some(&user.id),
+            ip_address: client_ip,
+            user_agent: client_user_agent.as_deref(),
+            details: Some("grant_type=fido2-assertion"),
+        },
+    )
+    .await;
 
     let token_type = if params.dpop_proof.is_some() {
         "DPoP"

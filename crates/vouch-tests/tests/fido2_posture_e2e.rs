@@ -438,3 +438,53 @@ async fn test_fido2_grant_os_recency_no_posture_denied() {
         "Expected access_denied, got: {error} (full: {json})"
     );
 }
+
+/// A successful FIDO2 grant records an `oauth_token_issued` audit event
+/// carrying the user id and grant type.
+#[tokio::test]
+async fn test_fido2_grant_records_token_issued_audit_event() {
+    let harness = TestHarness::new().await;
+    let user = harness
+        .create_user("issued-audit@example.com")
+        .await
+        .expect("Failed to create user");
+
+    let device = IntegrationMockDevice::new();
+    let _auth_id = register_mock_device_in_db(&harness, &user.id, &user.email, &device).await;
+    let (client, pkcs8) = create_jwt_client(&harness, &user.id).await;
+    let (challenge, state) = get_challenge(&harness).await;
+
+    let (status, json) = exchange_fido2_assertion(AssertionExchange {
+        harness: &harness,
+        device: &device,
+        challenge: &challenge,
+        state_jwt: &state,
+        user_id: &user.id,
+        client: &client,
+        pkcs8: &pkcs8,
+        authorization_details: None,
+    })
+    .await;
+    assert_eq!(status, 200, "FIDO2 grant must succeed: {json}");
+
+    let rows = harness
+        .state
+        .audit
+        .query_events(&db::AuditEventFilter {
+            event_types: Some(vec!["oauth_token_issued".to_string()]),
+            user_id: Some(user.id.clone()),
+            ..Default::default()
+        })
+        .await
+        .expect("query audit events");
+    assert_eq!(
+        rows.len(),
+        1,
+        "the grant must write exactly one oauth_token_issued row"
+    );
+    assert!(
+        rows[0].data.contains("fido2-assertion"),
+        "the audit payload must carry the grant type: {}",
+        rows[0].data
+    );
+}
