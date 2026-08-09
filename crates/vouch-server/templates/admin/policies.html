@@ -72,7 +72,7 @@
                             </form>
                         </summary>
                         <div class="px-4 pb-3 pt-0 ml-[3.125rem]">
-                            <p class="text-gray-600 text-xs font-mono mb-2">{{ policy.cel_expression }}</p>
+                            <p class="text-gray-600 text-xs font-mono mb-2">{{ policy.policy_text }}</p>
                             {% if policy.slug == "disk_encryption" %}
                             <div class="text-xs text-gray-500 space-y-1">
                                 <p class="flex items-center gap-1.5">{{ os::apple("w-3.5 h-3.5 text-gray-500 shrink-0") }} {{ self.tr("admin-policies-disk-macos") }}</p>
@@ -103,10 +103,10 @@
                             </div>
                             {% else if policy.slug == "os_recency" %}
                             <div class="text-xs text-gray-500 space-y-1">
-                                <p class="flex items-center gap-1.5">{{ os::apple("w-3.5 h-3.5 text-gray-500 shrink-0") }} semver(os_version) &ge; semver("14.0.0") (Sonoma+)</p>
-                                <p class="flex items-center gap-1.5">{{ os::windows("w-3.5 h-3.5 text-gray-500 shrink-0") }} semver(os_version) &ge; semver("10.0.26100") (24H2+)</p>
+                                <p class="flex items-center gap-1.5">{{ os::apple("w-3.5 h-3.5 text-gray-500 shrink-0") }} os_version_num &ge; 14000000 (Sonoma+)</p>
+                                <p class="flex items-center gap-1.5">{{ os::windows("w-3.5 h-3.5 text-gray-500 shrink-0") }} os_build_num &ge; 26100 (24H2+)</p>
                                 <p class="flex items-center gap-1.5">{{ os::linux("w-3.5 h-3.5 text-gray-500 shrink-0") }} {{ self.tr("admin-policies-osrecency-linux") }}</p>
-                                <p class="mt-1 text-gray-600"><span class="font-mono">semver()</span> {{ self.tr("admin-policies-semver-explain") }} (<span class="font-mono">"9" &lt; "14"</span>)</p>
+                                <p class="mt-1 text-gray-600"><span class="font-mono">os_version_num</span> {{ self.tr("admin-policies-semver-explain") }} (<span class="font-mono">"15.3.1" &rarr; 15003001</span>)</p>
                             </div>
                             {% endif %}
                         </div>
@@ -146,20 +146,23 @@
                                 <label for="policy-expression" class="flex items-center gap-1 text-xs text-gray-400 mb-1">
                                     {{ self.tr("admin-policies-rule-label") }}
                                     <span class="text-gray-600 font-normal">{{ self.tr("admin-policies-rule-hint") }}</span>
-                                    <a href="https://celbyexample.com/" target="_blank" rel="noopener noreferrer" class="text-gray-600 hover:text-gray-400 ml-auto" title="{{ self.tr("admin-policies-cel-ref-title") }}">
+                                    <a href="https://dogwood-policy.github.io/dogwood/" target="_blank" rel="noopener noreferrer" class="text-gray-600 hover:text-gray-400 ml-auto" title="{{ self.tr("admin-policies-cel-ref-title") }}">
                                         <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M8.228 9c.549-1.165 2.03-2 3.772-2 2.21 0 4 1.343 4 3 0 1.4-1.278 2.575-3.006 2.907-.542.104-.994.54-.994 1.093m0 3h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
                                     </a>
                                 </label>
-                                <textarea id="policy-expression" name="cel_expression" required maxlength="1024" rows="2"
+                                <textarea id="policy-expression" name="policy_text" required maxlength="4096" rows="3"
                                     class="w-full px-3 py-1.5 bg-vouch-bg border border-vouch-border rounded text-gray-200 text-sm font-mono focus:border-vouch-accent focus:outline-none"
-                                    placeholder='e.g., posture.os == "macos" && posture.os_version >= "15"'></textarea>
+                                    placeholder='e.g., forbid (principal, action, resource) unless {&#10;  context.input.posture.os == "macos" };'></textarea>
                             </div>
                             <p class="text-xs text-gray-600 mb-3">
-                                Use <span class="text-gray-500">==</span> <span class="text-gray-500">!=</span>
+                                Write a Cedar <span class="text-gray-500">forbid &hellip; unless { &hellip; }</span> rule over
+                                <span class="text-gray-500">context.input.posture</span> fields.
+                                Operators: <span class="text-gray-500">==</span> <span class="text-gray-500">!=</span>
                                 <span class="text-gray-500">&amp;&amp;</span> <span class="text-gray-500">||</span>
-                                <span class="text-gray-500">&gt;=</span> <span class="text-gray-500">&lt;=</span> to compare fields.
-                                <span class="text-gray-500">size(list) &gt; 0</span> for lists.
-                                <span class="text-gray-500">semver("15.3")</span> for version comparison.
+                                <span class="text-gray-500">&gt;=</span> <span class="text-gray-500">&lt;=</span>.
+                                <span class="text-gray-500">edr.contains("x")</span> for lists.
+                                <span class="text-gray-500">os_version_num</span> for version comparison.
+                                <span class="text-gray-500">when temporal { &hellip; }</span> for event-history rules.
                                 See field reference below.
                             </p>
 
@@ -203,7 +206,7 @@
                                     data-id="{{ policy.id }}"
                                     data-name="{{ policy.name }}"
                                     data-description="{{ policy.description.as_deref().unwrap_or("") }}"
-                                    data-expression="{{ policy.cel_expression }}">
+                                    data-expression="{{ policy.policy_text }}">
                                     <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="m16.862 4.487 1.687-1.688a1.875 1.875 0 1 1 2.652 2.652L10.582 16.07a4.5 4.5 0 0 1-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 0 1 1.13-1.897l8.932-8.931Zm0 0L19.5 7.125"/></svg>
                                 </button>
                                 <form method="POST" action="/admin/policies/custom/{{ policy.id }}/delete" data-confirm-message="{{ self.tr("admin-policies-delete-confirm") }}" class="inline">
@@ -216,7 +219,7 @@
                         {% if let Some(desc) = policy.description %}
                         <p class="text-gray-500 text-xs">{{ desc }}</p>
                         {% endif %}
-                        <p class="text-gray-600 text-xs font-mono mt-1 truncate" title="{{ policy.cel_expression }}">{{ policy.cel_expression }}</p>
+                        <p class="text-gray-600 text-xs font-mono mt-1 truncate" title="{{ policy.policy_text }}">{{ policy.policy_text }}</p>
                     </div>
                     {% endfor %}
                 </div>
@@ -245,40 +248,42 @@
                             </tr>
                         </thead>
                         <tbody class="font-mono text-gray-400">
-                            <tr class="border-b border-vouch-border/30"><td class="py-1 pr-3">posture.os</td><td class="py-1 pr-3 text-gray-600 font-sans">string</td><td class="py-1 text-gray-500">"macos"</td></tr>
-                            <tr class="border-b border-vouch-border/30"><td class="py-1 pr-3">posture.os_version</td><td class="py-1 pr-3 text-gray-600 font-sans">string</td><td class="py-1 text-gray-500">"26.3.1"</td></tr>
-                            <tr class="border-b border-vouch-border/30"><td class="py-1 pr-3">posture.os_distribution</td><td class="py-1 pr-3 text-gray-600 font-sans">string</td><td class="py-1 text-gray-500">"macos"<span class="font-sans ml-1 text-gray-700">(e.g. "ubuntu" on Linux)</span></td></tr>
-                            <tr class="border-b border-vouch-border/30"><td class="py-1 pr-3">posture.os_build</td><td class="py-1 pr-3 text-gray-600 font-sans">string</td><td class="py-1 text-gray-500">"25d2128"</td></tr>
-                            <tr class="border-b border-vouch-border/30"><td class="py-1 pr-3">posture.arch</td><td class="py-1 pr-3 text-gray-600 font-sans">string</td><td class="py-1 text-gray-500">"aarch64"</td></tr>
-                            <tr class="border-b border-vouch-border/30"><td class="py-1 pr-3">posture.disk_encryption_enabled</td><td class="py-1 pr-3 text-gray-600 font-sans">boolean</td><td class="py-1 text-green-500">true</td></tr>
-                            <tr class="border-b border-vouch-border/30"><td class="py-1 pr-3">posture.disk_encryption_technology</td><td class="py-1 pr-3 text-gray-600 font-sans">string</td><td class="py-1 text-gray-500">"filevault"</td></tr>
-                            <tr class="border-b border-vouch-border/30"><td class="py-1 pr-3">posture.firewall_enabled</td><td class="py-1 pr-3 text-gray-600 font-sans">boolean</td><td class="py-1 text-green-500">true</td></tr>
-                            <tr class="border-b border-vouch-border/30"><td class="py-1 pr-3">posture.firewall_technology</td><td class="py-1 pr-3 text-gray-600 font-sans">string</td><td class="py-1 text-gray-500">"application firewall"</td></tr>
-                            <tr class="border-b border-vouch-border/30"><td class="py-1 pr-3">posture.screen_lock_enabled</td><td class="py-1 pr-3 text-gray-600 font-sans">boolean</td><td class="py-1 text-green-500">true</td></tr>
-                            <tr class="border-b border-vouch-border/30"><td class="py-1 pr-3">posture.screen_lock_idle_timeout_secs</td><td class="py-1 pr-3 text-gray-600 font-sans">number</td><td class="py-1 text-gray-500">300</td></tr>
-                            <tr class="border-b border-vouch-border/30"><td class="py-1 pr-3">posture.secure_boot_enabled</td><td class="py-1 pr-3 text-gray-600 font-sans">boolean</td><td class="py-1 text-green-500">true</td></tr>
-                            <tr class="border-b border-vouch-border/30"><td class="py-1 pr-3">posture.sip_enabled</td><td class="py-1 pr-3 text-gray-600 font-sans">boolean</td><td class="py-1 text-green-500">true</td></tr>
-                            <tr class="border-b border-vouch-border/30"><td class="py-1 pr-3">posture.tpm_present</td><td class="py-1 pr-3 text-gray-600 font-sans">boolean</td><td class="py-1 text-green-500">true</td></tr>
-                            <tr class="border-b border-vouch-border/30"><td class="py-1 pr-3">posture.auto_update_enabled</td><td class="py-1 pr-3 text-gray-600 font-sans">boolean</td><td class="py-1 text-green-500">true</td></tr>
-                            <tr class="border-b border-vouch-border/30"><td class="py-1 pr-3">posture.auto_update_technology</td><td class="py-1 pr-3 text-gray-600 font-sans">string</td><td class="py-1 text-gray-500">"softwareupdate"</td></tr>
-                            <tr class="border-b border-vouch-border/30"><td class="py-1 pr-3">posture.uptime_secs</td><td class="py-1 pr-3 text-gray-600 font-sans">number</td><td class="py-1 text-gray-500">86400</td></tr>
-                            <tr class="border-b border-vouch-border/30"><td class="py-1 pr-3">posture.access_control_enforcing</td><td class="py-1 pr-3 text-gray-600 font-sans">boolean</td><td class="py-1 text-green-500">true</td></tr>
-                            <tr class="border-b border-vouch-border/30"><td class="py-1 pr-3">posture.access_control_technology</td><td class="py-1 pr-3 text-gray-600 font-sans">string</td><td class="py-1 text-gray-500">"gatekeeper"</td></tr>
-                            <tr class="border-b border-vouch-border/30"><td class="py-1 pr-3">posture.edr</td><td class="py-1 pr-3 text-gray-600 font-sans">list</td><td class="py-1 text-gray-500">["crowdstrike"]</td></tr>
-                            <tr class="border-b border-vouch-border/30"><td class="py-1 pr-3">posture.mdm</td><td class="py-1 pr-3 text-gray-600 font-sans">list</td><td class="py-1 text-gray-500">["jamf"]</td></tr>
-                            <tr class="border-b border-vouch-border/30"><td class="py-1 pr-3">posture.elevated</td><td class="py-1 pr-3 text-gray-600 font-sans">boolean</td><td class="py-1 text-red-400">false</td></tr>
-                            <tr class="border-b border-vouch-border/30"><td class="py-1 pr-3">posture.tty</td><td class="py-1 pr-3 text-gray-600 font-sans">boolean</td><td class="py-1 text-green-500">true</td></tr>
-                            <tr class="border-b border-vouch-border/30"><td class="py-1 pr-3">posture.parent_process</td><td class="py-1 pr-3 text-gray-600 font-sans">string</td><td class="py-1 text-gray-500">"zsh"</td></tr>
-                            <tr><td class="py-1 pr-3">posture.cli_version</td><td class="py-1 pr-3 text-gray-600 font-sans">string</td><td class="py-1 text-gray-500">"2026.3.11"</td></tr>
+                            <tr class="border-b border-vouch-border/30"><td class="py-1 pr-3">context.input.posture.os</td><td class="py-1 pr-3 text-gray-600 font-sans">string</td><td class="py-1 text-gray-500">"macos"</td></tr>
+                            <tr class="border-b border-vouch-border/30"><td class="py-1 pr-3">context.input.posture.os_version</td><td class="py-1 pr-3 text-gray-600 font-sans">string</td><td class="py-1 text-gray-500">"26.3.1"</td></tr>
+                            <tr class="border-b border-vouch-border/30"><td class="py-1 pr-3">context.input.posture.os_version_num</td><td class="py-1 pr-3 text-gray-600 font-sans">number</td><td class="py-1 text-gray-500">26003001<span class="font-sans ml-1 text-gray-700">(-1 if unparseable)</span></td></tr>
+                            <tr class="border-b border-vouch-border/30"><td class="py-1 pr-3">context.input.posture.os_distribution</td><td class="py-1 pr-3 text-gray-600 font-sans">string</td><td class="py-1 text-gray-500">"macos"<span class="font-sans ml-1 text-gray-700">(e.g. "ubuntu" on Linux)</span></td></tr>
+                            <tr class="border-b border-vouch-border/30"><td class="py-1 pr-3">context.input.posture.os_build</td><td class="py-1 pr-3 text-gray-600 font-sans">string</td><td class="py-1 text-gray-500">"25d2128"</td></tr>
+                            <tr class="border-b border-vouch-border/30"><td class="py-1 pr-3">context.input.posture.os_build_num</td><td class="py-1 pr-3 text-gray-600 font-sans">number</td><td class="py-1 text-gray-500">-1<span class="font-sans ml-1 text-gray-700">(numeric builds parse, e.g. "26100")</span></td></tr>
+                            <tr class="border-b border-vouch-border/30"><td class="py-1 pr-3">context.input.posture.arch</td><td class="py-1 pr-3 text-gray-600 font-sans">string</td><td class="py-1 text-gray-500">"aarch64"</td></tr>
+                            <tr class="border-b border-vouch-border/30"><td class="py-1 pr-3">context.input.posture.disk_encryption_enabled</td><td class="py-1 pr-3 text-gray-600 font-sans">boolean</td><td class="py-1 text-green-500">true</td></tr>
+                            <tr class="border-b border-vouch-border/30"><td class="py-1 pr-3">context.input.posture.disk_encryption_technology</td><td class="py-1 pr-3 text-gray-600 font-sans">string</td><td class="py-1 text-gray-500">"filevault"</td></tr>
+                            <tr class="border-b border-vouch-border/30"><td class="py-1 pr-3">context.input.posture.firewall_enabled</td><td class="py-1 pr-3 text-gray-600 font-sans">boolean</td><td class="py-1 text-green-500">true</td></tr>
+                            <tr class="border-b border-vouch-border/30"><td class="py-1 pr-3">context.input.posture.firewall_technology</td><td class="py-1 pr-3 text-gray-600 font-sans">string</td><td class="py-1 text-gray-500">"application firewall"</td></tr>
+                            <tr class="border-b border-vouch-border/30"><td class="py-1 pr-3">context.input.posture.screen_lock_enabled</td><td class="py-1 pr-3 text-gray-600 font-sans">boolean</td><td class="py-1 text-green-500">true</td></tr>
+                            <tr class="border-b border-vouch-border/30"><td class="py-1 pr-3">context.input.posture.screen_lock_idle_timeout_secs</td><td class="py-1 pr-3 text-gray-600 font-sans">number</td><td class="py-1 text-gray-500">300</td></tr>
+                            <tr class="border-b border-vouch-border/30"><td class="py-1 pr-3">context.input.posture.secure_boot_enabled</td><td class="py-1 pr-3 text-gray-600 font-sans">boolean</td><td class="py-1 text-green-500">true</td></tr>
+                            <tr class="border-b border-vouch-border/30"><td class="py-1 pr-3">context.input.posture.sip_enabled</td><td class="py-1 pr-3 text-gray-600 font-sans">boolean</td><td class="py-1 text-green-500">true</td></tr>
+                            <tr class="border-b border-vouch-border/30"><td class="py-1 pr-3">context.input.posture.tpm_present</td><td class="py-1 pr-3 text-gray-600 font-sans">boolean</td><td class="py-1 text-green-500">true</td></tr>
+                            <tr class="border-b border-vouch-border/30"><td class="py-1 pr-3">context.input.posture.auto_update_enabled</td><td class="py-1 pr-3 text-gray-600 font-sans">boolean</td><td class="py-1 text-green-500">true</td></tr>
+                            <tr class="border-b border-vouch-border/30"><td class="py-1 pr-3">context.input.posture.auto_update_technology</td><td class="py-1 pr-3 text-gray-600 font-sans">string</td><td class="py-1 text-gray-500">"softwareupdate"</td></tr>
+                            <tr class="border-b border-vouch-border/30"><td class="py-1 pr-3">context.input.posture.uptime_secs</td><td class="py-1 pr-3 text-gray-600 font-sans">number</td><td class="py-1 text-gray-500">86400</td></tr>
+                            <tr class="border-b border-vouch-border/30"><td class="py-1 pr-3">context.input.posture.access_control_enforcing</td><td class="py-1 pr-3 text-gray-600 font-sans">boolean</td><td class="py-1 text-green-500">true</td></tr>
+                            <tr class="border-b border-vouch-border/30"><td class="py-1 pr-3">context.input.posture.access_control_technology</td><td class="py-1 pr-3 text-gray-600 font-sans">string</td><td class="py-1 text-gray-500">"gatekeeper"</td></tr>
+                            <tr class="border-b border-vouch-border/30"><td class="py-1 pr-3">context.input.posture.edr</td><td class="py-1 pr-3 text-gray-600 font-sans">list</td><td class="py-1 text-gray-500">["crowdstrike"]</td></tr>
+                            <tr class="border-b border-vouch-border/30"><td class="py-1 pr-3">context.input.posture.edr_count</td><td class="py-1 pr-3 text-gray-600 font-sans">number</td><td class="py-1 text-gray-500">1</td></tr>
+                            <tr class="border-b border-vouch-border/30"><td class="py-1 pr-3">context.input.posture.mdm</td><td class="py-1 pr-3 text-gray-600 font-sans">list</td><td class="py-1 text-gray-500">["jamf"]</td></tr>
+                            <tr class="border-b border-vouch-border/30"><td class="py-1 pr-3">context.input.posture.mdm_count</td><td class="py-1 pr-3 text-gray-600 font-sans">number</td><td class="py-1 text-gray-500">1</td></tr>
+                            <tr class="border-b border-vouch-border/30"><td class="py-1 pr-3">context.input.posture.elevated</td><td class="py-1 pr-3 text-gray-600 font-sans">boolean</td><td class="py-1 text-red-400">false</td></tr>
+                            <tr class="border-b border-vouch-border/30"><td class="py-1 pr-3">context.input.posture.tty</td><td class="py-1 pr-3 text-gray-600 font-sans">boolean</td><td class="py-1 text-green-500">true</td></tr>
+                            <tr class="border-b border-vouch-border/30"><td class="py-1 pr-3">context.input.posture.parent_process</td><td class="py-1 pr-3 text-gray-600 font-sans">string</td><td class="py-1 text-gray-500">"zsh"</td></tr>
+                            <tr><td class="py-1 pr-3">context.input.posture.cli_version</td><td class="py-1 pr-3 text-gray-600 font-sans">string</td><td class="py-1 text-gray-500">"2026.3.11"</td></tr>
                         </tbody>
                     </table>
                     <div class="mt-3 pt-3 border-t border-vouch-border/50 text-xs text-gray-600">
                         <span class="text-gray-500 font-medium">{{ self.tr("admin-policies-example-rules") }}</span>
-                        <span class="font-mono text-gray-500 ml-1">posture.os == "macos" &amp;&amp; semver(posture.os_version) >= semver("15.0.0")</span>
+                        <span class="font-mono text-gray-500 ml-1">forbid (principal, action, resource) unless { context.input.posture.os == "macos" &amp;&amp; context.input.posture.os_version_num >= 15000000 };</span>
                         <span class="mx-1">&middot;</span>
-                        <span class="font-mono text-gray-500">size(posture.edr) > 0 && posture.firewall_enabled == true</span>
-                        <span class="mx-1">&middot;</span>
-                        <span class="font-mono text-gray-500">posture.screen_lock_idle_timeout_secs <= 300</span>
+                        <span class="font-mono text-gray-500">forbid (principal, action, resource) unless { context.input.posture.edr_count > 0 && context.input.posture.firewall_enabled };</span>
                     </div>
                 </div>
             </details>

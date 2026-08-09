@@ -1,5 +1,11 @@
 # Posture Policies
 
+> **Dogwood spike.** This branch replaces the CEL policy engine with
+> [Dogwood](https://dogwood-policy.github.io/dogwood/), a Cedar-derived policy language with
+> temporal (event-history) conditions. Custom policies are Cedar `forbid` rules over
+> `context.input.posture`, not CEL expressions. Policies written for the CEL engine fail
+> validation on edit and fail closed at enforcement until re-authored.
+
 Posture policies let you require that a user's device meets a security standard before Vouch will
 issue them credentials. A laptop without full-disk encryption, or running an unsupported OS
 version, can be refused a token even though the user holds a valid hardware key.
@@ -61,11 +67,14 @@ if it is macOS 14.0.0 or later, **or** Windows 10.0.26100 (24H2) or later.
 > If any part of your fleet runs Linux, do not enable `os_recency`. Write a custom policy that
 > covers all three platforms instead:
 >
-> ```javascript
-> (posture.os == "macos" && semver(posture.os_version) >= semver("14.0.0"))
->   || (posture.os == "windows" && semver(posture.os_version) >= semver("10.0.26100"))
->   || (posture.os == "linux" && posture.os_distribution == "ubuntu"
->       && semver(posture.os_version) >= semver("22.04.0"))
+> ```cedar
+> forbid (principal, action == Vouch::Action::"IssueToken", resource)
+> unless {
+>     (context.input.posture.os == "macos" && context.input.posture.os_version_num >= 14000000) ||
+>     (context.input.posture.os == "windows" && context.input.posture.os_build_num >= 26100) ||
+>     (context.input.posture.os == "linux" && context.input.posture.os_distribution == "ubuntu"
+>         && context.input.posture.os_version_num >= 22004000)
+> };
 > ```
 
 Those thresholds are compiled into the server, so they advance when you upgrade Vouch. Read the
@@ -74,29 +83,37 @@ were passing yesterday.
 
 ## Custom policies
 
-For anything the built-ins do not cover, write a CEL
-([Common Expression Language](https://github.com/google/cel-spec)) expression. It must evaluate to
-a boolean, where `true` means the device passes.
+For anything the built-ins do not cover, write a
+[Dogwood/Cedar](https://dogwood-policy.github.io/dogwood/) `forbid` rule. The rule fires — and the
+token request is denied — when its `unless` requirement is **not** met. Posture attributes live at
+`context.input.posture`.
 
-```javascript
+```cedar
 // Require BitLocker specifically, not just any disk encryption
-posture.disk_encryption_technology == "BitLocker"
+forbid (principal, action == Vouch::Action::"IssueToken", resource)
+unless { context.input.posture.disk_encryption_technology == "bitlocker" };
 
 // Require a recent Ubuntu
-posture.os_distribution == "ubuntu" && semver(posture.os_version) >= semver("22.04.0")
+forbid (principal, action == Vouch::Action::"IssueToken", resource)
+unless { context.input.posture.os_distribution == "ubuntu"
+         && context.input.posture.os_version_num >= 22004000 };
 
 // Screen lock must engage within five minutes
-posture.screen_lock_enabled == true && posture.screen_lock_idle_timeout_secs <= 300
+forbid (principal, action == Vouch::Action::"IssueToken", resource)
+unless { context.input.posture.screen_lock_enabled
+         && context.input.posture.screen_lock_idle_timeout_secs <= 300 };
 
 // Require both an EDR agent and MDM enrollment
-size(posture.edr) > 0 && size(posture.mdm) > 0
+forbid (principal, action == Vouch::Action::"IssueToken", resource)
+unless { context.input.posture.edr_count > 0 && context.input.posture.mdm_count > 0 };
 
 // Apply a rule only on macOS, passing every other platform
-posture.os != "macos" || posture.sip_enabled == true
+forbid (principal, action == Vouch::Action::"IssueToken", resource)
+unless { context.input.posture.os != "macos" || context.input.posture.sip_enabled };
 ```
 
 That last pattern matters: attributes are populated per platform, so an unqualified rule applies
-everywhere. Guard on `posture.os` when a requirement is platform-specific.
+everywhere. Guard on `context.input.posture.os` when a requirement is platform-specific.
 
 ### Available attributes
 
@@ -118,19 +135,25 @@ missing field. The corollary: **a missing attribute looks identical to a negativ
 
 **Numbers** (default `0`)
 
-`screen_lock_idle_timeout_secs`, `uptime_secs`
+`screen_lock_idle_timeout_secs`, `uptime_secs`, `edr_count`, `mdm_count`
 
-**Lists** (default `[]`)
+**Derived version numbers** (`-1` when unparseable)
 
-`edr`, `mdm`
+`os_version_num` — `os_version` encoded as `major*1000000 + minor*1000 + patch`
+(`"15.3.1"` → `15003001`; 4-component Windows versions encode as `-1`).
+`os_build_num` — `os_build` parsed as an integer (`"26100"` → `26100`).
 
-### The `semver` function
+**Sets** (default empty)
 
-Beyond standard CEL, Vouch provides `semver(string)` for version comparison. Use it rather than
-comparing version strings directly — lexical comparison puts `"10.0.0"` before `"9.0.0"`.
+`edr`, `mdm` — test membership with `context.input.posture.edr.contains("crowdstrike")`
 
-```javascript
-semver(posture.os_version) >= semver("14.0.0")
+### Version comparison
+
+Compare `os_version_num` (never the `os_version` string) — lexical comparison puts `"10.0.0"`
+before `"9.0.0"`, the numeric encoding does not.
+
+```cedar
+context.input.posture.os_version_num >= 14000000
 ```
 
 ## Testing an expression before you enable it
@@ -173,6 +196,7 @@ The attribute probably is not reported on that platform and is defaulting to `fa
 the server log at `RUST_LOG=vouch_server=debug`, which logs each policy evaluation and its result,
 then guard the expression on `posture.os`.
 
-**A custom expression never passes.**
-Runtime errors and non-boolean results both count as failures. Test it in the policy editor against
-known-good sample posture.
+**A custom policy never passes.**
+Runtime evaluation errors count as failures (fail-closed), and policies written in CEL syntax for
+the pre-Dogwood engine always fail. Test the rule in the policy editor against known-good sample
+posture.

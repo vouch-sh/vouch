@@ -288,6 +288,8 @@ pub(crate) async fn exchange_fido2_assertion(
     .map_err(|e| ServiceError::Internal(format!("Failed to update counter: {e}")))?;
 
     // 8. Log auth event (fire-and-forget)
+    let client_ip = params.client_info.client_ip;
+    let client_user_agent = params.client_info.user_agent.clone();
     let auth_event_params = AuthEventParams {
         user_id: user.id.clone(),
         event_type: AuthEventType::LoginSuccess,
@@ -308,9 +310,12 @@ pub(crate) async fn exchange_fido2_assertion(
 
     // 9b. Evaluate device posture policies (if org has active policies)
     if let Some(ref org_id) = user.org_id {
-        crate::services::posture::evaluate_posture_policies(
-            &state.store,
+        crate::services::policy::evaluate_posture_policies(
+            state,
             org_id,
+            &user.id,
+            client_ip,
+            &params.client.client.client_id,
             ad_value.as_ref(),
         )
         .await?;
@@ -361,6 +366,23 @@ pub(crate) async fn exchange_fido2_assertion(
         proof,
     )
     .await?;
+
+    // Record token issuance in the audit log. The other grants already do
+    // this; the FIDO2 grant needs it too so aggregation policies (e.g. the
+    // issuance rate limit) can count issuances from the audit history.
+    db::record_oauth_event(
+        &state.audit,
+        &state.store,
+        &db::RecordOAuthEventParams {
+            oauth_client_id: &params.client.client.id,
+            event_type: db::OAuthEventType::TokenIssued,
+            user_id: Some(&user.id),
+            ip_address: client_ip,
+            user_agent: client_user_agent.as_deref(),
+            details: Some("grant_type=fido2-assertion"),
+        },
+    )
+    .await;
 
     let token_type = if params.dpop_proof.is_some() {
         "DPoP"

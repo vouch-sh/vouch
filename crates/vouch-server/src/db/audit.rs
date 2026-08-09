@@ -334,6 +334,24 @@ impl AuditStore {
             .await
     }
 
+    /// Test-only: like [`Self::insert_event_for_test`] but with a user id,
+    /// for seeding per-principal temporal policy history.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database write fails.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub async fn insert_user_event_for_test(
+        &self,
+        kind: AuditEventKind,
+        user_id: &str,
+        created_at: jiff::Timestamp,
+        data_json: &str,
+    ) -> Result<String> {
+        self.insert_event_raw(kind, Some(user_id), None, None, created_at, data_json)
+            .await
+    }
+
     /// Shared insert path for [`Self::insert_event`],
     /// [`Self::insert_event_with_domain`], and (test-only)
     /// [`Self::insert_event_for_test`].

@@ -630,6 +630,7 @@ async fn build_app_state(
             config.session_cache_ttl_secs,
         ),
         org_keys_cache: Default::default(),
+        policy: Default::default(),
         idps,
     });
 

@@ -506,7 +506,7 @@ async fn test_update_custom_policy_only_intended_fields_change() {
         CreateCustomPolicyParams {
             name: "OriginalPolicy",
             description: Some("orig desc"),
-            cel_expression: "true",
+            policy_text: "true",
             org_id: "org-policy-test",
         },
     )
@@ -527,7 +527,7 @@ async fn test_update_custom_policy_only_intended_fields_change() {
         UpdateCustomPolicyParams {
             name: Some("UpdatedPolicy"),
             description: FieldUpdate::Set("new desc"),
-            cel_expression: Some("false"),
+            policy_text: Some("false"),
             active: Some(true),
         },
     )
@@ -541,10 +541,7 @@ async fn test_update_custom_policy_only_intended_fields_change() {
         Some("new desc"),
         "description must update"
     );
-    assert_eq!(
-        updated.cel_expression, "false",
-        "cel_expression must update"
-    );
+    assert_eq!(updated.policy_text, "false", "policy_text must update");
     assert!(updated.active, "active must be set to true");
 
     let after = store
@@ -572,7 +569,7 @@ async fn test_update_custom_policy_field_update_keep() {
         CreateCustomPolicyParams {
             name: "KeepDescPolicy",
             description: Some("original desc"),
-            cel_expression: "true",
+            policy_text: "true",
             org_id: "org-keep-test",
         },
     )
@@ -586,7 +583,7 @@ async fn test_update_custom_policy_field_update_keep() {
         UpdateCustomPolicyParams {
             name: None,
             description: FieldUpdate::Keep,
-            cel_expression: None,
+            policy_text: None,
             active: None,
         },
     )
@@ -611,7 +608,7 @@ async fn test_update_custom_policy_field_update_clear() {
         CreateCustomPolicyParams {
             name: "ClearDescPolicy",
             description: Some("will be cleared"),
-            cel_expression: "true",
+            policy_text: "true",
             org_id: "org-clear-test",
         },
     )
@@ -625,7 +622,7 @@ async fn test_update_custom_policy_field_update_clear() {
         UpdateCustomPolicyParams {
             name: None,
             description: FieldUpdate::Clear,
-            cel_expression: None,
+            policy_text: None,
             active: None,
         },
     )
@@ -649,7 +646,7 @@ async fn test_update_custom_policy_wrong_org_returns_none() {
         CreateCustomPolicyParams {
             name: "ProtectedPolicy",
             description: None,
-            cel_expression: "true",
+            policy_text: "true",
             org_id: "real-org",
         },
     )
@@ -663,7 +660,7 @@ async fn test_update_custom_policy_wrong_org_returns_none() {
         UpdateCustomPolicyParams {
             name: Some("HackedName"),
             description: FieldUpdate::Keep,
-            cel_expression: None,
+            policy_text: None,
             active: None,
         },
     )
@@ -697,7 +694,7 @@ async fn test_update_custom_policy_not_found_returns_none() {
         UpdateCustomPolicyParams {
             name: Some("Anything"),
             description: FieldUpdate::Keep,
-            cel_expression: None,
+            policy_text: None,
             active: None,
         },
     )
@@ -848,7 +845,7 @@ async fn test_update_custom_policy_concurrent_org_change_returns_none() {
         CreateCustomPolicyParams {
             name: "PolicyBefore",
             description: None,
-            cel_expression: "true",
+            policy_text: "true",
             org_id: "org-occ-race",
         },
     )
@@ -882,7 +879,7 @@ async fn test_update_custom_policy_concurrent_org_change_returns_none() {
         UpdateCustomPolicyParams {
             name: Some("Hacked"),
             description: FieldUpdate::Keep,
-            cel_expression: None,
+            policy_text: None,
             active: None,
         },
     )

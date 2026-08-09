@@ -1094,6 +1094,7 @@ async fn test_discovery_tls_client_auth_in_auth_methods_with_tls() {
         http_client: reqwest::Client::new(),
         session_cache: crate::db::SessionCache::new(10_000, 30),
         org_keys_cache: Default::default(),
+        policy: Default::default(),
         idps: Vec::new(),
     });
 

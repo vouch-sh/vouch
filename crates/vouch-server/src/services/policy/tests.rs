@@ -1,0 +1,654 @@
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+//! Unit tests for the Dogwood policy engine, ported from the CEL engine's
+//! suite (services/posture.rs) plus new validator-quality and field-parity
+//! coverage the CEL engine could not express.
+#![expect(
+    clippy::unwrap_used,
+    clippy::panic,
+    reason = "test code: panic on assertion failure is acceptable"
+)]
+
+use super::preconfigured::BASE_ALLOW;
+use super::*;
+use vouch_common::posture::{EdrAgent, MdmAgent, OperatingSystem, PostureTypeTag};
+
+fn sample_posture() -> DevicePosture {
+    DevicePosture {
+        detail_type: PostureTypeTag,
+        posture_version: 1,
+        os: Some(OperatingSystem::MacOs),
+        os_version: Some("15.3.1".to_string()),
+        disk_encryption_enabled: Some(true),
+        disk_encryption_technology: Some("filevault".to_string()),
+        firewall_enabled: Some(true),
+        firewall_technology: Some("application firewall".to_string()),
+        screen_lock_enabled: Some(true),
+        screen_lock_idle_timeout_secs: Some(300),
+        secure_boot_enabled: Some(true),
+        sip_enabled: Some(true),
+        edr: vec![EdrAgent::CrowdStrike],
+        mdm: vec![MdmAgent::Jamf],
+        elevated: Some(false),
+        tty: Some(true),
+        ..Default::default()
+    }
+}
+
+/// A posture with every field populated — used by the parity test so
+/// "non-default value reachable" checks hold for all 31 record fields.
+fn full_posture() -> DevicePosture {
+    let mut posture = sample_posture();
+    posture.os_distribution = Some("macos".to_string());
+    posture.os_build = Some("26100".to_string());
+    posture.arch = Some("aarch64".to_string());
+    posture.tpm_present = Some(true);
+    posture.tpm_version = Some("2.0".to_string());
+    posture.auto_update_enabled = Some(true);
+    posture.auto_update_technology = Some("softwareupdate".to_string());
+    posture.uptime_secs = Some(86400);
+    posture.access_control_enforcing = Some(true);
+    posture.access_control_technology = Some("gatekeeper".to_string());
+    posture.parent_process = Some("zsh".to_string());
+    posture.cli_version = Some("1.2.3".to_string());
+    posture.collected_at = Some("2026-08-08t00:00:00z".to_string());
+    posture
+}
+
+fn minimal_posture() -> DevicePosture {
+    DevicePosture::new()
+}
+
+/// The policy text of a preconfigured policy, by slug.
+fn preconfigured_text(slug: PreconfiguredSlug) -> &'static str {
+    PRECONFIGURED_POLICIES
+        .iter()
+        .find(|p| p.slug == slug)
+        .unwrap()
+        .policy_text
+}
+
+/// Evaluate a single policy text (plus the base permit) against a posture.
+/// Engine-level failures panic — these tests only exercise valid text.
+fn evaluate_one(policy_text: &str, posture: &DevicePosture) -> bool {
+    let composed = compose(&[policy_text]);
+    let event = issue_token_request(posture, "test-user", "test-org");
+    match decide(&composed, &event) {
+        Ok(EngineDecision::Allow) => true,
+        Ok(EngineDecision::Deny) => false,
+        Err(e) => panic!("engine error: {e}"),
+    }
+}
+
+/// Wrap a boolean requirement expression in the standard forbid shape —
+/// the idiom admins use for custom policies.
+fn requirement(expr: &str) -> String {
+    format!(
+        "forbid (principal, action == Vouch::Action::\"IssueToken\", resource) \
+         unless {{ {expr} }};"
+    )
+}
+
+// ============================================================
+// Validation
+// ============================================================
+
+#[test]
+fn test_validate_policy_text_valid() {
+    validate_policy_text(&requirement(
+        "context.input.posture.disk_encryption_enabled",
+    ))
+    .unwrap();
+    validate_policy_text(&requirement("context.input.posture.edr_count > 0")).unwrap();
+    validate_policy_text(&requirement(
+        "context.input.posture.os == \"macos\" || context.input.posture.os == \"linux\"",
+    ))
+    .unwrap();
+}
+
+#[test]
+fn test_validate_policy_text_invalid() {
+    // Empty and whitespace-only text
+    assert!(validate_policy_text("").is_err());
+    assert!(validate_policy_text("   ").is_err());
+    // Unterminated string literal
+    assert!(
+        validate_policy_text(&requirement("context.input.posture.os == \"unterminated")).is_err()
+    );
+    // Truncated policy
+    assert!(validate_policy_text("forbid (principal, action ==").is_err());
+    // Leftover CEL text from before the migration must be rejected
+    assert!(validate_policy_text("posture.disk_encryption_enabled == true").is_err());
+}
+
+#[test]
+fn test_validate_policy_text_catches_typoed_field() {
+    // The CEL engine silently evaluated unknown fields to a runtime miss;
+    // the Dogwood validator reports them as type errors.
+    let result = validate_policy_text(&requirement(
+        "context.input.posture.disk_encryption_enabledz",
+    ));
+    assert!(result.is_err(), "typo'd posture field must fail validation");
+}
+
+// ============================================================
+// Preconfigured policy evaluation
+// ============================================================
+
+#[test]
+fn test_evaluate_disk_encryption_pass_and_fail() {
+    let text = preconfigured_text(PreconfiguredSlug::DiskEncryption);
+    assert!(evaluate_one(text, &sample_posture()));
+    assert!(!evaluate_one(text, &minimal_posture()));
+}
+
+#[test]
+fn test_evaluate_firewall_pass() {
+    assert!(evaluate_one(
+        preconfigured_text(PreconfiguredSlug::Firewall),
+        &sample_posture()
+    ));
+}
+
+#[test]
+fn test_evaluate_screen_lock_pass() {
+    assert!(evaluate_one(
+        preconfigured_text(PreconfiguredSlug::ScreenLock),
+        &sample_posture()
+    ));
+}
+
+#[test]
+fn test_evaluate_edr_pass_and_fail_empty() {
+    let text = preconfigured_text(PreconfiguredSlug::EndpointProtection);
+    assert!(evaluate_one(text, &sample_posture()));
+    assert!(!evaluate_one(text, &minimal_posture()));
+}
+
+#[test]
+fn test_evaluate_secure_boot_pass() {
+    assert!(evaluate_one(
+        preconfigured_text(PreconfiguredSlug::PlatformIntegrity),
+        &sample_posture()
+    ));
+}
+
+#[test]
+fn test_none_fields_default_to_false() {
+    let minimal = minimal_posture();
+    for slug in [
+        PreconfiguredSlug::DiskEncryption,
+        PreconfiguredSlug::Firewall,
+        PreconfiguredSlug::ScreenLock,
+        PreconfiguredSlug::PlatformIntegrity,
+    ] {
+        assert!(
+            !evaluate_one(preconfigured_text(slug), &minimal),
+            "absent posture fields must default to false and deny '{slug}'"
+        );
+    }
+}
+
+#[test]
+fn test_none_string_fields_default_to_empty() {
+    assert!(evaluate_one(
+        &requirement("context.input.posture.os == \"\""),
+        &minimal_posture()
+    ));
+}
+
+// ============================================================
+// OS recency matrix
+// ============================================================
+
+#[test]
+fn test_evaluate_os_recency_macos_pass() {
+    assert!(evaluate_one(
+        preconfigured_text(PreconfiguredSlug::OsRecency),
+        &sample_posture()
+    ));
+}
+
+/// Regression for #544: macOS 15.x must pass OsRecency — the threshold
+/// compares the marketing version reported by `sw_vers -productVersion`,
+/// not the Darwin kernel version.
+#[test]
+fn test_os_recency_macos_15_passes() {
+    let mut posture = sample_posture();
+    posture.os_version = Some("15.3.1".to_string());
+    assert!(
+        evaluate_one(preconfigured_text(PreconfiguredSlug::OsRecency), &posture),
+        "macOS 15.3.1 (Sequoia) must pass OsRecency (>= 14.0.0)"
+    );
+}
+
+/// Regression for #544: macOS 13.x must fail OsRecency (older than N-1).
+#[test]
+fn test_os_recency_macos_13_fails() {
+    let mut posture = sample_posture();
+    posture.os_version = Some("13.7.0".to_string());
+    assert!(
+        !evaluate_one(preconfigured_text(PreconfiguredSlug::OsRecency), &posture),
+        "macOS 13.7.0 (Ventura) must fail OsRecency (< 14.0.0)"
+    );
+}
+
+#[test]
+fn test_evaluate_os_recency_linux_does_not_pass() {
+    let mut posture = minimal_posture();
+    posture.os = Some(OperatingSystem::Linux);
+    // Linux is not covered by the preconfigured os_recency policy;
+    // admins should create per-distro custom policies instead.
+    assert!(!evaluate_one(
+        preconfigured_text(PreconfiguredSlug::OsRecency),
+        &posture
+    ));
+}
+
+/// Regression for the Windows OsRecency 4-component version bug.
+///
+/// The Windows CLI reports `os_version` as a 4-component string
+/// (e.g., "10.0.26100.0") which the semver encoding rejects
+/// (`os_version_num` = -1). The preconfigured OsRecency policy must compare
+/// Windows by `os_build_num` (the registry `CurrentBuild` integer), not
+/// `os_version`.
+#[test]
+fn test_os_recency_windows_24h2_four_component_version_passes() {
+    let mut posture = sample_posture();
+    posture.os = Some(OperatingSystem::Windows);
+    posture.os_version = Some("10.0.26100.0".to_string());
+    posture.os_build = Some("26100".to_string());
+    assert!(
+        evaluate_one(preconfigured_text(PreconfiguredSlug::OsRecency), &posture),
+        "Windows 11 24H2 (build 26100) must pass OsRecency even though \
+         os_version has 4 components"
+    );
+}
+
+/// Windows builds below the 26100 threshold (e.g., 22631 = 23H2) must fail.
+#[test]
+fn test_os_recency_windows_old_build_fails() {
+    let mut posture = sample_posture();
+    posture.os = Some(OperatingSystem::Windows);
+    posture.os_version = Some("10.0.22631.0".to_string());
+    posture.os_build = Some("22631".to_string()); // 23H2
+    assert!(
+        !evaluate_one(preconfigured_text(PreconfiguredSlug::OsRecency), &posture),
+        "Windows 11 23H2 (build 22631) must fail OsRecency (< 26100)"
+    );
+}
+
+/// Windows OsRecency must pass when `os_version` is absent entirely.
+#[test]
+fn test_os_recency_windows_missing_os_version_passes_on_build() {
+    let mut posture = sample_posture();
+    posture.os = Some(OperatingSystem::Windows);
+    posture.os_version = None;
+    posture.os_build = Some("26100".to_string());
+    assert!(
+        evaluate_one(preconfigured_text(PreconfiguredSlug::OsRecency), &posture),
+        "Windows with a compliant os_build but missing os_version must pass"
+    );
+}
+
+/// Windows OsRecency must fail when `os_build` is below the threshold, even
+/// if `os_version` looks like a 3-component semver that would have passed
+/// the old (buggy) comparison.
+#[test]
+fn test_os_recency_windows_ignores_os_version_for_comparison() {
+    let mut posture = sample_posture();
+    posture.os = Some(OperatingSystem::Windows);
+    posture.os_version = Some("10.0.26100".to_string());
+    posture.os_build = Some("22631".to_string()); // 23H2
+    assert!(
+        !evaluate_one(preconfigured_text(PreconfiguredSlug::OsRecency), &posture),
+        "Windows OsRecency must compare os_build_num, not os_version"
+    );
+}
+
+// ============================================================
+// Preconfigured set health
+// ============================================================
+
+/// Every preconfigured policy must lower AND validate cleanly against the
+/// embedded schema — stronger than the CEL compile-only check.
+#[test]
+fn test_all_preconfigured_policies_lower_and_validate() {
+    for policy in PRECONFIGURED_POLICIES {
+        validate_policy_text(policy.policy_text)
+            .unwrap_or_else(|e| panic!("policy '{}' failed validation: {e:?}", policy.slug));
+    }
+}
+
+#[test]
+fn test_all_preconfigured_pass_with_full_posture() {
+    let posture = sample_posture();
+    for policy in PRECONFIGURED_POLICIES {
+        assert!(
+            evaluate_one(policy.policy_text, &posture),
+            "Policy '{}' should pass with full posture",
+            policy.slug
+        );
+    }
+}
+
+// ============================================================
+// Playground (test_policy_text)
+// ============================================================
+
+#[test]
+fn test_test_policy_text_pass() {
+    let result = test_policy_text(
+        &requirement("context.input.posture.disk_encryption_enabled"),
+        &sample_posture(),
+    )
+    .unwrap();
+    assert!(result);
+}
+
+#[test]
+fn test_test_policy_text_fail() {
+    let result = test_policy_text(
+        &requirement("context.input.posture.disk_encryption_enabled"),
+        &minimal_posture(),
+    )
+    .unwrap();
+    assert!(!result);
+}
+
+#[test]
+fn test_test_policy_text_invalid() {
+    let posture = minimal_posture();
+    assert!(test_policy_text("", &posture).is_err());
+    assert!(
+        test_policy_text(
+            &requirement("context.input.posture.os == \"unterminated"),
+            &posture
+        )
+        .is_err()
+    );
+}
+
+/// A custom `permit` an admin writes is harmless: the base permit already
+/// allows, and forbids always override permits.
+#[test]
+fn test_custom_permit_cannot_widen_access() {
+    let permit_everything =
+        "permit (principal, action == Vouch::Action::\"IssueToken\", resource);";
+    assert!(test_policy_text(permit_everything, &minimal_posture()).unwrap());
+    // ...but an active forbid still denies even alongside a custom permit.
+    let contradictory = format!(
+        "{permit_everything}\n\n{}",
+        requirement("context.input.posture.disk_encryption_enabled")
+    );
+    assert!(!test_policy_text(&contradictory, &minimal_posture()).unwrap());
+}
+
+// ============================================================
+// Remediation and slugs
+// ============================================================
+
+#[test]
+fn test_remediation_macos() {
+    let r = remediation_for_slug(PreconfiguredSlug::DiskEncryption, Some("macos"));
+    assert!(r.contains("FileVault"));
+}
+
+#[test]
+fn test_remediation_linux() {
+    let r = remediation_for_slug(PreconfiguredSlug::Firewall, Some("linux"));
+    assert!(r.contains("ufw"));
+}
+
+#[test]
+fn test_remediation_windows() {
+    let r = remediation_for_slug(PreconfiguredSlug::ScreenLock, Some("windows"));
+    assert!(r.contains("Sign-in options"));
+}
+
+#[test]
+fn test_preconfigured_slug_round_trip() {
+    assert_eq!(
+        "disk_encryption".parse::<PreconfiguredSlug>(),
+        Ok(PreconfiguredSlug::DiskEncryption)
+    );
+    assert_eq!(
+        "os_recency".parse::<PreconfiguredSlug>(),
+        Ok(PreconfiguredSlug::OsRecency)
+    );
+    assert!("custom".parse::<PreconfiguredSlug>().is_err());
+    assert_eq!(
+        PreconfiguredSlug::DiskEncryption.as_str(),
+        "disk_encryption"
+    );
+}
+
+#[test]
+fn test_is_valid_preconfigured_slug() {
+    assert!(is_valid_preconfigured_slug("disk_encryption"));
+    assert!(is_valid_preconfigured_slug("os_recency"));
+    assert!(!is_valid_preconfigured_slug("custom"));
+}
+
+#[test]
+fn test_max_active_policies_covers_all_preconfigured() {
+    assert!(MAX_ACTIVE_POLICIES >= PRECONFIGURED_POLICIES.len());
+}
+
+// ============================================================
+// semver encoding
+// ============================================================
+
+#[test]
+fn test_semver_num_encoding() {
+    assert_eq!(posture_input::semver_num("15.3.1"), Some(15_003_001));
+    assert_eq!(posture_input::semver_num("15.3"), Some(15_003_000));
+    assert_eq!(posture_input::semver_num("15"), Some(15_000_000));
+    assert_eq!(posture_input::semver_num("9.0.0"), Some(9_000_000));
+    // 4-component (Windows) and non-numeric versions are rejected
+    assert_eq!(posture_input::semver_num("10.0.26100.0"), None);
+    assert_eq!(posture_input::semver_num("24h2"), None);
+    assert_eq!(posture_input::semver_num(""), None);
+}
+
+#[test]
+fn test_semver_comparison_via_policy() {
+    // 15.3.1 >= 14.0.0 (passes the lenient N-2 OsRecency floor)
+    assert!(evaluate_one(
+        &requirement("context.input.posture.os_version_num >= 14000000"),
+        &sample_posture()
+    ));
+    // 15.3.1 < 16.0.0 (does not meet a hypothetical next-year floor)
+    assert!(evaluate_one(
+        &requirement("context.input.posture.os_version_num < 16000000"),
+        &sample_posture()
+    ));
+    // 9.0.0 must NOT be >= 14.0.0 (unlike lexicographic comparison)
+    let mut old = minimal_posture();
+    old.os_version = Some("9.0.0".to_string());
+    assert!(!evaluate_one(
+        &requirement("context.input.posture.os_version_num >= 14000000"),
+        &old
+    ));
+}
+
+// ============================================================
+// Device posture extraction (RFC 9396)
+// ============================================================
+
+#[test]
+fn test_extract_device_posture_from_ad() {
+    let value: serde_json::Value = serde_json::from_str(
+        r#"[{"type":"device_posture","posture_version":1,"os":"macos","disk_encryption_enabled":true}]"#,
+    )
+    .unwrap();
+    let posture = extract_device_posture(Some(&value)).unwrap();
+    assert_eq!(posture.os, Some(OperatingSystem::MacOs));
+    assert_eq!(posture.disk_encryption_enabled, Some(true));
+}
+
+#[test]
+fn test_extract_device_posture_missing() {
+    assert!(extract_device_posture(None).is_err());
+}
+
+#[test]
+fn test_extract_device_posture_no_posture_entry() {
+    let value: serde_json::Value = serde_json::from_str(r#"[{"type":"other_thing"}]"#).unwrap();
+    assert!(extract_device_posture(Some(&value)).is_err());
+}
+
+// ============================================================
+// Field parity
+// ============================================================
+
+/// One schema-validated check per Posture record field, true for
+/// `full_posture()`. Together with the exhaustive destructuring in
+/// `posture_record`, this guarantees every `DevicePosture` field (plus the
+/// four derived fields) is reachable — and correctly valued — from policy
+/// text.
+const POSTURE_FIELD_CHECKS: &[(&str, &str)] = &[
+    ("os", "context.input.posture.os == \"macos\""),
+    (
+        "os_version",
+        "context.input.posture.os_version == \"15.3.1\"",
+    ),
+    (
+        "os_version_num",
+        "context.input.posture.os_version_num == 15003001",
+    ),
+    (
+        "os_distribution",
+        "context.input.posture.os_distribution == \"macos\"",
+    ),
+    ("os_build", "context.input.posture.os_build == \"26100\""),
+    (
+        "os_build_num",
+        "context.input.posture.os_build_num == 26100",
+    ),
+    ("arch", "context.input.posture.arch == \"aarch64\""),
+    (
+        "disk_encryption_enabled",
+        "context.input.posture.disk_encryption_enabled",
+    ),
+    (
+        "disk_encryption_technology",
+        "context.input.posture.disk_encryption_technology == \"filevault\"",
+    ),
+    (
+        "screen_lock_enabled",
+        "context.input.posture.screen_lock_enabled",
+    ),
+    (
+        "screen_lock_idle_timeout_secs",
+        "context.input.posture.screen_lock_idle_timeout_secs == 300",
+    ),
+    ("firewall_enabled", "context.input.posture.firewall_enabled"),
+    (
+        "firewall_technology",
+        "context.input.posture.firewall_technology == \"application firewall\"",
+    ),
+    (
+        "secure_boot_enabled",
+        "context.input.posture.secure_boot_enabled",
+    ),
+    ("sip_enabled", "context.input.posture.sip_enabled"),
+    ("tpm_present", "context.input.posture.tpm_present"),
+    (
+        "tpm_version",
+        "context.input.posture.tpm_version == \"2.0\"",
+    ),
+    (
+        "auto_update_enabled",
+        "context.input.posture.auto_update_enabled",
+    ),
+    (
+        "auto_update_technology",
+        "context.input.posture.auto_update_technology == \"softwareupdate\"",
+    ),
+    ("uptime_secs", "context.input.posture.uptime_secs == 86400"),
+    (
+        "access_control_enforcing",
+        "context.input.posture.access_control_enforcing",
+    ),
+    (
+        "access_control_technology",
+        "context.input.posture.access_control_technology == \"gatekeeper\"",
+    ),
+    ("edr", "context.input.posture.edr.contains(\"crowdstrike\")"),
+    ("edr_count", "context.input.posture.edr_count == 1"),
+    ("mdm", "context.input.posture.mdm.contains(\"jamf\")"),
+    ("mdm_count", "context.input.posture.mdm_count == 1"),
+    ("elevated", "context.input.posture.elevated == false"),
+    ("tty", "context.input.posture.tty"),
+    (
+        "parent_process",
+        "context.input.posture.parent_process == \"zsh\"",
+    ),
+    (
+        "cli_version",
+        "context.input.posture.cli_version == \"1.2.3\"",
+    ),
+    (
+        "collected_at",
+        "context.input.posture.collected_at == \"2026-08-08t00:00:00z\"",
+    ),
+];
+
+#[test]
+fn test_posture_field_parity() {
+    let posture = full_posture();
+
+    // Completeness: the check list covers exactly the record's fields.
+    let record = posture_input::posture_record(&posture);
+    let dogwood_language::Value::Object(record) = record else {
+        panic!("posture_record must build an object");
+    };
+    let checked: std::collections::BTreeSet<&str> = POSTURE_FIELD_CHECKS
+        .iter()
+        .map(|(field, _)| *field)
+        .collect();
+    let present: std::collections::BTreeSet<&str> = record.keys().map(String::as_str).collect();
+    assert_eq!(
+        checked, present,
+        "POSTURE_FIELD_CHECKS must cover exactly the posture record fields"
+    );
+
+    // Reachability + value fidelity, through schema validation and the
+    // full engine (validate catches typos; evaluate catches wrong values).
+    for (field, expr) in POSTURE_FIELD_CHECKS {
+        let policy = requirement(expr);
+        validate_policy_text(&policy)
+            .unwrap_or_else(|e| panic!("field '{field}' check failed validation: {e:?}"));
+        assert!(
+            evaluate_one(&policy, &posture),
+            "Field '{field}' not accessible or wrongly valued (expr: {expr})"
+        );
+    }
+}
+
+// ============================================================
+// Fail-closed behavior
+// ============================================================
+
+/// A policy that fails to lower (leftover CEL text) must be an engine
+/// error — enforcement treats it as a deny, never a pass.
+#[test]
+fn test_unlowerable_policy_is_fail_closed() {
+    let composed = compose(&["posture.disk_encryption_enabled == true"]);
+    let event = issue_token_request(&sample_posture(), "test-user", "test-org");
+    assert!(
+        decide(&composed, &event).is_err(),
+        "CEL text must be an engine error (deny)"
+    );
+}
+
+/// The base permit alone allows — no active forbids means issuance passes.
+#[test]
+fn test_base_allow_alone_allows() {
+    let event = issue_token_request(&minimal_posture(), "test-user", "test-org");
+    let allowed = match decide(BASE_ALLOW, &event) {
+        Ok(EngineDecision::Allow) => true,
+        Ok(EngineDecision::Deny) | Err(_) => false,
+    };
+    assert!(allowed, "base permit alone must allow");
+}

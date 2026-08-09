@@ -95,6 +95,8 @@ pub struct AppState {
     pub session_cache: db::SessionCache,
     /// Per-org issuer signing key cache (60s TTL).
     pub org_keys_cache: services::oidc::OrgKeysCache,
+    /// Per-org stateful Dogwood policy engines (temporal event history).
+    pub(crate) policy: services::policy::engine::PolicyEngine,
     /// Configured upstream identity providers (OIDC and/or SAML), in the order
     /// operators listed them in `VOUCH_IDPS` (or the S3 `idps` array). Order
     /// controls login page button order; `id` is the lookup key at callback time.
@@ -289,6 +291,7 @@ mod redirect_tests {
             http_client: reqwest::Client::new(),
             session_cache: db::SessionCache::new(10_000, 30),
             org_keys_cache: Default::default(),
+            policy: Default::default(),
             idps: Vec::new(),
         }
     }

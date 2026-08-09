@@ -6,7 +6,7 @@ use crate::db;
 use crate::error::ServiceError;
 use crate::handlers::admin::flash;
 use crate::impl_template_response;
-use crate::services::posture;
+use crate::services::policy as posture;
 use askama::Template;
 use aws_lc_rs::digest::{self, SHA256};
 use axum::Json;
@@ -35,7 +35,7 @@ pub(crate) struct PreconfiguredPolicyRow {
     pub slug: String,
     pub name: String,
     pub description: String,
-    pub cel_expression: String,
+    pub policy_text: String,
     pub active: bool,
 }
 
@@ -44,7 +44,7 @@ pub(crate) struct CustomPolicyRow {
     pub id: String,
     pub name: String,
     pub description: Option<String>,
-    pub cel_expression: String,
+    pub policy_text: String,
     pub active: bool,
 }
 
@@ -101,7 +101,7 @@ pub(crate) async fn admin_policies_page(
             slug: p.slug.to_string(),
             name: p.name.to_string(),
             description: p.description.to_string(),
-            cel_expression: p.cel_expression.to_string(),
+            policy_text: p.policy_text.to_string(),
             active: active_slugs.iter().any(|s| s == p.slug.as_str()),
         })
         .collect();
@@ -114,7 +114,7 @@ pub(crate) async fn admin_policies_page(
                     id: p.id,
                     name: p.name,
                     description: p.description,
-                    cel_expression: p.cel_expression,
+                    policy_text: p.policy_text,
                     active: p.active,
                 })
                 .collect(),
@@ -233,7 +233,7 @@ pub(crate) struct CustomPolicyForm {
     pub name: String,
     #[serde(default, alias = "policy_description")]
     pub description: Option<String>,
-    pub cel_expression: String,
+    pub policy_text: String,
 }
 
 /// POST /admin/policies/custom — Create a new custom policy.
@@ -255,10 +255,10 @@ pub(crate) async fn create_custom_policy(
         ));
     }
 
-    if form.cel_expression.is_empty() || form.cel_expression.len() > 1024 {
+    if form.policy_text.is_empty() || form.policy_text.len() > 4096 {
         return Ok(redirect_error(
             jar,
-            "CEL expression must be between 1 and 1024 characters",
+            "Policy text must be between 1 and 4096 characters",
         ));
     }
 
@@ -276,7 +276,7 @@ pub(crate) async fn create_custom_policy(
         extract_org_admin(&state, &headers, &jar, method.as_str(), uri.path(), None).await?;
 
     // Validate CEL syntax
-    if let Err(e) = posture::validate_cel_expression(&form.cel_expression) {
+    if let Err(e) = posture::validate_policy_text(&form.policy_text) {
         return Ok(redirect_error(jar, format!("Invalid CEL expression: {e}")));
     }
 
@@ -300,20 +300,20 @@ pub(crate) async fn create_custom_policy(
         db::CreateCustomPolicyParams {
             name: &form.name,
             description: description.as_deref(),
-            cel_expression: &form.cel_expression,
+            policy_text: &form.policy_text,
             org_id: &org_id,
         },
     )
     .await
     .map_err(|e| ServiceError::Internal(format!("Failed to create policy: {e}")))?;
 
-    let cel_hash = cel_expression_hash(&form.cel_expression);
+    let cel_hash = policy_text_hash(&form.policy_text);
     let data = serde_json::json!({
         "action": "custom_policy_created",
         "policy_id": policy.id,
         "policy_name": policy.name,
         "admin_user_id": admin.id,
-        "cel_expression_hash": cel_hash,
+        "policy_text_hash": cel_hash,
     });
     if let Err(e) = state
         .audit
@@ -356,10 +356,10 @@ pub(crate) async fn update_custom_policy(
         ));
     }
 
-    if form.cel_expression.is_empty() || form.cel_expression.len() > 1024 {
+    if form.policy_text.is_empty() || form.policy_text.len() > 4096 {
         return Ok(redirect_error(
             jar,
-            "CEL expression must be between 1 and 1024 characters",
+            "Policy text must be between 1 and 4096 characters",
         ));
     }
 
@@ -367,7 +367,7 @@ pub(crate) async fn update_custom_policy(
     let (admin, org_id) =
         extract_org_admin(&state, &headers, &jar, method.as_str(), uri.path(), None).await?;
 
-    if let Err(e) = posture::validate_cel_expression(&form.cel_expression) {
+    if let Err(e) = posture::validate_policy_text(&form.policy_text) {
         return Ok(redirect_error(jar, format!("Invalid CEL expression: {e}")));
     }
 
@@ -382,7 +382,7 @@ pub(crate) async fn update_custom_policy(
             description: description
                 .as_deref()
                 .map_or(db::FieldUpdate::Clear, db::FieldUpdate::Set),
-            cel_expression: Some(&form.cel_expression),
+            policy_text: Some(&form.policy_text),
             active: None,
         },
     )
@@ -397,13 +397,13 @@ pub(crate) async fn update_custom_policy(
         ));
     }
 
-    let cel_hash = cel_expression_hash(&form.cel_expression);
+    let cel_hash = policy_text_hash(&form.policy_text);
     let data = serde_json::json!({
         "action": "custom_policy_updated",
         "policy_id": &*id,
         "policy_name": form.name,
         "admin_user_id": admin.id,
-        "cel_expression_hash": cel_hash,
+        "policy_text_hash": cel_hash,
     });
     if let Err(e) = state
         .audit
@@ -537,7 +537,7 @@ pub(crate) async fn toggle_custom_policy(
         db::UpdateCustomPolicyParams {
             name: None,
             description: db::FieldUpdate::Keep,
-            cel_expression: None,
+            policy_text: None,
             active: Some(new_active),
         },
     )
@@ -557,13 +557,13 @@ pub(crate) async fn toggle_custom_policy(
     } else {
         "deactivated"
     };
-    let cel_hash = cel_expression_hash(&policy.cel_expression);
+    let cel_hash = policy_text_hash(&policy.policy_text);
     let data = serde_json::json!({
         "action": format!("custom_policy_{action}"),
         "policy_id": &*id,
         "policy_name": policy.name,
         "admin_user_id": admin.id,
-        "cel_expression_hash": cel_hash,
+        "policy_text_hash": cel_hash,
     });
     if let Err(e) = state
         .audit
@@ -592,7 +592,7 @@ pub(crate) async fn toggle_custom_policy(
 ///
 /// Included in audit events to trace which version of a policy was in
 /// effect at the time of an admin action.
-fn cel_expression_hash(expression: &str) -> String {
+fn policy_text_hash(expression: &str) -> String {
     let hash = digest::digest(&SHA256, expression.as_bytes());
     hash.as_ref()
         .iter()
@@ -620,7 +620,7 @@ pub(crate) struct TestResult {
 /// Request to validate a CEL expression (JSON API for CEL playground).
 #[derive(Debug, Deserialize)]
 pub(crate) struct ValidateRequest {
-    pub cel_expression: String,
+    pub policy_text: String,
     #[serde(default)]
     pub test_posture: Option<vouch_common::posture::DevicePosture>,
 }
@@ -638,15 +638,15 @@ pub(crate) async fn validate_cel_api(
     let _auth =
         extract_org_admin(&state, &headers, &jar, method.as_str(), uri.path(), None).await?;
 
-    if req.cel_expression.is_empty() || req.cel_expression.len() > 1024 {
+    if req.policy_text.is_empty() || req.policy_text.len() > 4096 {
         return Ok(Json(ValidateResponse {
             valid: false,
-            error: Some("CEL expression must be between 1 and 1024 characters".to_string()),
+            error: Some("Policy text must be between 1 and 4096 characters".to_string()),
             test_result: None,
         }));
     }
 
-    if let Err(e) = posture::validate_cel_expression(&req.cel_expression) {
+    if let Err(e) = posture::validate_policy_text(&req.policy_text) {
         return Ok(Json(ValidateResponse {
             valid: false,
             error: Some(format!("{e}")),
@@ -655,7 +655,7 @@ pub(crate) async fn validate_cel_api(
     }
 
     let test_result = if let Some(ref test_posture) = req.test_posture {
-        match posture::test_cel_expression(&req.cel_expression, test_posture) {
+        match posture::test_policy_text(&req.policy_text, test_posture) {
             Ok(pass) => Some(TestResult { pass }),
             Err(_) => Some(TestResult { pass: false }),
         }
@@ -706,7 +706,7 @@ mod tests {
         let auth = format!("Bearer {token}");
 
         let body = serde_json::json!({
-            "cel_expression": "posture.os == \"macos\""
+            "policy_text": "forbid (principal, action == Vouch::Action::\"IssueToken\", resource) unless { context.input.posture.os == \"macos\" };"
         });
         let (status, resp) = http_post_json(
             &app,
@@ -740,7 +740,7 @@ mod tests {
         let auth = format!("Bearer {token}");
 
         let body = serde_json::json!({
-            "cel_expression": "posture.os == \"macos\"",
+            "policy_text": "forbid (principal, action == Vouch::Action::\"IssueToken\", resource) unless { context.input.posture.os == \"macos\" };",
             "test_posture": {
                 "type": "device_posture",
                 "posture_version": 1,
@@ -776,7 +776,7 @@ mod tests {
 
         // Expression checks for macos but posture reports linux
         let body = serde_json::json!({
-            "cel_expression": "posture.os == \"macos\"",
+            "policy_text": "forbid (principal, action == Vouch::Action::\"IssueToken\", resource) unless { context.input.posture.os == \"macos\" };",
             "test_posture": {
                 "type": "device_posture",
                 "posture_version": 1,
@@ -806,7 +806,7 @@ mod tests {
     async fn test_cel_validate_requires_auth() {
         let (app, _state) = test_app().await;
 
-        let body = serde_json::json!({"cel_expression": "posture.os == \"macos\""});
+        let body = serde_json::json!({"policy_text": "forbid (principal, action == Vouch::Action::\"IssueToken\", resource) unless { context.input.posture.os == \"macos\" };"});
         let (status, _resp) = http_post_json(
             &app,
             "/api/v1/org/policies/validate",
@@ -832,7 +832,7 @@ mod tests {
         let token = create_test_session(&state, &member.id, &member.email, &auth_id).await;
         let auth = format!("Bearer {token}");
 
-        let body = serde_json::json!({"cel_expression": "posture.os == \"macos\""});
+        let body = serde_json::json!({"policy_text": "forbid (principal, action == Vouch::Action::\"IssueToken\", resource) unless { context.input.posture.os == \"macos\" };"});
         let (status, _resp) = http_post_json(
             &app,
             "/api/v1/org/policies/validate",
@@ -854,7 +854,7 @@ mod tests {
         let (_admin, token) = setup_admin(&state).await;
         let auth = format!("Bearer {token}");
 
-        let body = serde_json::json!({"cel_expression": ""});
+        let body = serde_json::json!({"policy_text": ""});
         let (status, resp) = http_post_json(
             &app,
             "/api/v1/org/policies/validate",
@@ -885,8 +885,8 @@ mod tests {
         let (_admin, token) = setup_admin(&state).await;
         let auth = format!("Bearer {token}");
 
-        let long_expr = "a".repeat(1025);
-        let body = serde_json::json!({"cel_expression": long_expr});
+        let long_expr = "a".repeat(4097);
+        let body = serde_json::json!({"policy_text": long_expr});
         let (status, resp) = http_post_json(
             &app,
             "/api/v1/org/policies/validate",
@@ -903,7 +903,7 @@ mod tests {
         let json: serde_json::Value = serde_json::from_str(&resp).unwrap();
         assert_eq!(
             json["valid"], false,
-            "valid must be false for >1024 char expression"
+            "valid must be false for >4096 char expression"
         );
         assert!(
             json["error"].as_str().is_some(),
@@ -918,7 +918,7 @@ mod tests {
         let auth = format!("Bearer {token}");
 
         // Unterminated string literal is genuinely invalid CEL syntax
-        let body = serde_json::json!({"cel_expression": "posture.os == \"unterminated"});
+        let body = serde_json::json!({"policy_text": "posture.os == \"unterminated"});
         let (status, resp) = http_post_json(
             &app,
             "/api/v1/org/policies/validate",
@@ -984,7 +984,7 @@ mod tests {
         let (status, _body) = http_post_form(
             &app,
             "/admin/policies/custom",
-            "policy_name=Test&cel_expression=posture.os+%3D%3D+%22macos%22",
+            "policy_name=Test&policy_text=posture.os+%3D%3D+%22macos%22",
             &[("Cookie", &cookie)],
         )
         .await;
@@ -1029,7 +1029,7 @@ mod tests {
         let (status, _body) = http_post_form(
             &app,
             "/admin/policies/custom",
-            "policy_name=&cel_expression=posture.os+%3D%3D+%22macos%22",
+            "policy_name=&policy_text=posture.os+%3D%3D+%22macos%22",
             &[("Cookie", &cookie), ("Origin", origin)],
         )
         .await;
@@ -1051,7 +1051,7 @@ mod tests {
 
         let long_cel = "a".repeat(1025);
         let body = format!(
-            "policy_name=Test&cel_expression={}",
+            "policy_name=Test&policy_text={}",
             urlencoding::encode(&long_cel)
         );
         let (status, _body) = http_post_form(
@@ -1101,7 +1101,7 @@ mod tests {
             db::CreateCustomPolicyParams {
                 name: "Toggle Me",
                 description: None,
-                cel_expression: "posture.os == \"linux\"",
+                policy_text: "posture.os == \"linux\"",
                 org_id,
             },
         )

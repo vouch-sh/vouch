@@ -46,6 +46,13 @@ allow = [
 ]
 exceptions = []
 
+# The dogwood-language crate manifest omits the `license` field; the repository
+# is Apache-2.0 (LICENSE at repo root). Spike-only clarification.
+[[licenses.clarify]]
+crate = "amzn-dogwood-language"
+expression = "Apache-2.0"
+license-files = []
+
 [bans]
 multiple-versions = "deny"
 wildcards = "deny"
@@ -101,7 +108,7 @@ skip = [
     # pastey version split
     { crate = "pastey@0.1.1", reason = "transitive dependency version split" },
     # rand 0.9 vs 0.10
-    { crate = "rand@0.9.4", reason = "some crates still on rand 0.9" },
+    { crate = "rand:>=0.9,<0.10", reason = "some crates still on rand 0.9" },
     { crate = "rand_core:>=0.6,<0.7", reason = "rand 0.8 ecosystem" },
     { crate = "rand_core:>=0.9,<0.10", reason = "rand 0.9 ecosystem" },
     # shlex version split (build-script dependency)
@@ -115,6 +122,26 @@ skip = [
     { crate = "unicode-width:>=0.1,<0.2", reason = "some crates still on unicode-width 0.1" },
     # untrusted version split (ring/aws-lc-rs transitive)
     { crate = "untrusted:>=0.7,<0.8", reason = "webpki/ring transitive" },
+    # base64 0.22 vs 0.23 (sqlx-core/ctap-hid-fido2/headers still on 0.22)
+    { crate = "base64:>=0.22,<0.23", reason = "sqlx and ctap-hid-fido2 still on base64 0.22" },
+    # ssh-key 0.6 pins the ed25519-dalek 2 stack; workspace is on 3
+    { crate = "curve25519-dalek:>=4,<5", reason = "ssh-key 0.6 uses ed25519-dalek 2 (curve25519-dalek 4)" },
+    { crate = "ed25519:>=2,<3", reason = "ssh-key 0.6 uses ed25519 2" },
+    { crate = "ed25519-dalek:>=2,<3", reason = "ssh-key 0.6 uses ed25519-dalek 2" },
+    { crate = "signature:>=2,<3", reason = "ssh-key 0.6 uses signature 2" },
+    # syn 2 vs 3 (async-trait 0.1.92 moved to syn 3; most proc-macros still on 2)
+    { crate = "syn:>=2,<3", reason = "most proc-macros still on syn 2; async-trait pulls syn 3" },
+    # tower-http 0.6 vs 0.7 (reqwest 0.13 still on 0.6; workspace pins 0.7)
+    { crate = "tower-http:>=0.6,<0.7", reason = "reqwest 0.13 still on tower-http 0.6" },
+    # ── Dogwood spike (feat/dogwood-spike, never merged): duplicates pulled
+    #    in by the amzn-dogwood-language git dependency (cedar-policy 4.11,
+    #    rhai, mcp-schema-generator). Remove with the spike.
+    { crate = "arrayvec:>=0.5,<0.6", reason = "cedar-policy-formatter → pretty still on arrayvec 0.5" },
+    { crate = "darling:>=0.20,<0.21", reason = "sea-query-derive on darling 0.20; cedar → serde_with pulls 0.23" },
+    { crate = "darling_core:>=0.20,<0.21", reason = "transitive via darling 0.20" },
+    { crate = "darling_macro:>=0.20,<0.21", reason = "transitive via darling 0.20" },
+    { crate = "nom:>=8,<9", reason = "cedar-policy-mcp-schema-generator → iso8601 on nom 8; webauthn stack on nom 7" },
+    { crate = "nonempty:>=0.12,<0.13", reason = "dogwood-language on nonempty 0.12; tower_governor on 0.7" },
 ]
 skip-tree = [
     # windows-sys bumps frequently; many crates lag behind. Rather than tracking
@@ -126,4 +153,8 @@ skip-tree = [
 unknown-registry = "deny"
 unknown-git = "warn"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
-allow-git = []
+allow-git = [
+    # Dogwood spike (feat/dogwood-spike, never merged): reference interpreter,
+    # not published on crates.io — pinned to an exact rev in Cargo.toml.
+    "https://github.com/dogwood-policy/dogwood",
+]

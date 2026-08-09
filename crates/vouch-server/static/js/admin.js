@@ -144,7 +144,7 @@ document.addEventListener("DOMContentLoaded", function () {
 
   function validateExpression(expr) {
     var body = {
-      cel_expression: expr,
+      policy_text: expr,
       test_posture: samplePosture(),
     };
     fetch("/api/v1/org/policies/validate", {

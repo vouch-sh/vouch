@@ -1,0 +1,99 @@
+// Vouch action schema for the Dogwood policy engine.
+//
+// Decision actions (evaluated as `::request` events):
+//   IssueToken     — FIDO2-assertion grant, step 9b of exchange_fido2_assertion
+//   ExchangeToken  — RFC 8693 token exchange (WIF / agent credential path)
+//
+// History actions (ingested from audit_events as `::response` events, never
+// decision points): Login, Logout, RevokeToken, IssueCredential. IssueToken
+// responses are also ingested as history so aggregation policies can count
+// issuances. AgentToolCall is forward-looking (future `vouch mcp` gateway).
+//
+// The Posture record mirrors vouch_common::posture::DevicePosture. Every
+// field is always present — Rust injects typed defaults for absent values
+// (posture_input.rs) — so the validator can type-check custom policies.
+// os_version_num / os_build_num / edr_count / mdm_count are derived in Rust
+// (see posture_input.rs; os_version_num is the semver encoding
+// major*1_000_000 + minor*1_000 + patch, -1 when unparseable).
+namespace Vouch {
+  type Posture = {
+    os: String,
+    os_version: String,
+    os_version_num: Long,
+    os_distribution: String,
+    os_build: String,
+    os_build_num: Long,
+    arch: String,
+    disk_encryption_enabled: Bool,
+    disk_encryption_technology: String,
+    screen_lock_enabled: Bool,
+    screen_lock_idle_timeout_secs: Long,
+    firewall_enabled: Bool,
+    firewall_technology: String,
+    secure_boot_enabled: Bool,
+    sip_enabled: Bool,
+    tpm_present: Bool,
+    tpm_version: String,
+    auto_update_enabled: Bool,
+    auto_update_technology: String,
+    uptime_secs: Long,
+    access_control_enforcing: Bool,
+    access_control_technology: String,
+    edr: Set<String>,
+    edr_count: Long,
+    mdm: Set<String>,
+    mdm_count: Long,
+    elevated: Bool,
+    tty: Bool,
+    parent_process: String,
+    cli_version: String,
+    collected_at: String
+  };
+
+  type IssueTokenInput = { posture: Posture, ip: String, client_id: String };
+  type ExchangeTokenInput = { audience: String, client_id: String, ip: String };
+  type LoginInput = { ip: String, user_agent: String };
+  type LoginOutput = { result: Bool };
+  type IssueCredentialInput = { kind: String };
+  type AgentToolCallInput = { tool: String, session_tag: String };
+  type EmptyInput = {};
+
+  entity User;
+  entity Org;
+
+  action "IssueToken" appliesTo {
+    principal: [User],
+    resource: [Org],
+    context: { input: IssueTokenInput }
+  };
+  action "ExchangeToken" appliesTo {
+    principal: [User],
+    resource: [Org],
+    context: { input: ExchangeTokenInput }
+  };
+  action "Login" appliesTo {
+    principal: [User],
+    resource: [Org],
+    context: { input: LoginInput, output?: LoginOutput }
+  };
+  action "Logout" appliesTo {
+    principal: [User],
+    resource: [Org],
+    context: { input: EmptyInput }
+  };
+  action "RevokeToken" appliesTo {
+    principal: [User],
+    resource: [Org],
+    context: { input: EmptyInput }
+  };
+  action "IssueCredential" appliesTo {
+    principal: [User],
+    resource: [Org],
+    context: { input: IssueCredentialInput }
+  };
+  action "AgentToolCall" appliesTo {
+    principal: [User],
+    resource: [Org],
+    context: { input: AgentToolCallInput }
+  };
+}
