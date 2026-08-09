@@ -84,7 +84,7 @@
                             </form>
                         </summary>
                         <div class="px-4 pb-3 pt-0 ml-[3.125rem]">
-                            <p class="text-gray-600 text-xs font-mono mb-2">{{ policy.policy_text }}</p>
+                            <pre class="text-gray-600 text-xs font-mono mb-2 whitespace-pre-wrap break-words">{{ policy.policy_text }}</pre>
                             {% if policy.slug == "disk_encryption" %}
                             <div class="text-xs text-gray-500 space-y-1">
                                 <p class="flex items-center gap-1.5">{{ os::apple("w-3.5 h-3.5 text-gray-500 shrink-0") }} {{ self.tr("admin-policies-disk-macos") }}</p>
@@ -112,26 +112,6 @@
                                 <p class="flex items-center gap-1.5">{{ os::apple("w-3.5 h-3.5 text-gray-500 shrink-0") }} {{ self.tr("admin-policies-platform-macos") }}</p>
                                 <p class="flex items-center gap-1.5">{{ os::windows("w-3.5 h-3.5 text-gray-500 shrink-0") }} {{ self.tr("admin-policies-platform-windows") }}</p>
                                 <p class="flex items-center gap-1.5">{{ os::linux("w-3.5 h-3.5 text-gray-500 shrink-0") }} {{ self.tr("admin-policies-platform-linux") }}</p>
-                            </div>
-                            {% else if policy.slug == "issuance_rate_limit" %}
-                            <div class="text-xs text-gray-500 space-y-1">
-                                <p>{{ self.tr("admin-policies-rate-limit-desc") }}</p>
-                            </div>
-                            {% else if policy.slug == "failed_login_burst" %}
-                            <div class="text-xs text-gray-500 space-y-1">
-                                <p>{{ self.tr("admin-policies-burst-desc") }}</p>
-                            </div>
-                            {% else if policy.slug == "token_exchange_step_up" %}
-                            <div class="text-xs text-gray-500 space-y-1">
-                                <p>{{ self.tr("admin-policies-stepup-desc") }}</p>
-                            </div>
-                            {% else if policy.slug == "exchange_ip_consistency" %}
-                            <div class="text-xs text-gray-500 space-y-1">
-                                <p>{{ self.tr("admin-policies-ipconsistency-desc") }}</p>
-                            </div>
-                            {% else if policy.slug == "logout_invalidates_exchange" %}
-                            <div class="text-xs text-gray-500 space-y-1">
-                                <p>{{ self.tr("admin-policies-logoutinvalidates-desc") }}</p>
                             </div>
                             {% else if policy.slug == "os_recency" %}
                             <div class="text-xs text-gray-500 space-y-1">
