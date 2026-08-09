@@ -224,7 +224,13 @@
                     {% for policy in custom_policies %}
                     <div class="px-4 py-3">
                         <div class="flex items-center justify-between gap-3 mb-1">
-                            <span class="text-gray-200 text-sm font-medium truncate">{{ policy.name }}</span>
+                            <span class="text-gray-200 text-sm font-medium truncate">
+                                {{ policy.name }}
+                                {% if !policy.valid %}
+                                <span class="ml-1.5 px-1.5 py-0.5 text-xs rounded bg-red-900/30 text-red-400 border border-red-800/50 align-middle"
+                                    title="{{ self.tr("admin-policies-invalid-title") }}">{{ self.tr("admin-policies-invalid-badge") }}</span>
+                                {% endif %}
+                            </span>
                             <div class="flex items-center gap-2 shrink-0">
                                 <form method="POST" action="/admin/policies/custom/{{ policy.id }}/toggle" class="inline">
                                     {% if policy.active %}

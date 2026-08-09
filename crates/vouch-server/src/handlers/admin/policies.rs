@@ -46,6 +46,11 @@ pub(crate) struct CustomPolicyRow {
     pub description: Option<String>,
     pub policy_text: String,
     pub active: bool,
+    /// Whether the stored text still validates. Policies written for the
+    /// previous CEL engine — or any that stopped validating after a schema
+    /// change — fail closed at login, so the page flags them rather than
+    /// letting an admin discover it through locked-out users.
+    pub valid: bool,
 }
 
 /// Policies page template.
@@ -114,6 +119,7 @@ pub(crate) async fn admin_policies_page(
                     id: p.id,
                     name: p.name,
                     description: p.description,
+                    valid: posture::validate_policy_text(&p.policy_text).is_ok(),
                     policy_text: p.policy_text,
                     active: p.active,
                 })
@@ -689,6 +695,7 @@ pub(crate) async fn validate_cel_api(
     reason = "test code: panic on assertion failure is acceptable"
 )]
 mod tests {
+    use super::{CustomPolicyRow, posture};
     use crate::db;
     use crate::test_utils::*;
     use axum::http::StatusCode;
@@ -1288,5 +1295,50 @@ mod tests {
             gone.is_none(),
             "policy must have been deleted by the OCC hook"
         );
+    }
+    /// A stored policy that no longer validates (e.g. leftover CEL text) is
+    /// flagged on the page, so an admin sees it before users are locked out.
+    #[tokio::test]
+    async fn test_policies_page_flags_invalid_custom_policy() {
+        let (app, state) = test_app().await;
+        let (admin, _token) = setup_admin(&state).await;
+        let org_id = admin.org_id.clone().expect("admin must have an org");
+
+        // CEL text from before the migration: stored fine, never validates.
+        db::create_custom_policy(
+            &state.store,
+            db::CreateCustomPolicyParams {
+                name: "Legacy CEL",
+                description: None,
+                policy_text: "posture.disk_encryption_enabled == true",
+                org_id: &org_id,
+            },
+        )
+        .await
+        .expect("create legacy policy");
+
+        let rows: Vec<CustomPolicyRow> = db::list_custom_policies(&state.store, &org_id)
+            .await
+            .expect("list")
+            .into_iter()
+            .map(|p| CustomPolicyRow {
+                id: p.id,
+                name: p.name,
+                description: p.description,
+                valid: posture::validate_policy_text(&p.policy_text).is_ok(),
+                policy_text: p.policy_text,
+                active: p.active,
+            })
+            .collect();
+
+        let legacy = rows
+            .iter()
+            .find(|r| r.name == "Legacy CEL")
+            .expect("legacy policy row");
+        assert!(
+            !legacy.valid,
+            "leftover CEL text must be flagged invalid on the policies page"
+        );
+        drop(app);
     }
 }
