@@ -9,7 +9,7 @@
 use dogwood_language::{PolicySchema, ServiceSchema};
 use std::sync::LazyLock;
 
-/// The embedded Vouch action schema (entities, actions, the Posture record).
+/// The embedded Vouch action schema (entities, actions, the Device record).
 pub(crate) const VOUCH_CEDARSCHEMA: &str = include_str!("vouch.cedarschema");
 
 static SERVICE_SCHEMA: LazyLock<ServiceSchema> = LazyLock::new(ServiceSchema::defaults);

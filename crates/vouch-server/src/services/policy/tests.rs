@@ -515,7 +515,7 @@ fn test_extract_device_posture_no_posture_entry() {
 // Field parity
 // ============================================================
 
-/// One schema-validated check per Posture record field, true for
+/// One schema-validated check per Device record field, true for
 /// `full_posture()`. Together with the exhaustive destructuring in
 /// `posture_fields`, this guarantees every `DevicePosture` field (plus the
 /// four derived fields) is reachable — and correctly valued — from policy
@@ -597,7 +597,7 @@ fn test_posture_field_parity() {
     let present: std::collections::BTreeSet<&str> = record.keys().map(String::as_str).collect();
     assert_eq!(
         checked, present,
-        "POSTURE_FIELD_CHECKS must cover exactly the posture record fields"
+        "POSTURE_FIELD_CHECKS must cover exactly the device record fields"
     );
 
     // Reachability + value fidelity, through schema validation and the

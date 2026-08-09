@@ -16,14 +16,14 @@
 // responses are also ingested as history so aggregation policies can count
 // issuances. AgentToolCall is forward-looking (future `vouch mcp` gateway).
 //
-// The Posture record mirrors vouch_common::posture::DevicePosture. Every
+// The Device record mirrors vouch_common::posture::DevicePosture. Every
 // field is always present — Rust injects typed defaults for absent values
 // (posture_input.rs) — so the validator can type-check custom policies.
 // os_version_num / os_build_num / edr_count / mdm_count are derived in Rust
 // (see posture_input.rs; os_version_num is the semver encoding
 // major*1_000_000 + minor*1_000 + patch, -1 when unparseable).
 namespace Vouch {
-  type Posture = {
+  type Device = {
     os: String,
     os_version: String,
     os_version_num: Long,
@@ -71,7 +71,7 @@ namespace Vouch {
   action "IssueToken" appliesTo {
     principal: [User],
     resource: [Org],
-    context: { input: IssueTokenInput, device: Posture }
+    context: { input: IssueTokenInput, device: Device }
   };
   action "ExchangeToken" appliesTo {
     principal: [User],
