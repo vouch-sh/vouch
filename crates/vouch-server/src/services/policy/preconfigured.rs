@@ -1,6 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Preconfigured posture policies, defined in code (updatable via deploy).
 //!
+//! The policy text lives in `policies/<slug>.dw` next to the schema it is
+//! written against, and is embedded at build time. Keeping it out of Rust
+//! string literals means the rules read as policy in review, and the
+//! `dogwood` CLI can check a file directly.
+//!
 //! Each policy is a Cedar `forbid … unless { <requirement> }` over the
 //! always-present `context.device` record. The composed policy set
 //! (see `mod.rs`) starts with one base `permit` — Cedar is deny-by-default,
@@ -21,11 +26,7 @@ pub(crate) const MAX_ACTIVE_POLICIES: usize =
 /// The always-present base permits for the two decision actions. Custom
 /// `permit`s an admin writes are harmless (these already allow; forbids
 /// always override).
-pub(crate) const BASE_ALLOW: &str = r#"@id("base_allow_issue")
-permit (principal, action == Vouch::Action::"IssueToken", resource);
-
-@id("base_allow_exchange")
-permit (principal, action == Vouch::Action::"ExchangeToken", resource);"#;
+pub(crate) const BASE_ALLOW: &str = include_str!("policies/base_allow.dw");
 
 /// Number of policies in [`BASE_ALLOW`] — the composed set's forbids start
 /// at this rule index.
@@ -217,33 +218,23 @@ pub(crate) struct PreconfiguredPolicy {
 pub(crate) const PRECONFIGURED_POLICIES: &[PreconfiguredPolicy] = &[
     PreconfiguredPolicy {
         slug: PreconfiguredSlug::DiskEncryption,
-        policy_text: r#"@id("disk_encryption")
-forbid (principal, action == Vouch::Action::"IssueToken", resource)
-unless { context.device.disk_encryption_enabled };"#,
+        policy_text: include_str!("policies/disk_encryption.dw"),
     },
     PreconfiguredPolicy {
         slug: PreconfiguredSlug::Firewall,
-        policy_text: r#"@id("firewall")
-forbid (principal, action == Vouch::Action::"IssueToken", resource)
-unless { context.device.firewall_enabled };"#,
+        policy_text: include_str!("policies/firewall.dw"),
     },
     PreconfiguredPolicy {
         slug: PreconfiguredSlug::ScreenLock,
-        policy_text: r#"@id("screen_lock")
-forbid (principal, action == Vouch::Action::"IssueToken", resource)
-unless { context.device.screen_lock_enabled };"#,
+        policy_text: include_str!("policies/screen_lock.dw"),
     },
     PreconfiguredPolicy {
         slug: PreconfiguredSlug::EndpointProtection,
-        policy_text: r#"@id("endpoint_protection")
-forbid (principal, action == Vouch::Action::"IssueToken", resource)
-unless { context.device.edr_count > 0 };"#,
+        policy_text: include_str!("policies/endpoint_protection.dw"),
     },
     PreconfiguredPolicy {
         slug: PreconfiguredSlug::PlatformIntegrity,
-        policy_text: r#"@id("platform_integrity")
-forbid (principal, action == Vouch::Action::"IssueToken", resource)
-unless { context.device.secure_boot_enabled };"#,
+        policy_text: include_str!("policies/platform_integrity.dw"),
     },
     // OS version thresholds — review with each major OS release.
     // Last updated: 2026-06-21
@@ -266,12 +257,7 @@ unless { context.device.secure_boot_enabled };"#,
     //  context.device.os_version_num >= 22004000`).
     PreconfiguredPolicy {
         slug: PreconfiguredSlug::OsRecency,
-        policy_text: r#"@id("os_recency")
-forbid (principal, action == Vouch::Action::"IssueToken", resource)
-unless {
-    (context.device.os == "macos" && context.device.os_version_num >= 14000000) ||
-    (context.device.os == "windows" && context.device.os_build_num >= 26100)
-};"#,
+        policy_text: include_str!("policies/os_recency.dw"),
     },
     // ── Temporal policies (event-history conditions) ─────────────────
     //
@@ -285,56 +271,23 @@ unless {
     // audit history.
     PreconfiguredPolicy {
         slug: PreconfiguredSlug::IssuanceRateLimit,
-        policy_text: r#"@id("issuance_rate_limit")
-forbid (principal, action == Vouch::Action::"IssueToken", resource)
-when temporal {
-    exists (n: Long). (
-        (count_within(1h, Vouch::Action::"IssueToken"::response{ callerPrincipal: principal })) == n
-        && n >= 10
-    )
-};"#,
+        policy_text: include_str!("policies/issuance_rate_limit.dw"),
     },
     PreconfiguredPolicy {
         slug: PreconfiguredSlug::FailedLoginBurst,
-        policy_text: r#"@id("failed_login_burst")
-forbid (principal, action == Vouch::Action::"IssueToken", resource)
-when temporal {
-    exists (n: Long). (
-        (count_within(10m, Vouch::Action::"Login"::response{ output.result: false })) == n
-        && n >= 5
-    )
-};"#,
+        policy_text: include_str!("policies/failed_login_burst.dw"),
     },
     PreconfiguredPolicy {
         slug: PreconfiguredSlug::TokenExchangeStepUp,
-        policy_text: r#"@id("token_exchange_step_up")
-forbid (principal, action == Vouch::Action::"ExchangeToken", resource)
-when temporal {
-    !(formerly within 15m Vouch::Action::"Login"::response{ output.result: true })
-};"#,
+        policy_text: include_str!("policies/token_exchange_step_up.dw"),
     },
     PreconfiguredPolicy {
         slug: PreconfiguredSlug::ExchangeIpConsistency,
-        policy_text: r#"@id("exchange_ip_consistency")
-forbid (principal, action == Vouch::Action::"ExchangeToken", resource)
-when temporal {
-    !(formerly within 8h Vouch::Action::"Login"::response{
-        input.ip: context.input.ip,
-        output.result: true
-    })
-};"#,
+        policy_text: include_str!("policies/exchange_ip_consistency.dw"),
     },
     PreconfiguredPolicy {
         slug: PreconfiguredSlug::LogoutInvalidatesExchange,
-        policy_text: r#"@id("logout_invalidates_exchange")
-forbid (principal, action == Vouch::Action::"ExchangeToken", resource)
-when temporal {
-    !(
-        (!Vouch::Action::"Logout"::response{ callerPrincipal: principal })
-        since within 24h
-        Vouch::Action::"Login"::response{ output.result: true }
-    )
-};"#,
+        policy_text: include_str!("policies/logout_invalidates_exchange.dw"),
     },
 ];
 

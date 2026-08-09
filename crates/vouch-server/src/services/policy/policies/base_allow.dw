@@ -1,0 +1,5 @@
+@id("base_allow_issue")
+permit (principal, action == Vouch::Action::"IssueToken", resource);
+
+@id("base_allow_exchange")
+permit (principal, action == Vouch::Action::"ExchangeToken", resource);

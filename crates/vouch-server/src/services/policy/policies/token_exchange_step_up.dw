@@ -1,0 +1,5 @@
+@id("token_exchange_step_up")
+forbid (principal, action == Vouch::Action::"ExchangeToken", resource)
+when temporal {
+    !(formerly within 15m Vouch::Action::"Login"::response{ output.result: true })
+};

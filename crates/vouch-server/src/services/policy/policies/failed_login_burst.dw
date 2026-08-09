@@ -1,0 +1,8 @@
+@id("failed_login_burst")
+forbid (principal, action == Vouch::Action::"IssueToken", resource)
+when temporal {
+    exists (n: Long). (
+        (count_within(10m, Vouch::Action::"Login"::response{ output.result: false })) == n
+        && n >= 5
+    )
+};

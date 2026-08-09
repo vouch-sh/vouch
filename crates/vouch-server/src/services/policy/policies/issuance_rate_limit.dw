@@ -1,0 +1,8 @@
+@id("issuance_rate_limit")
+forbid (principal, action == Vouch::Action::"IssueToken", resource)
+when temporal {
+    exists (n: Long). (
+        (count_within(1h, Vouch::Action::"IssueToken"::response{ callerPrincipal: principal })) == n
+        && n >= 10
+    )
+};

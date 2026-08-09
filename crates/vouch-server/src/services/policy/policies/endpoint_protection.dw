@@ -1,0 +1,3 @@
+@id("endpoint_protection")
+forbid (principal, action == Vouch::Action::"IssueToken", resource)
+unless { context.device.edr_count > 0 };

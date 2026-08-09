@@ -1,0 +1,3 @@
+@id("platform_integrity")
+forbid (principal, action == Vouch::Action::"IssueToken", resource)
+unless { context.device.secure_boot_enabled };

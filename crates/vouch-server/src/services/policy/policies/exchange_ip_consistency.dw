@@ -1,0 +1,8 @@
+@id("exchange_ip_consistency")
+forbid (principal, action == Vouch::Action::"ExchangeToken", resource)
+when temporal {
+    !(formerly within 8h Vouch::Action::"Login"::response{
+        input.ip: context.input.ip,
+        output.result: true
+    })
+};

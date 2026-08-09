@@ -1,0 +1,3 @@
+@id("screen_lock")
+forbid (principal, action == Vouch::Action::"IssueToken", resource)
+unless { context.device.screen_lock_enabled };

@@ -1,0 +1,9 @@
+@id("logout_invalidates_exchange")
+forbid (principal, action == Vouch::Action::"ExchangeToken", resource)
+when temporal {
+    !(
+        (!Vouch::Action::"Logout"::response{ callerPrincipal: principal })
+        since within 24h
+        Vouch::Action::"Login"::response{ output.result: true }
+    )
+};

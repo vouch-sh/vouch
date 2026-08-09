@@ -1,0 +1,3 @@
+@id("disk_encryption")
+forbid (principal, action == Vouch::Action::"IssueToken", resource)
+unless { context.device.disk_encryption_enabled };

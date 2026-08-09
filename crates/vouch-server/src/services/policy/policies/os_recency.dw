@@ -1,0 +1,6 @@
+@id("os_recency")
+forbid (principal, action == Vouch::Action::"IssueToken", resource)
+unless {
+    (context.device.os == "macos" && context.device.os_version_num >= 14000000) ||
+    (context.device.os == "windows" && context.device.os_build_num >= 26100)
+};

@@ -1,0 +1,3 @@
+@id("firewall")
+forbid (principal, action == Vouch::Action::"IssueToken", resource)
+unless { context.device.firewall_enabled };

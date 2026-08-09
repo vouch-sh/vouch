@@ -1033,3 +1033,18 @@ fn test_precheck_reports_whether_history_is_needed() {
         other => panic!("mixed set must pass precheck, got {other:?}"),
     }
 }
+
+/// Each policy file must carry the `@id` its slug expects: the id is what
+/// deny diagnostics map back to, so a mismatched file would attribute a
+/// denial to the wrong policy.
+#[test]
+fn test_policy_files_declare_their_slug_id() {
+    for policy in PRECONFIGURED_POLICIES {
+        let expected = format!("@id(\"{}\")", policy.slug.as_str());
+        assert!(
+            policy.policy_text.contains(&expected),
+            "policy file for '{}' must declare {expected}",
+            policy.slug
+        );
+    }
+}
