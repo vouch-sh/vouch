@@ -385,9 +385,7 @@ pub(crate) async fn exchange_fido2_assertion(
     )
     .await?;
 
-    // Record token issuance in the audit log. The other grants already do
-    // this; the FIDO2 grant needs it too so aggregation policies (e.g. the
-    // issuance rate limit) can count issuances from the audit history.
+    // Every access-token grant records an oauth_token_issued audit row.
     db::record_oauth_event(
         &state.audit,
         &state.store,

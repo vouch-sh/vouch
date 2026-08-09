@@ -46,8 +46,8 @@ allow = [
 ]
 exceptions = []
 
-# The dogwood-language crate manifest omits the `license` field; the repository
-# is Apache-2.0 (LICENSE at repo root). Spike-only clarification.
+# The dogwood-language crate manifest omits the `license` field; the
+# repository is Apache-2.0 (LICENSE at repo root).
 [[licenses.clarify]]
 crate = "amzn-dogwood-language"
 expression = "Apache-2.0"
@@ -107,7 +107,7 @@ skip = [
     { crate = "itertools@0.13.0", reason = "some dependencies still on itertools 0.13" },
     # pastey version split
     { crate = "pastey@0.1.1", reason = "transitive dependency version split" },
-    # rand 0.9 vs 0.10
+    # rand 0.9 vs 0.10 (a pinned 0.9.4 skip went stale when 0.9.5 shipped)
     { crate = "rand:>=0.9,<0.10", reason = "some crates still on rand 0.9" },
     { crate = "rand_core:>=0.6,<0.7", reason = "rand 0.8 ecosystem" },
     { crate = "rand_core:>=0.9,<0.10", reason = "rand 0.9 ecosystem" },
@@ -133,9 +133,8 @@ skip = [
     { crate = "syn:>=2,<3", reason = "most proc-macros still on syn 2; async-trait pulls syn 3" },
     # tower-http 0.6 vs 0.7 (reqwest 0.13 still on 0.6; workspace pins 0.7)
     { crate = "tower-http:>=0.6,<0.7", reason = "reqwest 0.13 still on tower-http 0.6" },
-    # ── Dogwood spike (feat/dogwood-spike, never merged): duplicates pulled
-    #    in by the amzn-dogwood-language git dependency (cedar-policy 4.11,
-    #    rhai, mcp-schema-generator). Remove with the spike.
+    # Duplicates pulled in by the amzn-dogwood-language git dependency
+    # (cedar-policy 4.11, rhai, mcp-schema-generator).
     { crate = "arrayvec:>=0.5,<0.6", reason = "cedar-policy-formatter → pretty still on arrayvec 0.5" },
     { crate = "darling:>=0.20,<0.21", reason = "sea-query-derive on darling 0.20; cedar → serde_with pulls 0.23" },
     { crate = "darling_core:>=0.20,<0.21", reason = "transitive via darling 0.20" },
