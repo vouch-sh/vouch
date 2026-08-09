@@ -1,3 +1,9 @@
+// Require screen lock on idle.
+//
+// Only the enabled flag is checked, not the timeout: an org that cares
+// about the idle window can add a custom policy on
+// `screen_lock_idle_timeout_secs`. Not always detectable over SSH, where
+// the device reports false and is denied.
 @id("screen_lock")
 forbid (principal, action == Vouch::Action::"IssueToken", resource)
 unless { context.device.screen_lock_enabled };

@@ -1,3 +1,15 @@
+// Require a hardware login within 15 minutes before token exchange.
+//
+// Exchange is how workload-identity and agent credentials are obtained, and
+// it presents an existing token rather than a fresh hardware touch. This
+// forces a recent human authentication for those credentials, independent
+// of the session's own lifetime.
+//
+// Gating exchange rather than login is deliberate: the FIDO2 grant is
+// itself a hardware login, so this condition would always hold there.
+//
+// A browser enrollment also records a successful login, and enrollment is
+// not posture-checked — so this proves recency, not device compliance.
 @id("token_exchange_step_up")
 forbid (principal, action == Vouch::Action::"ExchangeToken", resource)
 when temporal {

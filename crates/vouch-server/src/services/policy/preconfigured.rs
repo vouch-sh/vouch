@@ -6,11 +6,11 @@
 //! string literals means the rules read as policy in review, and the
 //! `dogwood` CLI can check a file directly.
 //!
-//! Each policy is a Cedar `forbid … unless { <requirement> }` over the
-//! always-present `context.device` record. The composed policy set
-//! (see `mod.rs`) starts with one base `permit` — Cedar is deny-by-default,
-//! forbids override permits, so all active policies are effectively ANDed,
-//! matching the CEL engine's semantics.
+//! Each policy is a `forbid … unless { <requirement> }` over the
+//! always-present `context.device` record, or a `when temporal { … }`
+//! condition over the event history. The composed set opens with the base
+//! permits: Cedar denies by default and a forbid overrides any permit, so
+//! every active policy must be satisfied for a decision to allow.
 
 /// Active custom policies an org may run alongside the built-ins.
 ///
@@ -242,39 +242,11 @@ pub(crate) const PRECONFIGURED_POLICIES: &[PreconfiguredPolicy] = &[
         slug: PreconfiguredSlug::PlatformIntegrity,
         policy_text: include_str!("policies/platform_integrity.dw"),
     },
-    // OS version thresholds — review with each major OS release.
-    // Last updated: 2026-06-21
-    //   macOS: 14.0.0 (intentionally lenient N-2 floor) — as of June 2026,
-    //     macOS 26 "Tahoe" (Darwin 25) is current (N), 15.x "Sequoia" is N-1,
-    //     and 14.x "Sonoma" is N-2. The floor accepts N-2 to avoid disrupting
-    //     Sonoma users during a transition year. Uses the marketing version as
-    //     reported by `sw_vers -productVersion` on the client (os_version_num
-    //     = semver encoding, so 14.0.0 → 14_000_000). Darwin kernel versions
-    //     (25.x) must NOT be used here.
-    //   Windows: build 26100 = 24H2. Compared via `os_build_num` (not
-    //     os_version) because the Windows CLI reports `os_version` as a
-    //     4-component string (e.g., "10.0.26100.0") that the semver encoding
-    //     rejects (os_version_num = -1). `os_build` is the registry
-    //     `CurrentBuild` value, a plain integer string like "26100".
-    // Linux is excluded — distributions manage versions independently; a
-    // Linux device fails both disjuncts. Admins can create custom policies
-    // for specific distro versions (e.g.,
-    // `context.device.os_distribution == "ubuntu" &&
-    //  context.device.os_version_num >= 22004000`).
     PreconfiguredPolicy {
         slug: PreconfiguredSlug::OsRecency,
         policy_text: include_str!("policies/os_recency.dw"),
     },
     // ── Temporal policies (event-history conditions) ─────────────────
-    //
-    // Recency-style rules (fresh login, same network, no logout since
-    // login) gate `ExchangeToken` — the RFC 8693 path that WIF/agent
-    // credential helpers use — because a token-exchange request arrives
-    // WITHOUT a fresh hardware login. They would be vacuous on
-    // `IssueToken`: the FIDO2 grant *is* a login, so "logged in recently"
-    // is true by construction there. `IssueToken` gets the aggregation
-    // rules instead (rate limit, failed-login burst), which count prior
-    // audit history.
     PreconfiguredPolicy {
         slug: PreconfiguredSlug::IssuanceRateLimit,
         policy_text: include_str!("policies/issuance_rate_limit.dw"),

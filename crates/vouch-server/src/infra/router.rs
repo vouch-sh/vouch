@@ -352,7 +352,7 @@ fn build_general_limited_routes(
             "/api/v1/org/audit-events",
             get(handlers::admin::audit_events),
         )
-        // CEL validation API (used by admin UI CEL playground)
+        // Policy validation API (used by the admin policy editor)
         .route(
             "/api/v1/org/policies/validate",
             post(handlers::admin::validate_policy_api),

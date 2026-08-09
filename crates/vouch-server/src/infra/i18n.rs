@@ -363,9 +363,9 @@ pub async fn i18n_layer(
 /// `static/js/` and a subset of the catalog, so a missing entry fails the build
 /// instead of silently rendering the raw key at runtime.
 pub(crate) const JS_I18N_KEYS: &[&str] = &[
-    "admin-js-cel-fails",
-    "admin-js-cel-invalid",
-    "admin-js-cel-passes",
+    "admin-js-policy-fails",
+    "admin-js-policy-invalid",
+    "admin-js-policy-passes",
     "admin-js-edit-policy-title",
     "admin-js-policy-history-note",
     "admin-policies-playground-title",

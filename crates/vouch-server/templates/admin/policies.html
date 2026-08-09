@@ -154,8 +154,8 @@
                     <button type="button" id="btn-new-policy" class="px-2.5 py-1 text-xs rounded bg-vouch-accent text-white hover:bg-vouch-accent-hover">{{ self.tr("admin-policies-new-btn") }}</button>
                 </div>
 
-                {# CEL Playground (hidden by default, shown on New/Edit) #}
-                <div id="cel-playground" class="mb-4 hidden">
+                {# Policy editor (hidden by default, shown on New/Edit) #}
+                <div id="policy-playground" class="mb-4 hidden">
                     <div class="bg-vouch-surface border border-vouch-accent/30 rounded-lg p-4">
                         <h3 class="text-sm font-medium text-gray-200 mb-3" id="playground-title">{{ self.tr("admin-policies-playground-title") }}</h3>
                         <form id="policy-form" method="POST" action="/admin/policies/custom">
@@ -178,7 +178,7 @@
                                 <label for="policy-expression" class="flex items-center gap-1 text-xs text-gray-400 mb-1">
                                     {{ self.tr("admin-policies-rule-label") }}
                                     <span class="text-gray-600 font-normal">{{ self.tr("admin-policies-rule-hint") }}</span>
-                                    <a href="https://dogwood-policy.github.io/dogwood/" target="_blank" rel="noopener noreferrer" class="text-gray-600 hover:text-gray-400 ml-auto" title="{{ self.tr("admin-policies-cel-ref-title") }}">
+                                    <a href="https://dogwood-policy.github.io/dogwood/" target="_blank" rel="noopener noreferrer" class="text-gray-600 hover:text-gray-400 ml-auto" title="{{ self.tr("admin-policies-ref-title") }}">
                                         <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M8.228 9c.549-1.165 2.03-2 3.772-2 2.21 0 4 1.343 4 3 0 1.4-1.278 2.575-3.006 2.907-.542.104-.994.54-.994 1.093m0 3h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
                                     </a>
                                 </label>
@@ -203,13 +203,13 @@
                             </p>
 
                             {# Validation status #}
-                            <div id="cel-validation" class="mb-3 hidden">
-                                <div id="cel-valid" class="hidden px-3 py-1.5 rounded bg-green-900/20 border border-green-800/50 text-xs">
-                                    <span class="font-medium text-green-400">{{ self.tr("admin-policies-cel-valid") }}</span>
-                                    <span id="cel-test-result" class="ml-1"></span>
+                            <div id="policy-validation" class="mb-3 hidden">
+                                <div id="policy-valid" class="hidden px-3 py-1.5 rounded bg-green-900/20 border border-green-800/50 text-xs">
+                                    <span class="font-medium text-green-400">{{ self.tr("admin-policies-valid") }}</span>
+                                    <span id="policy-test-result" class="ml-1"></span>
                                 </div>
-                                <div id="cel-invalid" class="hidden px-3 py-1.5 rounded bg-red-900/20 border border-red-800/50 text-red-400 text-xs">
-                                    <span id="cel-error-msg"></span>
+                                <div id="policy-invalid" class="hidden px-3 py-1.5 rounded bg-red-900/20 border border-red-800/50 text-red-400 text-xs">
+                                    <span id="policy-error-msg"></span>
                                 </div>
                             </div>
 

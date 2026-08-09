@@ -1,3 +1,13 @@
+// The baseline every policy set opens with.
+//
+// Cedar denies by default, so without a permit nothing is ever allowed and
+// a set of forbid rules would reject every request. These permits establish
+// "allowed unless a policy objects"; each active policy is a forbid that
+// overrides them, which is what gives an AND across policies.
+//
+// One permit per decision point: a permit scoped to a single action would
+// leave the other denying everything. An admin's own permit cannot widen
+// access — a forbid always wins.
 @id("base_allow_issue")
 permit (principal, action == Vouch::Action::"IssueToken", resource);
 

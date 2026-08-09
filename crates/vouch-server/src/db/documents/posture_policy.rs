@@ -4,8 +4,8 @@
 //! Two document types support posture policies:
 //! - [`PostureConfigDoc`]: Per-org config tracking which preconfigured
 //!   policy slugs are active (one per org).
-//! - [`CustomPosturePolicyDoc`]: Admin-created custom Dogwood/Cedar
-//!   policies (zero to many per org).
+//! - [`CustomPosturePolicyDoc`]: Admin-authored Dogwood policies (zero
+//!   to many per org).
 
 use serde::{Deserialize, Serialize};
 
@@ -38,9 +38,9 @@ impl DocumentType for PostureConfigDoc {
 pub struct CustomPosturePolicyDoc {
     pub name: String,
     pub description: Option<String>,
-    /// Dogwood/Cedar policy text. The serde alias keeps documents written
-    /// by the CEL engine deserializable; their text fails validation on
-    /// edit and fails closed at enforcement until re-authored.
+    /// Dogwood policy text. Documents predating the field rename store it
+    /// as `cel_expression`; the alias keeps those readable, and text that
+    /// no longer validates denies until an admin re-authors it.
     #[serde(alias = "cel_expression")]
     pub policy_text: String,
     pub active: bool,
@@ -72,10 +72,10 @@ impl DocumentType for CustomPosturePolicyDoc {
 mod tests {
     use super::*;
 
-    /// Documents written by the CEL engine used the `cel_expression` field
-    /// name; the serde alias must keep them deserializable.
+    /// Documents stored under the older `cel_expression` field name must
+    /// still deserialize.
     #[test]
-    fn test_legacy_cel_expression_field_still_deserializes() {
+    fn test_legacy_field_name_still_deserializes() {
         let json = r#"{
             "name": "old policy",
             "description": null,

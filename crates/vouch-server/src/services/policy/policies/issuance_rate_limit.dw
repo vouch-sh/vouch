@@ -1,3 +1,12 @@
+// Cap token issuance at 10 per hour per user.
+//
+// Counts `IssueToken` responses in this user's recent history — the audit
+// trail of tokens actually issued, not attempts. `count_within` is a
+// built-in macro; the `exists` binder is how an aggregate is compared
+// against a threshold.
+//
+// Enforcement is best-effort: audit writes on the login path are
+// fire-and-forget, so a dropped write undercounts by one.
 @id("issuance_rate_limit")
 forbid (principal, action == Vouch::Action::"IssueToken", resource)
 when temporal {

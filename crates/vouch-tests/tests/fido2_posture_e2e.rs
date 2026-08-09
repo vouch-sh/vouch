@@ -5,7 +5,7 @@
 //! (FIDO2 assertion grant) flow using the software `IntegrationMockDevice`,
 //! with the OsRecency posture policy active. They verify that the bug fix
 //! (comparing `os_build` instead of `os_version` for Windows) works
-//! end-to-end through the real CEL evaluation path in `fido2_grant.rs`.
+//! end-to-end through the policy gate in `fido2_grant.rs`.
 
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;

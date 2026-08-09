@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
-//! Unit tests for the Dogwood policy engine, ported from the CEL engine's
-//! suite (services/posture.rs) plus new validator-quality and field-parity
-//! coverage the CEL engine could not express.
+//! Unit tests for the policy engine: policy evaluation, schema/ingestion
+//! parity, validator behaviour, and fail-closed error paths.
 #![expect(
     clippy::unwrap_used,
     clippy::panic,
@@ -111,14 +110,14 @@ fn test_validate_policy_text_invalid() {
     assert!(validate_policy_text(&requirement("context.device.os == \"unterminated")).is_err());
     // Truncated policy
     assert!(validate_policy_text("forbid (principal, action ==").is_err());
-    // Leftover CEL text from before the migration must be rejected
+    // A bare boolean expression is not a policy: it must be rejected.
     assert!(validate_policy_text("posture.disk_encryption_enabled == true").is_err());
 }
 
 #[test]
 fn test_validate_policy_text_catches_typoed_field() {
-    // The CEL engine silently evaluated unknown fields to a runtime miss;
-    // the Dogwood validator reports them as type errors.
+    // An unknown field is a type error, caught when the policy is saved
+    // rather than silently never matching at evaluation time.
     let result = validate_policy_text(&requirement("context.device.disk_encryption_enabledz"));
     assert!(result.is_err(), "typo'd posture field must fail validation");
 }
@@ -283,9 +282,9 @@ fn test_os_recency_windows_missing_os_version_passes_on_build() {
     );
 }
 
-/// Windows OsRecency must fail when `os_build` is below the threshold, even
-/// if `os_version` looks like a 3-component semver that would have passed
-/// the old (buggy) comparison.
+/// Windows is judged by `os_build_num`, never `os_version`: a build below
+/// the threshold must fail even when `os_version` parses as a version that
+/// would clear it.
 #[test]
 fn test_os_recency_windows_ignores_os_version_for_comparison() {
     let mut posture = sample_posture();
@@ -303,7 +302,7 @@ fn test_os_recency_windows_ignores_os_version_for_comparison() {
 // ============================================================
 
 /// Every preconfigured policy must lower AND validate cleanly against the
-/// embedded schema — stronger than the CEL compile-only check.
+/// embedded schema, so a shipped policy cannot fail at a login.
 #[test]
 fn test_all_preconfigured_policies_lower_and_validate() {
     for policy in PRECONFIGURED_POLICIES {
@@ -617,15 +616,15 @@ fn test_posture_field_parity() {
 // Fail-closed behavior
 // ============================================================
 
-/// A policy that fails to lower (leftover CEL text) must be an engine
-/// error — enforcement treats it as a deny, never a pass.
+/// A policy that fails to lower must surface as an engine error;
+/// enforcement treats that as a deny, never a pass.
 #[test]
 fn test_unlowerable_policy_is_fail_closed() {
     let composed = compose(&["posture.disk_encryption_enabled == true"]);
     let event = issue_token_request(&sample_posture(), "test-user", "test-org");
     assert!(
         decide(&composed, &event).is_err(),
-        "CEL text must be an engine error (deny)"
+        "unparseable text must surface as an engine error, which callers deny on"
     );
 }
 
@@ -761,8 +760,8 @@ fn test_temporal_policies_ignore_other_principals_history() {
 
 /// Every `input`/`output` field the schema declares on a history event must
 /// be written by the ingestion mapping. A declared-but-unwritten field type
-/// checks fine and then silently never matches — the exact failure mode the
-/// typed-validation migration is supposed to eliminate.
+/// checks fine and then silently never matches, which no amount of policy
+/// review would catch.
 #[test]
 fn test_history_projection_matches_schema() {
     use std::collections::BTreeSet;
@@ -934,9 +933,8 @@ fn test_precheck_cache_hits_by_fingerprint_and_misses_on_change() {
     );
 }
 
-/// A custom policy that no longer lowers (leftover CEL text) is attributed
-/// by name, so the org's other policies are not blamed and the admin can
-/// find the broken one.
+/// A custom policy that fails to lower is attributed by name, so the org's
+/// working policies are not blamed and the admin can find the broken one.
 #[test]
 fn test_precheck_attributes_broken_custom_by_name() {
     let custom = vec![
@@ -952,7 +950,7 @@ fn test_precheck_attributes_broken_custom_by_name() {
         },
         db::CustomPosturePolicy {
             id: "p2".to_string(),
-            name: "Leftover CEL".to_string(),
+            name: "Unparseable".to_string(),
             description: None,
             policy_text: "posture.disk_encryption_enabled == true".to_string(),
             active: true,
@@ -964,11 +962,11 @@ fn test_precheck_attributes_broken_custom_by_name() {
     let set = compose_org_set(&[], &custom);
     match run_precheck(&set.composed, &custom) {
         engine::Precheck::BrokenCustom(name) => assert_eq!(
-            name, "Leftover CEL",
+            name, "Unparseable",
             "the precheck must name the policy that fails, not a working one"
         ),
         engine::Precheck::Ok { .. } => {
-            panic!("a policy set containing CEL text must not pass precheck")
+            panic!("a set containing unparseable text must not pass precheck")
         }
         engine::Precheck::EngineError(msg) => {
             panic!("failure must be attributed to the custom policy, got engine error: {msg}")

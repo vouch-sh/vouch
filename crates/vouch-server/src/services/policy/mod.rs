@@ -1,19 +1,23 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
-//! Device posture policy evaluation using Dogwood (Cedar + temporal).
+//! Device posture and temporal policy evaluation.
 //!
-//! Replaces the CEL engine: preconfigured policies are code-defined Cedar
-//! `forbid … unless` rules, custom policies are admin-authored Cedar/Dogwood
-//! text. The composed policy set always starts with base `permit`s for the
-//! decision actions; every active policy is a `forbid` that fires on
-//! violation, so all active policies are ANDed (deny overrides permit),
-//! matching the CEL engine's semantics. All error paths fail closed.
+//! Policies are written in [Dogwood], a Cedar dialect that adds a past-only
+//! temporal sublanguage over an event history. Built-in policies live in
+//! `policies/*.dw`; admins may add their own.
 //!
-//! Enforcement evaluates per decision: the org's composed set is prechecked
-//! (lower + validate, cached by config fingerprint — a custom policy that
-//! fails, e.g. leftover CEL text, denies with its name), then a fresh
-//! authorizer replays the requesting principal's 24h audit history and
-//! decides. See `engine` for why per-decision replay is sound and correct
+//! A composed set opens with the base `permit`s (`policies/base_allow.dw`)
+//! and every policy is a `forbid` that fires when its requirement is not
+//! met. Cedar denies by default and a forbid overrides any permit, so the
+//! set as a whole means "allowed unless some policy objects" — the AND
+//! across policies that Vouch requires. Every error path denies.
+//!
+//! One decision evaluates as: precheck the org's set (lower + validate,
+//! cached by a fingerprint of its configuration), fetch the requesting
+//! principal's recent audit history, then decide with a fresh authorizer.
+//! [`engine`] explains why per-decision replay is both sound and correct
 //! across replicas.
+//!
+//! [Dogwood]: https://dogwood-policy.github.io/dogwood/
 
 pub(crate) mod engine;
 pub(crate) mod events;
@@ -320,8 +324,7 @@ fn compose_org_set(
 
 /// Static precheck of an org's composed set: it must lower AND validate.
 /// On failure, bisect the custom policies (each alone with the base
-/// permits) to attribute the failure to one policy by name — leftover CEL
-/// text and schema drift across deploys both land here.
+/// permits) so the failure names a single policy the admin can fix.
 fn run_precheck(composed: &str, active_custom: &[db::CustomPosturePolicy]) -> engine::Precheck {
     let Some(policy_schema) = schema::policy_schema() else {
         return engine::Precheck::EngineError("policy schema unavailable".to_string());
@@ -598,9 +601,11 @@ pub(crate) async fn evaluate_posture_policies(
     .await
 }
 
-/// Evaluate temporal policies gating RFC 8693 token exchange (the WIF /
-/// agent credential path). No posture is involved — exchange requests
-/// carry no device posture; only event-history policies apply.
+/// Evaluate the policies gating token exchange ([RFC 8693]), the path
+/// workload-identity and agent credentials take. An exchange request
+/// carries no device posture, so only event-history policies can apply.
+///
+/// [RFC 8693]: https://www.rfc-editor.org/rfc/rfc8693
 ///
 /// # Errors
 ///
@@ -639,9 +644,12 @@ pub(crate) async fn evaluate_exchange_policies(
     .await
 }
 
-/// Extract `DevicePosture` from the `authorization_details` JSON value.
+/// Extract `DevicePosture` from the `authorization_details` value, the
+/// entry whose `type` is `device_posture`.
 ///
-/// Looks for an entry with `type: "device_posture"` in the RFC 9396 array.
+/// See [RFC 9396] for the authorization-details structure.
+///
+/// [RFC 9396]: https://www.rfc-editor.org/rfc/rfc9396
 fn extract_device_posture(ad_value: Option<&serde_json::Value>) -> ServiceResult<DevicePosture> {
     let value = ad_value.ok_or_else(|| {
         ServiceError::oauth(

@@ -2,6 +2,10 @@
 //! Dogwood schema construction: the service schema (defaults) and the Vouch
 //! action schema, both built once and cached for the process lifetime.
 //!
+//! The service schema supplies the event schema, provider declarations, and
+//! macro library; the action schema is Cedar. See
+//! <https://dogwood-policy.github.io/dogwood/guide/07-api-and-workflow.html>.
+//!
 //! Fail-closed: if the embedded `.cedarschema` fails to parse,
 //! [`policy_schema`] returns `None` and every policy evaluation reports the
 //! engine unavailable rather than silently passing.

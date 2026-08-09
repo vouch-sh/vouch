@@ -1,3 +1,9 @@
+// Deny token exchange after logout until the user logs in again.
+//
+// The negated-left `since` idiom: it holds when no Logout has occurred
+// since the anchoring Login. Without it a token issued before logout could
+// still be exchanged for credentials, because revoking a session does not
+// retract tokens already minted from it.
 @id("logout_invalidates_exchange")
 forbid (principal, action == Vouch::Action::"ExchangeToken", resource)
 when temporal {

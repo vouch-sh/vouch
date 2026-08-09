@@ -2,7 +2,7 @@
 //! CRUD round-trip tests for the posture-policy DB layer
 //! (`crates/vouch-server/src/db/posture_policies.rs`).
 //!
-//! Covers preconfigured-policy activation, custom CEL policy create/list/get
+//! Covers preconfigured-policy activation, custom policy create/list/get
 //! /update/delete, and org-scoped isolation.
 
 #![allow(

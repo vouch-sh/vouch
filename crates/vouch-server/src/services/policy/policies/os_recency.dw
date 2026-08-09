@@ -1,3 +1,25 @@
+// Require a supported OS version.
+//
+// Thresholds are reviewed with each major OS release; last updated
+// 2026-06-21.
+//
+// macOS floors at 14.0.0, a deliberately lenient N-2: as of June 2026,
+// macOS 26 "Tahoe" is current, 15.x "Sequoia" is N-1, and 14.x "Sonoma" is
+// N-2, which the floor accepts to avoid disrupting Sonoma users mid-cycle.
+// `os_version_num` encodes the marketing version reported by
+// `sw_vers -productVersion` (14.0.0 becomes 14000000). Darwin kernel
+// versions (25.x) are NOT what this compares.
+//
+// Windows floors at build 26100 (24H2) and is compared by `os_build_num`,
+// the registry `CurrentBuild` value. It cannot use `os_version_num`: the
+// Windows CLI reports a 4-component `os_version` ("10.0.26100.0") that the
+// version encoding rejects, yielding -1.
+//
+// Linux satisfies neither branch and is therefore denied: distributions
+// version independently, so no single built-in threshold is meaningful. An
+// org running Linux should leave this policy off and add a custom one, e.g.
+// `context.device.os_distribution == "ubuntu" &&
+//  context.device.os_version_num >= 22004000`.
 @id("os_recency")
 forbid (principal, action == Vouch::Action::"IssueToken", resource)
 unless {

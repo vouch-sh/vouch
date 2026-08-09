@@ -30,8 +30,8 @@ document.addEventListener("DOMContentLoaded", function () {
     });
   }
 
-  // CEL Playground for posture policies page
-  var playground = document.getElementById("cel-playground");
+  // Policy editor on the posture policies page
+  var playground = document.getElementById("policy-playground");
   if (!playground) return;
 
   var btnNew = document.getElementById("btn-new-policy");
@@ -43,11 +43,11 @@ document.addEventListener("DOMContentLoaded", function () {
   var descInput = document.getElementById("policy-description");
   var exprInput = document.getElementById("policy-expression");
   var playgroundTitle = document.getElementById("playground-title");
-  var validationBox = document.getElementById("cel-validation");
-  var validEl = document.getElementById("cel-valid");
-  var invalidEl = document.getElementById("cel-invalid");
-  var errorMsg = document.getElementById("cel-error-msg");
-  var testResult = document.getElementById("cel-test-result");
+  var validationBox = document.getElementById("policy-validation");
+  var validEl = document.getElementById("policy-valid");
+  var invalidEl = document.getElementById("policy-invalid");
+  var errorMsg = document.getElementById("policy-error-msg");
+  var testResult = document.getElementById("policy-test-result");
 
   var debounceTimer = null;
   var isValid = false;
@@ -127,7 +127,7 @@ document.addEventListener("DOMContentLoaded", function () {
     });
   });
 
-  // Debounced CEL validation
+  // Debounced policy validation
   exprInput.addEventListener("input", function () {
     clearTimeout(debounceTimer);
     var expr = exprInput.value.trim();
@@ -171,8 +171,8 @@ document.addEventListener("DOMContentLoaded", function () {
               testResult.className = "ml-1 text-gray-400";
             } else {
               testResult.textContent = pass
-                ? t("admin-js-cel-passes")
-                : t("admin-js-cel-fails");
+                ? t("admin-js-policy-passes")
+                : t("admin-js-policy-fails");
               testResult.className = "ml-1 " + (pass
                 ? "text-green-400"
                 : "text-yellow-400");
@@ -183,7 +183,7 @@ document.addEventListener("DOMContentLoaded", function () {
         } else {
           validEl.classList.add("hidden");
           invalidEl.classList.remove("hidden");
-          errorMsg.textContent = data.error || t("admin-js-cel-invalid");
+          errorMsg.textContent = data.error || t("admin-js-policy-invalid");
           isValid = false;
           btnSave.disabled = true;
           testResult.textContent = "";

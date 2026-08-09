@@ -1,28 +1,29 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
-//! `DevicePosture` → Dogwood context record.
+//! `DevicePosture` → the `device` context record.
 //!
-//! Builds the `context.input.posture` record every policy evaluates against.
-//! Every schema field is always present: absent `Option` fields get typed
-//! defaults (`false` / `""` / `0` / empty set) so policies can reference any
-//! field without runtime errors — the same guarantee `FIELD_DEFAULTS` gave
-//! the CEL engine. Four derived fields are computed here in Rust instead of
-//! registering an engine function: `os_version_num` (the old `semver()`),
+//! Builds the `context.device` record every policy evaluates against. Every
+//! schema field is always present: absent `Option` fields get typed defaults
+//! (`false` / `""` / `0` / empty set), so a policy can reference any field
+//! without risking a runtime error. Four fields are derived here rather than
+//! in policy text, which has no arithmetic or parsing: `os_version_num`,
 //! `os_build_num`, `edr_count`, `mdm_count`.
 
 use dogwood_language::Value;
 use std::collections::BTreeMap;
 use vouch_common::posture::DevicePosture;
 
-/// Sentinel for "not parseable as a version/build number": every `>=`
-/// threshold comparison fails against it (fail-closed, and matches the old
-/// CEL behavior where a `semver()` error propagated to a policy failure).
+/// Sentinel for "not parseable as a version/build number". Every `>=`
+/// threshold comparison fails against it, so an unreadable version denies
+/// rather than passes.
 const NOT_A_NUMBER: i64 = -1;
 
-/// `"15.3.1"` → `15_003_001`, the old CEL `semver()` encoding.
+/// Encode a version as `major * 1_000_000 + minor * 1_000 + patch`, so
+/// policies can compare versions with a plain integer `>=`.
 ///
-/// Accepts 1–3 dot-separated integer components ("15" → 15_000_000,
-/// "15.3" → 15_003_000). Four or more components (Windows' "10.0.26100.0")
-/// and non-numeric components return `None`.
+/// Accepts 1–3 dot-separated integer components (`"15"` → 15_000_000,
+/// `"15.3"` → 15_003_000, `"15.3.1"` → 15_003_001). Four or more components
+/// (Windows reports `"10.0.26100.0"`) and non-numeric components return
+/// `None`; callers compare Windows by `os_build_num` instead.
 pub(crate) fn semver_num(version: &str) -> Option<i64> {
     let mut parts = version.splitn(4, '.');
     let major: i64 = parts.next().and_then(|s| s.parse().ok())?;

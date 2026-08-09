@@ -1,3 +1,7 @@
+// Require Secure Boot.
+//
+// On macOS this is the Apple Silicon / T2 boot policy, not System
+// Integrity Protection — SIP is reported separately as `sip_enabled`.
 @id("platform_integrity")
 forbid (principal, action == Vouch::Action::"IssueToken", resource)
 unless { context.device.secure_boot_enabled };

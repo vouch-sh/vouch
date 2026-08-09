@@ -2,7 +2,7 @@
 //! Device posture policy database operations.
 //!
 //! Manages per-org activation of preconfigured policies (stored as a
-//! `PostureConfigDoc`) and custom CEL-based policies (stored as
+//! `PostureConfigDoc`) and admin-authored policies (stored as
 //! `CustomPosturePolicyDoc` documents).
 
 use super::document_type::Document;

@@ -1,9 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Per-decision policy evaluation.
 //!
-//! Every temporal predicate is sliced per principal (the default Dogwood
-//! event schema pins `callerPrincipal`), so a decision only ever consults
-//! the requesting user's history. Each decision therefore builds a fresh
+//! Every temporal predicate is sliced per principal: Dogwood's default
+//! event schema declares a universal pin on `callerPrincipal`, so a
+//! predicate only sees events from the deciding principal. A decision
+//! therefore consults just the requesting user's history.
+//! See <https://dogwood-policy.github.io/dogwood/guide/04-temporal-expressions.html>
+//! ("key-local vs. global semantics"). Each decision therefore builds a fresh
 //! authorizer, replays that user's last 24h of audit rows into it, and
 //! decides — no shared mutable engine, no audit cursor, and cross-replica
 //! correctness comes from querying the shared audit table at decision time.

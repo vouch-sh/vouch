@@ -1,3 +1,8 @@
+// Deny issuance after 5 failed logins in ten minutes.
+//
+// Counts failed `Login` responses for this user, which includes attempts
+// denied by a posture policy. Slows credential-stuffing against a user
+// whose hardware key is present but whose device keeps failing checks.
 @id("failed_login_burst")
 forbid (principal, action == Vouch::Action::"IssueToken", resource)
 when temporal {

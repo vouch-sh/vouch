@@ -8,7 +8,7 @@
 # the strings injected into static JS (see templates' `js_i18n` blocks).
 #
 # do-not-translate: some user-visible text is intentionally NOT in this catalog
-# because it is code, not prose — shell commands, CEL expression examples, JSON
+# because it is code, not prose — shell commands, policy examples, JSON
 # and URI placeholders, and proper nouns (OS names like macOS / Debian / Ubuntu).
 # Those stay verbatim in the templates so they read identically in every locale.
 #
@@ -751,8 +751,8 @@ admin-policies-syntax-temporal = for event-history rules.
 admin-policies-syntax-fieldref = See field reference below.
 admin-policies-rule-label = Rule
 admin-policies-rule-hint = — a Cedar forbid rule; issuance is denied when it fires
-admin-policies-cel-ref-title = Dogwood policy language reference
-admin-policies-cel-valid = Valid policy
+admin-policies-ref-title = Dogwood policy language reference
+admin-policies-valid = Valid policy
 admin-policies-invalid-badge = invalid
 admin-policies-invalid-title = This policy no longer validates and denies every request while active. Edit it to see the error.
 admin-policies-delete-confirm = Delete this custom policy?
@@ -837,9 +837,9 @@ admin-policies-deny-message = Device posture policy '{ $policy }' not satisfied.
 
 ## Admin policies — client-side JS (admin.js, policies page)
 admin-js-edit-policy-title = Edit Custom Policy
-admin-js-cel-passes = — passes against test device
-admin-js-cel-fails = — fails against test device
-admin-js-cel-invalid = Invalid policy
+admin-js-policy-passes = — passes against test device
+admin-js-policy-fails = — fails against test device
+admin-js-policy-invalid = Invalid policy
 admin-js-policy-history-note = — reads event history, which the test device has none of; this result reflects an empty history, not the policy's logic
 
 ## Admin SCIM tokens (admin/scim_tokens.html)

@@ -3,8 +3,8 @@
 //! policy engine is built on before anything depends on it.
 //!
 //! Covers the full pipeline on a Vouch-shaped schema: lowering, schema
-//! validation (including that a typo'd field is a caught error — CEL had no
-//! type environment), temporal evaluation (`formerly` recency window,
+//! validation (a typo'd field is caught at save time), temporal
+//! evaluation (`formerly` recency window,
 //! per-principal `callerPrincipal` slicing, `count_within` aggregation), and
 //! deny diagnostics mapping back to source rule indices.
 
@@ -123,8 +123,8 @@ fn syntax_error_is_a_lowering_error_not_a_panic() {
 
 #[test]
 fn typoed_field_is_caught_by_the_validator() -> Result<(), String> {
-    // `client_idz` does not exist on IssueInput. CEL silently evaluated this
-    // kind of typo to a runtime miss; Dogwood's validator reports it.
+    // `client_idz` does not exist on IssueInput; the validator reports it
+    // rather than letting the policy lower and never match.
     let policies = lower(
         r#"
         @id("typo")

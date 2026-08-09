@@ -2,9 +2,9 @@
 //! Audit rows → Dogwood history events.
 //!
 //! The `audit_events` table is the durable source of truth for temporal
-//! policy history. Each org engine replays the last 24 hours (Dogwood's
-//! default `max_window`) at build time and tails new rows before each
-//! decision. History events are `::response` kind — never decision points.
+//! policy history: each decision reads the requesting principal's recent
+//! rows and replays them as events. They are ingested as the `::response`
+//! kind, which Dogwood treats as history rather than a decision point.
 //!
 //! Rows with a NULL `user_id` are skipped: every temporal predicate is
 //! sliced per principal (the default event schema pins `callerPrincipal`),
@@ -29,8 +29,9 @@ pub(crate) const HISTORY_KINDS: &[AuditEventKind] = &[
     AuditEventKind::GitHubCredential,
 ];
 
-/// How far back the replay looks. Matches Dogwood's default `max_window`
-/// cap, so every legal `within` window is fully served after a replay.
+/// How far back a decision reads. Matches Dogwood's default `max_window`
+/// cap, which the validator enforces on every `within` interval, so any
+/// policy that lowers is fully served by this window.
 const REPLAY_WINDOW_HOURS: i64 = 24;
 
 /// Cap on rows fetched per replay/tail query. Exceeding it is logged —
