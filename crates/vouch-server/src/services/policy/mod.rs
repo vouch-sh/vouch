@@ -414,7 +414,7 @@ fn deny_error(denying: Option<engine::DenyingPolicy>, os: Option<&str>) -> Servi
             crate::infra::i18n::Tr::new("admin-policies-deny-generic").to_string(),
         ),
         None => (
-            "posture".to_string(),
+            crate::infra::i18n::Tr::new("admin-policies-deny-unattributed").to_string(),
             crate::infra::i18n::Tr::new("admin-policies-deny-generic").to_string(),
         ),
     };

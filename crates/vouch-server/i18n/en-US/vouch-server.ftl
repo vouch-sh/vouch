@@ -830,6 +830,8 @@ admin-policies-fix-logout-invalidates-exchange = You logged out since your last 
 
 admin-policies-err-empty = Policy text must not be empty
 admin-policies-err-invalid = Invalid policy: { $detail }
+# Shown when a deny cannot be traced to a specific policy.
+admin-policies-deny-unattributed = device posture
 admin-policies-deny-generic = Check your device settings to meet your organization's compliance requirements
 admin-policies-deny-message = Device posture policy '{ $policy }' not satisfied. { $remediation }
 
