@@ -13,7 +13,13 @@
 //! matching the CEL engine's semantics.
 
 /// Active custom policies an org may run alongside the built-ins.
-pub(crate) const MAX_ACTIVE_CUSTOM_POLICIES: usize = 2;
+///
+/// A guardrail against an admin enabling more rules than they can reason
+/// about, not a cost limit: evaluation is dominated by fixed per-decision
+/// overhead, so the policy count barely moves it (13 policies measured
+/// within a rounding error of 2). Orgs may author up to
+/// `MAX_CUSTOM_POLICIES`; this bounds how many run at once.
+pub(crate) const MAX_ACTIVE_CUSTOM_POLICIES: usize = 10;
 
 /// Maximum number of active policies (preconfigured + custom combined).
 ///

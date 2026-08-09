@@ -118,6 +118,9 @@ were passing yesterday.
 
 ## Custom policies
 
+An organization can author up to 20 custom policies and have 10 active at once, alongside any of
+the built-ins.
+
 For anything the built-ins do not cover, write a
 [Dogwood/Cedar](https://dogwood-policy.github.io/dogwood/) `forbid` rule. The rule fires — and the
 token request is denied — when its `unless` requirement is **not** met. Posture attributes live at
