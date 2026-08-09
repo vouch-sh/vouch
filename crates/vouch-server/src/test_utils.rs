@@ -1651,6 +1651,19 @@ pub fn fuzz_validate_policy_text(text: &str) {
     let _result = crate::services::policy::validate_policy_text(text);
 }
 
+/// Fuzzing entry: run arbitrary history-event shapes through the runtime
+/// evaluation path (`Authorizer::is_authorized` over a replayed trace) with
+/// every temporal policy active. This is the path that executes on each
+/// login and token exchange, and it must never panic — the release profile
+/// is `panic = "abort"`, so a panic here takes down every org on the
+/// replica, not just the triggering request.
+///
+/// `rows` are `(event_type, user_id, data_json, secs_offset)` tuples, mapped
+/// through the same ingestion the production path uses.
+pub fn fuzz_evaluate_history(rows: &[(String, String, String, i64)]) {
+    crate::services::policy::fuzz_evaluate_history(rows);
+}
+
 pub fn make_test_oidc_key() -> OidcSigningKey {
     OidcSigningKey::generate().expect("generate key")
 }

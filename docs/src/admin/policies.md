@@ -31,6 +31,13 @@ Policies are enforced at two points:
 Recency policies ("logged in within 15 minutes") deliberately gate *exchange*, not login: the login
 itself is a hardware authentication, so requiring a recent login there would always be satisfied.
 
+> **Browser enrollment is not posture-checked.** Policies gate the CLI token endpoint. The browser
+> WebAuthn flow (`vouch enroll`) issues a session without evaluating device posture, and records a
+> successful login that satisfies the recency and IP policies above. A user who enrolls in the
+> browser can therefore obtain credentials — including via token exchange — from a device your
+> posture policies would reject at `vouch login`. Treat posture policies as a control on the CLI
+> credential path, not a fleet-wide device gate, until browser enrollment is covered.
+
 If any active policy fails, the token request is rejected with OAuth `access_denied` and a message
 naming the failed policy plus remediation guidance for the user's operating system:
 
@@ -114,7 +121,7 @@ were passing yesterday.
 For anything the built-ins do not cover, write a
 [Dogwood/Cedar](https://dogwood-policy.github.io/dogwood/) `forbid` rule. The rule fires — and the
 token request is denied — when its `unless` requirement is **not** met. Posture attributes live at
-`context.posture`.
+`context.device`.
 
 ```cedar
 // Require BitLocker specifically, not just any disk encryption

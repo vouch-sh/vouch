@@ -355,7 +355,7 @@ fn build_general_limited_routes(
         // CEL validation API (used by admin UI CEL playground)
         .route(
             "/api/v1/org/policies/validate",
-            post(handlers::admin::validate_cel_api),
+            post(handlers::admin::validate_policy_api),
         )
         // SCIM 2.0 endpoints (RFC 7643/7644)
         .route(

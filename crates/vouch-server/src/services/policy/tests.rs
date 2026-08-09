@@ -736,7 +736,7 @@ fn test_temporal_policies_ignore_other_principals_history() {
     })
     .unwrap();
     let denied_by = match decision {
-        engine::OrgDecision::Deny(Some(engine::PolicyRef::Preconfigured(slug))) => Some(slug),
+        engine::OrgDecision::Deny(Some(engine::DenyingPolicy::Preconfigured(slug))) => Some(slug),
         engine::OrgDecision::Allow | engine::OrgDecision::Deny(_) => None,
     };
     assert_eq!(
@@ -874,4 +874,153 @@ when temporal {
         result.note.is_some(),
         "a temporal policy's playground result must carry the empty-history note"
     );
+}
+
+// ============================================================
+// Precheck cache + broken-custom attribution
+// ============================================================
+
+/// The precheck cache is keyed by config fingerprint: a hit skips
+/// recomputation, and a config change (new fingerprint) recomputes.
+#[test]
+fn test_precheck_cache_hits_by_fingerprint_and_misses_on_change() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let cache = engine::PolicyEngine::default();
+    let computed = AtomicUsize::new(0);
+    let compute = || {
+        computed.fetch_add(1, Ordering::SeqCst);
+        engine::Precheck::Ok {
+            uses_temporal: false,
+        }
+    };
+
+    let fp_a = engine::fingerprint(&["disk_encryption".to_string()], &[]);
+    cache.precheck("org-1", fp_a, compute);
+    cache.precheck("org-1", fp_a, compute);
+    assert_eq!(
+        computed.load(Ordering::SeqCst),
+        1,
+        "a second decision with unchanged policy config must reuse the cached verdict"
+    );
+
+    // An admin edits the org's policies: new fingerprint, recompute.
+    let fp_b = engine::fingerprint(
+        &["disk_encryption".to_string(), "firewall".to_string()],
+        &[],
+    );
+    cache.precheck("org-1", fp_b, compute);
+    assert_eq!(
+        computed.load(Ordering::SeqCst),
+        2,
+        "a policy config change must invalidate the cached verdict"
+    );
+
+    // A different org never reads org-1's verdict.
+    cache.precheck("org-2", fp_a, compute);
+    assert_eq!(
+        computed.load(Ordering::SeqCst),
+        3,
+        "the cache must be scoped per org"
+    );
+}
+
+/// A custom policy that no longer lowers (leftover CEL text) is attributed
+/// by name, so the org's other policies are not blamed and the admin can
+/// find the broken one.
+#[test]
+fn test_precheck_attributes_broken_custom_by_name() {
+    let custom = vec![
+        db::CustomPosturePolicy {
+            id: "p1".to_string(),
+            name: "Working".to_string(),
+            description: None,
+            policy_text: requirement("context.device.firewall_enabled"),
+            active: true,
+            org_id: "org-1".to_string(),
+            created_at: jiff::Timestamp::now(),
+            updated_at: jiff::Timestamp::now(),
+        },
+        db::CustomPosturePolicy {
+            id: "p2".to_string(),
+            name: "Leftover CEL".to_string(),
+            description: None,
+            policy_text: "posture.disk_encryption_enabled == true".to_string(),
+            active: true,
+            org_id: "org-1".to_string(),
+            created_at: jiff::Timestamp::now(),
+            updated_at: jiff::Timestamp::now(),
+        },
+    ];
+    let set = compose_org_set(&[], &custom);
+    match run_precheck(&set.composed, &custom) {
+        engine::Precheck::BrokenCustom(name) => assert_eq!(
+            name, "Leftover CEL",
+            "the precheck must name the policy that fails, not a working one"
+        ),
+        engine::Precheck::Ok { .. } => {
+            panic!("a policy set containing CEL text must not pass precheck")
+        }
+        engine::Precheck::EngineError(msg) => {
+            panic!("failure must be attributed to the custom policy, got engine error: {msg}")
+        }
+    }
+}
+
+/// A deny is attributed to the failing policy, and the message carries that
+/// policy's remediation — the text the user sees.
+#[test]
+fn test_deny_error_names_policy_and_remediation() {
+    let err = deny_error(
+        Some(engine::DenyingPolicy::Preconfigured(
+            PreconfiguredSlug::DiskEncryption,
+        )),
+        Some("macos"),
+    );
+    let rendered = format!("{err:?}");
+    assert!(
+        rendered.contains("Disk Encryption"),
+        "deny must name the policy: {rendered}"
+    );
+    assert!(
+        rendered.contains("FileVault"),
+        "deny must carry OS-specific remediation: {rendered}"
+    );
+}
+
+/// The precheck reports whether an org's set reads event history. Only
+/// those decisions pay the audit query and replay, so a posture-only org
+/// must come back non-temporal.
+#[test]
+fn test_precheck_reports_whether_history_is_needed() {
+    let posture_only = compose_org_set(
+        &[
+            "disk_encryption".to_string(),
+            "firewall".to_string(),
+            "os_recency".to_string(),
+        ],
+        &[],
+    );
+    match run_precheck(&posture_only.composed, &[]) {
+        engine::Precheck::Ok { uses_temporal } => assert!(
+            !uses_temporal,
+            "a posture-only policy set must not require event history"
+        ),
+        other => panic!("posture-only set must pass precheck, got {other:?}"),
+    }
+
+    let with_temporal = compose_org_set(
+        &[
+            "disk_encryption".to_string(),
+            "token_exchange_step_up".to_string(),
+        ],
+        &[],
+    );
+    match run_precheck(&with_temporal.composed, &[]) {
+        engine::Precheck::Ok { uses_temporal } => assert!(
+            uses_temporal,
+            "a set containing a temporal policy must require event history"
+        ),
+        other => panic!("mixed set must pass precheck, got {other:?}"),
+    }
 }

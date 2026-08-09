@@ -2,7 +2,7 @@
 //! Preconfigured posture policies, defined in code (updatable via deploy).
 //!
 //! Each policy is a Cedar `forbid … unless { <requirement> }` over the
-//! always-present `context.posture` record. The composed policy set
+//! always-present `context.device` record. The composed policy set
 //! (see `mod.rs`) starts with one base `permit` — Cedar is deny-by-default,
 //! forbids override permits, so all active policies are effectively ANDed,
 //! matching the CEL engine's semantics.

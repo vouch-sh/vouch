@@ -22,30 +22,38 @@ use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::sync::Mutex;
 
+/// A policy a deny can be attributed to. Base permits are excluded by
+/// construction, so a deny message can never name one.
+#[derive(Debug, Clone)]
+pub(crate) enum DenyingPolicy {
+    Preconfigured(PreconfiguredSlug),
+    Custom { name: String },
+}
+
 /// Identifies the source rule at a composed-set index, for deny messages.
 #[derive(Debug, Clone)]
 pub(crate) enum PolicyRef {
     /// One of the base permits — never a deny reason, present so rule
     /// indices line up with composition order.
     BasePermit,
-    Preconfigured(PreconfiguredSlug),
-    Custom {
-        name: String,
-    },
+    Policy(DenyingPolicy),
 }
 
 /// Outcome of one decision.
 pub(crate) enum OrgDecision {
     Allow,
     /// Denied; the first determining forbid, when it maps to a known rule.
-    Deny(Option<PolicyRef>),
+    Deny(Option<DenyingPolicy>),
 }
 
 /// Cached verdict of the static precheck over an org's composed policy set.
 #[derive(Debug, Clone)]
 pub(crate) enum Precheck {
-    /// The composed set lowers and validates.
-    Ok,
+    /// The composed set lowers and validates. `uses_temporal` is false when
+    /// no policy reads event history, which lets the decision path skip the
+    /// audit query and replay entirely — the common case for an org running
+    /// only device-posture policies.
+    Ok { uses_temporal: bool },
     /// A custom policy fails to lower or validate; decisions deny with its
     /// name until it is fixed (fail-closed, attributable).
     BrokenCustom(String),
@@ -143,11 +151,11 @@ pub(crate) fn evaluate(
                 .reason()
                 .map(|r| r.rule_index)
                 .filter_map(|i| refs.get(i))
-                .find(|r| match r {
-                    PolicyRef::BasePermit => false,
-                    PolicyRef::Preconfigured(_) | PolicyRef::Custom { .. } => true,
+                .find_map(|r| match r {
+                    PolicyRef::BasePermit => None,
+                    PolicyRef::Policy(policy) => Some(policy.clone()),
                 });
-            Ok(OrgDecision::Deny(denying.cloned()))
+            Ok(OrgDecision::Deny(denying))
         }
     }
 }

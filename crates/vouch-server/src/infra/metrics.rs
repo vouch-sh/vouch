@@ -99,6 +99,17 @@ pub fn record_policy_decision(outcome: &str, policy: &str) {
     .increment(1);
 }
 
+/// Record how long a policy decision took. Split by whether the org's set
+/// reads event history: only those decisions pay the audit query and
+/// replay, whose cost grows with the user's recent activity.
+pub fn record_policy_decision_duration(seconds: f64, temporal: bool) {
+    metrics::histogram!(
+        "vouch_policy_decision_duration_seconds",
+        "temporal" => if temporal { "true" } else { "false" }
+    )
+    .record(seconds);
+}
+
 #[cfg(test)]
 #[expect(
     clippy::expect_used,

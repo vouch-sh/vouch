@@ -277,13 +277,13 @@ pub(crate) async fn create_custom_policy(
         ));
     }
 
-    // Auth before CEL compilation (fixes security finding F-04)
+    // Authenticate before parsing: policy text is attacker-influenced
+    // input, so only an authenticated org admin may reach the parser.
     let (admin, org_id) =
         extract_org_admin(&state, &headers, &jar, method.as_str(), uri.path(), None).await?;
 
-    // Validate CEL syntax
     if let Err(e) = posture::validate_policy_text(&form.policy_text) {
-        return Ok(redirect_error(jar, format!("Invalid CEL expression: {e}")));
+        return Ok(redirect_error(jar, format!("Invalid policy: {e}")));
     }
 
     // Check total custom policy count limit
@@ -374,7 +374,7 @@ pub(crate) async fn update_custom_policy(
         extract_org_admin(&state, &headers, &jar, method.as_str(), uri.path(), None).await?;
 
     if let Err(e) = posture::validate_policy_text(&form.policy_text) {
-        return Ok(redirect_error(jar, format!("Invalid CEL expression: {e}")));
+        return Ok(redirect_error(jar, format!("Invalid policy: {e}")));
     }
 
     let description = form.description.filter(|d| !d.is_empty());
@@ -627,7 +627,7 @@ pub(crate) struct TestResult {
     pub note: Option<&'static str>,
 }
 
-/// Request to validate a CEL expression (JSON API for CEL playground).
+/// Request to validate policy text (JSON API for the policy editor).
 #[derive(Debug, Deserialize)]
 pub(crate) struct ValidateRequest {
     pub policy_text: String,
@@ -636,7 +636,7 @@ pub(crate) struct ValidateRequest {
 }
 
 /// POST /api/v1/org/policies/validate — Validate CEL expression (JSON).
-pub(crate) async fn validate_cel_api(
+pub(crate) async fn validate_policy_api(
     method: Method,
     uri: OriginalUri,
     State(state): State<Arc<AppState>>,
@@ -644,7 +644,8 @@ pub(crate) async fn validate_cel_api(
     jar: CookieJar,
     Json(req): Json<ValidateRequest>,
 ) -> Result<Json<ValidateResponse>, ServiceError> {
-    // Auth before CEL compilation (fixes security finding F-04)
+    // Authenticate before parsing: policy text is attacker-influenced
+    // input, so only an authenticated org admin may reach the parser.
     let _auth =
         extract_org_admin(&state, &headers, &jar, method.as_str(), uri.path(), None).await?;
 
@@ -717,7 +718,7 @@ mod tests {
     // ── CEL Validation API — Positive ────────────────────────────────────────
 
     #[tokio::test]
-    async fn test_cel_validate_valid_expression() {
+    async fn test_policy_validate_valid_expression() {
         let (app, state) = test_app().await;
         let (_admin, token) = setup_admin(&state).await;
         let auth = format!("Bearer {token}");
@@ -751,7 +752,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_cel_validate_with_test_posture() {
+    async fn test_policy_validate_with_test_posture() {
         let (app, state) = test_app().await;
         let (_admin, token) = setup_admin(&state).await;
         let auth = format!("Bearer {token}");
@@ -786,7 +787,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_cel_validate_with_failing_test_posture() {
+    async fn test_policy_validate_with_failing_test_posture() {
         let (app, state) = test_app().await;
         let (_admin, token) = setup_admin(&state).await;
         let auth = format!("Bearer {token}");
@@ -820,7 +821,7 @@ mod tests {
     // ── CEL Validation API — Negative ────────────────────────────────────────
 
     #[tokio::test]
-    async fn test_cel_validate_requires_auth() {
+    async fn test_policy_validate_requires_auth() {
         let (app, _state) = test_app().await;
 
         let body = serde_json::json!({"policy_text": "forbid (principal, action == Vouch::Action::\"IssueToken\", resource) unless { context.device.os == \"macos\" };"});
@@ -840,7 +841,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_cel_validate_requires_org_admin() {
+    async fn test_policy_validate_requires_org_admin() {
         let (app, state) = test_app().await;
         let org = create_test_org(&state.store, "example.com").await;
         let member =
@@ -866,7 +867,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_cel_validate_empty_expression() {
+    async fn test_policy_validate_empty_expression() {
         let (app, state) = test_app().await;
         let (_admin, token) = setup_admin(&state).await;
         let auth = format!("Bearer {token}");
@@ -897,7 +898,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_cel_validate_too_long_expression() {
+    async fn test_policy_validate_too_long_expression() {
         let (app, state) = test_app().await;
         let (_admin, token) = setup_admin(&state).await;
         let auth = format!("Bearer {token}");
@@ -929,7 +930,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_cel_validate_invalid_syntax() {
+    async fn test_policy_validate_invalid_syntax() {
         let (app, state) = test_app().await;
         let (_admin, token) = setup_admin(&state).await;
         let auth = format!("Bearer {token}");
@@ -944,7 +945,7 @@ mod tests {
         )
         .await;
 
-        assert_eq!(status, StatusCode::OK, "Invalid CEL returns 200: {resp}");
+        assert_eq!(status, StatusCode::OK, "Invalid policy returns 200: {resp}");
         let json: serde_json::Value = serde_json::from_str(&resp).unwrap();
         assert_eq!(
             json["valid"], false,

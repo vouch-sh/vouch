@@ -8,7 +8,7 @@ edition = "2024"
 cargo-fuzz = true
 
 [dependencies]
-libfuzzer-sys = "0.4.9"
+libfuzzer-sys = { version = "0.4.9", features = ["arbitrary-derive"] }
 vouch-server = { path = "../crates/vouch-server", features = ["test-utils"] }
 vouch-common = { path = "../crates/vouch-common" }
 vouch-httpsig = { path = "../crates/vouch-httpsig" }
@@ -40,4 +40,9 @@ doc = false
 [[bin]]
 name = "fuzz_dogwood_policy"
 path = "fuzz_targets/fuzz_dogwood_policy.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_dogwood_evaluate"
+path = "fuzz_targets/fuzz_dogwood_evaluate.rs"
 doc = false

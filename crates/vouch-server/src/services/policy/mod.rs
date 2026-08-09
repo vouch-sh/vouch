@@ -297,14 +297,16 @@ fn compose_org_set(
             && let Some(policy) = PRECONFIGURED_POLICIES.iter().find(|p| p.slug == slug)
         {
             texts.push(policy.policy_text);
-            refs.push(engine::PolicyRef::Preconfigured(slug));
+            refs.push(engine::PolicyRef::Policy(
+                engine::DenyingPolicy::Preconfigured(slug),
+            ));
         }
     }
     for custom in active_custom {
         texts.push(custom.policy_text.as_str());
-        refs.push(engine::PolicyRef::Custom {
+        refs.push(engine::PolicyRef::Policy(engine::DenyingPolicy::Custom {
             name: custom.name.clone(),
-        });
+        }));
     }
     OrgPolicySet {
         composed: compose(&texts),
@@ -328,7 +330,8 @@ fn run_precheck(composed: &str, active_custom: &[db::CustomPosturePolicy]) -> en
                 let errors: Vec<String> =
                     report.validation_errors().map(|e| e.to_string()).collect();
                 if errors.is_empty() {
-                    Ok(())
+                    // A set with no temporal leaves needs no event history.
+                    Ok(!lowered.is_self_contained_cedar())
                 } else {
                     Err(format!(
                         "composed set failed validation: {}",
@@ -336,8 +339,9 @@ fn run_precheck(composed: &str, active_custom: &[db::CustomPosturePolicy]) -> en
                     ))
                 }
             });
-    let Err(composed_error) = composed_result else {
-        return engine::Precheck::Ok;
+    let composed_error = match composed_result {
+        Ok(uses_temporal) => return engine::Precheck::Ok { uses_temporal },
+        Err(e) => e,
     };
     for custom in active_custom {
         let alone = compose(&[custom.policy_text.as_str()]);
@@ -396,27 +400,19 @@ async fn record_denial(
 }
 
 /// Deny message for a determining rule.
-fn deny_error(denying: Option<engine::PolicyRef>, os: Option<&str>) -> ServiceError {
+fn deny_error(denying: Option<engine::DenyingPolicy>, os: Option<&str>) -> ServiceError {
+    let generic = "Check your device settings to meet your organization's \
+                   compliance requirements";
     let (name, remediation) = match denying {
-        Some(engine::PolicyRef::Preconfigured(slug)) => {
+        Some(engine::DenyingPolicy::Preconfigured(slug)) => {
             let name = PRECONFIGURED_POLICIES
                 .iter()
                 .find(|p| p.slug == slug)
                 .map_or("policy", |p| p.name);
             (name.to_string(), remediation_for_slug(slug, os))
         }
-        Some(engine::PolicyRef::Custom { name }) => (
-            name,
-            "Check your device settings to meet your organization's \
-             compliance requirements"
-                .to_string(),
-        ),
-        Some(engine::PolicyRef::BasePermit) | None => (
-            "posture".to_string(),
-            "Check your device settings to meet your organization's \
-             compliance requirements"
-                .to_string(),
-        ),
+        Some(engine::DenyingPolicy::Custom { name }) => (name, generic.to_string()),
+        None => ("posture".to_string(), generic.to_string()),
     };
     tracing::debug!(policy = name, "policy denied");
     ServiceError::oauth(
@@ -444,14 +440,15 @@ async fn authorize_decision(
         .collect();
     let fingerprint = engine::fingerprint(active_slugs, &custom_pairs);
     let set = compose_org_set(active_slugs, active_custom);
+    let started = std::time::Instant::now();
 
-    match state.policy.precheck(org_id, fingerprint, || {
+    let needs_history = match state.policy.precheck(org_id, fingerprint, || {
         run_precheck(&set.composed, active_custom)
     }) {
-        engine::Precheck::Ok => {}
+        engine::Precheck::Ok { uses_temporal } => uses_temporal,
         engine::Precheck::BrokenCustom(name) => {
             crate::infra::metrics::record_policy_decision("deny", &name);
-            return Err(deny_error(Some(engine::PolicyRef::Custom { name }), os));
+            return Err(deny_error(Some(engine::DenyingPolicy::Custom { name }), os));
         }
         engine::Precheck::EngineError(msg) => {
             tracing::error!(org_id, "policy precheck failed: {msg}");
@@ -459,14 +456,20 @@ async fn authorize_decision(
                 "policy engine unavailable".to_string(),
             ));
         }
-    }
+    };
 
-    let history = events::fetch_user_history(&state.audit, user_id)
-        .await
-        .map_err(|msg| {
-            tracing::error!(org_id, "policy history fetch failed: {msg}");
-            ServiceError::Internal("policy engine unavailable".to_string())
-        })?;
+    // Orgs running only device-posture policies never read event history,
+    // so they pay neither the audit query nor the replay.
+    let history = if needs_history {
+        events::fetch_user_history(&state.audit, user_id)
+            .await
+            .map_err(|msg| {
+                tracing::error!(org_id, "policy history fetch failed: {msg}");
+                ServiceError::Internal("policy engine unavailable".to_string())
+            })?
+    } else {
+        Vec::new()
+    };
 
     let Some(policy_schema) = schema::policy_schema() else {
         return Err(ServiceError::Internal(
@@ -488,6 +491,10 @@ async fn authorize_decision(
         tracing::error!(org_id, "policy decision failed: {msg}");
         ServiceError::Internal("policy engine unavailable".to_string())
     })?;
+    crate::infra::metrics::record_policy_decision_duration(
+        started.elapsed().as_secs_f64(),
+        needs_history,
+    );
 
     match decision {
         engine::OrgDecision::Allow => {
@@ -496,9 +503,9 @@ async fn authorize_decision(
         }
         engine::OrgDecision::Deny(denying) => {
             let label = match &denying {
-                Some(engine::PolicyRef::Preconfigured(slug)) => slug.as_str(),
-                Some(engine::PolicyRef::Custom { .. }) => "custom",
-                Some(engine::PolicyRef::BasePermit) | None => "unattributed",
+                Some(engine::DenyingPolicy::Preconfigured(slug)) => slug.as_str(),
+                Some(engine::DenyingPolicy::Custom { .. }) => "custom",
+                None => "unattributed",
             };
             crate::infra::metrics::record_policy_decision("deny", label);
             record_denial(state, org_id, user_id, &kind, label).await;
@@ -667,4 +674,59 @@ fn extract_device_posture(ad_value: Option<&serde_json::Value>) -> ServiceResult
         OAuthErrorCode::AccessDenied,
         "Device posture data is required by organization policy",
     ))
+}
+
+/// Fuzzing entry for the runtime evaluation path. Builds a trace from raw
+/// row shapes and decides against the full preconfigured policy set — the
+/// same `engine::evaluate` call the login and exchange paths make.
+#[cfg(any(test, feature = "test-utils"))]
+pub(crate) fn fuzz_evaluate_history(rows: &[(String, String, String, i64)]) {
+    let Some(policy_schema) = schema::policy_schema() else {
+        return;
+    };
+    let slugs: Vec<String> = PRECONFIGURED_POLICIES
+        .iter()
+        .map(|p| p.slug.as_str().to_string())
+        .collect();
+    let set = compose_org_set(&slugs, &[]);
+    let Ok(lowered) =
+        LoweredPolicySet::from_str(&set.composed, schema::service_schema(), policy_schema)
+    else {
+        return;
+    };
+    let now = jiff::Timestamp::now();
+    let history: Vec<db::AuditEvent> = rows
+        .iter()
+        .map(|(event_type, user_id, data, offset)| db::AuditEvent {
+            id: format!("fuzz-{offset}"),
+            event_type: event_type.clone(),
+            user_id: Some(user_id.clone()),
+            email_domain: None,
+            email_hmac: None,
+            data: data.clone(),
+            created_at: now
+                .checked_sub(jiff::Span::new().seconds(offset.rem_euclid(86_400)))
+                .unwrap_or(now),
+        })
+        .collect();
+    let posture = DevicePosture::new();
+    let _decision = engine::evaluate(
+        lowered,
+        &set.refs,
+        &history,
+        "fuzz-org",
+        now.as_second(),
+        |ts| {
+            decision_event(
+                &DecisionKind::IssueToken {
+                    posture: &posture,
+                    ip: None,
+                    client_id: "fuzz",
+                },
+                "fuzz-user",
+                "fuzz-org",
+                ts,
+            )
+        },
+    );
 }
