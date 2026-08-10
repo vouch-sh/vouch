@@ -662,3 +662,110 @@ fn index_value_condition_hpke_emits_in() {
         "HPKE mode should use IN clause, got: {sql}"
     );
 }
+
+#[tokio::test]
+async fn insert_rejects_nul_in_index_value() {
+    let store = test_store().await;
+    let doc = TestDoc {
+        name: "ali\0ce".to_string(),
+        value: 1,
+    };
+
+    let err = store.insert_with_id("nul-doc", &doc).await.unwrap_err();
+    let invalid = err.downcast_ref::<InvalidIndexValue>().unwrap();
+    assert_eq!(invalid.field, "name");
+
+    // The transaction rolled back: no document row either.
+    assert!(store.get::<TestDoc>("nul-doc").await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn update_rejects_nul_in_index_value() {
+    let store = test_store().await;
+    let doc = TestDoc {
+        name: "frank".to_string(),
+        value: 1,
+    };
+    let inserted = store.insert(&doc).await.unwrap();
+
+    let bad = TestDoc {
+        name: "fra\0nk".to_string(),
+        value: 2,
+    };
+    let err = store.update(&inserted.id, &bad).await.unwrap_err();
+    assert!(err.downcast_ref::<InvalidIndexValue>().is_some());
+
+    // Rolled back: the original document and its index row survive.
+    let found = store.find_one::<TestDoc>("name", "frank").await.unwrap();
+    assert_eq!(found.unwrap().data, doc);
+}
+
+#[tokio::test]
+async fn compare_and_update_rejects_nul_in_index_value() {
+    let store = test_store().await;
+    let doc = TestDoc {
+        name: "grace".to_string(),
+        value: 1,
+    };
+    let inserted = store.insert(&doc).await.unwrap();
+
+    let bad = TestDoc {
+        name: "gra\0ce".to_string(),
+        value: 2,
+    };
+    let err = store
+        .compare_and_update(&inserted.id, inserted.version, &bad)
+        .await
+        .unwrap_err();
+    assert!(err.downcast_ref::<InvalidIndexValue>().is_some());
+
+    let found = store.find_one::<TestDoc>("name", "grace").await.unwrap();
+    assert_eq!(found.unwrap().data, doc);
+}
+
+#[tokio::test]
+async fn find_with_nul_lookup_matches_nothing() {
+    let store = test_store().await;
+    store
+        .insert(&TestDoc {
+            name: "heidi".to_string(),
+            value: 1,
+        })
+        .await
+        .unwrap();
+
+    // Must degrade to not-found — binding 0x00 as a text parameter is a
+    // hard error on Postgres/DSQL.
+    let found = store.find_one::<TestDoc>("name", "hei\0di").await.unwrap();
+    assert!(found.is_none());
+
+    let all = store.find_all::<TestDoc>("name", "hei\0di").await.unwrap();
+    assert!(all.is_empty());
+}
+
+#[test]
+fn index_value_condition_nul_never_binds_raw_value() {
+    use sea_query::SqliteQueryBuilder;
+
+    // HPKE mode is where the IN bridge would otherwise bind the raw value.
+    let crypto = HashingTestCrypto;
+    let expr = index_value_condition(&crypto, DocumentIndexes::Table, "ali\0ce");
+
+    let (sql, values) = Query::select()
+        .column(DocumentIndexes::IndexValue)
+        .from(DocumentIndexes::Table)
+        .and_where(expr)
+        .build(SqliteQueryBuilder);
+
+    assert!(
+        !sql.contains("IN"),
+        "NUL lookup must not use IN, got: {sql}"
+    );
+    for value in &values.0 {
+        let rendered = format!("{value:?}");
+        assert!(
+            !rendered.contains('\0'),
+            "NUL must never be bound as a parameter, got: {rendered}"
+        );
+    }
+}

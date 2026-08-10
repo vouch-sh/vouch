@@ -554,6 +554,14 @@ pub async fn register_client(
     )
     .await
     .map_err(|e| {
+        // The store rejects NUL bytes in index values (issue #883); for a
+        // registration request the only client-supplied one is software_id.
+        if let Some(invalid) = e.downcast_ref::<db::InvalidIndexValue>() {
+            return ServiceError::oauth(
+                OAuthErrorCode::InvalidClientMetadata,
+                format!("{} must not contain a NUL (0x00) character", invalid.field),
+            );
+        }
         tracing::error!("Failed to create dynamically registered client: {e}");
         ServiceError::Internal("Failed to create client".to_string())
     })?;

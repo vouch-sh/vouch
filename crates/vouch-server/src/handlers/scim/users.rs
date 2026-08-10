@@ -175,6 +175,9 @@ pub(super) fn create_scim_user_error_response(
                 .into_response()
         }
         db::CreateScimUserError::Other(e) => {
+            if let Some(resp) = super::invalid_index_value_response(&e) {
+                return resp.into_response();
+            }
             tracing::error!("Failed to create user: {e}");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -504,6 +507,9 @@ pub(crate) async fn patch_user(
                 .into_response();
         }
         Err(e) => {
+            if let Some(resp) = super::invalid_index_value_response(&e) {
+                return resp.into_response();
+            }
             tracing::error!("Failed to update user: {e}");
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,

@@ -43,7 +43,7 @@ mod users;
 
 // Re-export Pool, DatabaseType, Transaction, and StoreTransaction
 pub use pool::{DatabaseType, Pool, Transaction};
-pub use store::StoreTransaction;
+pub use store::{InvalidIndexValue, StoreTransaction};
 
 // Re-export user types and functions
 pub use users::{

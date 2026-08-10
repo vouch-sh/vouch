@@ -60,6 +60,26 @@ async fn test_store_jwt_assertion_jti_too_long() {
 }
 
 #[tokio::test]
+async fn test_store_jwt_assertion_jti_rejects_nul() {
+    use crate::db::claim::ClaimError;
+    let (store, _audit) = test_db().await;
+
+    // A NUL byte would be rejected by Postgres/DSQL at insert time; the
+    // pre-check turns that into a client error instead of a Database one.
+    let result = store_jwt_assertion_jti(
+        &store,
+        "jti\0abc",
+        "client-1",
+        "2099-01-01T00:00:00Z".parse().unwrap(),
+    )
+    .await;
+    assert!(
+        matches!(result, Err(ClaimError::InvalidInput(_))),
+        "JTI containing NUL must return InvalidInput: got {result:?}"
+    );
+}
+
+#[tokio::test]
 async fn test_store_jwt_assertion_jti_at_max_length() {
     use crate::db::claim::ClaimError;
     let (store, _audit) = test_db().await;

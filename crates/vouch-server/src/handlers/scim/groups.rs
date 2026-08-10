@@ -158,6 +158,9 @@ pub(crate) async fn create_group(
     {
         Ok(g) => g,
         Err(e) => {
+            if let Some(resp) = super::invalid_index_value_response(&e) {
+                return resp.into_response();
+            }
             tracing::error!("Failed to create group: {e}");
             let detail = if e.to_string().contains("UNIQUE") {
                 "Group already exists"
@@ -416,6 +419,9 @@ pub(crate) async fn patch_group(
                     .into_response();
             }
             Err(e) => {
+                if let Some(resp) = super::invalid_index_value_response(&e) {
+                    return resp.into_response();
+                }
                 tracing::error!("Failed to update group: {e}");
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
