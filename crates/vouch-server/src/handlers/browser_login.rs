@@ -192,15 +192,26 @@ pub(crate) struct LoginQuery {
 /// token when an already-enrolled user runs `vouch enroll`; the assertion in
 /// [`browser_login_complete`] is what authorizes it.
 ///
-/// Returns `None` when there is no session cookie, no enrollment session for
-/// it, or the enrollment session carries no device authorization.
-async fn pending_device_auth(state: &AppState, jar: &CookieJar) -> Option<db::EnrollmentSession> {
-    let token = jar.get(vouch_common::SESSION_COOKIE_NAME)?.value();
-    let session = db::get_enrollment_session_by_token_hash(&state.store, &hash_token(token))
-        .await
-        .ok()
-        .flatten()?;
-    session.device_auth_id.is_some().then_some(session)
+/// `Ok(None)` when there is no session cookie, no enrollment session for it, or
+/// the enrollment session carries no device authorization — all ordinary for a
+/// plain login.
+///
+/// # Errors
+///
+/// Propagates storage failures instead of reporting them as "nothing pending".
+/// Collapsing the two would strand the waiting CLI: the caller could skip the
+/// assertion form, or issue a session while the device request stays pending,
+/// with nothing on screen to explain why.
+async fn pending_device_auth(
+    state: &AppState,
+    jar: &CookieJar,
+) -> Result<Option<db::EnrollmentSession>, ServiceError> {
+    let Some(cookie) = jar.get(vouch_common::SESSION_COOKIE_NAME) else {
+        return Ok(None);
+    };
+    let session =
+        db::get_enrollment_session_by_token_hash(&state.store, &hash_token(cookie.value())).await?;
+    Ok(session.filter(|s| s.device_auth_id.is_some()))
 }
 
 pub(crate) async fn login_page(
@@ -234,11 +245,21 @@ pub(crate) async fn login_page(
     // forced re-auth.
     // A session created by `vouch enroll` for an already-enrolled user is
     // authenticated but not hardware-verified, and a CLI is waiting on the
-    // assertion. Skipping the form here would leave it polling forever.
+    // assertion. Skipping the form here would leave it polling forever, so a
+    // lookup failure forces the form too: rendering it needlessly costs the
+    // user one touch, skipping it strands the CLI until it times out.
+    let device_auth_pending = match pending_device_auth(&state, &jar).await {
+        Ok(pending) => pending.is_some(),
+        Err(e) => {
+            tracing::error!("Failed to check for a pending device authorization: {e}");
+            true
+        }
+    };
+
     let requires_reauth = pending
         .as_ref()
         .is_some_and(|p| p.prompt.as_deref() == Some("login") || p.max_age.is_some())
-        || pending_device_auth(&state, &jar).await.is_some();
+        || device_auth_pending;
 
     if auth.authenticated && !requires_reauth {
         if let Some(ref pending_id) = query.pending_auth {
@@ -694,10 +715,10 @@ pub(crate) async fn browser_login_complete(
     let new_counter = verification_result.new_counter.cast_signed();
     db::update_authenticator_counter(&state.store, &authenticator.id, new_counter).await?;
 
-    // Release a CLI waiting on `vouch enroll`. The assertion just verified is
-    // the possession proof the upstream IdP sign-in could not provide, so the
-    // device authorization is approved here rather than at IdP callback.
-    if let Some(enrollment) = pending_device_auth(&state, &jar).await
+    // Release a CLI waiting on `vouch enroll`: the assertion just verified is
+    // the possession proof the upstream IdP sign-in cannot provide, so the
+    // device authorization is authorized from here.
+    if let Some(enrollment) = pending_device_auth(&state, &jar).await?
         && let Some(ref device_auth_id) = enrollment.device_auth_id
     {
         // The enrollment session must belong to whoever just asserted;
@@ -1081,6 +1102,58 @@ mod tests {
         assert!(
             location.contains("/oauth/authorize"),
             "Should redirect to /oauth/authorize: {location}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_login_page_shows_form_when_device_auth_pending() {
+        // A returning user running `vouch enroll` arrives here already
+        // carrying a session cookie. Redirecting them away because they look
+        // authenticated would leave the CLI polling until it times out — the
+        // assertion is what authorizes the waiting device request.
+        let (app, state) = crate::test_utils::test_app().await;
+
+        let user =
+            crate::test_utils::create_test_user(&state.store, "cli-assert@example.com").await;
+        let auth_id = crate::test_utils::create_test_authenticator(&state.store, &user.id).await;
+        let session_token =
+            crate::test_utils::create_test_session(&state, &user.id, &user.email, &auth_id).await;
+
+        let expires: jiff::Timestamp = "2099-12-31T23:59:59Z".parse().expect("valid timestamp");
+        let device_auth_id = crate::db::create_device_auth_request(
+            &state.store,
+            "login-page-device-hash",
+            "LGPG-CODE",
+            None,
+            expires,
+            0,
+        )
+        .await
+        .expect("create device auth");
+
+        crate::db::create_enrollment_session(
+            &state.store,
+            &user.id,
+            &user.email,
+            &crate::crypto::hash_token(&session_token),
+            Some(&device_auth_id),
+            expires,
+        )
+        .await
+        .expect("create enrollment session");
+
+        let resp = crate::test_utils::http_get_full(
+            &app,
+            "/login",
+            &[("Cookie", &format!("__Host-vouch_session={session_token}"))],
+        )
+        .await;
+
+        assert_eq!(
+            resp.status,
+            axum::http::StatusCode::OK,
+            "an authenticated session with a device authorization waiting must \
+             still be shown the assertion form, got a redirect"
         );
     }
 

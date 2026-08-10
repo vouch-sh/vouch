@@ -411,11 +411,9 @@ pub(crate) async fn device_token(
                     act: None,
                     audience: None,
                     auth_time: Some(now_secs),
-                    // Mirrors how the browser approved this request. Asserting
-                    // `Verified` unconditionally would let an approval that
-                    // never exercised the authenticator mint a token claiming
-                    // it did, which is exactly what the credential endpoints
-                    // gate on.
+                    // Mirrors how the browser approved this request, so the
+                    // claim the credential endpoints gate on reflects whether
+                    // the authenticator was actually exercised.
                     hardware_verification: if request.hardware_verified {
                         crate::services::auth::HardwareVerification::Verified
                     } else {
@@ -1558,17 +1556,15 @@ mod tests {
     }
 
     /// A device authorization approved without a WebAuthn ceremony — what an
-    /// upstream-IdP sign-in alone can produce — must not mint a token that
-    /// passes the credential endpoints' hardware gate. The grant used to
-    /// hardcode `HardwareVerification::Verified`, so `vouch enroll` handed a
-    /// returning user SSH and AWS credentials with the key untouched.
+    /// upstream-IdP sign-in alone produces — must not mint a token that clears
+    /// the credential endpoints' hardware gate.
     #[tokio::test]
     async fn test_device_grant_without_ceremony_cannot_reach_credentials() {
         let (app, token) = device_token_for_approval("unverified", false).await;
         let auth = format!("Bearer {token}");
 
-        // Every credential endpoint, not just the one that happened to carry a
-        // check: the requirement now rides on `HardwareVerifiedToken`.
+        // Every credential endpoint, since the requirement rides on
+        // `HardwareVerifiedToken` rather than a per-handler check.
         let (status, body) = http_get(
             &app,
             "/v1/credentials/aws/token",

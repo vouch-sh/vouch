@@ -860,9 +860,7 @@ pub(crate) async fn complete_enrollment_after_identity(
     // no device_auth_id in the OIDC state (see direct_enroll_start).
     //
     // Either way the CLI is released by a key ceremony, never by the IdP
-    // sign-in alone: that authenticates the person, not the hardware, so
-    // approving here would hand out a credential-capable token for a key
-    // nobody touched.
+    // sign-in alone, which authenticates the person rather than the hardware.
     let mut require_assertion = false;
 
     if let Some(device_auth_id) = stored_state.device_auth_id.as_deref() {

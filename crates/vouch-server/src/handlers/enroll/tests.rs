@@ -407,9 +407,8 @@ async fn test_direct_web_signin_returning_user_logs_login_success_with_ip() {
 async fn test_cli_enroll_returning_user_requires_assertion_before_approval() {
     // `vouch enroll` by a user who already has a key: the upstream IdP
     // sign-in authenticates the person, not the hardware, so the pending
-    // device authorization must stay Pending and the browser must be sent
-    // to /login to assert. Approving here released a full-scope,
-    // credential-capable token with the key untouched.
+    // device authorization stays Pending and the browser is sent to /login
+    // to assert.
     let state = test_app_state().await;
     let user = create_test_user(&state.store, "cli-returning@example.com").await;
     create_test_authenticator(&state.store, &user.id).await;

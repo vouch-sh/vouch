@@ -344,10 +344,9 @@ const CREDENTIAL_HANDLERS_WITHOUT_HARDWARE: &[(&str, &str)] = &[
 
 /// Every credential-issuing handler proves key possession through its type.
 ///
-/// `vouch enroll` once released a credential-capable token for a key nobody
-/// touched, and the check that would have caught it existed on the AWS endpoint
-/// but not on SSH or GitHub. Requiring the type rather than a call means the
-/// omission cannot recur silently.
+/// Requiring the type rather than a call means an endpoint cannot issue
+/// credentials while silently omitting the check: the proof is part of the
+/// signature, so a handler that wants the weaker token has to name it.
 #[test]
 fn credential_handlers_require_hardware_verified_token() -> Result<(), Box<dyn std::error::Error>> {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/handlers/credentials.rs");

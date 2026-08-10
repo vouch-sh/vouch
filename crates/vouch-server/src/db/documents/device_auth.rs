@@ -35,8 +35,8 @@ pub struct DeviceAuthRequestDoc {
     /// with a WebAuthn ceremony. The device-code grant copies this onto the
     /// issued token's `hardware_verified` claim, so an approval that never
     /// exercised the authenticator cannot mint a token asserting it did.
-    /// Defaults to `false` so documents written before this field existed
-    /// (rolling deploy) are treated as unverified.
+    /// Absent from documents written by an older server during a rolling
+    /// deploy; the default treats those as unverified.
     #[serde(default)]
     pub hardware_verified: bool,
     pub expires_at: Timestamp,
