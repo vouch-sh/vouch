@@ -6,8 +6,10 @@ use crate::crypto::hash_token;
 use crate::db;
 use crate::error::ServiceError;
 use crate::services::auth::ValidatedResourceToken;
+use axum::extract::FromRequestParts;
 use axum::http::StatusCode;
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
+use std::sync::Arc;
 use subtle::ConstantTimeEq;
 use time::Duration;
 
@@ -71,7 +73,7 @@ impl AuthContext {
 /// used for DPoP proof validation and audience coverage. Pass empty strings
 /// for cookie-only paths where DPoP validation is skipped (an empty `uri`
 /// means only deployment-root audiences pass the coverage check).
-pub(crate) async fn extract_resource_token(
+async fn extract_resource_token(
     state: &AppState,
     headers: &axum::http::HeaderMap,
     jar: &CookieJar,
@@ -288,32 +290,157 @@ fn enforce_audience_coverage(
     ))
 }
 
-/// Extract resource token and also fetch the user email from DB.
+// ============================================================================
+// Token Extractors
+// ============================================================================
+//
+// `extract_resource_token` is private to this module. The only ways a handler
+// can obtain a validated token are the two extractors below, so the strength of
+// authentication a route accepts is stated in its signature rather than left to
+// a check the handler remembers to write. `HardwareVerifiedToken` is the reason
+// the split exists: credential issuance must not run on a session that never
+// exercised the security key.
+
+/// An access token that passed validation.
 ///
-/// Convenience function for handlers that need the user email.
-pub(crate) async fn extract_resource_token_with_email(
+/// Says nothing about *how* the user authenticated — an enrollment bootstrap
+/// session satisfies this. Handlers that mint credentials want
+/// [`HardwareVerifiedToken`] instead.
+pub(crate) struct AuthenticatedToken(pub(crate) ValidatedResourceToken);
+
+/// An access token whose session proved possession of the user's security key.
+///
+/// The only constructor is the extractor below, which rejects the request when
+/// the `hardware_verified` claim is false. A handler naming this type cannot
+/// run without the proof.
+///
+/// The gate is on `hardware_verified` rather than `authenticator_id`: the latter
+/// only means the user has a key on record, which an enrollment session carries
+/// while `hardware_verified` is false.
+pub(crate) struct HardwareVerifiedToken(pub(crate) ValidatedResourceToken);
+
+/// Run the shared validation for both extractors.
+///
+/// The path comes from `OriginalUri` so it is the path the client actually
+/// requested: `extract_resource_token` feeds it to RFC 8707 audience coverage
+/// and to the DPoP `htu` comparison, both of which must see the request as sent
+/// rather than a matched route template.
+async fn extract_token_from_parts(
+    parts: &mut http::request::Parts,
+    state: &Arc<AppState>,
+) -> Result<ValidatedResourceToken, ServiceError> {
+    let axum::extract::OriginalUri(uri) =
+        axum::extract::OriginalUri::from_request_parts(parts, state)
+            .await
+            .unwrap_or_else(|infallible| match infallible {});
+    let client_cert = super::extractors::OptionalClientCert::from_request_parts(parts, state)
+        .await
+        .unwrap_or_else(|infallible| match infallible {});
+    let jar = CookieJar::from_headers(&parts.headers);
+
+    extract_resource_token(
+        state,
+        &parts.headers,
+        &jar,
+        parts.method.as_str(),
+        uri.path(),
+        client_cert.0.as_ref(),
+    )
+    .await
+}
+
+impl axum::extract::FromRequestParts<Arc<AppState>> for AuthenticatedToken {
+    type Rejection = ServiceError;
+
+    async fn from_request_parts(
+        parts: &mut http::request::Parts,
+        state: &Arc<AppState>,
+    ) -> Result<Self, Self::Rejection> {
+        Ok(Self(extract_token_from_parts(parts, state).await?))
+    }
+}
+
+/// An access token when the request offered one, for endpoints where
+/// authentication is optional (RFC 7591 open client registration).
+///
+/// `None` means no `Authorization` header was sent. A header carrying an
+/// invalid token is an **error**, not an absence — otherwise a rejected token
+/// would silently downgrade to an anonymous request. `Option<AuthenticatedToken>`
+/// cannot express this, which is why this is its own type.
+///
+/// Only the `Authorization` header is consulted: a browser session cookie must
+/// not authenticate a client registration.
+pub(crate) struct OptionalAuthenticatedToken(pub(crate) Option<ValidatedResourceToken>);
+
+impl axum::extract::FromRequestParts<Arc<AppState>> for OptionalAuthenticatedToken {
+    type Rejection = ServiceError;
+
+    async fn from_request_parts(
+        parts: &mut http::request::Parts,
+        state: &Arc<AppState>,
+    ) -> Result<Self, Self::Rejection> {
+        if !parts
+            .headers
+            .contains_key(axum::http::header::AUTHORIZATION)
+        {
+            return Ok(Self(None));
+        }
+        let axum::extract::OriginalUri(uri) =
+            axum::extract::OriginalUri::from_request_parts(parts, state)
+                .await
+                .unwrap_or_else(|infallible| match infallible {});
+        let token = extract_resource_token(
+            state,
+            &parts.headers,
+            &CookieJar::default(),
+            parts.method.as_str(),
+            uri.path(),
+            None,
+        )
+        .await?;
+        Ok(Self(Some(token)))
+    }
+}
+
+impl axum::extract::FromRequestParts<Arc<AppState>> for HardwareVerifiedToken {
+    type Rejection = ServiceError;
+
+    async fn from_request_parts(
+        parts: &mut http::request::Parts,
+        state: &Arc<AppState>,
+    ) -> Result<Self, Self::Rejection> {
+        let token = extract_token_from_parts(parts, state).await?;
+        if !token.hardware_verified {
+            tracing::warn!(
+                target: "security",
+                path = %parts.uri.path(),
+                "Refusing a session that is not hardware-verified"
+            );
+            return Err(ServiceError::api(
+                StatusCode::FORBIDDEN,
+                "hardware_required",
+                "This credential requires a hardware-verified session - run 'vouch login' to authenticate with your security key",
+            ));
+        }
+        Ok(Self(token))
+    }
+}
+
+/// Email for a validated token: the `email` claim when present, else the user
+/// record.
+pub(super) async fn resolve_token_email(
     state: &AppState,
-    headers: &axum::http::HeaderMap,
-    jar: &CookieJar,
-    method: &str,
-    uri: &str,
-    client_cert: Option<&crate::services::oidc::mtls::ClientCertificate>,
-) -> Result<(ValidatedResourceToken, String), ServiceError> {
-    let token = extract_resource_token(state, headers, jar, method, uri, client_cert).await?;
-
-    // If token already has email, use it; otherwise look up from DB
-    let email = if let Some(ref email) = token.email {
-        email.clone()
-    } else {
-        let user = db::get_user_by_id(&state.store, &token.sub)
-            .await?
-            .ok_or_else(|| {
-                ServiceError::api(StatusCode::NOT_FOUND, "user_not_found", "User not found")
-            })?;
-        user.email
-    };
-
-    Ok((token, email))
+    token: &ValidatedResourceToken,
+) -> Result<String, ServiceError> {
+    if let Some(ref email) = token.email {
+        return Ok(email.clone());
+    }
+    let user = db::get_user_by_id(&state.store, &token.sub)
+        .await?
+        .ok_or_else(|| {
+            ServiceError::api(StatusCode::NOT_FOUND, "user_not_found", "User not found")
+        })?;
+    Ok(user.email)
 }
 
 /// Extract and validate an OAuth access token from the session cookie only.

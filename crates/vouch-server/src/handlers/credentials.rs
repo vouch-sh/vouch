@@ -10,10 +10,8 @@ use crate::error::ServiceError;
 use crate::services::integrations::aws::{AwsError, issue_aws_token};
 use crate::services::integrations::github::{GitHubInstallationId, minimal_git_permissions};
 use crate::services::oidc;
-use axum::extract::{OriginalUri, Query};
-use axum::http::Method;
-use axum::{Json, extract::State, http::HeaderMap, http::StatusCode};
-use axum_extra::extract::cookie::CookieJar;
+use axum::extract::Query;
+use axum::{Json, extract::State, http::StatusCode};
 use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -22,8 +20,7 @@ use vouch_common::{
     SshCaPublicKeyResponse, SshCertificateRequest, SshCertificateResponse,
 };
 
-use super::extractors::OptionalClientCert;
-use super::session::{extract_resource_token, extract_resource_token_with_email};
+use super::session::{AuthenticatedToken, HardwareVerifiedToken};
 use crate::db::ClientInfo;
 use crate::redact_email;
 use crate::services::auth::ValidatedResourceToken;
@@ -34,18 +31,10 @@ use crate::services::auth::ValidatedResourceToken;
 ///
 /// Requires Bearer token authentication. Signs the provided SSH public key
 /// as a user certificate with principals extracted from the user's email.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "axum handler signature: extractors are positional parameters"
-)]
 pub(crate) async fn issue_ssh_certificate(
-    method: Method,
-    uri: OriginalUri,
-    headers: HeaderMap,
-    jar: CookieJar,
     State(state): State<Arc<AppState>>,
-    client_cert: OptionalClientCert,
     client_info: ClientInfo,
+    HardwareVerifiedToken(token): HardwareVerifiedToken,
     Json(request): Json<SshCertificateRequest>,
 ) -> Result<Json<SshCertificateResponse>, ServiceError> {
     // Check config before auth — zero-cost in-memory check avoids DB queries
@@ -57,16 +46,7 @@ pub(crate) async fn issue_ssh_certificate(
         ));
     }
 
-    // Validate token and get user email + user_id
-    let (token, user_email) = extract_resource_token_with_email(
-        &state,
-        &headers,
-        &jar,
-        method.as_str(),
-        uri.path(),
-        client_cert.0.as_ref(),
-    )
-    .await?;
+    let user_email = super::session::resolve_token_email(&state, &token).await?;
 
     // Reject deactivated users (defense-in-depth for SCIM deactivation)
     let user = super::session::load_active_user(&state, &token.sub).await?;
@@ -325,42 +305,18 @@ pub(crate) struct SshRevocationCheckResponse {
 // AWS Token Endpoint
 // ============================================================================
 
-/// Shared preamble for the AWS credential endpoints: authenticate the request,
-/// require a hardware-verified session, confirm the user is active, and resolve
-/// the user's email.
+/// Shared preamble for the AWS credential endpoints: confirm the user is active
+/// and resolve the user's email and issuer.
 ///
 /// AWS federation mints an OIDC token whose claims hardcode
 /// `hardware_verified: true`, so the *current session* must itself be
 /// hardware-verified — otherwise a non-verified bootstrap session could be
-/// laundered into a verified assertion (#451). The gate is on the access-token
-/// `hardware_verified` claim, not `authenticator_id` (a re-enrollment bootstrap
-/// session can have an `authenticator_id` while `hardware_verified` is false).
+/// laundered into a verified assertion (#451). That requirement is carried by
+/// the [`HardwareVerifiedToken`] the caller had to extract.
 async fn authorize_aws_token_request(
     state: &Arc<AppState>,
-    headers: &HeaderMap,
-    jar: &CookieJar,
-    method: &Method,
-    path: &str,
-    client_cert: &OptionalClientCert,
+    token: ValidatedResourceToken,
 ) -> Result<AwsIssuanceContext, ServiceError> {
-    let token = extract_resource_token(
-        state,
-        headers,
-        jar,
-        method.as_str(),
-        path,
-        client_cert.0.as_ref(),
-    )
-    .await?;
-
-    if !token.hardware_verified {
-        return Err(ServiceError::api(
-            StatusCode::FORBIDDEN,
-            "hardware_required",
-            "AWS federation requires a hardware-verified session - run 'vouch login' to authenticate with your security key",
-        ));
-    }
-
     // Confirm the user is still active. Email and federation claims come from
     // the session snapshot, not from current state.
     let user = super::session::load_active_user(state, &token.sub).await?;
@@ -495,28 +451,18 @@ fn validate_pinned_role(role_arn: &str) -> Result<(), ServiceError> {
 /// When the DPoP proof includes a `source` custom claim (e.g., "claude-code"),
 /// the issued token includes AI-specific session tags (`vouch:AccessType=AI`,
 /// `vouch:Agent=<agent>`) for CloudTrail differentiation and IAM condition keys.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "axum handler signature: extractors are positional parameters"
-)]
 pub(crate) async fn get_aws_token(
-    method: Method,
-    uri: OriginalUri,
-    headers: HeaderMap,
-    jar: CookieJar,
     State(state): State<Arc<AppState>>,
     Query(params): Query<AwsTokenParams>,
-    client_cert: OptionalClientCert,
     client_info: ClientInfo,
+    HardwareVerifiedToken(token): HardwareVerifiedToken,
 ) -> Result<Json<AwsTokenResponse>, ServiceError> {
     let pinned_role = params.role_arn.as_deref();
     if let Some(role_arn) = pinned_role {
         validate_pinned_role(role_arn)?;
     }
 
-    let ctx =
-        authorize_aws_token_request(&state, &headers, &jar, &method, uri.path(), &client_cert)
-            .await?;
+    let ctx = authorize_aws_token_request(&state, token).await?;
 
     // Issue AWS token using the session-time snapshot of aaguid and org domain.
     // Sign with the org's own RS256 key when it has a claimed subdomain, so the
@@ -600,24 +546,9 @@ pub(crate) async fn get_aws_token(
 ///
 /// Returns whether GitHub is configured and connected for the user's organization.
 pub(crate) async fn get_github_status(
-    method: Method,
-    uri: OriginalUri,
-    headers: HeaderMap,
-    jar: CookieJar,
     State(state): State<Arc<AppState>>,
-    client_cert: OptionalClientCert,
+    AuthenticatedToken(token): AuthenticatedToken,
 ) -> Result<Json<GitHubStatusResponse>, ServiceError> {
-    // Validate token
-    let token = extract_resource_token(
-        &state,
-        &headers,
-        &jar,
-        method.as_str(),
-        uri.path(),
-        client_cert.0.as_ref(),
-    )
-    .await?;
-
     // Get user
     let user = super::session::load_active_user(&state, &token.sub).await?;
 
@@ -662,21 +593,13 @@ pub(crate) async fn get_github_status(
 /// with Git operations. The token is scoped to the user's organization's
 /// GitHub installation with minimal permissions (contents:write, metadata:read).
 #[expect(
-    clippy::too_many_arguments,
-    reason = "axum handler signature: extractors are positional parameters"
-)]
-#[expect(
     clippy::too_many_lines,
     reason = "sequential GitHub installation token validation and issuance"
 )]
 pub(crate) async fn get_github_token(
-    method: Method,
-    uri: OriginalUri,
     client_info: ClientInfo,
-    headers: HeaderMap,
-    jar: CookieJar,
     State(state): State<Arc<AppState>>,
-    client_cert: OptionalClientCert,
+    HardwareVerifiedToken(token): HardwareVerifiedToken,
     Json(request): Json<GitHubTokenRequest>,
 ) -> Result<Json<GitHubTokenResponse>, ServiceError> {
     // Check config before auth — zero-cost in-memory check avoids DB queries
@@ -687,17 +610,6 @@ pub(crate) async fn get_github_token(
             "GitHub App is not configured",
         )
     })?;
-
-    // Validate token
-    let token = extract_resource_token(
-        &state,
-        &headers,
-        &jar,
-        method.as_str(),
-        uri.path(),
-        client_cert.0.as_ref(),
-    )
-    .await?;
 
     // Get user
     let user = super::session::load_active_user(&state, &token.sub).await?;

@@ -459,13 +459,16 @@ impl TestHarness {
             .await?
             .ok_or_else(|| anyhow::anyhow!("Device auth request not found"))?;
 
-        // Authorize it
+        // Authorize it as the browser assertion flow does.
         vouch_server::db::authorize_device_auth(
             &self.state.store,
-            &request.id,
-            user_id,
-            email,
-            auth_id,
+            vouch_server::db::AuthorizeDeviceAuthParams {
+                id: &request.id,
+                user_id,
+                user_email: email,
+                authenticator_id: auth_id,
+                hardware_verified: true,
+            },
         )
         .await?;
 

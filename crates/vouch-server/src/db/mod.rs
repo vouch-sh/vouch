@@ -97,17 +97,13 @@ pub use organizations::create_organization;
 
 // Re-export device auth types and functions
 pub use device_auth::{
-    DeviceAuthRequest, DeviceAuthStatus, OidcState, authorize_device_auth,
-    create_device_auth_request, create_oidc_state, delete_expired_device_auth_requests,
-    delete_expired_oidc_states, deny_device_auth, get_device_auth_by_code_hash,
-    get_device_auth_by_user_code, get_oidc_state, try_consume_device_auth, try_consume_oidc_state,
-    update_device_auth_poll_time,
+    AuthorizeDeviceAuthParams, DeviceAuthRequest, DeviceAuthStatus, OidcState,
+    authorize_device_auth, create_device_auth_request, create_oidc_state,
+    delete_expired_device_auth_requests, delete_expired_oidc_states, deny_device_auth,
+    get_device_auth_by_code_hash, get_device_auth_by_user_code, get_oidc_state,
+    try_consume_device_auth, try_consume_oidc_state, update_device_auth_poll_time,
 };
-pub(crate) use device_auth::{DeviceCodeClaim, OidcStateClaim};
-
-// Re-export device auth test helpers (only available in tests)
-#[cfg(test)]
-pub(crate) use device_auth::get_device_auth_by_id;
+pub(crate) use device_auth::{DeviceCodeClaim, OidcStateClaim, get_device_auth_by_id};
 
 // Re-export audit event types (used by integration tests and the handlers)
 pub use audit::{AuditEvent, AuditEventFilter, AuditEventKind, Retention};
