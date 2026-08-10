@@ -172,7 +172,7 @@ jobs:
           echo "digest=${digest}" >> "$GITHUB_OUTPUT"
 
       - name: Generate artifact attestation
-        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           subject-digest: ${{ steps.inspect.outputs.digest }}
@@ -246,7 +246,7 @@ jobs:
         if: runner.os != 'Linux'
         # Restore-only (save-if:false) and non-Linux; a tag build reads only
         # main/tag-scoped caches, so there is no cross-ref poisoning vector.
-        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1 # zizmor: ignore[cache-poisoning]
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.1 # zizmor: ignore[cache-poisoning]
         with:
           prefix-key: "v2"
           shared-key: "release-${{ matrix.target }}"
@@ -481,13 +481,13 @@ jobs:
           retention-days: 5
 
       - name: Attest build provenance (CLI archive)
-        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-path: vouch-v${{ steps.version.outputs.version }}-${{ matrix.target }}.${{ matrix.archive-ext }}
 
       - name: Attest SBOM (CLI archive)
         if: steps.sbom.outputs.main_sbom != ''
-        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-path: vouch-v${{ steps.version.outputs.version }}-${{ matrix.target }}.${{ matrix.archive-ext }}
           sbom-path: ${{ steps.sbom.outputs.main_sbom }}
@@ -615,13 +615,13 @@ jobs:
           retention-days: 5
 
       - name: Attest build provenance (server archive)
-        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-path: vouch-server-v${{ steps.version.outputs.version }}-${{ matrix.target }}.tar.gz
 
       - name: Attest SBOM (server archive)
         if: steps.sbom.outputs.main_sbom != ''
-        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-path: vouch-server-v${{ steps.version.outputs.version }}-${{ matrix.target }}.tar.gz
           sbom-path: ${{ steps.sbom.outputs.main_sbom }}
@@ -1011,7 +1011,7 @@ jobs:
           helm package charts/vouch-server --destination .helm-packages
 
       - name: Generate Helm chart attestation
-        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-path: .helm-packages/*.tgz
 
