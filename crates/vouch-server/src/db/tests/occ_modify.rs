@@ -508,6 +508,7 @@ async fn test_update_custom_policy_only_intended_fields_change() {
             description: Some("orig desc"),
             policy_text: "true",
             org_id: "org-policy-test",
+            builder_spec: None,
         },
     )
     .await
@@ -529,6 +530,7 @@ async fn test_update_custom_policy_only_intended_fields_change() {
             description: FieldUpdate::Set("new desc"),
             policy_text: Some("false"),
             active: Some(true),
+            builder_spec: FieldUpdate::Keep,
         },
     )
     .await
@@ -571,6 +573,7 @@ async fn test_update_custom_policy_field_update_keep() {
             description: Some("original desc"),
             policy_text: "true",
             org_id: "org-keep-test",
+            builder_spec: None,
         },
     )
     .await
@@ -585,6 +588,7 @@ async fn test_update_custom_policy_field_update_keep() {
             description: FieldUpdate::Keep,
             policy_text: None,
             active: None,
+            builder_spec: FieldUpdate::Keep,
         },
     )
     .await
@@ -610,6 +614,7 @@ async fn test_update_custom_policy_field_update_clear() {
             description: Some("will be cleared"),
             policy_text: "true",
             org_id: "org-clear-test",
+            builder_spec: None,
         },
     )
     .await
@@ -624,6 +629,7 @@ async fn test_update_custom_policy_field_update_clear() {
             description: FieldUpdate::Clear,
             policy_text: None,
             active: None,
+            builder_spec: FieldUpdate::Keep,
         },
     )
     .await
@@ -648,6 +654,7 @@ async fn test_update_custom_policy_wrong_org_returns_none() {
             description: None,
             policy_text: "true",
             org_id: "real-org",
+            builder_spec: None,
         },
     )
     .await
@@ -662,6 +669,7 @@ async fn test_update_custom_policy_wrong_org_returns_none() {
             description: FieldUpdate::Keep,
             policy_text: None,
             active: None,
+            builder_spec: FieldUpdate::Keep,
         },
     )
     .await
@@ -696,6 +704,7 @@ async fn test_update_custom_policy_not_found_returns_none() {
             description: FieldUpdate::Keep,
             policy_text: None,
             active: None,
+            builder_spec: FieldUpdate::Keep,
         },
     )
     .await
@@ -847,6 +856,7 @@ async fn test_update_custom_policy_concurrent_org_change_returns_none() {
             description: None,
             policy_text: "true",
             org_id: "org-occ-race",
+            builder_spec: None,
         },
     )
     .await
@@ -881,6 +891,7 @@ async fn test_update_custom_policy_concurrent_org_change_returns_none() {
             description: FieldUpdate::Keep,
             policy_text: None,
             active: None,
+            builder_spec: FieldUpdate::Keep,
         },
     )
     .await

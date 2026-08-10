@@ -13,7 +13,14 @@ logout. These read the user's recent authentication history rather than their de
 > policies written for the previous CEL engine are rejected when you edit them and fail closed at
 > login until re-authored — see [Rewriting a CEL policy](#rewriting-a-cel-policy).
 
-Manage them at `/admin/policies`.
+Manage them at `/admin/policies`. The page shows one list of every policy — built-in and custom,
+active first, each tagged with its source — with the caps in the header (20 custom policies per
+organization, 21 active in total). A policy's Dogwood source is behind its row's expando; the list
+itself shows name, description, and state.
+
+Custom policies are written with a guided builder: pick the decision point, add conditions from
+typed dropdowns, and the generated rule previews live. Raw Dogwood text remains available for
+anything the builder does not cover — see [Custom policies](#custom-policies).
 
 ## How enforcement works
 
@@ -64,7 +71,7 @@ Three properties are worth understanding before you enable anything:
 
 ## Preconfigured policies
 
-Six policies ship built in. Toggle each on or off from `/admin/policies`.
+Seven policies ship built in. Toggle each on or off from `/admin/policies`.
 
 | Slug | Name | Requires |
 |------|------|----------|
@@ -72,14 +79,16 @@ Six policies ship built in. Toggle each on or off from `/admin/policies`.
 | `firewall` | Firewall | An active firewall |
 | `screen_lock` | Screen Lock | Screen lock on idle enabled |
 | `endpoint_protection` | Endpoint Protection | At least one EDR agent installed |
+| `mdm_enrollment` | MDM Enrollment | At least one MDM agent detected (Jamf, Kandji, Intune, …) |
 | `platform_integrity` | Platform Integrity | Secure Boot enabled |
 | `os_recency` | OS Recency | macOS 14.0.0+ or Windows 24H2+. **Denies all Linux devices** — see below |
 
-Five more policies read the user's recent authentication history instead of their device:
+Six more policies read the user's recent authentication history instead of their device:
 
 | Slug | Name | Denies when |
 |------|------|-------------|
 | `issuance_rate_limit` | Issuance Rate Limit | The user obtained 10 or more tokens in the past hour |
+| `exchange_rate_limit` | Exchange Rate Limit | The user performed 30 or more token exchanges in the past hour (exchange only) |
 | `failed_login_burst` | Failed Login Burst | The user had 5 or more failed logins in the past ten minutes |
 | `token_exchange_step_up` | Token Exchange Step-Up | No successful hardware login in the past 15 minutes (exchange only) |
 | `exchange_ip_consistency` | Exchange IP Consistency | No successful login from this IP address in the past 8 hours (exchange only) |
@@ -121,7 +130,47 @@ were passing yesterday.
 An organization can author up to 20 custom policies and have 10 active at once, alongside any of
 the built-ins.
 
-For anything the built-ins do not cover, write a
+### The rule builder
+
+"New policy" opens the builder. It asks three things:
+
+1. **Applies to** — token issuance (`vouch login`) or token exchange (workload and agent
+   credentials). Device checks are only offered on issuance, because an exchange request carries no
+   device posture; picking exchange switches the builder to activity checks.
+2. **Checks** — *device state* ("allow the request only when ALL of these hold") or *recent
+   activity* ("deny the request when …"). A rule is one or the other. A device rule may stack
+   several requirements (equivalent to activating them as separate policies, since every active
+   policy must pass); an activity rule carries exactly one condition, following Dogwood's own
+   guidance that combined history conditions are expressed as separate policies.
+3. **Conditions** — one row per condition:
+   - A device row is field → operator → value. The field dropdown lists every posture attribute
+     grouped by area, and each field offers only the operators its type allows: booleans get
+     *is*, numbers get comparisons, closed-value strings (`os`) and sets (`edr`, `mdm`) get
+     dropdowns of the values clients can actually report. Version fields take a version like
+     `15.3` and emit the numeric `os_version_num` encoding for you.
+   - "Add OS version floor" adds the per-platform minimum-version pattern (macOS/Linux by
+     version, Windows by build number) as a single row, OR'd across the platforms you enable.
+   - An activity row is event → shape → window: *happened in the last*, *did not happen in the
+     last*, *happened at least N times in the last*, or *is missing or was followed by* another
+     event (e.g. deny when the most recent successful login was followed by a logout — or there
+     was no login at all). The window control enforces the 24-hour history cap.
+
+The generated rule previews below the rows, is validated continuously, and for activity rules the
+validation box states in prose what the rule will deny — since the sample device has no history, a
+dry-run pass/fail would be meaningless for those.
+
+The builder warns (without blocking) when a successful-login recency condition targets token
+issuance: the login being evaluated is not yet in the history the rule reads, so "did not happen"
+locks users out, and "happened" is a once-per-window login cooldown. Login-recency requirements
+belong on token exchange.
+
+**Edit as text** is the escape hatch, and a one-way door: it turns the generated rule into an
+editable textarea, and a policy edited as text reopens as text from then on — the builder never
+tries to parse hand-written Dogwood back into rows. Copying a built-in also opens as text.
+
+### Writing policy text directly
+
+For anything the builder does not cover, write a
 [Dogwood/Cedar](https://dogwood-policy.github.io/dogwood/) `forbid` rule. The rule fires — and the
 token request is denied — when its `unless` requirement is **not** met. Posture attributes live at
 `context.device`.
@@ -178,9 +227,30 @@ when temporal {
 Aggregations must be compared inside an `exists (n: Long). ((count_within(…)) == n && n >= K)`
 binding — that shape is what lets the count be thresholded.
 
+#### Event fields
+
+The braces after an event name filter which past events count, by matching these fields. A
+literal value selects events (`output.result: true` means successful logins only); a context
+reference requires the field to match the current request (`input.ip: context.input.ip`, as the
+built-in `exchange_ip_consistency` does). On the decision being evaluated, the same `input`
+fields are readable directly as `context.input.*`.
+
+| Event | Matchable fields |
+|-------|-----------------|
+| `Vouch::Action::"Login"::response` | `input.ip`, `input.user_agent`, `output.result` (boolean) |
+| `Vouch::Action::"IssueToken"::response` | `input.ip`, `input.client_id` |
+| `Vouch::Action::"ExchangeToken"::response` | `input.ip`, `input.client_id`, `input.audience` |
+| `Vouch::Action::"Logout"::response` | none — the event itself is the signal |
+| `Vouch::Action::"RevokeToken"::response` | none |
+| `Vouch::Action::"IssueCredential"::response` | `input.kind` — one of `"ssh"`, `"aws"`, `"github"` |
+
+The same table is generated on `/admin/policies` under the field reference, from the catalog the
+ingestion parity tests check — the in-app copy cannot drift.
+
 The policy editor validates history policies but cannot evaluate them: the test device has no
-history, so a temporal result is labelled rather than reported as a plain pass or fail. Verify
-these against a real account in a staging organization.
+history, so a temporal result is labelled — and, for builder-authored rules, summarized in prose —
+rather than reported as a plain pass or fail. Verify these against a real account in a staging
+organization.
 
 ### Rewriting a CEL policy
 
@@ -234,6 +304,9 @@ missing field. The corollary: **a missing attribute looks identical to a negativ
 
 `edr`, `mdm` — test membership with `context.device.edr.contains("crowdstrike")`
 
+The in-app field reference at the bottom of `/admin/policies` is generated from the same catalog
+that drives the builder, with each field's type and its value on the sample test device.
+
 ### Version comparison
 
 Compare `os_version_num` (never the `os_version` string) — lexical comparison puts `"10.0.0"`
@@ -245,9 +318,11 @@ context.device.os_version_num >= 14000000
 
 ## Testing an expression before you enable it
 
-The policy editor validates expressions against sample posture data before you save, using
-`POST /api/v1/org/policies/validate`. Use it — a syntactically valid expression that is
-semantically wrong fails closed and locks users out.
+The policy editor validates every rule against sample posture data before you save, using
+`POST /api/v1/org/policies/validate` (the endpoint takes either raw `policy_text` or a builder
+`rule`, and dry-runs against the decision point the rule targets — an exchange rule is evaluated as
+an exchange, not as a login). Use it — a syntactically valid expression that is semantically wrong
+fails closed and locks users out.
 
 Test at minimum: a device that should pass, a device that should fail, and a device reporting
 nothing at all (the "old CLI" case).

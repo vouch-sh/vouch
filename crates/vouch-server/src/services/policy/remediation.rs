@@ -63,6 +63,11 @@ pub(crate) fn remediation_for_slug(slug: PreconfiguredSlug, os: Option<&str>) ->
             Tr::new("admin-policies-fix-endpoint-protection").to_string()
         }
 
+        // MDM enrollment — the fix is org-specific on every platform.
+        (PreconfiguredSlug::MdmEnrollment, _) => {
+            Tr::new("admin-policies-fix-mdm-enrollment").to_string()
+        }
+
         // Platform integrity
         (PreconfiguredSlug::PlatformIntegrity, "macos") => {
             Tr::new("admin-policies-fix-platform-integrity-macos").to_string()
@@ -89,6 +94,9 @@ pub(crate) fn remediation_for_slug(slug: PreconfiguredSlug, os: Option<&str>) ->
         // Temporal policies — the advice is the same on every platform.
         (PreconfiguredSlug::IssuanceRateLimit, _) => {
             Tr::new("admin-policies-fix-issuance-rate-limit").to_string()
+        }
+        (PreconfiguredSlug::ExchangeRateLimit, _) => {
+            Tr::new("admin-policies-fix-exchange-rate-limit").to_string()
         }
         (PreconfiguredSlug::FailedLoginBurst, _) => {
             Tr::new("admin-policies-fix-failed-login-burst").to_string()

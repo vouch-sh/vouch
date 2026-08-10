@@ -34,6 +34,11 @@ pub enum OperatingSystem {
 }
 
 impl OperatingSystem {
+    /// Every variant's canonical string, for UIs that enumerate the known
+    /// values. Kept next to [`Self::as_str`] so adding a variant updates
+    /// both in the same edit; a test asserts each entry deserializes.
+    pub const ALL: &'static [&'static str] = &["macos", "linux", "windows"];
+
     /// The canonical string representation.
     #[must_use]
     pub const fn as_str(&self) -> &'static str {
@@ -104,6 +109,18 @@ pub enum EdrAgent {
 }
 
 impl EdrAgent {
+    /// Every variant's canonical string, for UIs that enumerate the known
+    /// values. Kept next to [`Self::as_str`] so adding a variant updates
+    /// both in the same edit; a test asserts each entry deserializes.
+    pub const ALL: &'static [&'static str] = &[
+        "crowdstrike",
+        "sentinelone",
+        "carbon black",
+        "microsoft defender",
+        "trellix",
+        "1password device trust",
+    ];
+
     /// The canonical string representation.
     #[must_use]
     pub const fn as_str(&self) -> &'static str {
@@ -159,6 +176,18 @@ pub enum MdmAgent {
 }
 
 impl MdmAgent {
+    /// Every variant's canonical string, for UIs that enumerate the known
+    /// values. Kept next to [`Self::as_str`] so adding a variant updates
+    /// both in the same edit; a test asserts each entry deserializes.
+    pub const ALL: &'static [&'static str] = &[
+        "jamf",
+        "kandji",
+        "workspace one",
+        "mosyle",
+        "fleetsmith",
+        "intune",
+    ];
+
     /// The canonical string representation.
     #[must_use]
     pub const fn as_str(&self) -> &'static str {
@@ -430,6 +459,7 @@ impl DevicePosture {
 #[expect(
     clippy::unwrap_used,
     clippy::indexing_slicing,
+    clippy::panic,
     reason = "test code: panic on assertion failure is acceptable"
 )]
 mod tests {
@@ -600,6 +630,27 @@ mod tests {
         // Unknown EDR agents are rejected (no Other variant)
         let err = serde_json::from_str::<EdrAgent>("\"custom agent\"");
         assert!(err.is_err());
+    }
+
+    #[test]
+    fn test_all_consts_round_trip_through_deserialize() {
+        for s in OperatingSystem::ALL {
+            let parsed: OperatingSystem =
+                serde_json::from_str(&format!("\"{s}\"")).unwrap_or_else(|e| {
+                    panic!("OperatingSystem::ALL entry {s:?} does not deserialize: {e}")
+                });
+            assert_eq!(parsed.as_str(), *s);
+        }
+        for s in EdrAgent::ALL {
+            let parsed: EdrAgent = serde_json::from_str(&format!("\"{s}\""))
+                .unwrap_or_else(|e| panic!("EdrAgent::ALL entry {s:?} does not deserialize: {e}"));
+            assert_eq!(parsed.as_str(), *s);
+        }
+        for s in MdmAgent::ALL {
+            let parsed: MdmAgent = serde_json::from_str(&format!("\"{s}\""))
+                .unwrap_or_else(|e| panic!("MdmAgent::ALL entry {s:?} does not deserialize: {e}"));
+            assert_eq!(parsed.as_str(), *s);
+        }
     }
 
     #[test]

@@ -45,6 +45,12 @@ pub struct CustomPosturePolicyDoc {
     pub policy_text: String,
     pub active: bool,
     pub org_id: String,
+    /// The serialized builder `RuleSpec` this text was generated from,
+    /// absent for hand-written policies. Advisory only: the engine never
+    /// reads it, and a spec that no longer parses just reopens the policy
+    /// in the text editor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub builder_spec: Option<String>,
 }
 
 impl DocumentType for CustomPosturePolicyDoc {
@@ -85,6 +91,7 @@ mod tests {
         }"#;
         let doc: CustomPosturePolicyDoc = serde_json::from_str(json).unwrap();
         assert_eq!(doc.policy_text, "posture.disk_encryption_enabled == true");
+        assert_eq!(doc.builder_spec, None);
     }
 
     /// New documents serialize under the new field name.
@@ -96,9 +103,11 @@ mod tests {
             policy_text: "permit (principal, action, resource);".to_string(),
             active: false,
             org_id: "org-1".to_string(),
+            builder_spec: None,
         };
         let json = serde_json::to_value(&doc).unwrap();
         assert!(json.get("policy_text").is_some());
         assert!(json.get("cel_expression").is_none());
+        assert!(json.get("builder_spec").is_none());
     }
 }
