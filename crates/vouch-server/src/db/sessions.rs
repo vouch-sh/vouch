@@ -242,15 +242,6 @@ impl SessionCache {
         });
     }
 
-    /// Invalidate all cached sessions (used when bulk-deleting).
-    pub fn invalidate_all(&self) {
-        self.generation.fetch_add(1, Ordering::SeqCst);
-        let Ok(mut map) = self.entries.lock() else {
-            return;
-        };
-        map.clear();
-    }
-
     fn get(&self, key: &str) -> CacheLookup {
         let Ok(mut map) = self.entries.lock() else {
             return CacheLookup::Miss;
@@ -374,25 +365,6 @@ mod tests {
         assert!(matches!(cache.get("hash-c"), CacheLookup::Miss));
     }
 
-    #[test]
-    fn invalidate_all_clears_cache() {
-        let cache = SessionCache::new(100, 30);
-        let generation = cache.generation();
-        cache.insert_if_valid(
-            "hash-d".to_string(),
-            Some(fake_session("hash-d")),
-            generation,
-        );
-        cache.insert_if_valid(
-            "hash-e".to_string(),
-            Some(fake_session("hash-e")),
-            generation,
-        );
-        cache.invalidate_all();
-        assert!(matches!(cache.get("hash-d"), CacheLookup::Miss));
-        assert!(matches!(cache.get("hash-e"), CacheLookup::Miss));
-    }
-
     /// Regression test: simulates the TOCTOU race where an invalidation
     /// occurs between the generation snapshot and the insert. The stale
     /// session must NOT be written to the cache.
@@ -414,36 +386,6 @@ mod tests {
         assert!(
             matches!(cache.get("hash-f"), CacheLookup::Miss),
             "revoked session must not be cached"
-        );
-    }
-
-    /// Same as above but with `invalidate_all`.
-    #[test]
-    fn insert_after_invalidate_all_is_rejected() {
-        let cache = SessionCache::new(100, 30);
-
-        // Populate a valid entry first
-        let generation = cache.generation();
-        cache.insert_if_valid(
-            "hash-g".to_string(),
-            Some(fake_session("hash-g")),
-            generation,
-        );
-
-        // Snapshot generation, then invalidate_all
-        let gen_before = cache.generation();
-        cache.invalidate_all();
-
-        // Attempt to insert with the stale generation
-        cache.insert_if_valid(
-            "hash-g".to_string(),
-            Some(fake_session("hash-g")),
-            gen_before,
-        );
-
-        assert!(
-            matches!(cache.get("hash-g"), CacheLookup::Miss),
-            "revoked session must not be cached after invalidate_all"
         );
     }
 
