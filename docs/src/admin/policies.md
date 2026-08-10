@@ -15,7 +15,7 @@ logout. These read the user's recent authentication history rather than their de
 
 Manage them at `/admin/policies`. The page shows one list of every policy — built-in and custom,
 active first, each tagged with its source — with the caps in the header (20 custom policies per
-organization, 21 active in total). A policy's Dogwood source is behind its row's expando; the list
+organization, 10 active at once alongside the built-ins). A policy's Dogwood source is behind its row's expando; the list
 itself shows name, description, and state.
 
 Custom policies are written with a guided builder: pick the decision point, add conditions from
