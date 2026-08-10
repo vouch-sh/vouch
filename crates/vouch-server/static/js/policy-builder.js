@@ -55,6 +55,11 @@ document.addEventListener("DOMContentLoaded", function () {
 
   var debounceTimer = null;
   var isValid = false;
+  // Monotonic token for validate round-trips: a response is applied only
+  // if no newer validate started (or cleared state) after it was sent, so
+  // a slow early response can never overwrite the fields a later edit
+  // produced.
+  var validateSeq = 0;
   // "builder" or "text" — text is the escape hatch and a one-way door.
   var editorMode = "builder";
   var maxWindowSecs = catalog.max_window_hours * 3600;
@@ -373,6 +378,7 @@ document.addEventListener("DOMContentLoaded", function () {
   }
 
   function clearValidation() {
+    validateSeq++;
     validationBox.classList.add("hidden");
     validEl.classList.add("hidden");
     invalidEl.classList.add("hidden");
@@ -404,6 +410,7 @@ document.addEventListener("DOMContentLoaded", function () {
       }
       body = { policy_text: expr, decision: decisionValue() };
     }
+    var seq = ++validateSeq;
     fetch("/api/v1/org/policies/validate", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -412,6 +419,7 @@ document.addEventListener("DOMContentLoaded", function () {
     })
       .then(function (res) { return res.json(); })
       .then(function (data) {
+        if (seq !== validateSeq) return;
         validationBox.classList.remove("hidden");
         if (data.valid) {
           validEl.classList.remove("hidden");
@@ -456,6 +464,7 @@ document.addEventListener("DOMContentLoaded", function () {
         }
       })
       .catch(function () {
+        if (seq !== validateSeq) return;
         clearValidation();
       });
   }
