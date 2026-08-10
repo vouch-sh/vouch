@@ -48,20 +48,29 @@ impl Email {
     /// Splits on the **last** `@` (RFC 5321: a quoted local part may itself
     /// contain `@`), the semantics the org-domain and audit layers already
     /// used. First-`@` splitting picks the wrong domain for such addresses.
+    ///
+    /// Returns `None` when the domain contains a NUL byte: no real domain
+    /// can, and 0x00 in a `text` column or bind parameter is a hard error
+    /// on Postgres/DSQL (issue #883).
     #[must_use]
     pub fn domain(&self) -> Option<&str> {
-        self.0.rsplit_once('@').map(|(_, domain)| domain)
+        self.0
+            .rsplit_once('@')
+            .map(|(_, domain)| domain)
+            .filter(|domain| !domain.contains('\0'))
     }
 
     /// The canonical (lowercased) domain of a raw address, if any.
     ///
     /// For call sites that only need the domain of a `&str` without
-    /// building an [`Email`]. Same last-`@` semantics as [`Self::domain`].
+    /// building an [`Email`]. Same last-`@` semantics and NUL rejection
+    /// as [`Self::domain`].
     #[must_use]
     pub fn domain_of(raw: &str) -> Option<String> {
         raw.trim()
             .rsplit_once('@')
             .map(|(_, domain)| domain.to_ascii_lowercase())
+            .filter(|domain| !domain.contains('\0'))
     }
 }
 
@@ -126,6 +135,24 @@ mod tests {
     #[test]
     fn domain_none_without_at() {
         assert_eq!(Email::new("not-an-email").domain(), None);
+    }
+
+    #[test]
+    fn domain_none_with_nul_in_domain() {
+        // 0x00 in a text column or bind parameter is a hard error on
+        // Postgres/DSQL; no real domain contains it.
+        assert_eq!(Email::new("alice@exa\0mple.com").domain(), None);
+        assert_eq!(Email::domain_of("alice@exa\0mple.com"), None);
+    }
+
+    #[test]
+    fn domain_of_ignores_nul_in_local_part() {
+        // Only the domain part is stored as a domain; a NUL confined to
+        // the local part still yields the (clean) domain.
+        assert_eq!(
+            Email::domain_of("ali\0ce@example.com"),
+            Some("example.com".to_string())
+        );
     }
 
     #[test]

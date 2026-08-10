@@ -1159,6 +1159,13 @@ pub async fn store_jwt_assertion_jti(
             "JTI exceeds maximum length ({MAX_JTI_LENGTH})"
         )));
     }
+    // Checked here rather than downcast from the store's index guard:
+    // the Err arm below stringifies the error, which destroys the type.
+    if jti.contains('\0') {
+        return Err(ClaimError::InvalidInput(
+            "JTI must not contain a NUL (0x00) character".to_string(),
+        ));
+    }
 
     let id = deterministic_jti_id(jti, client_id);
     let doc = JwtAssertionJtiDoc {

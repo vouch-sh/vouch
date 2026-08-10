@@ -253,9 +253,17 @@ impl AuditStore {
     /// both HMAC the canonical form (`crate::email::Email`) or the same
     /// address keys differently depending on the casing the IdP or caller
     /// supplied.
-    fn email_hmac(&self, email: &str) -> String {
-        self.crypto
-            .hmac_index(crate::email::Email::new(email).as_str())
+    ///
+    /// Returns `None` when the address contains a NUL byte: in plaintext
+    /// crypto mode `hmac_index` passes the value through verbatim, and 0x00
+    /// in a `text` column or bind parameter is a hard error on
+    /// Postgres/DSQL (issue #883).
+    fn email_hmac(&self, email: &str) -> Option<String> {
+        let canonical = crate::email::Email::new(email);
+        if canonical.as_str().contains('\0') {
+            return None;
+        }
+        Some(self.crypto.hmac_index(canonical.as_str()))
     }
 
     /// Insert a new audit event.
@@ -274,7 +282,7 @@ impl AuditStore {
         data_json: &str,
     ) -> Result<String> {
         let email_domain = email.and_then(crate::email::Email::domain_of);
-        let email_hmac = email.map(|e| self.email_hmac(e));
+        let email_hmac = email.and_then(|e| self.email_hmac(e));
 
         self.insert_event_raw(
             kind,
@@ -471,9 +479,14 @@ impl AuditStore {
             if let Some(ref email) = filter.email {
                 // Same canonicalizing HMAC as insert time, so lookups
                 // correlate regardless of the casing supplied by the caller
-                // or returned by the IdP.
-                let hmac = self.email_hmac(email);
-                q.and_where(Expr::col(AuditEvents::EmailHmac).eq(hmac));
+                // or returned by the IdP. A NUL-bearing filter value can
+                // never correlate with a stored row, so it matches nothing
+                // rather than dropping the filter (which would return every
+                // event) or binding 0x00 (a Postgres/DSQL error).
+                match self.email_hmac(email) {
+                    Some(hmac) => q.and_where(Expr::col(AuditEvents::EmailHmac).eq(hmac)),
+                    None => q.and_where(Expr::val(1).eq(0)),
+                };
             }
             if let Some(ref domains) = filter.email_domains {
                 q.and_where(

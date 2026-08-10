@@ -82,6 +82,23 @@ fn validate_list_params(
     Ok(())
 }
 
+/// SCIM 400 response for a write the document store rejected because an
+/// index value contained a NUL byte, or `None` for any other database
+/// error so the call site keeps its own fallback mapping.
+fn invalid_index_value_response(err: &anyhow::Error) -> Option<(StatusCode, Json<ScimError>)> {
+    let invalid = err.downcast_ref::<db::InvalidIndexValue>()?;
+    Some((
+        StatusCode::BAD_REQUEST,
+        Json(
+            ScimError::new(
+                400,
+                format!("{} must not contain a NUL (0x00) character", invalid.field),
+            )
+            .with_type("invalidValue"),
+        ),
+    ))
+}
+
 // ============================================================================
 // Authentication
 // ============================================================================

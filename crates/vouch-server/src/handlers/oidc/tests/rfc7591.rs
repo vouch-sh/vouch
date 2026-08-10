@@ -61,6 +61,37 @@ async fn test_rfc7591_open_registration_succeeds_without_bearer() {
 }
 
 #[tokio::test]
+async fn test_rfc7591_rejects_nul_in_software_id() {
+    // Postgres/DSQL reject 0x00 in text columns while SQLite stores it; the
+    // document store refuses it up front so open (unauthenticated)
+    // registration fails identically on every backend instead of a
+    // backend-dependent 500 (issue #883).
+    let (app, _state) = test_app().await;
+
+    let body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "software_id": "soft\u{0}ware"
+    });
+
+    let (status, body) = http_post_json(&app, "/oauth/register", &body.to_string(), &[]).await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "NUL in software_id must be a 400, not a 500: {body}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(json["error"], "invalid_client_metadata");
+    assert!(
+        json["error_description"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("software_id"),
+        "error_description must name the offending field: {body}"
+    );
+}
+
+#[tokio::test]
 async fn test_rfc7591_register_rejects_expired_token() {
     // Simulate a revoked token by creating a real session then deleting it from the DB.
     // The token is a valid ES256 JWT but has no matching session record, so validation fails.

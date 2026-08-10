@@ -2271,3 +2271,185 @@ async fn create_error_other_maps_to_500() {
     );
     assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
 }
+
+// ========================================================================
+// NUL-byte rejection (issue #883)
+// ========================================================================
+//
+// Postgres/DSQL reject 0x00 in text columns while SQLite stores it; the
+// document store refuses NUL in index values so every backend behaves the
+// same. These tests pin the SCIM surfaces to a 400, not a 500.
+
+#[tokio::test]
+async fn test_scim_create_user_rejects_nul_external_id() {
+    let (app, state) = test_app().await;
+    let token = create_test_scim_token(&state.store, "test-nul-extid", "test-org").await;
+
+    let body = serde_json::json!({
+        "schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"],
+        "userName": "nul-extid@test-org.example.com",
+        "externalId": "ext\u{0}42"
+    });
+    let (status, body) = http_post_json(
+        &app,
+        "/scim/v2/Users",
+        &body.to_string(),
+        &[("Authorization", &format!("Bearer {token}"))],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "NUL in externalId must be a 400, not a 500: {body}"
+    );
+    let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(error["scimType"], "invalidValue");
+    assert!(
+        error["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("external_id"),
+        "detail must name the field: {body}"
+    );
+}
+
+#[tokio::test]
+async fn test_scim_create_user_rejects_nul_in_username_local_part() {
+    // The domain is clean, so this passes the userName shape check and is
+    // caught by the store's index guard on the email field instead.
+    let (app, state) = test_app().await;
+    let token = create_test_scim_token(&state.store, "test-nul-local", "test-org").await;
+
+    let body = serde_json::json!({
+        "schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"],
+        "userName": "nul\u{0}user@test-org.example.com"
+    });
+    let (status, body) = http_post_json(
+        &app,
+        "/scim/v2/Users",
+        &body.to_string(),
+        &[("Authorization", &format!("Bearer {token}"))],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "NUL in userName local part must be a 400, not a 500: {body}"
+    );
+    let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(error["scimType"], "invalidValue");
+}
+
+#[tokio::test]
+async fn test_scim_create_user_rejects_nul_in_username_domain() {
+    // A NUL in the domain fails Email::domain_of, so the userName shape
+    // check rejects it before any database write.
+    let (app, state) = test_app().await;
+    let token = create_test_scim_token(&state.store, "test-nul-domain", "test-org").await;
+
+    let body = serde_json::json!({
+        "schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"],
+        "userName": "user@test-org.exam\u{0}ple.com"
+    });
+    let (status, body) = http_post_json(
+        &app,
+        "/scim/v2/Users",
+        &body.to_string(),
+        &[("Authorization", &format!("Bearer {token}"))],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "NUL in userName domain must be a 400, not a 500: {body}"
+    );
+    let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(error["scimType"], "invalidValue");
+}
+
+#[tokio::test]
+async fn test_scim_patch_user_rejects_nul_external_id() {
+    // PATCH pulls externalId out of a raw serde_json::Value (no DTO
+    // validation), so the rejection must come from the store guard.
+    let (app, state) = test_app().await;
+    let token = create_test_scim_token(&state.store, "test-nul-patch", "test-org").await;
+    let auth_header = format!("Bearer {token}");
+
+    let (status, body) = http_post_json(
+        &app,
+        "/scim/v2/Users",
+        r#"{"schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"], "userName": "nul-patch@test-org.example.com"}"#,
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "setup create failed: {body}");
+    let created: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let user_id = created["id"].as_str().expect("user id");
+
+    let patch = serde_json::json!({
+        "schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
+        "Operations": [{"op": "replace", "path": "externalId", "value": "ext\u{0}42"}]
+    });
+    let (status, body) = http_request(
+        &app,
+        "PATCH",
+        &format!("/scim/v2/Users/{user_id}"),
+        Some(patch.to_string()),
+        &[
+            ("Content-Type", "application/json"),
+            ("Authorization", &auth_header),
+        ],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "NUL in PATCHed externalId must be a 400, not a 500: {body}"
+    );
+    let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(error["scimType"], "invalidValue");
+    assert!(
+        error["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("external_id"),
+        "detail must name the field: {body}"
+    );
+}
+
+#[tokio::test]
+async fn test_scim_create_group_rejects_nul_display_name() {
+    let (app, state) = test_app().await;
+    let token = create_test_scim_token(&state.store, "test-nul-group", "test-org").await;
+
+    let body = serde_json::json!({
+        "schemas": ["urn:ietf:params:scim:schemas:core:2.0:Group"],
+        "displayName": "Sal\u{0}es"
+    });
+    let (status, body) = http_post_json(
+        &app,
+        "/scim/v2/Groups",
+        &body.to_string(),
+        &[("Authorization", &format!("Bearer {token}"))],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "NUL in displayName must be a 400, not a 500: {body}"
+    );
+    let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(error["scimType"], "invalidValue");
+    assert!(
+        error["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("display_name"),
+        "detail must name the field: {body}"
+    );
+}

@@ -81,15 +81,35 @@ enum DocumentIndexes {
     IndexValue,
 }
 
+/// A document index value contained a NUL byte (0x00).
+///
+/// Postgres and Aurora DSQL reject 0x00 in `text` columns while SQLite
+/// stores it, so the store refuses it up front to behave identically on
+/// every backend and crypto mode. Client-facing surfaces downcast this
+/// from the `anyhow` chain to return a 4xx naming the field.
+#[derive(Debug, thiserror::Error)]
+#[error("index field `{field}` contains a NUL (0x00) character")]
+pub struct InvalidIndexValue {
+    /// The index field name the rejected value was destined for.
+    pub field: &'static str,
+}
+
 /// Build an INSERT statement for a single document index entry.
 ///
 /// Used by both `DocumentStore` and `StoreTransaction` write paths to avoid
 /// duplicating the index insertion logic.
+///
+/// # Errors
+///
+/// Returns [`InvalidIndexValue`] if the entry's value contains a NUL byte.
 fn build_index_insert(
     crypto: &dyn DocumentCrypto,
     doc_id: &str,
     entry: &super::document_type::IndexEntry,
 ) -> Result<sea_query::InsertStatement> {
+    if entry.value.contains('\0') {
+        return Err(InvalidIndexValue { field: entry.field }.into());
+    }
     let index_id = uuid::Uuid::now_v7().to_string();
     let hashed_value = crypto.hmac_index(&entry.value);
     let stmt = Query::insert()
@@ -253,6 +273,12 @@ fn index_value_condition<T: sea_query::IntoIden>(
     table: T,
     value: &str,
 ) -> sea_query::SimpleExpr {
+    // A NUL byte can never match: writes reject it, and binding it as a
+    // text parameter is itself a Postgres/DSQL error. Return a constant
+    // false so lookups degrade to not-found instead of a backend error.
+    if value.contains('\0') {
+        return Expr::val(1).eq(0);
+    }
     let hashed = crypto.hmac_index(value);
     let col = Expr::col((table.into_iden(), DocumentIndexes::IndexValue));
     if hashed == value {
