@@ -17,11 +17,12 @@ targets = [
 
 [advisories]
 ignore = [
-    # smartstring is unmaintained (repo archived 2026-05-03), pulled in
-    # transitively by `rhai` v1.25.1 → `amzn-dogwood-language`. No safe
-    # upgrade is available upstream; the advisory is informational only
-    # (no known vulnerability). Re-evaluate when rhai drops the dependency
-    # or switches to a maintained alternative (compact_str / smol_str).
+    # smartstring is unmaintained (repository archived 2026-05-03), reached
+    # transitively through `rhai` -> `amzn-dogwood-language`. No safe upgrade
+    # exists and the advisory reports no vulnerability. The policy engine
+    # registers no Rhai providers, so the scripting surface that pulls this in
+    # is not exercised at runtime. Re-evaluate when Dogwood's rhai dependency
+    # moves to compact_str/smol_str.
     # https://rustsec.org/advisories/RUSTSEC-2026-0249
     "RUSTSEC-2026-0249",
 ]

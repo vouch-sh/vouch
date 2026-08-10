@@ -114,9 +114,18 @@ async fn test_device_auth_authorization_flow() {
     assert_eq!(request.status, DeviceAuthStatus::Pending);
 
     // Authorize the request
-    authorize_device_auth(&store, &id, &user_id, &user.email, &auth_id)
-        .await
-        .expect("Failed to authorize");
+    authorize_device_auth(
+        &store,
+        AuthorizeDeviceAuthParams {
+            id: &id,
+            user_id: &user_id,
+            user_email: &user.email,
+            authenticator_id: &auth_id,
+            hardware_verified: true,
+        },
+    )
+    .await
+    .expect("Failed to authorize");
 
     // Verify status changed to authorized
     let request = get_device_auth_by_id(&store, &id)
@@ -213,9 +222,18 @@ async fn test_try_consume_device_auth_authorized_succeeds() {
     .await
     .expect("auth");
 
-    authorize_device_auth(&store, &id, &user_id, "consume@example.com", &auth_id)
-        .await
-        .expect("authorize");
+    authorize_device_auth(
+        &store,
+        AuthorizeDeviceAuthParams {
+            id: &id,
+            user_id: &user_id,
+            user_email: "consume@example.com",
+            authenticator_id: &auth_id,
+            hardware_verified: true,
+        },
+    )
+    .await
+    .expect("authorize");
 
     // Consume — claim binding satisfies #[must_use].
     let _claim = try_consume_device_auth(&store, device_code_hash)
@@ -266,9 +284,18 @@ async fn test_try_consume_device_auth_already_consumed_returns_false() {
     .await
     .expect("auth");
 
-    authorize_device_auth(&store, &id, &user_id, "double@example.com", &auth_id)
-        .await
-        .expect("authorize");
+    authorize_device_auth(
+        &store,
+        AuthorizeDeviceAuthParams {
+            id: &id,
+            user_id: &user_id,
+            user_email: "double@example.com",
+            authenticator_id: &auth_id,
+            hardware_verified: true,
+        },
+    )
+    .await
+    .expect("authorize");
 
     let _first = try_consume_device_auth(&store, device_code_hash)
         .await
@@ -335,9 +362,18 @@ async fn test_try_consume_device_auth_expired_returns_false() {
     .await
     .expect("auth");
 
-    authorize_device_auth(&store, &id, &user_id, "expired@example.com", &auth_id)
-        .await
-        .expect("authorize");
+    authorize_device_auth(
+        &store,
+        AuthorizeDeviceAuthParams {
+            id: &id,
+            user_id: &user_id,
+            user_email: "expired@example.com",
+            authenticator_id: &auth_id,
+            hardware_verified: true,
+        },
+    )
+    .await
+    .expect("authorize");
 
     let consumed = try_consume_device_auth(&store, device_code_hash).await;
     assert!(
@@ -400,11 +436,30 @@ async fn test_double_authorization_should_fail() {
     .await
     .expect("create");
 
-    authorize_device_auth(&store, &id, "user_a", "a@example.com", "auth_a")
-        .await
-        .expect("first authorization should succeed");
+    authorize_device_auth(
+        &store,
+        AuthorizeDeviceAuthParams {
+            id: &id,
+            user_id: "user_a",
+            user_email: "a@example.com",
+            authenticator_id: "auth_a",
+            hardware_verified: true,
+        },
+    )
+    .await
+    .expect("first authorization should succeed");
 
-    let result = authorize_device_auth(&store, &id, "user_b", "b@example.com", "auth_b").await;
+    let result = authorize_device_auth(
+        &store,
+        AuthorizeDeviceAuthParams {
+            id: &id,
+            user_id: "user_b",
+            user_email: "b@example.com",
+            authenticator_id: "auth_b",
+            hardware_verified: true,
+        },
+    )
+    .await;
     assert!(result.is_err(), "second authorization should fail");
 
     // Original user must be preserved
@@ -433,7 +488,17 @@ async fn test_authorize_after_deny_should_fail() {
 
     deny_device_auth(&store, &id).await.expect("deny succeeds");
 
-    let result = authorize_device_auth(&store, &id, "user_a", "a@example.com", "auth_a").await;
+    let result = authorize_device_auth(
+        &store,
+        AuthorizeDeviceAuthParams {
+            id: &id,
+            user_id: "user_a",
+            user_email: "a@example.com",
+            authenticator_id: "auth_a",
+            hardware_verified: true,
+        },
+    )
+    .await;
     assert!(result.is_err(), "authorize after deny should fail");
 
     let req = get_device_auth_by_id(&store, &id)
@@ -459,9 +524,18 @@ async fn test_deny_after_authorize_should_fail() {
     .await
     .expect("create");
 
-    authorize_device_auth(&store, &id, "user_a", "a@example.com", "auth_a")
-        .await
-        .expect("authorize succeeds");
+    authorize_device_auth(
+        &store,
+        AuthorizeDeviceAuthParams {
+            id: &id,
+            user_id: "user_a",
+            user_email: "a@example.com",
+            authenticator_id: "auth_a",
+            hardware_verified: true,
+        },
+    )
+    .await
+    .expect("authorize succeeds");
 
     let result = deny_device_auth(&store, &id).await;
     assert!(result.is_err(), "deny after authorize should fail");

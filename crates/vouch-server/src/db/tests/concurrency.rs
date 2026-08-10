@@ -86,9 +86,18 @@ async fn test_device_auth_consume_concurrent() {
     )
     .await
     .expect("create authenticator");
-    authorize_device_auth(&store, &id, &user_id, "race-device@example.com", &auth_id)
-        .await
-        .expect("authorize");
+    authorize_device_auth(
+        &store,
+        AuthorizeDeviceAuthParams {
+            id: &id,
+            user_id: &user_id,
+            user_email: "race-device@example.com",
+            authenticator_id: &auth_id,
+            hardware_verified: true,
+        },
+    )
+    .await
+    .expect("authorize");
 
     let store_a = store.clone();
     let store_b = store.clone();
@@ -249,20 +258,26 @@ async fn test_authorize_device_auth_concurrent() {
         async move {
             authorize_device_auth(
                 &store_a,
-                &id_a,
-                &uid_a,
-                "race-authorize@example.com",
-                &aid_a,
+                AuthorizeDeviceAuthParams {
+                    id: &id_a,
+                    user_id: &uid_a,
+                    user_email: "race-authorize@example.com",
+                    authenticator_id: &aid_a,
+                    hardware_verified: true,
+                },
             )
             .await
         },
         async move {
             authorize_device_auth(
                 &store_b,
-                &id_b,
-                &uid_b,
-                "race-authorize@example.com",
-                &aid_b,
+                AuthorizeDeviceAuthParams {
+                    id: &id_b,
+                    user_id: &uid_b,
+                    user_email: "race-authorize@example.com",
+                    authenticator_id: &aid_b,
+                    hardware_verified: true,
+                },
             )
             .await
         },
@@ -1020,10 +1035,13 @@ async fn test_delete_authenticator_clears_device_auth_reference() {
     // Authorize to bind the authenticator_id.
     authorize_device_auth(
         &store,
-        &request_id,
-        &user_id,
-        "cascade@example.com",
-        &auth_id,
+        AuthorizeDeviceAuthParams {
+            id: &request_id,
+            user_id: &user_id,
+            user_email: "cascade@example.com",
+            authenticator_id: &auth_id,
+            hardware_verified: true,
+        },
     )
     .await
     .expect("authorize device auth");

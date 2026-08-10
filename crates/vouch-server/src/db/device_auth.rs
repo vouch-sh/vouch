@@ -23,6 +23,10 @@ pub struct DeviceAuthRequest {
     pub user_id: Option<String>,
     pub user_email: Option<String>,
     pub authenticator_id: Option<String>,
+    /// Whether the approving browser session completed a WebAuthn ceremony.
+    /// The device-code grant issues its token with this as the
+    /// `hardware_verified` claim.
+    pub hardware_verified: bool,
     pub expires_at: Timestamp,
     pub interval_seconds: i32,
     pub last_poll_at: Option<Timestamp>,
@@ -40,6 +44,7 @@ impl From<Document<DeviceAuthRequestDoc>> for DeviceAuthRequest {
             user_id: doc.data.user_id,
             user_email: doc.data.user_email,
             authenticator_id: doc.data.authenticator_id,
+            hardware_verified: doc.data.hardware_verified,
             expires_at: doc.data.expires_at,
             interval_seconds: doc.data.interval_seconds,
             last_poll_at: doc.data.last_poll_at,
@@ -120,6 +125,7 @@ pub async fn create_device_auth_request(
         user_id: None,
         user_email: None,
         authenticator_id: None,
+        hardware_verified: false,
         expires_at,
         interval_seconds,
         last_poll_at: None,
@@ -164,6 +170,20 @@ pub(crate) async fn get_device_auth_by_id(
     Ok(doc.map(DeviceAuthRequest::from))
 }
 
+/// Inputs for [`authorize_device_auth`].
+pub struct AuthorizeDeviceAuthParams<'a> {
+    /// ID of the pending device authorization request.
+    pub id: &'a str,
+    pub user_id: &'a str,
+    pub user_email: &'a str,
+    /// Authenticator that approved the request.
+    pub authenticator_id: &'a str,
+    /// Whether the approving browser session completed a WebAuthn ceremony.
+    /// Recorded on the request so the device-code grant issues its token with
+    /// a `hardware_verified` claim that reflects what actually happened.
+    pub hardware_verified: bool,
+}
+
 /// Authorize a device auth request.
 ///
 /// Uses `compare_and_update` (OCC) so two concurrent authorization
@@ -173,11 +193,16 @@ pub(crate) async fn get_device_auth_by_id(
 /// each clobbering the other's user attribution.
 pub async fn authorize_device_auth(
     store: &DocumentStore,
-    id: &str,
-    user_id: &str,
-    user_email: &str,
-    authenticator_id: &str,
+    params: AuthorizeDeviceAuthParams<'_>,
 ) -> Result<()> {
+    let AuthorizeDeviceAuthParams {
+        id,
+        user_id,
+        user_email,
+        authenticator_id,
+        hardware_verified,
+    } = params;
+
     if id.is_empty() {
         bail!("authorize_device_auth called with empty id");
     }
@@ -206,6 +231,7 @@ pub async fn authorize_device_auth(
     data.user_id = Some(user_id.to_string());
     data.user_email = Some(user_email.to_string());
     data.authenticator_id = Some(authenticator_id.to_string());
+    data.hardware_verified = hardware_verified;
     let won = store.compare_and_update(id, version, &data).await?;
     if !won {
         bail!(

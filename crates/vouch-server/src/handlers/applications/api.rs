@@ -6,14 +6,7 @@
 
 use crate::AppState;
 use crate::db::{self, AccessScope, OAuthEventType, UpdateOAuthClientParams};
-use axum::extract::OriginalUri;
-use axum::http::Method;
-use axum::{
-    Json,
-    extract::State,
-    http::{HeaderMap, StatusCode},
-};
-use axum_extra::extract::cookie::CookieJar;
+use axum::{Json, extract::State, http::StatusCode};
 use std::sync::Arc;
 
 use super::generate_client_secret;
@@ -28,31 +21,16 @@ use super::validate::{
     validate_update_format,
 };
 use crate::error::ServiceError;
-use crate::handlers::extractors::OptionalClientCert;
 use crate::handlers::hash_token;
-use crate::handlers::session::extract_resource_token;
+use crate::handlers::session::AuthenticatedToken;
 use crate::handlers::{ValidPath, ValidUuid};
 
 /// List user's applications (API).
 /// GET /api/v1/applications
 pub(crate) async fn list_applications_api(
-    method: Method,
-    uri: OriginalUri,
-    headers: HeaderMap,
-    jar: CookieJar,
     State(state): State<Arc<AppState>>,
-    client_cert: OptionalClientCert,
+    AuthenticatedToken(token): AuthenticatedToken,
 ) -> Result<Json<ListApplicationsResponse>, ServiceError> {
-    let token = extract_resource_token(
-        &state,
-        &headers,
-        &jar,
-        method.as_str(),
-        uri.path(),
-        client_cert.0.as_ref(),
-    )
-    .await?;
-
     let applications = db::get_oauth_clients_for_user(&state.store, &token.sub)
         .await
         .map_err(|e| {
@@ -96,12 +74,8 @@ async fn load_active_user_for_scope(
 /// Create a new application (API).
 /// POST /api/v1/applications
 pub(crate) async fn create_application_api(
-    method: Method,
-    uri: OriginalUri,
-    headers: HeaderMap,
-    jar: CookieJar,
     State(state): State<Arc<AppState>>,
-    client_cert: OptionalClientCert,
+    token: Result<AuthenticatedToken, ServiceError>,
     Json(req): Json<CreateApplicationRequest>,
 ) -> Result<Json<CreateApplicationResponse>, ServiceError> {
     // ── Pure format validation first — no DB cost for malformed requests ──
@@ -124,15 +98,10 @@ pub(crate) async fn create_application_api(
     let is_fapi = validated.is_fapi;
 
     // ── Authentication — validated input is good, now check credentials ──
-    let token = extract_resource_token(
-        &state,
-        &headers,
-        &jar,
-        method.as_str(),
-        uri.path(),
-        client_cert.0.as_ref(),
-    )
-    .await?;
+    // Deferred so a malformed body still answers 400 rather than 401; an
+    // unauthenticated request costs no DB lookup either way, because token
+    // extraction fails before touching the store when no credential is sent.
+    let AuthenticatedToken(token) = token?;
 
     // Parse access scope (default to personal if not provided)
     let access_scope = req
@@ -236,24 +205,10 @@ pub(crate) async fn create_application_api(
 /// Get application details (API).
 /// GET /api/v1/applications/:id
 pub(crate) async fn get_application_api(
-    method: Method,
-    uri: OriginalUri,
-    headers: HeaderMap,
-    jar: CookieJar,
     State(state): State<Arc<AppState>>,
-    client_cert: OptionalClientCert,
+    AuthenticatedToken(token): AuthenticatedToken,
     ValidPath(app_id): ValidPath<ValidUuid>,
 ) -> Result<Json<ApplicationResponse>, ServiceError> {
-    let token = extract_resource_token(
-        &state,
-        &headers,
-        &jar,
-        method.as_str(),
-        uri.path(),
-        client_cert.0.as_ref(),
-    )
-    .await?;
-
     let client = db::get_oauth_client_by_id(&state.store, &app_id)
         .await
         .map_err(|e| {
@@ -282,17 +237,9 @@ pub(crate) async fn get_application_api(
 
 /// Update an application (API).
 /// PATCH /api/v1/applications/:id
-#[expect(
-    clippy::too_many_arguments,
-    reason = "axum handler signature: extractors are positional parameters"
-)]
 pub(crate) async fn update_application_api(
-    method: Method,
-    uri: OriginalUri,
-    headers: HeaderMap,
-    jar: CookieJar,
     State(state): State<Arc<AppState>>,
-    client_cert: OptionalClientCert,
+    token: Result<AuthenticatedToken, ServiceError>,
     ValidPath(app_id): ValidPath<ValidUuid>,
     Json(req): Json<UpdateApplicationRequest>,
 ) -> Result<Json<ApplicationResponse>, ServiceError> {
@@ -308,15 +255,10 @@ pub(crate) async fn update_application_api(
     })?;
 
     // ── Authentication — validated input is good, now check credentials ──
-    let token = extract_resource_token(
-        &state,
-        &headers,
-        &jar,
-        method.as_str(),
-        uri.path(),
-        client_cert.0.as_ref(),
-    )
-    .await?;
+    // Deferred so a malformed body still answers 400 rather than 401; an
+    // unauthenticated request costs no DB lookup either way, because token
+    // extraction fails before touching the store when no credential is sent.
+    let AuthenticatedToken(token) = token?;
 
     // Get existing application
     let client = db::get_oauth_client_by_id(&state.store, &app_id)
@@ -442,24 +384,10 @@ pub(crate) async fn update_application_api(
 /// Delete an application (API).
 /// DELETE /api/v1/applications/:id
 pub(crate) async fn delete_application_api(
-    method: Method,
-    uri: OriginalUri,
-    headers: HeaderMap,
-    jar: CookieJar,
     State(state): State<Arc<AppState>>,
-    client_cert: OptionalClientCert,
+    AuthenticatedToken(token): AuthenticatedToken,
     ValidPath(app_id): ValidPath<ValidUuid>,
 ) -> Result<StatusCode, ServiceError> {
-    let token = extract_resource_token(
-        &state,
-        &headers,
-        &jar,
-        method.as_str(),
-        uri.path(),
-        client_cert.0.as_ref(),
-    )
-    .await?;
-
     // Verify ownership
     let client = db::get_oauth_client_by_id(&state.store, &app_id)
         .await
@@ -501,30 +429,12 @@ pub(crate) async fn delete_application_api(
 
 /// Add a new client secret (API).
 /// POST /api/v1/applications/:id/secrets
-#[expect(
-    clippy::too_many_arguments,
-    reason = "axum handler signature: extractors are positional parameters"
-)]
 pub(crate) async fn add_secret_api(
-    method: Method,
-    uri: OriginalUri,
-    headers: HeaderMap,
-    jar: CookieJar,
     State(state): State<Arc<AppState>>,
-    client_cert: OptionalClientCert,
+    AuthenticatedToken(token): AuthenticatedToken,
     ValidPath(app_id): ValidPath<ValidUuid>,
     Json(req): Json<AddSecretRequest>,
 ) -> Result<(StatusCode, Json<AddSecretResponse>), ServiceError> {
-    let token = extract_resource_token(
-        &state,
-        &headers,
-        &jar,
-        method.as_str(),
-        uri.path(),
-        client_cert.0.as_ref(),
-    )
-    .await?;
-
     let client = db::get_oauth_client_by_id(&state.store, &app_id)
         .await
         .map_err(|e| {
@@ -611,24 +521,10 @@ pub(crate) async fn add_secret_api(
 /// List secrets for an application (API).
 /// GET /api/v1/applications/:id/secrets
 pub(crate) async fn list_secrets_api(
-    method: Method,
-    uri: OriginalUri,
-    headers: HeaderMap,
-    jar: CookieJar,
     State(state): State<Arc<AppState>>,
-    client_cert: OptionalClientCert,
+    AuthenticatedToken(token): AuthenticatedToken,
     ValidPath(app_id): ValidPath<ValidUuid>,
 ) -> Result<Json<ListSecretsResponse>, ServiceError> {
-    let token = extract_resource_token(
-        &state,
-        &headers,
-        &jar,
-        method.as_str(),
-        uri.path(),
-        client_cert.0.as_ref(),
-    )
-    .await?;
-
     let client = db::get_oauth_client_by_id(&state.store, &app_id)
         .await
         .map_err(|e| {
@@ -682,24 +578,10 @@ pub(crate) async fn list_secrets_api(
 /// Delete (revoke) a secret (API).
 /// DELETE /api/v1/applications/:id/secrets/:secret_id
 pub(crate) async fn delete_secret_api(
-    method: Method,
-    uri: OriginalUri,
-    headers: HeaderMap,
-    jar: CookieJar,
     State(state): State<Arc<AppState>>,
-    client_cert: OptionalClientCert,
+    AuthenticatedToken(token): AuthenticatedToken,
     ValidPath((app_id, secret_id)): ValidPath<(ValidUuid, ValidUuid)>,
 ) -> Result<StatusCode, ServiceError> {
-    let token = extract_resource_token(
-        &state,
-        &headers,
-        &jar,
-        method.as_str(),
-        uri.path(),
-        client_cert.0.as_ref(),
-    )
-    .await?;
-
     let client = db::get_oauth_client_by_id(&state.store, &app_id)
         .await
         .map_err(|e| {
@@ -806,24 +688,10 @@ pub(crate) async fn delete_secret_api(
 /// Revoke all tokens for an application (API).
 /// `POST /api/v1/applications/:id/revoke`
 pub(crate) async fn revoke_tokens_api(
-    method: Method,
-    uri: OriginalUri,
-    headers: HeaderMap,
-    jar: CookieJar,
     State(state): State<Arc<AppState>>,
-    client_cert: OptionalClientCert,
+    AuthenticatedToken(token): AuthenticatedToken,
     ValidPath(app_id): ValidPath<ValidUuid>,
 ) -> Result<StatusCode, ServiceError> {
-    let token = extract_resource_token(
-        &state,
-        &headers,
-        &jar,
-        method.as_str(),
-        uri.path(),
-        client_cert.0.as_ref(),
-    )
-    .await?;
-
     // Verify ownership
     let client = db::get_oauth_client_by_id(&state.store, &app_id)
         .await

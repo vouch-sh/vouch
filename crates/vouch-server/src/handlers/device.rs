@@ -411,7 +411,14 @@ pub(crate) async fn device_token(
                     act: None,
                     audience: None,
                     auth_time: Some(now_secs),
-                    hardware_verification: crate::services::auth::HardwareVerification::Verified,
+                    // Mirrors how the browser approved this request, so the
+                    // claim the credential endpoints gate on reflects whether
+                    // the authenticator was actually exercised.
+                    hardware_verification: if request.hardware_verified {
+                        crate::services::auth::HardwareVerification::Verified
+                    } else {
+                        crate::services::auth::HardwareVerification::NotVerified
+                    },
                     session_purpose: crate::db::SessionPurpose::OAuthAccessToken,
                     authorization_details: None,
                     hardware_aaguid: hardware_aaguid.as_deref(),
@@ -805,9 +812,18 @@ mod tests {
         let user = create_test_user(&state.store, "device-success@example.com").await;
         let auth_id = create_test_authenticator(&state.store, &user.id).await;
 
-        crate::db::authorize_device_auth(&state.store, &id, &user.id, &user.email, &auth_id)
-            .await
-            .expect("Failed to authorize device");
+        crate::db::authorize_device_auth(
+            &state.store,
+            crate::db::AuthorizeDeviceAuthParams {
+                id: &id,
+                user_id: &user.id,
+                user_email: &user.email,
+                authenticator_id: &auth_id,
+                hardware_verified: true,
+            },
+        )
+        .await
+        .expect("Failed to authorize device");
 
         // Poll for token
         let (status, body) = http_post_form(
@@ -1034,9 +1050,18 @@ mod tests {
         let user = create_test_user(&state.store, "single-use@example.com").await;
         let auth_id = create_test_authenticator(&state.store, &user.id).await;
 
-        crate::db::authorize_device_auth(&state.store, &id, &user.id, &user.email, &auth_id)
-            .await
-            .expect("authorize device");
+        crate::db::authorize_device_auth(
+            &state.store,
+            crate::db::AuthorizeDeviceAuthParams {
+                id: &id,
+                user_id: &user.id,
+                user_email: &user.email,
+                authenticator_id: &auth_id,
+                hardware_verified: true,
+            },
+        )
+        .await
+        .expect("authorize device");
 
         // First poll — should succeed
         let body = format!(
@@ -1085,9 +1110,18 @@ mod tests {
         let auth_id = create_test_authenticator(&state.store, &user.id).await;
 
         // Authorize then consume
-        crate::db::authorize_device_auth(&state.store, &id, &user.id, &user.email, &auth_id)
-            .await
-            .expect("authorize");
+        crate::db::authorize_device_auth(
+            &state.store,
+            crate::db::AuthorizeDeviceAuthParams {
+                id: &id,
+                user_id: &user.id,
+                user_email: &user.email,
+                authenticator_id: &auth_id,
+                hardware_verified: true,
+            },
+        )
+        .await
+        .expect("authorize");
 
         let _claim = crate::db::try_consume_device_auth(&state.store, &device_code_hash)
             .await
@@ -1135,9 +1169,18 @@ mod tests {
         let user = create_test_user(&state.store, "revoke@example.com").await;
         let auth_id = create_test_authenticator(&state.store, &user.id).await;
 
-        crate::db::authorize_device_auth(&state.store, &id, &user.id, &user.email, &auth_id)
-            .await
-            .expect("authorize");
+        crate::db::authorize_device_auth(
+            &state.store,
+            crate::db::AuthorizeDeviceAuthParams {
+                id: &id,
+                user_id: &user.id,
+                user_email: &user.email,
+                authenticator_id: &auth_id,
+                hardware_verified: true,
+            },
+        )
+        .await
+        .expect("authorize");
 
         // First poll — get a real token
         let body = format!(
@@ -1268,9 +1311,18 @@ mod tests {
         let user = create_test_user(&state.store, &format!("{setup_label}@example.com")).await;
         let auth_id = create_test_authenticator(&state.store, &user.id).await;
 
-        crate::db::authorize_device_auth(&state.store, &id, &user.id, &user.email, &auth_id)
-            .await
-            .expect("authorize device");
+        crate::db::authorize_device_auth(
+            &state.store,
+            crate::db::AuthorizeDeviceAuthParams {
+                id: &id,
+                user_id: &user.id,
+                user_email: &user.email,
+                authenticator_id: &auth_id,
+                hardware_verified: true,
+            },
+        )
+        .await
+        .expect("authorize device");
 
         // Create a pre-existing OAuth session for the user. Its survival
         // after a race-loser AlreadyConsumed is the regression we test for.
@@ -1415,9 +1467,18 @@ mod tests {
 
         let user = create_test_user(&state.store, "device-deactivated@example.com").await;
         let auth_id = create_test_authenticator(&state.store, &user.id).await;
-        crate::db::authorize_device_auth(&state.store, &id, &user.id, &user.email, &auth_id)
-            .await
-            .expect("authorize device");
+        crate::db::authorize_device_auth(
+            &state.store,
+            crate::db::AuthorizeDeviceAuthParams {
+                id: &id,
+                user_id: &user.id,
+                user_email: &user.email,
+                authenticator_id: &auth_id,
+                hardware_verified: true,
+            },
+        )
+        .await
+        .expect("authorize device");
 
         crate::db::update_user_active_status(&state.store, &user.id, false)
             .await
@@ -1438,6 +1499,127 @@ mod tests {
         assert!(
             !resp.contains("access_token"),
             "no token may be issued: {resp}"
+        );
+    }
+
+    /// Exchange a device code whose authorization recorded
+    /// `hardware_verified`, and return the issued access token.
+    async fn device_token_for_approval(
+        label: &str,
+        hardware_verified: bool,
+    ) -> (axum::Router, String) {
+        let (app, state) = test_app().await;
+
+        let device_code = format!("test_hwv_{label}");
+        let expires_at = Timestamp::now()
+            .checked_add(Span::new().hours(1))
+            .expect("expiry");
+        let id = crate::db::create_device_auth_request(
+            &state.store,
+            &hash_device_code(&device_code),
+            "HWV-CODE",
+            None,
+            expires_at,
+            0,
+        )
+        .await
+        .expect("create device auth");
+
+        let user = create_test_user(&state.store, &format!("{label}@example.com")).await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        crate::db::authorize_device_auth(
+            &state.store,
+            crate::db::AuthorizeDeviceAuthParams {
+                id: &id,
+                user_id: &user.id,
+                user_email: &user.email,
+                authenticator_id: &auth_id,
+                hardware_verified,
+            },
+        )
+        .await
+        .expect("authorize device");
+
+        let body = format!(
+            "grant_type=urn:ietf:params:oauth:grant-type:\
+             device_code&device_code={device_code}"
+        );
+        let (status, resp) = http_post_form(&app, "/oauth/token", &body, &[]).await;
+        assert_eq!(status, StatusCode::OK, "device grant should issue: {resp}");
+        let json: serde_json::Value = serde_json::from_str(&resp).expect("Valid JSON");
+        let token = json["access_token"]
+            .as_str()
+            .expect("access_token")
+            .to_string();
+
+        (app, token)
+    }
+
+    /// A device authorization approved without a WebAuthn ceremony — what an
+    /// upstream-IdP sign-in alone produces — must not mint a token that clears
+    /// the credential endpoints' hardware gate.
+    #[tokio::test]
+    async fn test_device_grant_without_ceremony_cannot_reach_credentials() {
+        let (app, token) = device_token_for_approval("unverified", false).await;
+        let auth = format!("Bearer {token}");
+
+        // Every credential endpoint, since the requirement rides on
+        // `HardwareVerifiedToken` rather than a per-handler check.
+        let (status, body) = http_get(
+            &app,
+            "/v1/credentials/aws/token",
+            &[("Authorization", &auth)],
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "aws: {body}");
+        let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+        assert_eq!(error["code"], "hardware_required");
+
+        let (status, body) = http_post_json(
+            &app,
+            "/v1/credentials/ssh",
+            r#"{"public_key":"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA test"}"#,
+            &[("Authorization", &auth)],
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "ssh: {body}");
+        let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+        assert_eq!(error["code"], "hardware_required");
+
+        let (status, body) = http_post_json(
+            &app,
+            "/v1/credentials/github/token",
+            r#"{"repositories":["owner/repo"]}"#,
+            &[("Authorization", &auth)],
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "github: {body}");
+        let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+        assert_eq!(error["code"], "hardware_required");
+    }
+
+    /// The companion case: an approval that did complete a ceremony still
+    /// clears the hardware gate. Reaching the issuer's missing RSA key proves
+    /// the request got past it — this app has no signing key configured.
+    #[tokio::test]
+    async fn test_device_grant_with_ceremony_passes_hardware_gate() {
+        let (app, token) = device_token_for_approval("verified", true).await;
+
+        let (status, body) = http_get(
+            &app,
+            "/v1/credentials/aws/token",
+            &[("Authorization", &format!("Bearer {token}"))],
+        )
+        .await;
+
+        assert_ne!(
+            status,
+            StatusCode::FORBIDDEN,
+            "hardware-verified approval must clear the gate: {body}"
+        );
+        assert!(
+            !body.contains("hardware_required"),
+            "gate must not reject a verified approval: {body}"
         );
     }
 }
