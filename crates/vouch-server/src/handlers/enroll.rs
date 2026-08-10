@@ -858,67 +858,58 @@ pub(crate) async fn complete_enrollment_after_identity(
 
     // Handle CLI-initiated device auth flow. Direct browser sign-ins carry
     // no device_auth_id in the OIDC state (see direct_enroll_start).
-    if let Some(device_auth_id) = stored_state.device_auth_id.as_deref() {
-        if let Some(ref auth_id) = authenticator_id {
-            // User already has a registered key — authorize the device auth
-            // immediately so the CLI stops polling.
-            if let Err(e) = db::authorize_device_auth(
-                &state.store,
-                device_auth_id,
-                &user.id,
-                &user.email,
-                auth_id,
-            )
-            .await
-            {
-                // Surface the failure instead of redirecting to the keys page
-                // as though sign-in succeeded: the device auth was never
-                // approved, so the waiting CLI would poll until it timed out
-                // with nothing on screen to explain why.
-                tracing::error!("Failed to authorize device auth: {}", e);
-                return ErrorTemplate {
-                    title: Tr::new("error-heading").to_string(),
-                    message: Tr::new("enroll-error-device-auth-approve-failed").to_string(),
-                    back_url: None,
-                }
-                .into_response();
-            }
+    //
+    // Either way the CLI is released by a key ceremony, never by the IdP
+    // sign-in alone: that authenticates the person, not the hardware, so
+    // approving here would hand out a credential-capable token for a key
+    // nobody touched.
+    let mut require_assertion = false;
 
-            let event = db::AuthEventParams {
-                user_id: user.id.clone(),
-                event_type: db::AuthEventType::DeviceAuthApproved,
-                authenticator_id: Some(auth_id.clone()),
-                success: true,
-                client: client_info,
-                ..Default::default()
-            };
-            db::spawn_audit_event(&state.audit, event, Some(user.email.clone()));
-        } else {
-            // No key yet — store the device_auth_id in an enrollment session
-            // so browser_register_complete can authorize it after WebAuthn registration.
-            if let Err(e) = db::create_enrollment_session(
-                &state.store,
-                &user.id,
-                &user.email,
-                &token_hash,
-                Some(device_auth_id),
-                expires,
-            )
+    if let Some(device_auth_id) = stored_state.device_auth_id.as_deref() {
+        // Refuse before the key ceremony if the request the CLI is waiting on
+        // is gone or already settled — the row expired and was reclaimed, or
+        // the callback was submitted twice. Continuing would walk the user
+        // through a touch that could never release the CLI (#746).
+        let pending = db::get_device_auth_by_id(&state.store, device_auth_id)
             .await
-            {
-                // Without this row browser_register_complete cannot authorize
-                // the device auth after WebAuthn registration, so continuing
-                // would walk the user through enrolling a key that could never
-                // release the waiting CLI.
-                tracing::error!("Failed to create enrollment session for CLI: {}", e);
-                return ErrorTemplate {
-                    title: Tr::new("error-heading").to_string(),
-                    message: Tr::new("enroll-error-session-create-failed").to_string(),
-                    back_url: None,
-                }
-                .into_response();
+            .ok()
+            .flatten()
+            .is_some_and(|r| r.status == db::DeviceAuthStatus::Pending);
+        if !pending {
+            tracing::error!("Device auth '{device_auth_id}' is missing or already settled");
+            return ErrorTemplate {
+                title: Tr::new("error-heading").to_string(),
+                message: Tr::new("enroll-error-device-auth-approve-failed").to_string(),
+                back_url: None,
             }
+            .into_response();
         }
+
+        // Carry the device_auth_id in an enrollment session so whichever
+        // ceremony follows can authorize it: browser_register_complete after
+        // a first-key registration, browser_login_complete after an assertion.
+        if let Err(e) = db::create_enrollment_session(
+            &state.store,
+            &user.id,
+            &user.email,
+            &token_hash,
+            Some(device_auth_id),
+            expires,
+        )
+        .await
+        {
+            // Without this row neither ceremony can authorize the device
+            // auth, so continuing would walk the user through a key
+            // ceremony that could never release the waiting CLI.
+            tracing::error!("Failed to create enrollment session for CLI: {}", e);
+            return ErrorTemplate {
+                title: Tr::new("error-heading").to_string(),
+                message: Tr::new("enroll-error-session-create-failed").to_string(),
+                back_url: None,
+            }
+            .into_response();
+        }
+        require_assertion = authenticator_id.is_some();
     } else if authenticator_id.is_some() {
         // Returning user signing in directly via the website (upstream IdP,
         // no CLI). No FIDO2 assertion happened, so authenticator_id stays
@@ -938,15 +929,23 @@ pub(crate) async fn complete_enrollment_after_identity(
     // marked the row `consumed_at = Some(now)` (replay-blocking) and
     // `delete_expired_oidc_states` will reclaim the row at expiry.
 
-    tracing::info!("Session created for user: {}", redact_email(&user.email));
-    tracing::debug!("Setting session cookie and redirecting to /enroll/keys");
+    // A returning user with a CLI waiting goes to the login page to assert
+    // with their key; everyone else lands on the keys page, where a
+    // first-time enrollee registers one.
+    let destination = if require_assertion {
+        "/login"
+    } else {
+        "/enroll/keys"
+    };
 
-    // Create session cookie and redirect to keys page
+    tracing::info!("Session created for user: {}", redact_email(&user.email));
+    tracing::debug!("Setting session cookie and redirecting to {destination}");
+
     let cookie = create_session_cookie(token.expose_secret(), session_hours.saturating_mul(3600));
 
     Response::builder()
         .status(StatusCode::SEE_OTHER)
-        .header(header::LOCATION, "/enroll/keys")
+        .header(header::LOCATION, destination)
         .header(header::SET_COOKIE, cookie.to_string())
         .body(Body::empty())
         .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
@@ -1578,10 +1577,14 @@ pub(crate) async fn browser_register_complete(
     } else {
         db::authorize_device_auth(
             &state.store,
-            &reg_state.device_auth_id,
-            &reg_state.user_id.to_string(),
-            &reg_state.user_email,
-            &authenticator_id,
+            db::AuthorizeDeviceAuthParams {
+                id: &reg_state.device_auth_id,
+                user_id: &reg_state.user_id.to_string(),
+                user_email: &reg_state.user_email,
+                authenticator_id: &authenticator_id,
+                // The WebAuthn registration ceremony just completed above.
+                hardware_verified: true,
+            },
         )
         .await
         .inspect_err(|e| {

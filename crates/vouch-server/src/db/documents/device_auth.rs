@@ -31,6 +31,14 @@ pub struct DeviceAuthRequestDoc {
     pub user_id: Option<String>,
     pub user_email: Option<String>,
     pub authenticator_id: Option<String>,
+    /// Whether the approving browser session proved possession of the key
+    /// with a WebAuthn ceremony. The device-code grant copies this onto the
+    /// issued token's `hardware_verified` claim, so an approval that never
+    /// exercised the authenticator cannot mint a token asserting it did.
+    /// Defaults to `false` so documents written before this field existed
+    /// (rolling deploy) are treated as unverified.
+    #[serde(default)]
+    pub hardware_verified: bool,
     pub expires_at: Timestamp,
     pub interval_seconds: i32,
     pub last_poll_at: Option<Timestamp>,

@@ -21,6 +21,7 @@
 
 use crate::AppState;
 use crate::crypto::generate_challenge;
+use crate::crypto::hash_token;
 use crate::db::ClientInfo;
 use crate::db::{self, AuthEventParams, AuthEventType};
 use crate::error::ServiceError;
@@ -186,6 +187,22 @@ pub(crate) struct LoginQuery {
     pending_auth: Option<String>,
 }
 
+/// The pending CLI device authorization this browser session must release, if
+/// any. `complete_enrollment_after_identity` records it against the session
+/// token when an already-enrolled user runs `vouch enroll`; the assertion in
+/// [`browser_login_complete`] is what authorizes it.
+///
+/// Returns `None` when there is no session cookie, no enrollment session for
+/// it, or the enrollment session carries no device authorization.
+async fn pending_device_auth(state: &AppState, jar: &CookieJar) -> Option<db::EnrollmentSession> {
+    let token = jar.get(vouch_common::SESSION_COOKIE_NAME)?.value();
+    let session = db::get_enrollment_session_by_token_hash(&state.store, &hash_token(token))
+        .await
+        .ok()
+        .flatten()?;
+    session.device_auth_id.is_some().then_some(session)
+}
+
 pub(crate) async fn login_page(
     State(state): State<Arc<AppState>>,
     axum::extract::Query(query): axum::extract::Query<LoginQuery>,
@@ -215,9 +232,13 @@ pub(crate) async fn login_page(
     // re-authentication when the session age exceeds the requested value.
     // Only skip the login form when the pending auth does NOT require
     // forced re-auth.
+    // A session created by `vouch enroll` for an already-enrolled user is
+    // authenticated but not hardware-verified, and a CLI is waiting on the
+    // assertion. Skipping the form here would leave it polling forever.
     let requires_reauth = pending
         .as_ref()
-        .is_some_and(|p| p.prompt.as_deref() == Some("login") || p.max_age.is_some());
+        .is_some_and(|p| p.prompt.as_deref() == Some("login") || p.max_age.is_some())
+        || pending_device_auth(&state, &jar).await.is_some();
 
     if auth.authenticated && !requires_reauth {
         if let Some(ref pending_id) = query.pending_auth {
@@ -380,7 +401,7 @@ pub(crate) async fn browser_login_complete(
     State(state): State<Arc<AppState>>,
     client_info: ClientInfo,
     headers: HeaderMap,
-    _jar: CookieJar,
+    jar: CookieJar,
     Json(req): Json<BrowserLoginCompleteRequest>,
 ) -> Result<Response, ServiceError> {
     // ── Phase 1: Origin header validation ────────────────────────────────
@@ -672,6 +693,57 @@ pub(crate) async fn browser_login_complete(
     // approach 2^31 uses, and bitwise reinterpret preserves DB monotonicity comparisons.
     let new_counter = verification_result.new_counter.cast_signed();
     db::update_authenticator_counter(&state.store, &authenticator.id, new_counter).await?;
+
+    // Release a CLI waiting on `vouch enroll`. The assertion just verified is
+    // the possession proof the upstream IdP sign-in could not provide, so the
+    // device authorization is approved here rather than at IdP callback.
+    if let Some(enrollment) = pending_device_auth(&state, &jar).await
+        && let Some(ref device_auth_id) = enrollment.device_auth_id
+    {
+        // The enrollment session must belong to whoever just asserted;
+        // otherwise a stale cookie would approve another user's device
+        // authorization using this user's hardware proof.
+        if enrollment.user_id == user.id {
+            db::authorize_device_auth(
+                &state.store,
+                db::AuthorizeDeviceAuthParams {
+                    id: device_auth_id,
+                    user_id: &user.id,
+                    user_email: &user.email,
+                    authenticator_id: &authenticator.id,
+                    hardware_verified: true,
+                },
+            )
+            .await
+            .map_err(|e| {
+                tracing::error!("Failed to authorize device auth '{device_auth_id}': {e}");
+                ServiceError::api(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "device_auth_failed",
+                    "Failed to complete CLI authorization",
+                )
+            })?;
+
+            db::spawn_audit_event(
+                &state.audit,
+                AuthEventParams {
+                    user_id: user.id.clone(),
+                    event_type: AuthEventType::DeviceAuthApproved,
+                    authenticator_id: Some(authenticator.id.clone()),
+                    success: true,
+                    client: client_info.clone(),
+                    ..AuthEventParams::default()
+                },
+                Some(user.email.clone()),
+            );
+        } else {
+            tracing::warn!(
+                target: "security",
+                "Enrollment session belongs to a different user than the one asserting; \
+                 refusing to approve the device authorization"
+            );
+        }
+    }
 
     // Issue an OAuth access token (RFC 9068) — the server acts as both issuer and audience
     let client_id = state.config().base_url.clone();

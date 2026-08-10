@@ -404,6 +404,92 @@ async fn test_direct_web_signin_returning_user_logs_login_success_with_ip() {
 }
 
 #[tokio::test]
+async fn test_cli_enroll_returning_user_requires_assertion_before_approval() {
+    // `vouch enroll` by a user who already has a key: the upstream IdP
+    // sign-in authenticates the person, not the hardware, so the pending
+    // device authorization must stay Pending and the browser must be sent
+    // to /login to assert. Approving here released a full-scope,
+    // credential-capable token with the key untouched.
+    let state = test_app_state().await;
+    let user = create_test_user(&state.store, "cli-returning@example.com").await;
+    create_test_authenticator(&state.store, &user.id).await;
+
+    let device_code_hash = "cli-returning-device-code-hash";
+    let expires_at: jiff::Timestamp = "2099-12-31T23:59:59Z".parse().expect("valid timestamp");
+    let device_auth_id = crate::db::create_device_auth_request(
+        &state.store,
+        device_code_hash,
+        "CLI-RTRN",
+        None,
+        expires_at,
+        0,
+    )
+    .await
+    .expect("create_device_auth_request");
+
+    let (stored, claim) =
+        seed_and_consume_oidc_state(&state, "cli-returning-state", Some(&device_auth_id)).await;
+
+    let identity = IdentityResult {
+        email: "cli-returning@example.com".to_string(),
+        domain: Some("example.com".to_string()),
+        upstream: None,
+    };
+
+    let resp =
+        complete_enrollment_after_identity(&state, &stored, identity, claim, ClientInfo::default())
+            .await;
+
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    let location = resp
+        .headers()
+        .get(axum::http::header::LOCATION)
+        .and_then(|v| v.to_str().ok())
+        .expect("redirect location");
+    assert_eq!(
+        location, "/login",
+        "a returning user must be sent to assert with their key"
+    );
+
+    let request = crate::db::get_device_auth_by_code_hash(&state.store, device_code_hash)
+        .await
+        .expect("device auth lookup")
+        .expect("device auth exists");
+    assert_eq!(
+        request.status,
+        crate::db::DeviceAuthStatus::Pending,
+        "IdP sign-in alone must not release the waiting CLI"
+    );
+    assert!(!request.hardware_verified);
+
+    let approvals = state
+        .audit
+        .query_events(&crate::db::AuditEventFilter {
+            event_types: Some(vec!["device_auth_approved".to_string()]),
+            ..Default::default()
+        })
+        .await
+        .expect("query audit events");
+    assert!(
+        approvals.is_empty(),
+        "no approval may be recorded before the assertion"
+    );
+
+    let logins = state
+        .audit
+        .query_events(&crate::db::AuditEventFilter {
+            event_types: Some(vec!["login_success".to_string()]),
+            ..Default::default()
+        })
+        .await
+        .expect("query audit events");
+    assert!(
+        logins.is_empty(),
+        "an IdP sign-in that still owes an assertion is not a completed login"
+    );
+}
+
+#[tokio::test]
 async fn test_identity_conflict_renders_error_and_audits() {
     // An IdP login whose asserted (issuer, subject) does not match the
     // subject already bound to the account with this email must be
@@ -541,75 +627,6 @@ async fn test_lazy_bind_emits_identity_bound_event() {
     let event = events.first().expect("identity_bound event");
     let data: serde_json::Value = serde_json::from_str(&event.data).expect("event data JSON");
     assert_eq!(data["idp_issuer"], issuer);
-}
-
-#[tokio::test]
-async fn test_cli_device_auth_immediate_approval_records_client_ip() {
-    // CLI-initiated flow (real device_auth_id) by a user who already has
-    // a passkey: the immediate approval authorizes the device auth and
-    // the device_auth_approved event carries the client IP.
-    let state = test_app_state().await;
-    let user = create_test_user(&state.store, "cli-returning@example.com").await;
-    let auth_id = create_test_authenticator(&state.store, &user.id).await;
-
-    let expires_at: jiff::Timestamp = "2099-12-31T23:59:59Z".parse().expect("valid timestamp");
-    let device_auth_id = crate::db::create_device_auth_request(
-        &state.store,
-        "cli-flow-device-hash",
-        "CLFW-CDGH",
-        None,
-        expires_at,
-        5,
-    )
-    .await
-    .expect("create_device_auth_request");
-
-    let (stored, claim) =
-        seed_and_consume_oidc_state(&state, "cli-flow-state", Some(&device_auth_id)).await;
-
-    let client_info = ClientInfo {
-        client_ip: Some("198.51.100.9".parse().expect("valid IP")),
-        ..Default::default()
-    };
-    let identity = IdentityResult {
-        email: "cli-returning@example.com".to_string(),
-        domain: Some("example.com".to_string()),
-        upstream: None,
-    };
-
-    let resp =
-        complete_enrollment_after_identity(&state, &stored, identity, claim, client_info).await;
-    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
-
-    let events = wait_for_audit_events(&state, "device_auth_approved", &user.id).await;
-    assert_eq!(
-        events.len(),
-        1,
-        "immediate approval -> one device_auth_approved"
-    );
-    let event = events.first().expect("device_auth_approved event");
-    let data: serde_json::Value = serde_json::from_str(&event.data).expect("event data JSON");
-    assert_eq!(data["client_ip"], "198.51.100.9");
-    assert_eq!(data["authenticator_id"], auth_id.as_str());
-
-    let device_auth = crate::db::get_device_auth_by_user_code(&state.store, "CLFW-CDGH")
-        .await
-        .expect("get device auth")
-        .expect("device auth exists");
-    assert_eq!(device_auth.status, crate::db::DeviceAuthStatus::Authorized);
-
-    let logins = state
-        .audit
-        .query_events(&crate::db::AuditEventFilter {
-            event_types: Some(vec!["login_success".to_string()]),
-            ..Default::default()
-        })
-        .await
-        .expect("query audit events");
-    assert!(
-        logins.is_empty(),
-        "a CLI approval is not additionally recorded as a website login"
-    );
 }
 
 // Regression for #746: if the device auth cannot be authorized — the row
