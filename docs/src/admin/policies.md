@@ -277,7 +277,7 @@ states the same requirement, and denies when it is not met. Version comparisons 
 Every attribute is always present in the evaluation context. When a client does not report one, it
 takes a type-appropriate default — `false`, `""`, `0`, or `[]` — so an expression never errors on a
 missing field. The corollary: **a missing attribute looks identical to a negative one.** Requiring
-`posture.tpm_present == true` also fails every client too old to report it.
+`context.device.tpm_present == true` also fails every client too old to report it.
 
 **Booleans** (default `false`)
 
@@ -357,7 +357,7 @@ carrying no posture data is rejected. Disable the policy, confirm CLI versions, 
 **A policy fails on devices that visibly satisfy it.**
 The attribute probably is not reported on that platform and is defaulting to `false` or `""`. Check
 the server log at `RUST_LOG=vouch_server=debug`, which logs each policy evaluation and its result,
-then guard the expression on `posture.os`.
+then guard the expression on `context.device.os`.
 
 **A custom policy never passes.**
 Runtime evaluation errors count as failures (fail-closed), and policies written in CEL syntax for
