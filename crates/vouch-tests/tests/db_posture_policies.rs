@@ -92,6 +92,7 @@ async fn custom_policy_create_defaults_to_inactive() {
             description: Some("Block non-mac platforms"),
             policy_text: "device.platform == 'mac'",
             org_id: &org_id,
+            builder_spec: None,
         },
     )
     .await
@@ -120,6 +121,7 @@ async fn custom_policy_list_is_scoped_to_org() {
             description: None,
             policy_text: "true",
             org_id: &org_a,
+            builder_spec: None,
         },
     )
     .await
@@ -131,6 +133,7 @@ async fn custom_policy_list_is_scoped_to_org() {
             description: None,
             policy_text: "true",
             org_id: &org_b,
+            builder_spec: None,
         },
     )
     .await
@@ -160,6 +163,7 @@ async fn custom_policy_get_returns_record() {
             description: None,
             policy_text: "true",
             org_id: &org_id,
+            builder_spec: None,
         },
     )
     .await
@@ -193,6 +197,7 @@ async fn custom_policy_update_can_activate_and_rename() {
             description: Some("old desc"),
             policy_text: "true",
             org_id: &org_id,
+            builder_spec: None,
         },
     )
     .await
@@ -207,6 +212,7 @@ async fn custom_policy_update_can_activate_and_rename() {
             description: FieldUpdate::Clear,
             policy_text: Some("device.os_version >= '14'"),
             active: Some(true),
+            builder_spec: FieldUpdate::Keep,
         },
     )
     .await
@@ -234,6 +240,7 @@ async fn custom_policy_update_refuses_cross_org_writes() {
             description: None,
             policy_text: "true",
             org_id: &org_a,
+            builder_spec: None,
         },
     )
     .await
@@ -248,6 +255,7 @@ async fn custom_policy_update_refuses_cross_org_writes() {
             description: FieldUpdate::Keep,
             policy_text: None,
             active: None,
+            builder_spec: FieldUpdate::Keep,
         },
     )
     .await
@@ -275,6 +283,7 @@ async fn custom_policy_delete_removes_record() {
             description: None,
             policy_text: "true",
             org_id: &org_id,
+            builder_spec: None,
         },
     )
     .await
@@ -303,6 +312,7 @@ async fn custom_policy_delete_refuses_cross_org() {
             description: None,
             policy_text: "true",
             org_id: &org_a,
+            builder_spec: None,
         },
     )
     .await
@@ -343,6 +353,7 @@ async fn get_active_custom_policies_filters_by_flag() {
             description: None,
             policy_text: "true",
             org_id: &org_id,
+            builder_spec: None,
         },
     )
     .await
@@ -354,6 +365,7 @@ async fn get_active_custom_policies_filters_by_flag() {
             description: None,
             policy_text: "true",
             org_id: &org_id,
+            builder_spec: None,
         },
     )
     .await
@@ -367,6 +379,7 @@ async fn get_active_custom_policies_filters_by_flag() {
             description: FieldUpdate::Keep,
             policy_text: None,
             active: Some(true),
+            builder_spec: FieldUpdate::Keep,
         },
     )
     .await

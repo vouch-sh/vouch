@@ -5,6 +5,8 @@
     clippy::unwrap_used,
     clippy::expect_used,
     clippy::panic,
+    clippy::indexing_slicing,
+    clippy::get_unwrap,
     reason = "test code: panic on assertion failure is acceptable"
 )]
 
@@ -333,6 +335,7 @@ fn test_test_policy_text_pass() {
     let result = test_policy_text(
         &requirement("context.device.disk_encryption_enabled"),
         &sample_posture(),
+        catalog::DecisionPoint::IssueToken,
     )
     .unwrap();
     assert!(result.pass);
@@ -347,6 +350,7 @@ fn test_test_policy_text_fail() {
     let result = test_policy_text(
         &requirement("context.device.disk_encryption_enabled"),
         &minimal_posture(),
+        catalog::DecisionPoint::IssueToken,
     )
     .unwrap();
     assert!(!result.pass);
@@ -355,11 +359,12 @@ fn test_test_policy_text_fail() {
 #[test]
 fn test_test_policy_text_invalid() {
     let posture = minimal_posture();
-    assert!(test_policy_text("", &posture).is_err());
+    assert!(test_policy_text("", &posture, catalog::DecisionPoint::IssueToken).is_err());
     assert!(
         test_policy_text(
             &requirement("context.device.os == \"unterminated"),
-            &posture
+            &posture,
+            catalog::DecisionPoint::IssueToken,
         )
         .is_err()
     );
@@ -372,9 +377,13 @@ fn test_custom_permit_cannot_widen_access() {
     let permit_everything =
         "permit (principal, action == Vouch::Action::\"IssueToken\", resource);";
     assert!(
-        test_policy_text(permit_everything, &minimal_posture())
-            .unwrap()
-            .pass
+        test_policy_text(
+            permit_everything,
+            &minimal_posture(),
+            catalog::DecisionPoint::IssueToken
+        )
+        .unwrap()
+        .pass
     );
     // ...but an active forbid still denies even alongside a custom permit.
     let contradictory = format!(
@@ -382,9 +391,13 @@ fn test_custom_permit_cannot_widen_access() {
         requirement("context.device.disk_encryption_enabled")
     );
     assert!(
-        !test_policy_text(&contradictory, &minimal_posture())
-            .unwrap()
-            .pass
+        !test_policy_text(
+            &contradictory,
+            &minimal_posture(),
+            catalog::DecisionPoint::IssueToken
+        )
+        .unwrap()
+        .pass
     );
 }
 
@@ -512,104 +525,279 @@ fn test_extract_device_posture_no_posture_entry() {
 }
 
 // ============================================================
-// Field parity
+// Field parity (catalog ↔ posture_fields ↔ schema ↔ generator)
 // ============================================================
 
-/// One schema-validated check per Device record field, true for
-/// `full_posture()`. Together with the exhaustive destructuring in
-/// `posture_fields`, this guarantees every `DevicePosture` field (plus the
-/// four derived fields) is reachable — and correctly valued — from policy
-/// text.
-const POSTURE_FIELD_CHECKS: &[(&str, &str)] = &[
-    ("os", "context.device.os == \"macos\""),
-    ("os_version", "context.device.os_version == \"15.3.1\""),
-    (
-        "os_version_num",
-        "context.device.os_version_num == 15003001",
-    ),
-    (
-        "os_distribution",
-        "context.device.os_distribution == \"macos\"",
-    ),
-    ("os_build", "context.device.os_build == \"26100\""),
-    ("os_build_num", "context.device.os_build_num == 26100"),
-    ("arch", "context.device.arch == \"aarch64\""),
-    (
-        "disk_encryption_enabled",
-        "context.device.disk_encryption_enabled",
-    ),
-    (
-        "disk_encryption_technology",
-        "context.device.disk_encryption_technology == \"filevault\"",
-    ),
-    ("screen_lock_enabled", "context.device.screen_lock_enabled"),
-    (
-        "screen_lock_idle_timeout_secs",
-        "context.device.screen_lock_idle_timeout_secs == 300",
-    ),
-    ("firewall_enabled", "context.device.firewall_enabled"),
-    (
-        "firewall_technology",
-        "context.device.firewall_technology == \"application firewall\"",
-    ),
-    ("secure_boot_enabled", "context.device.secure_boot_enabled"),
-    ("sip_enabled", "context.device.sip_enabled"),
-    ("tpm_present", "context.device.tpm_present"),
-    ("tpm_version", "context.device.tpm_version == \"2.0\""),
-    ("auto_update_enabled", "context.device.auto_update_enabled"),
-    (
-        "auto_update_technology",
-        "context.device.auto_update_technology == \"softwareupdate\"",
-    ),
-    ("uptime_secs", "context.device.uptime_secs == 86400"),
-    (
-        "access_control_enforcing",
-        "context.device.access_control_enforcing",
-    ),
-    (
-        "access_control_technology",
-        "context.device.access_control_technology == \"gatekeeper\"",
-    ),
-    ("edr", "context.device.edr.contains(\"crowdstrike\")"),
-    ("edr_count", "context.device.edr_count == 1"),
-    ("mdm", "context.device.mdm.contains(\"jamf\")"),
-    ("mdm_count", "context.device.mdm_count == 1"),
-    ("elevated", "context.device.elevated == false"),
-    ("tty", "context.device.tty"),
-    ("parent_process", "context.device.parent_process == \"zsh\""),
-    ("cli_version", "context.device.cli_version == \"1.2.3\""),
-    (
-        "collected_at",
-        "context.device.collected_at == \"2026-08-08t00:00:00z\"",
-    ),
-];
-
+/// The catalog is the single field list the builder, the reference table,
+/// and the generator all read. Together with the exhaustive destructuring
+/// in `posture_fields`, this guarantees every `DevicePosture` field (plus
+/// the four derived fields) is present in the catalog with the right type,
+/// and reachable — and correctly valued — from policy text.
 #[test]
 fn test_posture_field_parity() {
     let posture = full_posture();
 
-    // Completeness: the check list covers exactly the record's fields.
+    // Completeness: the catalog covers exactly the record's fields.
     let record = posture_input::posture_fields(&posture);
-    let checked: std::collections::BTreeSet<&str> = POSTURE_FIELD_CHECKS
-        .iter()
-        .map(|(field, _)| *field)
-        .collect();
+    let cataloged: std::collections::BTreeSet<&str> =
+        catalog::DEVICE_FIELDS.iter().map(|f| f.name).collect();
     let present: std::collections::BTreeSet<&str> = record.keys().map(String::as_str).collect();
     assert_eq!(
-        checked, present,
-        "POSTURE_FIELD_CHECKS must cover exactly the device record fields"
+        cataloged, present,
+        "catalog::DEVICE_FIELDS must cover exactly the device record fields"
     );
+
+    // Type fidelity: each catalog kind matches the value the record
+    // actually carries, so the builder never offers the wrong operators.
+    for field in catalog::DEVICE_FIELDS {
+        let value = record.get(field.name).unwrap();
+        let matches = match field.kind {
+            catalog::FieldKind::Bool => matches!(value, Value::Bool(_)),
+            catalog::FieldKind::Long
+            | catalog::FieldKind::VersionNum { .. }
+            | catalog::FieldKind::BuildNum { .. } => matches!(value, Value::Int(_)),
+            catalog::FieldKind::Text | catalog::FieldKind::TextEnum(_) => {
+                matches!(value, Value::String(_))
+            }
+            catalog::FieldKind::StringSet(_) => matches!(value, Value::Array(_)),
+        };
+        assert!(
+            matches,
+            "catalog kind {:?} does not match the record value for '{}'",
+            field.kind, field.name
+        );
+    }
 
     // Reachability + value fidelity, through schema validation and the
     // full engine (validate catches typos; evaluate catches wrong values).
-    for (field, expr) in POSTURE_FIELD_CHECKS {
-        let policy = requirement(expr);
+    for field in catalog::DEVICE_FIELDS {
+        let policy = requirement(field.sample_check);
         validate_policy_text(&policy)
-            .unwrap_or_else(|e| panic!("field '{field}' check failed validation: {e:?}"));
+            .unwrap_or_else(|e| panic!("field '{}' check failed validation: {e:?}", field.name));
         assert!(
             evaluate_one(&policy, &posture),
-            "Field '{field}' not accessible or wrongly valued (expr: {expr})"
+            "Field '{}' not accessible or wrongly valued (expr: {})",
+            field.name,
+            field.sample_check
         );
+    }
+}
+
+/// A default one-condition spec for a field, shaped like the builder's
+/// first offering for that kind.
+fn default_field_spec(field: &catalog::FieldMeta) -> serde_json::Value {
+    let (op, value) = match field.kind {
+        catalog::FieldKind::Bool => ("eq", serde_json::json!(true)),
+        catalog::FieldKind::Long => ("ge", serde_json::json!(1)),
+        catalog::FieldKind::BuildNum { .. } => ("ge", serde_json::json!(26100)),
+        catalog::FieldKind::VersionNum { .. } => ("ge", serde_json::json!("15.3.1")),
+        catalog::FieldKind::Text => ("eq", serde_json::json!("sample")),
+        catalog::FieldKind::TextEnum(values) | catalog::FieldKind::StringSet(values) => {
+            let first = values.first().expect("closed enum has values");
+            let op = if matches!(field.kind, catalog::FieldKind::StringSet(_)) {
+                "contains"
+            } else {
+                "eq"
+            };
+            (op, serde_json::json!(first))
+        }
+    };
+    serde_json::json!({
+        "decision": "issue_token",
+        "body": {
+            "kind": "device",
+            "conditions": [
+                { "kind": "field", "field": field.name, "op": op, "value": value }
+            ]
+        }
+    })
+}
+
+/// Every catalog field, with its default operator and a kind-appropriate
+/// value, must generate text the validator accepts — the builder can never
+/// offer a field the engine then rejects.
+#[test]
+fn test_every_catalog_field_generates_valid_policy() {
+    for field in catalog::DEVICE_FIELDS {
+        let spec: rule::RuleSpec = serde_json::from_value(default_field_spec(field))
+            .unwrap_or_else(|e| panic!("spec for '{}' does not deserialize: {e}", field.name));
+        let text = rule::generate(&spec)
+            .unwrap_or_else(|e| panic!("field '{}' does not generate: {e}", field.name));
+        validate_policy_text(&text).unwrap_or_else(|e| {
+            panic!(
+                "generated text for '{}' fails validation: {e:?}\n{text}",
+                field.name
+            )
+        });
+    }
+}
+
+/// Every history event × every shape must generate text the validator
+/// accepts — this is the guard that catches Dogwood grammar drift on a
+/// dependency bump, next to `dogwood_smoke.rs`.
+#[test]
+fn test_every_history_event_and_shape_generates_valid_policy() {
+    let shapes = [
+        "happened_within",
+        "not_happened_within",
+        "count_at_least",
+        "not_since",
+    ];
+    for event in catalog::HISTORY_EVENTS {
+        for shape in shapes {
+            let mut condition = serde_json::json!({
+                "shape": shape,
+                "window": { "amount": 1, "unit": "h" }
+            });
+            if shape == "not_since" {
+                condition["anchor"] = serde_json::json!(event.key);
+                condition["cancelled_by"] = serde_json::json!("logout");
+            } else {
+                condition["event"] = serde_json::json!(event.key);
+            }
+            if shape == "count_at_least" {
+                condition["threshold"] = serde_json::json!(5);
+            }
+            let spec: rule::RuleSpec = serde_json::from_value(serde_json::json!({
+                "decision": "exchange_token",
+                "body": { "kind": "history", "conditions": [condition] }
+            }))
+            .unwrap_or_else(|e| panic!("{}/{shape} does not deserialize: {e}", event.key));
+            let text = rule::generate(&spec)
+                .unwrap_or_else(|e| panic!("{}/{shape} does not generate: {e}", event.key));
+            validate_policy_text(&text).unwrap_or_else(|e| {
+                panic!(
+                    "{}/{shape} generated text fails validation: {e:?}\n{text}",
+                    event.key
+                )
+            });
+        }
+    }
+}
+
+/// The catalog's history events mirror the audit → event ingestion: same
+/// count, and every ingested audit kind's action appears in the catalog.
+#[test]
+fn test_history_events_match_ingested_kinds() {
+    assert_eq!(
+        catalog::HISTORY_EVENTS.len(),
+        events::HISTORY_KINDS.len(),
+        "one builder event per ingested audit kind"
+    );
+    let keys: std::collections::BTreeSet<&str> =
+        catalog::HISTORY_EVENTS.iter().map(|e| e.key).collect();
+    assert_eq!(
+        keys.len(),
+        catalog::HISTORY_EVENTS.len(),
+        "history event keys must be unique"
+    );
+}
+
+/// The builder's window cap and the replay window must agree: a window the
+/// builder allows must be fully served by the history a decision fetches.
+#[test]
+fn test_builder_window_cap_matches_replay_window() {
+    assert_eq!(
+        i64::try_from(catalog::MAX_WINDOW_SECS).unwrap(),
+        events::REPLAY_WINDOW_HOURS * 3600,
+    );
+}
+
+/// The generated event reference lists exactly the fields ingestion writes,
+/// per action, with the right types — so the on-page table for hand-written
+/// temporal rules can never drift from what actually matches.
+#[test]
+fn test_event_reference_matches_ingestion() {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    // Fields written per action, with the value shapes and (for strings)
+    // the literal values seen — built the same way the projection test
+    // builds its ingestion view.
+    let mut written: BTreeMap<String, BTreeMap<String, (bool, BTreeSet<String>)>> = BTreeMap::new();
+    for kind in events::HISTORY_KINDS {
+        let row = history_row(kind.as_str(), "user-a", 60, 0);
+        let event = events::history_event(&row, "org-1", 0)
+            .unwrap_or_else(|| panic!("history kind '{}' has no mapping arm", kind.as_str()));
+        let per_action = written
+            .entry(dogwood_action_of(kind).to_string())
+            .or_default();
+        for group in ["input", "output"] {
+            for (name, value) in event.fields(group) {
+                let entry = per_action
+                    .entry(format!("{group}.{name}"))
+                    .or_insert_with(|| (false, BTreeSet::new()));
+                match value {
+                    Value::Bool(_) => entry.0 = true,
+                    Value::String(s) => {
+                        entry.1.insert(s.clone());
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    // Same actions, by bare name.
+    let cataloged: BTreeSet<&str> = catalog::HISTORY_ACTION_FIELDS
+        .iter()
+        .map(|a| a.action)
+        .collect();
+    let ingested: BTreeSet<String> = written
+        .keys()
+        .filter_map(|full| full.rsplit("::").next().map(ToString::to_string))
+        .collect();
+    assert_eq!(
+        cataloged,
+        ingested.iter().map(String::as_str).collect::<BTreeSet<_>>(),
+        "the event reference must cover exactly the ingested actions"
+    );
+
+    for action_meta in catalog::HISTORY_ACTION_FIELDS {
+        let Some((_, fields)) = written
+            .iter()
+            .find(|(full, _)| full.rsplit("::").next() == Some(action_meta.action))
+        else {
+            panic!("no ingestion view for '{}'", action_meta.action);
+        };
+        let cataloged_paths: BTreeSet<&str> = action_meta.fields.iter().map(|f| f.path).collect();
+        let written_paths: BTreeSet<&str> = fields.keys().map(String::as_str).collect();
+        assert_eq!(
+            cataloged_paths, written_paths,
+            "field list for '{}' must match ingestion",
+            action_meta.action
+        );
+        for field in action_meta.fields {
+            let (is_bool, string_values) = fields.get(field.path).unwrap();
+            match field.kind {
+                catalog::FieldKind::Bool => {
+                    assert!(is_bool, "'{}' is not a boolean in ingestion", field.path);
+                }
+                catalog::FieldKind::TextEnum(values) => {
+                    // Closed values come from the ingestion arms (one per
+                    // credential audit kind), so the lists must agree.
+                    let listed: BTreeSet<&str> = values.iter().copied().collect();
+                    let seen: BTreeSet<&str> = string_values.iter().map(String::as_str).collect();
+                    assert_eq!(
+                        listed, seen,
+                        "closed values for '{}' must match ingestion",
+                        field.path
+                    );
+                }
+                catalog::FieldKind::Text => {
+                    assert!(
+                        !is_bool,
+                        "'{}' is declared text but ingestion writes booleans",
+                        field.path
+                    );
+                }
+                catalog::FieldKind::Long
+                | catalog::FieldKind::StringSet(_)
+                | catalog::FieldKind::VersionNum { .. }
+                | catalog::FieldKind::BuildNum { .. } => {
+                    panic!("event fields are text or boolean, got {:?}", field.kind)
+                }
+            }
+        }
     }
 }
 
@@ -878,10 +1066,52 @@ fn test_playground_flags_temporal_policies() {
 when temporal {
     !(formerly within 15m Vouch::Action::"Login"::response{ output.result: true })
 };"#;
-    let result = test_policy_text(temporal, &sample_posture()).unwrap();
+    let result = test_policy_text(
+        temporal,
+        &sample_posture(),
+        catalog::DecisionPoint::ExchangeToken,
+    )
+    .unwrap();
     assert!(
         result.reads_history,
         "a temporal policy's playground result must be flagged as history-dependent"
+    );
+    // Evaluated as the decision it gates, the empty-history step-up rule
+    // denies. Evaluated as IssueToken it would trivially pass — the bug the
+    // decision parameter exists to fix.
+    assert!(
+        !result.pass,
+        "an exchange-scoped forbid must actually fire when tested as an exchange"
+    );
+    let as_issue = test_policy_text(
+        temporal,
+        &sample_posture(),
+        catalog::DecisionPoint::IssueToken,
+    )
+    .unwrap();
+    assert!(
+        as_issue.pass,
+        "the same policy never matches an IssueToken event"
+    );
+}
+
+/// `reads_history` is structural (from the lowered set), not a text scan:
+/// the phrase "when temporal" in a comment must not flag a plain policy.
+#[test]
+fn test_playground_reads_history_is_structural() {
+    let commented = format!(
+        "// when temporal is not used here\n{}",
+        requirement("context.device.disk_encryption_enabled")
+    );
+    let result = test_policy_text(
+        &commented,
+        &sample_posture(),
+        catalog::DecisionPoint::IssueToken,
+    )
+    .unwrap();
+    assert!(
+        !result.reads_history,
+        "a comment mentioning temporal syntax must not mark the policy history-dependent"
     );
 }
 
@@ -947,6 +1177,7 @@ fn test_precheck_attributes_broken_custom_by_name() {
             policy_text: requirement("context.device.firewall_enabled"),
             active: true,
             org_id: "org-1".to_string(),
+            builder_spec: None,
             created_at: jiff::Timestamp::now(),
             updated_at: jiff::Timestamp::now(),
         },
@@ -957,6 +1188,7 @@ fn test_precheck_attributes_broken_custom_by_name() {
             policy_text: "posture.disk_encryption_enabled == true".to_string(),
             active: true,
             org_id: "org-1".to_string(),
+            builder_spec: None,
             created_at: jiff::Timestamp::now(),
             updated_at: jiff::Timestamp::now(),
         },
@@ -1087,6 +1319,7 @@ when temporal {
         .to_string(),
         active: true,
         org_id: "org-1".to_string(),
+        builder_spec: None,
         created_at: jiff::Timestamp::now(),
         updated_at: jiff::Timestamp::now(),
     }];

@@ -709,7 +709,10 @@ admin-subdomain-flash-emergency-rotation-done = Emergency key rotation complete.
 admin-policies-page-title = { -product } - Device Posture Policies
 admin-policies-heading = Device Posture Policies
 admin-policies-subtitle = Enforce device security requirements for authentication. All active policies must pass.
-admin-policies-builtin = Built-in Policies
+admin-policies-list-heading = Policies
+admin-policies-counts = { $custom } of { $maxCustom } custom · { $active } of { $maxActive } active
+admin-policies-badge-builtin = Built-in
+admin-policies-badge-custom = Custom
 # Fluent attribute pattern: the value is the displayed pill label (current
 # state), the `.title` is the action invoked by clicking it (the inverse).
 admin-policies-on = On
@@ -726,25 +729,75 @@ admin-policies-screenlock-macos = Screen saver with password on wake
 admin-policies-screenlock-windows = Lock screen on idle timeout
 admin-policies-screenlock-linux = Screen locker configured
 admin-policies-endpoint-desc = At least one EDR agent detected (CrowdStrike, SentinelOne, Carbon Black, etc.)
+admin-policies-mdm-note = At least one MDM agent detected (Jamf, Kandji, Workspace ONE, Mosyle, Intune, etc.)
 admin-policies-platform-macos = Secure Boot via Apple Silicon or T2 chip
 admin-policies-platform-windows = UEFI Secure Boot enabled
 admin-policies-platform-linux = UEFI Secure Boot enabled
 admin-policies-osrecency-linux = Not checked — use a custom policy per distro
 admin-policies-semver-explain = encodes versions as numbers for correct comparison
-admin-policies-custom = Custom Policies
 admin-policies-copy-btn = Copy to a custom policy
 admin-policies-new-btn = + New
 admin-policies-playground-title = New Custom Policy
 admin-policies-name-placeholder = e.g., Require macOS Sequoia
 admin-policies-optional = (optional)
 admin-policies-desc-placeholder = e.g., Require macOS 15 or later
-admin-policies-syntax-rule = Write a Cedar
-admin-policies-syntax-over = rule over
-admin-policies-syntax-operators = Operators:
-admin-policies-syntax-lists = for lists.
-admin-policies-syntax-versions = for version comparison.
-admin-policies-syntax-temporal = for event-history rules.
-admin-policies-syntax-fieldref = See field reference below.
+# Builder: decision point and condition family selectors
+admin-policies-applies-label = Applies to
+admin-policies-applies-issue = Token issuance (vouch login)
+admin-policies-applies-exchange = Token exchange (workload / agent credentials)
+admin-policies-applies-hint = Device checks are only available on token issuance — an exchange request carries no device posture.
+admin-policies-checks-label = Checks
+admin-policies-checks-device = Device state
+admin-policies-checks-history = Recent activity
+admin-policies-polarity-device = Allow the request only when ALL of these hold:
+admin-policies-polarity-history = Deny the request when:
+admin-policies-add-check = + Add check
+admin-policies-add-osfloor = + Add OS version floor
+admin-policies-osfloor-label = OS version floor:
+admin-policies-osfloor-windows-build = Windows build
+admin-policies-window-cap-note = Windows are capped at 24 hours — history older than that is not kept.
+admin-policies-warn-login-lockout = This locks users out: the login being evaluated is not yet in the history it checks, so a user returning after the window is denied — and denied again on every retry. Require login recency on token exchange instead.
+admin-policies-warn-login-cooldown = This denies issuance because a login recently succeeded — a login cooldown. Users can obtain a token at most once per window.
+admin-policies-preview-label = Generated policy
+admin-policies-edit-as-text = Edit as text
+# History condition shapes: each label completes the sentence
+# "<event> <shape> <window>", so they read as prose in the row.
+admin-policies-shape-happened = happened in the last
+admin-policies-shape-not-happened = did not happen in the last
+admin-policies-shape-count = happened at least
+admin-policies-shape-not-since = is missing or was followed in the last
+admin-policies-times-in-last = times in the last
+admin-policies-followed-by = by
+admin-policies-unit-s = seconds
+admin-policies-unit-m = minutes
+admin-policies-unit-h = hours
+admin-policies-unit-d = days
+# Field groups (builder dropdown + reference table)
+admin-policies-group-os = Operating system
+admin-policies-group-security = Security posture
+admin-policies-group-agents = Security agents
+admin-policies-group-process = Process context
+admin-policies-group-meta = Metadata
+# History events (builder dropdown), sentence-level labels
+admin-policies-event-login-success = successful login
+admin-policies-event-login-failed = failed login
+admin-policies-event-logout = logout
+admin-policies-event-token-issued = token issuance
+admin-policies-event-token-revoked = token revocation
+admin-policies-event-token-exchange = token exchange
+admin-policies-event-ssh-credential = SSH credential issuance
+admin-policies-event-aws-credential = AWS credential issuance
+admin-policies-event-github-credential = GitHub credential issuance
+# Set operators (numeric/string operators render as symbols)
+admin-policies-op-contains = contains
+admin-policies-op-not-contains = does not contain
+# Field type labels (reference table)
+admin-policies-type-bool = boolean
+admin-policies-type-long = number
+admin-policies-type-text = string
+admin-policies-type-text-enum = string — one of: { $values }
+admin-policies-type-set = set of strings — known: { $values }
+admin-policies-type-derived-num = number — derived from { $source }
 admin-policies-rule-label = Rule
 admin-policies-rule-hint = — a Cedar forbid rule; issuance is denied when it fires
 admin-policies-ref-title = Dogwood policy language reference
@@ -752,12 +805,14 @@ admin-policies-valid = Valid policy
 admin-policies-invalid-badge = invalid
 admin-policies-invalid-title = This policy no longer validates and denies every request while active. Edit it to see the error.
 admin-policies-delete-confirm = Delete this custom policy?
-admin-policies-none = No custom policies yet.
 admin-policies-sample-device-note = Your rule is tested against this sample device when editing. Fields not listed below default to "" (string), false (boolean), or 0 (number).
 admin-policies-fieldref-summary = Field reference & test device
 admin-policies-fieldref-th-field = Field
 admin-policies-fieldref-th-test = Test value
 admin-policies-example-rules = Example rules:
+admin-policies-eventref-heading = Event history fields
+admin-policies-eventref-note = In a temporal rule, the braces after an event name filter which past events count. Match a field against a literal to select events — output.result: true means successful logins only — or against a context reference to require it to match the current request, as in input.ip: context.input.ip. On the decision being evaluated, the same input fields are readable directly as context.input.*.
+admin-policies-eventref-none = no matchable fields — the event itself is the signal
 admin-policies-note-label = Note:
 admin-policies-note-body = Posture data is self-reported by the CLI. Policies are a compliance baseline, not a cryptographic guarantee.
 
@@ -790,6 +845,10 @@ admin-policies-fix-endpoint-protection = Install an endpoint detection and respo
 admin-policies-fix-endpoint-protection-macos = Install an EDR agent (e.g., CrowdStrike, SentinelOne)
 admin-policies-fix-endpoint-protection-windows = Install an EDR agent (e.g., CrowdStrike, Microsoft Defender for Endpoint)
 
+admin-policies-name-mdm-enrollment = MDM Enrollment
+admin-policies-desc-mdm-enrollment = Require enrollment in mobile device management (Jamf, Kandji, Intune)
+admin-policies-fix-mdm-enrollment = Enroll this device in your organization's device management (MDM), then retry
+
 admin-policies-name-platform-integrity = Platform Integrity
 admin-policies-desc-platform-integrity = Require Secure Boot to be enabled
 admin-policies-fix-platform-integrity = Enable Secure Boot on your device
@@ -807,6 +866,10 @@ admin-policies-fix-os-recency-windows = Update Windows to a supported version (b
 admin-policies-name-issuance-rate-limit = Issuance Rate Limit
 admin-policies-desc-issuance-rate-limit = Deny token issuance after 10 issuances within one hour
 admin-policies-fix-issuance-rate-limit = Too many token issuances in the last hour. Wait and retry
+
+admin-policies-name-exchange-rate-limit = Exchange Rate Limit
+admin-policies-desc-exchange-rate-limit = Deny token exchange after 30 exchanges within one hour
+admin-policies-fix-exchange-rate-limit = Too many token exchanges in the last hour. Wait and retry
 
 admin-policies-name-failed-login-burst = Failed Login Burst
 admin-policies-desc-failed-login-burst = Deny token issuance after 5 failed logins within ten minutes
@@ -826,18 +889,39 @@ admin-policies-fix-logout-invalidates-exchange = You logged out since your last 
 
 admin-policies-err-empty = Policy text must not be empty
 admin-policies-err-invalid = Invalid policy: { $detail }
+# Builder rule-spec errors (shown in the validation box)
+admin-policies-err-rule-empty = Add at least one complete condition
+admin-policies-err-device-on-exchange = Device conditions only apply to token issuance — switch "Applies to", or use recent-activity checks
+admin-policies-err-unknown-field = Unknown device field: { $field }
+admin-policies-err-bad-operator = That operator does not apply to { $field }
+admin-policies-err-bad-value = The value does not fit { $field }
+admin-policies-err-unknown-value = "{ $value }" is not a known value for { $field }
+admin-policies-err-unknown-event = Unknown history event: { $event }
+admin-policies-err-bad-version = "{ $value }" is not a version like 15.3.1
+admin-policies-err-bad-window = The window must be between 1 second and 24 hours
+admin-policies-err-bad-threshold = The count must be at least 1
+admin-policies-err-bad-text = Text values must not contain control characters
+admin-policies-err-too-long = The generated policy exceeds { $max } characters — remove some conditions
 # Shown when a deny cannot be traced to a specific policy.
 admin-policies-deny-unattributed = device posture
 admin-policies-deny-generic = Check your device settings to meet your organization's compliance requirements
 admin-policies-deny-message = Device posture policy '{ $policy }' not satisfied. { $remediation }
 
-## Admin policies — client-side JS (admin.js, policies page)
+## Admin policies — client-side JS (policy-builder.js, policies page)
 admin-js-edit-policy-title = Edit Custom Policy
 admin-js-copy-of = Copy of { $name }
 admin-js-policy-passes = — passes against test device
 admin-js-policy-fails = — fails against test device
 admin-js-policy-invalid = Invalid policy
-admin-js-policy-history-note = — reads event history, which the test device has none of; this result reflects an empty history, not the policy's logic
+admin-js-policy-history-note = — reads event history, which the test device has none of; the shape summaries below describe what the policy will do
+admin-js-edit-as-text-confirm = Editing the text directly means this policy can no longer be edited with the builder. Continue?
+admin-js-version-encodes = → { $num }
+# Shape-aware outcome summaries for history rules, one line per condition
+admin-js-preview-all = This rule denies only when all of the above hold at the same time.
+admin-js-preview-happened = Denies when a { $event } occurred in the last { $window }; allows otherwise.
+admin-js-preview-not-happened = Denies when there was no { $event } in the last { $window }.
+admin-js-preview-count = Denies at { $n } or more { $event } events in { $window }; allows at { $m } or fewer.
+admin-js-preview-not-since = Denies when there was no { $anchor } in the last { $window }, or the most recent one was followed by a { $cancel }.
 
 ## Admin SCIM tokens (admin/scim_tokens.html)
 admin-scim-page-title = { -product } - API Tokens

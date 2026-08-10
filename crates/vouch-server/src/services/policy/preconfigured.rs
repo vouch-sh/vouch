@@ -50,9 +50,11 @@ pub(crate) enum PreconfiguredSlug {
     Firewall,
     ScreenLock,
     EndpointProtection,
+    MdmEnrollment,
     PlatformIntegrity,
     OsRecency,
     IssuanceRateLimit,
+    ExchangeRateLimit,
     FailedLoginBurst,
     TokenExchangeStepUp,
     ExchangeIpConsistency,
@@ -68,9 +70,11 @@ impl PreconfiguredSlug {
             Self::Firewall => "firewall",
             Self::ScreenLock => "screen_lock",
             Self::EndpointProtection => "endpoint_protection",
+            Self::MdmEnrollment => "mdm_enrollment",
             Self::PlatformIntegrity => "platform_integrity",
             Self::OsRecency => "os_recency",
             Self::IssuanceRateLimit => "issuance_rate_limit",
+            Self::ExchangeRateLimit => "exchange_rate_limit",
             Self::FailedLoginBurst => "failed_login_burst",
             Self::TokenExchangeStepUp => "token_exchange_step_up",
             Self::ExchangeIpConsistency => "exchange_ip_consistency",
@@ -94,6 +98,9 @@ impl PreconfiguredSlug {
             Self::EndpointProtection => {
                 crate::infra::i18n::Tr::new("admin-policies-name-endpoint-protection").to_string()
             }
+            Self::MdmEnrollment => {
+                crate::infra::i18n::Tr::new("admin-policies-name-mdm-enrollment").to_string()
+            }
             Self::PlatformIntegrity => {
                 crate::infra::i18n::Tr::new("admin-policies-name-platform-integrity").to_string()
             }
@@ -102,6 +109,9 @@ impl PreconfiguredSlug {
             }
             Self::IssuanceRateLimit => {
                 crate::infra::i18n::Tr::new("admin-policies-name-issuance-rate-limit").to_string()
+            }
+            Self::ExchangeRateLimit => {
+                crate::infra::i18n::Tr::new("admin-policies-name-exchange-rate-limit").to_string()
             }
             Self::FailedLoginBurst => {
                 crate::infra::i18n::Tr::new("admin-policies-name-failed-login-burst").to_string()
@@ -137,6 +147,9 @@ impl PreconfiguredSlug {
             Self::EndpointProtection => {
                 crate::infra::i18n::Tr::new("admin-policies-desc-endpoint-protection").to_string()
             }
+            Self::MdmEnrollment => {
+                crate::infra::i18n::Tr::new("admin-policies-desc-mdm-enrollment").to_string()
+            }
             Self::PlatformIntegrity => {
                 crate::infra::i18n::Tr::new("admin-policies-desc-platform-integrity").to_string()
             }
@@ -145,6 +158,9 @@ impl PreconfiguredSlug {
             }
             Self::IssuanceRateLimit => {
                 crate::infra::i18n::Tr::new("admin-policies-desc-issuance-rate-limit").to_string()
+            }
+            Self::ExchangeRateLimit => {
+                crate::infra::i18n::Tr::new("admin-policies-desc-exchange-rate-limit").to_string()
             }
             Self::FailedLoginBurst => {
                 crate::infra::i18n::Tr::new("admin-policies-desc-failed-login-burst").to_string()
@@ -174,9 +190,11 @@ impl std::str::FromStr for PreconfiguredSlug {
             "firewall" => Ok(Self::Firewall),
             "screen_lock" => Ok(Self::ScreenLock),
             "endpoint_protection" => Ok(Self::EndpointProtection),
+            "mdm_enrollment" => Ok(Self::MdmEnrollment),
             "platform_integrity" => Ok(Self::PlatformIntegrity),
             "os_recency" => Ok(Self::OsRecency),
             "issuance_rate_limit" => Ok(Self::IssuanceRateLimit),
+            "exchange_rate_limit" => Ok(Self::ExchangeRateLimit),
             "failed_login_burst" => Ok(Self::FailedLoginBurst),
             "token_exchange_step_up" => Ok(Self::TokenExchangeStepUp),
             "exchange_ip_consistency" => Ok(Self::ExchangeIpConsistency),
@@ -219,6 +237,10 @@ pub(crate) const PRECONFIGURED_POLICIES: &[PreconfiguredPolicy] = &[
         policy_text: include_str!("policies/endpoint_protection.dw"),
     },
     PreconfiguredPolicy {
+        slug: PreconfiguredSlug::MdmEnrollment,
+        policy_text: include_str!("policies/mdm_enrollment.dw"),
+    },
+    PreconfiguredPolicy {
         slug: PreconfiguredSlug::PlatformIntegrity,
         policy_text: include_str!("policies/platform_integrity.dw"),
     },
@@ -230,6 +252,10 @@ pub(crate) const PRECONFIGURED_POLICIES: &[PreconfiguredPolicy] = &[
     PreconfiguredPolicy {
         slug: PreconfiguredSlug::IssuanceRateLimit,
         policy_text: include_str!("policies/issuance_rate_limit.dw"),
+    },
+    PreconfiguredPolicy {
+        slug: PreconfiguredSlug::ExchangeRateLimit,
+        policy_text: include_str!("policies/exchange_rate_limit.dw"),
     },
     PreconfiguredPolicy {
         slug: PreconfiguredSlug::FailedLoginBurst,

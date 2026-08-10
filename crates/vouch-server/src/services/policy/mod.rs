@@ -19,11 +19,13 @@
 //!
 //! [Dogwood]: https://dogwood-policy.github.io/dogwood/
 
+pub(crate) mod catalog;
 pub(crate) mod engine;
 pub(crate) mod events;
 pub(crate) mod posture_input;
 pub(crate) mod preconfigured;
 pub(crate) mod remediation;
+pub(crate) mod rule;
 pub(crate) mod schema;
 
 #[cfg(test)]
@@ -72,29 +74,41 @@ fn with_device_context(builder: EventBuilder, posture: &DevicePosture) -> EventB
     builder
 }
 
-/// Build the `IssueToken` decision event for one evaluation.
+/// Build the `IssueToken` decision event for one evaluation (test fixture;
+/// the enforcement and playground paths build events via [`decision_event`]
+/// directly).
+#[cfg(test)]
 fn issue_token_request(posture: &DevicePosture, user_id: &str, org_id: &str) -> Event {
-    let builder = Event::builder("Vouch::Action::IssueToken", "request")
-        .timestamp(0)
-        .principal_for("Vouch::User", user_id)
-        .resource_for("Vouch::Org", org_id)
-        .request_context("input", "ip", Value::String(String::new()))
-        .request_context("input", "client_id", Value::String(String::new()))
-        .field("input", "ip", Value::String(String::new()))
-        .field("input", "client_id", Value::String(String::new()));
-    with_device_context(builder, posture).build()
+    decision_event(
+        &DecisionKind::IssueToken {
+            posture,
+            ip: None,
+            client_id: "",
+        },
+        user_id,
+        org_id,
+        0,
+    )
 }
 
 /// Lower a composed policy set and decide the given event with a fresh
 /// authorizer (stateless: no event history — temporal atoms see an empty
-/// trace and evaluate accordingly).
+/// trace and evaluate accordingly). Test fixture; production paths lower
+/// once and use [`decide_lowered`].
 ///
 /// Returns `Err` only for engine-level failures (schema unavailable,
 /// lowering error, no decision returned) — callers treat those as deny.
+#[cfg(test)]
 fn decide(policy_text: &str, event: &Event) -> Result<EngineDecision, String> {
     let policy_schema = schema::policy_schema().ok_or("policy schema unavailable")?;
     let lowered = LoweredPolicySet::from_str(policy_text, schema::service_schema(), policy_schema)
         .map_err(|e| format!("policy set failed to lower: {e}"))?;
+    decide_lowered(lowered, event)
+}
+
+/// Decide the given event against an already-lowered set with a fresh
+/// authorizer (stateless — see [`decide`]).
+fn decide_lowered(lowered: LoweredPolicySet, event: &Event) -> Result<EngineDecision, String> {
     let mut authorizer = Authorizer::new(lowered);
     let response = authorizer
         .is_authorized(event)
@@ -116,6 +130,12 @@ fn decide(policy_text: &str, event: &Event) -> Result<EngineDecision, String> {
 /// type-check. Returns a 400 `ServiceError` with the engine's diagnostic
 /// message on failure.
 pub(crate) fn validate_policy_text(text: &str) -> ServiceResult<()> {
+    lower_composed(text).map(|_| ())
+}
+
+/// Lower and type-check one policy's text composed with the base permits,
+/// returning the lowered set so callers can also decide with it.
+fn lower_composed(text: &str) -> ServiceResult<LoweredPolicySet> {
     let trimmed = text.trim();
     if trimmed.is_empty() {
         tracing::debug!("policy validation rejected: empty text");
@@ -157,8 +177,8 @@ pub(crate) fn validate_policy_text(text: &str) -> ServiceResult<()> {
                 .to_string(),
         ));
     }
-    tracing::debug!("policy text validated successfully");
-    Ok(())
+    tracing::trace!("policy text validated successfully");
+    Ok(lowered)
 }
 
 /// Outcome of a playground evaluation.
@@ -173,7 +193,9 @@ pub(crate) struct PolicyTestResult {
 }
 
 /// Evaluate a candidate policy against a sample `DevicePosture` (the admin
-/// playground).
+/// playground), as the decision point the admin is targeting — an
+/// exchange-scoped forbid never fires on an `IssueToken` event, so testing
+/// with the wrong event kind would report a meaningless pass.
 ///
 /// A temporal policy's verdict depends on the requesting user's audit
 /// history, which the playground has none of. Evaluating one against an
@@ -184,12 +206,26 @@ pub(crate) struct PolicyTestResult {
 pub(crate) fn test_policy_text(
     text: &str,
     posture: &DevicePosture,
+    decision: catalog::DecisionPoint,
 ) -> ServiceResult<PolicyTestResult> {
-    validate_policy_text(text)?;
-    let trimmed = text.trim();
-    let composed = compose(&[trimmed]);
-    let event = issue_token_request(posture, "playground", "playground");
-    let pass = match decide(&composed, &event) {
+    let lowered = lower_composed(text)?;
+    // Structural, from the lowered set: temporal leaves are hoisted during
+    // lowering, so a set with none left is plain Cedar.
+    let reads_history = !lowered.is_self_contained_cedar();
+    let kind = match decision {
+        catalog::DecisionPoint::IssueToken => DecisionKind::IssueToken {
+            posture,
+            ip: None,
+            client_id: "",
+        },
+        catalog::DecisionPoint::ExchangeToken => DecisionKind::ExchangeToken {
+            ip: None,
+            client_id: "",
+            audience: None,
+        },
+    };
+    let event = decision_event(&kind, "playground", "playground", 0);
+    let pass = match decide_lowered(lowered, &event) {
         Ok(EngineDecision::Allow) => true,
         Ok(EngineDecision::Deny) => false,
         Err(msg) => {
@@ -201,7 +237,7 @@ pub(crate) fn test_policy_text(
     };
     Ok(PolicyTestResult {
         pass,
-        reads_history: trimmed.contains("when temporal"),
+        reads_history,
     })
 }
 
@@ -239,22 +275,23 @@ fn decision_event(kind: &DecisionKind<'_>, user_id: &str, org_id: &str, ts: i64)
             // carries no posture, so it must not be temporally matchable.
             // `input` fields go to both bags — the Cedar request context
             // and the logged record temporal predicates match against.
-            let builder = Event::builder("Vouch::Action::IssueToken", "request")
-                .timestamp(ts)
-                .principal_for("Vouch::User", user_id)
-                .resource_for("Vouch::Org", org_id)
-                .request_context("input", "ip", Value::String(ip.clone()))
-                .request_context(
-                    "input",
-                    "client_id",
-                    Value::String((*client_id).to_string()),
-                )
-                .field("input", "ip", Value::String(ip))
-                .field(
-                    "input",
-                    "client_id",
-                    Value::String((*client_id).to_string()),
-                );
+            let builder =
+                Event::builder(catalog::DecisionPoint::IssueToken.action_name(), "request")
+                    .timestamp(ts)
+                    .principal_for("Vouch::User", user_id)
+                    .resource_for("Vouch::Org", org_id)
+                    .request_context("input", "ip", Value::String(ip.clone()))
+                    .request_context(
+                        "input",
+                        "client_id",
+                        Value::String((*client_id).to_string()),
+                    )
+                    .field("input", "ip", Value::String(ip))
+                    .field(
+                        "input",
+                        "client_id",
+                        Value::String((*client_id).to_string()),
+                    );
             with_device_context(builder, posture).build()
         }
         DecisionKind::ExchangeToken {
@@ -264,25 +301,28 @@ fn decision_event(kind: &DecisionKind<'_>, user_id: &str, org_id: &str, ts: i64)
         } => {
             let ip = ip_string(*ip);
             let audience = audience.unwrap_or_default().to_string();
-            Event::builder("Vouch::Action::ExchangeToken", "request")
-                .timestamp(ts)
-                .principal_for("Vouch::User", user_id)
-                .resource_for("Vouch::Org", org_id)
-                .request_context("input", "ip", Value::String(ip.clone()))
-                .request_context(
-                    "input",
-                    "client_id",
-                    Value::String((*client_id).to_string()),
-                )
-                .request_context("input", "audience", Value::String(audience.clone()))
-                .field("input", "ip", Value::String(ip))
-                .field(
-                    "input",
-                    "client_id",
-                    Value::String((*client_id).to_string()),
-                )
-                .field("input", "audience", Value::String(audience))
-                .build()
+            Event::builder(
+                catalog::DecisionPoint::ExchangeToken.action_name(),
+                "request",
+            )
+            .timestamp(ts)
+            .principal_for("Vouch::User", user_id)
+            .resource_for("Vouch::Org", org_id)
+            .request_context("input", "ip", Value::String(ip.clone()))
+            .request_context(
+                "input",
+                "client_id",
+                Value::String((*client_id).to_string()),
+            )
+            .request_context("input", "audience", Value::String(audience.clone()))
+            .field("input", "ip", Value::String(ip))
+            .field(
+                "input",
+                "client_id",
+                Value::String((*client_id).to_string()),
+            )
+            .field("input", "audience", Value::String(audience))
+            .build()
         }
     }
 }

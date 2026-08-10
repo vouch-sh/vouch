@@ -31,8 +31,9 @@ pub(crate) const HISTORY_KINDS: &[AuditEventKind] = &[
 
 /// How far back a decision reads. Matches Dogwood's default `max_window`
 /// cap, which the validator enforces on every `within` interval, so any
-/// policy that lowers is fully served by this window.
-const REPLAY_WINDOW_HOURS: i64 = 24;
+/// policy that lowers is fully served by this window. The catalog's
+/// builder cap is cross-checked against this in the parity tests.
+pub(crate) const REPLAY_WINDOW_HOURS: i64 = 24;
 
 /// Cap on rows fetched per replay/tail query. Exceeding it is logged —
 /// never silently truncated.

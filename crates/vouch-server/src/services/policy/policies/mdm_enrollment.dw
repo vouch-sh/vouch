@@ -1,0 +1,8 @@
+// Require enrollment in mobile device management.
+//
+// `mdm_count` is derived in Rust from the detected-agent list, since policy
+// text has no arithmetic. Which agent is present is not checked; an org
+// that requires a specific vendor can add `mdm.contains("jamf")`.
+@id("mdm_enrollment")
+forbid (principal, action == Vouch::Action::"IssueToken", resource)
+unless { context.device.mdm_count > 0 };

@@ -1,0 +1,18 @@
+// Cap token exchange at 30 per hour per user.
+//
+// Counts `ExchangeToken` responses in this user's recent history — the
+// workload-identity and agent credential path, which is automated and can
+// run far faster than a human login. The threshold is higher than the
+// issuance cap because a single workload legitimately re-exchanges on
+// every credential expiry.
+//
+// Enforcement is best-effort: audit writes on this path are
+// fire-and-forget, so a dropped write undercounts by one.
+@id("exchange_rate_limit")
+forbid (principal, action == Vouch::Action::"ExchangeToken", resource)
+when temporal {
+    exists (n: Long). (
+        (count_within(1h, Vouch::Action::"ExchangeToken"::response{ callerPrincipal: principal })) == n
+        && n >= 30
+    )
+};

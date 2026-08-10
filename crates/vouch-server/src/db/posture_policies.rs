@@ -24,6 +24,9 @@ pub struct CustomPosturePolicy {
     pub policy_text: String,
     pub active: bool,
     pub org_id: String,
+    /// Serialized builder `RuleSpec` the text was generated from, absent
+    /// for hand-written policies. Advisory: never read by the engine.
+    pub builder_spec: Option<String>,
     pub created_at: Timestamp,
     pub updated_at: Timestamp,
 }
@@ -37,6 +40,7 @@ impl From<Document<CustomPosturePolicyDoc>> for CustomPosturePolicy {
             policy_text: doc.data.policy_text,
             active: doc.data.active,
             org_id: doc.data.org_id,
+            builder_spec: doc.data.builder_spec,
             created_at: doc.created_at,
             updated_at: doc.updated_at,
         }
@@ -108,6 +112,7 @@ pub struct CreateCustomPolicyParams<'a> {
     pub description: Option<&'a str>,
     pub policy_text: &'a str,
     pub org_id: &'a str,
+    pub builder_spec: Option<&'a str>,
 }
 
 /// Create a new custom posture policy (defaults to inactive).
@@ -121,6 +126,7 @@ pub async fn create_custom_policy(
         policy_text: params.policy_text.to_string(),
         active: false,
         org_id: params.org_id.to_string(),
+        builder_spec: params.builder_spec.map(String::from),
     };
     let result = store.insert(&doc).await?;
     Ok(CustomPosturePolicy::from(result))
@@ -177,6 +183,9 @@ pub struct UpdateCustomPolicyParams<'a> {
     pub description: FieldUpdate<'a>,
     pub policy_text: Option<&'a str>,
     pub active: Option<bool>,
+    /// Follows `policy_text`: set when the new text came from the builder,
+    /// cleared when it was hand-edited, kept for toggles.
+    pub builder_spec: FieldUpdate<'a>,
 }
 
 /// Update a custom posture policy.
@@ -209,6 +218,11 @@ pub async fn update_custom_policy(
     };
     let cel_owned = params.policy_text.map(String::from);
     let active_owned = params.active;
+    let builder_spec_owned = match params.builder_spec {
+        FieldUpdate::Keep => None,
+        FieldUpdate::Clear => Some(None::<String>),
+        FieldUpdate::Set(s) => Some(Some(s.to_string())),
+    };
 
     let applied = std::sync::atomic::AtomicBool::new(false);
     let found = store
@@ -231,6 +245,9 @@ pub async fn update_custom_policy(
             }
             if let Some(ref cel) = cel_owned {
                 data.policy_text = cel.clone();
+            }
+            if let Some(ref spec_opt) = builder_spec_owned {
+                data.builder_spec = spec_opt.clone();
             }
             if let Some(active) = active_owned {
                 data.active = active;

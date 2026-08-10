@@ -30,28 +30,33 @@ fn redirect_error(jar: CookieJar, msg: impl Into<String>) -> Response {
 /// Maximum number of custom policies per org (active + inactive).
 const MAX_CUSTOM_POLICIES: usize = 20;
 
-/// A preconfigured policy row for the template.
-pub(crate) struct PreconfiguredPolicyRow {
+/// Size bound on a stored builder spec. A legitimate spec is well under
+/// this; anything larger is dropped rather than stored.
+const MAX_BUILDER_SPEC_LEN: usize = 8192;
+
+/// One row of the merged policy list — built-in (code-defined) and custom
+/// (admin-authored) policies together, active first.
+pub(crate) struct PolicyRow {
+    /// The preconfigured slug, or `"custom"` — selects the icon and the
+    /// per-OS notes in the detail drawer.
     pub slug: String,
+    /// Mutation target: the slug for built-ins, the document id for
+    /// customs.
+    pub key: String,
     pub name: String,
     pub description: String,
     pub policy_text: String,
-    /// The rule alone, for seeding a custom policy the admin can edit.
+    /// Seed text for the editor: the rule without its header comment for
+    /// built-ins, the stored text for customs.
     pub editable_text: String,
     pub active: bool,
-}
-
-/// A custom policy row for the template.
-pub(crate) struct CustomPolicyRow {
-    pub id: String,
-    pub name: String,
-    pub description: Option<String>,
-    pub policy_text: String,
-    pub active: bool,
+    pub builtin: bool,
     /// Whether the stored text still validates. A policy that does not
     /// denies every request while active, so the page flags it rather than
     /// letting an admin discover that through locked-out users.
     pub valid: bool,
+    /// The stored builder spec, for customs authored with the builder.
+    pub builder_spec: Option<String>,
 }
 
 /// Policies page template.
@@ -59,9 +64,17 @@ pub(crate) struct CustomPolicyRow {
 #[template(path = "admin/policies.html")]
 pub(crate) struct AdminPoliciesTemplate {
     pub auth: AuthContext,
-    pub preconfigured_policies: Vec<PreconfiguredPolicyRow>,
-    pub custom_policies: Vec<CustomPolicyRow>,
+    pub policies: Vec<PolicyRow>,
     pub flash_message: Option<String>,
+    /// The builder catalog, labels pre-translated, parsed by
+    /// `policy-builder.js` from a `data-` attribute.
+    pub catalog_json: String,
+    pub field_groups: Vec<posture::catalog::FieldRefGroup>,
+    pub event_groups: Vec<posture::catalog::EventRefGroup>,
+    pub custom_count: usize,
+    pub max_custom: usize,
+    pub active_count: usize,
+    pub max_active: usize,
 }
 
 impl_template_response!(AdminPoliciesTemplate);
@@ -101,36 +114,49 @@ pub(crate) async fn admin_policies_page(
         }
     };
 
-    let preconfigured_policies: Vec<PreconfiguredPolicyRow> = posture::PRECONFIGURED_POLICIES
+    let mut policies: Vec<PolicyRow> = posture::PRECONFIGURED_POLICIES
         .iter()
-        .map(|p| PreconfiguredPolicyRow {
+        .map(|p| PolicyRow {
             slug: p.slug.to_string(),
+            key: p.slug.to_string(),
             name: p.slug.name(),
             description: p.slug.description(),
             policy_text: p.policy_text.to_string(),
             editable_text: posture::as_editable(p.policy_text),
             active: active_slugs.iter().any(|s| s == p.slug.as_str()),
+            builtin: true,
+            valid: true,
+            builder_spec: None,
         })
         .collect();
 
-    let custom_policies: Vec<CustomPolicyRow> =
-        match db::list_custom_policies(&state.store, &org_id).await {
-            Ok(policies) => policies
-                .into_iter()
-                .map(|p| CustomPolicyRow {
-                    id: p.id,
-                    name: p.name,
-                    description: p.description,
-                    valid: posture::validate_policy_text(&p.policy_text).is_ok(),
-                    policy_text: p.policy_text,
-                    active: p.active,
-                })
-                .collect(),
-            Err(e) => {
-                tracing::error!("Failed to load custom policies: {e}");
-                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-            }
-        };
+    let custom_count = match db::list_custom_policies(&state.store, &org_id).await {
+        Ok(customs) => {
+            let count = customs.len();
+            policies.extend(customs.into_iter().map(|p| PolicyRow {
+                slug: "custom".to_string(),
+                key: p.id,
+                name: p.name,
+                description: p.description.unwrap_or_default(),
+                valid: posture::validate_policy_text(&p.policy_text).is_ok(),
+                editable_text: p.policy_text.clone(),
+                policy_text: p.policy_text,
+                active: p.active,
+                builtin: false,
+                builder_spec: p.builder_spec,
+            }));
+            count
+        }
+        Err(e) => {
+            tracing::error!("Failed to load custom policies: {e}");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+
+    let active_count = policies.iter().filter(|p| p.active).count();
+    // Active first; the sort is stable, so built-ins keep their catalog
+    // order and customs their creation order within each half.
+    policies.sort_by_key(|p| !p.active);
 
     // Consume any flash messages set by a prior POST → redirect, then expire
     // the cookies in the response so a refresh doesn't re-show them.
@@ -139,9 +165,15 @@ pub(crate) async fn admin_policies_page(
 
     let body = AdminPoliciesTemplate {
         auth,
-        preconfigured_policies,
-        custom_policies,
+        policies,
         flash_message: messages.err,
+        catalog_json: posture::catalog::catalog_json(),
+        field_groups: posture::catalog::field_reference_groups(),
+        event_groups: posture::catalog::event_reference_groups(),
+        custom_count,
+        max_custom: MAX_CUSTOM_POLICIES,
+        active_count,
+        max_active: posture::MAX_ACTIVE_POLICIES,
     };
     (jar, body).into_response()
 }
@@ -242,6 +274,44 @@ pub(crate) struct CustomPolicyForm {
     #[serde(default, alias = "policy_description")]
     pub description: Option<String>,
     pub policy_text: String,
+    /// The serialized builder `RuleSpec` the text was generated from,
+    /// absent when the admin edited the text directly.
+    #[serde(default)]
+    pub builder_spec: Option<String>,
+}
+
+/// Accept a submitted builder spec only if it regenerates exactly the
+/// submitted text — a spec that disagrees would reopen the builder showing
+/// conditions the saved policy does not enforce. A rejected spec is
+/// dropped, not an error: the spec is advisory and the text is what is
+/// enforced.
+fn verified_builder_spec(form: &CustomPolicyForm) -> Option<&str> {
+    let spec_json = form.builder_spec.as_deref()?;
+    if spec_json.is_empty() {
+        return None;
+    }
+    if spec_json.len() > MAX_BUILDER_SPEC_LEN {
+        tracing::warn!("builder spec dropped: exceeds size bound");
+        return None;
+    }
+    let spec: posture::rule::RuleSpec = match serde_json::from_str(spec_json) {
+        Ok(spec) => spec,
+        Err(e) => {
+            tracing::warn!("builder spec dropped: does not parse: {e}");
+            return None;
+        }
+    };
+    match posture::rule::generate(&spec) {
+        Ok(text) if text == form.policy_text => Some(spec_json),
+        Ok(_) => {
+            tracing::warn!("builder spec dropped: does not regenerate the submitted text");
+            None
+        }
+        Err(e) => {
+            tracing::warn!("builder spec dropped: does not generate: {e}");
+            None
+        }
+    }
 }
 
 /// POST /admin/policies/custom — Create a new custom policy.
@@ -263,10 +333,14 @@ pub(crate) async fn create_custom_policy(
         ));
     }
 
-    if form.policy_text.is_empty() || form.policy_text.len() > 4096 {
+    if form.policy_text.is_empty() || form.policy_text.len() > posture::catalog::MAX_POLICY_TEXT_LEN
+    {
         return Ok(redirect_error(
             jar,
-            "Policy text must be between 1 and 4096 characters",
+            format!(
+                "Policy text must be between 1 and {} characters",
+                posture::catalog::MAX_POLICY_TEXT_LEN
+            ),
         ));
     }
 
@@ -301,7 +375,7 @@ pub(crate) async fn create_custom_policy(
         ));
     }
 
-    let description = form.description.filter(|d| !d.is_empty());
+    let description = form.description.clone().filter(|d| !d.is_empty());
 
     let policy = db::create_custom_policy(
         &state.store,
@@ -310,6 +384,7 @@ pub(crate) async fn create_custom_policy(
             description: description.as_deref(),
             policy_text: &form.policy_text,
             org_id: &org_id,
+            builder_spec: verified_builder_spec(&form),
         },
     )
     .await
@@ -364,10 +439,14 @@ pub(crate) async fn update_custom_policy(
         ));
     }
 
-    if form.policy_text.is_empty() || form.policy_text.len() > 4096 {
+    if form.policy_text.is_empty() || form.policy_text.len() > posture::catalog::MAX_POLICY_TEXT_LEN
+    {
         return Ok(redirect_error(
             jar,
-            "Policy text must be between 1 and 4096 characters",
+            format!(
+                "Policy text must be between 1 and {} characters",
+                posture::catalog::MAX_POLICY_TEXT_LEN
+            ),
         ));
     }
 
@@ -378,7 +457,7 @@ pub(crate) async fn update_custom_policy(
         return Ok(redirect_error(jar, format!("Invalid policy: {e}")));
     }
 
-    let description = form.description.filter(|d| !d.is_empty());
+    let description = form.description.clone().filter(|d| !d.is_empty());
 
     let result = db::update_custom_policy(
         &state.store,
@@ -391,6 +470,10 @@ pub(crate) async fn update_custom_policy(
                 .map_or(db::FieldUpdate::Clear, db::FieldUpdate::Set),
             policy_text: Some(&form.policy_text),
             active: None,
+            // The text is being replaced, so a stale spec must not
+            // survive: set the verified one or clear.
+            builder_spec: verified_builder_spec(&form)
+                .map_or(db::FieldUpdate::Clear, db::FieldUpdate::Set),
         },
     )
     .await
@@ -546,6 +629,7 @@ pub(crate) async fn toggle_custom_policy(
             description: db::FieldUpdate::Keep,
             policy_text: None,
             active: Some(new_active),
+            builder_spec: db::FieldUpdate::Keep,
         },
     )
     .await
@@ -614,6 +698,10 @@ fn policy_text_hash(expression: &str) -> String {
 #[derive(Debug, serde::Serialize)]
 pub(crate) struct ValidateResponse {
     pub valid: bool,
+    /// The text that was validated — generated from `rule`, or echoed from
+    /// `policy_text`. Absent only when generation itself failed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub policy_text: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -630,15 +718,34 @@ pub(crate) struct TestResult {
     pub reads_history: bool,
 }
 
-/// Request to validate policy text (JSON API for the policy editor).
+/// Request to validate a policy (JSON API for the policy editor): raw
+/// `policy_text` or a builder `rule`, exactly one of the two.
 #[derive(Debug, Deserialize)]
 pub(crate) struct ValidateRequest {
-    pub policy_text: String,
+    #[serde(default)]
+    pub policy_text: Option<String>,
+    #[serde(default)]
+    pub rule: Option<posture::rule::RuleSpec>,
+    /// Which decision point to dry-run `policy_text` against; a `rule`
+    /// carries its own. Defaults to token issuance.
+    #[serde(default)]
+    pub decision: Option<posture::catalog::DecisionPoint>,
+    /// Device the dry run evaluates; the built-in sample device when
+    /// absent.
     #[serde(default)]
     pub test_posture: Option<vouch_common::posture::DevicePosture>,
 }
 
-/// POST /api/v1/org/policies/validate — validate policy text (JSON).
+fn invalid(text: Option<String>, error: String) -> Json<ValidateResponse> {
+    Json(ValidateResponse {
+        valid: false,
+        policy_text: text,
+        error: Some(error),
+        test_result: None,
+    })
+}
+
+/// POST /api/v1/org/policies/validate — validate a policy (JSON).
 pub(crate) async fn validate_policy_api(
     method: Method,
     uri: OriginalUri,
@@ -652,39 +759,56 @@ pub(crate) async fn validate_policy_api(
     let _auth =
         extract_org_admin(&state, &headers, &jar, method.as_str(), uri.path(), None).await?;
 
-    if req.policy_text.is_empty() || req.policy_text.len() > 4096 {
-        return Ok(Json(ValidateResponse {
-            valid: false,
-            error: Some("Policy text must be between 1 and 4096 characters".to_string()),
-            test_result: None,
-        }));
-    }
-
-    if let Err(e) = posture::validate_policy_text(&req.policy_text) {
-        return Ok(Json(ValidateResponse {
-            valid: false,
-            error: Some(format!("{e}")),
-            test_result: None,
-        }));
-    }
-
-    let test_result = if let Some(ref test_posture) = req.test_posture {
-        match posture::test_policy_text(&req.policy_text, test_posture) {
-            Ok(result) => Some(TestResult {
-                pass: result.pass,
-                reads_history: result.reads_history,
-            }),
-            Err(_) => Some(TestResult {
-                pass: false,
-                reads_history: false,
-            }),
+    let (policy_text, decision) = match (req.policy_text, req.rule) {
+        (Some(_), Some(_)) | (None, None) => {
+            return Err(ServiceError::api(
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+                "Provide exactly one of policy_text or rule",
+            ));
         }
-    } else {
-        None
+        (Some(text), None) => (
+            text,
+            req.decision
+                .unwrap_or(posture::catalog::DecisionPoint::IssueToken),
+        ),
+        (None, Some(rule)) => match posture::rule::generate(&rule) {
+            Ok(text) => (text, rule.decision),
+            Err(e) => return Ok(invalid(None, e.to_string())),
+        },
+    };
+
+    if policy_text.is_empty() || policy_text.len() > posture::catalog::MAX_POLICY_TEXT_LEN {
+        return Ok(invalid(
+            Some(policy_text),
+            format!(
+                "Policy text must be between 1 and {} characters",
+                posture::catalog::MAX_POLICY_TEXT_LEN
+            ),
+        ));
+    }
+
+    if let Err(e) = posture::validate_policy_text(&policy_text) {
+        return Ok(invalid(Some(policy_text), format!("{e}")));
+    }
+
+    let test_posture = req
+        .test_posture
+        .unwrap_or_else(posture::catalog::sample_posture);
+    let test_result = match posture::test_policy_text(&policy_text, &test_posture, decision) {
+        Ok(result) => Some(TestResult {
+            pass: result.pass,
+            reads_history: result.reads_history,
+        }),
+        Err(_) => Some(TestResult {
+            pass: false,
+            reads_history: false,
+        }),
     };
 
     Ok(Json(ValidateResponse {
         valid: true,
+        policy_text: Some(policy_text),
         error: None,
         test_result,
     }))
@@ -699,7 +823,7 @@ pub(crate) async fn validate_policy_api(
     reason = "test code: panic on assertion failure is acceptable"
 )]
 mod tests {
-    use super::{CustomPolicyRow, posture};
+    use super::{PolicyRow, posture};
     use crate::db;
     use crate::test_utils::*;
     use axum::http::StatusCode;
@@ -748,9 +872,13 @@ mod tests {
             json.get("error").is_none() || json["error"].is_null(),
             "no error for valid policy text"
         );
-        assert!(
-            json.get("test_result").is_none() || json["test_result"].is_null(),
-            "no test_result without test_posture"
+        assert_eq!(
+            json["test_result"]["pass"], true,
+            "without test_posture the built-in sample device is used, which runs macOS"
+        );
+        assert_eq!(
+            json["policy_text"], body["policy_text"],
+            "raw policy_text is echoed back"
         );
     }
 
@@ -822,6 +950,218 @@ mod tests {
     }
 
     // ── Validation API — rejected input ──────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_policy_validate_accepts_builder_rule() {
+        let (app, state) = test_app().await;
+        let (_admin, token) = setup_admin(&state).await;
+        let auth = format!("Bearer {token}");
+
+        let body = serde_json::json!({
+            "rule": {
+                "decision": "issue_token",
+                "body": { "kind": "device", "conditions": [
+                    { "kind": "field", "field": "disk_encryption_enabled", "op": "eq", "value": true }
+                ]}
+            }
+        });
+        let (status, resp) = http_post_json(
+            &app,
+            "/api/v1/org/policies/validate",
+            &body.to_string(),
+            &[("Authorization", &auth)],
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK, "builder rule must validate: {resp}");
+        let json: serde_json::Value = serde_json::from_str(&resp).unwrap();
+        assert_eq!(json["valid"], true, "{resp}");
+        let text = json["policy_text"].as_str().expect("generated text");
+        assert!(
+            text.contains("unless {\n    context.device.disk_encryption_enabled\n}"),
+            "generated text carries the condition: {text}"
+        );
+        assert_eq!(
+            json["test_result"]["pass"], true,
+            "the sample device has disk encryption on"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_policy_validate_rule_dry_runs_as_its_own_decision() {
+        let (app, state) = test_app().await;
+        let (_admin, token) = setup_admin(&state).await;
+        let auth = format!("Bearer {token}");
+
+        // A step-up rule on exchange: with no history it must DENY when
+        // evaluated as an exchange (as IssueToken it would trivially pass).
+        let body = serde_json::json!({
+            "rule": {
+                "decision": "exchange_token",
+                "body": { "kind": "history", "conditions": [
+                    { "shape": "not_happened_within", "event": "login_success",
+                      "window": { "amount": 15, "unit": "m" } }
+                ]}
+            }
+        });
+        let (status, resp) = http_post_json(
+            &app,
+            "/api/v1/org/policies/validate",
+            &body.to_string(),
+            &[("Authorization", &auth)],
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK, "{resp}");
+        let json: serde_json::Value = serde_json::from_str(&resp).unwrap();
+        assert_eq!(json["valid"], true, "{resp}");
+        assert_eq!(
+            json["test_result"]["reads_history"], true,
+            "a temporal rule is history-dependent"
+        );
+        assert_eq!(
+            json["test_result"]["pass"], false,
+            "an exchange-scoped forbid must fire when dry-run as an exchange"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_policy_validate_rejects_both_or_neither_input() {
+        let (app, state) = test_app().await;
+        let (_admin, token) = setup_admin(&state).await;
+        let auth = format!("Bearer {token}");
+
+        for body in [
+            serde_json::json!({}),
+            serde_json::json!({
+                "policy_text": "permit (principal, action, resource);",
+                "rule": {
+                    "decision": "issue_token",
+                    "body": { "kind": "device", "conditions": [
+                        { "kind": "field", "field": "tty", "op": "eq", "value": true }
+                    ]}
+                }
+            }),
+        ] {
+            let (status, resp) = http_post_json(
+                &app,
+                "/api/v1/org/policies/validate",
+                &body.to_string(),
+                &[("Authorization", &auth)],
+            )
+            .await;
+            assert_eq!(
+                status,
+                StatusCode::BAD_REQUEST,
+                "exactly one of policy_text/rule is required: {resp}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_policy_validate_reports_rule_errors_as_invalid() {
+        let (app, state) = test_app().await;
+        let (_admin, token) = setup_admin(&state).await;
+        let auth = format!("Bearer {token}");
+
+        // Device conditions on exchange cannot generate.
+        let body = serde_json::json!({
+            "rule": {
+                "decision": "exchange_token",
+                "body": { "kind": "device", "conditions": [
+                    { "kind": "field", "field": "tty", "op": "eq", "value": true }
+                ]}
+            }
+        });
+        let (status, resp) = http_post_json(
+            &app,
+            "/api/v1/org/policies/validate",
+            &body.to_string(),
+            &[("Authorization", &auth)],
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK, "{resp}");
+        let json: serde_json::Value = serde_json::from_str(&resp).unwrap();
+        assert_eq!(json["valid"], false, "{resp}");
+        assert!(
+            json["error"].as_str().unwrap().contains("token issuance"),
+            "the error explains the device-on-exchange restriction: {resp}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_create_stores_verified_builder_spec_and_drops_mismatched() {
+        let (app, state) = test_app().await;
+        let (admin, token) = setup_admin(&state).await;
+        let cookie = admin_cookie(&token);
+        let origin = "https://test.example.com";
+        let org_id = admin.org_id.clone().expect("admin has org");
+
+        let spec = serde_json::json!({
+            "decision": "issue_token",
+            "body": { "kind": "device", "conditions": [
+                { "kind": "field", "field": "firewall_enabled", "op": "eq", "value": true }
+            ]}
+        });
+        let text = posture::rule::generate(&serde_json::from_value(spec.clone()).unwrap())
+            .expect("spec generates");
+
+        // Matching spec is stored.
+        let form = format!(
+            "policy_name={}&policy_text={}&builder_spec={}",
+            urlencoding::encode("Firewall via builder"),
+            urlencoding::encode(&text),
+            urlencoding::encode(&spec.to_string()),
+        );
+        let (status, _body) = http_post_form(
+            &app,
+            "/admin/policies/custom",
+            &form,
+            &[("Cookie", &cookie), ("Origin", origin)],
+        )
+        .await;
+        assert_eq!(status, StatusCode::SEE_OTHER);
+        let stored = db::list_custom_policies(&state.store, &org_id)
+            .await
+            .expect("list")
+            .into_iter()
+            .find(|p| p.name == "Firewall via builder")
+            .expect("created");
+        assert!(
+            stored.builder_spec.is_some(),
+            "a spec that regenerates the text must be stored"
+        );
+
+        // A spec that does not regenerate the submitted text is dropped.
+        let form = format!(
+            "policy_name={}&policy_text={}&builder_spec={}",
+            urlencoding::encode("Hand-tweaked"),
+            urlencoding::encode(
+                "forbid (principal, action == Vouch::Action::\"IssueToken\", resource) \
+                 unless { context.device.tty };"
+            ),
+            urlencoding::encode(&spec.to_string()),
+        );
+        let (status, _body) = http_post_form(
+            &app,
+            "/admin/policies/custom",
+            &form,
+            &[("Cookie", &cookie), ("Origin", origin)],
+        )
+        .await;
+        assert_eq!(status, StatusCode::SEE_OTHER);
+        let stored = db::list_custom_policies(&state.store, &org_id)
+            .await
+            .expect("list")
+            .into_iter()
+            .find(|p| p.name == "Hand-tweaked")
+            .expect("created");
+        assert!(
+            stored.builder_spec.is_none(),
+            "a spec that disagrees with the text must be dropped, not stored"
+        );
+    }
 
     #[tokio::test]
     async fn test_policy_validate_requires_auth() {
@@ -994,6 +1334,46 @@ mod tests {
         );
     }
 
+    /// The page renders for an org admin, carrying the builder's moving
+    /// parts: the catalog data attribute, the three row templates, and the
+    /// generated field reference — including the fields the old
+    /// hand-written table had drifted away from.
+    #[tokio::test]
+    async fn test_admin_policies_page_renders_builder_scaffolding() {
+        let (app, state) = test_app().await;
+        let (_admin, token) = setup_admin(&state).await;
+        let cookie = admin_cookie(&token);
+
+        let (status, body) = http_get(&app, "/admin/policies", &[("Cookie", &cookie)]).await;
+
+        assert_eq!(status, StatusCode::OK, "org admin must get the page");
+        for marker in [
+            "id=\"policy-catalog\"",
+            "data-catalog=",
+            "id=\"tpl-device-row\"",
+            "id=\"tpl-osfloor-row\"",
+            "id=\"tpl-history-row\"",
+            "id=\"policy-preview\"",
+            "/static/js/policy-builder.js",
+            // Generated reference covers the fields the 29-row table missed.
+            "context.device.tpm_version",
+            "context.device.collected_at",
+            // The event reference for hand-written temporal rules.
+            "input.user_agent",
+            "Vouch::Action::\"IssueCredential\"::response",
+        ] {
+            assert!(body.contains(marker), "page must contain {marker}");
+        }
+        // All 11 built-ins render in the merged list.
+        for policy in posture::PRECONFIGURED_POLICIES {
+            assert!(
+                body.contains(&policy.slug.name()),
+                "built-in '{}' must appear in the merged list",
+                policy.slug
+            );
+        }
+    }
+
     // ── Admin UI Endpoints — CSRF checks ─────────────────────────────────────
 
     #[tokio::test]
@@ -1124,6 +1504,7 @@ mod tests {
                 description: None,
                 policy_text: "posture.os == \"linux\"",
                 org_id,
+                builder_spec: None,
             },
         )
         .await
@@ -1316,22 +1697,27 @@ mod tests {
                 description: None,
                 policy_text: "posture.disk_encryption_enabled == true",
                 org_id: &org_id,
+                builder_spec: None,
             },
         )
         .await
         .expect("create unparseable policy");
 
-        let rows: Vec<CustomPolicyRow> = db::list_custom_policies(&state.store, &org_id)
+        let rows: Vec<PolicyRow> = db::list_custom_policies(&state.store, &org_id)
             .await
             .expect("list")
             .into_iter()
-            .map(|p| CustomPolicyRow {
-                id: p.id,
+            .map(|p| PolicyRow {
+                slug: "custom".to_string(),
+                key: p.id,
                 name: p.name,
-                description: p.description,
+                description: p.description.unwrap_or_default(),
                 valid: posture::validate_policy_text(&p.policy_text).is_ok(),
+                editable_text: p.policy_text.clone(),
                 policy_text: p.policy_text,
                 active: p.active,
+                builtin: false,
+                builder_spec: p.builder_spec,
             })
             .collect();
 
