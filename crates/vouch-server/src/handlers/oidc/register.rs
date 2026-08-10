@@ -13,18 +13,18 @@
 //!   with a valid FIDO2 key (hardware-bound) to obtain any token.
 
 use crate::AppState;
+use crate::error::ServiceError;
+use crate::handlers::session::OptionalAuthenticatedToken;
 use crate::services::oidc::registration::{
     RegistrationRequest, delete_client_configuration, read_client_configuration, register_client,
     update_client_configuration,
 };
-use axum::extract::OriginalUri;
 use axum::{
     Json,
     extract::{Path, State},
-    http::{HeaderMap, Method, StatusCode},
+    http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
 };
-use axum_extra::extract::cookie::CookieJar;
 use std::sync::Arc;
 
 /// POST /oauth/register — RFC 7591 Dynamic Client Registration.
@@ -35,38 +35,18 @@ use std::sync::Arc;
 ///
 /// Returns 201 Created with the client information response.
 pub(crate) async fn register(
-    method: Method,
-    uri: OriginalUri,
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    token: Result<OptionalAuthenticatedToken, ServiceError>,
     Json(request): Json<RegistrationRequest>,
 ) -> Response {
-    // Try to extract user from Bearer token (optional for open registration).
-    // We detect whether a token was even provided by checking the Authorization header.
-    let has_auth = headers.contains_key(axum::http::header::AUTHORIZATION);
-
-    let user_id = if has_auth {
-        let jar = CookieJar::default();
-        match crate::handlers::session::extract_resource_token(
-            &state,
-            &headers,
-            &jar,
-            method.as_str(),
-            uri.path(),
-            None,
-        )
-        .await
-        {
-            Ok(token) => Some(token.sub),
-            // RFC 7592 §2 / RFC 6750 §3.1: `extract_resource_token` returns
-            // `ServiceError::Api` with code `invalid_token` for any bearer-token
-            // validation failure. Propagate that error so the response carries
-            // `invalid_token` (not `invalid_client`), the correct 401 status,
-            // and a `WWW-Authenticate` challenge.
-            Err(e) => return into_registration_response(e),
-        }
-    } else {
-        None // Open registration — no user association
+    // Authentication is optional here, but a token that fails validation is an
+    // error rather than an anonymous request. RFC 7592 §2 / RFC 6750 §3.1: the
+    // rejection carries code `invalid_token` (not `invalid_client`), a 401, and
+    // a `WWW-Authenticate` challenge — propagate it rather than falling back to
+    // open registration.
+    let user_id = match token {
+        Ok(OptionalAuthenticatedToken(token)) => token.map(|t| t.sub),
+        Err(e) => return into_registration_response(e),
     };
 
     // Delegate to service layer

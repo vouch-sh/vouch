@@ -6,14 +6,11 @@ use crate::db::{self};
 use crate::error::ServiceError;
 use crate::redact_email;
 use crate::services::keys as key_svc;
-use axum::extract::OriginalUri;
-use axum::http::Method;
 use axum::{
     Json,
     extract::{Path, State},
-    http::{HeaderMap, StatusCode},
+    http::StatusCode,
 };
-use axum_extra::extract::cookie::CookieJar;
 use base64::Engine;
 use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
@@ -25,8 +22,7 @@ use vouch_common::{
     fido2_types::Challenge,
 };
 
-use super::extractors::OptionalClientCert;
-use super::session::extract_resource_token;
+use super::session::AuthenticatedToken;
 use super::{generate_challenge, validate_registration_attestation};
 use crate::crypto::webauthn_verify;
 
@@ -84,23 +80,10 @@ impl RegistrationState {
 /// (`vouch enroll`) to register their first key. After that, they can add
 /// additional keys via this endpoint after logging in with an existing key.
 pub(crate) async fn register_start(
-    method: Method,
-    uri: OriginalUri,
-    headers: HeaderMap,
-    jar: CookieJar,
     State(state): State<Arc<AppState>>,
-    client_cert: OptionalClientCert,
+    AuthenticatedToken(token): AuthenticatedToken,
     Json(req): Json<RegisterStartRequest>,
 ) -> Result<Json<RegisterStartResponse>, ServiceError> {
-    let token = extract_resource_token(
-        &state,
-        &headers,
-        &jar,
-        method.as_str(),
-        uri.path(),
-        client_cert.0.as_ref(),
-    )
-    .await?;
     let user_id = Uuid::parse_str(&token.sub).map_err(|e| {
         ServiceError::api(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -342,23 +325,9 @@ pub(crate) async fn register_complete(
 
 /// List all registered keys for the authenticated user.
 pub(crate) async fn list_keys(
-    method: Method,
-    uri: OriginalUri,
-    headers: HeaderMap,
-    jar: CookieJar,
     State(state): State<Arc<AppState>>,
-    client_cert: OptionalClientCert,
+    AuthenticatedToken(token): AuthenticatedToken,
 ) -> Result<Json<ListKeysResponse>, ServiceError> {
-    let token = extract_resource_token(
-        &state,
-        &headers,
-        &jar,
-        method.as_str(),
-        uri.path(),
-        client_cert.0.as_ref(),
-    )
-    .await?;
-
     let keys =
         key_svc::list_keys_for_user(&state.store, &token.sub, token.authenticator_id.as_deref())
             .await?;
@@ -367,17 +336,9 @@ pub(crate) async fn list_keys(
 }
 
 /// Rename a registered key.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "axum handler signature: extractors are positional parameters"
-)]
 pub(crate) async fn rename_key(
-    method: Method,
-    uri: OriginalUri,
-    headers: HeaderMap,
-    jar: CookieJar,
     State(state): State<Arc<AppState>>,
-    client_cert: OptionalClientCert,
+    AuthenticatedToken(token): AuthenticatedToken,
     Path(key_id): Path<String>,
     Json(req): Json<RenameKeyRequest>,
 ) -> Result<Json<RenameKeyResponse>, ServiceError> {
@@ -398,33 +359,15 @@ pub(crate) async fn rename_key(
         ));
     }
 
-    let token = extract_resource_token(
-        &state,
-        &headers,
-        &jar,
-        method.as_str(),
-        uri.path(),
-        client_cert.0.as_ref(),
-    )
-    .await?;
-
     let message = key_svc::rename_key(&state.store, &token.sub, &key_id, name).await?;
 
     Ok(Json(RenameKeyResponse { message }))
 }
 
 /// Delete a registered key.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "axum handler signature: extractors are positional parameters"
-)]
 pub(crate) async fn delete_key(
-    method: Method,
-    uri: OriginalUri,
-    headers: HeaderMap,
-    jar: CookieJar,
     State(state): State<Arc<AppState>>,
-    client_cert: OptionalClientCert,
+    AuthenticatedToken(token): AuthenticatedToken,
     client_info: db::ClientInfo,
     Path(key_id): Path<String>,
 ) -> Result<Json<DeleteKeyResponse>, ServiceError> {
@@ -437,15 +380,6 @@ pub(crate) async fn delete_key(
         ));
     }
 
-    let token = extract_resource_token(
-        &state,
-        &headers,
-        &jar,
-        method.as_str(),
-        uri.path(),
-        client_cert.0.as_ref(),
-    )
-    .await?;
     // Use auth_time as the freshness anchor; default to epoch (always stale) if absent
     key_svc::require_fresh_timestamp(
         token.auth_time.unwrap_or(0),

@@ -315,3 +315,101 @@ fn brace_group_idents(group: &str) -> Vec<String> {
     }
     idents
 }
+
+/// Credential handlers that legitimately run without proof of key possession.
+///
+/// Everything else in `handlers/credentials.rs` must take a
+/// `HardwareVerifiedToken`. The list is deny-by-default on purpose: a new
+/// credential endpoint fails this test until it either takes the strong token
+/// or is named here, which puts the decision in front of a reviewer instead of
+/// leaving it to a check someone remembered to write.
+const CREDENTIAL_HANDLERS_WITHOUT_HARDWARE: &[(&str, &str)] = &[
+    (
+        "get_ssh_ca_public_key",
+        "publishes the CA public key, unauthenticated",
+    ),
+    (
+        "get_ssh_krl",
+        "publishes the revocation list, unauthenticated",
+    ),
+    (
+        "check_ssh_revocation",
+        "revocation lookup by serial, unauthenticated",
+    ),
+    (
+        "get_github_status",
+        "reports whether the org has GitHub connected; issues no credential",
+    ),
+];
+
+/// Every credential-issuing handler proves key possession through its type.
+///
+/// `vouch enroll` once released a credential-capable token for a key nobody
+/// touched, and the check that would have caught it existed on the AWS endpoint
+/// but not on SSH or GitHub. Requiring the type rather than a call means the
+/// omission cannot recur silently.
+#[test]
+fn credential_handlers_require_hardware_verified_token() -> Result<(), Box<dyn std::error::Error>> {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/handlers/credentials.rs");
+    let content = fs::read_to_string(&path)?;
+    let cutoff = test_module_cutoff(&content);
+    let scannable = content.get(..cutoff).unwrap_or(&content);
+
+    let mut violations = Vec::new();
+    let mut used_exemptions = vec![false; CREDENTIAL_HANDLERS_WITHOUT_HARDWARE.len()];
+
+    let mut rest = scannable;
+    while let Some(pos) = rest.find("pub(crate) async fn ") {
+        let after = rest
+            .get(pos.saturating_add("pub(crate) async fn ".len())..)
+            .unwrap_or("");
+        let name: String = after
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '_')
+            .collect();
+        // Parameter list ends at the return arrow.
+        let params = after.split("->").next().unwrap_or("");
+
+        if let Some(idx) = CREDENTIAL_HANDLERS_WITHOUT_HARDWARE
+            .iter()
+            .position(|(exempt, _)| *exempt == name)
+        {
+            if let Some(flag) = used_exemptions.get_mut(idx) {
+                *flag = true;
+            }
+            if params.contains("HardwareVerifiedToken") {
+                violations.push(format!(
+                    "{name} is listed as not needing hardware verification but takes \
+                     HardwareVerifiedToken — remove it from the exemption list"
+                ));
+            }
+        } else if !params.contains("HardwareVerifiedToken") {
+            violations.push(format!(
+                "{name} issues credentials but does not take HardwareVerifiedToken; \
+                 add the extractor, or list it in CREDENTIAL_HANDLERS_WITHOUT_HARDWARE \
+                 with a reason if it genuinely issues nothing"
+            ));
+        }
+
+        rest = after;
+    }
+
+    for (idx, (name, reason)) in CREDENTIAL_HANDLERS_WITHOUT_HARDWARE.iter().enumerate() {
+        if !used_exemptions.get(idx).copied().unwrap_or(false) {
+            violations.push(format!(
+                "stale exemption: handler '{name}' ({reason}) no longer exists"
+            ));
+        }
+    }
+
+    if violations.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "{} credential-handler violation(s):\n{}",
+            violations.len(),
+            violations.join("\n")
+        )
+        .into())
+    }
+}

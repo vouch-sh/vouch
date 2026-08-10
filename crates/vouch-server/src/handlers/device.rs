@@ -1565,15 +1565,39 @@ mod tests {
     #[tokio::test]
     async fn test_device_grant_without_ceremony_cannot_reach_credentials() {
         let (app, token) = device_token_for_approval("unverified", false).await;
+        let auth = format!("Bearer {token}");
 
+        // Every credential endpoint, not just the one that happened to carry a
+        // check: the requirement now rides on `HardwareVerifiedToken`.
         let (status, body) = http_get(
             &app,
             "/v1/credentials/aws/token",
-            &[("Authorization", &format!("Bearer {token}"))],
+            &[("Authorization", &auth)],
         )
         .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "aws: {body}");
+        let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+        assert_eq!(error["code"], "hardware_required");
 
-        assert_eq!(status, StatusCode::FORBIDDEN, "body: {body}");
+        let (status, body) = http_post_json(
+            &app,
+            "/v1/credentials/ssh",
+            r#"{"public_key":"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA test"}"#,
+            &[("Authorization", &auth)],
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "ssh: {body}");
+        let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+        assert_eq!(error["code"], "hardware_required");
+
+        let (status, body) = http_post_json(
+            &app,
+            "/v1/credentials/github/token",
+            r#"{"repositories":["owner/repo"]}"#,
+            &[("Authorization", &auth)],
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "github: {body}");
         let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
         assert_eq!(error["code"], "hardware_required");
     }
