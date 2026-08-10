@@ -67,6 +67,7 @@ ssh:
 # Build configuration
 builder:
   arch: amd64
+  remote: ssh://kamal@10.0.57.30
   cache:
     type: registry
     options: mode=max,image-manifest=true,oci-mediatypes=true
