@@ -182,6 +182,9 @@ pub(crate) async fn create_group(
                 db::add_scim_group_member(&state.store, &db_group.id, &auth.org_id, &member.value)
                     .await
             {
+                if let Some(resp) = super::invalid_index_value_response(&e) {
+                    return resp.into_response();
+                }
                 tracing::warn!("Failed to add member {} to group: {e}", member.value);
             }
         }
@@ -343,6 +346,9 @@ pub(crate) async fn patch_group(
                                 )
                                 .await
                                 {
+                                    if let Some(resp) = super::invalid_index_value_response(&e) {
+                                        return resp.into_response();
+                                    }
                                     tracing::error!("Failed to replace group members: {e}");
                                 }
                             }
@@ -376,6 +382,9 @@ pub(crate) async fn patch_group(
                                 )
                                 .await
                             {
+                                if let Some(resp) = super::invalid_index_value_response(&e) {
+                                    return resp.into_response();
+                                }
                                 tracing::warn!("Failed to add member: {e}");
                             }
                         }
