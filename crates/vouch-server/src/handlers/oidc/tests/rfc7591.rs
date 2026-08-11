@@ -1342,10 +1342,6 @@ async fn test_rfc7591_post_logout_redirect_uris_loopback_http_allowed() {
 
 /// RFC 8705 §3 + RFC 7591: An mTLS-bound access token presented with its
 /// matching client certificate MUST authenticate at `POST /oauth/register`.
-///
-/// Regression test: `OptionalAuthenticatedToken` previously passed `None` for
-/// `client_cert`, so even a correctly-bound token+cert pair was rejected with
-/// "mTLS certificate required for certificate-bound token".
 #[tokio::test]
 async fn test_rfc7591_mtls_bound_token_with_matching_cert_authenticates() {
     let (app, state) = test_app().await;
@@ -1389,8 +1385,9 @@ async fn test_rfc7591_mtls_bound_token_with_matching_cert_authenticates() {
 }
 
 /// RFC 8705 §3: An mTLS-bound token presented with a mismatched client
-/// certificate MUST be rejected at `POST /oauth/register` with `invalid_token`.
-/// Confirms the cert is now extracted AND validated, not silently ignored.
+/// certificate MUST be rejected at `POST /oauth/register` with `invalid_token`
+/// — the presented cert is validated against `cnf.x5t#S256`, not merely
+/// extracted.
 #[tokio::test]
 async fn test_rfc7591_mtls_bound_token_with_wrong_cert_rejected() {
     let (app, state) = test_app().await;
@@ -1432,8 +1429,7 @@ async fn test_rfc7591_mtls_bound_token_with_wrong_cert_rejected() {
 }
 
 /// RFC 8705 §3: An mTLS-bound token presented without any client certificate
-/// MUST be rejected at `POST /oauth/register` with `invalid_token`. The cert
-/// extraction added by the fix must not weaken this enforcement.
+/// MUST be rejected at `POST /oauth/register` with `invalid_token`.
 #[tokio::test]
 async fn test_rfc7591_mtls_bound_token_without_cert_rejected() {
     let (app, state) = test_app().await;
@@ -1475,9 +1471,9 @@ async fn test_rfc7591_mtls_bound_token_without_cert_rejected() {
     );
 }
 
-/// Regression: A plain (non-bound) Bearer token presented together with a
-/// client certificate MUST still authenticate at `POST /oauth/register`. The
-/// added cert extraction must not break the non-bound token path.
+/// A plain (non-bound) Bearer token presented together with a client
+/// certificate MUST still authenticate at `POST /oauth/register` — a
+/// presented cert is ignored for tokens without a `cnf` binding.
 #[tokio::test]
 async fn test_rfc7591_plain_token_with_cert_presented_still_works() {
     let (app, state) = test_app().await;
