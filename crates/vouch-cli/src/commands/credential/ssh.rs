@@ -369,7 +369,7 @@ pub(crate) async fn run(server: &str, key_path: Option<&str>, force: bool) -> Re
         tr_println!(
             "credential-ssh-cached-display",
             cert_path = result.cert_path.display().to_string(),
-            serial = result.response.serial,
+            serial = result.response.serial.to_string(),
             principals = result.response.principals.join(", "),
             remaining = format_duration(result.response.valid_for_seconds),
         );
@@ -392,7 +392,7 @@ pub(crate) async fn run(server: &str, key_path: Option<&str>, force: bool) -> Re
     tr_println!(
         "credential-ssh-issued-display",
         cert_path = result.cert_path.display().to_string(),
-        serial = result.response.serial,
+        serial = result.response.serial.to_string(),
         principals = result.response.principals.join(", "),
         valid_for = format_duration(result.response.valid_for_seconds),
     );

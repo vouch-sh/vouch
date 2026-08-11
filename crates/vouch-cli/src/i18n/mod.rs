@@ -239,6 +239,26 @@ macro_rules! tr_eprintln {
 mod tests {
     use super::*;
 
+    /// SSH certificate serials are random `u64`, so they routinely exceed the
+    /// 2^53 a Fluent number can hold exactly. They identify a certificate for
+    /// revocation, so every digit has to survive rendering — hence the
+    /// `.to_string()` at the call sites rather than passing the integer.
+    #[test]
+    fn ssh_serial_renders_every_digit() {
+        let serial: u64 = 9_110_598_395_386_437_425;
+        let rendered = crate::tr_args!(
+            "credential-ssh-issued-display",
+            cert_path = "/tmp/id_ed25519_vouch-cert.pub",
+            serial = serial.to_string(),
+            principals = "jplock",
+            valid_for = "8h 0m",
+        );
+        assert!(
+            rendered.contains("9110598395386437425"),
+            "serial lost precision or was grouped: {rendered}"
+        );
+    }
+
     #[test]
     fn preresolve_cli_lang_space_form() {
         let argv: Vec<&OsStr> = ["vouch", "--lang", "fr-FR", "enroll"]
