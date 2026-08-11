@@ -741,6 +741,35 @@ pub async fn http_post_form_with_cert(
     (status, String::from_utf8_lossy(&body_bytes).to_string())
 }
 
+/// Helper for making POST JSON requests with an injected mTLS client certificate.
+///
+/// Mirrors [`http_post_json`] but injects the certificate via
+/// `ConnectInfo<PeerClientCert>` so [`OptionalClientCert`] extracts it in the
+/// handler. Pass `None` for `cert_der` to simulate a connection where no client
+/// certificate was presented.
+pub async fn http_post_json_with_cert(
+    app: &Router,
+    uri: &str,
+    body: &str,
+    headers: &[(&str, &str)],
+    cert_der: Option<Vec<u8>>,
+) -> (StatusCode, String) {
+    let mut all_headers = vec![("Content-Type", "application/json")];
+    all_headers.extend_from_slice(headers);
+    let request =
+        build_test_request_with_cert("POST", uri, Some(body.to_string()), &all_headers, cert_der);
+    let response: axum::response::Response = app
+        .clone()
+        .oneshot(request)
+        .await
+        .expect("Failed to execute request");
+    let status = response.status();
+    let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("Failed to read response body");
+    (status, String::from_utf8_lossy(&body_bytes).to_string())
+}
+
 /// Helper for making GET requests with an injected mTLS client certificate.
 ///
 /// The `cert_der` is injected via `ConnectInfo<PeerClientCert>` so that
