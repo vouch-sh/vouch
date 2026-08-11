@@ -2454,22 +2454,19 @@ async fn test_scim_create_group_rejects_nul_display_name() {
     );
 }
 
-// ------------------------------------------------------------------------
-// NUL-byte rejection in Group *member* operations (issue #883 follow-up)
-// ------------------------------------------------------------------------
+// ========================================================================
+// NUL-byte rejection in Group member operations (issue #883)
+// ========================================================================
 //
-// Commit a822552 wired `invalid_index_value_response` into the group
-// create/patch error handlers for displayName/externalId but missed the
-// three member write paths (create-group add members, patch replace
-// members, patch add member). A NUL in `members[*].value` (the user_id
-// index) was logged and swallowed — the request succeeded with 201/200
-// while the invalid member was silently dropped. These tests pin each
-// member surface to a 400 so the inconsistency cannot regress.
+// A NUL in `members[*].value` (the `user_id` index) must fail the request
+// with a SCIM 400 `invalidValue` on every member write surface —
+// create-group members, PATCH replace members, and PATCH add member —
+// matching the displayName/externalId handling above.
 
 #[tokio::test]
 async fn test_scim_create_group_rejects_nul_member_user_id() {
     // POST /scim/v2/Groups with a NUL in members[0].value must be a 400,
-    // not a 201 CREATED with the invalid member silently dropped.
+    // not a 201 CREATED with the invalid member dropped.
     let (app, state) = test_app().await;
     let token = create_test_scim_token(&state.store, "test-nul-member-create", "test-org").await;
     let auth_header = format!("Bearer {token}");
@@ -2605,15 +2602,10 @@ async fn test_scim_patch_group_add_member_rejects_nul_user_id() {
     );
 }
 
-// ------------------------------------------------------------------------
-// Positive regression: PATCH replace members happy path still works.
-// Guards against the replace-members error handler becoming over-broad
-// and rejecting valid user_ids.
-// ------------------------------------------------------------------------
-
 #[tokio::test]
 async fn test_scim_patch_group_replace_members() {
-    // PATCH replace members swaps the full member set and returns 200.
+    // PATCH replace members swaps the full member set and returns 200 —
+    // valid user_ids must not be caught by the invalid-value handling.
     let (app, state) = test_app().await;
     let token = create_test_scim_token(&state.store, "test-replace-members", "test-org").await;
     let auth_header = format!("Bearer {token}");
