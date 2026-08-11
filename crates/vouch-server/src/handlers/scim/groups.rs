@@ -16,7 +16,61 @@ use super::types::{
 };
 use crate::AppState;
 use crate::db;
-use crate::db::{ScimFilterError, ScimScope};
+use crate::db::{GroupMembersError, ScimFilterError, ScimScope};
+
+/// Maximum number of group members accepted in a single request (POST
+/// members array, PATCH add/replace values).
+///
+/// Member writes are atomic — one transaction per request — and Aurora DSQL
+/// caps rows mutated per transaction at 3,000 (error 54000, not
+/// configurable). Each member is 3 rows (1 document + 2 index entries), so
+/// 500 members is ~1,500 rows, a wide margin. Real provisioners batch ~100
+/// members per request. The delete side of PATCH replace scales with the
+/// *current* group size, not the request, so it is bounded by this cap only
+/// as long as groups grow through capped requests.
+pub(super) const MAX_MEMBERS_PER_REQUEST: usize = 500;
+
+/// Reject a members array larger than [`MAX_MEMBERS_PER_REQUEST`].
+fn members_over_cap(len: usize) -> Option<(StatusCode, Json<ScimError>)> {
+    if len <= MAX_MEMBERS_PER_REQUEST {
+        return None;
+    }
+    Some((
+        StatusCode::BAD_REQUEST,
+        Json(
+            ScimError::new(
+                400,
+                format!("members must not exceed {MAX_MEMBERS_PER_REQUEST} entries per request"),
+            )
+            .with_type("invalidValue"),
+        ),
+    ))
+}
+
+/// Map a failed group-member write to its SCIM error response.
+///
+/// `op` names the operation ("add"/"replace") in the log line and the
+/// 500 detail.
+fn group_members_error_response(op: &str, err: GroupMembersError) -> Response {
+    if let GroupMembersError::GroupNotFound = err {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(ScimError::new(404, "Group not found")),
+        )
+            .into_response();
+    }
+    if let GroupMembersError::Other(ref e) = err
+        && let Some(resp) = super::invalid_index_value_response(e)
+    {
+        return resp.into_response();
+    }
+    tracing::error!("Failed to {op} group members: {err}");
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(ScimError::new(500, format!("Failed to {op} group members"))),
+    )
+        .into_response()
+}
 
 /// GET /scim/v2/Groups (RFC 7644 Section 3.4.2).
 ///
@@ -119,8 +173,9 @@ pub(crate) async fn list_groups(
 
 /// POST /scim/v2/Groups (RFC 7644 Section 3.3).
 ///
-/// Creates a new Group resource. Returns 201 Created on success,
-/// 409 Conflict if the group already exists.
+/// Creates a new Group resource and its initial members atomically:
+/// an invalid member value fails the whole request and nothing persists.
+/// Returns 201 Created on success.
 pub(crate) async fn create_group(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -137,6 +192,16 @@ pub(crate) async fn create_group(
         )
             .into_response();
     }
+    let member_ids: Vec<String> = group
+        .members
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .map(|m| m.value.clone())
+        .collect();
+    if let Some(resp) = members_over_cap(member_ids.len()) {
+        return resp.into_response();
+    }
 
     // Authenticate and check scope
     let auth = match authenticate_scim(&state, &headers).await {
@@ -147,12 +212,13 @@ pub(crate) async fn create_group(
         return (status, json).into_response();
     }
 
-    // Create group
+    // Create group with members atomically
     let db_group = match db::create_scim_group(
         &state.store,
         &auth.org_id,
         &group.display_name,
         group.external_id.as_deref(),
+        &member_ids,
     )
     .await
     {
@@ -162,33 +228,13 @@ pub(crate) async fn create_group(
                 return resp.into_response();
             }
             tracing::error!("Failed to create group: {e}");
-            let detail = if e.to_string().contains("UNIQUE") {
-                "Group already exists"
-            } else {
-                "Failed to create group"
-            };
             return (
-                StatusCode::CONFLICT,
-                Json(ScimError::new(409, detail).with_type("uniqueness")),
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ScimError::new(500, "Failed to create group")),
             )
                 .into_response();
         }
     };
-
-    // Add members if provided
-    if let Some(members) = &group.members {
-        for member in members {
-            if let Err(e) =
-                db::add_scim_group_member(&state.store, &db_group.id, &auth.org_id, &member.value)
-                    .await
-            {
-                if let Some(resp) = super::invalid_index_value_response(&e) {
-                    return resp.into_response();
-                }
-                tracing::warn!("Failed to add member {} to group: {e}", member.value);
-            }
-        }
-    }
 
     // Audit log
     if let Err(e) = db::insert_scim_audit(
@@ -338,6 +384,9 @@ pub(crate) async fn patch_group(
                                         v.get("value").and_then(|v| v.as_str()).map(String::from)
                                     })
                                     .collect();
+                                if let Some(resp) = members_over_cap(user_ids.len()) {
+                                    return resp.into_response();
+                                }
                                 if let Err(e) = db::replace_scim_group_members(
                                     &state.store,
                                     &id,
@@ -346,10 +395,7 @@ pub(crate) async fn patch_group(
                                 )
                                 .await
                                 {
-                                    if let Some(resp) = super::invalid_index_value_response(&e) {
-                                        return resp.into_response();
-                                    }
-                                    tracing::error!("Failed to replace group members: {e}");
+                                    return group_members_error_response("replace", e);
                                 }
                             }
                         }
@@ -370,23 +416,27 @@ pub(crate) async fn patch_group(
                     && path == "members"
                     && let Some(val) = &op.value
                 {
-                    // Add members
+                    // Add members atomically — a mid-list failure adds none
                     if let Some(arr) = val.as_array() {
-                        for member in arr {
-                            if let Some(user_id) = member.get("value").and_then(|v| v.as_str())
-                                && let Err(e) = db::add_scim_group_member(
-                                    &state.store,
-                                    &id,
-                                    &auth.org_id,
-                                    user_id,
-                                )
-                                .await
-                            {
-                                if let Some(resp) = super::invalid_index_value_response(&e) {
-                                    return resp.into_response();
-                                }
-                                tracing::warn!("Failed to add member: {e}");
-                            }
+                        let user_ids: Vec<String> = arr
+                            .iter()
+                            .filter_map(|v| {
+                                v.get("value").and_then(|v| v.as_str()).map(String::from)
+                            })
+                            .collect();
+                        if let Some(resp) = members_over_cap(user_ids.len()) {
+                            return resp.into_response();
+                        }
+                        if !user_ids.is_empty()
+                            && let Err(e) = db::add_scim_group_members(
+                                &state.store,
+                                &id,
+                                &auth.org_id,
+                                &user_ids,
+                            )
+                            .await
+                        {
+                            return group_members_error_response("add", e);
                         }
                     }
                 }
@@ -401,7 +451,12 @@ pub(crate) async fn patch_group(
                             db::remove_scim_group_member(&state.store, &id, &auth.org_id, &user_id)
                                 .await
                     {
-                        tracing::warn!("Failed to remove member: {e}");
+                        tracing::error!("Failed to remove group member: {e}");
+                        return (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(ScimError::new(500, "Failed to remove group member")),
+                        )
+                            .into_response();
                     }
                 }
             }

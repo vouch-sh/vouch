@@ -444,7 +444,8 @@ impl RetryableError for anyhow::Error {
 /// `anyhow::Error` retries on transient DSQL errors (`is_retryable_db_error`);
 /// `ServiceError` retries only on the `OccConflict` variant.
 ///
-/// Usage: `with_dsql_retry!(async { ... }).await`
+/// Usage: `with_dsql_retry!(async { ... })` — the macro awaits the body
+/// itself; the whole expression evaluates to the final `Result`.
 #[macro_export]
 macro_rules! with_dsql_retry {
     ($body:expr) => {{

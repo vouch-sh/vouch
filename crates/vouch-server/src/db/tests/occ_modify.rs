@@ -424,7 +424,7 @@ async fn test_update_scim_group_only_intended_fields_change() {
 
     let (store, _audit) = test_db().await;
 
-    let group = create_scim_group(&store, TEST_ORG_ID, "OriginalName", Some("ext-123"))
+    let group = create_scim_group(&store, TEST_ORG_ID, "OriginalName", Some("ext-123"), &[])
         .await
         .expect("create_scim_group");
 
@@ -472,7 +472,7 @@ async fn test_update_scim_group_only_intended_fields_change() {
 async fn test_update_scim_group_wrong_org_returns_false() {
     let (store, _audit) = test_db().await;
 
-    let group = create_scim_group(&store, TEST_ORG_ID, "GroupToProtect", None)
+    let group = create_scim_group(&store, TEST_ORG_ID, "GroupToProtect", None, &[])
         .await
         .expect("create_scim_group");
 
@@ -794,7 +794,7 @@ async fn test_update_scim_group_concurrent_org_change_reports_not_applied() {
     use crate::db::documents::scim::ScimGroupDoc;
 
     let (store, _audit) = test_db().await;
-    let group = create_scim_group(&store, TEST_ORG_ID, "GroupBefore", None)
+    let group = create_scim_group(&store, TEST_ORG_ID, "GroupBefore", None, &[])
         .await
         .expect("create_scim_group");
 
