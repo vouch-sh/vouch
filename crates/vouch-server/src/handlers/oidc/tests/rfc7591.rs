@@ -1329,3 +1329,186 @@ async fn test_rfc7591_post_logout_redirect_uris_loopback_http_allowed() {
         "http://localhost:3000/logged-out"
     );
 }
+
+// ========================================================================
+// RFC 8705 §3 — mTLS-bound tokens at the registration endpoint
+//
+// The discovery document advertises `mtls_endpoint_aliases.registration_endpoint`,
+// so an mTLS-bound access token (cnf.x5t#S256) presented with its matching
+// client certificate MUST authenticate at POST /oauth/register. The
+// `OptionalAuthenticatedToken` extractor must extract and forward the client
+// certificate, mirroring `AuthenticatedToken`.
+// ========================================================================
+
+/// RFC 8705 §3 + RFC 7591: An mTLS-bound access token presented with its
+/// matching client certificate MUST authenticate at `POST /oauth/register`.
+///
+/// Regression test: `OptionalAuthenticatedToken` previously passed `None` for
+/// `client_cert`, so even a correctly-bound token+cert pair was rejected with
+/// "mTLS certificate required for certificate-bound token".
+#[tokio::test]
+async fn test_rfc7591_mtls_bound_token_with_matching_cert_authenticates() {
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "rfc7591-mtls-match@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+
+    let cert_der = make_test_cert_der("rfc7591-mtls-match");
+    let thumbprint = cert_thumbprint(&cert_der);
+    let token =
+        create_test_session_with_mtls(&state, &user.id, &user.email, &auth_id, &thumbprint).await;
+
+    let body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "client_name": "mTLS-bound Registration"
+    });
+
+    let (status, resp) = http_post_json_with_cert(
+        &app,
+        "/oauth/register",
+        &body.to_string(),
+        &[("Authorization", &format!("Bearer {token}"))],
+        Some(cert_der),
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "mTLS-bound token with matching cert must authenticate at /oauth/register: {resp}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&resp).expect("Valid JSON");
+    assert!(
+        json.get("client_id").is_some(),
+        "Response must include client_id"
+    );
+    assert!(
+        json["client_name"].as_str() == Some("mTLS-bound Registration"),
+        "client_name must be echoed back: {resp}"
+    );
+}
+
+/// RFC 8705 §3: An mTLS-bound token presented with a mismatched client
+/// certificate MUST be rejected at `POST /oauth/register` with `invalid_token`.
+/// Confirms the cert is now extracted AND validated, not silently ignored.
+#[tokio::test]
+async fn test_rfc7591_mtls_bound_token_with_wrong_cert_rejected() {
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "rfc7591-mtls-wrong@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+
+    let cert_a_der = make_test_cert_der("rfc7591-bound-a");
+    let thumbprint_a = cert_thumbprint(&cert_a_der);
+    let token =
+        create_test_session_with_mtls(&state, &user.id, &user.email, &auth_id, &thumbprint_a).await;
+
+    // Present a different certificate than the one the token is bound to.
+    let cert_b_der = make_test_cert_der("rfc7591-presented-b");
+    let body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "client_name": "mTLS Mismatch"
+    });
+
+    let (status, resp) = http_post_json_with_cert(
+        &app,
+        "/oauth/register",
+        &body.to_string(),
+        &[("Authorization", &format!("Bearer {token}"))],
+        Some(cert_b_der),
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "mTLS-bound token with wrong cert must be rejected: {resp}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&resp).expect("Valid JSON");
+    assert_eq!(
+        json["error"], "invalid_token",
+        "Wrong cert must return invalid_token: {resp}"
+    );
+}
+
+/// RFC 8705 §3: An mTLS-bound token presented without any client certificate
+/// MUST be rejected at `POST /oauth/register` with `invalid_token`. The cert
+/// extraction added by the fix must not weaken this enforcement.
+#[tokio::test]
+async fn test_rfc7591_mtls_bound_token_without_cert_rejected() {
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "rfc7591-mtls-nocert@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+
+    let cert_der = make_test_cert_der("rfc7591-nocert");
+    let thumbprint = cert_thumbprint(&cert_der);
+    let token =
+        create_test_session_with_mtls(&state, &user.id, &user.email, &auth_id, &thumbprint).await;
+
+    let body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "client_name": "mTLS No Cert"
+    });
+
+    // No client certificate injected (cert_der = None) — the request still
+    // carries the Authorization header, so the extractor must validate the
+    // token and reject it for lack of a binding cert.
+    let (status, resp) = http_post_json_with_cert(
+        &app,
+        "/oauth/register",
+        &body.to_string(),
+        &[("Authorization", &format!("Bearer {token}"))],
+        None,
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "mTLS-bound token without cert must be rejected: {resp}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&resp).expect("Valid JSON");
+    assert_eq!(
+        json["error"], "invalid_token",
+        "Missing cert must return invalid_token: {resp}"
+    );
+}
+
+/// Regression: A plain (non-bound) Bearer token presented together with a
+/// client certificate MUST still authenticate at `POST /oauth/register`. The
+/// added cert extraction must not break the non-bound token path.
+#[tokio::test]
+async fn test_rfc7591_plain_token_with_cert_presented_still_works() {
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "rfc7591-plain-cert@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+
+    let cert_der = make_test_cert_der("rfc7591-plain");
+    let body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "client_name": "Plain Token With Cert"
+    });
+
+    let (status, resp) = http_post_json_with_cert(
+        &app,
+        "/oauth/register",
+        &body.to_string(),
+        &[("Authorization", &format!("Bearer {token}"))],
+        Some(cert_der),
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "Plain token with a cert presented must still authenticate: {resp}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&resp).expect("Valid JSON");
+    assert!(
+        json.get("client_id").is_some(),
+        "Response must include client_id"
+    );
+}

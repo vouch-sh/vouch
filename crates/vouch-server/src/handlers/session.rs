@@ -389,13 +389,16 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for OptionalAuthenticatedTok
             axum::extract::OriginalUri::from_request_parts(parts, state)
                 .await
                 .unwrap_or_else(|infallible| match infallible {});
+        let client_cert = super::extractors::OptionalClientCert::from_request_parts(parts, state)
+            .await
+            .unwrap_or_else(|infallible| match infallible {});
         let token = extract_resource_token(
             state,
             &parts.headers,
             &CookieJar::default(),
             parts.method.as_str(),
             uri.path(),
-            None,
+            client_cert.0.as_ref(),
         )
         .await?;
         Ok(Self(Some(token)))
