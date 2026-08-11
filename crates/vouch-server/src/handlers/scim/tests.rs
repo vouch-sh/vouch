@@ -2453,3 +2453,245 @@ async fn test_scim_create_group_rejects_nul_display_name() {
         "detail must name the field: {body}"
     );
 }
+
+// ------------------------------------------------------------------------
+// NUL-byte rejection in Group *member* operations (issue #883 follow-up)
+// ------------------------------------------------------------------------
+//
+// Commit a822552 wired `invalid_index_value_response` into the group
+// create/patch error handlers for displayName/externalId but missed the
+// three member write paths (create-group add members, patch replace
+// members, patch add member). A NUL in `members[*].value` (the user_id
+// index) was logged and swallowed — the request succeeded with 201/200
+// while the invalid member was silently dropped. These tests pin each
+// member surface to a 400 so the inconsistency cannot regress.
+
+#[tokio::test]
+async fn test_scim_create_group_rejects_nul_member_user_id() {
+    // POST /scim/v2/Groups with a NUL in members[0].value must be a 400,
+    // not a 201 CREATED with the invalid member silently dropped.
+    let (app, state) = test_app().await;
+    let token = create_test_scim_token(&state.store, "test-nul-member-create", "test-org").await;
+    let auth_header = format!("Bearer {token}");
+
+    let body = serde_json::json!({
+        "schemas": ["urn:ietf:params:scim:schemas:core:2.0:Group"],
+        "displayName": "NulMemberCreate",
+        "members": [{"value": "user\u{0}id"}]
+    });
+    let (status, resp_body) = http_post_json(
+        &app,
+        "/scim/v2/Groups",
+        &body.to_string(),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "NUL in member user_id must be a 400, not 201 CREATED: {resp_body}"
+    );
+    let error: serde_json::Value = serde_json::from_str(&resp_body).expect("Valid JSON");
+    assert_eq!(error["scimType"], "invalidValue");
+    assert!(
+        error["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("user_id"),
+        "detail must name the user_id field: {resp_body}"
+    );
+}
+
+#[tokio::test]
+async fn test_scim_patch_group_replace_members_rejects_nul_user_id() {
+    // PATCH replace members with a NUL in value must be a 400, not 200 OK.
+    let (app, state) = test_app().await;
+    let token = create_test_scim_token(&state.store, "test-nul-member-replace", "test-org").await;
+    let auth_header = format!("Bearer {token}");
+
+    // Create a group to PATCH.
+    let (status, body) = http_post_json(
+        &app,
+        "/scim/v2/Groups",
+        r#"{"schemas":["urn:ietf:params:scim:schemas:core:2.0:Group"],"displayName":"NulMemberReplace"}"#,
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "setup create failed: {body}");
+    let created: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let group_id = created["id"].as_str().expect("group id");
+
+    let patch = serde_json::json!({
+        "schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
+        "Operations": [{"op": "replace", "path": "members", "value": [{"value": "bad\u{0}user"}]}]
+    });
+    let (status, resp_body) = http_request(
+        &app,
+        "PATCH",
+        &format!("/scim/v2/Groups/{group_id}"),
+        Some(patch.to_string()),
+        &[
+            ("Content-Type", "application/json"),
+            ("Authorization", &auth_header),
+        ],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "NUL in replace-members user_id must be a 400, not 200 OK: {resp_body}"
+    );
+    let error: serde_json::Value = serde_json::from_str(&resp_body).expect("Valid JSON");
+    assert_eq!(error["scimType"], "invalidValue");
+    assert!(
+        error["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("user_id"),
+        "detail must name the user_id field: {resp_body}"
+    );
+}
+
+#[tokio::test]
+async fn test_scim_patch_group_add_member_rejects_nul_user_id() {
+    // PATCH add member with a NUL in value must be a 400, not 200 OK.
+    let (app, state) = test_app().await;
+    let token = create_test_scim_token(&state.store, "test-nul-member-add", "test-org").await;
+    let auth_header = format!("Bearer {token}");
+
+    // Create a group to PATCH.
+    let (status, body) = http_post_json(
+        &app,
+        "/scim/v2/Groups",
+        r#"{"schemas":["urn:ietf:params:scim:schemas:core:2.0:Group"],"displayName":"NulMemberAdd"}"#,
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "setup create failed: {body}");
+    let created: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let group_id = created["id"].as_str().expect("group id");
+
+    let patch = serde_json::json!({
+        "schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
+        "Operations": [{"op": "add", "path": "members", "value": [{"value": "bad\u{0}user"}]}]
+    });
+    let (status, resp_body) = http_request(
+        &app,
+        "PATCH",
+        &format!("/scim/v2/Groups/{group_id}"),
+        Some(patch.to_string()),
+        &[
+            ("Content-Type", "application/json"),
+            ("Authorization", &auth_header),
+        ],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "NUL in add-member user_id must be a 400, not 200 OK: {resp_body}"
+    );
+    let error: serde_json::Value = serde_json::from_str(&resp_body).expect("Valid JSON");
+    assert_eq!(error["scimType"], "invalidValue");
+    assert!(
+        error["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("user_id"),
+        "detail must name the user_id field: {resp_body}"
+    );
+}
+
+// ------------------------------------------------------------------------
+// Positive regression: PATCH replace members happy path still works.
+// Guards against the replace-members error handler becoming over-broad
+// and rejecting valid user_ids.
+// ------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_scim_patch_group_replace_members() {
+    // PATCH replace members swaps the full member set and returns 200.
+    let (app, state) = test_app().await;
+    let token = create_test_scim_token(&state.store, "test-replace-members", "test-org").await;
+    let auth_header = format!("Bearer {token}");
+
+    // Create two users.
+    let (_, body) = http_post_json(
+        &app,
+        "/scim/v2/Users",
+        r#"{"schemas":["urn:ietf:params:scim:schemas:core:2.0:User"],"userName":"replace-a@test-org.example.com"}"#,
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    let user_a: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let user_a_id = user_a["id"].as_str().expect("user a id");
+
+    let (_, body) = http_post_json(
+        &app,
+        "/scim/v2/Users",
+        r#"{"schemas":["urn:ietf:params:scim:schemas:core:2.0:User"],"userName":"replace-b@test-org.example.com"}"#,
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    let user_b: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let user_b_id = user_b["id"].as_str().expect("user b id");
+
+    // Create a group with user_a as a member.
+    let create_body = format!(
+        r#"{{"schemas":["urn:ietf:params:scim:schemas:core:2.0:Group"],"displayName":"ReplaceTeam","members":[{{"value":"{user_a_id}"}}]}}"#
+    );
+    let (status, body) = http_post_json(
+        &app,
+        "/scim/v2/Groups",
+        &create_body,
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "setup create failed: {body}");
+    let created: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let group_id = created["id"].as_str().expect("group id");
+
+    // PATCH replace members with user_b only.
+    let patch = serde_json::json!({
+        "schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
+        "Operations": [{"op": "replace", "path": "members", "value": [{"value": user_b_id}]}]
+    });
+    let (status, body) = http_request(
+        &app,
+        "PATCH",
+        &format!("/scim/v2/Groups/{group_id}"),
+        Some(patch.to_string()),
+        &[
+            ("Content-Type", "application/json"),
+            ("Authorization", &auth_header),
+        ],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "PATCH replace must return 200: {body}"
+    );
+
+    // GET the group: user_a must be gone, user_b must be present.
+    let (status, body) = http_get(
+        &app,
+        &format!("/scim/v2/Groups/{group_id}"),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let group: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let members = group["members"].as_array().expect("members array");
+    assert!(
+        members.iter().any(|m| m["value"] == user_b_id),
+        "replaced member (user_b) must appear in GET response"
+    );
+    assert!(
+        !members.iter().any(|m| m["value"] == user_a_id),
+        "previous member (user_a) must be removed after replace"
+    );
+}
