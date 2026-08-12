@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/*"]
 
 [workspace.package]
-version = "2026.8.3"
+version = "2026.8.4"
 edition = "2024"
 license = "Apache-2.0 OR MIT"
 rust-version = "1.97.1"
@@ -144,7 +144,7 @@ ciborium = { version = "=0.2.2", default-features = false }
 clap = { version = "=4.6.6", default-features = false }
 clap_complete = { version = "=4.6.9", default-features = false }
 const-oid = { version = "=0.9.6", default-features = false }
-ctap-hid-fido2 = { version = "=3.5.12", default-features = false }
+ctap-hid-fido2 = { version = "=3.5.13", default-features = false }
 der = { version = "=0.7.10", default-features = false }
 dirs = { version = "=6.0.0", default-features = false }
 dogwood-language = { git = "https://github.com/dogwood-policy/dogwood", rev = "5063bcc2d6d6cf5024d1b0498e6cc8ef52cbcf0c", package = "amzn-dogwood-language", default-features = false }
