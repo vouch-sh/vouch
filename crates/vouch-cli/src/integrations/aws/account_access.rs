@@ -171,10 +171,39 @@ pub(crate) async fn list_applications(
     Ok(applications)
 }
 
+/// Split a response page into entitled roles and a count of entries that
+/// could not be read (future union members or missing required fields).
+fn extract_entitled_roles(members: Vec<EntitlementsListMember>) -> (Vec<EntitledRole>, u32) {
+    let mut roles = Vec::new();
+    let mut dropped: u32 = 0;
+    for member in members {
+        let Some(EntitlementSummary {
+            principal_role:
+                Some(PrincipalRoleSummary {
+                    role_arn: Some(role_arn),
+                    account: Some(account),
+                    account_name,
+                }),
+        }) = member.entitlement
+        else {
+            dropped = dropped.saturating_add(1);
+            continue;
+        };
+        roles.push(EntitledRole {
+            role_arn,
+            account,
+            account_name,
+        });
+    }
+    (roles, dropped)
+}
+
 /// List the roles entitled to one principal in an application.
 ///
 /// Paginates automatically with a 100-page safety cap. Entries missing the
-/// role ARN or account (or of a future union shape) are skipped.
+/// role ARN or account (or of a future union shape) are skipped and warned
+/// about — a shape change in this week-old API must not read as "no
+/// entitlements".
 pub(crate) async fn list_entitlements(
     http_client: &reqwest::Client,
     region: &str,
@@ -185,6 +214,7 @@ pub(crate) async fn list_entitlements(
     let endpoint = Partition::from_region(region).account_access_endpoint(region)?;
 
     let mut roles = Vec::new();
+    let mut dropped_total: u32 = 0;
     let mut next_token: Option<String> = None;
     let max_pages: u32 = 100;
 
@@ -206,26 +236,9 @@ pub(crate) async fn list_entitlements(
         let resp: ListEntitlementsResponse = serde_json::from_str(&response_body)
             .context(tr!("err-failed-parse-account-access-response"))?;
 
-        for member in resp.entitlements {
-            let Some(EntitlementSummary {
-                principal_role: Some(principal_role),
-            }) = member.entitlement
-            else {
-                continue;
-            };
-            if let PrincipalRoleSummary {
-                role_arn: Some(role_arn),
-                account: Some(account),
-                account_name,
-            } = principal_role
-            {
-                roles.push(EntitledRole {
-                    role_arn,
-                    account,
-                    account_name,
-                });
-            }
-        }
+        let (page_roles, dropped) = extract_entitled_roles(resp.entitlements);
+        roles.extend(page_roles);
+        dropped_total = dropped_total.saturating_add(dropped);
 
         match resp.next_token {
             Some(token) if !token.is_empty() => {
@@ -237,6 +250,13 @@ pub(crate) async fn list_entitlements(
         if page == max_pages.saturating_sub(1) {
             tracing::warn!("entitlement list reached {max_pages}-page safety cap");
         }
+    }
+
+    if dropped_total > 0 {
+        tracing::warn!(
+            "{dropped_total} entitlement entries had an unrecognized shape and were \
+             skipped; the account-access API may have changed"
+        );
     }
 
     Ok(roles)
@@ -352,23 +372,30 @@ mod tests {
         }"#;
         let resp: ListEntitlementsResponse = serde_json::from_str(json).unwrap();
         assert_eq!(resp.entitlements.len(), 2);
-        assert!(
-            resp.entitlements
-                .first()
-                .unwrap()
-                .entitlement
-                .as_ref()
-                .unwrap()
-                .principal_role
-                .is_none()
-        );
-        let role = resp
-            .entitlements
-            .get(1)
-            .and_then(|member| member.entitlement.as_ref())
-            .and_then(|summary| summary.principal_role.as_ref())
-            .unwrap();
+
+        // The unknown union member is dropped and counted; the readable
+        // entry survives with account_name absent.
+        let (roles, dropped) = extract_entitled_roles(resp.entitlements);
+        assert_eq!(dropped, 1);
+        let role = roles.first().unwrap();
+        assert_eq!(role.role_arn, "arn:aws:iam::1:role/R");
         assert!(role.account_name.is_none());
+    }
+
+    #[test]
+    fn extract_entitled_roles_counts_missing_fields_as_dropped() {
+        let json = r#"{
+            "entitlements": [
+                {"entitlementId": "e1"},
+                {"entitlementId": "e2", "entitlement": {"principalRole": {"account": "000000000001"}}},
+                {"entitlementId": "e3", "entitlement": {"principalRole": {
+                    "roleArn": "arn:aws:iam::1:role/R", "account": "000000000001"}}}
+            ]
+        }"#;
+        let resp: ListEntitlementsResponse = serde_json::from_str(json).unwrap();
+        let (roles, dropped) = extract_entitled_roles(resp.entitlements);
+        assert_eq!(roles.len(), 1);
+        assert_eq!(dropped, 2);
     }
 
     #[test]

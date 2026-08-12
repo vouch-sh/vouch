@@ -779,9 +779,13 @@ fn write_entitled_profiles<'a>(
             continue;
         };
         if aws_config.profile_exists(&profile_name) {
+            // Unlike a permission-set re-run, this is a cross-mechanism
+            // collision: the existing profile may vend different
+            // credentials, and the entitlement was NOT configured.
             tr_println!(
-                "setup-aws-discover-skipped",
-                profile = profile_name.as_str()
+                "setup-aws-entitlements-name-taken",
+                profile = profile_name.as_str(),
+                role_arn = role.role_arn.as_str()
             );
             *skipped = skipped.saturating_add(1);
             continue;
