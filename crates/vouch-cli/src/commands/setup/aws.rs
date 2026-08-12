@@ -778,15 +778,26 @@ fn write_entitled_profiles<'a>(
             *skipped = skipped.saturating_add(1);
             continue;
         };
-        if aws_config.profile_exists(&profile_name) {
-            // Unlike a permission-set re-run, this is a cross-mechanism
-            // collision: the existing profile may vend different
-            // credentials, and the entitlement was NOT configured.
-            tr_println!(
-                "setup-aws-entitlements-name-taken",
-                profile = profile_name.as_str(),
-                role_arn = role.role_arn.as_str()
-            );
+        if let Some(existing) = aws_config.get_profile(&profile_name) {
+            match classify_name_collision(&existing, &role.role_arn) {
+                // A prior discovery run already configured this role —
+                // benign, idempotent re-run.
+                NameCollision::SameRole => {
+                    tr_println!(
+                        "setup-aws-discover-skipped",
+                        profile = profile_name.as_str()
+                    );
+                }
+                // Cross-mechanism collision: the existing profile vends
+                // something else, and the entitlement was NOT configured.
+                NameCollision::Foreign => {
+                    tr_println!(
+                        "setup-aws-entitlements-name-taken",
+                        profile = profile_name.as_str(),
+                        role_arn = role.role_arn.as_str()
+                    );
+                }
+            }
             *skipped = skipped.saturating_add(1);
             continue;
         }
@@ -806,6 +817,31 @@ fn write_entitled_profiles<'a>(
             role_arn = role.role_arn.as_str()
         );
         *created = created.saturating_add(1);
+    }
+}
+
+/// How an entitled role relates to an existing profile occupying its name.
+#[derive(Debug, PartialEq, Eq)]
+enum NameCollision {
+    /// The existing profile's `credential_process` targets the same role
+    /// ARN — a previous discovery run already configured this entitlement.
+    SameRole,
+    /// The existing profile targets something else (a permission set, a
+    /// different role, or a hand-written profile).
+    Foreign,
+}
+
+fn classify_name_collision(existing: &AwsProfile, role_arn: &str) -> NameCollision {
+    let same_role = existing
+        .credential_process
+        .as_deref()
+        .and_then(crate::integrations::aws::extract_role_from_credential_process)
+        .as_deref()
+        == Some(role_arn);
+    if same_role {
+        NameCollision::SameRole
+    } else {
+        NameCollision::Foreign
     }
 }
 
@@ -1092,6 +1128,56 @@ mod tests {
         assert_eq!(
             entitled_role_profile_name(&role, None),
             Some("vouch-444455556666-readonly".to_string())
+        );
+    }
+
+    fn profile_with_cp(credential_process: Option<&str>) -> AwsProfile {
+        AwsProfile {
+            name: "vouch-prod-readonly".to_string(),
+            credential_process: credential_process.map(str::to_string),
+            region: None,
+            output: None,
+        }
+    }
+
+    #[test]
+    fn test_classify_name_collision_same_role_is_rerun() {
+        let role = "arn:aws:iam::444455556666:role/vouch/VouchReadOnly";
+        let existing = profile_with_cp(Some(
+            "\"/usr/local/bin/vouch\" credential aws --role \
+             arn:aws:iam::444455556666:role/vouch/VouchReadOnly --via \
+             arn:aws:iam::999999999999:role/vouch/VouchAccess",
+        ));
+        assert_eq!(
+            classify_name_collision(&existing, role),
+            NameCollision::SameRole
+        );
+    }
+
+    #[test]
+    fn test_classify_name_collision_foreign_targets() {
+        let role = "arn:aws:iam::444455556666:role/vouch/VouchReadOnly";
+        // Different role ARN.
+        let other_role = profile_with_cp(Some(
+            "\"/usr/local/bin/vouch\" credential aws --role arn:aws:iam::1:role/Other",
+        ));
+        assert_eq!(
+            classify_name_collision(&other_role, role),
+            NameCollision::Foreign
+        );
+        // Permission-set profile (no --role in the credential_process).
+        let permission_set = profile_with_cp(Some(
+            "\"/usr/local/bin/vouch\" credential aws --idc-application arn:aws:sso::1:application/x/y \
+             --account 444455556666 --permission-set \"ReadOnly\"",
+        ));
+        assert_eq!(
+            classify_name_collision(&permission_set, role),
+            NameCollision::Foreign
+        );
+        // Hand-written profile without a credential_process.
+        assert_eq!(
+            classify_name_collision(&profile_with_cp(None), role),
+            NameCollision::Foreign
         );
     }
 
