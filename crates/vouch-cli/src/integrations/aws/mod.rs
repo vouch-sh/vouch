@@ -4,12 +4,15 @@
 //! - `config` - AWS config file (~/.aws/config) parsing
 //! - `sts` - AWS STS (Security Token Service) utilities
 
+pub(crate) mod account_access;
 pub(crate) mod codeartifact;
 pub(crate) mod codecommit;
 pub(crate) mod config;
 pub(crate) mod identity_center;
+pub(crate) mod identitystore;
 pub(crate) mod redshift;
 pub(crate) mod sigv4;
+pub(crate) mod sso_admin;
 pub(crate) mod sso_portal;
 pub(crate) mod sts;
 

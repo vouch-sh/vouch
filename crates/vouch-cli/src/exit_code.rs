@@ -58,6 +58,20 @@ pub(crate) enum CliError {
     /// Network or server connectivity failure.
     NetworkError(String),
 
+    /// A SigV4-signed AWS API call returned a non-2xx response.
+    AwsApi {
+        /// Service signing name (e.g. `"sts"`, `"account-access"`).
+        service: String,
+        /// HTTP status returned by the service.
+        status: reqwest::StatusCode,
+        /// AWS error code from the response (`x-amzn-errortype` header,
+        /// XML `<Code>`, or JSON `__type`), when present.
+        code: Option<String>,
+        /// Response body truncated so account IDs and ARNs are not
+        /// over-exposed.
+        detail: String,
+    },
+
     /// Server denied the request (403).
     PermissionDenied(String),
 
@@ -94,12 +108,69 @@ pub(crate) enum CliError {
     },
 }
 
+impl CliError {
+    /// True when this error is an AWS-side access denial (HTTP 403 or an
+    /// `AccessDenied` error code from a SigV4-signed API call).
+    pub(crate) fn is_aws_access_denied(&self) -> bool {
+        let Self::AwsApi { status, code, .. } = self else {
+            return false;
+        };
+        match code.as_deref() {
+            Some("AccessDenied" | "AccessDeniedException") => true,
+            // Signature and clock-skew faults arrive as 403 but are
+            // client-side request problems, not authorization denials —
+            // they must not exit 5 or trigger trust-policy remediation.
+            Some(
+                "SignatureDoesNotMatch"
+                | "InvalidSignatureException"
+                | "RequestTimeTooSkewed"
+                | "RequestExpired",
+            ) => false,
+            Some(_) | None => *status == reqwest::StatusCode::FORBIDDEN,
+        }
+    }
+}
+
+/// True when any error in the chain is an AWS access denial.
+pub(crate) fn aws_access_denied(err: &anyhow::Error) -> bool {
+    for cause in err.chain() {
+        if let Some(cli_err) = cause.downcast_ref::<CliError>()
+            && cli_err.is_aws_access_denied()
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// True when any error in the chain is an AWS API error with this code.
+pub(crate) fn aws_error_code_matches(err: &anyhow::Error, expected: &str) -> bool {
+    for cause in err.chain() {
+        if let Some(CliError::AwsApi {
+            code: Some(code), ..
+        }) = cause.downcast_ref::<CliError>()
+            && code == expected
+        {
+            return true;
+        }
+    }
+    false
+}
+
 impl std::fmt::Display for CliError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::NotAuthenticated { reason } => f.write_str(reason),
             Self::HardwareNotFound(msg) | Self::NetworkError(msg) | Self::ConfigError(msg) => {
                 f.write_str(msg)
+            }
+            Self::AwsApi {
+                service,
+                status,
+                detail,
+                ..
+            } => {
+                write!(f, "{service} returned error {status}: {detail}")
             }
             Self::PermissionDenied(detail) => {
                 write!(
@@ -129,6 +200,13 @@ pub(crate) fn classify(err: &anyhow::Error) -> ExitCode {
                 CliError::NotAuthenticated { .. } => ExitCode::from(NOT_AUTHENTICATED),
                 CliError::HardwareNotFound(_) => ExitCode::from(HARDWARE_NOT_FOUND),
                 CliError::NetworkError(_) => ExitCode::from(NETWORK_ERROR),
+                CliError::AwsApi { .. } => {
+                    if cli_err.is_aws_access_denied() {
+                        ExitCode::from(PERMISSION_DENIED)
+                    } else {
+                        ExitCode::from(NETWORK_ERROR)
+                    }
+                }
                 CliError::PermissionDenied(_) => ExitCode::from(PERMISSION_DENIED),
                 CliError::ConfigError(_) => ExitCode::from(CONFIG_ERROR),
                 CliError::StepUpRequired { .. } => ExitCode::from(STEP_UP_REQUIRED),
@@ -229,7 +307,8 @@ fn classify_message(msg: &str) -> ExitCode {
 #[cfg(test)]
 #[expect(
     clippy::arithmetic_side_effects,
-    reason = "test code: bounded loop over Debug string length"
+    clippy::unwrap_used,
+    reason = "test code: bounded loop over Debug string length; panic on assertion failure is acceptable"
 )]
 mod tests {
     use super::*;
@@ -353,6 +432,86 @@ mod tests {
         })
         .context("failed to get credentials");
         assert_eq!(code_value(classify(&err)), NOT_AUTHENTICATED);
+    }
+
+    fn aws_api_error(status: u16, code: Option<&str>) -> CliError {
+        CliError::AwsApi {
+            service: "sts".to_string(),
+            status: reqwest::StatusCode::from_u16(status).unwrap(),
+            code: code.map(str::to_string),
+            detail: "denied".to_string(),
+        }
+    }
+
+    #[test]
+    fn test_classify_aws_api_forbidden_is_permission_denied() {
+        let err: anyhow::Error = aws_api_error(403, None).into();
+        assert_eq!(code_value(classify(&err)), PERMISSION_DENIED);
+    }
+
+    #[test]
+    fn test_classify_aws_api_code_only_is_permission_denied() {
+        let err: anyhow::Error = aws_api_error(400, Some("AccessDeniedException")).into();
+        assert_eq!(code_value(classify(&err)), PERMISSION_DENIED);
+    }
+
+    #[test]
+    fn test_classify_aws_api_server_error_is_network() {
+        let err: anyhow::Error = aws_api_error(500, Some("InternalFailure")).into();
+        assert_eq!(code_value(classify(&err)), NETWORK_ERROR);
+    }
+
+    #[test]
+    fn test_aws_access_denied_through_context_chain() {
+        let err = anyhow::Error::new(aws_api_error(403, Some("AccessDenied")))
+            .context("failed to assume target role");
+        assert!(aws_access_denied(&err));
+
+        let other = anyhow::Error::new(aws_api_error(429, Some("ThrottlingException")))
+            .context("failed to assume target role");
+        assert!(!aws_access_denied(&other));
+    }
+
+    #[test]
+    fn test_classify_aws_api_signature_and_skew_403_is_network_not_permission() {
+        for code in [
+            "SignatureDoesNotMatch",
+            "InvalidSignatureException",
+            "RequestTimeTooSkewed",
+            "RequestExpired",
+        ] {
+            let cli_err = aws_api_error(403, Some(code));
+            assert!(
+                !cli_err.is_aws_access_denied(),
+                "{code} must not read as access denial"
+            );
+            let err: anyhow::Error = cli_err.into();
+            assert_eq!(code_value(classify(&err)), NETWORK_ERROR, "{code}");
+        }
+    }
+
+    #[test]
+    fn test_aws_error_code_matches_through_context_chain() {
+        let err = anyhow::Error::new(aws_api_error(400, Some("ResourceNotFoundException")))
+            .context("failed to resolve Identity Center user");
+        assert!(aws_error_code_matches(&err, "ResourceNotFoundException"));
+        assert!(!aws_error_code_matches(&err, "AccessDenied"));
+
+        let no_code = anyhow::Error::new(aws_api_error(400, None)).context("failed");
+        assert!(!aws_error_code_matches(
+            &no_code,
+            "ResourceNotFoundException"
+        ));
+    }
+
+    #[test]
+    fn test_aws_api_display_matches_legacy_network_error_format() {
+        // The AwsApi Display must stay byte-identical to the string the
+        // sigv4 sender previously produced via NetworkError.
+        assert_eq!(
+            aws_api_error(403, Some("AccessDenied")).to_string(),
+            "sts returned error 403 Forbidden: denied"
+        );
     }
 
     #[test]

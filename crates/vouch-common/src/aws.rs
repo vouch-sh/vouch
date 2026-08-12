@@ -130,6 +130,45 @@ impl Partition {
         format!("https://portal.sso.{}.{}", region, self.dns_suffix())
     }
 
+    /// Identity Store endpoint for this partition.
+    #[must_use]
+    pub fn identity_store_endpoint(self, region: &str) -> String {
+        format!("https://identitystore.{}.{}", region, self.dns_suffix())
+    }
+
+    /// IAM Identity Center admin (sso-admin) endpoint for this partition.
+    ///
+    /// The sso-admin service's endpoint prefix is `sso`, not `sso-admin`.
+    #[must_use]
+    pub fn sso_admin_endpoint(self, region: &str) -> String {
+        format!("https://sso.{}.{}", region, self.dns_suffix())
+    }
+
+    /// Account access manager (`account-access`) endpoint.
+    ///
+    /// The service exposes only dualstack `.api.aws` endpoints — there is
+    /// no `.amazonaws.com` form — and is available in the commercial
+    /// partition only (no GovCloud, China, or ISO regions).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for every partition other than [`Partition::Aws`].
+    pub fn account_access_endpoint(
+        self,
+        region: &str,
+    ) -> Result<String, AccountAccessEndpointError> {
+        match self {
+            Self::Aws => Ok(format!("https://account-access.{region}.api.aws")),
+            Self::AwsCn
+            | Self::AwsUsGov
+            | Self::AwsEusc
+            | Self::AwsIso
+            | Self::AwsIsoB
+            | Self::AwsIsoE
+            | Self::AwsIsoF => Err(AccountAccessEndpointError(self)),
+        }
+    }
+
     /// AWS Console sign-in federation endpoint for this partition.
     ///
     /// Used to obtain a sign-in token and construct a console login URL.
@@ -210,6 +249,12 @@ pub struct PartitionError(String);
 #[derive(Debug, thiserror::Error)]
 #[error("AWS Console federation is not supported for the '{0}' partition")]
 pub struct FederationError(Partition);
+
+/// Error returned when account access manager is not available in a
+/// partition.
+#[derive(Debug, thiserror::Error)]
+#[error("AWS account access manager is not available in the '{0}' partition")]
+pub struct AccountAccessEndpointError(Partition);
 
 /// Parsed AWS ARN (Amazon Resource Name).
 ///
@@ -563,6 +608,53 @@ mod tests {
         assert_eq!(
             Partition::AwsUsGov.sso_portal_endpoint("us-gov-west-1"),
             "https://portal.sso.us-gov-west-1.amazonaws.com"
+        );
+    }
+
+    #[test]
+    fn test_identity_store_endpoint_commercial() {
+        assert_eq!(
+            Partition::Aws.identity_store_endpoint("us-east-1"),
+            "https://identitystore.us-east-1.amazonaws.com"
+        );
+    }
+
+    #[test]
+    fn test_sso_admin_endpoint_uses_sso_prefix() {
+        assert_eq!(
+            Partition::Aws.sso_admin_endpoint("us-east-1"),
+            "https://sso.us-east-1.amazonaws.com"
+        );
+        assert_eq!(
+            Partition::AwsUsGov.sso_admin_endpoint("us-gov-west-1"),
+            "https://sso.us-gov-west-1.amazonaws.com"
+        );
+    }
+
+    #[test]
+    fn test_account_access_endpoint_commercial_dualstack_only() {
+        assert_eq!(
+            Partition::Aws.account_access_endpoint("us-east-1").unwrap(),
+            "https://account-access.us-east-1.api.aws"
+        );
+    }
+
+    #[test]
+    fn test_account_access_endpoint_unavailable_outside_commercial() {
+        assert!(
+            Partition::AwsUsGov
+                .account_access_endpoint("us-gov-west-1")
+                .is_err()
+        );
+        assert!(
+            Partition::AwsCn
+                .account_access_endpoint("cn-north-1")
+                .is_err()
+        );
+        assert!(
+            Partition::AwsIso
+                .account_access_endpoint("us-iso-east-1")
+                .is_err()
         );
     }
 
