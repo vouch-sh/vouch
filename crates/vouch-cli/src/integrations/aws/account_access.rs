@@ -112,6 +112,55 @@ fn list_entitlements_body(
     body
 }
 
+/// Shared request context for account-access calls, retrying throttled
+/// requests with bounded backoff — the service's TPS limits are unpublished
+/// and discovery fans out one query per principal.
+struct AccountAccessClient<'a> {
+    http_client: &'a reqwest::Client,
+    endpoint: String,
+    region: &'a str,
+    creds: &'a StsCredentials,
+}
+
+impl AccountAccessClient<'_> {
+    /// Backoff schedule for `ThrottlingException` retries.
+    const BACKOFF_MS: [u64; 3] = [200, 400, 800];
+
+    async fn post_with_throttle_retry(
+        &self,
+        path: &str,
+        body: &serde_json::Value,
+    ) -> Result<String> {
+        let mut backoff = Self::BACKOFF_MS.iter();
+        loop {
+            let result = sign_and_send_json_post(
+                self.http_client,
+                &self.endpoint,
+                path,
+                &[],
+                "account-access",
+                self.region,
+                self.creds,
+                body,
+            )
+            .await;
+            match result {
+                Ok(response_body) => return Ok(response_body),
+                Err(err)
+                    if crate::exit_code::aws_error_code_matches(&err, "ThrottlingException") =>
+                {
+                    let Some(delay_ms) = backoff.next() else {
+                        return Err(err);
+                    };
+                    tracing::debug!("account-access {path} throttled; retrying in {delay_ms}ms");
+                    tokio::time::sleep(std::time::Duration::from_millis(*delay_ms)).await;
+                }
+                Err(err) => return Err(err),
+            }
+        }
+    }
+}
+
 /// List account access manager application ARNs (one per org in practice).
 ///
 /// Paginates automatically with a 100-page safety cap.
@@ -121,6 +170,12 @@ pub(crate) async fn list_applications(
     creds: &StsCredentials,
 ) -> Result<Vec<String>> {
     let endpoint = Partition::from_region(region).account_access_endpoint(region)?;
+    let client = AccountAccessClient {
+        http_client,
+        endpoint,
+        region,
+        creds,
+    };
 
     let mut applications = Vec::new();
     let mut next_token: Option<String> = None;
@@ -134,18 +189,10 @@ pub(crate) async fn list_applications(
             map.insert("nextToken".to_string(), serde_json::json!(token));
         }
 
-        let response_body = sign_and_send_json_post(
-            http_client,
-            &endpoint,
-            "/applications-list",
-            &[],
-            "account-access",
-            region,
-            creds,
-            &body,
-        )
-        .await
-        .context(tr!("err-failed-list-aam-applications"))?;
+        let response_body = client
+            .post_with_throttle_retry("/applications-list", &body)
+            .await
+            .context(tr!("err-failed-list-aam-applications"))?;
 
         let resp: ListApplicationsResponse = serde_json::from_str(&response_body)
             .context(tr!("err-failed-parse-account-access-response"))?;
@@ -212,6 +259,12 @@ pub(crate) async fn list_entitlements(
     principal: &AamPrincipal,
 ) -> Result<Vec<EntitledRole>> {
     let endpoint = Partition::from_region(region).account_access_endpoint(region)?;
+    let client = AccountAccessClient {
+        http_client,
+        endpoint,
+        region,
+        creds,
+    };
 
     let mut roles = Vec::new();
     let mut dropped_total: u32 = 0;
@@ -220,18 +273,10 @@ pub(crate) async fn list_entitlements(
 
     for page in 0..max_pages {
         let body = list_entitlements_body(application_arn, principal, next_token.as_deref());
-        let response_body = sign_and_send_json_post(
-            http_client,
-            &endpoint,
-            "/entitlements-list",
-            &[],
-            "account-access",
-            region,
-            creds,
-            &body,
-        )
-        .await
-        .context(tr!("err-failed-list-aam-entitlements"))?;
+        let response_body = client
+            .post_with_throttle_retry("/entitlements-list", &body)
+            .await
+            .context(tr!("err-failed-list-aam-entitlements"))?;
 
         let resp: ListEntitlementsResponse = serde_json::from_str(&response_body)
             .context(tr!("err-failed-parse-account-access-response"))?;

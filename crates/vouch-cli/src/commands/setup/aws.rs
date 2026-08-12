@@ -823,16 +823,13 @@ fn instance_id_from_application_arn(application_arn: &str) -> Option<&str> {
 
 /// Pick the identity store backing the configured IdC application.
 ///
-/// A single visible instance is used directly; with several, the one whose
-/// ID is embedded in the application ARN must match — anything else returns
-/// `None` (never guess).
+/// The instance whose ID is embedded in the application ARN must be
+/// visible — never guess, even when only one instance is listed, so a
+/// stale `--idc-application` cannot resolve against the wrong org's store.
 fn resolve_identity_store(
     instances: &[crate::integrations::aws::sso_admin::SsoInstance],
     application_arn: &str,
 ) -> Option<String> {
-    if let [only] = instances {
-        return Some(only.identity_store_id.clone());
-    }
     let embedded = instance_id_from_application_arn(application_arn)?;
     let mut matched = None;
     for instance in instances {
@@ -1003,11 +1000,17 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_identity_store_single_instance() {
+    fn test_resolve_identity_store_single_instance_must_match() {
         let instances = vec![instance("arn:aws:sso:::instance/ssoins-1", "d-1")];
         assert_eq!(
-            resolve_identity_store(&instances, "arn:aws:sso::1:application/ssoins-other/apl-1"),
+            resolve_identity_store(&instances, "arn:aws:sso::1:application/ssoins-1/apl-1"),
             Some("d-1".to_string())
+        );
+        // A single visible instance is NOT trusted blindly: a stale
+        // application ARN pointing at another instance must not resolve.
+        assert_eq!(
+            resolve_identity_store(&instances, "arn:aws:sso::1:application/ssoins-other/apl-1"),
+            None
         );
     }
 

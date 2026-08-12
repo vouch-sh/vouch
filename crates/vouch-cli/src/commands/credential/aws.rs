@@ -524,6 +524,12 @@ async fn assume_role_via_management_chain(
 /// long email could also land here with a truncated domain — the printed
 /// statement is remediation text, not applied policy).
 fn source_identity_pattern(session: &str) -> String {
+    // At the 64-char RoleSessionName cap the domain may be cut mid-way; a
+    // derived pattern like `*@exampl` would look plausible but be wrong.
+    // Fail closed with the obviously-editable placeholder instead.
+    if session.chars().count() >= 64 {
+        return "*@YOUR-EMAIL-DOMAIN".to_string();
+    }
     match session.split_once('@') {
         Some((_, domain)) if !domain.is_empty() => format!("*@{domain}"),
         Some(_) | None => "*@YOUR-EMAIL-DOMAIN".to_string(),
@@ -1221,6 +1227,19 @@ mod tests {
         assert_eq!(source_identity_pattern("nonemail"), "*@YOUR-EMAIL-DOMAIN");
         assert_eq!(source_identity_pattern("user@"), "*@YOUR-EMAIL-DOMAIN");
         assert_eq!(source_identity_pattern(""), "*@YOUR-EMAIL-DOMAIN");
+    }
+
+    #[test]
+    fn test_source_identity_pattern_at_session_cap_uses_placeholder() {
+        // 64 chars = the RoleSessionName cap; the domain may be truncated,
+        // so the derived pattern must not be trusted.
+        let session = format!("{}@example.com", "a".repeat(52));
+        assert_eq!(session.chars().count(), 64);
+        assert_eq!(source_identity_pattern(&session), "*@YOUR-EMAIL-DOMAIN");
+
+        // One under the cap is safe to derive from.
+        let session = format!("{}@example.com", "a".repeat(51));
+        assert_eq!(source_identity_pattern(&session), "*@example.com");
     }
 
     #[test]

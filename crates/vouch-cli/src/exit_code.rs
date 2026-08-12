@@ -115,12 +115,18 @@ impl CliError {
         let Self::AwsApi { status, code, .. } = self else {
             return false;
         };
-        if *status == reqwest::StatusCode::FORBIDDEN {
-            return true;
-        }
         match code.as_deref() {
             Some("AccessDenied" | "AccessDeniedException") => true,
-            Some(_) | None => false,
+            // Signature and clock-skew faults arrive as 403 but are
+            // client-side request problems, not authorization denials —
+            // they must not exit 5 or trigger trust-policy remediation.
+            Some(
+                "SignatureDoesNotMatch"
+                | "InvalidSignatureException"
+                | "RequestTimeTooSkewed"
+                | "RequestExpired",
+            ) => false,
+            Some(_) | None => *status == reqwest::StatusCode::FORBIDDEN,
         }
     }
 }
@@ -464,6 +470,24 @@ mod tests {
         let other = anyhow::Error::new(aws_api_error(429, Some("ThrottlingException")))
             .context("failed to assume target role");
         assert!(!aws_access_denied(&other));
+    }
+
+    #[test]
+    fn test_classify_aws_api_signature_and_skew_403_is_network_not_permission() {
+        for code in [
+            "SignatureDoesNotMatch",
+            "InvalidSignatureException",
+            "RequestTimeTooSkewed",
+            "RequestExpired",
+        ] {
+            let cli_err = aws_api_error(403, Some(code));
+            assert!(
+                !cli_err.is_aws_access_denied(),
+                "{code} must not read as access denial"
+            );
+            let err: anyhow::Error = cli_err.into();
+            assert_eq!(code_value(classify(&err)), NETWORK_ERROR, "{code}");
+        }
     }
 
     #[test]
