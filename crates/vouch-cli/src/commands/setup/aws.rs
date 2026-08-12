@@ -380,6 +380,28 @@ fn store_org(
 /// When `management_role` differs from `role_arn`, the generated
 /// `credential_process` includes `--via <management_role>` so the CLI can
 /// chain through the correct management role in multi-org configurations.
+/// The `credential_process` line for an STS role profile.
+///
+/// Includes `--via` when chaining through a management role that differs
+/// from the target role.
+fn sts_credential_process(
+    vouch_path: &std::path::Path,
+    role_arn: &str,
+    management_role: &str,
+) -> String {
+    if management_role != role_arn {
+        format!(
+            "\"{}\" credential aws --role {role_arn} --via {management_role}",
+            vouch_path.display()
+        )
+    } else {
+        format!(
+            "\"{}\" credential aws --role {role_arn}",
+            vouch_path.display()
+        )
+    }
+}
+
 fn write_sts_profile(
     profile_name_hint: Option<&str>,
     role_arn: &str,
@@ -410,18 +432,7 @@ fn write_sts_profile(
         }
     };
 
-    // Include --via when chaining through a management role in another account.
-    let credential_process = if management_role != role_arn {
-        format!(
-            "\"{}\" credential aws --role {role_arn} --via {management_role}",
-            vouch_path.display()
-        )
-    } else {
-        format!(
-            "\"{}\" credential aws --role {role_arn}",
-            vouch_path.display()
-        )
-    };
+    let credential_process = sts_credential_process(&vouch_path, role_arn, management_role);
 
     config.set_profile(&AwsProfile {
         name: profile_name.clone(),
@@ -438,17 +449,24 @@ fn write_sts_profile(
     Ok(())
 }
 
-/// Enumerate accounts and permission-sets via Identity Center and write profiles.
+/// Enumerate Identity Center access and write profiles.
 ///
 /// Uses the TTI exchange (`CreateTokenWithIAM`) to obtain an IdC access token,
 /// then calls `ListAccounts` + `ListAccountRoles` (SSO portal) and writes one
 /// `--account <id> --permission-set <name>` profile per assignment found.
+/// A second pass surfaces account access manager entitlements (existing IAM
+/// roles assigned to the user or their groups) as `--role`/`--via` profiles;
+/// that pass is best-effort — anything it cannot do (missing IAM grants on
+/// the management role, no email claim, org without account access manager)
+/// is debug-logged and skipped, never aborting permission-set discovery.
 async fn run_discover(
     profile_prefix: Option<&str>,
     idc_application_arn: Option<&str>,
     server: &str,
 ) -> Result<()> {
-    use crate::commands::credential::aws::{obtain_identity_center_token, resolve_identity_center};
+    use crate::commands::credential::aws::{
+        assume_management_role, exchange_idc_access_token, resolve_identity_center,
+    };
     use crate::config::Config;
     use crate::integrations::aws::sso_portal::{list_account_roles, list_accounts};
     use vouch_common::http::credential_client;
@@ -468,7 +486,8 @@ async fn run_discover(
     let http_client = credential_client(&format!("vouch-cli/{}", env!("CARGO_PKG_VERSION")))
         .context(tr!("err-failed-create-http-client"))?;
 
-    let idc_token = obtain_identity_center_token(&http_client, server, management_role, idc)
+    let mgmt_session = assume_management_role(&http_client, server, management_role).await?;
+    let idc_token = exchange_idc_access_token(&http_client, idc, &mgmt_session)
         .await
         .context(tr!("err-failed-obtain-identity-center-token"))?;
 
@@ -535,6 +554,29 @@ async fn run_discover(
         }
     }
 
+    // Entitlement pass — best-effort: failures are debug-logged only and
+    // the permission-set results above still land.
+    let user_email = mgmt_session.user_email;
+    let creds = std::sync::Arc::new(mgmt_session.credentials);
+    if let Err(err) = discover_entitlements(
+        EntitlementDiscovery {
+            http_client: &http_client,
+            idc,
+            management_role,
+            user_email: user_email.as_deref(),
+            creds,
+            vouch_path: &vouch_path,
+            profile_prefix,
+        },
+        &mut aws_config,
+        &mut created_count,
+        &mut skipped_count,
+    )
+    .await
+    {
+        tracing::debug!("entitlement discovery skipped: {err:#}");
+    }
+
     if created_count > 0 {
         aws_config.save()?;
     }
@@ -546,6 +588,295 @@ async fn run_discover(
         skipped = skipped_count
     );
     Ok(())
+}
+
+/// Inputs to the account access manager entitlement pass.
+struct EntitlementDiscovery<'a> {
+    http_client: &'a reqwest::Client,
+    idc: &'a AwsIdentityCenter,
+    management_role: &'a str,
+    user_email: Option<&'a str>,
+    creds: std::sync::Arc<crate::integrations::aws::sts::StsCredentials>,
+    vouch_path: &'a std::path::Path,
+    profile_prefix: Option<&'a str>,
+}
+
+/// Discover account access manager entitlements and append one
+/// `--role`/`--via` profile per entitled role.
+///
+/// Runs whenever the org has IdC configured. Conditions that make the pass
+/// inapplicable (non-commercial partition, no email claim, user not in the
+/// identity store) are debug-logged and return `Ok`; real failures propagate
+/// for the caller's debug log. Only findings are user-visible: added/skipped
+/// profile lines, dropped invalid entitlements, and partial-failure warnings.
+async fn discover_entitlements(
+    input: EntitlementDiscovery<'_>,
+    aws_config: &mut AwsConfig,
+    created: &mut u32,
+    skipped: &mut u32,
+) -> Result<()> {
+    use crate::integrations::aws::account_access::{self, AamPrincipal};
+    use crate::integrations::aws::{identitystore, sso_admin};
+    use vouch_common::aws::Partition;
+
+    let region = &input.idc.region;
+    if Partition::from_region(region) != Partition::Aws {
+        tracing::debug!(
+            "entitlement discovery skipped: account access manager is not available \
+             in the {region} region's partition"
+        );
+        return Ok(());
+    }
+
+    let Some(email) = input.user_email else {
+        tracing::debug!("entitlement discovery skipped: server token has no email claim");
+        return Ok(());
+    };
+
+    let instances = sso_admin::list_instances(input.http_client, region, &input.creds).await?;
+    let Some(identity_store_id) = resolve_identity_store(&instances, &input.idc.application_arn)
+    else {
+        tracing::debug!("entitlement discovery skipped: could not resolve the identity store");
+        return Ok(());
+    };
+
+    let user_id = match identitystore::get_user_id(
+        input.http_client,
+        region,
+        &input.creds,
+        &identity_store_id,
+        email,
+    )
+    .await
+    {
+        Ok(user_id) => user_id,
+        Err(err) if crate::exit_code::aws_error_code_matches(&err, "ResourceNotFoundException") => {
+            tracing::debug!("entitlement discovery skipped: no Identity Center user for {email}");
+            return Ok(());
+        }
+        Err(err) => return Err(err),
+    };
+
+    let group_ids = identitystore::list_group_ids_for_member(
+        input.http_client,
+        region,
+        &input.creds,
+        &identity_store_id,
+        &user_id,
+    )
+    .await?;
+
+    let applications =
+        account_access::list_applications(input.http_client, region, &input.creds).await?;
+    if applications.is_empty() {
+        tracing::debug!("entitlement discovery: no account access manager application");
+        return Ok(());
+    }
+
+    let mut principals = vec![AamPrincipal::User(user_id)];
+    for group_id in group_ids {
+        principals.push(AamPrincipal::Group(group_id));
+    }
+
+    // Bounded fan-out over application × principal queries; per-query
+    // failures are collected, not fatal.
+    let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(4));
+    let mut join_set = tokio::task::JoinSet::new();
+    let mut total_queries: u32 = 0;
+    for application_arn in &applications {
+        for principal in &principals {
+            total_queries = total_queries.saturating_add(1);
+            let semaphore = std::sync::Arc::clone(&semaphore);
+            let http_client = input.http_client.clone();
+            let region = region.clone();
+            let creds = std::sync::Arc::clone(&input.creds);
+            let application_arn = application_arn.clone();
+            let principal = principal.clone();
+            join_set.spawn(async move {
+                let _permit = semaphore
+                    .acquire_owned()
+                    .await
+                    .context(tr!("err-failed-list-aam-entitlements"))?;
+                account_access::list_entitlements(
+                    &http_client,
+                    &region,
+                    &creds,
+                    &application_arn,
+                    &principal,
+                )
+                .await
+            });
+        }
+    }
+
+    let mut entitled = std::collections::BTreeMap::new();
+    let mut failed: u32 = 0;
+    let mut first_error: Option<anyhow::Error> = None;
+    while let Some(joined) = join_set.join_next().await {
+        match joined {
+            Ok(Ok(roles)) => {
+                for role in roles {
+                    entitled.entry(role.role_arn.clone()).or_insert(role);
+                }
+            }
+            Ok(Err(err)) => {
+                failed = failed.saturating_add(1);
+                if first_error.is_none() {
+                    first_error = Some(err);
+                }
+            }
+            Err(join_err) => {
+                failed = failed.saturating_add(1);
+                if first_error.is_none() {
+                    first_error = Some(join_err.into());
+                }
+            }
+        }
+    }
+
+    if failed > 0 {
+        if failed == total_queries
+            && let Some(err) = first_error
+        {
+            // Every query failed — surface as a pass-level failure for the
+            // caller's debug log.
+            return Err(err);
+        }
+        tr_println!(
+            "setup-aws-entitlements-partial",
+            failed = failed,
+            total = total_queries
+        );
+    }
+
+    if entitled.is_empty() {
+        if failed == 0 {
+            tracing::debug!("entitlement discovery: no entitlements for {email}");
+        }
+        return Ok(());
+    }
+
+    write_entitled_profiles(entitled.values(), &input, aws_config, created, skipped);
+    Ok(())
+}
+
+/// Validate each entitled role and append its `--role`/`--via` profile,
+/// updating the shared discovery counters.
+fn write_entitled_profiles<'a>(
+    roles: impl Iterator<Item = &'a crate::integrations::aws::account_access::EntitledRole>,
+    input: &EntitlementDiscovery<'_>,
+    aws_config: &mut AwsConfig,
+    created: &mut u32,
+    skipped: &mut u32,
+) {
+    for role in roles {
+        let Some(profile_name) = entitled_role_profile_name(role, input.profile_prefix) else {
+            tr_println!(
+                "setup-aws-entitlements-invalid-skipped",
+                role_arn = role.role_arn.as_str()
+            );
+            *skipped = skipped.saturating_add(1);
+            continue;
+        };
+        if aws_config.profile_exists(&profile_name) {
+            tr_println!(
+                "setup-aws-discover-skipped",
+                profile = profile_name.as_str()
+            );
+            *skipped = skipped.saturating_add(1);
+            continue;
+        }
+        aws_config.set_profile(&AwsProfile {
+            name: profile_name.clone(),
+            credential_process: Some(sts_credential_process(
+                input.vouch_path,
+                &role.role_arn,
+                input.management_role,
+            )),
+            region: None,
+            output: Some("json".to_string()),
+        });
+        tr_println!(
+            "setup-aws-discover-added",
+            profile = profile_name.as_str(),
+            role_arn = role.role_arn.as_str()
+        );
+        *created = created.saturating_add(1);
+    }
+}
+
+/// Extract the `ssoins-…` instance ID embedded in an IdC application ARN
+/// (`arn:…:sso::…:application/<ssoins-id>/<apl-id>`).
+fn instance_id_from_application_arn(application_arn: &str) -> Option<&str> {
+    let resource = application_arn.rsplit(':').next()?;
+    let mut segments = resource.split('/');
+    if segments.next() != Some("application") {
+        return None;
+    }
+    let candidate = segments.next()?;
+    candidate.starts_with("ssoins-").then_some(candidate)
+}
+
+/// Pick the identity store backing the configured IdC application.
+///
+/// A single visible instance is used directly; with several, the one whose
+/// ID is embedded in the application ARN must match — anything else returns
+/// `None` (never guess).
+fn resolve_identity_store(
+    instances: &[crate::integrations::aws::sso_admin::SsoInstance],
+    application_arn: &str,
+) -> Option<String> {
+    if let [only] = instances {
+        return Some(only.identity_store_id.clone());
+    }
+    let embedded = instance_id_from_application_arn(application_arn)?;
+    let mut matched = None;
+    for instance in instances {
+        if instance.instance_arn.ends_with(embedded) {
+            if matched.is_some() {
+                return None;
+            }
+            matched = Some(instance);
+        }
+    }
+    matched.map(|instance| instance.identity_store_id.clone())
+}
+
+/// Validate an entitled role and derive its profile name.
+///
+/// AWS-returned values are interpolated into `credential_process` lines, so
+/// the role ARN must parse as an IAM role, the account must be 12 ASCII
+/// digits, and the two must agree; anything else is rejected. Naming
+/// follows the permission-set scheme: `{prefix|vouch}-{account}-{role}`,
+/// falling back to the account ID when the account name sanitizes away.
+fn entitled_role_profile_name(
+    role: &crate::integrations::aws::account_access::EntitledRole,
+    profile_prefix: Option<&str>,
+) -> Option<String> {
+    let arn = crate::integrations::aws::sts::parse_role_arn(&role.role_arn).ok()?;
+    if role.account.len() != 12 || !role.account.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    if arn.account.as_deref() != Some(role.account.as_str()) {
+        return None;
+    }
+    // Role names cannot contain `/`, so the last segment is the bare name
+    // even for pathed roles (`role/vouch/Name` → `Name`).
+    let role_name = role.role_arn.rsplit('/').next()?;
+    let safe_role = sanitize_profile_name(role_name);
+    if safe_role.is_empty() {
+        return None;
+    }
+    let account_label = role
+        .account_name
+        .as_deref()
+        .map(sanitize_profile_name)
+        .filter(|label| !label.is_empty())
+        .unwrap_or_else(|| role.account.clone());
+    Some(match profile_prefix {
+        Some(prefix) => format!("{prefix}-{account_label}-{safe_role}"),
+        None => format!("vouch-{account_label}-{safe_role}"),
+    })
 }
 
 #[cfg(test)]
@@ -622,6 +953,173 @@ mod tests {
         assert!(
             credential_process.contains(&format!("--permission-set \"{role_name}\"")),
             "credential_process must include --permission-set: {credential_process}"
+        );
+    }
+
+    #[test]
+    fn test_sts_credential_process_chains_via_when_roles_differ() {
+        let vouch_path = std::path::Path::new("/usr/local/bin/vouch");
+        let target = "arn:aws:iam::111111111111:role/vouch/VouchReadOnly";
+        let mgmt = "arn:aws:iam::999999999999:role/vouch/VouchAccess";
+
+        assert_eq!(
+            sts_credential_process(vouch_path, target, mgmt),
+            format!("\"/usr/local/bin/vouch\" credential aws --role {target} --via {mgmt}")
+        );
+        assert_eq!(
+            sts_credential_process(vouch_path, mgmt, mgmt),
+            format!("\"/usr/local/bin/vouch\" credential aws --role {mgmt}")
+        );
+    }
+
+    #[test]
+    fn test_instance_id_from_application_arn() {
+        assert_eq!(
+            instance_id_from_application_arn(
+                "arn:aws:sso::860114833029:application/ssoins-722325820ad4410d/apl-abc123"
+            ),
+            Some("ssoins-722325820ad4410d")
+        );
+        assert_eq!(
+            instance_id_from_application_arn("arn:aws:sso:::instance/ssoins-1"),
+            None
+        );
+        assert_eq!(instance_id_from_application_arn("not-an-arn"), None);
+        assert_eq!(
+            instance_id_from_application_arn("arn:aws:sso::1:application/apl-only"),
+            None
+        );
+    }
+
+    fn instance(arn: &str, store: &str) -> crate::integrations::aws::sso_admin::SsoInstance {
+        crate::integrations::aws::sso_admin::SsoInstance {
+            instance_arn: arn.to_string(),
+            identity_store_id: store.to_string(),
+        }
+    }
+
+    #[test]
+    fn test_resolve_identity_store_single_instance() {
+        let instances = vec![instance("arn:aws:sso:::instance/ssoins-1", "d-1")];
+        assert_eq!(
+            resolve_identity_store(&instances, "arn:aws:sso::1:application/ssoins-other/apl-1"),
+            Some("d-1".to_string())
+        );
+    }
+
+    #[test]
+    fn test_resolve_identity_store_matches_embedded_id() {
+        let instances = vec![
+            instance("arn:aws:sso:::instance/ssoins-1", "d-1"),
+            instance("arn:aws:sso:::instance/ssoins-2", "d-2"),
+        ];
+        assert_eq!(
+            resolve_identity_store(&instances, "arn:aws:sso::1:application/ssoins-2/apl-1"),
+            Some("d-2".to_string())
+        );
+    }
+
+    #[test]
+    fn test_resolve_identity_store_no_match_never_guesses() {
+        let instances = vec![
+            instance("arn:aws:sso:::instance/ssoins-1", "d-1"),
+            instance("arn:aws:sso:::instance/ssoins-2", "d-2"),
+        ];
+        assert_eq!(
+            resolve_identity_store(&instances, "arn:aws:sso::1:application/ssoins-3/apl-1"),
+            None
+        );
+        assert_eq!(
+            resolve_identity_store(&[], "arn:aws:sso::1:application/ssoins-1/apl-1"),
+            None
+        );
+    }
+
+    fn entitled(
+        role_arn: &str,
+        account: &str,
+        account_name: Option<&str>,
+    ) -> crate::integrations::aws::account_access::EntitledRole {
+        crate::integrations::aws::account_access::EntitledRole {
+            role_arn: role_arn.to_string(),
+            account: account.to_string(),
+            account_name: account_name.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn test_entitled_role_profile_name_uses_account_name_and_role() {
+        let role = entitled(
+            "arn:aws:iam::444455556666:role/vouch/VouchReadOnly",
+            "444455556666",
+            Some("Prod Payments"),
+        );
+        assert_eq!(
+            entitled_role_profile_name(&role, None),
+            Some("vouch-prod-payments-vouchreadonly".to_string())
+        );
+        assert_eq!(
+            entitled_role_profile_name(&role, Some("work")),
+            Some("work-prod-payments-vouchreadonly".to_string())
+        );
+    }
+
+    #[test]
+    fn test_entitled_role_profile_name_falls_back_to_account_id() {
+        let role = entitled(
+            "arn:aws:iam::444455556666:role/ReadOnly",
+            "444455556666",
+            None,
+        );
+        assert_eq!(
+            entitled_role_profile_name(&role, None),
+            Some("vouch-444455556666-readonly".to_string())
+        );
+
+        // An account name that sanitizes to nothing also falls back.
+        let role = entitled(
+            "arn:aws:iam::444455556666:role/ReadOnly",
+            "444455556666",
+            Some("!!!"),
+        );
+        assert_eq!(
+            entitled_role_profile_name(&role, None),
+            Some("vouch-444455556666-readonly".to_string())
+        );
+    }
+
+    #[test]
+    fn test_entitled_role_profile_name_rejects_invalid_input() {
+        // Not an IAM role ARN.
+        assert_eq!(
+            entitled_role_profile_name(
+                &entitled("arn:aws:sso:::instance/ssoins-1", "444455556666", None),
+                None
+            ),
+            None
+        );
+        // Account is not 12 ASCII digits.
+        assert_eq!(
+            entitled_role_profile_name(
+                &entitled("arn:aws:iam::444455556666:role/R", "44445555666", None),
+                None
+            ),
+            None
+        );
+        assert_eq!(
+            entitled_role_profile_name(
+                &entitled("arn:aws:iam::444455556666:role/R", "44445555666x", None),
+                None
+            ),
+            None
+        );
+        // ARN account and entitlement account disagree.
+        assert_eq!(
+            entitled_role_profile_name(
+                &entitled("arn:aws:iam::444455556666:role/R", "111111111111", None),
+                None
+            ),
+            None
         );
     }
 }

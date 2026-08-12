@@ -77,6 +77,9 @@ impl std::fmt::Debug for OidcTokenResponse {
 struct JwtIdTokenClaims {
     /// OIDC Core Section 2: Subject Identifier (required).
     sub: String,
+    /// OIDC standard email claim; set by the Vouch server on AWS tokens.
+    #[serde(default)]
+    email: Option<String>,
 }
 
 /// Extract the `sub` claim from a JWT payload without signature verification.
@@ -97,6 +100,29 @@ fn extract_sub_from_jwt(token: &str) -> Result<String> {
     anyhow::ensure!(!claims.sub.is_empty(), "invalid JWT: 'sub' claim is empty");
     // AWS RoleSessionName max is 64 chars.
     Ok(claims.sub.chars().take(64).collect())
+}
+
+/// Extract the `email` claim from a JWT payload without signature
+/// verification.
+///
+/// Unlike `sub` (truncated to the 64-char `RoleSessionName` cap), the email
+/// is returned untruncated — it is the Identity Store lookup key.
+fn extract_email_from_jwt(token: &str) -> Result<String> {
+    let payload = token
+        .split('.')
+        .nth(1)
+        .context(tr!("err-invalid-jwt-expected-3-dot-separated-parts"))?;
+    let decoded = URL_SAFE_NO_PAD
+        .decode(payload)
+        .context(tr!("err-invalid-jwt-payload-is-not-valid-base64url"))?;
+    let claims: JwtIdTokenClaims = serde_json::from_slice(&decoded)
+        .context(tr!("err-invalid-jwt-payload-missing-required-sub-claim"))?;
+    let email = claims.email.unwrap_or_default();
+    anyhow::ensure!(
+        !email.is_empty(),
+        "invalid JWT: 'email' claim is missing or empty"
+    );
+    Ok(email)
 }
 
 /// Result of the OIDC → STS credential exchange.
@@ -455,7 +481,7 @@ async fn assume_role_via_management_chain(
     .await
     .context(tr!("err-failed-assume-management-role"))?;
 
-    assume_role(AssumeRoleRequest {
+    let target = assume_role(AssumeRoleRequest {
         http_client: input.http_client,
         role_arn: input.role_arn,
         role_session_name: input.session,
@@ -467,8 +493,62 @@ async fn assume_role_via_management_chain(
         // call on this path, which is deferred (#623).
         identity_context: None,
     })
-    .await
-    .context(tr!("err-failed-assume-target-role-via-chaining"))
+    .await;
+
+    // Only this hop routes through the SigV4 sender, so an AWS-side access
+    // denial here can only mean the target role rejected the management
+    // role — print the exact trust statement to add.
+    match target {
+        Ok(credentials) => Ok(credentials),
+        Err(err) if crate::exit_code::aws_access_denied(&err) => {
+            let statement = chained_role_trust_statement(
+                input.mgmt_role_arn,
+                &source_identity_pattern(input.session),
+            );
+            Err(err.context(tr_args!(
+                "aws-err-target-role-trust-missing",
+                role_arn = input.role_arn,
+                management_role = input.mgmt_role_arn,
+                statement = statement.as_str()
+            )))
+        }
+        Err(err) => Err(err.context(tr!("err-failed-assume-target-role-via-chaining"))),
+    }
+}
+
+/// The `aws:SourceIdentity` pattern for a chained target role's trust
+/// condition, derived from the session name (the user's email `sub`).
+///
+/// Falls back to a fail-closed placeholder the admin must edit when the
+/// session is not email-shaped (the `sub` is capped at 64 chars, so a very
+/// long email could also land here with a truncated domain — the printed
+/// statement is remediation text, not applied policy).
+fn source_identity_pattern(session: &str) -> String {
+    match session.split_once('@') {
+        Some((_, domain)) if !domain.is_empty() => format!("*@{domain}"),
+        Some(_) | None => "*@YOUR-EMAIL-DOMAIN".to_string(),
+    }
+}
+
+/// The trust-policy statement a chained target role needs so the management
+/// role can assume it.
+///
+/// Gates on `aws:SourceIdentity` so the statement never grants broader
+/// access than Vouch's own member-role baseline — without it, anyone able
+/// to assume the shared management role could pivot into the target role.
+/// Deliberately excludes `sts:RoleAuthorizedByIdp` — that condition key is
+/// defined only for `AssumeRoleWithWebIdentity` and can never match on a
+/// plain `AssumeRole` hop.
+fn chained_role_trust_statement(management_role_arn: &str, source_identity: &str) -> String {
+    serde_json::to_string_pretty(&serde_json::json!({
+        "Effect": "Allow",
+        "Principal": { "AWS": management_role_arn },
+        "Action": ["sts:AssumeRole", "sts:SetSourceIdentity", "sts:TagSession"],
+        "Condition": {
+            "StringLike": { "aws:SourceIdentity": source_identity }
+        }
+    }))
+    .unwrap_or_default()
 }
 
 /// Session policies applied to STS calls, restricted when an AI coding
@@ -662,36 +742,43 @@ pub(crate) fn resolve_identity_center<'a>(
         .find_map(|o| o.identity_center.as_ref().map(|idc| (o, idc))))
 }
 
-/// Obtain an IAM Identity Center access token via the trusted-token-issuer
-/// (TTI) exchange.
+/// A management-role session produced by the web-identity hop.
 ///
-/// Called by `credential aws --account/--permission-set`, `aws console`
-/// (IdC path), and `setup aws --discover`. Blocks AI agents — permission-set
-/// credentials cannot be downscoped — so caller credentials are always full
-/// (no `ReadOnlyAccess` policy, no DPoP source tag).
+/// Carries everything downstream admin-plane calls need: the STS
+/// credentials, the RS256 token that authorized them, and the user's
+/// verified email from that token.
+pub(crate) struct ManagementRoleSession {
+    /// STS credentials for the management role (full, unrestricted).
+    pub(crate) credentials: crate::integrations::aws::sts::StsCredentials,
+    /// RS256 token pinned to the management role; doubles as the
+    /// `CreateTokenWithIAM` jwt-bearer assertion.
+    pub(crate) id_token: SecretString,
+    /// The token's `email` claim — the Identity Store lookup key.
+    /// `None` when the server did not include an email claim.
+    pub(crate) user_email: Option<String>,
+}
+
+/// Assume the org's management role with full (unrestricted) credentials
+/// via `AssumeRoleWithWebIdentity`.
 ///
-/// 1. Fetch the RS256 AWS token pinned to the management role and assume
-///    that role via `AssumeRoleWithWebIdentity` (full creds).
-/// 2. Exchange the same token for an IdC access token via `CreateTokenWithIAM`.
-pub(crate) async fn obtain_identity_center_token(
+/// Blocks AI agents: every caller feeds either the IdC portal path — whose
+/// permission-set credentials cannot be downscoped with inline session
+/// policies, and the vouch:AccessType=ai tag does not reliably propagate
+/// through it — or admin-plane discovery; neither should run under an agent.
+pub(crate) async fn assume_management_role(
     http_client: &reqwest::Client,
     server: &str,
     management_role: &str,
-    idc: &crate::config::AwsIdentityCenter,
-) -> Result<secrecy::SecretString> {
+) -> Result<ManagementRoleSession> {
     use crate::integrations::aws::sts::{WebIdentityRequest, assume_role_with_web_identity};
     use secrecy::ExposeSecret;
 
-    // Block AI agents: GetRoleCredentials returns full permission-set access
-    // that cannot be downscoped with inline session policies, and the
-    // vouch:AccessType=ai tag does not reliably propagate through it.
     if detect_agent_source().is_some() {
         return Err(
             crate::exit_code::CliError::ConfigError(tr!("aws-err-agent-idc-unsupported")).into(),
         );
     }
 
-    // Step 1: assume the management role with full (unrestricted) credentials.
     let region = crate::integrations::aws::resolve_region_with_fallback(management_role)?;
     let mgmt_arn = crate::integrations::aws::sts::parse_role_arn(management_role)?;
     let domain_suffix = mgmt_arn.partition.dns_suffix();
@@ -709,15 +796,19 @@ pub(crate) async fn obtain_identity_center_token(
         .get_authenticated(&aws_token_path(Some(management_role))?)
         .await
         .context(tr!("err-failed-get-oidc-token-management-role"))?;
-    let id_token = token_response.id_token.expose_secret();
-    let session =
-        extract_sub_from_jwt(id_token).context(tr!("err-server-returned-invalid-oidc-token"))?;
+    let id_token = token_response.id_token;
+    let session = extract_sub_from_jwt(id_token.expose_secret())
+        .context(tr!("err-server-returned-invalid-oidc-token"))?;
+    // Email is only needed by entitlement discovery; its absence must not
+    // break the credential paths, so it degrades to None here and the
+    // discovery pass reports it.
+    let user_email = extract_email_from_jwt(id_token.expose_secret()).ok();
 
-    let caller_creds = assume_role_with_web_identity(WebIdentityRequest {
+    let credentials = assume_role_with_web_identity(WebIdentityRequest {
         http_client,
         role_arn: management_role,
         role_session_name: &session,
-        web_identity_token: id_token,
+        web_identity_token: id_token.expose_secret(),
         region: &region,
         domain_suffix,
         session_policy_names: &[],
@@ -726,19 +817,52 @@ pub(crate) async fn obtain_identity_center_token(
     .await
     .context(tr!("err-failed-assume-management-role-idc-exchange"))?;
 
-    // Step 2: exchange the same RS256 token (the TTI assertion) for an IdC
-    // access token. The identity context in the exchange is not needed on
-    // this path — GetRoleCredentials mints permission-set credentials with
-    // the identity context already embedded.
+    Ok(ManagementRoleSession {
+        credentials,
+        id_token,
+        user_email,
+    })
+}
+
+/// Exchange a management-role session's RS256 token (the TTI assertion) for
+/// an IdC access token via `CreateTokenWithIAM`.
+///
+/// The identity context in the exchange is not needed on this path —
+/// `GetRoleCredentials` mints permission-set credentials with the identity
+/// context already embedded.
+pub(crate) async fn exchange_idc_access_token(
+    http_client: &reqwest::Client,
+    idc: &crate::config::AwsIdentityCenter,
+    session: &ManagementRoleSession,
+) -> Result<SecretString> {
+    use secrecy::ExposeSecret;
+
     let exchange = crate::integrations::aws::identity_center::create_token_with_iam(
         http_client,
         &idc.region,
         &idc.application_arn,
-        id_token,
-        &caller_creds,
+        session.id_token.expose_secret(),
+        &session.credentials,
     )
     .await?;
     Ok(exchange.access_token)
+}
+
+/// Obtain an IAM Identity Center access token via the trusted-token-issuer
+/// (TTI) exchange.
+///
+/// Called by `credential aws --account/--permission-set` and `aws console`
+/// (IdC path). Blocks AI agents (via [`assume_management_role`]) —
+/// permission-set credentials cannot be downscoped — so caller credentials
+/// are always full (no `ReadOnlyAccess` policy, no DPoP source tag).
+pub(crate) async fn obtain_identity_center_token(
+    http_client: &reqwest::Client,
+    server: &str,
+    management_role: &str,
+    idc: &crate::config::AwsIdentityCenter,
+) -> Result<secrecy::SecretString> {
+    let session = assume_management_role(http_client, server, management_role).await?;
+    exchange_idc_access_token(http_client, idc, &session).await
 }
 
 /// Get cached Identity Center credentials, fetching fresh ones if needed.
@@ -1066,6 +1190,72 @@ mod tests {
         assert!(extract_sub_from_jwt("not-a-jwt").is_err());
         assert!(extract_sub_from_jwt("").is_err());
         assert!(extract_sub_from_jwt("a.!!!.c").is_err());
+    }
+
+    #[test]
+    fn test_chained_role_trust_statement_exact_json() {
+        let statement =
+            chained_role_trust_statement("arn:aws:iam::999999999999:role/vouch/Hub", "*@vouch.sh");
+        let parsed: serde_json::Value = serde_json::from_str(&statement).unwrap();
+        assert_eq!(
+            parsed,
+            serde_json::json!({
+                "Effect": "Allow",
+                "Principal": { "AWS": "arn:aws:iam::999999999999:role/vouch/Hub" },
+                "Action": ["sts:AssumeRole", "sts:SetSourceIdentity", "sts:TagSession"],
+                "Condition": {
+                    "StringLike": { "aws:SourceIdentity": "*@vouch.sh" }
+                }
+            })
+        );
+        // This Bool condition key only exists for AssumeRoleWithWebIdentity
+        // and would never match on the chained AssumeRole hop.
+        assert!(!statement.contains("RoleAuthorizedByIdp"));
+    }
+
+    #[test]
+    fn test_source_identity_pattern() {
+        assert_eq!(source_identity_pattern("user@vouch.sh"), "*@vouch.sh");
+        // Non-email or truncated-empty-domain sessions fall back to a
+        // fail-closed placeholder the admin must edit.
+        assert_eq!(source_identity_pattern("nonemail"), "*@YOUR-EMAIL-DOMAIN");
+        assert_eq!(source_identity_pattern("user@"), "*@YOUR-EMAIL-DOMAIN");
+        assert_eq!(source_identity_pattern(""), "*@YOUR-EMAIL-DOMAIN");
+    }
+
+    #[test]
+    fn test_extract_email_from_jwt() {
+        let payload = serde_json::json!({
+            "sub": "user@example.com",
+            "email": "user@example.com",
+        });
+        let encoded = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&payload).unwrap());
+        let token = format!("eyJhbGciOiJFUzI1NiJ9.{encoded}.fake");
+
+        assert_eq!(extract_email_from_jwt(&token).unwrap(), "user@example.com");
+    }
+
+    #[test]
+    fn test_extract_email_from_jwt_missing_or_empty() {
+        let payload = serde_json::json!({"sub": "user@example.com"});
+        let encoded = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&payload).unwrap());
+        let token = format!("eyJhbGciOiJFUzI1NiJ9.{encoded}.fake");
+        assert!(extract_email_from_jwt(&token).is_err());
+
+        let payload = serde_json::json!({"sub": "user@example.com", "email": ""});
+        let encoded = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&payload).unwrap());
+        let token = format!("eyJhbGciOiJFUzI1NiJ9.{encoded}.fake");
+        assert!(extract_email_from_jwt(&token).is_err());
+    }
+
+    #[test]
+    fn test_extract_email_from_jwt_not_truncated() {
+        // sub is capped at 64 chars for RoleSessionName; email must not be.
+        let long_email = format!("{}@example.com", "a".repeat(70));
+        let payload = serde_json::json!({"sub": "user", "email": long_email});
+        let encoded = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&payload).unwrap());
+        let token = format!("eyJhbGciOiJFUzI1NiJ9.{encoded}.fake");
+        assert_eq!(extract_email_from_jwt(&token).unwrap(), long_email);
     }
 
     #[test]

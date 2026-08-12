@@ -805,6 +805,23 @@ aws-err-region-partition-mismatch =
     The AWS region must be in the same partition as the role ARN.
     Set a region from the correct partition in your AWS profile or AWS_DEFAULT_REGION.
 
+aws-err-target-role-trust-missing =
+    AWS denied assuming { $role_arn } through the management role.
+
+    If the role's trust policy does not yet trust { -product }, ask an
+    administrator to add this statement to the role's trust-policy
+    Statement array (required for roles assigned via account access
+    manager, which only trust the account-access service by default):
+
+    { $statement }
+
+    Keep the aws:SourceIdentity condition and adjust its pattern to your
+    organization's email domain — without it, anyone who can assume the
+    management role could assume this role.
+
+    Also verify the management role { $management_role } has an IAM policy
+    allowing sts:AssumeRole on this role.
+
 sso-portal-err-token-expired = Identity Center access token is invalid or expired. Run '{ -cmd } login' to re-authenticate.
 
 aws-console-opening = Opening AWS Console...
@@ -1135,6 +1152,8 @@ setup-aws-added-profile-block =
     To configure AWS role trust policy, see:
       https://docs.aws.amazon.com/IAM/latest/UserGuide/id_roles_create_for-idp_oidc.html
 setup-aws-discover-skipped = Skipped [{ $profile }] — already exists
+setup-aws-entitlements-invalid-skipped = Skipped entitlement — invalid role or account: { $role_arn }
+setup-aws-entitlements-partial = Warning: { $failed } of { $total } entitlement queries failed; entitlement results may be incomplete
 setup-aws-discover-added = Added profile [{ $profile }] → { $role_arn }
 # Numeric arms ride as FluentValue::Number so locales can plural-form the
 # noun (e.g. "0 profil/1 profil/2 profile" rules).
@@ -1721,20 +1740,27 @@ err-failed-get-oidc-token-management-role = failed to get OIDC token for managem
 err-failed-get-redshift-cluster-credentials = failed to get Redshift cluster credentials
 err-failed-get-redshift-serverless-credentials = failed to get Redshift Serverless credentials
 err-failed-get-ssh-certificate = failed to get SSH certificate
+err-failed-list-aam-applications = failed to list account access manager applications
+err-failed-list-aam-entitlements = failed to list account access manager entitlements
+err-failed-list-group-memberships = failed to list Identity Center group memberships
+err-failed-list-idc-instances = failed to list Identity Center instances
 err-failed-list-sso-accounts = failed to list SSO accounts
 err-failed-load-config = failed to load config
 err-failed-load-vouch-config = failed to load Vouch config
 err-failed-obtain-identity-center-token = failed to obtain Identity Center token
+err-failed-parse-account-access-response = failed to parse account access manager response
 err-failed-parse-challenge-response = failed to parse challenge response
 err-failed-parse-codeartifact-response = failed to parse CodeArtifact response
 err-failed-parse-createtokenwithiam-response = failed to parse CreateTokenWithIAM response
 err-failed-parse-credential-request = failed to parse credential request
 err-failed-parse-ecr-response = failed to parse ECR response
 err-failed-parse-eks-describecluster-response = failed to parse EKS DescribeCluster response
+err-failed-parse-identitystore-response = failed to parse Identity Store response
 err-failed-parse-json-response = failed to parse JSON response
 err-failed-parse-redshift-serverless-json-response = failed to parse Redshift Serverless JSON response
 err-failed-parse-redshift-xml-response = failed to parse Redshift XML response
 err-failed-parse-registration-response = failed to parse registration response
+err-failed-parse-sso-admin-response = failed to parse sso-admin response
 err-failed-parse-sso-portal-accounts-response = failed to parse SSO Portal accounts response
 err-failed-parse-sso-portal-role-credentials-response = failed to parse SSO Portal role credentials response
 err-failed-parse-sso-portal-roles-response = failed to parse SSO Portal roles response
@@ -1749,6 +1775,7 @@ err-failed-read-sts-response = failed to read STS response
 err-failed-read-vouch-token-exchange-response-body = failed to read Vouch token-exchange response body
 err-failed-register-fapi-client = failed to register FAPI client
 err-failed-request-fido2-challenge = failed to request FIDO2 challenge
+err-failed-resolve-idc-user = failed to resolve Identity Center user
 err-failed-run-git-remote-http = failed to run git remote-http
 err-failed-save-fapi-client-key-disk = failed to save FAPI client key to disk
 err-failed-save-fapi-registration-config = failed to save FAPI registration to config

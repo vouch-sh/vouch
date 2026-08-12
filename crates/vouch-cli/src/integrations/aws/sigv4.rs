@@ -214,9 +214,9 @@ impl SigV4SigningInput<'_> {
 /// Apply the SigV4 signature headers, send the request, and return the body.
 ///
 /// Adds `X-Amz-Date`, `X-Amz-Security-Token`, and `Authorization` (shared by
-/// every signed request), then maps a non-2xx response to a truncated
-/// [`CliError::NetworkError`] (`crate::exit_code`) so account IDs and ARNs are
-/// not over-exposed.
+/// every signed request), then maps a non-2xx response to a typed
+/// [`CliError::AwsApi`] (`crate::exit_code`) carrying the parsed AWS error
+/// code and a truncated body so account IDs and ARNs are not over-exposed.
 async fn send_signed_request(
     request: reqwest::RequestBuilder,
     creds: &StsCredentials,
@@ -233,11 +233,22 @@ async fn send_signed_request(
 
     if !response.status().is_success() {
         let status = response.status();
+        // json-protocol services carry the error code in this header;
+        // capture it before the body is consumed.
+        let header_code = response
+            .headers()
+            .get("x-amzn-errortype")
+            .and_then(|value| value.to_str().ok())
+            .map(normalize_aws_error_code);
         let response_body = response.text().await.unwrap_or_default();
+        let code = header_code.or_else(|| parse_aws_error_code(&response_body));
         let truncated = truncate_error_body(&response_body, 500);
-        return Err(crate::exit_code::CliError::NetworkError(format!(
-            "{service} returned error {status}: {truncated}"
-        ))
+        return Err(crate::exit_code::CliError::AwsApi {
+            service: service.to_string(),
+            status,
+            code,
+            detail: truncated.to_string(),
+        }
         .into());
     }
 
@@ -245,6 +256,48 @@ async fn send_signed_request(
         .text()
         .await
         .context(tr!("err-failed-read-aws-api-response-body"))
+}
+
+/// Parse the AWS error code from a non-2xx response body.
+///
+/// Handles the Query-protocol XML shape (`<Error><Code>…</Code>`) and the
+/// JSON shapes (`{"__type": "…#AccessDeniedException"}` / `{"code": "…"}`).
+fn parse_aws_error_code(body: &str) -> Option<String> {
+    let trimmed = body.trim_start();
+    if trimmed.starts_with('<') {
+        let doc = roxmltree::Document::parse(body).ok()?;
+        let code = doc
+            .descendants()
+            .find(|node| node.has_tag_name("Code"))
+            .and_then(|node| node.text())?;
+        let normalized = normalize_aws_error_code(code);
+        return if normalized.is_empty() {
+            None
+        } else {
+            Some(normalized)
+        };
+    }
+    if trimmed.starts_with('{')
+        && let Ok(value) = serde_json::from_str::<serde_json::Value>(body)
+    {
+        for key in ["__type", "code", "Code"] {
+            if let Some(raw) = value.get(key).and_then(serde_json::Value::as_str) {
+                let normalized = normalize_aws_error_code(raw);
+                if !normalized.is_empty() {
+                    return Some(normalized);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Strip the `com.amazonaws…#` namespace prefix and any `:`-suffixed detail
+/// from an AWS error code.
+fn normalize_aws_error_code(raw: &str) -> String {
+    let after_hash = raw.rsplit('#').next().unwrap_or(raw);
+    let before_colon = after_hash.split(':').next().unwrap_or(after_hash);
+    before_colon.trim().to_string()
 }
 
 /// Send a SigV4-signed JSON-RPC style POST request to an AWS service.
@@ -1444,5 +1497,48 @@ mod tests {
             param_names, sorted,
             "query params must be alphabetically sorted"
         );
+    }
+
+    #[test]
+    fn parse_aws_error_code_sts_xml() {
+        let body = "<ErrorResponse xmlns=\"https://sts.amazonaws.com/doc/2011-06-15/\">\
+                    <Error><Type>Sender</Type><Code>AccessDenied</Code>\
+                    <Message>User is not authorized</Message></Error>\
+                    <RequestId>abc</RequestId></ErrorResponse>";
+        assert_eq!(parse_aws_error_code(body).as_deref(), Some("AccessDenied"));
+    }
+
+    #[test]
+    fn parse_aws_error_code_json_type_with_namespace() {
+        let body =
+            r#"{"__type":"com.amazonaws.accountaccess#AccessDeniedException","message":"no"}"#;
+        assert_eq!(
+            parse_aws_error_code(body).as_deref(),
+            Some("AccessDeniedException")
+        );
+    }
+
+    #[test]
+    fn parse_aws_error_code_garbage_is_none() {
+        assert_eq!(parse_aws_error_code("<not-xml"), None);
+        assert_eq!(parse_aws_error_code("plain text error"), None);
+        assert_eq!(
+            parse_aws_error_code("{\"message\":\"no code field\"}"),
+            None
+        );
+        assert_eq!(parse_aws_error_code(""), None);
+    }
+
+    #[test]
+    fn normalize_aws_error_code_strips_namespace_and_detail() {
+        assert_eq!(
+            normalize_aws_error_code("com.amazonaws.identitystore#ResourceNotFoundException"),
+            "ResourceNotFoundException"
+        );
+        assert_eq!(
+            normalize_aws_error_code("ThrottlingException: Rate exceeded"),
+            "ThrottlingException"
+        );
+        assert_eq!(normalize_aws_error_code("AccessDenied"), "AccessDenied");
     }
 }
