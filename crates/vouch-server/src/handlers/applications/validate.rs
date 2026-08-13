@@ -515,13 +515,13 @@ fn trim_nonempty(value: Option<&str>) -> Option<&str> {
 ///
 /// Returns `Ok(true)` for `"fapi2_security"` and `Ok(false)` for the
 /// accepted non-FAPI sentinels: `"none"` (the canonical `FapiProfile` wire
-/// value), `"standard"` (used by the API/tests), and `""` (the web form's
-/// radio-button value for the standard profile). Any other value is
-/// rejected with [`AppValidationError::InvalidFapiProfile`].
+/// value) and `""` (the web form's radio-button value for the standard
+/// profile). Any other value is rejected with
+/// [`AppValidationError::InvalidFapiProfile`].
 fn validate_fapi_profile_value(p: &str) -> Result<bool, AppValidationError> {
     match p {
         "fapi2_security" => Ok(true),
-        "none" | "standard" | "" => Ok(false),
+        "none" | "" => Ok(false),
         _ => Err(AppValidationError::InvalidFapiProfile(p.to_string())),
     }
 }
@@ -763,7 +763,7 @@ mod tests {
         let state = test_app_state().await;
         let client = fapi_test_client(&state, "fapi-disable@example.com").await;
 
-        let validated = update_input(Some("standard"));
+        let validated = update_input(Some("none"));
         let err =
             validate_update_fapi(&validated, &client).expect_err("FAPI downgrade must be rejected");
 
@@ -782,7 +782,7 @@ mod tests {
             .expect("db lookup")
             .expect("client exists");
 
-        let validated = update_input(Some("standard"));
+        let validated = update_input(Some("none"));
         validate_update_fapi(&validated, &client).expect("standard -> standard is allowed");
 
         let fields = compute_fapi_update_fields(&validated, &client);
@@ -903,7 +903,7 @@ mod tests {
     #[test]
     fn create_accepts_valid_non_fapi_profile_sentinels() {
         let redirect_uris = vec!["https://example.com/cb".to_string()];
-        for s in &["none", "standard", ""] {
+        for s in &["none", ""] {
             let validated =
                 validate_create_application(base_create_input(&redirect_uris, None, Some(s)))
                     .expect("valid non-FAPI sentinel");

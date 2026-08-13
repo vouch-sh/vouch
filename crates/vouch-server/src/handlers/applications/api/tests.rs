@@ -1295,7 +1295,7 @@ async fn test_update_application_rejects_fapi_downgrade() {
         &app,
         "PATCH",
         &format!("/api/v1/applications/{}", client.app_id),
-        Some(r#"{"fapi_profile": "standard"}"#.to_string()),
+        Some(r#"{"fapi_profile": "none"}"#.to_string()),
         &[
             ("Content-Type", "application/json"),
             ("Authorization", &auth),
