@@ -175,6 +175,20 @@ pub(crate) async fn register_complete(
         .await
         .map_err(|e| ServiceError::api(StatusCode::BAD_REQUEST, "invalid_state", e.to_string()))?;
 
+    // Account must be active. A user deactivated after obtaining the
+    // registration state (valid for five minutes) must not register a new
+    // hardware key (issue #846). Mirrors `browser_register_complete`.
+    let account = db::get_user_by_id(&state.store, &reg_state.user_id.to_string())
+        .await
+        .map_err(|e| {
+            ServiceError::api(StatusCode::INTERNAL_SERVER_ERROR, "db_error", e.to_string())
+        })?;
+    if let Some(account) = account
+        && !account.active
+    {
+        return Err(ServiceError::Forbidden("user_deactivated"));
+    }
+
     // Single-use enforcement: consume the state token before any WebAuthn work.
     // A captured state JWT cannot be replayed within the 5-minute validity window.
     // CLI registration adds an authenticator without issuing a token, so the
@@ -734,6 +748,129 @@ mod tests {
         assert_eq!(
             json["code"], "state_already_used",
             "replayed state must return state_already_used, got: {json}"
+        );
+    }
+
+    // ========================================================================
+    // Register Complete — Deactivated User Rejection (issue #846)
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_register_complete_refuses_deactivated_user() {
+        // A user deactivated after obtaining the registration state (valid
+        // for five minutes) must not complete key registration (issue #846).
+        // Mirrors `test_browser_register_complete_refuses_deactivated_user`.
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "deactivated-complete@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let user_uuid = Uuid::parse_str(&user.id).expect("user id is a uuid");
+
+        // Build a valid RegistrationState JWT for an (initially) active user.
+        let signer = &state.state_signer;
+        let challenge = Challenge::from(vec![3u8; 32]);
+        let now = jiff::Timestamp::now();
+        let exp = now
+            .checked_add(jiff::Span::new().minutes(5))
+            .map_or(now.as_second().saturating_add(300), |t| t.as_second());
+        let reg_state = RegistrationState {
+            user_id: user_uuid,
+            user_name: user.email.clone(),
+            device_name: "Test Device".to_string(),
+            challenge,
+            rp_id: "localhost".to_string(),
+            iat: now.as_second(),
+            exp,
+        };
+        let state_jwt = reg_state.encode(signer).await.expect("encode state");
+
+        // Admin deactivates the user after the state token was issued.
+        crate::db::update_user_active_status(&state.store, &user.id, false)
+            .await
+            .expect("deactivate user");
+
+        // The active-user check runs before WebAuthn verification, so dummy
+        // attestation bytes are sufficient to trigger the deactivation rejection.
+        let body = serde_json::json!({
+            "state": state_jwt,
+            "credential_id": [],
+            "public_key": [],
+            "attestation_object": [],
+            "client_data_json": [],
+        });
+        let (status, resp_body) = http_post_json(
+            &app,
+            "/v1/keys/register/complete",
+            &body.to_string(),
+            &[("Authorization", &format!("Bearer {token}"))],
+        )
+        .await;
+
+        assert_eq!(
+            status,
+            StatusCode::FORBIDDEN,
+            "deactivated user must not complete key registration: {resp_body}"
+        );
+        let json: serde_json::Value = serde_json::from_str(&resp_body).expect("valid JSON");
+        assert_eq!(json["code"], "forbidden");
+        assert_eq!(json["message"], "user_deactivated");
+    }
+
+    #[tokio::test]
+    async fn test_register_complete_allows_active_user_past_active_check() {
+        // An active user must not be rejected by the deactivation guard: the
+        // request must proceed past the active-user check to subsequent stages
+        // (here, WebAuthn verification, which fails on dummy attestation bytes).
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "active-complete@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let user_uuid = Uuid::parse_str(&user.id).expect("user id is a uuid");
+
+        let signer = &state.state_signer;
+        let challenge = Challenge::from(vec![4u8; 32]);
+        let now = jiff::Timestamp::now();
+        let exp = now
+            .checked_add(jiff::Span::new().minutes(5))
+            .map_or(now.as_second().saturating_add(300), |t| t.as_second());
+        let reg_state = RegistrationState {
+            user_id: user_uuid,
+            user_name: user.email.clone(),
+            device_name: "Test Device".to_string(),
+            challenge,
+            rp_id: "localhost".to_string(),
+            iat: now.as_second(),
+            exp,
+        };
+        let state_jwt = reg_state.encode(signer).await.expect("encode state");
+
+        let body = serde_json::json!({
+            "state": state_jwt,
+            "credential_id": [],
+            "public_key": [],
+            "attestation_object": [],
+            "client_data_json": [],
+        });
+        let (status, resp_body) = http_post_json(
+            &app,
+            "/v1/keys/register/complete",
+            &body.to_string(),
+            &[("Authorization", &format!("Bearer {token}"))],
+        )
+        .await;
+
+        // The active-user check must NOT fire for an active user. Dummy
+        // attestation bytes cause WebAuthn verification to fail with a 400
+        // invalid_attestation — never a 403 user_deactivated.
+        assert_ne!(
+            status,
+            StatusCode::FORBIDDEN,
+            "active user must not be rejected as deactivated: {resp_body}"
+        );
+        let json: serde_json::Value = serde_json::from_str(&resp_body).expect("valid JSON");
+        assert_ne!(
+            json["message"], "user_deactivated",
+            "active user must not receive user_deactivated: {json}"
         );
     }
 
