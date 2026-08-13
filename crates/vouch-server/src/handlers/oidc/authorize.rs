@@ -1112,7 +1112,17 @@ async fn complete_pending_auth(
 
     // Validate max_age: if the pending request specified max_age,
     // verify the session is not older than that threshold (RFC 9470).
-    if let Some(max_age) = pending.max_age {
+    //
+    // A session created after this authorization request began means the
+    // user authenticated *for this request*, which satisfies any max_age
+    // (including 0) by definition — no elapsed-seconds arithmetic can say
+    // otherwise. Checking timestamps directly keeps the outcome independent
+    // of how long the post-login browser navigation took: with max_age=0, a
+    // wall-clock age check alone would fail again whenever that round trip
+    // crosses an integer-second boundary.
+    if let Some(max_age) = pending.max_age
+        && auth_session.created_at < pending.created_at
+    {
         let age_secs = jiff::Timestamp::now()
             .duration_since(auth_session.created_at)
             .as_secs()
@@ -1121,10 +1131,9 @@ async fn complete_pending_auth(
         let age_u64 = u64::try_from(age_secs).unwrap_or(u64::MAX);
         // Reject only when the session age *exceeds* max_age (strict `>`).
         // A session exactly at the threshold (age == max_age) satisfies the
-        // requirement: it is "not older than" the threshold. This matters
-        // for max_age=0, where a freshly re-authenticated session has age ~0
-        // and must be accepted (0 > 0 is false). Using `>=` here would reject
-        // the boundary and make max_age=0 impossible to complete. This is
+        // requirement: it is "not older than" the threshold. Using `>=`
+        // here would reject the boundary and make max_age=0 impossible to
+        // complete even for a session created during this request. This is
         // consistent with the established pattern in keys.rs and dpop.rs.
         if age_u64 > max_age_u64 {
             return resolved
