@@ -506,7 +506,12 @@ pub(crate) async fn remove_member(
         )
     })?;
 
-    let deleted = db::delete_user(&state.store, &target_id).await?;
+    let deleted = db::delete_user(&state.store, &target_id)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to delete user: {e}");
+            ServiceError::Internal("Failed to delete user".to_string())
+        })?;
     if !deleted {
         return Err(member_gone());
     }

@@ -497,3 +497,95 @@ async fn test_delete_user_skips_deactivated_org_admin_as_successor() {
         "a deactivated admin must not inherit the application"
     );
 }
+
+/// Two org admins deleted at the same time must not leave the organization's
+/// applications owned by a user that no longer exists.
+///
+/// Both deletions read the org's members to choose a successor, and a
+/// predicate read is what concurrent transactions do not conflict on: each
+/// would otherwise pick the other, and both rows would then be removed.
+/// Writing the org row makes the loser re-read and pick a survivor — or,
+/// when it is the last admin, unlink.
+///
+/// This asserts the invariant; it does not reproduce the skew. SQLite
+/// serializes writers, so the interleaving that produces it cannot occur
+/// here — the same reason
+/// `test_enroll_user_with_org_same_domain_converges_on_one_org` exercises
+/// its property sequentially. The guarantee under READ COMMITTED comes from
+/// the org-row write in `delete_user`, which is the pattern enrollment uses
+/// to claim its admin slot.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_concurrent_admin_deletes_never_strand_org_apps() {
+    let (store, _audit) = test_db().await;
+    seed_test_org(&store).await;
+    let store = std::sync::Arc::new(store);
+
+    let (admin_a, _) = upsert_user_with_org(
+        &store,
+        "race-admin-a@example.com",
+        None,
+        Some(TEST_ORG_ID),
+        true,
+    )
+    .await
+    .expect("create admin a");
+    let (admin_b, _) = upsert_user_with_org(
+        &store,
+        "race-admin-b@example.com",
+        None,
+        Some(TEST_ORG_ID),
+        true,
+    )
+    .await
+    .expect("create admin b");
+
+    let app_a = create_scoped_client(
+        &store,
+        &admin_a,
+        "App A",
+        AccessScope::Organization,
+        Some(TEST_ORG_ID),
+    )
+    .await;
+    let app_b = create_scoped_client(
+        &store,
+        &admin_b,
+        "App B",
+        AccessScope::Organization,
+        Some(TEST_ORG_ID),
+    )
+    .await;
+
+    let (r1, r2) = tokio::join!(
+        {
+            let s = std::sync::Arc::clone(&store);
+            let id = admin_a.clone();
+            async move { delete_user(&s, &id).await }
+        },
+        {
+            let s = std::sync::Arc::clone(&store);
+            let id = admin_b.clone();
+            async move { delete_user(&s, &id).await }
+        },
+    );
+    assert!(r1.expect("delete a"), "admin a must be deleted");
+    assert!(r2.expect("delete b"), "admin b must be deleted");
+
+    // Whatever order they ran in, no application may reference a deleted user.
+    for app_id in [&app_a, &app_b] {
+        let client = get_oauth_client_by_id(&store, app_id)
+            .await
+            .expect("lookup app")
+            .expect("app still exists");
+        if let Some(owner) = client.user_id.as_deref() {
+            let owner_exists = get_user_by_id(&store, owner)
+                .await
+                .expect("lookup owner")
+                .is_some();
+            assert!(
+                owner_exists,
+                "application {app_id} is owned by deleted user {owner}"
+            );
+        }
+    }
+}

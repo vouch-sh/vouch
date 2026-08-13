@@ -145,6 +145,26 @@ pub async fn get_users_by_ids(
         .collect())
 }
 
+/// Failure modes of [`delete_user`].
+#[derive(Debug, thiserror::Error)]
+pub enum DeleteUserError {
+    /// Another transaction changed the organization row while this delete was
+    /// choosing a successor for the user's org-scoped applications.
+    #[error("organization changed during delete")]
+    OccConflict,
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
+}
+
+impl super::pool::RetryableError for DeleteUserError {
+    fn is_retryable(&self) -> bool {
+        match self {
+            Self::OccConflict => true,
+            Self::Other(e) => super::pool::is_retryable_db_error(e),
+        }
+    }
+}
+
 /// Pick the org admin that inherits a departing user's org-scoped
 /// applications.
 ///
@@ -195,7 +215,7 @@ async fn org_admin_successor(
 /// `Ok(true)` when the user existed and was deleted, `Ok(false)` when no
 /// user with `user_id` was found — callers surface the latter as a 404 and
 /// must not record a deletion audit event.
-pub async fn delete_user(store: &DocumentStore, user_id: &str) -> Result<bool> {
+pub async fn delete_user(store: &DocumentStore, user_id: &str) -> Result<bool, DeleteUserError> {
     use super::documents::authenticator::AuthenticatorDoc;
     use super::documents::credential::{EnrollmentSessionDoc, SshIssuedCertDoc};
     use super::documents::oauth::OAuthClientDoc;
@@ -269,6 +289,36 @@ pub async fn delete_user(store: &DocumentStore, user_id: &str) -> Result<bool> {
             };
         })
         .await?;
+
+        // Serialize deletions within an organization on the org row.
+        //
+        // Choosing a successor reads the org's members, and a predicate read
+        // is exactly what concurrent transactions do not conflict on under
+        // READ COMMITTED. Two admins deleted at once would each pick the
+        // other — both reads predate both deletions — and the applications
+        // would land on a user row that no longer exists. Writing the org
+        // row makes those transactions collide: the loser retries, re-reads
+        // members without the winner, and picks someone who still exists.
+        // Enrollment claims its admin slot against the same row for the same
+        // reason.
+        //
+        // Every delete of a member of an org takes this write, not only the
+        // ones that transfer: the user being deleted may itself be the
+        // successor a concurrent delete just chose. Deleting a user is a rare
+        // administrative action, so serializing per organization costs
+        // little.
+        if let Some(ref org_id) = org_id
+            && let Some(org_doc) = tx
+                .get::<super::documents::organization::OrganizationDoc>(org_id)
+                .await?
+        {
+            let won = tx
+                .compare_and_update(org_id, org_doc.version, &org_doc.data)
+                .await?;
+            if !won {
+                return Err(DeleteUserError::OccConflict);
+            }
+        }
 
         // 7. Delete the user
         tx.delete(user_id).await?;
