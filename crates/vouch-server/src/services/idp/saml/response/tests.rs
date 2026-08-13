@@ -602,6 +602,150 @@ fn subject_confirmation_missing_method_returns_error() {
 }
 
 // =========================================================================
+// Multiple SubjectConfirmation tests (SAML Core 2.4.1: "any one" semantics)
+// =========================================================================
+
+/// Helper: build an assertion XML string whose `<saml:Subject>` contains the
+/// given `<saml:SubjectConfirmation>` fragments verbatim. Callers parse the
+/// returned string in their own scope so the borrowed `Node` outlives use.
+fn assertion_with_subject_confirmations(confirmations_xml: &str) -> String {
+    format!(
+        r##"<saml:Assertion xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion">
+  <saml:Subject>
+{confirmations_xml}
+  </saml:Subject>
+</saml:Assertion>"##
+    )
+}
+
+/// SAML Core 2.4.1: a Subject with multiple SubjectConfirmation elements is
+/// confirmed if ANY ONE is satisfied. The first bearer here has a wrong
+/// Recipient (fails), the second is fully valid — the assertion MUST pass.
+#[test]
+fn subject_confirmation_multiple_one_valid_bearer_passes() {
+    let now = Timestamp::now();
+    let future = now
+        .checked_add(jiff::Span::new().hours(1))
+        .unwrap()
+        .strftime("%Y-%m-%dT%H:%M:%SZ")
+        .to_string();
+    let acs = "https://vouch.example.com/saml/acs";
+    let wrong = "https://wrong.example.com/saml/acs";
+    let confirmations = format!(
+        r#"<saml:SubjectConfirmation Method="urn:oasis:names:tc:SAML:2.0:cm:bearer">
+  <saml:SubjectConfirmationData Recipient="{wrong}" InResponseTo="_req123" NotOnOrAfter="{future}"/>
+</saml:SubjectConfirmation>
+<saml:SubjectConfirmation Method="urn:oasis:names:tc:SAML:2.0:cm:bearer">
+  <saml:SubjectConfirmationData Recipient="{acs}" InResponseTo="_req123" NotOnOrAfter="{future}"/>
+</saml:SubjectConfirmation>"#
+    );
+    let xml = assertion_with_subject_confirmations(&confirmations);
+    let doc = roxmltree::Document::parse(&xml).unwrap();
+    let assertion = doc.root().children().find(|n| n.is_element()).unwrap();
+    let result = validate_subject_confirmation(assertion, "_req123", acs, now);
+    assert!(
+        result.is_ok(),
+        "Expected Ok when at least one SubjectConfirmation is valid, got: {result:?}"
+    );
+}
+
+/// When every bearer SubjectConfirmation fails (all Recipients wrong), the
+/// assertion MUST be rejected.
+#[test]
+fn subject_confirmation_multiple_all_invalid_recipient_returns_error() {
+    let now = Timestamp::now();
+    let future = now
+        .checked_add(jiff::Span::new().hours(1))
+        .unwrap()
+        .strftime("%Y-%m-%dT%H:%M:%SZ")
+        .to_string();
+    let acs = "https://vouch.example.com/saml/acs";
+    let wrong1 = "https://wrong1.example.com/saml/acs";
+    let wrong2 = "https://wrong2.example.com/saml/acs";
+    let confirmations = format!(
+        r#"<saml:SubjectConfirmation Method="urn:oasis:names:tc:SAML:2.0:cm:bearer">
+  <saml:SubjectConfirmationData Recipient="{wrong1}" InResponseTo="_req123" NotOnOrAfter="{future}"/>
+</saml:SubjectConfirmation>
+<saml:SubjectConfirmation Method="urn:oasis:names:tc:SAML:2.0:cm:bearer">
+  <saml:SubjectConfirmationData Recipient="{wrong2}" InResponseTo="_req123" NotOnOrAfter="{future}"/>
+</saml:SubjectConfirmation>"#
+    );
+    let xml = assertion_with_subject_confirmations(&confirmations);
+    let doc = roxmltree::Document::parse(&xml).unwrap();
+    let assertion = doc.root().children().find(|n| n.is_element()).unwrap();
+    let err = validate_subject_confirmation(assertion, "_req123", acs, now).unwrap_err();
+    assert!(
+        matches!(err, ResponseError::DestinationMismatch { .. }),
+        "Expected DestinationMismatch when all Recipients are wrong, got: {err}"
+    );
+}
+
+/// Mixed methods: a non-bearer (holder-of-key) SubjectConfirmation followed by
+/// a valid bearer one. Vouch supports only bearer, but per SAML Core 2.4.1 the
+/// assertion is confirmed by the valid bearer SubjectConfirmation.
+#[test]
+fn subject_confirmation_mixed_methods_one_valid_bearer_passes() {
+    let now = Timestamp::now();
+    let future = now
+        .checked_add(jiff::Span::new().hours(1))
+        .unwrap()
+        .strftime("%Y-%m-%dT%H:%M:%SZ")
+        .to_string();
+    let acs = "https://vouch.example.com/saml/acs";
+    let confirmations = format!(
+        r#"<saml:SubjectConfirmation Method="urn:oasis:names:tc:SAML:2.0:cm:holder-of-key">
+  <saml:SubjectConfirmationData Recipient="{acs}" InResponseTo="_req123" NotOnOrAfter="{future}"/>
+</saml:SubjectConfirmation>
+<saml:SubjectConfirmation Method="urn:oasis:names:tc:SAML:2.0:cm:bearer">
+  <saml:SubjectConfirmationData Recipient="{acs}" InResponseTo="_req123" NotOnOrAfter="{future}"/>
+</saml:SubjectConfirmation>"#
+    );
+    let xml = assertion_with_subject_confirmations(&confirmations);
+    let doc = roxmltree::Document::parse(&xml).unwrap();
+    let assertion = doc.root().children().find(|n| n.is_element()).unwrap();
+    let result = validate_subject_confirmation(assertion, "_req123", acs, now);
+    assert!(
+        result.is_ok(),
+        "Expected Ok when a bearer SubjectConfirmation is present alongside a non-bearer one, got: {result:?}"
+    );
+}
+
+/// The first bearer SubjectConfirmation is expired (NotOnOrAfter in the past,
+/// beyond clock skew), the second is valid. Per "any one" semantics the
+/// assertion MUST be accepted via the second.
+#[test]
+fn subject_confirmation_multiple_first_expired_second_valid_passes() {
+    let now = Timestamp::now();
+    let future = now
+        .checked_add(jiff::Span::new().hours(1))
+        .unwrap()
+        .strftime("%Y-%m-%dT%H:%M:%SZ")
+        .to_string();
+    let expired = now
+        .checked_sub(jiff::Span::new().hours(1))
+        .unwrap()
+        .strftime("%Y-%m-%dT%H:%M:%SZ")
+        .to_string();
+    let acs = "https://vouch.example.com/saml/acs";
+    let confirmations = format!(
+        r#"<saml:SubjectConfirmation Method="urn:oasis:names:tc:SAML:2.0:cm:bearer">
+  <saml:SubjectConfirmationData Recipient="{acs}" InResponseTo="_req123" NotOnOrAfter="{expired}"/>
+</saml:SubjectConfirmation>
+<saml:SubjectConfirmation Method="urn:oasis:names:tc:SAML:2.0:cm:bearer">
+  <saml:SubjectConfirmationData Recipient="{acs}" InResponseTo="_req123" NotOnOrAfter="{future}"/>
+</saml:SubjectConfirmation>"#
+    );
+    let xml = assertion_with_subject_confirmations(&confirmations);
+    let doc = roxmltree::Document::parse(&xml).unwrap();
+    let assertion = doc.root().children().find(|n| n.is_element()).unwrap();
+    let result = validate_subject_confirmation(assertion, "_req123", acs, now);
+    assert!(
+        result.is_ok(),
+        "Expected Ok when a later SubjectConfirmation is valid despite an expired first one, got: {result:?}"
+    );
+}
+
+// =========================================================================
 // New error variant display tests
 // =========================================================================
 

@@ -446,6 +446,12 @@ fn validate_conditions(
 
 /// Validate `<saml:SubjectConfirmation>` Method and `SubjectConfirmationData`.
 ///
+/// SAML Core Section 2.4.1: A `<Subject>` containing more than one
+/// `<SubjectConfirmation>` is considered confirmed if **any one** of those
+/// `<SubjectConfirmation>` elements is satisfied. This iterates every
+/// `<SubjectConfirmation>` and returns `Ok` as soon as one passes all bearer
+/// checks; it only returns an error when none are valid.
+///
 /// SAML Core Section 2.4.1.2: The Method MUST be bearer for Web Browser SSO.
 /// SAML Profiles Section 4.1.4.3: SubjectConfirmationData Recipient and
 /// NotOnOrAfter MUST be validated.
@@ -479,58 +485,87 @@ fn validate_subject_confirmation(
         ));
     }
 
+    // SAML Core 2.4.1: A Subject with multiple SubjectConfirmation elements
+    // is considered confirmed if ANY ONE is satisfied. Try each one and
+    // return Ok as soon as a bearer SubjectConfirmation passes all checks.
+    // Only error if none are valid; surface the first error encountered so
+    // single-confirmation failures still report a specific cause.
+    let mut first_error: Option<ResponseError> = None;
     for confirmation in confirmations {
-        // SAML Core 2.4.1.2: Verify Method is bearer
-        let method = confirmation.attribute("Method").unwrap_or("");
-        if method != SUBJECT_BEARER {
-            return Err(ResponseError::InvalidSubjectConfirmationMethod(
-                method.to_string(),
-            ));
+        match validate_single_subject_confirmation(confirmation, expected_request_id, acs_url, now)
+        {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                first_error.get_or_insert(e);
+            }
         }
+    }
 
-        let conf_data = confirmation
-            .children()
-            .find(|n| n.has_tag_name((NS_SAML, "SubjectConfirmationData")))
-            .ok_or_else(|| {
-                ResponseError::Other(
-                    "missing SubjectConfirmationData (required for bearer)".to_string(),
-                )
-            })?;
+    Err(first_error.unwrap_or_else(|| {
+        ResponseError::Other("no valid bearer SubjectConfirmation found".to_string())
+    }))
+}
 
-        // SAML Profiles 4.1.4.3: Recipient MUST match ACS URL.
-        let recipient = conf_data.attribute("Recipient").ok_or_else(|| {
+/// Validate a single `<saml:SubjectConfirmation>` element as a bearer
+/// confirmation suitable for Web Browser SSO.
+///
+/// SAML Core Section 2.4.1.2: The Method MUST be bearer.
+/// SAML Profiles Section 4.1.4.3: SubjectConfirmationData Recipient,
+/// InResponseTo, and NotOnOrAfter MUST be validated.
+fn validate_single_subject_confirmation(
+    confirmation: roxmltree::Node<'_, '_>,
+    expected_request_id: &str,
+    acs_url: &str,
+    now: Timestamp,
+) -> Result<(), ResponseError> {
+    // SAML Core 2.4.1.2: Verify Method is bearer
+    let method = confirmation.attribute("Method").unwrap_or("");
+    if method != SUBJECT_BEARER {
+        return Err(ResponseError::InvalidSubjectConfirmationMethod(
+            method.to_string(),
+        ));
+    }
+
+    let conf_data = confirmation
+        .children()
+        .find(|n| n.has_tag_name((NS_SAML, "SubjectConfirmationData")))
+        .ok_or_else(|| {
             ResponseError::Other(
-                "missing Recipient in SubjectConfirmationData (required)".to_string(),
+                "missing SubjectConfirmationData (required for bearer)".to_string(),
             )
         })?;
-        if recipient != acs_url {
-            return Err(ResponseError::DestinationMismatch {
-                expected: acs_url.to_string(),
-                actual: recipient.to_string(),
-            });
-        }
 
-        // Check InResponseTo matches request ID
-        if let Some(in_response_to) = conf_data.attribute("InResponseTo")
-            && in_response_to != expected_request_id
-        {
-            return Err(ResponseError::InResponseToMismatch {
-                expected: expected_request_id.to_string(),
-                actual: in_response_to.to_string(),
-            });
-        }
+    // SAML Profiles 4.1.4.3: Recipient MUST match ACS URL.
+    let recipient = conf_data.attribute("Recipient").ok_or_else(|| {
+        ResponseError::Other("missing Recipient in SubjectConfirmationData (required)".to_string())
+    })?;
+    if recipient != acs_url {
+        return Err(ResponseError::DestinationMismatch {
+            expected: acs_url.to_string(),
+            actual: recipient.to_string(),
+        });
+    }
 
-        // Check NotOnOrAfter
-        if let Some(not_on_or_after_str) = conf_data.attribute("NotOnOrAfter") {
-            let not_on_or_after = parse_saml_timestamp(not_on_or_after_str)?;
-            let skewed_now = now
-                .checked_sub(jiff::Span::new().seconds(CLOCK_SKEW_SECS))
-                .unwrap_or(now);
-            if skewed_now >= not_on_or_after {
-                return Err(ResponseError::TimeValidation(format!(
-                    "SubjectConfirmationData expired: NotOnOrAfter={not_on_or_after_str}"
-                )));
-            }
+    // Check InResponseTo matches request ID
+    if let Some(in_response_to) = conf_data.attribute("InResponseTo")
+        && in_response_to != expected_request_id
+    {
+        return Err(ResponseError::InResponseToMismatch {
+            expected: expected_request_id.to_string(),
+            actual: in_response_to.to_string(),
+        });
+    }
+
+    // Check NotOnOrAfter
+    if let Some(not_on_or_after_str) = conf_data.attribute("NotOnOrAfter") {
+        let not_on_or_after = parse_saml_timestamp(not_on_or_after_str)?;
+        let skewed_now = now
+            .checked_sub(jiff::Span::new().seconds(CLOCK_SKEW_SECS))
+            .unwrap_or(now);
+        if skewed_now >= not_on_or_after {
+            return Err(ResponseError::TimeValidation(format!(
+                "SubjectConfirmationData expired: NotOnOrAfter={not_on_or_after_str}"
+            )));
         }
     }
 
