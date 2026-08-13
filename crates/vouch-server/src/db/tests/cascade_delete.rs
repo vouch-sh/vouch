@@ -291,48 +291,20 @@ async fn create_scoped_client(
     access_scope: AccessScope,
     org_id: Option<&str>,
 ) -> String {
-    let (client, _) = create_oauth_client(
+    create_test_client(
         store,
-        &CreateOAuthClientParams {
-            user_id: Some(user_id),
-            name,
-            description: None,
-            application_type: OAuthClientType::Web,
-            redirect_uris: &[],
+        user_id,
+        TestClientSpec {
+            name: name.to_string(),
+            redirect_uris: vec![],
             access_scope,
-            org_id,
-            resource_uris: &[],
-            token_endpoint_auth_method: None,
-            jwks: None,
-            jwks_uri: None,
-            fapi_profile: None,
-            dpop_bound_access_tokens: None,
-            grant_types: None,
-            response_types: None,
-            software_id: None,
-            software_version: None,
-            registration_source: RegistrationSource::Manual,
-            registration_access_token_hash: None,
-            registration_metadata: None,
-            id_token_signed_response_alg: JwsAlgorithm::Rs256,
-            tls_client_auth_subject_dn: None,
-            tls_client_auth_san_dns: None,
-            tls_client_auth_san_uri: None,
-            tls_client_auth_san_ip: None,
-            tls_client_auth_san_email: None,
-            tls_client_certificate_bound_access_tokens: None,
-            authorization_signed_response_alg: None,
-            introspection_signed_response_alg: None,
-            request_object_signing_alg: None,
-            require_signed_request_object: None,
-            userinfo_signed_response_alg: None,
-            request_uris: None,
-            post_logout_redirect_uris: None,
+            org_id: org_id.map(String::from),
+            with_secret: false,
+            ..Default::default()
         },
     )
     .await
-    .expect("Failed to create client");
-    client.id
+    .app_id
 }
 
 /// Deleting an org-scoped application's creator transfers the application to
