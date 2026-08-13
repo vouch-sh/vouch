@@ -1119,7 +1119,14 @@ async fn complete_pending_auth(
             .max(0);
         let max_age_u64 = u64::try_from(max_age).unwrap_or(0);
         let age_u64 = u64::try_from(age_secs).unwrap_or(u64::MAX);
-        if age_u64 >= max_age_u64 {
+        // Reject only when the session age *exceeds* max_age (strict `>`).
+        // A session exactly at the threshold (age == max_age) satisfies the
+        // requirement: it is "not older than" the threshold. This matters
+        // for max_age=0, where a freshly re-authenticated session has age ~0
+        // and must be accepted (0 > 0 is false). Using `>=` here would reject
+        // the boundary and make max_age=0 impossible to complete. This is
+        // consistent with the established pattern in keys.rs and dpop.rs.
+        if age_u64 > max_age_u64 {
             return resolved
                 .error_redirect(
                     state,

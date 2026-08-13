@@ -879,3 +879,229 @@ async fn test_rfc9470_key_delete_self_deletion_after_step_up() {
         "Self-deletion should revoke at least 1 session: {body}"
     );
 }
+
+// ========================================================================
+// RFC 9470 / OIDC Core — max_age post-login session validation
+// ========================================================================
+
+#[tokio::test]
+async fn test_rfc9470_max_age_zero_completes_after_reauth() {
+    // OIDC Core Section 3.1.2.1: max_age=0 is equivalent to prompt=login.
+    //
+    // Flow:
+    //   1. User has an existing session.
+    //   2. Requests /oauth/authorize?max_age=0 → re-auth required, server
+    //      stores pending OAuth params and redirects to /login?pending_auth=<id>.
+    //   3. User completes login → obtains a fresh session (age ~0 seconds).
+    //   4. Browser returns to /oauth/authorize?pending_auth=<id> with the new
+    //      session cookie.
+    //
+    // The post-login validation in complete_pending_auth must ACCEPT the fresh
+    // session. A fresh session has age 0, and `0 > 0` (strict `>`) is false, so
+    // the authorization must complete with a code redirect. Using `>=` here
+    // would reject the boundary (0 >= 0 = true) and make max_age=0 impossible
+    // to complete — the reported bug.
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "maxage-zero-complete@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+
+    // Step 1: existing session triggers re-auth with max_age=0.
+    let old_session = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+
+    let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+    let challenge = sha256_base64url(verifier);
+    let state_param = "maxage-zero-complete";
+
+    let response = http_get_full(
+        &app,
+        &format!(
+            "/oauth/authorize?response_type=code&client_id={}&redirect_uri={}&scope=openid\
+             &code_challenge={}&code_challenge_method=S256&max_age=0&state={}",
+            client.client_id,
+            urlencoding::encode("https://example.com/callback"),
+            challenge,
+            state_param,
+        ),
+        &[("Cookie", &format!("__Host-vouch_session={old_session}"))],
+    )
+    .await;
+
+    assert!(
+        response.status == StatusCode::FOUND || response.status == StatusCode::SEE_OTHER,
+        "max_age=0 must redirect for re-auth, got: {}",
+        response.status
+    );
+
+    let location = response
+        .headers
+        .get("Location")
+        .expect("Must have Location header")
+        .to_str()
+        .expect("Valid UTF-8");
+
+    assert!(
+        location.starts_with("/login?pending_auth="),
+        "max_age=0 must redirect to /login with pending_auth: {location}"
+    );
+
+    // Extract the pending_auth ID from the redirect URL.
+    let pending_id = location
+        .split("pending_auth=")
+        .nth(1)
+        .expect("pending_auth must be in redirect URL");
+    let pending_id = urlencoding::decode(pending_id)
+        .expect("pending_auth must be URL-decodable")
+        .into_owned();
+
+    // Step 2: simulate post-login — create a brand-new fresh session.
+    let fresh_session = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+
+    // Step 3: complete the pending authorization with the fresh session.
+    let completion = http_get_full(
+        &app,
+        &format!(
+            "/oauth/authorize?pending_auth={}",
+            urlencoding::encode(&pending_id)
+        ),
+        &[("Cookie", &format!("__Host-vouch_session={fresh_session}"))],
+    )
+    .await;
+
+    assert!(
+        completion.status == StatusCode::FOUND || completion.status == StatusCode::SEE_OTHER,
+        "max_age=0 must complete with a redirect after fresh login, got: {} body: {}",
+        completion.status,
+        completion.body
+    );
+
+    let code_location = completion
+        .headers
+        .get("Location")
+        .expect("completion must have Location header")
+        .to_str()
+        .expect("Valid UTF-8");
+
+    assert!(
+        code_location.contains("code="),
+        "Fresh session (age ~0) must satisfy max_age=0 and issue a code, \
+         got: {code_location}"
+    );
+    assert!(
+        !code_location.contains("error=login_required"),
+        "max_age=0 must NOT return login_required for a fresh session: {code_location}"
+    );
+    // State must be echoed back on success.
+    assert!(
+        code_location.contains(&format!("state={state_param}")),
+        "Success redirect must echo state parameter: {code_location}"
+    );
+}
+
+#[tokio::test]
+async fn test_rfc9470_max_age_completion_rejects_stale_session() {
+    // Counterpart to the max_age=0 completion test: a session whose age
+    // *exceeds* max_age (strictly greater) must still be rejected after
+    // the pending-auth flow, returning error=login_required.
+    //
+    // This guards against the fix (>=  →  >) over-correcting and accepting
+    // genuinely stale sessions. Only the boundary (age == max_age) changes
+    // behavior; age > max_age must remain rejected.
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "maxage-stale@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+
+    let session = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+
+    // Age the session so it is at least 2 seconds old (well past max_age=1).
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+    let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+    let challenge = sha256_base64url(verifier);
+    let state_param = "maxage-stale-reject";
+
+    // max_age=1 with a 2-second-old session: pre-login check (age >= max_age)
+    // triggers re-auth and stores a pending auth record carrying max_age=1.
+    let response = http_get_full(
+        &app,
+        &format!(
+            "/oauth/authorize?response_type=code&client_id={}&redirect_uri={}&scope=openid\
+             &code_challenge={}&code_challenge_method=S256&max_age=1&state={}",
+            client.client_id,
+            urlencoding::encode("https://example.com/callback"),
+            challenge,
+            state_param,
+        ),
+        &[("Cookie", &format!("__Host-vouch_session={session}"))],
+    )
+    .await;
+
+    assert!(
+        response.status == StatusCode::FOUND || response.status == StatusCode::SEE_OTHER,
+        "Stale session with max_age=1 must redirect for re-auth, got: {}",
+        response.status
+    );
+
+    let location = response
+        .headers
+        .get("Location")
+        .expect("Must have Location header")
+        .to_str()
+        .expect("Valid UTF-8");
+
+    assert!(
+        location.starts_with("/login?pending_auth="),
+        "Stale session must redirect to /login with pending_auth: {location}"
+    );
+
+    let pending_id = location
+        .split("pending_auth=")
+        .nth(1)
+        .expect("pending_auth must be in redirect URL");
+    let pending_id = urlencoding::decode(pending_id)
+        .expect("pending_auth must be URL-decodable")
+        .into_owned();
+
+    // Complete pending auth using the SAME stale session (still > 1 second old).
+    // The post-login validation must reject it: age (>1) > max_age (1) is true.
+    let completion = http_get_full(
+        &app,
+        &format!(
+            "/oauth/authorize?pending_auth={}",
+            urlencoding::encode(&pending_id)
+        ),
+        &[("Cookie", &format!("__Host-vouch_session={session}"))],
+    )
+    .await;
+
+    assert!(
+        completion.status == StatusCode::FOUND || completion.status == StatusCode::SEE_OTHER,
+        "Stale session must redirect with error, got: {} body: {}",
+        completion.status,
+        completion.body
+    );
+
+    let error_location = completion
+        .headers
+        .get("Location")
+        .expect("error redirect must have Location header")
+        .to_str()
+        .expect("Valid UTF-8");
+
+    assert!(
+        error_location.contains("error=login_required"),
+        "Session exceeding max_age must be rejected with login_required: {error_location}"
+    );
+    assert!(
+        !error_location.contains("code="),
+        "Stale session must NOT receive an authorization code: {error_location}"
+    );
+    // State must be echoed on the error redirect.
+    assert!(
+        error_location.contains(&format!("state={state_param}")),
+        "Error redirect must echo state parameter: {error_location}"
+    );
+}
