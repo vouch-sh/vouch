@@ -319,7 +319,7 @@ pub(crate) async fn token(
                 .await
         }
         OAuthGrantType::DeviceCode => {
-            handle_device_code_grant(State(state), client_info, params).await
+            handle_device_code_grant(State(state), client_info, client_cert, headers, params).await
         }
         OAuthGrantType::TokenExchange => {
             handle_token_exchange_grant(State(state), client_info, client_cert, headers, params)
@@ -841,15 +841,25 @@ async fn handle_client_credentials_grant(
 async fn handle_device_code_grant(
     State(state): State<Arc<AppState>>,
     client_info: crate::db::ClientInfo,
+    client_cert: crate::handlers::extractors::OptionalClientCert,
+    headers: HeaderMap,
     params: TokenRequest,
 ) -> Response {
     let device_req = vouch_common::DeviceTokenRequest {
         grant_type: params.grant_type,
         device_code: params.device_code.unwrap_or_default(),
     };
-    match super::super::device::device_token(State(state), client_info, Json(device_req)).await {
+    match super::super::device::device_token(
+        State(state),
+        client_info,
+        client_cert,
+        headers,
+        Json(device_req),
+    )
+    .await
+    {
         Ok(resp) => resp.into_response(),
-        Err((status, json)) => (status, json).into_response(),
+        Err(resp) => resp,
     }
 }
 
@@ -919,6 +929,20 @@ async fn handle_token_exchange_grant(
 
     // RFC 8705 Section 3: Bind access token to cert thumbprint only when opted in.
     let mtls_thumbprint = extract_mtls_thumbprint(&authenticated_client, &client_cert);
+
+    // FAPI 2.0 Section 5.2.2: sender-constrained access tokens required
+    // (DPoP or mTLS) on every grant a FAPI client can use — without this, a
+    // FAPI client could exchange a bound subject_token for an unbound one.
+    // Mirrors `handle_authorization_code_grant`.
+    if let Err(e) = crate::services::oidc::fapi::validate_fapi_token_request(
+        &authenticated_client.client,
+        crate::services::oidc::fapi::SenderConstraints {
+            dpop: dpop_proof.is_some(),
+            mtls_cert: client_cert.0.is_some(),
+        },
+    ) {
+        return e.into_oauth_response().into_response();
+    }
 
     // RFC 8707: If resource is present, use it as audience (unless audience is explicitly set).
     // If both are present, they must match.
@@ -1262,9 +1286,10 @@ fn token_success_response(body: impl Serialize) -> Response {
 
 /// Build a `use_dpop_nonce` error response with the `DPoP-Nonce` header.
 ///
-/// RFC 9449 Section 4.3: When the server requires a nonce, the error response
-/// MUST include the `DPoP-Nonce` header so the client can retry.
-fn dpop_use_nonce_response(nonce: &str) -> Response {
+/// RFC 9449 Section 8: when the authorization server requires a nonce, the
+/// error response MUST include the `DPoP-Nonce` header so the client can
+/// retry. Shared with the device-flow token path (`handlers::device`).
+pub(crate) fn dpop_use_nonce_response(nonce: &str) -> Response {
     (
         StatusCode::BAD_REQUEST,
         [(
