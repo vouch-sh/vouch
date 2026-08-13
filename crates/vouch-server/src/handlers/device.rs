@@ -8,8 +8,15 @@ use crate::services::auth::{
     create_oauth_access_token,
 };
 use crate::services::oidc::ScopeSet;
+use crate::services::oidc::dpop::DpopError;
+use crate::services::oidc::token::validate_dpop_if_present;
 use aws_lc_rs::digest::{self, SHA256};
-use axum::{Json, extract::State, http::StatusCode};
+use axum::{
+    Json,
+    extract::State,
+    http::{HeaderMap, StatusCode},
+    response::{IntoResponse, Response},
+};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use jiff::{Span, Timestamp};
@@ -26,8 +33,29 @@ use crate::redact_email;
 const USER_CODE_ALPHABET: &[u8] = b"BCDFGHJKLMNPQRSTVWXZ";
 
 /// OAuth error response helper.
-fn oauth_error(status: StatusCode, error: OAuthError) -> (StatusCode, Json<OAuthError>) {
-    (status, Json(error))
+fn oauth_error(status: StatusCode, error: OAuthError) -> Response {
+    (status, Json(error)).into_response()
+}
+
+/// Build a `use_dpop_nonce` error response with the `DPoP-Nonce` header.
+///
+/// RFC 9449 Section 4.3: When the server requires a nonce, the error
+/// response MUST include the `DPoP-Nonce` header so the client can retry.
+fn dpop_use_nonce_response(nonce: &str) -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        [(
+            axum::http::header::HeaderName::from_static("dpop-nonce"),
+            nonce.to_string(),
+        )],
+        Json(OAuthError {
+            error: "use_dpop_nonce".to_string(),
+            error_description: Some(
+                "Authorization server requires nonce in DPoP proof".to_string(),
+            ),
+        }),
+    )
+        .into_response()
 }
 
 /// Generate a random device code (32 bytes, base64url encoded).
@@ -211,8 +239,10 @@ async fn revoke_sessions_for_device_replay(state: &AppState, user_id: &str) {
 pub(crate) async fn device_token(
     State(state): State<Arc<AppState>>,
     client_info: db::ClientInfo,
+    client_cert: crate::handlers::extractors::OptionalClientCert,
+    headers: HeaderMap,
     Json(req): Json<DeviceTokenRequest>,
-) -> Result<Json<DeviceTokenResponse>, (StatusCode, Json<OAuthError>)> {
+) -> Result<Json<DeviceTokenResponse>, Response> {
     // Validate grant type
     if req.grant_type != "urn:ietf:params:oauth:grant-type:device_code" {
         return Err(oauth_error(
@@ -295,6 +325,123 @@ pub(crate) async fn device_token(
             ))
         }
         DeviceAuthStatus::Authorized => {
+            // RFC 9449 / FAPI 2.0: Validate the DPoP proof if present.
+            // This happens BEFORE consuming the device code so that a
+            // `use_dpop_nonce` or `invalid_dpop_proof` response does not
+            // burn the single-use code — the client can retry with a
+            // corrected proof. Consistent with the authorization code
+            // grant, which validates DPoP before exchanging the code.
+            let dpop_header = headers.get("DPoP").and_then(|v| v.to_str().ok());
+            let dpop_proof =
+                match validate_dpop_if_present(&state, dpop_header, "POST", "/oauth/token").await {
+                    Ok(proof) => proof,
+                    Err(DpopError::UseNonce(nonce)) => {
+                        return Err(dpop_use_nonce_response(&nonce));
+                    }
+                    Err(e @ DpopError::Database(_)) => {
+                        return Err(oauth_error(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            OAuthError {
+                                error: "server_error".to_string(),
+                                error_description: Some(e.to_string()),
+                            },
+                        ));
+                    }
+                    Err(e) => {
+                        return Err(oauth_error(
+                            StatusCode::BAD_REQUEST,
+                            OAuthError {
+                                error: "invalid_dpop_proof".to_string(),
+                                error_description: Some(e.to_string()),
+                            },
+                        ));
+                    }
+                };
+            let dpop_jkt = dpop_proof.as_ref().map(|p| p.jkt.clone());
+            let has_mtls_cert = client_cert.0.is_some();
+
+            // Look up the registered OAuth client to enforce FAPI 2.0
+            // sender-constraint requirements. The built-in CLI flow (no
+            // registered client_id) has no FAPI constraints — consistent
+            // with how the device auth request is created in `device_code`.
+            let oauth_client = match request.client_id.as_deref() {
+                Some(cid) => match db::get_oauth_client_by_client_id(&state.store, cid).await {
+                    Ok(Some(c)) => Some(c),
+                    Ok(None) => None,
+                    Err(_) => {
+                        return Err(oauth_error(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            OAuthError::invalid_grant(),
+                        ));
+                    }
+                },
+                None => None,
+            };
+
+            // FAPI 2.0 Section 5.2.2: sender-constrained access tokens
+            // required (DPoP or mTLS). Mirrors `handle_authorization_code_grant`.
+            if let Some(ref oc) = oauth_client {
+                if let Err(e) = crate::services::oidc::fapi::validate_fapi_token_request(
+                    oc,
+                    crate::services::oidc::fapi::SenderConstraints {
+                        dpop: dpop_proof.is_some(),
+                        mtls_cert: has_mtls_cert,
+                    },
+                ) {
+                    return Err(e.into_oauth_response().into_response());
+                }
+
+                // RFC 9449: When the client requires DPoP-bound access
+                // tokens, a valid DPoP proof MUST be present. The client
+                // explicitly opted into DPoP binding via
+                // `dpop_bound_access_tokens=true`, so mTLS alone does not
+                // satisfy this — the access token must carry a `cnf.jkt`.
+                if oc.dpop_bound_access_tokens && dpop_proof.is_none() {
+                    return Err(oauth_error(
+                        StatusCode::BAD_REQUEST,
+                        OAuthError {
+                            error: "invalid_request".to_string(),
+                            error_description: Some(
+                                "Client requires DPoP-bound access tokens \
+                                 but no DPoP proof was provided"
+                                    .to_string(),
+                            ),
+                        },
+                    ));
+                }
+
+                // RFC 8705 Section 3: When the client requires
+                // certificate-bound access tokens, a client certificate
+                // MUST be present. DPoP is accepted as an alternative
+                // sender-constraint mechanism.
+                if oc.tls_client_certificate_bound_access_tokens
+                    && !has_mtls_cert
+                    && dpop_proof.is_none()
+                {
+                    return Err(oauth_error(
+                        StatusCode::BAD_REQUEST,
+                        OAuthError {
+                            error: "invalid_request".to_string(),
+                            error_description: Some(
+                                "Client requires certificate-bound access \
+                                 tokens but no client certificate was presented"
+                                    .to_string(),
+                            ),
+                        },
+                    ));
+                }
+            }
+
+            // RFC 8705 Section 3: Bind the access token to the mTLS
+            // certificate thumbprint only when the client has opted in.
+            // DPoP (jkt) takes priority over mTLS (x5t#S256) in
+            // `create_oauth_access_token`.
+            let mtls_cert_thumbprint = oauth_client
+                .as_ref()
+                .filter(|c| c.tls_client_certificate_bound_access_tokens)
+                .and(client_cert.0.as_ref())
+                .map(|c| c.thumbprint.clone());
+
             // RFC 8628 Section 3.5: Atomically consume the device
             // code before issuing a token. The returned claim is the
             // structural proof that this caller won the consume; it is
@@ -406,8 +553,8 @@ pub(crate) async fn device_token(
                     authenticator_id: Some(&authenticator_id),
                     client_id: &client_id,
                     scope: Some(ScopeSet::all()),
-                    dpop_jkt: None,
-                    mtls_cert_thumbprint: None,
+                    dpop_jkt: dpop_jkt.as_deref(),
+                    mtls_cert_thumbprint: mtls_cert_thumbprint.as_deref(),
                     act: None,
                     audience: None,
                     auth_time: Some(now_secs),
