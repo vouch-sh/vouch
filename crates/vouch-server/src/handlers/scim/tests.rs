@@ -502,9 +502,9 @@ async fn test_patch_user_active_add_op_string_rejected() {
 
 #[tokio::test]
 async fn test_patch_user_add_display_name_applies() {
-    // RFC 7644 §3.5.2.1: Add with path "displayName" must replace the
-    // existing name. Previously the Add handler only recognized "active"
-    // and silently dropped displayName, returning 200 OK with no change.
+    // RFC 7644 §3.5.2.1: on a single-valued attribute, Add replaces the
+    // existing value — a 200 OK that leaves the stored name unchanged
+    // silently drops the operation.
     let (app, state) = test_app().await;
     let token = create_test_scim_token(&state.store, "test-add-displayname", "test-org").await;
     let auth_header = format!("Bearer {}", token);
@@ -557,7 +557,7 @@ async fn test_patch_user_add_display_name_applies() {
 #[tokio::test]
 async fn test_patch_user_add_name_formatted_applies() {
     // RFC 7644 §3.5.2.1: Add with path "name.formatted" must replace the
-    // existing name. Previously silently ignored by the Add handler.
+    // existing name, not be silently ignored.
     let (app, state) = test_app().await;
     let token = create_test_scim_token(&state.store, "test-add-name-formatted", "test-org").await;
     let auth_header = format!("Bearer {}", token);
@@ -596,7 +596,7 @@ async fn test_patch_user_add_name_formatted_applies() {
 #[tokio::test]
 async fn test_patch_user_add_external_id_applies() {
     // RFC 7644 §3.5.2.1: Add with path "externalId" must set/replace the
-    // externalId. Previously silently ignored by the Add handler.
+    // externalId, not be silently ignored.
     let (app, state) = test_app().await;
     let token = create_test_scim_token(&state.store, "test-add-external-id", "test-org").await;
     let auth_header = format!("Bearer {}", token);
@@ -780,9 +780,9 @@ async fn test_patch_user_add_unsupported_path_is_ignored() {
 // ========================================================================
 //
 // RFC 7644 §3.5.2.2: "If the target location is a single-valued attribute,
-// the attribute and its associated value is removed." Remove previously
-// recognized only "externalId" and silently ignored displayName and
-// name.formatted, returning 200 OK with the name still set.
+// the attribute and its associated value is removed." Every removable
+// attribute — externalId, displayName, name.formatted — must actually be
+// cleared; a 200 OK with the value still set silently drops the operation.
 
 #[tokio::test]
 async fn test_patch_user_remove_display_name_clears() {
@@ -2140,8 +2140,7 @@ async fn test_scim_patch_group_replace_external_id() {
 #[tokio::test]
 async fn test_scim_patch_group_add_display_name() {
     // RFC 7644 §3.5.2.1: Add with path "displayName" must replace the
-    // existing group displayName. Previously the Groups Add handler only
-    // recognized "members" and silently dropped displayName.
+    // existing group displayName, not be silently ignored.
     let (app, state) = test_app().await;
     let token = create_test_scim_token(&state.store, "test-add-group-name", "test-org").await;
     let auth_header = format!("Bearer {}", token);
@@ -2194,7 +2193,7 @@ async fn test_scim_patch_group_add_display_name() {
 #[tokio::test]
 async fn test_scim_patch_group_add_external_id() {
     // RFC 7644 §3.5.2.1: Add with path "externalId" must set/replace the
-    // group's externalId. Previously silently ignored by the Add handler.
+    // group's externalId, not be silently ignored.
     let (app, state) = test_app().await;
     let token = create_test_scim_token(&state.store, "test-add-group-extid", "test-org").await;
     let auth_header = format!("Bearer {}", token);
@@ -3068,9 +3067,9 @@ async fn test_scim_create_and_delete_user_audit_events_never_carry_a_raw_email()
 //
 // `meta.lastModified` MUST reflect the most recent DateTime the resource was
 // updated (RFC 7643 §3.1). For an unmodified resource it MUST equal `created`;
-// after a modification it MUST differ. Users previously returned `created` for
-// `lastModified` even after PATCH — see the `ScimUserRecord` / `db_user_to_scim`
-// projection-layer bug.
+// after a modification it MUST differ. The `ScimUserRecord` / `db_user_to_scim`
+// projection must carry the update timestamp through — hard-coding `created`
+// there leaves the two identical after PATCH.
 // ========================================================================
 
 #[tokio::test]
@@ -3108,9 +3107,9 @@ async fn test_user_meta_last_modified_equals_created_on_create() {
 
 #[tokio::test]
 async fn test_user_meta_last_modified_differs_after_patch() {
-    // Regression: after PATCH the User's `meta.lastModified` must differ from
-    // `meta.created`. Previously the projection hard-coded `lastModified` to
-    // `created_at`, so PATCHing left the two timestamps identical.
+    // After PATCH the User's `meta.lastModified` must differ from
+    // `meta.created`: the projection must surface the update timestamp,
+    // not reuse `created_at`.
     let (app, state) = test_app().await;
     let token = create_test_scim_token(&state.store, "test-lm-patch", "test-org").await;
     let auth_header = format!("Bearer {}", token);
@@ -3331,9 +3330,9 @@ async fn create_error_other_maps_to_500() {
 //
 // Group creation returns 500 INTERNAL_SERVER_ERROR for infrastructure failures
 // (serialization, encryption, DB pool/timeout, exhausted OCC retries), matching
-// list_groups/get_group/patch_group/delete_group. A previous version returned
-// 409 CONFLICT with a `uniqueness` SCIM type for all errors — mislabelling
-// transient infrastructure faults as duplicate-group conflicts.
+// list_groups/get_group/patch_group/delete_group. Mapping these to 409
+// CONFLICT with a `uniqueness` SCIM type would present transient
+// infrastructure faults as duplicate-group conflicts.
 
 #[tokio::test]
 async fn create_group_error_infrastructure_maps_to_500() {
@@ -3379,11 +3378,11 @@ async fn create_group_error_invalid_index_value_maps_to_400() {
     );
 }
 
-/// Regression: the old code checked `e.to_string().contains("UNIQUE")` and
-/// returned 409 CONFLICT. That check was dead code (the document-store unique
-/// constraint is on `(document_id, index_field, index_value)`, which can never
-/// fire for two distinct group documents), but pin the fix: even an error whose
-/// message contains "UNIQUE" must return 500, not 409.
+/// An infrastructure error whose message happens to contain "UNIQUE" must
+/// still map to 500, not 409. The document-store unique constraint is on
+/// `(document_id, index_field, index_value)`, which can never fire for two
+/// distinct group documents, so a unique-violation message here is only ever
+/// an infrastructure failure — never a duplicate group.
 #[tokio::test]
 async fn create_group_error_unique_string_still_maps_to_500() {
     let resp = super::groups::create_scim_group_error_response(anyhow::anyhow!(

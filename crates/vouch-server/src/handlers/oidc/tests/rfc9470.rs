@@ -1005,9 +1005,8 @@ async fn test_rfc9470_max_age_completion_rejects_stale_session() {
     // *exceeds* max_age (strictly greater) must still be rejected after
     // the pending-auth flow, returning error=login_required.
     //
-    // This guards against the fix (>=  →  >) over-correcting and accepting
-    // genuinely stale sessions. Only the boundary (age == max_age) changes
-    // behavior; age > max_age must remain rejected.
+    // Only the boundary case (age == max_age) is acceptable; a session
+    // strictly older than max_age must remain rejected.
     let (app, state) = test_app().await;
 
     let user = create_test_user(&state.store, "maxage-stale@example.com").await;

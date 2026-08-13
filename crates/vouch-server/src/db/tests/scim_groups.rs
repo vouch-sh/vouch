@@ -305,7 +305,7 @@ async fn test_scim_filter_group_external_id_co_is_case_sensitive() {
 #[tokio::test]
 async fn test_scim_filter_group_display_name_co_remains_case_insensitive() {
     // `displayName` is `caseExact: false` per RFC 7643, so "co" must stay
-    // case-insensitive. Guards against the fix being over-applied.
+    // case-insensitive even though externalId matching is case-exact.
     let (store, _audit) = test_db().await;
     seed_test_org(&store).await;
 
@@ -334,18 +334,15 @@ async fn test_scim_filter_group_display_name_co_remains_case_insensitive() {
 // Concurrent membership addition — duplicate-prevention regression
 // ========================================================================
 
-/// Regression for the SCIM group-member concurrent-add race: two concurrent
-/// `add_scim_group_member` calls for the same group and user must produce
-/// exactly one membership document, not two.
+/// Two concurrent `add_scim_group_member` calls for the same group and user
+/// must produce exactly one membership document, not two.
 ///
-/// Before the deterministic-ID fix, each call generated a fresh random UUID
-/// v7 primary key via `store.insert`, so neither insert conflicted with the
-/// other and both committed — producing duplicate membership rows. The fix
-/// derives the document ID from `(group_id, user_id)` via
-/// `deterministic_group_member_id`, so the two inserts collide on the
+/// The document ID is derived from `(group_id, user_id)` via
+/// `deterministic_group_member_id`, so concurrent inserts collide on the
 /// `documents` PRIMARY KEY. The losing insert fails with a unique/primary-key
 /// violation, which `is_unique_violation` maps to idempotent success
-/// (`Ok(true)`).
+/// (`Ok(true)`). A random per-call ID would let both inserts commit and
+/// duplicate the membership.
 ///
 /// Mirrors `test_create_scim_user_concurrent_same_email_produces_one_user`
 /// (`scim_provisioning.rs`). Uses `multi_thread` for defensive OS-level

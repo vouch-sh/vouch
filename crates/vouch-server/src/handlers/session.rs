@@ -992,7 +992,7 @@ mod tests {
     //
     // Nonces are optional at resource endpoints (`require_nonce = false` in
     // `validate_dpop_at_resource`), so `DpopError::UseNonce` only fires when a
-    // client supplies a nonce that was already consumed (replay). The fix
+    // client supplies a nonce that was already consumed (replay). The handler
     // surfaces a fresh `DPoP-Nonce` header + `use_dpop_nonce` error so the
     // client can retry per RFC 9449 §7.2.
     // ========================================================================
