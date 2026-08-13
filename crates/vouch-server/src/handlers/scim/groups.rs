@@ -117,10 +117,34 @@ pub(crate) async fn list_groups(
     .into_response()
 }
 
+/// Map a `create_scim_group` error onto its SCIM wire response.
+///
+/// Split from the create handler so every error arm — the 400
+/// `invalidValue` path (NUL in an index field) and the 500 infrastructure
+/// path — has a test that triggers it directly, mirroring the user
+/// handler's `create_scim_user_error_response`.
+///
+/// Infrastructure failures (serialization, encryption, database connection
+/// or timeout errors, exhausted OCC retries) return `500 INTERNAL SERVER
+/// ERROR`, matching `list_groups`, `get_group`, `patch_group`, and
+/// `delete_group`. A previous version returned `409 CONFLICT` with a
+/// `uniqueness` SCIM type for all errors, which mislabelled transient
+/// infrastructure faults as duplicate-group conflicts.
+pub(super) fn create_scim_group_error_response(err: anyhow::Error) -> Response {
+    if let Some(resp) = super::invalid_index_value_response(&err) {
+        return resp.into_response();
+    }
+    tracing::error!("Failed to create group: {err}");
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(ScimError::new(500, "Failed to create group")),
+    )
+        .into_response()
+}
+
 /// POST /scim/v2/Groups (RFC 7644 Section 3.3).
 ///
-/// Creates a new Group resource. Returns 201 Created on success,
-/// 409 Conflict if the group already exists.
+/// Creates a new Group resource. Returns 201 Created on success.
 pub(crate) async fn create_group(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -157,22 +181,7 @@ pub(crate) async fn create_group(
     .await
     {
         Ok(g) => g,
-        Err(e) => {
-            if let Some(resp) = super::invalid_index_value_response(&e) {
-                return resp.into_response();
-            }
-            tracing::error!("Failed to create group: {e}");
-            let detail = if e.to_string().contains("UNIQUE") {
-                "Group already exists"
-            } else {
-                "Failed to create group"
-            };
-            return (
-                StatusCode::CONFLICT,
-                Json(ScimError::new(409, detail).with_type("uniqueness")),
-            )
-                .into_response();
-        }
+        Err(e) => return create_scim_group_error_response(e),
     };
 
     // Add members if provided
