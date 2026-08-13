@@ -455,33 +455,90 @@ pub(crate) async fn patch_user(
                 }
             }
             ScimPatchOpType::Add => {
-                // Similar logic for add operations
-                if let Some(path) = &op.path
-                    && path == "active"
-                    && let Some(val) = &op.value
-                {
-                    let Some(new_active) = val.as_bool() else {
-                        return (
-                            StatusCode::BAD_REQUEST,
-                            Json(
-                                ScimError::new(400, "active must be a boolean")
-                                    .with_type("invalidValue"),
-                            ),
-                        )
-                            .into_response();
-                    };
-                    if active && !new_active {
-                        deactivated = true;
+                // RFC 7644 §3.5.2.1: an Add targeting a single-valued
+                // attribute replaces the existing value — the same
+                // semantics as Replace for the single-valued attributes
+                // Vouch stores (active, name.formatted, displayName,
+                // externalId). Multi-valued attributes are not supported
+                // via the path form on Users.
+                if let Some(path) = &op.path {
+                    match path.as_str() {
+                        "active" => {
+                            if let Some(val) = &op.value {
+                                let Some(new_active) = val.as_bool() else {
+                                    return (
+                                        StatusCode::BAD_REQUEST,
+                                        Json(
+                                            ScimError::new(400, "active must be a boolean")
+                                                .with_type("invalidValue"),
+                                        ),
+                                    )
+                                        .into_response();
+                                };
+                                if active && !new_active {
+                                    deactivated = true;
+                                }
+                                active = new_active;
+                            }
+                        }
+                        "name.formatted" | "displayName" => {
+                            if let Some(val) = &op.value {
+                                name = val.as_str().map(String::from);
+                            }
+                        }
+                        "externalId" => {
+                            if let Some(val) = &op.value {
+                                external_id = val.as_str().map(String::from);
+                            }
+                        }
+                        _ => {
+                            return (
+                                StatusCode::BAD_REQUEST,
+                                Json(
+                                    ScimError::new(400, "Unsupported attribute path")
+                                        .with_type("invalidPath"),
+                                ),
+                            )
+                                .into_response();
+                        }
                     }
-                    active = new_active;
+                } else if let Some(val) = &op.value {
+                    // Bulk add (no path) — merge presented attributes, same
+                    // as Replace.
+                    if let Some(a) = val.get("active").and_then(|v| v.as_bool()) {
+                        if active && !a {
+                            deactivated = true;
+                        }
+                        active = a;
+                    }
+                    if let Some(n) = val
+                        .get("name")
+                        .and_then(|v| v.get("formatted"))
+                        .and_then(|v| v.as_str())
+                    {
+                        name = Some(n.to_string());
+                    }
+                    if let Some(e) = val.get("externalId").and_then(|v| v.as_str()) {
+                        external_id = Some(e.to_string());
+                    }
                 }
             }
             ScimPatchOpType::Remove => {
-                // Remove operations
-                if let Some(path) = &op.path
-                    && path == "externalId"
-                {
-                    external_id = None;
+                // RFC 7644 §3.5.2.2: a Remove targeting a single-valued
+                // attribute removes the stored value. Paths Vouch does not
+                // store are ignored (Remove of an absent attribute is a
+                // no-op); `active` is excluded because removing it would
+                // ambiguously reset activation state.
+                if let Some(path) = &op.path {
+                    match path.as_str() {
+                        "name.formatted" | "displayName" => {
+                            name = None;
+                        }
+                        "externalId" => {
+                            external_id = None;
+                        }
+                        _ => {}
+                    }
                 }
             }
         }
