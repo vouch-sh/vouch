@@ -130,6 +130,7 @@ pub(crate) async fn create_application_form(
         redirect_uris: &redirect_uris,
         resource_uris: &resource_uris,
         post_logout_redirect_uris: post_logout_redirect_uris_input,
+        access_scope: Some(&form.access_scope),
         fapi_profile: form.fapi_profile.as_deref(),
         jwks: form.jwks.as_deref(),
         jwks_uri: form.jwks_uri.as_deref(),
@@ -141,8 +142,9 @@ pub(crate) async fn create_application_form(
     let app_type = validated.app_type;
     let is_fapi = validated.is_fapi;
 
-    // Parse and validate access scope
-    let access_scope = form.access_scope.parse::<AccessScope>().unwrap_or_default();
+    // Validated access scope (format checked in validate_create_application;
+    // org-membership check stays here because it depends on the auth context).
+    let access_scope = validated.access_scope;
 
     // Validate: Organization scope requires user to have an org
     if access_scope == AccessScope::Organization && !auth.has_org {
@@ -359,11 +361,34 @@ pub(crate) async fn update_application_form(
         );
     }
 
-    // Parse access scope if provided
-    let access_scope = form
-        .access_scope
-        .as_ref()
-        .and_then(|s| s.parse::<AccessScope>().ok());
+    // Parse textarea inputs, then run the shared format validation.
+    // The web form always submits the post_logout_redirect_uris field, so
+    // empty textarea = explicitly clear (Some(&[])), not absent (None).
+    let redirect_uris = parse_redirect_uris(&form.redirect_uris);
+    let resource_uris = parse_resource_uris(form.resource_uris.as_deref());
+    let post_logout_redirect_uris_raw = parse_redirect_uris(
+        form.post_logout_redirect_uris
+            .as_deref()
+            .unwrap_or_default(),
+    );
+
+    let validated = match validate_update_format(UpdateAppInput {
+        redirect_uris: Some(&redirect_uris),
+        resource_uris: Some(&resource_uris),
+        // Always Some: empty vec = explicitly clear; validation rejects invalid URIs.
+        post_logout_redirect_uris: Some(&post_logout_redirect_uris_raw),
+        access_scope: form.access_scope.as_deref(),
+        fapi_profile: form.fapi_profile.as_deref(),
+        jwks: form.jwks.as_deref(),
+        jwks_uri: form.jwks_uri.as_deref(),
+    }) {
+        Ok(v) => v,
+        Err(e) => return validation_error_response(&e, format!("/applications/{}", app_id)),
+    };
+
+    // Validated access scope (format checked in validate_update_format;
+    // org-membership check stays here because it depends on the auth context).
+    let access_scope = validated.access_scope;
 
     // Validate: Organization scope requires user to have an org
     if access_scope == Some(AccessScope::Organization) && !auth.has_org {
@@ -389,30 +414,6 @@ pub(crate) async fn update_application_form(
         user_org_id.as_deref()
     } else {
         None
-    };
-
-    // Parse textarea inputs, then run the shared format validation.
-    // The web form always submits the post_logout_redirect_uris field, so
-    // empty textarea = explicitly clear (Some(&[])), not absent (None).
-    let redirect_uris = parse_redirect_uris(&form.redirect_uris);
-    let resource_uris = parse_resource_uris(form.resource_uris.as_deref());
-    let post_logout_redirect_uris_raw = parse_redirect_uris(
-        form.post_logout_redirect_uris
-            .as_deref()
-            .unwrap_or_default(),
-    );
-
-    let validated = match validate_update_format(UpdateAppInput {
-        redirect_uris: Some(&redirect_uris),
-        resource_uris: Some(&resource_uris),
-        // Always Some: empty vec = explicitly clear; validation rejects invalid URIs.
-        post_logout_redirect_uris: Some(&post_logout_redirect_uris_raw),
-        fapi_profile: form.fapi_profile.as_deref(),
-        jwks: form.jwks.as_deref(),
-        jwks_uri: form.jwks_uri.as_deref(),
-    }) {
-        Ok(v) => v,
-        Err(e) => return validation_error_response(&e, format!("/applications/{}", app_id)),
     };
 
     // FAPI rules that depend on the existing client record

@@ -1295,7 +1295,7 @@ async fn test_update_application_rejects_fapi_downgrade() {
         &app,
         "PATCH",
         &format!("/api/v1/applications/{}", client.app_id),
-        Some(r#"{"fapi_profile": "standard"}"#.to_string()),
+        Some(r#"{"fapi_profile": "none"}"#.to_string()),
         &[
             ("Content-Type", "application/json"),
             ("Authorization", &auth),
@@ -1525,5 +1525,314 @@ async fn test_update_application_post_logout_redirect_uris_roundtrip() {
     assert_eq!(
         post_logout[0].as_str().unwrap(),
         "https://example.com/logged-out"
+    );
+}
+
+// ========================================================================
+// Invalid enum values for access_scope / fapi_profile must be rejected
+// with 400, not silently coerced to defaults.
+// ========================================================================
+
+#[tokio::test]
+async fn test_create_application_rejects_invalid_access_scope() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "bad-scope@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let auth = bearer(&token);
+
+    let (status, body) = http_post_json(
+        &app,
+        "/api/v1/applications",
+        r#"{"name": "App", "application_type": "web", "redirect_uris": ["https://example.com/cb"], "access_scope": "organizaton"}"#,
+        &[("Authorization", &auth)],
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+    let json: serde_json::Value = serde_json::from_str(&body).expect("valid json");
+    assert_eq!(json["code"], "invalid_access_scope", "body: {body}");
+}
+
+#[tokio::test]
+async fn test_create_application_rejects_invalid_access_scope_without_auth() {
+    // Format validation runs before auth, so an invalid access_scope must
+    // produce 400 (not 401) even without an Authorization header.
+    let (app, _state) = test_app().await;
+
+    let (status, body) = http_post_json(
+        &app,
+        "/api/v1/applications",
+        r#"{"name": "App", "application_type": "web", "redirect_uris": ["https://example.com/cb"], "access_scope": "organizaton"}"#,
+        &[],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "invalid access_scope must return 400 without auth: {body}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&body).expect("valid json");
+    assert_eq!(json["code"], "invalid_access_scope");
+}
+
+#[tokio::test]
+async fn test_create_application_rejects_invalid_fapi_profile() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "bad-fapi@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let auth = bearer(&token);
+
+    let (status, body) = http_post_json(
+        &app,
+        "/api/v1/applications",
+        r#"{"name": "App", "application_type": "web", "redirect_uris": ["https://example.com/cb"], "fapi_profile": "fapi_security"}"#,
+        &[("Authorization", &auth)],
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+    let json: serde_json::Value = serde_json::from_str(&body).expect("valid json");
+    assert_eq!(json["code"], "invalid_fapi_profile", "body: {body}");
+}
+
+#[tokio::test]
+async fn test_create_application_rejects_invalid_fapi_profile_without_auth() {
+    let (app, _state) = test_app().await;
+
+    let (status, body) = http_post_json(
+        &app,
+        "/api/v1/applications",
+        r#"{"name": "App", "application_type": "web", "redirect_uris": ["https://example.com/cb"], "fapi_profile": "fapi_security"}"#,
+        &[],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "invalid fapi_profile must return 400 without auth: {body}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&body).expect("valid json");
+    assert_eq!(json["code"], "invalid_fapi_profile");
+}
+
+#[tokio::test]
+async fn test_create_application_accepts_valid_access_scope() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "good-scope@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let auth = bearer(&token);
+
+    let (status, body) = http_post_json(
+        &app,
+        "/api/v1/applications",
+        r#"{"name": "App", "application_type": "web", "redirect_uris": ["https://example.com/cb"], "access_scope": "public"}"#,
+        &[("Authorization", &auth)],
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    let json: serde_json::Value = serde_json::from_str(&body).expect("valid json");
+    assert_eq!(json["access_scope"].as_str().unwrap(), "public");
+}
+
+#[tokio::test]
+async fn test_create_application_defaults_access_scope_to_personal() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "default-scope@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let auth = bearer(&token);
+
+    let (status, body) = http_post_json(
+        &app,
+        "/api/v1/applications",
+        r#"{"name": "App", "application_type": "web", "redirect_uris": ["https://example.com/cb"]}"#,
+        &[("Authorization", &auth)],
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    let json: serde_json::Value = serde_json::from_str(&body).expect("valid json");
+    assert_eq!(json["access_scope"].as_str().unwrap(), "personal");
+}
+
+#[tokio::test]
+async fn test_update_application_rejects_invalid_access_scope() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "upd-bad-scope@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let auth = bearer(&token);
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+
+    let (status, body) = http_request(
+        &app,
+        "PATCH",
+        &format!("/api/v1/applications/{}", client.app_id),
+        Some(r#"{"access_scope": "organizaton"}"#.to_string()),
+        &[
+            ("Content-Type", "application/json"),
+            ("Authorization", &auth),
+        ],
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+    let json: serde_json::Value = serde_json::from_str(&body).expect("valid json");
+    assert_eq!(json["code"], "invalid_access_scope", "body: {body}");
+}
+
+#[tokio::test]
+async fn test_update_application_rejects_invalid_fapi_profile() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "upd-bad-fapi@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let auth = bearer(&token);
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+
+    let (status, body) = http_request(
+        &app,
+        "PATCH",
+        &format!("/api/v1/applications/{}", client.app_id),
+        Some(r#"{"fapi_profile": "fapi1_adv"}"#.to_string()),
+        &[
+            ("Content-Type", "application/json"),
+            ("Authorization", &auth),
+        ],
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+    let json: serde_json::Value = serde_json::from_str(&body).expect("valid json");
+    assert_eq!(json["code"], "invalid_fapi_profile", "body: {body}");
+}
+
+#[tokio::test]
+async fn test_update_application_rejects_invalid_access_scope_without_auth() {
+    let (app, state) = test_app().await;
+    let client = create_test_oauth_client(
+        &state.store,
+        &create_test_user(&state.store, "upd-noauth-scope@example.com")
+            .await
+            .id,
+    )
+    .await;
+
+    let (status, body) = http_request(
+        &app,
+        "PATCH",
+        &format!("/api/v1/applications/{}", client.app_id),
+        Some(r#"{"access_scope": "organizaton"}"#.to_string()),
+        &[("Content-Type", "application/json")],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "invalid access_scope must return 400 without auth: {body}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&body).expect("valid json");
+    assert_eq!(json["code"], "invalid_access_scope");
+}
+
+#[tokio::test]
+async fn test_update_application_rejects_invalid_fapi_profile_without_auth() {
+    let (app, state) = test_app().await;
+    let client = create_test_oauth_client(
+        &state.store,
+        &create_test_user(&state.store, "upd-noauth-fapi@example.com")
+            .await
+            .id,
+    )
+    .await;
+
+    let (status, body) = http_request(
+        &app,
+        "PATCH",
+        &format!("/api/v1/applications/{}", client.app_id),
+        Some(r#"{"fapi_profile": "fapi1_adv"}"#.to_string()),
+        &[("Content-Type", "application/json")],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "invalid fapi_profile must return 400 without auth: {body}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&body).expect("valid json");
+    assert_eq!(json["code"], "invalid_fapi_profile");
+}
+
+#[tokio::test]
+async fn test_update_application_accepts_valid_access_scope() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "upd-good-scope@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let auth = bearer(&token);
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+
+    let (status, body) = http_request(
+        &app,
+        "PATCH",
+        &format!("/api/v1/applications/{}", client.app_id),
+        Some(r#"{"access_scope": "public"}"#.to_string()),
+        &[
+            ("Content-Type", "application/json"),
+            ("Authorization", &auth),
+        ],
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    let json: serde_json::Value = serde_json::from_str(&body).expect("valid json");
+    assert_eq!(json["access_scope"].as_str().unwrap(), "public");
+}
+
+#[tokio::test]
+async fn test_update_application_absent_access_scope_preserves_existing() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "upd-keep-scope@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let auth = bearer(&token);
+
+    // Create with public scope, then PATCH without access_scope.
+    let created = create_test_client(
+        &state.store,
+        &user.id,
+        TestClientSpec {
+            access_scope: crate::db::AccessScope::Public,
+            ..Default::default()
+        },
+    )
+    .await;
+
+    let (status, body) = http_request(
+        &app,
+        "PATCH",
+        &format!("/api/v1/applications/{}", created.app_id),
+        Some(r#"{"name": "Renamed"}"#.to_string()),
+        &[
+            ("Content-Type", "application/json"),
+            ("Authorization", &auth),
+        ],
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    let json: serde_json::Value = serde_json::from_str(&body).expect("valid json");
+    assert_eq!(
+        json["access_scope"].as_str().unwrap(),
+        "public",
+        "absent access_scope must preserve existing value"
     );
 }
