@@ -1647,8 +1647,9 @@ fn test_multi_rule_custom_policy_second_rule_attributed() {
     }
 }
 
-/// The first rule of a multi-rule custom policy must still be attributed
-/// correctly — the fix adds entries for *all* rules, not just extra ones.
+/// The first rule of a multi-rule custom policy must be attributed
+/// correctly — attribution entries exist for *all* rules, not only the
+/// rules after the first.
 #[test]
 fn test_multi_rule_custom_policy_first_rule_attributed() {
     let multi_rule_text = format!(
@@ -1746,7 +1747,8 @@ fn test_multi_rule_custom_policy_both_rules_attributed() {
 }
 
 /// A multi-rule custom policy that is satisfied (neither forbid fires)
-/// must still allow — the fix must not change enforcement, only attribution.
+/// must still allow — attribution is bookkeeping and must not change
+/// enforcement.
 #[test]
 fn test_multi_rule_custom_policy_allows_when_satisfied() {
     let multi_rule_text = format!(

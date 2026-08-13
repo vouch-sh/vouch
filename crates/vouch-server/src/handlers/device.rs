@@ -248,10 +248,11 @@ pub(crate) async fn device_token(
     let device_code_hash = hash_device_code(&req.device_code);
     let request = db::get_device_auth_by_code_hash(&state.store, &device_code_hash)
         .await
-        .map_err(|_| {
+        .map_err(|e| {
+            tracing::error!("Failed to look up device authorization request: {e}");
             oauth_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                OAuthError::invalid_grant(),
+                OAuthError::server_error(),
             )
         })?
         .ok_or_else(|| oauth_error(StatusCode::BAD_REQUEST, OAuthError::invalid_grant()))?;
@@ -270,10 +271,11 @@ pub(crate) async fn device_token(
     let allowed =
         db::update_device_auth_poll_time(&state.store, &request.id, request.interval_seconds)
             .await
-            .map_err(|_| {
+            .map_err(|e| {
+                tracing::error!("Failed to update device authorization poll time: {e}");
                 oauth_error(
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    OAuthError::invalid_grant(),
+                    OAuthError::server_error(),
                 )
             })?;
 
@@ -362,10 +364,11 @@ pub(crate) async fn device_token(
                             },
                         ));
                     }
-                    Err(_) => {
+                    Err(e) => {
+                        tracing::error!("Failed to look up OAuth client for device grant: {e}");
                         return Err(oauth_error(
                             StatusCode::INTERNAL_SERVER_ERROR,
-                            OAuthError::invalid_grant(),
+                            OAuthError::server_error(),
                         ));
                     }
                 },
@@ -425,33 +428,36 @@ pub(crate) async fn device_token(
                             OAuthError::invalid_grant(),
                         ));
                     }
-                    Err(_) => {
+                    Err(db::claim::ClaimError::InvalidInput(msg)) => {
+                        tracing::warn!("Rejected device code on consume: {msg}");
+                        return Err(oauth_error(
+                            StatusCode::BAD_REQUEST,
+                            OAuthError::invalid_grant(),
+                        ));
+                    }
+                    Err(db::claim::ClaimError::Database(e)) => {
+                        tracing::error!("Failed to consume device code: {e}");
                         return Err(oauth_error(
                             StatusCode::INTERNAL_SERVER_ERROR,
-                            OAuthError::invalid_grant(),
+                            OAuthError::server_error(),
                         ));
                     }
                 };
 
-            // Get user info and create OAuth access token
-            let user_id = request.user_id.ok_or_else(|| {
+            // An authorized request always carries these fields; a missing one
+            // is an internal state inconsistency, not a client mistake.
+            let missing = |field: &str| {
+                tracing::error!("Authorized device auth request missing {field}");
                 oauth_error(
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    OAuthError::invalid_grant(),
+                    OAuthError::server_error(),
                 )
-            })?;
-            let user_email = request.user_email.ok_or_else(|| {
-                oauth_error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    OAuthError::invalid_grant(),
-                )
-            })?;
-            let authenticator_id = request.authenticator_id.ok_or_else(|| {
-                oauth_error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    OAuthError::invalid_grant(),
-                )
-            })?;
+            };
+            let user_id = request.user_id.ok_or_else(|| missing("user_id"))?;
+            let user_email = request.user_email.ok_or_else(|| missing("user_email"))?;
+            let authenticator_id = request
+                .authenticator_id
+                .ok_or_else(|| missing("authenticator_id"))?;
 
             // Use the registered client_id from the device auth request.
             let client_id = request
@@ -469,12 +475,15 @@ pub(crate) async fn device_token(
             let db_error = || {
                 oauth_error(
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    OAuthError::invalid_grant(),
+                    OAuthError::server_error(),
                 )
             };
             let hardware_aaguid = db::get_authenticator_by_id(&state.store, &authenticator_id)
                 .await
-                .map_err(|_| db_error())?
+                .map_err(|e| {
+                    tracing::error!("Failed to load authenticator for device grant: {e}");
+                    db_error()
+                })?
                 .and_then(|a| a.aaguid);
             // A user deactivated (or deleted) after approving the device
             // authorization must not receive a token — the same `active`
@@ -482,7 +491,10 @@ pub(crate) async fn device_token(
             // already consumed above, so the refusal burns it.
             let user = db::get_user_by_id(&state.store, &user_id)
                 .await
-                .map_err(|_| db_error())?
+                .map_err(|e| {
+                    tracing::error!("Failed to load user for device grant: {e}");
+                    db_error()
+                })?
                 .ok_or_else(|| oauth_error(StatusCode::BAD_REQUEST, OAuthError::invalid_grant()))?;
             if !user.active {
                 tracing::warn!(
@@ -498,7 +510,10 @@ pub(crate) async fn device_token(
             let org_domain = match user.org_id {
                 Some(org_id) => db::get_organization_domain(&state.store, &org_id)
                     .await
-                    .map_err(|_| db_error())?,
+                    .map_err(|e| {
+                        tracing::error!("Failed to load organization domain for device grant: {e}");
+                        db_error()
+                    })?,
                 None => None,
             };
 
@@ -541,10 +556,11 @@ pub(crate) async fn device_token(
                 },
             )
             .await
-            .map_err(|_| {
+            .map_err(|e| {
+                tracing::error!("Failed to create device-flow access token: {e}");
                 oauth_error(
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    OAuthError::invalid_grant(),
+                    OAuthError::server_error(),
                 )
             })?;
 

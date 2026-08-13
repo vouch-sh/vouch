@@ -251,11 +251,10 @@ pub async fn delete_user(store: &DocumentStore, user_id: &str) -> Result<bool, D
         store.run_delete_test_hook(user_id).await;
 
         // Return `false` when the user document is missing so callers can
-        // surface a 404 and skip the audit event. Without this check the
-        // handler-side race-condition defense added in commit 0165b58 is
-        // dead code: `tx.delete` returns `Ok(())` regardless of whether
-        // anything was removed. Mirrors `delete_scim_group` /
-        // `delete_custom_policy`.
+        // surface a 404 and skip the audit event. `tx.delete` returns
+        // `Ok(())` regardless of whether anything was removed, so this
+        // existence check is the only signal that the user was already
+        // gone. Mirrors `delete_scim_group` / `delete_custom_policy`.
         let Some(user_doc) = tx.get::<UserDoc>(user_id).await? else {
             return Ok(false);
         };
