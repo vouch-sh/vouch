@@ -652,14 +652,28 @@ pub(crate) async fn delete_user(
             .into_response();
     }
 
-    // Delete user (cascades to authenticators)
-    if let Err(e) = db::delete_user(&state.store, &id).await {
-        tracing::error!("Failed to delete user: {e}");
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ScimError::new(500, "Failed to delete user")),
-        )
-            .into_response();
+    // Delete user (cascades to authenticators). A `false` return means the
+    // user vanished between the existence check above and the delete (e.g. a
+    // concurrent request deleted it). Surface a 404 and skip the audit event
+    // rather than reporting a successful delete — and logging a fraudulent
+    // audit entry — for a change that never happened.
+    match db::delete_user(&state.store, &id).await {
+        Ok(true) => {}
+        Ok(false) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(ScimError::new(404, "User not found")),
+            )
+                .into_response();
+        }
+        Err(e) => {
+            tracing::error!("Failed to delete user: {e}");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ScimError::new(500, "Failed to delete user")),
+            )
+                .into_response();
+        }
     }
 
     // Audit log

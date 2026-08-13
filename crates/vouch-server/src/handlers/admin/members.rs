@@ -1230,4 +1230,73 @@ mod tests {
             );
         }
     }
+
+    // ---- Concurrent-delete race for `remove`: no success + no audit on a miss ----
+
+    /// `remove_member` uses `delete_user` (a transactional delete), not
+    /// `store.modify`, so the `modify_test_hook` used by the test above
+    /// cannot intercept it. A dedicated `delete_test_hook` deletes the
+    /// target's user document from a separate transaction inside
+    /// `delete_user`, after the handler's existence check but before
+    /// `delete_user`'s own existence check — deterministically forcing the
+    /// miss. Same guarantee as the modify-based test: a member deleted
+    /// mid-operation must produce 404 and no audit event.
+    #[tokio::test]
+    async fn test_remove_member_returns_404_when_target_vanishes_mid_delete() {
+        use std::sync::{Arc, Mutex};
+
+        let target_slot: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let slot = Arc::clone(&target_slot);
+        let (app, state) = test_app_with_modify_hook(move |store| {
+            let writer = store.clone();
+            store.set_delete_test_hook(Arc::new(move |user_id: &str| {
+                let writer = writer.clone();
+                let user_id = user_id.to_string();
+                let slot = Arc::clone(&slot);
+                Box::pin(async move {
+                    // Only delete the member under test.
+                    let is_target =
+                        slot.lock().expect("slot lock").as_deref() == Some(user_id.as_str());
+                    if is_target {
+                        writer
+                            .delete(&user_id)
+                            .await
+                            .expect("delete target user doc mid-race");
+                    }
+                })
+            }));
+        })
+        .await;
+
+        let (_admin, token, member) = setup_admin_and_member(&state).await;
+        *target_slot.lock().expect("slot lock") = Some(member.id.clone());
+        let cookie = admin_cookie(&token);
+
+        let (status, body) = http_post_form(
+            &app,
+            &format!("/admin/members/{}/remove", member.id),
+            "",
+            &[("Cookie", &cookie), ("Origin", "https://test.example.com")],
+        )
+        .await;
+
+        assert_eq!(
+            status,
+            StatusCode::NOT_FOUND,
+            "remove: a member deleted mid-delete must produce 404, got {status}: {body}"
+        );
+
+        let events = state
+            .audit
+            .query_events(&crate::db::AuditEventFilter {
+                event_types: Some(vec!["admin_remove_user".to_string()]),
+                ..crate::db::AuditEventFilter::default()
+            })
+            .await
+            .expect("query audit events");
+        assert!(
+            events.is_empty(),
+            "remove: no admin_remove_user audit event may be logged when the delete did not occur"
+        );
+    }
 }

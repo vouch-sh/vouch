@@ -303,6 +303,9 @@ pub struct DocumentStore {
     /// See [`ModifyTestHook`]. Compiled out of non-test builds.
     #[cfg(test)]
     modify_test_hook: Option<ModifyTestHook>,
+    /// See [`DeleteTestHook`]. Compiled out of non-test builds.
+    #[cfg(test)]
+    delete_test_hook: Option<DeleteTestHook>,
 }
 
 /// Boxed future returned by a [`ModifyTestHook`].
@@ -319,6 +322,21 @@ pub(crate) type ModifyHookFuture =
 #[cfg(test)]
 pub(crate) type ModifyTestHook = Arc<dyn Fn(&str, u32) -> ModifyHookFuture + Send + Sync>;
 
+/// Boxed future returned by a [`DeleteTestHook`].
+#[cfg(test)]
+pub(crate) type DeleteHookFuture =
+    std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>;
+
+/// Test-only hook invoked inside `delete_user` after the transaction begins
+/// but before the existence check, receiving the `user_id`.
+///
+/// Lets tests deterministically delete the target user document from a
+/// separate transaction (simulating a concurrent delete that wins the race)
+/// so the existence check observes a miss — without relying on
+/// task-scheduling races. Mirrors [`ModifyTestHook`] for the delete path.
+#[cfg(test)]
+pub(crate) type DeleteTestHook = Arc<dyn Fn(&str) -> DeleteHookFuture + Send + Sync>;
+
 impl DocumentStore {
     /// Create a new document store.
     #[must_use]
@@ -328,6 +346,8 @@ impl DocumentStore {
             crypto,
             #[cfg(test)]
             modify_test_hook: None,
+            #[cfg(test)]
+            delete_test_hook: None,
         }
     }
 
@@ -335,6 +355,24 @@ impl DocumentStore {
     #[cfg(test)]
     pub(crate) fn set_modify_test_hook(&mut self, hook: ModifyTestHook) {
         self.modify_test_hook = Some(hook);
+    }
+
+    /// Install a hook that runs inside `delete_user` after the transaction
+    /// begins but before the existence check. Lets handler tests simulate a
+    /// concurrent delete that wins the race.
+    #[cfg(test)]
+    pub(crate) fn set_delete_test_hook(&mut self, hook: DeleteTestHook) {
+        self.delete_test_hook = Some(hook);
+    }
+
+    /// Run the installed `delete_test_hook` for `id`, if any. Invoked by
+    /// `delete_user` after the transaction begins and before the existence
+    /// check. No-op in non-test builds and when no hook is installed.
+    #[cfg(test)]
+    pub(crate) async fn run_delete_test_hook(&self, id: &str) {
+        if let Some(hook) = &self.delete_test_hook {
+            hook(id).await;
+        }
     }
 
     /// Access the underlying pool (for migrations and raw queries).

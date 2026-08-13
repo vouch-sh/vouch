@@ -583,6 +583,96 @@ async fn test_rfc7644_delete_user() {
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
+/// A user deleted between the SCIM existence check and `delete_user` must
+/// yield 404 (not 204) and no `scim_operation` delete audit event.
+///
+/// `delete_user` returns `Result<bool>`; the SCIM handler must honor a
+/// `false` return instead of unconditionally reporting a successful delete.
+/// The `delete_test_hook` deletes the target's user document from a separate
+/// transaction inside `delete_user`, after the handler's existence check but
+/// before `delete_user`'s own existence check — deterministically forcing the
+/// miss without relying on task-scheduling races.
+#[tokio::test]
+async fn test_scim_delete_user_returns_404_when_target_vanishes_mid_delete() {
+    use std::sync::{Arc, Mutex};
+
+    let target_slot: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    let slot = Arc::clone(&target_slot);
+    let (app, state) = test_app_with_modify_hook(move |store| {
+        let writer = store.clone();
+        store.set_delete_test_hook(Arc::new(move |user_id: &str| {
+            let writer = writer.clone();
+            let user_id = user_id.to_string();
+            let slot = Arc::clone(&slot);
+            Box::pin(async move {
+                let is_target =
+                    slot.lock().expect("slot lock").as_deref() == Some(user_id.as_str());
+                if is_target {
+                    writer
+                        .delete(&user_id)
+                        .await
+                        .expect("delete target user doc mid-race");
+                }
+            })
+        }));
+    })
+    .await;
+
+    let token = create_test_scim_token(&state.store, "test-race-delete", "test-org").await;
+    let auth_header = format!("Bearer {token}");
+
+    // Create a user to delete.
+    let (status, body) = http_post_json(
+        &app,
+        "/scim/v2/Users",
+        r#"{"schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"], "userName": "race-delete@test-org.example.com"}"#,
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "body: {body}");
+    let created: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let user_id = created["id"].as_str().expect("user id").to_string();
+    *target_slot.lock().expect("slot lock") = Some(user_id.clone());
+
+    // Delete the user. The delete hook races the deletion; the handler must
+    // observe the miss and return 404.
+    let (status, body) = http_delete(
+        &app,
+        &format!("/scim/v2/Users/{user_id}"),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "SCIM delete: a user deleted mid-delete must produce 404, got {status}: {body}"
+    );
+
+    // No `delete` scim_operation audit event may be logged when the delete
+    // did not occur.
+    let events = state
+        .audit
+        .query_events(&crate::db::AuditEventFilter {
+            event_types: Some(vec!["scim_operation".to_string()]),
+            ..crate::db::AuditEventFilter::default()
+        })
+        .await
+        .expect("query audit events");
+    let delete_events: Vec<_> = events
+        .iter()
+        .filter(|e| e.data.contains("\"delete\"") && e.data.contains(&user_id))
+        .collect();
+    assert!(
+        delete_events.is_empty(),
+        "SCIM delete: no scim_operation delete audit event may be logged when the delete did not occur; got {}",
+        delete_events
+            .iter()
+            .map(|e| e.data.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+}
+
 // ========================================================================
 // RFC 7644 Section 3.12 - Error Response Format Tests
 // ========================================================================
