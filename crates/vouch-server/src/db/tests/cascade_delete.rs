@@ -278,3 +278,222 @@ async fn test_oauth_client_cascade_delete() {
         "JWKS cache must be deleted with the client"
     );
 }
+
+// ========================================================================
+// Org-scoped application ownership transfer on user deletion
+// ========================================================================
+
+/// Build an OAuth client owned by `user_id` with the given access scope.
+async fn create_scoped_client(
+    store: &DocumentStore,
+    user_id: &str,
+    name: &str,
+    access_scope: AccessScope,
+    org_id: Option<&str>,
+) -> String {
+    let (client, _) = create_oauth_client(
+        store,
+        &CreateOAuthClientParams {
+            user_id: Some(user_id),
+            name,
+            description: None,
+            application_type: OAuthClientType::Web,
+            redirect_uris: &[],
+            access_scope,
+            org_id,
+            resource_uris: &[],
+            token_endpoint_auth_method: None,
+            jwks: None,
+            jwks_uri: None,
+            fapi_profile: None,
+            dpop_bound_access_tokens: None,
+            grant_types: None,
+            response_types: None,
+            software_id: None,
+            software_version: None,
+            registration_source: RegistrationSource::Manual,
+            registration_access_token_hash: None,
+            registration_metadata: None,
+            id_token_signed_response_alg: JwsAlgorithm::Rs256,
+            tls_client_auth_subject_dn: None,
+            tls_client_auth_san_dns: None,
+            tls_client_auth_san_uri: None,
+            tls_client_auth_san_ip: None,
+            tls_client_auth_san_email: None,
+            tls_client_certificate_bound_access_tokens: None,
+            authorization_signed_response_alg: None,
+            introspection_signed_response_alg: None,
+            request_object_signing_alg: None,
+            require_signed_request_object: None,
+            userinfo_signed_response_alg: None,
+            request_uris: None,
+            post_logout_redirect_uris: None,
+        },
+    )
+    .await
+    .expect("Failed to create client");
+    client.id
+}
+
+/// Deleting an org-scoped application's creator transfers the application to
+/// an active org admin. Management is creator-only, so leaving `user_id`
+/// empty would strand the application with no one able to manage it.
+#[tokio::test]
+async fn test_delete_user_transfers_org_scoped_apps_to_org_admin() {
+    let (store, _audit) = test_db().await;
+    seed_test_org(&store).await;
+
+    let (creator_id, _) = upsert_user_with_org(
+        &store,
+        "org-app-creator@example.com",
+        None,
+        Some(TEST_ORG_ID),
+        false,
+    )
+    .await
+    .expect("create creator");
+    let (admin_id, _) = upsert_user_with_org(
+        &store,
+        "org-app-admin@example.com",
+        None,
+        Some(TEST_ORG_ID),
+        true,
+    )
+    .await
+    .expect("create admin");
+
+    let org_app = create_scoped_client(
+        &store,
+        &creator_id,
+        "Org App",
+        AccessScope::Organization,
+        Some(TEST_ORG_ID),
+    )
+    .await;
+    let personal_app = create_scoped_client(
+        &store,
+        &creator_id,
+        "Personal App",
+        AccessScope::Personal,
+        Some(TEST_ORG_ID),
+    )
+    .await;
+
+    assert!(
+        delete_user(&store, &creator_id).await.expect("delete_user"),
+        "creator must be deleted"
+    );
+
+    let org_client = get_oauth_client_by_id(&store, &org_app)
+        .await
+        .expect("lookup org app")
+        .expect("org app still exists");
+    assert_eq!(
+        org_client.user_id.as_deref(),
+        Some(admin_id.as_str()),
+        "org-scoped app must transfer to the org admin so it stays manageable"
+    );
+
+    let personal_client = get_oauth_client_by_id(&store, &personal_app)
+        .await
+        .expect("lookup personal app")
+        .expect("personal app still exists");
+    assert_eq!(
+        personal_client.user_id, None,
+        "personal app has no other legitimate owner and stays unlinked"
+    );
+}
+
+/// With no other active org admin to inherit it, an org-scoped application
+/// is unlinked as before — there is no one to transfer it to.
+#[tokio::test]
+async fn test_delete_user_unlinks_org_app_when_no_admin_remains() {
+    let (store, _audit) = test_db().await;
+    seed_test_org(&store).await;
+
+    let (creator_id, _) = upsert_user_with_org(
+        &store,
+        "sole-admin@example.com",
+        None,
+        Some(TEST_ORG_ID),
+        true,
+    )
+    .await
+    .expect("create creator");
+
+    let org_app = create_scoped_client(
+        &store,
+        &creator_id,
+        "Sole Org App",
+        AccessScope::Organization,
+        Some(TEST_ORG_ID),
+    )
+    .await;
+
+    assert!(
+        delete_user(&store, &creator_id).await.expect("delete_user"),
+        "creator must be deleted"
+    );
+
+    let org_client = get_oauth_client_by_id(&store, &org_app)
+        .await
+        .expect("lookup org app")
+        .expect("org app still exists");
+    assert_eq!(
+        org_client.user_id, None,
+        "with no successor admin the app is unlinked"
+    );
+}
+
+/// A deactivated org admin must not inherit applications — they cannot
+/// authenticate, so the transfer would strand the app just as surely.
+#[tokio::test]
+async fn test_delete_user_skips_deactivated_org_admin_as_successor() {
+    let (store, _audit) = test_db().await;
+    seed_test_org(&store).await;
+
+    let (creator_id, _) = upsert_user_with_org(
+        &store,
+        "transfer-creator@example.com",
+        None,
+        Some(TEST_ORG_ID),
+        false,
+    )
+    .await
+    .expect("create creator");
+    let (inactive_admin_id, _) = upsert_user_with_org(
+        &store,
+        "inactive-admin@example.com",
+        None,
+        Some(TEST_ORG_ID),
+        true,
+    )
+    .await
+    .expect("create inactive admin");
+    update_user_active_status(&store, &inactive_admin_id, false)
+        .await
+        .expect("deactivate admin");
+
+    let org_app = create_scoped_client(
+        &store,
+        &creator_id,
+        "Org App",
+        AccessScope::Organization,
+        Some(TEST_ORG_ID),
+    )
+    .await;
+
+    assert!(
+        delete_user(&store, &creator_id).await.expect("delete_user"),
+        "creator must be deleted"
+    );
+
+    let org_client = get_oauth_client_by_id(&store, &org_app)
+        .await
+        .expect("lookup org app")
+        .expect("org app still exists");
+    assert_eq!(
+        org_client.user_id, None,
+        "a deactivated admin must not inherit the application"
+    );
+}

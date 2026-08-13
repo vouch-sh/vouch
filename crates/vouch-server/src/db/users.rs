@@ -145,6 +145,33 @@ pub async fn get_users_by_ids(
         .collect())
 }
 
+/// Pick the org admin that inherits a departing user's org-scoped
+/// applications.
+///
+/// Returns the lowest-sorting active org admin in `org_id`, excluding
+/// `departing_user_id`. Sorting by ID makes the choice deterministic, so
+/// concurrent deletions in the same organization agree on a successor.
+/// Returns `None` when the user has no org or the org has no other active
+/// admin — in that case the caller unlinks rather than transfers.
+async fn org_admin_successor(
+    tx: &mut super::store::StoreTransaction<'_>,
+    org_id: Option<&str>,
+    departing_user_id: &str,
+) -> Result<Option<String>> {
+    let Some(org_id) = org_id else {
+        return Ok(None);
+    };
+
+    let members = tx.find_all::<UserDoc>("org_id", org_id).await?;
+    let mut admin_ids: Vec<String> = members
+        .into_iter()
+        .filter(|m| m.data.is_org_admin && m.data.active && m.id != departing_user_id)
+        .map(|m| m.id)
+        .collect();
+    admin_ids.sort();
+    Ok(admin_ids.into_iter().next())
+}
+
 /// Delete a user and all associated data atomically.
 ///
 /// Wraps all cascade deletes in a single transaction so that a partial
@@ -156,12 +183,18 @@ pub async fn get_users_by_ids(
 /// 3. Delete authenticators (and their related device_auth refs)
 /// 4. Delete SSH issued certificate records
 /// 5. Delete token exchanges
-/// 6. Unlink OAuth clients (set user_id to None)
+/// 6. Transfer org-scoped OAuth clients to an org admin; unlink the rest
 /// 7. Delete the user
 ///
 /// Note: SSH revocation records (`SshRevokedCertDoc`) are intentionally
 /// NOT deleted — they must outlive the user so SSH servers can still
 /// check the KRL. They expire naturally via `expires_at`.
+///
+/// # Returns
+///
+/// `Ok(true)` when the user existed and was deleted, `Ok(false)` when no
+/// user with `user_id` was found — callers surface the latter as a 404 and
+/// must not record a deletion audit event.
 pub async fn delete_user(store: &DocumentStore, user_id: &str) -> Result<bool> {
     use super::documents::authenticator::AuthenticatorDoc;
     use super::documents::credential::{EnrollmentSessionDoc, SshIssuedCertDoc};
@@ -185,9 +218,10 @@ pub async fn delete_user(store: &DocumentStore, user_id: &str) -> Result<bool> {
         // dead code: `tx.delete` returns `Ok(())` regardless of whether
         // anything was removed. Mirrors `delete_scim_group` /
         // `delete_custom_policy`.
-        let Some(_) = tx.get::<UserDoc>(user_id).await? else {
+        let Some(user_doc) = tx.get::<UserDoc>(user_id).await? else {
             return Ok(false);
         };
+        let org_id = user_doc.data.org_id.clone();
 
         // 1. Delete sessions
         tx.delete_by_index::<SessionDoc>("user_id", user_id).await?;
@@ -214,9 +248,25 @@ pub async fn delete_user(store: &DocumentStore, user_id: &str) -> Result<bool> {
         tx.delete_by_index::<TokenExchangeDoc>("subject_user_id", user_id)
             .await?;
 
-        // 6. Unlink OAuth clients (set user_id to None)
+        // 6. Reassign org-scoped OAuth clients; unlink the rest.
+        //
+        // Application management is creator-only: every check compares the
+        // caller against `Some(client.user_id)`. Clearing `user_id` therefore
+        // strands an organization's applications permanently — no one can
+        // rotate their secrets, update redirect URIs, or delete them. An
+        // org-scoped application belongs to the organization rather than to
+        // the individual, so it transfers to an active org admin, keeping it
+        // both manageable and discoverable in that admin's normal list.
+        // Personal and public applications have no other legitimate owner
+        // and are unlinked.
+        let successor = org_admin_successor(&mut tx, org_id.as_deref(), user_id).await?;
         tx.update_by_index::<OAuthClientDoc, _>("user_id", user_id, |d| {
-            d.user_id = None;
+            d.user_id = match (d.access_scope, successor.as_deref()) {
+                (super::documents::oauth::AccessScope::Organization, Some(admin_id)) => {
+                    Some(admin_id.to_string())
+                }
+                _ => None,
+            };
         })
         .await?;
 
