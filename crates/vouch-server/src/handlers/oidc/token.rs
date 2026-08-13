@@ -9,10 +9,12 @@ use crate::AppState;
 use crate::db::JwtAssertionJtiClaim;
 use crate::error::OAuthErrorResponse;
 use crate::error::{OAuthErrorCode, ServiceError};
-use crate::services::auth::{ClientAuthProof, GrantProof, TokenIssuanceProof};
+use crate::services::auth::{
+    ClientAuthProof, GrantProof, SenderConstraintProof, TokenIssuanceProof,
+};
 use crate::services::oidc::{
     ScopeSet,
-    client_credentials::exchange_client_credentials,
+    client_credentials::{ClientCredentialsBindings, exchange_client_credentials},
     exchange::{TokenExchangeParams, exchange_token},
     grant_type::{OAuthGrantType, ParseOAuthGrantTypeError},
     jwt_bearer::client_auth::{PendingJti, authenticate_client_jwt},
@@ -489,10 +491,6 @@ async fn resolve_non_jwt_auth(
 }
 
 /// Handle authorization code grant.
-#[expect(
-    clippy::too_many_lines,
-    reason = "linear RFC 6749 section 4.1.3 authorization-code grant validation"
-)]
 async fn handle_authorization_code_grant(
     State(state): State<Arc<AppState>>,
     client_cert: crate::handlers::extractors::OptionalClientCert,
@@ -617,50 +615,17 @@ async fn handle_authorization_code_grant(
         return *resp;
     }
 
-    // FAPI 2.0: Require DPoP for FAPI clients (sender-constrained tokens).
-    if let Err(e) = crate::services::oidc::fapi::validate_fapi_token_request(
+    // Every sender-constraint requirement registered for this client.
+    let sender_constraint = match SenderConstraintProof::validate(
         &authenticated_client.client,
         crate::services::oidc::fapi::SenderConstraints {
             dpop: dpop_proof.is_some(),
             mtls_cert: has_mtls_cert,
         },
     ) {
-        return e.into_oauth_response().into_response();
-    }
-
-    // RFC 9449 Section 5: When the client requires DPoP-bound access tokens,
-    // a valid DPoP proof MUST be present. The client explicitly opted into
-    // DPoP binding via dpop_bound_access_tokens=true, so mTLS alone does
-    // not satisfy this — the access token must carry a jkt confirmation.
-    if authenticated_client.client.dpop_bound_access_tokens && dpop_proof.is_none() {
-        return ServiceError::oauth(
-            OAuthErrorCode::InvalidRequest,
-            "Client requires DPoP-bound access tokens \
-             but no DPoP proof was provided",
-        )
-        .into_oauth_response()
-        .into_response();
-    }
-
-    // RFC 8705 Section 3: When the client requires certificate-bound access
-    // tokens, a client certificate MUST be present. Without a cert the token
-    // would be issued without a cnf.x5t#S256 binding, violating the client's
-    // registered constraint. DPoP is accepted as an alternative sender
-    // constraint mechanism.
-    if authenticated_client
-        .client
-        .tls_client_certificate_bound_access_tokens
-        && !has_mtls_cert
-        && dpop_proof.is_none()
-    {
-        return ServiceError::oauth(
-            OAuthErrorCode::InvalidRequest,
-            "Client requires certificate-bound access tokens \
-             but no client certificate was presented",
-        )
-        .into_oauth_response()
-        .into_response();
-    }
+        Ok(witness) => witness,
+        Err(e) => return e.into_oauth_response().into_response(),
+    };
 
     // RFC 8705 Section 3: Bind access token to cert thumbprint only when opted in.
     let mtls_thumbprint = extract_mtls_thumbprint(&authenticated_client, &client_cert);
@@ -679,7 +644,8 @@ async fn handle_authorization_code_grant(
         mtls_cert_thumbprint: mtls_thumbprint.as_deref(),
     };
 
-    match exchange_authorization_code(&state, exchange_params, client_auth).await {
+    match exchange_authorization_code(&state, exchange_params, client_auth, sender_constraint).await
+    {
         Ok(result) => {
             crate::infra::metrics::record_auth_event("authorization_code_success");
             token_success_response(TokenResponse {
@@ -752,6 +718,40 @@ async fn handle_client_credentials_grant(
     // RFC 8705 Section 3: Bind access token to cert thumbprint only when opted in.
     let mtls_thumbprint = extract_mtls_thumbprint(&authenticated_client, &client_cert);
 
+    // RFC 9449 Section 5: Validate the DPoP proof if present so the issued
+    // token carries a `cnf.jkt` binding.
+    let dpop_header = headers.get("DPoP").and_then(|v| v.to_str().ok());
+    let dpop_proof =
+        match validate_dpop_if_present(&state, dpop_header, "POST", "/oauth/token").await {
+            Ok(proof) => proof,
+            Err(crate::services::oidc::dpop::DpopError::UseNonce(nonce)) => {
+                return dpop_use_nonce_response(&nonce);
+            }
+            Err(e @ crate::services::oidc::dpop::DpopError::Database(_)) => {
+                return ServiceError::oauth(OAuthErrorCode::ServerError, e.to_string())
+                    .into_oauth_response()
+                    .into_response();
+            }
+            Err(e) => {
+                return ServiceError::oauth(OAuthErrorCode::InvalidDpopProof, e.to_string())
+                    .into_oauth_response()
+                    .into_response();
+            }
+        };
+
+    // FAPI 2.0 Section 5.2.2: sender-constrained access tokens required
+    // (DPoP or mTLS), same as every other grant a FAPI client can reach.
+    let sender_constraint = match SenderConstraintProof::validate(
+        &authenticated_client.client,
+        crate::services::oidc::fapi::SenderConstraints {
+            dpop: dpop_proof.is_some(),
+            mtls_cert: client_cert.0.is_some(),
+        },
+    ) {
+        Ok(witness) => witness,
+        Err(e) => return e.into_oauth_response().into_response(),
+    };
+
     let jti_claim = match commit_optional_jti(&state, pending_jti, "client_credentials").await {
         Ok(c) => c,
         Err(r) => return r,
@@ -796,13 +796,17 @@ async fn handle_client_credentials_grant(
     let proof = TokenIssuanceProof {
         grant: GrantProof::ClientCredentials,
         client_auth,
+        sender_constraint,
     };
 
     match exchange_client_credentials(
         &state,
         &authenticated_client.client,
         params.scope.as_deref(),
-        mtls_thumbprint.as_deref(),
+        ClientCredentialsBindings {
+            dpop_jkt: dpop_proof.as_ref().map(|p| p.jkt.as_str()),
+            mtls_cert_thumbprint: mtls_thumbprint.as_deref(),
+        },
         proof,
     )
     .await
@@ -934,15 +938,16 @@ async fn handle_token_exchange_grant(
     // (DPoP or mTLS) on every grant a FAPI client can use — without this, a
     // FAPI client could exchange a bound subject_token for an unbound one.
     // Mirrors `handle_authorization_code_grant`.
-    if let Err(e) = crate::services::oidc::fapi::validate_fapi_token_request(
+    let sender_constraint = match SenderConstraintProof::validate(
         &authenticated_client.client,
         crate::services::oidc::fapi::SenderConstraints {
             dpop: dpop_proof.is_some(),
             mtls_cert: client_cert.0.is_some(),
         },
     ) {
-        return e.into_oauth_response().into_response();
-    }
+        Ok(witness) => witness,
+        Err(e) => return e.into_oauth_response().into_response(),
+    };
 
     // RFC 8707: If resource is present, use it as audience (unless audience is explicitly set).
     // If both are present, they must match.
@@ -1018,6 +1023,7 @@ async fn handle_token_exchange_grant(
     let proof = TokenIssuanceProof {
         grant: GrantProof::TokenExchange,
         client_auth,
+        sender_constraint,
     };
 
     match exchange_token(&state, exchange_params, proof).await {
@@ -1123,15 +1129,16 @@ async fn handle_fido2_assertion_grant(
     let has_mtls_cert = client_cert.0.is_some();
 
     // FAPI 2.0: Require sender-constrained tokens (DPoP or mTLS)
-    if let Err(e) = crate::services::oidc::fapi::validate_fapi_token_request(
+    let sender_constraint = match SenderConstraintProof::validate(
         &jwt_authenticated.client,
         crate::services::oidc::fapi::SenderConstraints {
             dpop: dpop_proof.is_some(),
             mtls_cert: has_mtls_cert,
         },
     ) {
-        return e.into_oauth_response().into_response();
-    }
+        Ok(witness) => witness,
+        Err(e) => return e.into_oauth_response().into_response(),
+    };
 
     // RFC 8705 Section 3: Bind access token to cert thumbprint only when opted in.
     let mtls_thumbprint = extract_mtls_thumbprint(&jwt_authenticated, &client_cert);
@@ -1169,6 +1176,7 @@ async fn handle_fido2_assertion_grant(
         &state,
         exchange_params,
         client_auth,
+        sender_constraint,
     )
     .await
     {

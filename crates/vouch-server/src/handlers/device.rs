@@ -4,7 +4,7 @@
 use crate::AppState;
 use crate::db::{self, DeviceAuthStatus};
 use crate::services::auth::{
-    ClientAuthProof, CreateOAuthTokenParams, GrantProof, TokenIssuanceProof,
+    ClientAuthProof, CreateOAuthTokenParams, GrantProof, SenderConstraintProof, TokenIssuanceProof,
     create_oauth_access_token,
 };
 use crate::services::oidc::ScopeSet;
@@ -372,59 +372,22 @@ pub(crate) async fn device_token(
                 None => None,
             };
 
-            // FAPI 2.0 Section 5.2.2: sender-constrained access tokens
-            // required (DPoP or mTLS). Mirrors `handle_authorization_code_grant`.
-            if let Some(ref oc) = oauth_client {
-                if let Err(e) = crate::services::oidc::fapi::validate_fapi_token_request(
+            // Every sender-constraint requirement registered for this
+            // client. The built-in CLI flow carries no registered client_id,
+            // so there is no registration to enforce against.
+            let sender_constraint = match oauth_client {
+                Some(ref oc) => match SenderConstraintProof::validate(
                     oc,
                     crate::services::oidc::fapi::SenderConstraints {
                         dpop: dpop_proof.is_some(),
                         mtls_cert: has_mtls_cert,
                     },
                 ) {
-                    return Err(e.into_oauth_response().into_response());
-                }
-
-                // RFC 9449: When the client requires DPoP-bound access
-                // tokens, a valid DPoP proof MUST be present. The client
-                // explicitly opted into DPoP binding via
-                // `dpop_bound_access_tokens=true`, so mTLS alone does not
-                // satisfy this — the access token must carry a `cnf.jkt`.
-                if oc.dpop_bound_access_tokens && dpop_proof.is_none() {
-                    return Err(oauth_error(
-                        StatusCode::BAD_REQUEST,
-                        OAuthError {
-                            error: "invalid_request".to_string(),
-                            error_description: Some(
-                                "Client requires DPoP-bound access tokens \
-                                 but no DPoP proof was provided"
-                                    .to_string(),
-                            ),
-                        },
-                    ));
-                }
-
-                // RFC 8705 Section 3: When the client requires
-                // certificate-bound access tokens, a client certificate
-                // MUST be present. DPoP is accepted as an alternative
-                // sender-constraint mechanism.
-                if oc.tls_client_certificate_bound_access_tokens
-                    && !has_mtls_cert
-                    && dpop_proof.is_none()
-                {
-                    return Err(oauth_error(
-                        StatusCode::BAD_REQUEST,
-                        OAuthError {
-                            error: "invalid_request".to_string(),
-                            error_description: Some(
-                                "Client requires certificate-bound access \
-                                 tokens but no client certificate was presented"
-                                    .to_string(),
-                            ),
-                        },
-                    ));
-                }
-            }
+                    Ok(witness) => witness,
+                    Err(e) => return Err(e.into_oauth_response().into_response()),
+                },
+                None => SenderConstraintProof::no_registered_client(),
+            };
 
             // RFC 8705 Section 3: Bind the access token to the mTLS
             // certificate thumbprint only when the client has opted in.
@@ -574,6 +537,7 @@ pub(crate) async fn device_token(
                     client_auth: ClientAuthProof::NoAuth(
                         crate::services::auth::NoClientAuth::internal_endpoint(),
                     ),
+                    sender_constraint,
                 },
             )
             .await

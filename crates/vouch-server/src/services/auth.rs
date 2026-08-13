@@ -333,12 +333,18 @@ pub(crate) const MAX_DELEGATION_DEPTH: usize = 5;
 ///
 /// `TokenIssuanceProof` is not `Clone` — the proof represents a one-shot
 /// authorization to issue a token and cannot be duplicated.
+///
+/// Every issuance must also supply a
+/// [`SenderConstraintProof`], so minting an
+/// unbound access token for a FAPI client is a compile error rather than a
+/// per-grant check that a new grant can forget to call.
 #[must_use = "the proof was constructed to authorize a single token issuance; \
               dropping it without calling create_oauth_access_token is a bug"]
 #[derive(Debug)]
 pub(crate) struct TokenIssuanceProof {
     pub(crate) grant: GrantProof,
     pub(crate) client_auth: ClientAuthProof,
+    pub(crate) sender_constraint: SenderConstraintProof,
 }
 
 /// Witness for the grant-level replay primitive consumed during token issuance.
@@ -436,6 +442,76 @@ impl JwtClientAuthProof {
             _auth: auth,
             _jti: jti,
         }
+    }
+}
+
+/// Witness that every sender-constraint requirement applying to an issuance
+/// was checked.
+///
+/// Requiring this on [`TokenIssuanceProof`] means a grant cannot mint a token
+/// without deciding which case it is in — the enforcement is not a call a new
+/// grant can forget. Both constructors are named for the case they assert, so
+/// the choice is visible at the call site and in review.
+#[derive(Debug)]
+pub(crate) struct SenderConstraintProof {
+    _private: (),
+}
+
+impl SenderConstraintProof {
+    /// Check every sender-constraint requirement registered for `client`.
+    ///
+    /// Three independent requirements, all enforced here so that no grant
+    /// enforces a different subset:
+    /// - FAPI 2.0 Section 5.2.2 — a FAPI client's tokens must be
+    ///   sender-constrained by DPoP or mTLS.
+    /// - RFC 9449 Section 5 — a client that registered
+    ///   `dpop_bound_access_tokens` must present a DPoP proof. mTLS does not
+    ///   substitute: the client asked for a `cnf.jkt` binding specifically.
+    /// - RFC 8705 Section 3 — a client that registered
+    ///   `tls_client_certificate_bound_access_tokens` must present a
+    ///   certificate, with DPoP accepted as an alternative constraint.
+    ///
+    /// # Errors
+    ///
+    /// Returns `ServiceError::OAuth` with `invalid_request` if a registered
+    /// requirement is unmet.
+    pub(crate) fn validate(
+        client: &db::OAuthClient,
+        constraints: crate::services::oidc::fapi::SenderConstraints,
+    ) -> ServiceResult<Self> {
+        crate::services::oidc::fapi::validate_fapi_token_request(client, constraints)?;
+
+        if client.dpop_bound_access_tokens && !constraints.dpop {
+            return Err(ServiceError::oauth(
+                OAuthErrorCode::InvalidRequest,
+                "Client requires DPoP-bound access tokens \
+                 but no DPoP proof was provided",
+            ));
+        }
+
+        if client.tls_client_certificate_bound_access_tokens
+            && !constraints.mtls_cert
+            && !constraints.dpop
+        {
+            return Err(ServiceError::oauth(
+                OAuthErrorCode::InvalidRequest,
+                "Client requires certificate-bound access tokens \
+                 but no client certificate was presented",
+            ));
+        }
+
+        Ok(Self { _private: () })
+    }
+
+    /// There is no registered OAuth client whose registration could constrain
+    /// this issuance.
+    ///
+    /// Browser sessions, enrollment bootstrap/completion, and the
+    /// certification-test bypass mint tokens for a user rather than for a
+    /// client. The device grant's built-in CLI flow (no `client_id`) is the
+    /// same case.
+    pub(crate) fn no_registered_client() -> Self {
+        Self { _private: () }
     }
 }
 
@@ -669,8 +745,17 @@ pub(crate) async fn create_oauth_access_token(
     //
     // `JwtAssertionJtiClaim` holds only `_private: ()` — the JTI string is
     // not retained in the witness, so the Debug log cannot leak it.
-    let TokenIssuanceProof { grant, client_auth } = proof;
-    tracing::debug!(?grant, ?client_auth, "token issuance proof consumed");
+    let TokenIssuanceProof {
+        grant,
+        client_auth,
+        sender_constraint,
+    } = proof;
+    tracing::debug!(
+        ?grant,
+        ?client_auth,
+        ?sender_constraint,
+        "token issuance proof consumed"
+    );
 
     let now = Timestamp::now();
     let session_hours = i64::try_from(state.config().session_hours)

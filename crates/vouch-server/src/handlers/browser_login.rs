@@ -29,7 +29,7 @@ use crate::handlers::session::{create_session_cookie, get_auth_context};
 use crate::impl_template_response;
 use crate::redact_email;
 use crate::services::auth::{
-    ClientAuthProof, CreateOAuthTokenParams, GrantProof, TokenIssuanceProof,
+    ClientAuthProof, CreateOAuthTokenParams, GrantProof, SenderConstraintProof, TokenIssuanceProof,
     create_oauth_access_token,
 };
 use crate::services::oidc::ScopeSet;
@@ -813,6 +813,7 @@ pub(crate) async fn browser_login_complete(
             client_auth: ClientAuthProof::NoAuth(
                 crate::services::auth::NoClientAuth::internal_endpoint(),
             ),
+            sender_constraint: SenderConstraintProof::no_registered_client(),
         },
     )
     .await

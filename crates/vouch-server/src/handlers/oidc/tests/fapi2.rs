@@ -1611,3 +1611,169 @@ async fn test_fapi2_token_exchange_with_dpop_issues_bound_token() {
         "exchanged token must carry cnf.jkt bound to the DPoP proof key"
     );
 }
+
+// ============================================================================
+// FAPI 2.0 Client Credentials (RFC 6749 §4.4) — Sender Constraints
+//
+// FAPI 2.0 Section 5.2.2 applies to every grant a FAPI client can reach.
+// The client_credentials grant is reachable by any registered client — the
+// token endpoint does not gate grants by the client's registered
+// `grant_types` — so it must enforce sender-constraining like the others.
+// ============================================================================
+
+/// Create a FAPI client registered for the `client_credentials` grant.
+async fn create_fapi_client_credentials_client(
+    store: &db::store::DocumentStore,
+    user_id: &str,
+) -> (TestOAuthClient, Vec<u8>) {
+    let (pkcs8_bytes, jwk) = generate_es256_signing_key();
+    let jwks_value = serde_json::json!({ "keys": [jwk] });
+
+    let client = create_test_client(
+        store,
+        user_id,
+        TestClientSpec {
+            jwks: TestJwks::Custom(jwks_value),
+            token_endpoint_auth_method: Some(crate::db::TokenEndpointAuthMethod::PrivateKeyJwt),
+            fapi_profile: Some(db::FapiProfile::Fapi2Security),
+            grant_types: Some(vec!["client_credentials".to_string()]),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    (client, pkcs8_bytes)
+}
+
+/// A FAPI client using the `client_credentials` grant without any sender
+/// constraint (no DPoP proof, no mTLS certificate) must be rejected rather
+/// than issued a plain bearer token.
+#[tokio::test]
+async fn test_fapi2_client_credentials_rejects_unbound_fapi_client() {
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "fapi2-cc-unbound@example.com").await;
+    let (client, pkcs8_bytes) = create_fapi_client_credentials_client(&state.store, &user.id).await;
+
+    let assertion = build_client_assertion(
+        &client.client_id,
+        &state.config().base_url,
+        &pkcs8_bytes,
+        None,
+    );
+    let body = format!(
+        "grant_type=client_credentials\
+         &client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer\
+         &client_assertion={assertion}",
+    );
+
+    let (status, resp_body) = http_post_form(&app, "/oauth/token", &body, &[]).await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "FAPI client_credentials without a sender constraint must be rejected: {resp_body}"
+    );
+    let error: serde_json::Value = serde_json::from_str(&resp_body).expect("Valid JSON");
+    assert_eq!(
+        error["error"], "invalid_request",
+        "must return invalid_request: {resp_body}"
+    );
+}
+
+/// A FAPI client presenting a valid DPoP proof on the `client_credentials`
+/// grant receives a DPoP-bound token: `cnf.jkt` matches the proof key and
+/// `token_type` is `DPoP` (RFC 9449 Section 5).
+#[tokio::test]
+async fn test_fapi2_client_credentials_with_dpop_issues_bound_token() {
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "fapi2-cc-dpop@example.com").await;
+    let (client, pkcs8_bytes) = create_fapi_client_credentials_client(&state.store, &user.id).await;
+
+    let (dpop_key, dpop_jwk) = generate_dpop_key_pair();
+    let expected_jkt = compute_jwk_thumbprint(&dpop_jwk);
+    let token_uri = format!("{}/oauth/token", state.config().base_url);
+    let nonce = acquire_dpop_nonce(&app, &dpop_key, &dpop_jwk, "POST", &token_uri).await;
+    let proof = create_dpop_proof(&dpop_key, &dpop_jwk, "POST", &token_uri, Some(&nonce), None);
+
+    let assertion = build_client_assertion(
+        &client.client_id,
+        &state.config().base_url,
+        &pkcs8_bytes,
+        None,
+    );
+    let body = format!(
+        "grant_type=client_credentials\
+         &client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer\
+         &client_assertion={assertion}",
+    );
+
+    let (status, resp_body) =
+        http_post_form(&app, "/oauth/token", &body, &[("DPoP", &proof)]).await;
+
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "FAPI client_credentials with DPoP must succeed: {resp_body}"
+    );
+    let resp: serde_json::Value = serde_json::from_str(&resp_body).expect("Valid JSON");
+    assert_eq!(
+        resp["token_type"], "DPoP",
+        "a DPoP-bound token must be advertised as token_type=DPoP: {resp_body}"
+    );
+    let access_token = resp["access_token"].as_str().expect("access_token");
+    let claims = decode_jwt_payload(access_token);
+    assert_eq!(
+        claims["cnf"]["jkt"].as_str(),
+        Some(expected_jkt.as_str()),
+        "client_credentials token must carry cnf.jkt bound to the DPoP proof key"
+    );
+}
+
+/// A client that registered `dpop_bound_access_tokens` must present a DPoP
+/// proof on the client_credentials grant, exactly as on the authorization-code
+/// and device grants. mTLS does not substitute: the client asked for a
+/// `cnf.jkt` binding specifically.
+#[tokio::test]
+async fn test_client_credentials_rejects_dpop_bound_client_without_proof() {
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "cc-dpop-bound@example.com").await;
+    let (pkcs8_bytes, jwk) = generate_es256_signing_key();
+    let client = create_test_client(
+        &state.store,
+        &user.id,
+        TestClientSpec {
+            jwks: TestJwks::Custom(serde_json::json!({ "keys": [jwk] })),
+            token_endpoint_auth_method: Some(crate::db::TokenEndpointAuthMethod::PrivateKeyJwt),
+            // Not a FAPI client: the binding flag alone must be enforced.
+            dpop_bound_access_tokens: true,
+            grant_types: Some(vec!["client_credentials".to_string()]),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    let assertion = build_client_assertion(
+        &client.client_id,
+        &state.config().base_url,
+        &pkcs8_bytes,
+        None,
+    );
+    let body = format!(
+        "grant_type=client_credentials\
+         &client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer\
+         &client_assertion={assertion}",
+    );
+
+    let (status, resp_body) = http_post_form(&app, "/oauth/token", &body, &[]).await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "a dpop_bound_access_tokens client must not receive an unbound token: {resp_body}"
+    );
+    let error: serde_json::Value = serde_json::from_str(&resp_body).expect("Valid JSON");
+    assert_eq!(error["error"], "invalid_request", "body: {resp_body}");
+}

@@ -87,7 +87,7 @@ pub struct SenderConstraints {
 /// # Errors
 ///
 /// Returns `ServiceError::OAuth` with `invalid_request` if constraints are violated.
-pub fn validate_fapi_token_request(
+pub(crate) fn validate_fapi_token_request(
     client: &OAuthClient,
     constraints: SenderConstraints,
 ) -> ServiceResult<()> {

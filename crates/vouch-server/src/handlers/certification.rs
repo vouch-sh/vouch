@@ -33,8 +33,8 @@ use crate::{
     handlers::browser_login::hmac_sha256_base64url,
     handlers::session::create_session_cookie,
     services::auth::{
-        ClientAuthProof, CreateOAuthTokenParams, GrantProof, TokenIssuanceProof,
-        create_oauth_access_token,
+        ClientAuthProof, CreateOAuthTokenParams, GrantProof, SenderConstraintProof,
+        TokenIssuanceProof, create_oauth_access_token,
     },
     services::oidc::ScopeSet,
 };
@@ -177,6 +177,7 @@ pub(crate) async fn complete_login(
             client_auth: ClientAuthProof::NoAuth(
                 crate::services::auth::NoClientAuth::internal_endpoint(),
             ),
+            sender_constraint: SenderConstraintProof::no_registered_client(),
         },
     )
     .await
