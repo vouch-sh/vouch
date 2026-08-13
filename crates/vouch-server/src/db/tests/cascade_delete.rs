@@ -89,6 +89,54 @@ async fn test_user_cascade_delete() {
     assert!(get_user_by_id(&store, &user_id).await.unwrap().is_none());
 }
 
+/// `delete_user` returns `Result<bool>`: it must return `false` when the
+/// user document does not exist (so handlers can surface 404 and skip the
+/// audit event) and `true` when the user is deleted. Mirrors the contract
+/// already implemented by `delete_scim_group` / `delete_custom_policy`.
+///
+/// Without the existence check, `delete_user` always returned `Ok(true)`,
+/// making the handler-side `member_gone()` defense dead code and allowing a
+/// fraudulent audit event when the target vanished mid-operation.
+#[tokio::test]
+async fn test_delete_user_returns_false_when_missing() {
+    let (store, _audit) = test_db().await;
+
+    // A valid UUID that was never inserted.
+    let missing_id = "00000000-0000-7000-0000-000000000001";
+    let deleted = delete_user(&store, missing_id)
+        .await
+        .expect("delete_user must not error on a missing user");
+    assert!(
+        !deleted,
+        "delete_user must return false when the user does not exist"
+    );
+
+    // Sanity: deleting a real user returns true and removes the document.
+    let (user_id, _) = upsert_user(&store, "delete-bool@example.com", None)
+        .await
+        .expect("create user");
+    let deleted = delete_user(&store, &user_id)
+        .await
+        .expect("delete_user should succeed");
+    assert!(deleted, "delete_user must return true for an existing user");
+    assert!(
+        get_user_by_id(&store, &user_id)
+            .await
+            .expect("query failed")
+            .is_none(),
+        "user should be gone after delete"
+    );
+
+    // Deleting the same user again returns false (idempotent miss).
+    let deleted_again = delete_user(&store, &user_id)
+        .await
+        .expect("delete_user must not error on a missing user");
+    assert!(
+        !deleted_again,
+        "delete_user must return false on the second delete of the same user"
+    );
+}
+
 /// Regression test for GH#249 / PR#262: SSH revocation records must
 /// survive user deletion so they remain visible in the KRL.
 #[tokio::test]

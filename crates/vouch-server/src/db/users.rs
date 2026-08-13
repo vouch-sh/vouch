@@ -172,6 +172,23 @@ pub async fn delete_user(store: &DocumentStore, user_id: &str) -> Result<bool> {
     crate::with_dsql_retry!(async {
         let mut tx = store.begin().await?;
 
+        // Test-only seam: let handler tests delete the target from a separate
+        // transaction before the existence check, deterministically simulating
+        // a concurrent delete that wins the race. Compiled out of non-test
+        // builds, so production pays nothing.
+        #[cfg(test)]
+        store.run_delete_test_hook(user_id).await;
+
+        // Return `false` when the user document is missing so callers can
+        // surface a 404 and skip the audit event. Without this check the
+        // handler-side race-condition defense added in commit 0165b58 is
+        // dead code: `tx.delete` returns `Ok(())` regardless of whether
+        // anything was removed. Mirrors `delete_scim_group` /
+        // `delete_custom_policy`.
+        let Some(_) = tx.get::<UserDoc>(user_id).await? else {
+            return Ok(false);
+        };
+
         // 1. Delete sessions
         tx.delete_by_index::<SessionDoc>("user_id", user_id).await?;
 
