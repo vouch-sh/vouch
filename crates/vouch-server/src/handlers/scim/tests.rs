@@ -2272,6 +2272,83 @@ async fn create_error_other_maps_to_500() {
     assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
 }
 
+// ============================================================================
+// create_scim_group_error_response — every arm has a test that triggers it
+// ============================================================================
+//
+// Group creation returns 500 INTERNAL_SERVER_ERROR for infrastructure failures
+// (serialization, encryption, DB pool/timeout, exhausted OCC retries), matching
+// list_groups/get_group/patch_group/delete_group. A previous version returned
+// 409 CONFLICT with a `uniqueness` SCIM type for all errors — mislabelling
+// transient infrastructure faults as duplicate-group conflicts.
+
+#[tokio::test]
+async fn create_group_error_infrastructure_maps_to_500() {
+    // A generic infrastructure error (e.g. DB connection refused) must surface
+    // as 500, not 409 CONFLICT, and must not carry a `uniqueness` scimType.
+    let resp = super::groups::create_scim_group_error_response(anyhow::anyhow!(
+        "sqlx::Error::PoolTimedOut: queue limit reached"
+    ));
+    assert_eq!(
+        resp.status(),
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "infrastructure errors must return 500, not 409"
+    );
+    let body = error_body(resp).await;
+    assert_eq!(body["status"], "500", "SCIM status field must be 500");
+    assert!(
+        body.get("scimType").is_none_or(|v| v.is_null()),
+        "infrastructure errors must not carry a scimType: {body}"
+    );
+    assert_eq!(
+        body["detail"], "Failed to create group",
+        "detail must not leak internal error strings"
+    );
+}
+
+#[tokio::test]
+async fn create_group_error_invalid_index_value_maps_to_400() {
+    // A NUL-byte index value is a client error (400 invalidValue), not a 500.
+    let err = anyhow::Error::from(crate::db::InvalidIndexValue {
+        field: "display_name",
+    });
+    let resp = super::groups::create_scim_group_error_response(err);
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body = error_body(resp).await;
+    assert_eq!(body["status"], "400");
+    assert_eq!(body["scimType"], "invalidValue");
+    assert!(
+        body["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("display_name"),
+        "detail must name the offending field: {body}"
+    );
+}
+
+/// Regression: the old code checked `e.to_string().contains("UNIQUE")` and
+/// returned 409 CONFLICT. That check was dead code (the document-store unique
+/// constraint is on `(document_id, index_field, index_value)`, which can never
+/// fire for two distinct group documents), but pin the fix: even an error whose
+/// message contains "UNIQUE" must return 500, not 409.
+#[tokio::test]
+async fn create_group_error_unique_string_still_maps_to_500() {
+    let resp = super::groups::create_scim_group_error_response(anyhow::anyhow!(
+        "UNIQUE constraint failed: document_indexes.index_value"
+    ));
+    assert_eq!(
+        resp.status(),
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "a 'UNIQUE' string in the error must not be misread as a duplicate-group 409"
+    );
+    let body = error_body(resp).await;
+    assert_eq!(body["status"], "500");
+    assert!(
+        body.get("scimType").is_none_or(|v| v.is_null()),
+        "no uniqueness scimType for infrastructure errors: {body}"
+    );
+}
+
 // ========================================================================
 // NUL-byte rejection (issue #883)
 // ========================================================================
