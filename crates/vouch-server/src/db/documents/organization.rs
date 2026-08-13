@@ -197,7 +197,7 @@ pub enum AdditionalDomainState {
 }
 
 /// A secondary email domain claimed by an organization.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct AdditionalDomain {
     /// Normalized lowercase ASCII domain.
     pub domain: String,
@@ -215,6 +215,22 @@ pub struct AdditionalDomain {
     #[serde(default)]
     pub consecutive_failures: u32,
     pub state: AdditionalDomainState,
+}
+
+// Custom Debug that redacts verification_token to keep the DNS challenge
+// value out of logs.
+impl std::fmt::Debug for AdditionalDomain {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AdditionalDomain")
+            .field("domain", &self.domain)
+            .field("verification_token", &"[REDACTED]")
+            .field("added_at", &self.added_at)
+            .field("added_by_user_id", &self.added_by_user_id)
+            .field("added_by_email", &self.added_by_email)
+            .field("consecutive_failures", &self.consecutive_failures)
+            .field("state", &self.state)
+            .finish()
+    }
 }
 
 /// Number of consecutive failed re-verifications before an entry is flipped

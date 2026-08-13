@@ -18,7 +18,7 @@ use vouch_common::dns::{DohConfigSerde, NetworkConfig};
 /// Supports both the multi-server format (with `current_server` +
 /// `servers` map) and the legacy flat format (top-level `server_url`
 /// + `token`).
-#[derive(Debug, Default, Deserialize)]
+#[derive(Default, Deserialize)]
 pub(crate) struct VouchConfig {
     /// Hostname of the currently active server (multi-server format).
     current_server: Option<String>,
@@ -34,11 +34,37 @@ pub(crate) struct VouchConfig {
     network: Option<NetworkConfig>,
 }
 
+// Custom Debug that redacts the legacy flat session token to prevent
+// accidental log exposure. `servers` is safe to print in full because
+// `ServerEntry` redacts its own token.
+impl std::fmt::Debug for VouchConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("VouchConfig")
+            .field("current_server", &self.current_server)
+            .field("servers", &self.servers)
+            .field("server_url", &self.server_url)
+            .field("token", &"[REDACTED]")
+            .field("network", &self.network)
+            .finish()
+    }
+}
+
 /// Read-only per-server entry within the config file.
-#[derive(Debug, Default, Deserialize)]
+#[derive(Default, Deserialize)]
 struct ServerEntry {
     server_url: Option<String>,
     token: Option<String>,
+}
+
+// Custom Debug that redacts the session token to prevent accidental log
+// exposure of a live bearer credential.
+impl std::fmt::Debug for ServerEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ServerEntry")
+            .field("server_url", &self.server_url)
+            .field("token", &"[REDACTED]")
+            .finish()
+    }
 }
 
 impl VouchConfig {

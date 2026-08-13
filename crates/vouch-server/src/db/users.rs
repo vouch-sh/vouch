@@ -9,7 +9,6 @@ use super::store::DocumentStore;
 use anyhow::Result;
 
 /// User record.
-#[derive(Debug)]
 pub struct User {
     pub id: String,
     pub email: String,
@@ -21,6 +20,25 @@ pub struct User {
     pub github_id: Option<i64>,
     pub github_login: Option<String>,
     pub github_refresh_token: Option<String>,
+}
+
+// Custom Debug that redacts github_refresh_token to prevent accidental log
+// exposure of a credential that mints new GitHub access tokens.
+impl std::fmt::Debug for User {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("User")
+            .field("id", &self.id)
+            .field("email", &self.email)
+            .field("name", &self.name)
+            .field("org_id", &self.org_id)
+            .field("is_org_admin", &self.is_org_admin)
+            .field("active", &self.active)
+            .field("external_id", &self.external_id)
+            .field("github_id", &self.github_id)
+            .field("github_login", &self.github_login)
+            .field("github_refresh_token", &"[REDACTED]")
+            .finish()
+    }
 }
 
 impl From<Document<UserDoc>> for User {

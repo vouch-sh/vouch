@@ -28,7 +28,7 @@ use super::client_auth::{ClientAuthFields, complete_client_auth, extract_client_
 ///
 /// Supports `client_secret_basic`, `client_secret_post`, and `private_key_jwt`
 /// (RFC 7523) client authentication methods.
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub(crate) struct RevokeRequest {
     /// RFC 7009 Section 2.1: The token that the client wants to get revoked.
     token: String,
@@ -49,6 +49,21 @@ pub(crate) struct RevokeRequest {
     /// `urn:ietf:params:oauth:client-assertion-type:jwt-bearer`).
     #[serde(default)]
     client_assertion_type: Option<String>,
+}
+
+// Custom Debug that redacts the subject token to prevent accidental log
+// exposure of a live credential the client is asking us to revoke.
+impl std::fmt::Debug for RevokeRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RevokeRequest")
+            .field("token", &"[REDACTED]")
+            .field("token_type_hint", &self.token_type_hint)
+            .field("client_id", &self.client_id)
+            .field("client_secret", &"[REDACTED]")
+            .field("client_assertion", &"[REDACTED]")
+            .field("client_assertion_type", &self.client_assertion_type)
+            .finish()
+    }
 }
 
 impl ClientAuthFields for RevokeRequest {
@@ -73,7 +88,7 @@ impl ClientAuthFields for RevokeRequest {
 ///
 /// Supports `client_secret_basic`, `client_secret_post`, and `private_key_jwt`
 /// (RFC 7523) client authentication methods.
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub(crate) struct IntrospectRequest {
     /// RFC 7662 Section 2.1: The string value of the token.
     token: String,
@@ -94,6 +109,21 @@ pub(crate) struct IntrospectRequest {
     /// `urn:ietf:params:oauth:client-assertion-type:jwt-bearer`).
     #[serde(default)]
     client_assertion_type: Option<String>,
+}
+
+// Custom Debug that redacts the subject token to prevent accidental log
+// exposure of the live credential being introspected.
+impl std::fmt::Debug for IntrospectRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IntrospectRequest")
+            .field("token", &"[REDACTED]")
+            .field("token_type_hint", &self.token_type_hint)
+            .field("client_id", &self.client_id)
+            .field("client_secret", &"[REDACTED]")
+            .field("client_assertion", &"[REDACTED]")
+            .field("client_assertion_type", &self.client_assertion_type)
+            .finish()
+    }
 }
 
 impl ClientAuthFields for IntrospectRequest {

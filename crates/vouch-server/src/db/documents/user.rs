@@ -8,7 +8,7 @@ use crate::db::document_type::{DocumentType, IndexEntry};
 use crate::email::Email;
 
 /// A Vouch user.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct UserDoc {
     /// Canonical (trimmed, ASCII-lowercased) address. The [`Email`] type
     /// canonicalizes on construction and deserialization, so the `email`
@@ -31,6 +31,25 @@ pub struct UserDoc {
     /// IdP — they bind lazily on their first verified-email login.
     #[serde(default)]
     pub idp_identities: Vec<IdpIdentity>,
+}
+
+// Custom Debug that redacts github_refresh_token to prevent accidental log
+// exposure of a credential that mints new GitHub access tokens.
+impl std::fmt::Debug for UserDoc {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UserDoc")
+            .field("email", &self.email)
+            .field("name", &self.name)
+            .field("org_id", &self.org_id)
+            .field("is_org_admin", &self.is_org_admin)
+            .field("active", &self.active)
+            .field("external_id", &self.external_id)
+            .field("github_id", &self.github_id)
+            .field("github_login", &self.github_login)
+            .field("github_refresh_token", &"[REDACTED]")
+            .field("idp_identities", &self.idp_identities)
+            .finish()
+    }
 }
 
 /// An upstream identity: the OIDC `(iss, sub)` pair, or for SAML the

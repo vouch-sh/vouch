@@ -43,12 +43,23 @@ use crate::{
 const CERT_USER_EMAIL: &str = "cert-test@vouch.sh";
 
 /// Query parameters for `GET /certification/complete-login`.
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub(crate) struct CompleteLoginQuery {
     /// Pending OAuth authorization ID (UUID).
     pub pending_auth: String,
     /// HMAC-SHA256 of `pending_auth`, base64url-encoded (no padding).
     pub token: String,
+}
+
+// Custom Debug that redacts the token to prevent accidental log exposure:
+// presenting it alongside `pending_auth` is what completes the login.
+impl std::fmt::Debug for CompleteLoginQuery {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CompleteLoginQuery")
+            .field("pending_auth", &self.pending_auth)
+            .field("token", &"[REDACTED]")
+            .finish()
+    }
 }
 
 /// GET /certification/complete-login?pending_auth=<UUID>&token=<HMAC>

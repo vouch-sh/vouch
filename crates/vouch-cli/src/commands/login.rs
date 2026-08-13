@@ -59,7 +59,7 @@ pub(crate) async fn run(server: &str, timeout_secs: u64) -> Result<()> {
 /// FAPI 2.0 assertion grant request form fields.
 ///
 /// Sent as `application/x-www-form-urlencoded` to `POST /oauth/token`.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Clone, Serialize)]
 struct Fido2AssertionTokenRequest {
     grant_type: &'static str,
     client_assertion_type: &'static str,
@@ -69,6 +69,21 @@ struct Fido2AssertionTokenRequest {
     /// RFC 9396: Device posture as authorization_details JSON array.
     #[serde(skip_serializing_if = "Option::is_none")]
     authorization_details: Option<String>,
+}
+
+// RFC 7521/7523: both the client assertion and the FIDO2 assertion are
+// credentials presented to the token endpoint, so neither is derived.
+impl std::fmt::Debug for Fido2AssertionTokenRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Fido2AssertionTokenRequest")
+            .field("grant_type", &self.grant_type)
+            .field("client_assertion_type", &self.client_assertion_type)
+            .field("client_assertion", &"[REDACTED]")
+            .field("assertion", &"[REDACTED]")
+            .field("scope", &self.scope)
+            .field("authorization_details", &self.authorization_details)
+            .finish()
+    }
 }
 
 /// JSON payload encoded into the `assertion` form field.

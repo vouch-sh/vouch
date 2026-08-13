@@ -29,12 +29,21 @@ struct ClientAssertionClaims {
 }
 
 /// A signed client assertion ready to be included in a token request.
-#[derive(Debug)]
 pub struct ClientAssertion {
     /// The signed JWT assertion string.
     pub assertion: String,
     /// The assertion type URI per RFC 7523.
     pub assertion_type: &'static str,
+}
+
+// The assertion is a signed JWT used as a client credential.
+impl std::fmt::Debug for ClientAssertion {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ClientAssertion")
+            .field("assertion", &"[REDACTED]")
+            .field("assertion_type", &self.assertion_type)
+            .finish()
+    }
 }
 
 impl ClientAssertion {

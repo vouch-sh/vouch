@@ -42,7 +42,7 @@ struct RegistrationRequest {
 ///
 /// Contains the server-assigned `client_id` and the RFC 7592
 /// `registration_access_token` for future management operations.
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 struct RegistrationResponse {
     /// Server-assigned client identifier.
     client_id: String,
@@ -52,6 +52,18 @@ struct RegistrationResponse {
     /// URI for reading/updating/deleting the registration (RFC 7592).
     #[serde(default)]
     registration_client_uri: Option<String>,
+}
+
+// Custom Debug that redacts registration_access_token to prevent accidental
+// log exposure of the RFC 7592 management credential.
+impl std::fmt::Debug for RegistrationResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RegistrationResponse")
+            .field("client_id", &self.client_id)
+            .field("registration_access_token", &"[REDACTED]")
+            .field("registration_client_uri", &self.registration_client_uri)
+            .finish()
+    }
 }
 
 /// Register this CLI installation as a FAPI 2.0 client.
@@ -177,7 +189,6 @@ pub async fn is_client_registered(
 }
 
 /// Registration result containing the fields to save.
-#[derive(Debug)]
 pub struct RegistrationResult {
     /// Server-assigned client identifier.
     pub client_id: String,
@@ -187,4 +198,17 @@ pub struct RegistrationResult {
     pub registration_client_uri: Option<String>,
     /// Key ID of the DPoP key used for registration.
     pub dpop_key_id: String,
+}
+
+// Custom Debug that redacts registration_access_token to prevent accidental
+// log exposure of the RFC 7592 management credential.
+impl std::fmt::Debug for RegistrationResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RegistrationResult")
+            .field("client_id", &self.client_id)
+            .field("registration_access_token", &"[REDACTED]")
+            .field("registration_client_uri", &self.registration_client_uri)
+            .field("dpop_key_id", &self.dpop_key_id)
+            .finish()
+    }
 }
