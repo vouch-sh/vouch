@@ -366,28 +366,59 @@ pub(crate) async fn patch_group(
                 }
             }
             ScimPatchOpType::Add => {
-                if let Some(path) = &op.path
-                    && path == "members"
-                    && let Some(val) = &op.value
-                {
-                    // Add members
-                    if let Some(arr) = val.as_array() {
-                        for member in arr {
-                            if let Some(user_id) = member.get("value").and_then(|v| v.as_str())
-                                && let Err(e) = db::add_scim_group_member(
-                                    &state.store,
-                                    &id,
-                                    &auth.org_id,
-                                    user_id,
-                                )
-                                .await
+                // RFC 7644 §3.5.2.1: an Add targeting a single-valued
+                // attribute replaces the existing value — the same
+                // semantics as Replace for displayName and externalId.
+                // The multi-valued `members` attribute is appended to.
+                if let Some(path) = &op.path {
+                    match path.as_str() {
+                        "displayName" => {
+                            if let Some(val) = &op.value
+                                && let Some(s) = val.as_str()
                             {
-                                if let Some(resp) = super::invalid_index_value_response(&e) {
-                                    return resp.into_response();
-                                }
-                                tracing::warn!("Failed to add member: {e}");
+                                display_name = s.to_string();
                             }
                         }
+                        "externalId" => {
+                            if let Some(val) = &op.value {
+                                external_id = val.as_str().map(String::from);
+                            }
+                        }
+                        "members" => {
+                            // Add members
+                            if let Some(val) = &op.value
+                                && let Some(arr) = val.as_array()
+                            {
+                                for member in arr {
+                                    if let Some(user_id) =
+                                        member.get("value").and_then(|v| v.as_str())
+                                        && let Err(e) = db::add_scim_group_member(
+                                            &state.store,
+                                            &id,
+                                            &auth.org_id,
+                                            user_id,
+                                        )
+                                        .await
+                                    {
+                                        if let Some(resp) = super::invalid_index_value_response(&e)
+                                        {
+                                            return resp.into_response();
+                                        }
+                                        tracing::warn!("Failed to add member: {e}");
+                                    }
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                } else if let Some(val) = &op.value {
+                    // Bulk add (no path) — merge presented attributes, same
+                    // as Replace.
+                    if let Some(n) = val.get("displayName").and_then(|v| v.as_str()) {
+                        display_name = n.to_string();
+                    }
+                    if let Some(e) = val.get("externalId").and_then(|v| v.as_str()) {
+                        external_id = Some(e.to_string());
                     }
                 }
             }

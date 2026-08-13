@@ -491,6 +491,287 @@ async fn test_patch_user_active_add_op_string_rejected() {
 }
 
 // ========================================================================
+// RFC 7644 Section 3.5.2.1 — Add operation on single-valued attributes
+// ========================================================================
+//
+// RFC 7644 §3.5.2.1: "If the target location specifies a single-valued
+// attribute, the existing value is replaced." These tests confirm the Add
+// operation applies displayName, name.formatted, externalId, and active
+// updates — the same behavior as Replace — rather than silently ignoring
+// them and returning 200 OK.
+
+#[tokio::test]
+async fn test_patch_user_add_display_name_applies() {
+    // RFC 7644 §3.5.2.1: Add with path "displayName" must replace the
+    // existing name. Previously the Add handler only recognized "active"
+    // and silently dropped displayName, returning 200 OK with no change.
+    let (app, state) = test_app().await;
+    let token = create_test_scim_token(&state.store, "test-add-displayname", "test-org").await;
+    let auth_header = format!("Bearer {}", token);
+
+    // Create a user with an initial formatted name.
+    let (status, body) = http_post_json(
+        &app,
+        "/scim/v2/Users",
+        r#"{"schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"], "userName": "add-displayname@test-org.example.com", "name": {"formatted": "Original Name"}, "active": true}"#,
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "setup create failed: {body}");
+    let created: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let user_id = created["id"].as_str().expect("user id");
+    assert_eq!(created["name"]["formatted"], "Original Name");
+
+    // PATCH add displayName.
+    let (status, body) = http_request(
+        &app,
+        "PATCH",
+        &format!("/scim/v2/Users/{}", user_id),
+        Some(r#"{"schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"], "Operations": [{"op": "add", "path": "displayName", "value": "New Name"}]}"#.to_string()),
+        &[
+            ("Authorization", &auth_header),
+            ("Content-Type", "application/json"),
+        ],
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    let updated: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(
+        updated["name"]["formatted"], "New Name",
+        "Add displayName must replace the existing name (RFC 7644 §3.5.2.1)"
+    );
+
+    // Re-GET to confirm persistence.
+    let (status, body) = http_get(
+        &app,
+        &format!("/scim/v2/Users/{}", user_id),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let fetched: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(fetched["name"]["formatted"], "New Name");
+}
+
+#[tokio::test]
+async fn test_patch_user_add_name_formatted_applies() {
+    // RFC 7644 §3.5.2.1: Add with path "name.formatted" must replace the
+    // existing name. Previously silently ignored by the Add handler.
+    let (app, state) = test_app().await;
+    let token = create_test_scim_token(&state.store, "test-add-name-formatted", "test-org").await;
+    let auth_header = format!("Bearer {}", token);
+
+    let (status, body) = http_post_json(
+        &app,
+        "/scim/v2/Users",
+        r#"{"schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"], "userName": "add-name-formatted@test-org.example.com", "name": {"formatted": "Old Formatted"}, "active": true}"#,
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "setup create failed: {body}");
+    let created: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let user_id = created["id"].as_str().expect("user id");
+
+    let (status, body) = http_request(
+        &app,
+        "PATCH",
+        &format!("/scim/v2/Users/{}", user_id),
+        Some(r#"{"schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"], "Operations": [{"op": "add", "path": "name.formatted", "value": "New Formatted"}]}"#.to_string()),
+        &[
+            ("Authorization", &auth_header),
+            ("Content-Type", "application/json"),
+        ],
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    let updated: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(
+        updated["name"]["formatted"], "New Formatted",
+        "Add name.formatted must replace the existing name (RFC 7644 §3.5.2.1)"
+    );
+}
+
+#[tokio::test]
+async fn test_patch_user_add_external_id_applies() {
+    // RFC 7644 §3.5.2.1: Add with path "externalId" must set/replace the
+    // externalId. Previously silently ignored by the Add handler.
+    let (app, state) = test_app().await;
+    let token = create_test_scim_token(&state.store, "test-add-external-id", "test-org").await;
+    let auth_header = format!("Bearer {}", token);
+
+    let (status, body) = http_post_json(
+        &app,
+        "/scim/v2/Users",
+        r#"{"schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"], "userName": "add-extid@test-org.example.com", "active": true}"#,
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "setup create failed: {body}");
+    let created: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let user_id = created["id"].as_str().expect("user id");
+    assert!(
+        created.get("externalId").is_none(),
+        "user created without externalId"
+    );
+
+    // Add externalId via Add operation.
+    let (status, body) = http_request(
+        &app,
+        "PATCH",
+        &format!("/scim/v2/Users/{}", user_id),
+        Some(r#"{"schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"], "Operations": [{"op": "add", "path": "externalId", "value": "ext-add-123"}]}"#.to_string()),
+        &[
+            ("Authorization", &auth_header),
+            ("Content-Type", "application/json"),
+        ],
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    let updated: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(
+        updated["externalId"], "ext-add-123",
+        "Add externalId must set the value (RFC 7644 §3.5.2.1)"
+    );
+
+    // Add a different externalId — should replace, not accumulate.
+    let (status, body) = http_request(
+        &app,
+        "PATCH",
+        &format!("/scim/v2/Users/{}", user_id),
+        Some(r#"{"schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"], "Operations": [{"op": "add", "path": "externalId", "value": "ext-add-456"}]}"#.to_string()),
+        &[
+            ("Authorization", &auth_header),
+            ("Content-Type", "application/json"),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    let updated: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(
+        updated["externalId"], "ext-add-456",
+        "Add externalId must replace the previous value"
+    );
+}
+
+#[tokio::test]
+async fn test_patch_user_add_active_deactivates() {
+    // Regression: Add with path "active" must still work after extending
+    // the handler to cover displayName/externalId. Deactivation must set
+    // active=false and trigger session invalidation side-effects.
+    let (app, state) = test_app().await;
+    let token = create_test_scim_token(&state.store, "test-add-active", "test-org").await;
+    let auth_header = format!("Bearer {}", token);
+
+    let (status, body) = http_post_json(
+        &app,
+        "/scim/v2/Users",
+        r#"{"schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"], "userName": "add-active@test-org.example.com", "active": true}"#,
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "setup create failed: {body}");
+    let created: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let user_id = created["id"].as_str().expect("user id");
+
+    let (status, body) = http_request(
+        &app,
+        "PATCH",
+        &format!("/scim/v2/Users/{}", user_id),
+        Some(r#"{"schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"], "Operations": [{"op": "add", "path": "active", "value": false}]}"#.to_string()),
+        &[
+            ("Authorization", &auth_header),
+            ("Content-Type", "application/json"),
+        ],
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    let updated: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(updated["active"], false, "Add active=false must deactivate");
+}
+
+#[tokio::test]
+async fn test_patch_user_add_bulk_merges_attributes() {
+    // RFC 7644 §3.5.2: Add without a path carries a complex value object
+    // whose presented attributes are merged into the resource — the same
+    // semantics as Replace without a path.
+    let (app, state) = test_app().await;
+    let token = create_test_scim_token(&state.store, "test-add-bulk", "test-org").await;
+    let auth_header = format!("Bearer {}", token);
+
+    let (status, body) = http_post_json(
+        &app,
+        "/scim/v2/Users",
+        r#"{"schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"], "userName": "add-bulk@test-org.example.com", "active": true}"#,
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "setup create failed: {body}");
+    let created: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let user_id = created["id"].as_str().expect("user id");
+
+    // Bulk add: merge name.formatted, externalId, and active in one op.
+    let (status, body) = http_request(
+        &app,
+        "PATCH",
+        &format!("/scim/v2/Users/{}", user_id),
+        Some(r#"{"schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"], "Operations": [{"op": "add", "value": {"name": {"formatted": "Bulk Name"}, "externalId": "bulk-ext-1", "active": false}}]}"#.to_string()),
+        &[
+            ("Authorization", &auth_header),
+            ("Content-Type", "application/json"),
+        ],
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    let updated: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(updated["name"]["formatted"], "Bulk Name");
+    assert_eq!(updated["externalId"], "bulk-ext-1");
+    assert_eq!(updated["active"], false);
+}
+
+#[tokio::test]
+async fn test_patch_user_add_unsupported_path_returns_400() {
+    // RFC 7644 §3.5.2: An Add operation on an unsupported attribute path
+    // must return 400 invalidPath — the same error Replace returns for
+    // unknown paths. Previously Add silently ignored unknown paths and
+    // returned 200 OK, masking data loss.
+    let (app, state) = test_app().await;
+    let token = create_test_scim_token(&state.store, "test-add-unknown-path", "test-org").await;
+    let auth_header = format!("Bearer {}", token);
+
+    let (status, body) = http_post_json(
+        &app,
+        "/scim/v2/Users",
+        r#"{"schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"], "userName": "add-unknown@test-org.example.com", "active": true}"#,
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "setup create failed: {body}");
+    let created: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let user_id = created["id"].as_str().expect("user id");
+
+    let (status, body) = http_request(
+        &app,
+        "PATCH",
+        &format!("/scim/v2/Users/{}", user_id),
+        Some(r#"{"schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"], "Operations": [{"op": "add", "path": "unknownField", "value": "test"}]}"#.to_string()),
+        &[
+            ("Authorization", &auth_header),
+            ("Content-Type", "application/json"),
+        ],
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+    let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(error["scimType"], "invalidPath");
+}
+
+// ========================================================================
 // RFC 7644 Section 3.5.3 - PATCH Unsupported Paths
 // ========================================================================
 
@@ -1486,6 +1767,171 @@ async fn test_scim_patch_group_replace_external_id() {
     assert_eq!(status, StatusCode::OK, "PATCH must return 200: {body}");
     let updated: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
     assert_eq!(updated["externalId"], "ext-devops-99");
+}
+
+// ========================================================================
+// RFC 7644 Section 3.5.2.1 — Group Add operation on single-valued attrs
+// ========================================================================
+//
+// RFC 7644 §3.5.2.1: "If the target location specifies a single-valued
+// attribute, the existing value is replaced." These tests confirm the Add
+// operation applies displayName and externalId updates for Groups — the
+// same behavior as Replace — rather than silently ignoring them.
+
+#[tokio::test]
+async fn test_scim_patch_group_add_display_name() {
+    // RFC 7644 §3.5.2.1: Add with path "displayName" must replace the
+    // existing group displayName. Previously the Groups Add handler only
+    // recognized "members" and silently dropped displayName.
+    let (app, state) = test_app().await;
+    let token = create_test_scim_token(&state.store, "test-add-group-name", "test-org").await;
+    let auth_header = format!("Bearer {}", token);
+
+    // Create group with initial displayName.
+    let (status, body) = http_post_json(
+        &app,
+        "/scim/v2/Groups",
+        r#"{"schemas": ["urn:ietf:params:scim:schemas:core:2.0:Group"], "displayName": "OldGroupName"}"#,
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "setup create failed: {body}");
+    let created: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let group_id = created["id"].as_str().expect("group id");
+    assert_eq!(created["displayName"], "OldGroupName");
+
+    // PATCH add displayName.
+    let (status, body) = http_request(
+        &app,
+        "PATCH",
+        &format!("/scim/v2/Groups/{}", group_id),
+        Some(r#"{"schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"], "Operations": [{"op": "add", "path": "displayName", "value": "NewGroupName"}]}"#.to_string()),
+        &[
+            ("Content-Type", "application/json"),
+            ("Authorization", &auth_header),
+        ],
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "PATCH add must return 200: {body}");
+    let updated: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(
+        updated["displayName"], "NewGroupName",
+        "Add displayName must replace the existing group name (RFC 7644 §3.5.2.1)"
+    );
+
+    // Re-GET to confirm persistence.
+    let (status, body) = http_get(
+        &app,
+        &format!("/scim/v2/Groups/{}", group_id),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let fetched: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(fetched["displayName"], "NewGroupName");
+}
+
+#[tokio::test]
+async fn test_scim_patch_group_add_external_id() {
+    // RFC 7644 §3.5.2.1: Add with path "externalId" must set/replace the
+    // group's externalId. Previously silently ignored by the Add handler.
+    let (app, state) = test_app().await;
+    let token = create_test_scim_token(&state.store, "test-add-group-extid", "test-org").await;
+    let auth_header = format!("Bearer {}", token);
+
+    let (status, body) = http_post_json(
+        &app,
+        "/scim/v2/Groups",
+        r#"{"schemas": ["urn:ietf:params:scim:schemas:core:2.0:Group"], "displayName": "AddExtIdGroup"}"#,
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "setup create failed: {body}");
+    let created: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let group_id = created["id"].as_str().expect("group id");
+    assert!(
+        created.get("externalId").is_none(),
+        "group created without externalId"
+    );
+
+    // Add externalId via Add operation.
+    let (status, body) = http_request(
+        &app,
+        "PATCH",
+        &format!("/scim/v2/Groups/{}", group_id),
+        Some(r#"{"schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"], "Operations": [{"op": "add", "path": "externalId", "value": "group-ext-1"}]}"#.to_string()),
+        &[
+            ("Content-Type", "application/json"),
+            ("Authorization", &auth_header),
+        ],
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "PATCH add must return 200: {body}");
+    let updated: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(
+        updated["externalId"], "group-ext-1",
+        "Add externalId must set the value (RFC 7644 §3.5.2.1)"
+    );
+
+    // Add a different externalId — should replace, not accumulate.
+    let (status, body) = http_request(
+        &app,
+        "PATCH",
+        &format!("/scim/v2/Groups/{}", group_id),
+        Some(r#"{"schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"], "Operations": [{"op": "add", "path": "externalId", "value": "group-ext-2"}]}"#.to_string()),
+        &[
+            ("Content-Type", "application/json"),
+            ("Authorization", &auth_header),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "PATCH add must return 200: {body}");
+    let updated: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(
+        updated["externalId"], "group-ext-2",
+        "Add externalId must replace the previous value"
+    );
+}
+
+#[tokio::test]
+async fn test_scim_patch_group_add_bulk_merges_attributes() {
+    // RFC 7644 §3.5.2: Add without a path carries a complex value object
+    // whose presented attributes are merged into the resource — the same
+    // semantics as Replace without a path.
+    let (app, state) = test_app().await;
+    let token = create_test_scim_token(&state.store, "test-add-group-bulk", "test-org").await;
+    let auth_header = format!("Bearer {}", token);
+
+    let (status, body) = http_post_json(
+        &app,
+        "/scim/v2/Groups",
+        r#"{"schemas": ["urn:ietf:params:scim:schemas:core:2.0:Group"], "displayName": "BulkOriginal"}"#,
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "setup create failed: {body}");
+    let created: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let group_id = created["id"].as_str().expect("group id");
+
+    // Bulk add: merge displayName and externalId in one op.
+    let (status, body) = http_request(
+        &app,
+        "PATCH",
+        &format!("/scim/v2/Groups/{}", group_id),
+        Some(r#"{"schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"], "Operations": [{"op": "add", "value": {"displayName": "BulkNew", "externalId": "bulk-group-ext"}}]}"#.to_string()),
+        &[
+            ("Content-Type", "application/json"),
+            ("Authorization", &auth_header),
+        ],
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "PATCH add must return 200: {body}");
+    let updated: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(updated["displayName"], "BulkNew");
+    assert_eq!(updated["externalId"], "bulk-group-ext");
 }
 
 // ========================================================================
