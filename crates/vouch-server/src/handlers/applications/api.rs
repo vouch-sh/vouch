@@ -89,6 +89,7 @@ pub(crate) async fn create_application_api(
         redirect_uris: &req.redirect_uris,
         resource_uris,
         post_logout_redirect_uris: post_logout_redirect_uris_raw,
+        access_scope: req.access_scope.as_deref(),
         fapi_profile: req.fapi_profile.as_deref(),
         jwks: req.jwks.as_deref(),
         jwks_uri: req.jwks_uri.as_deref(),
@@ -103,12 +104,7 @@ pub(crate) async fn create_application_api(
     // extraction fails before touching the store when no credential is sent.
     let AuthenticatedToken(token) = token?;
 
-    // Parse access scope (default to personal if not provided)
-    let access_scope = req
-        .access_scope
-        .as_ref()
-        .and_then(|s| s.parse::<AccessScope>().ok())
-        .unwrap_or_default();
+    let access_scope = validated.access_scope;
 
     let user = load_active_user_for_scope(
         &state,
@@ -249,6 +245,7 @@ pub(crate) async fn update_application_api(
         redirect_uris: req.redirect_uris.as_deref(),
         resource_uris: req.resource_uris.as_deref(),
         post_logout_redirect_uris: req.post_logout_redirect_uris.as_deref(),
+        access_scope: req.access_scope.as_deref(),
         fapi_profile: req.fapi_profile.as_deref(),
         jwks: req.jwks.as_deref(),
         jwks_uri: req.jwks_uri.as_deref(),
@@ -284,11 +281,7 @@ pub(crate) async fn update_application_api(
         ));
     }
 
-    // Parse access scope if provided
-    let access_scope = req
-        .access_scope
-        .as_ref()
-        .and_then(|s| s.parse::<AccessScope>().ok());
+    let access_scope = validated.access_scope;
 
     let user = load_active_user_for_scope(
         &state,

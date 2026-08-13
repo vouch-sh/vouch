@@ -24,6 +24,8 @@ use super::{validate_post_logout_redirect_uris, validate_redirect_uris};
 pub(super) enum AppValidationError {
     EmptyName,
     InvalidApplicationType,
+    InvalidAccessScope,
+    InvalidFapiProfile(String),
     MissingRedirectUris,
     InvalidRedirectUris(Vec<String>),
     InvalidPostLogoutRedirectUris(Vec<String>),
@@ -42,6 +44,8 @@ impl AppValidationError {
         match self {
             Self::EmptyName => "invalid_name",
             Self::InvalidApplicationType => "invalid_type",
+            Self::InvalidAccessScope => "invalid_access_scope",
+            Self::InvalidFapiProfile(_) => "invalid_fapi_profile",
             Self::MissingRedirectUris | Self::InvalidRedirectUris(_) => "invalid_redirect_uris",
             Self::InvalidPostLogoutRedirectUris(_) => "invalid_post_logout_redirect_uris",
             Self::InvalidResourceUri { .. } => "invalid_resource_uri",
@@ -59,6 +63,12 @@ impl AppValidationError {
             Self::EmptyName => "Application name is required".to_string(),
             Self::InvalidApplicationType => {
                 "Invalid application type. Must be: web, native, spa, or service".to_string()
+            }
+            Self::InvalidAccessScope => {
+                "Invalid access_scope. Valid values: personal, organization, public".to_string()
+            }
+            Self::InvalidFapiProfile(p) => {
+                format!("Invalid fapi_profile '{p}'. Valid values: none, fapi2_security")
             }
             Self::MissingRedirectUris => "At least one redirect URI is required".to_string(),
             Self::InvalidRedirectUris(invalid) => format!(
@@ -109,16 +119,19 @@ pub(super) struct CreateAppInput<'a> {
     pub resource_uris: &'a [String],
     /// `None` means not provided (field absent); `Some(&[])` is accepted (no post-logout URIs).
     pub post_logout_redirect_uris: Option<&'a [String]>,
+    pub access_scope: Option<&'a str>,
     pub fapi_profile: Option<&'a str>,
     pub jwks: Option<&'a str>,
     pub jwks_uri: Option<&'a str>,
 }
 
 /// Validated create fields, ready for `CreateOAuthClientParams`.
+#[derive(Debug)]
 pub(super) struct ValidatedCreateApp<'a> {
     /// Trimmed, non-empty application name.
     pub name: &'a str,
     pub app_type: OAuthClientType,
+    pub access_scope: AccessScope,
     pub is_fapi: bool,
     /// Parsed JWKS with a non-empty `keys` array (if provided).
     pub jwks: Option<serde_json::Value>,
@@ -159,7 +172,17 @@ pub(super) fn validate_create_application<'a>(
     // Validate resource URIs per RFC 8707 (absolute URI, no fragment).
     validate_resource_uris(input.resource_uris)?;
 
-    let is_fapi = input.fapi_profile.is_some_and(|p| p == "fapi2_security");
+    let access_scope = match input.access_scope {
+        None => AccessScope::default(),
+        Some(s) => s
+            .parse::<AccessScope>()
+            .map_err(|_| AppValidationError::InvalidAccessScope)?,
+    };
+
+    let is_fapi = match input.fapi_profile {
+        None => false,
+        Some(p) => validate_fapi_profile_value(p)?,
+    };
 
     // FAPI validation: must be a confidential client type
     if is_fapi && !matches!(app_type, OAuthClientType::Web | OAuthClientType::Service) {
@@ -180,6 +203,7 @@ pub(super) fn validate_create_application<'a>(
     Ok(ValidatedCreateApp {
         name,
         app_type,
+        access_scope,
         is_fapi,
         jwks,
         jwks_uri,
@@ -195,18 +219,22 @@ pub(super) struct UpdateAppInput<'a> {
     pub resource_uris: Option<&'a [String]>,
     /// `None` = field absent (preserve existing). `Some(&[])` = explicitly clear the list.
     pub post_logout_redirect_uris: Option<&'a [String]>,
+    pub access_scope: Option<&'a str>,
     pub fapi_profile: Option<&'a str>,
     pub jwks: Option<&'a str>,
     pub jwks_uri: Option<&'a str>,
 }
 
 /// Validated update fields (format phase only).
+#[derive(Debug)]
 pub(super) struct ValidatedUpdateApp<'a> {
     pub is_fapi: bool,
     /// Whether `fapi_profile` was present in the request at all. A provided
     /// non-FAPI value is an explicit transition away from FAPI; an absent
     /// field preserves the existing profile.
     pub fapi_profile_provided: bool,
+    /// Parsed access scope (`None` = field absent, preserve existing).
+    pub access_scope: Option<AccessScope>,
     /// Parsed JWKS with a non-empty `keys` array (if provided).
     pub jwks: Option<serde_json::Value>,
     /// Trimmed, https-validated JWKS URI (if provided).
@@ -246,7 +274,18 @@ pub(super) fn validate_update_format<'a>(
             .map_err(AppValidationError::InvalidPostLogoutRedirectUris)?;
     }
 
-    let is_fapi = input.fapi_profile.is_some_and(|p| p == "fapi2_security");
+    let access_scope = match input.access_scope {
+        None => None,
+        Some(s) => Some(
+            s.parse::<AccessScope>()
+                .map_err(|_| AppValidationError::InvalidAccessScope)?,
+        ),
+    };
+
+    let is_fapi = match input.fapi_profile {
+        None => false,
+        Some(p) => validate_fapi_profile_value(p)?,
+    };
 
     let jwks = trim_nonempty(input.jwks).map(parse_jwks).transpose()?;
     let jwks_uri = trim_nonempty(input.jwks_uri);
@@ -255,6 +294,7 @@ pub(super) fn validate_update_format<'a>(
     Ok(ValidatedUpdateApp {
         is_fapi,
         fapi_profile_provided: input.fapi_profile.is_some(),
+        access_scope,
         jwks,
         jwks_uri,
         redirect_uris: input.redirect_uris,
@@ -471,6 +511,21 @@ fn trim_nonempty(value: Option<&str>) -> Option<&str> {
     value.map(str::trim).filter(|s| !s.is_empty())
 }
 
+/// Parse a `fapi_profile` string into a boolean `is_fapi` flag.
+///
+/// Returns `Ok(true)` for `"fapi2_security"` and `Ok(false)` for the
+/// accepted non-FAPI sentinels: `"none"` (the canonical `FapiProfile` wire
+/// value), `"standard"` (used by the API/tests), and `""` (the web form's
+/// radio-button value for the standard profile). Any other value is
+/// rejected with [`AppValidationError::InvalidFapiProfile`].
+fn validate_fapi_profile_value(p: &str) -> Result<bool, AppValidationError> {
+    match p {
+        "fapi2_security" => Ok(true),
+        "none" | "standard" | "" => Ok(false),
+        _ => Err(AppValidationError::InvalidFapiProfile(p.to_string())),
+    }
+}
+
 fn validate_resource_uris(uris: &[String]) -> Result<(), AppValidationError> {
     for uri in uris {
         if let Err(e) = ResourceUri::parse(uri) {
@@ -528,6 +583,7 @@ mod tests {
             redirect_uris: &redirect_uris,
             resource_uris: &[],
             post_logout_redirect_uris: None,
+            access_scope: None,
             fapi_profile: Some("fapi2_security"),
             jwks: Some(&jwks),
             jwks_uri: None,
@@ -569,6 +625,7 @@ mod tests {
             redirect_uris: &redirect_uris,
             resource_uris: &[],
             post_logout_redirect_uris: None,
+            access_scope: None,
             fapi_profile: None,
             jwks: Some(&jwks),
             jwks_uri: None,
@@ -605,6 +662,7 @@ mod tests {
             redirect_uris: &redirect_uris,
             resource_uris: &[],
             post_logout_redirect_uris: Some(&post_logout),
+            access_scope: None,
             fapi_profile: None,
             jwks: None,
             jwks_uri: None,
@@ -672,6 +730,7 @@ mod tests {
             redirect_uris: None,
             resource_uris: None,
             post_logout_redirect_uris: None,
+            access_scope: None,
             fapi_profile,
             jwks: None,
             jwks_uri: None,
@@ -750,6 +809,7 @@ mod tests {
             redirect_uris: None,
             resource_uris: None,
             post_logout_redirect_uris: None,
+            access_scope: None,
             fapi_profile: Some("fapi2_security"),
             jwks: Some(&jwks),
             jwks_uri: Some("https://client.example/jwks.json"),
@@ -765,5 +825,127 @@ mod tests {
         assert!(fields.jwks.is_some(), "request JWKS used");
         assert_eq!(fields.jwks_uri, Some("https://client.example/jwks.json"));
         assert!(fields.dpop_bound_access_tokens);
+    }
+
+    // ========================================================================
+    // access_scope / fapi_profile enum validation — invalid values must be
+    // rejected, not silently coerced to defaults.
+    // ========================================================================
+
+    fn base_create_input<'a>(
+        redirect_uris: &'a [String],
+        access_scope: Option<&'a str>,
+        fapi_profile: Option<&'a str>,
+    ) -> CreateAppInput<'a> {
+        CreateAppInput {
+            name: "App",
+            application_type: "web",
+            redirect_uris,
+            resource_uris: &[],
+            post_logout_redirect_uris: None,
+            access_scope,
+            fapi_profile,
+            jwks: None,
+            jwks_uri: None,
+        }
+    }
+
+    #[test]
+    fn create_rejects_invalid_access_scope() {
+        let redirect_uris = vec!["https://example.com/cb".to_string()];
+        let err = validate_create_application(base_create_input(
+            &redirect_uris,
+            Some("organizaton"),
+            None,
+        ))
+        .expect_err("typo must be rejected");
+        assert_eq!(err.code(), "invalid_access_scope");
+        assert!(err.message().contains("personal"));
+    }
+
+    #[test]
+    fn create_accepts_valid_access_scope_values() {
+        let redirect_uris = vec!["https://example.com/cb".to_string()];
+        for (s, expected) in &[
+            ("personal", AccessScope::Personal),
+            ("organization", AccessScope::Organization),
+            ("public", AccessScope::Public),
+            ("PERSONAL", AccessScope::Personal), // case-insensitive
+        ] {
+            let validated =
+                validate_create_application(base_create_input(&redirect_uris, Some(s), None))
+                    .expect("valid scope");
+            assert_eq!(validated.access_scope, *expected, "scope {s}");
+        }
+    }
+
+    #[test]
+    fn create_absent_access_scope_defaults_to_personal() {
+        let redirect_uris = vec!["https://example.com/cb".to_string()];
+        let validated = validate_create_application(base_create_input(&redirect_uris, None, None))
+            .expect("valid input");
+        assert_eq!(validated.access_scope, AccessScope::Personal);
+    }
+
+    #[test]
+    fn create_rejects_invalid_fapi_profile() {
+        let redirect_uris = vec!["https://example.com/cb".to_string()];
+        let err = validate_create_application(base_create_input(
+            &redirect_uris,
+            None,
+            Some("fapi_security"),
+        ))
+        .expect_err("typo must be rejected");
+        assert_eq!(err.code(), "invalid_fapi_profile");
+        assert!(err.message().contains("fapi_security"));
+    }
+
+    #[test]
+    fn create_accepts_valid_non_fapi_profile_sentinels() {
+        let redirect_uris = vec!["https://example.com/cb".to_string()];
+        for s in &["none", "standard", ""] {
+            let validated =
+                validate_create_application(base_create_input(&redirect_uris, None, Some(s)))
+                    .expect("valid non-FAPI sentinel");
+            assert!(!validated.is_fapi, "sentinel '{s}' must not set is_fapi");
+        }
+    }
+
+    fn base_update_input<'a>(
+        access_scope: Option<&'a str>,
+        fapi_profile: Option<&'a str>,
+    ) -> UpdateAppInput<'a> {
+        UpdateAppInput {
+            redirect_uris: None,
+            resource_uris: None,
+            post_logout_redirect_uris: None,
+            access_scope,
+            fapi_profile,
+            jwks: None,
+            jwks_uri: None,
+        }
+    }
+
+    #[test]
+    fn update_rejects_invalid_access_scope() {
+        let err = validate_update_format(base_update_input(Some("publik"), None))
+            .expect_err("typo must be rejected");
+        assert_eq!(err.code(), "invalid_access_scope");
+    }
+
+    #[test]
+    fn update_absent_access_scope_is_none() {
+        let validated = validate_update_format(base_update_input(None, None)).expect("valid input");
+        assert!(
+            validated.access_scope.is_none(),
+            "absent field must be None"
+        );
+    }
+
+    #[test]
+    fn update_rejects_invalid_fapi_profile() {
+        let err = validate_update_format(base_update_input(None, Some("fapi1_adv")))
+            .expect_err("invalid profile must be rejected");
+        assert_eq!(err.code(), "invalid_fapi_profile");
     }
 }
