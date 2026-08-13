@@ -69,7 +69,6 @@ pub struct TokenExchangeParams<'a> {
 }
 
 /// Result of a token exchange (RFC 8693 Section 2.2).
-#[derive(Debug)]
 pub struct TokenExchangeResult {
     /// The security token issued by the authorization server.
     pub access_token: String,
@@ -83,6 +82,22 @@ pub struct TokenExchangeResult {
     pub scope: Option<ScopeSet>,
     /// RFC 9396: Rich authorization details (inherited from subject token).
     pub authorization_details: Option<AuthorizationDetails>,
+}
+
+// Custom Debug that redacts access_token to prevent accidental log exposure of
+// bearer credentials. The `access_token` field may hold either an RFC 9068
+// access token or an OIDC ID token (when `requested_token_type=id_token`).
+impl std::fmt::Debug for TokenExchangeResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TokenExchangeResult")
+            .field("access_token", &"[REDACTED]")
+            .field("issued_token_type", &self.issued_token_type)
+            .field("token_type", &self.token_type)
+            .field("expires_in", &self.expires_in)
+            .field("scope", &self.scope)
+            .field("authorization_details", &self.authorization_details)
+            .finish()
+    }
 }
 
 /// Exchange a token for a new token (RFC 8693).
@@ -740,5 +755,32 @@ mod tests {
         assert!(token_types::ACCESS_TOKEN.starts_with("urn:ietf:params:oauth:token-type:"));
         assert!(token_types::ID_TOKEN.starts_with("urn:ietf:params:oauth:token-type:"));
         assert!(token_types::JWT.starts_with("urn:ietf:params:oauth:token-type:"));
+    }
+
+    // =========================================================================
+    // TokenExchangeResult Debug redaction
+    //
+    // access_token is a bearer credential (RFC 9068 access token or OIDC ID
+    // token when requested_token_type=id_token) and must never appear in
+    // `{:?}` output (defense in depth — matches AwsTokenResult).
+    // =========================================================================
+
+    #[test]
+    fn test_token_exchange_result_debug_redacts_access_token() {
+        let result = TokenExchangeResult {
+            access_token: "eyJhbGciOiJFUzI1NiJ9.exchange-secret-token".to_string(),
+            issued_token_type: token_types::ACCESS_TOKEN.to_string(),
+            token_type: "Bearer".to_string(),
+            expires_in: 3600,
+            scope: Some(ScopeSet::parse("openid")),
+            authorization_details: None,
+        };
+        let debug = format!("{result:?}");
+        assert!(debug.contains("[REDACTED]"), "{debug}");
+        assert!(!debug.contains("exchange-secret-token"), "{debug}");
+        // Non-sensitive fields remain visible.
+        assert!(debug.contains("Bearer"), "{debug}");
+        assert!(debug.contains("3600"), "{debug}");
+        assert!(debug.contains("TokenExchangeResult"), "{debug}");
     }
 }
