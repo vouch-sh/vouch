@@ -284,7 +284,7 @@ pub(crate) struct UpdateApplicationRequest {
 }
 
 /// API response for a created application.
-#[derive(Debug, Serialize)]
+#[derive(Serialize)]
 pub(crate) struct CreateApplicationResponse {
     pub id: String,
     pub client_id: String,
@@ -305,6 +305,30 @@ pub(crate) struct CreateApplicationResponse {
     /// RP-Initiated Logout 1.0: Registered post-logout redirect URIs.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub post_logout_redirect_uris: Option<Vec<String>>,
+}
+
+// Custom Debug that redacts client_secret to prevent accidental log exposure
+// of the freshly minted plaintext secret, which is returned only once.
+impl std::fmt::Debug for CreateApplicationResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CreateApplicationResponse")
+            .field("id", &self.id)
+            .field("client_id", &self.client_id)
+            .field("client_secret", &"[REDACTED]")
+            .field("name", &self.name)
+            .field("application_type", &self.application_type)
+            .field("access_scope", &self.access_scope)
+            .field("resource_uris", &self.resource_uris)
+            .field(
+                "token_endpoint_auth_method",
+                &self.token_endpoint_auth_method,
+            )
+            .field("fapi_profile", &self.fapi_profile)
+            .field("jwks_configured", &self.jwks_configured)
+            .field("jwks_uri", &self.jwks_uri)
+            .field("post_logout_redirect_uris", &self.post_logout_redirect_uris)
+            .finish()
+    }
 }
 
 /// API response for application details.
@@ -377,12 +401,25 @@ pub(crate) struct AddSecretRequest {
 }
 
 /// API response for adding a secret (plaintext shown once).
-#[derive(Debug, Serialize)]
+#[derive(Serialize)]
 pub(crate) struct AddSecretResponse {
     pub secret_id: String,
     pub client_secret: String,
     pub created_at: Timestamp,
     pub expires_at: Option<Timestamp>,
+}
+
+// Custom Debug that redacts client_secret to prevent accidental log exposure
+// of the freshly minted plaintext secret, which is returned only once.
+impl std::fmt::Debug for AddSecretResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AddSecretResponse")
+            .field("secret_id", &self.secret_id)
+            .field("client_secret", &"[REDACTED]")
+            .field("created_at", &self.created_at)
+            .field("expires_at", &self.expires_at)
+            .finish()
+    }
 }
 
 /// Secret metadata for listing (never exposes hash).

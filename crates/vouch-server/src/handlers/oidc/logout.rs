@@ -47,17 +47,13 @@ use std::sync::Arc;
 // ============================================================================
 
 /// GET /oauth/logout query parameters (RP-Initiated Logout 1.0 Section 3).
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub(crate) struct LogoutQuery {
     /// OPTIONAL. Previously issued ID Token passed as a hint. Used to identify
     /// the RP and optionally to look up the client's registered post-logout URIs.
     pub id_token_hint: Option<String>,
     /// OPTIONAL. Hint about the End-User's login identifier. Informational only;
-    /// accepted per spec but not acted upon.
-    #[expect(
-        dead_code,
-        reason = "accepted per spec; not acted upon in this implementation"
-    )]
+    /// accepted per spec but not acted upon; the `Debug` impl is its only reader.
     pub logout_hint: Option<String>,
     /// OPTIONAL. OAuth 2.0 Client Identifier. Used only for display on the
     /// confirmation page when no `id_token_hint` is present. Does NOT gate
@@ -75,8 +71,23 @@ pub(crate) struct LogoutQuery {
     pub ui_locales: Option<String>,
 }
 
+// Custom Debug that redacts id_token_hint to prevent accidental log exposure:
+// it is a previously issued ID token, a bearer assertion in its own right.
+impl std::fmt::Debug for LogoutQuery {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LogoutQuery")
+            .field("id_token_hint", &"[REDACTED]")
+            .field("logout_hint", &self.logout_hint)
+            .field("client_id", &self.client_id)
+            .field("post_logout_redirect_uri", &self.post_logout_redirect_uri)
+            .field("state", &self.state)
+            .field("ui_locales", &self.ui_locales)
+            .finish()
+    }
+}
+
 /// POST /oauth/logout form body — mirrors the hidden fields in the confirmation form.
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub(crate) struct LogoutForm {
     pub id_token_hint: Option<String>,
     pub post_logout_redirect_uri: Option<String>,
@@ -89,6 +100,20 @@ pub(crate) struct LogoutForm {
     /// `ui_locales` is carried as a hidden field so the done page renders in the
     /// same locale as the confirmation page (plan §7).
     pub ui_locales: Option<String>,
+}
+
+// Custom Debug that redacts id_token_hint to prevent accidental log exposure:
+// it is a previously issued ID token, a bearer assertion in its own right.
+impl std::fmt::Debug for LogoutForm {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LogoutForm")
+            .field("id_token_hint", &"[REDACTED]")
+            .field("post_logout_redirect_uri", &self.post_logout_redirect_uri)
+            .field("client_id", &self.client_id)
+            .field("state", &self.state)
+            .field("ui_locales", &self.ui_locales)
+            .finish()
+    }
 }
 
 // ============================================================================

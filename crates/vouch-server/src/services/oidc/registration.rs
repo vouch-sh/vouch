@@ -184,7 +184,7 @@ impl RegistrationRequest {
 }
 
 /// RFC 7591 Section 3.2.1: Client Information Response.
-#[derive(Debug, Serialize)]
+#[derive(Serialize)]
 pub struct RegistrationResponse {
     /// RFC 7591 Section 3.2.1: REQUIRED. OAuth 2.0 client identifier.
     pub client_id: String,
@@ -257,6 +257,67 @@ pub struct RegistrationResponse {
     /// RP-Initiated Logout 1.0: Registered post-logout redirect URIs (echoed).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub post_logout_redirect_uris: Option<Vec<String>>,
+}
+
+// Custom Debug that redacts client_secret and registration_access_token to
+// prevent accidental log exposure. Both are minted here and returned to the
+// client in plaintext exactly once.
+impl std::fmt::Debug for RegistrationResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RegistrationResponse")
+            .field("client_id", &self.client_id)
+            .field("client_secret", &"[REDACTED]")
+            .field("client_secret_expires_at", &self.client_secret_expires_at)
+            .field("client_id_issued_at", &self.client_id_issued_at)
+            .field("registration_access_token", &"[REDACTED]")
+            .field("registration_client_uri", &self.registration_client_uri)
+            .field("redirect_uris", &self.redirect_uris)
+            .field(
+                "token_endpoint_auth_method",
+                &self.token_endpoint_auth_method,
+            )
+            .field("grant_types", &self.grant_types)
+            .field("response_types", &self.response_types)
+            .field("client_name", &self.client_name)
+            .field("client_uri", &self.client_uri)
+            .field("logo_uri", &self.logo_uri)
+            .field("tos_uri", &self.tos_uri)
+            .field("policy_uri", &self.policy_uri)
+            .field("scope", &self.scope)
+            .field("contacts", &self.contacts)
+            .field("jwks", &self.jwks)
+            .field("jwks_uri", &self.jwks_uri)
+            .field("software_id", &self.software_id)
+            .field("software_version", &self.software_version)
+            .field("dpop_bound_access_tokens", &self.dpop_bound_access_tokens)
+            .field(
+                "id_token_signed_response_alg",
+                &self.id_token_signed_response_alg,
+            )
+            .field(
+                "authorization_signed_response_alg",
+                &self.authorization_signed_response_alg,
+            )
+            .field(
+                "introspection_signed_response_alg",
+                &self.introspection_signed_response_alg,
+            )
+            .field(
+                "request_object_signing_alg",
+                &self.request_object_signing_alg,
+            )
+            .field(
+                "require_signed_request_object",
+                &self.require_signed_request_object,
+            )
+            .field(
+                "userinfo_signed_response_alg",
+                &self.userinfo_signed_response_alg,
+            )
+            .field("request_uris", &self.request_uris)
+            .field("post_logout_redirect_uris", &self.post_logout_redirect_uris)
+            .finish()
+    }
 }
 
 // ============================================================================

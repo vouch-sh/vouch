@@ -30,10 +30,20 @@ pub async fn list_additional_domains(
 }
 
 /// Result of adding an additional domain.
-#[derive(Debug)]
 pub struct AddedDomain {
     pub domain: String,
     pub verification_token: String,
+}
+
+// Custom Debug that redacts verification_token to keep the DNS challenge
+// value out of logs.
+impl std::fmt::Debug for AddedDomain {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AddedDomain")
+            .field("domain", &self.domain)
+            .field("verification_token", &"[REDACTED]")
+            .finish()
+    }
 }
 
 /// Generate a fresh verification token suitable for use in a DNS TXT record.
@@ -685,13 +695,27 @@ pub async fn cleanup_stale_additional_domains(
 /// A snapshot of one verified additional-domain entry, used by the
 /// re-verification task to drive its DNS checks without holding the org doc
 /// open while it waits on the network.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct VerifiedDomainRecord {
     pub org_id: String,
     pub domain: String,
     pub verification_token: String,
     pub last_checked_at: Option<Timestamp>,
     pub consecutive_failures: u32,
+}
+
+// Custom Debug that redacts verification_token to keep the DNS challenge
+// value out of logs.
+impl std::fmt::Debug for VerifiedDomainRecord {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("VerifiedDomainRecord")
+            .field("org_id", &self.org_id)
+            .field("domain", &self.domain)
+            .field("verification_token", &"[REDACTED]")
+            .field("last_checked_at", &self.last_checked_at)
+            .field("consecutive_failures", &self.consecutive_failures)
+            .finish()
+    }
 }
 
 /// Outcome of a single re-verification attempt for [`record_recheck_result`].

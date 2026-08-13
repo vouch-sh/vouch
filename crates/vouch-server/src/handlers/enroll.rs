@@ -170,11 +170,22 @@ pub(crate) struct OidcCallbackParams {
 }
 
 /// OIDC token response.
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 struct OidcTokenResponse {
     id_token: String,
     #[expect(dead_code, reason = "reserved for serde DTO conformance / future use")]
     access_token: String,
+}
+
+// Custom Debug that redacts both tokens to prevent accidental log exposure of
+// the upstream IdP's credentials for this user.
+impl std::fmt::Debug for OidcTokenResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OidcTokenResponse")
+            .field("id_token", &"[REDACTED]")
+            .field("access_token", &"[REDACTED]")
+            .finish()
+    }
 }
 
 /// Client data JSON structure from `WebAuthn` response.
