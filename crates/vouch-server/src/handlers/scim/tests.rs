@@ -772,6 +772,104 @@ async fn test_patch_user_add_unsupported_path_returns_400() {
 }
 
 // ========================================================================
+// RFC 7644 Section 3.5.2.2 — Remove operation on single-valued attributes
+// ========================================================================
+//
+// RFC 7644 §3.5.2.2: "If the target location is a single-valued attribute,
+// the attribute and its associated value is removed." Remove previously
+// recognized only "externalId" and silently ignored displayName and
+// name.formatted, returning 200 OK with the name still set.
+
+#[tokio::test]
+async fn test_patch_user_remove_display_name_clears() {
+    let (app, state) = test_app().await;
+    let token = create_test_scim_token(&state.store, "test-remove-displayname", "test-org").await;
+    let auth_header = format!("Bearer {}", token);
+
+    let (status, body) = http_post_json(
+        &app,
+        "/scim/v2/Users",
+        r#"{"schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"], "userName": "remove-displayname@test-org.example.com", "name": {"formatted": "Removable Name"}, "active": true}"#,
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "setup create failed: {body}");
+    let created: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let user_id = created["id"].as_str().expect("user id");
+    assert_eq!(created["name"]["formatted"], "Removable Name");
+
+    let (status, body) = http_request(
+        &app,
+        "PATCH",
+        &format!("/scim/v2/Users/{}", user_id),
+        Some(r#"{"schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"], "Operations": [{"op": "remove", "path": "displayName"}]}"#.to_string()),
+        &[
+            ("Authorization", &auth_header),
+            ("Content-Type", "application/json"),
+        ],
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    let updated: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(
+        updated["name"]["formatted"],
+        serde_json::Value::Null,
+        "Remove displayName must clear the stored name (RFC 7644 §3.5.2.2)"
+    );
+
+    // Re-GET to confirm persistence.
+    let (status, body) = http_get(
+        &app,
+        &format!("/scim/v2/Users/{}", user_id),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let fetched: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(fetched["name"]["formatted"], serde_json::Value::Null);
+}
+
+#[tokio::test]
+async fn test_patch_user_remove_name_formatted_clears() {
+    let (app, state) = test_app().await;
+    let token =
+        create_test_scim_token(&state.store, "test-remove-name-formatted", "test-org").await;
+    let auth_header = format!("Bearer {}", token);
+
+    let (status, body) = http_post_json(
+        &app,
+        "/scim/v2/Users",
+        r#"{"schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"], "userName": "remove-name-formatted@test-org.example.com", "name": {"formatted": "Removable Formatted"}, "active": true}"#,
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "setup create failed: {body}");
+    let created: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let user_id = created["id"].as_str().expect("user id");
+
+    let (status, body) = http_request(
+        &app,
+        "PATCH",
+        &format!("/scim/v2/Users/{}", user_id),
+        Some(r#"{"schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"], "Operations": [{"op": "remove", "path": "name.formatted"}]}"#.to_string()),
+        &[
+            ("Authorization", &auth_header),
+            ("Content-Type", "application/json"),
+        ],
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    let updated: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(
+        updated["name"]["formatted"],
+        serde_json::Value::Null,
+        "Remove name.formatted must clear the stored name (RFC 7644 §3.5.2.2)"
+    );
+}
+
+// ========================================================================
 // RFC 7644 Section 3.5.3 - PATCH Unsupported Paths
 // ========================================================================
 

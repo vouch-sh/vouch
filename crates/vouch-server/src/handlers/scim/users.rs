@@ -524,11 +524,21 @@ pub(crate) async fn patch_user(
                 }
             }
             ScimPatchOpType::Remove => {
-                // Remove operations
-                if let Some(path) = &op.path
-                    && path == "externalId"
-                {
-                    external_id = None;
+                // RFC 7644 §3.5.2.2: a Remove targeting a single-valued
+                // attribute removes the stored value. Paths Vouch does not
+                // store are ignored (Remove of an absent attribute is a
+                // no-op); `active` is excluded because removing it would
+                // ambiguously reset activation state.
+                if let Some(path) = &op.path {
+                    match path.as_str() {
+                        "name.formatted" | "displayName" => {
+                            name = None;
+                        }
+                        "externalId" => {
+                            external_id = None;
+                        }
+                        _ => {}
+                    }
                 }
             }
         }
