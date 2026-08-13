@@ -57,6 +57,25 @@ pub enum ServiceError {
         message: String,
     },
 
+    /// Structured API error that carries additional response headers.
+    ///
+    /// Like [`Self::Api`], but attaches headers the response must include —
+    /// e.g. the RFC 9449 `DPoP-Nonce` header that accompanies a
+    /// `use_dpop_nonce` error at a protected resource endpoint, so the client
+    /// can retry with a fresh nonce. The body is still
+    /// `{"code": "...", "message": "..."}`.
+    #[error("{message}")]
+    ApiWithHeaders {
+        /// HTTP status code.
+        status: StatusCode,
+        /// Machine-readable error code (e.g., "use_dpop_nonce").
+        code: String,
+        /// Human-readable error message.
+        message: String,
+        /// Additional response headers (e.g., `DPoP-Nonce`).
+        headers: Vec<(axum::http::HeaderName, axum::http::HeaderValue)>,
+    },
+
     /// RFC 9470: Step-up authentication required.
     ///
     /// A resource server determines the current token's authentication is
@@ -279,6 +298,34 @@ impl ServiceError {
         }
     }
 
+    /// Create a structured API error that carries an additional response header.
+    ///
+    /// Produces the same `{"code": "...", "message": "..."}` body as
+    /// [`Self::api`] but attaches a header such as `DPoP-Nonce` (RFC 9449) to
+    /// the response so the client can retry. The header name is parsed with
+    /// case-insensitive matching (`"DPoP-Nonce"` → `dpop-nonce`); the value is
+    /// stored verbatim and must be a valid HTTP header value.
+    #[must_use]
+    pub fn api_with_header(
+        status: StatusCode,
+        code: impl Into<String>,
+        message: impl Into<String>,
+        header: (&'static str, &str),
+    ) -> Self {
+        let (name, value) = header;
+        Self::ApiWithHeaders {
+            status,
+            code: code.into(),
+            message: message.into(),
+            headers: vec![(
+                axum::http::HeaderName::try_from(name)
+                    .unwrap_or_else(|_| axum::http::HeaderName::from_static("x-vouch-header")),
+                axum::http::HeaderValue::from_str(value)
+                    .unwrap_or_else(|_| axum::http::HeaderValue::from_static("")),
+            )],
+        }
+    }
+
     /// Classify a database error from a transactional operation.
     ///
     /// Writer contention (Postgres serialization failure, Aurora DSQL
@@ -407,6 +454,19 @@ impl ServiceError {
             } => {
                 return (*status, Json(ApiError::new(code.clone(), message.clone())))
                     .into_response();
+            }
+            Self::ApiWithHeaders {
+                status,
+                code,
+                message,
+                headers,
+            } => {
+                let mut response =
+                    (*status, Json(ApiError::new(code.clone(), message.clone()))).into_response();
+                for (name, value) in headers {
+                    response.headers_mut().append(name.clone(), value.clone());
+                }
+                return response;
             }
             Self::StepUpRequired {
                 acr_values,
@@ -845,5 +905,78 @@ mod tests {
                 .is_none_or(|d| !d.contains("issuer")),
             "internal error detail must not leak: {json:?}"
         );
+    }
+
+    // =========================================================================
+    // ServiceError::api_with_header — RFC 9449 DPoP-Nonce on resource 401s
+    // =========================================================================
+
+    /// `api_with_header` produces the same `{"code", "message"}` body as `api`,
+    /// plus the named response header. This is the shape `extract_resource_token`
+    /// relies on to return a `use_dpop_nonce` error with a fresh `DPoP-Nonce`
+    /// header (RFC 9449) at a protected resource endpoint.
+    #[tokio::test]
+    async fn test_api_with_header_emits_header_and_body() {
+        use axum::body::to_bytes;
+
+        let err = ServiceError::api_with_header(
+            StatusCode::UNAUTHORIZED,
+            "use_dpop_nonce",
+            "Authorization server requires nonce in DPoP proof",
+            ("DPoP-Nonce", "fresh-nonce-value"),
+        );
+        let response = err.into_response();
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        // Header name lookup is case-insensitive; "DPoP-Nonce" is stored as
+        // "dpop-nonce" and must be retrievable either way.
+        let nonce = response
+            .headers()
+            .get("dpop-nonce")
+            .and_then(|v| v.to_str().ok())
+            .unwrap();
+        assert_eq!(nonce, "fresh-nonce-value");
+
+        let body = to_bytes(response.into_body(), 4096).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["code"], "use_dpop_nonce");
+        assert_eq!(
+            json["message"],
+            "Authorization server requires nonce in DPoP proof"
+        );
+    }
+
+    /// `api_with_header` with an uppercase header name still produces a header
+    /// that clients reading the canonical lowercase form can find (HTTP headers
+    /// are case-insensitive per RFC 9230 §4.4.1).
+    #[test]
+    fn test_api_with_header_name_case_insensitive() {
+        let err = ServiceError::api_with_header(
+            StatusCode::UNAUTHORIZED,
+            "use_dpop_nonce",
+            "nonce required",
+            ("DPoP-Nonce", "abc"),
+        );
+        let response = err.into_response();
+        let headers = response.headers();
+        assert!(headers.get("dpop-nonce").is_some());
+        assert!(headers.get("DPoP-Nonce").is_some());
+        assert!(headers.get("DPOP-NONCE").is_some());
+    }
+
+    /// `ApiWithHeaders` is not retryable — only `OccConflict` is. Guards the
+    /// retry contract used by `with_dsql_retry!`.
+    #[test]
+    fn test_api_with_headers_is_not_retryable() {
+        use crate::db::pool::RetryableError;
+
+        let err = ServiceError::api_with_header(
+            StatusCode::UNAUTHORIZED,
+            "use_dpop_nonce",
+            "nonce required",
+            ("DPoP-Nonce", "abc"),
+        );
+        assert!(!err.is_retryable());
     }
 }
