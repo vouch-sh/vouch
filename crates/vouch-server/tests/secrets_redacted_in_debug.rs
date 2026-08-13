@@ -82,6 +82,11 @@ fn no_debug_derive_prints_a_plaintext_credential() {
         let cutoff = test_module_cutoff(&content);
         let production = content.get(..cutoff).unwrap_or(&content);
 
+        let rel = path.strip_prefix(&crates_root).map_or_else(
+            |_| path.to_string_lossy().into_owned(),
+            |p| p.to_string_lossy().into_owned(),
+        );
+
         for hit in debug_derived_secret_fields(production) {
             if ALLOWED
                 .iter()
@@ -89,14 +94,14 @@ fn no_debug_derive_prints_a_plaintext_credential() {
             {
                 continue;
             }
-            let rel = path.strip_prefix(&crates_root).map_or_else(
-                |_| path.to_string_lossy().into_owned(),
-                |p| p.to_string_lossy().into_owned(),
-            );
             violations.push(format!(
                 "{rel}:{} {}.{}: {}",
                 hit.line, hit.struct_name, hit.field, hit.ty
             ));
+        }
+
+        for (line, field) in manual_debug_unredacted_fields(production) {
+            violations.push(format!("{rel}:{line} manual Debug prints {field} verbatim"));
         }
     }
 
@@ -254,6 +259,39 @@ fn parse_field(trimmed: &str) -> Option<(String, String)> {
     Some((name.to_string(), ty.to_string()))
 }
 
+/// Secret-named fields a hand-written `Debug` prints without a placeholder.
+///
+/// Replacing a `derive(Debug)` with a manual impl is the fix this test asks
+/// for, so the manual impls are exactly where a credential can reappear —
+/// and a manual impl is invisible to [`debug_derived_secret_fields`], which
+/// only inspects derives.
+///
+/// The rule is type-independent: a secret-named field is printed as a
+/// placeholder regardless of whether its type would redact itself. A
+/// `SecretString` field prints `SecretBox<str>([REDACTED])` and so leaks
+/// nothing, but requiring the placeholder keeps every credential field in a
+/// manual impl reviewable without knowing each wrapper's `Debug`, and keeps
+/// the impl correct if the field is later changed to a bare `String`.
+fn manual_debug_unredacted_fields(content: &str) -> Vec<(usize, String)> {
+    let mut hits = Vec::new();
+    for (idx, line) in content.lines().enumerate() {
+        let trimmed = line.trim();
+        let Some(rest) = trimmed.strip_prefix(".field(\"") else {
+            continue;
+        };
+        let Some((name, tail)) = rest.split_once('"') else {
+            continue;
+        };
+        if !is_secret_field_name(name) {
+            continue;
+        }
+        if tail.contains("&self.") && !tail.contains("REDACTED") {
+            hits.push((idx.saturating_add(1), name.to_string()));
+        }
+    }
+    hits
+}
+
 /// Whether a field name names a live credential rather than a derived value.
 fn is_secret_field_name(name: &str) -> bool {
     if DERIVED_VALUE_MARKERS.iter().any(|m| name.contains(m)) {
@@ -264,6 +302,12 @@ fn is_secret_field_name(name: &str) -> bool {
         || name.ends_with("_token")
         || name.ends_with("_secret")
         || name.ends_with("_token_hint")
+        // RFC 7521/7523: a client_assertion is a signed JWT presented as a
+        // client credential, and `assertion` is the JWT-bearer grant's
+        // equivalent. Neither name ends in _token or _secret, so they need
+        // naming here. `*_assertion_type` is a URN, not a credential.
+        || name == "assertion"
+        || (name.ends_with("_assertion") && !name.ends_with("_assertion_type"))
 }
 
 /// Whether a type prints its contents under `Debug` — as opposed to

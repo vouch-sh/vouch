@@ -37,7 +37,7 @@ struct ParResponse {
 ///
 /// Contains the same parameters as an authorization request, plus client
 /// authentication fields.
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub(crate) struct ParRequest {
     /// RFC 6749 Section 4.1.1: Response type (must be "code").
     #[serde(default)]
@@ -99,6 +99,35 @@ pub(crate) struct ParRequest {
     /// JARM: Requested authorization response mode.
     #[serde(default)]
     response_mode: Option<String>,
+}
+
+// RFC 7521 Section 4.2: `client_assertion` is a signed JWT presented as a
+// client credential, so it is redacted rather than derived.
+impl std::fmt::Debug for ParRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ParRequest")
+            .field("response_type", &self.response_type)
+            .field("client_id", &self.client_id)
+            .field("redirect_uri", &self.redirect_uri)
+            .field("scope", &self.scope)
+            .field("state", &self.state)
+            .field("nonce", &self.nonce)
+            .field("code_challenge", &self.code_challenge)
+            .field("code_challenge_method", &self.code_challenge_method)
+            .field("resource", &self.resource)
+            .field("acr_values", &self.acr_values)
+            .field("max_age", &self.max_age)
+            .field("prompt", &self.prompt)
+            .field("request_uri", &self.request_uri)
+            .field("client_secret", &"[REDACTED]")
+            .field("client_assertion", &"[REDACTED]")
+            .field("client_assertion_type", &self.client_assertion_type)
+            .field("request", &self.request)
+            .field("dpop_jkt", &self.dpop_jkt)
+            .field("authorization_details", &self.authorization_details)
+            .field("response_mode", &self.response_mode)
+            .finish()
+    }
 }
 
 /// Implement `ClientAuthFields` for `ParRequest` to enable shared client

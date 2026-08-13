@@ -59,8 +59,8 @@ impl std::fmt::Debug for RevokeRequest {
             .field("token", &"[REDACTED]")
             .field("token_type_hint", &self.token_type_hint)
             .field("client_id", &self.client_id)
-            .field("client_secret", &self.client_secret)
-            .field("client_assertion", &self.client_assertion)
+            .field("client_secret", &"[REDACTED]")
+            .field("client_assertion", &"[REDACTED]")
             .field("client_assertion_type", &self.client_assertion_type)
             .finish()
     }
@@ -119,8 +119,8 @@ impl std::fmt::Debug for IntrospectRequest {
             .field("token", &"[REDACTED]")
             .field("token_type_hint", &self.token_type_hint)
             .field("client_id", &self.client_id)
-            .field("client_secret", &self.client_secret)
-            .field("client_assertion", &self.client_assertion)
+            .field("client_secret", &"[REDACTED]")
+            .field("client_assertion", &"[REDACTED]")
             .field("client_assertion_type", &self.client_assertion_type)
             .finish()
     }
