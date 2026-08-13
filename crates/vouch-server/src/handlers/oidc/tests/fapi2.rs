@@ -1483,3 +1483,131 @@ async fn test_fapi2_device_flow_no_client_id_succeeds_without_dpop() {
         "Built-in device flow (no client_id) must succeed without DPoP: {resp_body}"
     );
 }
+
+/// A device request whose client_id no longer resolves (client deleted
+/// mid-flow) must be rejected with `invalid_client`, not fall through with
+/// FAPI enforcement disabled and issue an unbound token.
+#[tokio::test]
+async fn test_fapi2_device_flow_unknown_client_id_rejected() {
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "fapi2-dev-ghost@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+
+    let device_code = setup_authorized_device(
+        &state,
+        Some("ghost-client-deleted-mid-flow"),
+        &user,
+        &auth_id,
+        "ghost",
+    )
+    .await;
+
+    let (status, resp_body) =
+        http_post_form(&app, "/oauth/token", &device_token_body(&device_code), &[]).await;
+
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "Unresolvable client_id must be rejected: {resp_body}"
+    );
+    let error: serde_json::Value = serde_json::from_str(&resp_body).expect("Valid JSON");
+    assert_eq!(error["error"], "invalid_client");
+}
+
+// ============================================================================
+// FAPI 2.0 Token Exchange (RFC 8693) — Sender Constraints
+//
+// FAPI 2.0 Section 5.2.2 applies to every grant a FAPI client can use.
+// Without enforcement here, a FAPI client could exchange a DPoP-bound
+// subject_token for an unbound access token, undoing the sender constraint
+// in one hop.
+// ============================================================================
+
+/// A FAPI client performing token exchange without any sender constraint
+/// (no DPoP proof, no mTLS certificate) must be rejected.
+#[tokio::test]
+async fn test_fapi2_token_exchange_rejects_unbound_fapi_client() {
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "fapi2-exchange-unbound@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let subject_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let (client, pkcs8_bytes) = create_fapi_test_client(&state.store, &user.id).await;
+
+    let assertion = build_client_assertion(
+        &client.client_id,
+        &state.config().base_url,
+        &pkcs8_bytes,
+        None,
+    );
+    let body = format!(
+        "grant_type=urn:ietf:params:oauth:grant-type:token-exchange\
+         &subject_token={subject_token}\
+         &subject_token_type=urn:ietf:params:oauth:token-type:access_token\
+         &client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer\
+         &client_assertion={assertion}",
+    );
+
+    let (status, resp_body) = http_post_form(&app, "/oauth/token", &body, &[]).await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "FAPI token exchange without sender constraint must be rejected: {resp_body}"
+    );
+    let error: serde_json::Value = serde_json::from_str(&resp_body).expect("Valid JSON");
+    assert_eq!(
+        error["error"], "invalid_request",
+        "FAPI token exchange without DPoP/mTLS must return invalid_request: {resp_body}"
+    );
+}
+
+/// A FAPI client performing token exchange with a valid DPoP proof receives
+/// a DPoP-bound access token (`cnf.jkt` matches the proof key thumbprint).
+#[tokio::test]
+async fn test_fapi2_token_exchange_with_dpop_issues_bound_token() {
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "fapi2-exchange-dpop@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let subject_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let (client, pkcs8_bytes) = create_fapi_test_client(&state.store, &user.id).await;
+
+    let (dpop_key, dpop_jwk) = generate_dpop_key_pair();
+    let expected_jkt = compute_jwk_thumbprint(&dpop_jwk);
+    let token_uri = format!("{}/oauth/token", state.config().base_url);
+    let nonce = acquire_dpop_nonce(&app, &dpop_key, &dpop_jwk, "POST", &token_uri).await;
+    let proof = create_dpop_proof(&dpop_key, &dpop_jwk, "POST", &token_uri, Some(&nonce), None);
+
+    let assertion = build_client_assertion(
+        &client.client_id,
+        &state.config().base_url,
+        &pkcs8_bytes,
+        None,
+    );
+    let body = format!(
+        "grant_type=urn:ietf:params:oauth:grant-type:token-exchange\
+         &subject_token={subject_token}\
+         &subject_token_type=urn:ietf:params:oauth:token-type:access_token\
+         &client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer\
+         &client_assertion={assertion}",
+    );
+
+    let (status, resp_body) =
+        http_post_form(&app, "/oauth/token", &body, &[("DPoP", &proof)]).await;
+
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "FAPI token exchange with DPoP must succeed: {resp_body}"
+    );
+    let resp: serde_json::Value = serde_json::from_str(&resp_body).expect("Valid JSON");
+    let access_token = resp["access_token"].as_str().expect("access_token");
+    let claims = decode_jwt_payload(access_token);
+    assert_eq!(
+        claims["cnf"]["jkt"].as_str(),
+        Some(expected_jkt.as_str()),
+        "exchanged token must carry cnf.jkt bound to the DPoP proof key"
+    );
+}

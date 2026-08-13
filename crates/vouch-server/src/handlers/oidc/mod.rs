@@ -95,7 +95,7 @@ pub(crate) use protected_resource::{
     protected_resource_metadata_root, protected_resource_metadata_subpath,
 };
 pub(crate) use register::{delete_client, read_client, register, update_client};
-pub(crate) use token::token;
+pub(crate) use token::{dpop_use_nonce_response, token};
 pub(crate) use userinfo::userinfo;
 
 #[cfg(test)]

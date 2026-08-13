@@ -27,6 +27,7 @@ use vouch_common::{
 };
 
 use crate::error::{OAuthErrorCode, ServiceError};
+use crate::handlers::oidc::dpop_use_nonce_response;
 use crate::redact_email;
 
 /// Characters used for user code generation (no ambiguous characters).
@@ -35,27 +36,6 @@ const USER_CODE_ALPHABET: &[u8] = b"BCDFGHJKLMNPQRSTVWXZ";
 /// OAuth error response helper.
 fn oauth_error(status: StatusCode, error: OAuthError) -> Response {
     (status, Json(error)).into_response()
-}
-
-/// Build a `use_dpop_nonce` error response with the `DPoP-Nonce` header.
-///
-/// RFC 9449 Section 4.3: When the server requires a nonce, the error
-/// response MUST include the `DPoP-Nonce` header so the client can retry.
-fn dpop_use_nonce_response(nonce: &str) -> Response {
-    (
-        StatusCode::BAD_REQUEST,
-        [(
-            axum::http::header::HeaderName::from_static("dpop-nonce"),
-            nonce.to_string(),
-        )],
-        Json(OAuthError {
-            error: "use_dpop_nonce".to_string(),
-            error_description: Some(
-                "Authorization server requires nonce in DPoP proof".to_string(),
-            ),
-        }),
-    )
-        .into_response()
 }
 
 /// Generate a random device code (32 bytes, base64url encoded).
@@ -367,7 +347,21 @@ pub(crate) async fn device_token(
             let oauth_client = match request.client_id.as_deref() {
                 Some(cid) => match db::get_oauth_client_by_client_id(&state.store, cid).await {
                     Ok(Some(c)) => Some(c),
-                    Ok(None) => None,
+                    // A device request carrying a client_id that no longer
+                    // resolves (client deleted mid-flow) must not fall
+                    // through with FAPI enforcement disabled — that would
+                    // issue an unbound token.
+                    Ok(None) => {
+                        return Err(oauth_error(
+                            StatusCode::UNAUTHORIZED,
+                            OAuthError {
+                                error: "invalid_client".to_string(),
+                                error_description: Some(
+                                    "Unknown client_id for device authorization".to_string(),
+                                ),
+                            },
+                        ));
+                    }
                     Err(_) => {
                         return Err(oauth_error(
                             StatusCode::INTERNAL_SERVER_ERROR,
