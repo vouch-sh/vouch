@@ -71,6 +71,42 @@ curl -X DELETE -H "Authorization: Bearer $(vouch credential token)" \
 Revocation takes effect immediately — tokens are checked against the database on every request.
 Expired tokens are removed by the background cleanup task.
 
+## Attribute Updates (PATCH)
+
+`PATCH /scim/v2/Users/{id}` and `PATCH /scim/v2/Groups/{id}` accept `add`, `replace`, and `remove`
+operations. Vouch stores a subset of the SCIM schema, and all three operations behave the same way
+across it:
+
+| Resource | Attribute path | `add` / `replace` | `remove` |
+|----------|----------------|-------------------|----------|
+| User | `active` | sets it; a non-boolean is rejected | rejected |
+| User | `name.formatted`, `displayName` | sets the stored name | clears it |
+| User | `externalId` | sets it | clears it |
+| Group | `displayName` | sets it; empty is rejected | rejected |
+| Group | `externalId` | sets it | clears it |
+| Group | `members` | `add` appends members, `replace` swaps the whole set | `members[value eq "<user-id>"]` removes one member |
+
+An operation with no `path` — a value object such as `{"op": "replace", "value": {"active": false}}` —
+sets every attribute in the table the object carries. Attribute names are matched
+case-insensitively, as RFC 7643 requires.
+
+**Any other attribute path is ignored, and the request still returns `200`.** Okta and Entra push
+attributes Vouch does not store (`title`, `department`, `name.givenName`, enterprise extensions);
+rejecting those would fail an entire provisioning sync over data the directory never keeps. The
+consequence for you: a `200` does not by itself prove Vouch stored what the IdP sent. The response
+body is the resource as stored — check it when an attribute appears not to sync.
+
+The two removals marked rejected return `400` with `"scimType": "invalidValue"`, because the
+attribute has no absent state to fall back to: `active` on a User (either default would change the
+user's access on its own) and `displayName` on a Group (RFC 7643 requires it). A rejected operation
+leaves the record untouched — Vouch writes it only once every operation in the request is accepted.
+Group membership is the exception: member additions and removals are applied as they are processed,
+so a later rejected operation in the same request does not undo them.
+
+Setting `active` to `false` is the one attribute update with effects beyond the record: it
+invalidates the user's sessions, revokes their SSH certificates, and clears their GitHub refresh
+token, the same way de-provisioning does.
+
 ## De-Provisioning Behavior
 
 When a user is de-provisioned via SCIM (e.g., employee leaves the organization):

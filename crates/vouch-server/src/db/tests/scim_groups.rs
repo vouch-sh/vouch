@@ -36,7 +36,7 @@ async fn test_scim_group_lifecycle() {
         &store,
         &group.id,
         TEST_ORG_ID,
-        Some("Platform"),
+        "Platform",
         Some("ext-grp-2"),
     )
     .await

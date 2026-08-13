@@ -439,7 +439,7 @@ async fn test_update_scim_group_only_intended_fields_change() {
         &store,
         &group.id,
         TEST_ORG_ID,
-        Some("UpdatedName"),
+        "UpdatedName",
         Some("ext-456"),
     )
     .await
@@ -476,7 +476,7 @@ async fn test_update_scim_group_wrong_org_returns_false() {
         .await
         .expect("create_scim_group");
 
-    let found = update_scim_group(&store, &group.id, "wrong-org", Some("HackedName"), None)
+    let found = update_scim_group(&store, &group.id, "wrong-org", "HackedName", None)
         .await
         .expect("update_scim_group query must not error");
     assert!(!found, "cross-org update must return false");
@@ -818,7 +818,7 @@ async fn test_update_scim_group_concurrent_org_change_reports_not_applied() {
         })
     }));
 
-    let applied = update_scim_group(&hooked, &group.id, TEST_ORG_ID, Some("Hacked"), None)
+    let applied = update_scim_group(&hooked, &group.id, TEST_ORG_ID, "Hacked", None)
         .await
         .expect("update_scim_group must not error");
     assert!(

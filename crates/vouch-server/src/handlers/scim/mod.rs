@@ -7,11 +7,13 @@
 //!
 //! - [`types`] - SCIM types (error, list, user, group)
 //! - [`discovery`] - Discovery endpoints (ServiceProviderConfig, Schemas, ResourceTypes)
+//! - [`patch`] - Table-driven applier shared by User and Group PATCH
 //! - [`users`] - User CRUD operations
 //! - [`groups`] - Group CRUD operations
 
 pub(crate) mod discovery;
 pub(crate) mod groups;
+pub(crate) mod patch;
 pub(crate) mod types;
 pub(crate) mod users;
 

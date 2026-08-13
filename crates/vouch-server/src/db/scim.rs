@@ -1176,6 +1176,10 @@ fn apply_scim_group_filter(
 
 /// Update a SCIM group, scoped to the caller's org.
 ///
+/// Both fields are written through, so `external_id: None` clears the stored
+/// value — the caller passes the group's full desired state, as it does for
+/// [`update_scim_user`].
+///
 /// Returns `Ok(false)` if the group doesn't exist, belongs to a different org,
 /// or if a concurrent org-ownership change races with the modify loop and causes
 /// the mutation to be skipped. `Ok(true)` on a successful update.
@@ -1187,7 +1191,7 @@ pub async fn update_scim_group(
     store: &DocumentStore,
     id: &str,
     org_id: &str,
-    display_name: Option<&str>,
+    display_name: &str,
     external_id: Option<&str>,
 ) -> Result<bool> {
     // Pre-check: return not-found quickly without entering the modify loop
@@ -1200,7 +1204,7 @@ pub async fn update_scim_group(
     }
 
     // Owned copies for the Fn closure.
-    let display_name_owned = display_name.map(String::from);
+    let display_name_owned = String::from(display_name);
     let external_id_owned = external_id.map(String::from);
 
     let applied = std::sync::atomic::AtomicBool::new(false);
@@ -1215,12 +1219,8 @@ pub async fn update_scim_group(
             if data.org_id != org_id {
                 return;
             }
-            if let Some(ref name) = display_name_owned {
-                data.display_name = name.clone();
-            }
-            if let Some(ref ext_id) = external_id_owned {
-                data.external_id = Some(ext_id.clone());
-            }
+            data.display_name = display_name_owned.clone();
+            data.external_id = external_id_owned.clone();
             applied.store(true, std::sync::atomic::Ordering::Relaxed);
         })
         .await?;
