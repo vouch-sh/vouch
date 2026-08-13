@@ -226,6 +226,17 @@ impl OAuthError {
             ),
         }
     }
+
+    /// Create a `server_error` error (RFC 6749 Section 5.2).
+    #[must_use]
+    pub fn server_error() -> Self {
+        Self {
+            error: "server_error".to_string(),
+            error_description: Some(
+                "The authorization server encountered an unexpected condition".to_string(),
+            ),
+        }
+    }
 }
 
 // ============================================================================
