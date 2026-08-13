@@ -41,11 +41,20 @@ pub struct ClientCredentialsResult {
 /// # Errors
 /// Returns `unauthorized_client` if the client does not have the
 /// `client_credentials` grant type registered.
+/// Sender-constraint bindings to stamp into the issued access token.
+///
+/// RFC 9449 (`cnf.jkt`) and RFC 8705 (`cnf.x5t#S256`) — DPoP takes priority
+/// over mTLS in `create_oauth_access_token`.
+pub(crate) struct ClientCredentialsBindings<'a> {
+    pub(crate) dpop_jkt: Option<&'a str>,
+    pub(crate) mtls_cert_thumbprint: Option<&'a str>,
+}
+
 pub(crate) async fn exchange_client_credentials(
     state: &Arc<AppState>,
     client: &OAuthClient,
     requested_scope: Option<&str>,
-    mtls_cert_thumbprint: Option<&str>,
+    bindings: ClientCredentialsBindings<'_>,
     proof: TokenIssuanceProof,
 ) -> ServiceResult<ClientCredentialsResult> {
     // Verify client has client_credentials in its registered grant_types
@@ -78,8 +87,8 @@ pub(crate) async fn exchange_client_credentials(
             authenticator_id: None,
             client_id: &client.client_id,
             scope: scope.clone(),
-            dpop_jkt: None,
-            mtls_cert_thumbprint,
+            dpop_jkt: bindings.dpop_jkt,
+            mtls_cert_thumbprint: bindings.mtls_cert_thumbprint,
             act: None,
             audience: None,
             auth_time: None,
@@ -98,9 +107,16 @@ pub(crate) async fn exchange_client_credentials(
         client.client_id
     );
 
+    // RFC 9449 Section 5: token_type is "DPoP" when the token is sender-constrained
+    let token_type = if bindings.dpop_jkt.is_some() {
+        "DPoP"
+    } else {
+        "Bearer"
+    };
+
     Ok(ClientCredentialsResult {
         access_token: session_result.token.expose_secret().to_string(),
-        token_type: "Bearer".to_string(),
+        token_type: token_type.to_string(),
         expires_in: session_result.expires_in,
         scope,
     })
@@ -113,7 +129,7 @@ pub(crate) async fn exchange_client_credentials(
 )]
 mod tests {
     use super::*;
-    use crate::services::auth::{ClientAuthProof, GrantProof};
+    use crate::services::auth::{ClientAuthProof, GrantProof, SenderConstraintProof};
     use crate::services::oidc::OAuthScope;
 
     #[test]
@@ -191,12 +207,16 @@ mod tests {
             &state,
             &client,
             None,
-            Some(thumbprint),
+            ClientCredentialsBindings {
+                dpop_jkt: None,
+                mtls_cert_thumbprint: Some(thumbprint),
+            },
             TokenIssuanceProof {
                 grant: GrantProof::ClientCredentials,
                 client_auth: ClientAuthProof::MutualTls(
                     crate::services::oidc::token::MtlsCertVerification::for_testing(),
                 ),
+                sender_constraint: SenderConstraintProof::no_registered_client(),
             },
         )
         .await

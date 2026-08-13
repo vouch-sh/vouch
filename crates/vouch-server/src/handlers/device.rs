@@ -4,7 +4,7 @@
 use crate::AppState;
 use crate::db::{self, DeviceAuthStatus};
 use crate::services::auth::{
-    ClientAuthProof, CreateOAuthTokenParams, GrantProof, TokenIssuanceProof,
+    ClientAuthProof, CreateOAuthTokenParams, GrantProof, SenderConstraintProof, TokenIssuanceProof,
     create_oauth_access_token,
 };
 use crate::services::oidc::ScopeSet;
@@ -374,17 +374,23 @@ pub(crate) async fn device_token(
 
             // FAPI 2.0 Section 5.2.2: sender-constrained access tokens
             // required (DPoP or mTLS). Mirrors `handle_authorization_code_grant`.
-            if let Some(ref oc) = oauth_client {
-                if let Err(e) = crate::services::oidc::fapi::validate_fapi_token_request(
+            // The built-in CLI flow carries no registered client_id, so there
+            // is no `fapi_profile` to enforce against.
+            let sender_constraint = match oauth_client {
+                Some(ref oc) => match crate::services::oidc::fapi::validate_fapi_token_request(
                     oc,
                     crate::services::oidc::fapi::SenderConstraints {
                         dpop: dpop_proof.is_some(),
                         mtls_cert: has_mtls_cert,
                     },
                 ) {
-                    return Err(e.into_oauth_response().into_response());
-                }
+                    Ok(witness) => witness,
+                    Err(e) => return Err(e.into_oauth_response().into_response()),
+                },
+                None => SenderConstraintProof::no_registered_client(),
+            };
 
+            if let Some(ref oc) = oauth_client {
                 // RFC 9449: When the client requires DPoP-bound access
                 // tokens, a valid DPoP proof MUST be present. The client
                 // explicitly opted into DPoP binding via
@@ -574,6 +580,7 @@ pub(crate) async fn device_token(
                     client_auth: ClientAuthProof::NoAuth(
                         crate::services::auth::NoClientAuth::internal_endpoint(),
                     ),
+                    sender_constraint,
                 },
             )
             .await

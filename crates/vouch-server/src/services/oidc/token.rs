@@ -15,8 +15,8 @@ use crate::db::{self, Authenticator, OAuthClient, Session, User};
 use crate::error::{OAuthErrorCode, ServiceError, ServiceResult};
 use crate::redact_email;
 use crate::services::auth::{
-    AuthMethod, ClientAuthProof, CreateOAuthTokenParams, GrantProof, TokenIssuanceProof,
-    create_oauth_access_token, decode_token,
+    AuthMethod, ClientAuthProof, CreateOAuthTokenParams, GrantProof, SenderConstraintProof,
+    TokenIssuanceProof, create_oauth_access_token, decode_token,
 };
 use aws_lc_rs::digest::{self, SHA256};
 use base64::Engine;
@@ -271,6 +271,7 @@ pub(crate) async fn exchange_authorization_code(
     state: &Arc<AppState>,
     params: AuthCodeExchangeParams<'_>,
     client_auth: ClientAuthProof,
+    sender_constraint: SenderConstraintProof,
 ) -> ServiceResult<AuthCodeExchangeResult> {
     // Decode and validate the authorization code
     let auth_code = decode_authorization_code(state, params.code, params.client_id).await?;
@@ -324,6 +325,7 @@ pub(crate) async fn exchange_authorization_code(
     let proof = TokenIssuanceProof {
         grant: GrantProof::AuthorizationCode(auth_code_claim),
         client_auth,
+        sender_constraint,
     };
     let session_result = create_oauth_access_token(
         state,

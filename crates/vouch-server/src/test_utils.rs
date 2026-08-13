@@ -889,8 +889,8 @@ pub async fn create_test_session(
     auth_id: &str,
 ) -> String {
     use crate::services::auth::{
-        ClientAuthProof, CreateOAuthTokenParams, GrantProof, TokenIssuanceProof,
-        create_oauth_access_token,
+        ClientAuthProof, CreateOAuthTokenParams, GrantProof, SenderConstraintProof,
+        TokenIssuanceProof, create_oauth_access_token,
     };
     use crate::services::oidc::ScopeSet;
     use secrecy::ExposeSecret;
@@ -922,6 +922,7 @@ pub async fn create_test_session(
             client_auth: ClientAuthProof::NoAuth(
                 crate::services::auth::NoClientAuth::internal_endpoint(),
             ),
+            sender_constraint: SenderConstraintProof::no_registered_client(),
         },
     )
     .await
@@ -949,8 +950,8 @@ pub async fn create_test_session_with_audience(
     audience: &str,
 ) -> String {
     use crate::services::auth::{
-        ClientAuthProof, CreateOAuthTokenParams, GrantProof, TokenIssuanceProof,
-        create_oauth_access_token,
+        ClientAuthProof, CreateOAuthTokenParams, GrantProof, SenderConstraintProof,
+        TokenIssuanceProof, create_oauth_access_token,
     };
     use crate::services::oidc::ScopeSet;
     use secrecy::ExposeSecret;
@@ -982,6 +983,7 @@ pub async fn create_test_session_with_audience(
             client_auth: ClientAuthProof::NoAuth(
                 crate::services::auth::NoClientAuth::internal_endpoint(),
             ),
+            sender_constraint: SenderConstraintProof::no_registered_client(),
         },
     )
     .await
@@ -998,8 +1000,8 @@ pub async fn create_test_session_with_audience(
 /// sessions (e.g., the RFC 8693 ID-token fork).
 pub async fn create_test_bootstrap_session(state: &AppState, user_id: &str, email: &str) -> String {
     use crate::services::auth::{
-        ClientAuthProof, CreateOAuthTokenParams, GrantProof, TokenIssuanceProof,
-        create_oauth_access_token,
+        ClientAuthProof, CreateOAuthTokenParams, GrantProof, SenderConstraintProof,
+        TokenIssuanceProof, create_oauth_access_token,
     };
     use crate::services::oidc::ScopeSet;
     use secrecy::ExposeSecret;
@@ -1030,6 +1032,7 @@ pub async fn create_test_bootstrap_session(state: &AppState, user_id: &str, emai
             client_auth: ClientAuthProof::NoAuth(
                 crate::services::auth::NoClientAuth::internal_endpoint(),
             ),
+            sender_constraint: SenderConstraintProof::no_registered_client(),
         },
     )
     .await
@@ -1053,8 +1056,8 @@ pub async fn create_test_bootstrap_session_with_authenticator(
     auth_id: &str,
 ) -> String {
     use crate::services::auth::{
-        ClientAuthProof, CreateOAuthTokenParams, GrantProof, TokenIssuanceProof,
-        create_oauth_access_token,
+        ClientAuthProof, CreateOAuthTokenParams, GrantProof, SenderConstraintProof,
+        TokenIssuanceProof, create_oauth_access_token,
     };
     use crate::services::oidc::ScopeSet;
     use secrecy::ExposeSecret;
@@ -1086,6 +1089,7 @@ pub async fn create_test_bootstrap_session_with_authenticator(
             client_auth: ClientAuthProof::NoAuth(
                 crate::services::auth::NoClientAuth::internal_endpoint(),
             ),
+            sender_constraint: SenderConstraintProof::no_registered_client(),
         },
     )
     .await
@@ -1106,8 +1110,8 @@ pub async fn create_test_session_with_iat(
     iat: i64,
 ) -> String {
     use crate::services::auth::{
-        ClientAuthProof, CreateOAuthTokenParams, GrantProof, TokenIssuanceProof,
-        create_oauth_access_token,
+        ClientAuthProof, CreateOAuthTokenParams, GrantProof, SenderConstraintProof,
+        TokenIssuanceProof, create_oauth_access_token,
     };
     use crate::services::oidc::ScopeSet;
     use secrecy::ExposeSecret;
@@ -1139,6 +1143,7 @@ pub async fn create_test_session_with_iat(
             client_auth: ClientAuthProof::NoAuth(
                 crate::services::auth::NoClientAuth::internal_endpoint(),
             ),
+            sender_constraint: SenderConstraintProof::no_registered_client(),
         },
     )
     .await
@@ -1159,8 +1164,8 @@ pub async fn create_test_session_for_client(
     client_id: &str,
 ) -> String {
     use crate::services::auth::{
-        ClientAuthProof, CreateOAuthTokenParams, GrantProof, TokenIssuanceProof,
-        create_oauth_access_token,
+        ClientAuthProof, CreateOAuthTokenParams, GrantProof, SenderConstraintProof,
+        TokenIssuanceProof, create_oauth_access_token,
     };
     use crate::services::oidc::ScopeSet;
     use secrecy::ExposeSecret;
@@ -1192,6 +1197,7 @@ pub async fn create_test_session_for_client(
             client_auth: ClientAuthProof::NoAuth(
                 crate::services::auth::NoClientAuth::internal_endpoint(),
             ),
+            sender_constraint: SenderConstraintProof::no_registered_client(),
         },
     )
     .await
@@ -1212,8 +1218,8 @@ pub async fn create_test_session_with_dpop(
     dpop_jkt: &str,
 ) -> String {
     use crate::services::auth::{
-        ClientAuthProof, CreateOAuthTokenParams, GrantProof, TokenIssuanceProof,
-        create_oauth_access_token,
+        ClientAuthProof, CreateOAuthTokenParams, GrantProof, SenderConstraintProof,
+        TokenIssuanceProof, create_oauth_access_token,
     };
     use crate::services::oidc::ScopeSet;
     use secrecy::ExposeSecret;
@@ -1245,6 +1251,7 @@ pub async fn create_test_session_with_dpop(
             client_auth: ClientAuthProof::NoAuth(
                 crate::services::auth::NoClientAuth::internal_endpoint(),
             ),
+            sender_constraint: SenderConstraintProof::no_registered_client(),
         },
     )
     .await
@@ -1265,8 +1272,8 @@ pub async fn create_test_session_with_mtls(
     mtls_cert_thumbprint: &str,
 ) -> String {
     use crate::services::auth::{
-        ClientAuthProof, CreateOAuthTokenParams, GrantProof, TokenIssuanceProof,
-        create_oauth_access_token,
+        ClientAuthProof, CreateOAuthTokenParams, GrantProof, SenderConstraintProof,
+        TokenIssuanceProof, create_oauth_access_token,
     };
     use crate::services::oidc::ScopeSet;
     use secrecy::ExposeSecret;
@@ -1298,6 +1305,7 @@ pub async fn create_test_session_with_mtls(
             client_auth: ClientAuthProof::NoAuth(
                 crate::services::auth::NoClientAuth::internal_endpoint(),
             ),
+            sender_constraint: SenderConstraintProof::no_registered_client(),
         },
     )
     .await

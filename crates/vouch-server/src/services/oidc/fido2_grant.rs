@@ -19,7 +19,7 @@ use crate::db::{self, AuthEventParams, AuthEventType};
 use crate::error::{OAuthErrorCode, ServiceError, ServiceResult};
 use crate::services::auth::{
     AuthenticatorLookupParams, ClientAuthProof, CreateOAuthTokenParams, GrantProof,
-    LoginAssertionParams, TokenIssuanceProof, create_oauth_access_token,
+    LoginAssertionParams, SenderConstraintProof, TokenIssuanceProof, create_oauth_access_token,
     lookup_and_verify_authenticator, verify_login_assertion,
 };
 use crate::services::oidc::authorization_details::AuthorizationDetails;
@@ -112,6 +112,7 @@ pub(crate) async fn exchange_fido2_assertion(
     state: &Arc<AppState>,
     params: Fido2AssertionParams<'_>,
     client_auth: ClientAuthProof,
+    sender_constraint: SenderConstraintProof,
 ) -> ServiceResult<Fido2AssertionResult> {
     // 1. Base64url-decode and parse the assertion JSON
     let assertion_bytes = URL_SAFE_NO_PAD.decode(params.assertion).map_err(|_| {
@@ -362,6 +363,7 @@ pub(crate) async fn exchange_fido2_assertion(
     let proof = TokenIssuanceProof {
         grant: GrantProof::Fido2Assertion(challenge_claim),
         client_auth,
+        sender_constraint,
     };
     let session_result = create_oauth_access_token(
         state,

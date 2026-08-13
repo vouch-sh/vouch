@@ -32,7 +32,7 @@ use super::{
 use crate::error::ServiceError;
 use crate::redact_email;
 use crate::services::auth::{
-    ClientAuthProof, CreateOAuthTokenParams, GrantProof, TokenIssuanceProof,
+    ClientAuthProof, CreateOAuthTokenParams, GrantProof, SenderConstraintProof, TokenIssuanceProof,
     create_oauth_access_token,
 };
 use crate::services::idp::IdentityResult;
@@ -838,6 +838,7 @@ pub(crate) async fn complete_enrollment_after_identity(
             client_auth: ClientAuthProof::NoAuth(
                 crate::services::auth::NoClientAuth::internal_endpoint(),
             ),
+            sender_constraint: SenderConstraintProof::no_registered_client(),
         },
     )
     .await
@@ -1697,6 +1698,7 @@ pub(crate) async fn browser_register_complete(
             client_auth: ClientAuthProof::NoAuth(
                 crate::services::auth::NoClientAuth::internal_endpoint(),
             ),
+            sender_constraint: SenderConstraintProof::no_registered_client(),
         },
     )
     .await
