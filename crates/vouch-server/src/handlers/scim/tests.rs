@@ -734,11 +734,11 @@ async fn test_patch_user_add_bulk_merges_attributes() {
 }
 
 #[tokio::test]
-async fn test_patch_user_add_unsupported_path_returns_400() {
-    // RFC 7644 §3.5.2: An Add operation on an unsupported attribute path
-    // must return 400 invalidPath — the same error Replace returns for
-    // unknown paths. Previously Add silently ignored unknown paths and
-    // returned 200 OK, masking data loss.
+async fn test_patch_user_add_unsupported_path_is_ignored() {
+    // An Add on an attribute Vouch does not store is a no-op that still
+    // returns 200. Okta and Entra push attributes outside Vouch's schema
+    // (title, department, enterprise extensions) on every sync; rejecting
+    // them fails the whole sync at the IdP over data Vouch never persists.
     let (app, state) = test_app().await;
     let token = create_test_scim_token(&state.store, "test-add-unknown-path", "test-org").await;
     let auth_header = format!("Bearer {}", token);
@@ -746,7 +746,7 @@ async fn test_patch_user_add_unsupported_path_returns_400() {
     let (status, body) = http_post_json(
         &app,
         "/scim/v2/Users",
-        r#"{"schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"], "userName": "add-unknown@test-org.example.com", "active": true}"#,
+        r#"{"schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"], "userName": "add-unknown@test-org.example.com", "name": {"formatted": "Kept Name"}, "active": true}"#,
         &[("Authorization", &auth_header)],
     )
     .await;
@@ -766,9 +766,13 @@ async fn test_patch_user_add_unsupported_path_returns_400() {
     )
     .await;
 
-    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
-    let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
-    assert_eq!(error["scimType"], "invalidPath");
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    let updated: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(
+        updated["name"]["formatted"], "Kept Name",
+        "an ignored path must leave the stored attributes alone"
+    );
+    assert_eq!(updated["active"], true);
 }
 
 // ========================================================================
@@ -870,12 +874,15 @@ async fn test_patch_user_remove_name_formatted_clears() {
 }
 
 // ========================================================================
-// RFC 7644 Section 3.5.3 - PATCH Unsupported Paths
+// RFC 7644 Section 3.5.2 - PATCH Unsupported Paths
 // ========================================================================
+//
+// A path outside the attributes Vouch stores is ignored, for every
+// operation and both resources: identity providers sync attributes the
+// directory does not hold, and a rejection there fails the whole sync.
 
 #[tokio::test]
-async fn test_rfc7644_patch_unsupported_path_returns_400() {
-    // RFC 7644 Section 3.5.3: Unsupported attribute paths should return 400
+async fn test_rfc7644_patch_unsupported_path_is_ignored() {
     let (app, state) = test_app().await;
 
     let token = create_test_scim_token(&state.store, "test-patch-invalid-path", "test-org").await;
@@ -893,7 +900,6 @@ async fn test_rfc7644_patch_unsupported_path_returns_400() {
     let created: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
     let user_id = created["id"].as_str().expect("user id");
 
-    // PATCH with an unsupported path should return 400
     let (status, body) = http_request(
         &app,
         "PATCH",
@@ -908,12 +914,177 @@ async fn test_rfc7644_patch_unsupported_path_returns_400() {
     )
     .await;
 
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    let updated: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(updated["active"], true, "the resource must be unchanged");
+}
+
+/// Every operation ignores a path Vouch does not store, and none of them
+/// disturbs the attributes it does store. `title` and the enterprise
+/// extension are the attributes Okta and Entra actually push.
+#[tokio::test]
+async fn test_patch_user_unknown_path_ignored_for_every_op() {
+    let (app, state) = test_app().await;
+    let token = create_test_scim_token(&state.store, "test-user-unknown-paths", "test-org").await;
+    let auth_header = format!("Bearer {}", token);
+
+    let (status, body) = http_post_json(
+        &app,
+        "/scim/v2/Users",
+        r#"{"schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"], "userName": "unknown-paths@test-org.example.com", "name": {"formatted": "Untouched"}, "externalId": "ext-untouched", "active": true}"#,
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "setup create failed: {body}");
+    let created: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let user_id = created["id"].as_str().expect("user id");
+
+    for op in ["add", "replace", "remove"] {
+        for path in [
+            "title",
+            "name.givenName",
+            "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User:department",
+        ] {
+            let patch = serde_json::json!({
+                "schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
+                "Operations": [{"op": op, "path": path, "value": "Sales"}]
+            });
+            let (status, body) = http_request(
+                &app,
+                "PATCH",
+                &format!("/scim/v2/Users/{user_id}"),
+                Some(patch.to_string()),
+                &[
+                    ("Authorization", &auth_header),
+                    ("Content-Type", "application/json"),
+                ],
+            )
+            .await;
+
+            assert_eq!(
+                status,
+                StatusCode::OK,
+                "{op} {path} must be ignored: {body}"
+            );
+            let updated: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+            assert_eq!(updated["name"]["formatted"], "Untouched", "{op} {path}");
+            assert_eq!(updated["externalId"], "ext-untouched", "{op} {path}");
+            assert_eq!(updated["active"], true, "{op} {path}");
+        }
+    }
+}
+
+/// The property the shared applier exists to hold: for a single-valued
+/// attribute, `add` and `replace` of the same value leave the same
+/// resource (RFC 7644 §3.5.2.1).
+#[tokio::test]
+async fn test_patch_user_add_and_replace_agree_on_single_valued_attributes() {
+    let (app, state) = test_app().await;
+    let token = create_test_scim_token(&state.store, "test-user-add-eq-replace", "test-org").await;
+    let auth_header = format!("Bearer {}", token);
+
+    let mut results = Vec::new();
+    for op in ["add", "replace"] {
+        let (status, body) = http_post_json(
+            &app,
+            "/scim/v2/Users",
+            &format!(
+                r#"{{"schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"], "userName": "{op}-eq@test-org.example.com", "name": {{"formatted": "Before"}}, "active": true}}"#
+            ),
+            &[("Authorization", &auth_header)],
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "setup create failed: {body}");
+        let created: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+        let user_id = created["id"].as_str().expect("user id");
+
+        let patch = serde_json::json!({
+            "schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
+            "Operations": [
+                {"op": op, "path": "displayName", "value": "After"},
+                {"op": op, "path": "externalId", "value": "ext-after"},
+                {"op": op, "path": "active", "value": false},
+            ]
+        });
+        let (status, body) = http_request(
+            &app,
+            "PATCH",
+            &format!("/scim/v2/Users/{user_id}"),
+            Some(patch.to_string()),
+            &[
+                ("Authorization", &auth_header),
+                ("Content-Type", "application/json"),
+            ],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{op} must return 200: {body}");
+
+        let mut updated: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+        // Identity and timestamps differ between the two users by design.
+        for field in ["id", "userName", "meta", "emails"] {
+            updated
+                .as_object_mut()
+                .expect("SCIM user object")
+                .remove(field);
+        }
+        results.push(updated);
+    }
+
+    assert_eq!(
+        results.first(),
+        results.last(),
+        "add and replace must leave the same resource"
+    );
+    assert_eq!(results[0]["name"]["formatted"], "After");
+    assert_eq!(results[0]["externalId"], "ext-after");
+    assert_eq!(results[0]["active"], false);
+}
+
+/// `active` is a stored boolean with no absent state, so a removal has no
+/// value to fall back to and is rejected rather than guessing (RFC 7644
+/// §3.12 `invalidValue`).
+#[tokio::test]
+async fn test_patch_user_remove_active_rejected() {
+    let (app, state) = test_app().await;
+    let token = create_test_scim_token(&state.store, "test-user-remove-active", "test-org").await;
+    let auth_header = format!("Bearer {}", token);
+
+    let (status, body) = http_post_json(
+        &app,
+        "/scim/v2/Users",
+        r#"{"schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"], "userName": "remove-active@test-org.example.com", "active": true}"#,
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "setup create failed: {body}");
+    let created: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let user_id = created["id"].as_str().expect("user id");
+
+    let (status, body) = http_request(
+        &app,
+        "PATCH",
+        &format!("/scim/v2/Users/{user_id}"),
+        Some(r#"{"schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"], "Operations": [{"op": "remove", "path": "active"}]}"#.to_string()),
+        &[
+            ("Authorization", &auth_header),
+            ("Content-Type", "application/json"),
+        ],
+    )
+    .await;
+
     assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
     let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
-    assert_eq!(
-        error["scimType"], "invalidPath",
-        "Should return invalidPath scimType"
-    );
+    assert_eq!(error["scimType"], "invalidValue");
+
+    let (status, body) = http_get(
+        &app,
+        &format!("/scim/v2/Users/{user_id}"),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let after: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(after["active"], true, "a rejected removal changes nothing");
 }
 
 // ========================================================================
@@ -2120,6 +2291,254 @@ async fn test_scim_patch_group_add_bulk_merges_attributes() {
     let updated: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
     assert_eq!(updated["displayName"], "BulkNew");
     assert_eq!(updated["externalId"], "bulk-group-ext");
+}
+
+// ========================================================================
+// RFC 7644 Section 3.5.2.2 — Group Remove operation
+// ========================================================================
+
+#[tokio::test]
+async fn test_scim_patch_group_remove_external_id_clears() {
+    // RFC 7644 §3.5.2.2: Remove on a single-valued attribute clears it.
+    let (app, state) = test_app().await;
+    let token = create_test_scim_token(&state.store, "test-group-remove-extid", "test-org").await;
+    let auth_header = format!("Bearer {}", token);
+
+    let (status, body) = http_post_json(
+        &app,
+        "/scim/v2/Groups",
+        r#"{"schemas": ["urn:ietf:params:scim:schemas:core:2.0:Group"], "displayName": "RemoveExtId", "externalId": "ext-removable"}"#,
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "setup create failed: {body}");
+    let created: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let group_id = created["id"].as_str().expect("group id");
+    assert_eq!(created["externalId"], "ext-removable");
+
+    let (status, body) = http_request(
+        &app,
+        "PATCH",
+        &format!("/scim/v2/Groups/{group_id}"),
+        Some(r#"{"schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"], "Operations": [{"op": "remove", "path": "externalId"}]}"#.to_string()),
+        &[
+            ("Content-Type", "application/json"),
+            ("Authorization", &auth_header),
+        ],
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    let updated: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert!(
+        updated.get("externalId").is_none(),
+        "Remove externalId must clear it: {body}"
+    );
+    assert_eq!(
+        updated["displayName"], "RemoveExtId",
+        "the other attributes are untouched"
+    );
+}
+
+/// `displayName` is required (RFC 7643 §4.2), so a group has no state in
+/// which it carries none: the removal is rejected as `invalidValue` rather
+/// than storing an empty name.
+#[tokio::test]
+async fn test_scim_patch_group_remove_display_name_rejected() {
+    let (app, state) = test_app().await;
+    let token = create_test_scim_token(&state.store, "test-group-remove-name", "test-org").await;
+    let auth_header = format!("Bearer {}", token);
+
+    let (status, body) = http_post_json(
+        &app,
+        "/scim/v2/Groups",
+        r#"{"schemas": ["urn:ietf:params:scim:schemas:core:2.0:Group"], "displayName": "Required"}"#,
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "setup create failed: {body}");
+    let created: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let group_id = created["id"].as_str().expect("group id");
+
+    let (status, body) = http_request(
+        &app,
+        "PATCH",
+        &format!("/scim/v2/Groups/{group_id}"),
+        Some(r#"{"schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"], "Operations": [{"op": "remove", "path": "displayName"}]}"#.to_string()),
+        &[
+            ("Content-Type", "application/json"),
+            ("Authorization", &auth_header),
+        ],
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+    let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(error["scimType"], "invalidValue");
+
+    let (status, body) = http_get(
+        &app,
+        &format!("/scim/v2/Groups/{group_id}"),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let after: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(
+        after["displayName"], "Required",
+        "a rejected removal changes nothing"
+    );
+}
+
+/// A `displayName` a group cannot carry — empty, or not a string — is
+/// rejected on PATCH, matching the check `POST /scim/v2/Groups` applies.
+#[tokio::test]
+async fn test_scim_patch_group_empty_display_name_rejected() {
+    let (app, state) = test_app().await;
+    let token = create_test_scim_token(&state.store, "test-group-empty-name", "test-org").await;
+    let auth_header = format!("Bearer {}", token);
+
+    let (status, body) = http_post_json(
+        &app,
+        "/scim/v2/Groups",
+        r#"{"schemas": ["urn:ietf:params:scim:schemas:core:2.0:Group"], "displayName": "NotEmpty"}"#,
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "setup create failed: {body}");
+    let created: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let group_id = created["id"].as_str().expect("group id");
+
+    for value in [serde_json::json!("   "), serde_json::json!(42)] {
+        let patch = serde_json::json!({
+            "schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
+            "Operations": [{"op": "replace", "path": "displayName", "value": value}]
+        });
+        let (status, body) = http_request(
+            &app,
+            "PATCH",
+            &format!("/scim/v2/Groups/{group_id}"),
+            Some(patch.to_string()),
+            &[
+                ("Content-Type", "application/json"),
+                ("Authorization", &auth_header),
+            ],
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST, "value {value}: {body}");
+        let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+        assert_eq!(error["scimType"], "invalidValue", "value {value}");
+    }
+}
+
+#[tokio::test]
+async fn test_scim_patch_group_unknown_path_ignored_for_every_op() {
+    let (app, state) = test_app().await;
+    let token = create_test_scim_token(&state.store, "test-group-unknown-paths", "test-org").await;
+    let auth_header = format!("Bearer {}", token);
+
+    let (status, body) = http_post_json(
+        &app,
+        "/scim/v2/Groups",
+        r#"{"schemas": ["urn:ietf:params:scim:schemas:core:2.0:Group"], "displayName": "UntouchedGroup", "externalId": "ext-untouched"}"#,
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "setup create failed: {body}");
+    let created: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let group_id = created["id"].as_str().expect("group id");
+
+    for op in ["add", "replace", "remove"] {
+        for path in ["description", "urn:example:params:scim:schemas:Group:owner"] {
+            let patch = serde_json::json!({
+                "schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
+                "Operations": [{"op": op, "path": path, "value": "ignored"}]
+            });
+            let (status, body) = http_request(
+                &app,
+                "PATCH",
+                &format!("/scim/v2/Groups/{group_id}"),
+                Some(patch.to_string()),
+                &[
+                    ("Content-Type", "application/json"),
+                    ("Authorization", &auth_header),
+                ],
+            )
+            .await;
+
+            assert_eq!(
+                status,
+                StatusCode::OK,
+                "{op} {path} must be ignored: {body}"
+            );
+            let updated: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+            assert_eq!(updated["displayName"], "UntouchedGroup", "{op} {path}");
+            assert_eq!(updated["externalId"], "ext-untouched", "{op} {path}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_scim_patch_group_add_and_replace_agree_on_single_valued_attributes() {
+    // The same property as the User test: on a single-valued attribute,
+    // add and replace of one value leave the same resource.
+    let (app, state) = test_app().await;
+    let token = create_test_scim_token(&state.store, "test-group-add-eq-replace", "test-org").await;
+    let auth_header = format!("Bearer {}", token);
+
+    let mut results = Vec::new();
+    for op in ["add", "replace"] {
+        let (status, body) = http_post_json(
+            &app,
+            "/scim/v2/Groups",
+            &format!(
+                r#"{{"schemas": ["urn:ietf:params:scim:schemas:core:2.0:Group"], "displayName": "Before-{op}"}}"#
+            ),
+            &[("Authorization", &auth_header)],
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "setup create failed: {body}");
+        let created: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+        let group_id = created["id"].as_str().expect("group id");
+
+        let patch = serde_json::json!({
+            "schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
+            "Operations": [
+                {"op": op, "path": "displayName", "value": "After"},
+                {"op": op, "path": "externalId", "value": "ext-after"},
+            ]
+        });
+        let (status, body) = http_request(
+            &app,
+            "PATCH",
+            &format!("/scim/v2/Groups/{group_id}"),
+            Some(patch.to_string()),
+            &[
+                ("Content-Type", "application/json"),
+                ("Authorization", &auth_header),
+            ],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{op} must return 200: {body}");
+
+        let mut updated: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+        for field in ["id", "meta"] {
+            updated
+                .as_object_mut()
+                .expect("SCIM group object")
+                .remove(field);
+        }
+        results.push(updated);
+    }
+
+    assert_eq!(
+        results.first(),
+        results.last(),
+        "add and replace must leave the same resource"
+    );
+    assert_eq!(results[0]["displayName"], "After");
+    assert_eq!(results[0]["externalId"], "ext-after");
 }
 
 // ========================================================================
@@ -3484,4 +3903,206 @@ async fn test_scim_patch_group_add_member_concurrent_same_user() {
         "member must appear exactly once after concurrent add, got {}",
         count
     );
+}
+
+/// A pathless bulk merge carrying both `name.formatted` and its alias
+/// `displayName` stores the canonical path's value. Applying every alias in
+/// table order would let `displayName` overwrite it — and a `null` alias
+/// clear a name the canonical path had just set.
+#[tokio::test]
+async fn test_patch_user_bulk_prefers_canonical_path_over_alias() {
+    let (app, state) = test_app().await;
+    let token = create_test_scim_token(&state.store, "test-bulk-alias", "test-org").await;
+    let auth_header = format!("Bearer {}", token);
+
+    let (status, body) = http_post_json(
+        &app,
+        "/scim/v2/Users",
+        r#"{"schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"], "userName": "bulk-alias@test-org.example.com", "name": {"formatted": "Original"}, "active": true}"#,
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "setup create failed: {body}");
+    let created: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let user_id = created["id"].as_str().expect("user id");
+
+    // Both names present: the canonical `name.formatted` must win.
+    let (status, body) = http_request(
+        &app,
+        "PATCH",
+        &format!("/scim/v2/Users/{}", user_id),
+        Some(r#"{"schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"], "Operations": [{"op": "replace", "value": {"name": {"formatted": "Canonical"}, "displayName": "Alias"}}]}"#.to_string()),
+        &[
+            ("Authorization", &auth_header),
+            ("Content-Type", "application/json"),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    let updated: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(
+        updated["name"]["formatted"], "Canonical",
+        "the canonical path must win over its alias: {body}"
+    );
+
+    // A null alias must not clear the value the canonical path sets.
+    let (status, body) = http_request(
+        &app,
+        "PATCH",
+        &format!("/scim/v2/Users/{}", user_id),
+        Some(r#"{"schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"], "Operations": [{"op": "replace", "value": {"name": {"formatted": "Still Set"}, "displayName": null}}]}"#.to_string()),
+        &[
+            ("Authorization", &auth_header),
+            ("Content-Type", "application/json"),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    let updated: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(
+        updated["name"]["formatted"], "Still Set",
+        "a null alias must not clear the canonical value: {body}"
+    );
+}
+
+/// A group PATCH whose member operation precedes an operation that fails
+/// validation must not change membership: the request is rejected whole.
+#[tokio::test]
+async fn test_scim_patch_group_rejected_op_leaves_membership_unchanged() {
+    let (app, state) = test_app().await;
+    let token = create_test_scim_token(&state.store, "test-partial-apply", "test-org").await;
+    let auth_header = format!("Bearer {}", token);
+
+    let (status, body) = http_post_json(
+        &app,
+        "/scim/v2/Groups",
+        r#"{"schemas": ["urn:ietf:params:scim:schemas:core:2.0:Group"], "displayName": "Partial Apply"}"#,
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "setup create failed: {body}");
+    let created: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let group_id = created["id"].as_str().expect("group id");
+
+    let (status, body) = http_post_json(
+        &app,
+        "/scim/v2/Users",
+        r#"{"schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"], "userName": "partial-apply@test-org.example.com", "active": true}"#,
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "setup create failed: {body}");
+    let user: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let user_id = user["id"].as_str().expect("user id");
+
+    // Add a member, then remove the required displayName in the same request.
+    let (status, body) = http_request(
+        &app,
+        "PATCH",
+        &format!("/scim/v2/Groups/{}", group_id),
+        Some(format!(
+            r#"{{"schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"], "Operations": [{{"op": "add", "path": "members", "value": [{{"value": "{user_id}"}}]}}, {{"op": "remove", "path": "displayName"}}]}}"#
+        )),
+        &[
+            ("Authorization", &auth_header),
+            ("Content-Type", "application/json"),
+        ],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "removing the required displayName must be rejected: {body}"
+    );
+
+    // The rejected request must not have added the member.
+    let (status, body) = http_get(
+        &app,
+        &format!("/scim/v2/Groups/{}", group_id),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let group: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let members = group["members"].as_array().map_or(0, Vec::len);
+    assert_eq!(
+        members, 0,
+        "a rejected PATCH must not leave membership changed: {body}"
+    );
+}
+
+/// Entra sends member removals as `path: "members"` with the members in
+/// `value`, rather than a `members[value eq "…"]` filter. Both forms remove.
+#[tokio::test]
+async fn test_scim_patch_group_remove_members_by_value_list() {
+    let (app, state) = test_app().await;
+    let token = create_test_scim_token(&state.store, "test-remove-value", "test-org").await;
+    let auth_header = format!("Bearer {}", token);
+
+    let (status, body) = http_post_json(
+        &app,
+        "/scim/v2/Groups",
+        r#"{"schemas": ["urn:ietf:params:scim:schemas:core:2.0:Group"], "displayName": "Remove By Value"}"#,
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "setup create failed: {body}");
+    let created: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let group_id = created["id"].as_str().expect("group id");
+
+    let (status, body) = http_post_json(
+        &app,
+        "/scim/v2/Users",
+        r#"{"schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"], "userName": "remove-by-value@test-org.example.com", "active": true}"#,
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "setup create failed: {body}");
+    let user: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let user_id = user["id"].as_str().expect("user id");
+
+    let (status, body) = http_request(
+        &app,
+        "PATCH",
+        &format!("/scim/v2/Groups/{}", group_id),
+        Some(format!(
+            r#"{{"schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"], "Operations": [{{"op": "add", "path": "members", "value": [{{"value": "{user_id}"}}]}}]}}"#
+        )),
+        &[
+            ("Authorization", &auth_header),
+            ("Content-Type", "application/json"),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "add member failed: {body}");
+
+    let (status, body) = http_request(
+        &app,
+        "PATCH",
+        &format!("/scim/v2/Groups/{}", group_id),
+        Some(format!(
+            r#"{{"schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"], "Operations": [{{"op": "remove", "path": "members", "value": [{{"value": "{user_id}"}}]}}]}}"#
+        )),
+        &[
+            ("Authorization", &auth_header),
+            ("Content-Type", "application/json"),
+        ],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "remove by value list failed: {body}"
+    );
+
+    let (status, body) = http_get(
+        &app,
+        &format!("/scim/v2/Groups/{}", group_id),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let group: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let members = group["members"].as_array().map_or(0, Vec::len);
+    assert_eq!(members, 0, "member must have been removed: {body}");
 }

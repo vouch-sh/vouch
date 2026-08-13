@@ -10,8 +10,9 @@ use axum::{
 use std::sync::Arc;
 
 use super::authenticate_scim;
+use super::patch::{Attribute, InvalidValue, apply_patch_op, optional_string};
 use super::types::{
-    ScimError, ScimGroup, ScimGroupMember, ScimListQuery, ScimListResponse, ScimMeta,
+    ScimError, ScimGroup, ScimGroupMember, ScimListQuery, ScimListResponse, ScimMeta, ScimPatchOp,
     ScimPatchOpType, ScimPatchRequest,
 };
 use crate::AppState;
@@ -267,14 +268,144 @@ pub(crate) async fn get_group(
     Json(db_group_to_scim(base_url, group, members)).into_response()
 }
 
+/// The Group fields a PATCH can change, seeded from the stored record.
+/// Members are not here: they live in the membership table, not in the
+/// group document.
+struct GroupPatch {
+    display_name: String,
+    external_id: Option<String>,
+}
+
+/// The single-valued Group attributes Vouch stores (RFC 7643 §4.2).
+const GROUP_ATTRIBUTES: &[Attribute<GroupPatch>] = &[
+    Attribute {
+        paths: &["displayName"],
+        set: |group, path, value| {
+            let Some(display_name) = value.as_str() else {
+                return Err(InvalidValue::new(format!("{path} must be a string")));
+            };
+            if display_name.trim().is_empty() {
+                return Err(InvalidValue::new(format!("{path} must not be empty")));
+            }
+            group.display_name = display_name.to_string();
+            Ok(())
+        },
+        // RFC 7643 §4.2 makes displayName required, so a group has no state
+        // in which it carries none; RFC 7644 §3.12 maps a value the
+        // attribute cannot take to `invalidValue`.
+        remove: |_, path| {
+            Err(InvalidValue::new(format!(
+                "{path} is required and cannot be removed"
+            )))
+        },
+    },
+    Attribute {
+        paths: &["externalId"],
+        set: |group, path, value| {
+            group.external_id = optional_string(path, value)?;
+            Ok(())
+        },
+        remove: |group, _| {
+            group.external_id = None;
+            Ok(())
+        },
+    },
+];
+
+/// Applies one `members` operation against the membership table.
+///
+/// `members` is multi-valued (RFC 7643 §4.2) and stored as membership rows
+/// rather than as a field of the group document, so it is applied here
+/// rather than through [`GROUP_ATTRIBUTES`]. `add` and `replace` carry the
+/// member set in the operation's value; `remove` names a single member with
+/// a value filter (`members[value eq "…"]`).
+async fn apply_member_op(
+    db: &crate::db::store::DocumentStore,
+    group_id: &str,
+    org_id: &str,
+    path: &str,
+    op: &ScimPatchOp,
+) -> Result<(), Response> {
+    match op.op {
+        ScimPatchOpType::Add => {
+            if path.contains('[') {
+                return Ok(());
+            }
+            let Some(members) = op.value.as_ref().and_then(|v| v.as_array()) else {
+                return Ok(());
+            };
+            for member in members {
+                let Some(user_id) = member.get("value").and_then(|v| v.as_str()) else {
+                    continue;
+                };
+                if let Err(e) = db::add_scim_group_member(db, group_id, org_id, user_id).await {
+                    if let Some(resp) = super::invalid_index_value_response(&e) {
+                        return Err(resp.into_response());
+                    }
+                    tracing::warn!("Failed to add member: {e}");
+                }
+            }
+            Ok(())
+        }
+        ScimPatchOpType::Replace => {
+            if path.contains('[') {
+                return Ok(());
+            }
+            let Some(members) = op.value.as_ref().and_then(|v| v.as_array()) else {
+                return Ok(());
+            };
+            let user_ids: Vec<String> = members
+                .iter()
+                .filter_map(|m| m.get("value").and_then(|v| v.as_str()).map(String::from))
+                .collect();
+            if let Err(e) = db::replace_scim_group_members(db, group_id, org_id, &user_ids).await {
+                if let Some(resp) = super::invalid_index_value_response(&e) {
+                    return Err(resp.into_response());
+                }
+                tracing::error!("Failed to replace group members: {e}");
+            }
+            Ok(())
+        }
+        ScimPatchOpType::Remove => {
+            // Two forms reach here: a path filter naming one member,
+            // `members[value eq "…"]`, and `path: "members"` carrying the
+            // members to drop in `value`, which is what Entra sends.
+            //
+            // A bare `remove` of `members` with no filter and no value means
+            // "remove every member" in RFC 7644 §3.5.2.2. It stays a no-op:
+            // emptying a group is an authorization change, and one arriving
+            // as an operation with nothing naming what to remove is more
+            // likely a malformed request than an intended purge.
+            let user_ids: Vec<String> = match parse_member_filter(path) {
+                Some(user_id) => vec![user_id],
+                None => op
+                    .value
+                    .as_ref()
+                    .and_then(|v| v.as_array())
+                    .map(|members| {
+                        members
+                            .iter()
+                            .filter_map(|m| m.get("value").and_then(|v| v.as_str()))
+                            .map(String::from)
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+            };
+            for user_id in user_ids {
+                if let Err(e) = db::remove_scim_group_member(db, group_id, org_id, &user_id).await {
+                    tracing::warn!("Failed to remove member: {e}");
+                }
+            }
+            Ok(())
+        }
+    }
+}
+
 /// PATCH /scim/v2/Groups/:id (RFC 7644 Section 3.5.2).
 ///
-/// Modifies a Group resource using SCIM PATCH operations (add, replace, remove).
-/// Supports member management via the `members` path.
-#[expect(
-    clippy::too_many_lines,
-    reason = "SCIM PATCH operation handles add/remove/replace across all group fields"
-)]
+/// Modifies a Group resource using SCIM PATCH operations (add, replace,
+/// remove) applied against [`GROUP_ATTRIBUTES`], plus member management
+/// via the `members` path.
 pub(crate) async fn patch_group(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -316,146 +447,49 @@ pub(crate) async fn patch_group(
     };
 
     // Apply patch operations
-    let mut display_name = group.display_name.clone();
-    let mut external_id = group.external_id.clone();
+    let mut patched = GroupPatch {
+        display_name: group.display_name.clone(),
+        external_id: group.external_id.clone(),
+    };
 
+    // Every attribute operation is validated before any membership is
+    // written. Membership writes go straight to the database while attribute
+    // operations accumulate in `patched`, so applying them as they were read
+    // would let an operation rejected later in the request — removing the
+    // required `displayName`, say — return 400 with group membership already
+    // changed. Members are collected here and applied below, in request order.
+    let mut member_ops = Vec::new();
     for op in &patch.operations {
-        match op.op {
-            ScimPatchOpType::Replace => {
-                if let Some(path) = &op.path {
-                    match path.as_str() {
-                        "displayName" => {
-                            if let Some(val) = &op.value
-                                && let Some(s) = val.as_str()
-                            {
-                                display_name = s.to_string();
-                            }
-                        }
-                        "externalId" => {
-                            if let Some(val) = &op.value {
-                                external_id = val.as_str().map(String::from);
-                            }
-                        }
-                        "members" => {
-                            // Replace all members
-                            if let Some(val) = &op.value
-                                && let Some(arr) = val.as_array()
-                            {
-                                let user_ids: Vec<String> = arr
-                                    .iter()
-                                    .filter_map(|v| {
-                                        v.get("value").and_then(|v| v.as_str()).map(String::from)
-                                    })
-                                    .collect();
-                                if let Err(e) = db::replace_scim_group_members(
-                                    &state.store,
-                                    &id,
-                                    &auth.org_id,
-                                    &user_ids,
-                                )
-                                .await
-                                {
-                                    if let Some(resp) = super::invalid_index_value_response(&e) {
-                                        return resp.into_response();
-                                    }
-                                    tracing::error!("Failed to replace group members: {e}");
-                                }
-                            }
-                        }
-                        _ => {}
-                    }
-                } else if let Some(val) = &op.value {
-                    // Replace entire resource
-                    if let Some(n) = val.get("displayName").and_then(|v| v.as_str()) {
-                        display_name = n.to_string();
-                    }
-                    if let Some(e) = val.get("externalId").and_then(|v| v.as_str()) {
-                        external_id = Some(e.to_string());
-                    }
-                }
-            }
-            ScimPatchOpType::Add => {
-                // RFC 7644 §3.5.2.1: an Add targeting a single-valued
-                // attribute replaces the existing value — the same
-                // semantics as Replace for displayName and externalId.
-                // The multi-valued `members` attribute is appended to.
-                if let Some(path) = &op.path {
-                    match path.as_str() {
-                        "displayName" => {
-                            if let Some(val) = &op.value
-                                && let Some(s) = val.as_str()
-                            {
-                                display_name = s.to_string();
-                            }
-                        }
-                        "externalId" => {
-                            if let Some(val) = &op.value {
-                                external_id = val.as_str().map(String::from);
-                            }
-                        }
-                        "members" => {
-                            // Add members
-                            if let Some(val) = &op.value
-                                && let Some(arr) = val.as_array()
-                            {
-                                for member in arr {
-                                    if let Some(user_id) =
-                                        member.get("value").and_then(|v| v.as_str())
-                                        && let Err(e) = db::add_scim_group_member(
-                                            &state.store,
-                                            &id,
-                                            &auth.org_id,
-                                            user_id,
-                                        )
-                                        .await
-                                    {
-                                        if let Some(resp) = super::invalid_index_value_response(&e)
-                                        {
-                                            return resp.into_response();
-                                        }
-                                        tracing::warn!("Failed to add member: {e}");
-                                    }
-                                }
-                            }
-                        }
-                        _ => {}
-                    }
-                } else if let Some(val) = &op.value {
-                    // Bulk add (no path) — merge presented attributes, same
-                    // as Replace.
-                    if let Some(n) = val.get("displayName").and_then(|v| v.as_str()) {
-                        display_name = n.to_string();
-                    }
-                    if let Some(e) = val.get("externalId").and_then(|v| v.as_str()) {
-                        external_id = Some(e.to_string());
-                    }
-                }
-            }
-            ScimPatchOpType::Remove => {
-                if let Some(path) = &op.path {
-                    if path == "externalId" {
-                        external_id = None;
-                    } else if path.starts_with("members")
-                        && let Some(user_id) = parse_member_filter(path)
-                        && let Err(e) =
-                            db::remove_scim_group_member(&state.store, &id, &auth.org_id, &user_id)
-                                .await
-                    {
-                        tracing::warn!("Failed to remove member: {e}");
-                    }
-                }
-            }
+        // A value filter may follow the attribute name, as in
+        // `members[value eq "…"]`.
+        let members_path = op.path.as_deref().filter(|path| {
+            path.split('[')
+                .next()
+                .is_some_and(|attribute| attribute.eq_ignore_ascii_case("members"))
+        });
+        if let Some(path) = members_path {
+            member_ops.push((path, op));
+            continue;
+        }
+        if let Err(invalid) = apply_patch_op(GROUP_ATTRIBUTES, &mut patched, op) {
+            return invalid.into_response();
+        }
+    }
+
+    for (path, op) in member_ops {
+        if let Err(response) = apply_member_op(&state.store, &id, &auth.org_id, path, op).await {
+            return response;
         }
     }
 
     // Update group in database
-    if display_name != group.display_name || external_id != group.external_id {
+    if patched.display_name != group.display_name || patched.external_id != group.external_id {
         match db::update_scim_group(
             &state.store,
             &id,
             &auth.org_id,
-            Some(&display_name),
-            external_id.as_deref(),
+            &patched.display_name,
+            patched.external_id.as_deref(),
         )
         .await
         {

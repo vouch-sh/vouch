@@ -10,9 +10,10 @@ use axum::{
 use std::sync::Arc;
 
 use super::authenticate_scim;
+use super::patch::{Attribute, InvalidValue, apply_patch_op, optional_string};
 use super::types::{
-    ScimEmail, ScimError, ScimListQuery, ScimListResponse, ScimMeta, ScimName, ScimPatchOpType,
-    ScimPatchRequest, ScimUser,
+    ScimEmail, ScimError, ScimListQuery, ScimListResponse, ScimMeta, ScimName, ScimPatchRequest,
+    ScimUser,
 };
 use crate::AppState;
 use crate::db;
@@ -333,14 +334,66 @@ pub(crate) async fn get_user(
     Json(db_user_to_scim(base_url, user)).into_response()
 }
 
+/// The User fields a PATCH can change, seeded from the stored record.
+struct UserPatch {
+    active: bool,
+    name: Option<String>,
+    external_id: Option<String>,
+    /// Set when an operation takes `active` from true to false; the handler
+    /// then invalidates sessions and revokes the user's credentials.
+    deactivated: bool,
+}
+
+/// The single-valued User attributes Vouch stores (RFC 7643 §4.1).
+/// `displayName` addresses the same stored name as `name.formatted`.
+const USER_ATTRIBUTES: &[Attribute<UserPatch>] = &[
+    Attribute {
+        paths: &["active"],
+        set: |user, path, value| {
+            // RFC 7643 §2.2 — `active` is a boolean. Coercing a non-boolean
+            // (e.g. the string "false") to `true` would silently reactivate
+            // a disabled user.
+            let Some(active) = value.as_bool() else {
+                return Err(InvalidValue::new(format!("{path} must be a boolean")));
+            };
+            user.deactivated |= user.active && !active;
+            user.active = active;
+            Ok(())
+        },
+        // `active` is a stored boolean with no absent state, so a removal
+        // has no value to fall back to: either default would change the
+        // user's access without the identity provider asking for it.
+        remove: |_, path| Err(InvalidValue::new(format!("{path} cannot be removed"))),
+    },
+    Attribute {
+        paths: &["name.formatted", "displayName"],
+        set: |user, path, value| {
+            user.name = optional_string(path, value)?;
+            Ok(())
+        },
+        remove: |user, _| {
+            user.name = None;
+            Ok(())
+        },
+    },
+    Attribute {
+        paths: &["externalId"],
+        set: |user, path, value| {
+            user.external_id = optional_string(path, value)?;
+            Ok(())
+        },
+        remove: |user, _| {
+            user.external_id = None;
+            Ok(())
+        },
+    },
+];
+
 /// PATCH /scim/v2/Users/:id (RFC 7644 Section 3.5.2).
 ///
-/// Modifies a User resource using SCIM PATCH operations (add, replace, remove).
-/// Deactivating a user invalidates all sessions and revokes SSH certificates.
-#[expect(
-    clippy::too_many_lines,
-    reason = "SCIM PATCH operation handles add/remove/replace across all user fields"
-)]
+/// Modifies a User resource using SCIM PATCH operations (add, replace,
+/// remove) applied against [`USER_ATTRIBUTES`]. Deactivating a user
+/// invalidates all sessions and revokes SSH certificates.
 pub(crate) async fn patch_user(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -382,165 +435,16 @@ pub(crate) async fn patch_user(
     };
 
     // Apply patch operations
-    let mut active = user.active;
-    let mut name = user.name.clone();
-    let mut external_id = user.external_id.clone();
-    let mut deactivated = false;
+    let mut patched = UserPatch {
+        active: user.active,
+        name: user.name,
+        external_id: user.external_id,
+        deactivated: false,
+    };
 
     for op in &patch.operations {
-        match op.op {
-            ScimPatchOpType::Replace => {
-                if let Some(path) = &op.path {
-                    match path.as_str() {
-                        "active" => {
-                            if let Some(val) = &op.value {
-                                // RFC 7643 §2.2 — `active` is a boolean. Coercing
-                                // non-boolean values (e.g. the string "false") to
-                                // `true` would silently reactivate disabled users.
-                                let Some(new_active) = val.as_bool() else {
-                                    return (
-                                        StatusCode::BAD_REQUEST,
-                                        Json(
-                                            ScimError::new(400, "active must be a boolean")
-                                                .with_type("invalidValue"),
-                                        ),
-                                    )
-                                        .into_response();
-                                };
-                                if active && !new_active {
-                                    deactivated = true;
-                                }
-                                active = new_active;
-                            }
-                        }
-                        "name.formatted" | "displayName" => {
-                            if let Some(val) = &op.value {
-                                name = val.as_str().map(String::from);
-                            }
-                        }
-                        "externalId" => {
-                            if let Some(val) = &op.value {
-                                external_id = val.as_str().map(String::from);
-                            }
-                        }
-                        _ => {
-                            return (
-                                StatusCode::BAD_REQUEST,
-                                Json(
-                                    ScimError::new(400, "Unsupported attribute path")
-                                        .with_type("invalidPath"),
-                                ),
-                            )
-                                .into_response();
-                        }
-                    }
-                } else if let Some(val) = &op.value {
-                    // Replace entire resource
-                    if let Some(a) = val.get("active").and_then(|v| v.as_bool()) {
-                        if active && !a {
-                            deactivated = true;
-                        }
-                        active = a;
-                    }
-                    if let Some(n) = val
-                        .get("name")
-                        .and_then(|v| v.get("formatted"))
-                        .and_then(|v| v.as_str())
-                    {
-                        name = Some(n.to_string());
-                    }
-                    if let Some(e) = val.get("externalId").and_then(|v| v.as_str()) {
-                        external_id = Some(e.to_string());
-                    }
-                }
-            }
-            ScimPatchOpType::Add => {
-                // RFC 7644 §3.5.2.1: an Add targeting a single-valued
-                // attribute replaces the existing value — the same
-                // semantics as Replace for the single-valued attributes
-                // Vouch stores (active, name.formatted, displayName,
-                // externalId). Multi-valued attributes are not supported
-                // via the path form on Users.
-                if let Some(path) = &op.path {
-                    match path.as_str() {
-                        "active" => {
-                            if let Some(val) = &op.value {
-                                let Some(new_active) = val.as_bool() else {
-                                    return (
-                                        StatusCode::BAD_REQUEST,
-                                        Json(
-                                            ScimError::new(400, "active must be a boolean")
-                                                .with_type("invalidValue"),
-                                        ),
-                                    )
-                                        .into_response();
-                                };
-                                if active && !new_active {
-                                    deactivated = true;
-                                }
-                                active = new_active;
-                            }
-                        }
-                        "name.formatted" | "displayName" => {
-                            if let Some(val) = &op.value {
-                                name = val.as_str().map(String::from);
-                            }
-                        }
-                        "externalId" => {
-                            if let Some(val) = &op.value {
-                                external_id = val.as_str().map(String::from);
-                            }
-                        }
-                        _ => {
-                            return (
-                                StatusCode::BAD_REQUEST,
-                                Json(
-                                    ScimError::new(400, "Unsupported attribute path")
-                                        .with_type("invalidPath"),
-                                ),
-                            )
-                                .into_response();
-                        }
-                    }
-                } else if let Some(val) = &op.value {
-                    // Bulk add (no path) — merge presented attributes, same
-                    // as Replace.
-                    if let Some(a) = val.get("active").and_then(|v| v.as_bool()) {
-                        if active && !a {
-                            deactivated = true;
-                        }
-                        active = a;
-                    }
-                    if let Some(n) = val
-                        .get("name")
-                        .and_then(|v| v.get("formatted"))
-                        .and_then(|v| v.as_str())
-                    {
-                        name = Some(n.to_string());
-                    }
-                    if let Some(e) = val.get("externalId").and_then(|v| v.as_str()) {
-                        external_id = Some(e.to_string());
-                    }
-                }
-            }
-            ScimPatchOpType::Remove => {
-                // RFC 7644 §3.5.2.2: a Remove targeting a single-valued
-                // attribute removes the stored value. Paths Vouch does not
-                // store are ignored (Remove of an absent attribute is a
-                // no-op); `active` is excluded because removing it would
-                // ambiguously reset activation state.
-                if let Some(path) = &op.path {
-                    match path.as_str() {
-                        "name.formatted" | "displayName" => {
-                            name = None;
-                        }
-                        "externalId" => {
-                            external_id = None;
-                        }
-                        _ => {}
-                    }
-                }
-            }
+        if let Err(invalid) = apply_patch_op(USER_ATTRIBUTES, &mut patched, op) {
+            return invalid.into_response();
         }
     }
 
@@ -549,9 +453,9 @@ pub(crate) async fn patch_user(
         &state.store,
         &id,
         &auth.org_id,
-        name.as_deref(),
-        external_id.as_deref(),
-        active,
+        patched.name.as_deref(),
+        patched.external_id.as_deref(),
+        patched.active,
     )
     .await
     {
@@ -577,7 +481,7 @@ pub(crate) async fn patch_user(
     }
 
     // If user was deactivated, invalidate all their sessions and revoke SSH certificates
-    if deactivated {
+    if patched.deactivated {
         tracing::info!(
             "User {} deactivated via SCIM, invalidating sessions and revoking SSH certificates",
             id
@@ -611,7 +515,10 @@ pub(crate) async fn patch_user(
         "User",
         &id,
         Some(&auth.token_id),
-        Some(&serde_json::json!({"active": active, "deactivated": deactivated}).to_string()),
+        Some(
+            &serde_json::json!({"active": patched.active, "deactivated": patched.deactivated})
+                .to_string(),
+        ),
         auth.org_domain.as_deref(),
     )
     .await
