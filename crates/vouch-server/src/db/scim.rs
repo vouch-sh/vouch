@@ -1253,6 +1253,32 @@ pub async fn delete_scim_group(store: &DocumentStore, id: &str, org_id: &str) ->
     })
 }
 
+/// Derive a deterministic document ID from `(group_id, user_id)`.
+///
+/// Two concurrent `add_scim_group_member` calls for the same group and user
+/// produce the same document ID, so the losing `insert_with_id` fails on the
+/// `documents` PRIMARY KEY constraint. This eliminates the check-then-insert
+/// TOCTOU race without requiring elevated transaction isolation or advisory
+/// locks.
+///
+/// Same SHA-256-with-domain-separator construction as
+/// `deterministic_org_id` (`db/enrollment.rs`), [`deterministic_user_id`]
+/// (`db/documents/user.rs`), `deterministic_jti_id` (`db/oauth.rs`), and
+/// `deterministic_challenge_state_id` (`db/challenge_states.rs`). The NUL
+/// separators cannot appear in a UUID (the shape of every `group_id` and
+/// `user_id` in the system), so distinct `(group_id, user_id)` pairs never
+/// collide.
+fn deterministic_group_member_id(group_id: &str, user_id: &str) -> String {
+    use aws_lc_rs::digest::{self, SHA256};
+
+    let mut ctx = digest::Context::new(&SHA256);
+    ctx.update(b"scim_group_member\0");
+    ctx.update(group_id.as_bytes());
+    ctx.update(b"\0");
+    ctx.update(user_id.as_bytes());
+    hex::encode(ctx.finish().as_ref())
+}
+
 /// Add a member to a SCIM group, scoped to the caller's org.
 ///
 /// Verifies the group is in the caller's org (single indexed lookup,
@@ -1262,6 +1288,38 @@ pub async fn delete_scim_group(store: &DocumentStore, id: &str, org_id: &str) ->
 ///
 /// Returns `Ok(false)` if the group doesn't exist OR belongs to a
 /// different org.
+///
+/// # Race safety
+///
+/// The membership document ID is derived deterministically from
+/// `(group_id, user_id)` via [`deterministic_group_member_id`] and inserted
+/// with [`DocumentStore::insert_with_id`]. Two concurrent
+/// `add_scim_group_member` calls for the same pair therefore compute the
+/// same primary key: the winning insert commits, and the loser's insert
+/// fails with a primary-key violation (`is_unique_violation`), which is
+/// treated as idempotent success (`Ok(true)`).
+///
+/// This closes the check-then-act TOCTOU window that existed when the
+/// insert used a fresh random UUID v7: two transactions could both observe
+/// "no membership exists" and then commit distinct rows, because neither
+/// `SERIALIZABLE` isolation nor a `SELECT FOR UPDATE` catches two concurrent
+/// inserts of *distinct* primary keys. The deterministic ID makes the keys
+/// collide, forcing serialization at the `documents` PRIMARY KEY constraint.
+///
+/// The `find_by_indexes` pre-check is retained as a fast path for the common
+/// "membership already exists" case — including legacy rows created before
+/// deterministic IDs (which carry random UUID v7 IDs and would not collide
+/// with the deterministic ID). The pre-check alone does not close the race
+/// (it runs outside the insert transaction); the deterministic PRIMARY KEY
+/// collision is the real guard.
+///
+/// `insert_with_id` is wrapped in `with_dsql_retry!` (`db/store.rs`).
+/// `23505` (unique violation) is not retryable, so it surfaces here and is
+/// mapped to idempotent success. Under Aurora DSQL's optimistic concurrency
+/// control, the losing concurrent transaction first receives a serialization
+/// error (`40001`), which `with_dsql_retry!` retries; on retry the insert
+/// collides with the already-committed winner row (`23505`), which is then
+/// caught here. Only one transaction wins.
 pub async fn add_scim_group_member(
     store: &DocumentStore,
     group_id: &str,
@@ -1272,19 +1330,33 @@ pub async fn add_scim_group_member(
         return Ok(false);
     }
 
+    // Fast path: if a membership already exists (including legacy rows
+    // created before deterministic IDs, which carry random UUID v7 IDs and
+    // would not collide with the deterministic ID below), return idempotent
+    // success without attempting an insert.
     let existing = store
         .find_by_indexes::<ScimGroupMemberDoc>(&[("group_id", group_id), ("user_id", user_id)])
         .await?;
-
-    if existing.is_empty() {
-        let doc = ScimGroupMemberDoc {
-            group_id: group_id.to_string(),
-            user_id: user_id.to_string(),
-        };
-        store.insert(&doc).await?;
+    if !existing.is_empty() {
+        return Ok(true);
     }
 
-    Ok(true)
+    // Deterministic ID: two concurrent adds for the same (group_id, user_id)
+    // compute the same primary key, so the losing insert fails with a
+    // unique/primary-key violation. The index pre-check above does not close
+    // the race (it runs outside the insert transaction), but the deterministic
+    // PRIMARY KEY collision does.
+    let member_id = deterministic_group_member_id(group_id, user_id);
+    let doc = ScimGroupMemberDoc {
+        group_id: group_id.to_string(),
+        user_id: user_id.to_string(),
+    };
+
+    match store.insert_with_id(&member_id, &doc).await {
+        Ok(_) => Ok(true),
+        Err(e) if super::pool::is_unique_violation(&e) => Ok(true),
+        Err(e) => Err(e),
+    }
 }
 
 /// Remove a member from a SCIM group, scoped to the caller's org.
@@ -1382,4 +1454,85 @@ pub async fn replace_scim_group_members(
         tx.commit().await?;
         Ok(true)
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::deterministic_group_member_id;
+
+    #[test]
+    fn deterministic_group_member_id_collides_on_equal_pairs() {
+        // Two callers passing the same (group_id, user_id) must produce the
+        // same document ID — this is what makes the losing concurrent insert
+        // surface a primary-key violation instead of silently creating a
+        // second membership row.
+        assert_eq!(
+            deterministic_group_member_id("group-1", "user-1"),
+            deterministic_group_member_id("group-1", "user-1"),
+        );
+    }
+
+    #[test]
+    fn deterministic_group_member_id_differs_for_distinct_pairs() {
+        assert_ne!(
+            deterministic_group_member_id("group-1", "user-1"),
+            deterministic_group_member_id("group-1", "user-2"),
+        );
+        assert_ne!(
+            deterministic_group_member_id("group-1", "user-1"),
+            deterministic_group_member_id("group-2", "user-1"),
+        );
+    }
+
+    #[test]
+    fn deterministic_group_member_id_boundary_is_unambiguous() {
+        // The NUL separator inside the digest makes the encoding unambiguous:
+        // shifting characters across the group_id/user_id boundary must not
+        // collide. Without the separator, ("g", "u1") and ("g1", "u") would
+        // both hash "gu1" and produce the same ID.
+        assert_ne!(
+            deterministic_group_member_id("g", "u1"),
+            deterministic_group_member_id("g1", "u"),
+        );
+        assert_ne!(
+            deterministic_group_member_id("group-1x", "user-1"),
+            deterministic_group_member_id("group-1", "xuser-1"),
+        );
+    }
+
+    #[test]
+    fn deterministic_group_member_id_is_plain_hex() {
+        // Postgres and Aurora DSQL reject NUL in a text value, and the
+        // document ID is stored as text. The hex encoding must contain no
+        // control characters so it is storable across every backend.
+        let id = deterministic_group_member_id("group-1", "user-1");
+        assert!(
+            id.chars().all(|c| c.is_ascii_hexdigit()),
+            "document ID must be plain hex, got {id:?}"
+        );
+        assert_eq!(
+            id.len(),
+            64,
+            "SHA-256 hex digest must be 64 chars, got {}",
+            id.len()
+        );
+    }
+
+    #[test]
+    fn deterministic_group_member_id_differs_from_other_deterministic_ids() {
+        // The "scim_group_member\0" domain separator prevents cross-type ID
+        // collisions with deterministic IDs derived for other document types
+        // (users, orgs, JTIs, challenge states). A user ID and a group-member
+        // ID derived from the same underlying bytes must not match.
+        use crate::db::documents::user::deterministic_user_id;
+        use crate::email::Email;
+
+        let member_id =
+            deterministic_group_member_id("01928374-5a6b-7c8d-9e0f-1a2b3c4d5e6f", "user-id-bytes");
+        let user_id = deterministic_user_id(&Email::new("user-id-bytes@example.com"));
+        assert_ne!(
+            member_id, user_id,
+            "group-member ID must not collide with a user ID"
+        );
+    }
 }
