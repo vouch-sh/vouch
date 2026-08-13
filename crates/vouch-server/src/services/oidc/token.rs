@@ -83,7 +83,6 @@ pub struct ClientCredentials {
 }
 
 /// Result of exchanging an authorization code.
-#[derive(Debug)]
 pub struct AuthCodeExchangeResult {
     /// The access token.
     pub access_token: String,
@@ -97,6 +96,21 @@ pub struct AuthCodeExchangeResult {
     pub scope: ScopeSet,
     /// RFC 9396: Rich authorization details.
     pub authorization_details: Option<AuthorizationDetails>,
+}
+
+// Custom Debug that redacts access_token and id_token to prevent accidental
+// log exposure of bearer credentials (matches the AwsTokenResult pattern).
+impl std::fmt::Debug for AuthCodeExchangeResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AuthCodeExchangeResult")
+            .field("access_token", &"[REDACTED]")
+            .field("token_type", &self.token_type)
+            .field("expires_in", &self.expires_in)
+            .field("id_token", &"[REDACTED]")
+            .field("scope", &self.scope)
+            .field("authorization_details", &self.authorization_details)
+            .finish()
+    }
 }
 
 /// Authenticated client information.
@@ -1891,5 +1905,32 @@ mod tests {
         };
         let result = load_and_validate_grant_subject(&state, &auth_code).await;
         assert_oauth_error(result, OAuthErrorCode::InvalidGrant);
+    }
+
+    // =========================================================================
+    // AuthCodeExchangeResult Debug redaction
+    //
+    // access_token and id_token are bearer credentials and must never appear
+    // in `{:?}` output (defense in depth — matches AwsTokenResult).
+    // =========================================================================
+
+    #[test]
+    fn test_auth_code_exchange_result_debug_redacts_tokens() {
+        let result = AuthCodeExchangeResult {
+            access_token: "eyJhbGciOiJFUzI1NiJ9.access-secret-token".to_string(),
+            token_type: "Bearer".to_string(),
+            expires_in: 3600,
+            id_token: "eyJhbGciOiJFUzI1NiJ9.id-secret-token".to_string(),
+            scope: ScopeSet::parse("openid"),
+            authorization_details: None,
+        };
+        let debug = format!("{result:?}");
+        assert!(debug.contains("[REDACTED]"), "{debug}");
+        assert!(!debug.contains("access-secret-token"), "{debug}");
+        assert!(!debug.contains("id-secret-token"), "{debug}");
+        // Non-sensitive fields remain visible.
+        assert!(debug.contains("Bearer"), "{debug}");
+        assert!(debug.contains("3600"), "{debug}");
+        assert!(debug.contains("AuthCodeExchangeResult"), "{debug}");
     }
 }
